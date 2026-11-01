@@ -52,7 +52,7 @@ import { usePreferences } from "../preferences/usePreferences";
 import SessionSearchSettings from "./session-search/SessionSearchSettings";
 import { useFeatureTipsSetting } from "./feature-tips/useFeatureTipsSetting";
 import KeybindingsSection, { ChordChips } from "../shortcuts/KeybindingsSection";
-import { buildBindingTable } from "../shortcuts/bindings";
+import { buildBindingTable, commandHint } from "../shortcuts/bindings";
 import { IS_MAC } from "../shortcuts/platform";
 import { isRecording } from "../shortcuts/recording";
 import { useOpenAiFastMode } from "../lib/useOpenAiFastMode";
@@ -1826,7 +1826,7 @@ function EditorSettings() {
         />
         <SelectRow
           title="Word wrap"
-          desc="Automatic wraps text, Markdown and log files and leaves code unwrapped. Alt+Z toggles it in the editor."
+          desc={`Automatic wraps text, Markdown and log files and leaves code unwrapped. ${commandHint(preferences.keybindings, "editor.toggleWordWrap") || "its shortcut"} toggles it in the editor.`}
           value={preferences.editorWordWrap}
           options={[
             { value: "auto", label: "Automatic" },

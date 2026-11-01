@@ -31,8 +31,7 @@ import {
 } from "./editor-cm/extensions";
 import { EDITOR_THEME_EXT } from "./editor-cm/themes";
 import { resolveWordWrap } from "./editor-cm/wordWrap";
-import { COMMANDS } from "../shortcuts/commands";
-import { chordToHint } from "../shortcuts/chord";
+import { commandHint } from "../shortcuts/bindings";
 import { initVimGlobals, vimHandlersExtension } from "./editor-cm/vim";
 import { languageLabel, resolveLanguage } from "./editor-cm/languageResolver";
 import { useDocument } from "./editor-cm/useDocument";
@@ -68,10 +67,6 @@ function isMarkdownPath(p: string): boolean {
 }
 
 type ViewMode = "edit" | "preview";
-
-const wrapShortcutLabel = chordToHint(
-  COMMANDS.find((c) => c.id === "editor.toggleWordWrap")!.defaultChords[0],
-);
 
 // Vim ex-commands (`:w`, `:q`, `:wq`, `:x`) and arrow→hjkl remaps are
 // installed once at module load. Subsequent EditorPane mounts reuse them.
@@ -173,6 +168,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const { preferences, setPreference } = usePreferences();
   const wrapOn = resolveWordWrap(preferences.editorWordWrap, path);
+  const wrapOnRef = useRef(wrapOn);
+  wrapOnRef.current = wrapOn;
+  const wrapShortcutLabel = commandHint(preferences.keybindings, "editor.toggleWordWrap");
   const previewVisible = secretKnown && (previewOnly || (hasViewToggle && viewMode === "preview"));
   const { fullscreen, toggleFullscreen } = usePreviewFullscreen(active && previewVisible);
   const fullscreenAction = previewVisible ? (
@@ -340,6 +338,19 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     });
   }, [preferences.vimMode]);
 
+  // A view is built from the seed above, which knows neither the saved
+  // preference nor the file, and it appears a frame after its props change, so
+  // it takes its wrap when it is created. The effect below keeps it current.
+  const onCreateEditor = useCallback(
+    (view: EditorView) => {
+      view.dispatch({
+        effects: wrapCompartment.reconfigure(wrapOnRef.current ? EditorView.lineWrapping : []),
+      });
+      editorFind.onViewCreated();
+    },
+    [editorFind.onViewCreated],
+  );
+
   // Word wrap follows the preference, or the file type while it is "auto".
   useEffect(() => {
     const view = cmRef.current?.view;
@@ -347,7 +358,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     view.dispatch({
       effects: wrapCompartment.reconfigure(wrapOn ? EditorView.lineWrapping : []),
     });
-  }, [wrapOn, doc.status]);
+  }, [wrapOn]);
 
   // Alt+Z (editor.toggleWordWrap) saves an explicit choice, the opposite of
   // what this file does now, so it wins over the file-type default.
@@ -683,7 +694,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               ref={cmRef}
               value={doc.content}
               onChange={onChange}
-              onCreateEditor={editorFind.onViewCreated}
+              onCreateEditor={onCreateEditor}
               extensions={extensions}
               theme="none"
               height="100%"
@@ -738,6 +749,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         {doc.status === "ready" && codeVisible && (
           <button
             type="button"
+            // Keep the editor focused: a click must not steal typing, and
+            // Space or Enter would otherwise toggle the control again.
+            onMouseDown={(e) => e.preventDefault()}
             onClick={toggleWrap}
             aria-pressed={wrapOn}
             aria-label="Word wrap"

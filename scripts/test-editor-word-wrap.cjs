@@ -15,6 +15,7 @@ async function load() {
       contents: [
         'export * from "./src/renderer/src/components/editor-cm/wordWrap";',
         'export { COMMANDS } from "./src/renderer/src/shortcuts/commands";',
+        'export { commandHint, terminalKeepsChord, buildBindingTable } from "./src/renderer/src/shortcuts/bindings";',
         'export { chordEquals } from "./src/renderer/src/shortcuts/chord";',
         'export { DEFAULT_PREFERENCES, EDITOR_WORD_WRAP_VALUES } from "./src/shared/types";',
       ].join("\n"),
@@ -45,14 +46,14 @@ function check(name, fn) {
 async function main() {
   const w = await load();
 
-  check("prose and plain files wrap by default", () => {
-    for (const p of ["/a/notes.txt", "/a/README.md", "/a/x.markdown", "/a/server.LOG", "/a/LICENSE", "C:\\a\\b\\notes.txt", ".env", "/a/.gitignore"]) {
+  check("prose, README-style names and rotated logs wrap by default", () => {
+    for (const p of ["/a/notes.txt", "/a/README.md", "/a/x.markdown", "/a/server.LOG", "/a/server.log.1", "/a/LICENSE", "/a/CHANGELOG", "C:\\a\\b\\notes.txt", "/a/notes."]) {
       assert.equal(w.wrapsByDefault(p), true, p);
     }
   });
 
-  check("code does not wrap by default", () => {
-    for (const p of ["/a/index.ts", "/a/x.py", "/a/data.json", "/a/style.css", "/a/run.sh"]) {
+  check("code, build files and dotfiles do not wrap by default", () => {
+    for (const p of ["/a/index.ts", "/a/x.py", "/a/data.json", "/a/style.css", "/a/run.sh", "/a/Dockerfile", "/a/Makefile", "/a/Gemfile", "/a/CMakeLists.txt", "/a/.bashrc", "/a/.env", "/a/.env.local", "/a/.gitignore", "/a/Dockerfile.dev", "/a/data.csv"]) {
       assert.equal(w.wrapsByDefault(p), false, p);
     }
   });
@@ -82,6 +83,24 @@ async function main() {
       if (other.id === cmd.id) continue;
       for (const c of other.defaultChords) assert.equal(w.chordEquals(c, cmd.defaultChords[0]), false, other.id);
     }
+  });
+
+  check("the hint follows the binding in force, including a rebind", () => {
+    const def = w.commandHint({}, "editor.toggleWordWrap");
+    assert.equal(def, "Alt+Z");
+    const rebound = w.commandHint({ "editor.toggleWordWrap": "ctrl+alt+w" }, "editor.toggleWordWrap");
+    assert.notEqual(rebound, def);
+    assert.match(rebound, /W/i);
+    assert.equal(w.commandHint({ "editor.toggleWordWrap": null }, "editor.toggleWordWrap"), "");
+  });
+
+  check("a terminal keeps Alt+Z, an editor does not, and other chords are never held back", () => {
+    const inTerminal = { closest: (sel) => (sel === ".codara-terminal-session" ? {} : null) };
+    const inEditor = { closest: () => null };
+    assert.equal(w.terminalKeepsChord("editor.toggleWordWrap", inTerminal), true);
+    assert.equal(w.terminalKeepsChord("editor.toggleWordWrap", inEditor), false);
+    assert.equal(w.terminalKeepsChord("editor.toggleWordWrap", null), false);
+    assert.equal(w.terminalKeepsChord("sidebar.toggleLeft", inTerminal), false);
   });
 
   console.log(`${passed} checks passed`);

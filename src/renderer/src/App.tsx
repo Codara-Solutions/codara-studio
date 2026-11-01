@@ -178,7 +178,7 @@ import {
 import type { CoraView } from "./components/chat/cora-view";
 import { basename } from "./path-utils";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
-import { buildBindingTable, digitFromEvent, type BindingTable } from "./shortcuts/bindings";
+import { buildBindingTable, digitFromEvent, terminalKeepsChord, type BindingTable } from "./shortcuts/bindings";
 import { chordToHint } from "./shortcuts/chord";
 import type { CommandId } from "./shortcuts/commands";
 import { isRecording } from "./shortcuts/recording";
@@ -6294,13 +6294,7 @@ export default function App() {
       }
       // Alt+Z is also a shell's meta-z (readline, zsh), and the toggle only
       // acts on a file editor, so a terminal keeps the key.
-      if (
-        id === "editor.toggleWordWrap" &&
-        event.target instanceof Element &&
-        event.target.closest(".codara-terminal-session")
-      ) {
-        return true;
-      }
+      if (terminalKeepsChord(id, event.target)) return true;
       // The terminal split chords only act on terminal tabs; swallowing them
       // at capture phase elsewhere would kill surface-local bindings that
       // share the chord (the whiteboard's Ctrl+D duplicate).

@@ -18,7 +18,7 @@ const PROOF_DIR = process.env.SPARK_E2E_PROOF_DIR ?? "";
 
 const words = (n: number, tag: string) => Array.from({ length: n }, (_, i) => `${tag}${i}`).join(" ");
 
-async function launch(theme: string): Promise<{ app: ElectronApplication; page: Page }> {
+async function launch(theme: string, prefs: Record<string, unknown> = {}): Promise<{ app: ElectronApplication; page: Page }> {
   const root = await mkdtemp(join(tmpdir(), "codara-editor-word-wrap-"));
   const userHome = join(root, "home");
   const dataHome = join(root, "data");
@@ -27,7 +27,9 @@ async function launch(theme: string): Promise<{ app: ElectronApplication; page: 
   await mkdir(dataHome, { recursive: true });
   await writeFile(join(cwd, "long-notes.txt"), [`${words(300, "word")} THE-END`, "a short line", words(300, "tail")].join("\n"));
   await writeFile(join(cwd, "long-code.ts"), `const x = "${words(300, "code")}"; // THE-END\n`);
-  await writeFile(join(dataHome, "spark-preferences.json"), JSON.stringify({ theme }));
+  await writeFile(join(cwd, "other-code.ts"), `const y = "${words(300, "other")}"; // THE-END\n`);
+  await writeFile(join(cwd, "other-notes.txt"), `${words(300, "note")} THE-END\n`);
+  await writeFile(join(dataHome, "spark-preferences.json"), JSON.stringify({ theme, ...prefs }));
   await writeFile(
     join(dataHome, "spark-state.json"),
     JSON.stringify({ activeWorkspaceId: "ws-wrap", workspaces: [{ id: "ws-wrap", name: "proj", cwd, color: "#42D6C7", workers: [] }] }),
@@ -72,9 +74,66 @@ async function openFile(page: Page, query: string, expectText: string): Promise<
 
 const scroller = (page: Page) =>
   page.evaluate(() => {
-    const s = document.querySelector(".cm-scroller") as HTMLElement;
+    // Hidden tabs keep their editors in the page; measure the one on screen.
+    const s = Array.from(document.querySelectorAll<HTMLElement>(".cm-scroller")).find((el) => el.offsetParent !== null)!;
     return { clientWidth: s.clientWidth, scrollWidth: s.scrollWidth, scrollLeft: s.scrollLeft };
   });
+
+const isWrapped = (page: Page) => async () => {
+  const m = await scroller(page);
+  return m.scrollWidth <= m.clientWidth;
+};
+
+// The view must agree with the control, whichever way the file was opened: a
+// new tab, a second file after the first, a saved choice from another file.
+test("word wrap: a file opened after another gets the right wrap, in both orders", async () => {
+  test.setTimeout(120_000);
+  const { app, page } = await launch("codara-classic");
+  try {
+    await openFile(page, "long-code", "code0");
+    await expect.poll(isWrapped(page)).toBe(false);
+    await openFile(page, "long-notes", "word0");
+    await expect(page.getByRole("button", { name: "Word wrap" })).toHaveAttribute("aria-pressed", "true");
+    await expect.poll(isWrapped(page)).toBe(true);
+    await openFile(page, "other-code", "other0");
+    await expect.poll(isWrapped(page)).toBe(false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("word wrap: a saved choice applies to files opened later", async () => {
+  test.setTimeout(120_000);
+  const { app, page } = await launch("codara-classic");
+  try {
+    await openFile(page, "long-code", "code0");
+    await page.locator(".cm-line").first().click();
+    await page.keyboard.press("Alt+z");
+    await expect.poll(isWrapped(page)).toBe(true);
+    await openFile(page, "other-code", "other0");
+    await expect(page.getByRole("button", { name: "Word wrap" })).toHaveAttribute("aria-pressed", "true");
+    await expect.poll(isWrapped(page)).toBe(true);
+  } finally {
+    await app.close();
+  }
+});
+
+for (const [saved, firstFile, expectWrapped] of [
+  ["on", "long-code", true],
+  ["off", "long-notes", false],
+] as const) {
+  test(`word wrap: with "${saved}" saved before launch, a new tab opens ${expectWrapped ? "wrapped" : "unwrapped"}`, async () => {
+    test.setTimeout(120_000);
+    const { app, page } = await launch("codara-classic", { editorWordWrap: saved });
+    try {
+      await openFile(page, firstFile, firstFile === "long-code" ? "code0" : "word0");
+      await expect(page.getByRole("button", { name: "Word wrap" })).toHaveAttribute("aria-pressed", String(expectWrapped));
+      await expect.poll(isWrapped(page)).toBe(expectWrapped);
+    } finally {
+      await app.close();
+    }
+  });
+}
 
 for (const theme of ["codara-classic", "codara-daylight"]) {
 test(`word wrap: default by file type, Alt+Z, and sideways scroll when off (${theme})`, async () => {
@@ -135,7 +194,7 @@ test(`word wrap: default by file type, Alt+Z, and sideways scroll when off (${th
     expect(paint.gutter).toBe(paint.pane);
     expect(paint.gutter).toBe(paint.token);
 
-    // The scrollbar thumb is drawn: it is more than a faint tint of the editor.
+    // The thumb rule uses --muted-2 (a rule check; the screenshots show the pixels).
     const thumb = await page.evaluate(() => {
       const css = Array.from(document.styleSheets).flatMap((sheet) => {
         try { return Array.from(sheet.cssRules).map((r) => r.cssText); } catch { return []; }
@@ -148,10 +207,16 @@ test(`word wrap: default by file type, Alt+Z, and sideways scroll when off (${th
     // while on, and the footer control turns it back on.
     await openFile(page, "long-code", "code0");
     await expect(wrapButton).toHaveAttribute("aria-pressed", "false");
+    m = await scroller(page);
+    expect(m.scrollWidth).toBeGreaterThan(m.clientWidth);
+    await page.locator(".cm-line").first().click();
+    await page.keyboard.press("Control+Home");
     await wrapButton.click();
     await expect(wrapButton).toHaveAttribute("aria-pressed", "true");
-    m = await scroller(page);
-    expect(m.scrollWidth).toBeLessThanOrEqual(m.clientWidth);
+    await expect.poll(isWrapped(page)).toBe(true);
+    // Clicking the control leaves the editor focused, so typing still lands.
+    await page.keyboard.type("Z");
+    await expect(page.locator(".cm-content:visible")).toContainText("Zconst");
     await proof(page, "4-ts-wrap-on-by-control");
   } finally {
     await app.close();

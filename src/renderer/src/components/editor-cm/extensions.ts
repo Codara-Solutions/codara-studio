@@ -71,7 +71,9 @@ export function buildSharedExtensions(): Extension[] {
       ".cm-lineNumbers .cm-activeLineGutter": {
         userSelect: "none",
       },
-      // The active-line tint, flattened onto --bg so it matches the line.
+      // The active-line tint, flattened onto --bg: the same 4% ink as the line,
+      // but opaque so scrolled text cannot show through. The gutter cell's own
+      // opacity (0.55, below) is applied on top, so it reads slightly lighter.
       ".cm-activeLineGutter": {
         backgroundColor:
           "color-mix(in oklab, var(--ink) 4%, var(--bg)) !important",
