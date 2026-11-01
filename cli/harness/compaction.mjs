@@ -182,7 +182,9 @@ function latestLines(lines, budgetChars, leftOut) {
   return (missing > 0 ? [leftOut(missing), ...kept] : kept).join("\n");
 }
 
-function renderFacts(facts, { sessionId, cwd, sessionFile }, targetChars) {
+function renderFacts(facts, { sessionId, cwd, sessionFile: file }, targetChars) {
+  // With --no-session there is no file to point at.
+  const sessionFile = file ?? "nowhere, this session is not saved";
   const budget = Math.floor(targetChars * FACTS_SHARE);
   const fromHistory = (what) => (count) => `[${count} earlier ${what} left out: see ${sessionFile}]`;
   const list = (values, share, what) =>

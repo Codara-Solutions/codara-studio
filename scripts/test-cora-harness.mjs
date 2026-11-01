@@ -396,6 +396,14 @@ test("an unknown model is refused by name", async () => {
 
 // ── sessions ────────────────────────────────────────────────────────────────
 
+test("exec --resume with no id takes the latest session and opens no picker", async () => {
+  const world = makeWorld();
+  const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
+  const result = await cora(world, ["exec", "--resume", "--json", "PLAIN_TEXT two"], { timeout: 20_000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(resultOf(result.stdout).sessionId, sessionId);
+});
+
 test("resume continues with the full tool history, from any folder", async () => {
   const world = makeWorld();
   const first = resultOf((await cora(world, ["exec", "--model", "terra", "--json", "copy it"])).stdout);
@@ -1725,6 +1733,19 @@ test("one session has one lock, through a symlink and from a second Cora home", 
   }
 });
 
+test("compaction works with --no-session, which has no file to point at", async () => {
+  const world = compactionWorld();
+  stub.reportContext(410_000);
+  const result = await cora(world, ["exec", "--no-session", "--model", "sonnet", "--json", "copy it SEED-USER-FACT"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /compaction failed/);
+  assert.equal(resultOf(result.stdout).compactions, 1);
+  const carried = userTexts(stub.requests.at(-1)).map(({ text }) => text).join("\n");
+  assert.match(carried, /# Session facts/, "Pi's own summary replaced Cora's");
+  assert.match(carried, /<user-message n="1">\ncopy it SEED-USER-FACT/);
+  assert.doesNotMatch(carried, /undefined/);
+});
+
 test("code-built facts survive two compactions in a row", async () => {
   const world = compactionWorld();
   stub.reportContext(410_000);
@@ -2394,6 +2415,12 @@ test("MCP servers load from the shared config format", async () => {
   assert.match(system, /Connected MCP servers: demo \(1 tools\)/);
   assert.ok(tools.some((tool) => /codara_external_tools/i.test(tool)), tools.join());
   assert.deepEqual(readdirSync(world.home).filter((name) => name.includes("mcp-roster")), []);
+
+  stub.reset();
+  writeJson(join(world.home, "mcp.json"), { mcpServers: { "codara-studio": { command: process.execPath, args: [server] } } });
+  const reserved = await cora(world, ["exec", "--model", "sonnet", "copy it"]);
+  assert.equal(reserved.status, 0, reserved.stderr);
+  assert.match(stub.requests[0].system, /Connected MCP servers: codara-studio \(1 tools\)/);
 
   stub.reset();
   const extra = join(world.project, "extra.json");

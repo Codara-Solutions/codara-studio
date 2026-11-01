@@ -194,7 +194,7 @@ function buildMcpConfig(home, cli, sdkDir, normalize, build, activate) {
     }
     for (const [name, server] of Object.entries(parsed.mcpServers ?? {})) raw.push({ ...server, name });
   }
-  const servers = normalize(raw, { cwd: process.cwd() });
+  const servers = normalize(raw, { cwd: process.cwd(), keepReservedNames: true });
   if (servers.length === 0) return null;
   // activeMcpBridgeConfig reads a file because Studio hands the roster to a
   // child process. It can hold expanded secrets, so it never outlives this call.
@@ -282,7 +282,7 @@ function piArguments(cli, model, effort, { exec, prompt }) {
   if (model?.provider) args.push("--provider", model.provider);
   if (model?.id) args.push("--model", model.id);
   if (effort) args.push("--thinking", effort);
-  if (cli.resume === true) args.push(process.stdin.isTTY ? "--resume" : "--continue");
+  if (cli.resume === true) args.push(exec ? "--continue" : "--resume");
   else if (cli.resume) args.push("--session", cli.resume);
   if (cli.continue) args.push("--continue");
   if (exec) args.push(...(cli.json ? ["--mode", "json"] : ["--print"]));
