@@ -39,7 +39,8 @@ export function coraSystemPrompt({ exec }) {
   when any requested part is unfinished or unverified.
 - That reply is all the reader sees, so it holds the whole answer at full
   length. Copy code, diffs and output exactly from what you read, never from
-  memory. End with any closing line or format the user asked for, word for word.`
+  memory. submit_result is never shown to the reader, so that reply still ends
+  with any closing line or format the user asked for, word for word.`
       : ""
   }`;
 }
@@ -102,7 +103,7 @@ function registerSubmitResult(pi, run) {
         closing_included: {
           type: "boolean",
           description:
-            "True when the text of this same reply is your whole closing message and this is its only tool call. The run then ends here.",
+            "True when the text of this same reply is your whole closing message, ending with any closing line the user asked for, and this is its only tool call. The run then ends here.",
         },
         files_changed: {
           type: "array",
