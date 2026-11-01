@@ -104,9 +104,6 @@ const FENCE_BRIDGE_SHELL = [
   "codara_terminal_close",
   // servers stream: starts and stops the workspace's dev servers.
   "codara_terminal_servers",
-  // A session runs an agent in a terminal, and outlives the fenced caller.
-  "codara_session_start",
-  "codara_session_message",
   "codara_preview_evaluate",
   "codara_preview_run",
   CODE_TOOL,

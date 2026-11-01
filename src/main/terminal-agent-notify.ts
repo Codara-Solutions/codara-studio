@@ -1715,6 +1715,7 @@ function blockedBody(kind: string | null, msg: string | null): string {
 }
 
 function handleProgramStatus(w: PaneWatcher, report: ProgramStatusReport, now: number): void {
+  if (report.state === "done" && !report.id && report.msg) w.finalMessage = report.msg;
   // Child records describe background tasks (agents, teammates, workflows;
   // not shells): they run on after the parent reports its turn done.
   if (report.id) {

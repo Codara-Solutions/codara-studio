@@ -165,6 +165,16 @@ export interface AgentBoardCard {
   sleeping: boolean;
   target: NavigationTarget;
   reply: AgentBoardReply | null;
+  /**
+   * A background agent has no session of its own to open: where it was
+   * started, and that session's own target while it is on the board.
+   */
+  origin?: AgentWorkOrigin;
+}
+
+export interface AgentWorkOrigin {
+  name: string | null;
+  target: NavigationTarget | null;
 }
 
 export interface AgentBoardModel {

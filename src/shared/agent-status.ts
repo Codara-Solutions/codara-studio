@@ -6,7 +6,7 @@
 // and drops with the agent's pane. Pure, so scripts/test-agent-status.cjs
 // loads it without the app.
 
-import type { AgentBoardCard, AgentBoardModel } from "./agent-board";
+import type { AgentBoardCard, AgentBoardModel, AgentWorkOrigin } from "./agent-board";
 import { formatAgentSpan } from "./agent-board";
 import type { TaskSummary } from "./cos-tasks";
 import type { NavigationTarget } from "./types";
@@ -84,6 +84,8 @@ export interface AgentLine {
   /** When the agent entered its state; 0 when unknown. */
   since: number;
   target: NavigationTarget | null;
+  /** Set for a background agent, which has no session of its own to open. */
+  origin?: AgentWorkOrigin;
 }
 
 /**
@@ -167,6 +169,7 @@ export function buildAgentLines(input: AgentLinesInput): Record<string, AgentLin
       fromNote: note !== null,
       since: card.since,
       target: card.target,
+      ...(card.origin ? { origin: card.origin } : {}),
     });
   }
   for (const note of Object.values(input.notes)) {

@@ -386,12 +386,12 @@ const SESSION_TOOLS = [
   {
     name: "codara_session_start",
     description:
-      "Start a real agent session in a visible tab of workspace (id or folder; the user approves once; default yours), optionally in a new worktree, with brief already submitted. It keeps running when you end, and the user can open and answer it. Returns id; read the result with codara_session_wait or codara_session_status.",
+      "Start a real agent session in a visible tab of workspace (id or folder; the user approves once; default yours) or a new worktree of it, brief already submitted. It outlives you. Returns id for codara_session_wait.",
     inputSchema: {
       type: "object",
       required: ["brief", "runtime"],
       properties: {
-        brief: { type: "string", description: "The whole task, up to 60000 characters. It starts knowing nothing else." },
+        brief: { type: "string", description: "The whole task; max 60000 characters." },
         runtime: { type: "string", enum: ["claude", "codex"] },
         model: { type: "string", description: "Default the CLI's own." },
         effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max"] },
@@ -400,7 +400,7 @@ const SESSION_TOOLS = [
           type: "object",
           properties: { branch: { type: "string" }, base: { type: "string" }, purpose: { type: "string" } },
         },
-        title: { type: "string", description: "Tab title. Default the brief's first line." },
+        title: { type: "string" },
         group: { type: "string", description: "Tab group, named after your task." },
       },
       additionalProperties: false,
@@ -409,8 +409,7 @@ const SESSION_TOOLS = [
   {
     name: "codara_session_wait",
     description:
-      "Wait until sessions you started finish, fail or need the user, then return their status and final messages. Returns on timeout too (reason timeout): the sessions keep running, so call again or do other work.",
-    annotations: { readOnlyHint: true },
+      "Wait until sessions finish, fail or need the user; returns their status and final messages, or reason timeout while they keep running.",
     inputSchema: {
       type: "object",
       required: ["ids"],
@@ -425,8 +424,7 @@ const SESSION_TOOLS = [
   {
     name: "codara_session_status",
     description:
-      "One session's status and final message, or without id every session started from your workspace, by you or an earlier session: starting, working, needs_you (only the user can answer, in its tab), finished, failed or closed.",
-    annotations: { readOnlyHint: true },
+      "One session's status and final message, or without id every session started from your workspace: starting, working, needs_you, finished, failed or closed.",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" } },
@@ -436,7 +434,7 @@ const SESSION_TOOLS = [
   {
     name: "codara_session_message",
     description:
-      "Send a follow-up to a finished or failed session you started, as if typed in its tab and submitted; codara_session_wait then waits for the new turn. Refused while it works, needs the user, or the user is typing there.",
+      "Send a follow-up to a finished or failed session you started; codara_session_wait then waits for the new turn.",
     inputSchema: {
       type: "object",
       required: ["id", "text"],
@@ -2024,6 +2022,8 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "codara_workflow_status",
   "codara_workflow_wait",
   "codara_session_search",
+  "codara_session_status",
+  "codara_session_wait",
   "codara_task_list",
 ]);
 // Anything that runs a caller-chosen shell command or page script can destroy
@@ -2035,6 +2035,9 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "codara_terminal_write",
   "codara_spawn_terminals",
   "codara_terminal_close",
+  // Run an agent that can do anything the user's own agents can.
+  "codara_session_start",
+  "codara_session_message",
   "codara_whiteboard_update",
   "codara_board_update",
   "codara_delete_automation",
@@ -3052,7 +3055,7 @@ function toolManifest() {
     orchestration: names(EXECUTE_TOOLS),
     automation: names(AUTOMATION_TOOLS),
     workflow: names(WORKFLOW_TOOLS),
-    sessions: names([SESSION_SEARCH_TOOL]),
+    sessions: names([...SESSION_TOOLS, SESSION_SEARCH_TOOL]),
   };
 }
 

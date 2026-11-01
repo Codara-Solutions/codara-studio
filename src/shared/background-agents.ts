@@ -148,6 +148,7 @@ export function backgroundAgentCards(input: BackgroundAgentInput): AgentBoardCar
       sleeping: false,
       target: { type: "workspace", workspaceId: worktree.workspaceId },
       reply: null,
+      origin: { name: fromName, target: creatorCard?.target ?? null },
     });
   }
   return out;
