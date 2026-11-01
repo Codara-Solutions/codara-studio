@@ -2077,6 +2077,56 @@ test("a moved command with more words never starts a model run", async () => {
   }
 });
 
+test("a command word after options never starts a model run", async () => {
+  const world = makeWorld();
+  for (const args of [
+    ["--json", "task", "list"],
+    ["--model", "sonnet", "tool", "list"],
+    ["--model", "sonnet", "--json", "inbox"],
+    ["--effort", "high", "server", "list"],
+    ["--continue", "workflow", "list"],
+    ["--name", "x", "inspect", "@e1"],
+    ["--json", "studio", "status"],
+    ["--model", "sonnet", "models"],
+    ["--model", "sonnet", "exec", "PLAIN_TEXT"],
+  ]) {
+    const result = await cora(world, args);
+    assert.equal(result.status, 2, args.join(" "));
+    assert.match(result.stderr, /options go after the command.*quote it/, args.join(" "));
+  }
+  assert.equal(stub.requests.length, 0, "a command word reached a model");
+});
+
+test("a later -- does not free the command word before it", async () => {
+  const world = makeWorld();
+  for (const args of [["--model", "sonnet", "auth", "list", "--"], ["--json", "task", "list", "--", "x"], ["auth", "--", "list"]]) {
+    const result = await cora(world, args);
+    assert.equal(result.status, 2, args.join(" "));
+    assert.match(result.stderr, /quote it/, args.join(" "));
+  }
+  assert.equal(stub.requests.length, 0, "a command word reached a model");
+});
+
+test("a real prompt still reaches the model, however it starts", async () => {
+  const world = makeWorld();
+  for (const args of [
+    ["--model", "sonnet", "tool list PLAIN_TEXT"],
+    ["exec", "--model", "sonnet", "tool", "list", "PLAIN_TEXT"],
+    ["exec", "--model", "sonnet", "auth", "list", "PLAIN_TEXT"],
+    ["--model", "sonnet", "--", "tool", "list", "PLAIN_TEXT"],
+    ["--", "auth", "list", "PLAIN_TEXT"],
+    ["--name", "tool", "--model", "sonnet", "PLAIN_TEXT"],
+  ]) {
+    stub.reset();
+    const result = await cora(world, args);
+    assert.equal(result.status, 0, `${args.join(" ")}: ${result.stderr}`);
+    assert.equal(stub.requests.length, 1, args.join(" "));
+  }
+  const value = await cora(world, ["--model", "status", "PLAIN_TEXT"]);
+  assert.equal(value.status, 2);
+  assert.match(value.stderr, /unknown model: status/, "an option's value was read as a command");
+});
+
 test("cora studio still reaches the old commands", async () => {
   const world = makeWorld();
   const result = await cora(world, ["studio", "runs"], { env: { CODARA_HOME_DIR: world.studio } });

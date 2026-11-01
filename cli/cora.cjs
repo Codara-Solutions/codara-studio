@@ -10,10 +10,7 @@
 // This file stays dependency free so `--help`, `--version` and `studio` never
 // load the agent engine.
 
-/** Agents in Studio's panes call these by name, so they are not prompts. */
-const STUDIO_TOOLS = new Set([
-  "tool", "tools", "task", "tasks", "inbox", "inspect", "server", "servers", "workflow", "workflows",
-]);
+const { UsageError, parseArgs } = require("./harness/args.cjs");
 
 const HELP = `cora: a coding agent in your terminal
 
@@ -50,8 +47,6 @@ mcp.json, skills/, sessions/.
 function main() {
   const argv = process.argv.slice(2);
   const [first] = argv;
-  if (first === "studio") return require("./studio.cjs").run(argv.slice(1));
-  if (STUDIO_TOOLS.has(first)) return require("./studio.cjs").run(argv);
   if (first === "help" || first === "--help" || first === "-h") {
     process.stdout.write(HELP);
     return;
@@ -60,12 +55,22 @@ function main() {
     console.log(require("./package.json").version);
     return;
   }
+  let cli;
+  try {
+    cli = parseArgs(argv);
+  } catch (error) {
+    if (!(error instanceof UsageError)) throw error;
+    console.error(`cora: ${error.message}`);
+    process.exitCode = 2;
+    return;
+  }
+  if (cli.studioArgs) return require("./studio.cjs").run(cli.studioArgs);
   if (!process.features.typescript) {
     console.error(`cora needs Node 22.18 or newer (this is ${process.version}).`);
     process.exitCode = 2;
     return;
   }
-  import("./harness/main.mjs").then(({ run }) => run(argv)).catch((error) => {
+  import("./harness/main.mjs").then(({ run }) => run(cli)).catch((error) => {
     console.error(`cora: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
   });

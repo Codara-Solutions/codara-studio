@@ -7,8 +7,10 @@ read and edit a run's board, manage accounts and automations, and let one agent
 hand work to Cora from its own terminal. This page covers both. Agents in Studio's
 panes call `cora tool`, `task`, `inbox`, `inspect`, `server` and `workflow` by those
 names, so these six work with or without `studio` in front. Every other Studio
-command needs it: `cora auth list` stops and says so, with no model call. To send
-such words as a prompt, quote them: `cora "auth list"`.
+command needs it: `cora auth list` stops and says so, with no model call. The same
+goes for a command after options, such as `cora --json task list`: options go after
+the command. To send such words as a prompt, quote them (`cora "auth list"`), use
+`cora exec`, or put `--` first.
 [cli/README.md](../cli/README.md) goes deeper on the fullscreen chat UI, the live
 dashboard and the harness benchmark.
 

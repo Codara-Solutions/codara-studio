@@ -20,6 +20,7 @@ import {
   unexpiredLogin,
 } from "./accounts.mjs";
 import { defaultModels, isAlias, loadCatalog, registerCatalog, resolveAlias } from "./catalog.mjs";
+import { UsageError } from "./args.cjs";
 import { lockSessions } from "./session-lock.mjs";
 
 const STDIN_NOTICE_MS = 2000;
@@ -27,28 +28,9 @@ const STDIN_WAIT_NOTICE = "cora: waiting for stdin to close; add it to the promp
 
 const require = createRequire(import.meta.url);
 
-const EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const DEFAULT_EFFORT = "high";
 const EXIT_INTERRUPTED = 130;
 const LOGIN_PROVIDERS = ["anthropic", "openai-codex", "xai"];
-/** Commands that moved under `cora studio`. Unquoted, these words never reach a model:
- * `cora auth list` from an old habit must not start a paid run. */
-const STUDIO_COMMANDS = new Set([
-  "chat", "start", "send", "wait", "tail", "cancel", "runs", "run", "log", "agents", "watch",
-  "agent", "board", "whiteboard", "auto", "auth", "accounts", "profile", "status", "bench", "ws",
-  "read", "rpc",
-]);
-/** Pi flags cora forwards as they are. Anything else is refused, never ignored. */
-const PI_VALUE_FLAGS = new Set([
-  "--tools", "--exclude-tools", "--append-system-prompt", "--skill", "--name", "--session-id",
-  "--prompt-template", "--use-theme", "--tui-mode",
-]);
-const PI_SWITCHES = new Set([
-  "--no-tools", "--no-builtin-tools", "--no-skills", "--no-context-files", "--no-session",
-  "--no-prompt-templates", "--verbose",
-]);
-
-class UsageError extends Error {}
 
 function resolveModel(name, catalog) {
   if (isAlias(name)) return resolveAlias(name, catalog);
@@ -60,52 +42,6 @@ function resolveModel(name, catalog) {
   if (value.startsWith("grok-")) return { provider: "xai", id: value };
   if (process.env.CORA_BASE_URL?.trim() || Object.values(catalog.custom).some((ids) => ids.has(value))) return { id: value };
   throw new UsageError(`unknown model: ${value}. Use sonnet, opus, terra, sol or a provider/id; cora models lists them.`);
-}
-
-function movedCommand(words) {
-  const prompt = words.filter((word) => !word.startsWith("-")).join(" ");
-  return new UsageError(`\`cora ${words[0]}\` moved: use \`cora studio ${words[0]}\`. To send it as a prompt, quote it: cora "${prompt}"`);
-}
-
-function parseArgs(argv) {
-  const cli = { command: "run", positional: [], passthrough: [], resume: undefined };
-  const args = [...argv];
-  // First, because a moved command's own flags mean nothing here.
-  if (STUDIO_COMMANDS.has(args[0])) throw movedCommand(args);
-  if (["exec", "resume", "login", "logout", "models"].includes(args[0])) cli.command = args.shift();
-  let afterDashes = false;
-  while (args.length > 0) {
-    const arg = args.shift();
-    const value = () => {
-      if (args.length === 0) throw new UsageError(`${arg} needs a value`);
-      return args.shift();
-    };
-    if (arg === "--") {
-      afterDashes = true;
-      cli.positional.push(...args.splice(0));
-    }
-    else if (arg === "--model") cli.model = value();
-    else if (arg === "--effort") cli.effort = value();
-    else if (arg === "--mcp-config") cli.mcpConfig = resolve(value());
-    else if (arg === "--json") cli.json = true;
-    else if (arg === "--no-limit-wait") cli.noLimitWait = true;
-    else if (arg === "--continue" || arg === "-c") cli.continue = true;
-    else if (arg === "--resume" || arg === "-r") {
-      cli.resume = args[0] && !args[0].startsWith("-") ? args.shift() : true;
-    } else if (PI_VALUE_FLAGS.has(arg)) cli.passthrough.push(arg, value());
-    else if (PI_SWITCHES.has(arg)) cli.passthrough.push(arg);
-    else if (arg.startsWith("-") && arg.length > 1) throw new UsageError(`unknown option: ${arg}`);
-    else cli.positional.push(arg);
-  }
-  if (cli.command === "run" && !afterDashes && STUDIO_COMMANDS.has(cli.positional[0])) throw movedCommand(cli.positional);
-  if (cli.effort && !EFFORTS.has(cli.effort)) {
-    throw new UsageError(`--effort must be one of: ${[...EFFORTS].join(", ")}`);
-  }
-  if (cli.command === "resume") {
-    cli.resume = cli.positional.shift() ?? cli.resume ?? true;
-    cli.command = "run";
-  }
-  return cli;
 }
 
 /** The one model a new session starts on. */
@@ -526,11 +462,11 @@ async function loadPi() {
   return { ...bundle, AuthStorage, FileAuthStorageBackend, findMostRecentSession };
 }
 
-export async function run(argv) {
+/** @param cli  from parseArgs in args.cjs */
+export async function run(cli) {
   const home = coraHome();
   prepareEnvironment(home);
   try {
-    const cli = parseArgs(argv);
     if (cli.command === "login" && cli.positional.length === 0) return printLogins();
     const pi = await loadPi();
     if (cli.command === "login") return await login(pi, cli.positional[0]);
@@ -539,7 +475,7 @@ export async function run(argv) {
     return await runAgent(cli, pi, home);
   } catch (error) {
     const usage = error instanceof UsageError || error.usage;
-    reportFailure(error.message, !usage && argv.includes("--json"));
+    reportFailure(error.message, !usage && cli.json);
     process.exitCode = usage ? 2 : 1;
     return undefined;
   } finally {
