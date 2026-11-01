@@ -7,7 +7,7 @@ import { normalizeSearchQuery } from "./conversation-search";
 
 export type TurnFoldSegment =
   | { kind: "text"; text: string }
-  | { kind: "tool"; call: { toolName: string } }
+  | { kind: "tool"; call: { toolName: string; isError?: boolean } }
   | { kind: "error" };
 
 export interface SettledTurnFold<T> {
@@ -20,8 +20,8 @@ export interface SettledTurnFold<T> {
 /**
  * `answerBelow` says the durable final answer renders as its own message under
  * this turn. Without it, a closing text segment is the only answer the reader
- * has, so it stays. An error always stays: a failure must never need a click
- * to be seen. A turn without a tool call has no work to fold.
+ * has, so it stays. An error or a failed tool call always stays: a failure must
+ * never need a click to be seen. A turn without a tool call has no work to fold.
  */
 export function splitSettledTurn<T extends TurnFoldSegment>(
   segments: readonly T[],
@@ -30,7 +30,9 @@ export function splitSettledTurn<T extends TurnFoldSegment>(
   const lastIndex = segments.length - 1;
   const keepsClosingText = !answerBelow && segments[lastIndex]?.kind === "text";
   const stays = (segment: T, index: number) =>
-    segment.kind === "error" || (keepsClosingText && index === lastIndex);
+    segment.kind === "error" ||
+    (segment.kind === "tool" && segment.call.isError === true) ||
+    (keepsClosingText && index === lastIndex);
   const hidden = segments.filter((segment, index) => !stays(segment, index));
   if (!hidden.some((segment) => segment.kind === "tool")) return { hidden: [], kept: [...segments] };
   return { hidden, kept: segments.filter(stays) };

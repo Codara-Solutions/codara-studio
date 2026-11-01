@@ -262,6 +262,12 @@ test("the chat keeps failures open, folds long messages, and find opens what it 
     await expect(failed.getByRole("button", { name: /Worked/ })).toHaveCount(0);
     await expect(failed.locator('[data-execution-kind="tool"]')).toHaveCount(1);
 
+    // A tool that failed inside a finished turn stays out of the fold.
+    const recovered = page.locator('.cora-settled-turn[data-manager-call-id="spark-look-3"]');
+    await expect(recovered.getByRole("button", { name: /Worked for 19\s*s/ })).toHaveAttribute("aria-expanded", "false");
+    await expect(recovered.locator('[data-execution-kind="tool"]')).toHaveCount(1);
+    await expect(recovered.locator('[data-execution-kind="tool"]')).toContainText("exit 1");
+
     const more = page.getByRole("button", { name: "Show full message" });
     await expect(more).toBeVisible();
     await expect(page.locator(".cora-user-md.is-collapsed")).toHaveCount(1);
@@ -896,6 +902,8 @@ async function seedPersistedLookRun(
     ...toolPair("spark-look-1", "t-1", "2026-07-13T09:00:03.000Z", "2026-07-13T09:00:04.000Z", "Read", { file_path: "scripts/pack.mjs" }, "contents"),
     ...toolPair("spark-look-1", "t-2", "2026-07-13T09:00:05.000Z", "2026-07-13T09:00:06.000Z", "Bash", { command: "npm test -- pack" }, "1 failed"),
     ...toolPair("spark-look-2", "t-3", "2026-07-13T09:02:02.000Z", "2026-07-13T09:02:03.000Z", "Read", { file_path: "scripts/upload.mjs" }, "contents"),
+    event("spark-look-3", "2026-07-13T09:04:01.200Z", "chat.tool_use", { kind: "tool_use", toolUseId: "t-failed", toolName: "Bash", input: { command: "npm run upload" }, conversationEpoch: 0 }),
+    event("spark-look-3", "2026-07-13T09:04:01.600Z", "chat.tool_result", { kind: "tool_result", toolUseId: "t-failed", output: "exit 1", isError: true, conversationEpoch: 0 }),
     ...toolPair("spark-look-3", "t-4", "2026-07-13T09:04:02.000Z", "2026-07-13T09:04:03.000Z", "Edit", { file_path: "scripts/upload.mjs", old_string: "a", new_string: "b" }, "ok"),
   ].join("\n") + "\n", "utf8");
 }

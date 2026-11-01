@@ -416,10 +416,11 @@ own; the header of `turn-fold.ts` names the source too.
   bubble, 16px radius, no border, at most 80% wide.
 - Reply text is 14px at 1.625 line height.
 - A finished turn folds behind "Worked for 42s" and opens with one click. The
-  fold hides tool calls and the narration between them, never the answer and
-  never an error.
-- Only a completed turn folds. A failed or stopped turn stays open: that is
-  when the steps matter.
+  fold hides tool calls and the narration between them, never the answer, an
+  error or a failed tool call.
+- Only a completed turn folds. A failed or stopped turn stays open, every slice
+  of it: that is when the steps matter. A turn still running does not fold
+  either, even the part before a question it asked.
 - Find opens whatever it lands in, a fold or a long message. An opened fold
   stays open when the list scrolls it away and back.
 - A user message past 600 characters or 8 lines collapses to 176px with a fade

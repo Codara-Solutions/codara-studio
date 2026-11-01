@@ -2470,10 +2470,9 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
         <AssistantLiveTurn item={item} executionTurn={executionTurn} finalAnswer={finalAnswer} />
       );
     }
-    // A settled chat turn keeps its streamed prose and tool rows inline in the
-    // transcript (the Claude Code model) instead of collapsing them behind a
-    // disclosure. Maintenance rows (compaction) and non-chat manager stages
-    // (plan/review) keep the compact disclosure.
+    // A settled chat turn folds on its own terms (AssistantSettledTurn).
+    // Maintenance rows (compaction) and non-chat manager stages (plan/review)
+    // keep the compact disclosure.
     if (item.maintenance !== "compaction" && toolMetaValue(item, "Mode") === "chat") {
       return (
         <AssistantSettledTurn
@@ -2765,7 +2764,7 @@ function AssistantSettledTurn({
       )
     : [];
   const segments = liveTurnSegments(blocks);
-  const fold = item.status === "completed"
+  const fold = item.turnStatus === "completed"
     ? splitSettledTurn(segments, Boolean(finalAnswer?.trim()))
     : { hidden: [], kept: segments };
   const foldable = fold.hidden.length > 0;

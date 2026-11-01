@@ -35,7 +35,7 @@ async function loadBundle() {
 }
 
 const text = (value) => ({ kind: "text", text: value });
-const tool = (toolName) => ({ kind: "tool", call: { toolName } });
+const tool = (toolName, isError) => ({ kind: "tool", call: { toolName, isError } });
 const error = (message) => ({ kind: "error", message });
 
 let passed = 0;
@@ -79,6 +79,19 @@ function test(name, run) {
     const { hidden, kept } = splitSettledTurn([tool("Read"), failure, tool("Bash")], true);
     assert.deepEqual(hidden, [tool("Read"), tool("Bash")]);
     assert.deepEqual(kept, [failure]);
+  });
+
+  test("a failed tool call stays on screen in order with the error", () => {
+    const failed = tool("Bash", true);
+    const failure = error("The provider dropped the stream.");
+    const { hidden, kept } = splitSettledTurn([tool("Read"), failed, tool("Edit"), failure], true);
+    assert.deepEqual(hidden, [tool("Read"), tool("Edit")]);
+    assert.deepEqual(kept, [failed, failure]);
+  });
+
+  test("a turn whose only tool failed has nothing left to fold", () => {
+    const segments = [text("Trying."), tool("Bash", true)];
+    assert.deepEqual(splitSettledTurn(segments, true), { hidden: [], kept: segments });
   });
 
   test("a turn without a tool call has nothing to fold", () => {
