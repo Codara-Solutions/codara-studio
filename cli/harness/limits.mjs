@@ -22,11 +22,11 @@ export const CONTINUE_NOTE = "Cora paused here for a usage limit, and the limit 
 
 const secondsFrom = (seconds) => (seconds > 0 ? Date.now() + seconds * 1000 : null);
 
-function chatgptLimit(error, retryAfter, wording, socket) {
+function chatgptLimit(error, retryAfter, wording, piRetries) {
   return {
     name: "ChatGPT",
     wording,
-    socket,
+    piRetries,
     code: String(error?.code ?? error?.type ?? ""),
     plan: error?.plan_type,
     resetsAt: error?.resets_at ? error.resets_at * 1000 : secondsFrom(retryAfter || Number(error?.resets_in_seconds)),
@@ -48,12 +48,12 @@ function timeFrom(value) {
 /**
  * A subscription limit is marked by the unified rate limit headers, as Claude Code
  * reads them: status `rejected` and an epoch reset. Pi reads none of them. Without
- * a reset nothing is returned, so Pi's own handling of the 429 stands.
+ * a reset, Pi's own handling of the 429 stands.
  */
 function readAnthropicResponse({ headers }) {
   const reset = headers.get("anthropic-ratelimit-unified-status") === "rejected" && timeFrom(headers.get("anthropic-ratelimit-unified-reset"));
   const resetsAt = reset || retryAfterTime(headers.get("retry-after"));
-  return resetsAt ? { name: "Claude", wording: /\b429\b/, socket: false, code: reset ? "usage_limit_reached" : "", resetsAt } : null;
+  return { name: "Claude", wording: /\b429\b/, piRetries: !resetsAt, code: reset ? "usage_limit_reached" : "", resetsAt };
 }
 
 function retryAfterTime(value) {
@@ -131,8 +131,9 @@ export function limitFailure(message, limit, now, afterWait) {
   const name = limit.name === "Claude" && message.provider !== "anthropic" ? message.provider : limit.name;
   const waitMs = limit.resetsAt ? Math.max(0, limit.resetsAt - now) : 0;
   if (!USAGE_CODES.has(limit.code) && !afterWait && waitMs <= MAX_RATE_LIMIT_WAIT_MS) {
-    // Nothing holds a socket request back, so that retry stays as Pi has it.
-    if (limit.socket) return null;
+    // With no time to hold it back to, or nothing to hold a socket request, the
+    // retry stays as Pi has it.
+    if (limit.piRetries) return null;
     return { retryNotBefore: limit.resetsAt, errorMessage: `${name} rate limited the request (429), for about ${Math.ceil(waitMs / 1000)}s` };
   }
   const plan = limit.plan ? ` on the ${String(limit.plan).toLowerCase()} plan` : "";
@@ -191,8 +192,11 @@ export function registerLimitWait(pi, run, { settings, locks }) {
   };
   const resumeLater = () => (run.sessionId ? ` Continue later with: cora resume ${run.sessionId}` : "");
 
-  /** @returns whether the deadline was reached, not stopped short */
-  const sleep = async (ctx, deadline, time) => {
+  /**
+   * @param announce  runs once Ctrl+C can stop the wait, because a caller may act on it
+   * @returns whether the deadline was reached, not stopped short
+   */
+  const sleep = async (ctx, deadline, time, announce) => {
     const stopper = new AbortController();
     const stop = () => stopper.abort();
     const onKey = (data) => {
@@ -204,6 +208,7 @@ export function registerLimitWait(pi, run, { settings, locks }) {
     const stopListening = ctx.hasUI ? ctx.ui.onTerminalInput(onKey) : null;
     if (ctx.hasUI) ctx.ui.setWorkingMessage(`Waiting for the usage limit to reset at ${time} (Ctrl+C or Esc to stop)`);
     try {
+      announce();
       await sleepUntil(deadline, AbortSignal.any([stopper.signal, ...(ctx.signal ? [ctx.signal] : [])]));
       return true;
     } catch (error) {
@@ -222,25 +227,26 @@ export function registerLimitWait(pi, run, { settings, locks }) {
     if (!limit) return;
     const now = Date.now();
     const { name, resetsAt } = limit;
-    const facts = { provider: run.last?.provider, model: run.last?.model, resetsAt: new Date(resetsAt).toISOString() };
+    const facts = { provider: run.last?.provider, model: run.last?.model, resetsAt: resetsAt && new Date(resetsAt).toISOString() };
     if (unproven) {
       // Anything after this is someone's new request, with a wait of its own.
       unproven = false;
       tell(ctx, `${name} is still limited after the reset, so this run stops here.${resumeLater()}`, { status: "still_limited", ...facts });
       return;
     }
-    if (resetsAt - now > settings.maxMs) {
+    const deadline = resetsAt + settings.marginMs;
+    if (deadline - now > settings.maxMs) {
       const hours = Math.round((settings.maxMs / 3_600_000) * 10) / 10;
       tell(ctx, `${name} resets later than the ${hours}h Cora will wait, so this run stops here.${resumeLater()}`, { status: "too_long", ...facts });
       return;
     }
-    const time = new Date(resetsAt).toLocaleString();
-    tell(
-      ctx,
-      `${name} usage limit reached. ${resetPhrase(resetsAt, now)} Cora will wait and continue this session by itself; Ctrl+C stops it.`,
-      { status: "waiting", ...facts },
-    );
-    if (!(await sleep(ctx, resetsAt + settings.marginMs, time))) {
+    const announce = () =>
+      tell(
+        ctx,
+        `${name} usage limit reached. ${resetPhrase(resetsAt, now)} Cora will wait and continue this session by itself; Ctrl+C stops it.`,
+        { status: "waiting", ...facts },
+      );
+    if (!(await sleep(ctx, deadline, new Date(resetsAt).toLocaleString(), announce))) {
       run.waitStopped = true;
       tell(ctx, `Stopped waiting for the limit. The session is saved.${resumeLater()}`, { status: "stopped", ...facts });
       return;
@@ -256,7 +262,7 @@ export function registerLimitWait(pi, run, { settings, locks }) {
 
   return {
     failed(next) {
-      if (settings.enabled && next.canWait) failure = next;
+      if (settings.enabled && (next.canWait || unproven)) failure = next;
     },
     replied() {
       unproven = false;

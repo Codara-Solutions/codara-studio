@@ -720,7 +720,8 @@ function watch(world, args) {
   child.stdout.setEncoding("utf8").on("data", (chunk) => (run.stdout += chunk));
   child.stderr.setEncoding("utf8").on("data", (chunk) => (run.stderr += chunk));
   run.closed = new Promise((resolve) => child.on("close", resolve));
-  run.waiting = () => until(() => run.stdout.includes('"status":"waiting"') || run.stderr.includes("Cora will wait"), "the run never started waiting");
+  const json = args.includes("--json");
+  run.waiting = () => until(() => (json ? run.stdout.includes('"status":"waiting"') : run.stderr.includes("Cora will wait")), "the run never started waiting");
   return run;
 }
 
@@ -813,7 +814,7 @@ test("a Claude reset is read from the unified headers, then from retry-after", a
     for (const [next, expected] of cases) {
       headers = next;
       await globalThis.fetch("https://x.test/v1/messages?beta=true");
-      if (expected === null) assert.equal(run.limit, null);
+      if (expected === null) assert.equal(run.limit.resetsAt, null);
       else if (typeof expected === "number") assert.equal(run.limit.resetsAt, expected);
       else assert.ok(Math.abs(run.limit.resetsAt - Date.now() - 7_200_000) < 5000);
     }
@@ -854,6 +855,14 @@ test("a reset later than the maximum wait stops at once, and says so", async () 
   assert.match(result.stderr, /later than the 1h Cora will wait/);
   assert.match(result.stderr, /cora resume /);
   assert.equal(stub.requests.length, 1);
+});
+
+test("the margin counts towards the maximum wait", async () => {
+  const world = makeWorld({ settings: { limitWait: { maxMinutes: 60, marginSeconds: 30 } } });
+  stub.control({ mode: "chatgpt429", count: 9, body: usageLimit(3590) });
+  const result = await cora(world, ["exec", "--model", "terra", "--json", "copy it"]);
+  assert.equal(result.status, 1, result.stderr);
+  assert.deepEqual(waitEvents(result.stdout), ["too_long"]);
 });
 
 test("the wait can be turned off in settings", async () => {
@@ -936,6 +945,19 @@ test("still limited after the reset ends the run with one request, not a retry l
   stub.reset();
   const resumed = await cora(world, ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT carry on"]);
   assert.equal(resumed.status, 0, resumed.stderr);
+});
+
+test("still limited with no reset this time stops too, with no retries", async () => {
+  const world = makeWorld({ settings: WAIT_SETTINGS });
+  const headers = { "anthropic-ratelimit-unified-status": "rejected", "anthropic-ratelimit-unified-reset": String(inSeconds(2)) };
+  stub.control({ mode: "anthropic429", count: 1, headers });
+  const run = watch(world, ["exec", "--model", "sonnet", "--json", "copy it"]);
+  await run.waiting();
+  stub.control({ mode: "anthropic429", count: 9 });
+  assert.equal(await run.closed, 1, run.stderr);
+  assert.equal(stub.requests.filter((request) => request.fault === "anthropic429").length, 2);
+  assert.deepEqual(waitEvents(run.stdout), ["waiting", "resumed", "still_limited"]);
+  assert.equal(resultOf(run.stdout).retries, 0);
 });
 
 test("a new limit after real progress is waited out again", async () => {
@@ -1022,10 +1044,11 @@ test("a limit is told apart from a short rate limit, and waiting ends that benef
   const { limitFailure, limitWaitSettings } = await limits();
   const now = 1_000_000;
   const message = { provider: "anthropic", errorMessage: "429 limit" };
-  const soon = { name: "Claude", wording: /\b429\b/, socket: false, code: "", resetsAt: now + 5000 };
+  const soon = { name: "Claude", wording: /\b429\b/, piRetries: false, code: "", resetsAt: now + 5000 };
   assert.equal(limitFailure(message, soon, now, false).retryNotBefore, now + 5000);
   assert.equal(limitFailure(message, soon, now, true).canWait, true);
-  assert.equal(limitFailure(message, { ...soon, socket: true }, now, false), null);
+  assert.equal(limitFailure(message, { ...soon, piRetries: true }, now, false), null);
+  assert.equal(limitFailure(message, { ...soon, piRetries: true, resetsAt: null }, now, true).canWait, false);
   assert.equal(limitFailure({ ...message, errorMessage: "500 boom" }, soon, now, false), null);
   assert.equal(limitFailure(message, null, now, false), null);
   assert.match(limitFailure({ ...message, provider: "corp" }, { ...soon, resetsAt: now + 7_200_000 }, now, false).errorMessage, /^corp usage limit/);
