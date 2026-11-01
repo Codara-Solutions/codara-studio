@@ -47,8 +47,10 @@ export function buildSharedExtensions(): Extension[] {
         backgroundColor: "transparent !important",
         padding: "8px 0",
       },
+      // Solid, the pane's own --bg: the gutter is sticky, and a see-through
+      // one lets text scrolled sideways slide under the line numbers.
       ".cm-gutters": {
-        backgroundColor: "transparent !important",
+        backgroundColor: "var(--bg) !important",
         color: "var(--muted-2)",
         border: "none",
       },
@@ -68,6 +70,11 @@ export function buildSharedExtensions(): Extension[] {
       },
       ".cm-lineNumbers .cm-activeLineGutter": {
         userSelect: "none",
+      },
+      // The active-line tint, flattened onto --bg so it matches the line.
+      ".cm-activeLineGutter": {
+        backgroundColor:
+          "color-mix(in oklab, var(--ink) 4%, var(--bg)) !important",
       },
       ".cm-cursor, .cm-dropCursor": {
         borderLeftColor: "var(--ink)",

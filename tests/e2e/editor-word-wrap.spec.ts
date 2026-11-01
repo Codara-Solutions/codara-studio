@@ -18,7 +18,7 @@ const PROOF_DIR = process.env.SPARK_E2E_PROOF_DIR ?? "";
 
 const words = (n: number, tag: string) => Array.from({ length: n }, (_, i) => `${tag}${i}`).join(" ");
 
-async function launch(): Promise<{ app: ElectronApplication; page: Page }> {
+async function launch(theme: string): Promise<{ app: ElectronApplication; page: Page }> {
   const root = await mkdtemp(join(tmpdir(), "codara-editor-word-wrap-"));
   const userHome = join(root, "home");
   const dataHome = join(root, "data");
@@ -27,6 +27,7 @@ async function launch(): Promise<{ app: ElectronApplication; page: Page }> {
   await mkdir(dataHome, { recursive: true });
   await writeFile(join(cwd, "long-notes.txt"), [`${words(300, "word")} THE-END`, "a short line", words(300, "tail")].join("\n"));
   await writeFile(join(cwd, "long-code.ts"), `const x = "${words(300, "code")}"; // THE-END\n`);
+  await writeFile(join(dataHome, "spark-preferences.json"), JSON.stringify({ theme }));
   await writeFile(
     join(dataHome, "spark-state.json"),
     JSON.stringify({ activeWorkspaceId: "ws-wrap", workspaces: [{ id: "ws-wrap", name: "proj", cwd, color: "#42D6C7", workers: [] }] }),
@@ -51,10 +52,12 @@ async function launch(): Promise<{ app: ElectronApplication; page: Page }> {
   return { app, page };
 }
 
+let proofPrefix = "";
+
 async function proof(page: Page, name: string): Promise<void> {
   if (!PROOF_DIR) return;
   await mkdir(PROOF_DIR, { recursive: true });
-  await page.screenshot({ path: join(PROOF_DIR, `${name}.png`) });
+  await page.screenshot({ path: join(PROOF_DIR, `${proofPrefix}${name}.png`) });
 }
 
 async function openFile(page: Page, query: string, expectText: string): Promise<void> {
@@ -73,9 +76,11 @@ const scroller = (page: Page) =>
     return { clientWidth: s.clientWidth, scrollWidth: s.scrollWidth, scrollLeft: s.scrollLeft };
   });
 
-test("word wrap: default by file type, Alt+Z, and sideways scroll when off", async () => {
+for (const theme of ["codara-classic", "codara-daylight"]) {
+test(`word wrap: default by file type, Alt+Z, and sideways scroll when off (${theme})`, async () => {
   test.setTimeout(120_000);
-  const { app, page } = await launch();
+  proofPrefix = theme === "codara-classic" ? "" : "light-";
+  const { app, page } = await launch(theme);
   try {
     await openFile(page, "long-notes", "word0");
     const wrapButton = page.getByRole("button", { name: "Word wrap" });
@@ -113,6 +118,23 @@ test("word wrap: default by file type, Alt+Z, and sideways scroll when off", asy
     })).toBe(true);
     await proof(page, "3-txt-wrap-off-far-right");
 
+    // The line numbers are sticky and opaque: text scrolled under them is
+    // hidden, and they paint the pane's own background.
+    const paint = await page.evaluate(() => {
+      const gutters = document.querySelector(".cm-gutters") as HTMLElement;
+      let pane: HTMLElement | null = gutters.parentElement;
+      while (pane && /^(rgba\(0, 0, 0, 0\)|transparent)$/.test(getComputedStyle(pane).backgroundColor)) pane = pane.parentElement;
+      const probe = document.createElement("div");
+      probe.style.background = "var(--bg)";
+      document.body.appendChild(probe);
+      const bg = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return { gutter: getComputedStyle(gutters).backgroundColor, pane: pane ? getComputedStyle(pane).backgroundColor : "", token: bg };
+    });
+    expect(paint.gutter).toMatch(/^rgb\(/); // rgba() would mean see-through
+    expect(paint.gutter).toBe(paint.pane);
+    expect(paint.gutter).toBe(paint.token);
+
     // The scrollbar thumb is drawn: it is more than a faint tint of the editor.
     const thumb = await page.evaluate(() => {
       const css = Array.from(document.styleSheets).flatMap((sheet) => {
@@ -135,3 +157,4 @@ test("word wrap: default by file type, Alt+Z, and sideways scroll when off", asy
     await app.close();
   }
 });
+}
