@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, readlinkSync } from "node:fs";
 import { basename, join } from "node:path";
 import type {
   SystemAppUsage,
@@ -12,8 +12,9 @@ import { readProcLine, readSmallFile } from "./system-metrics-linux";
 
 // Per-process CPU, memory, video memory and swap for the popover, grouped by
 // who owns each process: the Codara pane whose pty it runs under (its whole
-// tree: the agent, its shells, test runners, MCP servers), Codara itself, or
-// the rest of the machine. Read only while the popover is open.
+// tree: the agent, its shells, test runners, MCP servers), what a closed pane
+// left running, Codara itself, or the rest of the machine. Read only while the
+// popover is open.
 
 // USER_HZ, the unit of /proc/<pid>/stat's CPU times, is 100 on every Linux
 // architecture Electron ships for; it is part of the kernel's ABI.
@@ -230,6 +231,48 @@ export function readLinuxCommandLine(pid: number, procRoot = "/proc"): string[] 
   return argv.length > 0 ? argv : null;
 }
 
+/** Where a process's inherited environment says it came from. */
+export interface ProcessOrigin {
+  paneId: string;
+  /** The agent CLI that started it, when it marks its children. */
+  runtime: string | null;
+}
+
+const PANE_ID_ENV = "SPARK_PANE_ID=";
+const PANE_ID = /^[\w.-]{1,128}$/;
+
+/**
+ * /proc/<pid>/environ, NUL separated. Every pty carries SPARK_PANE_ID and its
+ * children inherit it through setsid and reparenting, which is what still
+ * names a process once its parent, its session and its pane are gone. The
+ * block holds the process's secrets too: only these two facts leave here.
+ */
+export function parseProcessOrigin(environ: string): ProcessOrigin | null {
+  if (!environ.includes(PANE_ID_ENV)) return null;
+  let paneId: string | null = null;
+  let runtime: string | null = null;
+  for (const entry of environ.split("\0")) {
+    if (entry.startsWith(PANE_ID_ENV)) paneId = entry.slice(PANE_ID_ENV.length);
+    else if (entry.startsWith("CLAUDECODE=")) runtime = "claude";
+    else if (entry.startsWith("CODEX_MANAGED_BY_NPM=") || entry.startsWith("CODEX_THREAD_ID=")) runtime ??= "codex";
+  }
+  return paneId && PANE_ID.test(paneId) ? { paneId, runtime } : null;
+}
+
+export function readLinuxProcessOrigin(pid: number, procRoot = "/proc"): ProcessOrigin | null {
+  const environ = readSmallFile(`${procRoot}/${pid}/environ`);
+  return environ ? parseProcessOrigin(environ) : null;
+}
+
+/** The folder a process runs in; a removed folder reads as its old path. */
+export function readLinuxWorkingDirectory(pid: number, procRoot = "/proc"): string | null {
+  try {
+    return readlinkSync(`${procRoot}/${pid}/cwd`).replace(/ \(deleted\)$/, "");
+  } catch {
+    return null;
+  }
+}
+
 // ── macOS ───────────────────────────────────────────────────────────────────
 
 /** `ps -axo pid=,ppid=,pcpu=,rss=,comm=`: comm is last because it may hold spaces. */
@@ -381,22 +424,49 @@ export function friendlyProcessName(rawArgv: readonly string[], fallback: string
 type OwnerKey = string;
 const CODARA = "codara";
 const OUTSIDE = "outside";
+const LEFT_RUNNING_PREFIX = "left:";
+const INIT_NAMES = new Set(["systemd", "init"]);
+
+type OwnedProcess = Pick<MeasuredProcess, "pid" | "ppid" | "sid"> & Partial<Pick<MeasuredProcess, "name">>;
 
 /**
  * Which pane, if any, each process belongs to: the nearest ancestor that is a
  * pane's pty, else the pane whose session it still carries after being
- * reparented. Anything under Codara's own process that no pane owns is
- * Codara's (renderers, the GPU process, Cora's runtimes).
+ * reparented, else the pane named by its inherited environment. Anything under
+ * Codara's own process that no pane owns is Codara's (renderers, the GPU
+ * process, Cora's runtimes).
  */
-export function processOwners(
-  processes: readonly Pick<MeasuredProcess, "pid" | "ppid" | "sid">[],
+export function processOwners<T extends OwnedProcess>(
+  processes: readonly T[],
   panes: readonly PaneRoot[],
   appPid: number,
+  originOf: (process: T) => ProcessOrigin | null = () => null,
 ): Map<number, OwnerKey> {
+  const byPid = new Map(processes.map((entry) => [entry.pid, entry]));
   const parent = new Map(processes.map((entry) => [entry.pid, entry.ppid]));
   const session = new Map(processes.map((entry) => [entry.pid, entry.sid]));
   const paneByPid = new Map(panes.filter((pane) => pane.pid > 0).map((pane) => [pane.pid, `pane:${pane.paneId}`]));
+  const livePanes = new Set(paneByPid.values());
   const owners = new Map<number, OwnerKey>();
+  // A pane id this window does not have is not yet a closed pane: a second
+  // Studio's live panes look the same. Only when init holds the top of the
+  // processes carrying that id is nothing left above them.
+  const ownerByOrigin = (entry: T): OwnerKey | null => {
+    const paneId = originOf(entry)?.paneId;
+    if (!paneId) return null;
+    const pane = `pane:${paneId}`;
+    if (livePanes.has(pane)) return pane;
+    let top = entry;
+    for (let depth = 0; depth < MAX_ANCESTOR_DEPTH; depth += 1) {
+      if (top.ppid <= 1) return `${LEFT_RUNNING_PREFIX}${paneId}`;
+      const above = byPid.get(top.ppid);
+      if (!above) return null;
+      if (above.name && INIT_NAMES.has(above.name)) return `${LEFT_RUNNING_PREFIX}${paneId}`;
+      if (originOf(above)?.paneId !== paneId) return null;
+      top = above;
+    }
+    return null;
+  };
   for (const { pid } of processes) {
     if (owners.has(pid)) continue;
     const chain: number[] = [];
@@ -424,10 +494,12 @@ export function processOwners(
     }
     if (!owner || owner === OUTSIDE) {
       // Reparented to init (or under a process outside Codara): the session
-      // a pane's shell started may still claim it. Only this process proved
-      // that link, so its ancestors are left to answer for themselves.
+      // a pane's shell started, or the environment it inherited, may still
+      // claim it. Only this process proved that link, so its ancestors are
+      // left to answer for themselves.
       const sid = session.get(pid);
-      owners.set(pid, (sid !== null && sid !== undefined && paneByPid.get(sid)) || OUTSIDE);
+      const entry = byPid.get(pid) as T;
+      owners.set(pid, (sid !== null && sid !== undefined && paneByPid.get(sid)) || ownerByOrigin(entry) || OUTSIDE);
       continue;
     }
     for (const member of chain) owners.set(member, owner);
@@ -473,14 +545,18 @@ export interface GroupOptions {
   panes: readonly PaneRoot[];
   appPid: number;
   commandFor?: (process: MeasuredProcess) => { name: string; command: string } | null;
+  /** The pane a process's environment names, on platforms that can read it. */
+  originOf?: (process: MeasuredProcess) => ProcessOrigin | null;
+  /** The folder a process runs in, read only for what a closed pane left. */
+  workingDirectoryOf?: (process: MeasuredProcess) => string | null;
   /** Whether processes carry video memory and swap figures. */
   gpuMeasured?: boolean;
   swapMeasured?: boolean;
 }
 
 /**
- * The program a process outside Codara belongs to, for the Other apps row:
- * a Chromium helper counts as its browser ("chrome (renderer)" is chrome),
+ * The program a process belongs to, for the row's "what is heavy" line: a
+ * Chromium helper counts as its browser ("chrome (renderer)" is chrome),
  * a macOS helper as its app bundle, a kernel thread as the kernel.
  */
 function appNameOf(entry: MeasuredProcess, described: { name: string } | null): string {
@@ -491,7 +567,7 @@ function appNameOf(entry: MeasuredProcess, described: { name: string } | null): 
 }
 
 export function groupProcesses(processes: readonly MeasuredProcess[], options: GroupOptions): SystemProcessGroup[] {
-  const owners = processOwners(processes, options.panes, options.appPid);
+  const owners = processOwners(processes, options.panes, options.appPid, options.originOf);
   const members = new Map<OwnerKey, MeasuredProcess[]>();
   for (const entry of processes) {
     const key = owners.get(entry.pid) ?? OUTSIDE;
@@ -511,10 +587,11 @@ export function groupProcesses(processes: readonly MeasuredProcess[], options: G
   const groups: SystemProcessGroup[] = [];
   for (const [key, list] of members) {
     const pane = paneByKey.get(key) ?? null;
-    const owner = pane ? "pane" : key === CODARA ? "codara" : "outside";
+    const leftPaneId = key.startsWith(LEFT_RUNNING_PREFIX) ? key.slice(LEFT_RUNNING_PREFIX.length) : null;
+    const owner = pane ? "pane" : leftPaneId ? "left-running" : key === CODARA ? "codara" : "outside";
     const top = topBy(
       list,
-      owner === "pane" ? PANE_GROUP_TOP : owner === "codara" ? CODARA_GROUP_TOP : OUTSIDE_GROUP_TOP,
+      owner === "pane" || owner === "left-running" ? PANE_GROUP_TOP : owner === "codara" ? CODARA_GROUP_TOP : OUTSIDE_GROUP_TOP,
       resources,
       (entry) => entry.pid,
     );
@@ -533,7 +610,7 @@ export function groupProcesses(processes: readonly MeasuredProcess[], options: G
         };
       });
     let apps: SystemAppUsage[] = [];
-    if (owner === "outside") {
+    if (owner !== "codara") {
       const byName = new Map<string, SystemAppUsage>();
       for (const entry of list) {
         const name = appNameOf(entry, options.commandFor?.(entry) ?? null);
@@ -556,14 +633,16 @@ export function groupProcesses(processes: readonly MeasuredProcess[], options: G
         .map((app) => ({ ...app, cpuPercent: roundTenth(app.cpuPercent) }))
         .sort((left, right) => right.cpuPercent - left.cpuPercent || right.memoryBytes - left.memoryBytes);
     }
+    const heaviest = leftPaneId ? list.reduce((best, entry) => (entry.cpuPercent > best.cpuPercent ? entry : best)) : null;
     groups.push({
       owner,
-      paneId: pane?.paneId ?? null,
+      paneId: pane?.paneId ?? leftPaneId,
       workspaceId: pane?.workspaceId ?? null,
       tabId: pane?.tabId ?? null,
       serverId: pane?.serverId ?? null,
-      runtime: pane?.runtime ?? null,
+      runtime: pane?.runtime ?? (heaviest ? (options.originOf?.(heaviest)?.runtime ?? null) : null),
       task: pane?.task ?? null,
+      cwd: heaviest ? (options.workingDirectoryOf?.(heaviest) ?? null) : null,
       cpuPercent: roundTenth(list.reduce((sum, entry) => sum + entry.cpuPercent, 0)),
       memoryBytes: list.reduce((sum, entry) => sum + entry.memoryBytes, 0),
       gpuMemoryBytes: sumOf(list, (entry) => entry.gpuMemoryBytes, gpuMeasured),
@@ -604,6 +683,7 @@ export class ProcessSampler {
   private readonly platform: NodeJS.Platform;
   private readonly now: () => number;
   private readonly descriptions = new Map<string, { name: string; command: string }>();
+  private readonly origins = new Map<string, ProcessOrigin | null>();
   private readonly pendingMac = new Map<number, { key: string; name: string }>();
   private pageSize: number | null = null;
   private readonly privatePages: PrivatePagesCache = { entries: new Map() };
@@ -694,12 +774,16 @@ export class ProcessSampler {
       panes,
       appPid: this.options.appPid ?? process.pid,
       commandFor: (entry) => this.describe(entry),
+      originOf: (entry) => this.originOf(entry),
+      workingDirectoryOf: (entry) =>
+        this.platform === "linux" ? readLinuxWorkingDirectory(entry.pid, this.options.procRoot) : null,
       gpuMeasured,
       swapMeasured: wantSwap,
     });
     if (this.pendingMac.size > 0) await this.describeMac(groups);
     const live = new Set(processes.map(descriptionKey));
     for (const key of this.descriptions.keys()) if (!live.has(key)) this.descriptions.delete(key);
+    for (const key of this.origins.keys()) if (!live.has(key)) this.origins.delete(key);
     return {
       groups,
       processCount: processes.length,
@@ -769,6 +853,18 @@ export class ProcessSampler {
       : { name: entry.name, command: "" };
     this.descriptions.set(key, described);
     return described;
+  }
+
+  // environ is fixed at exec, and an exec changes the key, so one read lasts
+  // the process's life however many samples ask.
+  private originOf(entry: MeasuredProcess): ProcessOrigin | null {
+    if (this.platform !== "linux" || entry.kernelThread) return null;
+    const key = descriptionKey(entry);
+    const known = this.origins.get(key);
+    if (known !== undefined) return known;
+    const origin = readLinuxProcessOrigin(entry.pid, this.options.procRoot);
+    this.origins.set(key, origin);
+    return origin;
   }
 
   /** One `ps` for the processes whose command line is not known yet. */
