@@ -10,7 +10,10 @@ useDefault = true
 description = "Global allowlist"
 paths = [
   # Fixtures/mocks intentionally contain placeholder secrets, not real ones.
-  '''(^|/)(test|tests|__tests__|__mocks__|fixtures|scripts/test-.*)/''',
+  '''(^|/)(test|tests|__tests__|__mocks__|fixtures)/''',
+  # Test scripts directly in scripts/ (scripts/test-*.cjs|mjs) carry the same
+  # placeholder values; a folder-only rule never matched them.
+  '''^scripts/test-[^/]+\.(cjs|mjs)$''',
 ]
 regexes = [
   # Placeholder/example values used across docs and .env.example-style files.
