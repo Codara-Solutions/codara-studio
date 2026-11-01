@@ -47,6 +47,7 @@ import WindowChrome from "./components/WindowChrome";
 import { requestAutomationFocus, requestWorkflowRunFocus } from "./components/automations/focus-request";
 import WorkspaceRail from "./components/WorkspaceRail";
 import { publishAgentBoardSources } from "./components/agent-board/agentBoardSources";
+import { BackgroundAgentNotice } from "./components/workspace-status/BackgroundAgentNotice";
 import { setRailView } from "./components/agent-board/railView";
 import {
   publishSessionSearchHost,
@@ -8401,6 +8402,7 @@ const Workspace = React.memo(function Workspace({
           onSelectTab={handleInnerSelectTab}
         />
       )}
+      {workspace && <BackgroundAgentNotice workspaceId={workspace.id} />}
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
         {/* Also when effectiveActiveId is null with tabs present: every
             remaining tab is run-owned with no owning chat open (nothing is

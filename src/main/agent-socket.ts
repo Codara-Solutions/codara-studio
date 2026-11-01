@@ -1,6 +1,6 @@
 import { app, BrowserWindow } from "electron";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -29,7 +29,30 @@ import {
   shellActivity,
   type PaneIo,
 } from "./agent-terminal-io";
-import { terminalAgentStateSnapshot, terminalAgentTurnsSignaled, terminalPanePlacement } from "./terminal-agent-notify";
+import {
+  noteTerminalUserInput,
+  onTerminalAgentTurnEnded,
+  terminalAgentHibernationEvidence,
+  onTerminalPaneRemoved,
+  terminalAgentSessionLive,
+  terminalAgentStateSnapshot,
+  terminalAgentTurnsSignaled,
+  terminalPanePlacement,
+} from "./terminal-agent-notify";
+import {
+  AGENT_SESSION_LIST_LIMIT,
+  AgentSessions,
+  agentSessionCommand,
+  agentSessionMessageRefusal,
+  agentSessionShellRefusal,
+  agentSessionWaitMs,
+  parseAgentSessionStart,
+  type AgentSessionCaller,
+} from "./agent-sessions";
+import { AGENT_SESSION_BRIEF_MAX_CHARS, AGENT_SESSION_MAX_LIVE, type AgentSessionRecord } from "@shared/agent-sessions";
+import { codexTrustOverride } from "./agent-launch-integration";
+import { standingTerminalCompaction } from "./orchestration/cli-autocompact";
+import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
 import { paneAgentRuntime } from "./pane-agent-runtime";
 import {
   AgentTerminalOwnershipError,
@@ -43,6 +66,7 @@ import {
   registerAgentTerminal,
 } from "./agent-terminal-lifecycle";
 import { serversService } from "./servers/service";
+import { defaultShell } from "./shells";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { loadSettings, loadState, saveState, updateState } from "./storage";
 import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
@@ -348,6 +372,7 @@ let currentHandle: ServerHandle | null = null;
  * existing handle.
  */
 export async function startAgentSocket(): Promise<ServerHandle> {
+  void agentSessions().load();
   if (currentHandle) return currentHandle;
 
   const token = randomBytes(32).toString("hex");
@@ -624,6 +649,8 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "workflow.save",
   "worktree.create",
   "worktree.remove",
+  "session.start",
+  "session.message",
 ]);
 
 // The in-process Pi extension and MCP roster both hide these capabilities for
@@ -648,6 +675,10 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "worktree.remove",
   "worktree.setup",
   "worktree.cleanup",
+  "session.start",
+  "session.status",
+  "session.wait",
+  "session.message",
 ]);
 
 // A terminal that makes a worktree changes worktrees like worktree.create.
@@ -737,6 +768,14 @@ async function dispatch(
         return await handleTerminalRead(params, id);
       case "terminal.create":
         return await handleTerminalCreate(params, id, auth.kind, res);
+      case "session.start":
+        return await handleSessionStart(params, id, auth.kind, res);
+      case "session.status":
+        return await handleSessionStatus(params, id);
+      case "session.wait":
+        return await handleSessionWait(params, id, res);
+      case "session.message":
+        return await handleSessionMessage(params, id);
       case "terminal.write":
         return await handleTerminalWrite(params, id);
       case "terminal.close":
@@ -1677,9 +1716,10 @@ async function handleTerminalCreate(
   id: JsonRpcId,
   authKind: AgentSocketAuth["kind"],
   res: ServerResponse,
+  launch?: TerminalLaunch,
 ): Promise<JsonRpcResponse> {
   const made: TerminalWorktreeMade = { caller: null, worktree: null };
-  const response = await createTerminal(params, id, authKind, res, made);
+  const response = await createTerminal(params, id, authKind, res, made, launch);
   if (!response.error || !made.caller || !made.worktree) return response;
   // A worktree with no terminal would be an orphan that still counts toward
   // the repository's limit: remove it, or say where it stays.
@@ -1693,12 +1733,18 @@ async function handleTerminalCreate(
   return errorResponse(id, response.error.code, message, { worktree: kept });
 }
 
+// What runs in a terminal when the command depends on its folder, which a new
+// worktree only settles inside createTerminal. Returns the command, or throws
+// to refuse: the failed call then takes the worktree back like any other.
+type TerminalLaunch = (cwd: string) => Promise<string>;
+
 async function createTerminal(
   params: Record<string, unknown>,
   id: JsonRpcId,
   authKind: AgentSocketAuth["kind"],
   res: ServerResponse,
   made: TerminalWorktreeMade,
+  launch?: TerminalLaunch,
 ): Promise<JsonRpcResponse> {
   const startedAt = Date.now();
   let cwd = stringParam(params, "cwd");
@@ -1709,7 +1755,7 @@ async function createTerminal(
   const worktreeRequest = terminalWorktreeParam(params.worktree);
   if (typeof worktreeRequest === "string") return errorResponse(id, ERR_INVALID_PARAMS, worktreeRequest);
   if (worktreeRequest && cwd) return errorResponse(id, ERR_INVALID_PARAMS, "pass cwd or worktree, not both");
-  const command = stringParam(params, "command");
+  let command = stringParam(params, "command");
   const title = stringParam(params, "title");
   const group = tabGroupParam(params);
   if (group === undefined) return errorResponse(id, ERR_INVALID_PARAMS, TAB_GROUP_PARAM_ERROR);
@@ -1835,6 +1881,13 @@ async function createTerminal(
     // Nobody would drive a terminal opened after the caller gave up.
     if (res.destroyed || res.socket?.destroyed) {
       return errorResponse(id, ERR_INTERNAL, "the caller disconnected before the terminal opened");
+    }
+  }
+  if (launch) {
+    try {
+      command = await launch(cwd ?? workspaceCwd ?? "");
+    } catch (error) {
+      return errorResponse(id, ERR_FORBIDDEN, error instanceof Error ? error.message : String(error));
     }
   }
   const callerPane =
@@ -1981,6 +2034,266 @@ async function createTerminal(
     const message = err instanceof Error ? err.message : String(err);
     return errorResponse(id, ERR_INTERNAL, message);
   }
+}
+
+// ── Sessions one agent starts for another ───────────────────────────────────
+// codara_session_*: see agent-sessions.ts. A start is terminal.create with a
+// launch, so the approval card, the worktree and its rollback, the tab and the
+// ownership ledger are terminal.create's own.
+
+let agentSessionStore: AgentSessions | null = null;
+
+function agentSessions(): AgentSessions {
+  if (!agentSessionStore) {
+    agentSessionStore = new AgentSessions({
+      dir: codaraHome(),
+      live: terminalAgentSessionLive,
+      log: (message) => console.warn(`[agent-sessions] ${message}`),
+    });
+    const store = agentSessionStore;
+    onTerminalAgentTurnEnded((event) => store.noteTurnEnd(event));
+    onTerminalPaneRemoved((paneId) => store.notePaneClosed(paneId));
+    // A dev server started inside a session must not open it to other agents.
+    agentTerminals.keepOwnerOf((paneId) => store.holdsPane(paneId));
+  }
+  return agentSessionStore;
+}
+
+// Who is asking: the workspace comes from its run or the pane it runs in,
+// never from tool JSON, and decides which sessions it can see.
+async function agentSessionCaller(
+  params: Record<string, unknown>,
+): Promise<AgentSessionCaller & { paneId: string | null; run: RunState | null }> {
+  const runId = stringParam(params, "runId");
+  if (runId) {
+    const run = await (await getRunStore()).getRun(runId);
+    return { workspaceId: run?.workspaceId ?? null, process: null, paneId: null, run: run ?? null };
+  }
+  const agent = await resolveAgentCaller(params);
+  return {
+    workspaceId: agent.paneId ? await paneWorkspaceId(agent.paneId) : null,
+    process: agent.process ?? null,
+    paneId: agent.paneId,
+    run: null,
+  };
+}
+
+// An agent in an imported pull request may not start agents anywhere: what it
+// reads steers it, and a started session keeps running after it. The same
+// check as a terminal in another workspace, for the caller's own one too.
+async function agentSessionCallerRefusal(
+  params: Record<string, unknown>,
+  callerWorkspaceId: string | null,
+  run: RunState | null,
+  state: AppState,
+): Promise<string | null> {
+  if (run) return runProjectPolicyMode(run) === "untrusted-pull-request" ? "an imported pull-request run cannot start sessions" : null;
+  const caller = state.workspaces.find((workspace) => workspace.id === callerWorkspaceId);
+  if (!caller) return null;
+  const trust = await callerPullRequestTrust({
+    caller,
+    processCwds: await callerProcessCwds(params),
+    workspaces: state.workspaces,
+  });
+  return trust === "trusted" ? null : "an agent in an imported pull request cannot start sessions";
+}
+
+function sessionCapMessage(): string {
+  return `${AGENT_SESSION_MAX_LIVE} sessions are already running; wait for one to finish or ask the user`;
+}
+
+async function handleSessionStart(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  authKind: AgentSocketAuth["kind"],
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const request = parseAgentSessionStart(params);
+  if (typeof request === "string") return errorResponse(id, ERR_INVALID_PARAMS, request);
+  const role = stringParam(params, "callerRole");
+  if (role && role !== "studio" && role !== "manager") {
+    return errorResponse(id, ERR_FORBIDDEN, "only an agent the user runs, or Cora's own chat, can start sessions");
+  }
+  const sessions = agentSessions();
+  await sessions.load();
+  const caller = await agentSessionCaller(params);
+  const state = await loadState();
+  const refusal = await agentSessionCallerRefusal(params, caller.workspaceId, caller.run, state);
+  if (refusal) return errorResponse(id, ERR_FORBIDDEN, refusal);
+  const workspace = stringParam(params, "workspace") ?? caller.workspaceId;
+  if (!workspace) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "Codara could not tell which workspace you run in; pass workspace");
+  }
+  const shellRefusal = agentSessionShellRefusal((await defaultShell())?.family ?? null);
+  if (shellRefusal) return errorResponse(id, ERR_INVALID_PARAMS, shellRefusal);
+  const release = sessions.reserve();
+  if (!release) {
+    return errorResponse(id, ERR_INVALID_PARAMS, sessionCapMessage());
+  }
+  const sessionId = `as-${randomUUID()}`;
+  try {
+    const briefPath = await sessions.writeBrief(sessionId, request.brief);
+    const settings = await loadSettings().catch(() => null);
+    const compaction = await standingTerminalCompaction(settings?.coraAutoCompactPercent ?? null, [request.runtime]);
+    params.workspace = workspace;
+    params.title = request.title;
+    delete params.cwd;
+    delete params.command;
+    // A run's temporary terminals close with it, and a session outlives its caller.
+    if (caller.run) params.retention = "service";
+    else delete params.retention;
+    // Set once the worktree exists: the agent cannot have answered before this.
+    let launchedAt = Date.now();
+    const response = await handleTerminalCreate(params, id, authKind, res, async (cwd) => {
+      launchedAt = Date.now();
+      if (!cwd || isRemotePath(cwd)) throw new Error("sessions can only start in a local workspace");
+      if ((await workspaceProjectPolicyModeForTerminalCwd(cwd, state.workspaces)) === "untrusted-pull-request") {
+        throw new Error("a session cannot start in an imported pull request");
+      }
+      return agentSessionCommand({
+        runtime: request.runtime,
+        model: request.model,
+        effort: request.effort,
+        briefPath,
+        codexTrust: codexTrustOverride(cwd),
+        compaction,
+      });
+    });
+    if (response.error) {
+      await sessions.removeBrief(sessionId);
+      return response;
+    }
+    const opened = response.result as {
+      tabId: string;
+      paneId: string;
+      cwd: string;
+      group?: string;
+      workspaceId?: string;
+      workspace?: string;
+      worktree?: { branch?: string };
+    };
+    const workspaceId = opened.workspaceId ?? caller.workspaceId ?? terminalPanePlacement(opened.paneId)?.workspaceId ?? "";
+    const record: AgentSessionRecord = {
+      id: sessionId,
+      runtime: request.runtime,
+      model: request.model,
+      effort: request.effort,
+      title: request.title,
+      paneId: opened.paneId,
+      tabId: opened.tabId,
+      workspaceId,
+      workspaceName: opened.workspace ?? state.workspaces.find((entry) => entry.id === workspaceId)?.name ?? "",
+      cwd: opened.cwd,
+      branch: opened.worktree?.branch ?? null,
+      callerWorkspaceId: caller.workspaceId,
+      ownerProcess: caller.process,
+      startedAt: launchedAt,
+      promptAt: launchedAt,
+      turnEndedAt: null,
+      failure: null,
+      finalMessage: null,
+      closedAt: null,
+    };
+    await sessions.add(record);
+    return successResponse(id, {
+      ...sessions.view(record),
+      ...(opened.group ? { group: opened.group } : {}),
+    });
+  } finally {
+    release();
+  }
+}
+
+// Unknown and not visible read the same: an id proves nothing about access.
+function visibleSession(
+  sessions: AgentSessions,
+  caller: AgentSessionCaller,
+  sessionId: string,
+): AgentSessionRecord | null {
+  return sessions.visibleTo(caller).find((record) => record.id === sessionId) ?? null;
+}
+
+async function handleSessionStatus(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const sessions = agentSessions();
+  await sessions.load();
+  const caller = await agentSessionCaller(params);
+  const sessionId = stringParam(params, "id");
+  if (sessionId) {
+    const record = visibleSession(sessions, caller, sessionId);
+    if (!record) return errorResponse(id, ERR_INVALID_PARAMS, `no session ${sessionId.slice(0, 80)} was started from your workspace`);
+    return successResponse(id, sessions.view(record));
+  }
+  const records = sessions.visibleTo(caller).slice(0, AGENT_SESSION_LIST_LIMIT);
+  return successResponse(id, { sessions: records.map((record) => sessions.view(record, { cut: true })) });
+}
+
+async function handleSessionWait(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const ids = Array.isArray(params.ids) ? params.ids.filter((value): value is string => typeof value === "string") : [];
+  if (ids.length === 0) return errorResponse(id, ERR_INVALID_PARAMS, "ids is required: the sessions to wait for");
+  if (ids.length > AGENT_SESSION_MAX_LIVE * 2) return errorResponse(id, ERR_INVALID_PARAMS, "too many ids");
+  const mode = params.mode === undefined || params.mode === null ? "any" : params.mode;
+  if (mode !== "any" && mode !== "all") return errorResponse(id, ERR_INVALID_PARAMS, "mode must be any or all");
+  const timeoutMs = agentSessionWaitMs(params.timeoutSeconds);
+  if (typeof timeoutMs === "string") return errorResponse(id, ERR_INVALID_PARAMS, timeoutMs);
+  const sessions = agentSessions();
+  await sessions.load();
+  const caller = await agentSessionCaller(params);
+  const records: AgentSessionRecord[] = [];
+  for (const sessionId of ids) {
+    const record = visibleSession(sessions, caller, sessionId);
+    if (!record) return errorResponse(id, ERR_INVALID_PARAMS, `no session ${sessionId.slice(0, 80)} was started from your workspace`);
+    records.push(record);
+  }
+  const result = await sessions.wait({ records, mode, timeoutMs, cancelled: () => clientGone(res) });
+  if (result.reason === "cancelled") return errorResponse(id, ERR_INTERNAL, "session.wait aborted: client disconnected");
+  return successResponse(id, result);
+}
+
+async function handleSessionMessage(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const sessionId = stringParam(params, "id");
+  if (!sessionId) return errorResponse(id, ERR_INVALID_PARAMS, "id is required");
+  const text = params.text;
+  if (typeof text !== "string" || !text.trim()) return errorResponse(id, ERR_INVALID_PARAMS, "text is required");
+  if (text.length > AGENT_SESSION_BRIEF_MAX_CHARS) {
+    return errorResponse(id, ERR_INVALID_PARAMS, `text is limited to ${AGENT_SESSION_BRIEF_MAX_CHARS} characters`);
+  }
+  const sessions = agentSessions();
+  await sessions.load();
+  const caller = await agentSessionCaller(params);
+  const record = visibleSession(sessions, caller, sessionId);
+  if (!record) return errorResponse(id, ERR_INVALID_PARAMS, `no session ${sessionId.slice(0, 80)} was started from your workspace`);
+  const { paneId } = record;
+  await adoptRestoredAgentTerminal(paneId, params);
+  if (!agentTerminals.isActiveOwnedBy(paneId, stringParam(params, "runId"), await callerForOwnedTerminal(paneId, params))) {
+    return errorResponse(id, ERR_FORBIDDEN, "only the agent that started a session can message it");
+  }
+  const evidence = terminalAgentHibernationEvidence(paneId);
+  const refusal = agentSessionMessageRefusal({
+    status: sessions.state(record).status,
+    runtime: evidence?.runtime ?? null,
+    running: pty.hasSession(paneId),
+    lastUserInputAt: evidence?.lastUserInputAt ?? 0,
+    lastSubmitAt: evidence?.lastSubmitAt ?? 0,
+    now: Date.now(),
+  });
+  if (refusal) return errorResponse(id, ERR_INVALID_PARAMS, refusal);
+  // Nothing below awaits before the prompt is recorded, so a check is enough.
+  const release = sessions.reserve();
+  if (!release) return errorResponse(id, ERR_INVALID_PARAMS, sessionCapMessage());
+  release();
+  try {
+    pty.inject(paneId, text, { submit: true, stashDraft: record.runtime === "claude" });
+  } catch (err) {
+    if (err instanceof pty.RemotePaneDisconnectedError) return errorResponse(id, ERR_INVALID_PARAMS, err.message);
+    throw err;
+  }
+  noteTerminalUserInput(paneId);
+  sessions.notePrompt(record.id);
+  return successResponse(id, sessions.view(record));
 }
 
 // Deliver text to a terminal pane's PTY. paneId is the pty session id, so this

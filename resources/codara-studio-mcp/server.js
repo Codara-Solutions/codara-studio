@@ -379,6 +379,78 @@ const TASK_TOOL_TO_RPC = {
 // src/main/preview-tools/session-search.ts). Read only. Codara limits it to
 // the caller's own project unless the person allowed every session in
 // Settings, so the tool takes no scope.
+// Sessions one agent starts for another: a real agent CLI in a visible tab of
+// a workspace. The user's own agents and Cora's chats get them; a worker or an
+// automation pass never leaves something running behind it.
+const SESSION_TOOLS = [
+  {
+    name: "codara_session_start",
+    description:
+      "Start a real agent session in a visible tab of workspace (id or folder; the user approves once; default yours) or a new worktree of it, brief already submitted. It outlives you. Returns id for codara_session_wait.",
+    inputSchema: {
+      type: "object",
+      required: ["brief", "runtime"],
+      properties: {
+        brief: { type: "string", description: "The whole task; max 60000 characters." },
+        runtime: { type: "string", enum: ["claude", "codex"] },
+        model: { type: "string", description: "Default the CLI's own." },
+        effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max"] },
+        workspace: { type: "string" },
+        worktree: {
+          type: "object",
+          properties: { branch: { type: "string" }, base: { type: "string" }, purpose: { type: "string" } },
+        },
+        title: { type: "string" },
+        group: { type: "string", description: "Tab group, named after your task." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_session_wait",
+    description:
+      "Wait until sessions finish, fail or need the user; returns their status and final messages, or reason timeout while they keep running.",
+    inputSchema: {
+      type: "object",
+      required: ["ids"],
+      properties: {
+        ids: { type: "array", items: { type: "string" } },
+        mode: { type: "string", enum: ["any", "all"], description: "Default any." },
+        timeoutSeconds: { type: "number", description: "Default 120, max 540." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_session_status",
+    description:
+      "One session's status and final message, or without id every session started from your workspace: starting, working, needs_you, finished, failed or closed.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_session_message",
+    description:
+      "Send a follow-up to a finished or failed session you started; codara_session_wait then waits for the new turn.",
+    inputSchema: {
+      type: "object",
+      required: ["id", "text"],
+      properties: { id: { type: "string" }, text: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+];
+
+const SESSION_TOOL_TO_RPC = {
+  codara_session_start: "session.start",
+  codara_session_wait: "session.wait",
+  codara_session_status: "session.status",
+  codara_session_message: "session.message",
+};
+
 const SESSION_SEARCH_TOOL = {
   name: "codara_session_search",
   description:
@@ -1853,6 +1925,7 @@ if (IS_AUTOMATION_MODE) {
     ...WORKTREE_TOOLS,
     ...WORKFLOW_TOOLS,
     ...TASK_TOOLS,
+    ...SESSION_TOOLS,
     SESSION_SEARCH_TOOL,
     SHARE_TOOL,
     OPEN_FILE_TOOL,
@@ -1864,6 +1937,7 @@ if (IS_AUTOMATION_MODE) {
     ...WORKTREE_TOOL_TO_RPC,
     ...WORKFLOW_TOOL_TO_RPC,
     ...TASK_TOOL_TO_RPC,
+    ...SESSION_TOOL_TO_RPC,
     codara_session_search: "session.search",
     codara_share_offer: "share.offer",
     codara_open_file: "file.open",
@@ -1872,12 +1946,13 @@ if (IS_AUTOMATION_MODE) {
   TOOLS = WORKER_TOOLS;
   TOOL_TO_RPC = WORKER_TOOL_TO_RPC;
 } else if (process.env.CODARA_PI_DIRECT_TASK === "1") {
-  TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL, RECALL_TOOL, ...WORKTREE_TOOLS, SHARE_TOOL, OPEN_FILE_TOOL];
+  TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL, RECALL_TOOL, ...WORKTREE_TOOLS, ...SESSION_TOOLS, SHARE_TOOL, OPEN_FILE_TOOL];
   TOOL_TO_RPC = {
     ...STUDIO_TOOL_TO_RPC,
     codara_remember: "orchestrator.remember",
     codara_recall: "orchestrator.recall",
     ...WORKTREE_TOOL_TO_RPC,
+    ...SESSION_TOOL_TO_RPC,
     codara_share_offer: "share.offer",
     codara_open_file: "file.open",
   };
@@ -1895,6 +1970,7 @@ if (IS_AUTOMATION_MODE) {
     WORKSPACE_STATUS_TOOL,
     ...TASK_TOOLS,
     ...WORKTREE_TOOLS,
+    ...SESSION_TOOLS,
     SESSION_SEARCH_TOOL,
     SHARE_TOOL,
     OPEN_FILE_TOOL,
@@ -1905,6 +1981,7 @@ if (IS_AUTOMATION_MODE) {
     codara_workspace_status: "workspace.status",
     ...TASK_TOOL_TO_RPC,
     ...WORKTREE_TOOL_TO_RPC,
+    ...SESSION_TOOL_TO_RPC,
     codara_session_search: "session.search",
     codara_share_offer: "share.offer",
     codara_open_file: "file.open",
@@ -1945,6 +2022,8 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "codara_workflow_status",
   "codara_workflow_wait",
   "codara_session_search",
+  "codara_session_status",
+  "codara_session_wait",
   "codara_task_list",
 ]);
 // Anything that runs a caller-chosen shell command or page script can destroy
@@ -1956,6 +2035,9 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "codara_terminal_write",
   "codara_spawn_terminals",
   "codara_terminal_close",
+  // Run an agent that can do anything the user's own agents can.
+  "codara_session_start",
+  "codara_session_message",
   "codara_whiteboard_update",
   "codara_board_update",
   "codara_delete_automation",
@@ -2035,6 +2117,11 @@ function buildInstructions() {
   if (listed.has("codara_terminal_run")) {
     parts.push(
       "Terminals: codara_terminal_run runs a command and returns its exit code and output. Start watchers with codara_terminal_create, then poll codara_terminal_read with since=<cursor> to get only new output, or mode=\"screen\" for full-screen programs. codara_terminal_list shows the workspace's panes; you can read any of them but only write to terminals you created.",
+    );
+  }
+  if (listed.has("codara_session_start")) {
+    parts.push(
+      "Sessions: to hand work to an agent in another workspace, or work that should outlive you, call codara_session_start: a real session opens in a tab of that workspace and the user can open it. Then codara_session_wait (it returns on a timeout too, so wait in short steps), codara_session_status to find sessions, and codara_session_message for a follow-up. A session that reads needs_you waits for the user: tell them. A started session can use its own subagents.",
     );
   }
   if (listed.has("codara_preview_navigate") || listed.has("codara_terminal_create")) {
@@ -2123,6 +2210,7 @@ function isLongPollRpc(rpc) {
 const PROGRESS_RPCS = new Set([
   ...LONG_POLL_RPCS,
   "terminal.run",
+  "session.wait",
   "browser.use",
   "automation.update",
   "automation.delete",
@@ -2133,10 +2221,21 @@ const PROGRESS_RPCS = new Set([
   "worktree.cleanup",
 ]);
 const PROGRESS_INTERVAL_MS = 10_000;
+const SESSION_WAIT_DEFAULT_SECONDS = 120;
+const SESSION_WAIT_MAX_SECONDS = 540;
+const SESSION_WAIT_MARGIN_SECONDS = 30;
+
+// Past the wait itself, so Codara, not the transport, ends it on time.
+function sessionWaitTimeoutMs(args) {
+  const seconds = args && typeof args.timeoutSeconds === "number" ? args.timeoutSeconds : SESSION_WAIT_DEFAULT_SECONDS;
+  return (Math.min(Math.max(0, seconds), SESSION_WAIT_MAX_SECONDS) + SESSION_WAIT_MARGIN_SECONDS) * 1000;
+}
 
 function rpcTimeoutMs(rpc, args) {
   if (isOrchestrationRpc(rpc)) return ORCHESTRATION_TIMEOUT_MS;
   if (rpc === "terminal.create" && args && args.worktree) return TERMINAL_WORKTREE_TIMEOUT_MS;
+  if (rpc === "session.start" && args && args.worktree) return TERMINAL_WORKTREE_TIMEOUT_MS;
+  if (rpc === "session.wait") return sessionWaitTimeoutMs(args);
   if (rpc === "terminal.run") return TERMINAL_RUN_TIMEOUT_MS;
   if (rpc === "browser.use") return BROWSER_USE_TIMEOUT_MS;
   if (rpc === "worktree.create") return args && args.workspace ? WORKTREE_CREATE_ELSEWHERE_TIMEOUT_MS : WORKTREE_CREATE_TIMEOUT_MS;
@@ -2171,6 +2270,10 @@ const CALLER_LOCATED_RPCS = new Set([
   "task.list",
   "inbox.add",
   "tab.action",
+  "session.start",
+  "session.status",
+  "session.wait",
+  "session.message",
 ]);
 // The browser code tool is scoped like the single browser tools it drives.
 function isBrowserRpc(rpc) {
@@ -2221,7 +2324,7 @@ function worktreeCallerRole() {
 let CLIENT_NAME = "";
 
 function stampWorktreeCaller(rpc, args, ctx) {
-  if (!rpc.startsWith("worktree.") && !(rpc === "terminal.create" && args.worktree)) return;
+  if (!rpc.startsWith("worktree.") && !(rpc === "terminal.create" && args.worktree) && rpc !== "session.start") return;
   for (const key of ["runId", "callerPaneId", "callerPid", "callerRole", "callerClient"]) delete args[key];
   const envRunId = (process.env.SPARK_RUN_ID || "").trim();
   if (envRunId) args.runId = envRunId;
@@ -2953,7 +3056,7 @@ function toolManifest() {
     orchestration: names(EXECUTE_TOOLS),
     automation: names(AUTOMATION_TOOLS),
     workflow: names(WORKFLOW_TOOLS),
-    sessions: names([SESSION_SEARCH_TOOL]),
+    sessions: names([...SESSION_TOOLS, SESSION_SEARCH_TOOL]),
   };
 }
 

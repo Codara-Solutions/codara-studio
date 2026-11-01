@@ -93,8 +93,8 @@ environment variable that Codara sets for the agent:
 
 | Set | Who sees it | What it adds |
 |---|---|---|
-| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_tab`, `codara_notify_user`, `codara_workspace_status`, the task list tools, `codara_session_search`, `codara_share_offer`, `codara_open_file` and the worktree tools; whiteboard and board only inside a Cora chat |
-| `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only and without `codara_tab`, plus `codara_ask_user` and `codara_request_next_iteration` |
+| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, sessions, `codara_tab`, `codara_notify_user`, `codara_workspace_status`, the task list tools, `codara_session_search`, `codara_share_offer`, `codara_open_file` and the worktree tools; whiteboard and board only inside a Cora chat |
+| `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only and without `codara_tab` or the session tools, plus `codara_ask_user` and `codara_request_next_iteration` |
 | `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management, the task list tools, `codara_session_search`, the worktree tools, `codara_share_offer` and `codara_open_file` |
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
 
@@ -853,6 +853,58 @@ with their health, which agents in the workspace's panes reached Codara's
 tools (each codara-studio server reports itself once its client has
 initialized), the browser tabs each agent or run drives, and recordings in
 progress, with open, stop, start, restart, logs, edit and copy-id actions.
+
+## Sessions
+
+An agent can hand work to another agent in a real session of its own: a Claude
+Code or Codex CLI in a visible tab of any workspace, with its brief already
+submitted. It suits work in another repository, and work that should outlive
+the agent that started it. The session is an ordinary tab in that workspace's
+rail, so you can open it, read it and type in it, and it can use its own
+subagents.
+
+| Tool | What it does |
+|---|---|
+| `codara_session_start` | Starts one: `brief`, `runtime` (`claude` or `codex`), and optionally `model`, `effort`, `workspace`, `title`, `group`, and `worktree` (`branch`, `base`, `purpose`) to run it in a new worktree. Returns the session's `id` and its tab. |
+| `codara_session_wait` | Waits until a session in `ids` finishes or needs you (`mode: "any"`, the default) or all of them do (`mode: "all"`). It also returns on `timeoutSeconds` (default 120, at most 540) with `reason: "timeout"`, so a caller waits in short steps. |
+| `codara_session_status` | One session with `id`, with its whole final message, or the list of the workspace's sessions, newest first, with each message cut to 500 characters. |
+| `codara_session_message` | Sends a follow-up to a session you started, as a new turn, and clears its previous answer. |
+
+A session's `status` is `starting`, `working`, `needs_you` (it stopped for you
+in its tab, and `detail` says why), `finished`, `failed` or `closed`. When a
+turn ends, `finalMessage` holds what the agent said last, up to 16,000
+characters, so nobody has to read a terminal.
+
+The brief goes to a private file and reaches the agent as one argument, so its
+quotes and newlines never pass through shell parsing. It can be up to 60,000
+characters. The file is deleted when the first turn ends. On Windows the agent
+is told to read the file instead.
+
+Rules:
+
+- `workspace` takes a rail workspace's id or folder, and asks you once, like a
+  terminal in another workspace. `worktree` asks the same way and shows in that
+  workspace's rail.
+- Any agent in the workspace that started a session can find and read it, also
+  after that agent ended or Codara restarted. Only the agent that started it
+  can message it. A later agent cannot, and starts a new session instead.
+- A message is refused while the session is working, is waiting for you, is
+  closed, or has text you were typing. Its owner can still steer a working
+  session with `codara_terminal_write`.
+- At most 12 sessions run at once, so a caller in a loop cannot run up your
+  subscription.
+- A session needs bash, zsh or PowerShell as the terminal shell: agents report
+  to Codara through what those shells load.
+- A session keeps running when its caller ends. One started from a Cora chat
+  stays until you close it or delete that chat.
+- A session never wakes its caller: the caller finds out with
+  `codara_session_wait` or `codara_session_status`.
+- Workers, Talk chats, automations and agents in an imported pull request
+  cannot start sessions, and a session cannot start on a remote workspace or
+  inside an imported pull request.
+
+Cora chats get these tools too, but only Claude Code and Codex can run in a
+session: Cora's own chat is not a terminal.
 
 ## Notifications
 

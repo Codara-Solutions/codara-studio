@@ -1194,6 +1194,24 @@ async function main() {
     alertCount() === beforeApproval + 4 && /build is green/.test(T.alerts.at(-1).body) && !/took/.test(T.alerts.at(-1).body),
   );
 
+  // A prompt on the command line starts no turn Codara sees, so Codex's own
+  // report opens and ends it. A session waiting hears the whole answer.
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-cli-prompt", panes: [
+    { paneId: "c-cli", tabId: "tc-cli", tabTitle: "Codex", excluded: false },
+  ] });
+  const turnEnds = [];
+  const stopHearing = mod.onTerminalAgentTurnEnded((event) => turnEnds.push(event));
+  feed("c-cli", "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.162.1)                          │\r\n");
+  const fullAnswer = "The whole answer, line by line. ".repeat(40);
+  mod.noteTerminalHookEvent("c-cli", "CodexNotify", {
+    type: "agent-turn-complete",
+    "turn-id": "cli-1",
+    "input-messages": ["the brief"],
+    "last-assistant-message": fullAnswer,
+  });
+  check("codex: a command-line prompt's turn reports its whole final message", turnEnds.at(-1)?.message === fullAnswer);
+  stopHearing();
+
   // With Codara's notify on Codex launches, a screen-read finish waits a
   // moment for Codex's own message, but only in a pane whose shell passes
   // the program on: a typed `codex` in fish or cmd never sends one.

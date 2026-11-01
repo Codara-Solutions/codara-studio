@@ -192,6 +192,7 @@ calls.
 |---|---|
 | `test-worker-*` (access, cleanup-safety, diff, independence, model-hint, pane-harness-gate, prompt-budget, session-memory-options, session-reuse, sessions; `test-worker-terminal-controls` belongs to remote access) | Worker prompts, tool access, sessions, diffs, and the pane a worker runs in. |
 | `test-spawn-batch-guard`, `test-parallel-wave`, `test-autopilot-wave`, `test-peer-comms-opt-in`, `test-verifier-scoping`, `test-direct-worker` | How workers are batched and scheduled (`src/shared/parallel-wave.ts`, `autopilot-wave.ts`), and verifiers. |
+| `test-agent-sessions` | Sessions one agent starts for another (`agent-sessions.ts`, `src/shared/agent-sessions.ts`): statuses, the live cap, waits, the launch command, and a brief passed whole through real bash, sh and zsh. |
 | `test-agent-terminal-cleanup`, `test-agent-terminal-lifecycle`, `test-agent-terminal-placement` | Terminals that agents open (`agent-terminal-registry.ts`, `agent-terminal-lifecycle.ts`). |
 
 ### Pi runtime, the Cora extension and subscriptions

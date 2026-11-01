@@ -138,7 +138,7 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
   const onOpen = useCallback(
     (row: Row) => {
       updateAgentInbox((current) => setAgentUnread(current, row.key, false, Date.now()));
-      navigate?.(row.card.target);
+      navigate?.(row.card.origin?.target ?? row.card.target);
     },
     [navigate],
   );
