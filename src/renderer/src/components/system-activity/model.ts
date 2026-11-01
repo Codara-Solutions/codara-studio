@@ -11,8 +11,8 @@ import { visibleWorkerChip } from "../../tabs/terminalAgentState";
 import type { Tab } from "../../tabs/types";
 import { runtimeLabel } from "../../routing/agent-destinations";
 
-// The System activity popover's model: one row per pane with everything
-// running under it, named the way the user knows it, and how each resource
+// The System activity popover's model: one ranked list of who is using the
+// machine, each row named by its agent and workspace, and how each resource
 // reads. Pure functions of plain data, so scripts/test-system-activity-model.cjs
 // runs them without React.
 
@@ -51,6 +51,19 @@ export function formatPercent(value: number | null | undefined): string {
   return value >= 9.95 || value === 0 ? `${Math.round(value)}%` : `${value.toFixed(1)}%`;
 }
 
+/**
+ * Percent of the whole machine, the scale of the CPU headline. The sampler
+ * counts 100% per core and windows can overlap, so a share is capped at all of it.
+ */
+export function cpuShare(cpuPercent: number, cores: number): number {
+  return Math.min(100, cpuPercent / Math.max(1, cores));
+}
+
+export function formatShare(share: number | null | undefined): string {
+  if (share !== null && share !== undefined && share > 0 && share < 0.05) return "<0.1%";
+  return formatPercent(share);
+}
+
 type Measured = Pick<SystemProcessGroup, "cpuPercent" | "memoryBytes" | "gpuMemoryBytes" | "swapBytes">;
 
 /** A row's figure for one resource: CPU in percent of one core, the rest in bytes. */
@@ -61,9 +74,10 @@ export function valueOf(entry: Measured, resource: SystemResource): number | nul
   return entry.swapBytes;
 }
 
-export function formatValue(entry: Measured, resource: SystemResource): string {
-  const value = valueOf(entry, resource);
-  return resource === "cpu" ? formatPercent(value) : formatBytes(value);
+/** A row's figure as shown: CPU as a share of the machine, the rest in bytes. */
+export function formatValue(entry: Measured, resource: SystemResource, cores: number): string {
+  if (resource === "cpu") return formatShare(cpuShare(entry.cpuPercent, cores));
+  return formatBytes(valueOf(entry, resource));
 }
 
 export interface PaneOwner {
@@ -121,18 +135,22 @@ export function paneOwnerIndex(
   return index;
 }
 
+type WorkspaceRef = Pick<Workspace, "id" | "name" | "color"> & Partial<Pick<Workspace, "cwd">>;
+
 export interface GroupView {
   key: string;
   kind: SystemProcessGroup["owner"];
-  /** The agent's task, else the agent, else where the pane sits; "Codara"; "Other apps". */
+  /** "Claude Code · codara-studio"; "Codara"; "Other apps". What a closed pane left is named by rowName. */
   name: string;
-  /** The workspace the pane belongs to. */
+  /** The workspace the row belongs to. */
   workspace: string | null;
-  /** Where in the workspace, when the name does not already say it. */
+  /** Where in the workspace; what names an idle pane. */
   place: string | null;
+  /** What the agent was asked, kept for the row's detail: it is not a name. */
+  note: string | null;
   color: string | null;
   runtime: string | null;
-  /** Where a click goes; null for Codara itself and other apps. */
+  /** Where a click goes; null for Codara itself, other apps and closed panes. */
   target: NavigationTarget | null;
   group: SystemProcessGroup;
 }
@@ -142,14 +160,37 @@ function oneLine(text: string | null | undefined): string | null {
   return line ? line : null;
 }
 
+/** The workspace whose folder holds this one; the deepest wins, so a worktree beats its parent. */
+export function workspaceOfFolder<T extends WorkspaceRef>(folder: string | null, workspaces: readonly T[]): T | null {
+  if (!folder) return null;
+  let best: T | null = null;
+  for (const workspace of workspaces) {
+    const root = workspace.cwd?.replace(/\/+$/, "");
+    if (!root || (folder !== root && !folder.startsWith(`${root}/`))) continue;
+    if (!best || root.length > (best.cwd?.length ?? 0)) best = workspace;
+  }
+  return best;
+}
+
 export function describeGroup(
   group: SystemProcessGroup,
   panes: ReadonlyMap<string, PaneOwner>,
-  workspaces: readonly Pick<Workspace, "id" | "name" | "color">[],
+  workspaces: readonly WorkspaceRef[],
 ): GroupView {
-  const key = group.paneId ? `pane:${group.paneId}` : group.owner;
-  const base = { key, group, workspace: null, place: null, color: null, runtime: null, target: null };
+  const key = group.paneId ? `${group.owner}:${group.paneId}` : group.owner;
+  const base = { key, group, workspace: null, place: null, note: null, color: null, runtime: null, target: null };
   if (group.owner === "codara") return { ...base, kind: "codara", name: "Codara" };
+  if (group.owner === "left-running") {
+    const workspace = workspaceOfFolder(group.cwd, workspaces);
+    return {
+      ...base,
+      kind: "left-running",
+      name: "Left running",
+      workspace: workspace?.name ?? null,
+      color: workspace?.color ?? null,
+      runtime: group.runtime,
+    };
+  }
   if (group.owner === "outside" || !group.paneId) return { ...base, kind: "outside", name: "Other apps" };
   const known = panes.get(group.paneId);
   const runtime = group.runtime ?? known?.runtime ?? null;
@@ -159,16 +200,19 @@ export function describeGroup(
         const entry = group.workspaceId ? workspaces.find((candidate) => candidate.id === group.workspaceId) : undefined;
         return entry ? { name: entry.name, color: entry.color ?? null } : null;
       })();
-  const place = known?.place ?? (group.serverId ? `Dev server ${group.serverId}` : null);
-  const name = oneLine(known?.task) ?? oneLine(group.task) ?? runtimeLabel(runtime) ?? place ?? "Terminal";
+  const server = group.serverId ? `Dev server ${group.serverId}` : null;
+  const owner = runtimeLabel(runtime) ?? (server ? "Dev server" : "Terminal");
+  const task = oneLine(known?.task);
+  const prompt = oneLine(group.task);
   const workspaceId = known?.workspaceId ?? group.workspaceId;
   const tabId = known?.tabId ?? group.tabId;
   return {
     key,
     kind: "pane",
-    name,
+    name: workspace ? `${owner} · ${workspace.name}` : owner,
     workspace: workspace?.name ?? null,
-    place: place && place !== name ? place : null,
+    place: known?.place ?? server,
+    note: task ? `Task: ${task}` : prompt ? `Last prompt: ${prompt}` : null,
     color: workspace?.color ?? null,
     runtime,
     target:
@@ -181,17 +225,83 @@ export function describeGroup(
   };
 }
 
-// Video memory and swap list only the panes that use some; a pane at 0% CPU
-// still shows, so every agent can be found under CPU.
+// Video memory and swap list only what holds some.
 const MIN_LISTED_BYTES = 1024 * 1024;
+// A pane under 1% of one core is sitting idle; a shell's prompt costs that.
+const IDLE_CPU_PERCENT = 1;
+// A closed pane can leave a shell or a clipboard helper holding a few MB:
+// worth a count, not a row of its own.
+const MIN_LEFT_RUNNING_BYTES = 64 * 1024 * 1024;
 
-/** The pane rows for one resource, heaviest first. */
-export function paneRows(views: readonly GroupView[], resource: SystemResource): GroupView[] {
+/**
+ * Everything by one resource, heaviest first in a single list: what counts is
+ * what is heavy, not whether it is an agent. Idle rows fold away but stay
+ * findable. While CPU has no reading yet nothing can be called idle.
+ */
+export function rankedRows(
+  views: readonly GroupView[],
+  resource: SystemResource,
+  cpuMeasured = true,
+): { busy: GroupView[]; idle: GroupView[] } {
   const value = (view: GroupView) => valueOf(view.group, resource) ?? 0;
-  return views
-    .filter((view) => view.kind === "pane")
-    .filter((view) => resource === "cpu" || resource === "memory" || value(view) >= MIN_LISTED_BYTES)
-    .sort((left, right) => value(right) - value(left) || left.name.localeCompare(right.name));
+  const ranked = [...views].sort(
+    (left, right) => value(right) - value(left) || left.name.localeCompare(right.name) || left.key.localeCompare(right.key),
+  );
+  if (resource === "cpu") {
+    if (!cpuMeasured) return { busy: ranked, idle: [] };
+    return {
+      busy: ranked.filter((view) => value(view) >= IDLE_CPU_PERCENT),
+      idle: ranked.filter((view) => value(view) < IDLE_CPU_PERCENT),
+    };
+  }
+  if (resource === "memory") {
+    const small = (view: GroupView) => view.kind === "left-running" && value(view) < MIN_LEFT_RUNNING_BYTES;
+    return { busy: ranked.filter((view) => !small(view)), idle: ranked.filter(small) };
+  }
+  return { busy: ranked.filter((view) => value(view) >= MIN_LISTED_BYTES), idle: [] };
+}
+
+export function idleLabel(idle: readonly GroupView[]): string {
+  const panes = idle.every((view) => view.kind === "pane");
+  return `${idle.length} ${panes ? `idle pane${idle.length === 1 ? "" : "s"}` : "idle"}`;
+}
+
+/** Over half the machine on one row. */
+const ALARM_SHARE = 50;
+/** A full core nobody is watching. */
+const ALARM_LEFT_RUNNING_CPU = 100;
+
+/** CPU only: memory has its own warning, and the other two are not spent the same way. */
+export function isAlarm(view: GroupView, resource: SystemResource, cores: number): boolean {
+  if (resource !== "cpu") return false;
+  const cpu = view.group.cpuPercent;
+  return cpuShare(cpu, cores) >= ALARM_SHARE || (view.kind === "left-running" && cpu >= ALARM_LEFT_RUNNING_CPU);
+}
+
+/** "sh ×24" */
+export function programLabel(app: Pick<SystemAppUsage, "name" | "processCount">): string {
+  return app.processCount > 1 ? `${app.name} ×${app.processCount}` : app.name;
+}
+
+/** What a closed pane left is known by what it is. */
+export function rowName(view: GroupView, resource: SystemResource): string {
+  if (view.kind !== "left-running") return view.name;
+  const heaviest = topApps(view.group, resource, 1)[0] ?? view.group.apps[0];
+  return heaviest ? `${programLabel(heaviest)} left running` : view.name;
+}
+
+const WHERE_PROGRAMS = 3;
+
+/** The row's second line: what is heavy in it, or for a closed pane who it came from. */
+export function rowWhere(view: GroupView, resource: SystemResource): string {
+  if (view.kind === "left-running") {
+    return [runtimeLabel(view.runtime), view.workspace, "no open terminal"].filter(Boolean).join(" · ");
+  }
+  const count = view.group.processCount;
+  const processes = `${count} process${count === 1 ? "" : "es"}`;
+  if (view.kind === "codara") return processes;
+  const programs = topApps(view.group, resource, WHERE_PROGRAMS).map(programLabel).join(", ");
+  return programs || (view.kind === "outside" ? processes : (view.place ?? "Codara terminal"));
 }
 
 /** A group's heaviest processes for one resource. */

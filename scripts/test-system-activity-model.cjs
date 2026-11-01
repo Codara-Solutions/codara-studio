@@ -3,8 +3,8 @@
 
 // The System activity popover's model (components/system-activity/model.ts
 // and history.ts): which pane a process group belongs to and how its row is
-// named, where a click on it goes, each resource's figures and rows, and the
-// minute of chart history the title bar keeps.
+// named, where a click on it goes, each resource's figures and ranked rows,
+// and the minute of chart history the title bar keeps.
 //
 //   node scripts/test-system-activity-model.cjs
 
@@ -127,26 +127,27 @@ const group = (fields) => ({
 });
 const named = (view) => ({ name: view.name, workspace: view.workspace, place: view.place, color: view.color, target: view.target });
 
-// A row is named the way the user knows the pane: a Cora worker by its task,
-// an agent by the prompt it was started with, else by the agent, else by
-// where the pane sits. The workspace and its colour say where it lives.
+// A row is named by who it is: the agent, else what the pane runs, and its
+// workspace. What the agent was asked is often the person's own last message,
+// so it is kept for the row's detail and is never the name.
 const claude = model.describeGroup(group({ paneId: "pane-claude", cpuPercent: 130, memoryBytes: 800 * MiB, gpuMemoryBytes: 0, swapBytes: 3 * MiB }), panes, workspaces);
 assert.deepEqual(named(claude), {
-  name: "Claude Code",
+  name: "Claude Code · codara-studio",
   workspace: "codara-studio",
   place: "terminals pane 2",
   color: "#F0C419",
   target: { type: "terminal", workspaceId: "ws-1", tabId: "tab-1", paneId: "pane-claude" },
 });
 assert.equal(claude.runtime, "claude");
-const prompted = model.describeGroup(group({ paneId: "pane-claude", runtime: "claude", task: "Refactor\n  the parser " }), panes, workspaces);
-assert.equal(prompted.name, "Refactor the parser", "the agent's prompt, on one line");
+const prompted = model.describeGroup(group({ paneId: "pane-claude", runtime: "claude", task: "no no something\n  sh was using like 2000% " }), panes, workspaces);
+assert.equal(prompted.name, "Claude Code · codara-studio", "the prompt does not name the row");
+assert.equal(prompted.note, "Last prompt: no no something sh was using like 2000%", "it is kept for the detail, on one line");
 const worker = model.describeGroup(group({ paneId: "pane-worker", runtime: "codex", task: "an older prompt", cpuPercent: 40, memoryBytes: 1.5 * GiB, gpuMemoryBytes: 512 * MiB, swapBytes: 0 }), panes, workspaces);
-assert.deepEqual([worker.name, worker.workspace, worker.place, worker.runtime], ["Fix the login form", "client-site", "Terminal", "codex"]);
+assert.deepEqual([worker.name, worker.note, worker.place, worker.runtime], ["Codex · client-site", "Task: Fix the login form", "Terminal", "codex"]);
 const shell = model.describeGroup(group({ paneId: "pane-shell", cpuPercent: 0, memoryBytes: 5 * MiB, gpuMemoryBytes: 0, swapBytes: 0.5 * MiB }), panes, workspaces);
-assert.deepEqual([shell.name, shell.place], ["terminals pane 1", null], "a plain shell is named by its place, said once");
+assert.deepEqual([shell.name, shell.place, shell.note], ["Terminal · codara-studio", "terminals pane 1", null]);
 
-const codara = model.describeGroup(group({ owner: "codara", cpuPercent: 4, memoryBytes: 2 * GiB, gpuMemoryBytes: 300 * MiB, swapBytes: 0 }), panes, workspaces);
+const codara = model.describeGroup(group({ owner: "codara", cpuPercent: 138, memoryBytes: 2 * GiB, gpuMemoryBytes: 300 * MiB, swapBytes: 0, processCount: 14 }), panes, workspaces);
 assert.deepEqual([codara.kind, codara.name, codara.target], ["codara", "Codara", null]);
 const outside = model.describeGroup(group({ owner: "outside", cpuPercent: 12, memoryBytes: 6 * GiB }), panes, workspaces);
 assert.deepEqual([outside.kind, outside.name, outside.target], ["outside", "Other apps", null]);
@@ -155,9 +156,9 @@ assert.deepEqual([outside.kind, outside.name, outside.target], ["outside", "Othe
 // shell) is named from main's placement and still reachable.
 const server = model.describeGroup(group({ paneId: "pty-9", workspaceId: "ws-2", serverId: "web" }), panes, workspaces);
 assert.deepEqual(named(server), {
-  name: "Dev server web",
+  name: "Dev server · client-site",
   workspace: "client-site",
-  place: null,
+  place: "Dev server web",
   color: "#3987e5",
   target: { type: "workspace", workspaceId: "ws-2" },
 });
@@ -166,21 +167,102 @@ assert.deepEqual(placed.target, { type: "terminal", workspaceId: "ws-2", tabId: 
 const unknown = model.describeGroup(group({ paneId: "pty-11" }), panes, workspaces);
 assert.deepEqual([unknown.name, unknown.workspace, unknown.target], ["Terminal", null, null]);
 
+// What a closed pane left running: named by what it is, owned by the agent
+// its environment names and the workspace its folder sits in. There is no
+// pane to jump to.
+const located = [
+  { id: "ws-1", name: "codara-studio", color: "#F0C419", cwd: "/work/codara-studio" },
+  { id: "ws-3", name: "fix-branch", color: "#3987e5", cwd: "/work/codara-studio/.worktrees/fix/" },
+  { id: "ws-4", name: "remote", color: "#111111", cwd: "ssh://host/work" },
+];
+assert.equal(model.workspaceOfFolder("/work/codara-studio/src", located).name, "codara-studio");
+assert.equal(model.workspaceOfFolder("/work/codara-studio", located).name, "codara-studio");
+assert.equal(model.workspaceOfFolder("/work/codara-studio/.worktrees/fix/src", located).name, "fix-branch", "the deepest folder wins");
+assert.equal(model.workspaceOfFolder("/work/codara-studio-old", located), null, "a name that only starts the same is another folder");
+assert.equal(model.workspaceOfFolder(null, located), null);
+const sh = { name: "sh", processCount: 24, cpuPercent: 1968, memoryBytes: 48 * MiB, gpuMemoryBytes: null, swapBytes: null };
+const left = model.describeGroup(
+  group({ owner: "left-running", paneId: "pane-gone", runtime: "claude", cwd: "/work/codara-studio/src", cpuPercent: 1968, memoryBytes: 48 * MiB, processCount: 24, apps: [sh] }),
+  panes,
+  located,
+);
+assert.deepEqual([left.kind, left.workspace, left.color, left.target], ["left-running", "codara-studio", "#F0C419", null]);
+assert.equal(model.rowName(left, "cpu"), "sh ×24 left running");
+assert.equal(model.rowWhere(left, "cpu"), "Claude Code · codara-studio · no open terminal");
+const anonymous = model.describeGroup(group({ owner: "left-running", paneId: "pane-gone-2", cpuPercent: 3, apps: [{ ...sh, name: "ssh", processCount: 1 }] }), panes, located);
+assert.equal(model.rowName(anonymous, "cpu"), "ssh left running");
+assert.equal(model.rowWhere(anonymous, "cpu"), "no open terminal", "nothing is made up");
+
 // ── One resource's breakdown ────────────────────────────────────────────────
 
+// CPU reads on the headline's scale: 100% is the whole machine.
 assert.equal(model.valueOf(claude.group, "cpu"), 130);
-assert.equal(model.formatValue(claude.group, "cpu"), "130%", "percent of one core, so an agent can pass 100%");
-assert.equal(model.formatValue(claude.group, "memory"), "800 MB");
-assert.equal(model.formatValue(worker.group, "gpu"), "512 MB");
-assert.equal(model.formatValue(server.group, "gpu"), "n/a", "unmeasured, not zero");
+assert.equal(model.formatValue(claude.group, "cpu", 24), "5.4%", "130% of one core on 24 threads");
+assert.equal(model.formatValue(left.group, "cpu", 24), "82%");
+assert.equal(model.formatValue(group({ cpuPercent: 0 }), "cpu", 24), "0%");
+assert.equal(model.formatValue(group({ cpuPercent: 0.4 }), "cpu", 24), "<0.1%", "busy but tiny does not read as nothing");
+assert.equal(model.formatValue(group({ cpuPercent: 130 }), "cpu", 0), "100%", "a missing core count cannot divide by zero, and a share stops at all of it");
+assert.equal(model.formatValue(claude.group, "memory", 24), "800 MB");
+assert.equal(model.formatValue(worker.group, "gpu", 24), "512 MB");
+assert.equal(model.formatValue(server.group, "gpu", 24), "n/a", "unmeasured, not zero");
 assert.deepEqual(model.RESOURCES.map((resource) => model.RESOURCE_LABELS[resource]), ["CPU", "RAM", "GPU", "Swap"]);
+const shares = [138, 96, 91, 63, 34, 14].reduce((sum, cpu) => sum + model.cpuShare(cpu, 24), 0);
+assert.ok(Math.abs(shares - 436 / 24) < 1e-9, "rows add up on the total's scale");
 
-const views = [claude, codara, outside, server, worker, shell];
-const rows = (resource) => model.paneRows(views, resource).map((view) => view.name);
-assert.deepEqual(rows("cpu"), ["Claude Code", "Fix the login form", "Dev server web", "terminals pane 1"], "every pane under CPU, Codara and other apps apart");
-assert.deepEqual(rows("memory"), ["Fix the login form", "Claude Code", "terminals pane 1", "Dev server web"]);
-assert.deepEqual(rows("gpu"), ["Fix the login form"], "only the panes that hold video memory");
-assert.deepEqual(rows("swap"), ["Claude Code"], "under a megabyte of swap is not listed");
+// One ranked list. The biggest user comes first whoever it is: Codara at 138%
+// of a core used to sit under every pane at 0%.
+const views = [claude, codara, outside, server, worker, shell, left, anonymous];
+const names = (list) => list.map((view) => view.name);
+const cpuRows = model.rankedRows(views, "cpu");
+assert.deepEqual(
+  names(cpuRows.busy),
+  ["Left running", "Codara", "Claude Code · codara-studio", "Codex · client-site", "Other apps", "Left running"],
+  "heaviest first, panes among the rest",
+);
+assert.deepEqual(names(cpuRows.idle), ["Dev server · client-site", "Terminal · codara-studio"], "idle panes fold away, still reachable");
+assert.equal(model.idleLabel(cpuRows.idle), "2 idle panes");
+assert.equal(model.idleLabel([shell]), "1 idle pane");
+assert.equal(model.idleLabel([shell, left]), "2 idle");
+assert.deepEqual(model.rankedRows(views, "cpu", false).idle, [], "before the first reading nothing can be called idle");
+const memoryRows = model.rankedRows(views, "memory");
+assert.deepEqual(
+  names(memoryRows.busy),
+  ["Other apps", "Codara", "Codex · client-site", "Claude Code · codara-studio", "Terminal · codara-studio", "Dev server · client-site"],
+);
+assert.deepEqual(memoryRows.idle.map((view) => view.key), ["left-running:pane-gone", "left-running:pane-gone-2"], "a few MB left behind is a count, not a row");
+assert.deepEqual(names(model.rankedRows(views, "gpu").busy), ["Codex · client-site", "Codara"], "only what holds video memory");
+assert.deepEqual(names(model.rankedRows(views, "swap").busy), ["Claude Code · codara-studio"], "under a megabyte of swap is not listed");
+
+// The second line says what is heavy.
+const noisy = model.describeGroup(
+  group({
+    paneId: "pane-claude",
+    cpuPercent: 91,
+    apps: [
+      { name: "next-server", processCount: 1, cpuPercent: 62, memoryBytes: 0, gpuMemoryBytes: null, swapBytes: null },
+      { name: "chrome-headless", processCount: 3, cpuPercent: 17, memoryBytes: 0, gpuMemoryBytes: null, swapBytes: null },
+      { name: "claude", processCount: 1, cpuPercent: 12, memoryBytes: 0, gpuMemoryBytes: null, swapBytes: null },
+      { name: "zsh", processCount: 2, cpuPercent: 0, memoryBytes: 0, gpuMemoryBytes: null, swapBytes: null },
+    ],
+  }),
+  panes,
+  workspaces,
+);
+assert.equal(model.rowWhere(noisy, "cpu"), "next-server, chrome-headless ×3, claude");
+assert.equal(model.rowWhere(shell, "cpu"), "terminals pane 1", "a pane with nothing heavy says where it sits");
+assert.equal(model.rowWhere(codara, "cpu"), "14 processes");
+assert.equal(model.rowWhere(outside, "cpu"), "1 process", "other apps before any program has a figure");
+
+// A runaway is obvious: over half the machine on one row, or a full core
+// nobody is watching. Words and an icon go with the colour, in the component.
+assert.equal(model.isAlarm(left, "cpu", 24), true);
+assert.equal(model.isAlarm(left, "memory", 24), false, "CPU only: memory has its own warning");
+assert.equal(model.isAlarm(claude, "cpu", 24), false);
+assert.equal(model.isAlarm(claude, "cpu", 2), true, "130% of a core is most of a two-core machine");
+const oneCoreLeft = model.describeGroup(group({ owner: "left-running", paneId: "pane-gone-3", cpuPercent: 100 }), panes, located);
+assert.equal(model.isAlarm(oneCoreLeft, "cpu", 24), true, "a core nobody watches, though only 4% of this machine");
+const oneCoreAgent = model.describeGroup(group({ paneId: "pane-claude", cpuPercent: 100 }), panes, workspaces);
+assert.equal(model.isAlarm(oneCoreAgent, "cpu", 24), false, "an agent using a core is just working");
 
 const proc = (pid, fields) => ({ pid, name: `p${pid}`, command: "", cpuPercent: 0, memoryBytes: 0, gpuMemoryBytes: 0, swapBytes: 0, ...fields });
 const busy = group({
@@ -251,5 +333,5 @@ assert.deepEqual(
 assert.deepEqual(model.seriesOf([point], (entry) => entry.network), [], "missing figures are gaps, not zeros");
 
 console.log(
-  "PASS system activity model: one row per pane named by its task or agent with its workspace, jumping to the pane; each resource's rows heaviest first (video memory and swap only where used); a row's top processes and other apps by program; figures that keep their width; and the minute of chart history stays trimmed and in order",
+  "PASS system activity model: one ranked list named by agent and workspace with idle rows folded, CPU as a share of the whole machine, what a closed pane left running named by what it is with its owner, the alarm rules, each resource's rows, and the chart history",
 );

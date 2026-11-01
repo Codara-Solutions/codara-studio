@@ -12,10 +12,15 @@ import {
   formatRate,
   formatValue,
   HISTORY_WINDOW_MS,
+  idleLabel,
+  isAlarm,
   paneOwnerIndex,
-  paneRows,
+  programLabel,
+  rankedRows,
   RESOURCE_LABELS,
   RESOURCES,
+  rowName,
+  rowWhere,
   seriesOf,
   topApps,
   topProcesses,
@@ -25,17 +30,17 @@ import {
 } from "./model";
 import "./system-activity.css";
 
-// What is using the machine, one row per Codara pane with everything running
-// under it, then Codara itself and other apps. The title-bar meter that was
-// pressed picks the resource; the machine totals sit small in the tabs. The
-// meters own polling and history, so this only draws.
+// What is using the machine: one list, heaviest first, of Codara's panes, what
+// closed panes left running, Codara itself and other apps. CPU reads as a share
+// of the whole machine, the scale of the total, so the rows add up to it. The
+// title-bar meter that was pressed picks the resource; the machine totals sit
+// small in the tabs. The meters own polling and history, so this only draws.
 
 const WIDTH = 420;
 const CHART_HEIGHT = 30;
 const HISTORY_GAP_MS = 6_000;
 const PROCESSES_SHOWN = 4;
 const APPS_SHOWN = 5;
-const APPS_NAMED = 3;
 
 const BRAND_RUNTIMES = new Set(["claude", "codex", "grok", "pi"]);
 
@@ -245,7 +250,14 @@ function Chevron() {
   );
 }
 
-function OwnerMark({ view }: { view: GroupView }) {
+function OwnerMark({ view, alarm }: { view: GroupView; alarm: boolean }) {
+  if (alarm) {
+    return (
+      <span className="sa-mark sa-mark--alarm" aria-hidden>
+        <WarningIcon />
+      </span>
+    );
+  }
   if (view.kind === "codara") {
     return (
       <span className="sa-mark sa-mark--codara" aria-hidden>
@@ -281,65 +293,74 @@ function OwnerMark({ view }: { view: GroupView }) {
   );
 }
 
-/** The processes (or, for other apps, the programs) behind a row. */
-function RowDetail({ view, resource }: { view: GroupView; resource: SystemResource }) {
-  if (view.kind === "outside") {
-    const apps = topApps(view.group, resource, APPS_SHOWN);
-    return (
-      <ul className="sa-row__detail">
-        {apps.map((app) => (
-          <li key={app.name} title={`${app.processCount} process${app.processCount === 1 ? "" : "es"}`}>
-            <span className="sa-row__detail-name">{app.name}</span>
-            <span className="sa-num">{formatValue(app, resource)}</span>
-          </li>
-        ))}
-      </ul>
-    );
-  }
-  const processes = topProcesses(view.group, resource, PROCESSES_SHOWN);
+/** What was asked of the row, and the processes or programs behind it. */
+function RowDetail({ view, resource, cores }: { view: GroupView; resource: SystemResource; cores: number }) {
+  const leftRunning = view.kind === "left-running";
+  const command = leftRunning ? topProcesses(view.group, resource, 1)[0]?.command : "";
+  const programs = leftRunning || view.kind === "outside";
+  const listed = topApps(view.group, resource, APPS_SHOWN);
+  // One program left running is already the row's name and figure.
+  const apps = leftRunning && listed.length < 2 ? [] : listed;
   return (
-    <ul className="sa-row__detail">
-      {processes.map((entry) => (
-        <li key={entry.pid} title={`${entry.command || entry.name}\npid ${entry.pid}`}>
-          <span className="sa-row__detail-name">{entry.name}</span>
-          <span className="sa-num">{formatValue(entry, resource)}</span>
-        </li>
-      ))}
-    </ul>
+    <div className="sa-row__detail">
+      {view.note ? (
+        <p className="sa-row__note" title={view.note}>
+          {view.note}
+        </p>
+      ) : null}
+      {command ? (
+        <code className="sa-row__command" title={command}>
+          {command}
+        </code>
+      ) : null}
+      {leftRunning ? <p className="sa-row__note">Nothing is watching this. It runs until it is stopped.</p> : null}
+      <ul className="sa-row__list">
+        {programs
+          ? apps.map((app) => (
+              <li key={app.name} title={`${app.processCount} process${app.processCount === 1 ? "" : "es"}`}>
+                <span className="sa-row__detail-name">{programLabel(app)}</span>
+                <span className="sa-num">{formatValue(app, resource, cores)}</span>
+              </li>
+            ))
+          : topProcesses(view.group, resource, PROCESSES_SHOWN).map((entry) => (
+              <li key={entry.pid} title={`${entry.command || entry.name}\npid ${entry.pid}`}>
+                <span className="sa-row__detail-name">{entry.name}</span>
+                <span className="sa-num">{formatValue(entry, resource, cores)}</span>
+              </li>
+            ))}
+      </ul>
+    </div>
   );
 }
 
 function Row({
   view,
   resource,
+  cores,
+  alarm,
   expanded,
   onToggle,
   onJump,
 }: {
   view: GroupView;
   resource: SystemResource;
+  cores: number;
+  alarm: boolean;
   expanded: boolean;
   onToggle: () => void;
   onJump: (target: NavigationTarget) => void;
 }) {
   const detailId = useId();
-  const value = formatValue(view.group, resource);
-  const where =
-    view.kind === "pane"
-      ? [view.workspace, view.place].filter(Boolean).join(" · ") || "Codara terminal"
-      : view.kind === "codara"
-        ? `${view.group.processCount} process${view.group.processCount === 1 ? "" : "es"}`
-        : topApps(view.group, resource, APPS_NAMED)
-            .map((app) => app.name)
-            .join(", ") || `${view.group.processCount} processes`;
+  const value = formatValue(view.group, resource, cores);
+  const name = rowName(view, resource);
   const body = (
     <>
-      <OwnerMark view={view} />
+      <OwnerMark view={view} alarm={alarm} />
       <span className="sa-row__text">
-        <span className="sa-row__name">{view.name}</span>
+        <span className="sa-row__name">{name}</span>
         <span className="sa-row__where">
           {view.color ? <i className="sa-row__dot" style={{ background: view.color }} /> : null}
-          {where}
+          <span className="sa-row__where-text">{rowWhere(view, resource)}</span>
         </span>
       </span>
       <span className="sa-row__value sa-num">{value}</span>
@@ -347,13 +368,13 @@ function Row({
   );
   const target = view.target;
   return (
-    <li className="sa-row" data-owner={view.kind} data-expanded={expanded || undefined}>
+    <li className="sa-row" data-owner={view.kind} data-alarm={alarm || undefined} data-expanded={expanded || undefined}>
       <div className="sa-row__line">
         {target ? (
           <button
             type="button"
             className="sa-row__main"
-            aria-label={`Go to ${view.name}${view.workspace ? ` in ${view.workspace}` : ""}: ${value} ${RESOURCE_LABELS[resource]}`}
+            aria-label={`Go to ${name}: ${value} ${RESOURCE_LABELS[resource]}`}
             onClick={() => onJump(target)}
           >
             {body}
@@ -368,18 +389,23 @@ function Row({
           className="sa-row__more"
           aria-expanded={expanded}
           aria-controls={detailId}
-          aria-label={`${expanded ? "Hide" : "Show"} what runs in ${view.name}`}
+          aria-label={`${expanded ? "Hide" : "Show"} what runs in ${name}`}
           onClick={onToggle}
         >
           <Chevron />
         </button>
       </div>
       <div id={detailId} hidden={!expanded}>
-        {expanded ? <RowDetail view={view} resource={resource} /> : null}
+        {expanded ? <RowDetail view={view} resource={resource} cores={cores} /> : null}
       </div>
     </li>
   );
 }
+
+const NOTHING_USES: Partial<Record<SystemResource, string>> = {
+  gpu: "Nothing here uses video memory",
+  swap: "Nothing here uses swap",
+};
 
 function Rows({
   snapshot,
@@ -392,9 +418,13 @@ function Rows({
   resource: SystemResource;
   onJump: (target: NavigationTarget) => void;
 }) {
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  // Rows the user flipped. An alarmed row starts open, so what it is doing
+  // shows without a click, and a flip closes it like any other.
+  const [flipped, setFlipped] = useState<ReadonlySet<string>>(new Set());
+  const [showIdle, setShowIdle] = useState(false);
+  const idleId = useId();
   const toggle = (key: string) =>
-    setExpanded((current) => {
+    setFlipped((current) => {
       const next = new Set(current);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -409,33 +439,57 @@ function Rows({
   if (resource === "swap" && !processes.swapMeasured) {
     return <p className="sa-note">{processes.swapUnavailableReason ?? "Reading swap per app"}</p>;
   }
-  const panes = paneRows(views, resource);
-  const rest = [...views.filter((view) => view.kind === "codara"), ...views.filter((view) => view.kind === "outside")];
-  const row = (view: GroupView) => (
-    <Row
-      key={view.key}
-      view={view}
-      resource={resource}
-      expanded={expanded.has(view.key)}
-      onToggle={() => toggle(view.key)}
-      onJump={onJump}
-    />
-  );
+  const cores = snapshot.cpuLogicalCores;
+  const { busy, idle } = rankedRows(views, resource, processes.cpuMeasured);
+  const row = (view: GroupView) => {
+    const alarm = isAlarm(view, resource, cores);
+    return (
+      <Row
+        key={view.key}
+        view={view}
+        resource={resource}
+        cores={cores}
+        alarm={alarm}
+        expanded={flipped.has(view.key) !== alarm}
+        onToggle={() => toggle(view.key)}
+        onJump={onJump}
+      />
+    );
+  };
   const label = RESOURCE_LABELS[resource];
   return (
     <>
-      {panes.length > 0 ? (
-        <ul className="sa-rows" aria-label={`Panes by ${label}`}>
-          {panes.map(row)}
+      {busy.length > 0 ? (
+        <ul className="sa-rows" aria-label={`Everything by ${label}`}>
+          {busy.map(row)}
         </ul>
-      ) : (
-        <p className="sa-note">{resource === "cpu" || resource === "memory" ? "No terminal panes" : `No pane uses ${resource === "gpu" ? "video memory" : "swap"}`}</p>
-      )}
-      <ul className="sa-rows sa-rows--rest" aria-label={`Codara and other apps by ${label}`}>
-        {rest.map(row)}
-      </ul>
+      ) : NOTHING_USES[resource] ? (
+        <p className="sa-note">{NOTHING_USES[resource]}</p>
+      ) : null}
+      {idle.length > 0 ? (
+        <>
+          <button
+            type="button"
+            className="sa-idle"
+            data-expanded={showIdle || undefined}
+            aria-expanded={showIdle}
+            aria-controls={idleId}
+            onClick={() => setShowIdle((shown) => !shown)}
+          >
+            <Chevron />
+            <span>{idleLabel(idle)}</span>
+          </button>
+          <div id={idleId} hidden={!showIdle}>
+            {showIdle ? (
+              <ul className="sa-rows" aria-label={`Idle by ${label}`}>
+                {idle.map(row)}
+              </ul>
+            ) : null}
+          </div>
+        </>
+      ) : null}
       {resource === "cpu" ? (
-        <p className="sa-note sa-note--fine">{processes.cpuMeasured ? "100% is one core" : "Measuring CPU"}</p>
+        <p className="sa-note sa-note--fine">{processes.cpuMeasured ? "Share of the whole machine" : "Measuring CPU"}</p>
       ) : null}
     </>
   );
