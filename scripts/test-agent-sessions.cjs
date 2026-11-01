@@ -224,6 +224,14 @@ function tempDir() {
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(fs.existsSync(briefFile), false, "the brief goes once the first turn ended");
   store.noteTurnEnd({ paneId: "pane-unknown", failed: false, message: "x", at: T0 });
+  const releaseEarly = store.reserve();
+  store.noteTurnEnd({ paneId: "pane-quick", failed: false, message: "Quick.", at: T0 + 500 });
+  await store.add(record({ id: "as-quick", paneId: "pane-quick", promptAt: T0 + 100, callerWorkspaceId: "ws-quick" }));
+  releaseEarly();
+  assert.equal(store.get("as-quick").finalMessage, "Quick.", "a turn that ended before its record existed still counts");
+  store.noteTurnEnd({ paneId: "pane-stale", failed: false, message: "Old.", at: T0 });
+  await store.add(record({ id: "as-stale", paneId: "pane-stale", promptAt: T0 + 100, callerWorkspaceId: "ws-quick" }));
+  assert.equal(store.get("as-stale").finalMessage, null, "nor does a turn from before the launch, or with no start under way");
 
   const again = makeStore();
   await again.load();

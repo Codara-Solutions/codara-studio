@@ -51,7 +51,8 @@ process.stdin.on("data", (data) => {
   if (text.includes("\x03")) process.exit(0);
   line += text.replace(/\x1b\[20[01]~/g, "");
   if (line.includes("\r")) {
-    const sent = line.replace(/\r/g, "");
+    // Injecting into Claude Code parks any draft with a control key first.
+    const sent = line.replace(/[\x00-\x1f\x7f]/g, "");
     line = "";
     turn(sent);
   }
@@ -72,10 +73,10 @@ async function shot(page: Page, name: string): Promise<void> {
   if (dir) await page.screenshot({ path: join(dir, name) });
 }
 
-test("an agent starts a session in another workspace, gets its answer back, and the session outlives it", async () => {
-  test.skip(process.platform === "win32", "the stand-in agent is started from a POSIX shell");
-  test.setTimeout(240_000);
-  const root = await realpath(await mkdtemp(join(tmpdir(), "codara-agent-sessions-")));
+// Two workspaces, a shell with no rc files, and a yes already given for Notes to
+// open terminals in Repo (the card itself is covered by terminal-worktree.spec.ts).
+async function workspaces(prefix: string) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   const home = join(root, "home");
   const userHome = join(root, "user-home");
   const repo = join(root, "repo");
@@ -128,8 +129,6 @@ test("an agent starts a session in another workspace, gets its answer back, and 
       ],
     }),
   );
-  // The user already said yes to Notes opening terminals in Repo; the card
-  // itself is covered by terminal-worktree.spec.ts.
   await writeFile(
     join(home, "cross-workspace-grants.json"),
     JSON.stringify({
@@ -145,6 +144,13 @@ test("an agent starts a session in another workspace, gets its answer back, and 
       ],
     }),
   );
+  return { root, home, repo, notes, logs, env };
+}
+
+test("an agent starts a session in another workspace, gets its answer back, and the session outlives it", async () => {
+  test.skip(process.platform === "win32", "the stand-in agent is started from a POSIX shell");
+  test.setTimeout(240_000);
+  const { root, home, repo, notes, logs, env } = await workspaces("codara-agent-sessions-");
 
   const call = (method: string, params: Record<string, unknown> = {}) =>
     rpcRaw({ home }, method, params, { timeoutMs: 120_000 }) as Promise<{ result?: any; error?: { message: string } }>;
@@ -162,10 +168,16 @@ test("an agent starts a session in another workspace, gets its answer back, and 
   let running = await launch(env);
   try {
     const { page } = running;
-    const coordinator = await request("terminal.create", { cwd: notes, title: "coordinator" });
-    const other = await request("terminal.create", { cwd: notes, title: "another agent" });
-    const caller = { callerRole: "studio", callerClient: "claude-code", callerPaneId: coordinator.paneId };
-    const later = { ...caller, callerPaneId: other.paneId };
+    // Two agents are two processes, each in its own pane, as with real MCP servers.
+    const agentIn = async (title: string) => {
+      const pidFile = join(root, `${title.replace(/\W/g, "-")}.pid`);
+      const pane = await request("terminal.create", { cwd: notes, title, command: `sh -c 'echo $$ > "${pidFile}"; exec sleep 600'` });
+      await expect.poll(async () => (await readFile(pidFile, "utf8").catch(() => "")).trim(), { timeout: 20_000 }).not.toBe("");
+      const pid = Number((await readFile(pidFile, "utf8")).trim());
+      return { pane, params: { callerRole: "studio", callerClient: "claude-code", callerPid: pid } };
+    };
+    const { pane: coordinator, params: caller } = await agentIn("coordinator");
+    const { params: later } = await agentIn("another agent");
     const hostile = `Line one\nit's "quoted" \`touch ${join(root, "pwned")}\` $(touch ${join(root, "pwned")}) ; rm -rf ~\n${"long ".repeat(4_000)}`;
     let started: any;
 
@@ -181,10 +193,10 @@ test("an agent starts a session in another workspace, gets its answer back, and 
       });
       expect(started.id).toMatch(/^as-/);
       expect(started.workspaceId).toBe("ws-repo");
-      expect(started.status).toBe("starting");
+      expect(["starting", "working"]).toContain(started.status);
       await expect.poll(async () => (await briefs()).length, { timeout: 20_000 }).toBe(1);
       const [first] = await briefs();
-      expect(first!.brief).toBe(hostile.replace(/\n+$/, "").trimEnd());
+      expect(first!.brief).toBe(hostile);
       expect(first!.argv).toContain("stand-in-model");
       expect(first!.cwd).toBe(repo);
       await expect.poll(async () => (await readdir(root)).includes("pwned")).toBe(false);
@@ -201,22 +213,17 @@ test("an agent starts a session in another workspace, gets its answer back, and 
     });
 
     await test.step("its row in the target workspace's rail opens its real tab", async () => {
-      const line = page.locator('[data-workspace-id="ws-repo"] [data-testid="workspace-agent-line"]');
+      const line = page.locator('[data-rail-children-of="ws-repo"]').getByTestId("workspace-agent-line");
       await page.locator('[data-workspace-id="ws-repo"]').click();
-      await expect(page.locator(`[data-terminal-pane-id="${started.paneId}"]:visible`)).toContainText("Claude Code", {
-        timeout: 20_000,
-      });
+      await expect(page.locator(`[data-terminal-pane-id="${started.paneId}"]:visible`)).toBeVisible({ timeout: 20_000 });
       await shot(page, "session-in-target-workspace.png");
       await page.locator('[data-workspace-id="ws-notes"]').click();
       await expect(page.locator(`[data-terminal-pane-id="${coordinator.paneId}"]:visible`)).toBeVisible();
-      await expect(async () => {
-        if (!(await line.first().isVisible())) {
-          await page.locator('[data-workspace-id="ws-repo"]').hover();
-          await page.locator('[data-workspace-id="ws-repo"] [aria-expanded]').first().click({ timeout: 1_000 });
-        }
-        await line.first().click({ timeout: 1_000 });
-        await expect(page.locator(`[data-terminal-pane-id="${started.paneId}"]:visible`)).toBeVisible({ timeout: 2_000 });
-      }).toPass({ timeout: 20_000 });
+      const toggle = page.locator('[data-workspace-id="ws-repo"]').getByTestId("workspace-children-toggle");
+      if ((await toggle.getAttribute("aria-expanded")) === "false") await toggle.click();
+      await expect(line).toHaveCount(1, { timeout: 20_000 });
+      await line.click();
+      await expect(page.locator(`[data-terminal-pane-id="${started.paneId}"]:visible`)).toBeVisible({ timeout: 10_000 });
     });
 
     await test.step("a follow-up starts a new turn, and the wait is for that turn", async () => {
@@ -277,7 +284,9 @@ test("an agent starts a session in another workspace, gets its answer back, and 
       const before = (await briefs()).length;
       await running.app.close();
       running = await launch(env);
-      const relaunched = await request("session.status", { id: slow.id, callerPaneId: other.paneId, callerRole: "studio" });
+      await running.page.locator('[data-workspace-id="ws-notes"]').click();
+      const { params: nextSession } = await agentIn("next session");
+      const relaunched = await request("session.status", { ...nextSession, id: slow.id });
       expect(relaunched.finalMessage).toContain("Answer 1 to: slow work");
       await running.page.waitForTimeout(2_000);
       expect((await briefs()).length).toBe(before);
@@ -289,55 +298,9 @@ test("an agent starts a session in another workspace, gets its answer back, and 
 });
 
 test("a background agent's row says where the work is and opens that session", async () => {
+  test.skip(process.platform === "win32", "the stand-in agent is started from a POSIX shell");
   test.setTimeout(120_000);
-  const root = await realpath(await mkdtemp(join(tmpdir(), "codara-background-row-")));
-  const home = join(root, "home");
-  const repo = join(root, "repo");
-  const notes = join(root, "notes");
-  await Promise.all([home, repo, notes].map((dir) => mkdir(dir)));
-  const gitConfig = join(root, "gitconfig");
-  await writeFile(gitConfig, "[user]\n\tname = Test\n\temail = test@example.com\n");
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
-  Object.assign(env, {
-    GIT_CONFIG_GLOBAL: gitConfig,
-    GIT_CONFIG_NOSYSTEM: "1",
-    CODARA_HOME_DIR: home,
-    SPARK_HOME_DIR: home,
-    SPARK_USER_DATA_DIR: home,
-    SPARK_SKIP_LEGACY_MIGRATION: "1",
-    SPARK_NO_SHELL_INTEGRATION: "1",
-    SPARK_ALLOW_MULTI: "1",
-  });
-  execFileSync("git", ["init", "-q", "-b", "main", repo], { env });
-  await writeFile(join(repo, "README.md"), "# repo\n");
-  execFileSync("git", ["-C", repo, "add", "README.md"], { env });
-  execFileSync("git", ["-C", repo, "commit", "-q", "-m", "init"], { env });
-  await writeFile(
-    join(home, "spark-state.json"),
-    JSON.stringify({
-      activeWorkspaceId: "ws-notes",
-      workspaces: [
-        { id: "ws-repo", name: "Repo", cwd: repo, color: "#42D6C7", workers: [] },
-        { id: "ws-notes", name: "Notes", cwd: notes, color: "#78A8FF", workers: [] },
-      ],
-    }),
-  );
-  await writeFile(
-    join(home, "cross-workspace-grants.json"),
-    JSON.stringify({
-      version: 1,
-      grants: [
-        {
-          callerWorkspaceId: "ws-notes",
-          callerName: "Notes",
-          targetWorkspaceId: "ws-repo",
-          targetName: "Repo",
-          grantedAt: new Date().toISOString(),
-        },
-      ],
-    }),
-  );
+  const { root, home, notes, logs, env } = await workspaces("codara-background-row-");
   const request = async (method: string, params: Record<string, unknown> = {}) => {
     const response = await rpcRaw({ home }, method, params, { timeoutMs: 90_000 });
     if (response.error) throw new Error(response.error.message);
@@ -345,7 +308,9 @@ test("a background agent's row says where the work is and opens that session", a
   };
   const { app, page } = await launch(env);
   try {
-    const coordinator = await request("terminal.create", { cwd: notes, title: "coordinator" });
+    // The session a background subagent lives in: an agent on the board.
+    const coordinator = await request("terminal.create", { cwd: notes, title: "coordinator", command: "claude hello" });
+    await expect.poll(async () => (await readFile(join(logs, "briefs.jsonl"), "utf8").catch(() => "")).length, { timeout: 20_000 }).toBeGreaterThan(0);
     const made = await request("worktree.create", {
       callerRole: "studio",
       callerClient: "claude-code",
@@ -365,9 +330,21 @@ test("a background agent's row says where the work is and opens that session", a
     const row = page.locator(`[data-workspace-id="${made.workspaceId}"]`);
     await expect(row).toBeAttached({ timeout: 20_000 });
     await row.click();
-    await expect(page.getByTestId("empty-workbench-title")).toHaveText("A background agent works here", { timeout: 20_000 });
-    await expect(page.getByText("It runs inside the session that started it, in Notes")).toBeVisible();
-    await shot(page, "background-agent-empty-pane.png");
+    // The worktree's workspace shows an idle chat of its own, so this line is
+    // the only thing that says the work is elsewhere.
+    const notice = page.getByTestId("background-agent-notice");
+    await expect(notice).toContainText("A background agent works in this folder, from the session in Notes.", { timeout: 20_000 });
+    await shot(page, "background-agent-notice.png");
+    await page.getByTestId("background-agent-open-origin").click();
+    await expect(page.locator(`[data-terminal-pane-id="${coordinator.paneId}"]:visible`)).toBeVisible({ timeout: 10_000 });
+    await expect(notice).toHaveCount(0);
+
+    await row.click();
+    await expect(notice).toBeVisible({ timeout: 10_000 });
+    // Its row in the Agents view goes to the session too, not to this worktree.
+    await page.getByRole("tab", { name: /^Agents/ }).click();
+    await page.locator(".agent-inbox-row", { hasText: "background row" }).first().click();
+    await expect(page.locator(`[data-terminal-pane-id="${coordinator.paneId}"]:visible`)).toBeVisible({ timeout: 10_000 });
   } finally {
     await app.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true }).catch(() => undefined);

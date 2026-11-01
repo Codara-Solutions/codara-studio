@@ -43,6 +43,7 @@ const MAX_RECORDS = 200;
 const MAX_RECORD_AGE_MS = 30 * 24 * 60 * 60_000;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const WAIT_POLL_MS = 500;
+const MAX_EARLY_TURN_ENDS = 32;
 // The value lands in a shell line, quoted: a leading dash would still read as a flag.
 const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/+[\]-]{0,127}$/;
 const TITLE_MAX = 60;
@@ -151,6 +152,13 @@ export interface AgentSessionView {
   finalMessageCut?: boolean;
 }
 
+export interface AgentSessionTurnEnd {
+  paneId: string;
+  failed: boolean;
+  message: string | null;
+  at: number;
+}
+
 export type AgentSessionCaller = { workspaceId: string | null; process: string | null };
 
 export interface AgentSessionsDeps {
@@ -187,6 +195,8 @@ export class AgentSessions {
   private loaded: Promise<void> | null = null;
   private writes: Promise<unknown> = Promise.resolve();
   private reserved = 0;
+  // A quick turn can end before terminal.create returns and its record exists.
+  private readonly earlyTurnEnds = new Map<string, AgentSessionTurnEnd>();
   private readonly now: () => number;
   private readonly bootAt: number;
 
@@ -292,6 +302,9 @@ export class AgentSessions {
   add(record: AgentSessionRecord): Promise<void> {
     this.records.set(record.id, record);
     this.prune();
+    const early = this.earlyTurnEnds.get(record.paneId);
+    this.earlyTurnEnds.delete(record.paneId);
+    if (early && early.at >= record.promptAt) this.applyTurnEnd(record, early);
     return this.persist();
   }
 
@@ -304,16 +317,23 @@ export class AgentSessions {
   }
 
   /** A turn ended in the session's pane: the answer, or how it failed. */
-  noteTurnEnd(event: { paneId: string; failed: boolean; message: string | null; at: number }): void {
+  noteTurnEnd(event: AgentSessionTurnEnd): void {
     const records = this.forPane(event.paneId);
-    if (records.length === 0) return;
-    for (const record of records) {
-      record.turnEndedAt = event.at;
-      record.finalMessage = event.message ? event.message.slice(0, AGENT_SESSION_MESSAGE_MAX_CHARS) : null;
-      record.failure = event.failed ? (event.message ?? "The turn ended with an error.") : null;
-      void this.removeBrief(record.id);
+    if (records.length === 0) {
+      if (this.reserved === 0) return;
+      if (this.earlyTurnEnds.size >= MAX_EARLY_TURN_ENDS) this.earlyTurnEnds.clear();
+      this.earlyTurnEnds.set(event.paneId, event);
+      return;
     }
+    for (const record of records) this.applyTurnEnd(record, event);
     void this.persist();
+  }
+
+  private applyTurnEnd(record: AgentSessionRecord, event: AgentSessionTurnEnd): void {
+    record.turnEndedAt = event.at;
+    record.finalMessage = event.message ? event.message.slice(0, AGENT_SESSION_MESSAGE_MAX_CHARS) : null;
+    record.failure = event.failed ? (event.message ?? "The turn ended with an error.") : null;
+    void this.removeBrief(record.id);
   }
 
   notePaneClosed(paneId: string): void {

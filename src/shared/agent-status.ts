@@ -168,7 +168,8 @@ export function buildAgentLines(input: AgentLinesInput): Record<string, AgentLin
       text: note ?? card.message,
       fromNote: note !== null,
       since: card.since,
-      target: card.target,
+      // A background agent's own workspace shows nothing of it.
+      target: card.origin?.target ?? card.target,
       ...(card.origin ? { origin: card.origin } : {}),
     });
   }

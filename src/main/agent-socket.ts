@@ -2136,7 +2136,10 @@ async function handleSessionStart(
     // A run's temporary terminals close with it, and a session outlives its caller.
     if (caller.run) params.retention = "service";
     else delete params.retention;
+    // Set once the worktree exists: the agent cannot have answered before this.
+    let launchedAt = Date.now();
     const response = await handleTerminalCreate(params, id, authKind, res, async (cwd) => {
+      launchedAt = Date.now();
       if (!cwd || isRemotePath(cwd)) throw new Error("sessions can only start in a local workspace");
       if ((await workspaceProjectPolicyModeForTerminalCwd(cwd, state.workspaces)) === "untrusted-pull-request") {
         throw new Error("a session cannot start in an imported pull request");
@@ -2164,7 +2167,6 @@ async function handleSessionStart(
       worktree?: { branch?: string };
     };
     const workspaceId = opened.workspaceId ?? caller.workspaceId ?? terminalPanePlacement(opened.paneId)?.workspaceId ?? "";
-    const now = Date.now();
     const record: AgentSessionRecord = {
       id: sessionId,
       runtime: request.runtime,
@@ -2179,8 +2181,8 @@ async function handleSessionStart(
       branch: opened.worktree?.branch ?? null,
       callerWorkspaceId: caller.workspaceId,
       ownerProcess: caller.process,
-      startedAt: now,
-      promptAt: now,
+      startedAt: launchedAt,
+      promptAt: launchedAt,
       turnEndedAt: null,
       failure: null,
       finalMessage: null,

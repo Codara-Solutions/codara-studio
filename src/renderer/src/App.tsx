@@ -46,8 +46,8 @@ import {
 import WindowChrome from "./components/WindowChrome";
 import { requestAutomationFocus, requestWorkflowRunFocus } from "./components/automations/focus-request";
 import WorkspaceRail from "./components/WorkspaceRail";
-import { getAgentBoardSources, publishAgentBoardSources } from "./components/agent-board/agentBoardSources";
-import { useWorkspaceAgentLines } from "./components/workspace-status/agentLinesStore";
+import { publishAgentBoardSources } from "./components/agent-board/agentBoardSources";
+import { BackgroundAgentNotice } from "./components/workspace-status/BackgroundAgentNotice";
 import { setRailView } from "./components/agent-board/railView";
 import {
   publishSessionSearchHost,
@@ -8402,13 +8402,13 @@ const Workspace = React.memo(function Workspace({
           onSelectTab={handleInnerSelectTab}
         />
       )}
+      {workspace && <BackgroundAgentNotice workspaceId={workspace.id} />}
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
         {/* Also when effectiveActiveId is null with tabs present: every
             remaining tab is run-owned with no owning chat open (nothing is
             eligible to activate), and the empty state beats a blank void. */}
         {(visibleTabs.length === 0 || !effectiveActiveId) && (
           <EmptyWorkbench
-            workspaceId={workspace?.id ?? null}
             onNewChat={onNewChat}
             onNewTerminal={onNewTerminalTab}
             hints={pickerHints}
@@ -8714,20 +8714,14 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
 // in, each with its live keyboard shortcut. The "+" picker in the
 // top strip offers the same actions plus Open file / Preview / Automations.
 const EmptyWorkbench = React.memo(function EmptyWorkbench({
-  workspaceId,
   onNewChat,
   onNewTerminal,
   hints,
 }: {
-  workspaceId: string | null;
   onNewChat: () => void;
   onNewTerminal: () => void;
   hints: PickerHints;
 }) {
-  // A background agent working in this worktree has no tab to show: say so,
-  // and where it runs, rather than "nothing here".
-  const origin = useWorkspaceAgentLines(workspaceId ?? "").find((line) => line.origin)?.origin ?? null;
-  const originTarget = origin?.target ?? null;
   const hintStyle: React.CSSProperties = {
     marginLeft: 10,
     fontFamily: "var(--font-mono)",
@@ -8788,7 +8782,6 @@ const EmptyWorkbench = React.memo(function EmptyWorkbench({
         No tabs open
       </div>
       <div
-        data-testid="empty-workbench-title"
         style={{
           fontFamily: "var(--font-sans)",
           fontSize: 24,
@@ -8797,7 +8790,7 @@ const EmptyWorkbench = React.memo(function EmptyWorkbench({
           letterSpacing: "-0.005em",
         }}
       >
-        {origin ? "A background agent works here" : "Nothing open here"}
+        Nothing open here
       </div>
       <div
         style={{
@@ -8808,23 +8801,10 @@ const EmptyWorkbench = React.memo(function EmptyWorkbench({
           marginBottom: 8,
         }}
       >
-        {origin
-          ? `It runs inside the session that started it${origin.name ? `, in ${origin.name}` : ""}, so it has no chat to open here. Its work lands in this folder.`
-          : "Start a chat with Cora or open a terminal. Past chats are still in the history popover."}
+        Start a chat with Cora or open a terminal. Past chats are still in the
+        history popover.
       </div>
       <div style={{ display: "inline-flex", gap: 10 }}>
-        {originTarget && (
-          <button
-            type="button"
-            data-testid="empty-workbench-open-origin"
-            onClick={() => void getAgentBoardSources().navigate?.(originTarget)}
-            style={buttonStyle}
-            onMouseEnter={onEnter}
-            onMouseLeave={onLeave}
-          >
-            Open that session
-          </button>
-        )}
         <button
           type="button"
           onClick={onNewChat}

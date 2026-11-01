@@ -924,6 +924,10 @@ function requestDone(
   if (w.replayingTail || w.excluded) return;
   if (req.body && req.body.trim()) noteActivity(w, { message: req.body.slice(0, ACTIVITY_TEXT_MAX) });
   if (!req.followUp && !turnActive(w)) {
+    // A prompt given on the command line submits nothing Codara sees, so an
+    // agent that reports the end of that first turn has no turn open here.
+    // Nothing to alert, but a session waiting on it must hear.
+    if (w.turn === null && req.origin !== "heuristic") emitTurnEnded(w, false, req.body ?? null);
     tanLog(`pane=${w.paneId} done (${req.origin}) ignored: no unannounced turn`);
     return;
   }
