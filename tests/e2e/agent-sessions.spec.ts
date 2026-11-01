@@ -59,12 +59,6 @@ process.stdin.on("data", (data) => {
 setTimeout(() => process.exit(0), 170000);
 `;
 
-interface Caller {
-  callerRole: string;
-  callerClient: string;
-  callerPaneId: string;
-}
-
 async function launch(env: Record<string, string>): Promise<{ app: ElectronApplication; page: Page }> {
   const app = await electron.launch({ args: ["."], env });
   const page = await app.firstWindow();
@@ -170,8 +164,8 @@ test("an agent starts a session in another workspace, gets its answer back, and 
     const { page } = running;
     const coordinator = await request("terminal.create", { cwd: notes, title: "coordinator" });
     const other = await request("terminal.create", { cwd: notes, title: "another agent" });
-    const caller: Caller = { callerRole: "studio", callerClient: "claude-code", callerPaneId: coordinator.paneId };
-    const later: Caller = { ...caller, callerPaneId: other.paneId };
+    const caller = { callerRole: "studio", callerClient: "claude-code", callerPaneId: coordinator.paneId };
+    const later = { ...caller, callerPaneId: other.paneId };
     const hostile = `Line one\nit's "quoted" \`touch ${join(root, "pwned")}\` $(touch ${join(root, "pwned")}) ; rm -rf ~\n${"long ".repeat(4_000)}`;
     let started: any;
 

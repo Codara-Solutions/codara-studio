@@ -2233,7 +2233,8 @@ function sessionWaitTimeoutMs(args) {
 
 function rpcTimeoutMs(rpc, args) {
   if (isOrchestrationRpc(rpc)) return ORCHESTRATION_TIMEOUT_MS;
-  if ((rpc === "terminal.create" || rpc === "session.start") && args && args.worktree) return TERMINAL_WORKTREE_TIMEOUT_MS;
+  if (rpc === "terminal.create" && args && args.worktree) return TERMINAL_WORKTREE_TIMEOUT_MS;
+  if (rpc === "session.start" && args && args.worktree) return TERMINAL_WORKTREE_TIMEOUT_MS;
   if (rpc === "session.wait") return sessionWaitTimeoutMs(args);
   if (rpc === "terminal.run") return TERMINAL_RUN_TIMEOUT_MS;
   if (rpc === "browser.use") return BROWSER_USE_TIMEOUT_MS;
