@@ -1800,7 +1800,7 @@ export interface SystemProcessSnapshot {
   swapBytes: number | null;
 }
 
-/** Processes outside Codara added up by program name ("chrome", "slack"). */
+/** Processes added up by program name ("chrome", "sh"). */
 export interface SystemAppUsage {
   name: string;
   processCount: number;
@@ -1816,7 +1816,8 @@ export interface SystemAppUsage {
  * else on the machine.
  */
 export interface SystemProcessGroup {
-  owner: "pane" | "codara" | "outside";
+  owner: "pane" | "left-running" | "codara" | "outside";
+  /** For left-running: the pane that started them, no longer open here. */
   paneId: string | null;
   /** Main's last known placement of the pane, for panes the window has not loaded. */
   workspaceId: string | null;
@@ -1827,6 +1828,8 @@ export interface SystemProcessGroup {
   runtime: string | null;
   /** The agent's latest prompt, one line, when its hooks report it. */
   task: string | null;
+  /** Left-running only: the folder the heaviest process runs in, which finds its workspace. */
+  cwd: string | null;
   cpuPercent: number;
   memoryBytes: number;
   gpuMemoryBytes: number | null;
@@ -1834,7 +1837,7 @@ export interface SystemProcessGroup {
   processCount: number;
   /** The group's heaviest processes by each resource. */
   processes: SystemProcessSnapshot[];
-  /** Outside Codara only: the heaviest programs by each resource. */
+  /** The heaviest programs by each resource, folded by name; empty for Codara itself. */
   apps: SystemAppUsage[];
 }
 

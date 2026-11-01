@@ -775,6 +775,104 @@ fs.chmodSync(fakeNvidiaSmi, 0o755);
   assert.match(preload, /system:\s*\{[\s\S]*system:resourceSnapshot", \{ detail: options\?\.detail === true, focus: options\?\.focus \}/);
   assert.match(ipc, /handle\("system:resourceSnapshot", async \(_e, args: unknown\)[\s\S]{0,300}SYSTEM_RESOURCES\.find\(\(resource\) => resource === options\.focus\)[\s\S]{0,120}\.detail === true/);
 
+  // ── Processes that outlived their pane ─────────────────────────────────────
+  //
+  // 24 sh loops whose parent exited: init owns them, their session is a shell
+  // that is gone, and no pane's pty is above them. Only the environment they
+  // inherited still says where they came from.
+  {
+    const proc = path.join(TMP, "orphans-proc");
+    const write = (pid, { name, ppid, sid = pid, argv = [name], env = {}, cwd = null, kernel = false, ticks = 0 }) => {
+      const dir = path.join(proc, String(pid));
+      fs.mkdirSync(dir, { recursive: true });
+      const flags = kernel ? 0x00200000 : 0;
+      fs.writeFileSync(
+        path.join(dir, "stat"),
+        `${pid} (${name}) S ${ppid} ${sid} ${sid} 0 -1 ${flags} 0 0 0 0 ${ticks} 0 0 0 20 0 1 0 500 0 0 18446744073709551615\n`,
+      );
+      fs.writeFileSync(path.join(dir, "cmdline"), argv.join("\0") + "\0");
+      if (!kernel) fs.writeFileSync(path.join(dir, "environ"), Object.entries(env).map(([key, value]) => `${key}=${value}\0`).join(""));
+      if (cwd) fs.symlinkSync(cwd, path.join(dir, "cwd"));
+    };
+    const spin = (pid, ticks, extra = {}) =>
+      write(pid, {
+        name: "sh",
+        ppid: 1,
+        sid: 700,
+        argv: ["sh", "-c", "while :; do git status --short; done"],
+        env: { HOME: "/home/someone", API_TOKEN: "do-not-copy", CLAUDECODE: "1", SPARK_PANE_ID: "pane-closed" },
+        cwd: "/work/codara-studio/src",
+        ticks,
+        ...extra,
+      });
+    const stage = (ticks) => {
+      fs.rmSync(proc, { recursive: true, force: true });
+      write(1, { name: "systemd", ppid: 0 });
+      write(APP, { name: "electron", ppid: 1 });
+      write(200, { name: "zsh", ppid: APP, env: { SPARK_PANE_ID: "pane-live" } });
+      // Left by a pane this window still has: it goes back under that pane.
+      write(201, { name: "sh", ppid: 1, sid: 650, env: { SPARK_PANE_ID: "pane-live" }, ticks });
+      for (let index = 0; index < 24; index += 1) spin(800 + index, ticks);
+      // A second Studio's live pane, with its Studio still above it: not ours
+      // to call left behind.
+      write(900, { name: "electron", ppid: 1 });
+      write(901, { name: "zsh", ppid: 900, env: { SPARK_PANE_ID: "pane-of-another-studio" } });
+      write(902, { name: "node", ppid: 901, sid: 901, env: { SPARK_PANE_ID: "pane-of-another-studio" }, ticks });
+      // That pane detached a child: init holds it, yet its pane is still open.
+      write(903, { name: "python", ppid: 1, sid: 903, env: { SPARK_PANE_ID: "pane-of-another-studio" }, ticks });
+      // Its parent is unreadable, so nothing proves the pane closed.
+      write(904, { name: "node", ppid: 905, sid: 904, env: { SPARK_PANE_ID: "pane-held-by-root" }, ticks });
+      write(905, { name: "sudo", ppid: 1, sid: 905, env: {} });
+      write(950, { name: "chrome", ppid: 1, ticks });
+      write(960, { name: "kswapd0", ppid: 1, kernel: true });
+    };
+    let clock = 1_000_000;
+    const sampler = new metrics.ProcessSampler({ platform: "linux", procRoot: proc, appPid: APP, logicalCores: () => 24, now: () => clock });
+    const roots = [{ paneId: "pane-live", pid: 200, workspaceId: "ws-1", tabId: "tab-1", runtime: "codex", task: null }];
+    stage(0);
+    await sampler.sample(roots);
+    clock += 1000;
+    stage(82);
+    const sampled = await sampler.sample(roots);
+    const left = sampled.groups.find((group) => group.owner === "left-running");
+    assert.ok(left, "processes that outlived a closed pane are their own group, not Other apps");
+    assert.deepEqual(
+      [left.paneId, left.runtime, left.cwd, left.processCount, left.cpuPercent, left.workspaceId, left.tabId],
+      ["pane-closed", "claude", "/work/codara-studio/src", 24, 1968, null, null],
+    );
+    assert.deepEqual(left.apps.map((app) => [app.name, app.processCount]), [["sh", 24]], "the row can say sh ×24");
+    assert.match(left.processes[0].command, /while :; do git status/, "the command says what they do");
+    assert.ok(!JSON.stringify(sampled).includes("do-not-copy"), "nothing else from the environment leaves the sampler");
+    const live = sampled.groups.find((group) => group.paneId === "pane-live");
+    assert.deepEqual(
+      [live.owner, live.runtime, live.processCount, live.apps.map((app) => app.name)],
+      ["pane", "codex", 2, ["sh", "zsh"]],
+      "an orphan of a live pane returns to that pane, and a pane's row lists its programs",
+    );
+    const other = sampled.groups.find((group) => group.owner === "outside");
+    assert.deepEqual(
+      other.apps.filter((app) => app.cpuPercent > 0).map((app) => [app.name, app.processCount]).sort(),
+      [["chrome", 1], ["node", 2], ["python", 1]],
+      "another Studio's live pane stays with the other apps, even what it detached",
+    );
+    assert.equal(sampled.groups.filter((group) => group.owner === "left-running").length, 1, "doubt stays in Other apps");
+
+    // An environment is not read on every sample, yet an exec into a program
+    // of the same name is noticed: pid, start time and name all stay the same.
+    fs.writeFileSync(path.join(proc, "800", "environ"), "");
+    clock += 1000;
+    const again = await sampler.sample(roots);
+    assert.equal(again.groups.find((group) => group.owner === "left-running").processCount, 24, "reused between samples");
+    clock += 30_000;
+    const later = await sampler.sample(roots);
+    assert.equal(later.groups.find((group) => group.owner === "left-running").processCount, 23, "reread after a while");
+
+    assert.deepEqual(metrics.parseProcessOrigin("A=1\0SPARK_PANE_ID=pane-1\0CLAUDECODE=1\0"), { paneId: "pane-1", runtime: "claude" });
+    assert.deepEqual(metrics.parseProcessOrigin("SPARK_PANE_ID=pane-1\0CODEX_MANAGED_BY_NPM=1\0"), { paneId: "pane-1", runtime: "codex" });
+    assert.equal(metrics.parseProcessOrigin("PATH=/bin\0XSPARK_PANE_ID=nope\0"), null);
+    assert.equal(metrics.parseProcessOrigin("SPARK_PANE_ID=../../etc\nx\0"), null, "not a pane id");
+  }
+
   console.log(
     "PASS system monitor samplers: macOS/Windows/Linux parsers on captured output, a fake /proc and /sys end to end (per-core CPU, memory pressure, swap/disk/network rates, package temperature), Intel/AMD/NVIDIA GPUs with fake nvidia-smi loops (totals and video memory per process) and sleeping cards left asleep, and processes grouped by the pane that owns them with CPU, memory, video memory and swap per pane and other apps folded by program",
   );
