@@ -907,18 +907,68 @@ test("a writer that slept through a takeover stops instead of forking", async ()
   assert.equal(readFileSync(sessionFile(world), "utf8"), after);
 });
 
+test("a process whose lock lapsed writes nothing, even if it never noticed", async () => {
+  const noRenewal = join(sandbox, "no-renewal.cjs");
+  writeFileSync(
+    noRenewal,
+    `const { setTimeout: schedule } = globalThis;
+globalThis.setTimeout = (run, ms, ...rest) => (new Error().stack.includes("proper-lockfile") ? { unref() {} } : schedule(run, ms, ...rest));
+`,
+  );
+  const world = makeWorld();
+  const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
+  stub.reset();
+  stub.control({ mode: "late", count: 1 });
+  const stale = spawn(process.execPath, [CLI, "exec", "--resume", sessionId, "--json", "PLAIN_TEXT two"], {
+    cwd: world.project,
+    env: { ...world.env, NODE_OPTIONS: `--require ${networkGuard} --require ${noRenewal}` },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  stale.stdout.on("data", (chunk) => (output += chunk));
+  stale.stderr.on("data", (chunk) => (output += chunk));
+  const exited = new Promise((resolve) => stale.on("exit", resolve));
+  while (stub.requests.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+  const other = await cora(world, ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT three"]);
+  assert.equal(other.status, 0, other.stderr);
+  const after = readFileSync(sessionFile(world), "utf8");
+  stub.release();
+  const timer = setTimeout(() => stale.kill("SIGKILL"), 4000);
+  const code = await exited;
+  clearTimeout(timer);
+  assert.equal(readFileSync(sessionFile(world), "utf8"), after, "the stale process wrote to the session");
+  assert.equal(code, 1);
+  assert.match(output, new RegExp(`cora resume ${sessionId}`));
+});
+
+function fakeSessions(calls = []) {
+  return class SessionManager {
+    static open(file) {
+      if (file.endsWith("broken.jsonl")) throw new Error("not a session");
+      return Object.assign(new SessionManager(), { persist: true, sessionFile: file });
+    }
+    static create(cwd) {
+      calls.push(`create ${cwd}`);
+    }
+    static continueRecent(cwd) {
+      calls.push(`continueRecent ${cwd}`);
+    }
+    _persist() {
+      calls.push("_persist");
+    }
+    _rewriteFile() {
+      calls.push("_rewriteFile");
+    }
+  };
+}
+
+const lockSessionsModule = () => import(pathToFileURL(join(ROOT, "cli", "harness", "session-lock.mjs")).href);
+
 test("a switch keeps the outgoing session locked until the next one has started", async () => {
   const home = mkdtempSync(join(sandbox, "locks-"));
   const { default: lockfile } = await import(pathToFileURL(require.resolve("proper-lockfile")).href);
-  const { lockSessions } = await import(pathToFileURL(join(ROOT, "cli", "harness", "session-lock.mjs")).href);
-  const opened = (file) => ({ getSessionFile: () => file });
-  const SessionManager = {
-    open(file) {
-      if (file.endsWith("broken.jsonl")) throw new Error("not a session");
-      return opened(file);
-    },
-    continueRecent: (cwd) => opened(cwd),
-  };
+  const { lockSessions } = await lockSessionsModule();
+  const SessionManager = fakeSessions();
   const locks = lockSessions({ SessionManager, findMostRecentSession: () => null }, home, assert.fail);
   const locked = (name) =>
     lockfile.checkSync(name, { realpath: false, lockfilePath: join(home, "session-locks", `${name}.lock`) });
@@ -932,6 +982,54 @@ test("a switch keeps the outgoing session locked until the next one has started"
   assert.ok(locked("b.jsonl"));
   locks.holdOnly(undefined);
   assert.ok(!locked("b.jsonl"));
+  assert.deepEqual(readdirSync(join(home, "session-locks")), []);
+});
+
+test("both of Pi's session writers refuse to run for a process that lost the session", async () => {
+  const home = mkdtempSync(join(sandbox, "locks-"));
+  const { lockSessions } = await lockSessionsModule();
+  const calls = [];
+  const SessionManager = fakeSessions(calls);
+  const lost = [];
+  let stopping = true;
+  const locks = lockSessions({ SessionManager, findMostRecentSession: () => null }, home, (message) => {
+    lost.push(message);
+    if (stopping) throw new Error(message);
+  });
+  const session = SessionManager.open("0_abc.jsonl");
+  session._persist();
+  session._rewriteFile();
+  assert.deepEqual(calls, ["_persist", "_rewriteFile"]);
+  writeFileSync(join(home, "session-locks", "0_abc.jsonl.lock.owner"), "another process");
+  assert.throws(() => session._persist());
+  assert.throws(() => session._rewriteFile());
+  assert.equal(calls.length, 2, "a write went through");
+  assert.match(lost[0], /cora resume abc/);
+  const fresh = Object.assign(new SessionManager(), { persist: true, sessionFile: "1_new.jsonl" });
+  fresh._persist();
+  assert.equal(calls.length, 3, "a session that was never locked is new, and has nobody to race");
+  stopping = false;
+  locks.holdOnly(undefined);
+  assert.equal(readFileSync(join(home, "session-locks", "0_abc.jsonl.lock.owner"), "utf8"), "another process");
+  assert.ok(existsSync(join(home, "session-locks", "0_abc.jsonl.lock")), "it freed a lock that belongs to another process");
+});
+
+test("cora refuses to start if Pi renames a method the session fence relies on", async () => {
+  const home = mkdtempSync(join(sandbox, "locks-"));
+  const { lockSessions } = await lockSessionsModule();
+  class Renamed extends fakeSessions() {}
+  Object.setPrototypeOf(Renamed.prototype, { _rewriteFile() {} });
+  assert.throws(() => lockSessions({ SessionManager: Renamed, findMostRecentSession: () => null }, home, assert.fail), /_persist/);
+});
+
+test("--continue with nothing to continue starts a new session without searching again", async () => {
+  const home = mkdtempSync(join(sandbox, "locks-"));
+  const { lockSessions } = await lockSessionsModule();
+  const calls = [];
+  const SessionManager = fakeSessions(calls);
+  lockSessions({ SessionManager, findMostRecentSession: () => null }, home, assert.fail);
+  SessionManager.continueRecent("/project", "/sessions");
+  assert.deepEqual(calls, ["create /project"]);
 });
 
 test("the real terminal interface hands the lock over when a new session starts", async () => {
@@ -946,7 +1044,7 @@ test("the real terminal interface hands the lock over when a new session starts"
   );
   child.stdout.on("data", () => undefined);
   const exited = new Promise((resolve) => child.on("exit", resolve));
-  const locks = () => (existsSync(join(world.home, "session-locks")) ? readdirSync(join(world.home, "session-locks")) : []);
+  const locks = () => (existsSync(join(world.home, "session-locks")) ? readdirSync(join(world.home, "session-locks")).filter((name) => name.endsWith(".lock")) : []);
   const waitFor = async (check, label) => {
     const started = Date.now();
     while (!check()) {
@@ -976,7 +1074,7 @@ test("a new session is locked from the start", async () => {
   });
   const exited = new Promise((resolve) => writer.on("exit", resolve));
   while (stub.requests.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
-  const held = readdirSync(join(world.home, "session-locks"));
+  const held = readdirSync(join(world.home, "session-locks")).filter((name) => name.endsWith(".lock"));
   writer.kill("SIGKILL");
   await exited;
   assert.equal(held.length, 1);

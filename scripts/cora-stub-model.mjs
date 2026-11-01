@@ -19,8 +19,9 @@
 //
 // Faults: stub.control({ mode, count, after }) applies a fault to the next
 // `count` model requests, once `after` requests have passed. Modes: http429
-// http500 http401 cut hang empty, and chatgpt429, which answers with `body` as
-// the error and `headers` as its headers. stub.requests holds every request seen.
+// http500 http401 cut hang empty, late, which holds the reply until
+// stub.release(), and chatgpt429, which answers with `body` as the error and
+// `headers` as its headers. stub.requests holds every request seen.
 //
 // A summary request gets a narrative. stub.summaries([...]) queues how the next
 // ones behave: ok, bad (no sections), invented, huge, http500 or hang. Each ok
@@ -43,6 +44,7 @@ const control = { mode: "ok", count: null, after: 0, body: null, headers: null }
 const requests = [];
 const listRequests = [];
 const summaryQueue = [];
+const lateReplies = [];
 let reportedContext = 120;
 export const LONG_CLOSING = `Proposed fix:
 
@@ -309,7 +311,10 @@ async function handleModel(req, res, flavour) {
     if (fault === "cut") setTimeout(() => res.destroy(), 20);
     return undefined;
   }
-  return (flavour === "anthropic" ? streamAnthropic : streamResponses)(res, step, view.model);
+  const reply = () => (flavour === "anthropic" ? streamAnthropic : streamResponses)(res, step, view.model);
+  if (fault === "late") lateReplies.push(reply);
+  else reply();
+  return undefined;
 }
 
 export function startStubModel() {
@@ -343,6 +348,7 @@ export function startStubModel() {
           reportedContext = tokens;
         },
         control: (update) => Object.assign(control, { count: null, after: 0 }, update),
+        release: () => lateReplies.splice(0).forEach((reply) => reply()),
         reset: () => {
           requests.length = 0;
           listRequests.length = 0;
