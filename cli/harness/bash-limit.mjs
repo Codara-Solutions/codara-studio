@@ -4,7 +4,7 @@
 
 /** Longer than Claude Code's two minutes because that one moves a late command to
  * the background, where this one kills it, and a kill can skip a cleanup step. */
-const DEFAULT_SECONDS = 300;
+const DEFAULT_SECONDS = 120;
 /** Past this a job belongs in the background, where a long build still works. */
 const MAX_SECONDS = 1800;
 /** Time for Pi's own kill to end the call before this one stops waiting for it. */

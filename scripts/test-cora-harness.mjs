@@ -1273,10 +1273,10 @@ test("an explicit timeout is honoured up to the cap, and a bad one gets the defa
   assert.equal(callLimit("7", limits), 7);
   assert.equal(callLimit(Number.POSITIVE_INFINITY, limits), 5);
   assert.equal(callLimit(99, limits), 9);
-  assert.deepEqual(bashTimeoutSettings(undefined), { defaultSeconds: 300, maxSeconds: 1800 });
-  assert.deepEqual(bashTimeoutSettings({ defaultSeconds: "x", maxSeconds: -1 }), { defaultSeconds: 300, maxSeconds: 1800 });
+  assert.deepEqual(bashTimeoutSettings(undefined), { defaultSeconds: 120, maxSeconds: 1800 });
+  assert.deepEqual(bashTimeoutSettings({ defaultSeconds: "x", maxSeconds: -1 }), { defaultSeconds: 120, maxSeconds: 1800 });
   assert.deepEqual(bashTimeoutSettings({ defaultSeconds: 3600 }), { defaultSeconds: 3600, maxSeconds: 3600 });
-  assert.deepEqual(bashTimeoutSettings({ maxSeconds: 1e12 }), { defaultSeconds: 300, maxSeconds: 2_147_481 });
+  assert.deepEqual(bashTimeoutSettings({ maxSeconds: 1e12 }), { defaultSeconds: 120, maxSeconds: 2_147_481 });
   assert.deepEqual(bashTimeoutSettings({ maxSeconds: 30 }), { defaultSeconds: 30, maxSeconds: 30 });
   assert.deepEqual(bashTimeoutSettings({ defaultSeconds: 60, maxSeconds: 30 }), { defaultSeconds: 30, maxSeconds: 30 });
 });
@@ -1287,10 +1287,10 @@ test("a quick command is untouched, Pi's shell settings still apply and the mode
   assert.equal(result.status, 0, result.stderr);
   assert.equal(bashResult(stub.requests[1]).trim(), "PREFIX-APPLIED");
   const bash = stub.requests[0].toolSpecs.find((tool) => tool.name.toLowerCase() === "bash");
-  assert.match(bash.description, /killed after 300 seconds unless timeout sets a longer limit, up to 1800/);
+  assert.match(bash.description, /killed after 120 seconds unless timeout sets a longer limit, up to 1800/);
   assert.match(bash.description, /in the background with nohup/);
   assert.doesNotMatch(JSON.stringify(bash), /no default timeout/);
-  assert.match(bash.input_schema.properties.timeout.description, /Default 300, maximum 1800/);
+  assert.match(bash.input_schema.properties.timeout.description, /Default 120, maximum 1800/);
 });
 
 test("an untrusted repo cannot choose the shell, and a trusted one still can", async () => {

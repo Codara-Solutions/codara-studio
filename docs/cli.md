@@ -108,7 +108,7 @@ kill during a refresh leaves the old file.
 Everything lives in `~/.cora` (`CORA_HOME`): `auth.json`, `sessions/`, `skills/`,
 `catalog.json`, `settings.json` and `models.json` in Pi's format. `httpIdleTimeoutMs` in
 `settings.json` sets the hung-stream timeout. `bashTimeout` sets the time limit on each
-bash call the model makes: `{ "defaultSeconds": 300, "maxSeconds": 1800 }`. A call past its
+bash call the model makes: `{ "defaultSeconds": 120, "maxSeconds": 1800 }`. A call past its
 limit is killed with its process group, and the model gets the output so far and a line
 saying that any later commands in that call did not run. The model can ask for a longer
 limit up to the maximum, and runs longer jobs in the background. MCP servers come from `~/.cora/mcp.json`
