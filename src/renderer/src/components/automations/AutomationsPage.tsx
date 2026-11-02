@@ -1,3 +1,4 @@
+import { costForecast } from "./cost-forecast";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AutomationRunRecord,
@@ -31,6 +32,7 @@ import {
   fmtWhen,
   groupJobs,
   inboxGroup,
+  isStepsOnly,
   monthStats,
   monthTotals,
   plainSchedule,
@@ -59,6 +61,8 @@ import MiniFlow from "./MiniFlow";
 import LiveBoard from "./LiveBoard";
 import LiveRunHero from "./LiveRunHero";
 import NodeFlowEditor from "./flow/NodeFlowEditor";
+import SentenceBuilder from "./flow/SentenceBuilder";
+import type { LoomPreset } from "./flow/presets";
 import SkippedHistoryRow, { mergeTimeline } from "./SkippedHistoryRow";
 import { missedRunsSummary, precheckSummary } from "@shared/automation-catchup";
 
@@ -88,7 +92,8 @@ export interface Props {
 }
 
 // view: rail + detail. create/edit: the node-flow editor owns the stage.
-type Mode = { kind: "view" } | { kind: "create" } | { kind: "edit"; job: ScheduledJob };
+type FlowStart = { seed?: ScheduledJob; preset?: LoomPreset; name?: string };
+type Mode = { kind: "view" } | { kind: "create"; flow?: FlowStart } | { kind: "edit"; job: ScheduledJob };
 type SubTab = "looms" | "workers" | "workflows";
 
 const SUBTAB_STORAGE_KEY = "spark.automations.subtab";
@@ -691,16 +696,30 @@ export default function AutomationsPage({
                 pointerEvents: subTab === "looms" ? "inherit" : "none",
               }}
             >
-              <NodeFlowEditor
-                initial={mode.kind === "edit" ? mode.job : undefined}
-                jobs={jobs}
-                workspaceId={workspaceId}
-                workspaceName={workspaceName}
-                cwd={cwd}
-                onCreate={mode.kind === "create" ? handleCreate : undefined}
-                onSave={mode.kind === "edit" ? handleSaveEdit : undefined}
-                onCancel={() => setMode({ kind: "view" })}
-              />
+              {mode.kind === "create" && !mode.flow ? (
+                <SentenceBuilder
+                  workspaceId={workspaceId}
+                  workspaceName={workspaceName}
+                  cwd={cwd}
+                  onCreate={handleCreate}
+                  onCancel={() => setMode({ kind: "view" })}
+                  onOpenFlow={(flow) => setMode({ kind: "create", flow })}
+                />
+              ) : (
+                <NodeFlowEditor
+                  initial={mode.kind === "edit" ? mode.job : undefined}
+                  seed={mode.kind === "create" ? mode.flow?.seed : undefined}
+                  startPreset={mode.kind === "create" ? mode.flow?.preset : undefined}
+                  startName={mode.kind === "create" ? mode.flow?.name : undefined}
+                  jobs={jobs}
+                  workspaceId={workspaceId}
+                  workspaceName={workspaceName}
+                  cwd={cwd}
+                  onCreate={mode.kind === "create" ? handleCreate : undefined}
+                  onSave={mode.kind === "edit" ? handleSaveEdit : undefined}
+                  onCancel={() => setMode({ kind: "view" })}
+                />
+              )}
             </div>
           )}
 
@@ -892,7 +911,7 @@ const AutomationRow = React.memo(function AutomationRow({
   onSelect: () => void;
   onToggleEnabled: (enabled: boolean) => void;
 }): React.ReactElement {
-  const group = inboxGroup(job);
+  const group = inboxGroup(job, nowMs);
   const status = statusWord(job, nowMs);
   const schedule = rowSchedule(job, nowMs, names);
   const runs = recentRuns(job, RECENT_RUNS_IN_ROW, nowMs);
@@ -1472,6 +1491,7 @@ function ResultCard({
           </div>
         </div>
       )}
+      {card.branch?.note && <div className="automation-result__body">{card.branch.note}</div>}
       {(card.facts.length > 0 || card.runId) && (
         <div className="automation-facts">
           {card.facts.map((fact) => (
@@ -1480,7 +1500,18 @@ function ResultCard({
             </span>
           ))}
           <span style={{ flex: 1 }} />
-          {card.failed && onAskCora && (
+          {card.branch?.prUrl && (
+            <button
+              type="button"
+              className="spark-btn"
+              style={{ height: 22, padding: "0 8px", fontSize: 11 }}
+              title={card.branch.branch}
+              onClick={() => void window.spark.openExternal(card.branch?.prUrl ?? "")}
+            >
+              Open draft pull request
+            </button>
+          )}
+          {card.failed && !card.heldByLimit && onAskCora && (
             <button
               type="button"
               className="spark-btn"
@@ -1853,11 +1884,27 @@ function ConfigSummary({ job, names }: { job: ScheduledJob; names: ReadonlyMap<s
   // Every chip says what it IS in words and explains itself on hover — the
   // old `est. $0.00` badge read as noise and hid where the setting lives
   // (the Loop node's "Safety caps" in the editor).
+  const forecast = costForecast(
+    { trigger: job.trigger, stepsOnly: isStepsOnly(job), budgetUsd: stop.budgetUsd, monthlyCapUsd: job.guard?.monthlyCapUsd },
+    Date.now(),
+  );
   const chips: { label: string; hint: string }[] = [];
   if (typeof stop.maxIterations === "number") {
     chips.push({
       label: `at most ${stop.maxIterations} run${stop.maxIterations === 1 ? "" : "s"}`,
       hint: "Hard stop after this many runs each time it starts. Edit: Loop node → Safety caps.",
+    });
+  }
+  if (job.guard?.monthlyCapUsd) {
+    chips.push({
+      label: `${fmtUsd(job.guard.monthlyCapUsd)} a month`,
+      hint: "No new run starts once this month's spend reaches this, Run now included. Edit: Loop node → Safety caps.",
+    });
+  }
+  if (job.guard?.pauseAfterFailures) {
+    chips.push({
+      label: `pause after ${job.guard.pauseAfterFailures} failed`,
+      hint: "Pauses until you resume it after this many failed runs in a row. Edit: Loop node → Safety caps.",
     });
   }
   // budgetUsd <= 0 means "no cap" (engine semantics) — showing $0.00 as a
@@ -1905,6 +1952,12 @@ function ConfigSummary({ job, names }: { job: ScheduledJob; names: ReadonlyMap<s
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <ConfigKey label="Id" />
         <RunIdChip runId={job.id} label="automation id" maxChars={24} />
+      </div>
+      <div style={{ display: "flex", gap: 8 }} data-testid="automation-worst-case">
+        <ConfigKey label="Worst case" />
+        <span style={{ fontSize: 11, lineHeight: 1.5, color: forecast.open ? "color-mix(in oklab, var(--danger) 70%, var(--ink))" : "var(--muted)" }}>
+          {forecast.headline}
+        </span>
       </div>
       <div style={{ display: "flex", gap: 8 }}>
         <ConfigKey label="Stops" />

@@ -552,9 +552,29 @@ and GitHub Actions' row of recent results for the bar of ticks.
 - Month totals come from the kept history, which holds the last 50 runs. When
   that cannot cover the whole month the numbers carry a `+` and a tooltip that
   says so. Never show a floor as if it were the total.
+- Spending limits sit with the other caps in the Loop panel, with one line under
+  them saying the worst case for a month in dollars. That line is danger only when
+  nothing bounds the spend, so it stays quiet once a limit is set. An automation
+  held back by a limit sits on Needs you, because it stopped doing its job and
+  will not say so again.
+- The forecast says "about" and says limits are checked between runs. Never show a
+  ceiling firmer than the engine enforces.
+- New automation opens on a sentence (When, Do, Stop, Then) with what will happen
+  beside it, from variant D. It only ever makes one worker, so it maps one way, and
+  anything else is the flow editor's: "Open in flow editor" carries the sentence
+  over. Edit always opens the flow editor. Every choice is a plain native select,
+  so a keyboard and a screen reader work without new widgets.
+- The sentence starts with a $2 budget filled in, and no monthly cap. Clearing the
+  budget is one keystroke, and the cost line turns red when nothing bounds the spend.
 - Delete sits at the bottom of Details, well away from Run now.
 - "Fix with Cora" fills a new chat's message box and sends nothing. The user
   reads it first.
 - Narrow window: the rail gives up width first (264px), then the run rows drop
   their stop badge. The dot and the summary still carry the result.
-
+- Pull request triggers read as a sentence too ("When CI fails on a pull request
+  into main") and use the existing check and field controls. Trouble reaching
+  GitHub, or a pull request at its daily limit, is a "not started" row in Runs,
+  not a new surface.
+- An automation on its own branch says so in the sentence. The result card points
+  to the draft pull request when there is one, and otherwise says in one line
+  where the work is. The switch is in the Loop panel, off by default.

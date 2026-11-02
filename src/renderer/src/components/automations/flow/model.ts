@@ -1,3 +1,5 @@
+import { normalizeAutomationGuard } from "@shared/automation-guard";
+import type { AutomationGuard } from "@shared/types";
 import type {
   AgentEffortLevel,
   AutomationActivityEvent,
@@ -6,6 +8,7 @@ import type {
   AutomationTrigger,
   FolderTriggerEvent,
   GitTriggerEvent,
+  GitHubTriggerEvent,
   GuardPredicate,
   LoomEdgeDef,
   LoomGraph,
@@ -44,6 +47,9 @@ export interface TriggerDraft {
   activityEvents: Record<AutomationActivityEvent, boolean>;
   // Empty string = watch ANY automation.
   activitySourceId: string;
+  githubEvents: Record<GitHubTriggerEvent, boolean>;
+  githubBranch: string;
+  githubDrafts: boolean;
 }
 
 export interface LoopDraft {
@@ -51,8 +57,12 @@ export interface LoopDraft {
   countN: string;
   cadenceMin: string;
   isolate: boolean;
+  ownBranch: boolean;
+  draftPr: boolean;
   maxIters: string;
   budget: string;
+  monthlyCap: string;
+  pauseAfter: string;
   untilTests: boolean;
   testCommand: string;
   untilGit: boolean;
@@ -120,14 +130,21 @@ export function emptyDraft(): LoomDraft {
       gitBranch: "",
       activityEvents: { finished: true, failed: true },
       activitySourceId: "",
+      githubEvents: { prOpened: true, ciFailed: false },
+      githubBranch: "",
+      githubDrafts: false,
     },
     loop: {
       kind: "once",
       countN: "5",
       cadenceMin: "10",
       isolate: false,
+      ownBranch: false,
+      draftPr: true,
       maxIters: "",
       budget: "",
+      monthlyCap: "",
+      pauseAfter: "",
       untilTests: false,
       testCommand: "npm test",
       untilGit: false,
@@ -171,6 +188,13 @@ export function draftFromJob(job: ScheduledJob): LoomDraft {
       failed: job.trigger.events.includes("failed"),
     };
     d.trigger.activitySourceId = job.trigger.automationId ?? "";
+  } else if (job.trigger.kind === "github") {
+    d.trigger.githubEvents = {
+      prOpened: job.trigger.events.includes("prOpened"),
+      ciFailed: job.trigger.events.includes("ciFailed"),
+    };
+    d.trigger.githubBranch = job.trigger.branch ?? "";
+    d.trigger.githubDrafts = job.trigger.includeDrafts === true;
   }
 
   // `stop` is contractually backfilled by the scheduler, but a malformed
@@ -180,10 +204,14 @@ export function draftFromJob(job: ScheduledJob): LoomDraft {
   if (job.loop.kind === "count") d.loop.countN = String(stop.maxIterations ?? 5);
   if (job.loop.everyMs) d.loop.cadenceMin = String(job.loop.everyMs / 60_000);
   d.loop.isolate = Boolean(job.loop.isolate);
+  d.loop.ownBranch = Boolean(job.ownBranch);
+  d.loop.draftPr = job.ownBranch?.draftPr ?? true;
   if (stop.maxIterations !== undefined && job.loop.kind !== "count") {
     d.loop.maxIters = String(stop.maxIterations);
   }
   if (stop.budgetUsd !== undefined) d.loop.budget = String(stop.budgetUsd);
+  if (job.guard?.monthlyCapUsd !== undefined) d.loop.monthlyCap = String(job.guard.monthlyCapUsd);
+  if (job.guard?.pauseAfterFailures !== undefined) d.loop.pauseAfter = String(job.guard.pauseAfterFailures);
   d.loop.untilTests = Boolean(stop.untilTestsPass);
   d.loop.testCommand = stop.testCommand ?? "npm test";
   d.loop.untilGit = Boolean(stop.untilGitClean);
@@ -250,9 +278,27 @@ export function buildTrigger(d: TriggerDraft): AutomationTrigger | null {
         ? { kind: "onAutomationActivity", events, automationId }
         : { kind: "onAutomationActivity", events };
     }
+    case "github": {
+      const events = (["prOpened", "ciFailed"] as GitHubTriggerEvent[]).filter((e) => d.githubEvents[e]);
+      if (events.length === 0) return null;
+      const branch = d.githubBranch.trim();
+      return {
+        kind: "github",
+        events,
+        ...(branch ? { branch } : {}),
+        ...(d.githubDrafts && d.githubEvents.prOpened ? { includeDrafts: true } : {}),
+      };
+    }
     default:
       return { kind: "manual" };
   }
+}
+
+export function buildGuard(d: LoopDraft): AutomationGuard | undefined {
+  return normalizeAutomationGuard({
+    ...(d.monthlyCap.trim() ? { monthlyCapUsd: Number(d.monthlyCap) } : {}),
+    ...(d.pauseAfter.trim() ? { pauseAfterFailures: Number(d.pauseAfter) } : {}),
+  });
 }
 
 export function buildLoop(d: LoopDraft): AutomationLoop {

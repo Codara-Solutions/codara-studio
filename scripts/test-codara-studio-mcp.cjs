@@ -126,8 +126,10 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // first, about 70, so a background agent can work in another repository and
 // still show on its rail; studio and execute by 2,300 for the four
 // codara_session_* tools, about 2,270, so any agent can start and follow a
-// session that outlives it).
-const LIST_BUDGET = { studio: 37_150, run: 39_000, worker: 35_000, execute: 102_400, automation: 69_000 };
+// session that outlives it; execute by 400 for the github automation trigger's
+// fields, about 360, by 300 for own_branch, about 270, and by 200 for guard,
+// about 180).
+const LIST_BUDGET = { studio: 37_150, run: 39_000, worker: 35_000, execute: 103_300, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -533,6 +535,12 @@ function sortedEqual(actual, expected, label) {
       (tool) => tool.name === "codara_create_automation",
     );
     assert.ok(createAutomation, "automation roster must expose codara_create_automation");
+    const triggerSchema = createAutomation.inputSchema.properties.trigger;
+    assert.ok(triggerSchema.properties.kind.enum.includes("github"), "trigger schema must offer github");
+    for (const event of ["prOpened", "ciFailed"]) {
+      assert.ok(triggerSchema.properties.events.items.enum.includes(event), `trigger events must offer ${event}`);
+    }
+    assert.ok(!("fromAnyone" in triggerSchema.properties), "nothing lets a stranger's pull request start a run");
     const workerSchema = createAutomation.inputSchema.properties.worker;
     sortedEqual(
       workerSchema.required,
