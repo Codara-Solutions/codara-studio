@@ -17,6 +17,17 @@ export interface SessionSearchHost {
   /** The session's folder belongs to the workspace on screen, in a terminal tab. */
   canSplitSession: ((hit: SessionSearchHit) => boolean) | null;
   isSessionOpen: ((hit: SessionSearchHit) => boolean) | null;
+  /** Shows the picker for a worker being opened, or starts it when there is no history to offer. */
+  offerWorkerSessions: ((offer: WorkerSessionsOffer) => void) | null;
+}
+
+/** A worker the user is opening: its past sessions come first, and the picker's default starts it. */
+export interface WorkerSessionsOffer {
+  runtime: "claude" | "codex" | "grok";
+  cwd: string | null;
+  /** Where resuming lands: the surface that was asked decides, as starting new does. */
+  placement: "tab" | "pane";
+  startNew: () => void;
 }
 
 export interface SessionSearchRequest {
@@ -31,6 +42,7 @@ const EMPTY_HOST: SessionSearchHost = {
   splitSession: null,
   canSplitSession: null,
   isSessionOpen: null,
+  offerWorkerSessions: null,
 };
 
 let host: SessionSearchHost = EMPTY_HOST;
@@ -50,6 +62,11 @@ function subscribe(listener: () => void): () => void {
 export function publishSessionSearchHost(next: SessionSearchHost | null): void {
   host = next ?? EMPTY_HOST;
   emit();
+}
+
+export function offerWorkerSessions(offer: WorkerSessionsOffer): void {
+  if (host.offerWorkerSessions) host.offerWorkerSessions(offer);
+  else offer.startNew();
 }
 
 export function useSessionSearchHost(): SessionSearchHost {

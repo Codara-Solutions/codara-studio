@@ -51,9 +51,11 @@ import { BackgroundAgentNotice } from "./components/workspace-status/BackgroundA
 import {
   onSessionSearchRequest,
   publishSessionSearchHost,
+  offerWorkerSessions,
   type SessionSearchRequest,
+  type WorkerSessionsOffer,
 } from "./components/session-search/sessionSearchStore";
-import { isSafeSessionId, type SessionSearchHit } from "@shared/session-search";
+import { isSafeSessionId, normalizeSessionSearchPreferences, type SessionSearchHit } from "@shared/session-search";
 import StatusBar from "./components/StatusBar";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
@@ -657,7 +659,9 @@ export default function App() {
   // Jump palette (jump.open): mounted only while open, like the run switcher.
   const [jumpPaletteOpen, setJumpPaletteOpen] = useState(false);
   // What the open picker was asked for; the chord and the + menu ask for nothing.
-  const [sessionPicker, setSessionPicker] = useState<Partial<SessionSearchRequest> | null>(null);
+  const [sessionPicker, setSessionPicker] = useState<
+    (Partial<SessionSearchRequest> & { offer?: WorkerSessionsOffer }) | null
+  >(null);
   const openSessionPicker = useCallback(() => setSessionPicker({}), []);
   useEffect(() => onSessionSearchRequest(setSessionPicker), []);
   // Single "While you were away" digest surfaced on window focus-after-away.
@@ -5018,9 +5022,8 @@ export default function App() {
     return activeWorkspace?.cwd ?? null;
   }, [activeWorkspace?.cwd]);
 
-  // The tab-strip "+" worker rows: a new session of that agent in its own
-  // terminal tab, in the folder the active terminal is in. Earlier sessions
-  // are resumed from the session picker instead.
+  // A new session of that agent in its own terminal tab, in the folder the
+  // active terminal is in.
   const launchNewWorkerTab = useCallback(
     (command: string) => {
       const cwd = resolveWorkerLaunchCwd();
@@ -5028,18 +5031,45 @@ export default function App() {
     },
     [launchWorkerInNewTerminalTab, resolveWorkerLaunchCwd],
   );
+  // The tab-strip "+" worker rows show that agent's past sessions first.
+  const offerWorkerTab = useCallback(
+    (runtime: WorkerSessionsOffer["runtime"], command: string) => {
+      offerWorkerSessions({
+        runtime,
+        cwd: resolveWorkerLaunchCwd(),
+        placement: "tab",
+        startNew: () => launchNewWorkerTab(command),
+      });
+    },
+    [launchNewWorkerTab, resolveWorkerLaunchCwd],
+  );
   // Bound per runtime so the memoized TabBar gets stable callbacks.
   const openClaudeWorker = useCallback(
-    () => launchNewWorkerTab(CLAUDE_LAUNCH_COMMAND),
-    [launchNewWorkerTab],
+    () => offerWorkerTab("claude", CLAUDE_LAUNCH_COMMAND),
+    [offerWorkerTab],
   );
   const openCodexWorker = useCallback(
-    () => launchNewWorkerTab(CODEX_LAUNCH_COMMAND),
-    [launchNewWorkerTab],
+    () => offerWorkerTab("codex", CODEX_LAUNCH_COMMAND),
+    [offerWorkerTab],
   );
   const openGrokWorker = useCallback(
-    () => launchNewWorkerTab(GROK_LAUNCH_COMMAND),
-    [launchNewWorkerTab],
+    () => offerWorkerTab("grok", GROK_LAUNCH_COMMAND),
+    [offerWorkerTab],
+  );
+  // The "... worker sessions" commands. "New ... worker pane" stays separate
+  // so a binding made for an instant session never grows a dialog.
+  const offerWorkerPane = useCallback(
+    (runtime: WorkerSessionsOffer["runtime"], command: string) => {
+      if (visibleModalDialog()) return;
+      const cwd = resolveWorkerLaunchCwd();
+      offerWorkerSessions({
+        runtime,
+        cwd,
+        placement: "pane",
+        startNew: () => handleNewWorkerPane(command, cwd ? { cwd } : undefined),
+      });
+    },
+    [handleNewWorkerPane, resolveWorkerLaunchCwd],
   );
   const openPiWorker = useCallback(
     () => launchNewWorkerTab(PI_LAUNCH_COMMAND),
@@ -5184,8 +5214,22 @@ export default function App() {
     [],
   );
   const sessionSearchCwd = activeWorkspace && !activeWorkspace.remote ? activeWorkspace.cwd : null;
+  // The index holds this computer's sessions, of the agents Settings picked.
+  // Anywhere else there is no history to show, so the worker just starts.
+  const offerSessionsForWorker = useCallback(
+    (offer: WorkerSessionsOffer) => {
+      const prefs = normalizeSessionSearchPreferences(preferencesRef.current.sessionSearch);
+      if (!offer.cwd || !sessionSearchCwd || !prefs.enabled || !prefs.agents.includes(offer.runtime)) {
+        offer.startNew();
+        return;
+      }
+      setSessionPicker({ offer });
+    },
+    [sessionSearchCwd],
+  );
   useEffect(() => {
     publishSessionSearchHost({
+      offerWorkerSessions: offerSessionsForWorker,
       workspaceCwd: sessionSearchCwd,
       openSession: openSearchedSession,
       forkSession: forkSearchedSession,
@@ -5200,6 +5244,7 @@ export default function App() {
     splitSearchedSession,
     canSplitSearchedSession,
     isSearchedSessionOpen,
+    offerSessionsForWorker,
   ]);
   useEffect(() => () => publishSessionSearchHost(null), []);
 
@@ -6104,6 +6149,9 @@ export default function App() {
       "worker.newCodex": () => handleNewWorkerPane(CODEX_LAUNCH_COMMAND),
       "worker.newGrok": () => handleNewWorkerPane(GROK_LAUNCH_COMMAND),
       "worker.newPi": () => handleNewWorkerPane(PI_LAUNCH_COMMAND),
+      "worker.claudeSessions": () => offerWorkerPane("claude", CLAUDE_LAUNCH_COMMAND),
+      "worker.codexSessions": () => offerWorkerPane("codex", CODEX_LAUNCH_COMMAND),
+      "worker.grokSessions": () => offerWorkerPane("grok", GROK_LAUNCH_COMMAND),
       "tab.close": () => {
         if (!activeVisibleTabId) return;
         const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
@@ -6306,6 +6354,7 @@ export default function App() {
       handleNewTerminalTab,
       handleNewWhiteboard,
       handleNewWorkerPane,
+      offerWorkerPane,
       handleCloseChatTab,
       handleToggleLeft,
       handleToggleRight,
@@ -7292,6 +7341,7 @@ export default function App() {
             <SessionPicker
               initialQuery={sessionPicker.query}
               initialScope={sessionPicker.scope}
+              offer={sessionPicker.offer}
               onClose={() => setSessionPicker(null)}
             />
           </Suspense>

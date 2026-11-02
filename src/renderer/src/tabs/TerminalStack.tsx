@@ -74,7 +74,9 @@ import {
   CODEX_LAUNCH_COMMAND,
   GROK_LAUNCH_COMMAND,
   PI_LAUNCH_COMMAND,
+  runtimeFromAgentSessionLaunchCommand,
 } from "../workers/launch-commands";
+import { offerWorkerSessions } from "../components/session-search/sessionSearchStore";
 
 // TerminalStack hosts every terminal tab in the workspace. Each tab carries a
 // recursive PaneNode tree — leaves are PTY-backed panes, splits are
@@ -2542,7 +2544,17 @@ function PaneToolbar({
           paneCwd={paneCwd}
           onPick={(command, cwd) => {
             setMenuOpen(false);
-            onSmartAdd(command, undefined, cwd);
+            const runtime = runtimeFromAgentSessionLaunchCommand(command);
+            if (runtime === "claude" || runtime === "codex" || runtime === "grok") {
+              offerWorkerSessions({
+                runtime,
+                cwd: cwd ?? paneCwd ?? null,
+                placement: "pane",
+                startNew: () => onSmartAdd(command, undefined, cwd),
+              });
+            } else {
+              onSmartAdd(command, undefined, cwd);
+            }
           }}
         />,
         document.body,
