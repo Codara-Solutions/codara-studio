@@ -47,7 +47,7 @@ const raw = (over = {}) => ({
 });
 const pull = (over = {}) => parsePulls([raw(over)])[0];
 const NOW = 1_800_000_000_000;
-const memory = (over = {}) => ({ seededAt: NOW - 1000, seededMaxPr: 10, seen: [], fires: [], ...over });
+const memory = (over = {}) => ({ seededAt: NOW - 1000, seededMaxPr: 10, seen: {}, fires: [], ...over });
 const opened = { kind: "github", events: ["prOpened"] };
 const ci = { kind: "github", events: ["ciFailed"] };
 const none = new Map();
@@ -111,7 +111,7 @@ const none = new Map();
   const draft = pull({ draft: true });
   const d1 = decideGitHubTrigger(opened, memory(), [draft], none, NOW);
   assert.equal(d1.fire, undefined);
-  assert.deepEqual(d1.memory.seen, [], "still owed a run when marked ready");
+  assert.deepEqual(d1.memory.seen, {}, "still owed a run when marked ready");
   assert.equal(decideGitHubTrigger(opened, d1.memory, [pull()], none, NOW).fire.number, 12);
   assert.equal(decideGitHubTrigger({ ...opened, includeDrafts: true }, memory(), [draft], none, NOW).fire.number, 12);
   const checks = new Map([[SHA, { failed: ["build"], failedAt: NOW, pending: 0 }]]);
@@ -134,11 +134,11 @@ const none = new Map();
 
   const old = decideGitHubTrigger(ci, memory(), [pull({ number: 5 })], checks({ failedAt: NOW - 5000 }), NOW);
   assert.equal(old.fire, undefined);
-  assert.ok(old.memory.seen.includes(`ci:5:${SHA}`));
+  assert.ok(`ci:5:${SHA}` in old.memory.seen);
 
   const running = decideGitHubTrigger(ci, memory(), [pull({ number: 5 })], checks({ pending: 2 }), NOW);
   assert.equal(running.fire, undefined);
-  assert.deepEqual(running.memory.seen, [], "asked again next pass");
+  assert.deepEqual(running.memory.seen, {}, "asked again next pass");
   const stuck = checks({ pending: 2, failedAt: NOW - 31 * 60_000 });
   const patient = decideGitHubTrigger(ci, memory({ seededAt: NOW - 3_600_000 }), [pull({ number: 5 })], stuck, NOW);
   assert.equal(patient.fire.event, "ciFailed", "a check that never ends does not hide a failure");
@@ -191,7 +191,7 @@ const none = new Map();
   }
   assert.deepEqual(fired, [1, 2, 3]);
   assert.deepEqual(limited, [5, 5]);
-  assert.ok(m.seen.includes(`ci:5:${shaOf(5)}`), "a limited event is not retried every minute");
+  assert.ok(`ci:5:${shaOf(5)}` in m.seen, "a limited event is not retried every minute");
   const later = NOW + 25 * 60 * 60 * 1000;
   const p = pull({ number: 5, head: { sha: shaOf(6), ref: "x" } });
   const checks = new Map([[shaOf(6), { failed: ["build"], failedAt: later, pending: 0 }]]);
@@ -200,41 +200,46 @@ const none = new Map();
   assert.equal(d.memory.fires.length, 1, "old fires age out");
 }
 
-// The seen list stays bounded, and what it forgets cannot fire again.
+// What it handled stays handled: age forgets, being off the listing never does.
 {
-  // A re-run on a commit still open must stay handled however many others pass.
-  let m = memory({ seen: [`ci:12:${SHA}`] });
-  for (let i = 0; i < 250; i += 1) {
-    const sha = i.toString(16).padStart(40, "b");
-    const p = pull({ number: 1000 + i, head: { sha, ref: "x" } });
-    const checks = new Map([[sha, { failed: ["build"], failedAt: NOW + i, pending: 0 }]]);
-    m = decideGitHubTrigger(ci, m, [pull(), p], checks, NOW + i).memory;
-  }
-  assert.equal(m.seen.length, 200);
-  assert.ok(m.seen.includes(`ci:12:${SHA}`));
-  const rerun = new Map([[SHA, { failed: ["build"], failedAt: NOW + 9999, pending: 0 }]]);
-  assert.equal(decideGitHubTrigger(ci, m, [pull()], rerun, NOW + 9999).fire, undefined, "a re-run does not start a second run");
+  const KEEP = 90 * 24 * 60 * 60 * 1000;
+  const redAt = (sha, at) => new Map([[sha, { failed: ["build"], failedAt: at, pending: 0 }]]);
 
-  // Old commits of another open pull request go before a current head.
-  const old = Array.from({ length: 199 }, (_, i) => `ci:13:${i.toString(16).padStart(40, "d")}`);
-  const nextSha = "e".repeat(40);
-  const full = memory({ seen: [`ci:12:${SHA}`, ...old] });
-  const thirteen = pull({ number: 13, head: { sha: nextSha, ref: "x" } });
-  const redNext = new Map([[nextSha, { failed: ["build"], failedAt: NOW, pending: 0 }]]);
-  const after = decideGitHubTrigger(ci, full, [pull(), thirteen], redNext, NOW).memory;
-  assert.ok(after.seen.includes(`ci:12:${SHA}`), "the current head is kept");
-  assert.equal(after.seen.length, 200);
-  const seen = ["pr:11", `ci:12:${SHA}`, ...Array.from({ length: 198 }, (_, i) => `ci:1:${i}`)];
-  const d = decideGitHubTrigger(opened, memory({ seen }), [pull()], none, NOW);
-  assert.equal(d.memory.seen.length, 200);
-  assert.ok(d.memory.seen.includes("pr:12"));
-  assert.ok(!d.memory.seen.includes("pr:11"));
-  assert.equal(d.memory.seededMaxPr, 11);
-  assert.equal(decideGitHubTrigger(opened, d.memory, [pull({ number: 11 })], none, NOW + 1).fire, undefined);
-  const stored = JSON.parse(JSON.stringify(d.memory));
-  stored.seen = stored.seen.filter((key) => !key.startsWith("ci:12:"));
-  const checks = new Map([[SHA, { failed: ["build"], failedAt: NOW - 5, pending: 0 }]]);
-  assert.equal(decideGitHubTrigger(ci, stored, [pull()], checks, NOW + 1).fire, undefined, "a red commit it forgot is not news");
+  // A handled pull request off the listing, hundreds of later events, a comment
+  // that brings it back and a re-run with a new failure: still one paid run.
+  let m = decideGitHubTrigger(ci, memory(), [pull()], redAt(SHA, NOW), NOW).memory;
+  assert.ok(`ci:12:${SHA}` in m.seen);
+  for (let i = 0; i < 400; i += 1) {
+    const sha = i.toString(16).padStart(40, "b");
+    const other = pull({ number: 1000 + i, head: { sha, ref: "x" } });
+    m = decideGitHubTrigger(ci, m, [other], redAt(sha, NOW + i), NOW + i).memory;
+  }
+  assert.ok(`ci:12:${SHA}` in m.seen, "kept though it left the listing");
+  assert.equal(Object.keys(m.seen).length, 401);
+  assert.equal(decideGitHubTrigger(ci, m, [pull()], redAt(SHA, NOW + 9999), NOW + 9999).fire, undefined, "a re-run does not start a second run");
+
+  // Out of sight past the limit it goes, and nothing older counts as news.
+  const longAgo = NOW - KEEP - 1;
+  const aged = memory({ seen: { [`ci:13:${"d".repeat(40)}`]: longAgo, "pr:40": longAgo, [`ci:14:${"e".repeat(40)}`]: NOW - KEEP + 1000 } });
+  const later = decideGitHubTrigger(opened, aged, [], none, NOW).memory;
+  assert.deepEqual(Object.keys(later.seen), [`ci:14:${"e".repeat(40)}`], "only the old ones go");
+  assert.equal(later.seededMaxPr, 40, "a forgotten pull request cannot open again");
+  assert.equal(decideGitHubTrigger(opened, later, [pull({ number: 40 })], none, NOW + 1).fire, undefined);
+  const backOld = pull({ number: 13, head: { sha: "d".repeat(40), ref: "x" } });
+  assert.equal(decideGitHubTrigger(ci, memory({ seededAt: later.seededAt, seen: later.seen }), [backOld], redAt("d".repeat(40), longAgo - 5), NOW + 1).fire, undefined, "a failure older than the forgotten key is not news");
+
+  // A listed one stays however old, or a re-run on an open commit would pay twice.
+  const listedOld = memory({ seen: { [`ci:12:${SHA}`]: longAgo, "pr:12": longAgo } });
+  const kept = decideGitHubTrigger(ci, listedOld, [pull()], redAt(SHA, NOW), NOW);
+  assert.equal(kept.fire, undefined);
+  assert.equal(kept.memory.seen[`ci:12:${SHA}`], longAgo, "its age is not reset either");
+  assert.ok("pr:12" in kept.memory.seen);
+
+  // Forgetting one does not swallow other events waiting since before this pass.
+  const waiting = memory({ seededAt: NOW - KEEP * 2, seen: { "pr:2": longAgo } });
+  const next = decideGitHubTrigger(ci, waiting, [], none, NOW).memory;
+  assert.equal(next.seededAt, longAgo, "the seed line moves to the forgotten event, not to now");
+  assert.deepEqual(next.seen, {});
 }
 
 // A shell step sees only validated values; the worker's note labels the rest.
@@ -264,8 +269,9 @@ const none = new Map();
 
 assert.equal(normalizeGitHubMemory(null), undefined);
 assert.equal(normalizeGitHubMemory({ seededAt: 1, seededMaxPr: 1, seen: "x", fires: [] }), undefined);
-assert.equal(normalizeGitHubMemory({ seededAt: 1, seededMaxPr: 1, seen: [1], fires: [] }), undefined);
-assert.deepEqual(normalizeGitHubMemory({ seededAt: 1, seededMaxPr: 1, seen: ["a"], fires: [{ pr: 1, at: 2 }, 5] }).fires, [{ pr: 1, at: 2 }]);
+assert.equal(normalizeGitHubMemory({ seededAt: 1, seededMaxPr: 1, seen: ["a"], fires: [] }), undefined, "an old list starts afresh");
+assert.equal(normalizeGitHubMemory({ seededAt: 1, seededMaxPr: 1, seen: { a: "x" }, fires: [] }), undefined);
+assert.deepEqual(normalizeGitHubMemory({ seededAt: 1, seededMaxPr: 1, seen: { a: 1 }, fires: [{ pr: 1, at: 2 }, 5] }).fires, [{ pr: 1, at: 2 }]);
 
 // The watcher, with fake time.
 function harness(over = {}) {
@@ -285,7 +291,13 @@ function harness(over = {}) {
     async get(p) {
       state.reads.push(p);
       if (state.fail) throw state.fail;
-      if (p.includes("/pulls?")) return { value: state.missing ? null : state.pulls };
+      if (p.includes("/pulls?")) {
+        if (state.missing) return { value: null };
+        const url = new URL(p, "https://x");
+        const size = Number(url.searchParams.get("per_page"));
+        const page = Number(url.searchParams.get("page"));
+        return { value: state.pulls.slice((page - 1) * size, page * size) };
+      }
       if (p.includes("/check-runs")) return { value: state.runs ?? { check_runs: [] } };
       return { value: { statuses: [] } };
     },
@@ -377,7 +389,7 @@ function harness(over = {}) {
     state.busy = true;
     await tick();
     assert.equal(state.starts, 0);
-    assert.deepEqual(state.job.githubTrigger.seen, []);
+    assert.deepEqual(state.job.githubTrigger.seen, {});
     assert.equal(state.reads.length, 0);
     state.busy = false;
     await tick();
@@ -486,6 +498,56 @@ function harness(over = {}) {
     await tick();
     assert.equal(state.starts, 0);
     assert.equal(state.job.githubTrigger.seededMaxPr, 12);
+  }
+
+  // A busy repository: the oldest pull request is still seen, and a pass stays bounded.
+  const many = (count) => Array.from({ length: count }, (_, i) => raw({ number: 100 + i, head: { sha: (100 + i).toString(16).padStart(40, "a"), ref: "x" } }));
+  {
+    // Past the first page, and a malformed row is not taken for the last page.
+    const { state, tick } = harness({ memory: memory({ seededMaxPr: 148 }) });
+    state.pulls = many(51).reverse();
+    state.pulls[3] = { ...state.pulls[3], html_url: "not a url" };
+    await tick();
+    assert.equal(state.starts, 1);
+    assert.equal(state.job.lastGitHubFire.number, 149, "lowest new number first");
+    assert.equal(state.reads.length, 2, "two pages");
+    await tick();
+    assert.equal(state.job.lastGitHubFire.number, 150, "the one at the far end of the list");
+    const reads = state.reads.length;
+    state.pulls = many(10);
+    await tick();
+    assert.equal(state.reads.length, reads + 1, "a short list is one read");
+  }
+  {
+    // More than one pass can read: each still comes round, once, on a bounded budget.
+    const { state, tick } = harness({ memory: memory({ seededMaxPr: 99 }) });
+    state.pulls = many(530).reverse();
+    const fired = [];
+    for (let pass = 0; pass < 1500 && fired.length < 530; pass += 1) {
+      const reads = state.reads.length;
+      const starts = state.starts;
+      await tick();
+      assert.ok(state.reads.length - reads <= 10, "a pass reads at most ten pages");
+      if (state.starts > starts) fired.push(state.job.lastGitHubFire.number);
+    }
+    assert.equal(fired.length, 530, "every pull request comes round");
+    assert.equal(new Set(fired).size, 530, "and starts only once");
+    await tick();
+    assert.equal(state.starts, 530);
+  }
+  {
+    // Checks whose pages come round in turn are not starved by starting over.
+    const { state, tick } = harness({ trigger: ci, memory: memory() });
+    state.pulls = many(530).reverse();
+    state.runs = { check_runs: [{ name: "build", status: "in_progress", conclusion: null, started_at: new Date(NOW).toISOString(), check_suite: { id: 1 } }] };
+    for (let pass = 0; pass < 120; pass += 1) {
+      const reads = state.reads.filter((p) => p.includes("/check-runs")).length;
+      await tick();
+      state.now += 1000;
+      assert.ok(state.reads.filter((p) => p.includes("/check-runs")).length - reads <= 10, "ten commits a pass at most");
+    }
+    const read = new Set(state.reads.filter((p) => p.includes("/check-runs")).map((p) => /commits\/(\w+)\//.exec(p)[1]));
+    assert.equal(read.size, 530, "every open commit gets its checks read");
   }
 
   console.log("github trigger: ok");

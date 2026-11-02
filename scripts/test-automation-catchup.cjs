@@ -389,7 +389,7 @@ async function integrationChecks({ sched, loop }, workspace) {
 
   // ── github trigger memory ────────────────────────────────────────────────
   const prs = await sched.createJob({ name: "prs", trigger: { kind: "github", events: ["prOpened"] }, input, enabled: false });
-  const remembered = { seededAt: 1, seededMaxPr: 4, seen: ["pr:5"], fires: [] };
+  const remembered = { seededAt: 1, seededMaxPr: 4, seen: { "pr:5": 1 }, fires: [] };
   const lastFire = { event: "prOpened", number: 5, url: "https://github.com/a/b/pull/5", headSha: "a".repeat(40), title: "", headRef: "", baseRef: "", failedChecks: [] };
   const remember = () => sched.patchJob(prs.id, (j) => ({ ...j, githubTrigger: remembered, lastGitHubFire: lastFire }));
   await remember();
