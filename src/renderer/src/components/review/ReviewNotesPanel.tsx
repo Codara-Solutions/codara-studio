@@ -16,7 +16,8 @@ interface Props {
   onDelete: (note: ReviewNote) => void;
   onCopy: () => void;
   onClearAll: () => void;
-  onSend: (anchor: HTMLElement) => void;
+  /** Sends every note, or only the given ones; the user picks where. */
+  onSend: (anchor: HTMLElement, only?: readonly ReviewNote[]) => void;
 }
 
 function firstQuoteLine(note: ReviewNote): string {
@@ -82,11 +83,25 @@ export default function ReviewNotesPanel({ notes, cwd, sending, onJump, onUpdate
                       onClick={() => onJump(note)}
                       title={note.source === "markdown" ? "Open the file" : "Show in the diff"}
                     >
-                      <span className="rv-notes__where">{shortLocation(note)}</span>
+                      <span className="rv-notes__where">
+                        {shortLocation(note)}
+                        {note.reviewer ? ` · ${note.reviewer}` : ""}
+                      </span>
                       {firstQuoteLine(note) ? <div className="rv-notes__quote">{firstQuoteLine(note)}</div> : null}
                       <div className="rv-notes__text">{note.body}</div>
                     </button>
                     <span className="rv-note__actions rv-notes__row-actions">
+                      <button
+                        type="button"
+                        className="rv-textbtn"
+                        disabled={sending}
+                        aria-haspopup="listbox"
+                        data-testid="review-send-note"
+                        onClick={(event) => onSend(event.currentTarget, [note])}
+                        aria-label={`Send note on ${shortLocation(note)} to an agent`}
+                      >
+                        Send
+                      </button>
                       <button type="button" className="rv-textbtn" onClick={() => setEditingId(note.id)} aria-label={`Edit note on ${group.path} ${shortLocation(note)}`}>
                         Edit
                       </button>

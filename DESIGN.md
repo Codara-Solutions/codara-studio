@@ -277,6 +277,83 @@ gone. A cgroup cannot do this: only a personal launcher puts agents in their
 own scope, and Studio does not. macOS and Windows have no such reading yet, so
 there a process that lost its parent stays in Other apps.
 
+## Source Control (2026-11)
+
+**Chosen:** layout B, agent lanes, with layout A's small commit box docked at
+the bottom. One lane per checkout of the active project: line 1 is its branch
+with the pull request mark, line 2 its most urgent agent's state word (or "No
+agent · from main") and its diff size since the base, the same two lines a
+worktree has in the rail. The checkout the window is on is a lane too, last, and
+holds what the panel used to be: branch menu with small Pull, Push and Fetch,
+change lists, stash, GitHub (the journey, the PR, issues and PRs) and history.
+Picked by Etienne from four layouts built on the panel's real sizes and tokens
+(files first, agent lanes, review first, graph with stacks).
+
+**Why:** the panel answered "what am I saving" for one person on one branch.
+With several agents the question is "what did they change, and can it land". The
+Save and Review rooms and about 380px of controls above the first file are gone;
+the room bar was a mental model the commit box no longer needs.
+
+**References:** T3 Code and Conductor (a list of agent worktrees with diff size
+and a next step), Linear's issue rows (two quiet lines, colour only for state),
+VS Code (the commit box as part of the source control view).
+
+**Rules:**
+
+- A lane's row unfolds it and never switches workspace, so all agents can be read
+  from one place. The chevron is inside the one click target; nothing else in the
+  row acts. Going somewhere is the lane's own actions and its file rows.
+- The next step comes first and there is one primary look, Merge. Needs you opens
+  the agent; failing checks offer Fix checks; Merge shows only on an open, non
+  draft PR whose checks passed or report nothing, with no agent working or asking.
+  Merge always goes through the existing confirm dialog, after GitHub is read again.
+- Lanes order by what needs the user: needs you, failing checks, ready to merge,
+  working, done, idle, quiet. The active checkout stays last so the list above it
+  does not jump as its detail grows. Merged worktrees use the rail's own fold.
+- Who works where comes from the rail's rule (`buildRailFamily`), so the rail and
+  the panel never disagree. The rail stays "where is everyone"; lanes add "what
+  did they change, and what next".
+- Diff size is everything since the branch left its base, committed or not, so an
+  agent that committed does not read as +0. Commits the base gained later do not count.
+- The commit box always commits the active checkout. Amend and Split wait in its
+  ⋯ menu, Generate is a sparkle inside the message box.
+- Failed checks are never a green tick: the journey's step reads failed, ✕ in
+  `--danger`, with the same glyphs as `PullRequestMark`.
+- An SSH workspace shows only its own lane: every other lane would be a round trip.
+- The list and the commit box are separate columns of the panel, so the box never
+  covers a lane. A lane unfolded near the bottom scrolls its buttons into view.
+
+**Start an agent and review with an agent (2026-11):** New agent sits above the
+lanes: a task, Claude Code or Codex, the branch to start from, in a new worktree by
+default, through the same session start agents use. Review with agent is on any lane
+with changes.
+
+- The user picks who reviews, and who a finding goes to. Nothing is fixed to one
+  agent. Reviewers are a new Codex or Claude Code session, a new Cora chat, or an
+  agent already running. A running agent gets a prompt in its own session.
+- The reviewer preselected is the last one picked, unless that is a new agent of the
+  family that wrote the work: a second opinion comes from the other family.
+- A finding's Send menu starts on the last choice, then on the agent that wrote the
+  work, marked "wrote this" and listed first. A reviewer running in that worktree is
+  never taken for the writer. Any note can be sent alone.
+- Findings come back through `codara_review_findings` with a one-time id only that
+  reviewer's prompt holds, and become ordinary review notes with the reviewer's name.
+  They are untrusted: bad paths drop, secrets are removed, and sent on they say
+  "Finding by X, an agent, untrusted".
+- Anything that starts a new agent says it spends usage before the click. A review in
+  progress shows on the lane as "Reviewing · Codex"; clicking it stops waiting.
+- New agent offers Claude Code and Codex only, because a session cannot run Cora. Cora
+  can review through a new chat.
+
+**Collision warning (2026-11):** one quiet line under a lane in `--warn`, "session.ts
+clashes with feat/dark-charts if both merge.", between running lanes only. It reads
+committed work, because that is what merges. Etienne is unsure agents need it, so it
+is built to remove: `lane-collisions.ts`, `git-lane-collisions.ts`,
+`LaneCollisions.tsx`, the `collision` prop on `LaneRow` and one IPC handler. It is off
+for SSH workspaces and on git older than 2.38. It runs with no click behind it, so it
+also stays out of any repository where a merge could start a program the repository
+configures: a custom merge driver, a partial clone, an initialized submodule.
+
 ## Worktrees in the rail (2026-10)
 
 **Chosen:** variant A, a tree, with variant B's folded merged group. A

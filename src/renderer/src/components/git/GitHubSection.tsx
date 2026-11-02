@@ -34,12 +34,6 @@ interface Props {
   /** The block's one refresh affordance — re-reads status and queue. */
   onRefresh: () => void;
   onPublished: () => void;
-  /**
-   * The local sync + commit composer, rendered INSIDE this section's body so
-   * everything Git lives under the one GITHUB header. Provided by GitPanel
-   * (which owns all the composer state); null when the repo is not ready.
-   */
-  composer?: React.ReactNode;
 }
 
 interface Snapshot {
@@ -64,12 +58,9 @@ export default function GitHubSection({
   queue,
   onRefresh,
   onPublished,
-  composer,
 }: Props): React.ReactElement {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(false);
-  // Expanded by default: the section now hosts the commit composer (the
-  // panel's primary workflow), not just the secondary GitHub reads.
   const [collapsed, setCollapsed] = useState(false);
   const [headerHover, setHeaderHover] = useState(false);
   const [refreshHover, setRefreshHover] = useState(false);
@@ -104,9 +95,8 @@ export default function GitHubSection({
     [],
   );
 
-  // A new workspace context starts the block fresh — open, since the section
-  // hosts the commit composer (the panel's primary workflow), with any
-  // stale per-workspace state dropped.
+  // A new workspace context starts the block fresh: open, with any stale
+  // per-workspace state dropped.
   useEffect(() => {
     setCollapsed(false);
     setQueueMerge(null);
@@ -308,18 +298,7 @@ export default function GitHubSection({
     ? `${ready.repository.url.replace(/\/+$/, "")}/issues`
     : null;
 
-  // ── Two rooms (V2b): "Save" (local: sync, message, commit, split) and
-  // "Review" (the journey timeline + everything on GitHub). The room bar is
-  // the mental model: first save your work, then walk it through review.
-  // Auto-pick: a PR or queue item pulls the user to Review when the working
-  // tree is clean; otherwise Save. A manual click wins until the workspace
-  // changes.
-  const [room, setRoom] = useState<"save" | "review" | null>(null);
-  useEffect(() => setRoom(null), [cwd]);
   const dirtyCount = gitStatus ? gitStatus.staged.length + gitStatus.unstaged.length : 0;
-  const reviewCount = count ?? 0;
-  const activeRoom: "save" | "review" =
-    room ?? (dirtyCount === 0 && (ready?.pullRequest || reviewCount > 0) ? "review" : "save");
 
   return (
     <section
@@ -450,57 +429,7 @@ export default function GitHubSection({
           padding: "8px 10px 10px",
         }}
       >
-        {/* Room bar — the section's mental model: save work, then review it.
-            Counts pull the eye to the room that has something waiting. */}
-        <div
-          role="tablist"
-          aria-label="GitHub rooms"
-          style={{
-            display: "flex",
-            gap: 2,
-            padding: 3,
-            borderRadius: 8,
-            border: "1px solid var(--rule-soft)",
-            background: "var(--bg)",
-          }}
-        >
-          <RoomTab
-            label="Save"
-            title="Save your work locally: sync, commit, split"
-            active={activeRoom === "save"}
-            count={dirtyCount}
-            onClick={() => setRoom("save")}
-          />
-          <RoomTab
-            label="Review"
-            title="Walk your work through review on GitHub"
-            active={activeRoom === "review"}
-            count={reviewCount}
-            onClick={() => setRoom("review")}
-          />
-        </div>
-
-        {/* ── Save room: local git. Rendered even while the gh CLI is
-            unavailable, because local Git needs no GitHub. Hidden (not
-            unmounted) so composer draft state survives room switches. */}
-        <div
-          style={{
-            display: activeRoom === "save" ? "flex" : "none",
-            flexDirection: "column",
-            gap: 7,
-          }}
-        >
-          {composer}
-        </div>
-
-        {/* ── Review room: the journey timeline + GitHub state. */}
-        <div
-          style={{
-            display: activeRoom === "review" ? "flex" : "none",
-            flexDirection: "column",
-            gap: 7,
-          }}
-        >
+        <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
         {!status ? (
           <MutedText>Checking GitHub…</MutedText>
         ) : status.kind !== "ready" ? (
@@ -1497,82 +1426,7 @@ function MutedText({ children }: { children: React.ReactNode }): React.ReactElem
 // THE button of the section: one accent-filled action that runs the whole
 // share ceremony. Deliberately the only filled button in Source Control so
 // the panel keeps a single obvious next step.
-// One tab of the room bar. The count badge only renders when something is
-// actually waiting in that room.
-function RoomTab({
-  label,
-  title,
-  active,
-  count,
-  onClick,
-}: {
-  label: string;
-  title: string;
-  active: boolean;
-  count: number;
-  onClick: () => void;
-}): React.ReactElement {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      title={title}
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        appearance: "none",
-        flex: 1,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 6,
-        height: 24,
-        border: "none",
-        borderRadius: 6,
-        cursor: "default",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: 700,
-        background: active
-          ? "color-mix(in oklab, var(--panel-raised, var(--panel)) 88%, transparent)"
-          : hover
-            ? "var(--hover)"
-            : "transparent",
-        color: active ? "var(--ink)" : "var(--muted)",
-        boxShadow: active ? "var(--lift-lo, 0 1px 4px rgba(0,0,0,.25))" : "none",
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <span>{label}</span>
-      {count > 0 ? (
-        <span
-          style={{
-            minWidth: 15,
-            padding: "0 4px",
-            borderRadius: 999,
-            border: "1px solid var(--accent-edge)",
-            background: "var(--accent-soft)",
-            color: "var(--accent-text)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 8.5,
-            fontWeight: 700,
-            fontVariantNumeric: "tabular-nums",
-            lineHeight: "13px",
-            textAlign: "center",
-          }}
-        >
-          {count > 99 ? "99+" : count}
-        </span>
-      ) : null}
-    </button>
-  );
-}
-
-// The Review room's spine: the journey a change travels, drawn as a vertical
+// The section's spine: the journey a change travels, drawn as a vertical
 // timeline anyone can read — Saved → Shared → Checks → Merge. The current
 // stage glows and carries its single action; everything else is context.
 // Non-technical users see WHERE THEY ARE instead of a wall of git nouns.
@@ -1592,7 +1446,7 @@ function JourneyTimeline({
 
   type Step = {
     key: string;
-    state: "done" | "now" | "idle";
+    state: "done" | "failed" | "now" | "idle";
     title: string;
     detail: string;
     action?: React.ReactNode;
@@ -1624,7 +1478,7 @@ function JourneyTimeline({
       },
       {
         key: "checks",
-        state: checksRunning ? "now" : checksDone || checksFailed ? "done" : "idle",
+        state: checksFailed ? "failed" : checksRunning ? "now" : checksDone ? "done" : "idle",
         title: checksFailed
           ? "Checks found problems"
           : checksRunning
@@ -1652,7 +1506,7 @@ function JourneyTimeline({
         title: dirty > 0 ? "Save your work" : "Work saved",
         detail:
           dirty > 0
-            ? `${dirty} file${dirty === 1 ? "" : "s"} changed. Commit in the Save room`
+            ? `${dirty} file${dirty === 1 ? "" : "s"} changed. Commit them below`
             : `${ahead} commit${ahead === 1 ? "" : "s"} ready to share`,
       },
       {
@@ -1681,9 +1535,15 @@ function JourneyTimeline({
       {steps.map((step, index) => {
         const last = index === steps.length - 1;
         const numberColor =
-          step.state === "done" ? "var(--ok)" : step.state === "now" ? "var(--accent-text)" : "var(--muted-2)";
+          step.state === "done"
+            ? "var(--ok)"
+            : step.state === "failed"
+              ? "var(--danger)"
+              : step.state === "now"
+                ? "var(--accent-text)"
+                : "var(--muted-2)";
         return (
-          <div key={step.key} role="listitem" style={{ display: "flex", gap: 9, minWidth: 0 }}>
+          <div key={step.key} role="listitem" data-state={step.state} style={{ display: "flex", gap: 9, minWidth: 0 }}>
             {/* rail */}
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 15, flex: "0 0 15px" }}>
               <span
@@ -1701,10 +1561,10 @@ function JourneyTimeline({
                   fontFamily: "var(--font-mono)",
                   color: step.state === "now" ? "var(--bg)" : numberColor,
                   background: step.state === "now" ? "var(--accent)" : "transparent",
-                  border: `1.5px solid ${step.state === "now" ? "var(--accent)" : step.state === "done" ? "var(--ok)" : "var(--rule)"}`,
+                  border: `1.5px solid ${step.state === "now" ? "var(--accent)" : step.state === "done" ? "var(--ok)" : step.state === "failed" ? "var(--danger)" : "var(--rule)"}`,
                 }}
               >
-                {step.state === "done" ? "✓" : index + 1}
+                {step.state === "done" ? "✓" : step.state === "failed" ? "✕" : index + 1}
               </span>
               {!last ? (
                 <span
@@ -1727,7 +1587,14 @@ function JourneyTimeline({
                 style={{
                   fontSize: 11,
                   fontWeight: 650,
-                  color: step.state === "now" ? "var(--ink)" : step.state === "done" ? "var(--ink-dim)" : "var(--muted)",
+                  color:
+                    step.state === "failed"
+                      ? "var(--danger)"
+                      : step.state === "now"
+                        ? "var(--ink)"
+                        : step.state === "done"
+                          ? "var(--ink-dim)"
+                          : "var(--muted)",
                   lineHeight: 1.35,
                 }}
               >

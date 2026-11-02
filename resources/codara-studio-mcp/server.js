@@ -407,6 +407,35 @@ const SESSION_TOOLS = [
     },
   },
   {
+    name: "codara_review_findings",
+    description:
+      "Hand back a code review you were asked for: the reviewId from your prompt, once, with every finding (an empty list if none). Each lands on the diff as a note.",
+    inputSchema: {
+      type: "object",
+      required: ["reviewId", "findings"],
+      properties: {
+        reviewId: { type: "string" },
+        findings: {
+          type: "array",
+          maxItems: 100,
+          items: {
+            type: "object",
+            required: ["path", "text"],
+            properties: {
+              path: { type: "string", description: "From the repository's top folder." },
+              line: { type: "number" },
+              endLine: { type: "number" },
+              severity: { type: "string", enum: ["blocking", "should-fix", "minor"] },
+              text: { type: "string" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "codara_session_wait",
     description:
       "Wait until sessions finish, fail or need the user; returns their status and final messages, or reason timeout while they keep running.",
@@ -449,6 +478,7 @@ const SESSION_TOOL_TO_RPC = {
   codara_session_wait: "session.wait",
   codara_session_status: "session.status",
   codara_session_message: "session.message",
+  codara_review_findings: "review.findings",
 };
 
 const SESSION_SEARCH_TOOL = {
@@ -2274,6 +2304,7 @@ const CALLER_LOCATED_RPCS = new Set([
   "session.status",
   "session.wait",
   "session.message",
+  "review.findings",
 ]);
 // The browser code tool is scoped like the single browser tools it drives.
 function isBrowserRpc(rpc) {

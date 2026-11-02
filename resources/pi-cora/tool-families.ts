@@ -40,7 +40,7 @@ export const STUDIO_TOOL_LOADER_NAME = "codara_tools";
 export function studioToolFamily(name: string): StudioToolFamily | null {
   if (name.startsWith("codara_preview_") || name === "codara_browser_use") return "browser";
   if (name.startsWith("codara_terminal_")) return "terminal";
-  if (/^codara_session_(?:start|wait|status|message)$/.test(name)) return "terminal";
+  if (/^codara_session_(?:start|wait|status|message)$|^codara_review_findings$/.test(name)) return "terminal";
   if (name.startsWith("codara_whiteboard_")) return "whiteboard";
   if (name.startsWith("codara_board_")) return "board";
   if (/^codara_[a-z_]*automation/.test(name)) return "automations";
@@ -56,7 +56,7 @@ export function isStudioToolFamily(value: unknown): value is StudioToolFamily {
 const FAMILY_SIGNALS: Record<StudioToolFamily, RegExp> = {
   browser:
     /\b(?:browser|preview|localhost|website|web ?page|web ?site|screenshot|homepage|landing page|click|https?:\/\/\S+)/i,
-  terminal: /\b(?:terminal|dev server|watch(?:er)?|npm run dev|pnpm dev|yarn dev|start the (?:app|server)|run the (?:app|server))\b/i,
+  terminal: /\b(?:terminal|dev server|watch(?:er)?|npm run dev|pnpm dev|yarn dev|start the (?:app|server)|run the (?:app|server))\b|codara_review_findings/i,
   whiteboard: /\b(?:whiteboard|diagram|draw|sketch|visuali[sz]e|project map|architecture map)\b/i,
   board: /\b(?:board|kanban|cards?)\b|codara_board_/i,
   automations:

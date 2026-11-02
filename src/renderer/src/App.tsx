@@ -4595,6 +4595,7 @@ export default function App() {
   // always the working-tree (unstaged) diff — matching VS Code's entry point.
   const activeCwdRef = useRef<string | null>(activeWorkspace?.cwd ?? null);
   activeCwdRef.current = activeWorkspace?.cwd ?? null;
+  const pendingReviewWorkspaceRef = useRef<string | null>(null);
   const handleOpenDiffForPath = useCallback((absolutePath: string) => {
     const cwd = activeCwdRef.current;
     if (!cwd || !absolutePath) return;
@@ -4626,7 +4627,13 @@ export default function App() {
       if (path) handleOpenDiffForPath(path);
     };
     // The Source Control header and the Markdown preview's notes bar open the review tab.
-    const openReview = () => {
+    const openReview = (event: Event) => {
+      const workspaceId = (event as CustomEvent<{ workspaceId?: string } | undefined>).detail?.workspaceId;
+      if (workspaceId && workspaceId !== tabsRef.current.tabsWorkspaceId) {
+        pendingReviewWorkspaceRef.current = workspaceId;
+        if (workspaceId !== activeIdRef.current) handleActivateWorkspace(workspaceId);
+        return;
+      }
       tabsRef.current.openReviewTab();
     };
     window.addEventListener("spark:open-file", openFile);
@@ -4637,7 +4644,21 @@ export default function App() {
       window.removeEventListener("spark:open-diff", openDiff);
       window.removeEventListener("spark:open-review", openReview);
     };
-  }, [handleOpenDiffForPath, openFileByPath]);
+  }, [handleActivateWorkspace, handleOpenDiffForPath, openFileByPath]);
+
+  // A review asked for from another workspace's lane waits until that
+  // workspace's tabs are the ones on screen.
+  useEffect(() => {
+    const pending = pendingReviewWorkspaceRef.current;
+    if (!pending) return;
+    if (pending !== activeId) {
+      pendingReviewWorkspaceRef.current = null;
+      return;
+    }
+    if (pending !== tabs.tabsWorkspaceId) return;
+    pendingReviewWorkspaceRef.current = null;
+    tabsRef.current.openReviewTab();
+  }, [activeId, tabs.tabsWorkspaceId]);
 
   // An agent offered to share a page it wrote (codara_share_offer): open the
   // file and its Share prompt. Nothing is uploaded until the user clicks Share.
