@@ -955,7 +955,8 @@ const TRIGGER_SCHEMA = {
     "manual only fires via codara_run_automation or the Hub. " +
     "continuous re-fires immediately after each run finishes. " +
     "git REQUIRES an `events` array (remoteUpdated: the workspace repo's tracked remote gained commits: the user's own push, or a teammate's push arriving via fetch; localBranchMoved: the checked-out branch tip changed (commit, pull, merge)); optional `branch` limits firing to one branch, e.g. 'main'. " +
-    "onAutomationActivity REQUIRES an `events` array (finished|failed) and fires when automations reach that outcome: ANY automation when `automationId` is omitted, or just that one when set (never fires for itself).",
+    "onAutomationActivity REQUIRES an `events` array (finished|failed) and fires when automations reach that outcome: ANY automation when `automationId` is omitted, or just that one when set (never fires for itself). " +
+    "github REQUIRES `events` (prOpened|ciFailed): pull requests on the origin repo from its owners, members or collaborators; optional `branch` (target), `includeDrafts`. Adds {{pr_url}}, {{pr_number}}, {{pr_head}}.",
   required: ["kind"],
   properties: {
     kind: {
@@ -969,6 +970,7 @@ const TRIGGER_SCHEMA = {
         "onFinishOf",
         "git",
         "onAutomationActivity",
+        "github",
       ],
     },
     expr: { type: "string", description: "cron (REQUIRED): valid 5/6-field cron expression, e.g. '0 9 * * 1-5'." },
@@ -978,10 +980,10 @@ const TRIGGER_SCHEMA = {
     events: {
       type: "array",
       description:
-        "folder: which fs events fire (add|change|unlink). git (REQUIRED): remoteUpdated|localBranchMoved. onAutomationActivity (REQUIRED): finished|failed.",
+        "folder: which fs events fire (add|change|unlink). git (REQUIRED): remoteUpdated|localBranchMoved. onAutomationActivity (REQUIRED): finished|failed. github (REQUIRED): prOpened|ciFailed.",
       items: {
         type: "string",
-        enum: ["add", "change", "unlink", "remoteUpdated", "localBranchMoved", "finished", "failed"],
+        enum: ["add", "change", "unlink", "remoteUpdated", "localBranchMoved", "finished", "failed", "prOpened", "ciFailed"],
       },
     },
     glob: { type: "string", description: "folder only: optional basename glob, e.g. '*.md'. Omit to match every file." },
@@ -993,7 +995,11 @@ const TRIGGER_SCHEMA = {
     },
     branch: {
       type: "string",
-      description: "git only: optional branch name (e.g. 'main') to scope firing; omit for any branch.",
+      description: "git or github: optional branch name (e.g. 'main') to scope firing; omit for any branch.",
+    },
+    includeDrafts: {
+      type: "boolean",
+      description: "github only: also fire for drafts.",
     },
   },
   additionalProperties: false,
@@ -1206,6 +1212,8 @@ const AUTOMATION_TOOLS = [
         graph: GRAPH_SCHEMA,
         precheck: PRECHECK_SCHEMA,
         missed_runs: MISSED_RUNS_SCHEMA,
+        own_branch: { type: "object", description: "Work on a new branch in a separate copy: {draft_pr: bool} (draft pull request when a run goes well)." },
+        guard: { type: "object", description: "Spending limits: {monthly_cap_usd, pause_after_failures}. Checked between runs, so a run already going can finish over the cap." },
       },
       additionalProperties: false,
     },
@@ -1229,6 +1237,8 @@ const AUTOMATION_TOOLS = [
         graph: sameShapeAsCreate("graph"),
         precheck: { type: "object", description: "As in create; an empty command removes it." },
         missed_runs: { type: "object", description: "As in create." },
+        own_branch: { type: "object", description: "As in create; null goes back to the workspace folder." },
+        guard: { type: "object", description: "As in create; replaces both limits, null removes them." },
       },
       additionalProperties: false,
     },

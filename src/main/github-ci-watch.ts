@@ -802,7 +802,7 @@ function e2eTickMs(background: boolean): number | null {
 const CHECK_RUNS_JQ =
   "{check_runs: [.check_runs[] | {name, status, conclusion, started_at, completed_at, check_suite: {id: .check_suite.id}}]}";
 
-function ghConfigDir(home: string): string {
+export function ghConfigDir(home: string): string {
   if (process.env.GH_CONFIG_DIR) return process.env.GH_CONFIG_DIR;
   if (process.platform === "win32" && process.env.APPDATA) return `${process.env.APPDATA}\\GitHub CLI`;
   return `${process.env.XDG_CONFIG_HOME || `${home}/.config`}/gh`;

@@ -45,6 +45,7 @@ import {
 } from "@shared/workspace-colors";
 import WindowChrome from "./components/WindowChrome";
 import { requestAutomationFocus, requestWorkflowRunFocus } from "./components/automations/focus-request";
+import { requestDraftPrefill } from "./components/chat/composer/pending-prefill";
 import WorkspaceRail from "./components/WorkspaceRail";
 import { publishAgentBoardSources } from "./components/agent-board/agentBoardSources";
 import { BackgroundAgentNotice } from "./components/workspace-status/BackgroundAgentNotice";
@@ -8192,6 +8193,18 @@ const Workspace = React.memo(function Workspace({
     },
     [onOpenBoardCardRun, rememberChatView],
   );
+  // A surface outside the chat stack hands Cora a message to review and send.
+  // The draft may last have shown its board, where the composer is hidden.
+  const handleAskCora = useCallback(
+    (prompt: string) => {
+      if (!workspace) return;
+      const chatTabId = tabs.openChatTab({ runId: null, focus: true });
+      rememberChatView(chatTabId, "chat");
+      setChatView("chat");
+      requestDraftPrefill(workspace.id, prompt);
+    },
+    [tabs, workspace, rememberChatView],
+  );
   // First card mutation on a DRAFT chat's board: mint the run WITHOUT starting
   // autopilot, persist the cards on its board, then promote the draft tab via
   // the same snapshot path a first message uses. The user is looking at the
@@ -8747,6 +8760,7 @@ const Workspace = React.memo(function Workspace({
               dockIndex={dockIndex}
               workspace={workspace}
               onOpenRunChat={handleOpenBoardCardRunInChat}
+              onAskCora={handleAskCora}
             />
           </Suspense>
         )}
