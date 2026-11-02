@@ -923,6 +923,17 @@ export function injectTriggerNote(input: StartAutopilotInput, firedPath: string)
 
 // ── Arming ─────────────────────────────────────────────────────────────────
 
+const LONGEST_TIMER_MS = 2_147_483_647;
+
+// Past the longest timer Node keeps, setInterval fires at once, over and over, and
+// each firing starts a paid run. A longer interval counts down in equal shorter
+// ticks, so it still fires when it says. Reachable from the flow editor and Cora.
+function intervalTicks(everyMs: number): { tickMs: number; ticks: number } {
+  const whole = Math.max(1000, Math.floor(everyMs));
+  const ticks = Math.ceil(whole / LONGEST_TIMER_MS);
+  return { tickMs: Math.floor(whole / ticks), ticks };
+}
+
 function armJob(job: ScheduledJob): void {
   // Always disarm first so re-arming (toggle/edit) never leaks a timer.
   disarmJob(job.id);
@@ -939,10 +950,14 @@ function armJob(job: ScheduledJob): void {
         break;
       }
       case "interval": {
-        const everyMs = Math.max(1000, Math.floor(trigger.everyMs));
+        const { tickMs, ticks } = intervalTicks(trigger.everyMs);
+        let ticksLeft = ticks;
         const handle = setInterval(() => {
+          ticksLeft -= 1;
+          if (ticksLeft > 0) return;
+          ticksLeft = ticks;
           onScheduledFire(job.id);
-        }, everyMs);
+        }, tickMs);
         armedAt.set(job.id, Date.now());
         armed.set(job.id, () => clearInterval(handle));
         break;
