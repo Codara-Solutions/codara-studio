@@ -113,7 +113,7 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
 
     // The tab strip's "+" carries the worker rows beside Terminal and
     // Browser. Picking one starts a new session of that agent in a new tab
-    // at once; earlier sessions are resumed from the rail's Sessions view.
+    // at once; earlier sessions are resumed from the session picker.
     //
     // Watch both launch channels: a new tab's command travels as its pane's
     // startupCommand, and this pins the command, not the channel.

@@ -73,7 +73,7 @@ interface Props {
   onNewTerminal: () => void;
   onNewPreview: () => void;
   // Each starts a new session of that agent in its own terminal tab.
-  // Earlier sessions are resumed from the Sessions view of the rail.
+  // Earlier sessions are resumed from the session picker.
   onNewClaudeWorker: () => void;
   onNewCodexWorker: () => void;
   onNewGrokWorker: () => void;

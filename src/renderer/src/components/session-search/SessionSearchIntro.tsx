@@ -60,7 +60,7 @@ export default function SessionSearchIntro({ onClosed }: { onClosed: () => void 
         </h2>
         <p className="ss-intro__body">
           Codara is reading your past Claude, Codex, Grok, Pi and Cora sessions so you can search everything you and
-          your agents said, from the Sessions view in the rail. Only the messages are kept, never tool output, and the
+          your agents said, from the Sessions button in the rail. Only the messages are kept, never tool output, and the
           index stays on this computer.
         </p>
         <div className="ss-intro__progress">

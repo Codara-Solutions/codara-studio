@@ -362,17 +362,23 @@ const TERMINAL_RUN_STATUSES = new Set(["complete", "failed", "cancelled"]);
 export interface UsageContext {
   deps: WorktreeCleanupDeps;
   runs: RunState[];
+  /** False when the Cora runs could not be read, so `runs` says nothing. */
+  runsKnown: boolean;
   terminals: RendererTerminal[] | null;
   processes: Map<string, ProcessUse[]> | null;
 }
 
 export async function usageContext(deps: WorktreeCleanupDeps, dirs: readonly string[]): Promise<UsageContext> {
+  let runsKnown = true;
   const [runs, terminals, processes] = await Promise.all([
-    deps.listRuns().catch(() => [] as RunState[]),
+    deps.listRuns().catch(() => {
+      runsKnown = false;
+      return [] as RunState[];
+    }),
     deps.listRendererTerminals().catch(() => null),
     dirs.length ? deps.processesUnderCwds(dirs).catch(() => null) : Promise.resolve(new Map<string, ProcessUse[]>()),
   ]);
-  return { deps, runs, terminals, processes };
+  return { deps, runs, runsKnown, terminals, processes };
 }
 
 // Names the tab to close. A tab counts while it is open, even when its agent
@@ -567,6 +573,9 @@ export interface CheckContext {
   // Uses the caller accepts, such as the workspace's own idle shells when
   // the user clicked Clean up on its row. Every other use still blocks.
   allowInUse?: ReadonlySet<WorktreeInUseKind>;
+  // Nobody is watching this removal, so what could not be read counts as in
+  // use: no terminal list, no process scan or no run list blocks.
+  requireKnownUsage?: boolean;
 }
 
 function block(check: WorktreeRemovalCheck, code: WorktreeCleanupCode, message: string): void {
@@ -656,6 +665,9 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   // drive that is not mounted), so a locked one stays even when it looks gone.
   if (registration.locked) block(check, "LOCKED", "Locked with git worktree lock. Unlock it first.");
   if (stat === null) check.alreadyRemoved = true;
+  if (ctx.requireKnownUsage && (ctx.usage.terminals === null || ctx.usage.processes === null || !ctx.usage.runsKnown)) {
+    block(check, "UNCHECKED", "What is running in it could not be read, so it is not removed on its own.");
+  }
   const uses = (await usageOf(ctx.usage, registration.path, real, workspaces)).filter(
     (use) => !ctx.allowInUse?.has(use.kind),
   );

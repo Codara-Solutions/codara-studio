@@ -30,7 +30,7 @@ import {
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   runtimeStateIsBusy,
 } from "@shared/types";
-import type { WorktreeRailCleanupResult, WorktreeRailExternal } from "@shared/worktree-cleanup";
+import type { WorktreeRailCleanupRequest, WorktreeRailCleanupResult, WorktreeRailExternal } from "@shared/worktree-cleanup";
 import type {
   GitHubIssueSummary,
   GitHubWorkQueueItem,
@@ -48,10 +48,10 @@ import { requestAutomationFocus, requestWorkflowRunFocus } from "./components/au
 import WorkspaceRail from "./components/WorkspaceRail";
 import { publishAgentBoardSources } from "./components/agent-board/agentBoardSources";
 import { BackgroundAgentNotice } from "./components/workspace-status/BackgroundAgentNotice";
-import { setRailView } from "./components/agent-board/railView";
 import {
+  onSessionSearchRequest,
   publishSessionSearchHost,
-  requestSessionSearch,
+  type SessionSearchRequest,
 } from "./components/session-search/sessionSearchStore";
 import { isSafeSessionId, type SessionSearchHit } from "@shared/session-search";
 import StatusBar from "./components/StatusBar";
@@ -119,6 +119,7 @@ import {
   persistedTerminalPaneIds,
   restoredChatRunIds,
   sameWorkerMeta,
+  savedLayoutHoldsWork,
 } from "./tabs/useTabs";
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useAgentHibernation } from "./lib/useAgentHibernation";
@@ -654,8 +655,10 @@ export default function App() {
   const [runSwitcherOpen, setRunSwitcherOpen] = useState(false);
   // Jump palette (jump.open): mounted only while open, like the run switcher.
   const [jumpPaletteOpen, setJumpPaletteOpen] = useState(false);
-  const [sessionPickerOpen, setSessionPickerOpen] = useState(false);
-  const openSessionPicker = useCallback(() => setSessionPickerOpen(true), []);
+  // What the open picker was asked for; the chord and the + menu ask for nothing.
+  const [sessionPicker, setSessionPicker] = useState<Partial<SessionSearchRequest> | null>(null);
+  const openSessionPicker = useCallback(() => setSessionPicker({}), []);
+  useEffect(() => onSessionSearchRequest(setSessionPicker), []);
   // Single "While you were away" digest surfaced on window focus-after-away.
   // Holds the snapshot computed at focus time; null when nothing landed or the
   // user dismissed it.
@@ -872,9 +875,12 @@ export default function App() {
     `${activeWorkspace?.cwd ?? ""}:${sharedGit.status?.branch ?? ""}`,
   );
 
-  // Merged and missing copy-branch workspaces for the rail; a missing one
-  // whose branch is merged or gone is cleaned up without asking (main
-  // refuses anything in use, unpushed or possibly only unmounted).
+  const railWorkspaceHeldRef = useRef<(workspaceId: string) => boolean>(() => true);
+  // Merged and missing copy-branch workspaces for the rail. A missing one
+  // whose branch is merged or gone is cleaned up without asking, and so is a
+  // merged one nothing is left in or using (main refuses anything in use,
+  // unpushed or possibly only unmounted). What main cannot see stays here:
+  // a tab of the workspace, whatever it holds, keeps it.
   const {
     states: worktreeByWorkspaceId,
     external: externalWorktrees,
@@ -882,14 +888,14 @@ export default function App() {
     refresh: refreshWorktreeStates,
   } = useWorktreeRailStates(
     workspaces,
-    useCallback((result: WorktreeRailCleanupResult) => {
+    useCallback((result: WorktreeRailCleanupResult, mode: WorktreeRailCleanupRequest["mode"]) => {
+      const why = mode === "auto-merged" ? "Its work is merged and nothing was left in it." : "Its folder was gone and its work is merged.";
       emitLocalToast(
         `Removed ${result.workspaceName ?? "a merged workspace"}`,
-        result.branchKept
-          ? `Its folder was gone and its work is merged. Branch kept: ${result.branchKept}.`
-          : "Its folder was gone and its work is merged.",
+        result.branchKept ? `${why} Branch kept: ${result.branchKept}.` : why,
       );
     }, []),
+    useCallback((workspaceId: string) => railWorkspaceHeldRef.current(workspaceId), []),
   );
 
   // Switch HUD: bumps once per real workspace change (never on first load),
@@ -4351,6 +4357,14 @@ export default function App() {
   });
   const jumpSourcesRef = useRef(jumpSources);
   jumpSourcesRef.current = jumpSources;
+  railWorkspaceHeldRef.current = (workspaceId) => {
+    if (!booted || workspaceId === activeId) return true;
+    const layout =
+      tabs.tabsWorkspaceId === workspaceId
+        ? { tabs: tabs.tabs }
+        : tabs.inactiveWorkspaceLayouts.find((entry) => entry.workspaceId === workspaceId);
+    return layout ? layout.tabs.length > 0 : savedLayoutHoldsWork(workspaceId);
+  };
   const focusNextTerminal = useCallback(
     (scope: TerminalSwitchScope) => {
       const next = nextTerminalStop(jumpSourcesRef.current(), scope);
@@ -5002,7 +5016,7 @@ export default function App() {
 
   // The tab-strip "+" worker rows: a new session of that agent in its own
   // terminal tab, in the folder the active terminal is in. Earlier sessions
-  // are resumed from the Sessions view instead.
+  // are resumed from the session picker instead.
   const launchNewWorkerTab = useCallback(
     (command: string) => {
       const cwd = resolveWorkerLaunchCwd();
@@ -5028,8 +5042,8 @@ export default function App() {
     [launchNewWorkerTab],
   );
 
-  // Resuming a past session: Settings' session list and the rail's Sessions
-  // view. The session opens in a new terminal tab of the workspace that holds
+  // Resuming a past session: Settings' session list and the session picker.
+  // The session opens in a new terminal tab of the workspace that holds
   // its folder (added first when none does), through the same resume command
   // a restored pane uses.
   const pendingSessionResumeRef = useRef<(AgentSessionResumeRequest & { workspaceId: string }) | null>(null);
@@ -5107,8 +5121,7 @@ export default function App() {
 
   const workspaceJumpRef = useRef(workspaceJump);
   workspaceJumpRef.current = workspaceJump;
-  // The rail's Sessions view and the session picker open what they found
-  // through here. A session already running in a pane is gone to, not resumed
+  // The session picker opens what it found through here. A session already running in a pane is gone to, not resumed
   // a second time: two agents on one transcript would corrupt it.
   const openSearchedSession = useCallback(
     (hit: SessionSearchHit) => {
@@ -5185,18 +5198,6 @@ export default function App() {
     isSearchedSessionOpen,
   ]);
   useEffect(() => () => publishSessionSearchHost(null), []);
-
-  // The jump palette's "Search agent sessions": the rail's Sessions view,
-  // made visible, with the query in its box.
-  const openSessionSearch = useCallback((query: string) => {
-    const side: PanelSide = panelsRef.current.sections.left.includes("workspaces") ? "left" : "right";
-    if (compactWorkbenchRef.current) setCompactPanel(side);
-    else if (side === "left") setShowLeft(true);
-    else setShowRight(true);
-    panelsRef.current.revealSection("workspaces");
-    setRailView("sessions");
-    requestSessionSearch(query, "all");
-  }, []);
 
   const handleNewEditorTab = useCallback(() => {
     setSearchOpen(false);
@@ -6001,7 +6002,7 @@ export default function App() {
         // As with the jump palette: not under another dialog holding the keyboard.
         const modal = visibleModalDialog();
         if (modal && !modal.matches('[data-testid="session-picker"]')) return;
-        setSessionPickerOpen((open) => !open);
+        setSessionPicker((open) => (open ? null : {}));
       },
       "jump.open": () => {
         // Not over another dialog (Settings, Fix with agent, quick commands):
@@ -7276,15 +7277,19 @@ export default function App() {
               onCreateWorktree={handleJumpCreateWorktree}
               onSearchSessions={(query) => {
                 setJumpPaletteOpen(false);
-                openSessionSearch(query);
+                setSessionPicker({ query, scope: "all" });
               }}
             />
           </Suspense>
         ) : null}
 
-        {sessionPickerOpen ? (
+        {sessionPicker ? (
           <Suspense fallback={null}>
-            <SessionPicker onClose={() => setSessionPickerOpen(false)} />
+            <SessionPicker
+              initialQuery={sessionPicker.query}
+              initialScope={sessionPicker.scope}
+              onClose={() => setSessionPicker(null)}
+            />
           </Suspense>
         ) : null}
 

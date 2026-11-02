@@ -26,7 +26,7 @@ it has and how long ago it was last used.
   first row.
 
 You can also search from the jump palette: type anything and pick **Search
-agent sessions for "..."**. The Sessions view opens on that text, searching
+agent sessions for "..."**. The session picker opens on that text, searching
 every session.
 
 Clicking a row resumes the session in a new terminal tab, with the agent's

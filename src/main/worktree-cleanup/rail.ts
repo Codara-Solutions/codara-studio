@@ -34,6 +34,8 @@ import {
   isKeptBranch,
   listWorktrees,
   mapLimited,
+  isAtOrUnder,
+  lastActivity,
   mergeFacts,
   pathKey,
   targetFor,
@@ -63,6 +65,11 @@ import {
 // folder above it is still there (so not an unmounted drive), the branch is
 // merged or gone, the branch has nothing its upstream lacks, no lock, and
 // nothing in use, the workspace's own terminals included.
+//
+// A merged worktree whose folder is still there goes on its own only under
+// stricter rules still ("auto-merged", autoMergedRefusal below). Everything
+// held back stays in its project's merged group for one click, and leaves on
+// its own once what held it is gone.
 
 // What a click on the row accepts: the workspace's own idle shells close with
 // it, and once the folder is gone the agent that made the worktree has
@@ -72,7 +79,7 @@ const MANUAL_ALLOWED: ReadonlySet<WorktreeInUseKind> = new Set(["terminal"]);
 const MANUAL_MISSING_ALLOWED: ReadonlySet<WorktreeInUseKind> = new Set(["terminal", "agent"]);
 
 function allowedUses(mode: WorktreeRailCleanupRequest["mode"], missing: boolean): ReadonlySet<WorktreeInUseKind> | undefined {
-  if (mode === "auto") return undefined;
+  if (mode !== "manual") return undefined;
   return missing ? MANUAL_MISSING_ALLOWED : MANUAL_ALLOWED;
 }
 
@@ -85,7 +92,79 @@ const KEPT_WORDS: Record<NonNullable<WorktreeCleanupOutcome["branchKept"]>, stri
 };
 
 function callerFor(mode: WorktreeRailCleanupRequest["mode"]): WorktreeCaller {
-  return { role: "studio", client: mode === "auto" ? "workspace-rail-auto" : "workspace-rail" };
+  const client = mode === "auto" ? "workspace-rail-auto" : mode === "auto-merged" ? "workspace-rail-auto-merged" : "workspace-rail";
+  return { role: "studio", client };
+}
+
+/** How the automatic removal of merged worktrees runs; index.ts passes the user's setting. */
+export interface AutoRemoveMergedOptions {
+  /** Anything but true refuses, and no row is offered. */
+  enabled: boolean;
+  /** How long a worktree must have been untouched. */
+  quietMs?: number;
+  /** How long the app must have been up. */
+  minUptimeMs?: number;
+}
+
+export type RailOptions = RemoveOptions & { autoRemoveMerged?: AutoRemoveMergedOptions };
+
+const AUTO_MERGED_QUIET_MS = 30 * 60_000;
+// The renderer answers the terminal list before it has restored its tabs, so
+// right after launch an open terminal can look like none.
+const AUTO_MERGED_MIN_UPTIME_MS = 2 * 60_000;
+const STALE_AFTER_MS = 7 * 24 * 60 * 60_000;
+
+function upLongEnough(options: AutoRemoveMergedOptions): boolean {
+  return process.uptime() * 1000 >= (options.minUptimeMs ?? AUTO_MERGED_MIN_UPTIME_MS);
+}
+
+async function remoteRefExists(root: string, name: string): Promise<boolean> {
+  const out = await readGitText(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `refs/remotes/${name}^{commit}`]).catch(() => "");
+  return /^[0-9a-f]{40,64}$/i.test(out);
+}
+
+// The proof an unattended removal accepts, and why not otherwise. All of it
+// fails closed: a local-only base can still be rewritten or lost, "content in
+// target" alone can match by coincidence unless the branch was also pushed,
+// and an ancestor with no commit of its own is where the worktree started,
+// not merged work.
+async function autoMergedRefusal(
+  repo: RepoContext,
+  workspace: Workspace,
+  fact: { state: string; proof?: string; target?: string },
+  branch: string | null,
+  head: string | null,
+): Promise<string | null> {
+  if (!branch || !head) return "It is not on a branch.";
+  if (fact.state !== "merged" || !fact.target) return "Its branch is not merged.";
+  if (isKeptBranch(branch, fact.target)) return "It is on a long-lived branch.";
+  if (!(await remoteRefExists(repo.root, fact.target))) return "Its work is merged only locally.";
+  const ahead = unpushed(repo, branch);
+  if (ahead) return `Its branch has ${ahead} unpushed commit${ahead === 1 ? "" : "s"}.`;
+  if (fact.proof === "pull-request") return null;
+  if (fact.proof === "ancestor") {
+    return (await hasOwnCommits(repo, head, workspace)) ? null : "Nothing was ever committed in it.";
+  }
+  if (fact.proof === "content-in-target") {
+    return repo.tracking.get(branch)?.upstream ? null : "Its content is in the base, but its branch was never pushed.";
+  }
+  return "Its merge could not be proved.";
+}
+
+async function quietRefusal(path: string, head: string | null, root: string, now: number, options: AutoRemoveMergedOptions): Promise<string | null> {
+  const active = await lastActivity(path, head, root).catch(() => null);
+  if (active === null) return "When it was last used could not be read.";
+  return now - active < (options.quietMs ?? AUTO_MERGED_QUIET_MS) ? "It was used too recently." : null;
+}
+
+// A workspace row inside this worktree has tabs and state of its own, which
+// the rail only vouched for on this row.
+async function holdsOtherWorkspace(repo: RepoContext, workspace: Workspace, path: string): Promise<boolean> {
+  const real = await canonicalPath(path);
+  for (const other of repo.workspaces) {
+    if (other.id !== workspace.id && isAtOrUnder(await canonicalPath(other.cwd), real)) return true;
+  }
+  return false;
 }
 
 function isLocalCopy(workspace: Workspace): workspace is Workspace & { copyBranch: NonNullable<Workspace["copyBranch"]> } {
@@ -175,14 +254,14 @@ export async function railWorktreeStates(deps: WorktreeCleanupDeps): Promise<Wor
  */
 export async function railWorktreeOverview(
   deps: WorktreeCleanupDeps,
-  options: { external?: boolean } = {},
+  options: { external?: boolean; autoRemoveMerged?: AutoRemoveMergedOptions } = {},
 ): Promise<WorktreeRailOverview> {
   const state = await deps.loadState();
   const { repos } = await discoverRepos(state, {
     withPullRequests: (root) => deps.pullRequests(root).catch(() => null),
   });
   const [states, external] = await Promise.all([
-    statesOf(repos),
+    statesOf(deps, state, repos, options.autoRemoveMerged),
     options.external === false ? Promise.resolve([]) : externalWorktrees(state, repos),
   ]);
   return { states, external };
@@ -239,7 +318,13 @@ async function externalWorktrees(state: AppState, repos: readonly RepoContext[])
   });
 }
 
-async function statesOf(repos: readonly RepoContext[]): Promise<WorktreeRailState[]> {
+async function statesOf(
+  deps: WorktreeCleanupDeps,
+  state: AppState,
+  repos: readonly RepoContext[],
+  autoMerged: AutoRemoveMergedOptions | undefined,
+): Promise<WorktreeRailState[]> {
+  const now = deps.now().getTime();
   const items: Array<{ repo: RepoContext; workspace: Workspace & { copyBranch: NonNullable<Workspace["copyBranch"]> } }> = [];
   for (const repo of repos) {
     for (const workspace of repo.workspaces) if (isLocalCopy(workspace)) items.push({ repo, workspace });
@@ -256,6 +341,18 @@ async function statesOf(repos: readonly RepoContext[]): Promise<WorktreeRailStat
     const headAt = await commitTime(repo.root, head);
     const facts = await mergeFacts(repo, head, branch, await targetFor(repo, workspace)).catch(() => ({ state: "unknown" as const }));
     const empty = facts.state === "merged" && "proof" in facts && facts.proof === "ancestor" && !(await hasOwnCommits(repo, head, workspace));
+    // Only rows that passed the cheap facts pay for reading their activity.
+    const offerAuto =
+      autoMerged?.enabled === true &&
+      upLongEnough(autoMerged) &&
+      !missing &&
+      registered !== null &&
+      !registration?.locked &&
+      state.activeWorkspaceId !== workspace.id &&
+      facts.state === "merged" &&
+      (await autoMergedRefusal(repo, workspace, facts, shortName(registration?.branch), head)) === null &&
+      (await quietRefusal(workspace.cwd, head, repo.root, now, autoMerged)) === null;
+    const stale = empty && !missing && (await isStale(workspace, head, repo.root, now));
     return {
       ...base,
       merge: empty ? "empty" : facts.state,
@@ -264,8 +361,19 @@ async function statesOf(repos: readonly RepoContext[]): Promise<WorktreeRailStat
       // An empty branch loses nothing either, so a missing one goes too.
       autoCandidate: missing && facts.state === "merged",
       ...(headAt ? { headAt } : {}),
+      ...(offerAuto ? { autoRemoveMerged: true } : {}),
+      ...(stale ? { stale: true } : {}),
     };
   });
+}
+
+// Created long ago and not touched since. A worktree of no known age is not
+// old enough to offer: only a row that says when it was made counts.
+async function isStale(workspace: Workspace, head: string, root: string, now: number): Promise<boolean> {
+  const createdAt = Date.parse(workspace.copyBranch?.createdAt ?? "");
+  if (!Number.isFinite(createdAt) || now - createdAt < STALE_AFTER_MS) return false;
+  const active = await lastActivity(workspace.cwd, head, root).catch(() => null);
+  return active !== null && now - active >= STALE_AFTER_MS;
 }
 
 function refused(message: string, workspaceName?: string): WorktreeRailCleanupResult {
@@ -329,6 +437,13 @@ function railRefusal(
     const blocker = check.blockers[0];
     return blocker.code === "IN_USE" && check.inUse?.length ? inUseText(check.inUse) : blocker.message;
   }
+  if (request.mode === "auto-merged") {
+    if (check.alreadyRemoved) return "The folder is gone.";
+    // Ignored files included: nobody is here to be asked about them.
+    if (check.localWork) return "It holds uncommitted or kept files.";
+    if (!check.branchDeletable) return "Its branch is not one a cleanup deletes.";
+    return null;
+  }
   if (request.mode === "auto") {
     if (!check.alreadyRemoved) return "The folder is still there.";
     if (!parentPresent) return "The folder above it is gone or empty, so its drive may only be unmounted.";
@@ -352,10 +467,13 @@ async function cleanUpRegistered(
   options: RemoveOptions,
 ): Promise<WorktreeRailCleanupResult> {
   const allowInUse = allowedUses(request.mode, await folderGone(path));
-  const [check] = await checkCleanupTargets(deps, [{ repoRoot: repo.root, path }], { allowInUse });
+  const requireKnownUsage = request.mode === "auto-merged";
+  const [check] = await checkCleanupTargets(deps, [{ repoRoot: repo.root, path }], { allowInUse, requireKnownUsage });
   if (!check) return refused("The worktree could not be checked.", workspace.name);
   const parentPresent = await parentHoldsFolders(path);
-  const why = railRefusal(check, request, repo, parentPresent);
+  const why =
+    railRefusal(check, request, repo, parentPresent) ??
+    (request.mode === "auto-merged" ? await autoMergedRefusal(repo, workspace, check.merge, check.branch, check.head) : null);
   if (why) return refused(why, workspace.name);
   const holdsIgnored = !check.alreadyRemoved && check.localWork !== null;
   if (holdsIgnored && request.confirmIgnored !== check.fingerprint) {
@@ -378,7 +496,12 @@ async function cleanUpRegistered(
       ],
       deleteMergedBranches: true,
     },
-    { ...options, caller: callerFor(request.mode), ...(allowInUse ? { allowInUse } : {}) },
+    {
+      ...options,
+      caller: callerFor(request.mode),
+      ...(allowInUse ? { allowInUse } : {}),
+      ...(requireKnownUsage ? { requireKnownUsage } : {}),
+    },
   );
   const outcome = outcomes[0];
   if (!outcome) return { status: "failed", message: "The removal did not run.", workspaceName: workspace.name, branchDeleted: false };
@@ -488,9 +611,9 @@ async function cleanUpUnregistered(
 export async function cleanUpRailWorkspace(
   deps: WorktreeCleanupDeps,
   request: WorktreeRailCleanupRequest,
-  options: RemoveOptions = {},
+  options: RailOptions = {},
 ): Promise<WorktreeRailCleanupResult> {
-  const mode = request?.mode === "auto" ? "auto" : "manual";
+  const mode = request?.mode === "auto" || request?.mode === "auto-merged" ? request.mode : "manual";
   const normalized: WorktreeRailCleanupRequest = {
     workspaceId: String(request?.workspaceId ?? ""),
     mode,
@@ -519,6 +642,14 @@ export async function cleanUpRailWorkspace(
     return refused("Its repository could not be read.", workspace.name);
   }
   if (mode === "auto" && !missing) return refused("The folder is still there.", workspace.name);
+  const { autoRemoveMerged: autoMerged, ...removeOptions } = options;
+  if (mode === "auto-merged") {
+    if (autoMerged?.enabled !== true) return refused("Removing merged worktrees on their own is off.", workspace.name);
+    if (missing) return refused("The folder is gone.", workspace.name);
+    if (!upLongEnough(autoMerged)) return refused("Codara only just started.", workspace.name);
+    if (state.activeWorkspaceId === workspace.id) return refused("It is the workspace on screen.", workspace.name);
+    if (await holdsOtherWorkspace(repo, workspace, workspace.cwd)) return refused("Another workspace sits inside it.", workspace.name);
+  }
 
   try {
     // Read the registrations under the lock agent create and remove share,
@@ -533,7 +664,12 @@ export async function cleanUpRailWorkspace(
     });
     if (registration === null) return refused("git does not list this folder as a worktree. Use Delete instead.", workspace.name);
     if ("unregistered" in registration) return registration.unregistered;
-    return await cleanUpRegistered(deps, repo, workspace, registration.path, normalized, options);
+    if (mode === "auto-merged") {
+      // Before the check below, whose git status can itself touch the index.
+      const quiet = await quietRefusal(registration.path, registration.head, repo.root, deps.now().getTime(), autoMerged!);
+      if (quiet) return refused(quiet, workspace.name);
+    }
+    return await cleanUpRegistered(deps, repo, workspace, registration.path, normalized, removeOptions);
   } catch (err) {
     if (err instanceof RepoLockTimeoutError) {
       return refused("Another worktree change on this repository is running. Try again shortly.", workspace.name);

@@ -205,8 +205,9 @@ one, Shift+Enter edits it.
 
 "New ... worker pane" starts a fresh session right away. To resume an earlier
 session, open the session picker (**Resume a session...** in the tab strip's +
-menu, or Mod+Shift+H), search for it in the rail's Sessions view, or type in
-the jump palette and pick "Search agent sessions" (see
+menu, Mod+Shift+H, or the history button beside the rail's switch, which opens
+it on the current workspace), or type in the jump palette and pick "Search
+agent sessions" (see
 [Agent session search](agent-session-search.md)). The worker actions below
 have no default chord.
 
@@ -311,7 +312,7 @@ The pages:
 | Editor | Code editor (Vim mode, word wrap, autosave) and inline AI autocomplete. |
 | Terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard, clearing the terminal output Codara saved (**Clear saved terminal output**), a resource overview, and the run terminal lifecycle for worker panes. |
 | Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
-| Git | Remotes (background fetch, Instant git triggers, and a custom webhook receiver under Advanced), Alerts (notify on teammate pushes, new pull requests, and CI failing on your pull request; watch pull requests on the rail and tell agents when CI fails), Worktrees (whether agents may create and remove worktrees, and remove ones you created, the repository's worktree setup file, and under Advanced your own setup command for new worktrees and extra ignored files an agent may delete with a merged worktree). |
+| Git | Remotes (background fetch, Instant git triggers, and a custom webhook receiver under Advanced), Alerts (notify on teammate pushes, new pull requests, and CI failing on your pull request; watch pull requests on the rail and tell agents when CI fails), Worktrees (whether agents may create and remove worktrees, and remove ones you created, whether merged worktrees leave on their own, the repository's worktree setup file, and under Advanced your own setup command for new worktrees and extra ignored files an agent may delete with a merged worktree). |
 | Browser | Links (auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open), and the Chrome extension (**Keep agents in your Chrome**, link status, pairing, paired browsers, agent activity). |
 | Shared pages | The links you shared from the editor: copy one, change when it expires, or delete it (see [share-links.md](./share-links.md)). |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
@@ -793,9 +794,10 @@ once read. It is saved in `notifications.json` and the mutes in
 
 The switch at the top of the rail's Workspaces section picks what the
 section lists: **Workspaces**, your workspaces in your own order (the
-default), **Agents**, every agent of every workspace sorted by what it
-needs from you, or **Sessions**, which searches your past agent sessions
-(see [agent-session-search.md](./agent-session-search.md)). Codara remembers
+default), or **Agents**, every agent of every workspace sorted by what it
+needs from you. The history button beside it opens the session picker on this
+workspace's past sessions (see
+[agent-session-search.md](./agent-session-search.md)). Codara remembers
 the choice when it restarts. While the
 Workspaces list shows, the **Agents** side of the switch counts the agents
 waiting on you. Creating or renaming a workspace or a folder switches back
@@ -847,8 +849,7 @@ Clicking a row, or Enter on it, switches to its workspace and opens its pane
 or chat, where you answer it: a terminal agent's prompts are menus that take
 keys, so Codara never pastes into them.
 
-Keys: Left and Right move between **Workspaces**, **Agents** and
-**Sessions**; in the list, Up and Down (or Home and End) move between rows,
+Keys: Left and Right move between **Workspaces** and **Agents**; in the list, Up and Down (or Home and End) move between rows,
 E settles the row in focus, the menu key or Shift+F10 opens its menu, and
 Ctrl+Z (⌘Z) takes back the last settle or snooze.
 
@@ -1063,7 +1064,24 @@ worktree, deletes the merged branch and drops the row in one click, with the
 same checks and recovery ref as Clean up worktrees. Its own idle terminals
 close with it; uncommitted work, a branch that is not merged, a running
 program, an active Cora run or a dev server stop it, and the toast says why.
-A worktree with no commits of its own yet is not called merged.
+A worktree with no commits of its own yet is not called merged. After a week
+untouched with no agent on it, such an empty worktree offers **Clean up** too,
+and never goes on its own.
+
+A merged worktree goes on its own, with a toast, once nothing is left in it or
+using it. **Settings, Git, Worktrees, Remove merged worktrees on their own**
+turns this off (on by default). All of these must hold: its folder is there and
+registered with git, it is on a branch that is not long-lived, its work is
+provably in a remote base (a merged pull request for that exact commit, its
+commits in the base, or its content in the base after having been pushed), its
+branch has nothing its upstream lacks, no uncommitted, untracked or ignored
+files worth keeping, no lock, no open tab of that workspace, no terminal, Cora
+run, dev server or running program in it, the agent that made it is closed, and
+nothing has touched it for 30 minutes. What could not be read counts as in use.
+Anything else stays in the merged group, one click from **Clean up**, and goes
+on its own once what held it is gone. It never forces, and the last commit stays
+recoverable under `refs/codara/removed-worktrees/` for 30 days. Windows offers
+no process scan, so there it stays a click.
 
 A workspace whose folder is gone is struck through and reads **Folder gone**.
 Hovering it shows **×** (**Remove from rail** in its menu), which drops the

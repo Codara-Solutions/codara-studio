@@ -69,6 +69,8 @@ export interface RemoveOptions {
   sizeOf?: (id: string) => WorktreeSize | null;
   /** Uses that do not block, as in CheckContext.allowInUse. */
   allowInUse?: ReadonlySet<WorktreeInUseKind>;
+  /** As in CheckContext.requireKnownUsage. */
+  requireKnownUsage?: boolean;
   forgetSize?: (id: string) => void;
   usageFreshMs?: number;
   /** Who asked, for the audit log; the cleanup screen when absent. */
@@ -95,12 +97,14 @@ async function contextFor(
   repo: RepoContext,
   paths: string[],
   allowInUse?: ReadonlySet<WorktreeInUseKind>,
+  requireKnownUsage?: boolean,
 ): Promise<CheckContext> {
   const reals = await Promise.all(paths.map((path) => canonicalPath(path)));
   return {
     deps,
     repo,
     ...(allowInUse ? { allowInUse } : {}),
+    ...(requireKnownUsage ? { requireKnownUsage } : {}),
     usage: await usageContext(deps, reals),
     linked: await linkWorkspaces(repo),
     regenerable: await deps
@@ -129,7 +133,7 @@ function missingRepoCheck(target: WorktreeCleanupTarget): WorktreeRemovalCheck {
 export async function checkCleanupTargets(
   deps: WorktreeCleanupDeps,
   targets: readonly unknown[],
-  options: { allowInUse?: ReadonlySet<WorktreeInUseKind> } = {},
+  options: { allowInUse?: ReadonlySet<WorktreeInUseKind>; requireKnownUsage?: boolean } = {},
 ): Promise<WorktreeRemovalCheck[]> {
   const valid = targets.filter(validTarget).slice(0, MAX_ITEMS);
   const state = await deps.loadState();
@@ -149,6 +153,7 @@ export async function checkCleanupTargets(
         repo,
         valid.filter((item) => pathKey(item.repoRoot) === pathKey(repo.root)).map((item) => item.path),
         options.allowInUse,
+        options.requireKnownUsage,
       );
       contexts.set(repo, ctx);
     }
@@ -474,6 +479,7 @@ export async function removeCleanupWorktrees(
           repo,
           repoItems.map((item) => item.path),
           options.allowInUse,
+          options.requireKnownUsage,
         );
         let usageAt = Date.now();
         for (const [index, item] of repoItems.entries()) {
