@@ -21,6 +21,7 @@ export type CommandId =
   | "shortcuts.open"
   | "runSwitcher.open"
   | "jump.open"
+  | "sessions.openPicker"
   | "workspace.selectByIndex"
   | "workspace.back"
   | "workspace.forward"
@@ -140,6 +141,12 @@ export const COMMANDS: Command[] = [
     label: "Jump to a workspace, tab or agent",
     group: "Navigation",
     defaultChords: [jumpPaletteDefaultChord(IS_MAC)],
+  },
+  {
+    id: "sessions.openPicker",
+    label: "Resume a session",
+    group: "Navigation",
+    defaultChords: [mod("h", { shift: true })],
   },
   {
     id: "workspace.selectByIndex",

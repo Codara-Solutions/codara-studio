@@ -81,6 +81,19 @@ export interface SessionSearchRequest {
   agents?: SessionSearchAgent[] | null;
   limit?: number;
   offset?: number;
+  /** With an empty query, pinned sessions lead the list. */
+  pinnedFirst?: boolean;
+  /** Longer excerpts, for a surface with room to read them. */
+  wideSnippets?: boolean;
+}
+
+/** The part of a session a search matched: its name, what you said, what the agent said. */
+export type SessionMatchKind = "name" | "user" | "assistant";
+
+export interface SessionSearchMatch {
+  kind: SessionMatchKind;
+  /** The best matching text of that part, with SNIPPET_MARK_START/END around each hit. */
+  snippet: string;
 }
 
 export interface SessionSearchHit {
@@ -88,7 +101,15 @@ export interface SessionSearchHit {
   key: string;
   agent: SessionSearchAgent;
   sessionId: string;
+  /** The name the person gave the session, else its own title or first prompt. */
   title: string;
+  /** The session's own title when the person renamed it, else null. */
+  originalTitle: string | null;
+  pinned: boolean;
+  /** The git branch the transcript recorded, when the agent records one. */
+  branch: string | null;
+  /** One entry per part that matched: name, then what you said, then the agent. */
+  matches: SessionSearchMatch[];
   /** Matched text with SNIPPET_MARK_START/END around each hit; null for a recent list or a title-only match. */
   snippet: string | null;
   /** Which side said the matched text. */
@@ -161,6 +182,36 @@ export interface SessionTranscript {
   messages: SessionTranscriptMessage[];
   /** Every message the index holds for the session, of which `messages` is the start. */
   total: number;
+}
+
+/** The end of a conversation, for a preview beside a list. */
+export interface SessionPreview {
+  key: string;
+  /** Oldest first; each message's first part only, clipped. */
+  messages: SessionTranscriptMessage[];
+  /** Every message the index holds for the session. */
+  total: number;
+}
+
+// ── Names and pins ────────────────────────────────────────────────────────
+
+export interface SessionLabel {
+  name?: string;
+  pinned?: boolean;
+}
+
+export type SessionLabels = Record<string, SessionLabel>;
+
+export const SESSION_NAME_MAX = 120;
+
+/** One line of at most SESSION_NAME_MAX characters, or null when nothing is left. */
+export function cleanSessionName(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const name = raw
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return name ? [...name].slice(0, SESSION_NAME_MAX).join("").trim() : null;
 }
 
 // ── Snippet markers ───────────────────────────────────────────────────────
@@ -267,6 +318,35 @@ export function formatIndexBytes(bytes: number): string {
 }
 
 /** "Just now", "5m ago", "3h ago", "2d ago", "4mo ago", "1y ago". */
+export type SessionDayGroup = "Today" | "Yesterday" | "This week" | "Older";
+
+/** Which day heading a session falls under, by the calendar of this computer. */
+export function sessionDayGroup(at: number | null, now: number): SessionDayGroup {
+  if (at === null || !Number.isFinite(at)) return "Older";
+  const midnight = new Date(now);
+  midnight.setHours(0, 0, 0, 0);
+  const daysBack = (days: number) => {
+    const day = new Date(midnight);
+    day.setDate(day.getDate() - days);
+    return day.getTime();
+  };
+  if (at >= midnight.getTime()) return "Today";
+  if (at >= daysBack(1)) return "Yesterday";
+  if (at >= daysBack(6)) return "This week";
+  return "Older";
+}
+
+/** 12m, 1h 12m, 3d 4h: from a session's first message to its last. Empty when unknown. */
+export function sessionLengthLabel(startedAt: number | null, lastAt: number | null): string {
+  if (startedAt === null || lastAt === null || lastAt < startedAt) return "";
+  const minutes = Math.round((lastAt - startedAt) / 60_000);
+  if (minutes < 1) return "under 1m";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return minutes % 60 ? `${hours}h ${minutes % 60}m` : `${hours}h`;
+  return hours % 24 ? `${Math.floor(hours / 24)}d ${hours % 24}h` : `${Math.floor(hours / 24)}d`;
+}
+
 export function relativeAge(at: number | null, now: number): string {
   if (at === null || !Number.isFinite(at)) return "";
   const seconds = Math.max(0, Math.round((now - at) / 1000));

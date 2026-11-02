@@ -441,6 +441,34 @@ section headers, the snooze presets and the undo notice in the footer).
 - Rows do not answer questions in place: opening the row goes to the agent.
   The question is the row's tooltip.
 
+## Session picker (2026-11)
+
+**Chosen:** B, "Browser". A list beside the end of the highlighted conversation,
+in the read-tier glass dialog. Etienne picked B from four variants on one
+comparison page (A a quick switcher palette, B the browser, C a Recent section
+and flyouts in the + menu, D a full History tab), and added: "make it so we can
+rename them, search by name and what was said by us or the agent".
+
+**References:** Studio's own jump palette for the keyboard and focus behaviour;
+the transcript dialog for the surface; the Cora chat for the shape of a
+conversation (your words in a bubble, the reply without one).
+
+**Rules it implies:**
+
+- Color marks state only: the selected row, a matched word, the primary action,
+  the destructive one. Agent marks keep their brand colors; nothing else in the
+  list is tinted.
+- A result always says what matched: **Name**, **You** or the agent's name. A
+  highlighted word with no label does not answer the question.
+- The search box keeps the keyboard. Rows are chosen with `aria-activedescendant`,
+  so typing never needs a click back into the box.
+- The end of the conversation shows first, pinned to the bottom of the pane: it
+  is what tells you whether this is the session you meant.
+- A worker row in the + menu never opens the picker. It starts a new session.
+- A session running in a pane offers **Go to its tab**, never a second resume.
+- A name lives outside the index and outside the transcripts. The index is a
+  cache and the transcripts belong to the CLIs, so neither may be its only home.
+
 ## Cora chat (2026-11)
 
 **Chosen:** B, "T3 in Studio colours". The chat takes T3 Code's shape and keeps

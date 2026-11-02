@@ -3,8 +3,13 @@
 // can check it without a renderer.
 
 import { isSafeSessionId } from "@shared/session-search";
-import type { TerminalAgentSession } from "../tabs/types";
-import { buildAgentResumeCommand, type AgentSessionResumeRequest } from "./launch-commands";
+import { collectLeaves } from "../tabs/paneTree";
+import type { Tab, TerminalAgentSession } from "../tabs/types";
+import {
+  buildAgentForkCommand,
+  buildAgentResumeCommand,
+  type AgentSessionResumeRequest,
+} from "./launch-commands";
 
 function folderKey(value: string, platform: string): string {
   const path = value.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -54,4 +59,53 @@ export function sessionResumeLaunch(
     active: false,
   };
   return { command: buildAgentResumeCommand(pointer), pointer };
+}
+
+/** The same for a fork; the pointer is null when the CLI mints the new id itself. */
+export function sessionForkLaunch(
+  request: AgentSessionResumeRequest,
+  capturedAt: string,
+): { command: string; pointer: TerminalAgentSession | null } | null {
+  if (!isSafeSessionId(request.sessionId)) return null;
+  const fork = buildAgentForkCommand(request.runtime, request.sessionId);
+  if (!fork) return null;
+  return {
+    command: fork.command,
+    pointer: fork.sessionId
+      ? {
+          runtime: request.runtime,
+          nativeCodexProfileId: request.nativeCodexProfileId,
+          nativeGrokProfileId: request.nativeGrokProfileId,
+          sessionId: fork.sessionId,
+          cwd: request.cwd,
+          capturedAt,
+          active: false,
+        }
+      : null,
+  };
+}
+
+/**
+ * The pane running this session now, asleep included, live layout first.
+ * Resuming it again would put two agents on one transcript.
+ */
+export function findOpenSessionPane(
+  layouts: readonly { workspaceId: string; tabs: readonly Tab[] }[],
+  runtime: string,
+  sessionId: string,
+): { workspaceId: string; tabId: string; paneId: string } | null {
+  for (const layout of [...layouts].reverse()) {
+    for (const tab of layout.tabs) {
+      if (tab.kind !== "terminal") continue;
+      for (const leaf of collectLeaves(tab.root)) {
+        const session = leaf.agentSession;
+        if (session?.sessionId !== sessionId || session.runtime !== runtime) continue;
+        const running = !!leaf.worker && leaf.worker.agentRunning !== false && leaf.worker.state !== "done";
+        if (session.active === true || leaf.hibernation || running) {
+          return { workspaceId: layout.workspaceId, tabId: tab.id, paneId: leaf.paneId };
+        }
+      }
+    }
+  }
+  return null;
 }

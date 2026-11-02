@@ -143,6 +143,7 @@ import {
   deleteWorkerSession as deleteLocalWorkerSession,
   listWorkerSessions as listLocalWorkerSessions,
 } from "../worker-sessions";
+import { withSessionNames } from "../session-search/service";
 import {
   RemoteAccessService,
   type RemoteTerminalCreateRequest,
@@ -2797,7 +2798,8 @@ async function listWorkerSessionsForRemote(input: {
     root,
     await nativeClaudeSessionOptions(input.runtime),
   );
-  return sessions.slice(0, MAX_REMOTE_WORKER_SESSIONS).map((session) => ({
+  const named = await withSessionNames(sessions.slice(0, MAX_REMOTE_WORKER_SESSIONS));
+  return named.map((session) => ({
     runtime: session.runtime,
     sessionId: session.sessionId,
     title: truncateUtf8(session.title, 512),

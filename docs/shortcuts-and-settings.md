@@ -37,6 +37,7 @@ never trigger Codara's shortcuts.
 |---|---|---|
 | Switch Cora run | Mod+K | `runSwitcher.open` |
 | Jump to a workspace, tab or agent | Cmd+J on macOS, Ctrl+Shift+J on Windows and Linux | `jump.open` |
+| Resume a session | Mod+Shift+H | `sessions.openPicker` |
 | Switch to workspace 1 to 9 | Ctrl+1 ... Ctrl+9 on macOS, Alt+1 ... Alt+9 on Windows and Linux | `workspace.selectByIndex` |
 | Back to the previous workspace | Cmd+Option+Left on macOS, Alt+[ on Windows and Linux | `workspace.back` |
 | Forward to the next workspace | Cmd+Option+Right on macOS, Alt+] on Windows and Linux | `workspace.forward` |
@@ -203,10 +204,11 @@ one, Shift+Enter edits it.
 ### Workers
 
 "New ... worker pane" starts a fresh session right away. To resume an earlier
-session, search for it in the rail's Sessions view, or type in the jump
-palette and pick "Search agent sessions" (see
-[Agent session search](agent-session-search.md)). None of these has a default
-chord.
+session, open the session picker (**Resume a session...** in the tab strip's +
+menu, or Mod+Shift+H), search for it in the rail's Sessions view, or type in
+the jump palette and pick "Search agent sessions" (see
+[Agent session search](agent-session-search.md)). The worker actions below
+have no default chord.
 
 | Action | Default | Command id |
 |---|---|---|

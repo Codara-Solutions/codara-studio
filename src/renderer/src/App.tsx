@@ -192,7 +192,13 @@ import {
   type AgentSessionResumeRequest,
   runtimeFromAgentSessionLaunchCommand,
 } from "./workers/launch-commands";
-import { hasWorkspaceFolder, sessionResumeLaunch, workspaceForSessionFolder } from "./workers/session-resume";
+import {
+  findOpenSessionPane,
+  hasWorkspaceFolder,
+  sessionForkLaunch,
+  sessionResumeLaunch,
+  workspaceForSessionFolder,
+} from "./workers/session-resume";
 import { agentBrandColor, agentBrandRuntime } from "./lib/agent-brand";
 import { applyWorkspaceAccent } from "./lib/workspace-accent";
 import { useTheme } from "./theme/theme-context";
@@ -254,6 +260,7 @@ const SessionInspector = lazy(() => import("./components/SessionInspector"));
 const AgentCapabilitiesDialog = lazy(loadAgentCapabilitiesDialog);
 const RunSwitcher = lazy(() => import("./components/RunSwitcher"));
 const JumpPalette = lazy(() => import("./components/jump/JumpPalette"));
+const SessionPicker = lazy(() => import("./components/session-search/SessionPicker"));
 const CreateCopyDialog = lazy(() => import("./components/CreateCopyDialog"));
 const WorktreeSetupTray = lazy(() => import("./components/worktree-setup/WorktreeSetupTray"));
 const CopyBranchDeleteDialog = lazy(() =>
@@ -647,6 +654,8 @@ export default function App() {
   const [runSwitcherOpen, setRunSwitcherOpen] = useState(false);
   // Jump palette (jump.open): mounted only while open, like the run switcher.
   const [jumpPaletteOpen, setJumpPaletteOpen] = useState(false);
+  const [sessionPickerOpen, setSessionPickerOpen] = useState(false);
+  const openSessionPicker = useCallback(() => setSessionPickerOpen(true), []);
   // Single "While you were away" digest surfaced on window focus-after-away.
   // Holds the snapshot computed at focus time; null when nothing landed or the
   // user dismissed it.
@@ -5026,12 +5035,13 @@ export default function App() {
   const pendingSessionResumeRef = useRef<(AgentSessionResumeRequest & { workspaceId: string }) | null>(null);
 
   const launchSessionResume = useCallback((request: AgentSessionResumeRequest) => {
-    const launch = sessionResumeLaunch(request, new Date().toISOString());
+    const launch = (request.fork ? sessionForkLaunch : sessionResumeLaunch)(request, new Date().toISOString());
     if (!launch) return;
     tabsRef.current.newTerminalTab(request.cwd, launch.command, {
       agentSession: launch.pointer,
       manualAgentRuntime: request.runtime,
       color: workerTabBrandColor(request.runtime),
+      ...(request.title ? { title: request.title } : {}),
     });
   }, []);
 
@@ -5095,7 +5105,11 @@ export default function App() {
     [resumeAgentSession],
   );
 
-  // The rail's Sessions view opens what it found through here.
+  const workspaceJumpRef = useRef(workspaceJump);
+  workspaceJumpRef.current = workspaceJump;
+  // The rail's Sessions view and the session picker open what they found
+  // through here. A session already running in a pane is gone to, not resumed
+  // a second time: two agents on one transcript would corrupt it.
   const openSearchedSession = useCallback(
     (hit: SessionSearchHit) => {
       if (hit.agent === "cora") {
@@ -5103,14 +5117,79 @@ export default function App() {
         return;
       }
       if (!hit.cwd) return;
-      void resumeAgentSession({ runtime: hit.agent, cwd: hit.cwd, sessionId: hit.sessionId });
+      const pane = findOpenSessionPane(jumpSourcesRef.current().layouts, hit.agent, hit.sessionId);
+      if (pane) {
+        workspaceJumpRef.current.jumpTo(pane);
+        return;
+      }
+      void resumeAgentSession({
+        runtime: hit.agent,
+        cwd: hit.cwd,
+        sessionId: hit.sessionId,
+        ...(hit.originalTitle ? { title: hit.title } : {}),
+      });
     },
     [handleSelectRunAnywhere, resumeAgentSession],
   );
+  const forkSearchedSession = useCallback(
+    (hit: SessionSearchHit) => {
+      if (hit.agent === "cora" || !hit.cwd) return;
+      void resumeAgentSession({ runtime: hit.agent, cwd: hit.cwd, sessionId: hit.sessionId, fork: true });
+    },
+    [resumeAgentSession],
+  );
+  const handleNewWorkerPaneRef = useRef(handleNewWorkerPane);
+  handleNewWorkerPaneRef.current = handleNewWorkerPane;
+  const canSplitSearchedSession = useCallback(
+    (hit: SessionSearchHit) => {
+      if (hit.agent === "cora" || !hit.cwd || !hit.cwdExists) return false;
+      const current = tabsRef.current;
+      if (current.tabs.find((tab) => tab.id === current.activeId)?.kind !== "terminal") return false;
+      const workspace = workspaceForSessionFolder(workspacesRef.current, hit.cwd, platform);
+      return !!workspace && workspace.id === current.tabsWorkspaceId;
+    },
+    [platform],
+  );
+  const splitSearchedSession = useCallback(
+    (hit: SessionSearchHit) => {
+      if (hit.agent === "cora" || !hit.cwd || !canSplitSearchedSession(hit)) return;
+      const launch = sessionResumeLaunch(
+        { runtime: hit.agent, cwd: hit.cwd, sessionId: hit.sessionId },
+        new Date().toISOString(),
+      );
+      if (launch) handleNewWorkerPaneRef.current(launch.command, { cwd: hit.cwd, session: launch.pointer });
+    },
+    [canSplitSearchedSession],
+  );
+  const isSearchedSessionOpen = useCallback(
+    (hit: SessionSearchHit) =>
+      hit.agent !== "cora" && !!findOpenSessionPane(jumpSourcesRef.current().layouts, hit.agent, hit.sessionId),
+    [],
+  );
+  const handleRenameChatTabRef = useRef<(id: TabId, title: string) => void>(() => undefined);
+  const renameSearchedChat = useCallback((runId: string, name: string) => {
+    handleRenameChatTabRef.current(runId, name);
+  }, []);
   const sessionSearchCwd = activeWorkspace && !activeWorkspace.remote ? activeWorkspace.cwd : null;
   useEffect(() => {
-    publishSessionSearchHost({ workspaceCwd: sessionSearchCwd, openSession: openSearchedSession });
-  }, [sessionSearchCwd, openSearchedSession]);
+    publishSessionSearchHost({
+      workspaceCwd: sessionSearchCwd,
+      openSession: openSearchedSession,
+      forkSession: forkSearchedSession,
+      splitSession: splitSearchedSession,
+      canSplitSession: canSplitSearchedSession,
+      isSessionOpen: isSearchedSessionOpen,
+      renameChat: renameSearchedChat,
+    });
+  }, [
+    sessionSearchCwd,
+    openSearchedSession,
+    forkSearchedSession,
+    splitSearchedSession,
+    canSplitSearchedSession,
+    isSearchedSessionOpen,
+    renameSearchedChat,
+  ]);
   useEffect(() => () => publishSessionSearchHost(null), []);
 
   // The jump palette's "Search agent sessions": the rail's Sessions view,
@@ -5209,6 +5288,7 @@ export default function App() {
     },
     [renameChatTab],
   );
+  handleRenameChatTabRef.current = handleRenameChatTab;
 
   const openInSparkBrowser = useCallback(
     (
@@ -5924,6 +6004,12 @@ export default function App() {
     () => ({
       "shortcuts.open": () => setShortcutsOpen((open) => !open),
       "runSwitcher.open": () => setRunSwitcherOpen((open) => !open),
+      "sessions.openPicker": () => {
+        // As with the jump palette: not under another dialog holding the keyboard.
+        const modal = visibleModalDialog();
+        if (modal && !modal.matches('[data-testid="session-picker"]')) return;
+        setSessionPickerOpen((open) => !open);
+      },
       "jump.open": () => {
         // Not over another dialog (Settings, Fix with agent, quick commands):
         // the palette would open under it while the dialog keeps the keyboard.
@@ -6350,6 +6436,7 @@ export default function App() {
       chat: hintForCommand(bindingTable, "chat.new"),
       terminal: hintForCommand(bindingTable, "tab.newTerminal"),
       preview: hintForCommand(bindingTable, "tab.newPreview"),
+      sessions: hintForCommand(bindingTable, "sessions.openPicker"),
     }),
     [bindingTable],
   );
@@ -6996,6 +7083,7 @@ export default function App() {
               onNewCodexWorker={openCodexWorker}
               onNewGrokWorker={openGrokWorker}
               onNewPiWorker={openPiWorker}
+              onOpenSessionPicker={openSessionPicker}
               onNewChat={handleNewChat}
               onOpenBoardCardRun={handleOpenBoardCardRun}
               onRenameChat={handleRenameChatTab}
@@ -7198,6 +7286,12 @@ export default function App() {
                 openSessionSearch(query);
               }}
             />
+          </Suspense>
+        ) : null}
+
+        {sessionPickerOpen ? (
+          <Suspense fallback={null}>
+            <SessionPicker onClose={() => setSessionPickerOpen(false)} />
           </Suspense>
         ) : null}
 
@@ -7603,6 +7697,7 @@ interface WorkspaceProps {
   onNewCodexWorker: () => void;
   onNewGrokWorker: () => void;
   onNewPiWorker: () => void;
+  onOpenSessionPicker: () => void;
   onNewChat: () => void;
   // "Open chat" on a Cora Board card with a live run — App's run-selection
   // path, threaded down to the chat panel's embedded board sub-view.
@@ -7659,6 +7754,7 @@ const Workspace = React.memo(function Workspace({
   onNewCodexWorker,
   onNewGrokWorker,
   onNewPiWorker,
+  onOpenSessionPicker,
   onNewChat,
   onOpenBoardCardRun,
   onRenameChat,
@@ -8382,6 +8478,7 @@ const Workspace = React.memo(function Workspace({
         onNewCodexWorker={onNewCodexWorker}
         onNewGrokWorker={onNewGrokWorker}
         onNewPiWorker={onNewPiWorker}
+        onOpenSessionPicker={onOpenSessionPicker}
         onNewChat={onNewChat}
         onRenameChat={onRenameChat}
         onCloseChat={onCloseChat}

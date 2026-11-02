@@ -23,9 +23,12 @@ import {
   EMPTY_SESSION_SEARCH_STATUS,
   SNIPPET_MARK_END,
   SNIPPET_MARK_START,
+  cleanSessionName,
   isSessionSearchAgent,
   normalizeSessionSearchPreferences,
   sessionCwdKey,
+  type SessionLabel,
+  type SessionPreview,
   type SessionSearchAgent,
   type SessionSearchHit,
   type SessionSearchPreferences,
@@ -40,6 +43,7 @@ import type { IpcHandle } from "../ipc";
 import { getPreferenceCached, loadPreferences, onPreferenceChange, setPreference } from "../preferences-store";
 import { provideAgentSessionSearch, type AgentSessionSearch } from "../preview-tools/session-search";
 import type { IndexSessionRecord, IndexStats, SessionSourceRoot } from "./session-index";
+import { isSessionLabelKey, SessionLabelStore } from "./session-labels";
 import type { IndexPace, SessionIndexJob, SessionIndexMessage } from "./session-index-worker";
 
 /** The index thread's heap cap; scripts/profile-session-index.cjs measures with the same. */
@@ -58,9 +62,13 @@ const FRESH_MS = 60_000;
 const PAUSE_CHECK_MS = 15_000;
 /** One-minute load per core above which the computer counts as busy. */
 const BUSY_LOAD_PER_CORE = 0.85;
+const LABELS_FILE = "session-labels.json";
 const TRANSCRIPT_MESSAGES = 400;
+const PREVIEW_MESSAGES = 6;
+const PREVIEW_CLIP_CHARS = 1_500;
 /** Words around a match: what fits the rail's two lines, and more for an agent. */
 const RAIL_SNIPPET_TOKENS = 10;
+const WIDE_SNIPPET_TOKENS = 28;
 const AGENT_SNIPPET_TOKENS = 36;
 const SEARCH_LIMIT_MAX = 100;
 const STATUS_BROADCAST_MS = 250;
@@ -297,7 +305,10 @@ function control(message: { type: "pace"; pace: IndexPace } | { type: "pause"; p
 async function ensureOpen(): Promise<void> {
   if (!opened) {
     const attempt = call<IndexStats>({ type: "open", dbPath: sessionIndexPath(), platform: process.platform }).then(
-      (stats) => applyStats(stats),
+      async (stats) => {
+        applyStats(stats);
+        await sendLabels();
+      },
     );
     opened = attempt;
     attempt.catch(() => {
@@ -305,6 +316,31 @@ async function ensureOpen(): Promise<void> {
     });
   }
   return opened;
+}
+
+let labelStore: SessionLabelStore | null = null;
+
+function sessionLabelStore(): SessionLabelStore {
+  labelStore ??= new SessionLabelStore(join(codaraHome(), LABELS_FILE));
+  return labelStore;
+}
+
+/** The same sessions with the names the person gave them, for lists read outside the index. */
+export async function withSessionNames<T extends { runtime: string; sessionId: string; title: string }>(
+  sessions: readonly T[],
+): Promise<T[]> {
+  const store = sessionLabelStore();
+  await store.load();
+  return sessions.map((session) => {
+    const name = store.nameOf(`${session.runtime}:${session.sessionId}`);
+    return name ? { ...session, title: name } : session;
+  });
+}
+
+async function sendLabels(): Promise<void> {
+  const store = sessionLabelStore();
+  await store.load();
+  await call({ type: "labels", labels: store.snapshot() });
 }
 
 function armIdleStop(): void {
@@ -664,6 +700,7 @@ async function searchIndex(raw: SessionSearchRequest, snippetTokens: number, t0:
       offset,
       now: Date.now(),
       snippetTokens,
+      pinnedFirst: request.pinnedFirst === true,
     },
   });
   const memo = new Map<string, Promise<boolean>>();
@@ -696,6 +733,31 @@ export async function sessionTranscript(key: unknown): Promise<SessionTranscript
   if (typeof key !== "string" || key.length > 300 || !preferences().enabled) return null;
   await ensureOpen();
   return call<SessionTranscript | null>({ type: "transcript", key, limit: TRANSCRIPT_MESSAGES });
+}
+
+export async function sessionPreview(key: unknown): Promise<SessionPreview | null> {
+  if (typeof key !== "string" || key.length > 300 || !preferences().enabled) return null;
+  await ensureOpen();
+  return call<SessionPreview | null>({ type: "preview", key, limit: PREVIEW_MESSAGES, clipChars: PREVIEW_CLIP_CHARS });
+}
+
+/**
+ * Names or pins a session. The file is the record, so a failure there is the
+ * caller's to report; the index only follows it, and catches up when it next
+ * opens if search is off now.
+ */
+export async function setSessionLabel(key: unknown, patch: unknown): Promise<SessionLabel | null> {
+  if (!isSessionLabelKey(key)) throw new Error("Not a session.");
+  const source = patch && typeof patch === "object" ? (patch as Record<string, unknown>) : {};
+  const label = await sessionLabelStore().update(key, {
+    ...("name" in source ? { name: source.name === null ? null : cleanSessionName(source.name) } : {}),
+    ...(typeof source.pinned === "boolean" ? { pinned: source.pinned } : {}),
+  });
+  if (preferences().enabled) {
+    await ensureOpen();
+    await sendLabels();
+  }
+  return label;
 }
 
 export async function revealSessionTranscript(key: unknown): Promise<boolean> {
@@ -796,9 +858,13 @@ provideAgentSessionSearch(searchSessionsForAgent);
 
 export function registerSessionSearchIpc(handle: IpcHandle): void {
   handle("sessionSearch:status", (_event, load: unknown) => sessionSearchStatus(load === true));
-  handle("sessionSearch:search", (_event, request: SessionSearchRequest) => searchSessions(request));
+  handle("sessionSearch:search", (_event, request: SessionSearchRequest) =>
+    searchSessions(request, request?.wideSnippets === true ? WIDE_SNIPPET_TOKENS : RAIL_SNIPPET_TOKENS),
+  );
   handle("sessionSearch:refresh", (_event, force: unknown) => refreshSessionIndex(force === true));
   handle("sessionSearch:transcript", (_event, key: unknown) => sessionTranscript(key));
+  handle("sessionSearch:preview", (_event, key: unknown) => sessionPreview(key));
+  handle("sessionSearch:set-label", (_event, key: unknown, patch: unknown) => setSessionLabel(key, patch));
   handle("sessionSearch:reveal", (_event, key: unknown) => revealSessionTranscript(key));
   handle("sessionSearch:rebuild", () => rebuildSessionIndex());
   handle("sessionSearch:delete", () => deleteSessionIndex());
