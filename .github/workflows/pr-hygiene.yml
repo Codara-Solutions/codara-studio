@@ -2,11 +2,12 @@ name: PR hygiene
 
 # Size budget and wrong-base check for every pull request
 # (scripts/check-pr-hygiene.cjs). It re-runs when labels change, so adding
-# the large-pr label clears a size failure without a new push.
+# the large-pr label clears a size failure without a new push, and when the
+# pull request is edited, which includes pointing it at another base.
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled, ready_for_review]
 
 concurrency:
   group: pr-hygiene-${{ github.event.pull_request.number }}

@@ -7,6 +7,8 @@ name: Gitleaks
 
 on:
   pull_request:
+    # edited: a pull request pointed at another base has another range.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main, Cora]
 
