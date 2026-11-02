@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import type {
   AutomationBranchResult,
+  AutomationOwnBranchState,
   PreResolvedNode,
   AgentEffortLevel,
   AgentLoopSignal,
@@ -285,7 +286,7 @@ async function passesPrecheck(id: string, job: ScheduledJob, opts: StartIteratio
 
 // jobId of loops whose work is being committed and pushed. Nothing may start a
 // cycle meanwhile: it would close the same checkout a second time.
-const settlingBranch = new Set<string>();
+const settlingBranch = new Map<string, Promise<void>>();
 
 const STOPS_WITHOUT_A_PULL_REQUEST: ReadonlySet<AutomationStopReason> = new Set<AutomationStopReason>([
   "budget",
@@ -299,29 +300,34 @@ const STOPS_WITHOUT_A_PULL_REQUEST: ReadonlySet<AutomationStopReason> = new Set<
 async function settleOwnBranch(id: string, reason: AutomationStopReason): Promise<void> {
   const job = await getJob(id);
   const own = job?.state.ownBranch;
-  if (!job || !own || settlingBranch.has(id)) return;
-  settlingBranch.add(id);
-  try {
-    const last = job.history[job.history.length - 1];
-    const wentWell = !STOPS_WITHOUT_A_PULL_REQUEST.has(reason) && last?.status === "complete";
-    const { closeOwnBranch } = await import("./automation-branch");
-    const result: AutomationBranchResult = await closeOwnBranch(job, own, {
-      openPullRequest: wentWell && job.ownBranch?.draftPr === true,
-      summary: last?.summary,
-    }).catch(() => ({
-      branch: own.branch,
-      changed: true,
-      note: `Could not finish its branch. Anything it did is still in ${own.path}.`,
-    }));
-    await patchJob(id, (j) => {
-      const history = [...j.history];
-      if (history.length > 0) history[history.length - 1] = { ...history[history.length - 1], branchResult: result };
-      const { ownBranch: _settled, ...state } = j.state;
-      return { ...j, history, state };
-    });
-  } finally {
-    settlingBranch.delete(id);
-  }
+  // A caller that goes on to start a cycle has to wait for one already under way,
+  // or its start is refused and the restart is lost.
+  const settling = settlingBranch.get(id);
+  if (settling) return settling;
+  if (!job || !own) return;
+  const work = closeAndForgetOwnBranch(job, own, reason).finally(() => settlingBranch.delete(id));
+  settlingBranch.set(id, work);
+  return work;
+}
+
+async function closeAndForgetOwnBranch(job: ScheduledJob, own: AutomationOwnBranchState, reason: AutomationStopReason): Promise<void> {
+  const last = job.history[job.history.length - 1];
+  const wentWell = !STOPS_WITHOUT_A_PULL_REQUEST.has(reason) && last?.status === "complete";
+  const { closeOwnBranch } = await import("./automation-branch");
+  const result: AutomationBranchResult = await closeOwnBranch(job, own, {
+    openPullRequest: wentWell && job.ownBranch?.draftPr === true,
+    summary: last?.summary,
+  }).catch(() => ({
+    branch: own.branch,
+    changed: true,
+    note: `Could not finish its branch. Anything it did is still in ${own.path}.`,
+  }));
+  await patchJob(job.id, (j) => {
+    const history = [...j.history];
+    if (history.length > 0) history[history.length - 1] = { ...history[history.length - 1], branchResult: result };
+    const { ownBranch: _settled, ...state } = j.state;
+    return { ...j, history, state };
+  });
 }
 
 // Whether a trigger fire right now would be dropped: startIteration holds for
@@ -443,16 +449,23 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         await appendSkip(id, { reason: "ownBranch", detail: opened.problem });
         return;
       }
-      // Making the copy can take a while. A Stop or a restart meanwhile wins: this
-      // start is over, and it must not run in a copy nobody is tracking.
-      const now = await getJob(id);
-      if (!now || !now.enabled || now.state.status !== job.state.status || now.state.currentRunId || now.state.ownBranch) {
+      // Making the copy can take a while, and a Stop or a restart meanwhile wins.
+      // They drop this runner before they read the state, so exactly one side owns
+      // the copy: claimed here and they settle it, refused here and this closes it.
+      const startingStatus = job.state.status;
+      let claimed = false;
+      await patchJob(id, (j) => {
+        claimed =
+          loops.get(id) === runner && j.enabled && j.state.status === startingStatus && !j.state.currentRunId && !j.state.ownBranch;
+        return claimed ? { ...j, state: { ...j.state, ownBranch: opened.own } } : j;
+      });
+      if (!claimed) {
         const { closeOwnBranch } = await import("./automation-branch");
         await closeOwnBranch(job, opened.own, { openPullRequest: false }).catch(() => undefined);
         return;
       }
+      if (loops.get(id) !== runner) return;
       ownBranchState = opened.own;
-      await patchJob(id, (j) => ({ ...j, state: { ...j.state, ownBranch: opened.own } }));
       workCwd = opened.own.path;
     }
 

@@ -85,14 +85,40 @@ export async function openOwnBranch(job: ScheduledJob, nowMs: number = Date.now(
   return { ok: true, own: { path, branch, baseSha, ...(baseBranch && baseBranch !== "HEAD" ? { baseBranch } : {}) } };
 }
 
+// Rebuilt by a tool, so losing them loses nothing. Any other ignored file may be
+// the only copy of what a run produced, such as a report in an ignored folder.
+const REBUILT_FOLDERS: ReadonlySet<string> = new Set([
+  "node_modules",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".next",
+  ".turbo",
+  ".cache",
+]);
+
+async function leftIgnoredOutput(path: string): Promise<boolean> {
+  const status = await read(path, ["status", "--porcelain", "--ignored"]);
+  if (status === null) return true;
+  return status
+    .split("\n")
+    .filter((line) => line.startsWith("!! "))
+    .some((line) => !line.slice(3).split("/").some((part) => REBUILT_FOLDERS.has(part)));
+}
+
 // Never forced: git refuses while anything uncommitted is left, and that is
-// exactly when the copy has to stay. Ignored files such as node_modules go with it.
+// exactly when the copy has to stay. Git does not count ignored files, so those
+// are checked here.
 async function removeCheckout(repo: string, path: string): Promise<boolean> {
+  if (await leftIgnoredOutput(path)) return false;
   return (await read(repo, ["worktree", "remove", path])) !== null;
 }
 
 function stillThere(path: string): string {
-  return ` Some changes were not committed, so its copy is still in ${path}.`;
+  return ` Some files were not committed, so its copy is still in ${path}.`;
 }
 
 function oneLine(text: string): string {
@@ -185,7 +211,7 @@ export async function closeOwnBranch(
   }
   if (Number(count) === 0) {
     if (await removeCheckout(repo, path)) await read(repo, ["branch", "-D", branch]);
-    else return { branch, changed: true, note: `It made no commits, but its copy could not be removed. It is in ${path}.` };
+    else return { branch, changed: true, note: `It made no commits, but its copy was kept because of files it left there. It is in ${path}.` };
     return { branch, changed: false, note: "It changed nothing, so there is no branch to look at." };
   }
   const saved = `Its work is on the branch ${branch}.`;

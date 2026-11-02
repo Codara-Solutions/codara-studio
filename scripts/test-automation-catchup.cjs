@@ -83,7 +83,7 @@ const harnessPlugin = {
               init +
               "globalThis.__CU.branches ??= { opened: [], closed: [] };\n" +
               "export async function openOwnBranch(job){ if (globalThis.__CU.branchFails) return { ok: false, problem: 'no copy' }; if (globalThis.__CU.duringOpen) await globalThis.__CU.duringOpen(job); const own = { path: process.env.SPARK_HOME_DIR, branch: 'codara-automation/x', baseSha: 'a' }; globalThis.__CU.branches.opened.push(job.id); return { ok: true, own }; }\n" +
-              "export async function closeOwnBranch(job, own, opts){ globalThis.__CU.branches.closed.push({ id: job.id, opts }); return { branch: own.branch, changed: true }; }\n",
+              "export async function closeOwnBranch(job, own, opts){ globalThis.__CU.branches.closed.push({ id: job.id, opts }); if (globalThis.__CU.duringClose) await globalThis.__CU.duringClose(job); return { branch: own.branch, changed: true }; }\n",
             loader: "js",
           };
         case "git-exec":
@@ -520,6 +520,46 @@ async function integrationChecks({ sched, loop }, workspace) {
     assert.strictEqual(globalThis.__CU.branches.closed.length, closedBefore + 1);
     assert.strictEqual((await get(racing.id)).state.ownBranch, undefined);
     await sched.setEnabled(racing.id, false);
+
+    // Restarted while its copy was being made: the older start lets go of its copy,
+    // and the restart runs in its own.
+    const restarted = await sched.createJob({ name: "restarted", trigger: byHand, input, ownBranch: { draftPr: true }, prompt: { template: "go" } });
+    {
+      const closed = globalThis.__CU.branches.closed.length;
+      const launched = globalThis.__CU.launches.length;
+      let restart;
+      globalThis.__CU.duringOpen = async (j) => {
+        globalThis.__CU.duringOpen = null;
+        restart = loop.runNow(j.id);
+        await restart;
+      };
+      await loop.startIteration(restarted.id, { source: "manual" });
+      await restart;
+      assert.strictEqual(globalThis.__CU.launches.length, launched + 1, "only the restart runs");
+      assert.strictEqual(globalThis.__CU.branches.closed.length, closed + 1, "the older start closed its copy");
+      assert.ok((await get(restarted.id)).state.ownBranch, "the restart keeps its own copy");
+    }
+
+    // Run now while the last cycle is still being closed waits for it, then starts.
+    {
+      const launched = globalThis.__CU.launches.length;
+      let release;
+      const gate = new Promise((res) => { release = res; });
+      globalThis.__CU.duringClose = async () => {
+        globalThis.__CU.duringClose = null;
+        await gate;
+      };
+      const stopping = loop.stopLoop(restarted.id);
+      while (!(await sched.getJob(restarted.id)).state.lastStopReason) await new Promise((res) => setTimeout(res, 5));
+      await new Promise((res) => setTimeout(res, 20));
+      const again = loop.runNow(restarted.id);
+      await new Promise((res) => setTimeout(res, 20));
+      release();
+      await stopping;
+      await again;
+      assert.strictEqual(globalThis.__CU.launches.length, launched + 1, "the restart was not lost");
+    }
+    await sched.setEnabled(restarted.id, false);
 
     // No copy, no run: it never falls back to the workspace folder.
     globalThis.__CU.branchFails = true;

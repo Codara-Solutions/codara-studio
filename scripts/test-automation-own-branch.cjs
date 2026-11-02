@@ -166,6 +166,31 @@ const inOrigin = (origin, ...args) => execFileSync("git", ["--git-dir", origin, 
     assert.equal(inOrigin(origin, "show", `${second.branch}:app.txt`), "other branch");
   }
 
+  // What a run left in an ignored folder may be its only output. A rebuilt folder
+  // is not, and does not hold a copy back.
+  {
+    const { repo } = makeRepo("ignoredoutput");
+    fs.writeFileSync(path.join(repo, ".gitignore"), "results/\nnode_modules/\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "ignore");
+    git(repo, "push", "-q", "origin", "main");
+    const { own } = await openOwnBranch(job(repo));
+    fs.mkdirSync(path.join(own.path, "results"));
+    fs.writeFileSync(path.join(own.path, "results", "report.txt"), "only copy\n");
+    const done = await closeOwnBranch(job(repo), own, { openPullRequest: false });
+    assert.equal(done.changed, true);
+    assert.ok(done.note.includes(own.path));
+    assert.equal(fs.readFileSync(path.join(own.path, "results", "report.txt"), "utf8"), "only copy\n");
+    assert.equal(git(repo, "rev-parse", own.branch), own.baseSha);
+
+    const second = await openOwnBranch(job(repo));
+    fs.mkdirSync(path.join(second.own.path, "node_modules", "dep"), { recursive: true });
+    fs.writeFileSync(path.join(second.own.path, "node_modules", "dep", "index.js"), "x\n");
+    const clean = await closeOwnBranch(job(repo), second.own, { openPullRequest: false });
+    assert.equal(clean.changed, false);
+    assert.equal(fs.existsSync(second.own.path), false);
+  }
+
   // A worker that goes back to look at an older commit has not undone its work.
   {
     const { repo } = makeRepo("lookback");
@@ -209,7 +234,7 @@ const inOrigin = (origin, ...args) => execFileSync("git", ["--git-dir", origin, 
     const { own } = await openOwnBranch(job(repo));
     fs.writeFileSync(path.join(own.path, "app.txt"), "x\n");
     const done = await closeOwnBranch(job(repo), own, { openPullRequest: false });
-    assert.match(done.note, /Some changes were not committed/);
+    assert.match(done.note, /Some files were not committed/);
     assert.ok(done.note.includes(own.path));
     assert.equal(fs.readFileSync(path.join(own.path, "left-behind.txt"), "utf8"), "generated\n");
     assert.equal(git(repo, "show", `${own.branch}:app.txt`), "x");
