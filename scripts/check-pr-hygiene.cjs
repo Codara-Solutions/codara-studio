@@ -15,7 +15,7 @@
 //
 // Usage (CI passes these through the environment):
 //   node scripts/check-pr-hygiene.cjs --base origin/Cora --head HEAD \
-//     [--head-ref my-branch] [--labels '["large-pr"]'] [--title "..."]
+//     [--head-ref my-branch] [--labels '["large-pr"]']
 // Exit code 1 when a check fails. Annotations use the GitHub Actions
 // "::warning::" / "::error::" syntax and a summary goes to
 // $GITHUB_STEP_SUMMARY when it is set.
@@ -119,25 +119,23 @@ function findCarriedCommits(cwd, { base, head, headRef }) {
       const [sha, subject] = line.split("\0");
       return { sha, subject };
     });
+  const others = [...integration].filter((ref) => ref !== base);
+  const integrationBranchOf = (sha) =>
+    others.find((ref) => tryGit(cwd, ["merge-base", "--is-ancestor", sha, ref]) !== null) ?? null;
   const carried = [];
   for (const commit of commits) {
     const match = MERGED_SUBJECTS.map((pattern) => pattern.exec(commit.subject)).find(Boolean);
     if (!match) continue;
-    let foundOn = null;
-    if (baseSubjects.has(commit.subject)) foundOn = shortRef(base);
-    else {
-      for (const ref of integration) {
-        if (ref === base) continue;
-        if (tryGit(cwd, ["merge-base", "--is-ancestor", commit.sha, ref]) !== null) {
-          foundOn = shortRef(ref);
-          break;
-        }
-      }
-    }
-    if (foundOn) carried.push({ ...commit, pr: Number(match[1]), foundOn });
+    const onBranch = baseSubjects.has(commit.subject) ? base : integrationBranchOf(commit.sha);
+    if (onBranch) carried.push({ ...commit, pr: Number(match[1]), foundOn: shortRef(onBranch) });
   }
+  // Commits that only came in with a carried merge (the merged pull
+  // request's own commits) are on an integration branch too; they are not
+  // the author's work and must stay out of the rebase advice.
   const carriedShas = new Set(carried.map((commit) => commit.sha));
-  const own = commits.filter((commit) => !carriedShas.has(commit.sha));
+  const own = carried.length
+    ? commits.filter((commit) => !carriedShas.has(commit.sha) && !integrationBranchOf(commit.sha))
+    : commits;
   return { carried, own, total: commits.length };
 }
 
@@ -145,12 +143,20 @@ function findCarriedCommits(cwd, { base, head, headRef }) {
 // carried commit sits below the pull request's own work. Then one
 // `rebase --onto` drops them. Otherwise the own commits are listed for a
 // cherry-pick onto a fresh branch.
-function rebaseAdvice(cwd, { base, head, headRef, carried, own }) {
+// Branch names may hold shell metacharacters; the advice is meant to be
+// pasted into a shell.
+function shellQuote(value) {
+  return /^[A-Za-z0-9._\/@:+=-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function rebaseAdvice(cwd, { base, headRef, carried, own }) {
   const baseName = shortRef(base);
-  const branch = headRef ? shortRef(headRef) : "<your-branch>";
+  const branchName = headRef ? shortRef(headRef) : "your-branch";
+  const branch = shellQuote(branchName);
+  const upstream = shellQuote(`origin/${baseName}`);
   if (own.length === 0) {
     return [
-      `Every commit on this branch is already merged. Close this pull request, or reset the branch to origin/${baseName}.`,
+      `Every commit on this branch is already merged. Close this pull request, or reset the branch to ${upstream}.`,
     ];
   }
   const newestCarried = carried[0].sha;
@@ -162,25 +168,21 @@ function rebaseAdvice(cwd, { base, head, headRef, carried, own }) {
   if (prefix) {
     return [
       "Rebase only your own commits onto the base:",
-      `  git fetch origin ${baseName}`,
-      `  git rebase --onto origin/${baseName} ${newestCarried.slice(0, 12)} ${branch}`,
+      `  git fetch origin ${shellQuote(baseName)}`,
+      `  git rebase --onto ${upstream} ${newestCarried.slice(0, 12)} ${branch}`,
       `  git push --force-with-lease origin ${branch}`,
     ];
   }
   return [
     "Your own commits are mixed with merged ones. Start a fresh branch from the base and copy only yours:",
-    `  git fetch origin ${baseName}`,
-    `  git switch -c ${branch}-rebased origin/${baseName}`,
+    `  git fetch origin ${shellQuote(baseName)}`,
+    `  git switch -c ${shellQuote(`${branchName}-rebased`)} ${upstream}`,
     `  git cherry-pick ${own.map((commit) => commit.sha.slice(0, 12)).reverse().join(" ")}`,
     `Then push it and point this pull request at it (or force-push it to ${branch}).`,
   ];
 }
 
-function isRelease(title) {
-  return /^\s*release\b/i.test(title ?? "");
-}
-
-function analyze({ cwd = process.cwd(), base, head = "HEAD", headRef = "", labels = [], title = "" }) {
+function analyze({ cwd = process.cwd(), base, head = "HEAD", headRef = "", labels = [] }) {
   const errors = [];
   const warnings = [];
   const notes = [];
@@ -193,9 +195,7 @@ function analyze({ cwd = process.cwd(), base, head = "HEAD", headRef = "", label
 
   const size = measureSize(cwd, base, head);
   const large = labels.includes(LARGE_LABEL);
-  if (isRelease(title)) {
-    notes.push("Release pull request; size check skipped.");
-  } else if (size.counted > FAIL_LINES && !large) {
+  if (size.counted > FAIL_LINES && !large) {
     errors.push(
       `This pull request changes ${size.counted} lines (limit ${FAIL_LINES}, lockfiles and docs not counted). ` +
         `Split it into smaller pull requests, or add the "${LARGE_LABEL}" label if it cannot be split.`,
@@ -216,7 +216,7 @@ function analyze({ cwd = process.cwd(), base, head = "HEAD", headRef = "", label
       [
         `This branch carries ${carried.length} commit(s) that are already merged, so the diff shows other people's work:`,
         listed,
-        ...rebaseAdvice(cwd, { base, head, headRef, carried, own }),
+        ...rebaseAdvice(cwd, { base, headRef, carried, own }),
       ].join("\n"),
     );
   }
@@ -229,7 +229,6 @@ function parseArgs(argv) {
     head: process.env.PR_HEAD || "HEAD",
     headRef: process.env.PR_HEAD_REF ?? "",
     labels: process.env.PR_LABELS ?? "[]",
-    title: process.env.PR_TITLE ?? "",
   };
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i].replace(/^--/, "").replace(/-([a-z])/g, (_, c) => c.toUpperCase());

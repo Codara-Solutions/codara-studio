@@ -6,7 +6,7 @@ name: PR hygiene
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
 
 concurrency:
   group: pr-hygiene-${{ github.event.pull_request.number }}
@@ -33,5 +33,4 @@ jobs:
           # feature branch here.
           PR_HEAD_REF: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref || format('fork/{0}', github.head_ref) }}
           PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
         run: node scripts/check-pr-hygiene.cjs

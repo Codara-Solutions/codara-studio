@@ -114,8 +114,9 @@ obviously fake so neither scan stops you:
 
 If the scan flags a real secret, take it out of the history (not just the
 latest commit) and rotate it. Do not widen the allowlist to make a finding go
-away; the workflow reads the config from the base branch, so a pull request
-cannot allowlist its own finding anyway.
+away. The workflow takes `.gitleaks.toml` and `.gitleaksignore` from the base
+branch and ignores inline `gitleaks:allow` comments, so a pull request cannot
+allowlist its own finding anyway.
 
 ## 6. Open a pull request
 

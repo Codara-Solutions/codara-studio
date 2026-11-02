@@ -98,9 +98,9 @@ function publish(dir, branch) {
   assert.deepEqual(result.errors, []);
   assert.equal(result.warnings.length, 1);
 
+  // A title is not a way around the label.
   result = analyze({ cwd: dir, base: "origin/Cora", head: "large", headRef: "large", title: "Release 1.4.0" });
-  assert.deepEqual(result.errors, []);
-  assert.deepEqual(result.warnings, []);
+  assert.equal(result.errors.length, 1);
 
   // Promotion: Cora into main carries everything by design.
   result = analyze({ cwd: dir, base: "origin/main", head: "large", headRef: "Cora" });
@@ -179,6 +179,29 @@ function publish(dir, branch) {
   const result = analyze({ cwd: dir, base: "origin/main", head: "next", headRef: "next" });
   assert.equal(result.carried.length, 1);
   assert.equal(result.carried[0].pr, 107);
+  // The merged pull request's own commit came in with the merge: it is not
+  // listed as the author's, and the advice is one rebase past the merge.
+  const mergeSha = result.carried[0].sha;
+  assert.match(result.errors[0], new RegExp(`git rebase --onto origin/main ${mergeSha.slice(0, 12)} next`));
+  git(dir, "rebase", "-q", "--onto", "origin/main", mergeSha, "next");
+  const clean = analyze({ cwd: dir, base: "origin/main", head: "next", headRef: "next" });
+  assert.deepEqual(clean.errors, []);
+  assert.deepEqual(git(dir, "log", "--format=%s", "origin/main..next").split("\n"), ["feat: b"]);
+}
+
+// Branch names are shell-quoted in the advice.
+{
+  const dir = makeRepo();
+  git(dir, "switch", "-q", "-c", "Cora");
+  const merged = commit(dir, "src/q.ts", "q\n", "feat(q): q (#130)");
+  publish(dir, "Cora");
+  publish(dir, "main");
+  const weird = "feature;echo${IFS}injected";
+  git(dir, "switch", "-q", "-c", weird, "Cora");
+  commit(dir, "src/w.ts", "w\n", "feat: w");
+  const result = analyze({ cwd: dir, base: "origin/main", head: weird, headRef: weird });
+  assert.match(result.errors[0], new RegExp(`--onto origin/main ${merged.slice(0, 12)} 'feature;echo\\$\\{IFS\\}injected'`));
+  assert.doesNotMatch(result.errors[0], / feature;echo/);
 }
 
 // The CLI prints annotations and exits 1 on failure.

@@ -41,19 +41,30 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          # The base branch's config, so a pull request cannot allowlist its
-          # own finding. A branch without one falls back to the checkout's.
+          # Every suppression comes from the base branch, so a pull request
+          # cannot allowlist its own finding: the config, the .gitleaksignore
+          # (gitleaks also reads one from the checkout, so that copy is
+          # removed), and no inline gitleaks:allow comments. A base without a
+          # config falls back to the checkout's.
           config="$RUNNER_TEMP/gitleaks.toml"
           if ! git show "${BASE_SHA}:.gitleaks.toml" > "$config" 2>/dev/null; then
             cp .gitleaks.toml "$config"
           fi
+          ignore_dir="$RUNNER_TEMP/gitleaks-ignore"
+          mkdir -p "$ignore_dir"
+          git show "${BASE_SHA}:.gitleaksignore" > "$ignore_dir/.gitleaksignore" 2>/dev/null || : > "$ignore_dir/.gitleaksignore"
+          rm -f .gitleaksignore
           if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
             range="-1 $HEAD_SHA"
           else
             range="$BASE_SHA..$HEAD_SHA"
           fi
           echo "Scanning $range"
-          if ! "$RUNNER_TEMP/gitleaks" git --config "$config" --redact --no-banner --verbose --log-opts="$range" .; then
+          # first-parent diffs for merge commits: a value typed while resolving
+          # a merge conflict is in no parent's patch and would go unscanned.
+          if ! "$RUNNER_TEMP/gitleaks" git --config "$config" --gitleaks-ignore-path "$ignore_dir" \
+              --ignore-gitleaks-allow --redact --no-banner --verbose \
+              --log-opts="--diff-merges=first-parent $range" .; then
             echo "::error title=Gitleaks::A secret-like value is in the commits above. If it is real, remove it from the history and rotate it. If it is a made-up test value, put it under tests/ or a scripts/test-*.cjs file, or mark it with FAKE_ (see CONTRIBUTING.md, Secrets)."
             exit 1
           fi
