@@ -149,6 +149,8 @@ test("a finding never quotes through a link out of the folder", async (lib) => {
   const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codara-agent-outside-")), "private.txt");
   fs.writeFileSync(outside, "private\n");
   fs.symlinkSync(outside, path.join(cwd, "link.txt"));
+  fs.symlinkSync(path.dirname(outside), path.join(cwd, "linkdir"));
+  assert.equal(await lib.quoteLines(cwd, "linkdir/private.txt", 1, 1), "", "nor through a linked folder");
   assert.equal(await lib.quoteLines(cwd, "link.txt", 1, 1), "");
   assert.equal(await lib.quoteLines(cwd, "missing.txt", 1, 1), "");
   assert.equal(await lib.quoteLines(cwd, "link.txt", 0, 0), "");

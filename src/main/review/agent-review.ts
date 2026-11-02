@@ -7,7 +7,8 @@
 // it with a fake clock.
 
 import { randomUUID } from "node:crypto";
-import { lstat, open, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, realpath } from "node:fs/promises";
 import { join, sep } from "node:path";
 
 import { looksLikeSecretsFile, redactSecrets } from "@shared/git-fix";
@@ -59,10 +60,12 @@ export async function quoteLines(cwd: string, path: string, start: number, end: 
     const root = await realpath(cwd);
     const full = await realpath(join(root, path));
     if (!full.startsWith(root + sep)) return "";
-    const info = await lstat(join(root, path));
-    if (!info.isFile() || info.size > MAX_QUOTE_SOURCE_BYTES) return "";
-    const handle = await open(full, "r");
+    if (full !== join(root, path)) return "";
+    // Checked on the opened file, so a link swapped in after the check above is refused.
+    const handle = await open(full, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
+      const info = await handle.stat();
+      if (!info.isFile() || info.size > MAX_QUOTE_SOURCE_BYTES) return "";
       const { buffer, bytesRead } = await handle.read(Buffer.alloc(info.size), 0, info.size, 0);
       const body = buffer.subarray(0, bytesRead);
       if (body.includes(0)) return "";
