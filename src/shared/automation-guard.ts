@@ -32,6 +32,17 @@ export function monthlyCapReached(job: Pick<ScheduledJob, "guard" | "history" | 
   return typeof cap === "number" && monthSpentUsd(job, nowMs) >= cap;
 }
 
+/** Takes in what the history holds for this month, called before a new row can
+ *  push older runs out of it. A free month adds no field. */
+export function seedMonthSpend(job: Pick<ScheduledJob, "history" | "monthSpend">, nowMs: number): AutomationMonthSpend | undefined {
+  const month = monthKey(nowMs);
+  if (job.monthSpend?.month === month) return job.monthSpend;
+  const inMonth = job.history.filter((rec) => monthKey(Date.parse(rec.startedAt)) === month);
+  const costUsd = inMonth.reduce((sum, rec) => sum + usd(rec.costUsd), 0);
+  if (costUsd === 0) return job.monthSpend;
+  return { month, costUsd, measuredCostUsd: inMonth.reduce((sum, rec) => sum + usd(rec.measuredCostUsd), 0) };
+}
+
 /** The tally after a run gains its finish. A run belongs to the month it started
  *  in, as it does in the history, so a run recovered after a restart is not charged
  *  to the month the app reopened in. A tally's first run takes in what the history

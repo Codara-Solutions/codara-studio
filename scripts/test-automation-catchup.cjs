@@ -587,6 +587,47 @@ async function integrationChecks({ sched, loop }, workspace) {
     await sched.setEnabled(unrecorded.id, false);
     pass("a run that ended unrecorded still counts when Run now replaces it");
 
+    // A full history: the spend it holds survives the new run's row pushing it out.
+    const full = await sched.createJob({ name: "full", trigger: manualTrigger, input, guard: { monthlyCapUsd: 60 }, prompt: { template: "go" } });
+    const startedThisMonth = new Date(Date.now() - 60_000).toISOString();
+    await sched.patchJob(full.id, (j) => ({
+      ...j,
+      history: Array.from({ length: 50 }, (_, i) => ({ iteration: 0, runId: `old-${i}`, startedAt: startedThisMonth, finishedAt: startedThisMonth, status: "complete", costUsd: 1 })),
+    }));
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(full.id, { source: "manual" });
+    job = await get(full.id);
+    assert.strictEqual(job.monthSpend.costUsd, 50, "taken in before the oldest row went");
+    await ends(full.id, n, "complete", 1);
+    assert.strictEqual((await get(full.id)).monthSpend.costUsd, 51, "$50 kept plus a $1 run is $51");
+    await sched.setEnabled(full.id, false);
+    pass("a month's spend survives the history rotating, from the first run on");
+
+    // A stopped worker's real cost arrives after its row closed: it counts before
+    // the cap decides, and only once.
+    const lateCost = await sched.createJob({ name: "late cost", trigger: manualTrigger, input, guard: { monthlyCapUsd: 9 }, prompt: { template: "go" } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(lateCost.id, { source: "manual" });
+    const lateRun = globalThis.__CU.runs[launchAt(n).id];
+    lateRun.estimatedWorkerCostUsd = 2;
+    await loop.stopLoop(lateCost.id);
+    assert.strictEqual((await get(lateCost.id)).monthSpend.costUsd, 2);
+    lateRun.estimatedWorkerCostUsd = 0;
+    lateRun.measuredWorkerCostUsd = 10;
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(lateCost.id, { source: "trigger" });
+    job = await get(lateCost.id);
+    assert.strictEqual(job.monthSpend.costUsd, 10, "reconciled up to what it really spent");
+    assert.strictEqual(job.history.at(-1).costUsd, 10);
+    assert.strictEqual(globalThis.__CU.launches.length, n, "and the cap holds at the real figure");
+    await loop.startIteration(lateCost.id, { source: "trigger" });
+    assert.strictEqual((await get(lateCost.id)).monthSpend.costUsd, 10, "only once");
+    lateRun.measuredWorkerCostUsd = 1;
+    await loop.startIteration(lateCost.id, { source: "trigger" });
+    assert.strictEqual((await get(lateCost.id)).monthSpend.costUsd, 10, "never downward");
+    await sched.setEnabled(lateCost.id, false);
+    pass("a stopped worker's late cost counts before the cap decides, once");
+
     // The pause: failures in a row, a success between them starts over.
     const flaky = await sched.createJob({ name: "flaky", trigger: manualTrigger, input, guard: { pauseAfterFailures: 2 }, prompt: { template: "go" } });
     const fire = async (status) => {
@@ -610,6 +651,24 @@ async function integrationChecks({ sched, loop }, workspace) {
     n = globalThis.__CU.launches.length;
     await loop.startIteration(flaky.id, { source: "trigger" });
     assert.strictEqual(globalThis.__CU.launches.length, n, "paused means paused");
+
+    // One failed run ending the loop twice, as its two terminal events can.
+    const twice = await sched.createJob({ name: "twice", trigger: manualTrigger, input, guard: { pauseAfterFailures: 2 }, prompt: { template: "go" } });
+    const failsTwice = async () => {
+      const at = globalThis.__CU.launches.length;
+      await loop.startIteration(twice.id, { source: "trigger" });
+      Object.assign(globalThis.__CU.runs[launchAt(at).id], { status: "failed" });
+      await sched.patchJob(twice.id, (j) => ({ ...j, state: { ...j.state, status: "idle" } }));
+      await Promise.all([loop.resumeLoop(twice.id), loop.resumeLoop(twice.id)]);
+    };
+    await failsTwice();
+    assert.strictEqual((await get(twice.id)).failureStreak, 1, "one failed run counts once");
+    assert.strictEqual((await get(twice.id)).state.status, "stopped");
+    await failsTwice();
+    assert.strictEqual((await get(twice.id)).failureStreak, 2);
+    assert.strictEqual((await get(twice.id)).state.status, "paused", "and the second ending does not lift the pause");
+    assert.ok((await get(twice.id)).autoPaused);
+    await sched.setEnabled(twice.id, false);
 
     // Resuming gives it its full tries back, and starts nothing by itself.
     await sched.resumeJob(flaky.id);

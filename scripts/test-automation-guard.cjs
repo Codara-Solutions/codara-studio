@@ -91,6 +91,16 @@ assert.equal(g.addToMonthSpend(undefined, run(THIS_MONTH, 0), []), undefined);
   assert.equal(g.addToMonthSpend(undefined, self, [self]).costUsd, 9, "the run itself is not counted twice");
 }
 
+// Seeded before a new row can push older runs out, even when the new run is free.
+{
+  const kept = Array.from({ length: 50 }, (_, i) => ({ ...rec(THIS_MONTH, 1), runId: `old-${i}` }));
+  assert.deepEqual(g.seedMonthSpend({ history: kept }, NOW), { month: "2026-11", costUsd: 50, measuredCostUsd: 0 });
+  assert.equal(g.seedMonthSpend({ history: [] }, NOW), undefined, "a free month adds no field");
+  const had = { month: "2026-11", costUsd: 70, measuredCostUsd: 0 };
+  assert.equal(g.seedMonthSpend({ history: kept, monthSpend: had }, NOW), had, "only ever once");
+  assert.deepEqual(g.seedMonthSpend({ history: [rec(THIS_MONTH, 3)], monthSpend: { month: "2026-10", costUsd: 9, measuredCostUsd: 0 } }, NOW).costUsd, 3);
+}
+
 // A run belongs to the month it started in, even if recovered after a restart.
 assert.equal(g.addToMonthSpend(undefined, run(LAST_MONTH, 5), []).month, "2026-10");
 assert.equal(g.monthSpentUsd({ history: [], monthSpend: g.addToMonthSpend(undefined, run(LAST_MONTH, 5), []) }, NOW), 0, "and does not eat this month's cap");

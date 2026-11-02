@@ -1,4 +1,4 @@
-import { monthKey, monthlyCapReached } from "@shared/automation-guard";
+import { monthKey, monthlyCapReached, seedMonthSpend } from "@shared/automation-guard";
 import { promises as fs } from "node:fs";
 import type {
   AutomationBranchResult,
@@ -285,6 +285,9 @@ async function passesPrecheck(id: string, job: ScheduledJob, opts: StartIteratio
   return false;
 }
 
+const RECONCILED_STOPPED_RUNS = 5;
+const LATE_COST_NOISE_USD = 0.0001;
+
 // jobId of loops whose work is being committed and pushed. Nothing may start a
 // cycle meanwhile: it would close the same checkout a second time.
 const settlingBranch = new Map<string, Promise<void>>();
@@ -351,6 +354,34 @@ function fmtCapUsd(value: number | undefined): string {
   return `$${(value ?? 0).toFixed(2)}`;
 }
 
+// A stopped worker reports what it really spent as it exits, after its row was
+// closed on the estimate. Reconciled against what the run has been charged, only
+// upward, before a cap decides anything.
+async function chargeLateCosts(id: string): Promise<void> {
+  const job = await getJob(id);
+  if (!job?.guard?.monthlyCapUsd) return;
+  const month = monthKey(Date.now());
+  const stopped = job.history
+    .filter((rec) => rec.stopReason === "user-stop" && rec.finishedAt && monthKey(Date.parse(rec.startedAt)) === month)
+    .slice(-RECONCILED_STOPPED_RUNS);
+  for (const rec of stopped) {
+    const rows = job.history.filter((r) => r.runId === rec.runId);
+    // A same-run loop's earlier rows have rotated out: the charge cannot be known,
+    // and guessing would double count them.
+    if (!job.loop.isolate && !rows.some((r) => r.iteration === 0)) continue;
+    const run = await safeGetRun(rec.runId);
+    if (!run) continue;
+    const total = (run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0) + (run.estimatedWorkerCostUsd ?? 0);
+    const late = total - rows.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
+    if (late <= LATE_COST_NOISE_USD) continue;
+    await appendHistory(id, { ...rec, costUsd: (rec.costUsd ?? 0) + late }, {});
+    await patchJob(id, (j) => {
+      const tally = seedMonthSpend(j, Date.now());
+      return tally?.month === month ? { ...j, monthSpend: { ...tally, costUsd: tally.costUsd + late } } : j;
+    });
+  }
+}
+
 // Said once, however many fires it refuses. Decided inside the write so two
 // refusals cannot both be the first.
 async function noticeMonthlyCap(id: string): Promise<void> {
@@ -382,6 +413,10 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
   if (job.state.status === "paused") return; // explicit user hold; resumeLoop re-drives
   // Before the precheck and the reset below: a refused fire spends nothing and
   // leaves the last cycle's result on the page.
+  if (job.guard?.monthlyCapUsd) {
+    await chargeLateCosts(id);
+    job = (await getJob(id)) ?? job;
+  }
   if (monthlyCapReached(job, Date.now())) {
     if (job.state.status === "stopped" && !revivesStoppedLoop(opts.source)) return;
     if (job.state.currentRunId) {
@@ -917,6 +952,8 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
 
     await patchJob(id, (j) => ({
       ...j,
+      // This row can push the oldest out of the history, along with what it cost.
+      ...(seedMonthSpend(j, Date.now()) ? { monthSpend: seedMonthSpend(j, Date.now()) } : {}),
       lastRunAt: startedAt,
       lastRunId: run.id,
       state: {
@@ -970,6 +1007,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
 export async function runNow(id: string): Promise<RunState> {
   // Checked before anything is touched: a refused restart must not kill the run
   // that is going.
+  await chargeLateCosts(id);
   const capped = await getJob(id);
   if (capped && monthlyCapReached(capped, Date.now())) {
     await appendSkip(id, { reason: "monthlyCap", detail: capRefusal(capped) });
@@ -1931,6 +1969,10 @@ async function finalize(
 
   let pausedAfterFailures = 0;
   await patchJob(id, (current) => {
+    // A failed run's two terminal events can both end the loop: the second must
+    // not count it again or lift the pause the first one set.
+    const alreadyEnded = reason === "iteration-failed" && (current.state.status === "stopped" || Boolean(current.autoPaused));
+    if (alreadyEnded && current.autoPaused) return current;
     const { autoPaused: _stale, ...j } = current;
     const history = [...j.history];
     if (history.length > 0) {
@@ -1938,8 +1980,8 @@ async function finalize(
       if (!last.stopReason) history[history.length - 1] = { ...last, stopReason: reason };
     }
     const limit = j.guard?.pauseAfterFailures;
-    const streak = limit && reason === "iteration-failed" ? (j.failureStreak ?? 0) + 1 : j.failureStreak;
-    const pause = Boolean(limit && streak && reason === "iteration-failed" && streak >= limit);
+    const streak = limit && reason === "iteration-failed" && !alreadyEnded ? (j.failureStreak ?? 0) + 1 : j.failureStreak;
+    const pause = Boolean(limit && streak && reason === "iteration-failed" && !alreadyEnded && streak >= limit);
     if (pause) pausedAfterFailures = streak as number;
     return {
       ...j,

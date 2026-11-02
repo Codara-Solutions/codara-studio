@@ -1,4 +1,4 @@
-import { addToMonthSpend, normalizeAutomationGuard, normalizeMonthSpend } from "@shared/automation-guard";
+import { addToMonthSpend, normalizeAutomationGuard, normalizeMonthSpend, seedMonthSpend } from "@shared/automation-guard";
 import { promises as fs, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
 import { Cron } from "croner";
@@ -616,7 +616,8 @@ export async function appendHistory(
     // Counted the one time a record gains its finish, whichever path gets there
     // first, so the month's tally never counts a run twice.
     const newlyFinished = Boolean(record.finishedAt) && !(existing >= 0 && history[existing].finishedAt);
-    const monthSpend = newlyFinished ? addToMonthSpend(job.monthSpend, record, job.history) : job.monthSpend;
+    const seeded = existing < 0 ? seedMonthSpend(job, Date.now()) : job.monthSpend;
+    const monthSpend = newlyFinished ? addToMonthSpend(seeded, record, job.history) : seeded;
     if (existing >= 0) history[existing] = { ...history[existing], ...record };
     else history.push(record);
     // Newest-kept cap: drop oldest first.
