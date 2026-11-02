@@ -93,7 +93,8 @@ function daysOfWeek(field: string): number[] | null {
     };
     if (range) {
       const from = day(range[1]);
-      const to = day(range[2]);
+      // Croner reads a named Sunday that ends a range as 7, and any other as 0.
+      const to = day(range[2] === "SUN" ? "7" : range[2]);
       if (from === null || to === null || from > to) return null;
       // Sunday folds to 0 only after expanding, or `0-7` would collapse to one day.
       for (let d = from; d <= to; d += 1) out.add(d % 7);
