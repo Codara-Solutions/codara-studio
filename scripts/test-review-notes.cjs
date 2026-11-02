@@ -409,7 +409,9 @@ function diffFile(pathName, text, over = {}) {
     assert.deepEqual(await cache.addAndSaveReviewNotes("ws-full", [finding("f4"), finding("f5")]), ["f4"], "only what fits is reported saved");
     const realSave = global.window.spark.review.saveNotes;
     global.window.spark.review.saveNotes = async () => { throw new Error("disk full"); };
-    assert.deepEqual(await cache.addAndSaveReviewNotes("ws-cache", [finding("f6")]), [], "a failed save reports nothing saved");
+    // The same review can reach the window twice: the second must wait for the first's save.
+    const racing = [cache.addAndSaveReviewNotes("ws-cache", [finding("f6")]), cache.addAndSaveReviewNotes("ws-cache", [finding("f6")])];
+    assert.deepEqual(await Promise.all(racing), [[], []], "a failed save reports nothing saved, to either caller");
     global.window.spark.review.saveNotes = realSave;
     assert.deepEqual(await cache.addAndSaveReviewNotes("ws-cache", [finding("f6")]), ["f6"], "the retry saves what only memory held");
     assert.ok(onDisk.some((item) => item.id === "f6"));

@@ -66,9 +66,11 @@ export async function quoteLines(cwd: string, path: string, start: number, end: 
       const { buffer, bytesRead } = await handle.read(Buffer.alloc(info.size), 0, info.size, 0);
       const body = buffer.subarray(0, bytesRead);
       if (body.includes(0)) return "";
+      const source = body.toString("utf8");
+      // The lines asked for can sit inside a key whose marker they leave out.
+      if (/-----BEGIN [A-Z ]*PRIVATE KEY/.test(source)) return "";
       return redactSecrets(
-        body
-          .toString("utf8")
+        source
           .split("\n")
           .slice(start - 1, end)
           .map((line) => `+${line}`)

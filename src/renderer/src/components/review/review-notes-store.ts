@@ -143,6 +143,8 @@ export async function addAndSaveReviewNotes(workspaceId: string, incoming: reado
     // After a failed save the notes are in memory but not on disk: a retry must save again.
     return fresh.length > 0 || reviewNotesError(workspaceId) ? [...notes, ...fresh] : notes;
   });
+  // A save already under way may hold these same notes, and it can still fail.
+  await entryFor(workspaceId).saving;
   if (reviewNotesError(workspaceId)) return [];
   const now = new Set(getReviewNotes(workspaceId).map((note) => note.id));
   return incoming.filter((note) => now.has(note.id)).map((note) => note.id);

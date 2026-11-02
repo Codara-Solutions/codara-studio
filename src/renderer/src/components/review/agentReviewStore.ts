@@ -33,8 +33,8 @@ function take(state: AgentReviewState): void {
   }
 }
 
-// Main keeps what is not saved, so a full or unwritable list loses nothing: the
-// rest is added on a later focus or the next launch.
+// Main keeps what is not saved while Studio runs, and the rest is added on a later
+// focus. Nothing holds it across a restart; the reviewer's own tab still has it.
 async function addFindings(state: AgentReviewState, notes: readonly ReviewNote[]): Promise<void> {
   const incoming = cleanReviewNotes(notes);
   const saved = await addAndSaveReviewNotes(state.workspaceId, incoming).catch(() => [] as string[]);
@@ -54,7 +54,7 @@ async function addFindings(state: AgentReviewState, notes: readonly ReviewNote[]
     warned.add(state.id);
     emitLocalToast(
       left === 1 ? "1 finding is waiting" : `${left} findings are waiting`,
-      "The review notes are full or could not be saved. They are added once there is room.",
+      "The review notes are full or could not be saved. Make room while Studio stays open and they are added.",
       "warning",
     );
   }

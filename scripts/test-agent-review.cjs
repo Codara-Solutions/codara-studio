@@ -159,6 +159,10 @@ test("a finding never quotes through a link out of the folder", async (lib) => {
   const quoted = await lib.quoteLines(cwd, "app.ts", 1, 2);
   assert.ok(!quoted.includes(token), "a secret on a quoted line is removed");
   assert.match(quoted, /const two = 2;/);
+  const keyBody = "A".repeat(64);
+  const marker = "-----BEGIN " + "PRIVATE KEY-----";
+  fs.writeFileSync(path.join(cwd, "fixture.ts"), `const key = \`${marker}\n${keyBody}\n\`;\n`);
+  assert.equal(await lib.quoteLines(cwd, "fixture.ts", 2, 2), "", "a line inside a key is not quoted");
   fs.rmSync(cwd, { recursive: true, force: true });
   fs.rmSync(path.dirname(outside), { recursive: true, force: true });
 });
