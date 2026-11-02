@@ -432,6 +432,51 @@ test("resume, fork, pin, delete and a session whose folder is gone", async () =>
   }
 });
 
+test("moving on while delete checks a session never aims the confirm at the wrong one", async () => {
+  test.setTimeout(120_000);
+  const fixture = await prepareFixture();
+  let app: ElectronApplication | null = null;
+  try {
+    const launched = await launch(fixture);
+    app = launched.app;
+    const { page } = launched;
+    await page.waitForTimeout(500);
+    const picker = await openWithChord(page);
+    await showAll(picker);
+
+    // The check answers slowly, and it answers for the session it was asked about.
+    const cwd = fixture.workspaceDir;
+    const loginFile = join(fixture.homeDir, ".claude", "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"), `${IDS.login}.jsonl`);
+    await app.evaluate(
+      ({ ipcMain }, summary) => {
+        ipcMain.removeHandler("agentSession:listAll");
+        ipcMain.handle("agentSession:listAll", async () => {
+          await new Promise((done) => setTimeout(done, 1_000));
+          return [summary];
+        });
+      },
+      { runtime: "claude", sessionId: IDS.login, cwd, transcriptPath: loginFile, title: "Login page copy", updatedAt: at(0) },
+    );
+
+    await row(picker, IDS.login).click();
+    await picker.getByRole("button", { name: "More actions" }).click();
+    await page.getByRole("menuitem", { name: "Delete…" }).click();
+    await row(picker, IDS.theme).click();
+    await expect(picker.getByTestId("session-picker-detail").getByRole("heading")).toHaveText("Dark theme contrast");
+    await page.waitForTimeout(1_500);
+    await expect(picker.getByTestId("session-picker-confirm-delete")).toHaveCount(0);
+
+    // Coming back after it landed does not bring up a confirm nobody asked for.
+    await row(picker, IDS.login).click();
+    await page.waitForTimeout(300);
+    await expect(picker.getByTestId("session-picker-confirm-delete")).toHaveCount(0);
+    await stat(loginFile);
+  } finally {
+    await app?.close().catch(() => undefined);
+    await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
 test("screenshots in light and dark", async () => {
   test.skip(!SHOTS, "Only when SESSION_PICKER_SHOTS names a folder");
   test.setTimeout(120_000);

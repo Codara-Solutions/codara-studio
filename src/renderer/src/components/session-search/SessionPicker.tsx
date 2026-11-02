@@ -126,7 +126,9 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
   const [preview, setPreview] = useState<SessionPreview | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [deleting, setDeleting] = useState<WorkerSessionSummary | null>(null);
+  // The session a confirm is for and the files that check found for it: kept
+  // together, because the selection can move while the check runs.
+  const [deleting, setDeleting] = useState<{ hit: SessionSearchHit; session: WorkerSessionSummary } | null>(null);
   const [busy, setBusy] = useState(false);
   const [transcript, setTranscript] = useState<{ hit: SessionSearchHit; notice: string | null } | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -156,6 +158,8 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
   const answerKey = `${query}\n${effectiveScope}\n${agent ?? ""}\n${host.workspaceCwd ?? ""}`;
   const selected = hits.find((hit) => hit.key === selectedKey) ?? null;
   const selectedOpen = selected ? (host.isSessionOpen?.(selected) ?? false) : false;
+  const selectedKeyRef = useRef(selectedKey);
+  selectedKeyRef.current = selectedKey;
 
   const setScope = (next: SessionSearchScope) => {
     setScopeState(next);
@@ -477,8 +481,9 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
     setBusy(true);
     try {
       const sessions = await window.spark.agentSession.listAll();
+      if (selectedKeyRef.current !== hit.key) return;
       const session = sessions.find((item) => item.runtime === hit.agent && item.sessionId === hit.sessionId);
-      if (session) setDeleting(session);
+      if (session) setDeleting({ hit, session });
       else setNote("This session can't be deleted from here. Its transcript is unchanged.");
     } catch {
       setNote("Could not check this session's files");
@@ -487,7 +492,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const deleteSession = async (hit: SessionSearchHit, session: WorkerSessionSummary) => {
+  const deleteSession = async ({ hit, session }: { hit: SessionSearchHit; session: WorkerSessionSummary }) => {
     setBusy(true);
     try {
       const result = await window.spark.agentSession.delete({
@@ -838,7 +843,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
                 ) : null}
               </div>
 
-              {deleting ? (
+              {deleting?.hit.key === selected.key ? (
                 <footer className="sp-actions sp-actions--confirm" data-testid="session-picker-confirm-delete">
                   <span className="sp-actions__ask">Delete this session's transcript from this computer?</span>
                   <button
@@ -857,7 +862,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
                     type="button"
                     className="spark-btn is-danger"
                     disabled={busy}
-                    onClick={() => void deleteSession(selected, deleting)}
+                    onClick={() => void deleteSession(deleting)}
                   >
                     Delete
                   </button>
