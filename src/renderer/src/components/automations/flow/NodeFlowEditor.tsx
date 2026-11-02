@@ -391,6 +391,20 @@ function Editor({
 
   // ── validation ────────────────────────────────────────────────────────────
   const triggerBuilt = buildTrigger(draft.trigger);
+  // Walks a year of the schedule, and the canvas re-renders on every drag.
+  const forecast = useMemo(
+    () =>
+      costForecast(
+        {
+          trigger: buildTrigger(draft.trigger),
+          stepsOnly: isStepsOnly(nodes),
+          budgetUsd: buildLoop(draft.loop).stop.budgetUsd,
+          monthlyCapUsd: buildGuard(draft.loop)?.monthlyCapUsd,
+        },
+        Date.now(),
+      ),
+    [draft.trigger, draft.loop, nodes],
+  );
   const nameMissing = draft.name.trim().length === 0;
   const graphProblem = useMemo(() => validateGraph(nodes, edges), [nodes, edges]);
   const triggerInvalid = !triggerBuilt;
@@ -811,15 +825,7 @@ function Editor({
             {loopOpen ? (
               <LoopInspector
                 loop={draft.loop}
-                forecast={costForecast(
-                  {
-                    trigger: buildTrigger(draft.trigger),
-                    stepsOnly: isStepsOnly(nodes),
-                    budgetUsd: buildLoop(draft.loop).stop.budgetUsd,
-                    monthlyCapUsd: buildGuard(draft.loop)?.monthlyCapUsd,
-                  },
-                  Date.now(),
-                )}
+                forecast={forecast}
                 onChange={(loop) => {
                   setDraft((d) => ({ ...d, loop }));
                   markDirty();

@@ -1271,7 +1271,8 @@ spending limits. Once a calendar month's spend reaches the cap, no new run start
 until next month or until the cap is raised, including Run now. After that many
 failed runs in a row the automation pauses until it is resumed or run by hand.
 Limits are checked between runs, so a run already going can finish over the cap,
-and estimates count as spend. Off by default, and the approval shows any change.
+estimates count as spend, and a run counts in the month it started. Off by default,
+and the approval shows any change.
 `codara_list_automations` and `codara_get_automation` report the limits with
 `spentThisMonthUsd`.
 

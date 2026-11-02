@@ -32,16 +32,34 @@ export function monthlyCapReached(job: Pick<ScheduledJob, "guard" | "history" | 
   return typeof cap === "number" && monthSpentUsd(job, nowMs) >= cap;
 }
 
+/** The tally after a run gains its finish. A run belongs to the month it started
+ *  in, as it does in the history, so a run recovered after a restart is not charged
+ *  to the month the app reopened in. A tally's first run takes in what the history
+ *  already holds for that month, or older runs would be forgotten as they rotate
+ *  out of it. A run older than the tally changes nothing: only the newest month is
+ *  ever checked. */
 export function addToMonthSpend(
   prior: AutomationMonthSpend | undefined,
-  record: Pick<AutomationRunRecord, "costUsd" | "measuredCostUsd" | "finishedAt">,
-  fallbackMs: number,
+  record: Pick<AutomationRunRecord, "runId" | "iteration" | "costUsd" | "measuredCostUsd" | "startedAt">,
+  history: readonly AutomationRunRecord[],
 ): AutomationMonthSpend | undefined {
   const cost = usd(record.costUsd);
   if (cost === 0) return prior;
-  const at = record.finishedAt ? Date.parse(record.finishedAt) : Number.NaN;
-  const month = monthKey(Number.isFinite(at) ? at : fallbackMs);
-  const base = prior?.month === month ? prior : { month, costUsd: 0, measuredCostUsd: 0 };
+  const started = Date.parse(record.startedAt);
+  if (!Number.isFinite(started)) return prior;
+  const month = monthKey(started);
+  if (prior && prior.month > month) return prior;
+  const earlier = history.filter(
+    (rec) => monthKey(Date.parse(rec.startedAt)) === month && !(rec.runId === record.runId && rec.iteration === record.iteration),
+  );
+  const base =
+    prior?.month === month
+      ? prior
+      : {
+          month,
+          costUsd: earlier.reduce((sum, rec) => sum + usd(rec.costUsd), 0),
+          measuredCostUsd: earlier.reduce((sum, rec) => sum + usd(rec.measuredCostUsd), 0),
+        };
   return {
     month,
     costUsd: usd(base.costUsd) + cost,

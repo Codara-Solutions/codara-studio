@@ -59,16 +59,46 @@ assert.equal(g.monthlyCapReached({ history: [rec(THIS_MONTH, 2000)] }, NOW), fal
 assert.equal(g.monthlyCapReached({ guard: { pauseAfterFailures: 2 }, history: [rec(THIS_MONTH, 2000)] }, NOW), false);
 
 // The tally: starts over in a new month, and a free run adds no field.
-assert.deepEqual(g.addToMonthSpend(undefined, { costUsd: 2, measuredCostUsd: 1, finishedAt: THIS_MONTH }, NOW), { month: "2026-11", costUsd: 2, measuredCostUsd: 1 });
+const run = (startedAt, costUsd, measuredCostUsd) => ({ runId: `n-${startedAt}`, iteration: 0, startedAt, costUsd, measuredCostUsd });
+assert.deepEqual(g.addToMonthSpend(undefined, run(THIS_MONTH, 2, 1), []), { month: "2026-11", costUsd: 2, measuredCostUsd: 1 });
 assert.deepEqual(
-  g.addToMonthSpend({ month: "2026-11", costUsd: 2, measuredCostUsd: 1 }, { costUsd: 3, finishedAt: THIS_MONTH }, NOW),
+  g.addToMonthSpend({ month: "2026-11", costUsd: 2, measuredCostUsd: 1 }, run(THIS_MONTH, 3), [rec(THIS_MONTH, 2)]),
   { month: "2026-11", costUsd: 5, measuredCostUsd: 1 },
+  "an existing tally already holds the history",
 );
 assert.deepEqual(
-  g.addToMonthSpend({ month: "2026-10", costUsd: 40, measuredCostUsd: 40 }, { costUsd: 3, finishedAt: THIS_MONTH }, NOW),
+  g.addToMonthSpend({ month: "2026-10", costUsd: 40, measuredCostUsd: 40 }, run(THIS_MONTH, 3), []),
   { month: "2026-11", costUsd: 3, measuredCostUsd: 0 },
 );
-assert.equal(g.addToMonthSpend(undefined, { costUsd: 0, finishedAt: THIS_MONTH }, NOW), undefined);
+assert.equal(g.addToMonthSpend(undefined, run(THIS_MONTH, 0), []), undefined);
+
+// A tally's first run takes in the month's history, or those runs would be lost
+// as they rotate out: $50 kept, then twenty $1 runs, is $70.
+{
+  const kept = Array.from({ length: 50 }, (_, i) => ({ ...rec(THIS_MONTH, 1), runId: `old-${i}` }));
+  let tally;
+  let history = kept;
+  for (let i = 0; i < 20; i += 1) {
+    const next = { ...run(THIS_MONTH, 1), runId: `new-${i}` };
+    tally = g.addToMonthSpend(tally, next, history);
+    history = [...history, next].slice(-50);
+  }
+  assert.equal(tally.costUsd, 70);
+  assert.equal(g.monthSpentUsd({ history, monthSpend: tally }, NOW), 70);
+  const lastMonthRuns = [rec(LAST_MONTH, 30), rec(THIS_MONTH, 4)];
+  assert.equal(g.addToMonthSpend(undefined, run(THIS_MONTH, 1), lastMonthRuns).costUsd, 5, "only that month's runs");
+  const self = { ...run(THIS_MONTH, 9), runId: "same" };
+  assert.equal(g.addToMonthSpend(undefined, self, [self]).costUsd, 9, "the run itself is not counted twice");
+}
+
+// A run belongs to the month it started in, even if recovered after a restart.
+assert.equal(g.addToMonthSpend(undefined, run(LAST_MONTH, 5), []).month, "2026-10");
+assert.equal(g.monthSpentUsd({ history: [], monthSpend: g.addToMonthSpend(undefined, run(LAST_MONTH, 5), []) }, NOW), 0, "and does not eat this month's cap");
+assert.deepEqual(
+  g.addToMonthSpend({ month: "2026-11", costUsd: 8, measuredCostUsd: 0 }, run(LAST_MONTH, 5), []),
+  { month: "2026-11", costUsd: 8, measuredCostUsd: 0 },
+  "a late run from an older month does not wipe this month's tally",
+);
 
 // A limit that does not parse is dropped: a cap of zero would stop every run.
 assert.equal(g.normalizeAutomationGuard(undefined), undefined);
@@ -87,8 +117,11 @@ assert.deepEqual(g.normalizeMonthSpend({ month: "2026-11", costUsd: "x", measure
 // How often a schedule starts, from the real cron engine.
 const daily = { kind: "cron", expr: "0 2 * * *" };
 const hourly = { kind: "interval", everyMs: 3_600_000 };
-assert.equal(g.startsPerMonth(daily, NOW).runs, 30);
-assert.equal(g.startsPerMonth(hourly, NOW).runs, 720);
+assert.equal(g.startsPerMonth(daily, NOW).runs, 31, "the busiest month, not 30 days");
+assert.equal(g.startsPerMonth(hourly, NOW).runs, 744);
+assert.equal(g.startsPerMonth({ kind: "cron", expr: "0 * * * *" }, NOW).runs, 744, "a whole month is seen, however many starts");
+assert.equal(g.startsPerMonth({ kind: "cron", expr: "0 9 1 1 *" }, NOW).runs, 1, "a yearly schedule still counts in the month it fires");
+assert.equal(g.startsPerMonth({ kind: "cron", expr: "0 0 30 2 *" }, NOW), null, "a date that never comes");
 assert.equal(g.startsPerMonth({ kind: "cron", expr: "not cron" }, NOW), null);
 assert.equal(g.startsPerMonth({ kind: "manual" }, NOW), null);
 assert.equal(g.startsPerMonth({ kind: "github", events: ["prOpened"] }, NOW), null);
@@ -97,10 +130,13 @@ assert.deepEqual(g.startsPerMonth({ kind: "cron", expr: "* * * * *" }, NOW), { r
 // The worst case, in words.
 const says = (input) => g.costForecast({ stepsOnly: false, trigger: daily, ...input }, NOW);
 assert.equal(says({ stepsOnly: true, budgetUsd: 5 }).headline, "Free: it has no AI steps.");
-assert.equal(says({ budgetUsd: 5 }).headline, "Worst case about $150.00 a month: $5.00 a run, up to 30 runs.");
+assert.equal(says({ budgetUsd: 5 }).headline, "On its schedule, worst case about $155.00 a month: $5.00 a run, up to 31 runs.");
+assert.match(says({ budgetUsd: 5 }).detail, /Running it by hand adds to that\./, "a schedule is no ceiling on Run now");
 assert.equal(says({ budgetUsd: 5 }).open, false);
 assert.equal(says({ budgetUsd: 5, monthlyCapUsd: 20 }).headline, "Worst case about $20.00 a month: its monthly cap.");
-assert.equal(says({ budgetUsd: 5, monthlyCapUsd: 500 }).headline, "Worst case about $150.00 a month: $5.00 a run, up to 30 runs.", "the lower limit wins");
+assert.equal(says({ budgetUsd: 5, monthlyCapUsd: 500 }).headline, "On its schedule, worst case about $155.00 a month: $5.00 a run, up to 31 runs.");
+assert.match(says({ budgetUsd: 5, monthlyCapUsd: 500 }).detail, /up to its \$500\.00 cap/);
+assert.match(says({ trigger: { kind: "cron", expr: "0 9 1 1 *" }, budgetUsd: 5 }).headline, /\$5\.00 a month.*up to 1 run\./, "never $0 for a schedule that does fire");
 assert.equal(says({ monthlyCapUsd: 20 }).headline, "Worst case about $20.00 a month: its monthly cap.");
 assert.match(says({ monthlyCapUsd: 20 }).detail, /between runs/, "never firmer than the engine enforces");
 assert.equal(says({}).open, true);

@@ -993,11 +993,11 @@ export async function runNow(id: string): Promise<RunState> {
   const priorRunId = prior?.state.currentRunId;
   if (priorRunId) {
     watchedRuns.delete(priorRunId);
+    // Also a run that ended but whose ending was never recorded: its watcher just
+    // went, and the reset below would forget what it spent.
     const live = await safeGetRun(priorRunId);
-    if (live && !TERMINAL.has(live.status)) {
-      await killLiveRun(priorRunId);
-      await closeStoppedPass(id, priorRunId);
-    }
+    if (live && !TERMINAL.has(live.status)) await killLiveRun(priorRunId);
+    await closeStoppedPass(id, priorRunId, live !== null && !TERMINAL.has(live.status));
   }
   // The reset below would forget the last cycle's copy, and its work with it.
   await settleOwnBranch(id, "user-stop");
@@ -1026,6 +1026,8 @@ export async function runNow(id: string): Promise<RunState> {
 
   const job = await getJob(id);
   const runId = job?.state.currentRunId;
+  // The run just closed above may be the one that reached the cap.
+  if (!runId && job && monthlyCapReached(job, Date.now())) throw new Error(capRefusal(job));
   if (!runId) throw new Error(`Automation did not start a run: ${id}`);
   const run = await safeGetRun(runId);
   if (!run) throw new Error(`Run not found after start: ${runId}`);
@@ -1051,7 +1053,7 @@ export async function stopLoop(id: string, opts?: { fireDependents?: boolean }):
   const runId = job?.state.currentRunId;
   if (runId) {
     await killLiveRun(runId);
-    await closeStoppedPass(id, runId);
+    await closeStoppedPass(id, runId, true);
   }
   await finalize(id, "user-stop", opts);
 }
@@ -1080,7 +1082,7 @@ function passCosts(job: ScheduledJob, run: RunState): { passCost: number; measur
 // A stopped or restarted run never reaches onTerminal's accounting, and what it
 // spent before it was stopped is still spent: a cap that missed it could be
 // walked past by pressing Run now.
-async function closeStoppedPass(id: string, runId: string): Promise<void> {
+async function closeStoppedPass(id: string, runId: string, stopped: boolean): Promise<void> {
   const run = await safeGetRun(runId);
   const job = await getJob(id);
   const rec = job?.history.find((r) => r.runId === runId && !r.finishedAt);
@@ -1092,7 +1094,7 @@ async function closeStoppedPass(id: string, runId: string): Promise<void> {
       ...rec,
       finishedAt: nowIso(),
       status: TERMINAL.has(run.status) ? run.status : "cancelled",
-      stopReason: "user-stop",
+      ...(stopped ? { stopReason: "user-stop" as const } : {}),
       costUsd: costs.passCost,
       ...(costs.measuredPassCost > 0 ? { measuredCostUsd: costs.measuredPassCost } : {}),
     },

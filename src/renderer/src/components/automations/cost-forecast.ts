@@ -1,12 +1,17 @@
 import { Cron } from "croner";
+import { monthKey } from "@shared/automation-guard";
 import type { AutomationTrigger } from "@shared/types";
 import { fmtUsd } from "./presentation";
 
 // The most an automation can spend in a month, in words, before it is saved.
 // Pure, so scripts/test-automation-guard.cjs can exercise it.
 
-const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
+const YEAR_MS = 366 * 24 * 60 * 60 * 1000;
+const LONGEST_MONTH_MS = 31 * 24 * 60 * 60 * 1000;
+// Starts in the busiest month before the count gives up and reads as a floor.
 const MAX_COUNTED_RUNS = 1000;
+// Enough to see two whole months of any schedule under that.
+const MAX_SCANNED_STARTS = 5000;
 
 export interface CostForecast {
   headline: string;
@@ -22,20 +27,27 @@ export interface CostForecastInput {
   monthlyCapUsd?: number;
 }
 
-/** How many times a schedule can start in 30 days, or null when it depends on
- *  events. The count stops at MAX_COUNTED_RUNS: past that, the figure is a floor. */
+/** The most starts a schedule has in any calendar month of the coming year, or
+ *  null when it depends on events or never comes round. */
 export function startsPerMonth(trigger: AutomationTrigger | null, nowMs: number): { runs: number; floor: boolean } | null {
   if (trigger?.kind === "interval" && trigger.everyMs > 0) {
-    const runs = Math.ceil(MONTH_MS / trigger.everyMs);
-    return { runs, floor: false };
+    return { runs: Math.ceil(LONGEST_MONTH_MS / trigger.everyMs), floor: false };
   }
   if (trigger?.kind !== "cron") return null;
   try {
     const cron = new Cron(trigger.expr, { paused: true, ...(trigger.tz ? { timezone: trigger.tz } : {}) });
-    const upcoming = cron.nextRuns(MAX_COUNTED_RUNS + 1, new Date(nowMs));
+    const perMonth = new Map<string, number>();
+    let at: Date | null = new Date(nowMs);
+    for (let scanned = 0; scanned < MAX_SCANNED_STARTS; scanned += 1) {
+      at = cron.nextRun(at);
+      if (!at || at.getTime() - nowMs > YEAR_MS) break;
+      const month = monthKey(at.getTime());
+      perMonth.set(month, (perMonth.get(month) ?? 0) + 1);
+    }
     cron.stop();
-    const within = upcoming.filter((at) => at.getTime() - nowMs <= MONTH_MS);
-    return within.length > MAX_COUNTED_RUNS ? { runs: MAX_COUNTED_RUNS, floor: true } : { runs: within.length, floor: false };
+    const busiest = Math.max(0, ...perMonth.values());
+    if (busiest === 0) return null;
+    return busiest >= MAX_COUNTED_RUNS ? { runs: MAX_COUNTED_RUNS, floor: true } : { runs: busiest, floor: false };
   } catch {
     return null;
   }
@@ -55,8 +67,9 @@ export function costForecast(input: CostForecastInput, nowMs: number): CostForec
   if (byBudget !== null && starts) {
     const runs = `${starts.runs}${starts.floor ? "+" : ""} run${starts.runs === 1 ? "" : "s"}`;
     return {
-      headline: `Worst case about ${fmtUsd(byBudget)}${starts.floor ? " or more" : ""} a month: ${fmtUsd(perRun as number)} a run, up to ${runs}.`,
-      detail: BETWEEN_RUNS,
+      headline: `On its schedule, worst case about ${fmtUsd(byBudget)}${starts.floor ? " or more" : ""} a month: ${fmtUsd(perRun as number)} a run, up to ${runs}.`,
+      // Only the cap also refuses a run started by hand.
+      detail: `${cap !== null ? `Running it by hand adds to that, up to its ${fmtUsd(cap)} cap.` : "Running it by hand adds to that."} ${BETWEEN_RUNS}`,
       open: false,
     };
   }

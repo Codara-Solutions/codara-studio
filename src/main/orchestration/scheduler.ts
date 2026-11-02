@@ -616,7 +616,7 @@ export async function appendHistory(
     // Counted the one time a record gains its finish, whichever path gets there
     // first, so the month's tally never counts a run twice.
     const newlyFinished = Boolean(record.finishedAt) && !(existing >= 0 && history[existing].finishedAt);
-    const monthSpend = newlyFinished ? addToMonthSpend(job.monthSpend, record, Date.now()) : job.monthSpend;
+    const monthSpend = newlyFinished ? addToMonthSpend(job.monthSpend, record, job.history) : job.monthSpend;
     if (existing >= 0) history[existing] = { ...history[existing], ...record };
     else history.push(record);
     // Newest-kept cap: drop oldest first.

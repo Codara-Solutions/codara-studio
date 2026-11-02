@@ -566,6 +566,27 @@ async function integrationChecks({ sched, loop }, workspace) {
     await sched.setEnabled(stopped.id, false);
     pass("a stopped or restarted run's spend counts toward the month, once");
 
+    // A run that ended with its ending unrecorded still counts when Run now replaces it.
+    const unrecorded = await sched.createJob({ name: "unrecorded", trigger: manualTrigger, input, guard: { monthlyCapUsd: 100 }, prompt: { template: "go" } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(unrecorded.id, { source: "manual" });
+    Object.assign(globalThis.__CU.runs[launchAt(n).id], { status: "complete", estimatedWorkerCostUsd: 6 });
+    await loop.runNow(unrecorded.id);
+    job = await get(unrecorded.id);
+    assert.strictEqual(job.monthSpend.costUsd, 6);
+    const closedRow = job.history.find((r) => r.runId === launchAt(n).id);
+    assert.strictEqual(closedRow.status, "complete", "it finished; nobody stopped it");
+    assert.strictEqual(closedRow.stopReason, undefined);
+    // And if that run is what reached the cap, the restart says so.
+    await loop.stopLoop(unrecorded.id);
+    await sched.updateJob({ id: unrecorded.id, guard: { monthlyCapUsd: 8 } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(unrecorded.id, { source: "manual" });
+    Object.assign(globalThis.__CU.runs[launchAt(n).id], { status: "complete", estimatedWorkerCostUsd: 3 });
+    await assert.rejects(loop.runNow(unrecorded.id), /monthly cap/);
+    await sched.setEnabled(unrecorded.id, false);
+    pass("a run that ended unrecorded still counts when Run now replaces it");
+
     // The pause: failures in a row, a success between them starts over.
     const flaky = await sched.createJob({ name: "flaky", trigger: manualTrigger, input, guard: { pauseAfterFailures: 2 }, prompt: { template: "go" } });
     const fire = async (status) => {
