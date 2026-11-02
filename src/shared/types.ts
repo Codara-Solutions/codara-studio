@@ -5943,6 +5943,9 @@ export interface AutomationRunRecord {
   catchUp?: AutomationCatchUp;
   /** Set on the record the loop ended on, for an automation on its own branch. */
   branchResult?: AutomationBranchResult;
+  /** On a stopped run's record: its run's total so far as charged to the month.
+   *  Its worker reports the real figure later, and only the difference is owed. */
+  chargedRunUsd?: number;
 }
 
 // ── Precheck and missed-run catch-up ────────────────────────────────────────

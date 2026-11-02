@@ -620,12 +620,43 @@ async function integrationChecks({ sched, loop }, workspace) {
     assert.strictEqual(job.monthSpend.costUsd, 10, "reconciled up to what it really spent");
     assert.strictEqual(job.history.at(-1).costUsd, 10);
     assert.strictEqual(globalThis.__CU.launches.length, n, "and the cap holds at the real figure");
-    await loop.startIteration(lateCost.id, { source: "trigger" });
-    assert.strictEqual((await get(lateCost.id)).monthSpend.costUsd, 10, "only once");
+    await Promise.all([loop.startIteration(lateCost.id, { source: "trigger" }), loop.startIteration(lateCost.id, { source: "trigger" })]);
+    assert.strictEqual((await get(lateCost.id)).monthSpend.costUsd, 10, "only once, even from starts at the same moment");
     lateRun.measuredWorkerCostUsd = 1;
     await loop.startIteration(lateCost.id, { source: "trigger" });
     assert.strictEqual((await get(lateCost.id)).monthSpend.costUsd, 10, "never downward");
     await sched.setEnabled(lateCost.id, false);
+
+    // Two starts racing the very first late charge, with no tally yet: once, not twice.
+    const racing = await sched.createJob({ name: "racing charge", trigger: manualTrigger, input, guard: { monthlyCapUsd: 100 }, prompt: { template: "go" } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(racing.id, { source: "manual" });
+    const freeRun = globalThis.__CU.runs[launchAt(n).id];
+    await loop.stopLoop(racing.id);
+    assert.strictEqual((await get(racing.id)).monthSpend, undefined, "nothing spent yet");
+    freeRun.measuredWorkerCostUsd = 10;
+    await Promise.all([loop.startIteration(racing.id, { source: "trigger" }), loop.startIteration(racing.id, { source: "trigger" })]);
+    job = await get(racing.id);
+    assert.strictEqual(job.monthSpend.costUsd, 10, "the first charge counts once");
+    assert.strictEqual(job.history.find((r) => r.runId === freeRun.id).costUsd, 10);
+    await loop.stopLoop(racing.id);
+    await sched.setEnabled(racing.id, false);
+
+    // A long same-run loop's early rows have rotated out: its late cost still counts,
+    // against what was charged and not what the kept rows add up to.
+    const long = await sched.createJob({ name: "long loop", trigger: manualTrigger, input, guard: { monthlyCapUsd: 500 }, prompt: { template: "go" } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(long.id, { source: "manual" });
+    const longRun = globalThis.__CU.runs[launchAt(n).id];
+    longRun.estimatedWorkerCostUsd = 100;
+    await loop.stopLoop(long.id);
+    await sched.patchJob(long.id, (j) => ({ ...j, history: j.history.map((r) => ({ ...r, iteration: 60, costUsd: 2 })) }));
+    longRun.estimatedWorkerCostUsd = 0;
+    longRun.measuredWorkerCostUsd = 103;
+    await loop.startIteration(long.id, { source: "trigger" });
+    assert.strictEqual((await get(long.id)).monthSpend.costUsd, 103, "only the $3 still owed");
+    await loop.stopLoop(long.id);
+    await sched.setEnabled(long.id, false);
     pass("a stopped worker's late cost counts before the cap decides, once");
 
     // The pause: failures in a row, a success between them starts over.
@@ -669,6 +700,7 @@ async function integrationChecks({ sched, loop }, workspace) {
     assert.strictEqual((await get(twice.id)).state.status, "paused", "and the second ending does not lift the pause");
     assert.ok((await get(twice.id)).autoPaused);
     await sched.setEnabled(twice.id, false);
+    n = globalThis.__CU.launches.length;
 
     // Resuming gives it its full tries back, and starts nothing by itself.
     await sched.resumeJob(flaky.id);

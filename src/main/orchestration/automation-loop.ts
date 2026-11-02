@@ -355,29 +355,32 @@ function fmtCapUsd(value: number | undefined): string {
 }
 
 // A stopped worker reports what it really spent as it exits, after its row was
-// closed on the estimate. Reconciled against what the run has been charged, only
-// upward, before a cap decides anything.
+// closed on the estimate. Reconciled, only upward, before a cap decides anything.
+// The amount is worked out inside the write, against what the row says was already
+// charged, so concurrent starts cannot charge it twice and a restart cannot leave
+// the row and the tally disagreeing.
 async function chargeLateCosts(id: string): Promise<void> {
   const job = await getJob(id);
   if (!job?.guard?.monthlyCapUsd) return;
   const month = monthKey(Date.now());
   const stopped = job.history
-    .filter((rec) => rec.stopReason === "user-stop" && rec.finishedAt && monthKey(Date.parse(rec.startedAt)) === month)
+    .filter((rec) => rec.chargedRunUsd !== undefined && monthKey(Date.parse(rec.startedAt)) === month)
     .slice(-RECONCILED_STOPPED_RUNS);
-  for (const rec of stopped) {
-    const rows = job.history.filter((r) => r.runId === rec.runId);
-    // A same-run loop's earlier rows have rotated out: the charge cannot be known,
-    // and guessing would double count them.
-    if (!job.loop.isolate && !rows.some((r) => r.iteration === 0)) continue;
-    const run = await safeGetRun(rec.runId);
+  for (const { runId, iteration } of stopped) {
+    const run = await safeGetRun(runId);
     if (!run) continue;
-    const total = (run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0) + (run.estimatedWorkerCostUsd ?? 0);
-    const late = total - rows.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
-    if (late <= LATE_COST_NOISE_USD) continue;
-    await appendHistory(id, { ...rec, costUsd: (rec.costUsd ?? 0) + late }, {});
+    const total = runTotalUsd(run);
     await patchJob(id, (j) => {
+      const at = j.history.findIndex((r) => r.runId === runId && r.iteration === iteration);
+      const row = j.history[at];
+      const late = row ? total - (row.chargedRunUsd ?? total) : 0;
+      if (late <= LATE_COST_NOISE_USD) return j;
+      // Before the row changes, or the seed would already hold this charge.
       const tally = seedMonthSpend(j, Date.now());
-      return tally?.month === month ? { ...j, monthSpend: { ...tally, costUsd: tally.costUsd + late } } : j;
+      const base = tally?.month === month ? tally : { month, costUsd: 0, measuredCostUsd: 0 };
+      const history = [...j.history];
+      history[at] = { ...row, costUsd: (row.costUsd ?? 0) + late, chargedRunUsd: total };
+      return { ...j, history, monthSpend: { ...base, costUsd: base.costUsd + late } };
     });
   }
 }
@@ -1096,6 +1099,10 @@ export async function stopLoop(id: string, opts?: { fireDependents?: boolean }):
   await finalize(id, "user-stop", opts);
 }
 
+function runTotalUsd(run: RunState): number {
+  return (run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0) + (run.estimatedWorkerCostUsd ?? 0);
+}
+
 // What a pass cost, from its run's totals. Same-run loops accumulate on ONE run
 // (cumulative); isolate loops sum per-run costs. Either way spentUsd ends up the
 // true running total.
@@ -1132,7 +1139,7 @@ async function closeStoppedPass(id: string, runId: string, stopped: boolean): Pr
       ...rec,
       finishedAt: nowIso(),
       status: TERMINAL.has(run.status) ? run.status : "cancelled",
-      ...(stopped ? { stopReason: "user-stop" as const } : {}),
+      ...(stopped ? { stopReason: "user-stop" as const, chargedRunUsd: runTotalUsd(run) } : {}),
       costUsd: costs.passCost,
       ...(costs.measuredPassCost > 0 ? { measuredCostUsd: costs.measuredPassCost } : {}),
     },
