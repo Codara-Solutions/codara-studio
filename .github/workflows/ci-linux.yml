@@ -30,10 +30,11 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      - name: Xvfb, and the user namespaces Chromium's sandbox needs
+      - name: Xvfb, zsh, and the user namespaces Chromium's sandbox needs
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb
+          # zsh: the shell integration suites drive a real zsh as well as bash.
+          sudo apt-get install -y -qq xvfb zsh
           # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor,
           # and Electron's sandbox cannot start without them.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
