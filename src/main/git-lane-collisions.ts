@@ -3,9 +3,10 @@
 // it cannot get in an agent's way. It does write tree objects, which git cleans
 // up itself; a result is cached by the two commits, so a pair is merged once.
 // It runs with no click behind it, so it must not start any program the repository
-// configures: one with a custom merge driver is skipped, and so is a partial clone,
-// where a missing file means a fetch that can run its ssh command or credential
-// helper. Renormalizing, which runs clean and smudge filters, is turned off.
+// configures: one with a custom merge driver is skipped, and so is a partial clone
+// or one with an initialized submodule, which may be one, because a missing file
+// means a fetch that can run an ssh command or credential helper. Renormalizing,
+// which runs clean and smudge filters, is turned off.
 //
 // No Electron import: scripts/test-lane-collisions.cjs runs it on real repositories.
 
@@ -42,7 +43,7 @@ async function safeToMerge(cwd: string, run: typeof runGit): Promise<boolean> {
       ...GIT_C,
       "config",
       "--get-regexp",
-      "^(merge\\..*\\.driver|remote\\..*\\.promisor|extensions\\.partialclone)$",
+      "^(merge\\..*\\.driver|remote\\..*\\.(promisor|partialclonefilter)|extensions\\.partialclone|submodule\\..*\\.url)$",
     ]);
     return !stdout.trim();
   } catch (cause) {

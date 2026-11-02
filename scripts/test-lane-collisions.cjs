@@ -190,6 +190,13 @@ async function load() {
     git(filtered, "config", "extensions.partialClone", "origin");
     assert.deepEqual(await lib.readLaneCollisions([one, two], deps), {}, "by either of its settings");
     git(filtered, "config", "--unset", "extensions.partialClone");
+    git(filtered, "config", "remote.origin.partialCloneFilter", "blob:none");
+    assert.deepEqual(await lib.readLaneCollisions([one, two], deps), {}, "or a filter left behind on its own");
+    git(filtered, "config", "--unset", "remote.origin.partialCloneFilter");
+    git(filtered, "config", "submodule.vendor.url", "https://example.invalid/vendor.git");
+    assert.deepEqual(await lib.readLaneCollisions([one, two], deps), {}, "an initialized submodule may be a partial clone");
+    git(filtered, "config", "--unset", "submodule.vendor.url");
+    assert.equal(Object.keys(await lib.readLaneCollisions([one, two], deps)).length, 2, "with those gone it is checked again");
 
     console.log("lane collisions: ok");
   } finally {

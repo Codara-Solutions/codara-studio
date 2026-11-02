@@ -348,7 +348,9 @@ clashes with feat/dark-charts if both merge.", between running lanes only. It re
 committed work, because that is what merges. Etienne is unsure agents need it, so it
 is built to remove: `lane-collisions.ts`, `git-lane-collisions.ts`,
 `LaneCollisions.tsx`, the `collision` prop on `LaneRow` and one IPC handler. It is off
-for SSH workspaces and on git older than 2.38.
+for SSH workspaces and on git older than 2.38. It runs with no click behind it, so it
+also stays out of any repository where a merge could start a program the repository
+configures: a custom merge driver, a partial clone, an initialized submodule.
 
 ## Worktrees in the rail (2026-10)
 
