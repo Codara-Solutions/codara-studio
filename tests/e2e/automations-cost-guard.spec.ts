@@ -133,6 +133,9 @@ test("limits hold an automation back, say why, and the editor shows the worst ca
     await expect(card).toContainText("Monthly cap reached");
     await expect(card).toContainText("$21.50 of its $20.00 cap");
     await expect(page.getByTestId("automation-health")).toContainText("of $20.00 cap");
+    await expect(card.getByRole("button", { name: "Fix with Cora" })).toHaveCount(0);
+    await expect(page.getByTestId("automation-worst-case")).toContainText("about $20.00 a month");
+    await expect(page.getByText("$20.00 a month", { exact: true })).toBeVisible();
     await shot(app, page, "cost-guard-cap");
 
     // Run now is refused: nothing starts, and the row says why.
@@ -169,7 +172,12 @@ test("limits hold an automation back, say why, and the editor shows the worst ca
     await expect(forecast).toContainText("about $5.00 each time you run it");
     await page.getByLabel("Monthly cap").fill("20");
     await expect(forecast).toContainText("about $20.00 a month");
-    // A typo blocks saving, instead of quietly dropping the limit.
+    // A typo blocks saving, instead of quietly dropping the limit. "1e" matters:
+    // a number input would report it as empty, which means "remove the limit".
+    await page.getByLabel("Monthly cap").fill("1e");
+    await expect(page.getByRole("button", { name: "Create automation", exact: true })).toBeDisabled();
+    await expect(page.getByText(/monthly cap must be a number/)).toBeVisible();
+    await page.getByLabel("Monthly cap").fill("20");
     await page.getByLabel("Pause after").fill("0");
     await expect(page.getByRole("button", { name: "Create automation", exact: true })).toBeDisabled();
     await expect(page.getByText(/Pause after must be a whole number/)).toBeVisible();

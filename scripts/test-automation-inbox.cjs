@@ -360,6 +360,7 @@ async function main() {
     assert.equal(m.inboxGroup(capped, NOW), "needs");
     assert.equal(m.statusWord(capped, NOW).word, "Needs you");
     assert.equal(m.resultCard(capped, NOW).headline, "Monthly cap reached");
+    assert.equal(m.resultCard(capped, NOW).heldByLimit, true, "a cap is not a failure to fix");
     assert.match(m.resultCard(capped, NOW).body, /\$21\.00 of its \$20\.00 cap/);
     assert.ok(m.monthStats(capped, NOW).some((stat) => stat.includes("$21.00 of $20.00 cap")));
     // Under the cap, next month, switched off or mid-run: not held back.
@@ -373,6 +374,7 @@ async function main() {
     const paused = job({ guard: { pauseAfterFailures: 3 }, autoPaused: { at: thisMonth, failures: 3 }, state: { status: "paused", iteration: 0 }, history: [rec({ status: "failed" })] });
     assert.equal(m.inboxGroup(paused, NOW), "needs");
     assert.equal(m.resultCard(paused, NOW).headline, "Paused after 3 failed runs");
+    assert.equal(m.resultCard(paused, NOW).heldByLimit, false, "its failures still are");
     assert.match(m.resultCard(paused, NOW).body, /until you resume it/);
     const once = { ...paused, autoPaused: { at: thisMonth, failures: 1 } };
     assert.equal(m.resultCard(once, NOW).headline, "Paused after 1 failed run");

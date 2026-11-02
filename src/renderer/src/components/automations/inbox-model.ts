@@ -250,7 +250,7 @@ function workerNodes(job: ScheduledJob): LoomWorkerNode[] {
   return (job.graph?.nodes ?? []).filter((n): n is LoomWorkerNode => n.kind === "worker");
 }
 
-function isStepsOnly(job: ScheduledJob): boolean {
+export function isStepsOnly(job: ScheduledJob): boolean {
   const nodes = job.graph?.nodes ?? [];
   return workerNodes(job).length === 0 && nodes.some((n) => n.kind === "step");
 }
@@ -556,6 +556,8 @@ export interface ResultCard {
   runId?: string;
   /** Where this run's work went, for an automation on its own branch. */
   branch?: AutomationBranchResult;
+  /** A limit is holding it back, which is the user's call and nothing to fix. */
+  heldByLimit?: boolean;
 }
 
 function factsOf(job: ScheduledJob, rec: AutomationRunRecord, nowMs: number): string[] {
@@ -578,6 +580,7 @@ export function resultCard(job: ScheduledJob, nowMs: number): ResultCard {
       ...hold,
       facts: rec ? factsOf(job, rec, nowMs) : [],
       failed: true,
+      heldByLimit: job.state.status !== "paused",
       ...(rec ? { runId: rec.runId } : {}),
       ...(rec?.branchResult ? { branch: rec.branchResult } : {}),
     };

@@ -1,3 +1,4 @@
+import { costForecast } from "./cost-forecast";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AutomationRunRecord,
@@ -31,6 +32,7 @@ import {
   fmtWhen,
   groupJobs,
   inboxGroup,
+  isStepsOnly,
   monthStats,
   monthTotals,
   plainSchedule,
@@ -1492,7 +1494,7 @@ function ResultCard({
               Open draft pull request
             </button>
           )}
-          {card.failed && onAskCora && (
+          {card.failed && !card.heldByLimit && onAskCora && (
             <button
               type="button"
               className="spark-btn"
@@ -1865,11 +1867,27 @@ function ConfigSummary({ job, names }: { job: ScheduledJob; names: ReadonlyMap<s
   // Every chip says what it IS in words and explains itself on hover — the
   // old `est. $0.00` badge read as noise and hid where the setting lives
   // (the Loop node's "Safety caps" in the editor).
+  const forecast = costForecast(
+    { trigger: job.trigger, stepsOnly: isStepsOnly(job), budgetUsd: stop.budgetUsd, monthlyCapUsd: job.guard?.monthlyCapUsd },
+    Date.now(),
+  );
   const chips: { label: string; hint: string }[] = [];
   if (typeof stop.maxIterations === "number") {
     chips.push({
       label: `at most ${stop.maxIterations} run${stop.maxIterations === 1 ? "" : "s"}`,
       hint: "Hard stop after this many runs each time it starts. Edit: Loop node → Safety caps.",
+    });
+  }
+  if (job.guard?.monthlyCapUsd) {
+    chips.push({
+      label: `${fmtUsd(job.guard.monthlyCapUsd)} a month`,
+      hint: "No new run starts once this month's spend reaches this, Run now included. Edit: Loop node → Safety caps.",
+    });
+  }
+  if (job.guard?.pauseAfterFailures) {
+    chips.push({
+      label: `pause after ${job.guard.pauseAfterFailures} failed`,
+      hint: "Pauses until you resume it after this many failed runs in a row. Edit: Loop node → Safety caps.",
     });
   }
   // budgetUsd <= 0 means "no cap" (engine semantics) — showing $0.00 as a
@@ -1917,6 +1935,12 @@ function ConfigSummary({ job, names }: { job: ScheduledJob; names: ReadonlyMap<s
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <ConfigKey label="Id" />
         <RunIdChip runId={job.id} label="automation id" maxChars={24} />
+      </div>
+      <div style={{ display: "flex", gap: 8 }} data-testid="automation-worst-case">
+        <ConfigKey label="Worst case" />
+        <span style={{ fontSize: 11, lineHeight: 1.5, color: forecast.open ? "color-mix(in oklab, var(--danger) 70%, var(--ink))" : "var(--muted)" }}>
+          {forecast.headline}
+        </span>
       </div>
       <div style={{ display: "flex", gap: 8 }}>
         <ConfigKey label="Stops" />

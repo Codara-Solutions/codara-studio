@@ -112,6 +112,7 @@ export default function LoopInspector({
               placeholder="—"
               step={1}
               onChange={(v) => set({ monthlyCap: v })}
+              typedText
               hint="no new run past it this month · blank = no cap"
             />
             <CapBox
@@ -120,6 +121,7 @@ export default function LoopInspector({
               value={loop.pauseAfter}
               placeholder="—"
               onChange={(v) => set({ pauseAfter: v })}
+              typedText
               hint="failed runs in a row · blank = never"
             />
           </div>
@@ -309,6 +311,7 @@ function CapBox({
   step,
   onChange,
   hint,
+  typedText,
 }: {
   label: string;
   suffix: string;
@@ -317,6 +320,9 @@ function CapBox({
   step?: number;
   onChange: (v: string) => void;
   hint: string;
+  /** A number input reports half-typed text such as "1e" as empty, which for a
+   *  limit would read as removing it. Plain text reaches validation as typed. */
+  typedText?: boolean;
 }): React.ReactElement {
   return (
     <div
@@ -337,7 +343,8 @@ function CapBox({
         <input
           aria-label={label}
           className="spark-input spark-mono"
-          type="number"
+          type={typedText ? "text" : "number"}
+          inputMode={typedText ? "decimal" : undefined}
           min={0}
           step={step}
           value={value}
