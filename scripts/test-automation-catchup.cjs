@@ -401,6 +401,12 @@ async function integrationChecks({ sched, loop }, workspace) {
   const remembered = { seededAt: 1, seededMaxPr: 4, seen: { "pr:5": 1 }, fires: [] };
   const lastFire = { event: "prOpened", number: 5, url: "https://github.com/a/b/pull/5", headSha: "a".repeat(40), title: "", headRef: "", baseRef: "", failedChecks: [] };
   const remember = () => sched.patchJob(prs.id, (j) => ({ ...j, githubTrigger: remembered, lastGitHubFire: lastFire }));
+  await sched.patchJob(prs.id, (j) => ({ ...j, githubTrigger: { seededAt: 1, seededMaxPr: 4, seen: ["pr:5"], fires: [{ pr: 5, at: 2 }] } }));
+  await sched.updateJob({ id: prs.id, name: "prs" });
+  const migrated = (await get(prs.id)).githubTrigger;
+  assert.deepStrictEqual(Object.keys(migrated.seen), ["pr:5"], "an older stored list is kept, not dropped");
+  assert.ok(Number.isFinite(migrated.seen["pr:5"]), "and is stored with a time");
+  assert.deepStrictEqual(migrated.fires, [{ pr: 5, at: 2 }], "its run counts survive too");
   await remember();
   await sched.updateJob({ id: prs.id, name: "renamed" });
   assert.deepStrictEqual((await get(prs.id)).githubTrigger, remembered, "a rename keeps what it fired");
