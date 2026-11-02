@@ -2,7 +2,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { EMPTY_SESSION_SEARCH_STATUS, type SessionSearchStatus } from "@shared/session-search";
 
 // main's session index status, shared by every surface that shows it (the
-// Sessions view, the intro dialog, Settings): one IPC subscription for the
+// session picker, the intro dialog, Settings): one IPC subscription for the
 // window, opened by the first reader.
 
 let status: SessionSearchStatus = EMPTY_SESSION_SEARCH_STATUS;

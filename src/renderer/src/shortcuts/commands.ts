@@ -472,7 +472,7 @@ export const COMMANDS: Command[] = [
   // (Mod+Shift+C/Mod+Alt+C/…) all collide with built-in or browser
   // bindings. Users bind their own from Settings → Keybindings.
   // Each launches a new session at once; earlier sessions are resumed from
-  // the Sessions view.
+  // the session picker.
   {
     id: "worker.newClaude",
     label: "New Claude worker pane",
