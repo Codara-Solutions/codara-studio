@@ -2290,7 +2290,10 @@ function WorkspaceRow({
   const agentCreator = ws.copyBranch?.createdBy?.kind === "agent" ? ws.copyBranch.createdBy : null;
   const merged = rowMerged(worktree, missing);
   const canRemoveFromRail = missing && Boolean(onCleanUp);
-  const canCleanUp = !missing && merged && Boolean(onCleanUp);
+  // Nothing was ever committed here and it sat untouched for days: offered,
+  // never removed on its own.
+  const stale = !missing && !merged && worktree?.stale === true && agentTotal === 0;
+  const canCleanUp = !missing && (merged || stale) && Boolean(onCleanUp);
   const runCleanUp = () => {
     if (!onCleanUp || cleaning) return;
     rowCleanUp.start([{ id: ws.id, name: ws.name, cleanUp: onCleanUp }]);
@@ -2801,7 +2804,9 @@ function WorkspaceRow({
                 ? ws.copyBranch
                   ? "Remove from rail: drops git's record of the worktree, and deletes its branch only if merged"
                   : "Remove from rail"
-                : "Clean up: remove the worktree, its merged branch and this row"
+                : stale
+                  ? "Clean up: nothing was ever committed here, so only the empty worktree, its branch and this row go"
+                  : "Clean up: remove the worktree, its merged branch and this row"
             }
             testId={canRemoveFromRail ? "workspace-remove-from-rail" : "workspace-clean-up"}
             iconOnly={canRemoveFromRail}

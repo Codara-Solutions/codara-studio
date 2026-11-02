@@ -20,27 +20,37 @@ import type { WorkerSessionSummary } from "@shared/types";
 import { usePreferences } from "../../preferences/usePreferences";
 import { keyBelongsToOtherModal } from "../../shortcuts/modal-keys";
 import AnchoredMenu from "../chat/composer/AnchoredMenu";
-import { PencilIcon, PinIcon } from "../icons";
+import { PencilIcon, PinIcon, ReloadIcon } from "../icons";
 import SessionAgentMark from "./SessionAgentMark";
 import { SnippetText, TermsText } from "./SessionHighlight";
 import SessionTranscriptDialog from "./SessionTranscriptDialog";
 import { copySessionId, revealSessionTranscript } from "./session-actions";
 import {
   SESSION_SCOPES,
+  SESSION_AGENTS_KEY,
   SESSION_SCOPE_KEY,
   folderName,
+  readSessionAgents,
   readSessionScope,
   rememberSessionChoice,
   sessionStatusLine,
 } from "./session-list-shared";
-import { bumpSessionLabels, useSessionLabelsRevision, useSessionSearchHost } from "./sessionSearchStore";
+import {
+  bumpSessionLabels,
+  useSessionLabelsRevision,
+  useSessionSearchHost,
+  type WorkerSessionsOffer,
+} from "./sessionSearchStore";
 import { publishSessionSearchStatus, useSessionSearchStatus } from "./useSessionSearchStatus";
 import "./session-search.css";
 
 // The session picker: past agent sessions in a list, beside the end of the
 // highlighted conversation. One box searches names and what either side said,
 // and each result says which of those matched. Opened from the + menu and its
-// chord. A worker row in the + menu never comes here: it starts a new session.
+// chord, the rail's button (on this workspace), the jump palette (on what was
+// typed there), and in front of a Claude, Codex or Grok worker being opened.
+// There, nothing is selected at first and Enter starts the worker, so history
+// never costs more than one key and a session is only resumed on purpose.
 
 const PAGE = 50;
 const DEBOUNCE_MS = 120;
@@ -108,16 +118,29 @@ function RenameField({
   );
 }
 
-export default function SessionPicker({ onClose }: { onClose: () => void }) {
+export default function SessionPicker({
+  onClose,
+  initialQuery = "",
+  initialScope,
+  offer = null,
+}: {
+  onClose: () => void;
+  initialQuery?: string;
+  /** Where this opening looks. Only a click on a scope is remembered for next time. */
+  initialScope?: SessionSearchScope;
+  offer?: WorkerSessionsOffer | null;
+}) {
   const host = useSessionSearchHost();
   const labelsRevision = useSessionLabelsRevision();
   const { status, loaded } = useSessionSearchStatus();
   const { preferences, setPreference } = usePreferences();
   const prefs = normalizeSessionSearchPreferences(preferences.sessionSearch);
 
-  const [query, setQuery] = useState("");
-  const [scope, setScopeState] = useState<SessionSearchScope>(readSessionScope);
-  const [agent, setAgent] = useState<SessionSearchAgent | null>(null);
+  const [query, setQuery] = useState(initialQuery);
+  const [scope, setScopeState] = useState<SessionSearchScope>(() => initialScope ?? readSessionScope());
+  const [agentFilter, setAgentFilterState] = useState<SessionSearchAgent[]>(() =>
+    offer ? [offer.runtime] : readSessionAgents(),
+  );
   const [hits, setHits] = useState<SessionSearchHit[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [searched, setSearched] = useState(false);
@@ -150,12 +173,19 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
   // Deleted here but still in the index until the pass that notices is done.
   const deletedRef = useRef(new Set<string>());
 
-  const hasWorkspace = host.workspaceCwd !== null;
+  // A worker opens in its pane's folder, which need not be the workspace's.
+  const scopeCwd = offer?.cwd ?? host.workspaceCwd;
+  const hasWorkspace = scopeCwd !== null;
   const effectiveScope: SessionSearchScope = hasWorkspace ? scope : "all";
   const enabledAgents = prefs.agents;
+  const activeAgents = useMemo(
+    () => agentFilter.filter((item) => enabledAgents.includes(item)),
+    [agentFilter, enabledAgents],
+  );
+  const agentsKey = activeAgents.join(",");
   const terms = useMemo(() => sessionQueryTerms(query), [query]);
   const searching = terms.length > 0;
-  const answerKey = `${query}\n${effectiveScope}\n${agent ?? ""}\n${host.workspaceCwd ?? ""}`;
+  const answerKey = `${query}\n${effectiveScope}\n${agentsKey}\n${scopeCwd ?? ""}`;
   const selected = hits.find((hit) => hit.key === selectedKey) ?? null;
   const selectedOpen = selected ? (host.isSessionOpen?.(selected) ?? false) : false;
   const selectedKeyRef = useRef(selectedKey);
@@ -165,16 +195,22 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
     setScopeState(next);
     rememberSessionChoice(SESSION_SCOPE_KEY, next);
   };
+  const toggleAgent = (item: SessionSearchAgent) => {
+    const next = activeAgents.includes(item) ? activeAgents.filter((entry) => entry !== item) : [...activeAgents, item];
+    setAgentFilterState(next);
+    rememberSessionChoice(SESSION_AGENTS_KEY, JSON.stringify(next));
+  };
 
   const firstToShow = useCallback(
     (rows: SessionSearchHit[], typed: boolean): string | null => {
       if (typed) return rows[0]?.key ?? null;
+      if (offer) return null;
       // Pinned rows lead the list, but the likely next step is the latest
       // session that can actually be resumed from here.
       const likely = rows.find((hit) => !hit.pinned && !isGone(hit) && !host.isSessionOpen?.(hit));
       return (likely ?? rows[0])?.key ?? null;
     },
-    [host],
+    [host, offer],
   );
 
   const run = useCallback(
@@ -185,8 +221,8 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
         const result = await window.spark.sessionSearch.search({
           query,
           scope: effectiveScope,
-          cwd: host.workspaceCwd,
-          agents: agent ? [agent] : null,
+          cwd: scopeCwd,
+          agents: agentsKey ? (agentsKey.split(",") as SessionSearchAgent[]) : null,
           limit: PAGE,
           offset,
           pinnedFirst: true,
@@ -198,7 +234,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
         if (offset === 0) {
           const sameAnswer = hitsAnswerRef.current === answerKey;
           setSelectedKey((current) =>
-            sameAnswer && found.some((hit) => hit.key === current)
+            sameAnswer && (found.some((hit) => hit.key === current) || (offer !== null && current === null))
               ? current
               : firstToShow(found, sessionQueryTerms(query).length > 0),
           );
@@ -219,7 +255,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
         if (id === sequence.current) setLoading(false);
       }
     },
-    [query, effectiveScope, host.workspaceCwd, agent, answerKey, firstToShow],
+    [query, effectiveScope, scopeCwd, agentsKey, answerKey, firstToShow, offer],
   );
 
   useEffect(() => {
@@ -342,6 +378,13 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
     setTranscript({ hit, notice });
   };
 
+  const resumesInPane = (hit: SessionSearchHit) =>
+    offer?.placement === "pane" && !isGone(hit) && !host.isSessionOpen?.(hit) && !!host.canSplitSession?.(hit);
+
+  const startNew = () => {
+    if (offer) finish(offer.startNew);
+  };
+
   const primary = (hit: SessionSearchHit) => {
     if (isGone(hit) && !host.isSessionOpen?.(hit)) {
       showTranscript(
@@ -352,14 +395,20 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
       );
       return;
     }
-    finish(() => host.openSession?.(hit));
+    finish(() => (resumesInPane(hit) ? host.splitSession?.(hit) : host.openSession?.(hit)));
   };
   primaryRef.current = primary;
 
   const moveSelection = (delta: number) => {
     if (hits.length === 0) return;
     const index = hits.findIndex((hit) => hit.key === selectedKey);
-    const next = Math.max(0, Math.min(hits.length - 1, (index < 0 ? -1 : index) + delta));
+    const wanted = (index < 0 ? -1 : index) + delta;
+    // Above the first row is back to starting new.
+    if (offer && wanted < 0) {
+      setSelectedKey(null);
+      return;
+    }
+    const next = Math.max(0, Math.min(hits.length - 1, wanted));
     setSelectedKey(hits[next].key);
     if (hasMore && !loading && next >= hits.length - 3) void run(hits.length);
   };
@@ -376,6 +425,9 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
       const current = hitsAnswerRef.current === answerKey;
       if (event.altKey) {
         if (current && selected && canFork(selected)) finish(() => host.forkSession?.(selected));
+      } else if (offer && (searching ? current && !selected && hits.length > 0 : !current || !selected)) {
+        // Rows still catching up with an empty box must not turn this into a resume.
+        startNew();
       } else if (!current) {
         // The rows are still those of an earlier query: open the first of this one's.
         enterPendingRef.current = answerKey;
@@ -417,6 +469,11 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
   }, []);
+
+  const refreshIndex = () => {
+    void window.spark.sessionSearch.refresh(true).then(publishSessionSearchStatus, () => undefined);
+    focusSearch();
+  };
 
   const onListScroll = (event: UIEvent<HTMLDivElement>) => {
     const node = event.currentTarget;
@@ -531,7 +588,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
           ref={dialogRef}
           role="dialog"
           aria-modal="true"
-          aria-label="Resume a session"
+          aria-label={offer ? `${SESSION_SEARCH_AGENT_LABEL[offer.runtime]} sessions` : "Resume a session"}
           data-testid="session-picker"
           className="ss-dialog sp-dialog spark-glass--strong spark-overlay-surface"
           onMouseDown={(event) => event.stopPropagation()}
@@ -561,6 +618,8 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
     );
   }
 
+  const sessionsNoun =
+    activeAgents.length === 1 ? `${SESSION_SEARCH_AGENT_LABEL[activeAgents[0]]} sessions` : "agent sessions";
   let lastHeading: string | null = null;
   const firstBuildRunning = status.firstBuild && (indexing || status.phase === "paused");
 
@@ -609,24 +668,54 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
                 })}
               </div>
               <div className="sp-agents" role="group" aria-label="Agent">
-                {enabledAgents.map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    className={`sp-agent${agent === item ? " is-on" : ""}`}
-                    aria-pressed={agent === item}
-                    title={SESSION_SEARCH_AGENT_LABEL[item]}
-                    onClick={() => {
-                      setAgent((current) => (current === item ? null : item));
-                      focusSearch();
-                    }}
-                  >
-                    <SessionAgentMark agent={item} size={12} />
-                    {SESSION_SEARCH_AGENT_LABEL[item]}
-                  </button>
-                ))}
+                {enabledAgents.map((item) => {
+                  const on = activeAgents.includes(item);
+                  return (
+                    <button
+                      key={item}
+                      type="button"
+                      className={`sp-agent${on ? " is-on" : ""}`}
+                      aria-pressed={on}
+                      title={SESSION_SEARCH_AGENT_LABEL[item]}
+                      onClick={() => {
+                        toggleAgent(item);
+                        focusSearch();
+                      }}
+                    >
+                      <SessionAgentMark agent={item} size={12} />
+                      {SESSION_SEARCH_AGENT_LABEL[item]}
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  className="spark-icon-btn sp-refresh"
+                  aria-label="Refresh sessions"
+                  title="Read new sessions now"
+                  data-testid="session-picker-refresh"
+                  disabled={indexing}
+                  onClick={refreshIndex}
+                >
+                  <span className={indexing ? "ss-spin" : undefined} style={{ display: "inline-flex" }}>
+                    <ReloadIcon size={12} />
+                  </span>
+                </button>
               </div>
             </div>
+
+            {offer ? (
+              <button
+                type="button"
+                className={`sp-new${selected ? "" : " is-selected"}`}
+                data-testid="session-picker-new"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={startNew}
+              >
+                <SessionAgentMark agent={offer.runtime} />
+                <span className="sp-new__title">New session</span>
+                <span className="sp-new__where">{folderName(offer.cwd)}</span>
+              </button>
+            ) : null}
 
             <div
               ref={listRef}
@@ -653,10 +742,10 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
                   ) : (
                     <p>
                       {effectiveScope === "all"
-                        ? "No agent sessions on this computer yet."
+                        ? `No ${sessionsNoun} on this computer yet.`
                         : effectiveScope === "workspace"
-                          ? "No agent sessions in this workspace yet."
-                          : "No agent sessions in this project yet."}
+                          ? `No ${sessionsNoun} in this workspace yet.`
+                          : `No ${sessionsNoun} in this project yet.`}
                     </p>
                   )}
                 </div>
@@ -876,7 +965,9 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
                         ? "Go to its tab"
                         : isGone(selected)
                           ? "View transcript"
-                          : "Resume in a new tab"}
+                          : resumesInPane(selected)
+                            ? "Resume in a new pane"
+                            : "Resume in a new tab"}
                     <kbd className="spark-kbd sp-actions__kbd">Enter</kbd>
                   </button>
                   {canFork(selected) ? (
@@ -889,7 +980,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
                       Fork
                     </button>
                   ) : null}
-                  {!selectedOpen && host.canSplitSession?.(selected) ? (
+                  {!selectedOpen && !resumesInPane(selected) && host.canSplitSession?.(selected) ? (
                     <button
                       type="button"
                       className="spark-btn"
@@ -916,6 +1007,21 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
                   </button>
                 </footer>
               )}
+            </div>
+          ) : offer ? (
+            <div className="sp-detail sp-detail--new">
+              <div className="sp-new-detail">
+                <SessionAgentMark agent={offer.runtime} size={20} />
+                <h2>New {SESSION_SEARCH_AGENT_LABEL[offer.runtime]} session</h2>
+                <p title={offer.cwd ?? undefined}>In {folderName(offer.cwd)}</p>
+                {hits.length > 0 ? <p>Or press ↓ to pick up an earlier session from the list.</p> : null}
+              </div>
+              <footer className="sp-actions">
+                <button type="button" className="spark-btn is-primary" onClick={startNew}>
+                  Start session
+                  <kbd className="spark-kbd sp-actions__kbd">Enter</kbd>
+                </button>
+              </footer>
             </div>
           ) : (
             <div className="sp-detail sp-detail--empty" />

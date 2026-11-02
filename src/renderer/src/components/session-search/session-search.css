@@ -1,94 +1,5 @@
-/* Agent session search: the rail's Sessions view on the solid rail, and its
-   transcript dialog on the shared glass dialog surface. */
-
-.ss-panel {
-  flex: 1 1 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.ss-controls {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 6px 8px 4px;
-}
-
-.ss-search {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.ss-search__input {
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 26px;
-  appearance: none;
-  padding: 0 8px;
-  border: 1px solid var(--rule-soft);
-  border-radius: var(--radius-control, 7px);
-  background: var(--bg);
-  box-shadow: var(--well);
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: 12px;
-  outline: none;
-}
-
-.ss-search__input::placeholder {
-  color: var(--muted);
-}
-
-.ss-search__input:focus-visible {
-  box-shadow: var(--focus-ring);
-}
-
-.ss-search__input::-webkit-search-cancel-button {
-  display: none;
-}
-
-.ss-filter-btn {
-  flex: 0 0 auto;
-  max-width: 88px;
-  height: 26px;
-  padding: 0 7px;
-  appearance: none;
-  border: 1px solid var(--rule-soft);
-  border-radius: var(--radius-control, 7px);
-  background: transparent;
-  color: var(--ink-dim);
-  font-family: var(--font-sans);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: default;
-}
-
-.ss-filter-btn:hover {
-  background: var(--hover);
-  color: var(--ink);
-}
-
-.ss-filter-btn.is-active {
-  color: var(--accent-text);
-  border-color: color-mix(in oklab, var(--accent) 40%, var(--rule-soft));
-}
-
-.ss-filter-btn:focus-visible,
-.ss-refresh:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
-.ss-refresh {
-  --spark-icon-btn-size: 24px;
-  flex: 0 0 auto;
-  color: var(--ink-dim);
-}
+/* Agent session search: the session picker and its transcript dialog, on the
+   shared glass dialog surface. */
 
 .ss-spin {
   animation: ss-spin 1.1s linear infinite;
@@ -106,156 +17,9 @@
   }
 }
 
-.ss-scopes .spark-segmented-item {
-  flex: 1 1 0;
-  min-width: 0;
-}
-
-.ss-scopes .spark-segmented-item:disabled {
-  opacity: 0.45;
-}
-
-.ss-status {
-  min-height: 15px;
-  padding: 0 2px;
-  color: var(--muted);
-  font-size: 10.5px;
-  line-height: 15px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.ss-status[data-session-search-phase="error"] {
-  color: var(--danger);
-}
-
-.ss-list {
-  flex: 1 1 0;
-  min-height: 0;
-  overflow: auto;
-  padding: 2px 8px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.ss-row-wrap {
-  position: relative;
-}
-
-.ss-row {
-  appearance: none;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  width: 100%;
-  padding: 6px 8px;
-  border: 0;
-  border-radius: var(--radius-control, 7px);
-  background: transparent;
-  color: var(--ink-dim);
-  font-family: var(--font-sans);
-  text-align: left;
-  cursor: default;
-}
-
-.ss-row:hover {
-  background: var(--hover);
-}
-
-.ss-row:focus-visible {
-  outline: none;
-  background: var(--hover-strong, var(--hover));
-  box-shadow: var(--focus-ring);
-}
-
-.ss-row__head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  /* Room for the row's menu button. */
-  padding-right: 16px;
-}
-
 .ss-mark-icon {
   flex: 0 0 auto;
   display: inline-flex;
-}
-
-.ss-row__title {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--ink);
-  font-size: 12px;
-  font-weight: 550;
-}
-
-.ss-row__snippet {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-  color: var(--ink-dim);
-  font-size: 11.5px;
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
-
-.ss-row__who {
-  color: var(--muted);
-}
-
-.ss-row__meta {
-  color: var(--muted);
-  font-size: 10.5px;
-  font-variant-numeric: tabular-nums;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ss-row.is-gone .ss-row__title {
-  color: var(--ink-dim);
-}
-
-.ss-row__more {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 20px;
-  height: 20px;
-  appearance: none;
-  border: 0;
-  border-radius: var(--radius-control, 7px);
-  background: transparent;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 20px;
-  text-align: center;
-  opacity: 0;
-  cursor: default;
-}
-
-.ss-row-wrap:hover .ss-row__more,
-.ss-row__more:focus-visible,
-.ss-row__more[aria-expanded="true"] {
-  opacity: 1;
-}
-
-.ss-row__more:hover {
-  background: var(--hover-strong, var(--hover));
-  color: var(--ink);
-}
-
-.ss-row__more:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
 }
 
 .ss-hl {
@@ -613,7 +377,14 @@
 .sp-agents {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 2px;
+}
+
+.sp-refresh {
+  --spark-icon-btn-size: 24px;
+  margin-left: auto;
+  color: var(--ink-dim);
 }
 
 .sp-agent {
@@ -645,6 +416,75 @@
 .sp-agent:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
+}
+
+.sp-new {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 6px 2px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: default;
+}
+
+.sp-new:hover {
+  background: var(--hover);
+}
+
+.sp-new.is-selected {
+  background: var(--hover-strong);
+  box-shadow: inset 0 0 0 1px var(--rule-soft);
+}
+
+.sp-new__title {
+  font-weight: 600;
+}
+
+.sp-new__where {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--glass-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-new-detail {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 0;
+  padding: 18px;
+  color: var(--glass-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.sp-new-detail h2 {
+  margin: 4px 0 0;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.sp-new-detail p {
+  margin: 0;
+}
+
+.sp-detail--new .sp-actions {
+  justify-content: flex-end;
 }
 
 .sp-list {
