@@ -37,11 +37,22 @@ async function main() {
   // The root is a shell (the helper refuses this process as a root on
   // purpose). It runs two sleeps in sequence; the second starts after the
   // anchor, so only that one counts as launched work.
-  const root = spawn("sh", ["-c", "sleep 1.5; sleep 4; exit 0"], { stdio: "ignore" });
+  // lstart has one-second resolution, and on a VM its stamp (boot time plus
+  // jiffies) can sit a second off the wall clock, so the second sleep starts
+  // well over a second after the anchor.
+  const root = spawn("sh", ["-c", "sleep 2.5; sleep 4; exit 0"], { stdio: "ignore" });
   await sleep(300);
   const anchor = Date.now();
-  await sleep(2500); // lstart has one-second resolution; the second sleep is up by now
+  await sleep(3500); // the second sleep is up by now
   const found = mod.descendantsStartedAfter(root.pid, anchor);
+  if (!(Array.isArray(found) && found.length === 1)) {
+    const all = mod.captureOwnedProcessTree(root.pid);
+    console.error(
+      `anchor ${new Date(anchor).toISOString()}; found ${JSON.stringify(found)}; tree ${JSON.stringify(
+        all?.members.map((m) => ({ ...m, startedMs: mod.processStartMs(m.startedAt) })),
+      )}`,
+    );
+  }
   check("descendants started after the anchor are listed", Array.isArray(found) && found.length === 1);
   check("the root itself is never listed", found.every((m) => m.pid !== root.pid));
   const laterAnchor = mod.descendantsStartedAfter(root.pid, Date.now() + 60_000);
