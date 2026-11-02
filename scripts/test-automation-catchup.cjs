@@ -459,14 +459,45 @@ async function integrationChecks({ sched, loop }, workspace) {
   await sched.setEnabled(otherPrompt.id, false);
   pass("a pull request run is told what fired it, and other runs are untouched");
 
-  // ── an interval longer than a timer can hold must not fire at once ───────
+  // ── an interval longer than a timer can hold still fires when it says ───
   {
+    const realSetInterval = globalThis.setInterval;
+    const timers = [];
+    globalThis.setInterval = (fn, ms) => {
+      timers.push({ fn, ms });
+      return realSetInterval(() => {}, 1 << 30);
+    };
+    const year = 365 * 24 * 60 * 60 * 1000;
     const before = globalThis.__CU.launches.length;
-    const slow = await sched.createJob({ name: "slow", trigger: { kind: "interval", everyMs: 2_592_000_000 }, input, prompt: { template: "go" } });
-    await sleep(60);
-    assert.strictEqual(globalThis.__CU.launches.length, before, "a 30-day interval waits");
+    const slow = await sched.createJob({ name: "slow", trigger: { kind: "interval", everyMs: year }, input, prompt: { template: "go" } });
+    const usual = await sched.createJob({ name: "usual", trigger: { kind: "interval", everyMs: 900_000 }, input, prompt: { template: "go" } });
+    globalThis.setInterval = realSetInterval;
+    const [slowTimer, usualTimer] = timers;
+    assert.strictEqual(usualTimer.ms, 900_000, "a usual interval is one plain timer, as before");
+    assert.ok(slowTimer.ms <= 2_147_483_647, "every tick fits a timer");
+    const ticks = Math.round(year / slowTimer.ms);
+    assert.ok(Math.abs(ticks * slowTimer.ms - year) < 1000, "the ticks add up to the interval, not a shorter one");
+    // The clock moves with the ticks: a firing that stands for no elapsed time is
+    // ignored as settled, which would hide a timer that fired too soon.
+    const realNow = Date.now;
+    let elapsed = 0;
+    Date.now = () => realNow() + elapsed;
+    for (let i = 1; i < ticks; i += 1) {
+      elapsed += slowTimer.ms;
+      slowTimer.fn();
+      await sleep(5);
+    }
+    assert.strictEqual(globalThis.__CU.launches.length, before, "nothing before the last tick");
+    elapsed += slowTimer.ms;
+    slowTimer.fn();
+    await sleep(30);
+    Date.now = realNow;
+    assert.strictEqual(globalThis.__CU.launches.length, before + 1, "and it fires on the last");
+    const started = await get(slow.id);
+    if (started.state.currentRunId) globalThis.__CU.runs[started.state.currentRunId].status = "complete";
     await sched.setEnabled(slow.id, false);
-    pass("an interval longer than a timer can hold does not fire at once");
+    await sched.setEnabled(usual.id, false);
+    pass("an interval longer than a timer can hold fires when it says, and not before");
   }
 
   // ── spending limits: a month's tally, the cap, and the pause ──────────────
@@ -511,7 +542,9 @@ async function integrationChecks({ sched, loop }, workspace) {
     assert.strictEqual(notices(capped.id).length, 1);
     assert.match(notices(capped.id)[0].title, /monthly cap/);
 
-    // Any later fire is refused, spends nothing, and says so once.
+    // Any later fire is refused, spends nothing, and says so once. A pass in the same
+    // millisecond as a skip counts as after it and splits the row, so the clock moves on.
+    await sleep(2);
     await loop.startIteration(capped.id, { source: "trigger" });
     await loop.startIteration(capped.id, { source: "trigger" });
     job = await get(capped.id);
