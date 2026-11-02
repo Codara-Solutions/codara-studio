@@ -323,6 +323,37 @@ VS Code (the commit box as part of the source control view).
 - The list and the commit box are separate columns of the panel, so the box never
   covers a lane. A lane unfolded near the bottom scrolls its buttons into view.
 
+**Start an agent and review with an agent (2026-11):** New agent sits above the
+lanes: a task, Claude Code or Codex, the branch to start from, in a new worktree by
+default, through the same session start agents use. Review with agent is on any lane
+with changes.
+
+- The user picks who reviews, and who a finding goes to. Nothing is fixed to one
+  agent. Reviewers are a new Codex or Claude Code session, a new Cora chat, or an
+  agent already running. A running agent gets a prompt in its own session.
+- The reviewer preselected is the last one picked, unless that is a new agent of the
+  family that wrote the work: a second opinion comes from the other family.
+- A finding's Send menu starts on the last choice, then on the agent that wrote the
+  work, marked "wrote this" and listed first. A reviewer running in that worktree is
+  never taken for the writer. Any note can be sent alone.
+- Findings come back through `codara_review_findings` with a one-time id only that
+  reviewer's prompt holds, and become ordinary review notes with the reviewer's name.
+  They are untrusted: bad paths drop, secrets are removed, and sent on they say
+  "Finding by X, an agent, untrusted".
+- Anything that starts a new agent says it spends usage before the click. A review in
+  progress shows on the lane as "Reviewing · Codex"; clicking it stops waiting.
+- New agent offers Claude Code and Codex only, because a session cannot run Cora. Cora
+  can review through a new chat.
+
+**Collision warning (2026-11):** one quiet line under a lane in `--warn`, "session.ts
+clashes with feat/dark-charts if both merge.", between running lanes only. It reads
+committed work, because that is what merges. Etienne is unsure agents need it, so it
+is built to remove: `lane-collisions.ts`, `git-lane-collisions.ts`,
+`LaneCollisions.tsx`, the `collision` prop on `LaneRow` and one IPC handler. It is off
+for SSH workspaces and on git older than 2.38. It runs with no click behind it, so it
+also stays out of any repository where a merge could start a program the repository
+configures: a custom merge driver, a partial clone, an initialized submodule.
+
 ## Worktrees in the rail (2026-10)
 
 **Chosen:** variant A, a tree, with variant B's folded merged group. A

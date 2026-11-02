@@ -2261,6 +2261,13 @@ export function registerIpc(): void {
     return readLaneChanges(wanted, reviewBaseDeps);
   });
 
+  handle("git:laneCollisions", async (_e, cwds: unknown) => {
+    if (!Array.isArray(cwds)) return {};
+    const wanted = cwds.filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0 && cwd.length <= 16_384);
+    const { readLaneCollisions } = await import("./git-lane-collisions");
+    return readLaneCollisions(wanted);
+  });
+
   handle("github:status", async (_e, request: unknown): Promise<GitHubWorkspaceStatus> => {
     const candidate =
       request && typeof request === "object" && !Array.isArray(request)

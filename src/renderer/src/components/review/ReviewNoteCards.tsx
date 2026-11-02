@@ -164,7 +164,10 @@ export const NoteCard = React.memo(function NoteCard({
       data-note-id={note.id}
     >
       <div className="rv-note__meta">
-        <span className="rv-note__where">{shortLocation(note)}</span>
+        <span className="rv-note__where">
+          {shortLocation(note)}
+          {note.reviewer ? ` · ${note.reviewer}` : ""}
+        </span>
         {outdated ? <span title="The lines this note is on are not in the diff any more.">Lines changed since</span> : null}
         {!editing ? (
           <span className="rv-note__actions">

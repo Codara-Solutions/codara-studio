@@ -130,6 +130,7 @@ export function useSourceLanes(
           : (branchByWorkspaceId?.[item.id] ?? item.copyBranch?.branch ?? state?.branch ?? null),
         own: isOwn,
         agents: item.id === project.id ? family.own : (agentsOf.get(item.id) ?? []),
+        creator: item.copyBranch?.createdBy?.kind === "agent" ? (item.copyBranch.createdBy.client ?? null) : null,
         pullRequest: pullRequestOf(item.id),
         merged: item.id !== project.id && isMerged(state),
         missing: state?.missing === true,

@@ -15,6 +15,9 @@ import { Chevron, MergedFold, WorktreeAgentLine } from "../../rail/WorkspaceChil
 import FixWithAgentButton from "../fix/FixWithAgentButton";
 import { MergePullRequestDialog } from "../GitHubSection";
 import { splitPath, statusColor, statusGlyph, statusLabel } from "../git-ui";
+import { useLaneCollisions } from "./LaneCollisions";
+import LaneReviewButton from "./LaneReviewButton";
+import NewAgentDialog from "./NewAgentDialog";
 import "./lanes.css";
 
 // The Source Control panel's list (DESIGN.md, "Source Control"): one lane per
@@ -32,6 +35,8 @@ export interface LaneActions {
   externalWorktrees?: readonly WorktreeRailExternal[];
   /** A lane's merge changed what the panel shows. */
   onChanged: () => void;
+  /** New agent in the panel's project; absent where a session cannot start, such as SSH. */
+  newAgent?: { workspaceId: string; cwd: string };
 }
 
 function openLane(lane: SourceLane, actions: LaneActions): void {
@@ -144,6 +149,7 @@ function LaneDetail({
             Review
           </button>
         )}
+        {total > 0 && <LaneReviewButton lane={lane} />}
       </div>
     </div>
   );
@@ -155,6 +161,7 @@ function LaneRow({
   foldKey,
   defaultOpen,
   faded = false,
+  collision,
   children,
 }: {
   lane: SourceLane;
@@ -162,6 +169,7 @@ function LaneRow({
   foldKey: string;
   defaultOpen: boolean;
   faded?: boolean;
+  collision?: string;
   children: React.ReactNode;
 }): React.ReactElement {
   const open = useRailFold(foldKey, defaultOpen);
@@ -206,6 +214,7 @@ function LaneRow({
           <LaneStat lane={lane} />
         </span>
       </button>
+      {collision ? <div className="lane-collision" data-testid="source-lane-collision">{collision}</div> : null}
       {open && children}
     </div>
   );
@@ -261,6 +270,8 @@ export default function SourceLanesList({
   } | null>(null);
   const [mergeResult, setMergeResult] = useState<GitHubMergeResult | null>(null);
   const mergedOpen = useRailFold(`lanes-merged:${projectKey}`, false);
+  const [newAgentOpen, setNewAgentOpen] = useState(false);
+  const collisions = useLaneCollisions(lanes);
 
   const startMerge = (lane: SourceLane) => {
     void prepareMerge(lane).then((ready) => {
@@ -289,13 +300,31 @@ export default function SourceLanesList({
 
   return (
     <div className="lane-list" data-testid="source-lanes">
+      {actions.newAgent && (
+        <div className="lane-new">
+          <button
+            type="button"
+            className="lane-action is-primary"
+            data-testid="source-new-agent"
+            title="Start an agent on a task, in its own worktree. Spends that agent's usage."
+            onClick={() => setNewAgentOpen(true)}
+          >
+            New agent
+          </button>
+        </div>
+      )}
       {lanes.others.map((lane) => (
-        <LaneRow key={lane.id} lane={lane} entry={entryOf(lane)} foldKey={`lane:${lane.id}`} defaultOpen={false}>
+        <LaneRow key={lane.id} lane={lane} entry={entryOf(lane)} foldKey={`lane:${lane.id}`} defaultOpen={false} collision={collisions[lane.path]}>
           <LaneDetail lane={lane} actions={actions} onMerge={startMerge} />
         </LaneRow>
       ))}
       {lanes.own && (
-        <LaneRow lane={lanes.own} entry={entryOf(lanes.own)} foldKey={`lane-own:${projectKey}`} defaultOpen>
+        <LaneRow lane={lanes.own} entry={entryOf(lanes.own)} foldKey={`lane-own:${projectKey}`} defaultOpen collision={collisions[lanes.own.path]}>
+          {(lanes.own.changes?.fileCount ?? 0) > 0 && lanes.own.workspaceId ? (
+            <div className="lane-own-actions">
+              <LaneReviewButton lane={lanes.own} />
+            </div>
+          ) : null}
           {ownDetail}
         </LaneRow>
       )}
@@ -316,6 +345,14 @@ export default function SourceLanesList({
           />
         </div>
       )}
+      {newAgentOpen && actions.newAgent ? (
+        <NewAgentDialog
+          workspaceId={actions.newAgent.workspaceId}
+          cwd={actions.newAgent.cwd}
+          defaultBase={lanes.own?.changes?.base ?? null}
+          onClose={() => setNewAgentOpen(false)}
+        />
+      ) : null}
       {merge && (
         <MergePullRequestDialog
           cwd={merge.cwd}
