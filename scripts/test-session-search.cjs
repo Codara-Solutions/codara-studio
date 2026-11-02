@@ -36,11 +36,12 @@ async function load(work) {
     stdin: {
       contents: [
         'export * from "./src/main/session-search/session-index";',
+        'export * from "./src/main/session-search/session-labels";',
         'export * from "./src/main/session-search/transcript-parsers";',
         'export * from "./src/main/session-search/jsonl-reader";',
         'export * from "./src/shared/session-search";',
         'export * from "./src/renderer/src/workers/session-resume";',
-        'export { buildAgentResumeCommand } from "./src/renderer/src/workers/launch-commands";',
+        'export { buildAgentForkCommand, buildAgentResumeCommand, runtimeFromAgentSessionLaunchCommand } from "./src/renderer/src/workers/launch-commands";',
       ].join("\n"),
       resolveDir: ROOT,
       loader: "ts",
@@ -115,6 +116,7 @@ async function main() {
     await resumeTests(m);
     await indexTests(m, work);
     await cutShortPassTest(m, work);
+    await pickerTests(m, work);
     console.log(`\n${passed} session search checks passed`);
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
@@ -627,6 +629,218 @@ async function cutShortPassTest(m, work) {
     assert.equal(hits.length, 1);
     assert.equal(hits[0].messageCount, 1000);
     index.close();
+  });
+}
+
+async function pickerTests(m, work) {
+  const search = (index, query, extra = {}) =>
+    index.search({ query, agents: ["claude"], scopeKeys: null, limit: 20, offset: 0, now: Date.now(), snippetTokens: 12, ...extra });
+
+  const root = path.join(work, "picker", "projects");
+  const named = uuid();
+  const older = uuid();
+  const detached = uuid();
+  const openIndex = () => m.SessionIndex.open(path.join(work, "picker-index", "sessions.sqlite"), "linux");
+  write(
+    path.join(root, "-work-birds", `${named}.jsonl`),
+    jsonl([
+      claudeUser("Count the osprey nests near the lake", "/work/birds", 1, { gitBranch: "feat/nests" }),
+      claudeAssistant("There are twelve kingfisher burrows and one egret", 2),
+      claudeUser("Mention the egret again", "/work/birds", 3, { gitBranch: "feat/nests" }),
+      claudeAssistant("The egret is still there", 4),
+      { type: "ai-title", aiTitle: "Wetland census" },
+    ]),
+  );
+  write(
+    path.join(root, "-work-birds", `${older}.jsonl`),
+    jsonl([claudeUser("An older talk about gulls", "/work/birds", 0), claudeAssistant("Noted", 0)]),
+  );
+  write(
+    path.join(root, "-work-birds", `${detached}.jsonl`),
+    jsonl([claudeUser("Detached checkout", "/work/birds", 5, { gitBranch: "HEAD" }), claudeAssistant("Fine", 6)]),
+  );
+  const index = await openIndex();
+  await index.sync([{ agent: "claude", dir: root }], new Set(["claude"]), noPause);
+  const namedKey = `claude:${named}`;
+  const olderKey = `claude:${older}`;
+
+  await check("a search says which part of a session matched", () => {
+    const only = (query) => search(index, query).hits.find((hit) => hit.key === namedKey);
+    assert.deepEqual(only("osprey").matches.map((match) => match.kind), ["user"]);
+    assert.deepEqual(only("kingfisher").matches.map((match) => match.kind), ["assistant"]);
+    assert.deepEqual(only("egret").matches.map((match) => match.kind), ["user", "assistant"]);
+    assert.deepEqual(only("wetland").matches.map((match) => match.kind), ["name"]);
+    assert.equal(only("wetland").snippet, null, "no message matched, so the row has no excerpt");
+    assert.equal(only("osprey").snippetRole, "user");
+    const marked = only("kingfisher").matches[0].snippet;
+    assert.ok(marked.includes(`${m.SNIPPET_MARK_START}kingfisher${m.SNIPPET_MARK_END}`), "the snippet marks the word");
+  });
+
+  await check("a name is searchable, shows as the title, and the original still finds it", () => {
+    index.applyLabels({ [namedKey]: { name: "Lake survey" } });
+    const byName = search(index, "survey").hits;
+    assert.equal(byName.length, 1);
+    assert.equal(byName[0].title, "Lake survey");
+    assert.equal(byName[0].originalTitle, "Wetland census");
+    assert.deepEqual(byName[0].matches.map((match) => match.kind), ["name"]);
+    assert.equal(search(index, "wetland").hits[0].title, "Lake survey", "the session's own title still finds it");
+    assert.equal(index.transcript(namedKey, 10).title, "Lake survey");
+    assert.equal(search(index, "").hits.find((hit) => hit.key === namedKey).messageCount, 4, "a name is not a message");
+  });
+
+  await check("a new pass keeps the name, and clearing it brings the title back", async () => {
+    const file = path.join(root, "-work-birds", `${named}.jsonl`);
+    fs.appendFileSync(file, jsonl([claudeUser("One more grebe", "/work/birds", 7)]));
+    await index.sync([{ agent: "claude", dir: root }], new Set(["claude"]), noPause);
+    index.applyLabels({ [namedKey]: { name: "Lake survey" } });
+    assert.equal(search(index, "grebe").hits[0].title, "Lake survey");
+    assert.equal(search(index, "survey").hits.length, 1, "the name is one row, however often it is applied");
+    index.applyLabels({});
+    assert.equal(search(index, "survey").hits.length, 0);
+    assert.equal(search(index, "grebe").hits[0].title, "Wetland census");
+    assert.equal(search(index, "grebe").hits[0].originalTitle, null);
+  });
+
+  await check("pinned sessions lead only when asked, and only an empty box", () => {
+    index.applyLabels({ [olderKey]: { pinned: true } });
+    const recent = search(index, "").hits;
+    assert.notEqual(recent[0].key, olderKey);
+    const pinned = search(index, "", { pinnedFirst: true }).hits;
+    assert.equal(pinned[0].key, olderKey);
+    assert.equal(pinned[0].pinned, true);
+    assert.equal(pinned[1].pinned, false);
+    index.applyLabels({});
+    assert.equal(search(index, "").hits.find((hit) => hit.key === olderKey).pinned, false);
+  });
+
+  await check("the preview is the end of the conversation, oldest first and clipped", () => {
+    const preview = index.preview(namedKey, 2, 8);
+    assert.equal(preview.total, 5);
+    assert.equal(preview.messages.length, 2);
+    assert.equal(preview.messages[0].text, "The egre…");
+    assert.equal(preview.messages[0].role, "assistant");
+    assert.equal(preview.messages[1].text, "One more…");
+    assert.equal(preview.messages[1].role, "user");
+    assert.equal(index.preview("claude:not-there", 2, 8), null);
+    assert.equal(index.preview("nonsense", 2, 8), null);
+  });
+
+  await check("the branch comes from the transcript, and a detached checkout names none", () => {
+    const hits = search(index, "").hits;
+    assert.equal(hits.find((hit) => hit.key === namedKey).branch, "feat/nests");
+    assert.equal(hits.find((hit) => hit.key === `claude:${detached}`).branch, null);
+    const state = m.initialTranscriptState();
+    m.parseCodexLine(
+      JSON.stringify({ type: "session_meta", payload: { id: uuid(), cwd: "/work", git: { branch: "main" } } }),
+      state,
+      () => undefined,
+    );
+    assert.equal(state.branch, "main");
+    assert.equal(m.restoreTranscriptState(JSON.stringify(state)).branch, "main");
+  });
+  index.close();
+
+  await check("day headings and length follow the local calendar", () => {
+    const now = new Date(2026, 5, 17, 15, 0).getTime();
+    assert.equal(m.sessionDayGroup(new Date(2026, 5, 17, 0, 1).getTime(), now), "Today");
+    assert.equal(m.sessionDayGroup(new Date(2026, 5, 16, 23, 59).getTime(), now), "Yesterday");
+    assert.equal(m.sessionDayGroup(new Date(2026, 5, 11, 0, 1).getTime(), now), "This week");
+    assert.equal(m.sessionDayGroup(new Date(2026, 5, 10, 23, 59).getTime(), now), "Older");
+    assert.equal(m.sessionDayGroup(null, now), "Older");
+    assert.equal(m.sessionLengthLabel(0, 72 * 60_000), "1h 12m");
+    assert.equal(m.sessionLengthLabel(0, 10_000), "under 1m");
+    assert.equal(m.sessionLengthLabel(0, 49 * 3_600_000), "2d 1h");
+    assert.equal(m.sessionLengthLabel(null, 10), "");
+    assert.equal(m.sessionLengthLabel(10, 5), "");
+  });
+
+  await check("a name is one clean line of bounded length", () => {
+    assert.equal(m.cleanSessionName("  two\n\tlines  "), "two lines");
+    assert.equal(m.cleanSessionName("   "), null);
+    assert.equal(m.cleanSessionName(42), null);
+    assert.equal([...m.cleanSessionName("é".repeat(500))].length, m.SESSION_NAME_MAX);
+  });
+
+  await check("names and pins live in their own file, and survive a new store", async () => {
+    const file = path.join(work, "labels", "session-labels.json");
+    const store = new m.SessionLabelStore(file);
+    const id = uuid();
+    const key = `codex:${id}`;
+    await Promise.all([
+      store.update(key, { name: "  First   name " }),
+      store.update(key, { pinned: true }),
+      store.update(`claude:${uuid()}`, { name: "Other" }),
+    ]);
+    if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    const reopened = new m.SessionLabelStore(file);
+    await reopened.load();
+    assert.deepEqual(reopened.snapshot()[key], { name: "First name", pinned: true });
+    assert.equal(reopened.nameOf(key), "First name");
+    await reopened.update(key, { name: null });
+    assert.deepEqual(reopened.snapshot()[key], { pinned: true });
+    await reopened.update(key, { pinned: false });
+    assert.equal(reopened.snapshot()[key], undefined, "an empty label leaves nothing behind");
+    await assert.rejects(reopened.update("claude:../../etc", { name: "x" }), /Not a session/);
+    await assert.rejects(reopened.update("rm:abc", { name: "x" }), /Not a session/);
+  });
+
+  await check("a corrupt labels file is set aside, not overwritten", async () => {
+    const file = path.join(work, "labels-bad", "session-labels.json");
+    write(file, "{ not json");
+    const store = new m.SessionLabelStore(file);
+    await store.load();
+    assert.deepEqual(store.snapshot(), {});
+    assert.equal(fs.readFileSync(`${file}.corrupt`, "utf8"), "{ not json");
+    await store.update(`claude:${uuid()}`, { name: "Fresh" });
+    assert.equal(Object.keys(JSON.parse(fs.readFileSync(file, "utf8"))).length, 1);
+  });
+
+  await check("a labels file that cannot be read is never overwritten", async () => {
+    const file = path.join(work, "labels-unreadable", "session-labels.json");
+    // A folder in its place fails to read with something other than "not found".
+    fs.mkdirSync(file, { recursive: true });
+    const store = new m.SessionLabelStore(file);
+    await assert.rejects(store.load());
+    await assert.rejects(store.update(`claude:${uuid()}`, { name: "Lost" }));
+    assert.ok(fs.statSync(file).isDirectory(), "nothing was written over it");
+    fs.rmdirSync(file);
+    write(file, JSON.stringify({ [`claude:${uuid()}`]: { name: "Kept" } }));
+    await store.update(`claude:${uuid()}`, { name: "Added" });
+    assert.equal(Object.keys(store.snapshot()).length, 2, "the next try reads the file and keeps what it holds");
+  });
+
+  await check("a fork keeps the source's history under a new id", () => {
+    const id = uuid();
+    const claude = m.sessionForkLaunch({ runtime: "claude", cwd: "/w", sessionId: id }, "now");
+    assert.match(claude.command, new RegExp(`^claude .*--resume ${id} --fork-session --session-id [0-9a-f-]{36}$`));
+    assert.notEqual(claude.pointer.sessionId, id);
+    assert.ok(claude.command.endsWith(claude.pointer.sessionId));
+    const grok = m.sessionForkLaunch({ runtime: "grok", cwd: "/w", sessionId: id }, "now");
+    assert.match(grok.command, new RegExp(`^grok .*--resume ${id} --fork-session --session-id `));
+    const codex = m.sessionForkLaunch({ runtime: "codex", cwd: "/w", sessionId: id }, "now");
+    assert.equal(codex.command, `codex fork ${id} --yolo`);
+    assert.equal(codex.pointer, null, "Codex mints the id; discovery finds it");
+    assert.equal(m.runtimeFromAgentSessionLaunchCommand(codex.command), "codex");
+    assert.equal(m.sessionForkLaunch({ runtime: "pi", cwd: "/w", sessionId: id }, "now"), null);
+    assert.equal(m.sessionForkLaunch({ runtime: "claude", cwd: "/w", sessionId: "x; rm -rf /" }, "now"), null);
+  });
+
+  await check("a session running in a pane is found, asleep included, and a finished one is not", () => {
+    const id = uuid();
+    const leaf = (extra) => ({
+      kind: "leaf",
+      paneId: "p1",
+      agentSession: { runtime: "claude", sessionId: id, cwd: "/w", capturedAt: "now", active: false },
+      ...extra,
+    });
+    const layout = (root) => [{ workspaceId: "w1", tabs: [{ id: "t1", kind: "terminal", root }] }];
+    const find = (root) => m.findOpenSessionPane(layout(root), "claude", id);
+    assert.equal(find(leaf({})), null, "a pointer alone is a finished session");
+    assert.deepEqual(find(leaf({ hibernation: { at: 1 } })), { workspaceId: "w1", tabId: "t1", paneId: "p1" });
+    assert.ok(find(leaf({ worker: { state: "running", agentRunning: true } })));
+    assert.equal(find(leaf({ worker: { state: "done" } })), null);
+    assert.ok(find({ kind: "split", a: leaf({ paneId: "p0", agentSession: null }), b: leaf({ hibernation: { at: 1 } }) }));
+    assert.equal(m.findOpenSessionPane(layout(leaf({ hibernation: { at: 1 } })), "codex", id), null);
   });
 }
 

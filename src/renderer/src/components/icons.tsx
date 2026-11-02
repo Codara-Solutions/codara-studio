@@ -370,6 +370,42 @@ export function TabIdIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+export function PencilIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M9.6 2.2l2.2 2.2-7.3 7.3-2.9.7.7-2.9 7.3-7.3z" />
+    </svg>
+  );
+}
+
+export function PinIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M5 1.8h4M5.6 1.8v3.7L3.8 7.8h6.4L8.4 5.5V1.8M7 7.8v4.4" />
+    </svg>
+  );
+}
+
 export function HistoryIcon({ size = 14 }: { size?: number }) {
   // A clock face with a counter-clockwise arrow — the universal "history"
   // glyph. Used on the Codara chat header's Chats button to open the

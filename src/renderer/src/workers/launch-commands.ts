@@ -26,6 +26,10 @@ export interface AgentSessionResumeRequest {
   transcriptPath?: string;
   nativeCodexProfileId?: string;
   nativeGrokProfileId?: string;
+  /** Start a new session from this one's history instead of continuing it. */
+  fork?: boolean;
+  /** The tab's name, when the session has one the person gave it. */
+  title?: string;
 }
 
 // Fresh Claude launch with a Codara-minted session id. Forcing `--session-id`
@@ -52,7 +56,7 @@ export function runtimeFromAgentSessionLaunchCommand(
   const cmd = command?.trim();
   if (!cmd) return null;
   if (cmd.startsWith(CLAUDE_LAUNCH_COMMAND)) return "claude";
-  if (cmd.startsWith(CODEX_LAUNCH_COMMAND) || cmd.startsWith("codex resume ")) return "codex";
+  if (cmd.startsWith(CODEX_LAUNCH_COMMAND) || cmd.startsWith("codex resume ") || cmd.startsWith("codex fork ")) return "codex";
   if (cmd.startsWith(GROK_LAUNCH_COMMAND) || cmd.startsWith("grok --resume ") || cmd.startsWith("grok -r ")) {
     return "grok";
   }
@@ -91,6 +95,21 @@ export function buildGrokResumeCommand(sessionId: string): string {
 // the pane (pi-session-tracker.ts); nothing is forced at launch.
 export function buildPiResumeCommand(sessionId: string): string {
   return `${PI_LAUNCH_COMMAND} --session ${sessionId}`;
+}
+
+// Forks keep the source transcript as it is. Claude and Grok take the new id
+// up front; Codex mints its own, which disk discovery finds as for a fresh
+// launch. Null for Pi, whose fork is not verified.
+export function buildAgentForkCommand(
+  runtime: AgentSessionRuntime,
+  sessionId: string,
+): { command: string; sessionId: string | null } | null {
+  if (runtime === "claude" || runtime === "grok") {
+    const forkId = crypto.randomUUID();
+    const launch = runtime === "claude" ? CLAUDE_LAUNCH_COMMAND : GROK_LAUNCH_COMMAND;
+    return { command: `${launch} --resume ${sessionId} --fork-session --session-id ${forkId}`, sessionId: forkId };
+  }
+  return runtime === "codex" ? { command: `codex fork ${sessionId} --yolo`, sessionId: null } : null;
 }
 
 export function buildAgentResumeCommand(session: {

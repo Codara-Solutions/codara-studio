@@ -5,11 +5,9 @@ import {
   normalizeSessionSearchPreferences,
   relativeAge,
   sessionQueryTerms,
-  sessionSearchProgressLine,
   type SessionSearchAgent,
   type SessionSearchHit,
   type SessionSearchScope,
-  type SessionSearchStatus,
 } from "@shared/session-search";
 import { usePreferences } from "../../preferences/usePreferences";
 import AnchoredMenu from "../chat/composer/AnchoredMenu";
@@ -19,7 +17,15 @@ import SessionAgentMark from "./SessionAgentMark";
 import { SnippetText, TermsText } from "./SessionHighlight";
 import SessionTranscriptDialog from "./SessionTranscriptDialog";
 import { copySessionId, revealSessionTranscript } from "./session-actions";
-import { useSessionSearchHost, useSessionSearchRequest } from "./sessionSearchStore";
+import {
+  SESSION_SCOPES,
+  folderName,
+  readSessionScope,
+  rememberSessionChoice,
+  SESSION_SCOPE_KEY,
+  sessionStatusLine,
+} from "./session-list-shared";
+import { useSessionLabelsRevision, useSessionSearchHost, useSessionSearchRequest } from "./sessionSearchStore";
 import { publishSessionSearchStatus, useSessionSearchStatus } from "./useSessionSearchStatus";
 import "./session-search.css";
 
@@ -32,23 +38,7 @@ const PAGE = 40;
 const DEBOUNCE_MS = 120;
 /** While a pass runs, results refresh this often so new sessions appear. */
 const LIVE_REFRESH_MS = 3_000;
-const SCOPE_KEY = "codara.sessions.scope";
 const AGENTS_KEY = "codara.sessions.agents";
-
-const SCOPES: { id: SessionSearchScope; label: string; hint: string }[] = [
-  { id: "workspace", label: "Workspace", hint: "Sessions in this workspace's folder" },
-  { id: "project", label: "Project", hint: "Sessions in every worktree of this repository" },
-  { id: "all", label: "All", hint: "Every session on this computer" },
-];
-
-function readScope(): SessionSearchScope {
-  try {
-    const value = window.localStorage.getItem(SCOPE_KEY);
-    return value === "workspace" || value === "all" ? value : "project";
-  } catch {
-    return "project";
-  }
-}
 
 function readAgentFilter(): SessionSearchAgent[] {
   try {
@@ -59,42 +49,19 @@ function readAgentFilter(): SessionSearchAgent[] {
   }
 }
 
-function remember(key: string, value: string): void {
-  try {
-    window.localStorage.setItem(key, value);
-  } catch {
-    /* remembering the choice is best-effort */
-  }
-}
-
-function folderName(cwd: string | null): string {
-  if (!cwd) return "";
-  const parts = cwd.replace(/[\\/]+$/, "").split(/[\\/]/);
-  return parts[parts.length - 1] || cwd;
-}
-
-function statusLine(status: SessionSearchStatus): string {
-  if (status.phase === "paused") {
-    return status.pausedReason === "battery"
-      ? "Indexing waits while this computer is on battery"
-      : "Indexing waits while this computer is busy";
-  }
-  if (status.phase === "error") return status.error ?? "The session index stopped";
-  return sessionSearchProgressLine(status);
-}
-
 /** Requests the view applied, so a remount never replays an old one. */
 let appliedRequestNonce = 0;
 
 export default function SessionSearchList() {
   const host = useSessionSearchHost();
   const request = useSessionSearchRequest();
+  const labelsRevision = useSessionLabelsRevision();
   const { status, loaded } = useSessionSearchStatus();
   const { preferences, setPreference } = usePreferences();
   const prefs = normalizeSessionSearchPreferences(preferences.sessionSearch);
 
   const [query, setQuery] = useState("");
-  const [scope, setScopeState] = useState<SessionSearchScope>(readScope);
+  const [scope, setScopeState] = useState<SessionSearchScope>(readSessionScope);
   const [agentFilter, setAgentFilterState] = useState<SessionSearchAgent[]>(readAgentFilter);
   const [hits, setHits] = useState<SessionSearchHit[]>([]);
   const [hasMore, setHasMore] = useState(false);
@@ -128,11 +95,11 @@ export default function SessionSearchList() {
 
   const setScope = (next: SessionSearchScope) => {
     setScopeState(next);
-    remember(SCOPE_KEY, next);
+    rememberSessionChoice(SESSION_SCOPE_KEY, next);
   };
   const setAgentFilter = (next: SessionSearchAgent[]) => {
     setAgentFilterState(next);
-    remember(AGENTS_KEY, JSON.stringify(next));
+    rememberSessionChoice(AGENTS_KEY, JSON.stringify(next));
   };
 
   const run = useCallback(
@@ -165,7 +132,8 @@ export default function SessionSearchList() {
         if (id === sequence.current) setLoading(false);
       }
     },
-    [query, effectiveScope, host.workspaceCwd, agentsKey],
+    // A renamed or pinned session changes what the rows say.
+    [query, effectiveScope, host.workspaceCwd, agentsKey, labelsRevision],
   );
 
   // A new query, scope, folder or agent filter starts from the top.
@@ -390,7 +358,7 @@ export default function SessionSearchList() {
           </AnchoredMenu>
         </div>
         <div className="spark-segmented is-wrap ss-scopes" role="tablist" aria-label="Sessions from">
-          {SCOPES.map((entry) => {
+          {SESSION_SCOPES.map((entry) => {
             const disabled = entry.id !== "all" && !hasWorkspace;
             const selected = entry.id === effectiveScope;
             return (
@@ -410,7 +378,7 @@ export default function SessionSearchList() {
           })}
         </div>
         <div className="ss-status" role="status" aria-live="polite" data-session-search-phase={status.phase}>
-          {note ?? statusLine(status)}
+          {note ?? sessionStatusLine(status)}
         </div>
       </div>
 
