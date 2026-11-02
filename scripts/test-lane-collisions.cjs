@@ -182,6 +182,15 @@ async function load() {
     assert.equal(Object.keys(await lib.readLaneCollisions([one, two], deps)).length, 2, "the clash is still found");
     assert.equal(fs.existsSync(filterMarker), false, "no filter ran");
 
+    // A partial clone would fetch a missing file over the network to merge.
+    git(filtered, "config", "remote.origin.promisor", "true");
+    fs.writeFileSync(path.join(one, "y.ts"), "new\n");
+    assert.deepEqual(await lib.readLaneCollisions([one, two], deps), {}, "a partial clone is skipped");
+    git(filtered, "config", "--unset", "remote.origin.promisor");
+    git(filtered, "config", "extensions.partialClone", "origin");
+    assert.deepEqual(await lib.readLaneCollisions([one, two], deps), {}, "by either of its settings");
+    git(filtered, "config", "--unset", "extensions.partialClone");
+
     console.log("lane collisions: ok");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

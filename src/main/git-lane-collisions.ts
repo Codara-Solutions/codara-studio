@@ -3,8 +3,9 @@
 // it cannot get in an agent's way. It does write tree objects, which git cleans
 // up itself; a result is cached by the two commits, so a pair is merged once.
 // It runs with no click behind it, so it must not start any program the repository
-// configures: one with a custom merge driver is skipped, and renormalizing, which
-// runs clean and smudge filters, is turned off.
+// configures: one with a custom merge driver is skipped, and so is a partial clone,
+// where a missing file means a fetch that can run its ssh command or credential
+// helper. Renormalizing, which runs clean and smudge filters, is turned off.
 //
 // No Electron import: scripts/test-lane-collisions.cjs runs it on real repositories.
 
@@ -35,12 +36,17 @@ async function mergedFiles(cwd: string, a: string, b: string, run: typeof runGit
   }
 }
 
-async function hasNoMergeDriver(cwd: string, run: typeof runGit): Promise<boolean> {
+async function safeToMerge(cwd: string, run: typeof runGit): Promise<boolean> {
   try {
-    const { stdout } = await run(cwd, [...GIT_C, "config", "--get-regexp", "^merge\\..*\\.driver$"]);
+    const { stdout } = await run(cwd, [
+      ...GIT_C,
+      "config",
+      "--get-regexp",
+      "^(merge\\..*\\.driver|remote\\..*\\.promisor|extensions\\.partialclone)$",
+    ]);
     return !stdout.trim();
   } catch (cause) {
-    // 1 is git's "no such setting". Any other failure could not rule a driver out.
+    // 1 is git's "no such setting". Any other failure could not rule them out.
     return (cause as { code?: unknown }).code === 1;
   }
 }
@@ -56,7 +62,7 @@ export async function readLaneCollisions(paths: readonly string[], deps: LaneCol
   const heads = new Map<string, string>();
   await Promise.all(
     wanted.map(async (path) => {
-      if (!(await hasNoMergeDriver(path, run))) return;
+      if (!(await safeToMerge(path, run))) return;
       const head = await run(path, [...GIT_C, "rev-parse", "--verify", "-q", "HEAD^{commit}"]).then(
         (result) => result.stdout.trim(),
         () => "",
