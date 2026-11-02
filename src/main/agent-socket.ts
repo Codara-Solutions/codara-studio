@@ -2139,6 +2139,11 @@ async function handleSessionStart(
   try {
     const briefPath = await sessions.writeBrief(sessionId, request.brief);
     const settings = await loadSettings().catch(() => null);
+    // The hooks or notify program and the codara-studio server every Studio
+    // Claude or Codex gets: a session reports its turns and has the current
+    // tools only through them. The first sessions after boot wait for them,
+    // before a compaction --settings file is written to carry those hooks.
+    await integrationFilesReady();
     const compaction = await standingTerminalCompaction(settings?.coraAutoCompactPercent ?? null, [request.runtime]);
     params.workspace = workspace;
     params.title = request.title;
@@ -2155,10 +2160,6 @@ async function handleSessionStart(
       if ((await workspaceProjectPolicyModeForTerminalCwd(cwd, state.workspaces)) === "untrusted-pull-request") {
         throw new Error("a session cannot start in an imported pull request");
       }
-      // The hooks or notify program and the codara-studio server every Studio
-      // Claude or Codex gets: a session reports its turns and has the current
-      // tools only through them. The first sessions after boot wait for them.
-      await integrationFilesReady();
       return agentSessionCommand({
         runtime: request.runtime,
         model: request.model,
