@@ -60,6 +60,86 @@ process.stdin.on("data", (data) => {
 setTimeout(() => process.exit(0), 170000);
 `;
 
+// A stand-in for Codex that leans only on what Codara put on its command line,
+// as the real one must: the codara-studio server from its -c override, which
+// it starts with a cleared environment as Codex does, and the notify program
+// that reports the end of each turn. Its brief has it start a Claude session
+// from inside itself and wait for that answer.
+const FAKE_CODEX = String.raw`#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawn, spawnSync } = require("node:child_process");
+const { parse } = require(process.env.FAKE_TOML);
+const argv = process.argv.slice(2);
+const brief = argv[argv.length - 1];
+const values = argv.flatMap((arg, index) => (argv[index - 1] === "-c" ? [arg] : []));
+const log = (entry) => fs.appendFileSync(path.join(process.env.FAKE_LOG_DIR, "codex.jsonl"), JSON.stringify(entry) + "\n");
+process.stdout.write("OpenAI Codex (v0.163.0)\r\n› ");
+const serverValue = values.find((value) => value.startsWith("mcp_servers.codara-studio="));
+const notifyValue = values.find((value) => value.startsWith("notify="));
+log({ argv, brief });
+function mcp(server) {
+  const child = spawn(server.command, server.args, {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, ...server.env },
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  let buffer = "";
+  let next = 1;
+  const waiting = new Map();
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    buffer += chunk;
+    for (let index = buffer.indexOf("\n"); index >= 0; index = buffer.indexOf("\n")) {
+      const line = buffer.slice(0, index).trim();
+      buffer = buffer.slice(index + 1);
+      try {
+        const message = JSON.parse(line);
+        waiting.get(message.id)?.(message);
+      } catch {}
+    }
+  });
+  const call = (method, params) =>
+    new Promise((resolve) => {
+      const id = next++;
+      waiting.set(id, resolve);
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    });
+  const tool = async (name, args) => {
+    const reply = await call("tools/call", { name, arguments: args });
+    const text = reply.result?.content?.find((item) => item.type === "text")?.text ?? "";
+    if (reply.error || reply.result?.isError) throw new Error(text || reply.error?.message || "tool failed");
+    return JSON.parse(text);
+  };
+  return { call, tool, close: () => child.kill() };
+}
+async function turn() {
+  let answer = "no server";
+  if (serverValue) {
+    const client = mcp(parse(serverValue)["mcp_servers"]["codara-studio"]);
+    try {
+      await client.call("initialize", { clientInfo: { name: "codex-mcp-client", version: "0" } });
+      const tools = (await client.call("tools/list", {})).result.tools.map((tool) => tool.name);
+      log({ tools });
+      const started = await client.tool("codara_session_start", { brief: "from codex", runtime: "claude" });
+      log({ started });
+      const waited = await client.tool("codara_session_wait", { ids: [started.id], timeoutSeconds: 60 });
+      answer = waited.sessions[0].status + ": " + waited.sessions[0].finalMessage;
+    } catch (error) {
+      answer = "error: " + error.message;
+    }
+    client.close();
+  }
+  log({ answer });
+  if (!notifyValue) return;
+  const program = parse(notifyValue).notify;
+  const payload = { type: "agent-turn-complete", "turn-id": "t1", "input-messages": [brief], "last-assistant-message": "Codex heard back. " + answer };
+  spawnSync(program[0], [...program.slice(1), JSON.stringify(payload)], { stdio: "ignore" });
+}
+setTimeout(() => void turn(), 300);
+process.stdin.resume();
+setTimeout(() => process.exit(0), 170000);
+`;
+
 async function launch(env: Record<string, string>): Promise<{ app: ElectronApplication; page: Page }> {
   const app = await electron.launch({ args: ["."], env });
   const page = await app.firstWindow();
@@ -86,6 +166,8 @@ async function workspaces(prefix: string) {
   await Promise.all([home, userHome, repo, notes, bin, logs].map((dir) => mkdir(dir)));
   await writeFile(join(bin, "claude"), FAKE_CLAUDE);
   await chmod(join(bin, "claude"), 0o755);
+  await writeFile(join(bin, "codex"), FAKE_CODEX);
+  await chmod(join(bin, "codex"), 0o755);
   const shell = join(bin, "bash");
   await writeFile(shell, '#!/bin/sh\nexec /bin/bash --noprofile --norc "$@"\n');
   await chmod(shell, 0o755);
@@ -105,6 +187,7 @@ async function workspaces(prefix: string) {
     USERPROFILE: userHome,
     SHELL: shell,
     FAKE_LOG_DIR: logs,
+    FAKE_TOML: require.resolve("smol-toml"),
     GIT_CONFIG_GLOBAL: gitConfig,
     GIT_CONFIG_NOSYSTEM: "1",
     CLAUDE_CONFIG_DIR: join(userHome, ".claude"),
@@ -198,6 +281,9 @@ test("an agent starts a session in another workspace, gets its answer back, and 
       const [first] = await briefs();
       expect(first!.brief).toBe(hostile);
       expect(first!.argv).toContain("stand-in-model");
+      // Codara's own hooks and server, as on any Claude it starts: not the user's config.
+      expect(first!.argv[0]).toBe("--settings");
+      expect(first!.argv.filter((arg) => arg.startsWith("--mcp-config="))).toHaveLength(1);
       expect(first!.cwd).toBe(repo);
       await expect.poll(async () => (await readdir(root)).includes("pwned")).toBe(false);
     });
@@ -293,6 +379,62 @@ test("an agent starts a session in another workspace, gets its answer back, and 
     });
   } finally {
     await running.app.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("a Codex session reports its turn, and from inside it starts a Claude session and hears back", async () => {
+  test.skip(process.platform === "win32", "the stand-in agents are started from a POSIX shell");
+  test.setTimeout(180_000);
+  const { root, home, repo, notes, logs, env } = await workspaces("codara-codex-sessions-");
+  const request = async (method: string, params: Record<string, unknown> = {}) => {
+    const response = await rpcRaw({ home }, method, params, { timeoutMs: 120_000 });
+    if (response.error) throw new Error(response.error.message);
+    return response.result;
+  };
+  const codexLog = async () =>
+    (await readFile(join(logs, "codex.jsonl"), "utf8").catch(() => ""))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, any>);
+  const { app } = await launch(env);
+  try {
+    const pidFile = join(root, "caller.pid");
+    await request("terminal.create", { cwd: notes, title: "caller", command: `sh -c 'echo $$ > "${pidFile}"; exec sleep 600'` });
+    await expect.poll(async () => (await readFile(pidFile, "utf8").catch(() => "")).trim(), { timeout: 20_000 }).not.toBe("");
+    const caller = { callerRole: "studio", callerClient: "claude-code", callerPid: Number((await readFile(pidFile, "utf8")).trim()) };
+
+    const started = await request("session.start", {
+      ...caller,
+      workspace: "ws-repo",
+      brief: "Start a Claude session and report what it says",
+      runtime: "codex",
+      model: "stand-in-codex",
+      effort: "high",
+    });
+    expect(started.runtime).toBe("codex");
+    const done = await request("session.wait", { ...caller, ids: [started.id], timeoutSeconds: 90 });
+    expect(done.reason).toBe("any_settled");
+    expect(done.sessions[0].status).toBe("finished");
+    expect(done.sessions[0].finalMessage).toBe("Codex heard back. finished: Answer 1 to: from codex");
+
+    const entries = await codexLog();
+    const launched = entries.find((entry) => entry.argv)!;
+    expect(launched.brief).toBe("Start a Claude session and report what it says");
+    expect(launched.argv).toContain("--yolo");
+    expect(launched.argv).toContain("stand-in-codex");
+    expect(launched.argv).toContain("model_reasoning_effort=high");
+    const tools = entries.find((entry) => entry.tools)!.tools as string[];
+    for (const name of ["codara_session_start", "codara_session_wait", "codara_session_status", "codara_session_message"]) {
+      expect(tools).toContain(name);
+    }
+    // The Codex caller is found by its process, with no pane id in its server's
+    // environment: the Claude session it started opens in its own workspace.
+    const inner = entries.find((entry) => entry.started)!.started;
+    expect(inner.workspaceId).toBe("ws-repo");
+    expect(inner.cwd).toBe(repo);
+  } finally {
+    await app.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   }
 });

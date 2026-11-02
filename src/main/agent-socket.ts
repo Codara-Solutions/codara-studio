@@ -50,7 +50,12 @@ import {
   type AgentSessionCaller,
 } from "./agent-sessions";
 import { AGENT_SESSION_BRIEF_MAX_CHARS, AGENT_SESSION_MAX_LIVE, type AgentSessionRecord } from "@shared/agent-sessions";
-import { codexTrustOverride } from "./agent-launch-integration";
+import {
+  codexTrustOverride,
+  integrationFilesReady,
+  planClaudeLaunch,
+  planCodexLaunch,
+} from "./agent-launch-integration";
 import { standingTerminalCompaction } from "./orchestration/cli-autocompact";
 import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
 import { paneAgentRuntime } from "./pane-agent-runtime";
@@ -2134,6 +2139,11 @@ async function handleSessionStart(
   try {
     const briefPath = await sessions.writeBrief(sessionId, request.brief);
     const settings = await loadSettings().catch(() => null);
+    // The hooks or notify program and the codara-studio server every Studio
+    // Claude or Codex gets: a session reports its turns and has the current
+    // tools only through them. The first sessions after boot wait for them,
+    // before a compaction --settings file is written to carry those hooks.
+    await integrationFilesReady();
     const compaction = await standingTerminalCompaction(settings?.coraAutoCompactPercent ?? null, [request.runtime]);
     params.workspace = workspace;
     params.title = request.title;
@@ -2157,6 +2167,10 @@ async function handleSessionStart(
         briefPath,
         codexTrust: codexTrustOverride(cwd),
         compaction,
+        launchArgs: (sessionArgs) =>
+          request.runtime === "codex"
+            ? planCodexLaunch({ userArgs: sessionArgs }).argvPrefix
+            : planClaudeLaunch({ userArgs: sessionArgs }).argvPrefix,
       });
     });
     if (response.error) {
