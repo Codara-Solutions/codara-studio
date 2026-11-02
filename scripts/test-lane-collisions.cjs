@@ -202,6 +202,45 @@ async function load() {
     assert.deepEqual(await lib.readLaneCollisions([one, two], deps), {}, "a deinitialized submodule keeps its repository");
     fs.rmdirSync(modules);
 
+    // Set up inside a linked lane, it lives in that lane's private git dir instead.
+    const vendorSource = path.join(root, "vendor-source");
+    fs.mkdirSync(vendorSource);
+    git(vendorSource, "init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(vendorSource, "v.txt"), "v\n");
+    git(vendorSource, "add", "-A");
+    git(vendorSource, "commit", "-q", "-m", "v");
+    const host = path.join(root, "host");
+    fs.mkdirSync(host);
+    git(host, "init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(host, "s.ts"), "s\n");
+    git(host, "add", "-A");
+    git(host, "commit", "-q", "-m", "init");
+    const hostTree = (name) => {
+      const dir = path.join(root, `host-${name}`);
+      git(host, "worktree", "add", "-q", "-b", `host-${name}`, dir);
+      fs.writeFileSync(path.join(dir, "s.ts"), `${name}\n`);
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", name);
+      return dir;
+    };
+    const hostLeft = hostTree("left");
+    const hostRight = hostTree("right");
+    assert.equal(Object.keys(await lib.readLaneCollisions([hostLeft, hostRight], deps)).length, 2, "checked before any submodule");
+    git(hostLeft, "-c", "protocol.file.allow=always", "submodule", "add", "-q", vendorSource, "vendor");
+    git(hostLeft, "commit", "-q", "-m", "add vendor");
+    const privateModules = git(hostLeft, "rev-parse", "--git-path", "modules");
+    const privateVendor = path.join(path.isAbsolute(privateModules) ? privateModules : path.join(hostLeft, privateModules), "vendor");
+    assert.ok(privateVendor.includes(path.join(".git", "worktrees")), "the fixture puts it in the lane's private git dir");
+    git(privateVendor, "config", "remote.origin.promisor", "true");
+    git(privateVendor, "config", "remote.origin.partialCloneFilter", "blob:none");
+    git(hostLeft, "submodule", "deinit", "-q", "-f", "vendor");
+    assert.ok(fs.existsSync(privateVendor), "deinit keeps its repository");
+    assert.doesNotMatch(fs.readFileSync(path.join(host, ".git", "config"), "utf8"), /submodule/, "and drops its setting");
+    assert.equal(fs.existsSync(path.join(host, ".git", "modules")), false, "nothing in the shared git dir");
+    const mergesBefore = merges;
+    assert.deepEqual(await lib.readLaneCollisions([hostLeft, hostRight], deps), {}, "that lane is skipped");
+    assert.equal(merges, mergesBefore, "and never merged");
+
     // A fetch is refused outright where git knows the setting.
     fs.writeFileSync(path.join(one, "x.ts"), "edit one again\n");
     fs.rmSync(path.join(one, "y.ts"), { force: true });
