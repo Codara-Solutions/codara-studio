@@ -116,6 +116,34 @@ async function main() {
   assert.equal(cron("0 9 * * 1,3"), "Mondays and Wednesdays at 09:00");
   assert.equal(cron("0 9 * * 7"), "Sundays at 09:00");
   assert.equal(cron("0 9 * * 0,6"), "Every weekend day at 09:00");
+  assert.equal(cron("0 9 * * 0-7"), "Every day at 09:00", "a range ending in 7 still covers every day in it");
+  assert.equal(cron("0 9 * * 5-7"), "Sundays, Fridays and Saturdays at 09:00");
+  assert.equal(cron("0 9 * * 6-7"), "Every weekend day at 09:00");
+  {
+    const { Cron } = require("croner");
+    const names = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"];
+    for (const field of ["0-7", "5-7", "6-7", "1-5", "7", "0", "0,7", "1,7", "SUN-SAT", "MON-FRI", "2-3"]) {
+      const job = new Cron(`0 9 * * ${field}`, { paused: true, timezone: "UTC" });
+      const firing = new Set();
+      let at = new Date("2026-01-01T00:00:00Z");
+      for (let i = 0; i < 21; i += 1) {
+        const next = job.nextRun(at);
+        if (!next) break;
+        firing.add(next.getUTCDay());
+        at = next;
+      }
+      const phrase = cron(`0 9 * * ${field}`);
+      const expected = [...firing].sort((a, b) => a - b);
+      const said = expected.length === 7
+        ? phrase === "Every day at 09:00"
+        : expected.join() === "1,2,3,4,5"
+          ? phrase === "Every weekday at 09:00"
+          : expected.join() === "0,6"
+            ? phrase === "Every weekend day at 09:00"
+            : expected.every((d) => phrase.includes(names[d])) && names.filter((n) => phrase.includes(n)).length === expected.length;
+      assert.ok(said, `"${field}" fires on ${expected} but reads "${phrase}"`);
+    }
+  }
   assert.equal(cron("0 9 1 * *"), "Day 1 of every month at 09:00");
   assert.equal(cron("0 3 * * *", "Europe/Madrid"), "Every day at 03:00 (Europe/Madrid)");
   assert.equal(cron("* * * * * *"), "Every second");

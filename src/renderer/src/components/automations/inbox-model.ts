@@ -89,17 +89,18 @@ function daysOfWeek(field: string): number[] | null {
     const day = (token: string): number | null => {
       if (token in DAY_TOKENS) return DAY_TOKENS[token];
       const n = wholeNumber(token);
-      return n !== null && n >= 0 && n <= 7 ? n % 7 : null;
+      return n !== null && n >= 0 && n <= 7 ? n : null;
     };
     if (range) {
       const from = day(range[1]);
       const to = day(range[2]);
       if (from === null || to === null || from > to) return null;
-      for (let d = from; d <= to; d += 1) out.add(d);
+      // Sunday folds to 0 only after expanding, or `0-7` would collapse to one day.
+      for (let d = from; d <= to; d += 1) out.add(d % 7);
     } else {
       const single = day(part);
       if (single === null) return null;
-      out.add(single);
+      out.add(single % 7);
     }
   }
   return [...out].sort((a, b) => a - b);
