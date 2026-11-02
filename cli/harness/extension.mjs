@@ -118,6 +118,9 @@ function registerSubmitResult(pi, run) {
       additionalProperties: false,
     },
     async execute(_toolCallId, params) {
+      if (run.sharedBatch) {
+        throw new Error("submit_result must be the only tool call in its turn. Finish the other actions, then call submit_result again on its own.");
+      }
       const { message = "", ...fields } = params;
       if (typeof message !== "string" || !message.trim()) {
         throw new Error("submit_result needs a non-empty message: the closing reply for the reader. Call it again with the message.");
@@ -199,9 +202,12 @@ export function coraExtension(run, { exec, loginProblem, mcpConfig, compaction, 
       const { message } = event;
       if (message.role !== "assistant") return undefined;
       run.last = message;
+      // A submit_result that shares its turn with other tools is refused: it could not end the run,
+      // and the reply after it would replace the message.
+      const calls = (message.content ?? []).filter((part) => part.type === "toolCall");
+      run.sharedBatch = calls.length > 1 && calls.some((part) => part.name === "submit_result");
       const said = textOf(message);
-      // A reply before the report is progress. One after it (the model went on past
-      // a mixed tool batch) is the closing message.
+      // A reply before the report is progress. One after it is the closing message.
       if (said || !run.report) run.closing = said;
       for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
         run.usage[key] += message.usage?.[key] ?? 0;

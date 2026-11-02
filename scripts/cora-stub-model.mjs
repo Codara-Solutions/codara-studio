@@ -167,7 +167,9 @@ function plan(view) {
   if (results.length === 1 && !copied) {
     return { tool: write, input: { path: "output.txt", content: `${results[0].text.trim().toUpperCase()}\n` } };
   }
-  const reported = view.events.slice(lastUser + 1).some((event) => event.name?.toLowerCase() === "submit_result");
+  // SHARED_BATCH: the first submit_result call is refused, so the report only counts from the second.
+  const submits = view.events.slice(lastUser + 1).filter((event) => event.name?.toLowerCase() === "submit_result").length;
+  const reported = submits >= (prompt.includes("SHARED_BATCH") ? 2 : 1);
   if (reported) {
     if (prompt.includes("EMPTY_CLOSING")) return { text: "" };
     return { text: prompt.includes("LONG_CLOSING") ? LONG_CLOSING : "STUB-FINAL: copied input.txt to output.txt." };
@@ -176,6 +178,9 @@ function plan(view) {
     const status = /SUBMIT_(\w+)/.exec(prompt)?.[1]?.toLowerCase() ?? "complete";
     const checks = prompt.includes("FAILED_CHECK") ? [{ command: "npm test", result: "failed" }] : undefined;
     const beside = prompt.includes("TEXT_BESIDE_SUBMIT") ? { text: "STATUS: DONE" } : {};
+    // SHARED_BATCH: the first submit_result comes together with a read in one turn.
+    const shared = prompt.includes("SHARED_BATCH") && !view.events.some((event) => event.kind === "result" && /only tool call/.test(event.text ?? ""));
+    if (shared) return { tool: read, input: { path: "input.txt" }, also: { tool: finish, input: { status: "complete", message: "STUB-EARLY: should not be the answer." } } };
     const message = prompt.includes("EMPTY_CLOSING") ? "" : prompt.includes("LONG_CLOSING") ? LONG_CLOSING : "STUB-FINAL: copied input.txt to output.txt.";
     return { ...beside, tool: finish, input: { status, ...(prompt.includes("MISSING_MESSAGE") ? {} : { message }), ...(checks ? { checks } : {}) } };
   }
@@ -216,6 +221,12 @@ function streamAnthropic(res, step, model) {
   sse(res, "content_block_start", { type: "content_block_start", index, content_block: block });
   sse(res, "content_block_delta", { type: "content_block_delta", index, delta });
   sse(res, "content_block_stop", { type: "content_block_stop", index });
+  if (step.also) {
+    const next = index + 1;
+    sse(res, "content_block_start", { type: "content_block_start", index: next, content_block: { type: "tool_use", id: id("toolu"), name: step.also.tool, input: {} } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: next, delta: { type: "input_json_delta", partial_json: JSON.stringify(step.also.input) } });
+    sse(res, "content_block_stop", { type: "content_block_stop", index: next });
+  }
   sse(res, "message_delta", {
     type: "message_delta",
     delta: { stop_reason: step.tool ? "tool_use" : "end_turn", stop_sequence: null },

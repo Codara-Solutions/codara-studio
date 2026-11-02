@@ -546,6 +546,19 @@ test("a submit_result without a message is rejected and the model must answer", 
   }
 });
 
+test("a submit_result sharing a turn with another tool is refused, then the model submits alone", async () => {
+  const json = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it SHARED_BATCH"]);
+  assert.equal(json.status, 0, json.stderr);
+  const final = resultOf(json.stdout);
+  assert.equal(final.status, "complete");
+  // The early message never became the answer; the standalone call's message did.
+  assert.equal(final.text, "STUB-FINAL: copied input.txt to output.txt.");
+  assert.doesNotMatch(json.stdout, /STUB-EARLY: should not be the answer\.\s*"?\s*$/m);
+  const refusal = stub.requests.flatMap((request) => request.events).find((event) => event.kind === "result" && /only tool call/.test(event.text ?? ""));
+  assert.ok(refusal, "the model saw the refusal");
+  assert.equal(stub.requests.at(-1).reply.tool?.toLowerCase(), "submit_result");
+});
+
 test("nothing is printed after the report and the exit codes stay", async () => {
   const done = await cora(makeWorld(), ["exec", "--model", "terra", "--json", "copy it"]);
   assert.equal(done.status, 0);
