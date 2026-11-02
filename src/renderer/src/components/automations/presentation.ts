@@ -34,17 +34,18 @@ export function statusWord(status: AutomationStatus): string {
 }
 
 export const STOP_REASON_LABEL: Record<AutomationStopReason, string> = {
-  "agent-done": "agent finished",
+  "agent-done": "finished",
   "agent-no-signal": "agent gave no signal",
-  "max-iterations": "max iterations",
+  "max-iterations": "run limit reached",
   budget: "budget reached",
   phrase: "phrase matched",
   "tests-pass": "tests passed",
   "git-clean": "git clean",
   "until-command": "condition met",
   once: "done",
-  "iteration-failed": "iteration failed",
+  "iteration-failed": "run failed",
   "user-stop": "stopped by you",
+  "monthly-cap": "monthly cap reached",
   "engine-missing": "engine not installed",
 };
 
@@ -77,6 +78,10 @@ export function triggerSummary(trigger: AutomationTrigger): string {
     case "onAutomationActivity": {
       const what = trigger.events.join("/") || "activity";
       return trigger.automationId ? `when a loom ${what}` : `when any loom ${what}`;
+    }
+    case "github": {
+      const parts = trigger.events.map((e) => (e === "ciFailed" ? "CI failed" : "PR opened"));
+      return `${parts.join(" + ") || "pull request"}${trigger.branch ? ` into ${trigger.branch}` : ""}`;
     }
     default:
       return "trigger";

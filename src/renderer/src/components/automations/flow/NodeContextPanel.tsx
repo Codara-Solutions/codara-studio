@@ -42,6 +42,7 @@ const TRIGGER_KINDS: { value: AutomationTrigger["kind"]; label: string }[] = [
   { value: "continuous", label: "Continuous" },
   { value: "onFinishOf", label: "After automation" },
   { value: "git", label: "Git activity" },
+  { value: "github", label: "Pull requests" },
   { value: "onAutomationActivity", label: "Automation activity" },
 ];
 
@@ -55,6 +56,9 @@ const BASE_VARIABLES: { token: string; tip: string }[] = [
   { token: "{{date}}", tip: "Today's local date in YYYY-MM-DD format." },
   { token: "{{name}}", tip: "The name of this automation." },
   { token: "{{incoming}}", tip: "Output from upstream workers in this pass, labeled by branch." },
+  { token: "{{pr_url}}", tip: "The pull request that fired a Pull requests trigger. It is empty for anything else." },
+  { token: "{{pr_number}}", tip: "That pull request's number. It is empty for anything else." },
+  { token: "{{pr_head}}", tip: "That pull request's latest commit. It is empty for anything else." },
 ];
 
 function PromptVariableChip({
@@ -464,6 +468,44 @@ function TriggerForm({
               Codara Studio GitHub App
             </a>{" "}
             installed on your account.
+          </Hint>
+        </Group>
+      )}
+      {t.kind === "github" && (
+        <Group>
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <span className="spark-eyebrow">When</span>
+            <Check
+              label="a pull request is opened"
+              checked={t.githubEvents.prOpened}
+              onToggle={() => set({ githubEvents: { ...t.githubEvents, prOpened: !t.githubEvents.prOpened } })}
+            />
+            <Check
+              label="CI fails on a pull request"
+              checked={t.githubEvents.ciFailed}
+              onToggle={() => set({ githubEvents: { ...t.githubEvents, ciFailed: !t.githubEvents.ciFailed } })}
+            />
+          </div>
+          <Field label="Into branch (optional, any branch when empty)">
+            <input
+              className="spark-input spark-mono"
+              value={t.githubBranch}
+              onChange={(e) => set({ githubBranch: e.target.value })}
+              placeholder="main"
+              style={{ maxWidth: 200 }}
+            />
+          </Field>
+          {t.githubEvents.prOpened && (
+            <Check
+              label="include drafts (otherwise a draft counts when it is marked ready)"
+              checked={t.githubDrafts}
+              onToggle={() => set({ githubDrafts: !t.githubDrafts })}
+            />
+          )}
+          <Hint>
+            Checks this workspace's origin repository about once a minute with your gh sign-in, while
+            Codara is open. Only pull requests from its owners, members and collaborators count, so a
+            stranger cannot start a paid run. One pull request starts at most 3 runs a day.
           </Hint>
         </Group>
       )}
@@ -903,6 +945,9 @@ const STEP_VARIABLES: { token: string; tip: string }[] = [
   { token: "{{lastOutput}}", tip: "The previous pass's final output." },
   { token: "{{file}}", tip: "The path that fired a folder trigger." },
   { token: "{{name}}", tip: "The name of this automation." },
+  { token: "{{pr_url}}", tip: "The pull request that fired a Pull requests trigger." },
+  { token: "{{pr_number}}", tip: "That pull request's number." },
+  { token: "{{pr_head}}", tip: "That pull request's latest commit." },
 ];
 
 function StepForm({

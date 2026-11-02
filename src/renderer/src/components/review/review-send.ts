@@ -120,6 +120,45 @@ export function newAgentCommand(runtime: NewAgentRuntime, path: string): string 
   return `${launch} "Read the review notes in ${path} and address each one."`;
 }
 
+/** The agent that wrote the work: one running in the workspace, else the one that made its worktree. */
+export function writerDestinationId(
+  destinations: readonly ReviewDestination[],
+  lines: ReadonlyArray<{ key: string }>,
+  creatorPaneId?: string | null,
+): string | null {
+  const known = new Set(destinations.filter((destination) => !destination.disabled).map((destination) => destination.id));
+  const candidates = [
+    ...lines.map((line) =>
+      line.key.startsWith("pane:") ? line.key : line.key.startsWith("run:") ? `chat:${line.key.slice("run:".length)}` : "",
+    ),
+    creatorPaneId ? `pane:${creatorPaneId}` : "",
+  ];
+  return candidates.find((id) => id && known.has(id)) ?? null;
+}
+
+/** The writer's row goes first, marked, so sending findings back to it is one click. */
+export function markWriter(destinations: readonly ReviewDestination[], writerId: string | null): ReviewDestination[] {
+  const writer = destinations.find((destination) => destination.id === writerId);
+  if (!writer) return [...destinations];
+  return [
+    { ...writer, sublabel: writer.sublabel ? `wrote this · ${writer.sublabel}` : "wrote this" },
+    ...destinations.filter((destination) => destination !== writer),
+  ];
+}
+
+/** The row a send starts on: what the user chose last if it still exists, then the writer, then the usual default. */
+export function pickReviewDestination(
+  destinations: readonly ReviewDestination[],
+  input: { remembered: string | null; writerId: string | null; routingDefault: string },
+): string | null {
+  const usable = (id: string | null) => Boolean(id && destinations.some((row) => row.id === id && !row.disabled));
+  if (usable(input.remembered)) return input.remembered;
+  if (usable(input.writerId)) return input.writerId;
+  return defaultReviewDestination(destinations, input.routingDefault);
+}
+
+export const REVIEW_SEND_STORAGE_KEY = "codara.review.lastSend";
+
 /** The menu row a send goes to unless the user picks another: an agent pane, then the open chat, then a new Cora chat. */
 export function defaultReviewDestination(destinations: readonly ReviewDestination[], routingDefault: string): string | null {
   const enabled = destinations.filter((destination) => !destination.disabled);

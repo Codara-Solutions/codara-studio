@@ -90,6 +90,8 @@ test("Fix with agent hands checks, a hook failure, conflicts and reviews to agen
     const message = page.getByPlaceholder("Message  (Ctrl+Enter to commit)");
     await expect(message).toBeVisible({ timeout: 15_000 });
     await message.fill("Add widget");
+    // The box is always there; it can commit once the status poll sees the file.
+    await expect(page.getByTestId("commit-box").getByRole("button", { name: /^Commit/ })).toBeEnabled({ timeout: 20_000 });
     await message.press("Control+Enter");
     await expect(page.getByText("lint: src/widget.ts:1 'unused' is never read")).toBeVisible({ timeout: 20_000 });
     const fixHook = page.locator('[data-git-fix="hook"]');

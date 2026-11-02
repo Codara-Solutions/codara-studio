@@ -22,9 +22,10 @@ npm install     # also installs the git hooks and patches the bundled Pi sign-in
 npm run dev     # starts the app with hot reload
 ```
 
-CI runs only on macOS. The app also packages for Windows and Linux
-(`npm run package:win`, `npm run package:linux`), but CI does not test
-them.
+CI tests macOS on pull requests into `main` (`ci.yml`) and Linux, headless
+under Xvfb, on pull requests into `Cora` and pushes to it (`ci-linux.yml`:
+typechecks, build, every unit suite and an e2e smoke set). The app also
+packages for Windows (`npm run package:win`), but CI does not test it.
 
 **Your real data.** A dev build uses the same `~/.codarastudio` as an
 installed Codara Studio. It also writes the same hooks and MCP entries into

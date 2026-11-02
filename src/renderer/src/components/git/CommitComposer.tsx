@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   CommitIcon,
+  IconButton,
   PullIcon,
   PushIcon,
   SparkleIcon,
@@ -37,6 +38,8 @@ interface Props {
   canSplit?: boolean;
 }
 
+type CommitBoxProps = Omit<Props, "upstream" | "ahead" | "behind" | "onPush" | "onPull" | "onFetch">;
+
 // Button labels sit in half-width flex children, so they clip with an ellipsis
 // instead of pushing their icon out of the button when the panel is narrow.
 const ELLIPSIS: React.CSSProperties = {
@@ -45,8 +48,9 @@ const ELLIPSIS: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-// Commit message box + the branch / sync row. The Commit button is the panel's
-// one accent-tinted primary action.
+// The commit box docked at the bottom of Source Control: the message, with its
+// generate button inside, and Commit. Amend and Split wait in the small menu.
+// The Commit button is the panel's one accent-tinted primary action.
 export default function CommitComposer({
   message,
   onMessageChange,
@@ -59,17 +63,16 @@ export default function CommitComposer({
   busy,
   branch,
   detached,
-  upstream,
-  ahead,
-  behind,
-  onPush,
-  onPull,
-  onFetch,
   onSplit,
   canSplit,
-}: Props): React.ReactElement {
+}: CommitBoxProps): React.ReactElement {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [amend, setAmend] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  // Fixed to the window: the dock scrolls, so it would clip a menu inside it.
+  const [menuAnchor, setMenuAnchor] = useState({ right: 0, bottom: 0 });
+  const moreRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const anyBusy = busy !== null;
   const committing = busy === "commit";
   const generatingMessage = busy === "generateMessage";
@@ -82,96 +85,58 @@ export default function CommitComposer({
     ta.style.height = `${Math.min(Math.max(ta.scrollHeight, 46), 132)}px`;
   }, [message]);
 
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onPointer = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!menuRef.current?.contains(target) && !moreRef.current?.contains(target)) setMoreOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMoreOpen(false);
+    };
+    window.addEventListener("mousedown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [moreOpen]);
+
   return (
     <div
+      data-testid="commit-box"
       style={{
+        position: "relative",
         display: "flex",
         flexDirection: "column",
-        gap: 7,
-        padding: "8px 8px 10px",
-        borderBottom: "1px solid var(--rule-soft)",
+        gap: 6,
+        padding: "7px 8px 8px",
       }}
     >
-      {/* Branch / sync row. The branch name now lives in the dedicated branch
-          control above, so the composer keeps only the detached-HEAD warning
-          (a real caution) and the push / pull / fetch controls. */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        {detached && (
-          <span
-            title="HEAD is detached. Check out a branch to move it again"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-              minWidth: 0,
-              padding: "2px 7px",
-              borderRadius: 999,
-              fontFamily: "var(--font-mono)",
-              fontSize: 10,
-              fontWeight: 600,
-              color: "var(--warn)",
-              border: "1px solid color-mix(in oklch, var(--warn) 50%, var(--rule-soft))",
-              background: "color-mix(in oklch, var(--warn) 13%, transparent)",
-            }}
-          >
-            detached @ {branch ?? "—"}
-          </span>
-        )}
-        {!detached && upstream && (
-          <span
-            title={`Tracking ${upstream}`}
-            style={{
-              minWidth: 0,
-              flex: 1,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              color: "var(--muted-2)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 9,
-            }}
-          >
-            {upstream}
-          </span>
-        )}
-        <span style={{ flex: upstream || detached ? 0 : 1 }} />
-      </div>
+      {detached && (
+        <span
+          title="HEAD is detached. Check out a branch to move it again"
+          style={{
+            alignSelf: "flex-start",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            minWidth: 0,
+            padding: "2px 7px",
+            borderRadius: 999,
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            fontWeight: 600,
+            color: "var(--warn)",
+            border: "1px solid color-mix(in oklch, var(--warn) 50%, var(--rule-soft))",
+            background: "color-mix(in oklch, var(--warn) 13%, transparent)",
+          }}
+        >
+          detached @ {branch ?? "HEAD"}
+        </span>
+      )}
 
-      <div
-        aria-label="Remote repository actions"
-        style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 5 }}
-      >
-        <SyncButton
-          label="Pull"
-          title="Pull: download remote commits and integrate them into this branch"
-          onClick={onPull}
-          disabled={anyBusy}
-          count={behind}
-          busy={busy === "pull"}
-        >
-          <PullIcon />
-        </SyncButton>
-        <SyncButton
-          label="Push"
-          title="Push: upload this branch's local commits to the remote"
-          onClick={onPush}
-          disabled={anyBusy}
-          count={ahead}
-          busy={busy === "push"}
-        >
-          <PushIcon />
-        </SyncButton>
-        <SyncButton
-          label="Fetch"
-          title="Fetch: download remote updates without changing this branch or your files"
-          onClick={onFetch}
-          disabled={anyBusy}
-          busy={busy === "fetch"}
-        >
-          <SyncIcon />
-        </SyncButton>
-      </div>
-
+      <div style={{ position: "relative" }}>
       <textarea
         ref={taRef}
         value={message}
@@ -198,7 +163,7 @@ export default function CommitComposer({
           resize: "none",
           width: "100%",
           minHeight: 46,
-          padding: "7px 9px",
+          padding: "7px 30px 7px 9px",
           background: "var(--bg)",
           border: "1px solid var(--rule)",
           borderRadius: 7,
@@ -213,51 +178,18 @@ export default function CommitComposer({
         }}
       />
 
-      <button
-        type="button"
-        disabled={!canGenerateMessage || anyBusy}
-        onClick={onGenerateMessage}
-        title="Draft a commit message with your configured model"
-        style={{
-          appearance: "none",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 7,
-          height: 28,
-          width: "100%",
-          padding: "0 10px",
-          borderRadius: 7,
-          cursor: "default",
-          fontFamily: "var(--font-sans)",
-          fontSize: 12,
-          fontWeight: 650,
-          border: "1px solid var(--rule)",
-          background:
-            canGenerateMessage && !anyBusy
-              ? "color-mix(in oklch, var(--accent) 10%, transparent)"
-              : "transparent",
-          color:
-            canGenerateMessage && !anyBusy
-              ? "var(--ink-dim)"
-              : generatingMessage
-                ? "var(--ink-dim)"
-                : "var(--muted-2)",
-          opacity: !canGenerateMessage && !generatingMessage ? 0.65 : 1,
-        }}
-      >
-        {generatingMessage ? <Spinner size={11} /> : <SparkleIcon />}
-        <span>{generatingMessage ? "Generating message" : "Generate Message"}</span>
-      </button>
+        <span style={{ position: "absolute", top: 4, right: 4 }}>
+          <IconButton
+            title="Draft a commit message with your configured model"
+            disabled={!canGenerateMessage || anyBusy}
+            onClick={onGenerateMessage}
+            size={22}
+          >
+            {generatingMessage ? <Spinner size={11} /> : <SparkleIcon />}
+          </IconButton>
+        </span>
+      </div>
 
-      {/* Amend toggle — when on, the commit rewrites the last commit (git commit
-          --amend) instead of adding a new one. The flag is passed up through
-          onCommit(amend) and reset after each commit. */}
-      <AmendToggle checked={amend} disabled={anyBusy} onChange={setAmend} />
-
-      {/* Commit and its quieter sibling share one row, each taking half the
-          width, so the pair reads as a single action band. Both labels
-          truncate rather than overflow when the panel is narrow. */}
       <div style={{ display: "flex", alignItems: "stretch", gap: 6 }}>
         <button
           type="button"
@@ -324,128 +256,123 @@ export default function CommitComposer({
           )}
         </button>
 
-        {/* "Split into commits" — quieter sibling beside Commit: the AI proposes
-            grouping the changes into several commits and the user reviews the
-            plan before anything is committed. Hidden when the host has no
-            split support (remote workspaces), leaving Commit the whole row. */}
-        {onSplit ? (
+        <button
+          type="button"
+          ref={moreRef}
+          aria-label="More commit options"
+          aria-expanded={moreOpen}
+          title="Amend the last commit, or split the changes into several commits"
+          disabled={anyBusy}
+          onClick={() => {
+            const box = moreRef.current?.getBoundingClientRect();
+            if (box) setMenuAnchor({ right: window.innerWidth - box.right, bottom: window.innerHeight - box.top + 4 });
+            setMoreOpen((open) => !open);
+          }}
+          style={{
+            appearance: "none",
+            flex: "0 0 30px",
+            height: 30,
+            padding: 0,
+            borderRadius: 7,
+            cursor: "default",
+            fontFamily: "var(--font-sans)",
+            fontSize: 13,
+            lineHeight: 1,
+            border: amend ? "1px solid var(--accent-edge)" : "1px solid var(--rule)",
+            background: amend ? "var(--accent-soft)" : "transparent",
+            color: anyBusy ? "var(--muted-2)" : "var(--ink-dim)",
+          }}
+        >
+          ⋯
+        </button>
+      </div>
+
+      {moreOpen && (
+        <div
+          ref={menuRef}
+          role="menu"
+          aria-label="Commit options"
+          className="spark-menu"
+          style={{ position: "fixed", right: menuAnchor.right, bottom: menuAnchor.bottom, zIndex: 200 }}
+        >
           <button
             type="button"
-            disabled={!canSplit || anyBusy}
-            onClick={onSplit}
-            title="Group related changes into separate commits. You review the plan before anything is saved"
-            style={{
-              appearance: "none",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 6,
-              height: 30,
-              flex: "1 1 0",
-              minWidth: 0,
-              padding: "0 10px",
-              borderRadius: 7,
-              cursor: "default",
-              fontFamily: "var(--font-sans)",
-              fontSize: 12,
-              fontWeight: 650,
-              border: "1px solid var(--rule)",
-              background: "transparent",
-              color: canSplit && !anyBusy ? "var(--ink-dim)" : "var(--muted-2)",
-              opacity: !canSplit && !anyBusy ? 0.65 : 1,
-              transition:
-                "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-            }}
-            onMouseEnter={(e) => {
-              if (canSplit && !anyBusy) {
-                e.currentTarget.style.background = "color-mix(in oklab, var(--ink) 6%, transparent)";
-              }
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "transparent";
+            role="menuitemcheckbox"
+            aria-checked={amend}
+            className={amend ? "spark-menu-item is-active" : "spark-menu-item"}
+            onClick={() => {
+              setAmend(!amend);
+              setMoreOpen(false);
             }}
           >
-            <SplitCommitsIcon />
-            <span style={ELLIPSIS}>Split into commits</span>
+            Amend last commit
           </button>
-        ) : null}
-      </div>
+          {onSplit ? (
+            <button
+              type="button"
+              role="menuitem"
+              className="spark-menu-item"
+              disabled={!canSplit}
+              title="Group related changes into separate commits. You review the plan before anything is committed"
+              onClick={() => {
+                setMoreOpen(false);
+                onSplit();
+              }}
+            >
+              <SplitCommitsIcon />
+              Split into commits
+            </button>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }
 
-// A slim, left-aligned amend control — a checkbox-style square + label. Sits
-// just above the Commit button so the relationship reads at a glance.
-function AmendToggle({
-  checked,
-  disabled,
-  onChange,
-}: {
-  checked: boolean;
-  disabled: boolean;
-  onChange: (next: boolean) => void;
-}): React.ReactElement {
-  const [hover, setHover] = useState(false);
+/** Pull, Push and Fetch beside the branch, as small icons with their counts. */
+export function GitSyncButtons({
+  busy,
+  upstream,
+  ahead,
+  behind,
+  onPush,
+  onPull,
+  onFetch,
+}: Pick<Props, "busy" | "upstream" | "ahead" | "behind" | "onPush" | "onPull" | "onFetch">): React.ReactElement {
+  const anyBusy = busy !== null;
+  const tracking = upstream ? ` (tracking ${upstream})` : "";
   return (
-    <button
-      type="button"
-      role="checkbox"
-      aria-checked={checked}
-      disabled={disabled}
-      title="Replace the last commit instead of creating a new one"
-      onClick={() => {
-        if (!disabled) onChange(!checked);
-      }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        appearance: "none",
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 7,
-        alignSelf: "flex-start",
-        height: 22,
-        padding: "0 8px 0 6px",
-        borderRadius: 6,
-        border: "none",
-        background: hover && !disabled ? "var(--hover)" : "transparent",
-        color: disabled ? "var(--muted-2)" : checked ? "var(--ink-dim)" : "var(--muted)",
-        cursor: "default",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: 600,
-        opacity: disabled ? 0.6 : 1,
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <span
-        aria-hidden
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          width: 13,
-          height: 13,
-          flex: "0 0 13px",
-          borderRadius: 4,
-          border: checked
-            ? "1px solid var(--accent-edge)"
-            : "1px solid var(--rule-strong)",
-          background: checked ? "var(--accent-soft)" : "transparent",
-          color: "var(--ink)",
-          transition:
-            "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-        }}
+    <div aria-label="Remote repository actions" style={{ display: "flex", gap: 2, padding: "0 6px 0 2px", flex: "0 0 auto" }}>
+      <SyncButton
+        label="Pull"
+        title={`Pull: download remote commits and integrate them into this branch${tracking}`}
+        onClick={onPull}
+        disabled={anyBusy}
+        count={behind}
+        busy={busy === "pull"}
       >
-        {checked && (
-          <svg width="9" height="9" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <path d="M3 7.4 6 10.4 11.2 4" />
-          </svg>
-        )}
-      </span>
-      Amend last commit
-    </button>
+        <PullIcon />
+      </SyncButton>
+      <SyncButton
+        label="Push"
+        title={`Push: upload this branch's local commits to the remote${tracking}`}
+        onClick={onPush}
+        disabled={anyBusy}
+        count={ahead}
+        busy={busy === "push"}
+      >
+        <PushIcon />
+      </SyncButton>
+      <SyncButton
+        label="Fetch"
+        title="Fetch: download remote updates without changing this branch or your files"
+        onClick={onFetch}
+        disabled={anyBusy}
+        busy={busy === "fetch"}
+      >
+        <SyncIcon />
+      </SyncButton>
+    </div>
   );
 }
 
@@ -474,6 +401,7 @@ function SyncButton({
     <button
       type="button"
       title={title}
+      aria-label={label}
       disabled={disabled}
       onClick={() => {
         if (!disabled) onClick();
@@ -485,12 +413,12 @@ function SyncButton({
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
-        gap: 5,
-        height: 29,
-        minWidth: 0,
-        padding: "0 7px",
-        borderRadius: 7,
-        border: "1px solid var(--rule-soft)",
+        gap: 3,
+        height: 22,
+        minWidth: 22,
+        padding: "0 3px",
+        borderRadius: 5,
+        border: "none",
         background: lit ? "var(--hover)" : "transparent",
         color: disabled ? "var(--muted-2)" : lit ? "var(--ink)" : "var(--muted)",
         cursor: "default",
@@ -500,7 +428,6 @@ function SyncButton({
       }}
     >
       {busy ? <Spinner size={11} /> : children}
-      <span style={{ fontSize: 10, fontWeight: 650 }}>{busy ? `${label}ing` : label}</span>
       {count ? (
         <span
           style={{

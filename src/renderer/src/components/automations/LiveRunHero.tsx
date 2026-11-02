@@ -122,10 +122,10 @@ export default function LiveRunHero({
           )}
         </span>
         <span className="loom-hero__pass">
-          {blocked ? "Pass held: a worker needs you" : `Pass ${Math.max(1, job.state.iteration)} in flight`}
+          {blocked ? "Waiting for your answer" : "Working now"}
         </span>
         <span className="loom-hero__meta spark-mono spark-num">
-          {job.state.iteration}/{capLabel(job)} iters
+          run {Math.max(1, job.state.iteration)} of up to {capLabel(job)}
         </span>
         {(() => {
           // Elapsed clock for the pass: the live worker's start when there is
@@ -170,7 +170,7 @@ export default function LiveRunHero({
                 type="button"
                 className={`loom-hero__chip${current ? " is-current" : ""}`}
                 onClick={() => setPickedAttemptId(w.attemptId)}
-                title={`${w.nodeLabel ?? workerModelLabel(w.model)} · pass ${w.iteration + 1}`}
+                title={`${w.nodeLabel ?? workerModelLabel(w.model)} · run ${w.iteration + 1}`}
               >
                 <span
                   aria-hidden
