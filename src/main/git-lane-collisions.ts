@@ -4,11 +4,15 @@
 // up itself; a result is cached by the two commits, so a pair is merged once.
 // It runs with no click behind it, so it must not start any program the repository
 // configures: one with a custom merge driver is skipped, and so is a partial clone
-// or one with an initialized submodule, which may be one, because a missing file
-// means a fetch that can run an ssh command or credential helper. Renormalizing,
-// which runs clean and smudge filters, is turned off.
+// or one holding a submodule, which may be one, because a missing file means a
+// fetch that can run an ssh command or credential helper. Git 2.45 and later also
+// refuse that fetch outright through GIT_NO_LAZY_FETCH. Renormalizing, which runs
+// clean and smudge filters, is turned off.
 //
 // No Electron import: scripts/test-lane-collisions.cjs runs it on real repositories.
+
+import { existsSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 
 import { isRemotePath } from "@shared/remote";
 import { MAX_COLLISION_LANES, type LaneCollisions } from "@shared/lane-collisions";
@@ -29,7 +33,8 @@ export interface LaneCollisionDeps {
 async function mergedFiles(cwd: string, a: string, b: string, run: typeof runGit): Promise<string[] | null> {
   const parts = (stdout: string) => stdout.split("\0").filter(Boolean).slice(1);
   try {
-    return parts((await run(cwd, [...GIT_C, "-c", "merge.renormalize=false", "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", a, b])).stdout);
+    const args = [...GIT_C, "-c", "merge.renormalize=false", "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", a, b];
+    return parts((await run(cwd, args, { env: { ...process.env, GIT_NO_LAZY_FETCH: "1" } })).stdout);
   } catch (cause) {
     const failure = cause as { code?: unknown; stdout?: unknown };
     // 1 is git's answer "these conflict". Anything else says nothing about the pair.
@@ -44,11 +49,20 @@ async function safeToMerge(cwd: string, run: typeof runGit): Promise<boolean> {
       "config",
       "--get-regexp",
       "^(merge\\..*\\.driver|remote\\..*\\.(promisor|partialclonefilter)|extensions\\.partialclone|submodule\\..*\\.url)$",
-    ]);
-    return !stdout.trim();
-  } catch (cause) {
-    // 1 is git's "no such setting". Any other failure could not rule them out.
-    return (cause as { code?: unknown }).code === 1;
+    ]).then(
+      (result) => result,
+      (cause: { code?: unknown }) => {
+        if (cause.code === 1) return { stdout: "" };
+        throw cause;
+      },
+    );
+    if (stdout.trim()) return false;
+    // A deinitialized submodule drops its setting but keeps its repository here.
+    const common = (await run(cwd, [...GIT_C, "rev-parse", "--git-common-dir"])).stdout.trim();
+    return !existsSync(join(isAbsolute(common) ? common : join(cwd, common), "modules"));
+  } catch {
+    // Exit 1 above is git's "no such setting"; any other failure could not rule them out.
+    return false;
   }
 }
 

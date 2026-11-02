@@ -197,6 +197,25 @@ async function load() {
     assert.deepEqual(await lib.readLaneCollisions([one, two], deps), {}, "an initialized submodule may be a partial clone");
     git(filtered, "config", "--unset", "submodule.vendor.url");
     assert.equal(Object.keys(await lib.readLaneCollisions([one, two], deps)).length, 2, "with those gone it is checked again");
+    const modules = path.join(filtered, ".git", "modules");
+    fs.mkdirSync(modules);
+    assert.deepEqual(await lib.readLaneCollisions([one, two], deps), {}, "a deinitialized submodule keeps its repository");
+    fs.rmdirSync(modules);
+
+    // A fetch is refused outright where git knows the setting.
+    fs.writeFileSync(path.join(one, "x.ts"), "edit one again\n");
+    fs.rmSync(path.join(one, "y.ts"), { force: true });
+    git(one, "-c", "filter.mark.clean=cat", "-c", "filter.mark.smudge=cat", "add", "-A");
+    git(one, "-c", "filter.mark.clean=cat", "-c", "filter.mark.smudge=cat", "commit", "-q", "-m", "again");
+    let mergeEnv = null;
+    await lib.readLaneCollisions([one, two], {
+      supported: async () => true,
+      run: (cwd, args, opts) => {
+        if (args.includes("merge-tree")) mergeEnv = opts?.env ?? null;
+        return run(cwd, args, opts);
+      },
+    });
+    assert.equal(mergeEnv?.GIT_NO_LAZY_FETCH, "1", "the merge runs with lazy fetching off");
 
     console.log("lane collisions: ok");
   } finally {
