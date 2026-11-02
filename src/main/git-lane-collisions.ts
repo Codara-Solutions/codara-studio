@@ -2,6 +2,8 @@
 // `git merge-tree` works on commits alone and touches no worktree or index, so
 // it cannot get in an agent's way. It does write tree objects, which git cleans
 // up itself; a result is cached by the two commits, so a pair is merged once.
+// It runs with no click behind it, so a repository with a custom merge driver is
+// skipped: merge-tree would run that program.
 //
 // No Electron import: scripts/test-lane-collisions.cjs runs it on real repositories.
 
@@ -32,9 +34,20 @@ async function mergedFiles(cwd: string, a: string, b: string, run: typeof runGit
   }
 }
 
+async function hasNoMergeDriver(cwd: string, run: typeof runGit): Promise<boolean> {
+  try {
+    const { stdout } = await run(cwd, [...GIT_C, "config", "--get-regexp", "^merge\\..*\\.driver$"]);
+    return !stdout.trim();
+  } catch (cause) {
+    // 1 is git's "no such setting". Any other failure could not rule a driver out.
+    return (cause as { code?: unknown }).code === 1;
+  }
+}
+
 export async function readLaneCollisions(paths: readonly string[], deps: LaneCollisionDeps = {}): Promise<LaneCollisions> {
   const run = deps.run ?? runGit;
-  const wanted = [...new Set(paths)].filter((path) => !isRemotePath(path)).slice(0, MAX_COLLISION_LANES);
+  // Sorted after the cap, so a lane changing place does not merge its pairs again.
+  const wanted = [...new Set(paths)].filter((path) => !isRemotePath(path)).slice(0, MAX_COLLISION_LANES).sort();
   const out: LaneCollisions = {};
   if (wanted.length < 2) return out;
   if (!(await (deps.supported ?? gitSupportsMergeTreeWriteTree)(wanted[0]))) return out;
@@ -42,6 +55,7 @@ export async function readLaneCollisions(paths: readonly string[], deps: LaneCol
   const heads = new Map<string, string>();
   await Promise.all(
     wanted.map(async (path) => {
+      if (!(await hasNoMergeDriver(path, run))) return;
       const head = await run(path, [...GIT_C, "rev-parse", "--verify", "-q", "HEAD^{commit}"]).then(
         (result) => result.stdout.trim(),
         () => "",
@@ -63,7 +77,8 @@ export async function readLaneCollisions(paths: readonly string[], deps: LaneCol
     while (next < pairs.length) {
       const [a, b] = pairs[next++];
       const [left, right] = [heads.get(a)!, heads.get(b)!].sort();
-      const key = `${left}:${right}`;
+      // By folder too: another clone of the same commits can have other merge settings.
+      const key = `${a}\0${left}:${right}`;
       let files = cache.get(key);
       if (!files) {
         const merged = await mergedFiles(a, left, right, run);

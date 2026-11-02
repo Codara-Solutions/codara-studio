@@ -129,6 +129,34 @@ async function load() {
     git(a, "commit", "-q", "-m", "again");
     assert.deepEqual(await lib.readLaneCollisions([a, b], failing), {}, "a failed merge reads as no clash");
 
+    // A custom merge driver is a program: this check runs in the background and must not start it.
+    const marker = path.join(root, "driver-ran");
+    const driven = path.join(root, "driven");
+    fs.mkdirSync(driven);
+    git(driven, "init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(driven, ".gitattributes"), "*.ts merge=custom\n");
+    fs.writeFileSync(path.join(driven, "x.ts"), "one\n");
+    git(driven, "add", "-A");
+    git(driven, "commit", "-q", "-m", "init");
+    const drivenTree = (name) => {
+      const dir = path.join(root, `driven-${name}`);
+      git(driven, "worktree", "add", "-q", "-b", name, dir);
+      fs.writeFileSync(path.join(dir, "x.ts"), `${name}\n`);
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", name);
+      return dir;
+    };
+    const left = drivenTree("left");
+    const right = drivenTree("right");
+    const unprotected = await lib.readLaneCollisions([left, right], deps);
+    assert.deepEqual(Object.keys(unprotected).length, 2, "with no driver set up, the attribute alone is an ordinary clash");
+    git(driven, "config", "merge.custom.driver", `touch ${marker}`);
+    fs.writeFileSync(path.join(left, "x.ts"), "left again\n");
+    git(left, "add", "-A");
+    git(left, "commit", "-q", "-m", "left again");
+    assert.deepEqual(await lib.readLaneCollisions([left, right], deps), {}, "a repository with a driver is skipped");
+    assert.equal(fs.existsSync(marker), false, "the driver did not run");
+
     console.log("lane collisions: ok");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
