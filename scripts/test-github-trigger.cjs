@@ -214,6 +214,16 @@ const none = new Map();
   assert.ok(m.seen.includes(`ci:12:${SHA}`));
   const rerun = new Map([[SHA, { failed: ["build"], failedAt: NOW + 9999, pending: 0 }]]);
   assert.equal(decideGitHubTrigger(ci, m, [pull()], rerun, NOW + 9999).fire, undefined, "a re-run does not start a second run");
+
+  // Old commits of another open pull request go before a current head.
+  const old = Array.from({ length: 199 }, (_, i) => `ci:13:${i.toString(16).padStart(40, "d")}`);
+  const nextSha = "e".repeat(40);
+  const full = memory({ seen: [`ci:12:${SHA}`, ...old] });
+  const thirteen = pull({ number: 13, head: { sha: nextSha, ref: "x" } });
+  const redNext = new Map([[nextSha, { failed: ["build"], failedAt: NOW, pending: 0 }]]);
+  const after = decideGitHubTrigger(ci, full, [pull(), thirteen], redNext, NOW).memory;
+  assert.ok(after.seen.includes(`ci:12:${SHA}`), "the current head is kept");
+  assert.equal(after.seen.length, 200);
   const seen = ["pr:11", `ci:12:${SHA}`, ...Array.from({ length: 198 }, (_, i) => `ci:1:${i}`)];
   const d = decideGitHubTrigger(opened, memory({ seen }), [pull()], none, NOW);
   assert.equal(d.memory.seen.length, 200);

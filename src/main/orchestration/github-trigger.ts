@@ -161,14 +161,13 @@ export function decideGitHubTrigger(
   const finish = (fire?: GitHubTriggerFire): GitHubTriggerDecision => {
     const next: GitHubTriggerMemory = { ...memory, seen, fires };
     if (seen.length > SEEN_CAP) {
-      // A forgotten key must not fire again. Keys of pull requests still in the
-      // list go last, since a re-run on one could come back at any moment, and
-      // what is forgotten moves behind the seed line. That can drop an old
+      // A forgotten key must not fire again. What the open pull requests are at
+      // right now goes last, since a re-run on one could come back at any moment,
+      // and what is forgotten moves behind the seed line. That can drop an old
       // unseen event; a duplicate paid run is the worse mistake.
-      const open = new Set(pulls.map((pull) => pull.number));
-      const numberOf = (key: string): number => Number(key.split(":")[1]);
+      const current = new Set(pulls.flatMap((pull) => [`pr:${pull.number}`, ciKey(pull)]));
       const overflow = seen.length - SEEN_CAP;
-      const dropped = [...seen.filter((key) => !open.has(numberOf(key))), ...seen.filter((key) => open.has(numberOf(key)))].slice(0, overflow);
+      const dropped = [...seen.filter((key) => !current.has(key)), ...seen.filter((key) => current.has(key))].slice(0, overflow);
       const droppedSet = new Set(dropped);
       next.seen = seen.filter((key) => !droppedSet.has(key));
       next.seededAt = nowMs;
