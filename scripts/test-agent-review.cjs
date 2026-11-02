@@ -132,7 +132,10 @@ test("a review takes one answer, and holds its notes until acknowledged", async 
   assert.equal(done.notes[0].reviewer, "Codex");
   assert.deepEqual(await reviews.submit(state.id, []), { accepted: false, count: 0 });
   assert.ok(reviews.list()[0].notes, "kept for a window that was closed");
-  reviews.acknowledge(state.id);
+  // Only what the window saved is let go: a full or unwritable list loses nothing.
+  reviews.acknowledge(state.id, []);
+  assert.equal(reviews.list()[0].notes.length, 1, "kept when nothing was saved");
+  reviews.acknowledge(state.id, [done.notes[0].id]);
   assert.equal(reviews.list()[0].notes, undefined);
   assert.equal(reviews.list()[0].count, 1);
   assert.deepEqual(await reviews.submit("review-unknown", []), { accepted: false, count: 0 });
@@ -149,6 +152,13 @@ test("a finding never quotes through a link out of the folder", async (lib) => {
   assert.equal(await lib.quoteLines(cwd, "link.txt", 1, 1), "");
   assert.equal(await lib.quoteLines(cwd, "missing.txt", 1, 1), "");
   assert.equal(await lib.quoteLines(cwd, "link.txt", 0, 0), "");
+  const token = "ghp_" + "a1B2".repeat(9);
+  fs.writeFileSync(path.join(cwd, ".env"), `TOKEN=${token}\n`);
+  fs.writeFileSync(path.join(cwd, "app.ts"), `const key = "${token}";\nconst two = 2;\n`);
+  assert.equal(await lib.quoteLines(cwd, ".env", 1, 1), "", "a secrets file is never quoted");
+  const quoted = await lib.quoteLines(cwd, "app.ts", 1, 2);
+  assert.ok(!quoted.includes(token), "a secret on a quoted line is removed");
+  assert.match(quoted, /const two = 2;/);
   fs.rmSync(cwd, { recursive: true, force: true });
   fs.rmSync(path.dirname(outside), { recursive: true, force: true });
 });

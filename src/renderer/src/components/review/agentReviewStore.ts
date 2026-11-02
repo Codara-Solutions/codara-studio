@@ -1,8 +1,8 @@
 import { useSyncExternalStore } from "react";
 import type { AgentReviewState } from "@shared/agent-review";
-import { cleanReviewNotes, MAX_REVIEW_NOTES } from "@shared/review-notes";
+import { cleanReviewNotes, type ReviewNote } from "@shared/review-notes";
 import { emitLocalToast } from "../../notifications/local-toast";
-import { changeReviewNotes } from "./review-notes-store";
+import { addAndSaveReviewNotes } from "./review-notes-store";
 
 // Reviews by an agent, by workspace, for the lanes. A review's findings wait in
 // main until this window has put them in the workspace's notes: the notes store
@@ -12,6 +12,8 @@ let latest: Readonly<Record<string, AgentReviewState>> = {};
 let started = false;
 // A review reaches the window by its event and by the first read; it speaks once.
 const announced = new Set<string>();
+const warned = new Set<string>();
+const held = new Set<string>();
 const listeners = new Set<() => void>();
 
 function publish(state: AgentReviewState): void {
@@ -24,27 +26,46 @@ function publish(state: AgentReviewState): void {
 
 function take(state: AgentReviewState): void {
   publish(state);
-  const api = window.spark.review;
   if (state.notes) {
-    const incoming = cleanReviewNotes(state.notes);
-    void changeReviewNotes(state.workspaceId, (notes) => {
-      const known = new Set(notes.map((note) => note.id));
-      return [...notes, ...incoming.filter((note) => !known.has(note.id))].slice(0, MAX_REVIEW_NOTES);
-    })
-      .then(() => api.acknowledgeAgentReview(state.id))
-      .catch((cause: unknown) => {
-        emitLocalToast("Could not add the findings", cause instanceof Error ? cause.message : String(cause), "danger");
-      });
-    if (announced.has(state.id)) return;
+    void addFindings(state, state.notes);
+  } else if (state.status === "failed") {
+    emitLocalToast("The review did not finish", state.detail ?? "", "warning");
+  }
+}
+
+// Main keeps what is not saved, so a full or unwritable list loses nothing: the
+// rest is added on a later focus or the next launch.
+async function addFindings(state: AgentReviewState, notes: readonly ReviewNote[]): Promise<void> {
+  const incoming = cleanReviewNotes(notes);
+  const saved = await addAndSaveReviewNotes(state.workspaceId, incoming).catch(() => [] as string[]);
+  await window.spark.review.acknowledgeAgentReview(state.id, saved).catch(() => undefined);
+  const left = notes.length - saved.length;
+  if (left > 0) held.add(state.id);
+  else held.delete(state.id);
+  if (!announced.has(state.id)) {
     announced.add(state.id);
-    const count = state.count ?? incoming.length;
+    const count = state.count ?? notes.length;
     emitLocalToast(
       count === 0 ? `${state.reviewer} found nothing` : `${state.reviewer} found ${count === 1 ? "1 problem" : `${count} problems`}`,
       count === 0 ? "The review is finished." : "They are on the diff as notes, ready to send to an agent.",
     );
-  } else if (state.status === "failed") {
-    emitLocalToast("The review did not finish", state.detail ?? "", "warning");
   }
+  if (left > 0 && !warned.has(state.id)) {
+    warned.add(state.id);
+    emitLocalToast(
+      left === 1 ? "1 finding is waiting" : `${left} findings are waiting`,
+      "The review notes are full or could not be saved. They are added once there is room.",
+      "warning",
+    );
+  }
+}
+
+function retryHeld(): void {
+  if (held.size === 0) return;
+  void window.spark.review.agentReviews().then(
+    (states) => states.filter((state) => state.notes && held.has(state.id)).forEach(take),
+    () => undefined,
+  );
 }
 
 function start(): void {
@@ -54,6 +75,7 @@ function start(): void {
   if (!api?.onAgentReviewChanged) return;
   api.onAgentReviewChanged(take);
   void api.agentReviews().then((states) => states.forEach(take), () => undefined);
+  window.addEventListener("focus", retryHeld);
 }
 
 function subscribe(listener: () => void): () => void {

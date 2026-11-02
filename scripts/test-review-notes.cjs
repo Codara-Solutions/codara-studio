@@ -394,6 +394,25 @@ function diffFile(pathName, text, over = {}) {
     assert.equal(calls.list, 2);
     assert.deepEqual(calls.saves, [["disk-1", added.id]], "the saved list keeps the notes on disk");
     assert.equal(cache.reviewNotesError("ws-cache"), null);
+
+    // Findings come from a holder that lets go only of what is known to be saved.
+    const finding = (id) => ({ id, source: "diff", filePath: "a.ts", side: "new", startLine: 1, endLine: 1, quote: "", body: "x", createdAt: 1 });
+    assert.deepEqual(await cache.addAndSaveReviewNotes("ws-cache", [finding("f1"), finding("f2")]), ["f1", "f2"]);
+    assert.deepEqual(await cache.addAndSaveReviewNotes("ws-cache", [finding("f1")]), ["f1"], "a repeat counts as saved and adds nothing");
+    assert.equal(cache.getReviewNotes("ws-cache").filter((item) => item.id === "f1").length, 1);
+    failList = true;
+    assert.deepEqual(await cache.addAndSaveReviewNotes("ws-unreadable", [finding("f3")]), [], "nothing is saved over a list that could not be read");
+    failList = false;
+    onDisk = [];
+    const full = Array.from({ length: 499 }, (_, index) => finding(`full-${index}`));
+    assert.equal((await cache.addAndSaveReviewNotes("ws-full", full)).length, 499);
+    assert.deepEqual(await cache.addAndSaveReviewNotes("ws-full", [finding("f4"), finding("f5")]), ["f4"], "only what fits is reported saved");
+    const realSave = global.window.spark.review.saveNotes;
+    global.window.spark.review.saveNotes = async () => { throw new Error("disk full"); };
+    assert.deepEqual(await cache.addAndSaveReviewNotes("ws-cache", [finding("f6")]), [], "a failed save reports nothing saved");
+    global.window.spark.review.saveNotes = realSave;
+    assert.deepEqual(await cache.addAndSaveReviewNotes("ws-cache", [finding("f6")]), ["f6"], "the retry saves what only memory held");
+    assert.ok(onDisk.some((item) => item.id === "f6"));
     delete global.window;
 
     const handoff = await store.handoff("ws-1", "[Codara] 1 review note.");

@@ -39,7 +39,8 @@ export const reviewApi = {
   /** Starts a new Claude Code or Codex session as the reviewer. */
   startAgentReview: (request: AgentReviewRequest): Promise<AgentReviewState> =>
     ipcRenderer.invoke("agentReview:start", request),
-  acknowledgeAgentReview: (id: string): Promise<void> => ipcRenderer.invoke("agentReview:acknowledge", id),
+  acknowledgeAgentReview: (id: string, savedIds: readonly string[]): Promise<void> =>
+    ipcRenderer.invoke("agentReview:acknowledge", id, savedIds),
   dismissAgentReview: (id: string): Promise<void> => ipcRenderer.invoke("agentReview:dismiss", id),
   onAgentReviewChanged: (listener: (state: AgentReviewState) => void): (() => void) => {
     const wrapped = (_event: unknown, state: AgentReviewState): void => listener(state);

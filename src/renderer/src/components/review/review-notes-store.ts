@@ -131,6 +131,23 @@ export async function changeReviewNotes(
   await entry.saving;
 }
 
+/**
+ * Adds finished notes and resolves to the ids known to be on disk. Fewer than
+ * asked means the list is full or could not be read or saved, and the caller
+ * still holds the rest.
+ */
+export async function addAndSaveReviewNotes(workspaceId: string, incoming: readonly ReviewNote[]): Promise<string[]> {
+  await changeReviewNotes(workspaceId, (notes) => {
+    const known = new Set(notes.map((note) => note.id));
+    const fresh = incoming.filter((note) => !known.has(note.id)).slice(0, Math.max(0, MAX_REVIEW_NOTES - notes.length));
+    // After a failed save the notes are in memory but not on disk: a retry must save again.
+    return fresh.length > 0 || reviewNotesError(workspaceId) ? [...notes, ...fresh] : notes;
+  });
+  if (reviewNotesError(workspaceId)) return [];
+  const now = new Set(getReviewNotes(workspaceId).map((note) => note.id));
+  return incoming.filter((note) => now.has(note.id)).map((note) => note.id);
+}
+
 export type NewReviewNote = Omit<ReviewNote, "id" | "createdAt" | "updatedAt">;
 
 export async function addReviewNote(workspaceId: string, input: NewReviewNote): Promise<ReviewNote | null> {

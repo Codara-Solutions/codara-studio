@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { lstat, open, realpath } from "node:fs/promises";
 import { join, sep } from "node:path";
 
+import { looksLikeSecretsFile, redactSecrets } from "@shared/git-fix";
 import {
   agentReviewBrief,
   findingToNote,
@@ -50,9 +51,10 @@ interface Entry {
 }
 
 // The lines a finding points at, so the note shows them. A link is not
-// followed, and nothing outside the folder is read whatever the path says.
+// followed, nothing outside the folder is read whatever the path says, and no
+// secret gets into a note, which is saved and sent on to other agents.
 export async function quoteLines(cwd: string, path: string, start: number, end: number): Promise<string> {
-  if (start <= 0) return "";
+  if (start <= 0 || looksLikeSecretsFile(path)) return "";
   try {
     const root = await realpath(cwd);
     const full = await realpath(join(root, path));
@@ -64,12 +66,14 @@ export async function quoteLines(cwd: string, path: string, start: number, end: 
       const { buffer, bytesRead } = await handle.read(Buffer.alloc(info.size), 0, info.size, 0);
       const body = buffer.subarray(0, bytesRead);
       if (body.includes(0)) return "";
-      return body
-        .toString("utf8")
-        .split("\n")
-        .slice(start - 1, end)
-        .map((line) => `+${line}`)
-        .join("\n");
+      return redactSecrets(
+        body
+          .toString("utf8")
+          .split("\n")
+          .slice(start - 1, end)
+          .map((line) => `+${line}`)
+          .join("\n"),
+      );
     } finally {
       await handle.close().catch(() => undefined);
     }
@@ -159,12 +163,14 @@ export class AgentReviews {
     return { accepted: true, count: notes.length };
   }
 
-  /** The window added the notes; they need not be kept or sent again. */
-  acknowledge(id: string): void {
+  /** The window saved these notes. Any others stay here for it to try again. */
+  acknowledge(id: string, savedIds: readonly string[]): void {
     const entry = this.entries.get(id);
     if (!entry?.state.notes) return;
-    const { notes: _added, ...rest } = entry.state;
-    entry.state = rest;
+    const saved = new Set(savedIds);
+    const left = entry.state.notes.filter((note) => !saved.has(note.id));
+    const { notes: _held, ...rest } = entry.state;
+    entry.state = left.length > 0 ? { ...rest, notes: left } : rest;
   }
 
   /** Forgets a finished review, or stops waiting for a running one. */

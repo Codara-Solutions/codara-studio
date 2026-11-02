@@ -96,8 +96,9 @@ export function registerReviewIpc(handle: IpcHandle): void {
     if (!request.runtime) throw new Error("A new reviewer needs an agent: Claude Code or Codex.");
     return agentReviews().start({ ...request, runtime: request.runtime });
   });
-  handle("agentReview:acknowledge", async (_event, id: unknown) => {
-    if (typeof id === "string") agentReviews().acknowledge(id);
+  handle("agentReview:acknowledge", async (_event, id: unknown, saved: unknown) => {
+    if (typeof id !== "string" || !Array.isArray(saved)) return;
+    agentReviews().acknowledge(id, saved.filter((value): value is string => typeof value === "string"));
   });
   handle("agentReview:dismiss", async (_event, id: unknown) => {
     if (typeof id === "string") agentReviews().dismiss(id);
