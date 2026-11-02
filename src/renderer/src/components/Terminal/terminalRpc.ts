@@ -64,8 +64,18 @@ export function registerTerminalRpcHandler(): void {
   });
 }
 
+// App knows every workspace's tabs; until it says otherwise, every workspace is
+// held, so a removal asked for before it is ready refuses.
+let workspaceHeldProbe: (workspaceId: string) => boolean = () => true;
+
+export function setWorkspaceHeldProbe(probe: (workspaceId: string) => boolean): void {
+  workspaceHeldProbe = probe;
+}
+
 async function dispatch(req: BridgeRequest): Promise<unknown> {
   switch (req.op) {
+    case "workspaceHeld":
+      return workspaceHeldProbe(String((req.params as { workspaceId?: unknown }).workspaceId ?? ""));
     case "agentCounts":
       return getWorkspaceAgentCounts();
     case "list":

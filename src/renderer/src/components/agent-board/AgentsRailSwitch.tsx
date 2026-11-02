@@ -3,30 +3,28 @@ import type { KeyboardEvent } from "react";
 import { useAgentBoard } from "./useAgentBoard";
 import { useAgentInbox } from "./useAgentInbox";
 import { usePublishAgentLines } from "../workspace-status/agentLinesStore";
+import { HistoryIcon } from "../icons";
+import { requestSessionSearch } from "../session-search/sessionSearchStore";
 import { RAIL_VIEW_PANEL_ID, type RailView } from "./railView";
 import "./rail-view-switch.css";
 
 // The top of the rail's Workspaces section: a switch between the workspace
-// list in the user's own order, the Agents view, an inbox of every agent
+// list in the user's own order and the Agents view, an inbox of every agent
 // terminal and Cora chat of every workspace (what needs you or finished on
-// top, then the Working, Snoozed and Settled shelves), and the Sessions view,
-// which searches every past agent session.
+// top, then the Working, Snoozed and Settled shelves). Beside it, the button
+// that opens the session picker on this workspace's past sessions.
 // The rail renders its own list under this when the switch says Workspaces.
 
 const VIEWS: { id: RailView; label: string }[] = [
   { id: "workspaces", label: "Workspaces" },
   { id: "agents", label: "Agents" },
-  { id: "sessions", label: "Sessions" },
 ];
 
 const loadAgentInboxList = () => import("./AgentInboxList");
 const AgentInboxList = lazy(loadAgentInboxList);
-const loadSessionSearchList = () => import("../session-search/SessionSearchList");
-const SessionSearchList = lazy(loadSessionSearchList);
 
 const PRELOAD: Partial<Record<RailView, () => Promise<unknown>>> = {
   agents: loadAgentInboxList,
-  sessions: loadSessionSearchList,
 };
 
 export default function AgentsRailSwitch({
@@ -98,15 +96,20 @@ export default function AgentsRailSwitch({
             );
           })}
         </div>
+        <button
+          type="button"
+          className="spark-icon-btn rail-view-switch__sessions"
+          aria-label="Past sessions in this workspace"
+          title="Past sessions in this workspace"
+          data-testid="rail-sessions-button"
+          onClick={() => requestSessionSearch("", "workspace")}
+        >
+          <HistoryIcon size={13} />
+        </button>
       </div>
       {live && (
         <Suspense fallback={<div className="rail-view-switch__pending" />}>
           <AgentInboxList {...board} view={inbox} />
-        </Suspense>
-      )}
-      {view === "sessions" && (
-        <Suspense fallback={<div className="rail-view-switch__pending" />}>
-          <SessionSearchList />
         </Suspense>
       )}
     </>

@@ -333,6 +333,10 @@ function normalize(
       typeof src.agentsMayRemoveUserWorktrees === "boolean"
         ? src.agentsMayRemoveUserWorktrees
         : DEFAULT_PREFERENCES.agentsMayRemoveUserWorktrees,
+    worktreeAutoRemoveMerged:
+      typeof src.worktreeAutoRemoveMerged === "boolean"
+        ? src.worktreeAutoRemoveMerged
+        : DEFAULT_PREFERENCES.worktreeAutoRemoveMerged,
     agentWorktreeRegenerableIgnoredByRepo: normalizeStringListMap(
       src.agentWorktreeRegenerableIgnoredByRepo,
     ),

@@ -3,7 +3,19 @@
 
 .rail-view-switch {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   padding: 6px 8px 0;
+}
+
+.rail-view-switch__track {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.rail-view-switch__sessions {
+  flex: 0 0 auto;
 }
 
 /* Outweighs .spark-segmented.is-wrap's sizing (and styles.css loads after
