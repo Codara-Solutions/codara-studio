@@ -152,9 +152,16 @@ for (const [id, label, handler] of [
   assert.match(shortcutCommands, new RegExp(`id: "${id}"[\\s\\S]*?label: "${label}"`));
   assert.ok(app.includes(`"${id}": () => ${handler}`), `${id} must have an App handler`);
 }
-// No picker stands between a worker row or shortcut and a new session.
-assert.ok(!fs.existsSync(path.join(ROOT, "src/renderer/src/components/WorkerSessionPicker.tsx")));
-assert.doesNotMatch(shortcutCommands, /worker\.(claude|codex|grok)Sessions/);
+// The worker rows and the sessions commands show history first; a chord bound
+// to "New ... worker pane" never does.
+for (const [id, runtime, command] of [
+  ["worker.claudeSessions", "claude", "CLAUDE_LAUNCH_COMMAND"],
+  ["worker.codexSessions", "codex", "CODEX_LAUNCH_COMMAND"],
+  ["worker.grokSessions", "grok", "GROK_LAUNCH_COMMAND"],
+]) {
+  assert.match(shortcutCommands, new RegExp(`\\| "${id}"`));
+  assert.ok(app.includes(`"${id}": () => offerWorkerPane("${runtime}", ${command})`), `${id} must have an App handler`);
+}
 assert.match(
   app,
   /const launchWorkerInNewTerminalTab = useCallback\([\s\S]*?tabs\.newTerminalTab\(cwd, launchCommand/,
@@ -169,13 +176,17 @@ for (const [runtime, command] of [
   ["Claude", "CLAUDE_LAUNCH_COMMAND"],
   ["Codex", "CODEX_LAUNCH_COMMAND"],
   ["Grok", "GROK_LAUNCH_COMMAND"],
-  ["Pi", "PI_LAUNCH_COMMAND"],
 ]) {
   assert.ok(
-    app.includes(`() => launchNewWorkerTab(${command})`) && app.includes(`onNew${runtime}Worker={open${runtime}Worker}`),
-    `the tab-strip ${runtime} row must start a new session in its own tab`,
+    app.includes(`() => offerWorkerTab("${runtime.toLowerCase()}", ${command})`) &&
+      app.includes(`onNew${runtime}Worker={open${runtime}Worker}`),
+    `the tab-strip ${runtime} row must offer past sessions before a new tab`,
   );
 }
+assert.ok(
+  app.includes("() => launchNewWorkerTab(PI_LAUNCH_COMMAND)") && app.includes("onNewPiWorker={openPiWorker}"),
+  "the tab-strip Pi row must start a new session in its own tab",
+);
 assert.match(
   terminalStack,
   // The Where row may pass another machine's folder; the pane still lands in this tab.

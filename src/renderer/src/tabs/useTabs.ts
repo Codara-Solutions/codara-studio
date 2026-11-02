@@ -3497,30 +3497,28 @@ export function useTabs(
         agentSession?: TerminalAgentSession | null;
       },
     ): boolean => {
-      let added = false;
+      const rootWidth = options?.rootWidth ?? 1600;
+      const rootHeight = options?.rootHeight ?? 900;
+      // Answered before setTabs: React defers the updater whenever this
+      // component has another update pending, and a caller told "not added"
+      // opens a new tab too, which would launch the same command twice.
+      const current = tabsRef.current.find((t) => t.id === tabId);
+      if (current?.kind !== "terminal") return false;
+      if (findLeaf(current.root, paneId)) return true;
+      if (!smartAddTarget(current.root, rootWidth, rootHeight)) return false;
       setTabs((curr) =>
         curr.map((t) => {
-          if (t.id !== tabId || t.kind !== "terminal") return t;
-          if (findLeaf(t.root, paneId)) {
-            // already present; nothing to do but treat as success
-            added = true;
-            return t;
-          }
-          const target = smartAddTarget(
-            t.root,
-            options?.rootWidth ?? 1600,
-            options?.rootHeight ?? 900,
-          );
+          if (t.id !== tabId || t.kind !== "terminal" || findLeaf(t.root, paneId)) return t;
+          const target = smartAddTarget(t.root, rootWidth, rootHeight);
           if (!target) return t;
           const newLeaf = leaf(paneId, options?.cwd, options?.autorun);
           if (options?.worker !== undefined) newLeaf.worker = options.worker;
           if (options?.agentSession) newLeaf.agentSession = options.agentSession;
           const root = splitAtLeaf(t.root, target.paneId, target.direction, newLeaf);
-          added = true;
           return { ...t, root, activePaneId: paneId };
         }),
       );
-      return added;
+      return true;
     },
     [],
   );

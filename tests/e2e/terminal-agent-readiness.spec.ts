@@ -64,11 +64,13 @@ async function openSession(
     return;
   }
   if (launchKind === "fresh") {
-    // The tab strip's worker row starts a new session in a new tab at once.
+    // The tab strip's worker row shows past sessions; New session starts one
+    // in a new tab.
     await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
     const picker = page.locator(".spark-tabbar-picker");
     const workerLabel = runtime === "claude" ? "Claude worker" : "Codex worker";
     await picker.getByRole("button", { name: workerLabel }).dispatchEvent("click");
+    await page.getByTestId("session-picker-new").click();
     return;
   }
   // An earlier session is resumed from the session picker.
