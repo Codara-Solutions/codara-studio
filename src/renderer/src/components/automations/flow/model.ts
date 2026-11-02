@@ -1,3 +1,5 @@
+import { normalizeAutomationGuard } from "@shared/automation-guard";
+import type { AutomationGuard } from "@shared/types";
 import type {
   AgentEffortLevel,
   AutomationActivityEvent,
@@ -55,8 +57,12 @@ export interface LoopDraft {
   countN: string;
   cadenceMin: string;
   isolate: boolean;
+  ownBranch: boolean;
+  draftPr: boolean;
   maxIters: string;
   budget: string;
+  monthlyCap: string;
+  pauseAfter: string;
   untilTests: boolean;
   testCommand: string;
   untilGit: boolean;
@@ -133,8 +139,12 @@ export function emptyDraft(): LoomDraft {
       countN: "5",
       cadenceMin: "10",
       isolate: false,
+      ownBranch: false,
+      draftPr: true,
       maxIters: "",
       budget: "",
+      monthlyCap: "",
+      pauseAfter: "",
       untilTests: false,
       testCommand: "npm test",
       untilGit: false,
@@ -194,10 +204,14 @@ export function draftFromJob(job: ScheduledJob): LoomDraft {
   if (job.loop.kind === "count") d.loop.countN = String(stop.maxIterations ?? 5);
   if (job.loop.everyMs) d.loop.cadenceMin = String(job.loop.everyMs / 60_000);
   d.loop.isolate = Boolean(job.loop.isolate);
+  d.loop.ownBranch = Boolean(job.ownBranch);
+  d.loop.draftPr = job.ownBranch?.draftPr ?? true;
   if (stop.maxIterations !== undefined && job.loop.kind !== "count") {
     d.loop.maxIters = String(stop.maxIterations);
   }
   if (stop.budgetUsd !== undefined) d.loop.budget = String(stop.budgetUsd);
+  if (job.guard?.monthlyCapUsd !== undefined) d.loop.monthlyCap = String(job.guard.monthlyCapUsd);
+  if (job.guard?.pauseAfterFailures !== undefined) d.loop.pauseAfter = String(job.guard.pauseAfterFailures);
   d.loop.untilTests = Boolean(stop.untilTestsPass);
   d.loop.testCommand = stop.testCommand ?? "npm test";
   d.loop.untilGit = Boolean(stop.untilGitClean);
@@ -278,6 +292,13 @@ export function buildTrigger(d: TriggerDraft): AutomationTrigger | null {
     default:
       return { kind: "manual" };
   }
+}
+
+export function buildGuard(d: LoopDraft): AutomationGuard | undefined {
+  return normalizeAutomationGuard({
+    ...(d.monthlyCap.trim() ? { monthlyCapUsd: Number(d.monthlyCap) } : {}),
+    ...(d.pauseAfter.trim() ? { pauseAfterFailures: Number(d.pauseAfter) } : {}),
+  });
 }
 
 export function buildLoop(d: LoopDraft): AutomationLoop {

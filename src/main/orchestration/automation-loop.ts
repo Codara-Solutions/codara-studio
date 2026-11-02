@@ -1,4 +1,8 @@
+import { monthKey, monthlyCapReached, seedMonthSpend } from "@shared/automation-guard";
+import { promises as fs } from "node:fs";
 import type {
+  AutomationBranchResult,
+  AutomationOwnBranchState,
   PreResolvedNode,
   AgentEffortLevel,
   AgentLoopSignal,
@@ -25,6 +29,7 @@ import {
 } from "@shared/types";
 import { appendHistory, appendSkip, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
 import { githubFireNote, githubFireVars } from "./github-trigger";
+import { ownBranchNote } from "./own-branch-note";
 import { normalizeAutomationPrecheck, precheckSkipDetail } from "@shared/automation-catchup";
 import { PRECHECK_STOPPED_ERROR, runAutomationPrecheck, stopRunningPrechecks } from "./automation-precheck";
 import { automationSourceKey, publish, rearm, settleAutomationQuestions } from "../notify";
@@ -280,15 +285,126 @@ async function passesPrecheck(id: string, job: ScheduledJob, opts: StartIteratio
   return false;
 }
 
+const RECONCILED_STOPPED_RUNS = 5;
+const LATE_COST_NOISE_USD = 0.0001;
+
+// jobId of loops whose work is being committed and pushed. Nothing may start a
+// cycle meanwhile: it would close the same checkout a second time.
+const settlingBranch = new Map<string, Promise<void>>();
+
+const STOPS_WITHOUT_A_PULL_REQUEST: ReadonlySet<AutomationStopReason> = new Set<AutomationStopReason>([
+  "budget",
+  "iteration-failed",
+  "user-stop",
+  "engine-missing",
+]);
+
+// Commits what the cycle did and clears the checkout from the loop state, so
+// neither this nor a later cycle can act on it again.
+async function settleOwnBranch(id: string, reason: AutomationStopReason): Promise<void> {
+  const job = await getJob(id);
+  const own = job?.state.ownBranch;
+  // A caller that goes on to start a cycle has to wait for one already under way,
+  // or its start is refused and the restart is lost.
+  const settling = settlingBranch.get(id);
+  if (settling) return settling;
+  if (!job || !own) return;
+  const work = closeAndForgetOwnBranch(job, own, reason).finally(() => settlingBranch.delete(id));
+  settlingBranch.set(id, work);
+  return work;
+}
+
+async function closeAndForgetOwnBranch(job: ScheduledJob, own: AutomationOwnBranchState, reason: AutomationStopReason): Promise<void> {
+  const last = job.history[job.history.length - 1];
+  const wentWell = !STOPS_WITHOUT_A_PULL_REQUEST.has(reason) && last?.status === "complete";
+  const { closeOwnBranch } = await import("./automation-branch");
+  const result: AutomationBranchResult = await closeOwnBranch(job, own, {
+    openPullRequest: wentWell && job.ownBranch?.draftPr === true,
+    summary: last?.summary,
+  }).catch(() => ({
+    branch: own.branch,
+    changed: true,
+    note: `Could not finish its branch. Anything it did is still in ${own.path}.`,
+  }));
+  await patchJob(job.id, (j) => {
+    const history = [...j.history];
+    if (history.length > 0) history[history.length - 1] = { ...history[history.length - 1], branchResult: result };
+    const { ownBranch: _settled, ...state } = j.state;
+    return { ...j, history, state };
+  });
+}
+
 // Whether a trigger fire right now would be dropped: startIteration holds for
 // all of these. A trigger that remembers what it fired checks first, so the
 // event waits instead of being marked as handled and lost.
 export async function automationIsBusy(job: ScheduledJob): Promise<boolean> {
   if (job.state.status === "paused" || job.state.status === "blocked") return true;
-  if (runnerFor(job.id).firing) return true;
+  if (monthlyCapReached(job, Date.now())) return true;
+  if (runnerFor(job.id).firing || settlingBranch.has(job.id)) return true;
   if (!job.state.currentRunId) return false;
   const live = await safeGetRun(job.state.currentRunId);
   return !!live && !TERMINAL.has(live.status);
+}
+
+function capRefusal(job: ScheduledJob): string {
+  return `It reached its monthly cap of ${fmtCapUsd(job.guard?.monthlyCapUsd)}, so this run did not start.`;
+}
+
+function fmtCapUsd(value: number | undefined): string {
+  return `$${(value ?? 0).toFixed(2)}`;
+}
+
+// A stopped worker reports what it really spent as it exits, after its row was
+// closed on the estimate. Reconciled, only upward, before a cap decides anything.
+// The amount is worked out inside the write, against what the row says was already
+// charged, so concurrent starts cannot charge it twice and a restart cannot leave
+// the row and the tally disagreeing.
+async function chargeLateCosts(id: string): Promise<void> {
+  const job = await getJob(id);
+  if (!job?.guard?.monthlyCapUsd) return;
+  const month = monthKey(Date.now());
+  const stopped = job.history
+    .filter((rec) => rec.chargedRunUsd !== undefined && monthKey(Date.parse(rec.startedAt)) === month)
+    .slice(-RECONCILED_STOPPED_RUNS);
+  for (const { runId, iteration } of stopped) {
+    const run = await safeGetRun(runId);
+    if (!run) continue;
+    const total = runTotalUsd(run);
+    await patchJob(id, (j) => {
+      const at = j.history.findIndex((r) => r.runId === runId && r.iteration === iteration);
+      const row = j.history[at];
+      const late = row ? total - (row.chargedRunUsd ?? total) : 0;
+      if (late <= LATE_COST_NOISE_USD) return j;
+      // Before the row changes, or the seed would already hold this charge.
+      const tally = seedMonthSpend(j, Date.now());
+      const base = tally?.month === month ? tally : { month, costUsd: 0, measuredCostUsd: 0 };
+      const history = [...j.history];
+      history[at] = { ...row, costUsd: (row.costUsd ?? 0) + late, chargedRunUsd: total };
+      return { ...j, history, monthSpend: { ...base, costUsd: base.costUsd + late } };
+    });
+  }
+}
+
+// Said once, however many fires it refuses. Decided inside the write so two
+// refusals cannot both be the first.
+async function noticeMonthlyCap(id: string): Promise<void> {
+  let first = false;
+  const job = await patchJob(id, (j) => {
+    // Per cap as well as per month: reaching a raised cap is news again.
+    const notice = `${monthKey(Date.now())}:${j.guard?.monthlyCapUsd}`;
+    first = j.capNotice !== notice;
+    return first ? { ...j, capNotice: notice } : j;
+  });
+  if (!first || !job) return;
+  publish({
+    kind: "automation.failed",
+    sourceKey: automationSourceKey(id),
+    tone: "danger",
+    title: "Automation reached its monthly cap",
+    body: `“${job.name}” will not start again this month unless you raise its cap of ${fmtCapUsd(job.guard?.monthlyCapUsd)}.`,
+    soundKind: "needs-you",
+    target: { type: "automation", jobId: id, workspaceId: job.input.workspaceId },
+  });
 }
 
 // Start the next iteration of an automation's loop. Idempotent against an
@@ -296,7 +412,25 @@ export async function automationIsBusy(job: ScheduledJob): Promise<boolean> {
 export async function startIteration(id: string, opts: StartIterationOpts): Promise<void> {
   let job = await getJob(id);
   if (!job || !job.enabled) return;
+  if (settlingBranch.has(id)) return;
   if (job.state.status === "paused") return; // explicit user hold; resumeLoop re-drives
+  // Before the precheck and the reset below: a refused fire spends nothing and
+  // leaves the last cycle's result on the page.
+  if (job.guard?.monthlyCapUsd) {
+    await chargeLateCosts(id);
+    job = (await getJob(id)) ?? job;
+  }
+  if (monthlyCapReached(job, Date.now())) {
+    if (job.state.status === "stopped" && !revivesStoppedLoop(opts.source)) return;
+    if (job.state.currentRunId) {
+      const live = await safeGetRun(job.state.currentRunId);
+      if (live && !TERMINAL.has(live.status)) return;
+    }
+    await appendSkip(id, { reason: "monthlyCap", detail: capRefusal(job) });
+    await noticeMonthlyCap(id);
+    if (job.state.status !== "stopped" && job.state.iteration > 0) await finalize(id, "monthly-cap");
+    return;
+  }
   if (opts.source === "manual" && job.lastGitHubFire) {
     // Run now is not about the pull request that last fired it.
     job = await patchJob(id, (j) => ({ ...j, lastGitHubFire: undefined }));
@@ -325,6 +459,9 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
     if (opts.source !== "trigger" && opts.source !== "continuous" && opts.source !== "manual") {
       return;
     }
+    // Only left here by a crash between the last run ending and its branch
+    // being settled: that work belongs to the last cycle.
+    if (job.state.ownBranch) await settleOwnBranch(id, job.state.lastStopReason ?? "iteration-failed");
     await patchJob(id, (j) => ({
       ...j,
       state: {
@@ -372,6 +509,49 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       return;
     }
 
+    // Before anything is spent: an automation that asked for its own branch
+    // must never fall back to editing the user's checkout.
+    let workCwd = job.input.cwd;
+    let ownBranchState = job.state.ownBranch;
+    if (ownBranchState) {
+      // Mid-cycle: a same-run loop's run stays in the folder it started in, so
+      // the switch only ever takes effect at a fresh start.
+      if (!(await fs.access(ownBranchState.path).then(() => true, () => false))) {
+        await appendSkip(id, { reason: "ownBranch", detail: "Its separate copy disappeared during the loop, so the loop stopped." });
+        await finalize(id, "iteration-failed");
+        return;
+      }
+      workCwd = ownBranchState.path;
+    } else if (job.ownBranch && job.state.iteration === 0) {
+      const { openOwnBranch } = await import("./automation-branch");
+      const opened = await openOwnBranch(job).catch(() => ({
+        ok: false as const,
+        problem: "Could not create a separate copy of the repository, so this run did not start.",
+      }));
+      if (!opened.ok) {
+        await appendSkip(id, { reason: "ownBranch", detail: opened.problem });
+        return;
+      }
+      // Making the copy can take a while, and a Stop or a restart meanwhile wins.
+      // They drop this runner before they read the state, so exactly one side owns
+      // the copy: claimed here and they settle it, refused here and this closes it.
+      const startingStatus = job.state.status;
+      let claimed = false;
+      await patchJob(id, (j) => {
+        claimed =
+          loops.get(id) === runner && j.enabled && j.state.status === startingStatus && !j.state.currentRunId && !j.state.ownBranch;
+        return claimed ? { ...j, state: { ...j.state, ownBranch: opened.own } } : j;
+      });
+      if (!claimed) {
+        const { closeOwnBranch } = await import("./automation-branch");
+        await closeOwnBranch(job, opened.own, { openPullRequest: false }).catch(() => undefined);
+        return;
+      }
+      if (loops.get(id) !== runner) return;
+      ownBranchState = opened.own;
+      workCwd = opened.own.path;
+    }
+
     // A new iteration is real new activity — re-arm the notify policy so the
     // loop's eventual finish/failure alert delivers even after a prior one.
     rearm(automationSourceKey(id));
@@ -403,6 +583,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       if (job.trigger.kind === "github" && job.lastGitHubFire) {
         p = `${p}\n\n${githubFireNote(job.lastGitHubFire)}`;
       }
+      if (ownBranchState) p = `${p}\n\n${ownBranchNote(ownBranchState)}`;
       // Agent-driven loops: tell the model how to keep the loop going even if the
       // template never mentioned the mechanism. (Hard caps stop it regardless.)
       // steerable=false for multi-node entry prompts: resolveWorker only consumes
@@ -489,7 +670,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         run = await startDirectWorkerRun({
           workspaceId: job.input.workspaceId,
           workspaceName: job.input.workspaceName,
-          cwd: job.input.cwd,
+          cwd: workCwd,
           origin: job.input.origin,
           projectPolicyMode: job.input.projectPolicyMode,
           automationId: id,
@@ -545,7 +726,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
             liveStepRun = await startStepOnlyPass({
               workspaceId: job.input.workspaceId,
               workspaceName: job.input.workspaceName,
-              cwd: job.input.cwd,
+              cwd: workCwd,
               origin: job.input.origin,
               projectPolicyMode: job.input.projectPolicyMode,
               automationId: id,
@@ -624,7 +805,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           : undefined;
 
         const res = await resolveInlineNodes(graph, projected, {
-          cwd: job.input.cwd,
+          cwd: workCwd,
           vars: passVars,
           env: {
             SPARK_AUTOMATION_ID: id,
@@ -696,7 +877,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           run = await recordStepOnlyPass({
             workspaceId: job.input.workspaceId,
             workspaceName: job.input.workspaceName,
-            cwd: job.input.cwd,
+            cwd: workCwd,
             origin: job.input.origin,
             projectPolicyMode: job.input.projectPolicyMode,
             automationId: id,
@@ -756,7 +937,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         run = await startDirectWorkerRun({
           workspaceId: job.input.workspaceId,
           workspaceName: job.input.workspaceName,
-          cwd: job.input.cwd,
+          cwd: workCwd,
           origin: job.input.origin,
           projectPolicyMode: job.input.projectPolicyMode,
           automationId: id,
@@ -774,6 +955,8 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
 
     await patchJob(id, (j) => ({
       ...j,
+      // This row can push the oldest out of the history, along with what it cost.
+      ...(seedMonthSpend(j, Date.now()) ? { monthSpend: seedMonthSpend(j, Date.now()) } : {}),
       lastRunAt: startedAt,
       lastRunId: run.id,
       state: {
@@ -825,6 +1008,15 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
 // "Run now": reset the loop to a fresh manual pass and start it, returning the
 // live RunState (matches the old runJobNow contract).
 export async function runNow(id: string): Promise<RunState> {
+  // Checked before anything is touched: a refused restart must not kill the run
+  // that is going.
+  await chargeLateCosts(id);
+  const capped = await getJob(id);
+  if (capped && monthlyCapReached(capped, Date.now())) {
+    await appendSkip(id, { reason: "monthlyCap", detail: capRefusal(capped) });
+    await noticeMonthlyCap(id);
+    throw new Error(capRefusal(capped));
+  }
   const existing = loops.get(id);
   if (existing?.cadenceTimer) clearTimeout(existing.cadenceTimer);
   if (existing) for (const timer of existing.watchdogTimers.values()) clearTimeout(timer);
@@ -842,40 +1034,41 @@ export async function runNow(id: string): Promise<RunState> {
   const priorRunId = prior?.state.currentRunId;
   if (priorRunId) {
     watchedRuns.delete(priorRunId);
+    // Also a run that ended but whose ending was never recorded: its watcher just
+    // went, and the reset below would forget what it spent.
     const live = await safeGetRun(priorRunId);
-    if (live && !TERMINAL.has(live.status)) {
-      await killLiveRun(priorRunId);
-      await patchJob(id, (j) => ({
-        ...j,
-        history: j.history.map((r) =>
-          r.runId === priorRunId && !r.finishedAt
-            ? { ...r, finishedAt: nowIso(), status: "cancelled" as RunStatus, stopReason: "user-stop" as AutomationStopReason }
-            : r,
-        ),
-      }));
-    }
+    if (live && !TERMINAL.has(live.status)) await killLiveRun(priorRunId);
+    await closeStoppedPass(id, priorRunId, live !== null && !TERMINAL.has(live.status));
   }
+  // The reset below would forget the last cycle's copy, and its work with it.
+  await settleOwnBranch(id, "user-stop");
 
-  await patchJob(id, (j) => ({
-    ...j,
-    state: {
-      status: "idle",
-      iteration: 0,
-      currentRunId: undefined,
-      spentUsd: 0,
-      measuredSpentUsd: 0,
-      nextFireAt: undefined,
-      lastStopReason: undefined,
-      pendingNextPrompt: undefined,
-      pendingNextWorker: undefined,
-      pendingAgentSignal: undefined,
-    },
-  }));
+  await patchJob(id, (j) => {
+    // Running it by hand is the user trying again, so it lifts an automatic pause.
+    const { autoPaused, failureStreak: _streak, ...rest } = j;
+    return {
+      ...(autoPaused ? rest : j),
+      state: {
+        status: "idle",
+        iteration: 0,
+        currentRunId: undefined,
+        spentUsd: 0,
+        measuredSpentUsd: 0,
+        nextFireAt: undefined,
+        lastStopReason: undefined,
+        pendingNextPrompt: undefined,
+        pendingNextWorker: undefined,
+        pendingAgentSignal: undefined,
+      },
+    };
+  });
 
   await startIteration(id, { source: "manual" });
 
   const job = await getJob(id);
   const runId = job?.state.currentRunId;
+  // The run just closed above may be the one that reached the cap.
+  if (!runId && job && monthlyCapReached(job, Date.now())) throw new Error(capRefusal(job));
   if (!runId) throw new Error(`Automation did not start a run: ${id}`);
   const run = await safeGetRun(runId);
   if (!run) throw new Error(`Run not found after start: ${runId}`);
@@ -899,8 +1092,59 @@ export async function pauseLoop(id: string): Promise<void> {
 export async function stopLoop(id: string, opts?: { fireDependents?: boolean }): Promise<void> {
   const job = await getJob(id);
   const runId = job?.state.currentRunId;
-  if (runId) await killLiveRun(runId);
+  if (runId) {
+    await killLiveRun(runId);
+    await closeStoppedPass(id, runId, true);
+  }
   await finalize(id, "user-stop", opts);
+}
+
+function runTotalUsd(run: RunState): number {
+  return (run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0) + (run.estimatedWorkerCostUsd ?? 0);
+}
+
+// What a pass cost, from its run's totals. Same-run loops accumulate on ONE run
+// (cumulative); isolate loops sum per-run costs. Either way spentUsd ends up the
+// true running total.
+function passCosts(job: ScheduledJob, run: RunState): { passCost: number; measuredPassCost: number; spentUsd: number; measuredSpentUsd: number } {
+  const spent = job.state.spentUsd ?? 0;
+  const measuredSpent = job.state.measuredSpentUsd ?? 0;
+  // Measured spend (metered manager calls + worker attempts whose transport
+  // reported real cost) tallied apart from the combined total so the remote
+  // payload can report real vs estimated honestly. The budget cap keeps
+  // consuming the combined figure: measured where an attempt has it, the
+  // placeholder estimate where it does not (the rollup never double-counts).
+  const measuredRunCost = (run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0);
+  const runCost = measuredRunCost + (run.estimatedWorkerCostUsd ?? 0);
+  return {
+    passCost: job.loop.isolate ? runCost : Math.max(0, runCost - spent),
+    measuredPassCost: job.loop.isolate ? measuredRunCost : Math.max(0, measuredRunCost - measuredSpent),
+    spentUsd: job.loop.isolate ? spent + runCost : runCost,
+    measuredSpentUsd: job.loop.isolate ? measuredSpent + measuredRunCost : measuredRunCost,
+  };
+}
+
+// A stopped or restarted run never reaches onTerminal's accounting, and what it
+// spent before it was stopped is still spent: a cap that missed it could be
+// walked past by pressing Run now.
+async function closeStoppedPass(id: string, runId: string, stopped: boolean): Promise<void> {
+  const run = await safeGetRun(runId);
+  const job = await getJob(id);
+  const rec = job?.history.find((r) => r.runId === runId && !r.finishedAt);
+  if (!job || !run || !rec) return;
+  const costs = passCosts(job, run);
+  await appendHistory(
+    id,
+    {
+      ...rec,
+      finishedAt: nowIso(),
+      status: TERMINAL.has(run.status) ? run.status : "cancelled",
+      ...(stopped ? { stopReason: "user-stop" as const, chargedRunUsd: runTotalUsd(run) } : {}),
+      costUsd: costs.passCost,
+      ...(costs.measuredPassCost > 0 ? { measuredCostUsd: costs.measuredPassCost } : {}),
+    },
+    { spentUsd: costs.spentUsd, measuredSpentUsd: costs.measuredSpentUsd },
+  );
 }
 
 // Force-stop a live direct run: forcePauseRun terminalizes orchestration state;
@@ -1515,21 +1759,10 @@ async function onTerminal(id: string, run: RunState): Promise<void> {
   let spentUsd = job.state.spentUsd ?? 0;
   let measuredSpentUsd = job.state.measuredSpentUsd ?? 0;
   if (!prevRec?.finishedAt) {
-    // Measured spend (metered manager calls + worker attempts whose transport
-    // reported real cost) tallied apart from the combined total so the remote
-    // payload can report real vs estimated honestly. The budget cap keeps
-    // consuming the combined figure: measured where an attempt has it, the
-    // placeholder estimate where it does not (the rollup never double-counts).
-    const measuredRunCost = (run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0);
-    const runCost = measuredRunCost + (run.estimatedWorkerCostUsd ?? 0);
-    // Same-run loops accumulate cost on ONE run (cumulative); isolate loops sum
-    // per-run costs. Either way spentUsd ends up the true running total.
-    const passCost = job.loop.isolate ? runCost : Math.max(0, runCost - spentUsd);
-    const measuredPassCost = job.loop.isolate
-      ? measuredRunCost
-      : Math.max(0, measuredRunCost - measuredSpentUsd);
-    spentUsd = job.loop.isolate ? spentUsd + runCost : runCost;
-    measuredSpentUsd = job.loop.isolate ? measuredSpentUsd + measuredRunCost : measuredRunCost;
+    const costs = passCosts(job, run);
+    const { passCost, measuredPassCost } = costs;
+    spentUsd = costs.spentUsd;
+    measuredSpentUsd = costs.measuredSpentUsd;
     await appendHistory(
       id,
       {
@@ -1545,6 +1778,10 @@ async function onTerminal(id: string, run: RunState): Promise<void> {
       },
       { spentUsd, measuredSpentUsd },
     );
+  }
+
+  if (run.status === "complete" && job.failureStreak) {
+    await patchJob(id, ({ failureStreak: _cleared, ...rest }) => rest);
   }
 
   // Paused mid-flight: record the finish but do not advance.
@@ -1565,13 +1802,18 @@ async function onTerminal(id: string, run: RunState): Promise<void> {
     await finalize(id, "budget");
     return;
   }
+  if (monthlyCapReached(fresh, Date.now())) {
+    await noticeMonthlyCap(id);
+    await finalize(id, "monthly-cap");
+    return;
+  }
   if (fresh.state.iteration >= hardCap(fresh)) {
     await finalize(id, fresh.loop.kind === "once" ? "once" : "max-iterations");
     return;
   }
 
   // User-written until-predicates apply to ANY loop kind that sets them.
-  const cwd = fresh.input.cwd;
+  const cwd = fresh.state.ownBranch?.path ?? fresh.input.cwd;
   if (stop.untilPhrase && summary && summary.toLowerCase().includes(stop.untilPhrase.toLowerCase())) {
     await finalize(id, "phrase");
     return;
@@ -1732,18 +1974,33 @@ async function finalize(
   const finalizedRunId = (await getJob(id))?.state.currentRunId;
   if (finalizedRunId) agentSignals.delete(finalizedRunId);
 
-  await patchJob(id, (j) => {
+  let pausedAfterFailures = 0;
+  await patchJob(id, (current) => {
+    // A failed run's two terminal events can both end the loop: the second must
+    // not count it again or lift the pause the first one set.
+    const alreadyEnded = reason === "iteration-failed" && (current.state.status === "stopped" || Boolean(current.autoPaused));
+    if (alreadyEnded && current.autoPaused) return current;
+    const { autoPaused: _stale, ...j } = current;
     const history = [...j.history];
     if (history.length > 0) {
       const last = history[history.length - 1];
       if (!last.stopReason) history[history.length - 1] = { ...last, stopReason: reason };
     }
+    const limit = j.guard?.pauseAfterFailures;
+    const streak = limit && reason === "iteration-failed" && !alreadyEnded ? (j.failureStreak ?? 0) + 1 : j.failureStreak;
+    const pause = Boolean(limit && streak && reason === "iteration-failed" && !alreadyEnded && streak >= limit);
+    if (pause) pausedAfterFailures = streak as number;
     return {
       ...j,
       history,
+      ...(streak ? { failureStreak: streak } : {}),
+      ...(pause ? { autoPaused: { at: nowIso(), failures: streak as number } } : {}),
       state: {
         ...j.state,
-        status: "stopped",
+        // Back to the start of a cycle: resuming must wait for the trigger, not
+        // carry on a loop that just failed.
+        ...(pause ? { iteration: 0, spentUsd: 0, measuredSpentUsd: 0 } : {}),
+        status: pause ? "paused" : "stopped",
         lastStopReason: reason,
         currentRunId: undefined,
         nextFireAt: undefined,
@@ -1753,6 +2010,7 @@ async function finalize(
       },
     };
   });
+  await settleOwnBranch(id, reason);
   const finalJob = await getJob(id);
   void emitIteration(id, finalJob?.state.iteration ?? 0, undefined, "stopped");
   // Every stop, user-stop included: a stopped loop can no longer take the
@@ -1762,7 +2020,17 @@ async function finalize(
   // Loop-level completion alert — once per finalize, never per iteration.
   // user-stop is skipped: the user clicked stop themselves; pinging them
   // about their own action is noise.
-  if (finalJob && reason !== "user-stop") {
+  if (finalJob && pausedAfterFailures > 0) {
+    publish({
+      kind: "automation.failed",
+      sourceKey: automationSourceKey(id),
+      tone: "danger",
+      title: "Automation paused after repeated failures",
+      body: `“${finalJob.name}” failed ${pausedAfterFailures} time${pausedAfterFailures === 1 ? "" : "s"} in a row, so it will not start again until you resume it.`,
+      soundKind: "needs-you",
+      target: { type: "automation", jobId: id, runId: finalizedRunId, workspaceId: finalJob.input.workspaceId },
+    });
+  } else if (finalJob && reason !== "user-stop" && reason !== "monthly-cap") {
     const failed = reason === "iteration-failed" || reason === "engine-missing";
     const iterations = finalJob.state.iteration;
     const passes = `${iterations} iteration${iterations === 1 ? "" : "s"}`;

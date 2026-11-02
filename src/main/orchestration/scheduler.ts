@@ -1,3 +1,4 @@
+import { addToMonthSpend, normalizeAutomationGuard, normalizeMonthSpend, seedMonthSpend } from "@shared/automation-guard";
 import { promises as fs, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
 import { Cron } from "croner";
@@ -205,7 +206,18 @@ function normalizeJob(job: ScheduledJob): ScheduledJob {
 // Precheck, missed-run policy and skip records arrive from the editor, the
 // agent socket and hand-edited files: keep only well-formed values, so the
 // loop driver never runs an empty command or reads a malformed skip list.
-function normalizeGate(job: ScheduledJob): ScheduledJob {
+function normalizeGate(input: ScheduledJob): ScheduledJob {
+  let job = input;
+  if (job.ownBranch !== undefined && typeof job.ownBranch?.draftPr !== "boolean") {
+    const { ownBranch: _dropped, ...rest } = job;
+    job = rest;
+  }
+  if (job.guard !== undefined || job.monthSpend !== undefined) {
+    const { guard: _g, monthSpend: _s, ...rest } = job;
+    const guard = normalizeAutomationGuard(job.guard);
+    const monthSpend = normalizeMonthSpend(job.monthSpend);
+    job = { ...rest, ...(guard ? { guard } : {}), ...(monthSpend ? { monthSpend } : {}) };
+  }
   const precheck = normalizeAutomationPrecheck(job.precheck);
   const missedRuns = normalizeMissedRuns(job.missedRuns);
   // The history view and the repeat merge read id, at, reason and detail of
@@ -235,7 +247,7 @@ function isSkipRecord(value: unknown): value is AutomationSkipRecord {
     typeof s.id === "string" &&
     typeof s.at === "string" &&
     typeof s.detail === "string" &&
-    (s.reason === "precheck" || s.reason === "missed" || s.reason === "github")
+    (s.reason === "precheck" || s.reason === "missed" || s.reason === "github" || s.reason === "ownBranch" || s.reason === "monthlyCap")
   );
 }
 
@@ -441,6 +453,8 @@ export async function createJob(input: CreateScheduledJobInput): Promise<Schedul
     createdByRunId: input.createdByRunId,
     precheck: input.precheck,
     missedRuns: input.missedRuns,
+    ownBranch: input.ownBranch,
+    guard: input.guard,
   };
   // Re-normalize so a freshly created job lands in the cache with the same
   // backfilled shape it would have after a disk round-trip (graph in
@@ -476,6 +490,8 @@ export async function updateJob(input: UpdateScheduledJobInput): Promise<Schedul
     ...(input.graph !== undefined ? { graph: input.graph } : {}),
     ...(input.precheck !== undefined ? { precheck: input.precheck ?? undefined } : {}),
     ...(input.missedRuns !== undefined ? { missedRuns: input.missedRuns ?? undefined } : {}),
+    ...(input.ownBranch !== undefined ? { ownBranch: input.ownBranch ?? undefined } : {}),
+    ...(input.guard !== undefined ? { guard: input.guard ?? undefined } : {}),
     // Times the OLD schedule would have fired are not missed runs of the new one.
     ...(input.trigger !== undefined ? { scheduleCheckedAt: settleScheduleNow(input.id) } : {}),
     // A different watch starts from what exists now, as if newly armed.
@@ -599,11 +615,16 @@ export async function appendHistory(
     const existing = history.findIndex(
       (r) => r.runId === record.runId && r.iteration === record.iteration,
     );
+    // Counted the one time a record gains its finish, whichever path gets there
+    // first, so the month's tally never counts a run twice.
+    const newlyFinished = Boolean(record.finishedAt) && !(existing >= 0 && history[existing].finishedAt);
+    const seeded = existing < 0 ? seedMonthSpend(job, Date.now()) : job.monthSpend;
+    const monthSpend = newlyFinished ? addToMonthSpend(seeded, record, job.history) : seeded;
     if (existing >= 0) history[existing] = { ...history[existing], ...record };
     else history.push(record);
     // Newest-kept cap: drop oldest first.
     const capped = history.length > AUTOMATION_HISTORY_CAP ? history.slice(-AUTOMATION_HISTORY_CAP) : history;
-    return { ...job, state: { ...job.state, ...state }, history: capped };
+    return { ...job, state: { ...job.state, ...state }, history: capped, ...(monthSpend ? { monthSpend } : {}) };
   });
 }
 
@@ -636,10 +657,14 @@ export async function pauseJob(id: string): Promise<ScheduledJob | undefined> {
 // may have finished during the pause, or still be live). Without the re-drive a
 // manual/continuous/agent loom would be silently dead after pause+resume.
 export async function resumeJob(id: string): Promise<ScheduledJob | undefined> {
-  await patchJob(id, (job) => ({
-    ...job,
-    state: { ...job.state, status: job.state.status === "paused" ? "idle" : job.state.status },
-  }));
+  await patchJob(id, (job) => {
+    // Resuming after an automatic pause gives it its full number of tries again.
+    const { autoPaused, failureStreak: _streak, ...rest } = job;
+    return {
+      ...(autoPaused ? rest : job),
+      state: { ...job.state, status: job.state.status === "paused" ? "idle" : job.state.status },
+    };
+  });
   const { resumeLoop } = await import("./automation-loop");
   await resumeLoop(id);
   return getJob(id);
@@ -898,6 +923,17 @@ export function injectTriggerNote(input: StartAutopilotInput, firedPath: string)
 
 // ── Arming ─────────────────────────────────────────────────────────────────
 
+const LONGEST_TIMER_MS = 2_147_483_647;
+
+// Past the longest timer Node keeps, setInterval fires at once, over and over, and
+// each firing starts a paid run. A longer interval counts down in equal shorter
+// ticks, so it still fires when it says. Reachable from the flow editor and Cora.
+function intervalTicks(everyMs: number): { tickMs: number; ticks: number } {
+  const whole = Math.max(1000, Math.floor(everyMs));
+  const ticks = Math.ceil(whole / LONGEST_TIMER_MS);
+  return { tickMs: Math.floor(whole / ticks), ticks };
+}
+
 function armJob(job: ScheduledJob): void {
   // Always disarm first so re-arming (toggle/edit) never leaks a timer.
   disarmJob(job.id);
@@ -914,10 +950,14 @@ function armJob(job: ScheduledJob): void {
         break;
       }
       case "interval": {
-        const everyMs = Math.max(1000, Math.floor(trigger.everyMs));
+        const { tickMs, ticks } = intervalTicks(trigger.everyMs);
+        let ticksLeft = ticks;
         const handle = setInterval(() => {
+          ticksLeft -= 1;
+          if (ticksLeft > 0) return;
+          ticksLeft = ticks;
           onScheduledFire(job.id);
-        }, everyMs);
+        }, tickMs);
         armedAt.set(job.id, Date.now());
         armed.set(job.id, () => clearInterval(handle));
         break;

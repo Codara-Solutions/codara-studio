@@ -11,11 +11,12 @@
 // command only ever sees validated values, and the worker's note marks the rest
 // as data.
 
-import type {
-  AutomationTrigger,
-  GitHubTriggerFire,
-  GitHubTriggerMemory,
-  ScheduledJob,
+import {
+  AUTOMATION_BRANCH_PREFIX,
+  type AutomationTrigger,
+  type GitHubTriggerFire,
+  type GitHubTriggerMemory,
+  type ScheduledJob,
 } from "@shared/types";
 
 type GitHubTrigger = Extract<AutomationTrigger, { kind: "github" }>;
@@ -121,6 +122,8 @@ export function seedGitHubMemory(pulls: readonly GitHubPull[], nowMs: number): G
 
 function eligible(trigger: GitHubTrigger, pull: GitHubPull): boolean {
   if (!pull.trusted) return false;
+  // A run that opens a pull request must not start another run.
+  if (pull.headRef.startsWith(AUTOMATION_BRANCH_PREFIX)) return false;
   const branch = trigger.branch?.trim();
   return !branch || pull.baseRef === branch;
 }
