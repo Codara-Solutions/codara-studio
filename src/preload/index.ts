@@ -37,6 +37,8 @@ import type {
   GitSplitGroup,
   GitSplitPlanResult,
 } from "@shared/git-split";
+import type { LaneChanges } from "@shared/source-lanes";
+import type { LaneCollisions } from "@shared/lane-collisions";
 import type { BrowserFullScreenRequest, BrowserTabMemory } from "@shared/browser-tabs";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import type { ClaudeFollowStatus } from "@shared/claude-follow";
@@ -1019,6 +1021,11 @@ const api = {
     // Per-file +added/−removed counts for the change lists (Hermes-style).
     diffStats: (cwd: string): Promise<GitDiffStats> =>
       ipcRenderer.invoke("git:diffStats", cwd),
+
+    // What each checkout changed since its base, for the agent lanes.
+    laneChanges: (cwds: string[]): Promise<Record<string, LaneChanges>> =>
+      ipcRenderer.invoke("git:laneChanges", cwds),
+    laneCollisions: (cwds: string[]): Promise<LaneCollisions> => ipcRenderer.invoke("git:laneCollisions", cwds),
 
     // Partial staging + conflict resolution
     applyPatch: (

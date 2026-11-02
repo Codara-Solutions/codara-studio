@@ -45,6 +45,7 @@ import {
 } from "@shared/workspace-colors";
 import WindowChrome from "./components/WindowChrome";
 import { requestAutomationFocus, requestWorkflowRunFocus } from "./components/automations/focus-request";
+import { requestDraftPrefill } from "./components/chat/composer/pending-prefill";
 import WorkspaceRail from "./components/WorkspaceRail";
 import { publishAgentBoardSources } from "./components/agent-board/agentBoardSources";
 import { BackgroundAgentNotice } from "./components/workspace-status/BackgroundAgentNotice";
@@ -4595,6 +4596,7 @@ export default function App() {
   // always the working-tree (unstaged) diff — matching VS Code's entry point.
   const activeCwdRef = useRef<string | null>(activeWorkspace?.cwd ?? null);
   activeCwdRef.current = activeWorkspace?.cwd ?? null;
+  const pendingReviewWorkspaceRef = useRef<string | null>(null);
   const handleOpenDiffForPath = useCallback((absolutePath: string) => {
     const cwd = activeCwdRef.current;
     if (!cwd || !absolutePath) return;
@@ -4626,7 +4628,13 @@ export default function App() {
       if (path) handleOpenDiffForPath(path);
     };
     // The Source Control header and the Markdown preview's notes bar open the review tab.
-    const openReview = () => {
+    const openReview = (event: Event) => {
+      const workspaceId = (event as CustomEvent<{ workspaceId?: string } | undefined>).detail?.workspaceId;
+      if (workspaceId && workspaceId !== tabsRef.current.tabsWorkspaceId) {
+        pendingReviewWorkspaceRef.current = workspaceId;
+        if (workspaceId !== activeIdRef.current) handleActivateWorkspace(workspaceId);
+        return;
+      }
       tabsRef.current.openReviewTab();
     };
     window.addEventListener("spark:open-file", openFile);
@@ -4637,7 +4645,21 @@ export default function App() {
       window.removeEventListener("spark:open-diff", openDiff);
       window.removeEventListener("spark:open-review", openReview);
     };
-  }, [handleOpenDiffForPath, openFileByPath]);
+  }, [handleActivateWorkspace, handleOpenDiffForPath, openFileByPath]);
+
+  // A review asked for from another workspace's lane waits until that
+  // workspace's tabs are the ones on screen.
+  useEffect(() => {
+    const pending = pendingReviewWorkspaceRef.current;
+    if (!pending) return;
+    if (pending !== activeId) {
+      pendingReviewWorkspaceRef.current = null;
+      return;
+    }
+    if (pending !== tabs.tabsWorkspaceId) return;
+    pendingReviewWorkspaceRef.current = null;
+    tabsRef.current.openReviewTab();
+  }, [activeId, tabs.tabsWorkspaceId]);
 
   // An agent offered to share a page it wrote (codara_share_offer): open the
   // file and its Share prompt. Nothing is uploaded until the user clicks Share.
@@ -8171,6 +8193,18 @@ const Workspace = React.memo(function Workspace({
     },
     [onOpenBoardCardRun, rememberChatView],
   );
+  // A surface outside the chat stack hands Cora a message to review and send.
+  // The draft may last have shown its board, where the composer is hidden.
+  const handleAskCora = useCallback(
+    (prompt: string) => {
+      if (!workspace) return;
+      const chatTabId = tabs.openChatTab({ runId: null, focus: true });
+      rememberChatView(chatTabId, "chat");
+      setChatView("chat");
+      requestDraftPrefill(workspace.id, prompt);
+    },
+    [tabs, workspace, rememberChatView],
+  );
   // First card mutation on a DRAFT chat's board: mint the run WITHOUT starting
   // autopilot, persist the cards on its board, then promote the draft tab via
   // the same snapshot path a first message uses. The user is looking at the
@@ -8726,6 +8760,7 @@ const Workspace = React.memo(function Workspace({
               dockIndex={dockIndex}
               workspace={workspace}
               onOpenRunChat={handleOpenBoardCardRunInChat}
+              onAskCora={handleAskCora}
             />
           </Suspense>
         )}

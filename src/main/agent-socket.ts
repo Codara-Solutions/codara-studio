@@ -1,5 +1,7 @@
+import { monthSpentUsd, normalizeAutomationGuard } from "@shared/automation-guard";
 import { app, BrowserWindow } from "electron";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer, IncomingMessage, type Server, ServerResponse } from "node:http";
+import { Socket } from "node:net";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
@@ -48,6 +50,7 @@ import {
   agentSessionWaitMs,
   parseAgentSessionStart,
   type AgentSessionCaller,
+  type AgentSessionView,
 } from "./agent-sessions";
 import { AGENT_SESSION_BRIEF_MAX_CHARS, AGENT_SESSION_MAX_LIVE, type AgentSessionRecord } from "@shared/agent-sessions";
 import {
@@ -233,6 +236,8 @@ import type {
   PrefKey,
   AutomationLoop,
   AutomationMissedRuns,
+  AutomationGuard,
+  AutomationOwnBranch,
   AutomationPrecheck,
   AutomationTrigger,
   CreateScheduledJobInput,
@@ -656,6 +661,7 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "worktree.remove",
   "session.start",
   "session.message",
+  "review.findings",
 ]);
 
 // The in-process Pi extension and MCP roster both hide these capabilities for
@@ -775,6 +781,8 @@ async function dispatch(
         return await handleTerminalCreate(params, id, auth.kind, res);
       case "session.start":
         return await handleSessionStart(params, id, auth.kind, res);
+      case "review.findings":
+        return await handleReviewFindings(params, id);
       case "session.status":
         return await handleSessionStatus(params, id);
       case "session.wait":
@@ -1648,7 +1656,7 @@ async function authorizeWorkspaceTarget(input: {
       ? await paneWorkspaceId(callerPaneId)
       : null;
   const caller = state.workspaces.find((workspace) => workspace.id === callerWorkspaceId) ?? null;
-  if (caller?.id === target.id) {
+  if (caller?.id === target.id || userSessionStarts.has(input.params)) {
     return { ok: true, target, ...(resolved.folder ? { folder: resolved.folder } : {}), cross: null };
   }
   const refusal = crossWorkspaceRefusal({
@@ -1858,6 +1866,7 @@ async function createTerminal(
     try {
       const caller = {
         ...(await worktreeCaller(params)),
+        ...(userSessionStarts.has(params) && workspaceId ? { workspaceId } : {}),
         ...(crossWorkspace
           ? {
               workspaceId: crossWorkspace.target.id,
@@ -2101,6 +2110,46 @@ async function agentSessionCallerRefusal(
     workspaces: state.workspaces,
   });
   return trust === "trusted" ? null : "an agent in an imported pull request cannot start sessions";
+}
+
+// A session the user asked for with a click in Source Control. The click is the
+// approval a cross-workspace call would otherwise ask for, so only main can put
+// params in here: the socket's params are parsed JSON and never in the set.
+const userSessionStarts = new WeakSet<Record<string, unknown>>();
+
+/** session.start for the user's own click: the same path an agent's call takes. */
+export async function startAgentSessionForUser(input: {
+  brief: string;
+  runtime: "claude" | "codex";
+  workspace: string;
+  title?: string;
+  worktree?: { branch?: string; base?: string; purpose?: string };
+  group?: string;
+}): Promise<AgentSessionView> {
+  // Names the worktree's maker, which later says which model family wrote the work.
+  const params: Record<string, unknown> = { ...input, callerClient: input.runtime === "codex" ? "codex" : "claude-code" };
+  userSessionStarts.add(params);
+  const response = await handleSessionStart(params, 0, "root", new ServerResponse(new IncomingMessage(new Socket())));
+  if (response.error) throw new Error(response.error.message);
+  return response.result as AgentSessionView;
+}
+
+export async function agentSessionViewForUser(sessionId: string): Promise<AgentSessionView | null> {
+  const sessions = agentSessions();
+  await sessions.load();
+  const record = sessions.get(sessionId);
+  return record ? sessions.view(record) : null;
+}
+
+async function handleReviewFindings(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const reviewId = stringParam(params, "reviewId");
+  if (!reviewId) return errorResponse(id, ERR_INVALID_PARAMS, "reviewId is required: the id in your review prompt");
+  const { agentReviews } = await import("./review");
+  const result = await agentReviews().submit(reviewId, params.findings);
+  if (!result.accepted) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "no review is waiting for that id; it was answered or stopped");
+  }
+  return successResponse(id, { accepted: result.count });
 }
 
 function sessionCapMessage(): string {
@@ -6723,6 +6772,8 @@ function summarizeTrigger(t: AutomationTrigger): string {
       return `git([${(t.events ?? []).join(",")}]${t.branch ? ` ${t.branch}` : ""})`;
     case "onAutomationActivity":
       return `onAutomationActivity([${(t.events ?? []).join(",")}]${t.automationId ? ` ${t.automationId}` : " any"})`;
+    case "github":
+      return `github([${(t.events ?? []).join(",")}]${t.branch ? ` ${t.branch}` : ""})`;
     default:
       return "unknown";
   }
@@ -6761,9 +6812,13 @@ function summarizeJob(job: ScheduledJob): Record<string, unknown> {
       stopReason: h.stopReason ?? null,
       costUsd: h.costUsd ?? null,
       ...(h.catchUp ? { caughtUpMissedRunAt: h.catchUp.scheduledFor } : {}),
+      ...(h.branchResult ? { branch: h.branchResult.branch, pullRequest: h.branchResult.prUrl ?? null } : {}),
     })),
     ...(precheckSummary(job.precheck) ? { precheck: precheckSummary(job.precheck) } : {}),
     ...(missedRunsSummary(job) ? { missedRuns: missedRunsSummary(job) } : {}),
+    ...(job.ownBranch ? { ownBranch: job.ownBranch } : {}),
+    ...(job.guard ? { guard: job.guard, spentThisMonthUsd: monthSpentUsd(job, Date.now()) } : {}),
+    ...(job.autoPaused ? { pausedAfterFailures: job.autoPaused.failures } : {}),
     ...(job.skips?.length
       ? {
           skipped: job.skips
@@ -7007,7 +7062,9 @@ async function validateTriggerLoopWorker(opts: {
     "onFinishOf",
     "git",
     "onAutomationActivity",
+    "github",
   ]);
+  const GITHUB_TRIGGER_EVENTS = new Set(["prOpened", "ciFailed"]);
   const GIT_TRIGGER_EVENTS = new Set(["remoteUpdated", "localBranchMoved"]);
   const ACTIVITY_TRIGGER_EVENTS = new Set(["finished", "failed"]);
   const LOOP_KINDS = new Set(["once", "count", "cadence", "until", "continuous", "agent"]);
@@ -7020,9 +7077,10 @@ async function validateTriggerLoopWorker(opts: {
       automationId?: unknown;
       events?: unknown;
       branch?: unknown;
+      includeDrafts?: unknown;
     };
     if (typeof t.kind !== "string" || !TRIGGER_KINDS.has(t.kind)) {
-      return `trigger.kind '${String(t.kind)}' is invalid (expected cron|interval|folder|manual|continuous|onFinishOf|git|onAutomationActivity)`;
+      return `trigger.kind '${String(t.kind)}' is invalid (expected cron|interval|folder|manual|continuous|onFinishOf|git|onAutomationActivity|github)`;
     }
     // Per-kind required payload - the scheduler arms these directly, so a bad
     // payload becomes a hot loop / crash at arm time rather than a fixable error.
@@ -7068,6 +7126,20 @@ async function validateTriggerLoopWorker(opts: {
       }
       if (t.branch !== undefined && (typeof t.branch !== "string" || t.branch.trim().length === 0)) {
         return "trigger.branch must be a non-empty branch name when provided (omit it to fire for any branch)";
+      }
+    } else if (t.kind === "github") {
+      if (
+        !Array.isArray(t.events) ||
+        t.events.length === 0 ||
+        !t.events.every((e) => typeof e === "string" && GITHUB_TRIGGER_EVENTS.has(e))
+      ) {
+        return "trigger kind 'github' requires a non-empty 'events' array of prOpened|ciFailed";
+      }
+      if (t.branch !== undefined && (typeof t.branch !== "string" || t.branch.trim().length === 0)) {
+        return "trigger.branch must be a non-empty branch name when provided (omit it for pull requests into any branch)";
+      }
+      if (t.includeDrafts !== undefined && typeof t.includeDrafts !== "boolean") {
+        return "trigger.includeDrafts must be true or false when provided";
       }
     } else if (t.kind === "onAutomationActivity") {
       if (
@@ -7142,9 +7214,27 @@ function paramGraph(params: Record<string, unknown>): LoomGraph | undefined {
  *  precheck command also removes it. Any other value that does not normalize
  *  is an error, so a typo is never saved as "no precheck". */
 function paramGate(params: Record<string, unknown>):
-  | { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null }
+  | { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null; ownBranch?: AutomationOwnBranch | null; guard?: AutomationGuard | null }
   | { error: string } {
-  const out: { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null } = {};
+  const out: { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null; ownBranch?: AutomationOwnBranch | null; guard?: AutomationGuard | null } = {};
+  if (params.guard === null) out.guard = null;
+  else if (params.guard !== undefined) {
+    const raw = (params.guard ?? {}) as { monthly_cap_usd?: unknown; pause_after_failures?: unknown };
+    const guard = normalizeAutomationGuard({ monthlyCapUsd: raw.monthly_cap_usd, pauseAfterFailures: raw.pause_after_failures });
+    // A typo must not read as "no limit", and half of a pair must not silently drop.
+    const wanted = (raw.monthly_cap_usd !== undefined ? 1 : 0) + (raw.pause_after_failures !== undefined ? 1 : 0);
+    const kept = (guard?.monthlyCapUsd !== undefined ? 1 : 0) + (guard?.pauseAfterFailures !== undefined ? 1 : 0);
+    if (!guard || kept !== wanted) {
+      return { error: "guard must be { monthly_cap_usd: a number above 0, pause_after_failures: a whole number from 1 to 50 } (or null to remove them)" };
+    }
+    out.guard = guard;
+  }
+  if (params.own_branch === null) out.ownBranch = null;
+  else if (params.own_branch !== undefined) {
+    const draftPr = (params.own_branch as { draft_pr?: unknown } | undefined)?.draft_pr;
+    if (typeof draftPr !== "boolean") return { error: "own_branch must be { draft_pr: true|false } (or null to work in the workspace folder)" };
+    out.ownBranch = { draftPr };
+  }
   const rawPrecheck = params.precheck;
   if (rawPrecheck === null) out.precheck = null;
   else if (rawPrecheck !== undefined) {
@@ -7292,6 +7382,8 @@ async function handleAutomationCreate(
     graph,
     ...(gate.precheck ? { precheck: gate.precheck } : {}),
     ...(gate.missedRuns ? { missedRuns: gate.missedRuns } : {}),
+    ...(gate.ownBranch ? { ownBranch: gate.ownBranch } : {}),
+    ...(gate.guard ? { guard: gate.guard } : {}),
     input: {
       workspaceId: run.workspaceId,
       workspaceName,
@@ -7363,6 +7455,23 @@ function describeUpdate(existing: ScheduledJob, update: UpdateScheduledJobInput)
     const next = { trigger: update.trigger ?? existing.trigger, missedRuns: update.missedRuns ?? undefined };
     lines.push(`if a run is missed: ${missedRunsSummary(existing) ?? "skip"} → ${missedRunsSummary(next) ?? "skip"}`);
   }
+  if (update.ownBranch !== undefined) {
+    // It pushes and opens pull requests in the user's name, so it is shown.
+    const where = (own: AutomationOwnBranch | null | undefined): string =>
+      own ? (own.draftPr ? "own branch, opening a draft pull request" : "own branch") : "workspace folder";
+    lines.push(`works in: ${where(existing.ownBranch)} → ${where(update.ownBranch)}`);
+  }
+  if (update.guard !== undefined) {
+    // A limit on the user's money: raising or removing one is always spelled out.
+    const limits = (g: AutomationGuard | null | undefined): string =>
+      [
+        g?.monthlyCapUsd !== undefined ? `$${g.monthlyCapUsd} a month` : "",
+        g?.pauseAfterFailures !== undefined ? `pause after ${g.pauseAfterFailures} failed runs` : "",
+      ]
+        .filter(Boolean)
+        .join(", ") || "none";
+    lines.push(`spending limits: ${limits(existing.guard)} → ${limits(update.guard)}`);
+  }
   if (update.graph !== undefined) {
     const n = update.graph.nodes?.length ?? 0;
     const e = update.graph.edges?.length ?? 0;
@@ -7403,6 +7512,8 @@ async function handleAutomationUpdate(
     id: automationId,
     ...(gate.precheck !== undefined ? { precheck: gate.precheck } : {}),
     ...(gate.missedRuns !== undefined ? { missedRuns: gate.missedRuns } : {}),
+    ...(gate.ownBranch !== undefined ? { ownBranch: gate.ownBranch } : {}),
+    ...(gate.guard !== undefined ? { guard: gate.guard } : {}),
     ...(name ? { name } : {}),
     ...(paramTrigger(params) ? { trigger: paramTrigger(params) } : {}),
     ...(paramLoop(params) ? { loop: paramLoop(params) } : {}),

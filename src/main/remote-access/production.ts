@@ -3180,6 +3180,8 @@ function describeAutomationTrigger(trigger: AutomationTrigger): {
       return { kind: "continuous", summary: "Runs continuously" };
     case "onFinishOf":
       return { kind: "chain", summary: "Runs after another automation" };
+    case "github":
+      return { kind: "manual", summary: "Runs on pull requests" };
     default:
       return { kind: "manual", summary: "Runs when you start it" };
   }

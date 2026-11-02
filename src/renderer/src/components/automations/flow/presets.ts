@@ -242,4 +242,24 @@ export const PRESETS: LoomPreset[] = [
     worker: DEFAULT_WORKER,
     promptHint: "",
   },
+  {
+    id: "review-pull-requests",
+    title: "Review new pull requests",
+    blurb: "A worker reads each new pull request and writes up what it finds.",
+    trigger: { kind: "github", events: ["prOpened"] },
+    loop: { kind: "once", stop: { budgetUsd: 2 } },
+    worker: DEFAULT_WORKER,
+    promptHint:
+      "Review pull request {{pr_url}}. Read it with gh pr view and gh pr diff, then give your findings as your final answer. Do not comment on GitHub, push or merge.",
+  },
+  {
+    id: "explain-ci-failure",
+    title: "Explain a CI failure",
+    blurb: "When CI fails on a pull request, a worker finds out why.",
+    trigger: { kind: "github", events: ["ciFailed"] },
+    loop: { kind: "once", stop: { budgetUsd: 2 } },
+    worker: DEFAULT_WORKER,
+    promptHint:
+      "CI failed on pull request {{pr_url}}. Read the failed logs with gh run view --log-failed, then give the cause and the smallest fix as your final answer. Do not push or merge.",
+  },
 ];
