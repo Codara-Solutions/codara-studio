@@ -23,8 +23,12 @@ import {
   sessionCwdKey,
   SNIPPET_MARK_END,
   SNIPPET_MARK_START,
+  type SessionLabels,
+  type SessionMatchKind,
+  type SessionPreview,
   type SessionSearchAgent,
   type SessionSearchHit,
+  type SessionSearchMatch,
   type SessionTranscript,
   type SessionTranscriptMessage,
 } from "@shared/session-search";
@@ -42,7 +46,7 @@ import {
   type TranscriptState,
 } from "./transcript-parsers";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 /** One FTS row holds at most this much of a message; longer ones are split. */
 const CHUNK_CHARS = 8_000;
@@ -142,6 +146,8 @@ export interface IndexSearchInput {
   now: number;
   /** Words in an excerpt: few for the rail's two lines, more for an agent. */
   snippetTokens: number;
+  /** With an empty query, pinned sessions lead the list. */
+  pinnedFirst?: boolean;
 }
 
 /** Where a session's transcript is, for Reveal transcript. */
@@ -152,6 +158,8 @@ export interface IndexSessionRecord {
 }
 
 type Row = Record<string, unknown>;
+
+const MATCH_ORDER: readonly SessionMatchKind[] = ["name", "user", "assistant"];
 
 function num(value: unknown): number {
   return typeof value === "bigint" ? Number(value) : typeof value === "number" ? value : 0;
@@ -270,6 +278,9 @@ export class SessionIndex {
         cwd TEXT,
         cwd_key TEXT,
         model TEXT,
+        branch TEXT,
+        custom_name TEXT,
+        pinned INTEGER NOT NULL DEFAULT 0,
         message_count INTEGER NOT NULL DEFAULT 0,
         started_at INTEGER,
         last_at INTEGER,
@@ -584,6 +595,7 @@ export class SessionIndex {
         cwd = COALESCE(cwd, ?),
         cwd_key = COALESCE(cwd_key, ?),
         model = COALESCE(?, model),
+        branch = COALESCE(?, branch),
         first_prompt = COALESCE(first_prompt, ?),
         -- A session in several files (Codex segments) shows its newest one.
         transcript = CASE
@@ -602,6 +614,7 @@ export class SessionIndex {
       state.cwd,
       cwdKey,
       state.model,
+      state.branch,
       state.firstPrompt,
       file.path,
       file.mtimeMs,
@@ -887,11 +900,11 @@ export class SessionIndex {
       const rows = this.db
         .prepare(`
           SELECT s.* FROM sessions s WHERE ${filter.sql}
-          ORDER BY s.last_at DESC LIMIT ? OFFSET ?
+          ORDER BY ${input.pinnedFirst ? "s.pinned DESC, " : ""}s.last_at DESC LIMIT ? OFFSET ?
         `)
         .all(...filter.params, input.limit + 1, input.offset);
       return {
-        hits: rows.slice(0, input.limit).map((row) => this.toHit(row, null, null)),
+        hits: rows.slice(0, input.limit).map((row) => this.toHit(row, [], null, null)),
         hasMore: rows.length > input.limit,
       };
     }
@@ -909,35 +922,54 @@ export class SessionIndex {
     });
     scored.sort((a, b) => a.score - b.score || num(b.row.last_at) - num(a.row.last_at));
     const page = scored.slice(input.offset, input.offset + input.limit);
-    const snippet = this.stmt(
-      "SELECT snippet(messages_fts, 0, ?, ?, '…', ?) AS text FROM messages_fts WHERE messages_fts MATCH ? AND rowid = ?",
-    );
     const tokens = Math.max(4, Math.min(64, Math.floor(input.snippetTokens) || 12));
+    const parts = this.bestPartPerSession(page.map(({ row }) => row), tokens);
     return {
       hits: page.map(({ row }) => {
-        const hitMatch = String(row.hit_match);
-        let mid = num(row.mid);
-        let role = String(row.role);
-        if (role === "title") {
-          // The row shows the title already: the excerpt comes from the
-          // best matching message, and there is none when only the title matched.
-          const message = this.stmt(`
-            SELECT m.id AS mid, m.role AS role
-            FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
-            WHERE messages_fts MATCH ? AND m.session_row = ? AND m.part >= 0
-            ORDER BY bm25(messages_fts) LIMIT 1
-          `).get(hitMatch, BigInt(num(row.id)));
-          if (!message) return this.toHit(row, null, null);
-          mid = num(message.mid);
-          role = String(message.role);
-        }
-        // A JS number binds as a REAL, and FTS5 then ignores the rowid
-        // constraint and answers with the first match; a BigInt binds as an INTEGER.
-        const text = strOrNull(snippet.get(SNIPPET_MARK_START, SNIPPET_MARK_END, tokens, hitMatch, BigInt(mid))?.text);
-        return this.toHit(row, text, role === "user" ? "user" : "assistant");
+        const found = parts.get(num(row.id)) ?? [];
+        // The row shows the name already: its excerpt comes from the best
+        // matching message, and there is none when only the name matched.
+        const said = found.filter((part) => part.kind !== "name").sort((a, b) => a.rank - b.rank)[0];
+        const matches = MATCH_ORDER.flatMap((kind) =>
+          found.filter((part) => part.kind === kind).map(({ kind: partKind, snippet }) => ({ kind: partKind, snippet })),
+        );
+        return this.toHit(row, matches, said?.snippet ?? null, said ? (said.kind as "user" | "assistant") : null);
       }),
       hasMore: scored.length > input.offset + input.limit,
     };
+  }
+
+  /** For each session on a page: its best match in its name, in what you said and in what the agent said. */
+  private bestPartPerSession(rows: Row[], tokens: number): Map<number, (SessionSearchMatch & { rank: number })[]> {
+    const parts = new Map<number, (SessionSearchMatch & { rank: number })[]>();
+    if (rows.length === 0) return parts;
+    const match = String(rows[0].hit_match);
+    const best = this.db
+      .prepare(`
+        WITH hits AS MATERIALIZED (
+          SELECT m.session_row AS sid, m.id AS mid, m.role AS role, bm25(messages_fts) AS rank
+          FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
+          WHERE messages_fts MATCH ?
+        )
+        SELECT h.sid AS sid, h.mid AS mid, h.role AS role, MIN(h.rank) AS best
+        FROM hits h
+        WHERE h.sid IN (${rows.map(() => "?").join(", ")})
+        GROUP BY h.sid, h.role
+      `)
+      .all(match, ...rows.map((row) => BigInt(num(row.id))));
+    const snippet = this.stmt(
+      "SELECT snippet(messages_fts, 0, ?, ?, '…', ?) AS text FROM messages_fts WHERE messages_fts MATCH ? AND rowid = ?",
+    );
+    for (const row of best) {
+      // A JS number binds as a REAL, and FTS5 then ignores the rowid
+      // constraint and answers with the first match; a BigInt binds as an INTEGER.
+      const text = strOrNull(snippet.get(SNIPPET_MARK_START, SNIPPET_MARK_END, tokens, match, BigInt(num(row.mid)))?.text);
+      if (!text) continue;
+      const kind: SessionMatchKind = row.role === "title" ? "name" : row.role === "user" ? "user" : "assistant";
+      const sid = num(row.sid);
+      parts.set(sid, [...(parts.get(sid) ?? []), { kind, snippet: text, rank: num(row.best) }]);
+    }
+    return parts;
   }
 
   private rankedSessions(match: string, filter: { sql: string; params: SqlValue[] }): Row[] {
@@ -963,16 +995,23 @@ export class SessionIndex {
 
   private toHit(
     row: Row,
+    matches: SessionSearchMatch[],
     snippet: string | null,
     role: SessionSearchHit["snippetRole"],
   ): Omit<SessionSearchHit, "cwdExists"> {
     const agent = row.agent as SessionSearchAgent;
     const sessionId = String(row.session_id);
+    const ownTitle = strOrNull(row.title) ?? strOrNull(row.first_prompt) ?? "Untitled session";
+    const customName = strOrNull(row.custom_name);
     return {
       key: sessionKey(agent, sessionId),
       agent,
       sessionId,
-      title: strOrNull(row.title) ?? strOrNull(row.first_prompt) ?? "Untitled session",
+      title: customName ?? ownTitle,
+      originalTitle: customName ? ownTitle : null,
+      pinned: num(row.pinned) === 1,
+      branch: strOrNull(row.branch),
+      matches,
       snippet,
       snippetRole: snippet === null ? null : role,
       cwd: strOrNull(row.cwd),
@@ -1022,10 +1061,79 @@ export class SessionIndex {
     return {
       key,
       agent: parsed.agent,
-      title: strOrNull(session.title) ?? strOrNull(session.first_prompt) ?? "Untitled session",
+      title: strOrNull(session.custom_name) ?? strOrNull(session.title) ?? strOrNull(session.first_prompt) ?? "Untitled session",
       cwd: strOrNull(session.cwd),
       messages,
       total,
     };
+  }
+
+  /** The last messages of a session, oldest first, each clipped. */
+  preview(key: string, limit: number, clipChars: number): SessionPreview | null {
+    const parsed = parseSessionKey(key);
+    if (!parsed) return null;
+    const session = this.stmt("SELECT id FROM sessions WHERE agent = ? AND session_id = ?").get(parsed.agent, parsed.sessionId);
+    if (!session) return null;
+    const sessionRow = num(session.id);
+    const total = num(
+      this.stmt("SELECT COUNT(*) AS n FROM messages WHERE session_row = ? AND part = 0").get(sessionRow)?.n,
+    );
+    const rows = this.stmt(`
+      SELECT m.role AS role, m.ts AS ts, f.text AS text
+      FROM messages m JOIN messages_fts f ON f.rowid = m.id
+      WHERE m.session_row = ? AND m.part = 0
+      ORDER BY COALESCE(m.ts, 0) DESC, m.id DESC
+      LIMIT ?
+    `).all(sessionRow, limit);
+    const messages = rows.reverse().map((row): SessionTranscriptMessage => {
+      const text = String(row.text ?? "");
+      return {
+        role: row.role === "user" ? "user" : "assistant",
+        text: text.length > clipChars ? `${text.slice(0, clipChars)}…` : text,
+        at: numOrNull(row.ts),
+      };
+    });
+    return { key, messages, total };
+  }
+
+  /**
+   * Makes the index show the names and pins in `labels`, which is the whole
+   * set: a session not in it has neither. A name is a searchable row of its
+   * own beside the session's title (part -2), so both find the session. Safe
+   * during a pass, whose transaction it then joins; the worker applies the
+   * set again when a pass ends, for the rows the pass made or rolled back.
+   */
+  applyLabels(labels: SessionLabels): void {
+    const wanted = new Map<number, { name: string | null; pinned: boolean }>();
+    for (const row of this.stmt("SELECT id FROM sessions WHERE custom_name IS NOT NULL OR pinned = 1").all()) {
+      wanted.set(num(row.id), { name: null, pinned: false });
+    }
+    for (const [key, label] of Object.entries(labels)) {
+      const parsed = parseSessionKey(key);
+      if (!parsed) continue;
+      const row = this.stmt("SELECT id FROM sessions WHERE agent = ? AND session_id = ?").get(parsed.agent, parsed.sessionId);
+      if (row) wanted.set(num(row.id), { name: label.name ?? null, pinned: label.pinned === true });
+    }
+    if (wanted.size === 0) return;
+    const ownTransaction = !this.inTransaction;
+    this.begin();
+    try {
+      for (const [sessionRow, label] of wanted) {
+        const current = this.stmt("SELECT custom_name FROM sessions WHERE id = ?").get(sessionRow);
+        this.stmt("UPDATE sessions SET custom_name = ?, pinned = ? WHERE id = ?").run(label.name, label.pinned ? 1 : 0, sessionRow);
+        if (strOrNull(current?.custom_name) === label.name) continue;
+        this.stmt("DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_row = ? AND part = -2)").run(sessionRow);
+        this.stmt("DELETE FROM messages WHERE session_row = ? AND part = -2").run(sessionRow);
+        if (!label.name) continue;
+        const { lastInsertRowid } = this.stmt(
+          "INSERT INTO messages (session_row, file_row, role, part, ts) VALUES (?, 0, 'title', -2, NULL)",
+        ).run(sessionRow);
+        this.stmt("INSERT INTO messages_fts (rowid, text) VALUES (?, ?)").run(lastInsertRowid, label.name);
+      }
+      if (ownTransaction) this.commit();
+    } catch (err) {
+      if (ownTransaction) this.rollback();
+      throw err;
+    }
   }
 }

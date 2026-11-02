@@ -516,7 +516,7 @@ import { registerReviewIpc } from "./review";
 import { registerGitFixIpc } from "./git-fix-ipc";
 import { registerDiagnosticsIpc } from "./diagnostics";
 import { registerFeatureTipsIpc } from "./feature-tips";
-import { registerSessionSearchIpc } from "./session-search/service";
+import { registerSessionSearchIpc, withSessionNames } from "./session-search/service";
 import { registerServersIpc } from "./servers";
 import { registerWorkspaceStatusIpc } from "./workspace-status";
 import { registerPullRequestWatchIpc } from "./pull-request-watch-ipc";
@@ -3429,7 +3429,7 @@ export function registerIpc(): void {
           claudeExecution.env.CLAUDE_CONFIG_DIR ?? null,
         grokHome: grokExecution.env.GROK_HOME,
       });
-      return items.map((item) =>
+      return (await withSessionNames(items)).map((item) =>
         item.runtime === "codex"
           ? { ...item, nativeCodexProfileId: execution.profileId }
           : item.runtime === "grok"
