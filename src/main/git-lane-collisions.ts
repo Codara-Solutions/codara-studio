@@ -59,11 +59,13 @@ async function safeToMerge(cwd: string, run: typeof runGit): Promise<boolean> {
     if (stdout.trim()) return false;
     // A deinitialized submodule drops its setting but keeps its repository, and one
     // set up in a linked worktree keeps it in that worktree's private git dir.
-    const { stdout: located } = await run(cwd, [...GIT_C, "rev-parse", "--git-common-dir", "--git-path", "modules"]);
-    const [common, own] = located.split(/\r?\n/).map((line) => line.trim());
-    if (!common || !own) return false;
-    const inside = (path: string) => (isAbsolute(path) ? path : join(cwd, path));
-    return !existsSync(join(inside(common), "modules")) && !existsSync(inside(own));
+    // Asked one at a time and only the last line end cut: a folder name can hold a newline.
+    const locate = async (...args: string[]) => {
+      const path = (await run(cwd, [...GIT_C, "rev-parse", ...args])).stdout.replace(/\r?\n$/, "");
+      if (!path) throw new Error("git did not say where its folder is");
+      return isAbsolute(path) ? path : join(cwd, path);
+    };
+    return !existsSync(join(await locate("--git-common-dir"), "modules")) && !existsSync(await locate("--git-path", "modules"));
   } catch {
     // Exit 1 above is git's "no such setting"; any other failure could not rule them out.
     return false;

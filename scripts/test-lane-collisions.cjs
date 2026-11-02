@@ -241,6 +241,30 @@ async function load() {
     assert.deepEqual(await lib.readLaneCollisions([hostLeft, hostRight], deps), {}, "that lane is skipped");
     assert.equal(merges, mergesBefore, "and never merged");
 
+    if (process.platform !== "win32") {
+      const oddParent = path.join(root, "odd\nparent");
+      const oddRepo = path.join(oddParent, "repo");
+      fs.mkdirSync(oddRepo, { recursive: true });
+      git(oddRepo, "init", "-q", "-b", "main");
+      fs.writeFileSync(path.join(oddRepo, "s.ts"), "s\n");
+      git(oddRepo, "add", "-A");
+      git(oddRepo, "commit", "-q", "-m", "init");
+      const oddTree = (name) => {
+        const dir = path.join(oddParent, name);
+        git(oddRepo, "worktree", "add", "-q", "-b", name, dir);
+        fs.writeFileSync(path.join(dir, "s.ts"), `${name}\n`);
+        git(dir, "add", "-A");
+        git(dir, "commit", "-q", "-m", name);
+        return dir;
+      };
+      const oddLeft = oddTree("left");
+      const oddRight = oddTree("right");
+      assert.equal(Object.keys(await lib.readLaneCollisions([oddLeft, oddRight], deps)).length, 2, "a newline in the path is still checked");
+      const located = execFileSync("git", ["-C", oddLeft, "rev-parse", "--git-path", "modules"], { encoding: "utf8", env }).replace(/\n$/, "");
+      fs.mkdirSync(path.isAbsolute(located) ? located : path.join(oddLeft, located));
+      assert.deepEqual(await lib.readLaneCollisions([oddLeft, oddRight], deps), {}, "and its private submodule folder is still seen");
+    }
+
     // A fetch is refused outright where git knows the setting.
     fs.writeFileSync(path.join(one, "x.ts"), "edit one again\n");
     fs.rmSync(path.join(one, "y.ts"), { force: true });
