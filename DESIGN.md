@@ -305,7 +305,7 @@ VS Code (the commit box as part of the source control view).
   row acts. Going somewhere is the lane's own actions and its file rows.
 - The next step comes first and there is one primary look, Merge. Needs you opens
   the agent; failing checks offer Fix checks; Merge shows only on an open, non
-  draft PR whose checks passed or report nothing, with no agent still working.
+  draft PR whose checks passed or report nothing, with no agent working or asking.
   Merge always goes through the existing confirm dialog, after GitHub is read again.
 - Lanes order by what needs the user: needs you, failing checks, ready to merge,
   working, done, idle, quiet. The active checkout stays last so the list above it

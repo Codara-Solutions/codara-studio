@@ -84,6 +84,8 @@ function git(cwd, ...args) {
   assert.deepEqual(steps({ pullRequest: pr("passing", "draft") }), ["open"], "a draft is not asking to land");
   assert.deepEqual(steps({ pullRequest: pr("passing"), agents: [agent("working")] }), ["open-agent", "open"], "an agent still working may push again");
   assert.deepEqual(steps({ pullRequest: pr("passing"), agents: [agent("done")] }), ["merge", "open-agent", "open"]);
+  assert.deepEqual(steps({ pullRequest: pr("passing"), agents: [agent("needs-you")] }), ["open-agent", "open"], "an agent asking may still change the branch");
+  assert.deepEqual(steps({ pullRequest: pr("passing"), agents: [agent("needs-you"), agent("working")] }), ["open-agent", "open"], "any agent counts, not only the first");
   assert.deepEqual(steps({ missing: true }), [], "nothing to open when the folder is gone");
 
   // Order and grouping

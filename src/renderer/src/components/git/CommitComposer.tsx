@@ -69,6 +69,8 @@ export default function CommitComposer({
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [amend, setAmend] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  // Fixed to the window: the dock scrolls, so it would clip a menu inside it.
+  const [menuAnchor, setMenuAnchor] = useState({ right: 0, bottom: 0 });
   const moreRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const anyBusy = busy !== null;
@@ -261,7 +263,11 @@ export default function CommitComposer({
           aria-expanded={moreOpen}
           title="Amend the last commit, or split the changes into several commits"
           disabled={anyBusy}
-          onClick={() => setMoreOpen((open) => !open)}
+          onClick={() => {
+            const box = moreRef.current?.getBoundingClientRect();
+            if (box) setMenuAnchor({ right: window.innerWidth - box.right, bottom: window.innerHeight - box.top + 4 });
+            setMoreOpen((open) => !open);
+          }}
           style={{
             appearance: "none",
             flex: "0 0 30px",
@@ -287,7 +293,7 @@ export default function CommitComposer({
           role="menu"
           aria-label="Commit options"
           className="spark-menu"
-          style={{ position: "absolute", right: 8, bottom: "calc(100% - 42px)", zIndex: 60 }}
+          style={{ position: "fixed", right: menuAnchor.right, bottom: menuAnchor.bottom, zIndex: 200 }}
         >
           <button
             type="button"

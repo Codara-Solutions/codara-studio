@@ -70,9 +70,12 @@ function nextSteps(input: LaneInput): LaneStep[] {
   const openPr = pr?.phase === "open" ? pr : null;
   if (agent?.state === "needs-you") steps.push("open-agent");
   if (openPr?.checks === "failing") steps.push("fix-checks");
-  // Checks still running can fail, and a draft is not asking to land yet.
-  // Main reads GitHub again and pins the head commit when it merges.
-  if (openPr && (openPr.checks === "passing" || openPr.checks === "none") && agent?.state !== "working") {
+  // Checks still running can fail, a draft is not asking to land yet, and an
+  // agent working or asking may still change the branch, whichever agent the
+  // lane shows first. Main reads GitHub again and pins the head commit when it
+  // merges.
+  const settled = !input.agents.some((line) => line.state === "working" || line.state === "needs-you");
+  if (openPr && settled && (openPr.checks === "passing" || openPr.checks === "none")) {
     steps.push("merge");
   }
   if (agent && !steps.includes("open-agent")) steps.push("open-agent");

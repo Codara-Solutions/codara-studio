@@ -282,9 +282,14 @@ test("every checkout is a lane with its changes, its PR and its next step", asyn
       const list = page.getByTestId("source-lanes");
       expect((await dock.boundingBox())!.y).toBeGreaterThanOrEqual((await list.boundingBox())!.y);
       await dock.getByRole("button", { name: "More commit options" }).click();
-      await expect(page.getByRole("menuitemcheckbox", { name: "Amend last commit" })).toBeVisible();
       await expect(page.getByRole("menuitem", { name: "Split into commits" })).toBeVisible();
-      await page.keyboard.press("Escape");
+      // A click needs the item on screen: the dock scrolls and must not clip the menu.
+      await page.getByRole("menuitemcheckbox", { name: "Amend last commit" }).click();
+      await message.fill("x");
+      await expect(dock.getByRole("button", { name: "Amend Last Commit" })).toBeVisible();
+      await dock.getByRole("button", { name: "More commit options" }).click();
+      await page.getByRole("menuitemcheckbox", { name: "Amend last commit" }).click();
+      await expect(dock.getByRole("button", { name: /^Commit/ })).toBeVisible();
       await message.fill("Add my notes");
       await message.press("Control+Enter");
       await expect.poll(() => git(fixture.repo, ["log", "-1", "--format=%s"], fixture.env), { timeout: 15_000 }).toBe("Add my notes");
