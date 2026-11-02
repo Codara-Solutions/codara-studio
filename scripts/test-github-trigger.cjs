@@ -202,6 +202,18 @@ const none = new Map();
 
 // The seen list stays bounded, and what it forgets cannot fire again.
 {
+  // A re-run on a commit still open must stay handled however many others pass.
+  let m = memory({ seen: [`ci:12:${SHA}`] });
+  for (let i = 0; i < 250; i += 1) {
+    const sha = i.toString(16).padStart(40, "b");
+    const p = pull({ number: 1000 + i, head: { sha, ref: "x" } });
+    const checks = new Map([[sha, { failed: ["build"], failedAt: NOW + i, pending: 0 }]]);
+    m = decideGitHubTrigger(ci, m, [pull(), p], checks, NOW + i).memory;
+  }
+  assert.equal(m.seen.length, 200);
+  assert.ok(m.seen.includes(`ci:12:${SHA}`));
+  const rerun = new Map([[SHA, { failed: ["build"], failedAt: NOW + 9999, pending: 0 }]]);
+  assert.equal(decideGitHubTrigger(ci, m, [pull()], rerun, NOW + 9999).fire, undefined, "a re-run does not start a second run");
   const seen = ["pr:11", `ci:12:${SHA}`, ...Array.from({ length: 198 }, (_, i) => `ci:1:${i}`)];
   const d = decideGitHubTrigger(opened, memory({ seen }), [pull()], none, NOW);
   assert.equal(d.memory.seen.length, 200);
