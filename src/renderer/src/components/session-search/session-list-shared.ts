@@ -1,13 +1,15 @@
 import {
   sessionSearchProgressLine,
+  type SessionSearchAgent,
   type SessionSearchScope,
   type SessionSearchStatus,
 } from "@shared/session-search";
 
-// What the rail's Sessions view and the session picker have in common: where
-// to look, remembered between them, and how they word the index's state.
+// The session picker's choices, remembered between openings, and how it words
+// the index's state.
 
 export const SESSION_SCOPE_KEY = "codara.sessions.scope";
+export const SESSION_AGENTS_KEY = "codara.sessions.agents";
 
 export const SESSION_SCOPES: { id: SessionSearchScope; label: string; hint: string }[] = [
   { id: "workspace", label: "Workspace", hint: "Sessions in this workspace's folder" },
@@ -21,6 +23,15 @@ export function readSessionScope(): SessionSearchScope {
     return value === "workspace" || value === "all" ? value : "project";
   } catch {
     return "project";
+  }
+}
+
+export function readSessionAgents(): SessionSearchAgent[] {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(SESSION_AGENTS_KEY) ?? "[]");
+    return Array.isArray(value) ? value.filter((item): item is SessionSearchAgent => typeof item === "string") : [];
+  } catch {
+    return [];
   }
 }
 

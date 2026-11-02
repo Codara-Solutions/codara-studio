@@ -20,15 +20,17 @@ import type { WorkerSessionSummary } from "@shared/types";
 import { usePreferences } from "../../preferences/usePreferences";
 import { keyBelongsToOtherModal } from "../../shortcuts/modal-keys";
 import AnchoredMenu from "../chat/composer/AnchoredMenu";
-import { PencilIcon, PinIcon } from "../icons";
+import { PencilIcon, PinIcon, ReloadIcon } from "../icons";
 import SessionAgentMark from "./SessionAgentMark";
 import { SnippetText, TermsText } from "./SessionHighlight";
 import SessionTranscriptDialog from "./SessionTranscriptDialog";
 import { copySessionId, revealSessionTranscript } from "./session-actions";
 import {
   SESSION_SCOPES,
+  SESSION_AGENTS_KEY,
   SESSION_SCOPE_KEY,
   folderName,
+  readSessionAgents,
   readSessionScope,
   rememberSessionChoice,
   sessionStatusLine,
@@ -45,9 +47,10 @@ import "./session-search.css";
 // The session picker: past agent sessions in a list, beside the end of the
 // highlighted conversation. One box searches names and what either side said,
 // and each result says which of those matched. Opened from the + menu and its
-// chord, and in front of a Claude, Codex or Grok worker being opened. There,
-// nothing is selected at first and Enter starts the worker, so history never
-// costs more than one key and a session is only resumed on purpose.
+// chord, the rail's button (on this workspace), the jump palette (on what was
+// typed there), and in front of a Claude, Codex or Grok worker being opened.
+// There, nothing is selected at first and Enter starts the worker, so history
+// never costs more than one key and a session is only resumed on purpose.
 
 const PAGE = 50;
 const DEBOUNCE_MS = 120;
@@ -117,9 +120,14 @@ function RenameField({
 
 export default function SessionPicker({
   onClose,
+  initialQuery = "",
+  initialScope,
   offer = null,
 }: {
   onClose: () => void;
+  initialQuery?: string;
+  /** Where this opening looks. Only a click on a scope is remembered for next time. */
+  initialScope?: SessionSearchScope;
   offer?: WorkerSessionsOffer | null;
 }) {
   const host = useSessionSearchHost();
@@ -128,9 +136,11 @@ export default function SessionPicker({
   const { preferences, setPreference } = usePreferences();
   const prefs = normalizeSessionSearchPreferences(preferences.sessionSearch);
 
-  const [query, setQuery] = useState("");
-  const [scope, setScopeState] = useState<SessionSearchScope>(readSessionScope);
-  const [agent, setAgent] = useState<SessionSearchAgent | null>(offer?.runtime ?? null);
+  const [query, setQuery] = useState(initialQuery);
+  const [scope, setScopeState] = useState<SessionSearchScope>(() => initialScope ?? readSessionScope());
+  const [agentFilter, setAgentFilterState] = useState<SessionSearchAgent[]>(() =>
+    offer ? [offer.runtime] : readSessionAgents(),
+  );
   const [hits, setHits] = useState<SessionSearchHit[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [searched, setSearched] = useState(false);
@@ -168,9 +178,14 @@ export default function SessionPicker({
   const hasWorkspace = scopeCwd !== null;
   const effectiveScope: SessionSearchScope = hasWorkspace ? scope : "all";
   const enabledAgents = prefs.agents;
+  const activeAgents = useMemo(
+    () => agentFilter.filter((item) => enabledAgents.includes(item)),
+    [agentFilter, enabledAgents],
+  );
+  const agentsKey = activeAgents.join(",");
   const terms = useMemo(() => sessionQueryTerms(query), [query]);
   const searching = terms.length > 0;
-  const answerKey = `${query}\n${effectiveScope}\n${agent ?? ""}\n${scopeCwd ?? ""}`;
+  const answerKey = `${query}\n${effectiveScope}\n${agentsKey}\n${scopeCwd ?? ""}`;
   const selected = hits.find((hit) => hit.key === selectedKey) ?? null;
   const selectedOpen = selected ? (host.isSessionOpen?.(selected) ?? false) : false;
   const selectedKeyRef = useRef(selectedKey);
@@ -179,6 +194,11 @@ export default function SessionPicker({
   const setScope = (next: SessionSearchScope) => {
     setScopeState(next);
     rememberSessionChoice(SESSION_SCOPE_KEY, next);
+  };
+  const toggleAgent = (item: SessionSearchAgent) => {
+    const next = activeAgents.includes(item) ? activeAgents.filter((entry) => entry !== item) : [...activeAgents, item];
+    setAgentFilterState(next);
+    rememberSessionChoice(SESSION_AGENTS_KEY, JSON.stringify(next));
   };
 
   const firstToShow = useCallback(
@@ -202,7 +222,7 @@ export default function SessionPicker({
           query,
           scope: effectiveScope,
           cwd: scopeCwd,
-          agents: agent ? [agent] : null,
+          agents: agentsKey ? (agentsKey.split(",") as SessionSearchAgent[]) : null,
           limit: PAGE,
           offset,
           pinnedFirst: true,
@@ -235,7 +255,7 @@ export default function SessionPicker({
         if (id === sequence.current) setLoading(false);
       }
     },
-    [query, effectiveScope, scopeCwd, agent, answerKey, firstToShow, offer],
+    [query, effectiveScope, scopeCwd, agentsKey, answerKey, firstToShow, offer],
   );
 
   useEffect(() => {
@@ -450,6 +470,11 @@ export default function SessionPicker({
     return () => document.removeEventListener("keydown", onKey, true);
   }, []);
 
+  const refreshIndex = () => {
+    void window.spark.sessionSearch.refresh(true).then(publishSessionSearchStatus, () => undefined);
+    focusSearch();
+  };
+
   const onListScroll = (event: UIEvent<HTMLDivElement>) => {
     const node = event.currentTarget;
     if (!hasMore || loading) return;
@@ -593,7 +618,8 @@ export default function SessionPicker({
     );
   }
 
-  const sessionsNoun = agent ? `${SESSION_SEARCH_AGENT_LABEL[agent]} sessions` : "agent sessions";
+  const sessionsNoun =
+    activeAgents.length === 1 ? `${SESSION_SEARCH_AGENT_LABEL[activeAgents[0]]} sessions` : "agent sessions";
   let lastHeading: string | null = null;
   const firstBuildRunning = status.firstBuild && (indexing || status.phase === "paused");
 
@@ -642,22 +668,38 @@ export default function SessionPicker({
                 })}
               </div>
               <div className="sp-agents" role="group" aria-label="Agent">
-                {enabledAgents.map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    className={`sp-agent${agent === item ? " is-on" : ""}`}
-                    aria-pressed={agent === item}
-                    title={SESSION_SEARCH_AGENT_LABEL[item]}
-                    onClick={() => {
-                      setAgent((current) => (current === item ? null : item));
-                      focusSearch();
-                    }}
-                  >
-                    <SessionAgentMark agent={item} size={12} />
-                    {SESSION_SEARCH_AGENT_LABEL[item]}
-                  </button>
-                ))}
+                {enabledAgents.map((item) => {
+                  const on = activeAgents.includes(item);
+                  return (
+                    <button
+                      key={item}
+                      type="button"
+                      className={`sp-agent${on ? " is-on" : ""}`}
+                      aria-pressed={on}
+                      title={SESSION_SEARCH_AGENT_LABEL[item]}
+                      onClick={() => {
+                        toggleAgent(item);
+                        focusSearch();
+                      }}
+                    >
+                      <SessionAgentMark agent={item} size={12} />
+                      {SESSION_SEARCH_AGENT_LABEL[item]}
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  className="spark-icon-btn sp-refresh"
+                  aria-label="Refresh sessions"
+                  title="Read new sessions now"
+                  data-testid="session-picker-refresh"
+                  disabled={indexing}
+                  onClick={refreshIndex}
+                >
+                  <span className={indexing ? "ss-spin" : undefined} style={{ display: "inline-flex" }}>
+                    <ReloadIcon size={12} />
+                  </span>
+                </button>
               </div>
             </div>
 

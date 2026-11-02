@@ -465,11 +465,13 @@ test("one box finds sessions by name and by what either side said, and a new nam
     await page.keyboard.press("Escape");
     await expect(picker).toHaveCount(0);
 
-    // The rail shows the name too.
-    await page.getByRole("tablist", { name: "Rail view" }).getByRole("tab", { name: /^Sessions/ }).click();
-    const rail = page.getByTestId("session-search");
-    await expect(rail).toBeVisible();
-    await expect(rail.locator(`[data-session-row="claude:${IDS.rollout}"]`)).toContainText("Spring launch", { timeout: 30_000 });
+    // The rail's button opens the same list, on this workspace, name included.
+    await page.getByTestId("rail-sessions-button").click();
+    await expect(picker).toBeVisible();
+    await expect(picker.getByRole("tablist", { name: "Sessions from" }).getByRole("tab", { name: "Workspace" })).toHaveAttribute("aria-selected", "true");
+    await expect(picker.locator(`[data-session-row="claude:${IDS.rollout}"]`)).toContainText("Spring launch", { timeout: 30_000 });
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
 
     // A restart keeps it, and so does losing the index, which is only a cache.
     await app.close();
@@ -702,6 +704,15 @@ test("screenshots in light and dark", async () => {
       await page.waitForTimeout(200);
       await page.screenshot({ path: join(SHOTS!, `picker-rename-${theme}.png`) });
       await page.keyboard.press("Escape");
+      await page.keyboard.press("Escape");
+      await expect(picker).toHaveCount(0);
+      await page.waitForTimeout(200);
+      await page.screenshot({ path: join(SHOTS!, `rail-button-${theme}.png`) });
+      await page.getByTestId("rail-sessions-button").click();
+      await expect(picker.getByRole("tablist", { name: "Sessions from" }).getByRole("tab", { name: "Workspace" })).toHaveAttribute("aria-selected", "true");
+      await page.waitForTimeout(400);
+      await page.screenshot({ path: join(SHOTS!, `picker-from-rail-${theme}.png`) });
+      await showAll(picker);
     }
   } finally {
     await app?.close().catch(() => undefined);

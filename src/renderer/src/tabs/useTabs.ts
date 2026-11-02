@@ -552,6 +552,34 @@ export function validateDockLeaves(tabs: Tab[]): Tab[] {
   return out;
 }
 
+/**
+ * Whether a workspace's saved layout, not loaded this session, holds anything
+ * a removal of its folder would take away. A plain shell does not: it comes
+ * back empty anywhere. Anything unreadable counts as holding work.
+ */
+export function savedLayoutHoldsWork(workspaceId: string): boolean {
+  const key = storageKey(workspaceId);
+  if (!key) return true;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return false;
+    const parsed = migratePersisted(JSON.parse(raw) as PersistedShape);
+    if (!parsed) return true;
+    return parsed.tabs.some(
+      (tab) =>
+        tab.kind !== "terminal" ||
+        Boolean(tab.scope) ||
+        collectLeaves(tab.root).some(
+          (leaf) =>
+            Boolean(leaf.content && leaf.content.type !== "terminal") ||
+            Boolean(leaf.worker || leaf.agentSession || leaf.autorun || leaf.agentOwner),
+        ),
+    );
+  } catch {
+    return true;
+  }
+}
+
 function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number): PersistedShape | null {
   const key = storageKey(workspaceId);
   if (!key) return null;
