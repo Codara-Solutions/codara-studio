@@ -1,4 +1,6 @@
+import { promises as fs } from "node:fs";
 import type {
+  AutomationBranchResult,
   PreResolvedNode,
   AgentEffortLevel,
   AgentLoopSignal,
@@ -25,6 +27,7 @@ import {
 } from "@shared/types";
 import { appendHistory, appendSkip, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
 import { githubFireNote, githubFireVars } from "./github-trigger";
+import { ownBranchNote } from "./own-branch-note";
 import { normalizeAutomationPrecheck, precheckSkipDetail } from "@shared/automation-catchup";
 import { PRECHECK_STOPPED_ERROR, runAutomationPrecheck, stopRunningPrechecks } from "./automation-precheck";
 import { automationSourceKey, publish, rearm, settleAutomationQuestions } from "../notify";
@@ -280,12 +283,53 @@ async function passesPrecheck(id: string, job: ScheduledJob, opts: StartIteratio
   return false;
 }
 
+// jobId of loops whose work is being committed and pushed. Nothing may start a
+// cycle meanwhile: it would close the same checkout a second time.
+const settlingBranch = new Set<string>();
+
+const STOPS_WITHOUT_A_PULL_REQUEST: ReadonlySet<AutomationStopReason> = new Set<AutomationStopReason>([
+  "budget",
+  "iteration-failed",
+  "user-stop",
+  "engine-missing",
+]);
+
+// Commits what the cycle did and clears the checkout from the loop state, so
+// neither this nor a later cycle can act on it again.
+async function settleOwnBranch(id: string, reason: AutomationStopReason): Promise<void> {
+  const job = await getJob(id);
+  const own = job?.state.ownBranch;
+  if (!job || !own || settlingBranch.has(id)) return;
+  settlingBranch.add(id);
+  try {
+    const last = job.history[job.history.length - 1];
+    const wentWell = !STOPS_WITHOUT_A_PULL_REQUEST.has(reason) && last?.status === "complete";
+    const { closeOwnBranch } = await import("./automation-branch");
+    const result: AutomationBranchResult = await closeOwnBranch(job, own, {
+      openPullRequest: wentWell && job.ownBranch?.draftPr === true,
+      summary: last?.summary,
+    }).catch(() => ({
+      branch: own.branch,
+      changed: true,
+      note: `Could not finish its branch. Anything it did is still in ${own.path}.`,
+    }));
+    await patchJob(id, (j) => {
+      const history = [...j.history];
+      if (history.length > 0) history[history.length - 1] = { ...history[history.length - 1], branchResult: result };
+      const { ownBranch: _settled, ...state } = j.state;
+      return { ...j, history, state };
+    });
+  } finally {
+    settlingBranch.delete(id);
+  }
+}
+
 // Whether a trigger fire right now would be dropped: startIteration holds for
 // all of these. A trigger that remembers what it fired checks first, so the
 // event waits instead of being marked as handled and lost.
 export async function automationIsBusy(job: ScheduledJob): Promise<boolean> {
   if (job.state.status === "paused" || job.state.status === "blocked") return true;
-  if (runnerFor(job.id).firing) return true;
+  if (runnerFor(job.id).firing || settlingBranch.has(job.id)) return true;
   if (!job.state.currentRunId) return false;
   const live = await safeGetRun(job.state.currentRunId);
   return !!live && !TERMINAL.has(live.status);
@@ -296,6 +340,7 @@ export async function automationIsBusy(job: ScheduledJob): Promise<boolean> {
 export async function startIteration(id: string, opts: StartIterationOpts): Promise<void> {
   let job = await getJob(id);
   if (!job || !job.enabled) return;
+  if (settlingBranch.has(id)) return;
   if (job.state.status === "paused") return; // explicit user hold; resumeLoop re-drives
   if (opts.source === "manual" && job.lastGitHubFire) {
     // Run now is not about the pull request that last fired it.
@@ -325,6 +370,9 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
     if (opts.source !== "trigger" && opts.source !== "continuous" && opts.source !== "manual") {
       return;
     }
+    // Only left here by a crash between the last run ending and its branch
+    // being settled: that work belongs to the last cycle.
+    if (job.state.ownBranch) await settleOwnBranch(id, job.state.lastStopReason ?? "iteration-failed");
     await patchJob(id, (j) => ({
       ...j,
       state: {
@@ -372,6 +420,31 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       return;
     }
 
+    // Before anything is spent: an automation that asked for its own branch
+    // must never fall back to editing the user's checkout.
+    let workCwd = job.input.cwd;
+    let ownBranchState = job.ownBranch ? job.state.ownBranch : undefined;
+    if (job.ownBranch) {
+      let own = job.state.ownBranch;
+      const stillThere = own ? await fs.access(own.path).then(() => true, () => false) : false;
+      if (!own || !stillThere) {
+        const { openOwnBranch } = await import("./automation-branch");
+        const opened = await openOwnBranch(job).catch(() => ({
+          ok: false as const,
+          problem: "Could not create a separate copy of the repository, so this run did not start.",
+        }));
+        if (!opened.ok) {
+          await appendSkip(id, { reason: "ownBranch", detail: opened.problem });
+          if (job.state.iteration > 0) await finalize(id, "iteration-failed");
+          return;
+        }
+        own = opened.own;
+        await patchJob(id, (j) => ({ ...j, state: { ...j.state, ownBranch: opened.own } }));
+      }
+      workCwd = own.path;
+      ownBranchState = own;
+    }
+
     // A new iteration is real new activity — re-arm the notify policy so the
     // loop's eventual finish/failure alert delivers even after a prior one.
     rearm(automationSourceKey(id));
@@ -403,6 +476,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       if (job.trigger.kind === "github" && job.lastGitHubFire) {
         p = `${p}\n\n${githubFireNote(job.lastGitHubFire)}`;
       }
+      if (ownBranchState) p = `${p}\n\n${ownBranchNote(ownBranchState)}`;
       // Agent-driven loops: tell the model how to keep the loop going even if the
       // template never mentioned the mechanism. (Hard caps stop it regardless.)
       // steerable=false for multi-node entry prompts: resolveWorker only consumes
@@ -489,7 +563,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         run = await startDirectWorkerRun({
           workspaceId: job.input.workspaceId,
           workspaceName: job.input.workspaceName,
-          cwd: job.input.cwd,
+          cwd: workCwd,
           origin: job.input.origin,
           projectPolicyMode: job.input.projectPolicyMode,
           automationId: id,
@@ -545,7 +619,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
             liveStepRun = await startStepOnlyPass({
               workspaceId: job.input.workspaceId,
               workspaceName: job.input.workspaceName,
-              cwd: job.input.cwd,
+              cwd: workCwd,
               origin: job.input.origin,
               projectPolicyMode: job.input.projectPolicyMode,
               automationId: id,
@@ -624,7 +698,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           : undefined;
 
         const res = await resolveInlineNodes(graph, projected, {
-          cwd: job.input.cwd,
+          cwd: workCwd,
           vars: passVars,
           env: {
             SPARK_AUTOMATION_ID: id,
@@ -696,7 +770,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           run = await recordStepOnlyPass({
             workspaceId: job.input.workspaceId,
             workspaceName: job.input.workspaceName,
-            cwd: job.input.cwd,
+            cwd: workCwd,
             origin: job.input.origin,
             projectPolicyMode: job.input.projectPolicyMode,
             automationId: id,
@@ -756,7 +830,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         run = await startDirectWorkerRun({
           workspaceId: job.input.workspaceId,
           workspaceName: job.input.workspaceName,
-          cwd: job.input.cwd,
+          cwd: workCwd,
           origin: job.input.origin,
           projectPolicyMode: job.input.projectPolicyMode,
           automationId: id,
@@ -1571,7 +1645,7 @@ async function onTerminal(id: string, run: RunState): Promise<void> {
   }
 
   // User-written until-predicates apply to ANY loop kind that sets them.
-  const cwd = fresh.input.cwd;
+  const cwd = fresh.state.ownBranch?.path ?? fresh.input.cwd;
   if (stop.untilPhrase && summary && summary.toLowerCase().includes(stop.untilPhrase.toLowerCase())) {
     await finalize(id, "phrase");
     return;
@@ -1753,6 +1827,7 @@ async function finalize(
       },
     };
   });
+  await settleOwnBranch(id, reason);
   const finalJob = await getJob(id);
   void emitIteration(id, finalJob?.state.iteration ?? 0, undefined, "stopped");
   // Every stop, user-stop included: a stopped loop can no longer take the

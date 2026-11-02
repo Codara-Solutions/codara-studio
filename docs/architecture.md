@@ -423,6 +423,13 @@ iterations.
 workers, guards, merges and fixed steps (shell, script, HTTP, file,
 notification).
 
+An automation can opt in to its own branch (`automation-branch.ts`): each cycle
+gets a new branch in a separate worktree under the managed worktrees folder, and
+when the loop ends its work is committed and, if it went well and the automation
+asked, pushed as a draft pull request. It never falls back to the user's
+checkout: if the worktree cannot be made, the run does not start. Pull requests
+from these branches never start a pull request trigger.
+
 The pull request trigger (`github-trigger.ts`) polls the repository behind the
 workspace's origin remote through the user's own `gh`, with conditional reads so
 a quiet minute costs no rate limit. It keeps what it acted on in the job, so

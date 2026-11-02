@@ -561,3 +561,6 @@ and GitHub Actions' row of recent results for the bar of ticks.
   into main") and use the existing check and field controls. Trouble reaching
   GitHub, or a pull request at its daily limit, is a "not started" row in Runs,
   not a new surface.
+- An automation on its own branch says so in the sentence. The result card points
+  to the draft pull request when there is one, and otherwise says in one line
+  where the work is. The switch is in the Loop panel, off by default.

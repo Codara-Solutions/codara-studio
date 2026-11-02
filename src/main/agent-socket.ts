@@ -233,6 +233,7 @@ import type {
   PrefKey,
   AutomationLoop,
   AutomationMissedRuns,
+  AutomationOwnBranch,
   AutomationPrecheck,
   AutomationTrigger,
   CreateScheduledJobInput,
@@ -6763,9 +6764,11 @@ function summarizeJob(job: ScheduledJob): Record<string, unknown> {
       stopReason: h.stopReason ?? null,
       costUsd: h.costUsd ?? null,
       ...(h.catchUp ? { caughtUpMissedRunAt: h.catchUp.scheduledFor } : {}),
+      ...(h.branchResult ? { branch: h.branchResult.branch, pullRequest: h.branchResult.prUrl ?? null } : {}),
     })),
     ...(precheckSummary(job.precheck) ? { precheck: precheckSummary(job.precheck) } : {}),
     ...(missedRunsSummary(job) ? { missedRuns: missedRunsSummary(job) } : {}),
+    ...(job.ownBranch ? { ownBranch: job.ownBranch } : {}),
     ...(job.skips?.length
       ? {
           skipped: job.skips
@@ -7161,9 +7164,15 @@ function paramGraph(params: Record<string, unknown>): LoomGraph | undefined {
  *  precheck command also removes it. Any other value that does not normalize
  *  is an error, so a typo is never saved as "no precheck". */
 function paramGate(params: Record<string, unknown>):
-  | { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null }
+  | { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null; ownBranch?: AutomationOwnBranch | null }
   | { error: string } {
-  const out: { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null } = {};
+  const out: { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null; ownBranch?: AutomationOwnBranch | null } = {};
+  if (params.own_branch === null) out.ownBranch = null;
+  else if (params.own_branch !== undefined) {
+    const draftPr = (params.own_branch as { draft_pr?: unknown } | undefined)?.draft_pr;
+    if (typeof draftPr !== "boolean") return { error: "own_branch must be { draft_pr: true|false } (or null to work in the workspace folder)" };
+    out.ownBranch = { draftPr };
+  }
   const rawPrecheck = params.precheck;
   if (rawPrecheck === null) out.precheck = null;
   else if (rawPrecheck !== undefined) {
@@ -7311,6 +7320,7 @@ async function handleAutomationCreate(
     graph,
     ...(gate.precheck ? { precheck: gate.precheck } : {}),
     ...(gate.missedRuns ? { missedRuns: gate.missedRuns } : {}),
+    ...(gate.ownBranch ? { ownBranch: gate.ownBranch } : {}),
     input: {
       workspaceId: run.workspaceId,
       workspaceName,
@@ -7382,6 +7392,12 @@ function describeUpdate(existing: ScheduledJob, update: UpdateScheduledJobInput)
     const next = { trigger: update.trigger ?? existing.trigger, missedRuns: update.missedRuns ?? undefined };
     lines.push(`if a run is missed: ${missedRunsSummary(existing) ?? "skip"} → ${missedRunsSummary(next) ?? "skip"}`);
   }
+  if (update.ownBranch !== undefined) {
+    // It pushes and opens pull requests in the user's name, so it is shown.
+    const where = (own: AutomationOwnBranch | null | undefined): string =>
+      own ? (own.draftPr ? "own branch, opening a draft pull request" : "own branch") : "workspace folder";
+    lines.push(`works in: ${where(existing.ownBranch)} → ${where(update.ownBranch)}`);
+  }
   if (update.graph !== undefined) {
     const n = update.graph.nodes?.length ?? 0;
     const e = update.graph.edges?.length ?? 0;
@@ -7422,6 +7438,7 @@ async function handleAutomationUpdate(
     id: automationId,
     ...(gate.precheck !== undefined ? { precheck: gate.precheck } : {}),
     ...(gate.missedRuns !== undefined ? { missedRuns: gate.missedRuns } : {}),
+    ...(gate.ownBranch !== undefined ? { ownBranch: gate.ownBranch } : {}),
     ...(name ? { name } : {}),
     ...(paramTrigger(params) ? { trigger: paramTrigger(params) } : {}),
     ...(paramLoop(params) ? { loop: paramLoop(params) } : {}),

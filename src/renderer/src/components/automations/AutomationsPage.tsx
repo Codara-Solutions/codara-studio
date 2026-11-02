@@ -1472,6 +1472,7 @@ function ResultCard({
           </div>
         </div>
       )}
+      {card.branch?.note && <div className="automation-result__body">{card.branch.note}</div>}
       {(card.facts.length > 0 || card.runId) && (
         <div className="automation-facts">
           {card.facts.map((fact) => (
@@ -1480,6 +1481,17 @@ function ResultCard({
             </span>
           ))}
           <span style={{ flex: 1 }} />
+          {card.branch?.prUrl && (
+            <button
+              type="button"
+              className="spark-btn"
+              style={{ height: 22, padding: "0 8px", fontSize: 11 }}
+              title={card.branch.branch}
+              onClick={() => void window.spark.openExternal(card.branch?.prUrl ?? "")}
+            >
+              Open draft pull request
+            </button>
+          )}
           {card.failed && onAskCora && (
             <button
               type="button"

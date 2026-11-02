@@ -55,6 +55,8 @@ export interface LoopDraft {
   countN: string;
   cadenceMin: string;
   isolate: boolean;
+  ownBranch: boolean;
+  draftPr: boolean;
   maxIters: string;
   budget: string;
   untilTests: boolean;
@@ -133,6 +135,8 @@ export function emptyDraft(): LoomDraft {
       countN: "5",
       cadenceMin: "10",
       isolate: false,
+      ownBranch: false,
+      draftPr: true,
       maxIters: "",
       budget: "",
       untilTests: false,
@@ -194,6 +198,8 @@ export function draftFromJob(job: ScheduledJob): LoomDraft {
   if (job.loop.kind === "count") d.loop.countN = String(stop.maxIterations ?? 5);
   if (job.loop.everyMs) d.loop.cadenceMin = String(job.loop.everyMs / 60_000);
   d.loop.isolate = Boolean(job.loop.isolate);
+  d.loop.ownBranch = Boolean(job.ownBranch);
+  d.loop.draftPr = job.ownBranch?.draftPr ?? true;
   if (stop.maxIterations !== undefined && job.loop.kind !== "count") {
     d.loop.maxIters = String(stop.maxIterations);
   }

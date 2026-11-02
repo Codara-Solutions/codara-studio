@@ -1,5 +1,6 @@
 import { Cron } from "croner";
 import type {
+  AutomationBranchResult,
   AutomationRunRecord,
   AutomationStopReason,
   AutomationTrigger,
@@ -268,6 +269,7 @@ export function plainSentence(job: ScheduledJob, names?: ReadonlyMap<string, str
     say(" works in ");
   }
   say(place, true);
+  if (job.ownBranch) say(job.ownBranch.draftPr ? " on its own branch, for a draft pull request" : " on its own branch");
   const until = untilPhrase(job);
   if (until) say(`, ${until}`);
   if (job.loop?.kind === "cadence") say(`, repeating ${everyPhrase(job.loop.everyMs ?? 60_000).toLowerCase()}`);
@@ -516,6 +518,8 @@ export interface ResultCard {
   facts: string[];
   failed: boolean;
   runId?: string;
+  /** Where this run's work went, for an automation on its own branch. */
+  branch?: AutomationBranchResult;
 }
 
 function factsOf(job: ScheduledJob, rec: AutomationRunRecord, nowMs: number): string[] {
@@ -561,7 +565,14 @@ export function resultCard(job: ScheduledJob, nowMs: number): ResultCard {
       (failed || unfinished
         ? "It stopped without leaving a summary. See what it did for the details."
         : "It finished without leaving a summary.");
-  return { headline, body, facts: factsOf(job, rec, nowMs), failed, runId: rec.runId };
+  return {
+    headline,
+    body,
+    facts: factsOf(job, rec, nowMs),
+    failed,
+    runId: rec.runId,
+    ...(rec.branchResult ? { branch: rec.branchResult } : {}),
+  };
 }
 
 const FIX_PROMPT_SUMMARY_CHARS = 800;

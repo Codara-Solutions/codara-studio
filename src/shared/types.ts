@@ -5899,6 +5899,33 @@ export type AutomationContinuationSource =
   | "agent";
 
 // One iteration in an automation's history.
+/** Branches an automation creates start with this. A pull request from one
+ *  never starts a github trigger, so automations cannot feed each other. */
+export const AUTOMATION_BRANCH_PREFIX = "codara-automation/";
+
+/** Opt-in: this automation works in a separate checkout on a new branch. */
+export interface AutomationOwnBranch {
+  /** Open a draft pull request when a run goes well. */
+  draftPr: boolean;
+}
+
+/** The checkout of the cycle in progress. Survives a restart with the loop. */
+export interface AutomationOwnBranchState {
+  path: string;
+  branch: string;
+  baseSha: string;
+  baseBranch?: string;
+}
+
+/** What became of a run's work on its own branch. */
+export interface AutomationBranchResult {
+  branch: string;
+  changed: boolean;
+  prUrl?: string;
+  /** One plain line when there is no pull request to point at. */
+  note?: string;
+}
+
 export interface AutomationRunRecord {
   iteration: number; // 0-based
   runId: string;
@@ -5913,6 +5940,8 @@ export interface AutomationRunRecord {
   /** Set when this pass ran to catch up a scheduled time Codara missed
    *  (closed or asleep) under the "run once when back" policy. */
   catchUp?: AutomationCatchUp;
+  /** Set on the record the loop ended on, for an automation on its own branch. */
+  branchResult?: AutomationBranchResult;
 }
 
 // ── Precheck and missed-run catch-up ────────────────────────────────────────
@@ -5969,7 +5998,7 @@ export interface AutomationCatchUp {
 export interface AutomationSkipRecord {
   id: string;
   at: string; // ISO time the skip was recorded
-  reason: "precheck" | "missed" | "github";
+  reason: "precheck" | "missed" | "github" | "ownBranch";
   /** One plain-words line for the history row. */
   detail: string;
   precheck?: AutomationPrecheckResult & { command: string };
@@ -5999,6 +6028,7 @@ export interface AutomationState {
   /** Persisted mirror of the in-memory agent signal — survives a restart
    *  that lands between worker-finish and onTerminal. Read-once. */
   pendingAgentSignal?: AgentLoopSignal;
+  ownBranch?: AutomationOwnBranchState;
 }
 
 // An "automation" / loom. ScheduledJob's field set is a strict superset of the
@@ -6029,6 +6059,8 @@ export interface ScheduledJob {
   lastRunAt?: string; // ISO timestamp of the most recent firing
   lastRunId?: string; // runId produced by the most recent firing
   lastFiredPath?: string; // folder triggers: the path whose change last fired it
+  /** Absent means it works in the workspace folder, as every automation did before this existed. */
+  ownBranch?: AutomationOwnBranch;
   githubTrigger?: GitHubTriggerMemory;
   lastGitHubFire?: GitHubTriggerFire;
   /** git triggers: the remote / local commit the trigger last settled on.
@@ -6071,6 +6103,7 @@ export interface CreateScheduledJobInput {
   createdByRunId?: string; // the chat run that authored this loom (assist or ordinary chat, never a loom run)
   precheck?: AutomationPrecheck;
   missedRuns?: AutomationMissedRuns;
+  ownBranch?: AutomationOwnBranch;
 }
 
 // Edit payload (scheduler:update). Partial; id required. enabled/state/history
@@ -6088,6 +6121,8 @@ export interface UpdateScheduledJobInput {
   precheck?: AutomationPrecheck | null;
   /** null restores the default (skip). */
   missedRuns?: AutomationMissedRuns | null;
+  /** null goes back to working in the workspace folder. */
+  ownBranch?: AutomationOwnBranch | null;
 }
 
 /** automations:testPrecheck: run a precheck once from the editor. */

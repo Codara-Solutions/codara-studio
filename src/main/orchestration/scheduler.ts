@@ -203,7 +203,12 @@ function normalizeJob(job: ScheduledJob): ScheduledJob {
 // Precheck, missed-run policy and skip records arrive from the editor, the
 // agent socket and hand-edited files: keep only well-formed values, so the
 // loop driver never runs an empty command or reads a malformed skip list.
-function normalizeGate(job: ScheduledJob): ScheduledJob {
+function normalizeGate(input: ScheduledJob): ScheduledJob {
+  let job = input;
+  if (job.ownBranch !== undefined && typeof job.ownBranch?.draftPr !== "boolean") {
+    const { ownBranch: _dropped, ...rest } = job;
+    job = rest;
+  }
   const precheck = normalizeAutomationPrecheck(job.precheck);
   const missedRuns = normalizeMissedRuns(job.missedRuns);
   // The history view and the repeat merge read id, at, reason and detail of
@@ -233,7 +238,7 @@ function isSkipRecord(value: unknown): value is AutomationSkipRecord {
     typeof s.id === "string" &&
     typeof s.at === "string" &&
     typeof s.detail === "string" &&
-    (s.reason === "precheck" || s.reason === "missed" || s.reason === "github")
+    (s.reason === "precheck" || s.reason === "missed" || s.reason === "github" || s.reason === "ownBranch")
   );
 }
 
@@ -439,6 +444,7 @@ export async function createJob(input: CreateScheduledJobInput): Promise<Schedul
     createdByRunId: input.createdByRunId,
     precheck: input.precheck,
     missedRuns: input.missedRuns,
+    ownBranch: input.ownBranch,
   };
   // Re-normalize so a freshly created job lands in the cache with the same
   // backfilled shape it would have after a disk round-trip (graph in
@@ -474,6 +480,7 @@ export async function updateJob(input: UpdateScheduledJobInput): Promise<Schedul
     ...(input.graph !== undefined ? { graph: input.graph } : {}),
     ...(input.precheck !== undefined ? { precheck: input.precheck ?? undefined } : {}),
     ...(input.missedRuns !== undefined ? { missedRuns: input.missedRuns ?? undefined } : {}),
+    ...(input.ownBranch !== undefined ? { ownBranch: input.ownBranch ?? undefined } : {}),
     // Times the OLD schedule would have fired are not missed runs of the new one.
     ...(input.trigger !== undefined ? { scheduleCheckedAt: settleScheduleNow(input.id) } : {}),
     // A different watch starts from what exists now, as if newly armed.

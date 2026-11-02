@@ -438,6 +438,7 @@ function Editor({
         graph,
         precheck: gate.precheck ?? null,
         missedRuns: gate.missedRuns ?? null,
+        ownBranch: draft.loop.ownBranch ? { draftPr: draft.loop.draftPr } : null,
       });
     } else if (onCreate) {
       onCreate({
@@ -450,6 +451,7 @@ function Editor({
         graph,
         enabled: true,
         ...gate,
+        ...(draft.loop.ownBranch ? { ownBranch: { draftPr: draft.loop.draftPr } } : {}),
       });
     }
   }, [canSubmit, draft, nodes, edges, editing, initial, onCreate, onSave, workspaceId, workspaceName, cwd]);

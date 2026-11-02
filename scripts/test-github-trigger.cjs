@@ -99,6 +99,13 @@ const none = new Map();
   }
 }
 
+// A run's own pull request never starts another run.
+{
+  const own = pull({ head: { sha: SHA, ref: "codara-automation/nightly-abc" } });
+  assert.equal(decideGitHubTrigger(opened, memory(), [own], none, NOW).fire, undefined);
+  assert.equal(pullsNeedingChecks(ci, memory(), [own]).length, 0);
+}
+
 // Target branch filter.
 {
   const main = { ...opened, branch: "main" };

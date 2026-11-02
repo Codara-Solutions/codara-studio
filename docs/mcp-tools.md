@@ -1261,6 +1261,11 @@ approval shows the full precheck command, since it runs on your machine.
 `codara_list_automations` and `codara_get_automation` report both, with the
 latest skipped passes.
 
+`own_branch` (`{draft_pr}`, `null` to remove) makes an automation work on a new
+branch in a separate copy of the repository, starting from the default branch.
+With `draft_pr` it also pushes that branch and opens a draft pull request when a
+run goes well. Off by default, and the approval shows the change.
+
 The `github` trigger takes `events` (`prOpened`, `ciFailed`), an optional
 `branch` the pull request must target, and an optional `includeDrafts`. It reads
 the repository behind the workspace's origin remote with your `gh` sign-in, while

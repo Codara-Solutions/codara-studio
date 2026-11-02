@@ -151,6 +151,26 @@ export default function LoopInspector({
           </p>
         )}
 
+        <Group label="Where it works">
+          <Check
+            label="On its own branch, in a separate copy"
+            checked={loop.ownBranch}
+            onToggle={() => set({ ownBranch: !loop.ownBranch })}
+          />
+          {loop.ownBranch && (
+            <Check
+              label="Open a draft pull request when a run goes well"
+              checked={loop.draftPr}
+              onToggle={() => set({ draftPr: !loop.draftPr })}
+            />
+          )}
+          <p style={{ margin: "4px 0 0 22px", fontSize: 10.5, lineHeight: 1.5, color: "var(--muted-2)" }}>
+            {loop.ownBranch
+              ? "Starts from the default branch in a clean copy, so install steps may be needed. Your open files are never touched. The pull request holds everything the run changed, with its final summary as the text."
+              : "It edits this workspace's folder directly."}
+          </p>
+        </Group>
+
         {/* Isolation */}
         <Group label="Run lineage">
           <Check
