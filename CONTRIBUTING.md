@@ -78,6 +78,11 @@ with no filter runs everything and takes a while. If your change is visible
 in the app, try it in `npm run dev`. `npm run test:e2e` builds the app and
 runs the Playwright specs.
 
+If your change adds code the window loads at startup, also run
+`npm run build && node scripts/check-bundle-budgets.cjs`: CI fails a pull
+request into `Cora` that grows a bundle past its budget
+([scripts/README.md](./scripts/README.md) says how to change one).
+
 Suites that need real subscriptions or the network are the `smoke:*`
 scripts. They are not part of `npm test` and you do not need them for a
 normal change.
