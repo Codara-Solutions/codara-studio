@@ -6,14 +6,15 @@
 // conversation: it counts the tool results since the last user text.
 //   0 results  read input.txt
 //   1 result   write output.txt with the text upper-cased
-//   2 results  submit_result when offered (status from SUBMIT_<STATUS>), else text
-//   after it   the closing message, as plain text
+//   2 results  submit_result when offered (status from SUBMIT_<STATUS>, closing message in
+//              its message field), else text
+//   after it   nothing: the run ends on the call. A rejected call gets a plain text reply
 //
 // A prompt that contains PLAIN_TEXT gets a text reply straight away, one with
 // NO_SUBMIT finishes in text, one with EMPTY_TEXT gets an empty message, one with
 // FAILED_CHECK submits a failed check alongside its status, one with
 // TEXT_BESIDE_SUBMIT writes a line in the same message as the call, one with
-// EMPTY_CLOSING has nothing to say after the call, one with EARLY_TEXT writes
+// EMPTY_CLOSING sends an empty message (which is rejected), one with MISSING_MESSAGE leaves the field out, one with EARLY_TEXT writes
 // progress beside its first tool call, and one with LONG_CLOSING
 // closes with a long fenced diff full of characters JSON would have to escape.
 //
@@ -175,7 +176,8 @@ function plan(view) {
     const status = /SUBMIT_(\w+)/.exec(prompt)?.[1]?.toLowerCase() ?? "complete";
     const checks = prompt.includes("FAILED_CHECK") ? [{ command: "npm test", result: "failed" }] : undefined;
     const beside = prompt.includes("TEXT_BESIDE_SUBMIT") ? { text: "STATUS: DONE" } : {};
-    return { ...beside, tool: finish, input: { status, ...(checks ? { checks } : {}) } };
+    const message = prompt.includes("EMPTY_CLOSING") ? "" : prompt.includes("LONG_CLOSING") ? LONG_CLOSING : "STUB-FINAL: copied input.txt to output.txt.";
+    return { ...beside, tool: finish, input: { status, ...(prompt.includes("MISSING_MESSAGE") ? {} : { message }), ...(checks ? { checks } : {}) } };
   }
   return { text: "STUB-FINAL: copied input.txt to output.txt." };
 }
