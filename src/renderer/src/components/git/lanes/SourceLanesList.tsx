@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { GitHubMergeResult, GitHubPullRequestSummary } from "@shared/github";
 import type { PullRequestWatchEntry } from "@shared/pull-request-watch";
 import { LANE_STEP_LABELS, type LaneFile, type LaneStep, type SourceLane, type SourceLanes } from "@shared/source-lanes";
@@ -166,8 +166,15 @@ function LaneRow({
 }): React.ReactElement {
   const open = useRailFold(foldKey, defaultOpen);
   const name = lane.branch ?? "detached HEAD";
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const wasOpen = useRef(open);
+  // A lane unfolded near the bottom of a short panel would keep its buttons below the fold.
+  useLayoutEffect(() => {
+    if (open && !wasOpen.current) rootRef.current?.scrollIntoView({ block: "nearest" });
+    wasOpen.current = open;
+  }, [open]);
   return (
-    <div className={faded ? "lane is-faded" : "lane"} data-testid="source-lane" data-lane-branch={name} data-own={lane.own || undefined}>
+    <div ref={rootRef} className={faded ? "lane is-faded" : "lane"} data-testid="source-lane" data-lane-branch={name} data-own={lane.own || undefined}>
       <button
         type="button"
         className={lane.own ? "lane-row is-own" : "lane-row"}
@@ -281,7 +288,7 @@ export default function SourceLanesList({
   );
 
   return (
-    <div data-testid="source-lanes">
+    <div className="lane-list" data-testid="source-lanes">
       {lanes.others.map((lane) => (
         <LaneRow key={lane.id} lane={lane} entry={entryOf(lane)} foldKey={`lane:${lane.id}`} defaultOpen={false}>
           <LaneDetail lane={lane} actions={actions} onMerge={startMerge} />

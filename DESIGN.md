@@ -320,6 +320,8 @@ VS Code (the commit box as part of the source control view).
 - Failed checks are never a green tick: the journey's step reads failed, ✕ in
   `--danger`, with the same glyphs as `PullRequestMark`.
 - An SSH workspace shows only its own lane: every other lane would be a round trip.
+- The list and the commit box are separate columns of the panel, so the box never
+  covers a lane. A lane unfolded near the bottom scrolls its buttons into view.
 
 ## Worktrees in the rail (2026-10)
 

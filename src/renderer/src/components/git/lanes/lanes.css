@@ -1,4 +1,8 @@
 /* The Source Control panel's agent lanes (SourceLanesList.tsx). */
+.lane-list {
+  padding-bottom: 8px;
+}
+
 .lane {
   border-bottom: 1px solid var(--rule-soft);
 }
