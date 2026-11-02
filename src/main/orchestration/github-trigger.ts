@@ -22,7 +22,11 @@ import {
 type GitHubTrigger = Extract<AutomationTrigger, { kind: "github" }>;
 
 const TRUSTED_AUTHORS: ReadonlySet<string> = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
-const SEEN_CAP = 200;
+// How long a handled event is remembered once its pull request is out of sight.
+// While it is listed it stays remembered however old, since a re-run could come
+// at any moment. Each entry is an event on a trusted author's pull request, so
+// the time limit alone keeps this list small.
+const SEEN_KEEP_MS = 90 * 24 * 60 * 60 * 1000;
 // A worker that pushes to the pull request it was started for can keep failing
 // CI forever; each new commit would be a new paid run without this.
 export const GITHUB_FIRES_PER_PULL = 3;
@@ -35,6 +39,12 @@ const QUIET_RECHECK_MS = 10 * 60 * 1000;
 const POLL_MS = 60_000;
 const MAX_BACKOFF_MS = 15 * 60 * 1000;
 const FIRST_POLL_MS = 2_000;
+const PULLS_PER_PAGE = 50;
+// A pass reads the first page and at most this many others, then the next pass
+// carries on from there, so every open pull request comes round however many
+// there are.
+const MAX_FURTHER_PAGES = 9;
+const CHECKED_AT_KEEP_MS = 60 * 60 * 1000;
 
 const PULLS_JQ =
   "[.[] | {number, title, html_url, draft, author_association, head: {sha: .head.sha, ref: .head.ref}, base: {ref: .base.ref}}]";
@@ -105,7 +115,7 @@ export function seedGitHubMemory(pulls: readonly GitHubPull[], nowMs: number): G
   return {
     seededAt: nowMs,
     seededMaxPr: pulls.reduce((max, pull) => Math.max(max, pull.number), 0),
-    seen: [],
+    seen: {},
     fires: [],
   };
 }
@@ -129,11 +139,11 @@ export function pullsNeedingChecks(
   lastCheckedAt: (headSha: string) => number = () => 0,
 ): GitHubPull[] {
   if (!trigger.events.includes("ciFailed")) return [];
-  const seen = new Set(memory.seen);
+  const seen = memory.seen;
   // Least recently read first: a commit whose checks never finish must not keep
   // another pull request's failure from being looked at.
   return pulls
-    .filter((pull) => eligible(trigger, pull) && !seen.has(ciKey(pull)) && !isQuiet(pull.headSha))
+    .filter((pull) => eligible(trigger, pull) && seen[ciKey(pull)] === undefined && !isQuiet(pull.headSha))
     .map((pull, index) => ({ pull, index, at: lastCheckedAt(pull.headSha) }))
     .sort((a, b) => a.at - b.at || a.index - b.index)
     .slice(0, MAX_CHECKED_PULLS)
@@ -152,32 +162,24 @@ export function decideGitHubTrigger(
   checks: ReadonlyMap<string, GitHubPullChecks>,
   nowMs: number,
 ): GitHubTriggerDecision {
-  const seen = [...memory.seen];
-  const seenSet = new Set(seen);
+  const seen = { ...memory.seen };
   const mark = (key: string): void => {
-    if (seenSet.has(key)) return;
-    seenSet.add(key);
-    seen.push(key);
+    seen[key] ??= nowMs;
   };
   const fires = memory.fires.filter((f) => nowMs - f.at < FIRE_WINDOW_MS);
   const limited: number[] = [];
   const finish = (fire?: GitHubTriggerFire): GitHubTriggerDecision => {
     const next: GitHubTriggerMemory = { ...memory, seen, fires };
-    if (seen.length > SEEN_CAP) {
-      // A forgotten key must not fire again. What the open pull requests are at
-      // right now goes last, since a re-run on one could come back at any moment,
-      // and what is forgotten moves behind the seed line. That can drop an old
-      // unseen event; a duplicate paid run is the worse mistake.
-      const current = new Set(pulls.flatMap((pull) => [`pr:${pull.number}`, ciKey(pull)]));
-      const overflow = seen.length - SEEN_CAP;
-      const dropped = [...seen.filter((key) => !current.has(key)), ...seen.filter((key) => current.has(key))].slice(0, overflow);
-      const droppedSet = new Set(dropped);
-      next.seen = seen.filter((key) => !droppedSet.has(key));
-      next.seededAt = nowMs;
-      for (const key of dropped) {
-        const opened = /^pr:(\d+)$/.exec(key);
-        if (opened) next.seededMaxPr = Math.max(next.seededMaxPr, Number(opened[1]));
-      }
+    // Age decides what is forgotten. Being missing from this listing never does:
+    // a listing can be partial, and the pull request can come back with a re-run.
+    const current = new Set(pulls.flatMap((pull) => [`pr:${pull.number}`, ciKey(pull)]));
+    for (const [key, at] of Object.entries(seen)) {
+      if (nowMs - at < SEEN_KEEP_MS || current.has(key)) continue;
+      delete seen[key];
+      // The seed line moves past it, so nothing from before it can count as news.
+      next.seededAt = Math.max(next.seededAt, at);
+      const opened = /^pr:(\d+)$/.exec(key);
+      if (opened) next.seededMaxPr = Math.max(next.seededMaxPr, Number(opened[1]));
     }
     return { memory: next, limited, ...(fire ? { fire } : {}) };
   };
@@ -190,12 +192,12 @@ export function decideGitHubTrigger(
       trigger.events.includes("prOpened") &&
       pull.number > memory.seededMaxPr &&
       (!pull.draft || trigger.includeDrafts === true) &&
-      !seenSet.has(openedKey)
+      seen[openedKey] === undefined
     ) {
       candidates.push({ event: "prOpened", key: openedKey, failed: [] });
     }
     const result = trigger.events.includes("ciFailed") ? checks.get(pull.headSha) : undefined;
-    if (result && result.failed.length > 0 && !seenSet.has(ciKey(pull))) {
+    if (result && result.failed.length > 0 && seen[ciKey(pull)] === undefined) {
       if (result.failedAt > 0 && result.failedAt < memory.seededAt) {
         // It was already red when this automation was armed: not news.
         mark(ciKey(pull));
@@ -258,13 +260,14 @@ export function normalizeGitHubMemory(value: unknown): GitHubTriggerMemory | und
   if (!memory) return undefined;
   const { seededAt, seededMaxPr, seen, fires } = memory;
   if (typeof seededAt !== "number" || typeof seededMaxPr !== "number") return undefined;
-  if (!Array.isArray(seen) || !seen.every((key) => typeof key === "string")) return undefined;
+  const seenAt = record(seen);
+  if (!seenAt || !Object.values(seenAt).every((at) => typeof at === "number" && Number.isFinite(at))) return undefined;
   if (!Array.isArray(fires)) return undefined;
   const validFires = fires.flatMap((raw) => {
     const fire = record(raw);
     return fire && typeof fire.pr === "number" && typeof fire.at === "number" ? [{ pr: fire.pr, at: fire.at }] : [];
   });
-  return { seededAt, seededMaxPr, seen: seen as string[], fires: validFires };
+  return { seededAt, seededMaxPr, seen: seenAt as Record<string, number>, fires: validFires };
 }
 
 // ── Watching ────────────────────────────────────────────────────────────────
@@ -304,6 +307,7 @@ export function armGitHubWatch(jobId: string, trigger: GitHubTrigger, deps: GitH
   // so without this every open pull request costs two reads a minute forever.
   const quiet = new Map<string, number>();
   const checkedAt = new Map<string, number>();
+  let nextPage = 2;
   const pollMs = deps.pollMs ?? POLL_MS;
 
   const note = async (detail: string): Promise<void> => {
@@ -322,29 +326,45 @@ export function armGitHubWatch(jobId: string, trigger: GitHubTrigger, deps: GitH
       return;
     }
     const base = `repos/${source.repository}`;
-    const listed = async (sort: "created" | "updated"): Promise<GitHubPull[] | null> => {
-      const read = await source.reader.get(`${base}/pulls?state=open&sort=${sort}&direction=desc&per_page=50`, {
-        jq: PULLS_JQ,
-      });
-      return read.value === null ? null : parsePulls(read.value);
+    const listed = async (sort: "created" | "updated", page = 1): Promise<{ pulls: GitHubPull[]; more: boolean } | null> => {
+      const read = await source.reader.get(
+        `${base}/pulls?state=open&sort=${sort}&direction=desc&per_page=${PULLS_PER_PAGE}&page=${page}`,
+        { jq: PULLS_JQ },
+      );
+      if (read.value === null) return null;
+      // Counted before parsing: a malformed row must not look like the last page.
+      return { pulls: parsePulls(read.value), more: Array.isArray(read.value) && read.value.length >= PULLS_PER_PAGE };
+    };
+    const openPulls = async (): Promise<GitHubPull[] | null> => {
+      const first = await listed("updated");
+      if (!first) return null;
+      if (!first.more) nextPage = 2;
+      const byNumber = new Map(first.pulls.map((pull) => [pull.number, pull]));
+      for (let reads = 0; first.more && reads < MAX_FURTHER_PAGES && !disposed; reads += 1) {
+        const page = await listed("updated", nextPage);
+        for (const pull of page?.pulls ?? []) if (!byNumber.has(pull.number)) byNumber.set(pull.number, pull);
+        nextPage = page?.more ? nextPage + 1 : 2;
+        if (!page?.more) break;
+      }
+      return [...byNumber.values()];
     };
     const unseen = "GitHub does not show this repository to the signed-in account, so its pull requests cannot start this automation.";
     if (!job.githubTrigger) {
       // Newest first by creation: the list by activity could miss the highest
       // number and later mistake an old pull request for a new one.
-      const pulls = await listed("created");
+      const newest = await listed("created");
       if (disposed) return;
-      if (pulls === null) {
+      if (newest === null) {
         await note(unseen);
         return;
       }
-      const memory = seedGitHubMemory(pulls, deps.now());
+      const memory = seedGitHubMemory(newest.pulls, deps.now());
       await deps.patchJob(jobId, (j) => (j.githubTrigger ? j : { ...j, githubTrigger: memory }));
       noted = null;
       return;
     }
     if (await deps.isBusy(job)) return;
-    const pulls = await listed("updated");
+    const pulls = await openPulls();
     if (disposed) return;
     if (pulls === null) {
       await note(unseen);
@@ -354,7 +374,9 @@ export function armGitHubWatch(jobId: string, trigger: GitHubTrigger, deps: GitH
     for (const [sha, at] of quiet) if (now - at >= QUIET_RECHECK_MS) quiet.delete(sha);
     const checks = new Map<string, GitHubPullChecks>();
     const open = new Set(pulls.map((pull) => pull.headSha));
-    for (const sha of checkedAt.keys()) if (!open.has(sha)) checkedAt.delete(sha);
+    // Only an old read goes: a pull request on a page this pass did not reach is
+    // still open, and starting it over would put it ahead of the others every time.
+    for (const [sha, at] of checkedAt) if (!open.has(sha) && now - at >= CHECKED_AT_KEEP_MS) checkedAt.delete(sha);
     const toCheck = pullsNeedingChecks(
       trigger,
       job.githubTrigger,
