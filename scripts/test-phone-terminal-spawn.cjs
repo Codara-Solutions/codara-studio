@@ -131,7 +131,8 @@ async function main() {
       "an adapter that never appears fails with the mount error after the bounded wait",
       typeof message === "string" &&
         message.includes("renderer not mounted") &&
-        Date.now() - startedAt >= 200,
+        // Node timers may fire ~1 ms early by Date.now(); CI saw 199 ms.
+        Date.now() - startedAt >= 190,
       { message, waitedMs: Date.now() - startedAt },
     );
   }
