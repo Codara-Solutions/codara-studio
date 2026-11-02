@@ -47,8 +47,14 @@ file manager).
 
 **Resume a session...** in the tab strip's + menu, or Mod+Shift+H, opens the
 picker: the list on the left, and on the right the highlighted session's
-agent, model, folder, branch, length and the end of its conversation. Clicking
-a worker in the + menu still starts a new session straight away.
+agent, model, folder, branch, length and the end of its conversation.
+
+Clicking Claude, Codex or Grok in a + menu opens the same picker, showing that
+agent's sessions under a **New session** row. Enter starts a new session;
+press Down to pick an earlier one, and Enter resumes it. The worker starts
+without the picker when session search is off, when Settings leaves that agent
+out, and on a remote workspace, since the index only holds this computer's
+sessions.
 
 One box searches session names, what you typed and what the agent replied.
 Each result says which of those matched (**Name**, **You** or the agent's

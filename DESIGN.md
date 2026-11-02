@@ -464,7 +464,10 @@ conversation (your words in a bubble, the reply without one).
   so typing never needs a click back into the box.
 - The end of the conversation shows first, pinned to the bottom of the pane: it
   is what tells you whether this is the session you meant.
-- A worker row in the + menu never opens the picker. It starts a new session.
+- A Claude, Codex or Grok row in a + menu opens the picker for that agent first,
+  because seeing past sessions when opening a worker is the point. **New session**
+  is the default: Enter starts one, so it costs one key, and a session is only
+  resumed on purpose. A chord bound to "New ... worker pane" never shows it.
 - A session running in a pane offers **Go to its tab**, never a second resume.
 - A name lives outside the index and outside the transcripts. The index is a
   cache and the transcripts belong to the CLIs, so neither may be its only home.
