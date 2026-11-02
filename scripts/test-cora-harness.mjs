@@ -171,7 +171,10 @@ test("cora exec runs the task and prints the final text", async () => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), "STUB-FINAL: copied input.txt to output.txt.");
   assert.equal(readFileSync(join(world.project, "output.txt"), "utf8"), "HELLO\n");
-  assert.deepEqual(stub.requests.map(toolCalls), [[], ["read"], ["read", "write"], ["read", "write", "submit_result"]]);
+  // The run ends on submit_result: no closing turn follows it.
+  assert.deepEqual(stub.requests.map(toolCalls), [[], ["read"], ["read", "write"]]);
+  assert.equal(stub.requests.at(-1).reply.tool?.toLowerCase(), "submit_result");
+  assert.equal(stub.requests.at(-1).reply.input.message, "STUB-FINAL: copied input.txt to output.txt.");
 });
 
 test("--json streams events and ends with the result", async () => {
@@ -502,11 +505,12 @@ test("the prompt asks for few turns without dropping the checks", async () => {
     assert.match(system, /edits\[\]/);
     assert.match(system, /never replaces checking your work/);
   }
-  assert.match(stub.requests[0].system, /submit_result is never shown to the reader, so that reply still ends\s+with any closing line or format the user asked for, word for word/);
+  assert.match(stub.requests[0].system, /message field is all the reader sees/);
+  assert.match(stub.requests[0].system, /the run ends right after the call,\s+so do not write a reply after it/);
   assert.doesNotMatch(stub.requests[0].system, /closing_included/);
 });
 
-test("the closing message is the model's plain reply after the report, whole and exact", async () => {
+test("the closing message is the submit_result message, whole and exact", async () => {
   for (const model of ["sonnet", "terra"]) {
     stub.reset();
     const json = await cora(makeWorld(), ["exec", "--model", model, "--json", "copy it LONG_CLOSING"]);
@@ -516,28 +520,55 @@ test("the closing message is the model's plain reply after the report, whole and
     const plain = await cora(makeWorld(), ["exec", "--model", model, "copy it LONG_CLOSING"]);
     assert.equal(plain.stdout.trim(), LONG_CLOSING.trim());
   }
-  assert.match(stub.requests[0].system, /then\s+write your closing message as a normal reply/);
+  assert.doesNotMatch(stub.requests[0].system, /as a normal reply/);
 });
 
-test("a report followed by silence still shows what the model last said, and nothing else", async () => {
-  const beside = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it TEXT_BESIDE_SUBMIT EMPTY_CLOSING"]);
-  assert.equal(beside.status, 0, beside.stderr);
-  assert.equal(resultOf(beside.stdout).text, "STATUS: DONE");
-  const plain = await cora(makeWorld(), ["exec", "--model", "sonnet", "copy it TEXT_BESIDE_SUBMIT EMPTY_CLOSING"]);
-  assert.equal(plain.stdout.trim(), "STATUS: DONE");
-  const stale = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it EARLY_TEXT EMPTY_CLOSING"]);
-  assert.equal(stale.status, 1, "earlier progress passed as the closing message");
-  assert.equal(resultOf(stale.stdout).status, "error");
-  const silent = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it EMPTY_CLOSING"]);
-  assert.equal(silent.status, 1);
-  assert.equal(resultOf(silent.stdout).status, "error");
-  assert.match(resultOf(silent.stdout).error, /empty reply/);
+test("text beside the call never replaces the closing message", async () => {
+  const json = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it TEXT_BESIDE_SUBMIT"]);
+  assert.equal(json.status, 0, json.stderr);
+  assert.equal(resultOf(json.stdout).text, "STUB-FINAL: copied input.txt to output.txt.");
+  const plain = await cora(makeWorld(), ["exec", "--model", "sonnet", "copy it TEXT_BESIDE_SUBMIT"]);
+  assert.equal(plain.stdout.trim(), "STUB-FINAL: copied input.txt to output.txt.");
 });
 
-test("the report has no text of its own, so nothing long is written as a JSON string", async () => {
-  await cora(makeWorld(), ["exec", "--model", "sonnet", "copy it"]);
-  assert.ok(stub.requests.every((request) => request.reply.input?.summary === undefined));
+test("a submit_result without a message is rejected and the model must answer", async () => {
+  for (const flag of ["MISSING_MESSAGE", "EMPTY_CLOSING"]) {
+    stub.reset();
+    const json = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", `copy it ${flag}`]);
+    const last = stub.requests.at(-1);
+    // The run did not end on the rejected call: the model saw the error and went on.
+    assert.equal(stub.requests.length, 4, flag);
+    assert.equal(last.events.at(-1).kind, "result", flag);
+    assert.match(last.events.at(-1).text, /message/i, flag);
+    const final = resultOf(json.stdout);
+    assert.equal(final.report, null, flag);
+    assert.notEqual(final.status, "complete", flag);
+  }
 });
+
+test("a submit_result sharing a turn with another tool is refused, then the model submits alone", async () => {
+  const json = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it SHARED_BATCH"]);
+  assert.equal(json.status, 0, json.stderr);
+  const final = resultOf(json.stdout);
+  assert.equal(final.status, "complete");
+  // The early message never became the answer; the standalone call's message did.
+  assert.equal(final.text, "STUB-FINAL: copied input.txt to output.txt.");
+  assert.doesNotMatch(json.stdout, /STUB-EARLY: should not be the answer\.\s*"?\s*$/m);
+  const refusal = stub.requests.flatMap((request) => request.events).find((event) => event.kind === "result" && /only tool call/.test(event.text ?? ""));
+  assert.ok(refusal, "the model saw the refusal");
+  assert.equal(stub.requests.at(-1).reply.tool?.toLowerCase(), "submit_result");
+});
+
+test("nothing is printed after the report and the exit codes stay", async () => {
+  const done = await cora(makeWorld(), ["exec", "--model", "terra", "--json", "copy it"]);
+  assert.equal(done.status, 0);
+  assert.equal(stub.requests.length, 3);
+  const partial = await cora(makeWorld(), ["exec", "--model", "terra", "--json", "copy SUBMIT_PARTIAL LONG_CLOSING"]);
+  assert.equal(partial.status, 3);
+  assert.equal(resultOf(partial.stdout).text, LONG_CLOSING.trim());
+  assert.equal(resultOf(partial.stdout).report.message, undefined);
+});
+
 
 test("an internal failure after the last reply is never reported as success", async () => {
   const world = makeWorld();
@@ -600,7 +631,7 @@ for (const mode of ["http500", "cut", "http429"]) {
     assert.equal(final.status, "complete");
     assert.equal(final.retries, 1);
     // One extra request for the retry, with the same context as the failed one.
-    assert.equal(stub.requests.length, 5);
+    assert.equal(stub.requests.length, 4);
     assert.deepEqual(stub.requests.map(toolCalls).slice(0, 4), [[], ["read"], ["read", "write"], ["read", "write"]]);
     assert.equal(stub.requests[3].events.length, stub.requests[2].events.length);
     assert.ok(stub.requests.every((request) => userTexts(request).length === 1));
@@ -779,7 +810,7 @@ test("a ChatGPT usage limit is waited out and the same session goes on, nothing 
   assert.equal(final.resetsAt, undefined);
   assert.equal(readdirSync(join(world.home, "sessions")).length, 1);
   assert.equal(readFileSync(join(world.project, "output.txt"), "utf8"), "HELLO\n");
-  assert.deepEqual(toolCalls(stub.requests.at(-1)), ["read", "write", "submit_result"]);
+  assert.deepEqual(toolCalls(stub.requests.at(-1)), ["read", "write"]);
   assert.equal(result.stderr.trim().split("\n").filter((line) => /usage limit reached/.test(line)).length, 1);
   assert.match(result.stderr, /ChatGPT usage limit reached\. It resets at .*Cora will wait and continue this session by itself; Ctrl\+C stops it\./);
 });
@@ -817,7 +848,7 @@ test("a Claude usage limit with the unified headers is waited out", async () => 
   assert.equal(new Date(events(result.stdout).find((line) => line.status === "waiting").resetsAt).getTime(), reset * 1000);
   assert.equal(resultOf(result.stdout).retries, 0);
   assert.match(result.stderr, /Claude usage limit reached/);
-  assert.deepEqual(toolCalls(stub.requests.at(-1)), ["read", "write", "submit_result"]);
+  assert.deepEqual(toolCalls(stub.requests.at(-1)), ["read", "write"]);
 });
 
 test("a short Claude rate limit stays a retry, held back by its retry-after", async () => {
@@ -1391,7 +1422,7 @@ test("mid-run compaction continues the task with no new prompt and no re-reading
   assert.equal(final.status, "complete");
   assert.equal(final.compactions, 1);
   assert.equal(readFileSync(join(world.project, "output.txt"), "utf8"), "HELLO\n");
-  assert.deepEqual(workRequests().map((request) => request.reply.tool?.toLowerCase()), ["read", "write", "submit_result", undefined]);
+  assert.deepEqual(workRequests().map((request) => request.reply.tool?.toLowerCase()), ["read", "write", "submit_result"]);
   const after = stub.requests.findIndex((request) => request.summary) + 1;
   assert.match(stub.requests[after].system, /PROJECT-RULE-MARKER/);
   const handoff = userTexts(stub.requests[after])[0].text;
@@ -2050,7 +2081,7 @@ test("usage mistakes exit 2 and old commands point to their new home", async () 
 test("a sentence that starts with a Studio command is a prompt", async () => {
   const result = await cora(makeWorld(), ["--model", "sonnet", "status of the copy, please copy it"]);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(stub.requests.length, 4);
+  assert.equal(stub.requests.length, 3);
 });
 
 test("a moved command with more words never starts a model run", async () => {

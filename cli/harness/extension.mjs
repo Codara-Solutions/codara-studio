@@ -31,13 +31,14 @@ export function coraSystemPrompt({ exec }) {
       ? `
 - This is a one-shot run: nobody can answer a question. Make the safest
   reversible assumption and state it.
-- When finished, call submit_result exactly once with an honest status, then
-  write your closing message as a normal reply. Use partial when any requested
-  part is unfinished or unverified.
-- That reply is all the reader sees, so it holds the whole answer at full
+- When finished, call submit_result exactly once, as your last action. Its
+  message field is your closing message and the run ends right after the call,
+  so do not write a reply after it. Use partial when any requested part is
+  unfinished or unverified.
+- The message field is all the reader sees, so it holds the whole answer at full
   length. Copy code, diffs and output exactly from what you read, never from
-  memory. submit_result is never shown to the reader, so that reply still ends
-  with any closing line or format the user asked for, word for word.`
+  memory. The other fields are never shown to the reader, so the message still
+  ends with any closing line or format the user asked for, word for word.`
       : ""
   }`;
 }
@@ -82,14 +83,15 @@ function registerSubmitResult(pi, run) {
     name: "submit_result",
     label: "Submit result",
     description:
-      "Record the honest result of this one-shot run. Call once, after edits and focused checks, then write " +
-      "your closing message as a normal reply.",
-    promptSnippet: "Record the outcome, before your closing message",
+      "Finish this one-shot run: record the honest result and give the closing message the reader sees. " +
+      "Call once, as the last action, after edits and focused checks. The run ends with this call.",
+    promptSnippet: "Finish the run with the outcome and the closing message",
     parameters: {
       type: "object",
-      required: ["status"],
+      required: ["status", "message"],
       properties: {
         status: { type: "string", enum: REPORTED_STATUSES },
+        message: { type: "string", description: "The closing message for the reader: the whole final answer." },
         files_changed: {
           type: "array",
           items: {
@@ -116,14 +118,20 @@ function registerSubmitResult(pi, run) {
       additionalProperties: false,
     },
     async execute(_toolCallId, params) {
+      if (run.sharedBatch) {
+        throw new Error("submit_result must be the only tool call in its turn. Finish the other actions, then call submit_result again on its own.");
+      }
+      const { message = "", ...fields } = params;
+      if (typeof message !== "string" || !message.trim()) {
+        throw new Error("submit_result needs a non-empty message: the closing reply for the reader. Call it again with the message.");
+      }
       const reported = REPORTED_STATUSES.includes(params.status) ? params.status : "failed";
       const failedCheck = params.checks?.some((check) => check.result === "failed");
       const status = reported === "complete" && failedCheck ? "partial" : reported;
-      run.report = { ...params, status };
-      return {
-        content: [{ type: "text", text: `Result recorded (${status}). Now write your closing message as a normal reply.` }],
-        details: { status },
-      };
+      run.report = { ...fields, status };
+      run.closing = message.trim();
+      // The loop stops after this call, so there is no closing turn.
+      return { content: [{ type: "text", text: `Result recorded (${status}).` }], details: { status }, terminate: true };
     },
   });
 }
@@ -194,15 +202,23 @@ export function coraExtension(run, { exec, loginProblem, mcpConfig, compaction, 
       const { message } = event;
       if (message.role !== "assistant") return undefined;
       run.last = message;
+      // A submit_result that shares its turn with other tools is refused: it could not end the run,
+      // and the reply after it would replace the message.
+      const calls = (message.content ?? []).filter((part) => part.type === "toolCall");
+      run.sharedBatch = calls.length > 1 && calls.some((part) => part.name === "submit_result");
       const said = textOf(message);
-      // A reply before the report is progress. One after it is the closing message,
-      // and a text beside the report still counts when nothing follows it.
+      // A reply before the report is progress. One after it is the closing message.
       if (said || !run.report) run.closing = said;
       for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
         run.usage[key] += message.usage?.[key] ?? 0;
       }
       if (message.stopReason !== "error") {
         waits.replied();
+        // Pi prints the last message's text, and the submit_result message is the answer.
+        if (message.content?.some((part) => part.type === "toolCall" && part.name === "submit_result")) {
+          run.last = { ...message, content: message.content.filter((part) => part.type !== "text") };
+          return { message: run.last };
+        }
         return undefined;
       }
       const failure = limitFailure(message, run.limit, Date.now(), waits.afterWait());

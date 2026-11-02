@@ -6,14 +6,15 @@
 // conversation: it counts the tool results since the last user text.
 //   0 results  read input.txt
 //   1 result   write output.txt with the text upper-cased
-//   2 results  submit_result when offered (status from SUBMIT_<STATUS>), else text
-//   after it   the closing message, as plain text
+//   2 results  submit_result when offered (status from SUBMIT_<STATUS>, closing message in
+//              its message field), else text
+//   after it   nothing: the run ends on the call. A rejected call gets a plain text reply
 //
 // A prompt that contains PLAIN_TEXT gets a text reply straight away, one with
 // NO_SUBMIT finishes in text, one with EMPTY_TEXT gets an empty message, one with
 // FAILED_CHECK submits a failed check alongside its status, one with
 // TEXT_BESIDE_SUBMIT writes a line in the same message as the call, one with
-// EMPTY_CLOSING has nothing to say after the call, one with EARLY_TEXT writes
+// EMPTY_CLOSING sends an empty message (which is rejected), one with MISSING_MESSAGE leaves the field out, one with EARLY_TEXT writes
 // progress beside its first tool call, and one with LONG_CLOSING
 // closes with a long fenced diff full of characters JSON would have to escape.
 //
@@ -166,7 +167,9 @@ function plan(view) {
   if (results.length === 1 && !copied) {
     return { tool: write, input: { path: "output.txt", content: `${results[0].text.trim().toUpperCase()}\n` } };
   }
-  const reported = view.events.slice(lastUser + 1).some((event) => event.name?.toLowerCase() === "submit_result");
+  // SHARED_BATCH: the first submit_result call is refused, so the report only counts from the second.
+  const submits = view.events.slice(lastUser + 1).filter((event) => event.name?.toLowerCase() === "submit_result").length;
+  const reported = submits >= (prompt.includes("SHARED_BATCH") ? 2 : 1);
   if (reported) {
     if (prompt.includes("EMPTY_CLOSING")) return { text: "" };
     return { text: prompt.includes("LONG_CLOSING") ? LONG_CLOSING : "STUB-FINAL: copied input.txt to output.txt." };
@@ -175,7 +178,11 @@ function plan(view) {
     const status = /SUBMIT_(\w+)/.exec(prompt)?.[1]?.toLowerCase() ?? "complete";
     const checks = prompt.includes("FAILED_CHECK") ? [{ command: "npm test", result: "failed" }] : undefined;
     const beside = prompt.includes("TEXT_BESIDE_SUBMIT") ? { text: "STATUS: DONE" } : {};
-    return { ...beside, tool: finish, input: { status, ...(checks ? { checks } : {}) } };
+    // SHARED_BATCH: the first submit_result comes together with a read in one turn.
+    const shared = prompt.includes("SHARED_BATCH") && !view.events.some((event) => event.kind === "result" && /only tool call/.test(event.text ?? ""));
+    if (shared) return { tool: read, input: { path: "input.txt" }, also: { tool: finish, input: { status: "complete", message: "STUB-EARLY: should not be the answer." } } };
+    const message = prompt.includes("EMPTY_CLOSING") ? "" : prompt.includes("LONG_CLOSING") ? LONG_CLOSING : "STUB-FINAL: copied input.txt to output.txt.";
+    return { ...beside, tool: finish, input: { status, ...(prompt.includes("MISSING_MESSAGE") ? {} : { message }), ...(checks ? { checks } : {}) } };
   }
   return { text: "STUB-FINAL: copied input.txt to output.txt." };
 }
@@ -214,6 +221,12 @@ function streamAnthropic(res, step, model) {
   sse(res, "content_block_start", { type: "content_block_start", index, content_block: block });
   sse(res, "content_block_delta", { type: "content_block_delta", index, delta });
   sse(res, "content_block_stop", { type: "content_block_stop", index });
+  if (step.also) {
+    const next = index + 1;
+    sse(res, "content_block_start", { type: "content_block_start", index: next, content_block: { type: "tool_use", id: id("toolu"), name: step.also.tool, input: {} } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: next, delta: { type: "input_json_delta", partial_json: JSON.stringify(step.also.input) } });
+    sse(res, "content_block_stop", { type: "content_block_stop", index: next });
+  }
   sse(res, "message_delta", {
     type: "message_delta",
     delta: { stop_reason: step.tool ? "tool_use" : "end_turn", stop_sequence: null },
