@@ -61,8 +61,9 @@ export async function quoteLines(cwd: string, path: string, start: number, end: 
     const full = await realpath(join(root, path));
     if (!full.startsWith(root + sep)) return "";
     if (full !== join(root, path)) return "";
-    // Checked on the opened file, so a link swapped in after the check above is refused.
-    const handle = await open(full, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Checked on the opened file, so a link swapped in after the check above is
+    // refused. Non-blocking, or a named pipe would hang here until a writer came.
+    const handle = await open(full, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const info = await handle.stat();
       if (!info.isFile() || info.size > MAX_QUOTE_SOURCE_BYTES) return "";

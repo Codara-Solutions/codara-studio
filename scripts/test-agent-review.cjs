@@ -154,6 +154,10 @@ test("a finding never quotes through a link out of the folder", async (lib) => {
   assert.equal(await lib.quoteLines(cwd, "link.txt", 1, 1), "");
   assert.equal(await lib.quoteLines(cwd, "missing.txt", 1, 1), "");
   assert.equal(await lib.quoteLines(cwd, "link.txt", 0, 0), "");
+  if (process.platform !== "win32") {
+    require("node:child_process").execFileSync("mkfifo", [path.join(cwd, "pipe")]);
+    assert.equal(await lib.quoteLines(cwd, "pipe", 1, 1), "", "a named pipe is refused, not waited on");
+  }
   const token = "ghp_" + "a1B2".repeat(9);
   fs.writeFileSync(path.join(cwd, ".env"), `TOKEN=${token}\n`);
   fs.writeFileSync(path.join(cwd, "app.ts"), `const key = "${token}";\nconst two = 2;\n`);
