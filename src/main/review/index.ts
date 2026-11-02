@@ -14,7 +14,7 @@ function samePath(a: string, b: string): boolean {
   return process.platform === "win32" ? norm(a).toLowerCase() === norm(b).toLowerCase() : norm(a) === norm(b);
 }
 
-const liveDeps: ReviewDiffDeps = {
+export const reviewBaseDeps: ReviewDiffDeps = {
   // A copy-branch workspace forked from a branch remembers it; that is the
   // base its changes are reviewed against.
   async workspaceBase(cwd) {
@@ -45,7 +45,7 @@ function diffRequest(raw: unknown): ReviewDiffRequest {
 }
 
 export function registerReviewIpc(handle: IpcHandle): void {
-  handle("review:diff", async (_event, raw: unknown): Promise<ReviewDiff> => getReviewDiff(diffRequest(raw), liveDeps));
+  handle("review:diff", async (_event, raw: unknown): Promise<ReviewDiff> => getReviewDiff(diffRequest(raw), reviewBaseDeps));
   handle("review:notes:list", async (_event, workspaceId: unknown): Promise<ReviewNote[]> => store.list(String(workspaceId ?? "")));
   handle("review:notes:save", async (_event, raw: { workspaceId?: unknown; notes?: unknown }): Promise<ReviewNote[]> =>
     store.save(String(raw?.workspaceId ?? ""), raw?.notes),

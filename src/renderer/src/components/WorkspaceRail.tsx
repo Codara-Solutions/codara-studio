@@ -1098,6 +1098,14 @@ function WorkspaceRail(props: RailProps) {
             onOpenDiffTab={props.onOpenDiffTab}
             onOpenCommitDiffTab={props.onOpenCommitDiffTab}
             activeDiffTarget={props.activeDiffTarget}
+            workspaces={workspaces}
+            branchByWorkspaceId={props.branchByWorkspaceId}
+            worktreeByWorkspaceId={props.worktreeByWorkspaceId}
+            worktreeStatesLoaded={props.worktreeStatesLoaded}
+            externalWorktrees={props.externalWorktrees}
+            onActivateWorkspace={props.onActivate}
+            onOpenExternalWorktree={props.onOpenExternalWorktree}
+            onCleanUpWorkspace={props.onCleanUpWorkspace}
           />
         );
       case "explorer": {

@@ -40,6 +40,7 @@ import {
 import { createMachinesService, readLocalStats } from "./remote/machines";
 import type { MachinesSnapshot } from "@shared/machines";
 import { isRemotePath } from "@shared/remote";
+import type { LaneChanges } from "@shared/source-lanes";
 import { MUTE_KEY_PATTERN } from "@shared/notify-center";
 import type { UsageSummaryInput } from "@shared/usage-analytics";
 import type {
@@ -512,7 +513,7 @@ import { registerCaptureIpc } from "./browser/capture/ipc";
 import { registerPreviewTabsIpc } from "./browser/preview-tabs";
 import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerPointIpc } from "./browser/point";
-import { registerReviewIpc } from "./review";
+import { registerReviewIpc, reviewBaseDeps } from "./review";
 import { registerGitFixIpc } from "./git-fix-ipc";
 import { registerDiagnosticsIpc } from "./diagnostics";
 import { registerFeatureTipsIpc } from "./feature-tips";
@@ -2251,6 +2252,13 @@ export function registerIpc(): void {
   handle("git:diffStats", async (_e, cwd: string): Promise<GitDiffStats> => {
     const { getGitDiffStats } = await getGitOps();
     return getGitDiffStats(cwd);
+  });
+
+  handle("git:laneChanges", async (_e, cwds: unknown): Promise<Record<string, LaneChanges>> => {
+    if (!Array.isArray(cwds)) return {};
+    const wanted = cwds.filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0 && cwd.length <= 16_384);
+    const { readLaneChanges } = await import("./git-lanes");
+    return readLaneChanges(wanted, reviewBaseDeps);
   });
 
   handle("github:status", async (_e, request: unknown): Promise<GitHubWorkspaceStatus> => {

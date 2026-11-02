@@ -277,6 +277,50 @@ gone. A cgroup cannot do this: only a personal launcher puts agents in their
 own scope, and Studio does not. macOS and Windows have no such reading yet, so
 there a process that lost its parent stays in Other apps.
 
+## Source Control (2026-11)
+
+**Chosen:** layout B, agent lanes, with layout A's small commit box docked at
+the bottom. One lane per checkout of the active project: line 1 is its branch
+with the pull request mark, line 2 its most urgent agent's state word (or "No
+agent · from main") and its diff size since the base, the same two lines a
+worktree has in the rail. The checkout the window is on is a lane too, last, and
+holds what the panel used to be: branch menu with small Pull, Push and Fetch,
+change lists, stash, GitHub (the journey, the PR, issues and PRs) and history.
+Picked by Etienne from four layouts built on the panel's real sizes and tokens
+(files first, agent lanes, review first, graph with stacks).
+
+**Why:** the panel answered "what am I saving" for one person on one branch.
+With several agents the question is "what did they change, and can it land". The
+Save and Review rooms and about 380px of controls above the first file are gone;
+the room bar was a mental model the commit box no longer needs.
+
+**References:** T3 Code and Conductor (a list of agent worktrees with diff size
+and a next step), Linear's issue rows (two quiet lines, colour only for state),
+VS Code (the commit box as part of the source control view).
+
+**Rules:**
+
+- A lane's row unfolds it and never switches workspace, so all agents can be read
+  from one place. The chevron is inside the one click target; nothing else in the
+  row acts. Going somewhere is the lane's own actions and its file rows.
+- The next step comes first and there is one primary look, Merge. Needs you opens
+  the agent; failing checks offer Fix checks; Merge shows only on an open, non
+  draft PR whose checks passed or report nothing, with no agent still working.
+  Merge always goes through the existing confirm dialog, after GitHub is read again.
+- Lanes order by what needs the user: needs you, failing checks, ready to merge,
+  working, done, idle, quiet. The active checkout stays last so the list above it
+  does not jump as its detail grows. Merged worktrees use the rail's own fold.
+- Who works where comes from the rail's rule (`buildRailFamily`), so the rail and
+  the panel never disagree. The rail stays "where is everyone"; lanes add "what
+  did they change, and what next".
+- Diff size is everything since the branch left its base, committed or not, so an
+  agent that committed does not read as +0. Commits the base gained later do not count.
+- The commit box always commits the active checkout. Amend and Split wait in its
+  ⋯ menu, Generate is a sparkle inside the message box.
+- Failed checks are never a green tick: the journey's step reads failed, ✕ in
+  `--danger`, with the same glyphs as `PullRequestMark`.
+- An SSH workspace shows only its own lane: every other lane would be a round trip.
+
 ## Worktrees in the rail (2026-10)
 
 **Chosen:** variant A, a tree, with variant B's folded merged group. A

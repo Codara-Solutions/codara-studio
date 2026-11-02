@@ -50,6 +50,7 @@ import {
   reviewDestinations,
   type ReviewDestination,
 } from "./review-send";
+import { readReviewViewPrefs as readPrefs, writeReviewViewPrefs as writePrefs, type ReviewViewPrefs as ViewPrefs } from "./review-view-prefs";
 import "./review.css";
 
 // The review tab: every change of the workspace in one scrolling diff, with
@@ -73,35 +74,10 @@ interface Draft extends NoteAnchor {
   quote: string;
 }
 
-interface ViewPrefs {
-  mode: ReviewDiffMode;
-  base: string | null;
-}
-
-const PREFS_KEY = "codara.review.view:";
 const PANEL_KEY = "codara.review.notesPanel";
 const NO_NOTES: ReviewNote[] = [];
 /** Loaded sections read again on a refresh, at most. */
 const MAX_RELOAD_PATHS = 200;
-
-function readPrefs(workspaceId: string | null): ViewPrefs {
-  try {
-    const raw = workspaceId ? localStorage.getItem(PREFS_KEY + workspaceId) : null;
-    const value = raw ? (JSON.parse(raw) as Partial<ViewPrefs>) : null;
-    return { mode: value?.mode === "base" ? "base" : "uncommitted", base: typeof value?.base === "string" ? value.base : null };
-  } catch {
-    return { mode: "uncommitted", base: null };
-  }
-}
-
-function writePrefs(workspaceId: string | null, prefs: ViewPrefs): void {
-  if (!workspaceId) return;
-  try {
-    localStorage.setItem(PREFS_KEY + workspaceId, JSON.stringify(prefs));
-  } catch {
-    // The choice just is not remembered.
-  }
-}
 
 function readPanelOpen(): boolean {
   try {
