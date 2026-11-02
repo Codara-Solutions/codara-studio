@@ -24,6 +24,8 @@ export interface TranscriptState {
   /** The id inside the transcript, when it carries one (Codex, Pi). */
   sessionId: string | null;
   cwd: string | null;
+  /** The git branch the session last recorded. */
+  branch: string | null;
   model: string | null;
   /** A title the agent itself gave the session. */
   title: string | null;
@@ -39,6 +41,7 @@ export function initialTranscriptState(): TranscriptState {
   return {
     sessionId: null,
     cwd: null,
+    branch: null,
     model: null,
     title: null,
     customTitle: null,
@@ -59,6 +62,7 @@ export function restoreTranscriptState(raw: string | null): TranscriptState {
     return {
       sessionId: text(src.sessionId),
       cwd: text(src.cwd),
+      branch: text(src.branch),
       model: text(src.model),
       title: text(src.title),
       customTitle: text(src.customTitle),
@@ -237,6 +241,9 @@ export const parseClaudeLine: LineParser = (line, state, emit) => {
   if (record.isSidechain === true) return;
   const at = timestampOf(record.timestamp);
   if (state.cwd === null && typeof record.cwd === "string" && record.cwd) state.cwd = record.cwd;
+  // A detached checkout records HEAD, which names no branch.
+  const branch = str(record.gitBranch);
+  if (branch && branch !== "HEAD") state.branch = branch;
   const message = isRecord(record.message) ? record.message : null;
   if (!message) return;
   if (record.type === "user") {
@@ -264,6 +271,7 @@ export const parseCodexLine: LineParser = (line, state, emit) => {
     if (state.sessionId !== null) return;
     state.sessionId = str(payload.id) ?? str(payload.session_id);
     if (state.cwd === null) state.cwd = str(payload.cwd);
+    if (isRecord(payload.git)) state.branch = str(payload.git.branch);
     noteStart(state, timestampOf(payload.timestamp) ?? timestampOf(record.timestamp));
     const title = str(payload.title) ?? str(payload.thread_name);
     if (title) state.title = oneLine(title, TITLE_CHARS);

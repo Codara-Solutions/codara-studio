@@ -14,7 +14,10 @@
 //   2. The brief reaches the agent as one argument whatever it holds: the
 //      real shell gets it byte for byte through the command line, which names
 //      only the private file. Windows reads the file instead. A shell that
-//      cannot report back is refused.
+//      cannot report back is refused. Codara's launch flags (hooks or notify,
+//      its codara-studio server) go right after the binary, each one whole
+//      however its paths are written, and are chosen from the session's own
+//      flags.
 //   3. Requests are validated: runtime, effort, a model that could read as a
 //      flag, an oversized or empty brief.
 //   4. Records survive a new store, are mode 600, are found only from the
@@ -181,6 +184,52 @@ function tempDir() {
   assert.ok(codexArgs.includes("projects={'/tmp/a b'={trust_level='trusted'}}"), "Codex keeps its trust override whole");
   assert.equal(codexArgs.at(-1), brief.replace(/\n+$/, ""));
   assert.equal(codexArgs.at(-2), "--", "a brief that opens with a dash stays the brief");
+  // What agent-launch-integration.ts adds, with the characters its paths and
+  // TOML values carry: spaces, both quotes, `$`, backslashes, brackets, `=`.
+  const injected = [
+    "-c",
+    "mcp_servers.codara-studio={command='/o'\\''b/My Apps/node',args=['/a b/server.js'],env={SPARK_HOME_DIR='/h $HOME'}}",
+    "-c",
+    'notify=["python3","/x \"y\"/notify.py","--","notify-send"]',
+    "--mcp-config=/a b/[mcp] it's.json",
+    "=not-a-path",
+  ];
+  const planned = [];
+  for (const runtime of ["claude", "codex"]) {
+    const injectedLine = sessions.agentSessionCommand({
+      runtime,
+      model: "some-model",
+      effort: "high",
+      briefPath,
+      codexTrust: runtime === "codex" ? "projects={'/tmp/a b'={trust_level='trusted'}}" : null,
+      compaction: runtime === "claude" ? { claudeSettingsPath: "/c d/settings.json" } : { codexTokenLimit: 1000 },
+      launchArgs: (sessionArgs) => {
+        planned.push([runtime, [...sessionArgs]]);
+        return injected;
+      },
+      platform: "linux",
+    });
+    const sessionArgs = planned.at(-1)[1];
+    for (const shell of shells) {
+      const argv = JSON.parse(
+        execFileSync(shell, shell === "zsh" ? ["-f", "-c", injectedLine] : ["-c", injectedLine], {
+          env: { ...process.env, PATH: `${fake}:${process.env.PATH}` },
+          encoding: "utf8",
+        }),
+      );
+      assert.deepEqual(argv.slice(0, injected.length), injected, `${shell}: ${runtime} gets Codara's flags whole, first`);
+      assert.deepEqual(argv.slice(injected.length, -2), sessionArgs, `${shell}: then the session's own flags`);
+      assert.deepEqual(argv.slice(-2), ["--", brief.replace(/\n+$/, "")], `${shell}: and the brief last`);
+    }
+  }
+  const [claudeSeen, codexSeen] = planned.map(([, args]) => args);
+  assert.ok(claudeSeen.includes("--dangerously-skip-permissions") && claudeSeen.includes("--model"));
+  assert.deepEqual(claudeSeen.slice(-2), ["--settings", "/c d/settings.json"], "Claude's plan sees the session's --settings, so it adds no second one");
+  assert.ok(codexSeen.includes("--yolo"));
+  assert.ok(codexSeen.includes("model_auto_compact_token_limit=1000"));
+  assert.deepEqual(codexSeen.slice(-2), ["-c", "projects={'/tmp/a b'={trust_level='trusted'}}"], "Codex's trust stays in the session's flags");
+  assert.ok(!planned.some(([, args]) => args.includes("--")), "the plan never sees the brief");
+
   const windows = sessions.agentSessionCommand({
     runtime: "claude",
     model: null,

@@ -3,6 +3,8 @@
 
 import { ipcRenderer } from "electron";
 import type {
+  SessionLabel,
+  SessionPreview,
   SessionSearchRequest,
   SessionSearchResult,
   SessionSearchStatus,
@@ -17,6 +19,10 @@ export const sessionSearchApi = {
   /** Brings the index up to date when it is stale; `force` always does. */
   refresh: (force = false): Promise<SessionSearchStatus> => ipcRenderer.invoke("sessionSearch:refresh", force),
   transcript: (key: string): Promise<SessionTranscript | null> => ipcRenderer.invoke("sessionSearch:transcript", key),
+  preview: (key: string): Promise<SessionPreview | null> => ipcRenderer.invoke("sessionSearch:preview", key),
+  /** Names or pins a session; a null name goes back to its own title. */
+  setLabel: (key: string, patch: { name?: string | null; pinned?: boolean }): Promise<SessionLabel | null> =>
+    ipcRenderer.invoke("sessionSearch:set-label", key, patch),
   reveal: (key: string): Promise<boolean> => ipcRenderer.invoke("sessionSearch:reveal", key),
   rebuild: (): Promise<SessionSearchStatus> => ipcRenderer.invoke("sessionSearch:rebuild"),
   deleteIndex: (): Promise<SessionSearchStatus> => ipcRenderer.invoke("sessionSearch:delete"),

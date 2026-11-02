@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChatTab, Tab, TabGroup, TabGroupColor, TabId, TerminalTab } from "./types";
 import { buildDockIndex, canDockTab, isDockLeaf } from "./dock";
-import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon } from "../components/icons";
+import { CloseIcon, FileIcon, GlobeIcon, HistoryIcon, PhoneIcon, PlusIcon } from "../components/icons";
 import { AutomationsGlyph } from "../components/automations/AutomationsGlyph";
 import AutomationsStripButton from "../components/automations/AutomationsStripButton";
 import QuickCommandsButton from "../quick-commands/QuickCommandsButton";
@@ -78,6 +78,7 @@ interface Props {
   onNewCodexWorker: () => void;
   onNewGrokWorker: () => void;
   onNewPiWorker: () => void;
+  onOpenSessionPicker: () => void;
   // Starts a new draft Cora chat — the ✦ Cora button's action (identical to
   // the chat.new chord). The new-chat welcome surface is Cora's landing page.
   onNewChat: () => void;
@@ -117,6 +118,7 @@ export interface PickerHints {
   chat?: string;
   terminal?: string;
   preview?: string;
+  sessions?: string;
 }
 
 export interface TabGroupActions {
@@ -174,6 +176,7 @@ function TabBar({
   onNewCodexWorker,
   onNewGrokWorker,
   onNewPiWorker,
+  onOpenSessionPicker,
   onNewChat,
   onRenameChat,
   onCloseChat,
@@ -1109,6 +1112,17 @@ function TabBar({
               onClick={() => {
                 setPickerOpen(false);
                 onNewPiWorker();
+              }}
+            />
+            <PickerSectionLabel label="Sessions" />
+            <PickerItem
+              label="Resume a session…"
+              hint={pickerHints?.sessions}
+              glyph={<HistoryIcon size={11} />}
+              accent="shell"
+              onClick={() => {
+                setPickerOpen(false);
+                onOpenSessionPicker();
               }}
             />
           </div>

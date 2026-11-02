@@ -179,6 +179,7 @@ async function main() {
   // tier, which has no lens, instead of the thin strong or menu recipe.
   for (const [parts, pattern] of [
     [["components", "session-search", "SessionTranscriptDialog.tsx"], /className="ss-dialog ss-dialog--transcript spark-glass--strong spark-overlay-surface"/],
+    [["components", "session-search", "SessionPicker.tsx"], /className="ss-dialog sp-dialog spark-glass--strong spark-overlay-surface"/],
     [["components", "FileTree.tsx"], /aria-label="Confirm folder move"\s+className="spark-glass--strong spark-overlay-surface"/],
     [["components", "remote", "SshManagerDialog.tsx"], /className="spark-glass--strong spark-overlay-surface"/],
     [["components", "remote", "RemoteAuthPrompt.tsx"], /className="spark-glass--strong spark-overlay-surface"/],

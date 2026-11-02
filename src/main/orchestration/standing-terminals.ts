@@ -37,6 +37,16 @@ export function buildStandingTerminalCommand(
   effort?: string,
   compaction?: { codexTokenLimit?: number | null; claudeSettingsPath?: string | null },
 ): string {
+  return standingTerminalArgv(runtime, model, effort, compaction).map((arg) => quoteShellArg(arg)).join(" ");
+}
+
+/** The same launch as an argv, binary first, for a caller that quotes it for its own shell. */
+export function standingTerminalArgv(
+  runtime: StandingTerminalRuntime,
+  model?: string,
+  effort?: string,
+  compaction?: { codexTokenLimit?: number | null; claudeSettingsPath?: string | null },
+): string[] {
   let effectiveEffort: SpawnOpts["effort"];
   if (effort && STANDING_TERMINAL_EFFORTS.has(effort)) {
     effectiveEffort = effort as SpawnOpts["effort"];
@@ -52,7 +62,7 @@ export function buildStandingTerminalCommand(
       ...(effectiveModel ? ["--model", effectiveModel] : []),
       ...(effectiveEffort ? ["--thinking", effectiveEffort] : []),
     ];
-    return ["pi", ...args.map((arg) => quoteShellArg(arg))].join(" ");
+    return ["pi", ...args];
   }
 
   const provider = getProvider(runtime);
@@ -70,9 +80,7 @@ export function buildStandingTerminalCommand(
     providerArgs.push("--settings", claudeSettings);
   }
 
-  const head = provider.binaryName;
-  const tail = providerArgs.map((arg) => quoteShellArg(arg));
-  return [head, ...tail].join(" ");
+  return [provider.binaryName, ...providerArgs];
 }
 
 function runtimeLabel(runtime: string): string {
