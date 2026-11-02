@@ -210,6 +210,24 @@ cat "$file"
 }
 
 const lane = (page: Page, branch: string) => page.locator(`[data-testid="source-lane"][data-lane-branch="${branch}"]`);
+// Where an element sits as it is, with no scrolling here: fully between the top of
+// the list and the dock, and what a click at its centre would really land on.
+async function clearOfDock(page: Page, testId: string) {
+  return page.getByTestId("source-lanes").getByTestId(testId).first().evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    const dockNode = document.querySelector('[data-testid="commit-dock"]') as HTMLElement;
+    const dock = dockNode.getBoundingClientRect();
+    const scroller = (dockNode.previousElementSibling as HTMLElement).getBoundingClientRect();
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return {
+      clickable: node === hit || node.contains(hit),
+      above: box.bottom <= dock.top,
+      below: box.top >= scroller.top,
+      panelWidth: dock.width,
+    };
+  });
+}
+
 const laneOrder = (page: Page) =>
   page.getByTestId("source-lanes").getByTestId("source-lane").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-lane-branch")));
 
@@ -267,6 +285,17 @@ test("every checkout is a lane with its changes, its PR and its next step", asyn
       const fix = lane(page, "feat/failing").locator('[data-git-fix="checks"]');
       await expect(fix).toHaveText("Fix checks");
       await lane(page, "feat/ready").getByRole("button", { expanded: false }).click();
+      // Unfolding near the bottom of the narrow panel brings the buttons into view, clear of the dock.
+      await expect.poll(() => clearOfDock(page, "source-lane-merge")).toMatchObject({ clickable: true, above: true, below: true });
+      expect((await clearOfDock(page, "source-lane-merge")).panelWidth).toBeLessThan(300);
+      const end = await page.getByTestId("commit-dock").evaluate((dock) => {
+        const scroller = dock.previousElementSibling as HTMLElement;
+        scroller.scrollTop = scroller.scrollHeight;
+        const last = Array.from(document.querySelectorAll('[data-testid="source-lanes"] [data-testid="source-lane"]')).at(-1)!;
+        return dock.getBoundingClientRect().top - last.getBoundingClientRect().bottom;
+      });
+      expect(end, "the end of the list scrolls clear of the dock").toBeGreaterThanOrEqual(8);
+      await lane(page, "feat/ready").getByTestId("source-lane-merge").scrollIntoViewIfNeeded();
       await shots(page, "lanes");
       await lane(page, "feat/ready").getByTestId("source-lane-merge").click();
       const dialog = page.getByRole("dialog");
