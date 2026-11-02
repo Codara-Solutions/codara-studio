@@ -120,6 +120,10 @@ async function main() {
   assert.equal(cron("0 3 * * *", "Europe/Madrid"), "Every day at 03:00 (Europe/Madrid)");
   assert.equal(cron("* * * * * *"), "Every second");
   assert.equal(cron("*/30 * * * * *"), "Every 30 seconds");
+  assert.equal(cron("*/45 * * * *"), "On a schedule: */45 * * * *", "a step that restarts each hour is not a fixed interval");
+  assert.equal(cron("0 */5 * * *"), "On a schedule: 0 */5 * * *");
+  assert.equal(cron("*/45 * * * * *"), "On a schedule: */45 * * * * *");
+  assert.equal(cron("*/0 * * * *"), "On a schedule: */0 * * * *");
   assert.equal(cron("0 9 * 1 *"), "On a schedule: 0 9 * 1 *", "an unread shape shows the expression");
   assert.equal(cron("*/5 9-17 * * 1-5"), "On a schedule: */5 9-17 * * 1-5");
   assert.equal(cron("not a cron"), "On a schedule: not a cron");

@@ -67,9 +67,13 @@ function wholeNumber(field: string): number | null {
   return /^\d+$/.test(field) ? Number(field) : null;
 }
 
-function stepOf(field: string): number | null {
+// A `*/n` step, only when it is a true fixed interval: cron restarts a step at
+// each field boundary, so `*/45` minutes fires at :00 and :45, not every 45.
+function stepOf(field: string, cycle: number): number | null {
   const match = /^\*\/(\d+)$/.exec(field);
-  return match ? Number(match[1]) : null;
+  if (!match) return null;
+  const step = Number(match[1]);
+  return step > 0 && step < cycle && cycle % step === 0 ? step : null;
 }
 
 function count(n: number, one: string, many: string = `${one}s`): string {
@@ -126,16 +130,16 @@ function cronPhrase(expr: string): string | null {
   if (second !== undefined && second !== "0") {
     if (minute !== "*" || hour !== "*" || !anyDate) return null;
     if (second === "*") return "Every second";
-    const everySeconds = stepOf(second);
+    const everySeconds = stepOf(second, 60);
     return everySeconds ? `Every ${count(everySeconds, "second")}` : null;
   }
   if (!anyDate && (wholeNumber(minute as string) === null || wholeNumber(hour as string) === null)) return null;
 
   if (anyDate) {
     if (minute === "*" && hour === "*") return "Every minute";
-    const everyMinutes = stepOf(minute as string);
+    const everyMinutes = stepOf(minute as string, 60);
     if (everyMinutes && hour === "*") return `Every ${count(everyMinutes, "minute")}`;
-    const everyHours = stepOf(hour as string);
+    const everyHours = stepOf(hour as string, 24);
     if (minute === "0" && (hour === "*" || everyHours)) return `Every ${count(everyHours ?? 1, "hour")}`;
     const atMinute = wholeNumber(minute as string);
     if (atMinute !== null && hour === "*") return `Every hour at :${two(atMinute)}`;
