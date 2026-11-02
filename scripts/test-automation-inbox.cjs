@@ -172,6 +172,12 @@ async function main() {
   assert.equal(m.plainSchedule({ kind: "git", events: ["remoteUpdated"], branch: "main" }), "On every push on main");
   assert.equal(m.plainSchedule({ kind: "git", events: ["remoteUpdated", "localBranchMoved"] }), "On every push, commit or pull");
   assert.equal(m.plainSchedule({ kind: "onAutomationActivity", events: ["failed"] }), "When any automation fails");
+  assert.equal(m.plainSchedule({ kind: "github", events: ["prOpened"] }), "When a pull request is opened");
+  assert.equal(m.plainSchedule({ kind: "github", events: ["ciFailed"], branch: "main" }), "When CI fails on a pull request into main");
+  assert.equal(
+    m.plainSchedule({ kind: "github", events: ["prOpened", "ciFailed"] }),
+    "When a pull request is opened or CI fails on a pull request",
+  );
   assert.equal(
     m.plainSchedule({ kind: "onAutomationActivity", events: ["finished", "failed"], automationId: "job-2" }, names),
     "When Release notes finishes or fails",

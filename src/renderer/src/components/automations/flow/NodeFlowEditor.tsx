@@ -355,6 +355,12 @@ function Editor({
           next.trigger.cronTz = preset.trigger.tz ?? "";
         }
         if (preset.trigger.kind === "folder") next.trigger.folderPath = preset.trigger.path || cwd;
+        if (preset.trigger.kind === "github") {
+          next.trigger.githubEvents = {
+            prOpened: preset.trigger.events.includes("prOpened"),
+            ciFailed: preset.trigger.events.includes("ciFailed"),
+          };
+        }
         if (typeof preset.loop.stop.maxIterations === "number") next.loop.maxIters = String(preset.loop.stop.maxIterations);
         if (typeof preset.loop.stop.budgetUsd === "number") next.loop.budget = String(preset.loop.stop.budgetUsd);
         next.loop.untilTests = Boolean(preset.loop.stop.untilTestsPass);

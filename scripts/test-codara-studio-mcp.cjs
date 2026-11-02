@@ -533,6 +533,12 @@ function sortedEqual(actual, expected, label) {
       (tool) => tool.name === "codara_create_automation",
     );
     assert.ok(createAutomation, "automation roster must expose codara_create_automation");
+    const triggerSchema = createAutomation.inputSchema.properties.trigger;
+    assert.ok(triggerSchema.properties.kind.enum.includes("github"), "trigger schema must offer github");
+    for (const event of ["prOpened", "ciFailed"]) {
+      assert.ok(triggerSchema.properties.events.items.enum.includes(event), `trigger events must offer ${event}`);
+    }
+    assert.ok(!("fromAnyone" in triggerSchema.properties), "nothing lets a stranger's pull request start a run");
     const workerSchema = createAutomation.inputSchema.properties.worker;
     sortedEqual(
       workerSchema.required,

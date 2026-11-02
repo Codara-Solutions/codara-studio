@@ -6723,6 +6723,8 @@ function summarizeTrigger(t: AutomationTrigger): string {
       return `git([${(t.events ?? []).join(",")}]${t.branch ? ` ${t.branch}` : ""})`;
     case "onAutomationActivity":
       return `onAutomationActivity([${(t.events ?? []).join(",")}]${t.automationId ? ` ${t.automationId}` : " any"})`;
+    case "github":
+      return `github([${(t.events ?? []).join(",")}]${t.branch ? ` ${t.branch}` : ""})`;
     default:
       return "unknown";
   }
@@ -7007,7 +7009,9 @@ async function validateTriggerLoopWorker(opts: {
     "onFinishOf",
     "git",
     "onAutomationActivity",
+    "github",
   ]);
+  const GITHUB_TRIGGER_EVENTS = new Set(["prOpened", "ciFailed"]);
   const GIT_TRIGGER_EVENTS = new Set(["remoteUpdated", "localBranchMoved"]);
   const ACTIVITY_TRIGGER_EVENTS = new Set(["finished", "failed"]);
   const LOOP_KINDS = new Set(["once", "count", "cadence", "until", "continuous", "agent"]);
@@ -7020,9 +7024,10 @@ async function validateTriggerLoopWorker(opts: {
       automationId?: unknown;
       events?: unknown;
       branch?: unknown;
+      includeDrafts?: unknown;
     };
     if (typeof t.kind !== "string" || !TRIGGER_KINDS.has(t.kind)) {
-      return `trigger.kind '${String(t.kind)}' is invalid (expected cron|interval|folder|manual|continuous|onFinishOf|git|onAutomationActivity)`;
+      return `trigger.kind '${String(t.kind)}' is invalid (expected cron|interval|folder|manual|continuous|onFinishOf|git|onAutomationActivity|github)`;
     }
     // Per-kind required payload - the scheduler arms these directly, so a bad
     // payload becomes a hot loop / crash at arm time rather than a fixable error.
@@ -7068,6 +7073,20 @@ async function validateTriggerLoopWorker(opts: {
       }
       if (t.branch !== undefined && (typeof t.branch !== "string" || t.branch.trim().length === 0)) {
         return "trigger.branch must be a non-empty branch name when provided (omit it to fire for any branch)";
+      }
+    } else if (t.kind === "github") {
+      if (
+        !Array.isArray(t.events) ||
+        t.events.length === 0 ||
+        !t.events.every((e) => typeof e === "string" && GITHUB_TRIGGER_EVENTS.has(e))
+      ) {
+        return "trigger kind 'github' requires a non-empty 'events' array of prOpened|ciFailed";
+      }
+      if (t.branch !== undefined && (typeof t.branch !== "string" || t.branch.trim().length === 0)) {
+        return "trigger.branch must be a non-empty branch name when provided (omit it for pull requests into any branch)";
+      }
+      if (t.includeDrafts !== undefined && typeof t.includeDrafts !== "boolean") {
+        return "trigger.includeDrafts must be true or false when provided";
       }
     } else if (t.kind === "onAutomationActivity") {
       if (

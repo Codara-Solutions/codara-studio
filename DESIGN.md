@@ -557,4 +557,7 @@ and GitHub Actions' row of recent results for the bar of ticks.
   reads it first.
 - Narrow window: the rail gives up width first (264px), then the run rows drop
   their stop badge. The dot and the summary still carry the result.
-
+- Pull request triggers read as a sentence too ("When CI fails on a pull request
+  into main") and use the existing check and field controls. Trouble reaching
+  GitHub, or a pull request at its daily limit, is a "not started" row in Runs,
+  not a new surface.

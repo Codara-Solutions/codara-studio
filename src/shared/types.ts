@@ -5297,6 +5297,9 @@ export interface StartSearchResponse {
 //                 tip moving (commit, pull, merge).
 //   onAutomationActivity — fires when automations finish/fail: any automation
 //                 in the app, or one specific automation when scoped.
+//   github      — fires when a pull request is opened or CI fails on one, in
+//                 the repository behind the workspace's origin remote, for
+//                 authors who belong to that repository.
 export type FolderTriggerEvent = "add" | "change" | "unlink";
 
 // git trigger events:
@@ -5306,6 +5309,8 @@ export type FolderTriggerEvent = "add" | "change" | "unlink";
 //   localBranchMoved — the checked-out branch's tip changed (commit, pull,
 //                      merge, reset).
 export type GitTriggerEvent = "remoteUpdated" | "localBranchMoved";
+
+export type GitHubTriggerEvent = "prOpened" | "ciFailed";
 
 // onAutomationActivity events map to the loop's terminal outcome.
 export type AutomationActivityEvent = "finished" | "failed";
@@ -5340,7 +5345,42 @@ export type AutomationTrigger =
       // Scope to one automation. Omitted = ANY automation (the triggered
       // automation itself is always excluded to prevent self-firing).
       automationId?: string;
+    }
+  | {
+      kind: "github";
+      events: GitHubTriggerEvent[];
+      // Only pull requests into this branch (e.g. "main"). Omitted = any branch.
+      branch?: string;
+      // prOpened only: also fire for a draft. Otherwise a draft fires when it
+      // is marked ready.
+      includeDrafts?: boolean;
     };
+
+/** What a github trigger has already acted on. PERSISTED so what happens while
+ *  the app is closed still fires, and nothing fires twice across a restart. */
+export interface GitHubTriggerMemory {
+  /** When it was armed: a check that failed earlier is not news. */
+  seededAt: number;
+  /** Pull requests up to this number existed when it was armed. */
+  seededMaxPr: number;
+  /** `pr:<n>` and `ci:<n>:<sha>` keys already fired or ruled out; capped. */
+  seen: string[];
+  /** Recent fires, for the per-pull-request limit. */
+  fires: { pr: number; at: number }[];
+}
+
+/** The pull request event behind the latest run of a github trigger. */
+export interface GitHubTriggerFire {
+  event: GitHubTriggerEvent;
+  number: number;
+  url: string;
+  headSha: string;
+  // Written by other people: never put these in a {{var}} a shell step can see.
+  title: string;
+  headRef: string;
+  baseRef: string;
+  failedChecks: string[];
+}
 
 // LOOP kinds — how an automation REPEATS once started:
 //   once        — a single iteration (legacy behaviour).
@@ -5929,7 +5969,7 @@ export interface AutomationCatchUp {
 export interface AutomationSkipRecord {
   id: string;
   at: string; // ISO time the skip was recorded
-  reason: "precheck" | "missed";
+  reason: "precheck" | "missed" | "github";
   /** One plain-words line for the history row. */
   detail: string;
   precheck?: AutomationPrecheckResult & { command: string };
@@ -5989,6 +6029,8 @@ export interface ScheduledJob {
   lastRunAt?: string; // ISO timestamp of the most recent firing
   lastRunId?: string; // runId produced by the most recent firing
   lastFiredPath?: string; // folder triggers: the path whose change last fired it
+  githubTrigger?: GitHubTriggerMemory;
+  lastGitHubFire?: GitHubTriggerFire;
   /** git triggers: the remote / local commit the trigger last settled on.
    *  PERSISTED so a push that lands while the app is closed (or before the
    *  background auto-fetch's first pass) still fires at the next arm instead

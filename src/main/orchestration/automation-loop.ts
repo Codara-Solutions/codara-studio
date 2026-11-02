@@ -24,6 +24,7 @@ import {
   SPARK_LOOP_DONE,
 } from "@shared/types";
 import { appendHistory, appendSkip, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
+import { githubFireNote, githubFireVars } from "./github-trigger";
 import { normalizeAutomationPrecheck, precheckSkipDetail } from "@shared/automation-catchup";
 import { PRECHECK_STOPPED_ERROR, runAutomationPrecheck, stopRunningPrechecks } from "./automation-precheck";
 import { automationSourceKey, publish, rearm, settleAutomationQuestions } from "../notify";
@@ -167,6 +168,7 @@ function buildPassVars(
     file: ctx.file ?? job.lastFiredPath ?? "",
     date: nowIso().slice(0, 10),
     name: job.name,
+    ...(job.trigger.kind === "github" ? githubFireVars(job.lastGitHubFire) : {}),
   };
 }
 
@@ -278,12 +280,28 @@ async function passesPrecheck(id: string, job: ScheduledJob, opts: StartIteratio
   return false;
 }
 
+// Whether a trigger fire right now would be dropped: startIteration holds for
+// all of these. A trigger that remembers what it fired checks first, so the
+// event waits instead of being marked as handled and lost.
+export async function automationIsBusy(job: ScheduledJob): Promise<boolean> {
+  if (job.state.status === "paused" || job.state.status === "blocked") return true;
+  if (runnerFor(job.id).firing) return true;
+  if (!job.state.currentRunId) return false;
+  const live = await safeGetRun(job.state.currentRunId);
+  return !!live && !TERMINAL.has(live.status);
+}
+
 // Start the next iteration of an automation's loop. Idempotent against an
 // in-flight run (won't stack), and enforces the hard caps before launching.
 export async function startIteration(id: string, opts: StartIterationOpts): Promise<void> {
   let job = await getJob(id);
   if (!job || !job.enabled) return;
   if (job.state.status === "paused") return; // explicit user hold; resumeLoop re-drives
+  if (opts.source === "manual" && job.lastGitHubFire) {
+    // Run now is not about the pull request that last fired it.
+    job = await patchJob(id, (j) => ({ ...j, lastGitHubFire: undefined }));
+    if (!job) return;
+  }
   // Before the stopped-loop reset below: a skipped fire leaves the last
   // cycle's state exactly as it was.
   if (precheckApplies(job, opts.source)) {
@@ -381,6 +399,9 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       if (opts.firedPath && !p.includes(opts.firedPath)) {
         p = injectTriggerNote({ ...job.input, initialUserNote: p }, opts.firedPath)
           .initialUserNote as string;
+      }
+      if (job.trigger.kind === "github" && job.lastGitHubFire) {
+        p = `${p}\n\n${githubFireNote(job.lastGitHubFire)}`;
       }
       // Agent-driven loops: tell the model how to keep the loop going even if the
       // template never mentioned the mechanism. (Hard caps stop it regardless.)

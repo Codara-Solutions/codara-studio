@@ -42,6 +42,7 @@ import { makeId } from "@shared/ids";
 import { writeFileAtomic } from "../fs-atomic";
 import { codaraHome } from "../codara-home";
 import { appendEvent } from "./event-log";
+import { armGitHubWatch, normalizeGitHubMemory, type GitHubTriggerDeps } from "./github-trigger";
 // run-store is heavy (it transitively loads the manager backends + agent-sync).
 // Importing scheduler at boot to arm timers must NOT drag run-store into cold
 // start, so firing lazily imports the automation loop driver only when a job
@@ -111,6 +112,15 @@ function normalizeJob(job: ScheduledJob): ScheduledJob {
   }
   if (!Array.isArray(next.history)) {
     next = { ...next, history: [] };
+  }
+  if (next.githubTrigger !== undefined) {
+    // A hand-edited memory would throw on every pass; starting over only means
+    // it arms afresh.
+    const memory = normalizeGitHubMemory(next.githubTrigger);
+    if (!memory) {
+      const { githubTrigger: _dropped, ...rest } = next;
+      next = rest;
+    }
   }
   // Looms on Pi: migrate the worker config on EVERY read, not only when it is
   // absent — persisted jobs from pre-Pi builds carry an `engine` field and may
@@ -223,7 +233,7 @@ function isSkipRecord(value: unknown): value is AutomationSkipRecord {
     typeof s.id === "string" &&
     typeof s.at === "string" &&
     typeof s.detail === "string" &&
-    (s.reason === "precheck" || s.reason === "missed")
+    (s.reason === "precheck" || s.reason === "missed" || s.reason === "github")
   );
 }
 
@@ -466,6 +476,10 @@ export async function updateJob(input: UpdateScheduledJobInput): Promise<Schedul
     ...(input.missedRuns !== undefined ? { missedRuns: input.missedRuns ?? undefined } : {}),
     // Times the OLD schedule would have fired are not missed runs of the new one.
     ...(input.trigger !== undefined ? { scheduleCheckedAt: settleScheduleNow(input.id) } : {}),
+    // A different watch starts from what exists now, as if newly armed.
+    ...(input.trigger !== undefined && JSON.stringify(input.trigger) !== JSON.stringify(target.trigger)
+      ? { githubTrigger: undefined, lastGitHubFire: undefined }
+      : {}),
   });
   await persist(jobs.map((job) => (job.id === input.id ? updated : job)));
   // Re-arm so a changed trigger schedule takes effect now.
@@ -667,7 +681,8 @@ export async function setEnabled(id: string, enabled: boolean): Promise<Schedule
   // Scheduled times that passed while it was off were not missed: it was off.
   const updated: ScheduledJob =
     enabled && !target.enabled
-      ? { ...target, enabled, scheduleCheckedAt: settleScheduleNow(id) }
+      ? // Pull requests opened while it was off are not owed a run either.
+        { ...target, enabled, scheduleCheckedAt: settleScheduleNow(id), githubTrigger: undefined }
       : { ...target, enabled };
   await persist(jobs.map((job) => (job.id === id ? updated : job)));
   if (enabled) armJob(updated);
@@ -937,6 +952,10 @@ function armJob(job: ScheduledJob): void {
         armed.set(job.id, armGitTrigger(job, trigger));
         break;
       }
+      case "github": {
+        armed.set(job.id, armGitHubWatch(job.id, trigger, githubTriggerDeps()));
+        break;
+      }
       case "onAutomationActivity": {
         // Register with the loop driver, which fires watchers at the same
         // terminal site as onFinishOf dependents; disarm unregisters.
@@ -951,6 +970,27 @@ function armJob(job: ScheduledJob): void {
   } catch (err) {
     console.warn(`[scheduler] failed to arm job ${job.id}:`, err);
   }
+}
+
+function githubTriggerDeps(): GitHubTriggerDeps {
+  const tick = Number(process.env.SPARK_E2E_PR_WATCH_TICK_MS);
+  return {
+    source: async (cwd) => (await import("./github-trigger-source")).githubSourceFor(cwd),
+    getJob,
+    patchJob,
+    noteProblem: (id, detail) => appendSkip(id, { reason: "github", detail }),
+    isBusy: async (job) => (await import("./automation-loop")).automationIsBusy(job),
+    start: (id) => startIterationViaDriver(id, { source: "trigger" }),
+    now: () => Date.now(),
+    setTimeout: (fn, ms) => {
+      const handle = setTimeout(fn, ms);
+      handle.unref?.();
+      return handle;
+    },
+    clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
+    log: (message) => console.warn(message),
+    ...(process.env.SPARK_E2E_BACKGROUND === "1" && Number.isFinite(tick) && tick >= 500 ? { pollMs: tick } : {}),
+  };
 }
 
 function disarmJob(id: string): void {

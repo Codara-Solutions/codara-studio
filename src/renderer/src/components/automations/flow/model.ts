@@ -6,6 +6,7 @@ import type {
   AutomationTrigger,
   FolderTriggerEvent,
   GitTriggerEvent,
+  GitHubTriggerEvent,
   GuardPredicate,
   LoomEdgeDef,
   LoomGraph,
@@ -44,6 +45,9 @@ export interface TriggerDraft {
   activityEvents: Record<AutomationActivityEvent, boolean>;
   // Empty string = watch ANY automation.
   activitySourceId: string;
+  githubEvents: Record<GitHubTriggerEvent, boolean>;
+  githubBranch: string;
+  githubDrafts: boolean;
 }
 
 export interface LoopDraft {
@@ -120,6 +124,9 @@ export function emptyDraft(): LoomDraft {
       gitBranch: "",
       activityEvents: { finished: true, failed: true },
       activitySourceId: "",
+      githubEvents: { prOpened: true, ciFailed: false },
+      githubBranch: "",
+      githubDrafts: false,
     },
     loop: {
       kind: "once",
@@ -171,6 +178,13 @@ export function draftFromJob(job: ScheduledJob): LoomDraft {
       failed: job.trigger.events.includes("failed"),
     };
     d.trigger.activitySourceId = job.trigger.automationId ?? "";
+  } else if (job.trigger.kind === "github") {
+    d.trigger.githubEvents = {
+      prOpened: job.trigger.events.includes("prOpened"),
+      ciFailed: job.trigger.events.includes("ciFailed"),
+    };
+    d.trigger.githubBranch = job.trigger.branch ?? "";
+    d.trigger.githubDrafts = job.trigger.includeDrafts === true;
   }
 
   // `stop` is contractually backfilled by the scheduler, but a malformed
@@ -249,6 +263,17 @@ export function buildTrigger(d: TriggerDraft): AutomationTrigger | null {
       return automationId
         ? { kind: "onAutomationActivity", events, automationId }
         : { kind: "onAutomationActivity", events };
+    }
+    case "github": {
+      const events = (["prOpened", "ciFailed"] as GitHubTriggerEvent[]).filter((e) => d.githubEvents[e]);
+      if (events.length === 0) return null;
+      const branch = d.githubBranch.trim();
+      return {
+        kind: "github",
+        events,
+        ...(branch ? { branch } : {}),
+        ...(d.githubDrafts && d.githubEvents.prOpened ? { includeDrafts: true } : {}),
+      };
     }
     default:
       return { kind: "manual" };

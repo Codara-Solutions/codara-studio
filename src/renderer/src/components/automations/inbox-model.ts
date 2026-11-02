@@ -208,6 +208,11 @@ export function plainSchedule(trigger: AutomationTrigger, names?: ReadonlyMap<st
       const words = trigger.events.map((e) => (e === "failed" ? "fails" : "finishes"));
       return `When ${who} ${joinWords(words.length ? words : ["finishes"], "or")}`;
     }
+    case "github": {
+      const words = trigger.events.map((e) => (e === "ciFailed" ? "CI fails on a pull request" : "a pull request is opened"));
+      const into = trigger.branch ? ` into ${trigger.branch}` : "";
+      return `When ${joinWords(words.length ? words : ["a pull request is opened"], "or")}${into}`;
+    }
     default:
       return "When its trigger fires";
   }

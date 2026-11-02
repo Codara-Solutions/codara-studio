@@ -4,7 +4,8 @@ import { fmtTime } from "./presentation";
 import { fmtWhen } from "./inbox-model";
 
 // A history-timeline row for a pass that did not start: its precheck said no,
-// or its scheduled time was missed and not caught up. No run exists, so the
+// its scheduled time was missed and not caught up, or a pull request trigger
+// could not act. No run exists, so the
 // row has no run chip and no peek; it expands to the reason and the check's
 // output.
 
@@ -33,7 +34,7 @@ export default function SkippedHistoryRow({
   skip: AutomationSkipRecord;
 }): React.ReactElement {
   const [expanded, setExpanded] = useState(false);
-  const label = skip.reason === "precheck" ? "check said no" : "missed";
+  const label = skip.reason === "precheck" ? "check said no" : skip.reason === "github" ? "not started" : "missed";
   const output = skip.precheck?.outputTail ?? "";
   const repeats = skip.repeats && skip.repeats > 1 ? skip.repeats : 0;
   return (

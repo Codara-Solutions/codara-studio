@@ -925,7 +925,8 @@ const TRIGGER_SCHEMA = {
     "manual only fires via codara_run_automation or the Hub. " +
     "continuous re-fires immediately after each run finishes. " +
     "git REQUIRES an `events` array (remoteUpdated: the workspace repo's tracked remote gained commits: the user's own push, or a teammate's push arriving via fetch; localBranchMoved: the checked-out branch tip changed (commit, pull, merge)); optional `branch` limits firing to one branch, e.g. 'main'. " +
-    "onAutomationActivity REQUIRES an `events` array (finished|failed) and fires when automations reach that outcome: ANY automation when `automationId` is omitted, or just that one when set (never fires for itself).",
+    "onAutomationActivity REQUIRES an `events` array (finished|failed) and fires when automations reach that outcome: ANY automation when `automationId` is omitted, or just that one when set (never fires for itself). " +
+    "github REQUIRES an `events` array (prOpened: a pull request was opened or a draft marked ready; ciFailed: CI failed on an open pull request) and watches the repository behind the workspace's origin remote through the user's gh, for authors who are owners, members or collaborators of that repository; optional `branch` limits it to pull requests into one branch, optional `includeDrafts` also fires for drafts. Prompts and steps can use {{pr_number}}, {{pr_url}} and {{pr_head}}.",
   required: ["kind"],
   properties: {
     kind: {
@@ -939,6 +940,7 @@ const TRIGGER_SCHEMA = {
         "onFinishOf",
         "git",
         "onAutomationActivity",
+        "github",
       ],
     },
     expr: { type: "string", description: "cron (REQUIRED): valid 5/6-field cron expression, e.g. '0 9 * * 1-5'." },
@@ -948,10 +950,10 @@ const TRIGGER_SCHEMA = {
     events: {
       type: "array",
       description:
-        "folder: which fs events fire (add|change|unlink). git (REQUIRED): remoteUpdated|localBranchMoved. onAutomationActivity (REQUIRED): finished|failed.",
+        "folder: which fs events fire (add|change|unlink). git (REQUIRED): remoteUpdated|localBranchMoved. onAutomationActivity (REQUIRED): finished|failed. github (REQUIRED): prOpened|ciFailed.",
       items: {
         type: "string",
-        enum: ["add", "change", "unlink", "remoteUpdated", "localBranchMoved", "finished", "failed"],
+        enum: ["add", "change", "unlink", "remoteUpdated", "localBranchMoved", "finished", "failed", "prOpened", "ciFailed"],
       },
     },
     glob: { type: "string", description: "folder only: optional basename glob, e.g. '*.md'. Omit to match every file." },
@@ -963,7 +965,11 @@ const TRIGGER_SCHEMA = {
     },
     branch: {
       type: "string",
-      description: "git only: optional branch name (e.g. 'main') to scope firing; omit for any branch.",
+      description: "git: optional branch name (e.g. 'main') to scope firing; omit for any branch. github: only pull requests into this branch.",
+    },
+    includeDrafts: {
+      type: "boolean",
+      description: "github only: also fire when a draft pull request is opened. By default a draft fires when it is marked ready.",
     },
   },
   additionalProperties: false,

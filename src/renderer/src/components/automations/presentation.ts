@@ -78,6 +78,10 @@ export function triggerSummary(trigger: AutomationTrigger): string {
       const what = trigger.events.join("/") || "activity";
       return trigger.automationId ? `when a loom ${what}` : `when any loom ${what}`;
     }
+    case "github": {
+      const parts = trigger.events.map((e) => (e === "ciFailed" ? "CI failed" : "PR opened"));
+      return `${parts.join(" + ") || "pull request"}${trigger.branch ? ` into ${trigger.branch}` : ""}`;
+    }
     default:
       return "trigger";
   }

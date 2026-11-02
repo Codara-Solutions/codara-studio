@@ -1261,6 +1261,13 @@ approval shows the full precheck command, since it runs on your machine.
 `codara_list_automations` and `codara_get_automation` report both, with the
 latest skipped passes.
 
+The `github` trigger takes `events` (`prOpened`, `ciFailed`), an optional
+`branch` the pull request must target, and an optional `includeDrafts`. It reads
+the repository behind the workspace's origin remote with your `gh` sign-in, while
+Codara is open. Only authors who are owners, members or collaborators of that
+repository count, and one pull request starts at most 3 runs in 24 hours. Prompts
+and steps can use `{{pr_number}}`, `{{pr_url}}` and `{{pr_head}}`.
+
 ## Workflows
 
 Only in `execute`, and never for an imported pull request. A workflow is a

@@ -31,7 +31,7 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve(
-      { filter: /^(\.\/(run-queue|run-store|event-log)|\.\.\/(codara-home|fs-atomic|agent-runtimes|pty-manager|notify|git-exec|git-events))$/ },
+      { filter: /^(\.\/(run-queue|run-store|event-log|github-trigger-source)|\.\.\/(codara-home|fs-atomic|agent-runtimes|pty-manager|notify|git-exec|git-events))$/ },
       (args) => ({ path: args.path.replace(/^\.\.?\//, ""), namespace: "stub" }),
     );
     // node:fs with an injectable readdir failure. A directory that cannot be
