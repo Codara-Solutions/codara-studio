@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
 // The session picker in a temp HOME holding made-up sessions: it opens from
-// the + menu and its chord, a worker row still starts a new session, one box
+// the + menu and its chord, a worker row shows that agent's history, one box
 // finds a session by name or by what either side said and says which, a new
 // name survives a restart and shows in the rail, and resume, fork, split, pin
 // and delete do what they say. SESSION_PICKER_SHOTS names a folder to keep
@@ -168,6 +168,29 @@ async function launches(fixture: Fixture): Promise<string[]> {
   return (await readFile(fixture.launchLog, "utf8")).split("\n").filter(Boolean);
 }
 
+// The commands handed to terminals from now on. Which `claude` a shell finds
+// depends on the machine, and what Studio asks it to run does not. The panes
+// stay inert, which is all a test of the picker needs.
+async function recordLaunchCommands(app: ElectronApplication): Promise<void> {
+  await app.evaluate(({ ipcMain }) => {
+    const state = globalThis as typeof globalThis & { __pickerLaunches?: string[] };
+    state.__pickerLaunches = [];
+    ipcMain.removeHandler("pty:inject");
+    ipcMain.handle("pty:inject", (_event, args: { text?: string }) => {
+      if (args?.text) state.__pickerLaunches?.push(args.text);
+    });
+    ipcMain.removeHandler("pty:spawn");
+    ipcMain.handle("pty:spawn", (_event, args: { id?: string; startupCommand?: string }) => {
+      if (args?.startupCommand) state.__pickerLaunches?.push(args.startupCommand);
+      return { id: args?.id, pid: 0, startupCommandHandled: true };
+    });
+  });
+}
+
+function launchCommands(app: ElectronApplication): Promise<string[]> {
+  return app.evaluate(() => (globalThis as typeof globalThis & { __pickerLaunches?: string[] }).__pickerLaunches ?? []);
+}
+
 const row = (picker: Locator, id: string, agent = "claude") => picker.locator(`[data-session-row="${agent}:${id}"]`);
 
 async function openWithChord(page: Page): Promise<Locator> {
@@ -183,7 +206,7 @@ async function showAll(picker: Locator) {
   await expect(picker.locator("[data-session-row]")).toHaveCount(5, { timeout: 30_000 });
 }
 
-test("the picker opens from the + menu and its chord, and a worker row still starts a new session", async () => {
+test("a worker row lists that agent's sessions, Enter starts new, and Down then Enter resumes", async () => {
   test.setTimeout(150_000);
   const fixture = await prepareFixture();
   let app: ElectronApplication | null = null;
@@ -192,13 +215,155 @@ test("the picker opens from the + menu and its chord, and a worker row still sta
     app = launched.app;
     const { page } = launched;
     await page.waitForTimeout(500);
+    await recordLaunchCommands(app);
+    const addTab = page.getByRole("button", { name: "New tab" }).first();
+
+    // Only Claude's sessions, nothing selected, and the default says what Enter does.
+    await addTab.click();
+    await page.getByText("Claude worker", { exact: true }).click();
+    const picker = page.getByRole("dialog", { name: "Claude sessions" });
+    await expect(picker).toBeVisible();
+    await expect(picker.getByRole("combobox")).toBeFocused();
+    await expect(row(picker, IDS.rollout)).toBeVisible({ timeout: 30_000 });
+    await expect(row(picker, IDS.login)).toBeVisible();
+    await expect(row(picker, IDS.invoices, "codex")).toHaveCount(0);
+    await expect(picker.locator('[role="option"][aria-selected="true"]')).toHaveCount(0);
+    await expect(picker.getByTestId("session-picker-new")).toHaveClass(/is-selected/);
+    if (SHOTS) await page.screenshot({ path: join(SHOTS, "worker-offer.png") });
+
+    // Escape opens nothing.
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+    await page.waitForTimeout(500);
+    expect(await launchCommands(app)).toEqual([]);
+
+    // Down then Up comes back to New session, and Enter starts one.
+    await addTab.click();
+    await page.getByText("Claude worker", { exact: true }).click();
+    await expect(row(picker, IDS.rollout)).toBeVisible({ timeout: 30_000 });
+    await page.keyboard.press("ArrowDown");
+    await expect(row(picker, IDS.rollout)).toHaveAttribute("aria-selected", "true");
+    if (SHOTS) await page.screenshot({ path: join(SHOTS, "worker-offer-selected.png") });
+    await page.keyboard.press("ArrowUp");
+    await expect(picker.getByTestId("session-picker-new")).toHaveClass(/is-selected/);
+    await page.keyboard.press("Enter");
+    await expect(picker).toHaveCount(0);
+    await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBe(1);
+    const fresh = await launchCommands(app);
+    expect(fresh[0]).toContain("claude ");
+    expect(fresh[0]).not.toContain("--resume");
+
+    // Down then Enter resumes the session it landed on.
+    await addTab.click();
+    await page.getByText("Claude worker", { exact: true }).click();
+    await expect(row(picker, IDS.rollout)).toBeVisible({ timeout: 30_000 });
+    await page.keyboard.press("ArrowDown");
+    await expect(row(picker, IDS.rollout)).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBe(2);
+    expect((await launchCommands(app))[1]).toContain(`--resume ${IDS.rollout}`);
+  } finally {
+    await app?.close();
+    await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("the pane's + menu offers history and stays in its tab; chords keep their split", async () => {
+  test.setTimeout(150_000);
+  const fixture = await prepareFixture();
+  await writeFile(
+    join(fixture.userDataDir, "spark-preferences.json"),
+    JSON.stringify({ keybindings: { "worker.claudeSessions": "ctrl+alt+h", "worker.newClaude": "ctrl+alt+g" } }),
+    "utf8",
+  );
+  let app: ElectronApplication | null = null;
+  try {
+    const launched = await launch(fixture);
+    app = launched.app;
+    const { page } = launched;
+    await page.waitForTimeout(500);
+    await page.getByText("terminals", { exact: true }).first().click();
+    await recordLaunchCommands(app);
+    const tabsBefore = await page.locator(".spark-tab").count();
+    const picker = page.getByRole("dialog", { name: "Claude sessions" });
+
+    const openFromPane = async () => {
+      await page.getByTitle("Add pane…").first().dispatchEvent("click");
+      await page.getByRole("menu", { name: "Add terminal pane" }).getByText("Claude worker", { exact: true }).click();
+      await expect(row(picker, IDS.rollout)).toBeVisible({ timeout: 30_000 });
+    };
+
+    await openFromPane();
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBe(1);
+    expect((await launchCommands(app))[0]).not.toContain("--resume");
+
+    await openFromPane();
+    await page.keyboard.press("ArrowDown");
+    await expect(picker.getByRole("button", { name: /Resume in a new pane/ })).toBeVisible();
+    await expect(picker.getByRole("button", { name: "Split here" })).toHaveCount(0);
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBeGreaterThan(1);
+    // Exactly one: a second resume would put two agents on one transcript.
+    await page.waitForTimeout(2_000);
+    const afterResume = await launchCommands(app);
+    expect(afterResume).toHaveLength(2);
+    expect(afterResume[1]).toContain(`--resume ${IDS.rollout}`);
+    await expect(page.locator(".spark-tab")).toHaveCount(tabsBefore);
+
+    // The sessions command shows the picker, and the new-pane command never does.
+    await page.keyboard.press("Control+Alt+h");
+    await expect(picker).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+    await page.keyboard.press("Control+Alt+g");
+    await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBe(3);
+    await expect(page.getByTestId("session-picker")).toHaveCount(0);
+  } finally {
+    await app?.close();
+    await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("a worker row starts at once when session search is off", async () => {
+  test.setTimeout(90_000);
+  const fixture = await prepareFixture();
+  await writeFile(join(fixture.userDataDir, "spark-preferences.json"), JSON.stringify({ sessionSearch: { enabled: false } }), "utf8");
+  let app: ElectronApplication | null = null;
+  try {
+    const launched = await launch(fixture);
+    app = launched.app;
+    const { page } = launched;
+    await page.waitForTimeout(500);
+    await recordLaunchCommands(app);
+    await page.getByRole("button", { name: "New tab" }).first().click();
+    await page.getByText("Claude worker", { exact: true }).click();
+    await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBe(1);
+    await expect(page.getByTestId("session-picker")).toHaveCount(0);
+  } finally {
+    await app?.close();
+    await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("the picker opens from the + menu and its chord", async () => {
+  test.setTimeout(150_000);
+  const fixture = await prepareFixture();
+  let app: ElectronApplication | null = null;
+  try {
+    const launched = await launch(fixture);
+    app = launched.app;
+    const { page } = launched;
+    await page.waitForTimeout(500);
+    await recordLaunchCommands(app);
 
     const addTab = page.getByRole("button", { name: "New tab" }).first();
     await addTab.click();
     await page.getByText("Claude worker", { exact: true }).click();
-    await expect.poll(async () => (await launches(fixture)).length, { timeout: 30_000 }).toBeGreaterThan(0);
-    const started = await launches(fixture);
-    expect(started[0]).toContain("|claude ");
+    await page.getByTestId("session-picker-new").click();
+    await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBeGreaterThan(0);
+    const started = await launchCommands(app);
+    expect(started[0]).toContain("claude ");
     expect(started[0]).not.toContain("--resume");
     await expect(page.getByTestId("session-picker")).toHaveCount(0);
 
@@ -343,6 +508,7 @@ test("resume, fork, pin, delete and a session whose folder is gone", async () =>
     app = launched.app;
     const { page } = launched;
     await page.waitForTimeout(500);
+    await recordLaunchCommands(app);
 
     let picker = await openWithChord(page);
     await showAll(picker);
@@ -397,7 +563,7 @@ test("resume, fork, pin, delete and a session whose folder is gone", async () =>
     await page.keyboard.press("Alt+Enter");
     await expect(picker).toHaveCount(0);
     await expect
-      .poll(async () => (await launches(fixture)).find((line) => line.includes("--fork-session")), { timeout: 30_000 })
+      .poll(async () => (await launchCommands(app!)).find((line) => line.includes("--fork-session")), { timeout: 30_000 })
       .toContain(`--resume ${IDS.rollout} --fork-session --session-id `);
 
     // Enter resumes, in the session's folder; asked again, it goes to that tab.
@@ -408,7 +574,7 @@ test("resume, fork, pin, delete and a session whose folder is gone", async () =>
     await page.keyboard.press("Enter");
     await expect(picker).toHaveCount(0);
     await expect
-      .poll(async () => (await launches(fixture)).filter((line) => line.includes("|codex ") && line.includes(`resume ${IDS.invoices}`)).length, { timeout: 30_000 })
+      .poll(async () => (await launchCommands(app!)).filter((line) => line.includes("codex ") && line.includes(`resume ${IDS.invoices}`)).length, { timeout: 30_000 })
       .toBe(1);
     picker = await openWithChord(page);
     await picker.getByRole("combobox").fill("invoice totals");
@@ -417,17 +583,21 @@ test("resume, fork, pin, delete and a session whose folder is gone", async () =>
     await page.keyboard.press("Enter");
     await expect(picker).toHaveCount(0);
     await page.waitForTimeout(1_000);
-    expect((await launches(fixture)).filter((line) => line.includes("|codex ") && line.includes(`resume ${IDS.invoices}`)).length).toBe(1);
+    expect((await launchCommands(app)).filter((line) => line.includes("codex ") && line.includes(`resume ${IDS.invoices}`)).length).toBe(1);
 
     // Split here: a new pane in this tab, not a new tab.
     picker = await openWithChord(page);
     await picker.getByRole("combobox").fill("release note");
     await expect(row(picker, IDS.rollout)).toHaveAttribute("aria-selected", "true");
+    const tabsBeforeSplit = await page.locator(".spark-tab").count();
     await picker.getByRole("button", { name: "Split here" }).click();
     await expect(picker).toHaveCount(0);
-    await expect
-      .poll(async () => (await launches(fixture)).some((line) => line.endsWith(`--resume ${IDS.rollout}`)), { timeout: 30_000 })
-      .toBe(true);
+    const splits = async () => (await launchCommands(app!)).filter((line) => line.endsWith(`--resume ${IDS.rollout}`)).length;
+    await expect.poll(splits, { timeout: 30_000 }).toBeGreaterThan(0);
+    // Exactly one: a second resume would put two agents on one transcript.
+    await page.waitForTimeout(2_000);
+    expect(await splits()).toBe(1);
+    await expect(page.locator(".spark-tab")).toHaveCount(tabsBeforeSplit);
   } finally {
     await app?.close().catch(() => undefined);
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);

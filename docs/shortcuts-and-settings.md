@@ -203,13 +203,14 @@ one, Shift+Enter edits it.
 
 ### Workers
 
-"New ... worker pane" starts a fresh session right away. To resume an earlier
-session, open the session picker (**Resume a session...** in the tab strip's +
-menu, Mod+Shift+H, or the history button beside the rail's switch, which opens
-it on the current workspace), or type in the jump palette and pick "Search
-agent sessions" (see
-[Agent session search](agent-session-search.md)). The worker actions below
-have no default chord.
+"New ... worker pane" starts a fresh session right away. "Open ... worker
+sessions" shows that agent's past sessions first, as its row in a + menu does,
+and Enter there starts a fresh one. To resume any earlier session, open the
+session picker (**Resume a session...** in the tab strip's + menu, Mod+Shift+H,
+or the history button beside the rail's switch, which opens it on the current
+workspace), or type in the jump palette and pick "Search agent sessions" (see
+[Agent session search](agent-session-search.md)). The worker actions below have
+no default chord.
 
 | Action | Default | Command id |
 |---|---|---|
@@ -217,6 +218,9 @@ have no default chord.
 | New Codex worker pane | (unbound) | `worker.newCodex` |
 | New Grok worker pane | (unbound) | `worker.newGrok` |
 | New Pi worker pane | (unbound) | `worker.newPi` |
+| Open Claude worker sessions… | (unbound) | `worker.claudeSessions` |
+| Open Codex worker sessions… | (unbound) | `worker.codexSessions` |
+| Open Grok worker sessions… | (unbound) | `worker.grokSessions` |
 
 ### Agent
 

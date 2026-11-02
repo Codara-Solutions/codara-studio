@@ -112,8 +112,8 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
     // The tab strip's "+" carries the worker rows beside Terminal and
-    // Browser. Picking one starts a new session of that agent in a new tab
-    // at once; earlier sessions are resumed from the session picker.
+    // Browser. Picking one shows that agent's past sessions, and Enter starts
+    // a new session of it in a new tab.
     //
     // Watch both launch channels: a new tab's command travels as its pane's
     // startupCommand, and this pins the command, not the channel.
@@ -140,6 +140,10 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     const codexRow = tabPicker.getByRole("button", { name: "Codex worker" });
     await expect(codexRow).toBeVisible();
     await codexRow.dispatchEvent("click");
+    const codexSessions = page.getByRole("dialog", { name: "Codex sessions" });
+    await expect(codexSessions).toBeVisible();
+    await expect(codexSessions.getByRole("combobox")).toBeFocused();
+    await page.keyboard.press("Enter");
     await expect(page.locator(".spark-tab")).toHaveCount(tabsBefore + 1);
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect.poll(
