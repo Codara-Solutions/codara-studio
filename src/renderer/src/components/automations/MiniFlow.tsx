@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import type { LoomNodeDef, LoomStepAction, RunState, ScheduledJob } from "@shared/types";
-import { triggerSummary } from "./presentation";
+import { plainSchedule } from "./inbox-model";
 import { graphForJob } from "./flow/model";
 import { LoomIcon, WORKER_TONE } from "./flow/FlowNodes";
 import { workerModelLabel } from "./worker-models";
@@ -78,7 +78,7 @@ export default function MiniFlow({
         kind: "trigger",
         tone: "var(--warn)",
         eyebrow: "Trigger",
-        text: triggerSummary(job.trigger),
+        text: plainSchedule(job.trigger),
       },
     ];
     for (const n of graph.nodes) {

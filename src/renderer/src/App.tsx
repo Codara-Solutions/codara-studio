@@ -231,6 +231,8 @@ import {
   type ChatStatusTone,
 } from "./components/chat/timeline";
 
+const ASK_CORA_PAINT_DELAY_MS = 300;
+
 function workerTabBrandColor(
   runtime: string | null | undefined,
   launchCommand?: string,
@@ -8023,6 +8025,19 @@ const Workspace = React.memo(function Workspace({
     },
     [onOpenBoardCardRun, rememberChatView],
   );
+  // A surface outside the chat stack hands Cora a message to review and send.
+  // The composer only listens while it is on screen, so the text waits for the
+  // tab switch to paint.
+  const handleAskCora = useCallback(
+    (prompt: string) => {
+      tabs.openChatTab({ runId: null, focus: true });
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent("spark:prefill-composer", { detail: { text: prompt } }));
+        window.dispatchEvent(new Event("spark:focus-composer"));
+      }, ASK_CORA_PAINT_DELAY_MS);
+    },
+    [tabs],
+  );
   // First card mutation on a DRAFT chat's board: mint the run WITHOUT starting
   // autopilot, persist the cards on its board, then promote the draft tab via
   // the same snapshot path a first message uses. The user is looking at the
@@ -8577,6 +8592,7 @@ const Workspace = React.memo(function Workspace({
               dockIndex={dockIndex}
               workspace={workspace}
               onOpenRunChat={handleOpenBoardCardRunInChat}
+              onAskCora={handleAskCora}
             />
           </Suspense>
         )}

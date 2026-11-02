@@ -488,3 +488,45 @@ of a new chat, because centring it would make it jump on the first send. It
 keeps Studio's own control order. Worker rows stay separate timeline items. The
 composer uses `--panel`, so in the light themes it stays warm rather than near
 white.
+
+## Automations (2026-11)
+
+**Chosen:** variant A, inbox and run history, from four variants built with the
+real tokens and sample content (A inbox, B the day on a timeline, C cards and
+templates, D a When, do, then builder). Etienne picked A for the page and D's
+builder for the New automation screen, which comes in a later change. The rail
+has shelves in the order Needs you, Failed, Running, Scheduled, Paused. The
+page opens on one plain sentence, then the last result, the bar of recent runs
+with the month so far, the runs, how it runs, and the details.
+
+**Why:** the old page answered "how is this wired?" when the reader asked "did
+it work, and what did it do?". A row said `cron 0 2 * * 1-5 · once` and `armed`;
+the page led with the flow, and the outcome sat in a card that spoke in passes
+and iterations. A failed automation looked like any other.
+
+**References:** the Agents tab's inbox in this repo (shelves, rows with no box,
+a status word at the end of the row, the word giving way to an action on hover)
+and GitHub Actions' row of recent results for the bar of ticks.
+
+**Rules:**
+
+- Colour is for state only: danger for needs you and failed, info for running.
+  A run that went fine is a neutral tick, not a green one, so a failure stands
+  out in a row of them. Tone text mixes in ink to read at 4.5:1 on every theme.
+- Plain words on this page: run, not pass or iteration. Paused and Turn on, not
+  armed. A schedule is a phrase ("Every weekday at 02:00"); the raw expression
+  stays in Details, and a cron shape the phrase cannot read shows the expression
+  rather than a guess.
+- In the sentence, only the model, the folder and money are strong: they are
+  what a reader checks first.
+- A switched-off automation sits on Paused even if its last run failed: it has
+  been looked at. A question outranks the switch and stays on Needs you.
+- Month totals come from the kept history, which holds the last 50 runs. When
+  that cannot cover the whole month the numbers carry a `+` and a tooltip that
+  says so. Never show a floor as if it were the total.
+- Delete sits at the bottom of Details, well away from Run now.
+- "Fix with Cora" fills a new chat's message box and sends nothing. The user
+  reads it first.
+- Narrow window: the rail gives up width first (264px), then the run rows drop
+  their stop badge. The dot and the summary still carry the result.
+

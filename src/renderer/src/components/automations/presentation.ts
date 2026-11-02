@@ -34,16 +34,16 @@ export function statusWord(status: AutomationStatus): string {
 }
 
 export const STOP_REASON_LABEL: Record<AutomationStopReason, string> = {
-  "agent-done": "agent finished",
+  "agent-done": "finished",
   "agent-no-signal": "agent gave no signal",
-  "max-iterations": "max iterations",
+  "max-iterations": "run limit reached",
   budget: "budget reached",
   phrase: "phrase matched",
   "tests-pass": "tests passed",
   "git-clean": "git clean",
   "until-command": "condition met",
   once: "done",
-  "iteration-failed": "iteration failed",
+  "iteration-failed": "run failed",
   "user-stop": "stopped by you",
   "engine-missing": "engine not installed",
 };

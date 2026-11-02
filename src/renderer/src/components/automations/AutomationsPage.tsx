@@ -11,24 +11,40 @@ import type {
   ScheduledJob,
   UpdateScheduledJobInput,
 } from "@shared/types";
+import { AUTOMATION_HISTORY_CAP } from "@shared/types";
 import { resolveOpenRunQuestion, runQuestionDraftScopeKey } from "@shared/run-questions";
 import { isLiveOnlyEvent } from "@shared/live-events";
-import { runStatusColor } from "../../lib/run-status";
 import {
   STOP_REASON_LABEL,
-  automationDotColor,
-  capLabel,
   fmtClock,
   fmtElapsed,
   fmtTime,
   fmtUsd,
-  liveCue,
-  loomState,
   loopSummary,
   triggerSummary,
   jobWorkerSummary,
   workerSummary,
 } from "./presentation";
+import {
+  fixWithCoraPrompt,
+  fmtSpan,
+  fmtWhen,
+  groupJobs,
+  inboxGroup,
+  monthStats,
+  monthTotals,
+  plainSchedule,
+  plainSentence,
+  recentRuns,
+  recentRunsLabel,
+  recordFailed,
+  resultCard,
+  rowSchedule,
+  runMarkOf,
+  statusWord,
+  type RecentRun,
+  type RunMark,
+} from "./inbox-model";
 import { consumePendingAutomationFocus, consumePendingWorkflowRunFocus } from "./focus-request";
 import { reportViewedAutomation } from "../../notifications/viewed-automation";
 import WorkflowsView from "../workflows/WorkflowsView";
@@ -49,9 +65,11 @@ import { missedRunsSummary, precheckSummary } from "@shared/automation-catchup";
 // AutomationsPage — the operations console for this workspace's automations.
 // An automation is a TRIGGER (when to start) + a LOOP (how it repeats) +
 // WORKER nodes that run on the bundled Pi runtime (model + effort are the only
-// worker knobs). Layout: a permanent rail on the left (every automation with
-// its armed/paused state and a quick toggle), and a STAGE on the right that
-// swaps between the detail, the node-flow editor, and the live workers grid.
+// worker knobs). Layout: a permanent rail on the left (an inbox: what needs you
+// first, then failed, running, scheduled and paused), and a STAGE on the right
+// that swaps between the detail, the node-flow editor, and the live workers
+// grid. Words on this page describe what happens in plain language; see
+// inbox-model.ts and the "Automations" section of DESIGN.md.
 // Automations are CREATED by asking Cora in any normal chat, or manually via
 // the flow editor here; there is no separate design-with-Cora surface.
 
@@ -65,6 +83,8 @@ export interface Props {
   // Opens a run's ordinary chat surface, used by "Open chat" on an
   // automation's creator run.
   onOpenRunChat?: (runId: string) => void;
+  // Opens a Cora chat with this text waiting in its message box.
+  onAskCora?: (prompt: string) => void;
 }
 
 // view: rail + detail. create/edit: the node-flow editor owns the stage.
@@ -72,6 +92,22 @@ type Mode = { kind: "view" } | { kind: "create" } | { kind: "edit"; job: Schedul
 type SubTab = "looms" | "workers" | "workflows";
 
 const SUBTAB_STORAGE_KEY = "spark.automations.subtab";
+const RECENT_RUNS_IN_ROW = 10;
+const RECENT_RUNS_ON_PAGE = 20;
+// Rows and stats say "next in 10h" and "Running 3m": a minute hand is enough.
+const CLOCK_TICK_MS = 30_000;
+
+const RUN_WORD: Record<RunMark, string> = {
+  ok: "Finished",
+  failed: "Failed",
+  needs: "Waiting for your answer",
+  running: "Running",
+  skipped: "Skipped",
+};
+
+function firstLine(text: string | undefined): string {
+  return (text ?? "").trim().split("\n", 1)[0].trim();
+}
 
 function subTabStorageKey(workspaceId: string): string {
   return `${SUBTAB_STORAGE_KEY}:${workspaceId}`;
@@ -87,8 +123,18 @@ export default function AutomationsPage({
   cwd,
   active,
   onOpenRunChat,
+  onAskCora,
 }: Props): React.ReactElement {
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
+  const [search, setSearch] = useState("");
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNowMs(Date.now());
+    const clock = window.setInterval(() => setNowMs(Date.now()), CLOCK_TICK_MS);
+    return () => window.clearInterval(clock);
+  }, [active]);
+  const names = useMemo(() => new Map(jobs.map((job) => [job.id, job.name])), [jobs]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "view" });
@@ -195,7 +241,7 @@ export default function AutomationsPage({
     return () => unsubscribe();
   }, [refresh, refreshDetail, liveRun?.id]);
 
-  // Keep the selection valid; auto-select the first automation when nothing is
+  // Keep the selection valid; auto-select the top of the inbox when nothing is
   // chosen.
   useEffect(() => {
     if (jobs.length === 0) {
@@ -203,7 +249,7 @@ export default function AutomationsPage({
       return;
     }
     if (selectedId === null || !jobs.some((j) => j.id === selectedId)) {
-      if (mode.kind === "view") setSelectedId(jobs[0].id);
+      if (mode.kind === "view") setSelectedId(groupJobs(jobs, Date.now())[0]?.jobs[0]?.id ?? jobs[0].id);
     }
   }, [jobs, selectedId, mode.kind]);
 
@@ -396,78 +442,79 @@ export default function AutomationsPage({
   // visibility contract so the canvas viewport survives).
   const boardShowing = boardOpen && selected !== null && subTab === "looms" && !editing;
 
-  // The rail: always on screen. The header carries the create action, each row
-  // carries its armed/paused state + a quick toggle, and the footer swaps the
-  // stage to the global workers grid.
+  // The rail: always on screen. What needs the user comes first, then what
+  // failed, what is running, what is scheduled and what is paused. The footer
+  // swaps the stage to workflows and to the global workers grid.
+  const query = search.trim().toLowerCase();
+  const found = query
+    ? jobs.filter((job) =>
+        `${job.name} ${plainSchedule(job.trigger, names)} ${jobWorkerSummary(job)}`.toLowerCase().includes(query),
+      )
+    : jobs;
+  const shelves = groupJobs(found, nowMs);
   const rail = (
-    <aside
-      style={{
-        flex: "0 0 300px",
-        width: 300,
-        minWidth: 0,
-        display: "flex",
-        flexDirection: "column",
-        background: "var(--panel)",
-        borderRight: "1px solid var(--rule)",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "9px 10px 9px 12px",
-          borderBottom: "1px solid var(--rule)",
-        }}
-      >
-        <span
-          style={{
-            flex: "0 0 auto",
-            fontSize: 12,
-            fontWeight: 650,
-            color: "var(--ink)",
+    <aside className="automation-rail">
+      <div className="automation-rail__head">
+        <input
+          className="spark-input"
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setSearch("");
           }}
-        >
-          Automations
-        </span>
-        <span className="spark-mono spark-num" style={{ flex: 1, fontSize: 10, color: "var(--muted-2)" }}>
-          {String(jobs.length).padStart(2, "0")}
-        </span>
+          placeholder="Find an automation"
+          aria-label="Find an automation"
+          style={{ flex: 1, minWidth: 0, height: 24 }}
+        />
         <button
           type="button"
           className="spark-btn is-primary"
-          style={{ height: 24, padding: "0 9px", fontSize: 11 }}
+          style={{ flex: "0 0 auto", height: 24, padding: "0 9px", fontSize: 11 }}
           disabled={editing}
           onClick={startCreate}
+          aria-label="New automation"
           title={editing ? "The editor is already open" : "Open the flow editor"}
         >
-          + New automation
+          New
         </button>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "8px 8px 12px" }}>
+      <div className="automation-rail__list">
         {loading ? (
-          <div style={{ padding: "10px 8px", color: "var(--muted-2)", fontSize: 11 }}>Loading…</div>
+          <div className="automation-quiet" style={{ padding: "10px 8px" }}>Loading…</div>
         ) : jobs.length === 0 ? (
-          <div style={{ padding: "26px 10px", fontSize: 11.5, lineHeight: 1.6, color: "var(--muted)" }}>
+          <div style={{ padding: "26px 10px", fontSize: 11.5, lineHeight: 1.6, color: "var(--ink-dim)" }}>
             Nothing here yet. Ask Cora in any chat to automate something recurring, or create one
             with the button above.
           </div>
+        ) : shelves.length === 0 ? (
+          <div className="automation-quiet" style={{ padding: "10px 8px" }}>No automation matches.</div>
         ) : (
-          jobs.map((job) => (
-            <AutomationRow
-              key={job.id}
-              job={job}
-              selected={job.id === selectedId && subTab === "looms"}
-              onSelect={() => {
-                setActionError(null);
-                setSelectedId(job.id);
-                switchSubTab("looms");
-              }}
-              onToggleEnabled={(enabled) =>
-                void act(() => window.spark.scheduler.setEnabled(job.id, enabled))
-              }
-            />
+          shelves.map((shelf) => (
+            <React.Fragment key={shelf.id}>
+              <div className="automation-group" data-testid={`automation-group-${shelf.id}`}>
+                {shelf.label}
+                <span className="automation-group__count spark-num">{shelf.jobs.length}</span>
+              </div>
+              {shelf.jobs.map((job) => (
+                <AutomationRow
+                  key={job.id}
+                  job={job}
+                  selected={job.id === selectedId && subTab === "looms"}
+                  nowMs={nowMs}
+                  names={names}
+                  onSelect={() => {
+                    setActionError(null);
+                    setSelectedId(job.id);
+                    switchSubTab("looms");
+                  }}
+                  onToggleEnabled={(enabled) =>
+                    void act(() => window.spark.scheduler.setEnabled(job.id, enabled))
+                  }
+                />
+              ))}
+            </React.Fragment>
           ))
         )}
       </div>
@@ -579,6 +626,7 @@ export default function AutomationsPage({
 
   return (
     <div
+      className="automation-page"
       style={{
         flex: 1,
         minHeight: 0,
@@ -697,59 +745,6 @@ export default function AutomationsPage({
 
           {!editing && subTab === "looms" && (
             <section style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>
-              {/* Another automation just went live while you look at this one:
-                  a slim jump strip so a running machine is never off-screen
-                  without a signpost. */}
-              {(() => {
-                const runningElsewhere = jobs.find(
-                  (j) =>
-                    (j.state.status === "running" || j.state.status === "blocked") &&
-                    j.id !== (selected?.id ?? ""),
-                );
-                if (!runningElsewhere) return null;
-                const heldUp = runningElsewhere.state.status === "blocked";
-                return (
-                  <button
-                    type="button"
-                    className={`loom-live-strip${heldUp ? " is-blocked" : ""}`}
-                    onClick={() => openDetail(runningElsewhere.id)}
-                    title={`Show ${runningElsewhere.name}`}
-                  >
-                    <span className="loom-live-strip__glyph" aria-hidden>
-                      {heldUp ? (
-                        <span
-                          style={{
-                            width: 8,
-                            height: 8,
-                            borderRadius: 999,
-                            background: "var(--danger)",
-                            boxShadow: "0 0 7px color-mix(in oklch, var(--danger) 55%, transparent)",
-                          }}
-                        />
-                      ) : (
-                        <span
-                          className="spark-activity-spin"
-                          style={{
-                            width: 11,
-                            height: 11,
-                            borderRadius: 999,
-                            background:
-                              "conic-gradient(from 0deg, transparent 0deg 90deg, var(--accent) 360deg)",
-                            WebkitMask:
-                              "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
-                            mask: "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
-                          }}
-                        />
-                      )}
-                    </span>
-                    <span className="loom-live-strip__text">
-                      <strong>{runningElsewhere.name}</strong>{" "}
-                      {heldUp ? "needs you" : "is running"}
-                    </span>
-                    <span className="loom-live-strip__action">Watch</span>
-                  </button>
-                );
-              })()}
               {!selected ? (
                 loading ? null : jobs.length === 0 ? (
                   <AutomationsEmptyState onCreate={startCreate} />
@@ -769,6 +764,9 @@ export default function AutomationsPage({
                   liveRun={liveRun}
                   workers={boardWorkers}
                   heroShown={active && !boardOpen}
+                  nowMs={nowMs}
+                  names={names}
+                  onAskCora={onAskCora}
                   onEdit={() => setMode({ kind: "edit", job: selected })}
                   onOpenCreatorChat={
                     selected.createdByRunId && onOpenRunChat
@@ -879,201 +877,55 @@ function AutomationsEmptyState({ onCreate }: { onCreate: () => void }): React.Re
 
 // ── Rail row ─────────────────────────────────────────────────────────────────
 
-// Two-bar pause mark, sized to sit inside the row's state tile.
-function PauseBars({ color, size = 10 }: { color: string; size?: number }): React.ReactElement {
-  return (
-    <svg width={size} height={size} viewBox="0 0 10 10" aria-hidden>
-      <rect x="2" y="1.5" width="2.2" height="7" rx="1" fill={color} />
-      <rect x="5.8" y="1.5" width="2.2" height="7" rx="1" fill={color} />
-    </svg>
-  );
-}
-
-// The row's 18px state tile. The shape tells the automation's disposition at a
-// glance: amber bolt = armed (trigger live, will fire), muted bars = paused,
-// accent pulse = running, red = needs you, info bars = the live pass is held.
-// Status is COLOR + GLYPH here, never a moving box.
-function StateTile({ job }: { job: ScheduledJob }): React.ReactElement {
-  const st = loomState(job);
-  const tile: React.CSSProperties = {
-    flex: "0 0 18px",
-    width: 18,
-    height: 18,
-    marginTop: 1,
-    borderRadius: 6,
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    border: `1px solid color-mix(in oklch, ${st.color} 26%, var(--rule-soft))`,
-    background: `color-mix(in oklch, ${st.color} 9%, var(--panel-2))`,
-  };
-  if (st.kind === "running") {
-    // The comet arc: the same rotation the live surfaces use, so "running"
-    // reads identically from rail glance to detail hero.
-    return (
-      <span aria-hidden style={tile}>
-        <span
-          className="spark-activity-spin"
-          style={{
-            width: 11,
-            height: 11,
-            borderRadius: 999,
-            background: `conic-gradient(from 0deg, transparent 0deg 90deg, ${st.color} 360deg)`,
-            WebkitMask:
-              "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
-            mask: "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
-          }}
-        />
-      </span>
-    );
-  }
-  if (st.kind === "blocked") {
-    return (
-      <span aria-hidden style={tile}>
-        <span
-          style={{
-            width: 7,
-            height: 7,
-            borderRadius: 999,
-            background: st.color,
-            boxShadow: `0 0 6px color-mix(in oklch, ${st.color} 55%, transparent)`,
-          }}
-        />
-      </span>
-    );
-  }
-  if (st.kind === "paused" || st.kind === "passPaused") {
-    return (
-      <span aria-hidden style={tile}>
-        <PauseBars color={st.color} />
-      </span>
-    );
-  }
-  // armed: the trigger's own bolt, in its warm trigger amber.
-  return (
-    <span aria-hidden style={tile}>
-      <LoomIcon kind="trigger" tone={st.color} size={11} />
-    </span>
-  );
-}
-
 const AutomationRow = React.memo(function AutomationRow({
   job,
   selected,
+  nowMs,
+  names,
   onSelect,
   onToggleEnabled,
 }: {
   job: ScheduledJob;
   selected: boolean;
+  nowMs: number;
+  names: ReadonlyMap<string, string>;
   onSelect: () => void;
   onToggleEnabled: (enabled: boolean) => void;
 }): React.ReactElement {
-  const st = loomState(job);
-  const paused = st.kind === "paused";
-  const live = st.kind === "running";
-  const [hover, setHover] = useState(false);
-  const cue = liveCue(job);
+  const group = inboxGroup(job);
+  const status = statusWord(job, nowMs);
+  const schedule = rowSchedule(job, nowMs, names);
+  const runs = recentRuns(job, RECENT_RUNS_IN_ROW, nowMs);
   return (
     <button
       type="button"
       onClick={onSelect}
       aria-current={selected ? "true" : undefined}
-      className={`spark-fade-in automation-row${live ? " is-live" : ""}`}
-      onMouseEnter={(e) => {
-        setHover(true);
-        if (!selected) e.currentTarget.style.background = "var(--hover)";
-      }}
-      onMouseLeave={(e) => {
-        setHover(false);
-        if (!selected) e.currentTarget.style.background = "transparent";
-      }}
-      style={{
-        appearance: "none",
-        position: "relative",
-        overflow: "hidden",
-        textAlign: "left",
-        width: "100%",
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 9,
-        padding: "9px 10px",
-        marginBottom: 4,
-        borderRadius: "var(--radius-surface)",
-        border: "1px solid transparent",
-        background: selected ? "color-mix(in oklch, var(--accent) 13%, var(--panel))" : "transparent",
-        boxShadow: selected ? "var(--lift-hi)" : "none",
-        cursor: "default",
-        // A paused automation recedes as a WHOLE row, so armed vs paused reads
-        // even in peripheral vision. spark-fade-in's fill-forwards animation
-        // would override an inline opacity, so the entrance is dropped while
-        // paused.
-        opacity: paused ? 0.68 : 1,
-        animation: paused ? "none" : undefined,
-        transition:
-          "background var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
-      }}
+      data-group={group}
+      className="automation-row"
     >
-      <StateTile job={job} />
-      <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-        <span style={{ display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 }}>
-          <span
-            style={{
-              flex: 1,
-              minWidth: 0,
-              fontSize: 12.5,
-              fontWeight: 600,
-              color: selected ? "var(--ink)" : "var(--ink-dim)",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-            }}
-            title={job.name}
-          >
+      <span aria-hidden className={`automation-dot is-${group}`} />
+      <span className="automation-row__main">
+        <span className="automation-row__name">
+          <span className="automation-row__title" title={job.name}>
             {job.name}
           </span>
-          <span
-            className="spark-mono"
-            style={{
-              flex: "0 0 auto",
-              fontSize: 9.5,
-              color: st.kind === "running" ? "var(--accent-text)" : st.color,
-              letterSpacing: "0.04em",
-            }}
-          >
-            {st.label}
-          </span>
-          <RunIdChip runId={job.id} label="automation id" compact />
+          <span className={`automation-row__word is-${status.tone}`}>{status.word}</span>
         </span>
-        <span
-          className="spark-mono"
-          style={{ fontSize: 10, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-          title={`${triggerSummary(job.trigger)} · ${loopSummary(job.loop)} · ${jobWorkerSummary(job)}`}
-        >
-          {triggerSummary(job.trigger)} · {loopSummary(job.loop)}
+        <span className="automation-row__sub" title={`${schedule} · ${jobWorkerSummary(job)}`}>
+          {schedule}
         </span>
-        {cue !== "idle" && (
-          <span className="spark-mono spark-num" style={{ fontSize: 9.5, color: "var(--muted-2)" }}>
-            {cue}
-          </span>
-        )}
+        {runs.length > 0 && <RunTicks runs={runs} />}
       </span>
-      {/* Quick arm/pause, revealed on hover (and always for a paused
-          automation so re-arming never needs discovery). A span with
-          role=button because the row itself is already a <button>. */}
+      {/* Quick pause, in the status word's place while the row is hovered or
+          this control has focus. A span with role=button because the row itself
+          is already a <button>. */}
       <span
         role="button"
         tabIndex={0}
-        aria-label={job.enabled ? "Pause this automation" : "Arm this automation"}
-        title={job.enabled ? "Pause: the trigger stops firing" : "Arm: the trigger fires again"}
-        className="spark-icon-btn"
-        style={{
-          ["--spark-icon-btn-size"]: "20px",
-          flex: "0 0 auto",
-          marginTop: 0,
-          opacity: hover || paused ? 1 : 0,
-          pointerEvents: hover || paused ? "auto" : "none",
-          transition: "opacity var(--motion-fast) var(--ease-out)",
-        } as React.CSSProperties}
+        aria-label={job.enabled ? "Pause this automation" : "Turn this automation on"}
+        title={job.enabled ? "Pause: nothing new starts by itself" : "Turn on: it starts by itself again"}
+        className="automation-row__toggle"
         onClick={(e) => {
           e.stopPropagation();
           onToggleEnabled(!job.enabled);
@@ -1085,16 +937,8 @@ const AutomationRow = React.memo(function AutomationRow({
             onToggleEnabled(!job.enabled);
           }
         }}
-        // Keyboard focus must reveal the control; otherwise tab lands on an
-        // invisible, still-operable toggle.
-        onFocus={() => setHover(true)}
-        onBlur={() => setHover(false)}
       >
-        {job.enabled ? (
-          <PauseBars color="currentColor" size={9} />
-        ) : (
-          <LoomIcon kind="trigger" tone="var(--warn)" size={10} />
-        )}
+        {job.enabled ? "Pause" : "Turn on"}
       </span>
     </button>
   );
@@ -1107,6 +951,8 @@ function AutomationDetail({
   liveRun,
   workers,
   heroShown,
+  nowMs,
+  names,
   onEdit,
   onOpenCreatorChat,
   onRunNow,
@@ -1118,6 +964,7 @@ function AutomationDetail({
   onOpenLiveBoard,
   onOpenBoardFocused,
   onAnswer,
+  onAskCora,
 }: {
   job: ScheduledJob;
   liveRun: RunState | null;
@@ -1126,6 +973,8 @@ function AutomationDetail({
   // The detail is on screen and unobstructed (tab active, board closed) —
   // gates the live hero's 1s clock and activity poll.
   heroShown: boolean;
+  nowMs: number;
+  names: ReadonlyMap<string, string>;
   onEdit: () => void;
   // Present only when this automation carries a createdByRunId; the button is
   // further gated below on the run still existing.
@@ -1141,10 +990,10 @@ function AutomationDetail({
   // Opens the board focused on one worker (by attemptId).
   onOpenBoardFocused: (attemptId: string) => void;
   onAnswer: (runId: string, questionMessageId: string, answer: string) => void;
+  onAskCora?: (prompt: string) => void;
 }): React.ReactElement {
   const status = job.state.status;
   const running = status === "running" || status === "blocked";
-  const st = loomState(job);
   // Resolve whether the creator chat still exists so a deleted run doesn't
   // leave a dead "Open chat" button. One cheap getRun per automation that has
   // a back-pointer; re-checked when the pointer changes.
@@ -1177,101 +1026,36 @@ function AutomationDetail({
     // flex:"1 0 auto": fill the scroll pane's height so the last section's
     // background runs to the bottom instead of leaving a dead void.
     <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: "1 0 auto" }}>
-      {/* Sticky header */}
-      <div
-        style={{
-          position: "sticky",
-          top: 0,
-          zIndex: 2,
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          padding: "12px 16px",
-          background: "var(--bg)",
-          borderBottom: "1px solid var(--rule)",
-        }}
-      >
-        <StateTile job={job} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
-            <span style={{ fontSize: 14, fontWeight: 700, color: "var(--ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              {job.name}
-            </span>
-            <span
-              className="spark-badge"
-              style={{
-                flex: "0 0 auto",
-                color: st.kind === "running" ? "var(--accent-text)" : st.color,
-                borderColor: `color-mix(in oklch, ${st.color} 32%, transparent)`,
-                background: `color-mix(in oklch, ${st.color} 8%, transparent)`,
-              }}
-            >
-              {st.label}
-            </span>
-            <RunIdChip runId={job.id} label="automation id" maxChars={24} />
+      <div className="automation-head">
+        <div className="automation-head__main">
+          <div className="automation-head__title">
+            <span aria-hidden className={`automation-dot is-${inboxGroup(job)}`} />
+            <span className="automation-head__name" title={job.name}>{job.name}</span>
           </div>
-          <div className="spark-mono" style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 2 }}>
-            {triggerSummary(job.trigger)} · {loopSummary(job.loop)} · {jobWorkerSummary(job)}
-          </div>
+          <p className="automation-sentence" data-testid="automation-sentence">
+            {plainSentence(job, names).map((part, i) =>
+              part.strong ? <b key={i}>{part.text}</b> : <React.Fragment key={i}>{part.text}</React.Fragment>,
+            )}
+          </p>
         </div>
-        {/* The board's ONLY entry points are explicit clicks like this one; it
-            never auto-opens. Glowing while live so a running automation
-            invites you in; plain "Board" otherwise. */}
-        <button
-          type="button"
-          className="spark-btn"
-          style={
-            running
-              ? {
-                  height: 26,
-                  padding: "0 12px",
-                  fontSize: 11.5,
-                  borderColor: "var(--accent-edge)",
-                  background: "var(--accent-soft)",
-                  boxShadow: "0 0 14px var(--accent-glow)",
-                }
-              : { height: 26, padding: "0 12px", fontSize: 11.5 }
-          }
-          onClick={onOpenLiveBoard}
-          title={
-            running
-              ? "Watch this run on the whiteboard: live graph and worker activity"
-              : "Open the whiteboard with the last run's state"
-          }
-        >
-          {running ? (
-            <>
-              <span aria-hidden style={{ color: "var(--accent-text)", marginRight: 6 }}>
-                ●
-              </span>
-              Live board
-            </>
-          ) : (
-            "Board"
-          )}
-        </button>
+        <ActionBar
+          job={job}
+          onRunNow={onRunNow}
+          onPause={onPause}
+          onResume={onResume}
+          onStop={onStop}
+          onEdit={onEdit}
+          onToggleEnabled={onToggleEnabled}
+          onOpenLiveBoard={onOpenLiveBoard}
+        />
       </div>
-
-      {/* Action bar: every control in ONE place, run-scoped first, then
-          automation-scoped, destructive last. */}
-      <ActionBar
-        job={job}
-        onRunNow={onRunNow}
-        onPause={onPause}
-        onResume={onResume}
-        onStop={onStop}
-        onEdit={onEdit}
-        onOpenCreatorChat={canOpenCreatorChat ? onOpenCreatorChat : undefined}
-        onToggleEnabled={onToggleEnabled}
-        onDelete={onDelete}
-      />
 
       {/* THE LIVE MOMENT: while a pass is in flight the detail leads with the
           machine actually working — wire electricity, comet arc, ticking
-          readout, and the worker's live activity stream. Idle automations get
-          the quieter status card below instead. */}
-      {running ? (
-        <div style={{ padding: "12px 16px 2px" }}>
+          readout, and the worker's live activity stream. Quiet automations get
+          the last result instead. */}
+      <div style={{ padding: "12px 16px 0" }}>
+        {running ? (
           <LiveRunHero
             job={job}
             liveRun={liveRun}
@@ -1280,20 +1064,12 @@ function AutomationDetail({
             onOpenLiveBoard={onOpenLiveBoard}
             onAnswer={onAnswer}
           />
-        </div>
-      ) : null}
-
-      {/* Pipeline strip */}
-      <div style={{ padding: "10px 16px 4px" }}>
-        <MiniFlow job={job} liveRun={liveRun} onOpenEditor={onEdit} />
+        ) : (
+          <ResultCard job={job} liveRun={liveRun} nowMs={nowMs} onAnswer={onAnswer} onAskCora={onAskCora} />
+        )}
       </div>
 
-      {/* Status card only while idle — the hero above owns the live state. */}
-      {!running && (
-        <Section label="Last pass">
-          <LivePassCard job={job} liveRun={liveRun} onOpenLiveBoard={onOpenLiveBoard} onAnswer={onAnswer} />
-        </Section>
-      )}
+      <RecentRunsBar job={job} nowMs={nowMs} />
 
       {/* Workers: THIS automation's live/lingering workers, surfaced inside
           the detail (not only on the global Workers grid). Hidden when none. */}
@@ -1303,17 +1079,65 @@ function AutomationDetail({
         </Section>
       )}
 
-      {/* History */}
-      <Section label="History" count={job.history.length + (job.skips?.length ?? 0)}>
-        <HistoryTimeline jobId={job.id} history={job.history} skips={job.skips} liveRunId={job.state.currentRunId} onOpenLiveBoard={onOpenLiveBoard} />
+      <Section label="Runs" count={job.history.length + (job.skips?.length ?? 0)}>
+        <HistoryTimeline jobId={job.id} history={job.history} skips={job.skips} liveRunId={job.state.currentRunId} onOpenLiveBoard={onOpenLiveBoard} nowMs={nowMs} />
       </Section>
 
-      {/* Read-only configuration; the actions for it (Edit / Delete) live in
-          the action bar up top with everything else. Grows to absorb the
-          leftover height so the page reads as one composed surface. */}
-      <Section label="Configuration" grow>
-        <ConfigSummary job={job} />
+      <Section label="How it runs">
+        <MiniFlow job={job} liveRun={liveRun} onOpenEditor={onEdit} />
       </Section>
+
+      {/* Read-only settings, then the actions a reader reaches for rarely:
+          destructive last and well away from Run now. Grows to absorb the
+          leftover height so the page reads as one composed surface. */}
+      <Section label="Details" grow>
+        <ConfigSummary job={job} names={names} />
+        <DetailFooter onOpenCreatorChat={canOpenCreatorChat ? onOpenCreatorChat : undefined} onDelete={onDelete} />
+      </Section>
+    </div>
+  );
+}
+
+function DetailFooter({
+  onOpenCreatorChat,
+  onDelete,
+}: {
+  onOpenCreatorChat?: () => void;
+  onDelete: () => void;
+}): React.ReactElement {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const btn: React.CSSProperties = { height: 24, fontSize: 11 };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14 }}>
+      {onOpenCreatorChat && (
+        <button
+          type="button"
+          className="spark-btn"
+          style={btn}
+          onClick={onOpenCreatorChat}
+          title="Open the Cora chat that created this automation"
+        >
+          ✦ Open chat
+        </button>
+      )}
+      <span style={{ flex: 1 }} />
+      <button
+        type="button"
+        className="spark-btn is-danger"
+        style={btn}
+        onClick={() => {
+          if (confirmDelete) {
+            setConfirmDelete(false);
+            onDelete();
+          } else {
+            setConfirmDelete(true);
+          }
+        }}
+        onMouseLeave={() => setConfirmDelete(false)}
+        title="Delete this automation (its run history stays on disk)"
+      >
+        {confirmDelete ? "Confirm delete" : "Delete"}
+      </button>
     </div>
   );
 }
@@ -1327,9 +1151,8 @@ function ActionBar({
   onResume,
   onStop,
   onEdit,
-  onOpenCreatorChat,
   onToggleEnabled,
-  onDelete,
+  onOpenLiveBoard,
 }: {
   job: ScheduledJob;
   onRunNow: () => void;
@@ -1337,51 +1160,31 @@ function ActionBar({
   onResume: () => void;
   onStop: () => void;
   onEdit: () => void;
-  onOpenCreatorChat?: () => void;
   onToggleEnabled: (enabled: boolean) => void;
-  onDelete: () => void;
+  onOpenLiveBoard: () => void;
 }): React.ReactElement {
   const [confirmStop, setConfirmStop] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const status = job.state.status;
   const running = status === "running" || status === "blocked";
   const btn: React.CSSProperties = { height: 26, fontSize: 11.5 };
-  const divider = (
-    <span aria-hidden style={{ width: 1, height: 16, background: "var(--rule)", margin: "0 2px" }} />
-  );
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        flexWrap: "wrap",
-        padding: "10px 16px",
-        borderBottom: "1px solid var(--rule-soft)",
-        background: "var(--panel)",
-      }}
-    >
-      {/* Run-scoped controls */}
+    <div className="automation-actions">
       <button
         type="button"
         className={`spark-btn${!running ? " is-primary" : ""}`}
         style={btn}
         onClick={onRunNow}
-        title={
-          running
-            ? "Stop the current pass and start over from pass 1"
-            : "Start a fresh run now"
-        }
+        title={running ? "Stop the current run and start over" : "Start a fresh run now"}
       >
         {running ? "Restart" : "Run now"}
       </button>
       {status === "paused" ? (
-        <button type="button" className="spark-btn" style={btn} onClick={onResume} title="Resume the held pass">
+        <button type="button" className="spark-btn" style={btn} onClick={onResume} title="Carry on with the run on hold">
           Resume
         </button>
       ) : running ? (
-        <button type="button" className="spark-btn" style={btn} onClick={onPause} title="Hold the live pass; resume it any time">
-          Pause pass
+        <button type="button" className="spark-btn" style={btn} onClick={onPause} title="Hold this run; resume it any time">
+          Hold run
         </button>
       ) : null}
       {running && (
@@ -1403,65 +1206,40 @@ function ActionBar({
           {confirmStop ? "Confirm stop" : "Stop"}
         </button>
       )}
-
-      {divider}
-
-      {/* Automation-scoped controls */}
       <button
         type="button"
         className="spark-btn"
-        style={
-          job.enabled
-            ? btn
-            : {
-                ...btn,
-                color: "var(--warn)",
-                borderColor: "color-mix(in oklch, var(--warn) 34%, transparent)",
-                background: "color-mix(in oklch, var(--warn) 9%, transparent)",
-              }
-        }
+        style={btn}
         onClick={() => onToggleEnabled(!job.enabled)}
         title={
           job.enabled
-            ? "Pause the automation: its trigger stops firing (a live pass keeps going)"
-            : "Arm the automation: its trigger fires again"
+            ? "Pause the automation: nothing new starts by itself (a live run keeps going)"
+            : "Turn the automation back on: it starts by itself again"
         }
       >
-        {job.enabled ? "Pause automation" : "⚡ Arm automation"}
+        {job.enabled ? "Pause" : "Turn on"}
       </button>
       <button type="button" className="spark-btn" style={btn} onClick={onEdit} title="Open this automation in the flow editor">
         Edit
       </button>
-      {onOpenCreatorChat && (
-        <button
-          type="button"
-          className="spark-btn"
-          style={btn}
-          onClick={onOpenCreatorChat}
-          title="Open the Cora chat that created this automation"
-        >
-          ✦ Open chat
-        </button>
-      )}
-
-      <span style={{ flex: 1 }} />
-
+      {/* The board's ONLY entry points are explicit clicks like this one; it
+          never auto-opens. */}
       <button
         type="button"
-        className="spark-btn is-danger"
-        style={btn}
-        onClick={() => {
-          if (confirmDelete) {
-            setConfirmDelete(false);
-            onDelete();
-          } else {
-            setConfirmDelete(true);
-          }
-        }}
-        onMouseLeave={() => setConfirmDelete(false)}
-        title="Delete this automation (its run history stays on disk)"
+        className="spark-btn"
+        style={
+          running
+            ? { ...btn, borderColor: "var(--accent-edge)", background: "var(--accent-soft)" }
+            : btn
+        }
+        onClick={onOpenLiveBoard}
+        title={
+          running
+            ? "Watch this run on the whiteboard: live graph and worker activity"
+            : "Open the whiteboard with the last run's state"
+        }
       >
-        {confirmDelete ? "Confirm delete" : "Delete"}
+        {running ? "Live board" : "Board"}
       </button>
     </div>
   );
@@ -1491,9 +1269,7 @@ function Section({
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "12px 16px 4px" }}>
         <span style={{ fontSize: 12, fontWeight: 650, color: "var(--ink-dim)" }}>{label}</span>
         {typeof count === "number" && (
-          <span className="spark-mono spark-num" style={{ fontSize: 10, color: "var(--muted-2)" }}>
-            {String(count).padStart(2, "0")}
-          </span>
+          <span className="spark-num automation-quiet">{count}</span>
         )}
       </div>
       <div style={{ padding: "4px 16px 14px", ...(grow ? { flex: 1 } : {}) }}>{children}</div>
@@ -1628,32 +1404,30 @@ function DetailWorkerRow({
   );
 }
 
-// ── Live pass card ───────────────────────────────────────────────────────────
+// ── The last result ──────────────────────────────────────────────────────────
 
-// Status-only: what the automation is doing this instant (iteration, live
-// run, spend, a blocked worker's question). Every BUTTON lives in the
-// ActionBar.
-function LivePassCard({
+// What the automation did last: the first thing a reader wants when nothing is
+// running. Running work has the live hero instead.
+function ResultCard({
   job,
   liveRun,
-  onOpenLiveBoard,
+  nowMs,
   onAnswer,
+  onAskCora,
 }: {
   job: ScheduledJob;
   liveRun: RunState | null;
-  onOpenLiveBoard: () => void;
+  nowMs: number;
   onAnswer: (runId: string, questionMessageId: string, answer: string) => void;
+  onAskCora?: (prompt: string) => void;
 }): React.ReactElement {
+  const card = resultCard(job, nowMs);
+  const [peeking, setPeeking] = useState(false);
+  useEffect(() => {
+    setPeeking(false);
+  }, [card.runId]);
   const [answerDraft, setAnswerDraft] = useState("");
-  const status = job.state.status;
-  const running = status === "running" || status === "blocked";
-  const edge = liveRun ? runStatusColor(liveRun.status) : automationDotColor(status);
-  const budget = job.loop?.stop?.budgetUsd;
-  // The pass on show: the live run while one is in flight, otherwise the most
-  // recent recorded iteration, so the card always names a run you can inspect.
-  const shownRunId = liveRun?.id ?? job.history[job.history.length - 1]?.runId;
-
-  // The blocked iteration's exact unresolved question. Its id must travel with
+  // The held iteration's exact unresolved question. Its id must travel with
   // every answer; a historical same-text question is not interchangeable.
   const pendingQuestion = liveRun ? resolveOpenRunQuestion(liveRun) : null;
   const answerDraftScope = runQuestionDraftScopeKey(liveRun?.id, pendingQuestion?.id);
@@ -1663,81 +1437,19 @@ function LivePassCard({
   useEffect(() => {
     setAnswerDraft("");
   }, [answerDraftScope]);
-
+  const send = (): void => {
+    if (!liveRun || !pendingQuestion || !answerDraft.trim()) return;
+    onAnswer(liveRun.id, pendingQuestion.id, answerDraft.trim());
+    setAnswerDraft("");
+  };
   return (
-    <div
-      style={{
-        borderRadius: "var(--radius-surface)",
-        // A card in the window, so solid: --notify-surface turns into toast
-        // glass when glass is on.
-        background: "var(--panel-2)",
-        border: "1px solid var(--rule)",
-        boxShadow: `inset 3px 0 0 ${edge}, var(--shadow-1)`,
-        padding: "12px 14px",
-        display: "flex",
-        flexDirection: "column",
-        gap: 10,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-        <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink)" }}>
-          {running ? `Iteration ${job.state.iteration}` : status === "stopped" ? "Loop finished" : "Idle"}
-        </span>
-        <span className="spark-mono spark-num" style={{ fontSize: 10.5, color: "var(--muted)" }}>
-          {job.state.iteration}/{capLabel(job)} iters
-        </span>
-        <span style={{ flex: 1 }} />
-        {shownRunId && (
-          <span style={{ alignSelf: "center", minWidth: 0 }}>
-            <RunIdChip runId={shownRunId} maxChars={24} />
-          </span>
-        )}
-        <span className="spark-mono spark-num" style={{ fontSize: 10.5, color: "var(--muted)" }}>
-          est. {fmtUsd(job.state.spentUsd)}
-          {typeof budget === "number" ? ` / ${fmtUsd(budget)}` : ""}
-        </span>
-      </div>
-
-      {liveRun ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span className="spark-mono" style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--ink-dim)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            <span style={{ color: runStatusColor(liveRun.status) }}>●</span> {liveRun.title || "run"}:{" "}
-            {liveRun.status}
-          </span>
-          {running && (
-            <button
-              type="button"
-              className="spark-btn"
-              style={{ height: 24, padding: "0 10px", fontSize: 11 }}
-              onClick={onOpenLiveBoard}
-              title="Watch this run on the whiteboard"
-            >
-              Live board →
-            </button>
-          )}
-        </div>
-      ) : (
-        <div className="spark-mono" style={{ fontSize: 11, color: "var(--muted)" }}>
-          No live run. {status === "stopped" && job.state.lastStopReason
-            ? `Stopped: ${STOP_REASON_LABEL[job.state.lastStopReason]}.`
-            : "Run it now or wait for the trigger."}
-        </div>
-      )}
-
+    <div className={`automation-result${card.failed ? " is-failed" : ""}`} data-testid="automation-result">
+      <div className="automation-result__headline">{card.headline}</div>
+      <div className="automation-result__body">{card.body}</div>
       {pendingQuestion && liveRun && (
-        <div
-          style={{
-            borderRadius: "var(--radius-control)",
-            border: "1px solid color-mix(in oklch, var(--danger) 30%, transparent)",
-            background: "var(--danger-soft)",
-            padding: "8px 10px",
-            display: "flex",
-            flexDirection: "column",
-            gap: 8,
-          }}
-        >
-          <span style={{ fontSize: 11.5, color: "var(--ink)", whiteSpace: "pre-wrap" }}>{pendingQuestion.message}</span>
-          <div style={{ display: "flex", gap: 6 }}>
+        <div className="automation-ask">
+          <span style={{ whiteSpace: "pre-wrap" }}>{pendingQuestion.message}</span>
+          <div className="automation-ask__row">
             <input
               className="spark-input"
               value={answerDraft}
@@ -1745,10 +1457,7 @@ function LivePassCard({
               placeholder="Answer the worker…"
               style={{ flex: 1, height: 26 }}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && answerDraft.trim()) {
-                  onAnswer(liveRun.id, pendingQuestion.id, answerDraft.trim());
-                  setAnswerDraft("");
-                }
+                if (e.key === "Enter") send();
               }}
             />
             <button
@@ -1756,16 +1465,81 @@ function LivePassCard({
               className="spark-btn is-primary"
               style={{ height: 26, fontSize: 11 }}
               disabled={!answerDraft.trim()}
-              onClick={() => {
-                onAnswer(liveRun.id, pendingQuestion.id, answerDraft.trim());
-                setAnswerDraft("");
-              }}
+              onClick={send}
             >
               Send
             </button>
           </div>
         </div>
       )}
+      {(card.facts.length > 0 || card.runId) && (
+        <div className="automation-facts">
+          {card.facts.map((fact) => (
+            <span key={fact} className="automation-chip spark-num">
+              {fact}
+            </span>
+          ))}
+          <span style={{ flex: 1 }} />
+          {card.failed && onAskCora && (
+            <button
+              type="button"
+              className="spark-btn"
+              style={{ height: 22, padding: "0 8px", fontSize: 11 }}
+              title="Open a Cora chat with this failure in the message box. Nothing is sent until you send it."
+              onClick={() => onAskCora(fixWithCoraPrompt(job))}
+            >
+              Fix with Cora
+            </button>
+          )}
+          {card.runId && (
+            <button
+              type="button"
+              className="spark-btn"
+              style={{ height: 22, padding: "0 8px", fontSize: 11 }}
+              aria-expanded={peeking}
+              onClick={() => setPeeking((open) => !open)}
+            >
+              {peeking ? "Hide what it did" : "See what it did"}
+            </button>
+          )}
+        </div>
+      )}
+      {peeking && card.runId && <RunPeek runId={card.runId} onClose={() => setPeeking(false)} />}
+    </div>
+  );
+}
+
+// ── Recent runs ──────────────────────────────────────────────────────────────
+
+function RunTicks({ runs, large }: { runs: RecentRun[]; large?: boolean }): React.ReactElement {
+  return (
+    <span className={`automation-ticks${large ? " is-large" : ""}`} aria-hidden={!large} role={large ? "img" : undefined} aria-label={large ? recentRunsLabel(runs) : undefined}>
+      {runs.map((run, i) => (
+        <i key={`${run.at}-${i}`} className={`is-${run.mark}`} title={large ? run.label : undefined} />
+      ))}
+    </span>
+  );
+}
+
+function RecentRunsBar({ job, nowMs }: { job: ScheduledJob; nowMs: number }): React.ReactElement {
+  const runs = recentRuns(job, RECENT_RUNS_ON_PAGE, nowMs);
+  const partial = monthTotals(job, nowMs).partial;
+  return (
+    <div className="automation-health" data-testid="automation-health">
+      {runs.length > 0 && (
+        <div className="automation-health__bar">
+          <RunTicks runs={runs} large />
+          <span className="automation-quiet">{recentRunsLabel(runs)}</span>
+        </div>
+      )}
+      <div
+        className="automation-stats spark-num"
+        title={partial ? `Only the last ${AUTOMATION_HISTORY_CAP} runs are kept, so the month's real totals can be higher.` : undefined}
+      >
+        {monthStats(job, nowMs).map((stat) => (
+          <span key={stat}>{stat}</span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1778,12 +1552,14 @@ function HistoryTimeline({
   skips,
   liveRunId,
   onOpenLiveBoard,
+  nowMs,
 }: {
   jobId: string;
   history: AutomationRunRecord[];
   skips?: AutomationSkipRecord[];
   liveRunId?: string;
   onOpenLiveBoard: () => void;
+  nowMs: number;
 }): React.ReactElement {
   // Keyed iteration+runId: iteration alone collides across loop cycles
   // ("Run now" resets the counter while history is retained), which would
@@ -1792,7 +1568,7 @@ function HistoryTimeline({
   const [peekRunId, setPeekRunId] = useState<string | null>(null);
 
   if (history.length === 0 && !skips?.length) {
-    return <div style={{ fontSize: 11, color: "var(--muted-2)" }}>No iterations yet.</div>;
+    return <div className="automation-quiet">No runs yet.</div>;
   }
   const rows = mergeTimeline(history, skips);
   return (
@@ -1800,7 +1576,7 @@ function HistoryTimeline({
       {rows.map((rec) => {
         if ("skip" in rec) return <SkippedHistoryRow key={`skip-${rec.skip.id}`} jobId={jobId} skip={rec.skip} />;
         const recKey = `${rec.iteration}-${rec.runId}`;
-        const dot = rec.status === "running" ? "var(--accent)" : runStatusColor(rec.status);
+        const dot = runMarkOf(rec);
         const isExpanded = expanded === recKey;
         const isLive = rec.runId === liveRunId && rec.status === "running";
         return (
@@ -1831,6 +1607,7 @@ function HistoryTimeline({
                   textAlign: "left",
                   flex: 1,
                   minWidth: 0,
+                  overflow: "hidden",
                   display: "flex",
                   alignItems: "center",
                   gap: 10,
@@ -1840,40 +1617,12 @@ function HistoryTimeline({
                   cursor: "default",
                 }}
               >
-                <span
-                  aria-hidden
-                  style={{ flex: "0 0 7px", width: 7, height: 7, borderRadius: 999, background: dot }}
-                />
-                <span className="spark-mono spark-num" style={{ flex: "0 0 auto", fontSize: 10.5, color: "var(--ink-dim)" }}>
-                  #{rec.iteration}
+                <span aria-hidden className={`automation-dot is-${dot}`} />
+                <span className="spark-mono spark-num automation-runs__when">
+                  {fmtWhen(rec.startedAt, nowMs)}
                 </span>
-                <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={rec.summary}>
-                  {rec.summary || rec.status}
-                </span>
-                <span
-                  className="spark-mono spark-num"
-                  style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}
-                  title={
-                    (rec.costUsd ?? 0) > (rec.measuredCostUsd ?? 0)
-                      ? "Includes estimated value of subscription usage priced at public list rates; billed spend: " +
-                        fmtUsd(rec.measuredCostUsd ?? 0)
-                      : "Billed spend"
-                  }
-                >
-                  {(rec.costUsd ?? 0) > (rec.measuredCostUsd ?? 0) ? "est. " : ""}
-                  {fmtUsd(rec.costUsd)}
-                </span>
-                {rec.finishedAt && (
-                  <span
-                    className="spark-mono spark-num"
-                    style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}
-                    title="How long this pass ran"
-                  >
-                    {fmtElapsed(rec.startedAt, Date.parse(rec.finishedAt))}
-                  </span>
-                )}
-                <span className="spark-mono" style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}>
-                  {fmtTime(rec.finishedAt ?? rec.startedAt)}
+                <span className="automation-runs__text" title={rec.summary}>
+                  {firstLine(rec.summary) || RUN_WORD[dot]}
                 </span>
                 {rec.catchUp && (
                   <span
@@ -1884,20 +1633,29 @@ function HistoryTimeline({
                     caught up
                   </span>
                 )}
-                {rec.stopReason && (
+                {rec.stopReason && rec.stopReason !== "once" && rec.stopReason !== "agent-done" && (
                   <span
-                    className={`spark-badge${
-                      rec.stopReason === "iteration-failed" || rec.stopReason === "budget" || rec.stopReason === "engine-missing"
-                        ? " is-danger"
-                        : rec.stopReason === "agent-done" || rec.stopReason === "tests-pass" || rec.stopReason === "once"
-                          ? " is-ok"
-                          : ""
+                    className={`spark-badge automation-runs__badge${
+                      recordFailed(rec) ? " is-danger" : rec.stopReason === "tests-pass" ? " is-ok" : ""
                     }`}
                     style={{ flex: "0 0 auto" }}
                   >
                     {STOP_REASON_LABEL[rec.stopReason]}
                   </span>
                 )}
+                <span
+                  className="spark-mono spark-num automation-runs__meta"
+                  title={
+                    (rec.costUsd ?? 0) > (rec.measuredCostUsd ?? 0)
+                      ? "Includes estimated value of subscription usage priced at public list rates; billed spend: " +
+                        fmtUsd(rec.measuredCostUsd ?? 0)
+                      : "Billed spend"
+                  }
+                >
+                  {rec.finishedAt ? `${fmtSpan(Date.parse(rec.finishedAt) - Date.parse(rec.startedAt))} · ` : ""}
+                  {(rec.costUsd ?? 0) > (rec.measuredCostUsd ?? 0) ? "est. " : ""}
+                  {fmtUsd(rec.costUsd)}
+                </span>
               </button>
               <RunIdChip runId={rec.runId} compact />
             </div>
@@ -2088,7 +1846,7 @@ function NodeConfigCard({ node }: { node: LoomNodeDef }): React.ReactElement {
   );
 }
 
-function ConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
+function ConfigSummary({ job, names }: { job: ScheduledJob; names: ReadonlyMap<string, string> }): React.ReactElement {
   // Tolerate malformed persisted jobs (loop without stop): the scheduler
   // backfills on read, but a bad record must never take down the renderer.
   const stop = job.loop?.stop ?? {};
@@ -2098,8 +1856,8 @@ function ConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
   const chips: { label: string; hint: string }[] = [];
   if (typeof stop.maxIterations === "number") {
     chips.push({
-      label: `max ${stop.maxIterations} iteration${stop.maxIterations === 1 ? "" : "s"}`,
-      hint: "Hard stop after this many iterations per fire. Edit: Loop node → Safety caps.",
+      label: `at most ${stop.maxIterations} run${stop.maxIterations === 1 ? "" : "s"}`,
+      hint: "Hard stop after this many runs each time it starts. Edit: Loop node → Safety caps.",
     });
   }
   // budgetUsd <= 0 means "no cap" (engine semantics) — showing $0.00 as a
@@ -2137,10 +1895,17 @@ function ConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
   const nodes = orderedNodes(graphForJob(job));
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <KeyVal k="Trigger" v={triggerSummary(job.trigger)} />
+      <KeyVal
+        k="Starts"
+        v={job.trigger.kind === "cron" ? `${plainSchedule(job.trigger, names)} · ${triggerSummary(job.trigger)}` : plainSchedule(job.trigger, names)}
+      />
       {precheckSummary(job.precheck) && <KeyVal k="Check first" v={precheckSummary(job.precheck) as string} />}
       {missedRunsSummary(job) && <KeyVal k="If missed" v={missedRunsSummary(job) as string} />}
-      <KeyVal k="Loop" v={loopSummary(job.loop)} />
+      <KeyVal k="Repeats" v={loopSummary(job.loop)} />
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <ConfigKey label="Id" />
+        <RunIdChip runId={job.id} label="automation id" maxChars={24} />
+      </div>
       <div style={{ display: "flex", gap: 8 }}>
         <ConfigKey label="Stops" />
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -2163,7 +1928,7 @@ function ConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
       {/* The pipeline, node by node in execution order, each worker with ITS
           model and ITS prompt. */}
       <div style={{ display: "flex", gap: 8 }}>
-        <ConfigKey label="Pipeline" />
+        <ConfigKey label="Steps" />
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
           {nodes.map((n) => (
             <NodeConfigCard key={n.id} node={n} />
