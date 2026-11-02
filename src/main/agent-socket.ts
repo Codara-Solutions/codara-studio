@@ -1,6 +1,7 @@
 import { monthSpentUsd, normalizeAutomationGuard } from "@shared/automation-guard";
 import { app, BrowserWindow } from "electron";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer, IncomingMessage, type Server, ServerResponse } from "node:http";
+import { Socket } from "node:net";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
@@ -49,6 +50,7 @@ import {
   agentSessionWaitMs,
   parseAgentSessionStart,
   type AgentSessionCaller,
+  type AgentSessionView,
 } from "./agent-sessions";
 import { AGENT_SESSION_BRIEF_MAX_CHARS, AGENT_SESSION_MAX_LIVE, type AgentSessionRecord } from "@shared/agent-sessions";
 import {
@@ -659,6 +661,7 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "worktree.remove",
   "session.start",
   "session.message",
+  "review.findings",
 ]);
 
 // The in-process Pi extension and MCP roster both hide these capabilities for
@@ -778,6 +781,8 @@ async function dispatch(
         return await handleTerminalCreate(params, id, auth.kind, res);
       case "session.start":
         return await handleSessionStart(params, id, auth.kind, res);
+      case "review.findings":
+        return await handleReviewFindings(params, id);
       case "session.status":
         return await handleSessionStatus(params, id);
       case "session.wait":
@@ -1651,7 +1656,7 @@ async function authorizeWorkspaceTarget(input: {
       ? await paneWorkspaceId(callerPaneId)
       : null;
   const caller = state.workspaces.find((workspace) => workspace.id === callerWorkspaceId) ?? null;
-  if (caller?.id === target.id) {
+  if (caller?.id === target.id || userSessionStarts.has(input.params)) {
     return { ok: true, target, ...(resolved.folder ? { folder: resolved.folder } : {}), cross: null };
   }
   const refusal = crossWorkspaceRefusal({
@@ -1861,6 +1866,7 @@ async function createTerminal(
     try {
       const caller = {
         ...(await worktreeCaller(params)),
+        ...(userSessionStarts.has(params) && workspaceId ? { workspaceId } : {}),
         ...(crossWorkspace
           ? {
               workspaceId: crossWorkspace.target.id,
@@ -2104,6 +2110,46 @@ async function agentSessionCallerRefusal(
     workspaces: state.workspaces,
   });
   return trust === "trusted" ? null : "an agent in an imported pull request cannot start sessions";
+}
+
+// A session the user asked for with a click in Source Control. The click is the
+// approval a cross-workspace call would otherwise ask for, so only main can put
+// params in here: the socket's params are parsed JSON and never in the set.
+const userSessionStarts = new WeakSet<Record<string, unknown>>();
+
+/** session.start for the user's own click: the same path an agent's call takes. */
+export async function startAgentSessionForUser(input: {
+  brief: string;
+  runtime: "claude" | "codex";
+  workspace: string;
+  title?: string;
+  worktree?: { branch?: string; base?: string; purpose?: string };
+  group?: string;
+}): Promise<AgentSessionView> {
+  // Names the worktree's maker, which later says which model family wrote the work.
+  const params: Record<string, unknown> = { ...input, callerClient: input.runtime === "codex" ? "codex" : "claude-code" };
+  userSessionStarts.add(params);
+  const response = await handleSessionStart(params, 0, "root", new ServerResponse(new IncomingMessage(new Socket())));
+  if (response.error) throw new Error(response.error.message);
+  return response.result as AgentSessionView;
+}
+
+export async function agentSessionViewForUser(sessionId: string): Promise<AgentSessionView | null> {
+  const sessions = agentSessions();
+  await sessions.load();
+  const record = sessions.get(sessionId);
+  return record ? sessions.view(record) : null;
+}
+
+async function handleReviewFindings(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const reviewId = stringParam(params, "reviewId");
+  if (!reviewId) return errorResponse(id, ERR_INVALID_PARAMS, "reviewId is required: the id in your review prompt");
+  const { agentReviews } = await import("./review");
+  const result = await agentReviews().submit(reviewId, params.findings);
+  if (!result.accepted) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "no review is waiting for that id; it was answered or stopped");
+  }
+  return successResponse(id, { accepted: result.count });
 }
 
 function sessionCapMessage(): string {

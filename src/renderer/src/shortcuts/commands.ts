@@ -66,6 +66,9 @@ export type CommandId =
   | "worker.newCodex"
   | "worker.newGrok"
   | "worker.newPi"
+  | "worker.claudeSessions"
+  | "worker.codexSessions"
+  | "worker.grokSessions"
   | "agent.cycleModel"
   | "agent.cycleEffort"
   | "agent.openModelPicker"
@@ -471,8 +474,10 @@ export const COMMANDS: Command[] = [
   // CLI worker spawners. No default chord — the chord-space we'd want
   // (Mod+Shift+C/Mod+Alt+C/…) all collide with built-in or browser
   // bindings. Users bind their own from Settings → Keybindings.
-  // Each launches a new session at once; earlier sessions are resumed from
-  // the Sessions view.
+  // "New ... worker pane" starts a new session at once. The "... worker
+  // sessions" variants show that agent's past sessions first, as its row in the
+  // + menus does. Split on purpose: a binding made for an instant session must
+  // not grow a dialog in front of it.
   {
     id: "worker.newClaude",
     label: "New Claude worker pane",
@@ -494,6 +499,24 @@ export const COMMANDS: Command[] = [
   {
     id: "worker.newPi",
     label: "New Pi worker pane",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.claudeSessions",
+    label: "Open Claude worker sessions…",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.codexSessions",
+    label: "Open Codex worker sessions…",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.grokSessions",
+    label: "Open Grok worker sessions…",
     group: "Workers",
     defaultChords: [],
   },

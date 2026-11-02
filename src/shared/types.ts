@@ -1416,6 +1416,10 @@ export interface AppPreferences {
   // Lets agents remove merged worktrees the user created too. Default off:
   // agents remove only worktrees an agent created.
   agentsMayRemoveUserWorktrees?: boolean;
+  // Removes a worktree from the rail on its own once its work is provably
+  // merged and nothing is left in it or using it. Default on. Off leaves such
+  // a worktree in its project's merged group, one click from removal.
+  worktreeAutoRemoveMerged?: boolean;
   // Extra git-ignored paths, per repo, that removal may delete because a
   // build regenerates them (on top of node_modules/, dist/, ...). Entries are
   // a first path segment ("generated/") or a basename glob ("*.log").
@@ -1635,6 +1639,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   terminalRightClick: "paste",
   agentWorktreesEnabled: true,
   agentsMayRemoveUserWorktrees: false,
+  worktreeAutoRemoveMerged: true,
   agentWorktreeRegenerableIgnoredByRepo: {},
   restoreAgentSessions: false,
   restoreTerminalOutput: true,

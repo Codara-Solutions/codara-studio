@@ -1,10 +1,9 @@
 import { useSyncExternalStore } from "react";
 import type { SessionSearchHit, SessionSearchScope } from "@shared/session-search";
 
-// What App hands the Sessions view (the active workspace and how to open a
-// session), and the requests other surfaces make of it: the jump palette asks
-// it to show a query. Kept in a store rather than props so the memoized rail
-// does not re-render when the active folder changes.
+// What App hands the session picker (the active workspace and how to open a
+// session), and how the rail asks App to open it. Kept in a store rather than
+// props so the memoized rail does not re-render when the active folder changes.
 
 export interface SessionSearchHost {
   /** The active workspace's folder; null with no workspace or a remote one. */
@@ -18,13 +17,22 @@ export interface SessionSearchHost {
   /** The session's folder belongs to the workspace on screen, in a terminal tab. */
   canSplitSession: ((hit: SessionSearchHit) => boolean) | null;
   isSessionOpen: ((hit: SessionSearchHit) => boolean) | null;
+  /** Shows the picker for a worker being opened, or starts it when there is no history to offer. */
+  offerWorkerSessions: ((offer: WorkerSessionsOffer) => void) | null;
+}
+
+/** A worker the user is opening: its past sessions come first, and the picker's default starts it. */
+export interface WorkerSessionsOffer {
+  runtime: "claude" | "codex" | "grok";
+  cwd: string | null;
+  /** Where resuming lands: the surface that was asked decides, as starting new does. */
+  placement: "tab" | "pane";
+  startNew: () => void;
 }
 
 export interface SessionSearchRequest {
   query: string;
   scope: SessionSearchScope;
-  /** Bumps on every request, so asking twice for one query still lands. */
-  nonce: number;
 }
 
 const EMPTY_HOST: SessionSearchHost = {
@@ -34,12 +42,12 @@ const EMPTY_HOST: SessionSearchHost = {
   splitSession: null,
   canSplitSession: null,
   isSessionOpen: null,
+  offerWorkerSessions: null,
 };
 
 let host: SessionSearchHost = EMPTY_HOST;
-let request: SessionSearchRequest | null = null;
-let nonce = 0;
 let labelsRevision = 0;
+const requestListeners = new Set<(request: SessionSearchRequest) => void>();
 const listeners = new Set<() => void>();
 
 function emit(): void {
@@ -56,15 +64,23 @@ export function publishSessionSearchHost(next: SessionSearchHost | null): void {
   emit();
 }
 
+export function offerWorkerSessions(offer: WorkerSessionsOffer): void {
+  if (host.offerWorkerSessions) host.offerWorkerSessions(offer);
+  else offer.startNew();
+}
+
 export function useSessionSearchHost(): SessionSearchHost {
   return useSyncExternalStore(subscribe, () => host);
 }
 
-/** Asks the Sessions view to show this query; App makes the view visible. */
+/** Asks App to open the session picker on this query and scope. */
 export function requestSessionSearch(query: string, scope: SessionSearchScope = "all"): void {
-  nonce += 1;
-  request = { query, scope, nonce };
-  emit();
+  for (const listener of requestListeners) listener({ query, scope });
+}
+
+export function onSessionSearchRequest(listener: (request: SessionSearchRequest) => void): () => void {
+  requestListeners.add(listener);
+  return () => requestListeners.delete(listener);
 }
 
 /** A name or pin changed, so every list showing sessions reads them again. */
@@ -75,8 +91,4 @@ export function bumpSessionLabels(): void {
 
 export function useSessionLabelsRevision(): number {
   return useSyncExternalStore(subscribe, () => labelsRevision);
-}
-
-export function useSessionSearchRequest(): SessionSearchRequest | null {
-  return useSyncExternalStore(subscribe, () => request);
 }

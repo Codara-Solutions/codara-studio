@@ -64,7 +64,7 @@ const TERMINAL_TOOLS = [
 ];
 const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_inspect", "codara_whiteboard_review"];
 const BOARD_TOOLS = ["codara_board_get", "codara_board_update"];
-const SESSION_TOOLS = ["codara_session_start", "codara_session_wait", "codara_session_status", "codara_session_message"];
+const SESSION_TOOLS = ["codara_session_start", "codara_session_wait", "codara_session_status", "codara_session_message", "codara_review_findings"];
 const WORKTREE_TOOLS = [
   "codara_worktree_create",
   "codara_worktree_list",
@@ -126,10 +126,11 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // first, about 70, so a background agent can work in another repository and
 // still show on its rail; studio and execute by 2,300 for the four
 // codara_session_* tools, about 2,270, so any agent can start and follow a
-// session that outlives it; execute by 400 for the github automation trigger's
-// fields, about 360, by 300 for own_branch, about 270, and by 200 for guard,
-// about 180).
-const LIST_BUDGET = { studio: 37_150, run: 39_000, worker: 35_000, execute: 103_300, automation: 69_000 };
+// session that outlives it; studio and execute by 800 for
+// codara_review_findings, so any agent the user picks can hand a review back;
+// execute by 400 for the github automation trigger's fields, about 360, by 300
+// for own_branch, about 270, and by 200 for guard, about 180).
+const LIST_BUDGET = { studio: 37_950, run: 39_000, worker: 35_000, execute: 104_100, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
