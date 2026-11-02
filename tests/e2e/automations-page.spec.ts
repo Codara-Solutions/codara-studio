@@ -7,7 +7,7 @@ import { join } from "node:path";
 // Smoke for the rebuilt Automations page and the Cora Hub tab.
 //
 // Automations: the empty state teaches creation-via-chat and offers manual
-// creation; "New automation" opens the flow editor; a worker node's config
+// creation; "New automation" reaches the flow editor; a worker node's config
 // panel exposes model + effort only (workers run on the bundled Pi runtime,
 // so there is no engine choice and no install/auth badges).
 //
@@ -42,11 +42,13 @@ test("automations page: empty state, editor, and Pi-only worker knobs", async ()
     // There is no design-with-Cora surface inside automations anymore.
     await expect(page.getByRole("button", { name: /Design with Cora/ })).toHaveCount(0);
 
-    // "New automation" opens the flow editor with the preset gallery.
+    // "New automation" opens the sentence with the proven workflows under it, and
+    // the flow editor is one click away.
     await clickAttached(page.getByRole("button", { name: "New automation", exact: true }).first());
     await expect(page.getByText("Start from a proven workflow", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: /Fix until tests pass/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /Start blank/ })).toBeVisible();
+    await clickAttached(page.getByRole("button", { name: "Open in flow editor", exact: true }));
 
     // The worker node's config panel: model + effort selects, no engine
     // segmented control and no install/auth badges.

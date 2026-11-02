@@ -52,6 +52,11 @@ import {
 
 export interface NodeFlowEditorProps {
   initial?: ScheduledJob;
+  /** A new automation carried over from the sentence screen, not yet saved. */
+  seed?: ScheduledJob;
+  /** A new automation starting from a proven workflow. */
+  startPreset?: LoomPreset;
+  startName?: string;
   jobs: ScheduledJob[];
   workspaceId: string;
   workspaceName: string;
@@ -73,6 +78,9 @@ export default function NodeFlowEditor(props: NodeFlowEditorProps): React.ReactE
 
 function Editor({
   initial,
+  seed,
+  startPreset,
+  startName,
   jobs,
   workspaceId,
   workspaceName,
@@ -86,12 +94,12 @@ function Editor({
   // The draft holds name + trigger + loop + (worker defaults). The GRAPH lives
   // in ReactFlow state. Worker node data carries its own LoomWorkerConfig.
   const [draft, setDraft] = useState<LoomDraft>(() =>
-    initial ? draftFromJob(initial) : emptyDraft(),
+    initial || seed ? draftFromJob((initial ?? seed) as ScheduledJob) : { ...emptyDraft(), name: startName ?? "" },
   );
 
   const initialFlow = useMemo(() => {
-    if (initial) {
-      const flow = flowFromGraph(initial);
+    if (initial || seed) {
+      const flow = flowFromGraph((initial ?? seed) as ScheduledJob);
       // Open with the trigger selected so its config panel is showing.
       flow.nodes = flow.nodes.map((n) => ({ ...n, selected: n.id === TRIGGER_ID }));
       return flow;
@@ -122,9 +130,9 @@ function Editor({
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>(initialFlow.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>(initialFlow.edges);
   const [selectedId, setSelectedId] = useState<string | null>(TRIGGER_ID);
-  const [dirty, setDirty] = useState(false);
+  const [dirty, setDirty] = useState(Boolean(seed));
   const [confirmDiscard, setConfirmDiscard] = useState(false);
-  const [presetsOpen, setPresetsOpen] = useState(!editing);
+  const [presetsOpen, setPresetsOpen] = useState(!editing && !seed && !startPreset);
   const [loopOpen, setLoopOpen] = useState(false);
   const [palette, setPalette] = useState<PaletteState | null>(null);
   const [showMiniMap, setShowMiniMap] = useState(true);
@@ -389,6 +397,12 @@ function Editor({
     },
     [cwd, rf, setNodes, setEdges],
   );
+
+  useEffect(() => {
+    if (startPreset) applyPreset(startPreset);
+    // Once, on opening: the choice was made on the screen before this one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── validation ────────────────────────────────────────────────────────────
   const triggerBuilt = buildTrigger(draft.trigger);

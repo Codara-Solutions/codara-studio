@@ -559,6 +559,13 @@ and GitHub Actions' row of recent results for the bar of ticks.
   will not say so again.
 - The forecast says "about" and says limits are checked between runs. Never show a
   ceiling firmer than the engine enforces.
+- New automation opens on a sentence (When, Do, Stop, Then) with what will happen
+  beside it, from variant D. It only ever makes one worker, so it maps one way, and
+  anything else is the flow editor's: "Open in flow editor" carries the sentence
+  over. Edit always opens the flow editor. Every choice is a plain native select,
+  so a keyboard and a screen reader work without new widgets.
+- The sentence starts with a $2 budget filled in, and no monthly cap. Clearing the
+  budget is one keystroke, and the cost line turns red when nothing bounds the spend.
 - Delete sits at the bottom of Details, well away from Run now.
 - "Fix with Cora" fills a new chat's message box and sends nothing. The user
   reads it first.

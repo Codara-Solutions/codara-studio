@@ -61,6 +61,8 @@ import MiniFlow from "./MiniFlow";
 import LiveBoard from "./LiveBoard";
 import LiveRunHero from "./LiveRunHero";
 import NodeFlowEditor from "./flow/NodeFlowEditor";
+import SentenceBuilder from "./flow/SentenceBuilder";
+import type { LoomPreset } from "./flow/presets";
 import SkippedHistoryRow, { mergeTimeline } from "./SkippedHistoryRow";
 import { missedRunsSummary, precheckSummary } from "@shared/automation-catchup";
 
@@ -90,7 +92,8 @@ export interface Props {
 }
 
 // view: rail + detail. create/edit: the node-flow editor owns the stage.
-type Mode = { kind: "view" } | { kind: "create" } | { kind: "edit"; job: ScheduledJob };
+type FlowStart = { seed?: ScheduledJob; preset?: LoomPreset; name?: string };
+type Mode = { kind: "view" } | { kind: "create"; flow?: FlowStart } | { kind: "edit"; job: ScheduledJob };
 type SubTab = "looms" | "workers" | "workflows";
 
 const SUBTAB_STORAGE_KEY = "spark.automations.subtab";
@@ -693,16 +696,30 @@ export default function AutomationsPage({
                 pointerEvents: subTab === "looms" ? "inherit" : "none",
               }}
             >
-              <NodeFlowEditor
-                initial={mode.kind === "edit" ? mode.job : undefined}
-                jobs={jobs}
-                workspaceId={workspaceId}
-                workspaceName={workspaceName}
-                cwd={cwd}
-                onCreate={mode.kind === "create" ? handleCreate : undefined}
-                onSave={mode.kind === "edit" ? handleSaveEdit : undefined}
-                onCancel={() => setMode({ kind: "view" })}
-              />
+              {mode.kind === "create" && !mode.flow ? (
+                <SentenceBuilder
+                  workspaceId={workspaceId}
+                  workspaceName={workspaceName}
+                  cwd={cwd}
+                  onCreate={handleCreate}
+                  onCancel={() => setMode({ kind: "view" })}
+                  onOpenFlow={(flow) => setMode({ kind: "create", flow })}
+                />
+              ) : (
+                <NodeFlowEditor
+                  initial={mode.kind === "edit" ? mode.job : undefined}
+                  seed={mode.kind === "create" ? mode.flow?.seed : undefined}
+                  startPreset={mode.kind === "create" ? mode.flow?.preset : undefined}
+                  startName={mode.kind === "create" ? mode.flow?.name : undefined}
+                  jobs={jobs}
+                  workspaceId={workspaceId}
+                  workspaceName={workspaceName}
+                  cwd={cwd}
+                  onCreate={mode.kind === "create" ? handleCreate : undefined}
+                  onSave={mode.kind === "edit" ? handleSaveEdit : undefined}
+                  onCancel={() => setMode({ kind: "view" })}
+                />
+              )}
             </div>
           )}
 
