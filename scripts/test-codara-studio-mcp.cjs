@@ -126,8 +126,9 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // first, about 70, so a background agent can work in another repository and
 // still show on its rail; studio and execute by 2,300 for the four
 // codara_session_* tools, about 2,270, so any agent can start and follow a
-// session that outlives it).
-const LIST_BUDGET = { studio: 37_150, run: 39_000, worker: 35_000, execute: 102_400, automation: 69_000 };
+// session that outlives it; execute by 400 for the github automation trigger's
+// fields, about 360).
+const LIST_BUDGET = { studio: 37_150, run: 39_000, worker: 35_000, execute: 102_800, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",

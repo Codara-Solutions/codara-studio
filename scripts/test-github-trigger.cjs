@@ -149,6 +149,17 @@ const none = new Map();
   assert.equal(pullsNeedingChecks(ci, memory(), [pull()], () => true).length, 0, "green commits rest");
   const many = Array.from({ length: 15 }, (_, i) => pull({ number: 20 + i }));
   assert.equal(pullsNeedingChecks(ci, memory(), many).length, 10);
+  const crowd = Array.from({ length: 15 }, (_, i) => pull({ number: 20 + i, head: { sha: `${i}`.padStart(40, "a"), ref: "x" } }));
+  const read = new Map();
+  const seenNumbers = new Set();
+  for (let round = 0; round < 2; round += 1) {
+    const picked = pullsNeedingChecks(ci, memory(), crowd, () => false, (sha) => read.get(sha) ?? 0);
+    picked.forEach((p, i) => {
+      seenNumbers.add(p.number);
+      read.set(p.headSha, NOW + round + i);
+    });
+  }
+  assert.equal(seenNumbers.size, 15, "pull requests stuck on pending checks do not hide the others");
 }
 
 // One fire per pass, oldest first; the rest wait.
@@ -189,12 +200,19 @@ const none = new Map();
   assert.equal(d.memory.fires.length, 1, "old fires age out");
 }
 
-// The seen list stays bounded.
+// The seen list stays bounded, and what it forgets cannot fire again.
 {
-  const seen = Array.from({ length: 200 }, (_, i) => `ci:1:${i}`);
+  const seen = ["pr:11", `ci:12:${SHA}`, ...Array.from({ length: 198 }, (_, i) => `ci:1:${i}`)];
   const d = decideGitHubTrigger(opened, memory({ seen }), [pull()], none, NOW);
   assert.equal(d.memory.seen.length, 200);
   assert.ok(d.memory.seen.includes("pr:12"));
+  assert.ok(!d.memory.seen.includes("pr:11"));
+  assert.equal(d.memory.seededMaxPr, 11);
+  assert.equal(decideGitHubTrigger(opened, d.memory, [pull({ number: 11 })], none, NOW + 1).fire, undefined);
+  const stored = JSON.parse(JSON.stringify(d.memory));
+  stored.seen = stored.seen.filter((key) => !key.startsWith("ci:12:"));
+  const checks = new Map([[SHA, { failed: ["build"], failedAt: NOW - 5, pending: 0 }]]);
+  assert.equal(decideGitHubTrigger(ci, stored, [pull()], checks, NOW + 1).fire, undefined, "a red commit it forgot is not news");
 }
 
 // A shell step sees only validated values; the worker's note labels the rest.
@@ -263,6 +281,7 @@ function harness(over = {}) {
       },
     getJob: async () => state.job,
     patchJob: async (_id, fn) => {
+      state.writes = (state.writes ?? 0) + 1;
       state.job = fn(state.job);
       return state.job;
     },
@@ -313,6 +332,19 @@ function harness(over = {}) {
     assert.equal(state.job.lastGitHubFire.number, 4);
     assert.match(state.reads[state.reads.length - 1], /sort=updated/);
     await tick();
+    assert.equal(state.starts, 1);
+  }
+
+  // A quiet minute writes nothing.
+  {
+    const { state, tick } = harness({ memory: memory({ seededMaxPr: 50 }) });
+    state.pulls = [raw()];
+    await tick();
+    await tick();
+    assert.equal(state.writes ?? 0, 0);
+    state.pulls = [raw({ number: 51 })];
+    await tick();
+    assert.equal(state.writes, 1);
     assert.equal(state.starts, 1);
   }
 

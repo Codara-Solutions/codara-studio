@@ -926,7 +926,7 @@ const TRIGGER_SCHEMA = {
     "continuous re-fires immediately after each run finishes. " +
     "git REQUIRES an `events` array (remoteUpdated: the workspace repo's tracked remote gained commits: the user's own push, or a teammate's push arriving via fetch; localBranchMoved: the checked-out branch tip changed (commit, pull, merge)); optional `branch` limits firing to one branch, e.g. 'main'. " +
     "onAutomationActivity REQUIRES an `events` array (finished|failed) and fires when automations reach that outcome: ANY automation when `automationId` is omitted, or just that one when set (never fires for itself). " +
-    "github REQUIRES an `events` array (prOpened: a pull request was opened or a draft marked ready; ciFailed: CI failed on an open pull request) and watches the repository behind the workspace's origin remote through the user's gh, for authors who are owners, members or collaborators of that repository; optional `branch` limits it to pull requests into one branch, optional `includeDrafts` also fires for drafts. Prompts and steps can use {{pr_number}}, {{pr_url}} and {{pr_head}}.",
+    "github REQUIRES `events` (prOpened|ciFailed): pull requests on the origin repo from its owners, members or collaborators; optional `branch` (target), `includeDrafts`. Adds {{pr_url}}, {{pr_number}}, {{pr_head}}.",
   required: ["kind"],
   properties: {
     kind: {
@@ -965,11 +965,11 @@ const TRIGGER_SCHEMA = {
     },
     branch: {
       type: "string",
-      description: "git: optional branch name (e.g. 'main') to scope firing; omit for any branch. github: only pull requests into this branch.",
+      description: "git or github: optional branch name (e.g. 'main') to scope firing; omit for any branch.",
     },
     includeDrafts: {
       type: "boolean",
-      description: "github only: also fire when a draft pull request is opened. By default a draft fires when it is marked ready.",
+      description: "github only: also fire for drafts.",
     },
   },
   additionalProperties: false,

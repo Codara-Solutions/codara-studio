@@ -123,12 +123,18 @@ export function pullsNeedingChecks(
   memory: GitHubTriggerMemory,
   pulls: readonly GitHubPull[],
   isQuiet: (headSha: string) => boolean = () => false,
+  lastCheckedAt: (headSha: string) => number = () => 0,
 ): GitHubPull[] {
   if (!trigger.events.includes("ciFailed")) return [];
   const seen = new Set(memory.seen);
+  // Least recently read first: a commit whose checks never finish must not keep
+  // another pull request's failure from being looked at.
   return pulls
     .filter((pull) => eligible(trigger, pull) && !seen.has(ciKey(pull)) && !isQuiet(pull.headSha))
-    .slice(0, MAX_CHECKED_PULLS);
+    .map((pull, index) => ({ pull, index, at: lastCheckedAt(pull.headSha) }))
+    .sort((a, b) => a.at - b.at || a.index - b.index)
+    .slice(0, MAX_CHECKED_PULLS)
+    .map(({ pull }) => pull);
 }
 
 /**
@@ -152,11 +158,22 @@ export function decideGitHubTrigger(
   };
   const fires = memory.fires.filter((f) => nowMs - f.at < FIRE_WINDOW_MS);
   const limited: number[] = [];
-  const finish = (fire?: GitHubTriggerFire): GitHubTriggerDecision => ({
-    memory: { ...memory, seen: seen.length > SEEN_CAP ? seen.slice(-SEEN_CAP) : seen, fires },
-    limited,
-    ...(fire ? { fire } : {}),
-  });
+  const finish = (fire?: GitHubTriggerFire): GitHubTriggerDecision => {
+    const next: GitHubTriggerMemory = { ...memory, seen, fires };
+    if (seen.length > SEEN_CAP) {
+      // A forgotten key must not fire again, so everything it covered moves
+      // behind the seed line. That can drop an old unseen event; a duplicate
+      // paid run is the worse mistake.
+      const dropped = seen.slice(0, seen.length - SEEN_CAP);
+      next.seen = seen.slice(-SEEN_CAP);
+      next.seededAt = nowMs;
+      for (const key of dropped) {
+        const opened = /^pr:(\d+)$/.exec(key);
+        if (opened) next.seededMaxPr = Math.max(next.seededMaxPr, Number(opened[1]));
+      }
+    }
+    return { memory: next, limited, ...(fire ? { fire } : {}) };
+  };
 
   for (const pull of [...pulls].sort((a, b) => a.number - b.number)) {
     if (!eligible(trigger, pull)) continue;
@@ -279,6 +296,7 @@ export function armGitHubWatch(jobId: string, trigger: GitHubTrigger, deps: GitH
   // Head commits that were green last read. Checks live outside the list's ETag,
   // so without this every open pull request costs two reads a minute forever.
   const quiet = new Map<string, number>();
+  const checkedAt = new Map<string, number>();
   const pollMs = deps.pollMs ?? POLL_MS;
 
   const note = async (detail: string): Promise<void> => {
@@ -298,7 +316,7 @@ export function armGitHubWatch(jobId: string, trigger: GitHubTrigger, deps: GitH
     }
     const base = `repos/${source.repository}`;
     const listed = async (sort: "created" | "updated"): Promise<GitHubPull[] | null> => {
-      const read = await source.reader.get(`${base}/pulls?state=open&sort=${sort}&direction=desc&per_page=20`, {
+      const read = await source.reader.get(`${base}/pulls?state=open&sort=${sort}&direction=desc&per_page=50`, {
         jq: PULLS_JQ,
       });
       return read.value === null ? null : parsePulls(read.value);
@@ -328,7 +346,17 @@ export function armGitHubWatch(jobId: string, trigger: GitHubTrigger, deps: GitH
     const now = deps.now();
     for (const [sha, at] of quiet) if (now - at >= QUIET_RECHECK_MS) quiet.delete(sha);
     const checks = new Map<string, GitHubPullChecks>();
-    for (const pull of pullsNeedingChecks(trigger, job.githubTrigger, pulls, (sha) => quiet.has(sha))) {
+    const open = new Set(pulls.map((pull) => pull.headSha));
+    for (const sha of checkedAt.keys()) if (!open.has(sha)) checkedAt.delete(sha);
+    const toCheck = pullsNeedingChecks(
+      trigger,
+      job.githubTrigger,
+      pulls,
+      (sha) => quiet.has(sha),
+      (sha) => checkedAt.get(sha) ?? 0,
+    );
+    for (const pull of toCheck) {
+      checkedAt.set(pull.headSha, now);
       const [runs, status] = await Promise.all([
         source.reader.get(`${base}/commits/${pull.headSha}/check-runs?per_page=100`, { jq: CHECK_RUNS_JQ }),
         source.reader.get(`${base}/commits/${pull.headSha}/status`, { jq: "{statuses: .statuses}" }),
@@ -338,6 +366,18 @@ export function armGitHubWatch(jobId: string, trigger: GitHubTrigger, deps: GitH
       checks.set(pull.headSha, summary);
       // No checks at all is a commit CI has not reached yet, not a green one.
       if (summary.failed.length === 0 && summary.pending === 0 && summary.passed > 0) quiet.set(pull.headSha, now);
+    }
+    noted = null;
+    // A quiet minute must not rewrite scheduler.json and refresh every open page.
+    const latest = await deps.getJob(jobId);
+    if (disposed || !latest?.enabled || !latest.githubTrigger) return;
+    const preview = decideGitHubTrigger(trigger, latest.githubTrigger, pulls, checks, now);
+    if (
+      !preview.fire &&
+      preview.limited.length === 0 &&
+      JSON.stringify(preview.memory) === JSON.stringify(latest.githubTrigger)
+    ) {
+      return;
     }
     let decision: GitHubTriggerDecision | null = null;
     await deps.patchJob(jobId, (j) => {
@@ -350,7 +390,6 @@ export function armGitHubWatch(jobId: string, trigger: GitHubTrigger, deps: GitH
         ...(decision.fire ? { lastGitHubFire: decision.fire } : {}),
       };
     });
-    noted = null;
     const made = decision as GitHubTriggerDecision | null;
     if (!made || disposed) return;
     for (const number of made.limited) {
