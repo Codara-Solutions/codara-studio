@@ -5,7 +5,10 @@
 // reach only the sessions Codara starts, as flags on their command line
 // (agent-launch-integration.ts). This suite pins what those flags are, what
 // the per-launch files under <codaraHome>/integrations contain, and that
-// building them writes nothing outside Codara's home.
+// building them writes nothing outside Codara's home. A session another agent
+// starts (codara_session_start, agent-sessions.ts) gets the same flags through
+// a real shell, and the server they name offers it the session tools with the
+// cleared environment Codex gives its MCP servers.
 //
 // SAFETY: HOME, CODARA_HOME_DIR and CODEX_HOME point into a throwaway
 // directory before the module loads; the real configs are hashed before and
@@ -16,6 +19,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { execFileSync, spawn } = require("node:child_process");
 const { build } = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -75,6 +79,56 @@ async function load() {
     ],
   });
   return require(outfile);
+}
+
+async function loadSessions() {
+  const outfile = path.join(TMP, "agent-sessions.cjs");
+  await build({
+    entryPoints: [path.join(ROOT, "src", "main", "agent-sessions.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node20",
+    outfile,
+    logLevel: "silent",
+    external: ["electron"],
+    alias: { "@shared": path.join(ROOT, "src", "shared") },
+  });
+  return require(outfile);
+}
+
+// initialize + tools/list against one server process; resolves the tool names.
+function serverTools(command, args, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { env, stdio: ["pipe", "pipe", "ignore"] });
+    let out = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("timeout waiting for tools/list"));
+    }, 10_000);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      out += chunk;
+      for (let index = out.indexOf("\n"); index >= 0; index = out.indexOf("\n")) {
+        const line = out.slice(0, index).trim();
+        out = out.slice(index + 1);
+        let message = null;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (message.id === 2 && message.result) {
+          clearTimeout(timer);
+          child.kill();
+          resolve(message.result.tools.map((tool) => tool.name));
+        }
+      }
+    });
+    child.on("error", reject);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })}\n`);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
+  });
 }
 
 function tree(dir) {
@@ -216,6 +270,95 @@ async function main() {
         { command: claude.command, args: claude.args, env: claude.env },
         `${mode}: the same tools for every runtime`,
       );
+    }
+  });
+
+  await check("a started session gets the same flags as a Studio tab, through a real shell", async () => {
+    const sessions = await loadSessions();
+    const bin = path.join(TMP, "bin");
+    fs.mkdirSync(bin, { recursive: true });
+    for (const name of ["claude", "codex"]) {
+      fs.writeFileSync(path.join(bin, name), "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.argv.slice(2)));\n", { mode: 0o755 });
+    }
+    const briefPath = path.join(TMP, "it's a brief", "brief.md");
+    fs.mkdirSync(path.dirname(briefPath), { recursive: true });
+    fs.writeFileSync(briefPath, "Do the thing. $(not run) `nor this`");
+    const cwd = path.join(TMP, "work 'tree'");
+    const plan = (runtime) => (sessionArgs) =>
+      runtime === "codex"
+        ? launch.planCodexLaunch({ userArgs: sessionArgs }).argvPrefix
+        : launch.planClaudeLaunch({ userArgs: sessionArgs }).argvPrefix;
+    const shells = ["bash", ...(fs.existsSync("/usr/bin/zsh") || fs.existsSync("/bin/zsh") ? ["zsh"] : [])];
+    const run = (line) =>
+      shells.map((shell) =>
+        JSON.parse(
+          execFileSync(shell, shell === "zsh" ? ["-f", "-c", line] : ["-c", line], {
+            env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+            encoding: "utf8",
+          }),
+        ),
+      );
+    const codexLine = sessions.agentSessionCommand({
+      runtime: "codex",
+      model: "gpt-6",
+      effort: "high",
+      briefPath,
+      codexTrust: launch.codexTrustOverride(cwd),
+      launchArgs: plan("codex"),
+      platform: "linux",
+    });
+    for (const argv of run(codexLine)) {
+      const values = argv.flatMap((arg, index) => (argv[index - 1] === "-c" ? [arg] : []));
+      const server = parseToml(values.find((value) => value.startsWith("mcp_servers.")) ?? "").mcp_servers?.["codara-studio"];
+      assert.ok(server, "a Codex session gets Codara's current server, not the one the user's config names");
+      assert.match(server.args[0], /codara-studio-mcp[\\/]server\.js$/);
+      assert.equal(server.env.SPARK_HOME_DIR, CODARA);
+      const notify = parseToml(values.find((value) => value.startsWith("notify=")) ?? "").notify;
+      assert.equal(notify?.[3], path.join(CODARA, "codex-hooks", "codara-codex-notify.py"), "a Codex session reports its turns");
+      assert.deepEqual(JSON.parse(JSON.stringify(parseToml(values.find((value) => value.startsWith("projects=")) ?? "").projects)), {
+        [cwd]: { trust_level: "trusted" },
+      });
+      assert.ok(argv.includes("--yolo") && argv.includes("gpt-6") && values.includes("model_reasoning_effort=high"), "model and effort kept");
+      assert.deepEqual(argv.slice(-2), ["--", "Do the thing. $(not run) `nor this`"], "the brief is the last word, unexpanded");
+      assert.equal(argv.indexOf("--"), argv.length - 2);
+    }
+    const claudeLine = sessions.agentSessionCommand({
+      runtime: "claude",
+      model: "opus",
+      effort: "max",
+      briefPath,
+      codexTrust: null,
+      launchArgs: plan("claude"),
+      platform: "linux",
+    });
+    for (const argv of run(claudeLine)) {
+      assert.deepEqual(argv.slice(0, 3), ["--settings", settingsPath, `--mcp-config=${studioMcp}`], "a Claude session does not lean on the user's hooks");
+      assert.ok(argv.includes("--dangerously-skip-permissions") && argv.includes("opus") && argv.includes("max"));
+      assert.deepEqual(argv.slice(-2), ["--", "Do the thing. $(not run) `nor this`"]);
+    }
+    const compacted = path.join(CODARA, "cli-launch", "claude-autocompact-80.json");
+    const compactedLine = sessions.agentSessionCommand({
+      runtime: "claude",
+      model: null,
+      effort: null,
+      briefPath,
+      codexTrust: null,
+      compaction: { claudeSettingsPath: compacted },
+      launchArgs: plan("claude"),
+      platform: "linux",
+    });
+    for (const argv of run(compactedLine)) {
+      assert.deepEqual(argv.filter((arg) => arg === "--settings").length, 1, "Claude keeps only its last --settings");
+      assert.equal(argv[argv.indexOf("--settings") + 1], compacted, "the compaction file, which carries the hooks itself");
+      assert.ok(argv.includes(`--mcp-config=${studioMcp}`));
+    }
+  });
+
+  await check("the server a Codex session is given offers it the session tools, with Codex's cleared environment", async () => {
+    const server = parseToml(launch.codexStudioServerOverride("studio")).mcp_servers["codara-studio"];
+    const tools = await serverTools(server.command, server.args, { PATH: process.env.PATH, HOME, ...server.env });
+    for (const name of ["codara_session_start", "codara_session_wait", "codara_session_status", "codara_session_message"]) {
+      assert.ok(tools.includes(name), `${name} missing`);
     }
   });
 

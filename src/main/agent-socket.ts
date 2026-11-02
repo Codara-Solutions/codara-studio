@@ -50,7 +50,12 @@ import {
   type AgentSessionCaller,
 } from "./agent-sessions";
 import { AGENT_SESSION_BRIEF_MAX_CHARS, AGENT_SESSION_MAX_LIVE, type AgentSessionRecord } from "@shared/agent-sessions";
-import { codexTrustOverride } from "./agent-launch-integration";
+import {
+  codexTrustOverride,
+  integrationFilesReady,
+  planClaudeLaunch,
+  planCodexLaunch,
+} from "./agent-launch-integration";
 import { standingTerminalCompaction } from "./orchestration/cli-autocompact";
 import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
 import { paneAgentRuntime } from "./pane-agent-runtime";
@@ -2150,6 +2155,10 @@ async function handleSessionStart(
       if ((await workspaceProjectPolicyModeForTerminalCwd(cwd, state.workspaces)) === "untrusted-pull-request") {
         throw new Error("a session cannot start in an imported pull request");
       }
+      // The hooks or notify program and the codara-studio server every Studio
+      // Claude or Codex gets: a session reports its turns and has the current
+      // tools only through them. The first sessions after boot wait for them.
+      await integrationFilesReady();
       return agentSessionCommand({
         runtime: request.runtime,
         model: request.model,
@@ -2157,6 +2166,10 @@ async function handleSessionStart(
         briefPath,
         codexTrust: codexTrustOverride(cwd),
         compaction,
+        launchArgs: (sessionArgs) =>
+          request.runtime === "codex"
+            ? planCodexLaunch({ userArgs: sessionArgs }).argvPrefix
+            : planClaudeLaunch({ userArgs: sessionArgs }).argvPrefix,
       });
     });
     if (response.error) {
