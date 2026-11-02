@@ -73,6 +73,9 @@ export interface WorktreeCleanupDeps {
   sessionPid?(paneId: string): number | null;
   // Null when the renderer did not answer.
   listRendererTerminals(): Promise<RendererTerminal[] | null>;
+  // Whether the window has tabs of this workspace or shows it; null when it
+  // did not answer. Absent counts as held.
+  workspaceHeld?(workspaceId: string): Promise<boolean | null>;
   // Null when the platform offers no process scan.
   processesUnderCwds(dirs: readonly string[]): Promise<Map<string, ProcessUse[]> | null>;
   runningServers(workspaceId: string): number;

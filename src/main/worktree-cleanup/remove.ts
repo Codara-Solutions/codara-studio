@@ -71,6 +71,8 @@ export interface RemoveOptions {
   allowInUse?: ReadonlySet<WorktreeInUseKind>;
   /** As in CheckContext.requireKnownUsage. */
   requireKnownUsage?: boolean;
+  /** Runs under the lock after the last check, right before anything changes: a reason stops the removal. */
+  beforeRemove?: () => Promise<string | null>;
   forgetSize?: (id: string) => void;
   usageFreshMs?: number;
   /** Who asked, for the audit log; the cleanup screen when absent. */
@@ -296,6 +298,8 @@ async function removeOne(
       return refuse("UNMERGED_NOT_CONFIRMED", "It has commits that are not merged, and you did not confirm removing it.");
     }
   }
+  const stopped = await options.beforeRemove?.();
+  if (stopped) return refuse("IN_USE", stopped);
 
   const id = refSafe(check.workspace?.id ?? `wt-${createHash("sha256").update(real).digest("hex").slice(0, 12)}`);
   const refBase = `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${id}`;

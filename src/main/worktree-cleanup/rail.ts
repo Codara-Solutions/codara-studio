@@ -24,6 +24,7 @@ import {
   type WorktreeCaller,
 } from "../agent-worktrees";
 import { deleteBranchIfAt } from "../git-branches";
+import { isAncestor } from "../git-worktrees";
 import { errorText, readGitText } from "../git-exec";
 import type { WorktreeRegistration } from "../git-worktree-porcelain";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
@@ -118,16 +119,32 @@ function upLongEnough(options: AutoRemoveMergedOptions): boolean {
   return process.uptime() * 1000 >= (options.minUptimeMs ?? AUTO_MERGED_MIN_UPTIME_MS);
 }
 
-async function remoteRefExists(root: string, name: string): Promise<boolean> {
-  const out = await readGitText(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `refs/remotes/${name}^{commit}`]).catch(() => "");
-  return /^[0-9a-f]{40,64}$/i.test(out);
+async function commitOf(root: string, rev: string): Promise<string | null> {
+  const out = await readGitText(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${rev}^{commit}`]).catch(() => "");
+  return /^[0-9a-f]{40,64}$/i.test(out) ? out.toLowerCase() : null;
+}
+
+// The merge was judged against whatever this name resolves to, and a local
+// branch or tag can be spelled "origin/main" too and win over the remote's.
+async function nameIsRemoteRef(root: string, name: string): Promise<boolean> {
+  const remote = await commitOf(root, `refs/remotes/${name}`);
+  return remote !== null && remote === (await commitOf(root, name));
+}
+
+// This exact commit is on the remote. A gone upstream shows nothing: commits
+// made after the last push look the same, and a local upstream never left here.
+async function tipOnRemote(repo: RepoContext, branch: string, head: string): Promise<boolean> {
+  const tracking = repo.tracking.get(branch);
+  if (!tracking?.upstream || tracking.gone) return false;
+  const upstream = await commitOf(repo.root, `refs/remotes/${tracking.upstream}`);
+  return upstream !== null && (await isAncestor(repo.root, head, upstream));
 }
 
 // The proof an unattended removal accepts, and why not otherwise. All of it
 // fails closed: a local-only base can still be rewritten or lost, "content in
-// target" alone can match by coincidence unless the branch was also pushed,
-// and an ancestor with no commit of its own is where the worktree started,
-// not merged work.
+// target" says nothing about commits that happen to net out to the same files
+// unless this exact tip was pushed, and an ancestor with no commit of its own
+// is where the worktree started, not merged work.
 async function autoMergedRefusal(
   repo: RepoContext,
   workspace: Workspace,
@@ -138,7 +155,7 @@ async function autoMergedRefusal(
   if (!branch || !head) return "It is not on a branch.";
   if (fact.state !== "merged" || !fact.target) return "Its branch is not merged.";
   if (isKeptBranch(branch, fact.target)) return "It is on a long-lived branch.";
-  if (!(await remoteRefExists(repo.root, fact.target))) return "Its work is merged only locally.";
+  if (!(await nameIsRemoteRef(repo.root, fact.target))) return "Its work is merged only locally.";
   const ahead = unpushed(repo, branch);
   if (ahead) return `Its branch has ${ahead} unpushed commit${ahead === 1 ? "" : "s"}.`;
   if (fact.proof === "pull-request") return null;
@@ -146,7 +163,7 @@ async function autoMergedRefusal(
     return (await hasOwnCommits(repo, head, workspace)) ? null : "Nothing was ever committed in it.";
   }
   if (fact.proof === "content-in-target") {
-    return repo.tracking.get(branch)?.upstream ? null : "Its content is in the base, but its branch was never pushed.";
+    return (await tipOnRemote(repo, branch, head)) ? null : "Its content is in the base, but its last commit cannot be shown to have been pushed.";
   }
   return "Its merge could not be proved.";
 }
@@ -155,6 +172,15 @@ async function quietRefusal(path: string, head: string | null, root: string, now
   const active = await lastActivity(path, head, root).catch(() => null);
   if (active === null) return "When it was last used could not be read.";
   return now - active < (options.quietMs ?? AUTO_MERGED_QUIET_MS) ? "It was used too recently." : null;
+}
+
+// The checks and the wait for the repository lock take time, in which the user
+// can open this workspace and start typing in a buffer nothing in main can see.
+async function lastMomentRefusal(deps: WorktreeCleanupDeps, workspace: Workspace): Promise<string | null> {
+  const state = await deps.loadState().catch(() => null);
+  if (!state || state.activeWorkspaceId === workspace.id) return "It is the workspace on screen.";
+  const held = await deps.workspaceHeld?.(workspace.id).catch(() => null);
+  return held === false ? null : "It has open tabs, or the window did not answer.";
 }
 
 // A workspace row inside this worktree has tabs and state of its own, which
@@ -500,7 +526,7 @@ async function cleanUpRegistered(
       ...options,
       caller: callerFor(request.mode),
       ...(allowInUse ? { allowInUse } : {}),
-      ...(requireKnownUsage ? { requireKnownUsage } : {}),
+      ...(requireKnownUsage ? { requireKnownUsage, beforeRemove: () => lastMomentRefusal(deps, workspace) } : {}),
     },
   );
   const outcome = outcomes[0];

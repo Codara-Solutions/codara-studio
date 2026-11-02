@@ -124,6 +124,14 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
         return null;
       }
     },
+    workspaceHeld: async (workspaceId) => {
+      try {
+        const held = await requestTerminalOp<unknown>("workspaceHeld", { workspaceId }, { timeoutMs: 5_000 });
+        return typeof held === "boolean" ? held : null;
+      } catch {
+        return null;
+      }
+    },
     // Shells stay in the list: one whose pane opened elsewhere and moved
     // into the worktree with cd is only seen here. usageOf drops the shells
     // of panes it already counts as open terminals.

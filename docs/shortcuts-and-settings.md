@@ -1073,8 +1073,9 @@ using it. **Settings, Git, Worktrees, Remove merged worktrees on their own**
 turns this off (on by default). All of these must hold: its folder is there and
 registered with git, it is on a branch that is not long-lived, its work is
 provably in a remote base (a merged pull request for that exact commit, its
-commits in the base, or its content in the base after having been pushed), its
-branch has nothing its upstream lacks, no uncommitted, untracked or ignored
+commits in the base, or its content in the base with its last commit still on
+its remote branch), its branch has nothing its upstream lacks, no uncommitted,
+untracked or ignored
 files worth keeping, no lock, no open tab of that workspace, no terminal, Cora
 run, dev server or running program in it, the agent that made it is closed, and
 nothing has touched it for 30 minutes. What could not be read counts as in use.

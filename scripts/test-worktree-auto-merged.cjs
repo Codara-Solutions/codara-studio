@@ -104,6 +104,7 @@ async function main() {
       processes: {},
       servers: {},
       sessions: {},
+      held: {},
       // An hour ahead, so everything made here reads as quiet.
       now: new Date(Date.now() + HOUR),
     };
@@ -120,6 +121,7 @@ async function main() {
       sessionCwd: (paneId) => h.sessions[paneId] ?? null,
       sessionsUnderCwd: () => [],
       listRendererTerminals: async () => h.terminals,
+      workspaceHeld: async (id) => h.held[id] ?? false,
       processesUnderCwds: async (dirs) => new Map(dirs.map((dir) => [dir, h.processes[dir] ?? []])),
       runningServers: (id) => h.servers[id] ?? 0,
       pullRequests: async () => h.pullRequests,
@@ -227,17 +229,44 @@ async function main() {
       h.pullRequests = { open: [], merged: [] };
     });
 
-    await check("a squash whose remote branch was deleted goes on its content, having been pushed", async () => {
-      const entry = worktree("squash-gone");
+    await check("a squash goes on its content while its remote branch still holds this exact commit", async () => {
+      const entry = worktree("squash-pushed");
       commitFile(entry.dir, "sq.txt", "sq\n", "squash work");
+      git(entry.dir, ["push", "-q", "-u", "origin", entry.branch]);
+      git(repo, ["merge", "-q", "--squash", entry.branch]);
+      git(repo, ["commit", "-q", "-m", "squash"]);
+      git(repo, ["push", "-q", "origin", "main"]);
+      assert.equal((await stateOf(entry.id)).proof, "content-in-target");
+      await assertGone(entry);
+    });
+
+    await check("once its remote branch is deleted, content alone cannot show the last commit was pushed", async () => {
+      const entry = worktree("squash-gone");
+      commitFile(entry.dir, "sg.txt", "sg\n", "squash work");
       git(entry.dir, ["push", "-q", "-u", "origin", entry.branch]);
       git(repo, ["merge", "-q", "--squash", entry.branch]);
       git(repo, ["commit", "-q", "-m", "squash"]);
       git(repo, ["push", "-q", "origin", "main"]);
       git(repo, ["push", "-q", "origin", "--delete", entry.branch]);
       git(repo, ["fetch", "-q", "--prune", "origin"]);
-      assert.equal((await stateOf(entry.id)).proof, "content-in-target");
-      await assertGone(entry);
+      // Two commits after the last push that net out to the same files.
+      commitFile(entry.dir, "sg.txt", "experiment\n", "never pushed");
+      commitFile(entry.dir, "sg.txt", "sg\n", "never pushed either");
+      const state = await stateOf(entry.id);
+      assert.equal(state.proof, "content-in-target");
+      assert.equal(state.autoRemoveMerged, undefined);
+      await assertStays(entry, /cannot be shown to have been pushed/);
+    });
+
+    await check("an upstream that is a local branch shows nothing either", async () => {
+      const entry = worktree("local-upstream");
+      commitFile(entry.dir, "lu.txt", "lu\n", "local upstream work");
+      git(entry.dir, ["branch", "--set-upstream-to=main"]);
+      git(repo, ["merge", "-q", "--squash", entry.branch]);
+      git(repo, ["commit", "-q", "-m", "squash"]);
+      git(repo, ["push", "-q", "origin", "main"]);
+      assert.equal((await stateOf(entry.id)).autoRemoveMerged, undefined);
+      await assertStays(entry, /unpushed|cannot be shown to have been pushed/);
     });
 
     // ── Local work ────────────────────────────────────────────────────────
@@ -310,7 +339,7 @@ async function main() {
       const state = await stateOf(entry.id);
       assert.equal(state.proof, "content-in-target");
       assert.equal(state.autoRemoveMerged, undefined);
-      await assertStays(entry, /never pushed/);
+      await assertStays(entry, /cannot be shown to have been pushed/);
     });
 
     await check("a pull request for another commit proves nothing", async () => {
@@ -540,6 +569,67 @@ async function main() {
       assert.equal(result.status, "refused");
       assert.match(result.message, /folder is gone/);
       assert.equal(has(entry.id), true);
+    });
+
+    await check("the window is asked again at the last moment, and only a plain no lets it go", async () => {
+      const opened = mergedWorktree("opened-late");
+      h.held[opened.id] = true;
+      await assertStays(opened, /open tabs/);
+      assert.equal(fs.existsSync(path.join(opened.dir, "opened-late.txt")), true);
+      assert.ok(
+        !git(repo, ["for-each-ref", "--format=%(refname)", "refs/codara/removed-worktrees"]).includes(opened.id),
+        "stopped before anything changed",
+      );
+      for (const [name, answer] of [
+        ["no answer", async () => null],
+        ["a failed question", async () => { throw new Error("no window"); }],
+      ]) {
+        const result = await auto(opened.id, ON, { ...deps, workspaceHeld: answer });
+        assert.equal(result.status, "refused", name);
+        assert.equal(fs.existsSync(opened.dir), true, name);
+      }
+      const { workspaceHeld: _unused, ...noProbe } = deps;
+      assert.equal((await auto(opened.id, ON, noProbe)).status, "refused", "no way to ask counts as held");
+      delete h.held[opened.id];
+      await assertGone(opened);
+    });
+
+    await check("switching to the workspace while the checks run stops the removal", async () => {
+      const entry = mergedWorktree("switched-to");
+      let calls = 0;
+      const racing = {
+        ...deps,
+        listRendererTerminals: async () => {
+          calls += 1;
+          if (calls === 2) h.state.activeWorkspaceId = entry.id;
+          return [];
+        },
+      };
+      const result = await auto(entry.id, ON, racing);
+      h.state.activeWorkspaceId = "ws-repo";
+      assert.equal(result.status, "refused");
+      assert.match(result.message, /on screen/);
+      assert.equal(fs.existsSync(entry.dir), true);
+      assert.equal(has(entry.id), true);
+    });
+
+    await check("a local branch spelled like the remote's base is not the remote", async () => {
+      const entry = worktree("shadowed-base");
+      commitFile(entry.dir, "s.txt", "s\n", "never left this computer");
+      git(repo, ["branch", "origin/main", "main"]);
+      git(repo, ["branch", "--no-track", "shadow-tmp", "main"]);
+      try {
+        git(repo, ["checkout", "-q", "origin/main"]);
+        git(repo, ["merge", "-q", "--no-ff", "-m", "local merge", entry.branch]);
+        git(repo, ["checkout", "-q", "main"]);
+        const state = await stateOf(entry.id);
+        assert.equal(state.merge, "merged", "merged into what the name resolves to");
+        assert.equal(state.autoRemoveMerged, undefined);
+        await assertStays(entry, /only locally/);
+      } finally {
+        git(repo, ["checkout", "-q", "main"]);
+        git(repo, ["branch", "-D", "origin/main", "shadow-tmp"]);
+      }
     });
 
     await check("a request from the rail cannot widen the mode", async () => {

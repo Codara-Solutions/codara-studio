@@ -534,6 +534,15 @@ test("screenshots in light and dark", async () => {
       await page.waitForTimeout(200);
       await page.screenshot({ path: join(SHOTS!, `picker-rename-${theme}.png`) });
       await page.keyboard.press("Escape");
+      await page.keyboard.press("Escape");
+      await expect(picker).toHaveCount(0);
+      await page.waitForTimeout(200);
+      await page.screenshot({ path: join(SHOTS!, `rail-button-${theme}.png`) });
+      await page.getByTestId("rail-sessions-button").click();
+      await expect(picker.getByRole("tablist", { name: "Sessions from" }).getByRole("tab", { name: "Workspace" })).toHaveAttribute("aria-selected", "true");
+      await page.waitForTimeout(400);
+      await page.screenshot({ path: join(SHOTS!, `picker-from-rail-${theme}.png`) });
+      await showAll(picker);
     }
   } finally {
     await app?.close().catch(() => undefined);

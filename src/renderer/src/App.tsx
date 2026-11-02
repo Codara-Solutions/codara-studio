@@ -91,6 +91,7 @@ import {
   type ShareableStudioTerminal,
 } from "./components/Terminal/terminalRegistry";
 import { setPaneOverlayHostLocator } from "./components/Terminal/paneOverlays";
+import { setWorkspaceHeldProbe } from "./components/Terminal/terminalRpc";
 import { deliverablePanes } from "./routing/agent-destinations";
 import { forgetTerminalSessionMemory } from "./components/Terminal/useTerminalSession";
 import {
@@ -876,6 +877,9 @@ export default function App() {
   );
 
   const railWorkspaceHeldRef = useRef<(workspaceId: string) => boolean>(() => true);
+  // Main asks again right before an automatic removal: the answer above can be
+  // old by the time its checks and the repository lock are through.
+  useEffect(() => setWorkspaceHeldProbe((workspaceId) => railWorkspaceHeldRef.current(workspaceId)), []);
   // Merged and missing copy-branch workspaces for the rail. A missing one
   // whose branch is merged or gone is cleaned up without asking, and so is a
   // merged one nothing is left in or using (main refuses anything in use,

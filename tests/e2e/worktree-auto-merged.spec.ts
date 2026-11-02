@@ -126,18 +126,20 @@ const saveLayout = (page: Page, workspaceId: string, tabs: unknown[]) =>
 
 async function shoot(page: Page, name: string) {
   if (!SHOTS) return;
-  for (const [theme, klass] of [
-    ["dark", "codara-classic"],
+  for (const [theme, id] of [
     ["light", "codara-daylight"],
+    ["dark", "codara-classic"],
   ] as const) {
     await page.evaluate(
-      ([value, className]) => {
+      ([mode, themeId]) => {
         const root = document.documentElement;
-        root.dataset.theme = value;
-        root.classList.remove("codara-classic", "codara-daylight");
-        root.classList.add(className);
+        root.classList.remove("light", "dark", "theme-codara-daylight", "theme-codara-classic");
+        root.classList.add(mode, `theme-${themeId}`);
+        root.dataset.theme = themeId;
+        root.dataset.themeMode = mode;
+        root.style.setProperty("color-scheme", mode);
       },
-      [theme, klass],
+      [theme, id] as const,
     );
     await page.waitForTimeout(250);
     await page.screenshot({ path: join(SHOTS, `${name}-${theme}.png`) });

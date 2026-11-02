@@ -458,6 +458,11 @@ Worktrees, Remove merged worktrees on their own** turns it off (on by default).
   only a removal nobody needs to confirm may run. Dirty, untracked, ignored
   files worth keeping, unpushed, locked, in use or merged only locally all stay.
   It never forces, and the last commit stays recoverable for 30 days.
+- Matching content is not enough on its own: the branch's last commit must still
+  be on its remote branch. A squash merge whose remote branch was deleted goes on
+  the merged pull request instead; without that lookup it stays in the fold.
+- The window is asked again at the last moment, under the repository lock, and
+  anything but a clear "not held" keeps the worktree.
 - A row with a tab stays, whatever the tab holds. Main cannot see an editor
   buffer or a draft, so the rail decides this one.
 - An empty worktree (nothing ever committed) is never removed on its own. After
