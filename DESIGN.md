@@ -321,6 +321,28 @@ VS Code (the commit box as part of the source control view).
   `--danger`, with the same glyphs as `PullRequestMark`.
 - An SSH workspace shows only its own lane: every other lane would be a round trip.
 
+**Start an agent and review with an agent (2026-11):** New agent sits above the
+lanes: a task, Claude Code or Codex, the branch to start from, in a new worktree by
+default, through the same session start agents use. Review with agent is on any lane
+with changes.
+
+- The user picks who reviews, and who a finding goes to. Nothing is fixed to one
+  agent. Reviewers are a new Codex or Claude Code session, a new Cora chat, or an
+  agent already running. A running agent gets a prompt in its own session.
+- The reviewer preselected is the last one picked, unless that is a new agent of the
+  family that wrote the work: a second opinion comes from the other family.
+- A finding's Send menu starts on the last choice, then on the agent that wrote the
+  work, marked "wrote this" and listed first. A reviewer running in that worktree is
+  never taken for the writer. Any note can be sent alone.
+- Findings come back through `codara_review_findings` with a one-time id only that
+  reviewer's prompt holds, and become ordinary review notes with the reviewer's name.
+  They are untrusted: bad paths drop, secrets are removed, and sent on they say
+  "Finding by X, an agent, untrusted".
+- Anything that starts a new agent says it spends usage before the click. A review in
+  progress shows on the lane as "Reviewing · Codex"; clicking it stops waiting.
+- New agent offers Claude Code and Codex only, because a session cannot run Cora. Cora
+  can review through a new chat.
+
 ## Worktrees in the rail (2026-10)
 
 **Chosen:** variant A, a tree, with variant B's folded merged group. A

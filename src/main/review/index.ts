@@ -2,10 +2,14 @@
 // the hand-off file for a newly launched agent. Registered by ipc.ts through
 // its sender-gated `handle`.
 
+import { BrowserWindow } from "electron";
 import type { ReviewDiff, ReviewDiffRequest, ReviewNote } from "@shared/review-notes";
 import type { IpcHandle } from "../ipc";
+import { AGENT_REVIEW_CHANGED_CHANNEL, type AgentReviewState } from "@shared/agent-review";
+import { isRemotePath } from "@shared/remote";
+import { AgentReviews, type AgentReviewStartRequest } from "./agent-review";
 import { createReviewNotesStore } from "./notes-store";
-import { getReviewDiff, type ReviewDiffDeps } from "./review-diff";
+import { getReviewDiff, isSafeRefName, type ReviewDiffDeps } from "./review-diff";
 
 const store = createReviewNotesStore();
 
@@ -44,7 +48,72 @@ function diffRequest(raw: unknown): ReviewDiffRequest {
   };
 }
 
+let reviews: AgentReviews | null = null;
+
+export function agentReviews(): AgentReviews {
+  if (!reviews) {
+    reviews = new AgentReviews({
+      startSession: async (input) => (await import("../agent-socket")).startAgentSessionForUser(input),
+      viewSession: async (id) => (await import("../agent-socket")).agentSessionViewForUser(id),
+      emit: (state) => {
+        for (const window of BrowserWindow.getAllWindows()) {
+          if (!window.isDestroyed()) window.webContents.send(AGENT_REVIEW_CHANGED_CHANNEL, state);
+        }
+      },
+    });
+  }
+  return reviews;
+}
+
+function reviewRequest(raw: unknown): AgentReviewStartRequest {
+  const value = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const text = (key: string, max: number) => {
+    const field = value[key];
+    return typeof field === "string" && field.trim() ? field.trim().slice(0, max) : null;
+  };
+  const workspaceId = text("workspaceId", 200);
+  const cwd = text("cwd", 16_384);
+  const reviewer = text("reviewer", 80);
+  if (!workspaceId || !cwd || !reviewer) throw new Error("A review needs a workspace, a folder and a reviewer.");
+  if (isRemotePath(cwd)) throw new Error("A review with an agent runs on local checkouts only.");
+  const base = text("base", 250);
+  return {
+    workspaceId,
+    cwd,
+    reviewer,
+    branch: text("branch", 250),
+    // Goes into a command the reviewer runs, so only a plain branch name does.
+    base: base && isSafeRefName(base) ? base : null,
+    ...(value.runtime === "claude" || value.runtime === "codex" ? { runtime: value.runtime } : {}),
+  };
+}
+
 export function registerReviewIpc(handle: IpcHandle): void {
+  handle("agentReview:list", async (): Promise<AgentReviewState[]> => agentReviews().list());
+  handle("agentReview:prepare", async (_event, raw: unknown) => agentReviews().prepare(reviewRequest(raw)));
+  handle("agentReview:start", async (_event, raw: unknown): Promise<AgentReviewState> => {
+    const request = reviewRequest(raw);
+    if (!request.runtime) throw new Error("A new reviewer needs an agent: Claude Code or Codex.");
+    return agentReviews().start({ ...request, runtime: request.runtime });
+  });
+  handle("agentReview:acknowledge", async (_event, id: unknown) => {
+    if (typeof id === "string") agentReviews().acknowledge(id);
+  });
+  handle("agentReview:dismiss", async (_event, id: unknown) => {
+    if (typeof id === "string") agentReviews().dismiss(id);
+  });
+  handle("sourceAgents:start", async (_event, raw: unknown) => {
+    const value = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    const { startAgentSessionForUser } = await import("../agent-socket");
+    const worktree = value.worktree && typeof value.worktree === "object" ? (value.worktree as { base?: string; purpose?: string }) : undefined;
+    return startAgentSessionForUser({
+      brief: typeof value.brief === "string" ? value.brief : "",
+      runtime: value.runtime === "codex" ? "codex" : "claude",
+      workspace: typeof value.workspace === "string" ? value.workspace : "",
+      ...(worktree ? { worktree: { ...(worktree.base ? { base: worktree.base } : {}), ...(worktree.purpose ? { purpose: worktree.purpose } : {}) } } : {}),
+    });
+  });
+
   handle("review:diff", async (_event, raw: unknown): Promise<ReviewDiff> => getReviewDiff(diffRequest(raw), reviewBaseDeps));
   handle("review:notes:list", async (_event, workspaceId: unknown): Promise<ReviewNote[]> => store.list(String(workspaceId ?? "")));
   handle("review:notes:save", async (_event, raw: { workspaceId?: unknown; notes?: unknown }): Promise<ReviewNote[]> =>

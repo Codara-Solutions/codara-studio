@@ -15,6 +15,8 @@ import { Chevron, MergedFold, WorktreeAgentLine } from "../../rail/WorkspaceChil
 import FixWithAgentButton from "../fix/FixWithAgentButton";
 import { MergePullRequestDialog } from "../GitHubSection";
 import { splitPath, statusColor, statusGlyph, statusLabel } from "../git-ui";
+import LaneReviewButton from "./LaneReviewButton";
+import NewAgentDialog from "./NewAgentDialog";
 import "./lanes.css";
 
 // The Source Control panel's list (DESIGN.md, "Source Control"): one lane per
@@ -32,6 +34,8 @@ export interface LaneActions {
   externalWorktrees?: readonly WorktreeRailExternal[];
   /** A lane's merge changed what the panel shows. */
   onChanged: () => void;
+  /** New agent in the panel's project; absent where a session cannot start, such as SSH. */
+  newAgent?: { workspaceId: string; cwd: string };
 }
 
 function openLane(lane: SourceLane, actions: LaneActions): void {
@@ -144,6 +148,7 @@ function LaneDetail({
             Review
           </button>
         )}
+        {total > 0 && <LaneReviewButton lane={lane} />}
       </div>
     </div>
   );
@@ -254,6 +259,7 @@ export default function SourceLanesList({
   } | null>(null);
   const [mergeResult, setMergeResult] = useState<GitHubMergeResult | null>(null);
   const mergedOpen = useRailFold(`lanes-merged:${projectKey}`, false);
+  const [newAgentOpen, setNewAgentOpen] = useState(false);
 
   const startMerge = (lane: SourceLane) => {
     void prepareMerge(lane).then((ready) => {
@@ -282,6 +288,19 @@ export default function SourceLanesList({
 
   return (
     <div data-testid="source-lanes">
+      {actions.newAgent && (
+        <div className="lane-new">
+          <button
+            type="button"
+            className="lane-action is-primary"
+            data-testid="source-new-agent"
+            title="Start an agent on a task, in its own worktree. Spends that agent's usage."
+            onClick={() => setNewAgentOpen(true)}
+          >
+            New agent
+          </button>
+        </div>
+      )}
       {lanes.others.map((lane) => (
         <LaneRow key={lane.id} lane={lane} entry={entryOf(lane)} foldKey={`lane:${lane.id}`} defaultOpen={false}>
           <LaneDetail lane={lane} actions={actions} onMerge={startMerge} />
@@ -289,6 +308,11 @@ export default function SourceLanesList({
       ))}
       {lanes.own && (
         <LaneRow lane={lanes.own} entry={entryOf(lanes.own)} foldKey={`lane-own:${projectKey}`} defaultOpen>
+          {(lanes.own.changes?.fileCount ?? 0) > 0 && lanes.own.workspaceId ? (
+            <div className="lane-own-actions">
+              <LaneReviewButton lane={lanes.own} />
+            </div>
+          ) : null}
           {ownDetail}
         </LaneRow>
       )}
@@ -309,6 +333,14 @@ export default function SourceLanesList({
           />
         </div>
       )}
+      {newAgentOpen && actions.newAgent ? (
+        <NewAgentDialog
+          workspaceId={actions.newAgent.workspaceId}
+          cwd={actions.newAgent.cwd}
+          defaultBase={lanes.own?.changes?.base ?? null}
+          onClose={() => setNewAgentOpen(false)}
+        />
+      ) : null}
       {merge && (
         <MergePullRequestDialog
           cwd={merge.cwd}

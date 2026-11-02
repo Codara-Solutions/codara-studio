@@ -49,6 +49,8 @@ export interface LaneInput {
   own: boolean;
   /** Most urgent first. */
   agents: readonly AgentLine[];
+  /** Who made the worktree when an agent did ("claude-code"), for a reviewer of the other family. */
+  creator?: string | null;
   pullRequest: PullRequestWatchState | null;
   merged: boolean;
   /** The folder is not on disk. */

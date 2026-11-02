@@ -108,8 +108,9 @@ export default function GitPanel({
       onCleanUpWorkspace,
       externalWorktrees,
       onChanged: notifyChanged,
+      ...(workspace && !workspace.remote ? { newAgent: { workspaceId: workspace.id, cwd: workspace.cwd } } : {}),
     }),
-    [onActivateWorkspace, onOpenExternalWorktree, onCleanUpWorkspace, externalWorktrees, notifyChanged],
+    [onActivateWorkspace, onOpenExternalWorktree, onCleanUpWorkspace, externalWorktrees, notifyChanged, workspace],
   );
   const [opError, setOpError] = useState<string | null>(null);
   // The last failed commit, so a hook's rejection can go to an agent.

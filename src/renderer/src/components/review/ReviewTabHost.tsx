@@ -15,6 +15,7 @@ import { IconButton, RefreshIcon, Spinner } from "../git/git-ui";
 import ReviewDiffList, { type HunkAction, type ReviewListContext } from "./ReviewDiffList";
 import ReviewMenu, { type MenuRow } from "./ReviewMenus";
 import ReviewNotesPanel from "./ReviewNotesPanel";
+import { useAgentReviewOf } from "./agentReviewStore";
 import {
   anchorFor,
   anchorLineIndex,
@@ -43,13 +44,18 @@ import {
   useReviewNotes,
 } from "./review-notes-store";
 import {
-  defaultReviewDestination,
+  markWriter,
   newAgentCommand,
+  pickReviewDestination,
+  REVIEW_SEND_STORAGE_KEY,
   REVIEW_GROUP_TITLES,
   reviewDeliveryTarget,
   reviewDestinations,
+  writerDestinationId,
   type ReviewDestination,
 } from "./review-send";
+import { getAgentBoardSources } from "../agent-board/agentBoardSources";
+import { useWorkspaceAgentLines } from "../workspace-status/agentLinesStore";
 import { readReviewViewPrefs as readPrefs, writeReviewViewPrefs as writePrefs, type ReviewViewPrefs as ViewPrefs } from "./review-view-prefs";
 import "./review.css";
 
@@ -131,6 +137,22 @@ function statusSignature(status: GitStatus | null): string {
   return `${status.branch ?? ""}#${side(status.staged)}#${side(status.unstaged)}`;
 }
 
+function rememberedSend(): string | null {
+  try {
+    return localStorage.getItem(REVIEW_SEND_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberSend(id: string): void {
+  try {
+    localStorage.setItem(REVIEW_SEND_STORAGE_KEY, id);
+  } catch {
+    // The choice just is not remembered.
+  }
+}
+
 export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpenFile, onOpenFileDiff, onChanged, onLaunchAgent }: Props): React.ReactElement {
   const routing = useOptionalSelectionRouting();
   const workspaceId = routing?.workspaceId ?? null;
@@ -166,7 +188,9 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
   const [confirmDiscard, setConfirmDiscard] = useState<string | null>(null);
   const [message, setMessage] = useState<{ text: string; tone?: "error"; undo?: ReviewNote } | null>(null);
   const [panelOpen, setPanelOpen] = useState(readPanelOpen);
-  const [menu, setMenu] = useState<{ kind: "send" | "base"; anchor: HTMLElement } | null>(null);
+  const [menu, setMenu] = useState<{ kind: "send" | "base"; anchor: HTMLElement; notes?: readonly ReviewNote[] } | null>(null);
+  const agentLines = useWorkspaceAgentLines(workspaceId ?? "");
+  const agentReview = useAgentReviewOf(workspaceId ?? null);
   const [sending, setSending] = useState(false);
   const listRef = useRef<GroupedVirtuosoHandle>(null);
 
@@ -689,9 +713,19 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
   const destinations = useMemo((): { list: ReviewDestination[]; defaultId: string | null } => {
     if (!menu || menu.kind !== "send") return { list: [], defaultId: null };
     const routed = routing ? routing.destinationsFor(null) : { destinations: [], defaultId: "" };
-    const list = reviewDestinations(routed.destinations, Boolean(workspaceId), { remote: isRemotePath(cwd) });
-    return { list, defaultId: defaultReviewDestination(list, routed.defaultId) };
-  }, [cwd, menu, routing, workspaceId]);
+    const rows = reviewDestinations(routed.destinations, Boolean(workspaceId), { remote: isRemotePath(cwd) });
+    const creator = getAgentBoardSources().workspaces.find((workspace) => workspace.id === workspaceId)?.copyBranch?.createdBy;
+    const reviewerLine = agentReview?.reviewerPaneId ? `pane:${agentReview.reviewerPaneId}` : null;
+    const writerId = writerDestinationId(
+      rows,
+      agentLines.filter((line) => line.key !== reviewerLine),
+      creator?.kind === "agent" ? creator.paneId : null,
+    );
+    return {
+      list: markWriter(rows, writerId),
+      defaultId: pickReviewDestination(rows, { remembered: rememberedSend(), writerId, routingDefault: routed.defaultId }),
+    };
+  }, [agentLines, agentReview, cwd, menu, routing, workspaceId]);
 
   const scope = useMemo(() => {
     if (notes.some((note) => note.source !== "diff")) return null;
@@ -700,9 +734,10 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
   }, [diff?.base, mode, notes]);
 
   const send = useCallback(
-    async (destination: ReviewDestination) => {
+    async (destination: ReviewDestination, only?: readonly ReviewNote[]) => {
       if (!workspaceId || !notes.length || sending) return;
-      const batch = sortReviewNotes(notes);
+      rememberSend(destination.id);
+      const batch = sortReviewNotes(only ?? notes);
       const text = formatReviewNotes(batch, { scope, workspaceCwd: cwd, repoRoot: diff?.root });
       setSending(true);
       setMessage(null);
@@ -989,14 +1024,14 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
             onDelete={deleteNote}
             onCopy={copyAll}
             onClearAll={clearAll}
-            onSend={(anchor) => setMenu({ kind: "send", anchor })}
+            onSend={(anchor, only) => setMenu({ kind: "send", anchor, ...(only ? { notes: only } : {}) })}
           />
         ) : null}
       </div>
       {menu?.kind === "send" ? (
         <ReviewMenu
           anchor={menu.anchor}
-          label="Send the notes to"
+          label={menu.notes?.length === 1 ? "Send this note to" : "Send the notes to"}
           testId="review-send-menu"
           rows={destinations.list.map((destination) => ({
             id: destination.id,
@@ -1011,7 +1046,7 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
           onChoose={(id) => {
             const destination = destinations.list.find((candidate) => candidate.id === id);
             setMenu(null);
-            if (destination && !destination.disabled) void send(destination);
+            if (destination && !destination.disabled) void send(destination, menu.notes);
           }}
           onClose={() => setMenu(null)}
         />
