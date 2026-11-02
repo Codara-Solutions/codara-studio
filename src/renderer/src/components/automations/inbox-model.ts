@@ -231,7 +231,7 @@ function untilPhrase(job: ScheduledJob): string {
   if (stop.untilCommand) until.push("its check passes");
   if (stop.untilPhrase) until.push(`it says "${stop.untilPhrase}"`);
   if (until.length > 0) return `until ${joinWords(until, "or")}`;
-  if (job.loop?.kind === "agent" || job.loop?.kind === "continuous") return "until it says it is done";
+  if (job.loop?.kind === "agent") return "until it says it is done";
   return "";
 }
 

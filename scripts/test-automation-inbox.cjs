@@ -163,6 +163,12 @@ async function main() {
     "Back to back, Opus 5 works in sample-repo, until it says it is done.",
   );
 
+  assert.equal(
+    sentence(job({ trigger: { kind: "continuous" }, loop: { kind: "continuous", stop: { maxIterations: 20 } } })),
+    "Back to back, Opus 5 works in sample-repo, stopping at 20 runs.",
+    "a continuous loop does not stop when the agent says so",
+  );
+
   // Next run: cron and a parked cadence loop; nothing when paused or unknowable.
   const next = m.nextRunAt(job({ trigger: { kind: "cron", expr: "0 2 * * 1-5" } }), NOW);
   assert.equal(next, new Date(2026, 10, 19, 2, 0, 0).getTime());
@@ -287,6 +293,27 @@ async function main() {
   assert.match(prompt, /^My automation "Nightly" failed \(run run-9\)\. Find out why and fix it\./);
   assert.ok(prompt.length < 1000);
   assert.equal(m.fixWithCoraPrompt(job({ name: "Empty" })), 'My automation "Empty" failed. Find out why and fix it.');
+
+  // A message for a draft chat only reaches that workspace's draft, once.
+  const prefillOut = path.join(tmp, "prefill.bundle.cjs");
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, "src", "renderer", "src", "components", "chat", "composer", "pending-prefill.ts")],
+    outfile: prefillOut,
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    logLevel: "silent",
+  });
+  const prefill = require(prefillOut);
+  assert.equal(prefill.consumeDraftPrefill("ws-a:draft"), null);
+  prefill.requestDraftPrefill("ws-a", "hello", 1_000);
+  assert.equal(prefill.consumeDraftPrefill("ws-b:draft", 1_001), null, "another workspace never takes it");
+  assert.equal(prefill.consumeDraftPrefill("ws-ab:draft", 1_001), null, "a longer id is another workspace");
+  assert.equal(prefill.consumeDraftPrefill(undefined, 1_001), null);
+  assert.equal(prefill.consumeDraftPrefill("ws-a:draft", 1_002), "hello");
+  assert.equal(prefill.consumeDraftPrefill("ws-a:draft", 1_003), null, "taken once");
+  prefill.requestDraftPrefill("ws-a", "stale", 1_000);
+  assert.equal(prefill.consumeDraftPrefill("ws-a:draft", 1_000 + 16_000), null, "an abandoned hand-off expires");
 
   console.log("automation inbox model: ok");
 }

@@ -45,6 +45,7 @@ import {
 } from "@shared/workspace-colors";
 import WindowChrome from "./components/WindowChrome";
 import { requestAutomationFocus, requestWorkflowRunFocus } from "./components/automations/focus-request";
+import { requestDraftPrefill } from "./components/chat/composer/pending-prefill";
 import WorkspaceRail from "./components/WorkspaceRail";
 import { publishAgentBoardSources } from "./components/agent-board/agentBoardSources";
 import { BackgroundAgentNotice } from "./components/workspace-status/BackgroundAgentNotice";
@@ -236,8 +237,6 @@ import {
   type AwayDigestBaseline,
   type ChatStatusTone,
 } from "./components/chat/timeline";
-
-const ASK_CORA_PAINT_DELAY_MS = 300;
 
 function workerTabBrandColor(
   runtime: string | null | undefined,
@@ -8115,17 +8114,16 @@ const Workspace = React.memo(function Workspace({
     [onOpenBoardCardRun, rememberChatView],
   );
   // A surface outside the chat stack hands Cora a message to review and send.
-  // The composer only listens while it is on screen, so the text waits for the
-  // tab switch to paint.
+  // The draft may last have shown its board, where the composer is hidden.
   const handleAskCora = useCallback(
     (prompt: string) => {
-      tabs.openChatTab({ runId: null, focus: true });
-      window.setTimeout(() => {
-        window.dispatchEvent(new CustomEvent("spark:prefill-composer", { detail: { text: prompt } }));
-        window.dispatchEvent(new Event("spark:focus-composer"));
-      }, ASK_CORA_PAINT_DELAY_MS);
+      if (!workspace) return;
+      const chatTabId = tabs.openChatTab({ runId: null, focus: true });
+      rememberChatView(chatTabId, "chat");
+      setChatView("chat");
+      requestDraftPrefill(workspace.id, prompt);
     },
-    [tabs],
+    [tabs, workspace, rememberChatView],
   );
   // First card mutation on a DRAFT chat's board: mint the run WITHOUT starting
   // autopilot, persist the cards on its board, then promote the draft tab via
