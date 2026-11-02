@@ -8,6 +8,7 @@ import {
   emptySentence,
   nextStarts,
   sentenceBudget,
+  sentenceMistake,
   sentenceProblem,
   sentenceToInput,
   sentenceToSeed,
@@ -63,6 +64,7 @@ export default function SentenceBuilder({
   const set = (patch: Partial<SentenceDraft>): void => setDraft((d) => ({ ...d, ...patch }));
   const ctx = { workspaceId, workspaceName, cwd };
   const problem = sentenceProblem(draft);
+  const mistake = sentenceMistake(draft);
   const trigger = useMemo(() => sentenceTrigger(draft), [draft]);
   const nowMs = useMemo(() => Date.now(), [trigger]);
   const starts = useMemo(() => nextStarts(trigger, nowMs, 3), [trigger, nowMs]);
@@ -204,8 +206,12 @@ export default function SentenceBuilder({
           <button
             type="button"
             className="spark-btn"
-            title="For branches, steps and other triggers"
-            onClick={() => onOpenFlow({ seed: sentenceToSeed(draft, ctx) })}
+            title={mistake ?? "For branches, steps and other triggers"}
+            disabled={Boolean(mistake)}
+            onClick={() => {
+              const seed = sentenceToSeed(draft, ctx);
+              if (seed) onOpenFlow({ seed });
+            }}
           >
             Open in flow editor
           </button>

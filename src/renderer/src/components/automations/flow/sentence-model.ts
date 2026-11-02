@@ -48,6 +48,9 @@ export function emptySentence(): SentenceDraft {
   };
 }
 
+// The longest timer Node keeps: past it setInterval fires at once, over and over.
+const MAX_EVERY_MINUTES = Math.floor(2_147_483_647 / 60_000);
+
 function timeParts(time: string): { hour: number; minute: number } | null {
   const match = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
   if (!match) return null;
@@ -73,7 +76,7 @@ export function sentenceTrigger(d: SentenceDraft): AutomationTrigger | null {
     }
     case "every": {
       const minutes = wholeAboveZero(d.everyMin);
-      return minutes ? { kind: "interval", everyMs: minutes * 60_000 } : null;
+      return minutes && minutes <= MAX_EVERY_MINUTES ? { kind: "interval", everyMs: minutes * 60_000 } : null;
     }
     case "prOpened":
       return { kind: "github", events: ["prOpened"] };
@@ -97,13 +100,12 @@ export function sentenceLoop(d: SentenceDraft): AutomationLoop {
   return { kind: "until", stop: { ...limits, untilTestsPass: true, testCommand: d.testCommand.trim() || "npm test" } };
 }
 
-/** What stops it being saved, first thing first. A limit only goes when its field
- *  is blank: a typo must not read as asking for none. */
-export function sentenceProblem(d: SentenceDraft): string | null {
-  if (!d.name.trim()) return "Name the automation.";
+/** What is wrong with what was written. A limit only goes when its field is blank:
+ *  a typo must not read as asking for none. These also stop it being carried to the
+ *  flow editor, which would read them as blank or as a different schedule. */
+export function sentenceMistake(d: SentenceDraft): string | null {
   if ((d.when === "daily" || d.when === "weekdays") && !timeParts(d.time)) return "Write the time like 02:00.";
-  if (d.when === "every" && !wholeAboveZero(d.everyMin)) return "Say how many minutes between runs.";
-  if (!d.prompt.trim()) return "Say what it should do.";
+  if (d.when === "every" && !sentenceTrigger(d)) return `Say how many minutes between runs, up to ${MAX_EVERY_MINUTES}.`;
   if (d.budget.trim() && !(Number.isFinite(Number(d.budget.trim())) && Number(d.budget.trim()) > 0)) {
     return "The budget must be a number above 0. Leave it blank for no budget.";
   }
@@ -111,6 +113,14 @@ export function sentenceProblem(d: SentenceDraft): string | null {
     return "The number of tries must be a whole number above 0.";
   }
   return guardDraftProblem(d.monthlyCap, d.pauseAfter);
+}
+
+/** What stops it being saved, first thing first. */
+export function sentenceProblem(d: SentenceDraft): string | null {
+  if (!d.name.trim()) return "Name the automation.";
+  const mistake = sentenceMistake(d);
+  if (mistake) return mistake;
+  return d.prompt.trim() ? null : "Say what it should do.";
 }
 
 export interface SentenceContext {
@@ -158,10 +168,9 @@ export function sentenceToInput(d: SentenceDraft, ctx: SentenceContext): CreateS
 }
 
 /** The sentence as the job the flow editor opens on, for going on from there. */
-export function sentenceToSeed(d: SentenceDraft, ctx: SentenceContext): ScheduledJob {
-  // A half-written schedule still opens: the flow editor's trigger panel finishes it.
-  const input = sentenceToInput(d, ctx) ?? (sentenceToInput({ ...d, when: "manual" }, ctx) as CreateScheduledJobInput);
-  return { ...input, name: d.name, id: "", state: { status: "idle", iteration: 0 }, history: [], createdAt: "" } as ScheduledJob;
+export function sentenceToSeed(d: SentenceDraft, ctx: SentenceContext): ScheduledJob | null {
+  const input = sentenceToInput(d, ctx);
+  return input ? ({ ...input, id: "", state: { status: "idle", iteration: 0 }, history: [], createdAt: "" } as ScheduledJob) : null;
 }
 
 /** The next times it starts by itself, or nothing when that depends on events. */

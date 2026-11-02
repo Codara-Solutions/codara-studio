@@ -459,6 +459,16 @@ async function integrationChecks({ sched, loop }, workspace) {
   await sched.setEnabled(otherPrompt.id, false);
   pass("a pull request run is told what fired it, and other runs are untouched");
 
+  // ── an interval longer than a timer can hold must not fire at once ───────
+  {
+    const before = globalThis.__CU.launches.length;
+    const slow = await sched.createJob({ name: "slow", trigger: { kind: "interval", everyMs: 2_592_000_000 }, input, prompt: { template: "go" } });
+    await sleep(60);
+    assert.strictEqual(globalThis.__CU.launches.length, before, "a 30-day interval waits");
+    await sched.setEnabled(slow.id, false);
+    pass("an interval longer than a timer can hold does not fire at once");
+  }
+
   // ── spending limits: a month's tally, the cap, and the pause ──────────────
   {
     const manualTrigger = { kind: "manual" };

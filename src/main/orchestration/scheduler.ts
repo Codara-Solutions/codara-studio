@@ -559,6 +559,8 @@ export async function deleteHistoryEntry(
 // repeats the newest one (same reason and line, same command, no pass in
 // between) updates that row and counts it instead: a precheck that says "no
 // work yet" every five minutes must not bury the real passes.
+const LONGEST_TIMER_MS = 2_147_483_647;
+
 export async function appendSkip(
   id: string,
   skip: Omit<AutomationSkipRecord, "id" | "at" | "repeats" | "firstAt">,
@@ -937,7 +939,9 @@ function armJob(job: ScheduledJob): void {
         break;
       }
       case "interval": {
-        const everyMs = Math.max(1000, Math.floor(trigger.everyMs));
+        // Past the longest timer Node keeps, setInterval fires at once, over and over,
+        // and each firing starts a paid run. Reachable from the flow editor and Cora.
+        const everyMs = Math.min(LONGEST_TIMER_MS, Math.max(1000, Math.floor(trigger.everyMs)));
         const handle = setInterval(() => {
           onScheduledFire(job.id);
         }, everyMs);

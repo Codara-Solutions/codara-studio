@@ -104,6 +104,7 @@ test("a sentence becomes an automation, and can carry on in the flow editor", as
     await shot(app, page, "builder-no-ceiling");
     await page.getByLabel("Budget", { exact: true }).fill("1e");
     await expect(create).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Open in flow editor", exact: true })).toBeDisabled();
     await page.getByLabel("Budget", { exact: true }).fill("2");
 
     await page.getByLabel("Only if", { exact: true }).fill("./has-changes.sh");
@@ -133,6 +134,7 @@ test("a sentence becomes an automation, and can carry on in the flow editor", as
     await page.getByLabel("Name", { exact: true }).fill("Carried over");
     await page.getByLabel("What it should do").fill("Review the open issues.");
     await page.getByLabel("When it starts").selectOption("weekdays");
+    await page.getByLabel("Only if", { exact: true }).fill("./ready.sh");
     await page.getByLabel("Monthly cap", { exact: true }).fill("12");
     await page.getByLabel("What happens to its work").selectOption("branch");
     await clickAttached(page.getByRole("button", { name: "Open in flow editor", exact: true }));
@@ -145,6 +147,7 @@ test("a sentence becomes an automation, and can carry on in the flow editor", as
     expect(carried.trigger).toMatchObject({ kind: "cron", expr: "0 2 * * 1-5" });
     expect(carried.loop).toMatchObject({ kind: "once", stop: { budgetUsd: 2 } });
     expect(carried.guard).toEqual({ monthlyCapUsd: 12 });
+    expect((carried.precheck as { command: string }).command).toBe("./ready.sh");
     expect(carried.ownBranch).toEqual({ draftPr: false });
     expect((carried.prompt as { template: string }).template).toBe("Review the open issues.");
 
