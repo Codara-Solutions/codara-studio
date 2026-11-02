@@ -100,6 +100,9 @@ async function devTransform() {
     plugins: config.renderer.plugins,
     resolve: config.renderer.resolve,
     server: { middlewareMode: true, hmr: { server: hmrServer } },
+    // Only transformIndexHtml is needed. The dependency optimizer would
+    // start a pre-bundle that close() sometimes waits on forever.
+    optimizeDeps: { noDiscovery: true, include: [] },
     logLevel: "silent",
   });
   try {
@@ -192,7 +195,13 @@ async function inChromium(html) {
   const html = await devTransform();
   await inChromium(html);
   console.log("studio CSP: policy text, HTML rewrite, Vite dev transform with the refresh preamble, enforced in real Chromium");
-})().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+})().then(
+  // After close() Vite still holds an fs.watch on files the transform
+  // reached (src/shared/*) and its esbuild service, so the process would
+  // outlive its checks until the runner's 180 s timeout.
+  () => process.exit(0),
+  (error) => {
+    console.error(error);
+    process.exit(1);
+  },
+);
