@@ -892,7 +892,7 @@ const AutomationRow = React.memo(function AutomationRow({
   onSelect: () => void;
   onToggleEnabled: (enabled: boolean) => void;
 }): React.ReactElement {
-  const group = inboxGroup(job);
+  const group = inboxGroup(job, nowMs);
   const status = statusWord(job, nowMs);
   const schedule = rowSchedule(job, nowMs, names);
   const runs = recentRuns(job, RECENT_RUNS_IN_ROW, nowMs);

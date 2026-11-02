@@ -22,12 +22,14 @@ import { isStepsOnly, type PaletteChoice } from "./model";
 import { loopSummary, triggerSummary } from "../presentation";
 import NodeContextPanel from "./NodeContextPanel";
 import LoopInspector from "./LoopInspector";
+import { costForecast } from "../cost-forecast";
 import AddNodePalette, { type PaletteState } from "./AddNodePalette";
 import { edgeTypes, nodeTypes } from "./FlowNodes";
 import { PRESETS, type LoomPreset } from "./presets";
 import { buildGate } from "./gate-model";
 import {
   TRIGGER_ID,
+  buildGuard,
   buildLoop,
   buildTrigger,
   buildWorker,
@@ -439,6 +441,7 @@ function Editor({
         precheck: gate.precheck ?? null,
         missedRuns: gate.missedRuns ?? null,
         ownBranch: draft.loop.ownBranch ? { draftPr: draft.loop.draftPr } : null,
+        guard: buildGuard(draft.loop) ?? null,
       });
     } else if (onCreate) {
       onCreate({
@@ -452,6 +455,7 @@ function Editor({
         enabled: true,
         ...gate,
         ...(draft.loop.ownBranch ? { ownBranch: { draftPr: draft.loop.draftPr } } : {}),
+        ...(buildGuard(draft.loop) ? { guard: buildGuard(draft.loop) } : {}),
       });
     }
   }, [canSubmit, draft, nodes, edges, editing, initial, onCreate, onSave, workspaceId, workspaceName, cwd]);
@@ -807,6 +811,15 @@ function Editor({
             {loopOpen ? (
               <LoopInspector
                 loop={draft.loop}
+                forecast={costForecast(
+                  {
+                    trigger: buildTrigger(draft.trigger),
+                    stepsOnly: isStepsOnly(nodes),
+                    budgetUsd: buildLoop(draft.loop).stop.budgetUsd,
+                    monthlyCapUsd: buildGuard(draft.loop)?.monthlyCapUsd,
+                  },
+                  Date.now(),
+                )}
                 onChange={(loop) => {
                   setDraft((d) => ({ ...d, loop }));
                   markDirty();

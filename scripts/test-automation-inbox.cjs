@@ -353,6 +353,39 @@ async function main() {
   prefill.requestDraftPrefill("ws-a", "stale", 1_000);
   assert.equal(prefill.consumeDraftPrefill("ws-a:draft", 1_000 + 16_000), null, "an abandoned hand-off expires");
 
+  // A limit holding it back puts it on Needs you, and the card says why.
+  {
+    const thisMonth = new Date(NOW - 3_600_000).toISOString();
+    const capped = job({ guard: { monthlyCapUsd: 20 }, monthSpend: { month: "2026-11", costUsd: 21, measuredCostUsd: 0 }, history: [rec({ startedAt: thisMonth, costUsd: 21 })] });
+    assert.equal(m.inboxGroup(capped, NOW), "needs");
+    assert.equal(m.statusWord(capped, NOW).word, "Needs you");
+    assert.equal(m.resultCard(capped, NOW).headline, "Monthly cap reached");
+    assert.match(m.resultCard(capped, NOW).body, /\$21\.00 of its \$20\.00 cap/);
+    assert.ok(m.monthStats(capped, NOW).some((stat) => stat.includes("$21.00 of $20.00 cap")));
+    // Under the cap, next month, switched off or mid-run: not held back.
+    const under = { ...capped, guard: { monthlyCapUsd: 50 } };
+    assert.equal(m.inboxGroup(under, NOW), "scheduled");
+    const nextMonth = new Date(2026, 11, 2).getTime();
+    assert.equal(m.guardHold(capped, nextMonth), null);
+    assert.equal(m.inboxGroup({ ...capped, enabled: false }, NOW), "paused");
+    assert.equal(m.inboxGroup({ ...capped, state: { status: "running", iteration: 1 } }, NOW), "running");
+
+    const paused = job({ guard: { pauseAfterFailures: 3 }, autoPaused: { at: thisMonth, failures: 3 }, state: { status: "paused", iteration: 0 }, history: [rec({ status: "failed" })] });
+    assert.equal(m.inboxGroup(paused, NOW), "needs");
+    assert.equal(m.resultCard(paused, NOW).headline, "Paused after 3 failed runs");
+    assert.match(m.resultCard(paused, NOW).body, /until you resume it/);
+    const once = { ...paused, autoPaused: { at: thisMonth, failures: 1 } };
+    assert.equal(m.resultCard(once, NOW).headline, "Paused after 1 failed run");
+    // The user's own pause stays quiet.
+    assert.equal(m.inboxGroup(job({ state: { status: "paused", iteration: 1 } }), NOW), "paused");
+    // The tally answers for the whole month even when the runs are a floor.
+    const busy = Array.from({ length: 50 }, (_, i) => rec({ runId: `r${i}`, startedAt: new Date(NOW - i * 60_000).toISOString(), costUsd: 1 }));
+    const whole = job({ history: busy, monthSpend: { month: "2026-11", costUsd: 80, measuredCostUsd: 80 } });
+    const stats = m.monthStats(whole, NOW);
+    assert.ok(stats.includes("50+ runs this month"));
+    assert.ok(stats.includes("$80.00"), "the cost needs no plus sign");
+  }
+
   console.log("automation inbox model: ok");
 }
 

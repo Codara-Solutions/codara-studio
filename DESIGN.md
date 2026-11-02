@@ -552,6 +552,13 @@ and GitHub Actions' row of recent results for the bar of ticks.
 - Month totals come from the kept history, which holds the last 50 runs. When
   that cannot cover the whole month the numbers carry a `+` and a tooltip that
   says so. Never show a floor as if it were the total.
+- Spending limits sit with the other caps in the Loop panel, with one line under
+  them saying the worst case for a month in dollars. That line is danger only when
+  nothing bounds the spend, so it stays quiet once a limit is set. An automation
+  held back by a limit sits on Needs you, because it stopped doing its job and
+  will not say so again.
+- The forecast says "about" and says limits are checked between runs. Never show a
+  ceiling firmer than the engine enforces.
 - Delete sits at the bottom of Details, well away from Run now.
 - "Fix with Cora" fills a new chat's message box and sends nothing. The user
   reads it first.

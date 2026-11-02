@@ -1266,6 +1266,15 @@ branch in a separate copy of the repository, starting from the default branch.
 With `draft_pr` it also pushes that branch and opens a draft pull request when a
 run goes well. Off by default, and the approval shows the change.
 
+`guard` (`{monthly_cap_usd, pause_after_failures}`, `null` to remove) sets
+spending limits. Once a calendar month's spend reaches the cap, no new run starts
+until next month or until the cap is raised, including Run now. After that many
+failed runs in a row the automation pauses until it is resumed or run by hand.
+Limits are checked between runs, so a run already going can finish over the cap,
+and estimates count as spend. Off by default, and the approval shows any change.
+`codara_list_automations` and `codara_get_automation` report the limits with
+`spentThisMonthUsd`.
+
 The `github` trigger takes `events` (`prOpened`, `ciFailed`), an optional
 `branch` the pull request must target, and an optional `includeDrafts`. It reads
 the repository behind the workspace's origin remote with your `gh` sign-in, while

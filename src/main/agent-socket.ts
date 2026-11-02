@@ -1,3 +1,4 @@
+import { monthSpentUsd, normalizeAutomationGuard } from "@shared/automation-guard";
 import { app, BrowserWindow } from "electron";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -233,6 +234,7 @@ import type {
   PrefKey,
   AutomationLoop,
   AutomationMissedRuns,
+  AutomationGuard,
   AutomationOwnBranch,
   AutomationPrecheck,
   AutomationTrigger,
@@ -6769,6 +6771,8 @@ function summarizeJob(job: ScheduledJob): Record<string, unknown> {
     ...(precheckSummary(job.precheck) ? { precheck: precheckSummary(job.precheck) } : {}),
     ...(missedRunsSummary(job) ? { missedRuns: missedRunsSummary(job) } : {}),
     ...(job.ownBranch ? { ownBranch: job.ownBranch } : {}),
+    ...(job.guard ? { guard: job.guard, spentThisMonthUsd: monthSpentUsd(job, Date.now()) } : {}),
+    ...(job.autoPaused ? { pausedAfterFailures: job.autoPaused.failures } : {}),
     ...(job.skips?.length
       ? {
           skipped: job.skips
@@ -7164,9 +7168,21 @@ function paramGraph(params: Record<string, unknown>): LoomGraph | undefined {
  *  precheck command also removes it. Any other value that does not normalize
  *  is an error, so a typo is never saved as "no precheck". */
 function paramGate(params: Record<string, unknown>):
-  | { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null; ownBranch?: AutomationOwnBranch | null }
+  | { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null; ownBranch?: AutomationOwnBranch | null; guard?: AutomationGuard | null }
   | { error: string } {
-  const out: { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null; ownBranch?: AutomationOwnBranch | null } = {};
+  const out: { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null; ownBranch?: AutomationOwnBranch | null; guard?: AutomationGuard | null } = {};
+  if (params.guard === null) out.guard = null;
+  else if (params.guard !== undefined) {
+    const raw = (params.guard ?? {}) as { monthly_cap_usd?: unknown; pause_after_failures?: unknown };
+    const guard = normalizeAutomationGuard({ monthlyCapUsd: raw.monthly_cap_usd, pauseAfterFailures: raw.pause_after_failures });
+    // A typo must not read as "no limit", and half of a pair must not silently drop.
+    const wanted = (raw.monthly_cap_usd !== undefined ? 1 : 0) + (raw.pause_after_failures !== undefined ? 1 : 0);
+    const kept = (guard?.monthlyCapUsd !== undefined ? 1 : 0) + (guard?.pauseAfterFailures !== undefined ? 1 : 0);
+    if (!guard || kept !== wanted) {
+      return { error: "guard must be { monthly_cap_usd: a number above 0, pause_after_failures: a whole number from 1 to 50 } (or null to remove them)" };
+    }
+    out.guard = guard;
+  }
   if (params.own_branch === null) out.ownBranch = null;
   else if (params.own_branch !== undefined) {
     const draftPr = (params.own_branch as { draft_pr?: unknown } | undefined)?.draft_pr;
@@ -7321,6 +7337,7 @@ async function handleAutomationCreate(
     ...(gate.precheck ? { precheck: gate.precheck } : {}),
     ...(gate.missedRuns ? { missedRuns: gate.missedRuns } : {}),
     ...(gate.ownBranch ? { ownBranch: gate.ownBranch } : {}),
+    ...(gate.guard ? { guard: gate.guard } : {}),
     input: {
       workspaceId: run.workspaceId,
       workspaceName,
@@ -7398,6 +7415,17 @@ function describeUpdate(existing: ScheduledJob, update: UpdateScheduledJobInput)
       own ? (own.draftPr ? "own branch, opening a draft pull request" : "own branch") : "workspace folder";
     lines.push(`works in: ${where(existing.ownBranch)} → ${where(update.ownBranch)}`);
   }
+  if (update.guard !== undefined) {
+    // A limit on the user's money: raising or removing one is always spelled out.
+    const limits = (g: AutomationGuard | null | undefined): string =>
+      [
+        g?.monthlyCapUsd !== undefined ? `$${g.monthlyCapUsd} a month` : "",
+        g?.pauseAfterFailures !== undefined ? `pause after ${g.pauseAfterFailures} failed runs` : "",
+      ]
+        .filter(Boolean)
+        .join(", ") || "none";
+    lines.push(`spending limits: ${limits(existing.guard)} → ${limits(update.guard)}`);
+  }
   if (update.graph !== undefined) {
     const n = update.graph.nodes?.length ?? 0;
     const e = update.graph.edges?.length ?? 0;
@@ -7439,6 +7467,7 @@ async function handleAutomationUpdate(
     ...(gate.precheck !== undefined ? { precheck: gate.precheck } : {}),
     ...(gate.missedRuns !== undefined ? { missedRuns: gate.missedRuns } : {}),
     ...(gate.ownBranch !== undefined ? { ownBranch: gate.ownBranch } : {}),
+    ...(gate.guard !== undefined ? { guard: gate.guard } : {}),
     ...(name ? { name } : {}),
     ...(paramTrigger(params) ? { trigger: paramTrigger(params) } : {}),
     ...(paramLoop(params) ? { loop: paramLoop(params) } : {}),

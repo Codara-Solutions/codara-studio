@@ -1,3 +1,5 @@
+import { normalizeAutomationGuard } from "@shared/automation-guard";
+import type { AutomationGuard } from "@shared/types";
 import type {
   AgentEffortLevel,
   AutomationActivityEvent,
@@ -59,6 +61,8 @@ export interface LoopDraft {
   draftPr: boolean;
   maxIters: string;
   budget: string;
+  monthlyCap: string;
+  pauseAfter: string;
   untilTests: boolean;
   testCommand: string;
   untilGit: boolean;
@@ -139,6 +143,8 @@ export function emptyDraft(): LoomDraft {
       draftPr: true,
       maxIters: "",
       budget: "",
+      monthlyCap: "",
+      pauseAfter: "",
       untilTests: false,
       testCommand: "npm test",
       untilGit: false,
@@ -204,6 +210,8 @@ export function draftFromJob(job: ScheduledJob): LoomDraft {
     d.loop.maxIters = String(stop.maxIterations);
   }
   if (stop.budgetUsd !== undefined) d.loop.budget = String(stop.budgetUsd);
+  if (job.guard?.monthlyCapUsd !== undefined) d.loop.monthlyCap = String(job.guard.monthlyCapUsd);
+  if (job.guard?.pauseAfterFailures !== undefined) d.loop.pauseAfter = String(job.guard.pauseAfterFailures);
   d.loop.untilTests = Boolean(stop.untilTestsPass);
   d.loop.testCommand = stop.testCommand ?? "npm test";
   d.loop.untilGit = Boolean(stop.untilGitClean);
@@ -284,6 +292,13 @@ export function buildTrigger(d: TriggerDraft): AutomationTrigger | null {
     default:
       return { kind: "manual" };
   }
+}
+
+export function buildGuard(d: LoopDraft): AutomationGuard | undefined {
+  return normalizeAutomationGuard({
+    ...(d.monthlyCap.trim() ? { monthlyCapUsd: Number(d.monthlyCap) } : {}),
+    ...(d.pauseAfter.trim() ? { pauseAfterFailures: Number(d.pauseAfter) } : {}),
+  });
 }
 
 export function buildLoop(d: LoopDraft): AutomationLoop {

@@ -1,3 +1,4 @@
+import { monthKey, monthlyCapReached } from "@shared/automation-guard";
 import { promises as fs } from "node:fs";
 import type {
   AutomationBranchResult,
@@ -335,10 +336,41 @@ async function closeAndForgetOwnBranch(job: ScheduledJob, own: AutomationOwnBran
 // event waits instead of being marked as handled and lost.
 export async function automationIsBusy(job: ScheduledJob): Promise<boolean> {
   if (job.state.status === "paused" || job.state.status === "blocked") return true;
+  if (monthlyCapReached(job, Date.now())) return true;
   if (runnerFor(job.id).firing || settlingBranch.has(job.id)) return true;
   if (!job.state.currentRunId) return false;
   const live = await safeGetRun(job.state.currentRunId);
   return !!live && !TERMINAL.has(live.status);
+}
+
+function capRefusal(job: ScheduledJob): string {
+  return `It reached its monthly cap of ${fmtCapUsd(job.guard?.monthlyCapUsd)}, so this run did not start.`;
+}
+
+function fmtCapUsd(value: number | undefined): string {
+  return `$${(value ?? 0).toFixed(2)}`;
+}
+
+// Said once, however many fires it refuses. Decided inside the write so two
+// refusals cannot both be the first.
+async function noticeMonthlyCap(id: string): Promise<void> {
+  let first = false;
+  const job = await patchJob(id, (j) => {
+    // Per cap as well as per month: reaching a raised cap is news again.
+    const notice = `${monthKey(Date.now())}:${j.guard?.monthlyCapUsd}`;
+    first = j.capNotice !== notice;
+    return first ? { ...j, capNotice: notice } : j;
+  });
+  if (!first || !job) return;
+  publish({
+    kind: "automation.failed",
+    sourceKey: automationSourceKey(id),
+    tone: "danger",
+    title: "Automation reached its monthly cap",
+    body: `“${job.name}” will not start again this month unless you raise its cap of ${fmtCapUsd(job.guard?.monthlyCapUsd)}.`,
+    soundKind: "needs-you",
+    target: { type: "automation", jobId: id, workspaceId: job.input.workspaceId },
+  });
 }
 
 // Start the next iteration of an automation's loop. Idempotent against an
@@ -348,6 +380,19 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
   if (!job || !job.enabled) return;
   if (settlingBranch.has(id)) return;
   if (job.state.status === "paused") return; // explicit user hold; resumeLoop re-drives
+  // Before the precheck and the reset below: a refused fire spends nothing and
+  // leaves the last cycle's result on the page.
+  if (monthlyCapReached(job, Date.now())) {
+    if (job.state.status === "stopped" && !revivesStoppedLoop(opts.source)) return;
+    if (job.state.currentRunId) {
+      const live = await safeGetRun(job.state.currentRunId);
+      if (live && !TERMINAL.has(live.status)) return;
+    }
+    await appendSkip(id, { reason: "monthlyCap", detail: capRefusal(job) });
+    await noticeMonthlyCap(id);
+    if (job.state.status !== "stopped" && job.state.iteration > 0) await finalize(id, "monthly-cap");
+    return;
+  }
   if (opts.source === "manual" && job.lastGitHubFire) {
     // Run now is not about the pull request that last fired it.
     job = await patchJob(id, (j) => ({ ...j, lastGitHubFire: undefined }));
@@ -923,6 +968,14 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
 // "Run now": reset the loop to a fresh manual pass and start it, returning the
 // live RunState (matches the old runJobNow contract).
 export async function runNow(id: string): Promise<RunState> {
+  // Checked before anything is touched: a refused restart must not kill the run
+  // that is going.
+  const capped = await getJob(id);
+  if (capped && monthlyCapReached(capped, Date.now())) {
+    await appendSkip(id, { reason: "monthlyCap", detail: capRefusal(capped) });
+    await noticeMonthlyCap(id);
+    throw new Error(capRefusal(capped));
+  }
   const existing = loops.get(id);
   if (existing?.cadenceTimer) clearTimeout(existing.cadenceTimer);
   if (existing) for (const timer of existing.watchdogTimers.values()) clearTimeout(timer);
@@ -943,34 +996,31 @@ export async function runNow(id: string): Promise<RunState> {
     const live = await safeGetRun(priorRunId);
     if (live && !TERMINAL.has(live.status)) {
       await killLiveRun(priorRunId);
-      await patchJob(id, (j) => ({
-        ...j,
-        history: j.history.map((r) =>
-          r.runId === priorRunId && !r.finishedAt
-            ? { ...r, finishedAt: nowIso(), status: "cancelled" as RunStatus, stopReason: "user-stop" as AutomationStopReason }
-            : r,
-        ),
-      }));
+      await closeStoppedPass(id, priorRunId);
     }
   }
   // The reset below would forget the last cycle's copy, and its work with it.
   await settleOwnBranch(id, "user-stop");
 
-  await patchJob(id, (j) => ({
-    ...j,
-    state: {
-      status: "idle",
-      iteration: 0,
-      currentRunId: undefined,
-      spentUsd: 0,
-      measuredSpentUsd: 0,
-      nextFireAt: undefined,
-      lastStopReason: undefined,
-      pendingNextPrompt: undefined,
-      pendingNextWorker: undefined,
-      pendingAgentSignal: undefined,
-    },
-  }));
+  await patchJob(id, (j) => {
+    // Running it by hand is the user trying again, so it lifts an automatic pause.
+    const { autoPaused, failureStreak: _streak, ...rest } = j;
+    return {
+      ...(autoPaused ? rest : j),
+      state: {
+        status: "idle",
+        iteration: 0,
+        currentRunId: undefined,
+        spentUsd: 0,
+        measuredSpentUsd: 0,
+        nextFireAt: undefined,
+        lastStopReason: undefined,
+        pendingNextPrompt: undefined,
+        pendingNextWorker: undefined,
+        pendingAgentSignal: undefined,
+      },
+    };
+  });
 
   await startIteration(id, { source: "manual" });
 
@@ -999,8 +1049,55 @@ export async function pauseLoop(id: string): Promise<void> {
 export async function stopLoop(id: string, opts?: { fireDependents?: boolean }): Promise<void> {
   const job = await getJob(id);
   const runId = job?.state.currentRunId;
-  if (runId) await killLiveRun(runId);
+  if (runId) {
+    await killLiveRun(runId);
+    await closeStoppedPass(id, runId);
+  }
   await finalize(id, "user-stop", opts);
+}
+
+// What a pass cost, from its run's totals. Same-run loops accumulate on ONE run
+// (cumulative); isolate loops sum per-run costs. Either way spentUsd ends up the
+// true running total.
+function passCosts(job: ScheduledJob, run: RunState): { passCost: number; measuredPassCost: number; spentUsd: number; measuredSpentUsd: number } {
+  const spent = job.state.spentUsd ?? 0;
+  const measuredSpent = job.state.measuredSpentUsd ?? 0;
+  // Measured spend (metered manager calls + worker attempts whose transport
+  // reported real cost) tallied apart from the combined total so the remote
+  // payload can report real vs estimated honestly. The budget cap keeps
+  // consuming the combined figure: measured where an attempt has it, the
+  // placeholder estimate where it does not (the rollup never double-counts).
+  const measuredRunCost = (run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0);
+  const runCost = measuredRunCost + (run.estimatedWorkerCostUsd ?? 0);
+  return {
+    passCost: job.loop.isolate ? runCost : Math.max(0, runCost - spent),
+    measuredPassCost: job.loop.isolate ? measuredRunCost : Math.max(0, measuredRunCost - measuredSpent),
+    spentUsd: job.loop.isolate ? spent + runCost : runCost,
+    measuredSpentUsd: job.loop.isolate ? measuredSpent + measuredRunCost : measuredRunCost,
+  };
+}
+
+// A stopped or restarted run never reaches onTerminal's accounting, and what it
+// spent before it was stopped is still spent: a cap that missed it could be
+// walked past by pressing Run now.
+async function closeStoppedPass(id: string, runId: string): Promise<void> {
+  const run = await safeGetRun(runId);
+  const job = await getJob(id);
+  const rec = job?.history.find((r) => r.runId === runId && !r.finishedAt);
+  if (!job || !run || !rec) return;
+  const costs = passCosts(job, run);
+  await appendHistory(
+    id,
+    {
+      ...rec,
+      finishedAt: nowIso(),
+      status: TERMINAL.has(run.status) ? run.status : "cancelled",
+      stopReason: "user-stop",
+      costUsd: costs.passCost,
+      ...(costs.measuredPassCost > 0 ? { measuredCostUsd: costs.measuredPassCost } : {}),
+    },
+    { spentUsd: costs.spentUsd, measuredSpentUsd: costs.measuredSpentUsd },
+  );
 }
 
 // Force-stop a live direct run: forcePauseRun terminalizes orchestration state;
@@ -1615,21 +1712,10 @@ async function onTerminal(id: string, run: RunState): Promise<void> {
   let spentUsd = job.state.spentUsd ?? 0;
   let measuredSpentUsd = job.state.measuredSpentUsd ?? 0;
   if (!prevRec?.finishedAt) {
-    // Measured spend (metered manager calls + worker attempts whose transport
-    // reported real cost) tallied apart from the combined total so the remote
-    // payload can report real vs estimated honestly. The budget cap keeps
-    // consuming the combined figure: measured where an attempt has it, the
-    // placeholder estimate where it does not (the rollup never double-counts).
-    const measuredRunCost = (run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0);
-    const runCost = measuredRunCost + (run.estimatedWorkerCostUsd ?? 0);
-    // Same-run loops accumulate cost on ONE run (cumulative); isolate loops sum
-    // per-run costs. Either way spentUsd ends up the true running total.
-    const passCost = job.loop.isolate ? runCost : Math.max(0, runCost - spentUsd);
-    const measuredPassCost = job.loop.isolate
-      ? measuredRunCost
-      : Math.max(0, measuredRunCost - measuredSpentUsd);
-    spentUsd = job.loop.isolate ? spentUsd + runCost : runCost;
-    measuredSpentUsd = job.loop.isolate ? measuredSpentUsd + measuredRunCost : measuredRunCost;
+    const costs = passCosts(job, run);
+    const { passCost, measuredPassCost } = costs;
+    spentUsd = costs.spentUsd;
+    measuredSpentUsd = costs.measuredSpentUsd;
     await appendHistory(
       id,
       {
@@ -1645,6 +1731,10 @@ async function onTerminal(id: string, run: RunState): Promise<void> {
       },
       { spentUsd, measuredSpentUsd },
     );
+  }
+
+  if (run.status === "complete" && job.failureStreak) {
+    await patchJob(id, ({ failureStreak: _cleared, ...rest }) => rest);
   }
 
   // Paused mid-flight: record the finish but do not advance.
@@ -1663,6 +1753,11 @@ async function onTerminal(id: string, run: RunState): Promise<void> {
   // matching guard at iteration start).
   if (typeof stop.budgetUsd === "number" && stop.budgetUsd > 0 && spentUsd >= stop.budgetUsd) {
     await finalize(id, "budget");
+    return;
+  }
+  if (monthlyCapReached(fresh, Date.now())) {
+    await noticeMonthlyCap(id);
+    await finalize(id, "monthly-cap");
     return;
   }
   if (fresh.state.iteration >= hardCap(fresh)) {
@@ -1832,18 +1927,29 @@ async function finalize(
   const finalizedRunId = (await getJob(id))?.state.currentRunId;
   if (finalizedRunId) agentSignals.delete(finalizedRunId);
 
-  await patchJob(id, (j) => {
+  let pausedAfterFailures = 0;
+  await patchJob(id, (current) => {
+    const { autoPaused: _stale, ...j } = current;
     const history = [...j.history];
     if (history.length > 0) {
       const last = history[history.length - 1];
       if (!last.stopReason) history[history.length - 1] = { ...last, stopReason: reason };
     }
+    const limit = j.guard?.pauseAfterFailures;
+    const streak = limit && reason === "iteration-failed" ? (j.failureStreak ?? 0) + 1 : j.failureStreak;
+    const pause = Boolean(limit && streak && reason === "iteration-failed" && streak >= limit);
+    if (pause) pausedAfterFailures = streak as number;
     return {
       ...j,
       history,
+      ...(streak ? { failureStreak: streak } : {}),
+      ...(pause ? { autoPaused: { at: nowIso(), failures: streak as number } } : {}),
       state: {
         ...j.state,
-        status: "stopped",
+        // Back to the start of a cycle: resuming must wait for the trigger, not
+        // carry on a loop that just failed.
+        ...(pause ? { iteration: 0, spentUsd: 0, measuredSpentUsd: 0 } : {}),
+        status: pause ? "paused" : "stopped",
         lastStopReason: reason,
         currentRunId: undefined,
         nextFireAt: undefined,
@@ -1863,7 +1969,17 @@ async function finalize(
   // Loop-level completion alert — once per finalize, never per iteration.
   // user-stop is skipped: the user clicked stop themselves; pinging them
   // about their own action is noise.
-  if (finalJob && reason !== "user-stop") {
+  if (finalJob && pausedAfterFailures > 0) {
+    publish({
+      kind: "automation.failed",
+      sourceKey: automationSourceKey(id),
+      tone: "danger",
+      title: "Automation paused after repeated failures",
+      body: `“${finalJob.name}” failed ${pausedAfterFailures} time${pausedAfterFailures === 1 ? "" : "s"} in a row, so it will not start again until you resume it.`,
+      soundKind: "needs-you",
+      target: { type: "automation", jobId: id, runId: finalizedRunId, workspaceId: finalJob.input.workspaceId },
+    });
+  } else if (finalJob && reason !== "user-stop" && reason !== "monthly-cap") {
     const failed = reason === "iteration-failed" || reason === "engine-missing";
     const iterations = finalJob.state.iteration;
     const passes = `${iterations} iteration${iterations === 1 ? "" : "s"}`;

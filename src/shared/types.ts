@@ -5883,6 +5883,7 @@ export type AutomationStopReason =
   | "once"
   | "iteration-failed"
   | "user-stop"
+  | "monthly-cap"
   // Legacy: pre-Pi builds recorded this when the loom's CLI engine was not
   // installed. Never produced anymore (Pi is bundled with the app); kept so
   // persisted history records still typecheck and render.
@@ -5998,7 +5999,7 @@ export interface AutomationCatchUp {
 export interface AutomationSkipRecord {
   id: string;
   at: string; // ISO time the skip was recorded
-  reason: "precheck" | "missed" | "github" | "ownBranch";
+  reason: "precheck" | "missed" | "github" | "ownBranch" | "monthlyCap";
   /** One plain-words line for the history row. */
   detail: string;
   precheck?: AutomationPrecheckResult & { command: string };
@@ -6008,6 +6009,23 @@ export interface AutomationSkipRecord {
   repeats?: number;
   /** ISO time of the first of those repeated skips (absent means `at`). */
   firstAt?: string;
+}
+
+/** Opt-in limits that outlast a loop's cycle. Shapes and checks live in
+ *  src/shared/automation-guard.ts. */
+export interface AutomationGuard {
+  /** No run starts once this calendar month's spend reaches it. */
+  monthlyCapUsd?: number;
+  /** Paused until resumed after this many failed runs in a row. */
+  pauseAfterFailures?: number;
+}
+
+/** Spend of one calendar month. The state's tally resets each cycle and the
+ *  history is capped, so neither can answer what a month cost. */
+export interface AutomationMonthSpend {
+  month: string; // YYYY-MM, local time
+  costUsd: number;
+  measuredCostUsd: number;
 }
 
 // Persisted live state of an automation's loop.
@@ -6061,6 +6079,14 @@ export interface ScheduledJob {
   lastFiredPath?: string; // folder triggers: the path whose change last fired it
   /** Absent means it works in the workspace folder, as every automation did before this existed. */
   ownBranch?: AutomationOwnBranch;
+  guard?: AutomationGuard;
+  monthSpend?: AutomationMonthSpend;
+  /** Failed runs in a row, counted only while a pause limit is set. */
+  failureStreak?: number;
+  /** Set while the state is paused because of that limit. */
+  autoPaused?: { at: string; failures: number };
+  /** Month and cap the user was last told about, so it is said once. */
+  capNotice?: string;
   githubTrigger?: GitHubTriggerMemory;
   lastGitHubFire?: GitHubTriggerFire;
   /** git triggers: the remote / local commit the trigger last settled on.
@@ -6104,6 +6130,7 @@ export interface CreateScheduledJobInput {
   precheck?: AutomationPrecheck;
   missedRuns?: AutomationMissedRuns;
   ownBranch?: AutomationOwnBranch;
+  guard?: AutomationGuard;
 }
 
 // Edit payload (scheduler:update). Partial; id required. enabled/state/history
@@ -6123,6 +6150,7 @@ export interface UpdateScheduledJobInput {
   missedRuns?: AutomationMissedRuns | null;
   /** null goes back to working in the workspace folder. */
   ownBranch?: AutomationOwnBranch | null;
+  guard?: AutomationGuard | null;
 }
 
 /** automations:testPrecheck: run a precheck once from the editor. */

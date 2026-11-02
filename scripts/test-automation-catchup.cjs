@@ -97,7 +97,7 @@ const harnessPlugin = {
           return {
             contents:
               "export const automationSourceKey = (id) => `automation:${id}`;\n" +
-              "export function publish(){}\nexport function rearm(){}\nexport function settleAutomationQuestions(){}\n",
+              "export function publish(e){ (globalThis.__CU.published ??= []).push(e); }\nexport function rearm(){}\nexport function settleAutomationQuestions(){}\n",
             loader: "js",
           };
         case "agent-runtimes":
@@ -458,6 +458,166 @@ async function integrationChecks({ sched, loop }, workspace) {
   globalThis.__CU.runs[globalThis.__CU.launches[launchedOther].id].status = "complete";
   await sched.setEnabled(otherPrompt.id, false);
   pass("a pull request run is told what fired it, and other runs are untouched");
+
+  // ── spending limits: a month's tally, the cap, and the pause ──────────────
+  {
+    const manualTrigger = { kind: "manual" };
+    const launchAt = (n) => globalThis.__CU.launches[n];
+    // Ends a run the way the loop finds out about it: a terminal run re-decided.
+    const ends = async (id, n, status, cost) => {
+      Object.assign(globalThis.__CU.runs[launchAt(n).id], { status, estimatedWorkerCostUsd: cost });
+      await sched.patchJob(id, (j) => ({ ...j, state: { ...j.state, status: "idle" } }));
+      await loop.resumeLoop(id);
+    };
+    const notices = (id) => (globalThis.__CU.published ?? []).filter((e) => e.target?.jobId === id);
+
+    // Without a limit it counts the month and does nothing else, however it goes.
+    const plain = await sched.createJob({ name: "no limits", trigger: manualTrigger, input, prompt: { template: "go" } });
+    for (const [status, cost] of [["failed", 40], ["failed", 40], ["complete", 40]]) {
+      const n = globalThis.__CU.launches.length;
+      await loop.startIteration(plain.id, { source: "manual" });
+      assert.strictEqual(globalThis.__CU.launches.length, n + 1);
+      await ends(plain.id, n, status, cost);
+    }
+    const plainNow = await get(plain.id);
+    assert.strictEqual(plainNow.monthSpend.costUsd, 120);
+    assert.strictEqual(plainNow.guard, undefined);
+    assert.strictEqual(plainNow.failureStreak, undefined);
+    assert.strictEqual(plainNow.autoPaused, undefined);
+    assert.strictEqual(plainNow.state.status, "stopped");
+    await sched.setEnabled(plain.id, false);
+    pass("an automation with no limits keeps running, and only its month is counted");
+
+    // The cap: the run that crosses it ends the loop, once it is told.
+    const capped = await sched.createJob({ name: "capped", trigger: manualTrigger, input, guard: { monthlyCapUsd: 3 }, loop: { kind: "count", stop: { maxIterations: 5 } }, prompt: { template: "go" } });
+    let n = globalThis.__CU.launches.length;
+    await loop.startIteration(capped.id, { source: "manual" });
+    await ends(capped.id, n, "complete", 4);
+    let job = await get(capped.id);
+    assert.strictEqual(job.state.status, "stopped", "the run that crossed it ends the loop");
+    assert.strictEqual(job.state.lastStopReason, "monthly-cap");
+    assert.strictEqual(job.monthSpend.costUsd, 4);
+    assert.strictEqual(globalThis.__CU.launches.length, n + 1, "no second run");
+    assert.strictEqual(notices(capped.id).length, 1);
+    assert.match(notices(capped.id)[0].title, /monthly cap/);
+
+    // Any later fire is refused, spends nothing, and says so once.
+    await loop.startIteration(capped.id, { source: "trigger" });
+    await loop.startIteration(capped.id, { source: "trigger" });
+    job = await get(capped.id);
+    assert.strictEqual(globalThis.__CU.launches.length, n + 1, "a trigger starts nothing");
+    assert.strictEqual(job.skips.at(-1).reason, "monthlyCap");
+    assert.strictEqual(job.skips.at(-1).repeats, 2);
+    assert.strictEqual(job.state.lastStopReason, "monthly-cap", "the last result stays on the page");
+    assert.strictEqual(notices(capped.id).length, 1, "said once");
+    assert.strictEqual(await loop.automationIsBusy(job), true, "a trigger that remembers keeps its event");
+    await assert.rejects(loop.runNow(capped.id), /monthly cap/);
+    assert.strictEqual(globalThis.__CU.launches.length, n + 1, "Run now is refused too");
+
+    // Raising the cap lets it run, and it is told again at the new one.
+    await sched.updateJob({ id: capped.id, guard: { monthlyCapUsd: 5 } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(capped.id, { source: "trigger" });
+    assert.strictEqual(globalThis.__CU.launches.length, n + 1);
+    await ends(capped.id, n, "complete", 2);
+    assert.strictEqual((await get(capped.id)).monthSpend.costUsd, 6);
+    assert.strictEqual(notices(capped.id).length, 2);
+
+    // A new month starts over.
+    await sched.patchJob(capped.id, (j) => ({ ...j, monthSpend: { month: "2020-01", costUsd: 99, measuredCostUsd: 0 }, history: [] }));
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(capped.id, { source: "trigger" });
+    assert.strictEqual(globalThis.__CU.launches.length, n + 1, "last month's spend does not hold it");
+    await loop.stopLoop(capped.id);
+    await sched.setEnabled(capped.id, false);
+    pass("the monthly cap ends the loop, refuses later fires and Run now, and lifts when raised or next month");
+
+    // A running run is left alone: the fire is held as it always was, with no row.
+    const going = await sched.createJob({ name: "going", trigger: manualTrigger, input, guard: { monthlyCapUsd: 3 }, prompt: { template: "go" } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(going.id, { source: "manual" });
+    await sched.patchJob(going.id, (j) => ({ ...j, monthSpend: { month: new Date().getFullYear() + "-" + String(new Date().getMonth() + 1).padStart(2, "0"), costUsd: 9, measuredCostUsd: 0 } }));
+    await loop.startIteration(going.id, { source: "trigger" });
+    assert.strictEqual((await get(going.id)).skips, undefined);
+    await assert.rejects(loop.runNow(going.id), /monthly cap/);
+    assert.notStrictEqual(globalThis.__CU.runs[launchAt(n).id].status, "cancelled", "a refused restart kills nothing");
+    assert.ok((await get(going.id)).state.currentRunId);
+    await loop.stopLoop(going.id);
+    await sched.setEnabled(going.id, false);
+
+    // Stopping or restarting a run does not hide what it spent, and it counts once.
+    const stopped = await sched.createJob({ name: "stopped", trigger: manualTrigger, input, guard: { monthlyCapUsd: 100 }, prompt: { template: "go" } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(stopped.id, { source: "manual" });
+    globalThis.__CU.runs[launchAt(n).id].estimatedWorkerCostUsd = 7;
+    await loop.stopLoop(stopped.id);
+    job = await get(stopped.id);
+    assert.strictEqual(job.monthSpend.costUsd, 7, "Stop counts it");
+    assert.strictEqual(job.history.at(-1).costUsd, 7);
+    assert.ok(job.history.at(-1).finishedAt);
+    await sched.appendHistory(stopped.id, { ...job.history.at(-1), costUsd: 7 }, {});
+    assert.strictEqual((await get(stopped.id)).monthSpend.costUsd, 7, "and only once");
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(stopped.id, { source: "manual" });
+    globalThis.__CU.runs[launchAt(n).id].estimatedWorkerCostUsd = 5;
+    await loop.runNow(stopped.id);
+    assert.strictEqual((await get(stopped.id)).monthSpend.costUsd, 12, "Run now counts the one it replaced");
+    await loop.stopLoop(stopped.id);
+    await sched.setEnabled(stopped.id, false);
+    pass("a stopped or restarted run's spend counts toward the month, once");
+
+    // The pause: failures in a row, a success between them starts over.
+    const flaky = await sched.createJob({ name: "flaky", trigger: manualTrigger, input, guard: { pauseAfterFailures: 2 }, prompt: { template: "go" } });
+    const fire = async (status) => {
+      const at = globalThis.__CU.launches.length;
+      await loop.startIteration(flaky.id, { source: "trigger" });
+      assert.strictEqual(globalThis.__CU.launches.length, at + 1, "it started");
+      await ends(flaky.id, at, status, 0);
+    };
+    await fire("failed");
+    assert.strictEqual((await get(flaky.id)).failureStreak, 1);
+    await fire("complete");
+    assert.strictEqual((await get(flaky.id)).failureStreak, undefined, "a good run starts over");
+    await fire("failed");
+    assert.strictEqual((await get(flaky.id)).state.status, "stopped");
+    await fire("failed");
+    job = await get(flaky.id);
+    assert.strictEqual(job.state.status, "paused");
+    assert.strictEqual(job.state.iteration, 0, "resuming waits for the trigger");
+    assert.strictEqual(job.autoPaused.failures, 2);
+    assert.match(notices(flaky.id).at(-1).title, /paused after repeated failures/);
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(flaky.id, { source: "trigger" });
+    assert.strictEqual(globalThis.__CU.launches.length, n, "paused means paused");
+
+    // Resuming gives it its full tries back, and starts nothing by itself.
+    await sched.resumeJob(flaky.id);
+    job = await get(flaky.id);
+    assert.strictEqual(job.state.status, "idle");
+    assert.strictEqual(job.autoPaused, undefined);
+    assert.strictEqual(job.failureStreak, undefined);
+    assert.strictEqual(globalThis.__CU.launches.length, n, "resume alone starts nothing");
+    await fire("failed");
+    assert.strictEqual((await get(flaky.id)).state.status, "stopped", "one failure after resuming does not pause it again");
+    await fire("failed");
+    assert.strictEqual((await get(flaky.id)).state.status, "paused");
+
+    // Running it by hand lifts the pause.
+    n = globalThis.__CU.launches.length;
+    await loop.runNow(flaky.id);
+    assert.strictEqual(globalThis.__CU.launches.length, n + 1);
+    assert.strictEqual((await get(flaky.id)).autoPaused, undefined);
+    await loop.stopLoop(flaky.id);
+    assert.strictEqual((await get(flaky.id)).failureStreak, undefined, "stopping by hand is not a failure");
+    await sched.setEnabled(flaky.id, false);
+    pass("failed runs in a row pause it until resumed or run by hand, and a good run starts over");
+
+    // Hand-edited limits that mean nothing are dropped on the way in.
+    const junk = await sched.createJob({ name: "junk", trigger: manualTrigger, input, guard: { monthlyCapUsd: -4, pauseAfterFailures: 0 }, prompt: { template: "go" } });
+    assert.strictEqual((await get(junk.id)).guard, undefined);
+    await sched.setEnabled(junk.id, false);
+    pass("a limit that does not parse is dropped, not read as zero");
+  }
 
   // ── own branch: when it opens, and that nothing forgets it ───────────────
   const byHand = { kind: "manual" };

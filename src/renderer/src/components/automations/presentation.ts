@@ -45,6 +45,7 @@ export const STOP_REASON_LABEL: Record<AutomationStopReason, string> = {
   once: "done",
   "iteration-failed": "run failed",
   "user-stop": "stopped by you",
+  "monthly-cap": "monthly cap reached",
   "engine-missing": "engine not installed",
 };
 
