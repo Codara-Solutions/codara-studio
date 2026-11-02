@@ -157,6 +157,31 @@ async function load() {
     assert.deepEqual(await lib.readLaneCollisions([left, right], deps), {}, "a repository with a driver is skipped");
     assert.equal(fs.existsSync(marker), false, "the driver did not run");
 
+    // Nor a clean or smudge filter, which renormalizing during a merge would start.
+    const filterMarker = path.join(root, "filter-ran");
+    const filtered = path.join(root, "filtered");
+    fs.mkdirSync(filtered);
+    git(filtered, "init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(filtered, ".gitattributes"), "*.ts filter=mark\n");
+    fs.writeFileSync(path.join(filtered, "x.ts"), "one\n");
+    git(filtered, "add", "-A");
+    git(filtered, "commit", "-q", "-m", "init");
+    const filteredTree = (name) => {
+      const dir = path.join(root, `filtered-${name}`);
+      git(filtered, "worktree", "add", "-q", "-b", name, dir);
+      fs.writeFileSync(path.join(dir, "x.ts"), `edit ${name}\n`);
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", name);
+      return dir;
+    };
+    const one = filteredTree("one");
+    const two = filteredTree("two");
+    git(filtered, "config", "merge.renormalize", "true");
+    git(filtered, "config", "filter.mark.clean", `sh -c 'touch ${filterMarker}; cat'`);
+    git(filtered, "config", "filter.mark.smudge", `sh -c 'touch ${filterMarker}; cat'`);
+    assert.equal(Object.keys(await lib.readLaneCollisions([one, two], deps)).length, 2, "the clash is still found");
+    assert.equal(fs.existsSync(filterMarker), false, "no filter ran");
+
     console.log("lane collisions: ok");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

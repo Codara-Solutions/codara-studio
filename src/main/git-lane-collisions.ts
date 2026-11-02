@@ -2,8 +2,9 @@
 // `git merge-tree` works on commits alone and touches no worktree or index, so
 // it cannot get in an agent's way. It does write tree objects, which git cleans
 // up itself; a result is cached by the two commits, so a pair is merged once.
-// It runs with no click behind it, so a repository with a custom merge driver is
-// skipped: merge-tree would run that program.
+// It runs with no click behind it, so it must not start any program the repository
+// configures: one with a custom merge driver is skipped, and renormalizing, which
+// runs clean and smudge filters, is turned off.
 //
 // No Electron import: scripts/test-lane-collisions.cjs runs it on real repositories.
 
@@ -26,7 +27,7 @@ export interface LaneCollisionDeps {
 async function mergedFiles(cwd: string, a: string, b: string, run: typeof runGit): Promise<string[] | null> {
   const parts = (stdout: string) => stdout.split("\0").filter(Boolean).slice(1);
   try {
-    return parts((await run(cwd, [...GIT_C, "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", a, b])).stdout);
+    return parts((await run(cwd, [...GIT_C, "-c", "merge.renormalize=false", "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", a, b])).stdout);
   } catch (cause) {
     const failure = cause as { code?: unknown; stdout?: unknown };
     // 1 is git's answer "these conflict". Anything else says nothing about the pair.
