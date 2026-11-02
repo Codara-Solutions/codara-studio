@@ -102,10 +102,12 @@ Most suites need only `npm install`. These are the exceptions:
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
 
-CI (`.github/workflows/ci.yml`, macOS) runs the three typechecks, then
-`npm run build`, then `npx playwright install chromium`, then
-`npm run test:all`. On your machine, run the same steps to reproduce a CI
-failure.
+CI (`.github/workflows/ci.yml`, macOS, pull requests into `main`) runs the
+three typechecks, then `npm run build`, then `npx playwright install
+chromium`, then `npm run test:all`. `.github/workflows/ci-linux.yml` runs the
+same on Linux under Xvfb for pull requests into `Cora`, then a smoke set of
+Playwright specs (listed in the workflow). On your machine, run the same
+steps to reproduce a CI failure.
 
 ## Isolation: suites leave your real data alone
 
