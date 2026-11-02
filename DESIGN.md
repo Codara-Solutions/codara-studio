@@ -441,6 +441,34 @@ section headers, the snooze presets and the undo notice in the footer).
 - Rows do not answer questions in place: opening the row goes to the agent.
   The question is the row's tooltip.
 
+## Merged worktrees leave on their own (2026-11)
+
+**Chosen:** removal, not hiding. Etienne: "once they are merged they should
+disappear from here, because it clutters the workspace". The merged fold already
+hid them and they still took a line and the disk, so a worktree whose work is
+provably merged now goes by itself, with a toast that says so. **Settings, Git,
+Worktrees, Remove merged worktrees on their own** turns it off (on by default).
+
+**Rules it implies:**
+
+- Two tiers. What passes every rule goes on its own; everything else stays in
+  the merged fold, one click from Clean up, and goes on its own once what held
+  it is gone. Nothing new is drawn for the second tier.
+- Unattended means fail closed: what could not be read counts as in use, and
+  only a removal nobody needs to confirm may run. Dirty, untracked, ignored
+  files worth keeping, unpushed, locked, in use or merged only locally all stay.
+  It never forces, and the last commit stays recoverable for 30 days.
+- Matching content is not enough on its own: the branch's last commit must still
+  be on its remote branch. A squash merge whose remote branch was deleted goes on
+  the merged pull request instead; without that lookup it stays in the fold.
+- The window is asked again at the last moment, under the repository lock, and
+  anything but a clear "not held" keeps the worktree.
+- A row with a tab stays, whatever the tab holds. Main cannot see an editor
+  buffer or a draft, so the rail decides this one.
+- An empty worktree (nothing ever committed) is never removed on its own. After
+  a week untouched with no agent, its row offers Clean up on hover, with a
+  tooltip that says nothing was committed there.
+
 ## Session picker (2026-11)
 
 **Chosen:** B, "Browser". A list beside the end of the highlighted conversation,
@@ -465,6 +493,10 @@ conversation (your words in a bubble, the reply without one).
 - The end of the conversation shows first, pinned to the bottom of the pane: it
   is what tells you whether this is the session you meant.
 - A worker row in the + menu never opens the picker. It starts a new session.
+- The picker is the one place for past sessions. The rail's Sessions tab is gone:
+  a small history button beside the Workspaces and Agents switch opens the picker
+  on the current workspace, and that opening does not change the remembered
+  scope. A session row has nowhere else to live in the rail, so naming stays here.
 - A session running in a pane offers **Go to its tab**, never a second resume.
 - A name lives outside the index and outside the transcripts. The index is a
   cache and the transcripts belong to the CLIs, so neither may be its only home.

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
 // Agent session search in a temp HOME holding small fake Claude and Codex
-// transcripts: the rail's Sessions view lists and searches them, with
+// transcripts: the session picker lists and searches them, with
 // highlights, scopes and the agent filter; a click resumes one in a new
 // terminal tab of its workspace (a folder no workspace has becomes one); a
 // session whose folder is gone opens read only; the jump palette searches
@@ -14,6 +14,7 @@ import { delimiter, join } from "node:path";
 const JUMP = process.platform === "darwin" ? "Meta+j" : "Control+Shift+J";
 
 const IDS = {
+  osprey: "f0f0f0f0-1111-4111-8111-555555555555",
   pelican: "aaaaaaaa-1111-4111-8111-111111111111",
   codexPelican: "bbbbbbbb-2222-4222-8222-222222222222",
   heron: "cccccccc-3333-4333-8333-333333333333",
@@ -149,11 +150,11 @@ async function launch(fixture: Fixture, extraEnv: Record<string, string> = {}): 
   return { app, page };
 }
 
-async function openSessionsView(page: Page) {
-  await page.getByRole("tablist", { name: "Rail view" }).getByRole("tab", { name: /^Sessions/ }).click();
-  const view = page.getByTestId("session-search");
-  await expect(view).toBeVisible();
-  return view;
+async function openFromRail(page: Page) {
+  await page.getByTestId("rail-sessions-button").click();
+  const picker = page.getByTestId("session-picker");
+  await expect(picker).toBeVisible();
+  return picker;
 }
 
 async function launches(fixture: Fixture): Promise<string[]> {
@@ -167,7 +168,7 @@ async function resumed(fixture: Fixture, cwd: string, sessionId: string): Promis
   );
 }
 
-test("the Sessions view finds past agent sessions and resumes them in new tabs", async () => {
+test("the rail's button opens the picker, which finds past agent sessions and resumes them in new tabs", async () => {
   test.setTimeout(150_000);
   const fixture = await prepareFixture();
   let app: ElectronApplication | null = null;
@@ -179,51 +180,71 @@ test("the Sessions view finds past agent sessions and resumes them in new tabs",
     await page.waitForTimeout(500);
     await expect(page.getByTestId("session-search-intro")).toHaveCount(0);
 
-    const view = await openSessionsView(page);
-    const rows = view.locator("[data-session-row]");
-    const search = view.getByRole("searchbox", { name: "Search agent sessions" });
-    const scopes = view.getByRole("tablist", { name: "Sessions from" });
+    // The rail has no Sessions tab any more, only the two lists.
+    const railTabs = page.getByRole("tablist", { name: "Rail view" }).getByRole("tab");
+    await expect(railTabs).toHaveText(["Workspaces", "Agents"]);
 
-    // Opening the view builds the index; an empty box lists this project's recent sessions.
+    const view = await openFromRail(page);
+    const rows = view.locator("[data-session-row]");
+    const search = view.getByRole("combobox", { name: "Search session names and what was said" });
+    const scopes = view.getByRole("tablist", { name: "Sessions from" });
+    const agents = view.getByRole("group", { name: "Agent" });
+    const status = view.getByRole("status");
+
+    // Opened from the rail, it looks in this workspace; the index builds on opening.
+    await expect(scopes.getByRole("tab", { name: "Workspace" })).toHaveAttribute("aria-selected", "true");
     await expect(rows).toHaveCount(2, { timeout: 30_000 });
-    await expect(view.getByRole("status")).toHaveText("4 sessions · 10 messages searchable", { timeout: 15_000 });
+    await expect(status).toHaveText("4 sessions · 10 messages searchable", { timeout: 15_000 });
     await expect(rows.first()).toContainText("Pelican migration");
-    await expect(rows.first()).toContainText("4 messages");
     await expect(rows.first()).toHaveAttribute("data-session-agent", "claude");
+
+    // That scope was this opening's, not a new default: a chord opens the remembered one.
+    await page.keyboard.press("Escape");
+    await expect(view).toHaveCount(0);
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+H" : "Control+Shift+H");
+    await expect(view).toBeVisible();
+    await expect(scopes.getByRole("tab", { name: "Project" })).toHaveAttribute("aria-selected", "true");
     await scopes.getByRole("tab", { name: "All" }).click();
     await expect(rows).toHaveCount(4);
 
-    // Search: matching sessions only, the words highlighted.
+    // Search: matching sessions only, the words highlighted, saying what matched.
     await search.fill("pelican");
     await expect(rows).toHaveCount(2);
     const pelican = view.locator(`[data-session-row="claude:${IDS.pelican}"]`);
     await expect(pelican.locator(".ss-hl").first()).toHaveText(/pelican/i);
-    await expect(pelican.locator(".ss-row__snippet")).toContainText("pelican");
+    await expect(pelican.locator(".sp-row__line")).toContainText("pelican");
 
-    // The agent filter.
-    await view.getByRole("button", { name: "All agents" }).click();
-    await page.getByRole("menu", { name: "Agents to show" }).getByRole("menuitemcheckbox", { name: "Codex" }).click();
+    // The agent filter takes several agents and is remembered.
+    await agents.getByRole("button", { name: "Codex" }).click();
     await expect(rows).toHaveCount(1);
     await expect(rows.first()).toHaveAttribute("data-session-agent", "codex");
-    await page.keyboard.press("Escape");
-    await view.getByRole("button", { name: "Codex" }).click();
-    await page.getByRole("menu", { name: "Agents to show" }).getByRole("menuitemradio", { name: "All agents" }).click();
+    await agents.getByRole("button", { name: "Claude" }).click();
+    await expect(rows).toHaveCount(2);
+    expect(await page.evaluate(() => window.localStorage.getItem("codara.sessions.agents"))).toBe('["codex","claude"]');
+    await agents.getByRole("button", { name: "Codex" }).click();
+    await agents.getByRole("button", { name: "Claude" }).click();
     await expect(rows).toHaveCount(2);
 
-    // Row actions: copy the session id.
-    await pelican.hover();
-    await view.getByRole("button", { name: "More for Pelican migration" }).click();
+    // The selected row's actions, which used to be on a rail row's menu.
+    await view.locator(`[data-session-row="codex:${IDS.codexPelican}"]`).click();
+    await view.getByRole("button", { name: "More actions" }).click();
     await page.getByRole("menu", { name: "Session actions" }).getByRole("menuitem", { name: "Copy session id" }).click();
-    await expect(view.getByRole("status")).toHaveText("Session id copied");
-    expect(await page.evaluate(() => window.spark.clipboard.readText())).toBe(IDS.pelican);
+    await expect(status).toHaveText("Session id copied");
+    expect(await page.evaluate(() => window.spark.clipboard.readText())).toBe(IDS.codexPelican);
+
+    // Refresh reads a session written since the last pass.
+    await search.fill("osprey");
+    await expect(rows).toHaveCount(0);
+    await writeClaudeSession(fixture.homeDir, fixture.workspaceDir, IDS.osprey, "Osprey survey", [["Survey the osprey nests", "Done."]], 5);
+    await view.getByTestId("session-picker-refresh").click();
+    await expect(rows).toHaveCount(1, { timeout: 30_000 });
+    await expect(rows.first()).toContainText("Osprey survey");
 
     // A session whose folder is gone opens read only, and says why.
     await search.fill("albatross");
-    const albatross = view.locator(`[data-session-row="claude:${IDS.albatross}"]`);
-    await expect(albatross).toBeVisible();
     await expect(rows).toHaveCount(1);
-    await expect(albatross).toContainText("folder gone");
-    await albatross.click();
+    await expect(view.getByTestId("session-picker-detail")).toContainText("Its folder is no longer on this computer");
+    await search.press("Enter");
     const transcript = page.getByRole("dialog", { name: "Session transcript" });
     await expect(transcript).toBeVisible();
     await expect(transcript.getByRole("status")).toContainText("is no longer on this computer");
@@ -232,15 +253,14 @@ test("the Sessions view finds past agent sessions and resumes them in new tabs",
     await expect(transcript).toHaveCount(0);
     expect(await launches(fixture)).toEqual([]);
 
-    // A click resumes the session in a new terminal tab of its workspace, with no picker.
+    // Enter resumes the session in a new terminal tab of its workspace.
     await search.fill("pelican queue");
     await expect(rows).toHaveCount(1);
-    await expect(pelican).toBeVisible();
-    await pelican.click();
-    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await search.press("Enter");
+    await expect(view).toHaveCount(0);
     await expect.poll(() => resumed(fixture, fixture.workspaceDir, IDS.pelican), { timeout: 20_000 }).toBe(true);
 
-    // The jump palette hands any text to the Sessions view, searching everything.
+    // The jump palette hands any text to the picker, searching everything.
     await page.keyboard.press(JUMP);
     const palette = page.getByTestId("jump-palette");
     await expect(palette).toBeVisible();
@@ -250,6 +270,7 @@ test("the Sessions view finds past agent sessions and resumes them in new tabs",
     await expect(sessionsRow).toContainText("Search agent sessions for “heron”");
     await sessionsRow.click();
     await expect(palette).toHaveCount(0);
+    await expect(view).toBeVisible();
     await expect(search).toHaveValue("heron");
     await expect(search).toBeFocused();
     await expect(scopes.getByRole("tab", { name: "All" })).toHaveAttribute("aria-selected", "true");
@@ -259,7 +280,6 @@ test("the Sessions view finds past agent sessions and resumes them in new tabs",
     // A folder no workspace has becomes a workspace, and the session resumes there.
     await search.press("Enter");
     await expect.poll(() => resumed(fixture, fixture.otherDir, IDS.heron), { timeout: 20_000 }).toBe(true);
-    await page.getByRole("tablist", { name: "Rail view" }).getByRole("tab", { name: "Workspaces" }).click();
     await expect(page.locator("[data-workspace-id]", { hasText: "other" }).first()).toBeVisible();
 
     // The index lives under the Codara home, readable by its owner only.
