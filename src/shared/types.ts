@@ -5363,8 +5363,8 @@ export interface GitHubTriggerMemory {
   seededAt: number;
   /** Pull requests up to this number existed when it was armed. */
   seededMaxPr: number;
-  /** `pr:<n>` and `ci:<n>:<sha>` keys already fired or ruled out; capped. */
-  seen: string[];
+  /** `pr:<n>` and `ci:<n>:<sha>` keys already fired or ruled out, with when. */
+  seen: Record<string, number>;
   /** Recent fires, for the per-pull-request limit. */
   fires: { pr: number; at: number }[];
 }
