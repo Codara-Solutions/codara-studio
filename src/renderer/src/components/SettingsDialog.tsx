@@ -1462,6 +1462,11 @@ function GitSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
           desc="Off limits agents to worktrees an agent created. The same checks apply either way."
           {...bindToggle("agentsMayRemoveUserWorktrees", preferences, setPreference)}
         />
+        <ToggleRow
+          title="Remove merged worktrees on their own"
+          desc="Once its work is merged, it has been quiet for 30 minutes and nothing is left in it or using it, a worktree leaves the rail with its branch. Its last commit stays recoverable for 30 days. Off keeps it in its project's merged group, one click from removal."
+          {...bindToggle("worktreeAutoRemoveMerged", preferences, setPreference)}
+        />
         {workspaceCwd ? <WorktreeSetupFileField workspaceCwd={workspaceCwd} /> : null}
         {workspaceCwd ? (
           <Advanced name="Worktrees advanced" hint="Your setup command, files agents may delete">

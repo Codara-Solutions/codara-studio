@@ -34,7 +34,7 @@ import {
 } from "@shared/agent-sessions";
 import { tabLink } from "@shared/tab-links";
 import { writeFileAtomic } from "./fs-atomic";
-import { buildStandingTerminalCommand } from "./orchestration/standing-terminals";
+import { standingTerminalArgv } from "./orchestration/standing-terminals";
 
 export const AGENT_SESSIONS_FILE = "agent-sessions.json";
 export const AGENT_SESSION_BRIEFS_DIR = "agent-session-briefs";
@@ -97,11 +97,25 @@ function shellQuote(value: string, platform: NodeJS.Platform): string {
     : `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+// Bare only where no shell reads anything into the word: zsh expands a
+// leading `=` and globs `[`, PowerShell takes `@` and `,` as operators.
+function shellWord(value: string, platform: NodeJS.Platform): string {
+  return /^[A-Za-z0-9_./-][A-Za-z0-9_./:=+-]*$/.test(value) ? value : shellQuote(value, platform);
+}
+
 /**
  * The line typed into the new pane. A command substitution puts the brief in
  * as one argument however it is written, so the agent's first message is the
  * brief itself. PowerShell has no form that survives every quote in a native
  * argument, so there the agent is told to read the file.
+ *
+ * `launchArgs` is what Codara puts after the binary of every Claude or Codex
+ * it starts (agent-launch-integration.ts: its hooks or notify program and the
+ * codara-studio server), given the session's own flags. The pane runs this
+ * line in a shell that loads no rc file, so no `claude` / `codex` wrapper adds
+ * them, and pty-manager leaves a line with a substitution alone: without them
+ * the session would get whichever server the user's own config names and
+ * report nothing back.
  */
 export function agentSessionCommand(input: {
   runtime: AgentSessionRuntime;
@@ -110,19 +124,20 @@ export function agentSessionCommand(input: {
   briefPath: string;
   codexTrust: string | null;
   compaction?: { codexTokenLimit?: number | null; claudeSettingsPath?: string | null };
+  launchArgs?: (sessionArgs: readonly string[]) => readonly string[];
   platform?: NodeJS.Platform;
 }): string {
   const platform = input.platform ?? process.platform;
-  const parts = [
-    buildStandingTerminalCommand(
-      input.runtime,
-      input.model ?? undefined,
-      input.effort ?? undefined,
-      input.compaction,
-    ),
-  ];
+  const [binary, ...args] = standingTerminalArgv(
+    input.runtime,
+    input.model ?? undefined,
+    input.effort ?? undefined,
+    input.compaction,
+  );
   // Nobody can answer Codex's trust prompt for an agent started this way.
-  if (input.runtime === "codex" && input.codexTrust) parts.push("-c", shellQuote(input.codexTrust, platform));
+  if (input.runtime === "codex" && input.codexTrust) args.push("-c", input.codexTrust);
+  const injected = input.launchArgs?.(args) ?? [];
+  const parts = [binary!, ...injected, ...args].map((arg) => shellWord(arg, platform));
   // After `--`, a brief that opens with a dash is still the brief.
   parts.push(
     "--",

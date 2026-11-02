@@ -4,6 +4,8 @@ import { InlineInput } from "../file-icons/InlineInput";
 import { BranchIcon, Caret, Count, Empty, GroupLabel, IconButton, Spinner } from "./git-ui";
 
 interface Props {
+  /** Sits on the trigger's row, right of it. */
+  trailing?: React.ReactNode;
   cwd: string;
   /** Called after any branch mutation so the panel re-reads git state. */
   onChanged: () => void;
@@ -19,6 +21,7 @@ interface Props {
 // never window.confirm. Every successful mutation calls onChanged() so the rest
 // of the panel re-reads git state.
 export default function BranchMenu({
+  trailing,
   cwd,
   onChanged,
   refreshKey,
@@ -222,6 +225,7 @@ export default function BranchMenu({
         borderBottom: "1px solid var(--rule-soft)",
       }}
     >
+      <div style={{ display: "flex", alignItems: "center", minWidth: 0 }}>
       {/* Current-branch trigger */}
       <button
         type="button"
@@ -252,7 +256,8 @@ export default function BranchMenu({
           display: "flex",
           alignItems: "center",
           gap: 6,
-          width: "100%",
+          flex: 1,
+          minWidth: 0,
           height: 30,
           padding: "0 8px 0 10px",
           border: "none",
@@ -286,6 +291,8 @@ export default function BranchMenu({
         {(loading || busy) && <Spinner size={11} />}
         <Caret open={open} />
       </button>
+      {trailing}
+      </div>
 
       {open && (
         <div

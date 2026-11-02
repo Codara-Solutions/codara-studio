@@ -14,17 +14,20 @@ import type {
   Workspace,
 } from "@shared/types";
 import type { GitHubWorkQueueItem } from "@shared/github";
+import type { WorktreeRailCleanupResult, WorktreeRailExternal } from "@shared/worktree-cleanup";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import { ReviewNotesIcon } from "../review/ReviewNotesIcon";
 import ChangeTree from "./ChangeTree";
 import ChangeSection from "./ChangeSection";
 import BranchMenu from "./BranchMenu";
-import CommitComposer from "./CommitComposer";
+import CommitComposer, { GitSyncButtons } from "./CommitComposer";
 import CommitDetail from "./CommitDetail";
 import SplitCommitsDialog from "./SplitCommitsDialog";
 import CommitHistory from "./CommitHistory";
 import GitHubSection from "./GitHubSection";
 import StashSection from "./StashSection";
+import SourceLanesList from "./lanes/SourceLanesList";
+import { useSourceLanes, type SourceLanesContext } from "./lanes/useSourceLanes";
 import { CommitHookFix, ConflictFixBanner } from "./fix/GitPanelFixes";
 import type { SharedGitStatus } from "../../git/useSharedGitStatus";
 import {
@@ -43,7 +46,7 @@ import {
 // it can never feel like the panel is scrolling on its own.
 const RESTORE_SETTLE_MS = 1_000;
 
-interface Props {
+interface Props extends SourceLanesContext {
   cwd: string | null;
   workspace: Workspace | null;
   /** Panel-level collapse, driven by the rail's section layout. */
@@ -59,11 +62,16 @@ interface Props {
   onOpenCommitDiffTab: (path: string, hash: string, options?: { pin?: boolean }) => void;
   /** The diff tab currently focused, if any — highlights its ChangeRow. */
   activeDiffTarget: { path: string; staged: boolean } | null;
+  onActivateWorkspace: (id: string) => void;
+  onOpenExternalWorktree?: (entry: WorktreeRailExternal) => void;
+  onCleanUpWorkspace?: (id: string, confirmIgnored?: string) => Promise<WorktreeRailCleanupResult | null>;
 }
 
-// The left-rail Source Control panel — branch + commit composer, staged /
-// working change lists, and the commit-graph history, over the git backend in
-// src/main/git-ops.ts. Slots into the rail's collapsible section layout.
+// The left-rail Source Control panel (DESIGN.md, "Source Control"): one lane per
+// checkout of the project, the active checkout's lane holding its branch,
+// change lists, stash, GitHub state and history, and the commit box docked
+// below, over the git backend in src/main/git-ops.ts. Slots into the rail's
+// collapsible section layout.
 export default function GitPanel({
   cwd,
   workspace,
@@ -75,11 +83,35 @@ export default function GitPanel({
   onOpenDiffTab,
   onOpenCommitDiffTab,
   activeDiffTarget,
+  workspaces,
+  branchByWorkspaceId,
+  worktreeByWorkspaceId,
+  worktreeStatesLoaded,
+  externalWorktrees,
+  onActivateWorkspace,
+  onOpenExternalWorktree,
+  onCleanUpWorkspace,
 }: Props): React.ReactElement {
   // Status/log/loading/gitVersion live in the App-owned shared hook
   // (useSharedGitStatus) so the explorer decorations and diff tabs read the
   // same snapshot this panel does. Everything below is panel-local UI state.
   const { status, log, loading, gitVersion, refresh, notifyChanged, readError } = git;
+  const lanes = useSourceLanes(
+    { workspaces, branchByWorkspaceId, worktreeByWorkspaceId, worktreeStatesLoaded, externalWorktrees },
+    workspace,
+    { branch: status?.branch ?? null, visible: !collapsed && Boolean(status?.isRepo), version: gitVersion },
+  );
+  const laneActions = useMemo(
+    () => ({
+      onOpenWorkspace: onActivateWorkspace,
+      onOpenExternalWorktree,
+      onCleanUpWorkspace,
+      externalWorktrees,
+      onChanged: notifyChanged,
+      ...(workspace && !workspace.remote ? { newAgent: { workspaceId: workspace.id, cwd: workspace.cwd } } : {}),
+    }),
+    [onActivateWorkspace, onOpenExternalWorktree, onCleanUpWorkspace, externalWorktrees, notifyChanged, workspace],
+  );
   const [opError, setOpError] = useState<string | null>(null);
   // The last failed commit, so a hook's rejection can go to an agent.
   const [commitFailure, setCommitFailure] = useState<{ output: string; message: string } | null>(null);
@@ -520,181 +552,196 @@ export default function GitPanel({
                 ) : !status.isRepo ? (
                   <NonRepoState busy={disabled} onInit={handleInit} />
                 ) : (
-                  <>
-                    <BranchMenu
-                      cwd={cwd}
-                      onChanged={handleGitChanged}
-                      refreshKey={gitVersion}
-                      disabled={disabled}
-                    />
-                    <GitHubSection
-                      cwd={cwd}
-                      gitStatus={status}
-                      refreshKey={gitVersion}
-                      userRefreshKey={githubRefreshNonce}
-                      queue={
-                        workspace && !workspace.remote
-                          ? {
-                              sourceWorkspaceId: workspace.id,
-                              refreshKey: githubRefreshNonce,
-                              onOpenItem: onOpenGitHubQueueItem,
-                            }
-                          : null
-                      }
-                      onRefresh={() => setGitHubRefreshNonce((value) => value + 1)}
-                      onPublished={() => {
-                        setGitHubRefreshNonce((value) => value + 1);
-                        notifyChanged();
-                      }}
-                      composer={
-                        <>
-                          <ConflictFixBanner cwd={cwd} status={status} />
-                          {displayError && (
-                            <ErrorStrip
-                              text={displayError}
-                              onDismiss={() => {
-                                setOpError(null);
-                                setCommitFailure(null);
-                              }}
-                            />
-                          )}
-                          {commitFailure && opError === commitFailure.output ? (
-                            <CommitHookFix
-                              cwd={cwd}
-                              output={commitFailure.output}
-                              commitMessage={commitFailure.message}
-                            />
-                          ) : null}
-                          <CommitComposer
-                            message={message}
-                            onMessageChange={setMessage}
-                            onCommit={(amend) => void handleCommit(amend)}
-                            onGenerateMessage={() => void handleGenerateMessage()}
-                            canCommit={canCommit}
-                            canGenerateMessage={canGenerateMessage}
-                            commitLabel={commitLabel}
-                            stagedCount={stagedCount}
-                            busy={busy}
-                            branch={status.branch}
-                            detached={status.detached}
-                            upstream={status.upstream}
-                            ahead={status.ahead}
-                            behind={status.behind}
-                            onPush={handlePush}
-                            onPull={handlePull}
-                            onFetch={handleFetch}
-                            onSplit={() => setSplitOpen(true)}
-                            canSplit={
-                              status.staged.length + status.unstaged.length >= 2 &&
-                              !status.hasConflicts
-                            }
-                          />
-                        </>
-                      }
-                    />
-
-                    {stagedCount > 0 && (
-                      <ChangeSection
-                        title="Staged Changes"
-                        count={stagedCount}
-                        collapsed={sections.staged}
-                        onToggle={() => setSections((s) => ({ ...s, staged: !s.staged }))}
-                        disabled={disabled}
-                        actions={[
-                          {
-                            key: "unstage-all",
-                            title: "Unstage all changes",
-                            icon: <MinusGlyph />,
-                            onClick: unstageAll,
-                          },
-                        ]}
-                      >
-                        <ChangeTree
-                          files={staged}
-                          staged
+                  <SourceLanesList
+                    lanes={lanes}
+                    projectKey={workspace?.id ?? cwd}
+                    actions={laneActions}
+                    ownDetail={
+                      <>
+                        <BranchMenu
+                          cwd={cwd}
+                          onChanged={handleGitChanged}
+                          refreshKey={gitVersion}
                           disabled={disabled}
-                          stats={diffStats?.staged}
-                          selectedPath={
-                            activeDiffTarget?.staged === true ? activeDiffTarget.path : null
+                          trailing={
+                            <GitSyncButtons
+                              busy={busy}
+                              upstream={status.upstream}
+                              ahead={status.ahead}
+                              behind={status.behind}
+                              onPush={handlePush}
+                              onPull={handlePull}
+                              onFetch={handleFetch}
+                            />
                           }
-                          onOpenDiff={openDiff}
-                          onPinDiff={pinDiff}
-                          onStage={stageOne}
-                          onUnstage={unstageOne}
-                          onDiscard={discardOne}
                         />
-                      </ChangeSection>
-                    )}
 
-                    {unstagedCount > 0 && (
-                      <ChangeSection
-                        title="Changes"
-                        count={unstagedCount}
-                        collapsed={sections.changes}
-                        onToggle={() => setSections((s) => ({ ...s, changes: !s.changes }))}
-                        disabled={disabled}
-                        actions={[
-                          {
-                            key: "discard-all",
-                            title: "Discard all changes",
-                            icon: <UndoIcon />,
-                            onClick: discardAll,
-                            danger: true,
-                          },
-                          {
-                            key: "stage-all",
-                            title: "Stage all changes",
-                            icon: <PlusGlyph />,
-                            onClick: stageAll,
-                          },
-                        ]}
-                      >
-                        <ChangeTree
-                          files={unstaged}
-                          staged={false}
+                        {stagedCount > 0 && (
+                          <ChangeSection
+                            title="Staged Changes"
+                            count={stagedCount}
+                            collapsed={sections.staged}
+                            onToggle={() => setSections((s) => ({ ...s, staged: !s.staged }))}
+                            disabled={disabled}
+                            actions={[
+                              {
+                                key: "unstage-all",
+                                title: "Unstage all changes",
+                                icon: <MinusGlyph />,
+                                onClick: unstageAll,
+                              },
+                            ]}
+                          >
+                            <ChangeTree
+                              files={staged}
+                              staged
+                              disabled={disabled}
+                              stats={diffStats?.staged}
+                              selectedPath={
+                                activeDiffTarget?.staged === true ? activeDiffTarget.path : null
+                              }
+                              onOpenDiff={openDiff}
+                              onPinDiff={pinDiff}
+                              onStage={stageOne}
+                              onUnstage={unstageOne}
+                              onDiscard={discardOne}
+                            />
+                          </ChangeSection>
+                        )}
+
+                        {unstagedCount > 0 && (
+                          <ChangeSection
+                            title="Changes"
+                            count={unstagedCount}
+                            collapsed={sections.changes}
+                            onToggle={() => setSections((s) => ({ ...s, changes: !s.changes }))}
+                            disabled={disabled}
+                            actions={[
+                              {
+                                key: "discard-all",
+                                title: "Discard all changes",
+                                icon: <UndoIcon />,
+                                onClick: discardAll,
+                                danger: true,
+                              },
+                              {
+                                key: "stage-all",
+                                title: "Stage all changes",
+                                icon: <PlusGlyph />,
+                                onClick: stageAll,
+                              },
+                            ]}
+                          >
+                            <ChangeTree
+                              files={unstaged}
+                              staged={false}
+                              disabled={disabled}
+                              stats={diffStats?.unstaged}
+                              selectedPath={
+                                activeDiffTarget?.staged === false ? activeDiffTarget.path : null
+                              }
+                              onOpenDiff={openDiff}
+                              onPinDiff={pinDiff}
+                              onStage={stageOne}
+                              onUnstage={unstageOne}
+                              onDiscard={discardOne}
+                            />
+                          </ChangeSection>
+                        )}
+
+                        {changeCount === 0 && <CleanState />}
+
+                        <StashSection
+                          cwd={cwd}
+                          onChanged={handleGitChanged}
+                          refreshKey={gitVersion}
                           disabled={disabled}
-                          stats={diffStats?.unstaged}
-                          selectedPath={
-                            activeDiffTarget?.staged === false ? activeDiffTarget.path : null
-                          }
-                          onOpenDiff={openDiff}
-                          onPinDiff={pinDiff}
-                          onStage={stageOne}
-                          onUnstage={unstageOne}
-                          onDiscard={discardOne}
                         />
-                      </ChangeSection>
-                    )}
 
-                    {changeCount === 0 && <CleanState />}
+                        <GitHubSection
+                          cwd={cwd}
+                          gitStatus={status}
+                          refreshKey={gitVersion}
+                          userRefreshKey={githubRefreshNonce}
+                          queue={
+                            workspace && !workspace.remote
+                              ? {
+                                  sourceWorkspaceId: workspace.id,
+                                  refreshKey: githubRefreshNonce,
+                                  onOpenItem: onOpenGitHubQueueItem,
+                                }
+                              : null
+                          }
+                          onRefresh={() => setGitHubRefreshNonce((value) => value + 1)}
+                          onPublished={() => {
+                            setGitHubRefreshNonce((value) => value + 1);
+                            notifyChanged();
+                          }}
+                        />
 
-                    <StashSection
-                      cwd={cwd}
-                      onChanged={handleGitChanged}
-                      refreshKey={gitVersion}
-                      disabled={disabled}
-                    />
-
-                    <CommitHistory
-                      cwd={cwd}
-                      rows={log?.rows ?? []}
-                      loading={loading && !log}
-                      collapsed={sections.history}
-                      onToggle={() => setSections((s) => ({ ...s, history: !s.history }))}
-                      disabled={disabled}
-                      onCheckout={handleCheckout}
-                      onRevert={handleRevert}
-                      onUndoLastCommit={handleUndoLastCommit}
-                      onOpenCommit={openCommitDetail}
-                      highlightHash={returnHighlightHash}
-                    />
-                  </>
+                        <CommitHistory
+                          cwd={cwd}
+                          rows={log?.rows ?? []}
+                          loading={loading && !log}
+                          collapsed={sections.history}
+                          onToggle={() => setSections((s) => ({ ...s, history: !s.history }))}
+                          disabled={disabled}
+                          onCheckout={handleCheckout}
+                          onRevert={handleRevert}
+                          onUndoLastCommit={handleUndoLastCommit}
+                          onOpenCommit={openCommitDetail}
+                          highlightHash={returnHighlightHash}
+                        />
+                      </>
+                    }
+                  />
                 )}
               </div>
             </>
           )}
         </div>
       )}
+      {!collapsed && cwd && status?.isRepo && !detailHash ? (
+        <div
+          data-testid="commit-dock"
+          style={{
+            flex: "0 0 auto",
+            maxHeight: "60%",
+            overflowY: "auto",
+            borderTop: "1px solid var(--rule)",
+            background: "var(--panel-2)",
+          }}
+        >
+          <ConflictFixBanner cwd={cwd} status={status} />
+          {displayError && (
+            <ErrorStrip
+              text={displayError}
+              onDismiss={() => {
+                setOpError(null);
+                setCommitFailure(null);
+              }}
+            />
+          )}
+          {commitFailure && opError === commitFailure.output ? (
+            <CommitHookFix cwd={cwd} output={commitFailure.output} commitMessage={commitFailure.message} />
+          ) : null}
+          <CommitComposer
+            message={message}
+            onMessageChange={setMessage}
+            onCommit={(amend) => void handleCommit(amend)}
+            onGenerateMessage={() => void handleGenerateMessage()}
+            canCommit={canCommit}
+            canGenerateMessage={canGenerateMessage}
+            commitLabel={commitLabel}
+            stagedCount={stagedCount}
+            busy={busy}
+            branch={status.branch}
+            detached={status.detached}
+            onSplit={() => setSplitOpen(true)}
+            canSplit={status.staged.length + status.unstaged.length >= 2 && !status.hasConflicts}
+          />
+        </div>
+      ) : null}
       {splitOpen && cwd ? (
         <SplitCommitsDialog
           cwd={cwd}

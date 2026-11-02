@@ -26,7 +26,7 @@ it has and how long ago it was last used.
   first row.
 
 You can also search from the jump palette: type anything and pick **Search
-agent sessions for "..."**. The Sessions view opens on that text, searching
+agent sessions for "..."**. The session picker opens on that text, searching
 every session.
 
 Clicking a row resumes the session in a new terminal tab, with the agent's
@@ -34,13 +34,58 @@ own resume command (`claude --resume <id>`, `codex resume <id>`,
 `grok --resume <id>`, `pi --session <id>`), in the workspace whose folder
 the session ran in. When no workspace has that folder, the deepest workspace
 holding it is used, and when none does, the folder is added as a new
-workspace. A Cora session opens its chat.
+workspace. A Cora session opens its chat. A session already running in a pane
+is gone to instead, because two agents on one transcript would corrupt it.
 
 When a session's folder is no longer on the computer, it cannot be resumed:
 the row says **folder gone**, and clicking it opens its transcript, read
 only. The **...** menu on each row also has **View transcript**, **Copy
 session id** and **Reveal transcript** (shows the transcript file in your
 file manager).
+
+## The session picker
+
+**Resume a session...** in the tab strip's + menu, or Mod+Shift+H, opens the
+picker: the list on the left, and on the right the highlighted session's
+agent, model, folder, branch, length and the end of its conversation.
+
+Clicking Claude, Codex or Grok in a + menu opens the same picker, showing that
+agent's sessions under a **New session** row. Enter starts a new session;
+press Down to pick an earlier one, and Enter resumes it. The worker starts
+without the picker when session search is off, when Settings leaves that agent
+out, and on a remote workspace, since the index only holds this computer's
+sessions.
+
+One box searches session names, what you typed and what the agent replied.
+Each result says which of those matched (**Name**, **You** or the agent's
+name), with the matching words highlighted. With the box empty, sessions are
+grouped as Pinned, Today, Yesterday, This week and Older.
+
+| Key | Does |
+|---|---|
+| Up, Down, Page Up, Page Down | Move through the list |
+| Enter | Resume, or go to its tab if it is running, or read it if its folder is gone |
+| Alt+Enter | Fork: a new session from this one's history (Claude, Codex, Grok) |
+| F2 | Rename; Enter saves, Escape cancels |
+| Escape | Clears the box, then closes |
+
+**Split here** resumes the session in a new pane beside the focused one, when
+its folder belongs to the workspace on screen. The **...** menu pins, renames,
+copies the id, reveals the transcript and deletes. Delete asks first, is only
+offered for Claude, Codex and Grok sessions not running in a pane, and removes
+the same files as Settings, Sessions. A session that list does not have (an
+archived Codex session, one in another account's home) says it can't be deleted
+from here before asking anything.
+
+### Names and pins
+
+A name is yours, not the agent's: it is stored in `session-labels.json` in the
+Codara home, never written to a transcript, and the index reads it from there,
+so it survives deleting or rebuilding the index. It shows wherever the session's
+title does: the picker, the rail, the transcript view, Settings, the phone and a
+tab opened by resuming it. Tabs already open keep their current title. Both the
+name and the session's own title find the session. **Use original** clears the
+name. Renaming a Cora chat renames the chat itself, with no separate name.
 
 ## What is indexed
 
@@ -56,8 +101,9 @@ them:
 | Cora | the chats in Codara's own `runs/` folder |
 
 From each session it keeps the text of your messages and the agents'
-replies, the title, the first prompt, the folder, the agent, the model, the
-number of messages and when it started and was last used. It leaves out tool
+replies, the title, the first prompt, the folder, the git branch when the
+transcript records one (Claude Code always, Codex in newer sessions), the
+agent, the model, the number of messages and when it started and was last used. It leaves out tool
 calls and their output, reasoning, images, the context the CLIs inject
 around a prompt, subagent threads, Codex exec runs, and any line longer than
 1 MB. A folder reached through a link is read once, by its real path, and

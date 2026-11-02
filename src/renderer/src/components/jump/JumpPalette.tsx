@@ -24,7 +24,7 @@ import {
 // Mod+1 to Mod+6; Enter jumps to the selected one; a name nothing is called
 // offers a new worktree through the same path as the rail's "Create isolated
 // worktree", and any typed text can be searched for in past agent sessions
-// (the rail's Sessions view). Same glass card and palette scrim as Quick Open.
+// (the session picker). Same glass card and palette scrim as Quick Open.
 
 interface Props {
   sources: JumpSources;
@@ -35,7 +35,7 @@ interface Props {
   onClose: () => void;
   onJump: (target: JumpTarget) => void;
   onCreateWorktree: (name: string) => void;
-  /** Opens the rail's Sessions view on this query; absent hides the row. */
+  /** Opens the session picker on this query; absent hides the row. */
   onSearchSessions?: (query: string) => void;
 }
 
@@ -154,7 +154,7 @@ export default function JumpPalette({
       return;
     }
     if (row.type === "sessions") {
-      // The Sessions view takes the keyboard.
+      // The session picker takes the keyboard.
       chosenRef.current = true;
       onSearchSessions?.(row.query);
       return;

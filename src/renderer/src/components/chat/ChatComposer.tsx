@@ -35,6 +35,7 @@ import FastModeToggle from "./composer/FastModeToggle";
 import ModelThinkingPicker from "./composer/ModelThinkingPicker";
 import { readModelVisibility, shownModelGroups } from "./composer/model-visibility";
 import { prefillDraft } from "./composer/prefill-draft";
+import { DRAFT_PREFILL_PENDING_EVENT, consumeDraftPrefill } from "./composer/pending-prefill";
 import ProfilePicker from "./composer/ProfilePicker";
 import CapabilitiesButton from "./composer/CapabilitiesButton";
 import {
@@ -534,6 +535,22 @@ export default function ChatComposer({
     window.addEventListener("spark:prefill-composer", handler);
     return () => window.removeEventListener("spark:prefill-composer", handler);
   }, [suspendGlobalEvents]);
+
+  // A message handed to this workspace's draft chat from another surface: taken
+  // only by the draft on screen, so it can never land in another conversation.
+  const isDraftChat = !run;
+  useEffect(() => {
+    if (suspendGlobalEvents || !isDraftChat) return;
+    const take = () => {
+      const text = consumeDraftPrefill(draftKey);
+      if (!text) return;
+      setDraft((current) => prefillDraft(current, text));
+      window.setTimeout(() => textareaRef.current?.focus({ preventScroll: true }), 0);
+    };
+    take();
+    window.addEventListener(DRAFT_PREFILL_PENDING_EVENT, take);
+    return () => window.removeEventListener(DRAFT_PREFILL_PENDING_EVENT, take);
+  }, [suspendGlobalEvents, isDraftChat, draftKey]);
 
   // Grow the textarea with its content up to a cap, then scroll internally.
   // Measuring is only valid while the composer is actually laid out: ChatPanel

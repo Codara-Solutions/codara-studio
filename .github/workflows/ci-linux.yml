@@ -1,0 +1,70 @@
+name: CI (Linux)
+
+# Pull requests into Cora, where most work lands, and pushes to it. main keeps
+# its macOS job in ci.yml; this one runs headless on Linux (Xvfb), the
+# platform most contributors here develop on.
+
+on:
+  pull_request:
+    branches: [Cora]
+  push:
+    branches: [Cora]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-linux-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Xvfb, zsh, and the user namespaces Chromium's sandbox needs
+        run: |
+          sudo apt-get update -qq
+          # zsh: the shell integration suites drive a real zsh as well as bash.
+          sudo apt-get install -y -qq xvfb zsh
+          # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor,
+          # and Electron's sandbox cannot start without them.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: npm ci
+      - run: npm run typecheck:node
+      - run: npm run typecheck:web
+      - run: npm run typecheck:e2e
+      # Some suites drive the BUILT app surface (agent-socket handshake) or a
+      # real Chromium (chat-surface-routing).
+      - run: npm run build
+      - run: npx playwright install chromium
+      - name: Unit suites
+        run: npm test
+      # The full Playwright suite boots one app per spec, one at a time (about
+      # 130 specs); these cover boot, workspaces, terminals, settings, the
+      # Cora run loop and crash capture in under two minutes.
+      - name: E2E smoke
+        run: >-
+          npx playwright test
+          tests/e2e/empty-new-workspace.spec.ts
+          tests/e2e/terminal-switch.spec.ts
+          tests/e2e/settings-search.spec.ts
+          tests/e2e/file-link-smoke.spec.ts
+          tests/e2e/orchestration-smoke.spec.ts
+          tests/e2e/crash-diagnostics.spec.ts
+          tests/e2e/startup-flags-status.spec.ts
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: e2e-results
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,4 +1,4 @@
-// Row actions shared by the Sessions view and the transcript dialog. Each
+// Row actions shared by the session picker and the transcript dialog. Each
 // resolves to the short line the caller shows as feedback.
 
 export async function copySessionId(sessionId: string): Promise<string> {

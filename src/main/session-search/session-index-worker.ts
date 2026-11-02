@@ -12,7 +12,7 @@
 import { setPriority } from "node:os";
 import { parentPort } from "node:worker_threads";
 
-import type { SessionSearchAgent } from "@shared/session-search";
+import type { SessionLabels, SessionSearchAgent } from "@shared/session-search";
 import {
   SessionIndex,
   type IndexPacer,
@@ -29,6 +29,8 @@ export type SessionIndexJob =
   | { id: number; type: "stats" }
   | { id: number; type: "session"; key: string }
   | { id: number; type: "transcript"; key: string; limit: number }
+  | { id: number; type: "preview"; key: string; limit: number; clipChars: number }
+  | { id: number; type: "labels"; labels: SessionLabels }
   | { id: number; type: "remove" }
   | { id: number; type: "close" };
 
@@ -96,6 +98,7 @@ function startThread(): void {
   let index: SessionIndex | null = null;
   let pacer: Pacer | null = null;
   let running: Promise<unknown> | null = null;
+  let labels: SessionLabels = {};
   const post = (message: SessionIndexMessage) => port.postMessage(message);
   const requireIndex = (): SessionIndex => {
     if (!index) throw new Error("The session index is not open.");
@@ -120,6 +123,12 @@ function startThread(): void {
         } finally {
           pacer = null;
           running = null;
+          // The pass made rows the set names, or rolled back a change made during it.
+          try {
+            index?.applyLabels(labels);
+          } catch {
+            // The next pass or change applies it again; the pass's own result stands.
+          }
         }
       }
       case "search":
@@ -130,6 +139,12 @@ function startThread(): void {
         return requireIndex().session(job.key);
       case "transcript":
         return requireIndex().transcript(job.key, job.limit);
+      case "preview":
+        return requireIndex().preview(job.key, job.limit, job.clipChars);
+      case "labels":
+        labels = job.labels;
+        requireIndex().applyLabels(labels);
+        return null;
       case "remove": {
         // Let a running pass reach its next checkpoint and roll back first.
         if (pacer) pacer.aborted = true;
