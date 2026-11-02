@@ -82,7 +82,7 @@ const harnessPlugin = {
             contents:
               init +
               "globalThis.__CU.branches ??= { opened: [], closed: [] };\n" +
-              "export async function openOwnBranch(job){ if (globalThis.__CU.branchFails) return { ok: false, problem: 'no copy' }; const own = { path: process.env.SPARK_HOME_DIR, branch: 'codara-automation/x', baseSha: 'a' }; globalThis.__CU.branches.opened.push(job.id); return { ok: true, own }; }\n" +
+              "export async function openOwnBranch(job){ if (globalThis.__CU.branchFails) return { ok: false, problem: 'no copy' }; if (globalThis.__CU.duringOpen) await globalThis.__CU.duringOpen(job); const own = { path: process.env.SPARK_HOME_DIR, branch: 'codara-automation/x', baseSha: 'a' }; globalThis.__CU.branches.opened.push(job.id); return { ok: true, own }; }\n" +
               "export async function closeOwnBranch(job, own, opts){ globalThis.__CU.branches.closed.push({ id: job.id, opts }); return { branch: own.branch, changed: true }; }\n",
             loader: "js",
           };
@@ -506,6 +506,20 @@ async function integrationChecks({ sched, loop }, workspace) {
     assert.strictEqual(globalThis.__CU.branches.opened.length, opened, "no copy mid-cycle");
     await loop.stopLoop(midway.id);
     await sched.setEnabled(midway.id, false);
+
+    // Stopped while its copy was being made: no run, and the copy is cleared up.
+    const racing = await sched.createJob({ name: "racing", trigger: byHand, input, ownBranch: { draftPr: true }, prompt: { template: "go" } });
+    const closedBefore = globalThis.__CU.branches.closed.length;
+    const launchedBefore = globalThis.__CU.launches.length;
+    globalThis.__CU.duringOpen = async (j) => {
+      globalThis.__CU.duringOpen = null;
+      await loop.stopLoop(j.id);
+    };
+    await loop.startIteration(racing.id, { source: "manual" });
+    assert.strictEqual(globalThis.__CU.launches.length, launchedBefore, "a Stop during setup wins");
+    assert.strictEqual(globalThis.__CU.branches.closed.length, closedBefore + 1);
+    assert.strictEqual((await get(racing.id)).state.ownBranch, undefined);
+    await sched.setEnabled(racing.id, false);
 
     // No copy, no run: it never falls back to the workspace folder.
     globalThis.__CU.branchFails = true;

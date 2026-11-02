@@ -443,6 +443,14 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         await appendSkip(id, { reason: "ownBranch", detail: opened.problem });
         return;
       }
+      // Making the copy can take a while. A Stop or a restart meanwhile wins: this
+      // start is over, and it must not run in a copy nobody is tracking.
+      const now = await getJob(id);
+      if (!now || !now.enabled || now.state.status !== job.state.status || now.state.currentRunId || now.state.ownBranch) {
+        const { closeOwnBranch } = await import("./automation-branch");
+        await closeOwnBranch(job, opened.own, { openPullRequest: false }).catch(() => undefined);
+        return;
+      }
       ownBranchState = opened.own;
       await patchJob(id, (j) => ({ ...j, state: { ...j.state, ownBranch: opened.own } }));
       workCwd = opened.own.path;

@@ -166,6 +166,40 @@ const inOrigin = (origin, ...args) => execFileSync("git", ["--git-dir", origin, 
     assert.equal(inOrigin(origin, "show", `${second.branch}:app.txt`), "other branch");
   }
 
+  // A worker that goes back to look at an older commit has not undone its work.
+  {
+    const { repo } = makeRepo("lookback");
+    const { own } = await openOwnBranch(job(repo));
+    fs.writeFileSync(path.join(own.path, "app.txt"), "the real work\n");
+    git(own.path, "add", "-A");
+    git(own.path, "commit", "-q", "-m", "work");
+    const tip = git(own.path, "rev-parse", "HEAD");
+    git(own.path, "checkout", "-q", own.baseSha);
+    const done = await closeOwnBranch(job(repo), own, { openPullRequest: false });
+    assert.equal(done.changed, true);
+    assert.match(done.note, /Its work is on the branch/);
+    assert.equal(git(repo, "rev-parse", own.branch), tip);
+  }
+
+  // Two different histories: neither is thrown away, nothing is pushed.
+  {
+    const { repo, origin } = makeRepo("diverged");
+    const { own } = await openOwnBranch(job(repo));
+    fs.writeFileSync(path.join(own.path, "app.txt"), "one way\n");
+    git(own.path, "add", "-A");
+    git(own.path, "commit", "-q", "-m", "one");
+    const tip = git(own.path, "rev-parse", "HEAD");
+    git(own.path, "checkout", "-q", own.baseSha);
+    fs.writeFileSync(path.join(own.path, "app.txt"), "other way\n");
+    git(own.path, "add", "-A");
+    git(own.path, "commit", "-q", "-m", "other");
+    const done = await closeOwnBranch(job(repo), own, { openPullRequest: true });
+    assert.match(done.note, /went two different ways/);
+    assert.ok(fs.existsSync(own.path));
+    assert.equal(git(repo, "rev-parse", own.branch), tip);
+    assert.equal(inOrigin(origin, "branch", "--list", own.branch), "");
+  }
+
   // A post-commit hook that leaves edits behind: the copy stays, never forced away.
   {
     const { repo } = makeRepo("dirtyafter");

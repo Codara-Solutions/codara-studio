@@ -161,13 +161,26 @@ export async function closeOwnBranch(
       return { branch, changed: true, note: `Could not commit its changes, so they are still in ${path}.` };
     }
   }
-  // A worker can detach HEAD or switch branch; what it made must be on the branch
-  // this reports, or removing the copy would leave its commits unreferenced.
+  // A worker can detach HEAD or switch branch. What it made must be on the branch
+  // this reports, or removing the copy would leave its commits unreferenced. Only
+  // ever forward: a worker that looked at an older commit has not undone its work.
   const head = await read(path, ["rev-parse", "--verify", "HEAD"]);
-  const pointed = head && (await read(path, ["update-ref", `refs/heads/${branch}`, head])) !== null;
+  const tip = await read(path, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+  if (!head || !tip) {
+    return { branch, changed: true, note: `Could not read its commits. Its work is still in ${path}.` };
+  }
+  if (head !== tip) {
+    if ((await read(path, ["merge-base", "--is-ancestor", tip, head])) !== null) {
+      if ((await read(path, ["update-ref", `refs/heads/${branch}`, head, tip])) === null) {
+        return { branch, changed: true, note: `Could not read its commits. Its work is still in ${path}.` };
+      }
+    } else if ((await read(path, ["merge-base", "--is-ancestor", head, tip])) === null) {
+      return { branch, changed: true, note: `Its commits went two different ways, so nothing was pushed. Its work is still in ${path}.` };
+    }
+  }
   const count = await read(path, ["rev-list", "--count", `${own.baseSha}..${branch}`]);
   // Unsure means keep everything: a failed read must not look like "no commits".
-  if (!pointed || count === null || !/^\d+$/.test(count)) {
+  if (count === null || !/^\d+$/.test(count)) {
     return { branch, changed: true, note: `Could not read its commits. Its work is still in ${path}.` };
   }
   if (Number(count) === 0) {
