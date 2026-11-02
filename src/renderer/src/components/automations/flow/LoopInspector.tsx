@@ -166,7 +166,7 @@ export default function LoopInspector({
           )}
           <p style={{ margin: "4px 0 0 22px", fontSize: 10.5, lineHeight: 1.5, color: "var(--muted-2)" }}>
             {loop.ownBranch
-              ? "Starts from the default branch in a clean copy, so install steps may be needed. Your open files are never touched. The pull request holds everything the run changed, with its final summary as the text."
+              ? "Starts from the default branch in a clean copy, so install steps may be needed. Your files are not touched, except by a check you set to run first. The pull request holds everything the run changed, with its final summary as the text. A change here applies from the next fresh start."
               : "It edits this workspace's folder directly."}
           </p>
         </Group>

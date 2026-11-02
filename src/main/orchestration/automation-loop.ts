@@ -423,26 +423,29 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
     // Before anything is spent: an automation that asked for its own branch
     // must never fall back to editing the user's checkout.
     let workCwd = job.input.cwd;
-    let ownBranchState = job.ownBranch ? job.state.ownBranch : undefined;
-    if (job.ownBranch) {
-      let own = job.state.ownBranch;
-      const stillThere = own ? await fs.access(own.path).then(() => true, () => false) : false;
-      if (!own || !stillThere) {
-        const { openOwnBranch } = await import("./automation-branch");
-        const opened = await openOwnBranch(job).catch(() => ({
-          ok: false as const,
-          problem: "Could not create a separate copy of the repository, so this run did not start.",
-        }));
-        if (!opened.ok) {
-          await appendSkip(id, { reason: "ownBranch", detail: opened.problem });
-          if (job.state.iteration > 0) await finalize(id, "iteration-failed");
-          return;
-        }
-        own = opened.own;
-        await patchJob(id, (j) => ({ ...j, state: { ...j.state, ownBranch: opened.own } }));
+    let ownBranchState = job.state.ownBranch;
+    if (ownBranchState) {
+      // Mid-cycle: a same-run loop's run stays in the folder it started in, so
+      // the switch only ever takes effect at a fresh start.
+      if (!(await fs.access(ownBranchState.path).then(() => true, () => false))) {
+        await appendSkip(id, { reason: "ownBranch", detail: "Its separate copy disappeared during the loop, so the loop stopped." });
+        await finalize(id, "iteration-failed");
+        return;
       }
-      workCwd = own.path;
-      ownBranchState = own;
+      workCwd = ownBranchState.path;
+    } else if (job.ownBranch && job.state.iteration === 0) {
+      const { openOwnBranch } = await import("./automation-branch");
+      const opened = await openOwnBranch(job).catch(() => ({
+        ok: false as const,
+        problem: "Could not create a separate copy of the repository, so this run did not start.",
+      }));
+      if (!opened.ok) {
+        await appendSkip(id, { reason: "ownBranch", detail: opened.problem });
+        return;
+      }
+      ownBranchState = opened.own;
+      await patchJob(id, (j) => ({ ...j, state: { ...j.state, ownBranch: opened.own } }));
+      workCwd = opened.own.path;
     }
 
     // A new iteration is real new activity — re-arm the notify policy so the
@@ -929,6 +932,8 @@ export async function runNow(id: string): Promise<RunState> {
       }));
     }
   }
+  // The reset below would forget the last cycle's copy, and its work with it.
+  await settleOwnBranch(id, "user-stop");
 
   await patchJob(id, (j) => ({
     ...j,

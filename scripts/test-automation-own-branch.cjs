@@ -143,6 +143,72 @@ const inOrigin = (origin, ...args) => execFileSync("git", ["--git-dir", origin, 
     assert.equal(inOrigin(origin, "show", `${own.branch}:app.txt`), "worker commit");
   }
 
+  // A worker that detaches HEAD still has its commits on the branch.
+  {
+    const { repo, origin } = makeRepo("detached");
+    const { own } = await openOwnBranch(job(repo));
+    git(own.path, "checkout", "-q", "--detach");
+    fs.writeFileSync(path.join(own.path, "app.txt"), "detached work\n");
+    git(own.path, "add", "-A");
+    git(own.path, "commit", "-q", "-m", "detached");
+    const local = await closeOwnBranch(job(repo), own, { openPullRequest: false });
+    assert.match(local.note, /Its work is on the branch/);
+    assert.equal(git(repo, "show", `${own.branch}:app.txt`), "detached work");
+    assert.ok(!fs.existsSync(own.path));
+
+    const second = (await openOwnBranch(job(repo))).own;
+    git(second.path, "checkout", "-q", "-b", "elsewhere");
+    fs.writeFileSync(path.join(second.path, "app.txt"), "other branch\n");
+    git(second.path, "add", "-A");
+    git(second.path, "commit", "-q", "-m", "other");
+    const pushed = await closeOwnBranch(job(repo), second, { openPullRequest: true });
+    assert.ok(pushed.prUrl);
+    assert.equal(inOrigin(origin, "show", `${second.branch}:app.txt`), "other branch");
+  }
+
+  // A post-commit hook that leaves edits behind: the copy stays, never forced away.
+  {
+    const { repo } = makeRepo("dirtyafter");
+    const hook = path.join(repo, git(repo, "rev-parse", "--git-path", "hooks"), "post-commit");
+    fs.writeFileSync(hook, "#!/bin/sh\necho generated > left-behind.txt\n");
+    fs.chmodSync(hook, 0o755);
+    const { own } = await openOwnBranch(job(repo));
+    fs.writeFileSync(path.join(own.path, "app.txt"), "x\n");
+    const done = await closeOwnBranch(job(repo), own, { openPullRequest: false });
+    assert.match(done.note, /Some changes were not committed/);
+    assert.ok(done.note.includes(own.path));
+    assert.equal(fs.readFileSync(path.join(own.path, "left-behind.txt"), "utf8"), "generated\n");
+    assert.equal(git(repo, "show", `${own.branch}:app.txt`), "x");
+  }
+
+  // Not being able to count the commits keeps everything.
+  {
+    const { repo } = makeRepo("unsure");
+    const { own } = await openOwnBranch(job(repo));
+    fs.writeFileSync(path.join(own.path, "app.txt"), "x\n");
+    git(own.path, "add", "-A");
+    git(own.path, "commit", "-q", "-m", "work");
+    const done = await closeOwnBranch(job(repo), { ...own, baseSha: "f".repeat(40) }, { openPullRequest: true });
+    assert.match(done.note, /Could not read its commits/);
+    assert.ok(fs.existsSync(path.join(own.path, "app.txt")), "the copy stays");
+    assert.equal(git(repo, "show", `${own.branch}:app.txt`), "x", "the branch stays");
+  }
+
+  // Ignored files do not hold the copy back.
+  {
+    const { repo } = makeRepo("ignored");
+    fs.writeFileSync(path.join(repo, ".gitignore"), "node_modules/\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "ignore");
+    git(repo, "push", "-q", "origin", "main");
+    const { own } = await openOwnBranch(job(repo));
+    fs.mkdirSync(path.join(own.path, "node_modules"));
+    fs.writeFileSync(path.join(own.path, "node_modules", "a.js"), "x");
+    const done = await closeOwnBranch(job(repo), own, { openPullRequest: false });
+    assert.equal(done.changed, false);
+    assert.ok(!fs.existsSync(own.path));
+  }
+
   // gh refuses: the branch is pushed, the line is plain, gh's words stay out.
   {
     const { repo, origin } = makeRepo("ghfails");

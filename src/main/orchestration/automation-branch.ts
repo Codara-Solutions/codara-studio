@@ -85,8 +85,14 @@ export async function openOwnBranch(job: ScheduledJob, nowMs: number = Date.now(
   return { ok: true, own: { path, branch, baseSha, ...(baseBranch && baseBranch !== "HEAD" ? { baseBranch } : {}) } };
 }
 
-async function removeCheckout(repo: string, path: string): Promise<void> {
-  await read(repo, ["worktree", "remove", "--force", path]);
+// Never forced: git refuses while anything uncommitted is left, and that is
+// exactly when the copy has to stay. Ignored files such as node_modules go with it.
+async function removeCheckout(repo: string, path: string): Promise<boolean> {
+  return (await read(repo, ["worktree", "remove", path])) !== null;
+}
+
+function stillThere(path: string): string {
+  return ` Some changes were not committed, so its copy is still in ${path}.`;
 }
 
 function oneLine(text: string): string {
@@ -155,29 +161,37 @@ export async function closeOwnBranch(
       return { branch, changed: true, note: `Could not commit its changes, so they are still in ${path}.` };
     }
   }
-  const ahead = Number(await read(path, ["rev-list", "--count", `${own.baseSha}..HEAD`]));
-  if (!ahead) {
-    await removeCheckout(repo, path);
-    await read(repo, ["branch", "-D", branch]);
+  // A worker can detach HEAD or switch branch; what it made must be on the branch
+  // this reports, or removing the copy would leave its commits unreferenced.
+  const head = await read(path, ["rev-parse", "--verify", "HEAD"]);
+  const pointed = head && (await read(path, ["update-ref", `refs/heads/${branch}`, head])) !== null;
+  const count = await read(path, ["rev-list", "--count", `${own.baseSha}..${branch}`]);
+  // Unsure means keep everything: a failed read must not look like "no commits".
+  if (!pointed || count === null || !/^\d+$/.test(count)) {
+    return { branch, changed: true, note: `Could not read its commits. Its work is still in ${path}.` };
+  }
+  if (Number(count) === 0) {
+    if (await removeCheckout(repo, path)) await read(repo, ["branch", "-D", branch]);
+    else return { branch, changed: true, note: `It made no commits, but its copy could not be removed. It is in ${path}.` };
     return { branch, changed: false, note: "It changed nothing, so there is no branch to look at." };
   }
   const saved = `Its work is on the branch ${branch}.`;
   if (!opts.openPullRequest) {
-    await removeCheckout(repo, path);
-    return { branch, changed: true, note: saved };
+    const removed = await removeCheckout(repo, path);
+    return { branch, changed: true, note: removed ? saved : `${saved}${stillThere(path)}` };
   }
   try {
-    await runGit(path, ["push", "--quiet", "--set-upstream", "origin", `HEAD:refs/heads/${branch}`], {
+    await runGit(path, ["push", "--quiet", "origin", `refs/heads/${branch}:refs/heads/${branch}`], {
       timeout: NETWORK_TIMEOUT_MS,
       internal: true,
     });
   } catch {
-    await removeCheckout(repo, path);
-    return { branch, changed: true, note: `${saved} No pull request: it could not push.` };
+    const removed = await removeCheckout(repo, path);
+    return { branch, changed: true, note: `${saved} No pull request: it could not push.${removed ? "" : stillThere(path)}` };
   }
   const pull = await openDraftPullRequest(job, own, opts.summary, opts.resolveGh ?? (() => resolveBinary("gh")));
-  await removeCheckout(repo, path);
-  return pull.url
-    ? { branch, changed: true, prUrl: pull.url }
-    : { branch, changed: true, note: `${saved} ${pull.problem ?? ""}`.trim() };
+  const removed = await removeCheckout(repo, path);
+  const left = removed ? "" : stillThere(path);
+  if (pull.url) return { branch, changed: true, prUrl: pull.url, ...(left ? { note: left.trim() } : {}) };
+  return { branch, changed: true, note: `${saved} ${pull.problem ?? ""}${left}`.trim() };
 }

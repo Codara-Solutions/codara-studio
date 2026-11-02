@@ -77,6 +77,15 @@ const harnessPlugin = {
             contents: "const fs = require('fs');\nexport async function writeFileAtomic(p, c){ fs.writeFileSync(p, c); }\n",
             loader: "js",
           };
+        case "automation-branch":
+          return {
+            contents:
+              init +
+              "globalThis.__CU.branches ??= { opened: [], closed: [] };\n" +
+              "export async function openOwnBranch(job){ if (globalThis.__CU.branchFails) return { ok: false, problem: 'no copy' }; const own = { path: process.env.SPARK_HOME_DIR, branch: 'codara-automation/x', baseSha: 'a' }; globalThis.__CU.branches.opened.push(job.id); return { ok: true, own }; }\n" +
+              "export async function closeOwnBranch(job, own, opts){ globalThis.__CU.branches.closed.push({ id: job.id, opts }); return { branch: own.branch, changed: true }; }\n",
+            loader: "js",
+          };
         case "git-exec":
           return { contents: "export async function runGit(){ return { stdout: '', stderr: '', code: 0 }; }\n", loader: "js" };
         case "git-events":
@@ -106,7 +115,7 @@ const harnessPlugin = {
           return {
             contents:
               init +
-              "export async function startDirectWorkerRun(input){ const id = 'run-' + (globalThis.__CU.launches.length + 1); globalThis.__CU.launches.push({ id, automationId: input.automationId, prompt: input.prompt, vars: input.vars }); globalThis.__CU.runs[id] = { id, status: 'running', humanMessages: [], workerAttempts: [] }; return globalThis.__CU.runs[id]; }\n" +
+              "export async function startDirectWorkerRun(input){ const id = 'run-' + (globalThis.__CU.launches.length + 1); globalThis.__CU.launches.push({ id, automationId: input.automationId, prompt: input.prompt, vars: input.vars, cwd: input.cwd }); globalThis.__CU.runs[id] = { id, status: 'running', humanMessages: [], workerAttempts: [] }; return globalThis.__CU.runs[id]; }\n" +
               "export async function addDirectIteration(input){ return { id: input.runId, status: 'running', humanMessages: [], workerAttempts: [] }; }\n" +
               "export async function getRun(id){ return globalThis.__CU.runs[id] ?? null; }\n" +
               "export async function forcePauseRun(id){ const r = globalThis.__CU.runs[id]; if (r) r.status = 'cancelled'; return r; }\n" +
@@ -449,6 +458,67 @@ async function integrationChecks({ sched, loop }, workspace) {
   globalThis.__CU.runs[globalThis.__CU.launches[launchedOther].id].status = "complete";
   await sched.setEnabled(otherPrompt.id, false);
   pass("a pull request run is told what fired it, and other runs are untouched");
+
+  // ── own branch: when it opens, and that nothing forgets it ───────────────
+  const byHand = { kind: "manual" };
+  const launchOf = (n) => globalThis.__CU.launches[n];
+  const finishRun = (n) => {
+    globalThis.__CU.runs[launchOf(n).id].status = "complete";
+  };
+  {
+    globalThis.__CU.branches = { opened: [], closed: [] };
+    const plain = await sched.createJob({ name: "plain", trigger: byHand, input, prompt: { template: "go" } });
+    const n0 = globalThis.__CU.launches.length;
+    await loop.startIteration(plain.id, { source: "manual" });
+    assert.strictEqual(globalThis.__CU.branches.opened.length, 0, "no switch, no copy");
+    assert.strictEqual(launchOf(n0).prompt, "go", "and the prompt is exactly as before");
+    assert.strictEqual(launchOf(n0).cwd, workspace);
+    finishRun(n0);
+    await sched.setEnabled(plain.id, false);
+
+    const own = await sched.createJob({ name: "own", trigger: byHand, input, ownBranch: { draftPr: true }, prompt: { template: "go" } });
+    const n1 = globalThis.__CU.launches.length;
+    await loop.startIteration(own.id, { source: "manual" });
+    assert.deepStrictEqual(globalThis.__CU.branches.opened, [own.id]);
+    assert.strictEqual(launchOf(n1).cwd, process.env.SPARK_HOME_DIR, "the run works in the copy");
+    assert.match(launchOf(n1).prompt, /separate copy of the repository/);
+    assert.strictEqual((await get(own.id)).state.ownBranch.branch, "codara-automation/x");
+
+    // Run now during the cycle settles the old copy before forgetting it.
+    await loop.runNow(own.id);
+    assert.strictEqual(globalThis.__CU.branches.closed.length, 1);
+    assert.strictEqual(globalThis.__CU.branches.closed[0].opts.openPullRequest, false, "a stopped run opens nothing");
+    assert.strictEqual(globalThis.__CU.branches.opened.length, 2);
+    await loop.stopLoop(own.id);
+    assert.strictEqual(globalThis.__CU.branches.closed.length, 2, "stopping settles it too");
+    assert.strictEqual((await get(own.id)).state.ownBranch, undefined);
+    await sched.setEnabled(own.id, false);
+
+    // Turning it on mid-cycle waits for a fresh start: a same-run loop's run
+    // stays in the folder it started in.
+    const midway = await sched.createJob({ name: "midway", trigger: byHand, input, loop: { kind: "count", stop: { maxIterations: 3 } }, prompt: { template: "go" } });
+    const n2 = globalThis.__CU.launches.length;
+    await loop.startIteration(midway.id, { source: "manual" });
+    await sched.updateJob({ id: midway.id, ownBranch: { draftPr: true } });
+    finishRun(n2);
+    const opened = globalThis.__CU.branches.opened.length;
+    await loop.startIteration(midway.id, { source: "count" });
+    assert.strictEqual(globalThis.__CU.branches.opened.length, opened, "no copy mid-cycle");
+    await loop.stopLoop(midway.id);
+    await sched.setEnabled(midway.id, false);
+
+    // No copy, no run: it never falls back to the workspace folder.
+    globalThis.__CU.branchFails = true;
+    const refused = await sched.createJob({ name: "refused", trigger: byHand, input, ownBranch: { draftPr: false }, prompt: { template: "go" } });
+    const n3 = globalThis.__CU.launches.length;
+    await loop.startIteration(refused.id, { source: "manual" });
+    assert.strictEqual(globalThis.__CU.launches.length, n3);
+    assert.strictEqual((await get(refused.id)).skips[0].reason, "ownBranch");
+    assert.strictEqual((await get(refused.id)).skips[0].detail, "no copy");
+    globalThis.__CU.branchFails = false;
+    await sched.setEnabled(refused.id, false);
+  }
+  pass("own branch: opens at a fresh start, never falls back, and nothing forgets it");
 
   // ── skip records: removal, cap, normalization ────────────────────────────
   const skipId = job.skips[0].id;
