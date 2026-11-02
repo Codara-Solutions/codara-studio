@@ -44,6 +44,8 @@ jobs:
       - name: Startup and memory (report only)
         if: ${{ !cancelled() }}
         continue-on-error: true
+        # A wedged app must not eat the job's time; 4 boots take under 1 min.
+        timeout-minutes: 6
         run: node scripts/measure-startup.cjs --runs 3 --json budgets-report/startup.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}

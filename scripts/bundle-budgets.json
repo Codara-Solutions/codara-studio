@@ -28,15 +28,15 @@
     }
   },
   "startup": {
-    "$comment": "Warn levels for scripts/measure-startup.cjs, medians on the CI runner. Report only: crossing one warns, never fails.",
+    "$comment": "Warn levels for scripts/measure-startup.cjs, medians on the GitHub Linux runner (4 CPUs). Report only: crossing one warns, never fails. On 2026-11-02 the runner measured first window 579 ms, workspace visible 960 ms, 640 MB.",
     "firstWindowMs": {
       "warn": 1500
     },
     "shellMs": {
-      "warn": 3000
+      "warn": 2000
     },
     "rssMb": {
-      "warn": 1200
+      "warn": 1000
     }
   }
 }
