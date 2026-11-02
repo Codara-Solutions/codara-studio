@@ -501,7 +501,9 @@ async function integrationChecks({ sched, loop }, workspace) {
     assert.strictEqual(notices(capped.id).length, 1);
     assert.match(notices(capped.id)[0].title, /monthly cap/);
 
-    // Any later fire is refused, spends nothing, and says so once.
+    // Any later fire is refused, spends nothing, and says so once. A pass in the same
+    // millisecond as a skip counts as after it and splits the row, so the clock moves on.
+    await sleep(2);
     await loop.startIteration(capped.id, { source: "trigger" });
     await loop.startIteration(capped.id, { source: "trigger" });
     job = await get(capped.id);
