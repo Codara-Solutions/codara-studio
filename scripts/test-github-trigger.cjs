@@ -269,7 +269,19 @@ const none = new Map();
 
 assert.equal(normalizeGitHubMemory(null), undefined);
 assert.equal(normalizeGitHubMemory({ seededAt: 1, seededMaxPr: 1, seen: "x", fires: [] }), undefined);
-assert.equal(normalizeGitHubMemory({ seededAt: 1, seededMaxPr: 1, seen: ["a"], fires: [] }), undefined, "an old list starts afresh");
+assert.equal(normalizeGitHubMemory({ seededAt: 1, seededMaxPr: 1, seen: [1], fires: [] }), undefined);
+{
+  // A stored list from an older build keeps what it handled, its limits included.
+  const oldKey = `ci:12:${SHA}`;
+  const stored = { seededAt: NOW - 5000, seededMaxPr: 10, seen: [oldKey, "pr:12"], fires: [{ pr: 12, at: NOW - 100 }] };
+  const loaded = normalizeGitHubMemory(JSON.parse(JSON.stringify(stored)), NOW);
+  assert.deepEqual(loaded, { seededAt: NOW - 5000, seededMaxPr: 10, seen: { [oldKey]: NOW, "pr:12": NOW }, fires: stored.fires });
+  const rerun = new Map([[SHA, { failed: ["build"], failedAt: NOW + 50, pending: 0 }]]);
+  const trigger = { kind: "github", events: ["prOpened", "ciFailed"] };
+  const after = decideGitHubTrigger(trigger, loaded, [pull()], rerun, NOW + 60);
+  assert.equal(after.fire, undefined, "a re-run on a handled commit does not pay again after a reload");
+  assert.ok(oldKey in after.memory.seen, "the keys survive the next write");
+}
 assert.equal(normalizeGitHubMemory({ seededAt: 1, seededMaxPr: 1, seen: { a: "x" }, fires: [] }), undefined);
 assert.deepEqual(normalizeGitHubMemory({ seededAt: 1, seededMaxPr: 1, seen: { a: 1 }, fires: [{ pr: 1, at: 2 }, 5] }).fires, [{ pr: 1, at: 2 }]);
 

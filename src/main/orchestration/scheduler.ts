@@ -120,6 +120,8 @@ function normalizeJob(job: ScheduledJob): ScheduledJob {
     if (!memory) {
       const { githubTrigger: _dropped, ...rest } = next;
       next = rest;
+    } else {
+      next = { ...next, githubTrigger: memory };
     }
   }
   // Looms on Pi: migrate the worker config on EVERY read, not only when it is

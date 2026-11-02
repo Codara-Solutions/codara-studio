@@ -252,12 +252,17 @@ export function githubFireNote(fire: GitHubTriggerFire): string {
   return lines.join("\n");
 }
 
-export function normalizeGitHubMemory(value: unknown): GitHubTriggerMemory | undefined {
+export function normalizeGitHubMemory(value: unknown, nowMs: number = Date.now()): GitHubTriggerMemory | undefined {
   const memory = record(value);
   if (!memory) return undefined;
   const { seededAt, seededMaxPr, seen, fires } = memory;
   if (typeof seededAt !== "number" || typeof seededMaxPr !== "number") return undefined;
-  const seenAt = record(seen);
+  // An older build kept a plain list with no times. Those keys count from now,
+  // since discarding them would let a re-run on a handled commit pay again.
+  const seenAt =
+    Array.isArray(seen) && seen.every((key) => typeof key === "string")
+      ? Object.fromEntries(seen.map((key: string) => [key, nowMs]))
+      : record(seen);
   if (!seenAt || !Object.values(seenAt).every((at) => typeof at === "number" && Number.isFinite(at))) return undefined;
   if (!Array.isArray(fires)) return undefined;
   const validFires = fires.flatMap((raw) => {
