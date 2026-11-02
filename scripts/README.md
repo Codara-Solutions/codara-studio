@@ -599,6 +599,8 @@ None of these are in the registry.
 | Script | When it runs | What it does |
 |---|---|---|
 | `run-all-tests.cjs` | `npm test`, `npm run test:all` | The test runner described above. |
+| `check-bundle-budgets.cjs` | `.github/workflows/budgets.yml`, on pull requests into `Cora`; by hand after `npm run build` | Measures raw and gzip bytes of `out/` (the renderer entry chunk, what `index.html` loads before first paint, all renderer files, the main entry, all main files, the preloads) and fails when one is over its limit in `bundle-budgets.json`. The limits started at the 2026-11-02 build plus 3%. When growth is intended, raise the limit in the same pull request and say why; `--update` rewrites every limit to today's size plus 3%. After a size win, lower the limit so the win sticks. Checked by `test-bundle-budgets`. |
+| `measure-startup.cjs` | `.github/workflows/budgets.yml`; by hand after `npm run build` | Boots the built app three times on fresh homes (on Linux inside Xvfb) and reports the median time to the first window and to a visible workspace, and the resident memory of all app processes after 5 s idle. It only warns, against the `startup` levels in `bundle-budgets.json`, because CI machines are noisy. |
 | `stamp-dev-electron-icon.cjs` | `postinstall`, `predev`, `prestart` | Puts the Codara icon and version strings on the development Electron binary. |
 | `brand-pi-oauth-page.cjs` | `postinstall` | Puts Codara's mark on the page a subscription sign-in ends on. Checked by `test-pi-oauth-branding`. |
 | `patch-macos-keychain.cjs` | `postinstall` | Adds an unreleased electron-builder fix for macOS signing. Checked by `test-macos-keychain`. |

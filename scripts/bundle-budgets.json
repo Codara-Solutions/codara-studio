@@ -1,0 +1,42 @@
+{
+  "$comment": "Limits in bytes for scripts/check-bundle-budgets.cjs. Started at the 2026-11-02 build plus 3%. Raise one only in the pull request that needs it and say why; lower one after a size win.",
+  "headroom": 0.03,
+  "metrics": {
+    "renderer.entry": {
+      "raw": 1786000,
+      "gzip": 535000
+    },
+    "renderer.startup": {
+      "raw": 2738000,
+      "gzip": 783000
+    },
+    "renderer.total": {
+      "raw": 14076000,
+      "gzip": 5126000
+    },
+    "main.index": {
+      "raw": 2018000,
+      "gzip": 662000
+    },
+    "main.total": {
+      "raw": 5635000,
+      "gzip": 1835000
+    },
+    "preload.total": {
+      "raw": 51000,
+      "gzip": 12000
+    }
+  },
+  "startup": {
+    "$comment": "Warn levels for scripts/measure-startup.cjs, medians on the GitHub Linux runner (4 CPUs). Report only: crossing one warns, never fails. On 2026-11-02 the runner measured first window 579 ms, workspace visible 960 ms, 640 MB.",
+    "firstWindowMs": {
+      "warn": 1500
+    },
+    "shellMs": {
+      "warn": 2000
+    },
+    "rssMb": {
+      "warn": 1000
+    }
+  }
+}
