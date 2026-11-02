@@ -1,9 +1,11 @@
 import React, { useState } from "react";
 import type { AutomationRunRecord, AutomationSkipRecord } from "@shared/types";
 import { fmtTime } from "./presentation";
+import { fmtWhen } from "./inbox-model";
 
 // A history-timeline row for a pass that did not start: its precheck said no,
-// or its scheduled time was missed and not caught up. No run exists, so the
+// its scheduled time was missed and not caught up, or a pull request trigger
+// could not act. No run exists, so the
 // row has no run chip and no peek; it expands to the reason and the check's
 // output.
 
@@ -32,7 +34,7 @@ export default function SkippedHistoryRow({
   skip: AutomationSkipRecord;
 }): React.ReactElement {
   const [expanded, setExpanded] = useState(false);
-  const label = skip.reason === "precheck" ? "check said no" : "missed";
+  const label = skip.reason === "precheck" ? "check said no" : skip.reason === "github" || skip.reason === "ownBranch" || skip.reason === "monthlyCap" ? "not started" : "missed";
   const output = skip.precheck?.outputTail ?? "";
   const repeats = skip.repeats && skip.repeats > 1 ? skip.repeats : 0;
   return (
@@ -76,6 +78,9 @@ export default function SkippedHistoryRow({
               boxSizing: "border-box",
             }}
           />
+          <span className="spark-mono spark-num automation-runs__when" title={fmtTime(skip.at)}>
+            {fmtWhen(skip.at, Date.now())}
+          </span>
           <span className="spark-badge" style={{ flex: "0 0 auto" }} data-testid="history-skip-badge">
             {repeats ? `skipped ${repeats} times` : "skipped"}
           </span>
@@ -84,7 +89,7 @@ export default function SkippedHistoryRow({
               flex: 1,
               minWidth: 0,
               fontSize: 11,
-              color: "var(--muted)",
+              color: "var(--ink-dim)",
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -93,12 +98,7 @@ export default function SkippedHistoryRow({
           >
             {skip.detail}
           </span>
-          <span className="spark-mono" style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}>
-            {label}
-          </span>
-          <span className="spark-mono" style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}>
-            {fmtTime(skip.at)}
-          </span>
+          <span className="spark-mono automation-runs__meta">{label}</span>
         </button>
       </div>
       {expanded && (

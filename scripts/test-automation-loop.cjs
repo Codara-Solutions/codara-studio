@@ -49,7 +49,7 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve(
-      { filter: /^(\.\/(run-queue|run-store|event-log)|\.\.\/(codara-home|fs-atomic|agent-runtimes|pty-manager|notify|git-exec|git-events))$/ },
+      { filter: /^(\.\/(run-queue|run-store|event-log|github-trigger-source|automation-branch)|\.\.\/(codara-home|fs-atomic|agent-runtimes|pty-manager|notify|git-exec|git-events))$/ },
       (args) => ({ path: args.path.replace(/^\.\.?\//, ""), namespace: "stub" }),
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {

@@ -861,8 +861,8 @@ Ctrl+Z (⌘Z) takes back the last settle or snooze.
 
 These two settings belong to each automation, not to the Settings dialog: open
 the automation in the editor and select its trigger. The cron and interval
-triggers show both; the folder, git, "After automation" and "Automation
-activity" triggers show only Check first. Manual and continuous triggers show
+triggers show both; the folder, git, "Pull requests", "After automation" and
+"Automation activity" triggers show only Check first. Manual and continuous triggers show
 Check first only with a cadence loop, whose later passes it checks.
 
 **Before each run** (the **Check first command**) takes an optional shell command. It runs in the

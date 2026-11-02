@@ -1261,6 +1261,28 @@ approval shows the full precheck command, since it runs on your machine.
 `codara_list_automations` and `codara_get_automation` report both, with the
 latest skipped passes.
 
+`own_branch` (`{draft_pr}`, `null` to remove) makes an automation work on a new
+branch in a separate copy of the repository, starting from the default branch.
+With `draft_pr` it also pushes that branch and opens a draft pull request when a
+run goes well. Off by default, and the approval shows the change.
+
+`guard` (`{monthly_cap_usd, pause_after_failures}`, `null` to remove) sets
+spending limits. Once a calendar month's spend reaches the cap, no new run starts
+until next month or until the cap is raised, including Run now. After that many
+failed runs in a row the automation pauses until it is resumed or run by hand.
+Limits are checked between runs, so a run already going can finish over the cap,
+estimates count as spend, and a run counts in the month it started. Off by default,
+and the approval shows any change.
+`codara_list_automations` and `codara_get_automation` report the limits with
+`spentThisMonthUsd`.
+
+The `github` trigger takes `events` (`prOpened`, `ciFailed`), an optional
+`branch` the pull request must target, and an optional `includeDrafts`. It reads
+the repository behind the workspace's origin remote with your `gh` sign-in, while
+Codara is open. Only authors who are owners, members or collaborators of that
+repository count, and one pull request starts at most 3 runs in 24 hours. Prompts
+and steps can use `{{pr_number}}`, `{{pr_url}}` and `{{pr_head}}`.
+
 ## Workflows
 
 Only in `execute`, and never for an imported pull request. A workflow is a

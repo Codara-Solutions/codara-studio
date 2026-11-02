@@ -1,5 +1,8 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+// Also opened from Source Control while no review tab has loaded this sheet;
+// without it the menu is not fixed and lands at the end of the page.
+import "./review.css";
 
 // The review tab's floating menus: where to send the notes, and which branch
 // to compare against. Glass through .spark-menu, keyboard first: arrows move,
