@@ -1,0 +1,139 @@
+// test-runner: heavy (peaks near 300 MB, like test-source-lanes)
+"use strict";
+// The Source Control warning that two running lanes would clash, on real git
+// worktrees: a real conflict is named on both lanes, work that merges cleanly
+// and a checkout with no commit are not, a pair is merged once for its two
+// commits, and a broken folder or an SSH path says nothing. Plus the line it reads.
+//
+//   node scripts/test-lane-collisions.cjs
+
+const assert = require("node:assert/strict");
+const { execFile, execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const esbuild = require("esbuild");
+
+const ROOT = path.resolve(__dirname, "..");
+
+async function load() {
+  const out = await esbuild.build({
+    stdin: {
+      contents: `
+        export * from "./main/git-lane-collisions";
+        export * from "./shared/lane-collisions";
+      `,
+      resolveDir: path.join(ROOT, "src"),
+      loader: "ts",
+    },
+    bundle: true,
+    write: false,
+    platform: "node",
+    format: "cjs",
+    alias: { "@shared": path.join(ROOT, "src/shared") },
+    external: ["ssh2", "cpu-features"],
+    plugins: [{
+      name: "no-electron",
+      setup(build) {
+        build.onResolve({ filter: /^electron$/ }, () => ({ path: "electron", namespace: "stub" }));
+        build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({ contents: "module.exports = {};", loader: "js" }));
+      },
+    }],
+    logLevel: "silent",
+  });
+  const mod = { exports: {} };
+  new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
+  return mod.exports;
+}
+
+(async () => {
+  const lib = await load();
+  const names = { "/a": "feat/a", "/b": "feat/b", "/c": "feat/c" };
+  const nameOf = (value) => names[value];
+  assert.equal(lib.collisionText(undefined, nameOf), null);
+  assert.equal(lib.collisionText([], nameOf), null);
+  assert.equal(lib.collisionText([{ otherPath: "/b", files: [] }], nameOf), null);
+  assert.equal(lib.collisionText([{ otherPath: "/b", files: ["src/session.ts"] }], nameOf), "session.ts clashes with feat/b if both merge.");
+  assert.equal(lib.collisionText([{ otherPath: "/b", files: ["a.ts", "b.ts", "c.ts"] }], nameOf), "a.ts and 2 more clash with feat/b if both merge.");
+  assert.equal(lib.collisionText([{ otherPath: "/b", files: ["a.ts"] }, { otherPath: "/c", files: ["z.ts"] }], nameOf), "a.ts clashes with feat/b and 1 more if both merge.");
+
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-lane-collisions-")));
+  try {
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(root, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1" };
+    fs.writeFileSync(env.GIT_CONFIG_GLOBAL, "[user]\n\tname = T\n\temail = t@example.invalid\n");
+    const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", env }).trim();
+    const repo = path.join(root, "repo");
+    fs.mkdirSync(repo);
+    git(repo, "init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(repo, "shared.ts"), "one\ntwo\nthree\n");
+    fs.writeFileSync(path.join(repo, "other.ts"), "alpha\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "init");
+    const tree = (name, file, text) => {
+      const dir = path.join(root, name);
+      git(repo, "worktree", "add", "-q", "-b", `feat/${name}`, dir);
+      if (file) {
+        fs.writeFileSync(path.join(dir, file), text);
+        git(dir, "add", "-A");
+        git(dir, "commit", "-q", "-m", name);
+      }
+      return dir;
+    };
+    const a = tree("a", "shared.ts", "one\nA\nthree\n");
+    const b = tree("b", "shared.ts", "one\nB\nthree\n");
+    const clean = tree("clean", "other.ts", "alpha\nbeta\n");
+    const same = tree("same", null);
+
+    let merges = 0;
+    const runGit = (cwd, args) =>
+      new Promise((resolve, reject) => {
+        execFile("git", ["-C", cwd, ...args], { env, encoding: "utf8" }, (error, stdout, stderr) => {
+          if (error) reject(Object.assign(error, { stdout, stderr }));
+          else resolve({ stdout, stderr });
+        });
+      });
+    const run = (cwd, args, opts) => {
+      if (args.includes("merge-tree")) merges += 1;
+      return runGit(cwd, args, opts);
+    };
+    const deps = { run, supported: async () => true };
+
+    const found = await lib.readLaneCollisions([a, b, clean, same], deps);
+    assert.deepEqual(found[a], [{ otherPath: b, files: ["shared.ts"] }], "named on the first lane");
+    assert.deepEqual(found[b], [{ otherPath: a, files: ["shared.ts"] }], "and on the other");
+    assert.equal(found[clean], undefined, "work that merges cleanly says nothing");
+    assert.equal(found[same], undefined, "a checkout with no commit of its own says nothing");
+
+    const counted = merges;
+    await lib.readLaneCollisions([a, b, clean, same], deps);
+    assert.equal(merges, counted, "a pair is merged once for its two commits");
+
+    // A new commit is a new pair: fixing the clash clears it.
+    fs.writeFileSync(path.join(b, "shared.ts"), "one\ntwo\nthree\n");
+    git(b, "add", "-A");
+    git(b, "commit", "-q", "-m", "back");
+    const after = await lib.readLaneCollisions([a, b], deps);
+    assert.deepEqual(after, {}, "the clash is gone with its commit");
+    assert.ok(merges > counted);
+
+    assert.deepEqual(await lib.readLaneCollisions([a], deps), {}, "one lane has nobody to clash with");
+    assert.deepEqual(await lib.readLaneCollisions([a, path.join(root, "gone")], deps), {}, "a missing folder is skipped");
+    assert.deepEqual(await lib.readLaneCollisions(["ssh://host/x", "ssh://host/y"], deps), {}, "SSH checkouts are not read");
+    assert.deepEqual(await lib.readLaneCollisions([a, b], { run, supported: async () => false }), {}, "old git says nothing");
+    const failing = { supported: async () => true, run: async (cwd, args) => {
+      if (args.includes("merge-tree")) throw Object.assign(new Error("boom"), { code: 128, stdout: "" });
+      return run(cwd, args);
+    } };
+    fs.writeFileSync(path.join(a, "shared.ts"), "one\nA2\nthree\n");
+    git(a, "add", "-A");
+    git(a, "commit", "-q", "-m", "again");
+    assert.deepEqual(await lib.readLaneCollisions([a, b], failing), {}, "a failed merge reads as no clash");
+
+    console.log("lane collisions: ok");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

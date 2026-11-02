@@ -15,6 +15,7 @@ import { Chevron, MergedFold, WorktreeAgentLine } from "../../rail/WorkspaceChil
 import FixWithAgentButton from "../fix/FixWithAgentButton";
 import { MergePullRequestDialog } from "../GitHubSection";
 import { splitPath, statusColor, statusGlyph, statusLabel } from "../git-ui";
+import { useLaneCollisions } from "./LaneCollisions";
 import LaneReviewButton from "./LaneReviewButton";
 import NewAgentDialog from "./NewAgentDialog";
 import "./lanes.css";
@@ -160,6 +161,7 @@ function LaneRow({
   foldKey,
   defaultOpen,
   faded = false,
+  collision,
   children,
 }: {
   lane: SourceLane;
@@ -167,6 +169,7 @@ function LaneRow({
   foldKey: string;
   defaultOpen: boolean;
   faded?: boolean;
+  collision?: string;
   children: React.ReactNode;
 }): React.ReactElement {
   const open = useRailFold(foldKey, defaultOpen);
@@ -204,6 +207,7 @@ function LaneRow({
           <LaneStat lane={lane} />
         </span>
       </button>
+      {collision ? <div className="lane-collision" data-testid="source-lane-collision">{collision}</div> : null}
       {open && children}
     </div>
   );
@@ -260,6 +264,7 @@ export default function SourceLanesList({
   const [mergeResult, setMergeResult] = useState<GitHubMergeResult | null>(null);
   const mergedOpen = useRailFold(`lanes-merged:${projectKey}`, false);
   const [newAgentOpen, setNewAgentOpen] = useState(false);
+  const collisions = useLaneCollisions(lanes);
 
   const startMerge = (lane: SourceLane) => {
     void prepareMerge(lane).then((ready) => {
@@ -302,12 +307,12 @@ export default function SourceLanesList({
         </div>
       )}
       {lanes.others.map((lane) => (
-        <LaneRow key={lane.id} lane={lane} entry={entryOf(lane)} foldKey={`lane:${lane.id}`} defaultOpen={false}>
+        <LaneRow key={lane.id} lane={lane} entry={entryOf(lane)} foldKey={`lane:${lane.id}`} defaultOpen={false} collision={collisions[lane.path]}>
           <LaneDetail lane={lane} actions={actions} onMerge={startMerge} />
         </LaneRow>
       ))}
       {lanes.own && (
-        <LaneRow lane={lanes.own} entry={entryOf(lanes.own)} foldKey={`lane-own:${projectKey}`} defaultOpen>
+        <LaneRow lane={lanes.own} entry={entryOf(lanes.own)} foldKey={`lane-own:${projectKey}`} defaultOpen collision={collisions[lanes.own.path]}>
           {(lanes.own.changes?.fileCount ?? 0) > 0 && lanes.own.workspaceId ? (
             <div className="lane-own-actions">
               <LaneReviewButton lane={lanes.own} />
