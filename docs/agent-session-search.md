@@ -67,7 +67,9 @@ grouped as Pinned, Today, Yesterday, This week and Older.
 its folder belongs to the workspace on screen. The **...** menu pins, renames,
 copies the id, reveals the transcript and deletes. Delete asks first, is only
 offered for Claude, Codex and Grok sessions not running in a pane, and removes
-the same files as Settings, Sessions.
+the same files as Settings, Sessions. A session that list does not have (an
+archived Codex session, one in another account's home) says it can't be deleted
+from here before asking anything.
 
 ### Names and pins
 
@@ -77,7 +79,7 @@ so it survives deleting or rebuilding the index. It shows wherever the session's
 title does: the picker, the rail, the transcript view, Settings, the phone and a
 tab opened by resuming it. Tabs already open keep their current title. Both the
 name and the session's own title find the session. **Use original** clears the
-name. Renaming a Cora chat also renames the chat itself.
+name. Renaming a Cora chat renames the chat itself, with no separate name.
 
 ## What is indexed
 

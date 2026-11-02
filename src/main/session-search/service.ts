@@ -330,7 +330,8 @@ export async function withSessionNames<T extends { runtime: string; sessionId: s
   sessions: readonly T[],
 ): Promise<T[]> {
   const store = sessionLabelStore();
-  await store.load();
+  // An unreadable file costs these lists their names, never the lists themselves.
+  await store.load().catch(() => undefined);
   return sessions.map((session) => {
     const name = store.nameOf(`${session.runtime}:${session.sessionId}`);
     return name ? { ...session, title: name } : session;
@@ -339,7 +340,12 @@ export async function withSessionNames<T extends { runtime: string; sessionId: s
 
 async function sendLabels(): Promise<void> {
   const store = sessionLabelStore();
-  await store.load();
+  try {
+    await store.load();
+  } catch {
+    // Search works without names, and the index keeps those it last had.
+    return;
+  }
   await call({ type: "labels", labels: store.snapshot() });
 }
 

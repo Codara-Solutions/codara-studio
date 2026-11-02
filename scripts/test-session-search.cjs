@@ -795,6 +795,20 @@ async function pickerTests(m, work) {
     assert.equal(Object.keys(JSON.parse(fs.readFileSync(file, "utf8"))).length, 1);
   });
 
+  await check("a labels file that cannot be read is never overwritten", async () => {
+    const file = path.join(work, "labels-unreadable", "session-labels.json");
+    // A folder in its place fails to read with something other than "not found".
+    fs.mkdirSync(file, { recursive: true });
+    const store = new m.SessionLabelStore(file);
+    await assert.rejects(store.load());
+    await assert.rejects(store.update(`claude:${uuid()}`, { name: "Lost" }));
+    assert.ok(fs.statSync(file).isDirectory(), "nothing was written over it");
+    fs.rmdirSync(file);
+    write(file, JSON.stringify({ [`claude:${uuid()}`]: { name: "Kept" } }));
+    await store.update(`claude:${uuid()}`, { name: "Added" });
+    assert.equal(Object.keys(store.snapshot()).length, 2, "the next try reads the file and keeps what it holds");
+  });
+
   await check("a fork keeps the source's history under a new id", () => {
     const id = uuid();
     const claude = m.sessionForkLaunch({ runtime: "claude", cwd: "/w", sessionId: id }, "now");

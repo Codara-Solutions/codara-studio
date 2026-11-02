@@ -16,6 +16,7 @@ import {
   type SessionSearchHit,
   type SessionSearchScope,
 } from "@shared/session-search";
+import type { WorkerSessionSummary } from "@shared/types";
 import { usePreferences } from "../../preferences/usePreferences";
 import { keyBelongsToOtherModal } from "../../shortcuts/modal-keys";
 import AnchoredMenu from "../chat/composer/AnchoredMenu";
@@ -125,7 +126,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
   const [preview, setPreview] = useState<SessionPreview | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState<WorkerSessionSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [transcript, setTranscript] = useState<{ hit: SessionSearchHit; notice: string | null } | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -142,7 +143,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
   const chosenRef = useRef(false);
   // What the shown rows answer, and an Enter pressed before they caught up.
   const hitsAnswerRef = useRef<string | null>(null);
-  const enterPendingRef = useRef(false);
+  const enterPendingRef = useRef<string | null>(null);
   const primaryRef = useRef<(hit: SessionSearchHit) => void>(() => undefined);
   // Deleted here but still in the index until the pass that notices is done.
   const deletedRef = useRef(new Set<string>());
@@ -152,7 +153,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
   const enabledAgents = prefs.agents;
   const terms = useMemo(() => sessionQueryTerms(query), [query]);
   const searching = terms.length > 0;
-  const answerKey = `${query}\n${effectiveScope}\n${agent ?? ""}`;
+  const answerKey = `${query}\n${effectiveScope}\n${agent ?? ""}\n${host.workspaceCwd ?? ""}`;
   const selected = hits.find((hit) => hit.key === selectedKey) ?? null;
   const selectedOpen = selected ? (host.isSessionOpen?.(selected) ?? false) : false;
 
@@ -198,8 +199,9 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
               : firstToShow(found, sessionQueryTerms(query).length > 0),
           );
           hitsAnswerRef.current = answerKey;
-          if (enterPendingRef.current) {
-            enterPendingRef.current = false;
+          // An earlier search can answer while this one waits out its debounce.
+          if (enterPendingRef.current === answerKey) {
+            enterPendingRef.current = null;
             if (found[0]) primaryRef.current(found[0]);
           }
         }
@@ -215,6 +217,10 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
     },
     [query, effectiveScope, host.workspaceCwd, agent, answerKey, firstToShow],
   );
+
+  useEffect(() => {
+    if (enterPendingRef.current !== answerKey) enterPendingRef.current = null;
+  }, [answerKey]);
 
   useEffect(() => {
     if (!status.enabled && loaded) return;
@@ -273,7 +279,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
       if (was) window.requestAnimationFrame(() => inputRef.current?.focus());
       return false;
     });
-    setConfirmingDelete(false);
+    setDeleting(null);
     setMenuOpen(false);
   }, [selectedKey]);
 
@@ -315,8 +321,8 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
   }, [selectedKey]);
 
   useEffect(() => {
-    if (confirmingDelete) cancelDeleteRef.current?.focus();
-  }, [confirmingDelete]);
+    if (deleting) cancelDeleteRef.current?.focus();
+  }, [deleting]);
 
   const focusSearch = () => window.requestAnimationFrame(() => inputRef.current?.focus());
 
@@ -368,7 +374,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
         if (current && selected && canFork(selected)) finish(() => host.forkSession?.(selected));
       } else if (!current) {
         // The rows are still those of an earlier query: open the first of this one's.
-        enterPendingRef.current = true;
+        enterPendingRef.current = answerKey;
       } else if (selected) {
         primary(selected);
       }
@@ -381,11 +387,11 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
   menuOpenRef.current = menuOpen;
   const escapeRef = useRef<() => void>(() => undefined);
   escapeRef.current = () => {
-    if (confirmingDelete) {
-      setConfirmingDelete(false);
+    if (deleting) {
+      setDeleting(null);
       focusSearch();
     } else if (query) {
-      enterPendingRef.current = false;
+      enterPendingRef.current = null;
       setQuery("");
       focusSearch();
     } else {
@@ -414,11 +420,29 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
     if (node.scrollTop + node.clientHeight >= node.scrollHeight - 120) void run(hits.length);
   };
 
+  // A Cora chat has a name of its own, which other surfaces and agents change
+  // too, so a label beside it would go stale and hide theirs. The index learns
+  // the new name from the run on the pass this starts, whose end refreshes the rows.
+  const renameChat = async (hit: SessionSearchHit, name: string) => {
+    setHits((rows) => rows.map((row) => (row.key === hit.key ? { ...row, title: name } : row)));
+    try {
+      await window.spark.orchestration.renameRun({ runId: hit.sessionId, title: name });
+      void window.spark.sessionSearch.refresh(true).then(publishSessionSearchStatus, () => undefined);
+    } catch {
+      setNote("Could not save the name");
+      void run(0);
+    }
+  };
+
   const applyName = async (hit: SessionSearchHit, raw: string) => {
     setRenaming(false);
     focusSearch();
     const own = hit.originalTitle ?? hit.title;
     const clean = cleanSessionName(raw);
+    if (hit.agent === "cora") {
+      if (clean && clean !== hit.title) await renameChat(hit, clean);
+      return;
+    }
     const name = !clean || clean === own ? null : clean;
     if ((name ?? own) === hit.title) return;
     setHits((rows) =>
@@ -428,7 +452,6 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
     );
     try {
       await window.spark.sessionSearch.setLabel(hit.key, { name });
-      if (hit.agent === "cora" && name) host.renameChat?.(hit.sessionId, name);
       bumpSessionLabels();
     } catch {
       setNote("Could not save the name");
@@ -447,16 +470,26 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
     focusSearch();
   };
 
-  const deleteSession = async (hit: SessionSearchHit) => {
+  // Delete can only remove what Settings' session list resolves, which leaves
+  // out archived sessions and other accounts' homes. Found out before asking,
+  // so nobody confirms a delete that cannot happen.
+  const askToDelete = async (hit: SessionSearchHit) => {
     setBusy(true);
     try {
-      // The index does not know which account's home holds the transcript.
       const sessions = await window.spark.agentSession.listAll();
       const session = sessions.find((item) => item.runtime === hit.agent && item.sessionId === hit.sessionId);
-      if (!session) {
-        setNote("Could not find this session's files to delete");
-        return;
-      }
+      if (session) setDeleting(session);
+      else setNote("This session can't be deleted from here. Its transcript is unchanged.");
+    } catch {
+      setNote("Could not check this session's files");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteSession = async (hit: SessionSearchHit, session: WorkerSessionSummary) => {
+    setBusy(true);
+    try {
       const result = await window.spark.agentSession.delete({
         runtime: session.runtime,
         nativeClaudeProfileId: session.nativeClaudeProfileId,
@@ -480,7 +513,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
       setNote(err instanceof Error ? err.message : "Could not delete this session");
     } finally {
       setBusy(false);
-      setConfirmingDelete(false);
+      setDeleting(null);
       focusSearch();
     }
   };
@@ -544,10 +577,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
                 placeholder="Search names and what was said"
                 spellCheck={false}
                 value={query}
-                onChange={(event) => {
-                  enterPendingRef.current = false;
-                  setQuery(event.currentTarget.value);
-                }}
+                onChange={(event) => setQuery(event.currentTarget.value)}
                 onKeyDown={onInputKey}
               />
               <div className="spark-segmented is-wrap sp-scopes" role="tablist" aria-label="Sessions from">
@@ -808,7 +838,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
                 ) : null}
               </div>
 
-              {confirmingDelete ? (
+              {deleting ? (
                 <footer className="sp-actions sp-actions--confirm" data-testid="session-picker-confirm-delete">
                   <span className="sp-actions__ask">Delete this session's transcript from this computer?</span>
                   <button
@@ -817,7 +847,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
                     className="spark-btn"
                     disabled={busy}
                     onClick={() => {
-                      setConfirmingDelete(false);
+                      setDeleting(null);
                       focusSearch();
                     }}
                   >
@@ -827,7 +857,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
                     type="button"
                     className="spark-btn is-danger"
                     disabled={busy}
-                    onClick={() => void deleteSession(selected)}
+                    onClick={() => void deleteSession(selected, deleting)}
                   >
                     Delete
                   </button>
@@ -931,7 +961,7 @@ export default function SessionPicker({ onClose }: { onClose: () => void }) {
                 className="spark-menu-item is-danger"
                 onClick={() => {
                   setMenuOpen(false);
-                  setConfirmingDelete(true);
+                  void askToDelete(selected);
                 }}
               >
                 Delete…

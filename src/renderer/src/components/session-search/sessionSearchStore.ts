@@ -18,8 +18,6 @@ export interface SessionSearchHost {
   /** The session's folder belongs to the workspace on screen, in a terminal tab. */
   canSplitSession: ((hit: SessionSearchHit) => boolean) | null;
   isSessionOpen: ((hit: SessionSearchHit) => boolean) | null;
-  /** Renames a Cora chat, which keeps its own name beside the label. */
-  renameChat: ((runId: string, name: string) => void) | null;
 }
 
 export interface SessionSearchRequest {
@@ -36,7 +34,6 @@ const EMPTY_HOST: SessionSearchHost = {
   splitSession: null,
   canSplitSession: null,
   isSessionOpen: null,
-  renameChat: null,
 };
 
 let host: SessionSearchHost = EMPTY_HOST;

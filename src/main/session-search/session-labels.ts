@@ -44,8 +44,15 @@ export class SessionLabelStore {
 
   constructor(private readonly path: string) {}
 
+  /**
+   * Rejects when the file exists but cannot be read, and tries again next
+   * time. Taking that for an empty file would let the next save erase it.
+   */
   load(): Promise<void> {
-    this.loading ??= this.read();
+    this.loading ??= this.read().catch((err) => {
+      this.loading = null;
+      throw err;
+    });
     return this.loading;
   }
 
@@ -53,14 +60,16 @@ export class SessionLabelStore {
     let text: string;
     try {
       text = await fs.readFile(this.path, "utf8");
-    } catch {
-      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw err;
     }
     try {
       this.labels = normalizeLabels(JSON.parse(text));
     } catch {
-      // The next save would overwrite a file that may still be repairable by hand.
-      await fs.rename(this.path, `${this.path}.corrupt`).catch(() => undefined);
+      // The next save would overwrite a file that may still be repairable by
+      // hand. If it cannot be moved aside, this rejects and nothing saves.
+      await fs.rename(this.path, `${this.path}.corrupt`);
     }
   }
 

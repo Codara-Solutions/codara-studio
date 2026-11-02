@@ -5166,10 +5166,6 @@ export default function App() {
       hit.agent !== "cora" && !!findOpenSessionPane(jumpSourcesRef.current().layouts, hit.agent, hit.sessionId),
     [],
   );
-  const handleRenameChatTabRef = useRef<(id: TabId, title: string) => void>(() => undefined);
-  const renameSearchedChat = useCallback((runId: string, name: string) => {
-    handleRenameChatTabRef.current(runId, name);
-  }, []);
   const sessionSearchCwd = activeWorkspace && !activeWorkspace.remote ? activeWorkspace.cwd : null;
   useEffect(() => {
     publishSessionSearchHost({
@@ -5179,7 +5175,6 @@ export default function App() {
       splitSession: splitSearchedSession,
       canSplitSession: canSplitSearchedSession,
       isSessionOpen: isSearchedSessionOpen,
-      renameChat: renameSearchedChat,
     });
   }, [
     sessionSearchCwd,
@@ -5188,7 +5183,6 @@ export default function App() {
     splitSearchedSession,
     canSplitSearchedSession,
     isSearchedSessionOpen,
-    renameSearchedChat,
   ]);
   useEffect(() => () => publishSessionSearchHost(null), []);
 
@@ -5288,7 +5282,6 @@ export default function App() {
     },
     [renameChatTab],
   );
-  handleRenameChatTabRef.current = handleRenameChatTab;
 
   const openInSparkBrowser = useCallback(
     (

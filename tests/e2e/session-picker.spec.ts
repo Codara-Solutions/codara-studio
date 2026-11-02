@@ -55,12 +55,15 @@ async function writeClaudeSession(
   lines.push({ type: "ai-title", aiTitle: title });
   const dir = join(fixture.homeDir, ".claude", "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
   await mkdir(dir, { recursive: true });
-  // Settings' session list, which delete goes through, only trusts sessions the prompt history names.
-  await appendFile(
-    join(fixture.homeDir, ".claude", "history.jsonl"),
-    `${JSON.stringify({ display: turns[0][0], project: cwd, sessionId: id, timestamp: Date.now() })}\n`,
-    "utf8",
-  );
+  // Settings' session list, which delete goes through, only trusts sessions the
+  // prompt history names. The old prototype stays out, to cover one it cannot delete.
+  if (cwd === fixture.workspaceDir) {
+    await appendFile(
+      join(fixture.homeDir, ".claude", "history.jsonl"),
+      `${JSON.stringify({ display: turns[0][0], project: cwd, sessionId: id, timestamp: Date.now() })}\n`,
+      "utf8",
+    );
+  }
   await writeFile(join(dir, `${id}.jsonl`), lines.map((line) => `${JSON.stringify(line)}\n`).join(""), "utf8");
 }
 
@@ -360,6 +363,12 @@ test("resume, fork, pin, delete and a session whose folder is gone", async () =>
     await page.keyboard.press("Escape");
     await expect(transcript).toHaveCount(0);
     await expect(picker).toBeVisible();
+
+    // A session delete cannot reach says so, without asking first.
+    await picker.getByRole("button", { name: "More actions" }).click();
+    await page.getByRole("menuitem", { name: "Delete…" }).click();
+    await expect(picker.getByRole("status")).toContainText("can't be deleted from here");
+    await expect(picker.getByTestId("session-picker-confirm-delete")).toHaveCount(0);
 
     // Delete asks first, and Cancel keeps it.
     await row(picker, IDS.login).click();
