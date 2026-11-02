@@ -15,8 +15,10 @@
 // section of scripts/bundle-budgets.json.
 //
 // CI machines are noisy, so this only warns: it exits 0 unless the app fails
-// to start at all. On Linux the windows open on a private Xvfb display
-// (scripts/virtual-display.cjs), never on the desktop.
+// to start at all (and CI does not block on that either; the e2e smoke set
+// in ci-linux.yml covers boot). On Linux the windows open on a private Xvfb
+// display (scripts/virtual-display.cjs), never on the desktop; without one it
+// refuses to run.
 //
 //   node scripts/measure-startup.cjs [--runs 3] [--idle-ms 5000] [--json file]
 
@@ -69,7 +71,7 @@ function median(values) {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-function freshHome() {
+function freshHome(osHome) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codara-startup-"));
   const home = path.join(root, "home");
   const workspace = path.join(root, "workspace");
@@ -87,13 +89,19 @@ function freshHome() {
   for (const key of INHERITED_KEYS) delete env[key];
   for (const key of Object.keys(env)) if (key.startsWith("CLAUDE_CODE_") || key === "CLAUDECODE") delete env[key];
   Object.assign(env, {
+    HOME: osHome,
+    USERPROFILE: osHome,
+    XDG_CONFIG_HOME: path.join(osHome, ".config"),
+    XDG_CACHE_HOME: path.join(osHome, ".cache"),
+    XDG_DATA_HOME: path.join(osHome, ".local", "share"),
+    XDG_STATE_HOME: path.join(osHome, ".local", "state"),
     CODARA_HOME_DIR: home,
     SPARK_HOME_DIR: home,
     SPARK_USER_DATA_DIR: home,
     SPARK_SKIP_LEGACY_MIGRATION: "1",
     SPARK_NO_SHELL_INTEGRATION: "1",
     SPARK_ALLOW_MULTI: "1",
-    SPARK_E2E_BACKGROUND: process.env.SPARK_E2E_BACKGROUND ?? "1",
+    SPARK_E2E_BACKGROUND: "1",
     CODARA_CHROME_LINK: "0",
     CODARA_DISABLE_KEYCHAIN: "1",
     CODARA_E2E_SEED_TERMINAL: "0",
@@ -105,8 +113,8 @@ function freshHome() {
   return { root, env };
 }
 
-async function measureOnce(electron, idleMs) {
-  const { root, env } = freshHome();
+async function measureOnce(electron, idleMs, osHome) {
+  const { root, env } = freshHome(osHome);
   const started = performance.now();
   const app = await electron.launch({ args: [ROOT], env, timeout: 60_000 });
   try {
@@ -138,16 +146,30 @@ async function main() {
   if (!fs.existsSync(path.join(ROOT, "out", "main", "index.js"))) {
     throw new Error("out/main/index.js is missing; run npm run build first");
   }
+  // Never on the desktop: background mode is forced, and on Linux (where
+  // the transparent window that hides it elsewhere is a no-op) a private
+  // Xvfb display is required.
+  process.env.SPARK_E2E_BACKGROUND = "1";
   const display = useVirtualDisplay();
+  if (process.platform === "linux" && !display) {
+    throw new Error("no private Xvfb display could be started (install xvfb); refusing to open windows on the desktop");
+  }
   const { _electron: electron } = require("playwright");
   const budgets = JSON.parse(fs.readFileSync(BUDGETS, "utf8")).startup ?? {};
 
+  // The app's own home is CODARA_HOME_DIR and fresh for every boot, but boot
+  // also runs the login shell (path-reconstruction.ts) and reads XDG paths.
+  // One empty OS home for the whole measurement keeps the user's rc files
+  // and configs out, while its font and GPU caches stay warm between boots
+  // the way a user's do.
+  const osHome = fs.mkdtempSync(path.join(os.tmpdir(), "codara-startup-os-home-"));
+  process.on("exit", () => fs.rmSync(osHome, { recursive: true, force: true }));
   const runs = [];
   // One unmeasured boot first: the first launch on a machine pays for disk
-  // cache misses that no user start after the first ever sees.
-  await measureOnce(electron, 0);
+  // and cache misses that no user start after the first ever sees.
+  await measureOnce(electron, 0, osHome);
   for (let i = 0; i < options.runs; i++) {
-    const run = await measureOnce(electron, options.idleMs);
+    const run = await measureOnce(electron, options.idleMs, osHome);
     runs.push(run);
     console.log(
       `run ${i + 1}: launch ${run.launch.toFixed(0)} ms, first window ${run.firstWindow.toFixed(0)} ms, ` +
