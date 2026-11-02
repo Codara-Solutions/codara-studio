@@ -124,6 +124,17 @@ assert.deepEqual(g.normalizeAutomationGuard({ monthlyCapUsd: 20, pauseAfterFailu
 assert.equal(g.normalizeMonthSpend({ month: "soon", costUsd: 1 }), undefined);
 assert.deepEqual(g.normalizeMonthSpend({ month: "2026-11", costUsd: "x", measuredCostUsd: -1 }), { month: "2026-11", costUsd: 0, measuredCostUsd: 0 });
 
+// Only a blank field removes a limit: a typo must not quietly drop one.
+assert.equal(g.guardDraftProblem("", ""), null);
+assert.equal(g.guardDraftProblem("  ", " "), null);
+assert.equal(g.guardDraftProblem("20", "3"), null);
+assert.match(g.guardDraftProblem("-1", ""), /monthly cap must be/);
+assert.match(g.guardDraftProblem("0", ""), /monthly cap must be/);
+assert.match(g.guardDraftProblem("abc", "3"), /monthly cap must be/);
+assert.match(g.guardDraftProblem("", "51"), /Pause after must be/);
+assert.match(g.guardDraftProblem("", "1.5"), /Pause after must be/);
+assert.match(g.guardDraftProblem("20", "0"), /Pause after must be/);
+
 // How often a schedule starts, from the real cron engine.
 const daily = { kind: "cron", expr: "0 2 * * *" };
 const hourly = { kind: "interval", everyMs: 3_600_000 };

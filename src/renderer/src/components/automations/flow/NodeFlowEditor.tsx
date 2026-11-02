@@ -21,6 +21,7 @@ import type {
 import { isStepsOnly, type PaletteChoice } from "./model";
 import { loopSummary, triggerSummary } from "../presentation";
 import NodeContextPanel from "./NodeContextPanel";
+import { guardDraftProblem } from "@shared/automation-guard";
 import LoopInspector from "./LoopInspector";
 import { costForecast } from "../cost-forecast";
 import AddNodePalette, { type PaletteState } from "./AddNodePalette";
@@ -408,12 +409,15 @@ function Editor({
   const nameMissing = draft.name.trim().length === 0;
   const graphProblem = useMemo(() => validateGraph(nodes, edges), [nodes, edges]);
   const triggerInvalid = !triggerBuilt;
+  const guardProblem = guardDraftProblem(draft.loop.monthlyCap, draft.loop.pauseAfter);
   const firstProblem: { message: string; focusNodeId?: string } | null = nameMissing
     ? { message: "Name the automation." }
     : triggerInvalid
       ? { message: "Finish the trigger setup.", focusNodeId: TRIGGER_ID }
-      : graphProblem;
-  const canSubmit = !nameMissing && !triggerInvalid && !graphProblem;
+      : guardProblem
+        ? { message: guardProblem }
+        : graphProblem;
+  const canSubmit = !nameMissing && !triggerInvalid && !guardProblem && !graphProblem;
 
   // ── save ────────────────────────────────────────────────────────────────────
   const handleSubmit = useCallback(() => {

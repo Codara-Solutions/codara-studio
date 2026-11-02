@@ -169,7 +169,12 @@ test("limits hold an automation back, say why, and the editor shows the worst ca
     await expect(forecast).toContainText("about $5.00 each time you run it");
     await page.getByLabel("Monthly cap").fill("20");
     await expect(forecast).toContainText("about $20.00 a month");
+    // A typo blocks saving, instead of quietly dropping the limit.
+    await page.getByLabel("Pause after").fill("0");
+    await expect(page.getByRole("button", { name: "Create automation", exact: true })).toBeDisabled();
+    await expect(page.getByText(/Pause after must be a whole number/)).toBeVisible();
     await page.getByLabel("Pause after").fill("3");
+    await expect(page.getByRole("button", { name: "Create automation", exact: true })).toBeEnabled();
     await forecast.scrollIntoViewIfNeeded();
     await shot(app, page, "cost-guard-forecast");
     await clickAttached(page.getByRole("button", { name: "Create automation", exact: true }));

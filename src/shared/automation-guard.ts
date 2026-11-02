@@ -98,6 +98,20 @@ export function normalizeAutomationGuard(value: unknown): AutomationGuard | unde
   return guard.monthlyCapUsd !== undefined || guard.pauseAfterFailures !== undefined ? guard : undefined;
 }
 
+/** What is wrong with limits typed into the editor. Only a blank field removes a
+ *  limit: saving a typo must not quietly drop the one already protecting the user. */
+export function guardDraftProblem(monthlyCap: string, pauseAfter: string): string | null {
+  const cap = monthlyCap.trim();
+  if (cap && !normalizeAutomationGuard({ monthlyCapUsd: Number(cap) })) {
+    return "The monthly cap must be a number above 0. Leave it blank for no cap.";
+  }
+  const pause = pauseAfter.trim();
+  if (pause && !normalizeAutomationGuard({ pauseAfterFailures: Number(pause) })) {
+    return `Pause after must be a whole number from 1 to ${MAX_PAUSE_AFTER_FAILURES}. Leave it blank to never pause.`;
+  }
+  return null;
+}
+
 export function normalizeMonthSpend(value: unknown): AutomationMonthSpend | undefined {
   if (!value || typeof value !== "object") return undefined;
   const { month, costUsd, measuredCostUsd } = value as Record<string, unknown>;
