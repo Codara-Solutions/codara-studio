@@ -130,7 +130,7 @@ export default function CommitComposer({
             background: "color-mix(in oklch, var(--warn) 13%, transparent)",
           }}
         >
-          detached @ {branch ?? "—"}
+          detached @ {branch ?? "HEAD"}
         </span>
       )}
 
