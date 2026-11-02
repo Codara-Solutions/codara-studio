@@ -606,6 +606,7 @@ None of these are in the registry.
 | `dev-commit-message-preview.cjs` | By hand | Runs the real commit message pipeline against a repository. |
 | `release.cjs`, `publish-release.cjs` | `npm run release:mac\|win\|all` | The manual release, built from a clean worktree. Needs the untracked `.env.releases`. |
 | `ci-version.cjs`, `release-github.cjs`, `release-bundle.cjs`, `publish-release-bundle.cjs`, `release-storage.cjs`, `notify-release.cjs` | `.github/workflows/release.yml` | The steps of the nightly release: pick the version, save the build bundle, tag, publish, announce. |
+| `check-pr-hygiene.cjs` | `.github/workflows/pr-hygiene.yml`, on every pull request | Warns above 800 changed lines, fails above 2,000 without the `large-pr` label, and fails when the branch carries already merged pull requests. Run it locally with `node scripts/check-pr-hygiene.cjs --base origin/Cora`. Checked by `test-pr-hygiene`. |
 | `setup-release-app.cjs` | Once, by an organization owner | Creates the GitHub App that tags releases. |
 
 [docs/releasing.md](../docs/releasing.md) covers both release paths.
