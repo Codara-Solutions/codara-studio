@@ -97,7 +97,7 @@ const harnessPlugin = {
           return {
             contents:
               "export const automationSourceKey = (id) => `automation:${id}`;\n" +
-              "export function publish(){}\nexport function rearm(){}\nexport function settleAutomationQuestions(){}\n",
+              "export function publish(e){ (globalThis.__CU.published ??= []).push(e); }\nexport function rearm(){}\nexport function settleAutomationQuestions(){}\n",
             loader: "js",
           };
         case "agent-runtimes":
@@ -464,6 +464,321 @@ async function integrationChecks({ sched, loop }, workspace) {
   globalThis.__CU.runs[globalThis.__CU.launches[launchedOther].id].status = "complete";
   await sched.setEnabled(otherPrompt.id, false);
   pass("a pull request run is told what fired it, and other runs are untouched");
+
+  // ── an interval longer than a timer can hold still fires when it says ───
+  {
+    const realSetInterval = globalThis.setInterval;
+    const timers = [];
+    globalThis.setInterval = (fn, ms) => {
+      timers.push({ fn, ms });
+      return realSetInterval(() => {}, 1 << 30);
+    };
+    const year = 365 * 24 * 60 * 60 * 1000;
+    const before = globalThis.__CU.launches.length;
+    const slow = await sched.createJob({ name: "slow", trigger: { kind: "interval", everyMs: year }, input, prompt: { template: "go" } });
+    const usual = await sched.createJob({ name: "usual", trigger: { kind: "interval", everyMs: 900_000 }, input, prompt: { template: "go" } });
+    globalThis.setInterval = realSetInterval;
+    const [slowTimer, usualTimer] = timers;
+    assert.strictEqual(usualTimer.ms, 900_000, "a usual interval is one plain timer, as before");
+    assert.ok(slowTimer.ms <= 2_147_483_647, "every tick fits a timer");
+    const ticks = Math.round(year / slowTimer.ms);
+    assert.ok(Math.abs(ticks * slowTimer.ms - year) < 1000, "the ticks add up to the interval, not a shorter one");
+    // The clock moves with the ticks: a firing that stands for no elapsed time is
+    // ignored as settled, which would hide a timer that fired too soon.
+    const realNow = Date.now;
+    let elapsed = 0;
+    Date.now = () => realNow() + elapsed;
+    for (let i = 1; i < ticks; i += 1) {
+      elapsed += slowTimer.ms;
+      slowTimer.fn();
+      await sleep(5);
+    }
+    assert.strictEqual(globalThis.__CU.launches.length, before, "nothing before the last tick");
+    elapsed += slowTimer.ms;
+    slowTimer.fn();
+    await sleep(30);
+    Date.now = realNow;
+    assert.strictEqual(globalThis.__CU.launches.length, before + 1, "and it fires on the last");
+    const started = await get(slow.id);
+    if (started.state.currentRunId) globalThis.__CU.runs[started.state.currentRunId].status = "complete";
+    await sched.setEnabled(slow.id, false);
+    await sched.setEnabled(usual.id, false);
+    pass("an interval longer than a timer can hold fires when it says, and not before");
+  }
+
+  // ── spending limits: a month's tally, the cap, and the pause ──────────────
+  {
+    const manualTrigger = { kind: "manual" };
+    const launchAt = (n) => globalThis.__CU.launches[n];
+    // Ends a run the way the loop finds out about it: a terminal run re-decided.
+    const ends = async (id, n, status, cost) => {
+      Object.assign(globalThis.__CU.runs[launchAt(n).id], { status, estimatedWorkerCostUsd: cost });
+      await sched.patchJob(id, (j) => ({ ...j, state: { ...j.state, status: "idle" } }));
+      await loop.resumeLoop(id);
+    };
+    const notices = (id) => (globalThis.__CU.published ?? []).filter((e) => e.target?.jobId === id);
+
+    // Without a limit it counts the month and does nothing else, however it goes.
+    const plain = await sched.createJob({ name: "no limits", trigger: manualTrigger, input, prompt: { template: "go" } });
+    for (const [status, cost] of [["failed", 40], ["failed", 40], ["complete", 40]]) {
+      const n = globalThis.__CU.launches.length;
+      await loop.startIteration(plain.id, { source: "manual" });
+      assert.strictEqual(globalThis.__CU.launches.length, n + 1);
+      await ends(plain.id, n, status, cost);
+    }
+    const plainNow = await get(plain.id);
+    assert.strictEqual(plainNow.monthSpend.costUsd, 120);
+    assert.strictEqual(plainNow.guard, undefined);
+    assert.strictEqual(plainNow.failureStreak, undefined);
+    assert.strictEqual(plainNow.autoPaused, undefined);
+    assert.strictEqual(plainNow.state.status, "stopped");
+    await sched.setEnabled(plain.id, false);
+    pass("an automation with no limits keeps running, and only its month is counted");
+
+    // The cap: the run that crosses it ends the loop, once it is told.
+    const capped = await sched.createJob({ name: "capped", trigger: manualTrigger, input, guard: { monthlyCapUsd: 3 }, loop: { kind: "count", stop: { maxIterations: 5 } }, prompt: { template: "go" } });
+    let n = globalThis.__CU.launches.length;
+    await loop.startIteration(capped.id, { source: "manual" });
+    await ends(capped.id, n, "complete", 4);
+    let job = await get(capped.id);
+    assert.strictEqual(job.state.status, "stopped", "the run that crossed it ends the loop");
+    assert.strictEqual(job.state.lastStopReason, "monthly-cap");
+    assert.strictEqual(job.monthSpend.costUsd, 4);
+    assert.strictEqual(globalThis.__CU.launches.length, n + 1, "no second run");
+    assert.strictEqual(notices(capped.id).length, 1);
+    assert.match(notices(capped.id)[0].title, /monthly cap/);
+
+    // Any later fire is refused, spends nothing, and says so once. A pass in the same
+    // millisecond as a skip counts as after it and splits the row, so the clock moves on.
+    await sleep(2);
+    await loop.startIteration(capped.id, { source: "trigger" });
+    await loop.startIteration(capped.id, { source: "trigger" });
+    job = await get(capped.id);
+    assert.strictEqual(globalThis.__CU.launches.length, n + 1, "a trigger starts nothing");
+    assert.strictEqual(job.skips.at(-1).reason, "monthlyCap");
+    assert.strictEqual(job.skips.at(-1).repeats, 2);
+    assert.strictEqual(job.state.lastStopReason, "monthly-cap", "the last result stays on the page");
+    assert.strictEqual(notices(capped.id).length, 1, "said once");
+    assert.strictEqual(await loop.automationIsBusy(job), true, "a trigger that remembers keeps its event");
+    await assert.rejects(loop.runNow(capped.id), /monthly cap/);
+    assert.strictEqual(globalThis.__CU.launches.length, n + 1, "Run now is refused too");
+
+    // Raising the cap lets it run, and it is told again at the new one.
+    await sched.updateJob({ id: capped.id, guard: { monthlyCapUsd: 5 } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(capped.id, { source: "trigger" });
+    assert.strictEqual(globalThis.__CU.launches.length, n + 1);
+    await ends(capped.id, n, "complete", 2);
+    assert.strictEqual((await get(capped.id)).monthSpend.costUsd, 6);
+    assert.strictEqual(notices(capped.id).length, 2);
+
+    // A new month starts over.
+    await sched.patchJob(capped.id, (j) => ({ ...j, monthSpend: { month: "2020-01", costUsd: 99, measuredCostUsd: 0 }, history: [] }));
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(capped.id, { source: "trigger" });
+    assert.strictEqual(globalThis.__CU.launches.length, n + 1, "last month's spend does not hold it");
+    await loop.stopLoop(capped.id);
+    await sched.setEnabled(capped.id, false);
+    pass("the monthly cap ends the loop, refuses later fires and Run now, and lifts when raised or next month");
+
+    // A running run is left alone: the fire is held as it always was, with no row.
+    const going = await sched.createJob({ name: "going", trigger: manualTrigger, input, guard: { monthlyCapUsd: 3 }, prompt: { template: "go" } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(going.id, { source: "manual" });
+    await sched.patchJob(going.id, (j) => ({ ...j, monthSpend: { month: new Date().getFullYear() + "-" + String(new Date().getMonth() + 1).padStart(2, "0"), costUsd: 9, measuredCostUsd: 0 } }));
+    await loop.startIteration(going.id, { source: "trigger" });
+    assert.strictEqual((await get(going.id)).skips, undefined);
+    await assert.rejects(loop.runNow(going.id), /monthly cap/);
+    assert.notStrictEqual(globalThis.__CU.runs[launchAt(n).id].status, "cancelled", "a refused restart kills nothing");
+    assert.ok((await get(going.id)).state.currentRunId);
+    await loop.stopLoop(going.id);
+    await sched.setEnabled(going.id, false);
+
+    // Stopping or restarting a run does not hide what it spent, and it counts once.
+    const stopped = await sched.createJob({ name: "stopped", trigger: manualTrigger, input, guard: { monthlyCapUsd: 100 }, prompt: { template: "go" } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(stopped.id, { source: "manual" });
+    globalThis.__CU.runs[launchAt(n).id].estimatedWorkerCostUsd = 7;
+    await loop.stopLoop(stopped.id);
+    job = await get(stopped.id);
+    assert.strictEqual(job.monthSpend.costUsd, 7, "Stop counts it");
+    assert.strictEqual(job.history.at(-1).costUsd, 7);
+    assert.ok(job.history.at(-1).finishedAt);
+    await sched.appendHistory(stopped.id, { ...job.history.at(-1), costUsd: 7 }, {});
+    assert.strictEqual((await get(stopped.id)).monthSpend.costUsd, 7, "and only once");
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(stopped.id, { source: "manual" });
+    globalThis.__CU.runs[launchAt(n).id].estimatedWorkerCostUsd = 5;
+    await loop.runNow(stopped.id);
+    assert.strictEqual((await get(stopped.id)).monthSpend.costUsd, 12, "Run now counts the one it replaced");
+    await loop.stopLoop(stopped.id);
+    await sched.setEnabled(stopped.id, false);
+    pass("a stopped or restarted run's spend counts toward the month, once");
+
+    // A run that ended with its ending unrecorded still counts when Run now replaces it.
+    const unrecorded = await sched.createJob({ name: "unrecorded", trigger: manualTrigger, input, guard: { monthlyCapUsd: 100 }, prompt: { template: "go" } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(unrecorded.id, { source: "manual" });
+    Object.assign(globalThis.__CU.runs[launchAt(n).id], { status: "complete", estimatedWorkerCostUsd: 6 });
+    await loop.runNow(unrecorded.id);
+    job = await get(unrecorded.id);
+    assert.strictEqual(job.monthSpend.costUsd, 6);
+    const closedRow = job.history.find((r) => r.runId === launchAt(n).id);
+    assert.strictEqual(closedRow.status, "complete", "it finished; nobody stopped it");
+    assert.strictEqual(closedRow.stopReason, undefined);
+    // And if that run is what reached the cap, the restart says so.
+    await loop.stopLoop(unrecorded.id);
+    await sched.updateJob({ id: unrecorded.id, guard: { monthlyCapUsd: 8 } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(unrecorded.id, { source: "manual" });
+    Object.assign(globalThis.__CU.runs[launchAt(n).id], { status: "complete", estimatedWorkerCostUsd: 3 });
+    await assert.rejects(loop.runNow(unrecorded.id), /monthly cap/);
+    await sched.setEnabled(unrecorded.id, false);
+    pass("a run that ended unrecorded still counts when Run now replaces it");
+
+    // A full history: the spend it holds survives the new run's row pushing it out.
+    const full = await sched.createJob({ name: "full", trigger: manualTrigger, input, guard: { monthlyCapUsd: 60 }, prompt: { template: "go" } });
+    const startedThisMonth = new Date(Date.now() - 60_000).toISOString();
+    await sched.patchJob(full.id, (j) => ({
+      ...j,
+      history: Array.from({ length: 50 }, (_, i) => ({ iteration: 0, runId: `old-${i}`, startedAt: startedThisMonth, finishedAt: startedThisMonth, status: "complete", costUsd: 1 })),
+    }));
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(full.id, { source: "manual" });
+    job = await get(full.id);
+    assert.strictEqual(job.monthSpend.costUsd, 50, "taken in before the oldest row went");
+    await ends(full.id, n, "complete", 1);
+    assert.strictEqual((await get(full.id)).monthSpend.costUsd, 51, "$50 kept plus a $1 run is $51");
+    await sched.setEnabled(full.id, false);
+    pass("a month's spend survives the history rotating, from the first run on");
+
+    // A stopped worker's real cost arrives after its row closed: it counts before
+    // the cap decides, and only once.
+    const lateCost = await sched.createJob({ name: "late cost", trigger: manualTrigger, input, guard: { monthlyCapUsd: 9 }, prompt: { template: "go" } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(lateCost.id, { source: "manual" });
+    const lateRun = globalThis.__CU.runs[launchAt(n).id];
+    lateRun.estimatedWorkerCostUsd = 2;
+    await loop.stopLoop(lateCost.id);
+    assert.strictEqual((await get(lateCost.id)).monthSpend.costUsd, 2);
+    lateRun.estimatedWorkerCostUsd = 0;
+    lateRun.measuredWorkerCostUsd = 10;
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(lateCost.id, { source: "trigger" });
+    job = await get(lateCost.id);
+    assert.strictEqual(job.monthSpend.costUsd, 10, "reconciled up to what it really spent");
+    assert.strictEqual(job.history.at(-1).costUsd, 10);
+    assert.strictEqual(globalThis.__CU.launches.length, n, "and the cap holds at the real figure");
+    await Promise.all([loop.startIteration(lateCost.id, { source: "trigger" }), loop.startIteration(lateCost.id, { source: "trigger" })]);
+    assert.strictEqual((await get(lateCost.id)).monthSpend.costUsd, 10, "only once, even from starts at the same moment");
+    lateRun.measuredWorkerCostUsd = 1;
+    await loop.startIteration(lateCost.id, { source: "trigger" });
+    assert.strictEqual((await get(lateCost.id)).monthSpend.costUsd, 10, "never downward");
+    await sched.setEnabled(lateCost.id, false);
+
+    // Two starts racing the very first late charge, with no tally yet: once, not twice.
+    const racing = await sched.createJob({ name: "racing charge", trigger: manualTrigger, input, guard: { monthlyCapUsd: 100 }, prompt: { template: "go" } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(racing.id, { source: "manual" });
+    const freeRun = globalThis.__CU.runs[launchAt(n).id];
+    await loop.stopLoop(racing.id);
+    assert.strictEqual((await get(racing.id)).monthSpend, undefined, "nothing spent yet");
+    freeRun.measuredWorkerCostUsd = 10;
+    await Promise.all([loop.startIteration(racing.id, { source: "trigger" }), loop.startIteration(racing.id, { source: "trigger" })]);
+    job = await get(racing.id);
+    assert.strictEqual(job.monthSpend.costUsd, 10, "the first charge counts once");
+    assert.strictEqual(job.history.find((r) => r.runId === freeRun.id).costUsd, 10);
+    await loop.stopLoop(racing.id);
+    await sched.setEnabled(racing.id, false);
+
+    // A long same-run loop's early rows have rotated out: its late cost still counts,
+    // against what was charged and not what the kept rows add up to.
+    const long = await sched.createJob({ name: "long loop", trigger: manualTrigger, input, guard: { monthlyCapUsd: 500 }, prompt: { template: "go" } });
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(long.id, { source: "manual" });
+    const longRun = globalThis.__CU.runs[launchAt(n).id];
+    longRun.estimatedWorkerCostUsd = 100;
+    await loop.stopLoop(long.id);
+    await sched.patchJob(long.id, (j) => ({ ...j, history: j.history.map((r) => ({ ...r, iteration: 60, costUsd: 2 })) }));
+    longRun.estimatedWorkerCostUsd = 0;
+    longRun.measuredWorkerCostUsd = 103;
+    await loop.startIteration(long.id, { source: "trigger" });
+    assert.strictEqual((await get(long.id)).monthSpend.costUsd, 103, "only the $3 still owed");
+    await loop.stopLoop(long.id);
+    await sched.setEnabled(long.id, false);
+    pass("a stopped worker's late cost counts before the cap decides, once");
+
+    // The pause: failures in a row, a success between them starts over.
+    const flaky = await sched.createJob({ name: "flaky", trigger: manualTrigger, input, guard: { pauseAfterFailures: 2 }, prompt: { template: "go" } });
+    const fire = async (status) => {
+      const at = globalThis.__CU.launches.length;
+      await loop.startIteration(flaky.id, { source: "trigger" });
+      assert.strictEqual(globalThis.__CU.launches.length, at + 1, "it started");
+      await ends(flaky.id, at, status, 0);
+    };
+    await fire("failed");
+    assert.strictEqual((await get(flaky.id)).failureStreak, 1);
+    await fire("complete");
+    assert.strictEqual((await get(flaky.id)).failureStreak, undefined, "a good run starts over");
+    await fire("failed");
+    assert.strictEqual((await get(flaky.id)).state.status, "stopped");
+    await fire("failed");
+    job = await get(flaky.id);
+    assert.strictEqual(job.state.status, "paused");
+    assert.strictEqual(job.state.iteration, 0, "resuming waits for the trigger");
+    assert.strictEqual(job.autoPaused.failures, 2);
+    assert.match(notices(flaky.id).at(-1).title, /paused after repeated failures/);
+    n = globalThis.__CU.launches.length;
+    await loop.startIteration(flaky.id, { source: "trigger" });
+    assert.strictEqual(globalThis.__CU.launches.length, n, "paused means paused");
+
+    // One failed run ending the loop twice, as its two terminal events can.
+    const twice = await sched.createJob({ name: "twice", trigger: manualTrigger, input, guard: { pauseAfterFailures: 2 }, prompt: { template: "go" } });
+    const failsTwice = async () => {
+      const at = globalThis.__CU.launches.length;
+      await loop.startIteration(twice.id, { source: "trigger" });
+      Object.assign(globalThis.__CU.runs[launchAt(at).id], { status: "failed" });
+      await sched.patchJob(twice.id, (j) => ({ ...j, state: { ...j.state, status: "idle" } }));
+      await Promise.all([loop.resumeLoop(twice.id), loop.resumeLoop(twice.id)]);
+    };
+    await failsTwice();
+    assert.strictEqual((await get(twice.id)).failureStreak, 1, "one failed run counts once");
+    assert.strictEqual((await get(twice.id)).state.status, "stopped");
+    await failsTwice();
+    assert.strictEqual((await get(twice.id)).failureStreak, 2);
+    assert.strictEqual((await get(twice.id)).state.status, "paused", "and the second ending does not lift the pause");
+    assert.ok((await get(twice.id)).autoPaused);
+    await sched.setEnabled(twice.id, false);
+    n = globalThis.__CU.launches.length;
+
+    // Resuming gives it its full tries back, and starts nothing by itself.
+    await sched.resumeJob(flaky.id);
+    job = await get(flaky.id);
+    assert.strictEqual(job.state.status, "idle");
+    assert.strictEqual(job.autoPaused, undefined);
+    assert.strictEqual(job.failureStreak, undefined);
+    assert.strictEqual(globalThis.__CU.launches.length, n, "resume alone starts nothing");
+    await fire("failed");
+    assert.strictEqual((await get(flaky.id)).state.status, "stopped", "one failure after resuming does not pause it again");
+    await fire("failed");
+    assert.strictEqual((await get(flaky.id)).state.status, "paused");
+
+    // Running it by hand lifts the pause.
+    n = globalThis.__CU.launches.length;
+    await loop.runNow(flaky.id);
+    assert.strictEqual(globalThis.__CU.launches.length, n + 1);
+    assert.strictEqual((await get(flaky.id)).autoPaused, undefined);
+    await loop.stopLoop(flaky.id);
+    assert.strictEqual((await get(flaky.id)).failureStreak, undefined, "stopping by hand is not a failure");
+    await sched.setEnabled(flaky.id, false);
+    pass("failed runs in a row pause it until resumed or run by hand, and a good run starts over");
+
+    // Hand-edited limits that mean nothing are dropped on the way in.
+    const junk = await sched.createJob({ name: "junk", trigger: manualTrigger, input, guard: { monthlyCapUsd: -4, pauseAfterFailures: 0 }, prompt: { template: "go" } });
+    assert.strictEqual((await get(junk.id)).guard, undefined);
+    await sched.setEnabled(junk.id, false);
+    pass("a limit that does not parse is dropped, not read as zero");
+  }
 
   // ── own branch: when it opens, and that nothing forgets it ───────────────
   const byHand = { kind: "manual" };

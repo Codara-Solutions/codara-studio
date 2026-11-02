@@ -2,6 +2,7 @@ import React from "react";
 import type { AutomationLoopKind } from "@shared/types";
 import { DEFAULT_AGENT_MAX_ITERATIONS } from "@shared/types";
 import { Check, Segmented } from "../FormKit";
+import type { CostForecast } from "../cost-forecast";
 import type { LoopDraft } from "./model";
 
 // The "Loop & stops" side inspector — REDESIGN of the old cramped loop form.
@@ -22,9 +23,11 @@ const LOOP_KINDS: { value: AutomationLoopKind; label: string; blurb: string }[] 
 export default function LoopInspector({
   loop,
   onChange,
+  forecast,
   onClose,
 }: {
   loop: LoopDraft;
+  forecast: CostForecast;
   onChange: (next: LoopDraft) => void;
   onClose: () => void;
 }): React.ReactElement {
@@ -100,6 +103,31 @@ export default function LoopInspector({
               onChange={(v) => set({ budget: v })}
               hint="AI spend hard stop · blank or 0 = no cap"
             />
+          </div>
+          <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+            <CapBox
+              label="Monthly cap"
+              suffix="$"
+              value={loop.monthlyCap}
+              placeholder="—"
+              step={1}
+              onChange={(v) => set({ monthlyCap: v })}
+              typedText
+              hint="no new run past it this month · blank = no cap"
+            />
+            <CapBox
+              label="Pause after"
+              suffix=""
+              value={loop.pauseAfter}
+              placeholder="—"
+              onChange={(v) => set({ pauseAfter: v })}
+              typedText
+              hint="failed runs in a row · blank = never"
+            />
+          </div>
+          <div data-testid="cost-forecast" data-open={forecast.open} style={{ marginTop: 12, fontSize: 11.5, lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 600, color: forecast.open ? "color-mix(in oklab, var(--danger) 70%, var(--ink))" : "var(--ink-dim)" }}>{forecast.headline}</div>
+            {forecast.detail && <div style={{ color: "var(--muted)" }}>{forecast.detail}</div>}
           </div>
         </Group>
 
@@ -283,6 +311,7 @@ function CapBox({
   step,
   onChange,
   hint,
+  typedText,
 }: {
   label: string;
   suffix: string;
@@ -291,6 +320,9 @@ function CapBox({
   step?: number;
   onChange: (v: string) => void;
   hint: string;
+  /** A number input reports half-typed text such as "1e" as empty, which for a
+   *  limit would read as removing it. Plain text reaches validation as typed. */
+  typedText?: boolean;
 }): React.ReactElement {
   return (
     <div
@@ -309,8 +341,10 @@ function CapBox({
       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
         {suffix && <span className="spark-mono" style={{ fontSize: 12, color: "var(--muted)" }}>{suffix}</span>}
         <input
+          aria-label={label}
           className="spark-input spark-mono"
-          type="number"
+          type={typedText ? "text" : "number"}
+          inputMode={typedText ? "decimal" : undefined}
           min={0}
           step={step}
           value={value}

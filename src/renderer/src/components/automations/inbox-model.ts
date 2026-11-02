@@ -1,3 +1,4 @@
+import { monthlyCapReached, monthSpentUsd, monthKey } from "@shared/automation-guard";
 import { Cron } from "croner";
 import type {
   AutomationBranchResult,
@@ -38,14 +39,35 @@ export function recordFailed(rec: Pick<AutomationRunRecord, "status" | "stopReas
   return rec.stopReason !== undefined && FAILED_STOP_REASONS.has(rec.stopReason);
 }
 
+/** Why a limit the user set is holding this automation back, in plain words. A
+ *  switched-off one has been looked at, and a live run has yet to end. */
+export function guardHold(job: ScheduledJob, nowMs: number): { headline: string; body: string } | null {
+  if (!job.enabled || job.state.status === "running" || job.state.status === "blocked") return null;
+  if (job.state.status === "paused") {
+    if (!job.autoPaused) return null;
+    const n = job.autoPaused.failures;
+    const runs = `${n} failed run${n === 1 ? "" : "s"}`;
+    return {
+      headline: `Paused after ${runs}`,
+      body: `It failed ${n === 1 ? "once" : `${n} times in a row`}, so it will not start again until you resume it. Running it by hand also lifts the pause.`,
+    };
+  }
+  if (!monthlyCapReached(job, nowMs)) return null;
+  return {
+    headline: "Monthly cap reached",
+    body: `It has spent ${fmtUsd(monthSpentUsd(job, nowMs))} of its ${fmtUsd(job.guard?.monthlyCapUsd ?? 0)} cap this month, so it will not start again until next month or until you raise the cap.`,
+  };
+}
+
 function lastRecord(job: ScheduledJob): AutomationRunRecord | undefined {
   return job.history[job.history.length - 1];
 }
 
-export function inboxGroup(job: ScheduledJob): InboxGroup {
+export function inboxGroup(job: ScheduledJob, nowMs: number = Date.now()): InboxGroup {
   const status = job.state.status;
   if (status === "blocked") return "needs";
   if (status === "running") return "running";
+  if (guardHold(job, nowMs)) return "needs";
   // A pass on hold and a switched-off automation both wait for the user to
   // turn them back on, and a switched-off one has already been looked at, so
   // its old failure does not keep it on the Failed shelf.
@@ -229,7 +251,7 @@ function workerNodes(job: ScheduledJob): LoomWorkerNode[] {
   return (job.graph?.nodes ?? []).filter((n): n is LoomWorkerNode => n.kind === "worker");
 }
 
-function isStepsOnly(job: ScheduledJob): boolean {
+export function isStepsOnly(job: ScheduledJob): boolean {
   const nodes = job.graph?.nodes ?? [];
   return workerNodes(job).length === 0 && nodes.some((n) => n.kind === "step");
 }
@@ -348,7 +370,7 @@ export type WordTone = "danger" | "info" | "quiet";
 
 /** The word at the end of a rail row. */
 export function statusWord(job: ScheduledJob, nowMs: number): { word: string; tone: WordTone } {
-  const group = inboxGroup(job);
+  const group = inboxGroup(job, nowMs);
   const last = lastRecord(job);
   switch (group) {
     case "needs":
@@ -374,7 +396,7 @@ export function statusWord(job: ScheduledJob, nowMs: number): { word: string; to
 /** The line under the name: its schedule and, when known, how soon it runs. */
 export function rowSchedule(job: ScheduledJob, nowMs: number, names?: ReadonlyMap<string, string>): string {
   const schedule = plainSchedule(job.trigger, names);
-  const next = inboxGroup(job) === "scheduled" || inboxGroup(job) === "failed" ? nextRunAt(job, nowMs) : null;
+  const next = inboxGroup(job, nowMs) === "scheduled" || inboxGroup(job, nowMs) === "failed" ? nextRunAt(job, nowMs) : null;
   return next !== null ? `${schedule} · next in ${fmtSpan(Math.max(0, next - nowMs))}` : schedule;
 }
 
@@ -383,7 +405,7 @@ export function rowSchedule(job: ScheduledJob, nowMs: number, names?: ReadonlyMa
  *  pointer as runs land. */
 export function groupJobs(jobs: readonly ScheduledJob[], nowMs: number): Array<{ id: InboxGroup; label: string; jobs: ScheduledJob[] }> {
   return INBOX_GROUPS.map((group) => {
-    const members = jobs.filter((job) => inboxGroup(job) === group.id);
+    const members = jobs.filter((job) => inboxGroup(job, nowMs) === group.id);
     if (group.id === "scheduled") {
       const next = new Map(members.map((job) => [job.id, nextRunAt(job, nowMs) ?? Number.POSITIVE_INFINITY]));
       members.sort((a, b) => (next.get(a.id) as number) - (next.get(b.id) as number));
@@ -451,6 +473,8 @@ export interface MonthTotals {
   /** The kept history reaches back past the month's runs it should count: the
    *  numbers are a floor, not the total. */
   partial: boolean;
+  /** The month's cost comes from the tally, so it is the total even then. */
+  costIsWhole: boolean;
 }
 
 function startOfMonth(ms: number): number {
@@ -470,8 +494,14 @@ function median(values: number[]): number | null {
 export function monthTotals(job: ScheduledJob, nowMs: number): MonthTotals {
   const from = startOfMonth(nowMs);
   const inMonth = job.history.filter((rec) => Date.parse(rec.startedAt) >= from);
-  const costUsd = inMonth.reduce((sum, rec) => sum + (rec.costUsd ?? 0), 0);
-  const measured = inMonth.reduce((sum, rec) => sum + (rec.measuredCostUsd ?? 0), 0);
+  // The durable tally outlasts the kept history, so the cost can be the whole
+  // month's even when the run counts are a floor.
+  const costUsd = monthSpentUsd(job, nowMs);
+  const tally = job.monthSpend?.month === monthKey(nowMs) ? job.monthSpend : undefined;
+  const measured = Math.max(
+    inMonth.reduce((sum, rec) => sum + (rec.measuredCostUsd ?? 0), 0),
+    tally?.measuredCostUsd ?? 0,
+  );
   const durations = inMonth.flatMap((rec) => {
     if (!rec.finishedAt) return [];
     const span = Date.parse(rec.finishedAt) - Date.parse(rec.startedAt);
@@ -484,6 +514,7 @@ export function monthTotals(job: ScheduledJob, nowMs: number): MonthTotals {
     estimated: costUsd > measured,
     typicalMs: median(durations),
     partial: job.history.length >= AUTOMATION_HISTORY_CAP && inMonth.length === job.history.length,
+    costIsWhole: tally !== undefined,
   };
 }
 
@@ -494,7 +525,11 @@ export function monthStats(job: ScheduledJob, nowMs: number): string[] {
   const stats = [`${totals.runs}${floor} run${totals.runs === 1 ? "" : "s"} this month`];
   if (totals.failed > 0) stats.push(`${totals.failed}${floor} failed`);
   if (isStepsOnly(job) && totals.costUsd === 0) stats.push("free");
-  else stats.push(`${totals.estimated ? "est. " : ""}${fmtUsd(totals.costUsd)}${floor}`);
+  else {
+    const cap = job.guard?.monthlyCapUsd;
+    const costFloor = totals.costIsWhole ? "" : floor;
+    stats.push(`${totals.estimated ? "est. " : ""}${fmtUsd(totals.costUsd)}${costFloor}${cap ? ` of ${fmtUsd(cap)} cap` : ""}`);
+  }
   if (totals.typicalMs !== null) stats.push(`${fmtSpan(totals.typicalMs)} typical`);
   return stats;
 }
@@ -507,6 +542,7 @@ const STOPPED_HEADLINE: Partial<Record<AutomationStopReason, string>> = {
   "max-iterations": "Stopped: run limit reached",
   "agent-no-signal": "Stopped: the agent gave no signal to go on",
   "user-stop": "Stopped by you",
+  "monthly-cap": "Stopped: monthly cap reached",
   "tests-pass": "Done: the tests pass",
   "git-clean": "Done: git is clean",
   "until-command": "Done: its check passes",
@@ -521,6 +557,8 @@ export interface ResultCard {
   runId?: string;
   /** Where this run's work went, for an automation on its own branch. */
   branch?: AutomationBranchResult;
+  /** A limit is holding it back, which is the user's call and nothing to fix. */
+  heldByLimit?: boolean;
 }
 
 function factsOf(job: ScheduledJob, rec: AutomationRunRecord, nowMs: number): string[] {
@@ -537,6 +575,17 @@ function factsOf(job: ScheduledJob, rec: AutomationRunRecord, nowMs: number): st
 /** What the card at the top of a quiet automation says. */
 export function resultCard(job: ScheduledJob, nowMs: number): ResultCard {
   const rec = lastRecord(job);
+  const hold = guardHold(job, nowMs);
+  if (hold) {
+    return {
+      ...hold,
+      facts: rec ? factsOf(job, rec, nowMs) : [],
+      failed: true,
+      heldByLimit: job.state.status !== "paused",
+      ...(rec ? { runId: rec.runId } : {}),
+      ...(rec?.branchResult ? { branch: rec.branchResult } : {}),
+    };
+  }
   if (!rec) {
     const next = nextRunAt(job, nowMs);
     return {
