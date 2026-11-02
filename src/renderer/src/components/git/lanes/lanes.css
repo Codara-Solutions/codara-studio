@@ -349,3 +349,11 @@
   color: var(--muted);
   font-size: 11px;
 }
+
+.lane-collision {
+  padding: 0 8px 6px 23px;
+  color: var(--warn);
+  font-size: 10.5px;
+  line-height: 14px;
+  overflow-wrap: anywhere;
+}
