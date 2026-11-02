@@ -3,11 +3,15 @@ title = "codara-studio gitleaks config"
 # Start from gitleaks' maintained default rule set (AWS, GitHub, Slack, private
 # keys, generic high-entropy secrets, etc.) and layer repo-specific exceptions
 # on top instead of hand-rolling rules.
+#
+# The same config runs in the pre-commit hook (.husky/pre-commit) and on every
+# pull request (.github/workflows/gitleaks.yml). CONTRIBUTING.md explains the
+# fixture conventions below.
 [extend]
 useDefault = true
 
-[allowlist]
-description = "Global allowlist"
+[[allowlists]]
+description = "Test fixtures and placeholders"
 paths = [
   # Fixtures/mocks intentionally contain placeholder secrets, not real ones.
   '''(^|/)(test|tests|__tests__|__mocks__|fixtures)/''',
@@ -19,3 +23,10 @@ regexes = [
   # Placeholder/example values used across docs and .env.example-style files.
   '''(?i)(YOUR_API_KEY|CHANGE_ME|REPLACE_ME|EXAMPLE|xxxxxxxx|placeholder|<[a-z_-]+>)''',
 ]
+
+[[allowlists]]
+description = "FAKE_ marker: a made-up secret anywhere else in the tree"
+# A fixture outside the paths above marks its value or its variable name with
+# FAKE_ (case-sensitive): sk-ant-api03-FAKE_0123..., const FAKE_GITHUB_TOKEN = "ghp_...".
+regexTarget = "line"
+regexes = ['''FAKE_''']
