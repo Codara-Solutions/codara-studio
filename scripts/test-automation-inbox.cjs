@@ -119,11 +119,33 @@ async function main() {
   assert.equal(cron("0 9 * * 0-7"), "Every day at 09:00", "a range ending in 7 still covers every day in it");
   assert.equal(cron("0 9 * * 5-7"), "Sundays, Fridays and Saturdays at 09:00");
   assert.equal(cron("0 9 * * 6-7"), "Every weekend day at 09:00");
+  assert.equal(cron("0 9 * * 0-SUN"), "Every day at 09:00", "a named Sunday ending a range is 7");
+  assert.equal(cron("0 9 * * SUN-SUN"), "Every day at 09:00");
+  assert.equal(cron("0 9 * * MON-SUN"), "Every day at 09:00");
+  assert.equal(cron("0 9 * * SAT-SUN"), "Every weekend day at 09:00");
+  assert.equal(cron("0 9 * * SUN-0"), "Sundays at 09:00", "and one starting a range is 0");
   {
     const { Cron } = require("croner");
     const names = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"];
-    for (const field of ["0-7", "5-7", "6-7", "1-5", "7", "0", "0,7", "1,7", "SUN-SAT", "MON-FRI", "2-3"]) {
-      const job = new Cron(`0 9 * * ${field}`, { paused: true, timezone: "UTC" });
+    const tokens = ["0", "1", "2", "3", "4", "5", "6", "7", "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+    const fields = [
+      ...tokens,
+      ...tokens.flatMap((from) => tokens.map((to) => `${from}-${to}`)),
+      "sun-sun",
+      "mon-sun",
+      "0,7",
+      "1,7",
+      "SUN,MON-SUN",
+      "SAT-SUN,WED",
+    ];
+    for (const field of fields) {
+      let job;
+      try {
+        job = new Cron(`0 9 * * ${field}`, { paused: true, timezone: "UTC" });
+      } catch {
+        assert.equal(cron(`0 9 * * ${field}`), `On a schedule: 0 9 * * ${field}`, "what the engine refuses is not given a meaning");
+        continue;
+      }
       const firing = new Set();
       let at = new Date("2026-01-01T00:00:00Z");
       for (let i = 0; i < 21; i += 1) {
