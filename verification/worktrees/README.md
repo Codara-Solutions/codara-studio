@@ -117,14 +117,14 @@ is what still acts after it.
 | `WorktreeLifecycle_reach` | NothingRemoved | Not vacuous: the automatic removal does remove a merged worktree |
 | `WorktreeLifecycle_reach_agent` | NothingRemoved | Not vacuous: the agent removal does too, with the automatic one off |
 | `WorktreeLifecycle_liveness` | pass | A merged, idle worktree leaves on its own |
-| `WorktreeLifecycle_fixed` | pass | With the fixes still proposed (`paths`, `bind`), every rule holds with every actor on, `late` included (not `handle`) |
-| `WorktreeLifecycle_fixed_two_rows` | pass | With the fixes still proposed, two rows never share a folder and no removal deletes another row's folder |
+| `WorktreeLifecycle_fixed` | pass | Every rule holds with every actor on, `late` included (not `handle`) |
+| `WorktreeLifecycle_fixed_two_rows` | pass | Two rows never share a folder and no removal deletes another row's folder |
 | `WorktreeLifecycle_finding_late_write` | pass | Finding 1, fixed: a late ignored file is seen once the folder is moved aside |
 | `WorktreeLifecycle_finding_late_use` | pass | Finding 1, fixed: so is a late tab (the window #123 declined) |
 | `WorktreeLifecycle_finding_agent_tabs` | pass | Finding 2, fixed: tabs hold a worktree against the agent removal |
 | `WorktreeLifecycle_finding_foreign_tab` | pass | Finding 2, fixed: another workspace's tab on a file inside holds it against the automatic removal |
-| `WorktreeLifecycle_finding_path_reuse` | NoCollateral | Finding 3, the agent removal |
-| `WorktreeLifecycle_finding_auto_rebind` | NoCollateral | Finding 3, the automatic removal (with `paths` on, without `bind`) |
+| `WorktreeLifecycle_finding_path_reuse` | pass | Finding 3, the agent removal: fixed |
+| `WorktreeLifecycle_finding_auto_rebind` | pass | Finding 3, the automatic removal: fixed |
 | `WorktreeLifecycle_finding_agent_process` | pass | Finding 4, fixed: the agent removal scans processes under the lock |
 | `RecoveryWindow_finding_early_prune` | pass | Finding 5, fixed: a ref lives 30 full days, counted from the end of its day |
 | `WorktreeLifecycle_finding_missing_ref` | pass | Finding 6, fixed |
@@ -138,6 +138,8 @@ is what still acts after it.
 | `WorktreeLifecycle_bug_late_write` | NoIgnoredLost | Puts back finding 1: deleted in place, a late ignored file goes with the folder |
 | `WorktreeLifecycle_bug_late_use` | NeverRemovedInUse | Puts back finding 1: a late tab |
 | `WorktreeLifecycle_bug_agent_process` | NeverRemovedInUse | Puts back finding 4: no process scan under the lock |
+| `WorktreeLifecycle_bug_path_reuse` | NoCollateral | Puts back finding 3 in the agent removal: a folder a row names handed out again, and no row binding under the lock |
+| `WorktreeLifecycle_bug_auto_rebind` | NoCollateral | Puts back finding 3 in the automatic removal: the rows read at its start trusted under the lock |
 | `RecoveryWindow_bug_early_prune` | KeptForWindow | Puts back finding 5: the age was counted from the stamped day's midnight |
 | `WorktreeLifecycle_bug_own_branch_target` | NoUnsafeRemoved | Puts back the bug fixed in 49306a6f: the worktree's own branch named as the target made the ancestor proof hold for unmerged work |
 
@@ -148,9 +150,10 @@ only behaviour and drop its `Fix` flag.
 ## Findings
 
 Findings 1 to 4 are ranked by what can be lost; 5 to 7 break the promise
-that a removed head stays recoverable for 30 days. A fix not in the code yet is a `Fix` flag that
-`WorktreeLifecycle_fixed` turns on; a fix in the code is the
-model's only behaviour, and a `Bug` flag puts the old code back.
+that a removed head stays recoverable for 30 days. All seven are fixed: each
+fix is the model's only behaviour, and a `Bug` flag puts the old code back. A
+fix proposed but not in the code yet would be a `Fix` flag that
+`WorktreeLifecycle_fixed` turns on; none is left.
 
 1. **The last check and the delete were two steps** (`late`). Fixed in
    part: both removals take a fingerprint of what git would delete (HEAD,
@@ -188,27 +191,25 @@ model's only behaviour, and a `Bug` flag puts the old code back.
    workspace (an agent's `codara_open_file` lands in the agent's own
    workspace) did not hold it. `WorktreeLifecycle_bug_agent_tabs` and
    `WorktreeLifecycle_bug_foreign_tab` put each half back.
-3. **A row left behind keeps its folder name for a new worktree**
-   (`self`, two rows). `pickCheckoutDirName` (`git-worktrees.ts:219`) only
-   avoids folders on disk. When an agent removed a worktree with plain
-   `git worktree remove` (or Studio crashed between delete and row drop), its
-   row stays until the rail's next poll; a new worktree on the same branch
-   name then gets the same folder. The automatic removal refuses such a pair
-   (`holdsOtherWorkspace`), but `codara_worktree_remove` on the old row
-   passes: the registration's branch has the same name
-   (`agent-worktrees.ts:1843`), its tip is the new worktree's, a fresh tip
-   reads as merged, and only the old row's creator pane is checked
-   (`agent-worktrees.ts:1798`). It deletes the new worktree while its agent
-   works in it. Uncommitted work still blocks, so the loss is the new
-   worktree itself. The automatic removal reads the rows once, at its start
-   (`cleanUpRailWorkspace`), then checks and deletes by path: if the row is
-   removed and a new worktree made in its folder between that read and
-   `checkCleanupTargets`, the new one is judged and deleted instead
-   (`WorktreeLifecycle_finding_auto_rebind`; the window is a few git calls,
-   so very unlikely). Likelihood: low. Fix `paths`: skip any folder a live
-   row names when picking one. Fix `bind`: in both locked re-checks, read the
-   rows again and refuse unless the row asked for is still there and alone
-   at its folder.
+3. **A row left behind kept its folder name for a new worktree** (`self`,
+   two rows). Fixed in fix/worktree-path-reuse. `pickCheckoutDirName`
+   (`git-worktrees.ts`) only avoided folders on disk. When an agent removed a
+   worktree with plain `git worktree remove` (or Studio crashed between delete
+   and row drop), its row stayed until the rail's next poll, and a new
+   worktree on the same branch name got the same folder.
+   `codara_worktree_remove` on the old row then passed: the registration's
+   branch had the same name, its tip was the new worktree's, a fresh tip read
+   as merged, and only the old row's creator pane was checked. It deleted the
+   new worktree while its agent worked in it. The automatic removal read the
+   rows once, at its start, then checked and deleted by path, so a row
+   removed and a new worktree made in its folder in between was judged and
+   deleted instead. Now a folder a row names is never handed out
+   (`takenPaths`, from every caller that creates a worktree), and both locked
+   re-checks read the rows again and refuse unless the row asked for is still
+   there and alone at its folder (`removeLocked`; `refreshRows` and
+   `boundTo` in `remove.ts`, which the rail passes).
+   `WorktreeLifecycle_bug_path_reuse` and `WorktreeLifecycle_bug_auto_rebind`
+   put the old code back.
 4. **The agent removal did not scan processes under the lock.** Fixed: the
    re-check in `removeLocked` scans processes (`scanProcesses: true`), and
    so does the check once the folder is aside. Before, a process started in

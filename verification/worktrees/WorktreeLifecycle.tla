@@ -35,7 +35,7 @@ CONSTANTS
     MaxCrashes,
     Act,         \* actors on, beyond the defaults (README, "Actors")
     Bug,         \* historical bugs put back (README, "Configs")
-    Fix          \* proposed fixes turned on (README, "Findings")
+    Fix          \* proposed fixes turned on (README, "Findings"); none is proposed now
 
 NONE == -1
 NoPath == <<"-", 0>>
@@ -163,9 +163,10 @@ AutoUse(p) == OwnerOpenAt(p, "none") \/ term[p] \/ proc[p]
 (* it answered for the worktree's own workspace only.                      *)
 HeldSeen(p) == TabAt(p) \/ ("foreign_tab" \notin Bug /\ ftab[p])
 
-(* Fix "bind": under the lock, the rows are read again, and the row asked *)
-(* for must still be there and alone at its folder.                       *)
-Bound(r, p) == "bind" \notin Fix \/ (row[r].st = "live" /\ LiveAt(p) = {r})
+(* Under the lock, the rows are read again, and the row asked for must    *)
+(* still be there and alone at its folder. Bug "no_bind": before          *)
+(* fix/worktree-path-reuse the rows read at the start were trusted.       *)
+Bound(r, p) == "no_bind" \in Bug \/ (row[r].st = "live" /\ LiveAt(p) = {r})
 
 (* Between a removal's last check under the lock and its delete. Unless  *)
 (* Act holds "late", nothing touches that folder in that window.          *)
@@ -476,8 +477,11 @@ GMissing ==
 (* Creating a worktree, under the lock: a new branch from origin/main, or *)
 (* (Act "reuse") an existing branch checked out again.                    *)
 
+(* A folder a live row names is never handed out (pickCheckoutDirName).  *)
+(* Bug "reuse_paths": before fix/worktree-path-reuse only folders on disk *)
+(* or registered with git were avoided.                                   *)
 FreePaths(b) == {k \in {1, 2} : disk[<<b, k>>] = "none" /\ reg[<<b, k>>] = "none"
-                                /\ ("paths" \notin Fix \/ LiveAt(<<b, k>>) = {})}
+                                /\ ("reuse_paths" \in Bug \/ LiveAt(<<b, k>>) = {})}
 
 Create(r, b, mode) ==
     /\ row[r].st = "none" /\ lock = "free" /\ ~CheckedOut(b)
