@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, promises as fsp } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
-import type { AppState, RunState, Workspace } from "@shared/types";
+import type { AppState, CopyBranchCreator, RunState, Workspace } from "@shared/types";
 import type {
   WorktreeCleanupCode,
   WorktreeInUse,
@@ -385,18 +385,44 @@ export async function usageContext(deps: WorktreeCleanupDeps, dirs: readonly str
   return { deps, runs, runsKnown, terminals, processes };
 }
 
-// Names the tab to close. A tab counts while it is open, even when its agent
-// has exited, so its title is what the user needs to find it.
-async function agentTabUse(deps: WorktreeCleanupDeps, tab: RendererTerminal | undefined): Promise<WorktreeInUse> {
-  const title = cleanText(tab?.title ?? "", 60);
-  if (!title) return { kind: "agent", label: "the agent that made it is still open" };
+const CLIENT_NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", cora: "Cora" };
+
+// Names the tab to close: its title and its workspace. A tab counts while it
+// is open, even when its agent has exited, so these are what the user needs
+// to find it. A tab with no title is named by its agent, and its workspace
+// by where the agent called from.
+async function agentTabUse(
+  deps: WorktreeCleanupDeps,
+  tab: RendererTerminal | undefined,
+  owner: CopyBranchCreator,
+  inside: boolean,
+): Promise<WorktreeInUse> {
+  const titled = cleanText(tab?.title ?? "", 60);
+  const title = titled || CLIENT_NAMES[owner.client ?? ""] || "agent";
   const state = await deps.loadState().catch(() => null);
-  const workspace = cleanText(state?.workspaces.find((entry) => entry.id === tab?.workspaceId)?.name ?? "", 60);
+  const nameOf = (id: string | undefined) => (id ? state?.workspaces.find((entry) => entry.id === id)?.name : undefined);
+  const workspace = cleanText(nameOf(tab?.workspaceId) ?? nameOf(owner.fromWorkspaceId) ?? owner.fromWorkspaceName ?? "", 60);
+  const where = workspace ? ` in ${workspace}` : "";
+  const named = titled ? `the tab “${title}”${where}` : `the ${title} tab${where}`;
   return {
     kind: "agent",
-    label: `the tab “${title}”${workspace ? ` in ${workspace}` : ""} of the agent that made it is still open`,
-    tab: { title, ...(workspace ? { workspace } : {}) },
+    label: `${named} of the agent that made it ${inside ? "works in it" : "is still open"}`,
+    tab: { title, ...(workspace ? { workspace } : {}), ...(titled ? {} : { untitled: true as const }) },
+    ...(inside ? {} : { elsewhere: true as const }),
   };
+}
+
+/**
+ * Whether a use holds the worktree once its work is done. The tab of the
+ * agent that made it, open while it works from another folder (a coordinator
+ * chat in another workspace, say), holds it only while that work may be
+ * unfinished: once the branch is merged and no files are left uncommitted,
+ * nothing of it is in the folder. A run, terminal or process inside still
+ * holds it, the maker's own tab included. Nobody watching (strict) keeps
+ * the open tab as a hold too, as anything else that cannot be ruled out.
+ */
+export function heldByMaker(use: WorktreeInUse, finished: boolean, strict = false): boolean {
+  return !(use.kind === "agent" && use.elsewhere && finished && !strict);
 }
 
 function count(n: number, one: string, many = `${one}s`): string {
@@ -424,7 +450,21 @@ export async function usageOf(
       if (isAtOrUnder(cwd, path) || isAtOrUnder(await canonicalPath(cwd), real)) panes.add(terminal.paneId);
     }
   }
-  if (panes.size) uses.push({ kind: "terminal", label: count(panes.size, "open terminal") });
+  // The agent that made the worktree, while its tab is open. Its pane is
+  // named as that tab, not counted again among the terminals inside.
+  let maker: WorktreeInUse | null = null;
+  for (const workspace of workspaces) {
+    const owner = workspace.copyBranch?.createdBy;
+    if (owner?.kind !== "agent" || !owner.paneId) continue;
+    const tab = (ctx.terminals ?? []).find((t) => t.paneId === owner.paneId);
+    const inside = panes.has(owner.paneId);
+    if (inside || deps.sessionCwd(owner.paneId) !== null || tab) {
+      maker = await agentTabUse(deps, tab, owner, inside);
+      break;
+    }
+  }
+  const others = maker && !maker.elsewhere ? panes.size - 1 : panes.size;
+  if (others) uses.push({ kind: "terminal", label: count(others, "open terminal") });
 
   let runs = 0;
   for (const run of ctx.runs) {
@@ -452,15 +492,7 @@ export async function usageOf(
 
   // An agent that made the worktree from another pane works in it through
   // absolute paths, so neither its pane nor its processes sit inside it.
-  for (const workspace of workspaces) {
-    const owner = workspace.copyBranch?.createdBy;
-    if (owner?.kind !== "agent" || !owner.paneId || panes.has(owner.paneId)) continue;
-    const tab = (ctx.terminals ?? []).find((t) => t.paneId === owner.paneId);
-    if (deps.sessionCwd(owner.paneId) !== null || tab) {
-      uses.push(await agentTabUse(deps, tab));
-      break;
-    }
-  }
+  if (maker) uses.push(maker);
 
   // The shell of a pane counted above is that open terminal. Any other
   // shell found inside (a terminal opened elsewhere that moved here with
@@ -675,10 +707,18 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   const uses = (await usageOf(ctx.usage, registration.path, real, workspaces)).filter(
     (use) => !ctx.allowInUse?.has(use.kind),
   );
-  if (uses.length) {
-    check.inUse = uses;
-    block(check, "IN_USE", `In use: ${uses.map((use) => use.label).join(", ")}.`);
-  }
+  const inUse = (held: WorktreeInUse[]) => {
+    if (!held.length) return;
+    check.inUse = [...(check.inUse ?? []), ...held];
+    const message = `In use: ${check.inUse.map((use) => use.label).join(", ")}.`;
+    const blocker = check.blockers.find((entry) => entry.code === "IN_USE");
+    if (blocker) blocker.message = message;
+    else block(check, "IN_USE", message);
+  };
+  // The maker's tab open in another folder is judged once the work is known:
+  // it holds an unmerged branch or uncommitted files only.
+  const pending = uses.filter((use) => !heldByMaker(use, true, ctx.requireKnownUsage));
+  inUse(uses.filter((use) => !pending.includes(use)));
 
   const target = await targetFor(repo, workspaces.find((workspace) => workspace.copyBranch) ?? null);
   const merge = await mergeFacts(repo, head, branch, target);
@@ -698,6 +738,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   }
   check.branchDeletable = Boolean(branch) && merge.state === "merged" && !isKeptBranch(branch!, merge.target);
 
+  if (merge.state !== "merged") inUse(pending.splice(0));
   if (check.alreadyRemoved) return finish();
 
   // Local work a removal deletes.
@@ -808,6 +849,9 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
       `Another checkout sits inside it: ${[...new Set(nested)].slice(0, 5).join(", ")}. Move or remove it first.`,
     );
   }
-  if (workFound) check.localWork = work;
+  if (workFound) {
+    check.localWork = work;
+    inUse(pending.splice(0));
+  }
   return finish();
 }

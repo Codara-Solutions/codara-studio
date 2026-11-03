@@ -724,20 +724,150 @@ async function main() {
       assert.equal(result.status, "removed", JSON.stringify(result));
     });
 
-    await check("a worktree its agent's open tab still owns names that tab", async () => {
-      const held = mergedWith("merged-held", "feature/merged-held");
-      const workspace = h.state.workspaces.find((entry) => entry.id === "ws-merged-held");
-      workspace.copyBranch.createdBy = { kind: "agent", client: "claude-code", paneId: "pane-agent" };
-      h.terminals.push({ paneId: "pane-agent", workspaceId: "ws-repo", title: "usage agent", cwd: repo });
+    // The agent that made a worktree, a coordinator chat in another
+    // workspace, keeps its tab open long after its subagent finished.
+    const coordinator = path.join(scratch, "coordinator");
+    fs.mkdirSync(coordinator);
+    h.state.workspaces.push({ id: "ws-coord", name: "AI Continous Improvment", cwd: coordinator, color: "#123456", workers: [] });
+    const madeBy = (id) => {
+      const workspace = h.state.workspaces.find((entry) => entry.id === id);
+      workspace.copyBranch.createdBy = {
+        kind: "agent",
+        client: "claude-code",
+        paneId: "pane-coord",
+        fromWorkspaceId: "ws-coord",
+        fromWorkspaceName: "AI Continous Improvment",
+      };
+    };
+    const withTab = async (tab, fn) => {
+      h.terminals.push({ paneId: "pane-coord", workspaceId: "ws-coord", ...tab });
       try {
-        const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-held", mode: "manual" });
-        assert.equal(result.status, "refused");
-        assert.equal(result.message, "Close the tab “usage agent” in repo first: its agent still owns this worktree.");
-        assert.equal(fs.existsSync(held), true);
+        return await fn();
       } finally {
-        h.terminals.pop();
+        h.terminals = h.terminals.filter((entry) => entry.paneId !== "pane-coord");
       }
-      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-held", mode: "manual" });
+    };
+
+    await check("the maker's tab open in another workspace does not hold a merged, clean, idle worktree", async () => {
+      const done = mergedWith("merged-made", "feature/merged-made");
+      madeBy("ws-merged-made");
+      const result = await withTab({ title: "coordinator", cwd: coordinator }, () =>
+        rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-made", mode: "manual" }),
+      );
+      assert.equal(result.status, "removed", result.message);
+      assert.equal(fs.existsSync(done), false);
+      assert.equal(branchExists(repo, "feature/merged-made"), false);
+      assert.equal(has("ws-merged-made"), false);
+    });
+
+    await check("the maker's tab with its folder inside still holds it, and the refusal names the tab", async () => {
+      const held = mergedWith("merged-held", "feature/merged-held");
+      madeBy("ws-merged-held");
+      const result = await withTab({ title: "usage agent", cwd: path.join(held, "src") }, () =>
+        rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-held", mode: "manual" }),
+      );
+      assert.equal(result.status, "refused");
+      assert.equal(
+        result.message,
+        "Close the tab “usage agent” in AI Continous Improvment first: its agent still owns this worktree.",
+      );
+      assert.equal(fs.existsSync(held), true);
+      const after = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-held", mode: "manual" });
+      assert.equal(after.status, "removed", after.message);
+    });
+
+    await check("the maker's tab elsewhere still holds unfinished work, named even without a title", async () => {
+      const open = mergedWith("merged-open", "feature/merged-open");
+      madeBy("ws-merged-open");
+      commitFile(open, "more.txt", "more\n", "work after the merge");
+      const unmergedResult = await withTab({ title: "coordinator", cwd: coordinator }, () =>
+        rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-open", mode: "manual" }),
+      );
+      assert.equal(unmergedResult.status, "refused");
+      assert.match(unmergedResult.message, /^Close the tab “coordinator” in AI Continous Improvment first/);
+      git(open, ["reset", "-q", "--hard", "HEAD~1"]);
+      fs.writeFileSync(path.join(open, "draft.txt"), "not committed\n");
+      // No tab listed, only a live session: named by its agent and the
+      // workspace it called from.
+      const live = { ...deps, sessionCwd: (pane) => (pane === "pane-coord" ? coordinator : null) };
+      const dirtyResult = await rail.cleanUpRailWorkspace(live, { workspaceId: "ws-merged-open", mode: "manual" });
+      assert.equal(dirtyResult.status, "refused");
+      assert.equal(
+        dirtyResult.message,
+        "Close the Claude Code tab in AI Continous Improvment first: its agent still owns this worktree.",
+      );
+      assert.equal(fs.existsSync(path.join(open, "draft.txt")), true);
+      fs.rmSync(path.join(open, "draft.txt"));
+      const done = await rail.cleanUpRailWorkspace(live, { workspaceId: "ws-merged-open", mode: "manual" });
+      assert.equal(done.status, "removed", done.message);
+    });
+
+    await check("a folder removed by hand leaves the rail on its own while the maker's tab is open", async () => {
+      // git worktree remove + branch -D, as an agent or the user does by hand.
+      const byHand = mergedWith("by-hand", "feature/by-hand");
+      madeBy("ws-by-hand");
+      git(repo, ["worktree", "remove", byHand]);
+      git(repo, ["branch", "-D", "feature/by-hand"]);
+      // Only the folder deleted: git still lists it.
+      const rmOnly = mergedWith("rm-only", "feature/rm-only");
+      madeBy("ws-rm-only");
+      fs.rmSync(rmOnly, { recursive: true, force: true });
+      // Branch kept and merged.
+      const kept = mergedWith("kept-branch", "feature/kept-branch");
+      madeBy("ws-kept-branch");
+      git(repo, ["worktree", "remove", kept]);
+      // Branch kept with commits not merged: it stays.
+      const unfinished = add("unfinished", "feature/unfinished");
+      commitFile(unfinished, "u2.txt", "u2\n", "unfinished work");
+      h.state.workspaces.push(copyWorkspace("ws-unfinished", unfinished, repo, "feature/unfinished"));
+      madeBy("ws-unfinished");
+      git(repo, ["worktree", "remove", unfinished]);
+      await withTab({ title: "coordinator", cwd: coordinator }, async () => {
+        const rows = Object.fromEntries((await rail.railWorktreeStates(deps)).map((entry) => [entry.workspaceId, entry]));
+        for (const id of ["ws-by-hand", "ws-rm-only", "ws-kept-branch"]) {
+          assert.equal(rows[id].autoCandidate, true, id);
+          const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: id, mode: "auto" });
+          assert.equal(result.status, "removed", `${id}: ${result.message}`);
+          assert.equal(has(id), false, id);
+        }
+        assert.equal(rows["ws-unfinished"].autoCandidate, false);
+        const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-unfinished", mode: "auto" });
+        assert.equal(result.status, "refused");
+        assert.equal(has("ws-unfinished"), true);
+        assert.equal(branchExists(repo, "feature/unfinished"), true);
+      });
+      assert.equal(registered(repo, rmOnly), false);
+      assert.equal(branchExists(repo, "feature/kept-branch"), false);
+    });
+
+    await check("a branch git could not read never drops the row", async () => {
+      if (process.platform === "win32") return; // The failing git is a shell script.
+      const gone = mergedWith("git-away-row", "feature/git-away-row");
+      git(repo, ["worktree", "remove", gone]);
+      git(repo, ["branch", "-D", "feature/git-away-row"]);
+      // git fails to answer for this branch (a lock, a timeout): a git on
+      // PATH that exits 128 for that one read.
+      const bin = path.join(scratch, "failing-git");
+      fs.mkdirSync(bin, { recursive: true });
+      const realGit = execFileSync("sh", ["-c", "command -v git"]).toString().trim();
+      fs.writeFileSync(
+        path.join(bin, "git"),
+        `#!/bin/sh\ncase "$*" in *refs/heads/feature/git-away-row*) echo "fatal: unable to read" >&2; exit 128;; esac\nexec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const pathBefore = process.env.PATH;
+      process.env.PATH = `${bin}${path.delimiter}${pathBefore}`;
+      try {
+        const rows = Object.fromEntries((await rail.railWorktreeStates(deps)).map((entry) => [entry.workspaceId, entry]));
+        assert.equal(rows["ws-git-away-row"].autoCandidate, false, "not offered on a failed read");
+        const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-git-away-row", mode: "auto" });
+        assert.equal(result.status, "refused", JSON.stringify(result));
+        assert.match(result.message, /could not read the branch/);
+        assert.equal(has("ws-git-away-row"), true);
+      } finally {
+        process.env.PATH = pathBefore;
+      }
+      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-git-away-row", mode: "auto" });
       assert.equal(result.status, "removed", result.message);
     });
 

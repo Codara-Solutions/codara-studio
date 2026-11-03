@@ -43,6 +43,7 @@ import {
   pathKey,
   ROW_CONCURRENCY,
   usageContext,
+  heldByMaker,
   usageOf,
   type CheckContext,
   type RepoContext,
@@ -260,8 +261,10 @@ async function changedWhileAside(
     return "What is running in it could not be read, so it was put back.";
   }
   const workspaces = ctx.linked.get(pathKey(real)) ?? [];
+  // The check let the maker's tab in another folder go only for finished
+  // work, and the fingerprint just showed nothing changed since.
   const uses = [...(await usageOf(usage, path, real, workspaces)), ...(await usageOf(usage, aside, realAside, workspaces))].filter(
-    (use) => !options.allowInUse?.has(use.kind),
+    (use) => !options.allowInUse?.has(use.kind) && heldByMaker(use, true, ctx.requireKnownUsage),
   );
   if (uses.length) return `In use: ${[...new Set(uses.map((use) => use.label))].join(", ")}, so it was put back.`;
   return (await options.beforeRemove?.()) ?? null;

@@ -25,7 +25,7 @@ import {
 } from "../agent-worktrees";
 import { deleteBranchIfAt } from "../git-branches";
 import { isAncestor, restoreAsideWorktrees } from "../git-worktrees";
-import { errorText, readGitText } from "../git-exec";
+import { errorText, readGitText, runGit } from "../git-exec";
 import type { WorktreeRegistration } from "../git-worktree-porcelain";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
 import {
@@ -41,7 +41,9 @@ import {
   pathKey,
   targetFor,
   usageContext,
+  heldByMaker,
   usageOf,
+  type MergeFacts,
   type RepoContext,
   type WorktreeCleanupDeps,
 } from "./inspect";
@@ -236,10 +238,19 @@ async function registrationOf(repo: RepoContext, cwd: string): Promise<WorktreeR
   return undefined;
 }
 
+// Null only when git says the branch is not there (exit 1): a git that
+// failed to answer throws, so a row is never dropped for a check that failed.
 async function branchTip(root: string, branch: string): Promise<string | null> {
   if (!branch) return null;
-  const out = await readGitText(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `refs/heads/${branch}^{commit}`]);
-  return /^[0-9a-f]{40,64}$/i.test(out) ? out.toLowerCase() : null;
+  let out: string;
+  try {
+    out = (await runGit(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `refs/heads/${branch}^{commit}`])).stdout.trim();
+  } catch (err) {
+    if ((err as { code?: unknown })?.code === 1) return null;
+    throw new Error(`git could not read the branch ${branch}: ${errorText(err)}`);
+  }
+  if (!/^[0-9a-f]{40,64}$/i.test(out)) throw new Error(`git gave no commit for the branch ${branch}.`);
+  return out.toLowerCase();
 }
 
 function shortName(ref: string | null | undefined): string | null {
@@ -363,9 +374,10 @@ async function statesOf(
     const registration = await registrationOf(repo, workspace.cwd);
     const branch = shortName(registration?.branch) ?? workspace.copyBranch.branch;
     const registered = registration?.head && !/^0+$/.test(registration.head) ? registration.head : null;
-    const tip = await branchTip(repo.root, branch);
-    const head = registered ?? tip;
+    const tip = await branchTip(repo.root, branch).catch(() => undefined);
     const base = { workspaceId: workspace.id, missing, branch, branchGone: tip === null };
+    if (tip === undefined && !registered) return { ...base, merge: "unknown", autoCandidate: false };
+    const head = registered ?? tip ?? null;
     if (!head) return { ...base, merge: "gone", autoCandidate: missing };
     const headAt = await commitTime(repo.root, head);
     const facts = await mergeFacts(repo, head, branch, await targetFor(repo, workspace)).catch(() => ({ state: "unknown" as const }));
@@ -431,9 +443,8 @@ function inUseText(uses: readonly WorktreeInUse[]): string {
   for (const use of uses) {
     if (use.kind === "agent" && use.tab) {
       const where = use.tab.workspace ? ` in ${use.tab.workspace}` : "";
-      parts.push(`Close the tab “${use.tab.title}”${where} first: its agent still owns this worktree.`);
-    } else if (use.kind === "agent") {
-      parts.push("Close the tab of the agent that made it first.");
+      const tab = use.tab.untitled ? `the ${use.tab.title} tab${where}` : `the tab “${use.tab.title}”${where}`;
+      parts.push(`Close ${tab} first: its agent still owns this worktree.`);
     } else if (use.kind === "app") {
       parts.push("Codara itself runs from it.");
     } else {
@@ -564,9 +575,9 @@ async function cleanUpUnregistered(
 ): Promise<WorktreeRailCleanupResult> {
   const caller = callerFor(request.mode);
   const branch = workspace.copyBranch.branch;
-  const tip = await branchTip(repo.root, branch);
+  let tip: string | null = null;
+  let facts: MergeFacts | null = null;
   const target = await targetFor(repo, workspace);
-  const facts = tip ? await mergeFacts(repo, tip, branch, target) : null;
   const audit = (outcome: "removed" | "refused", extra: { code?: string; recoveryRef?: string | null } = {}) =>
     deps
       .audit({
@@ -589,14 +600,22 @@ async function cleanUpUnregistered(
     await audit("refused", { code });
     return refused(message, workspace.name);
   };
+  try {
+    tip = await branchTip(repo.root, branch);
+  } catch (err) {
+    return refuse("GIT_FAILED", `${errorText(err)} Nothing was removed.`);
+  }
+  facts = tip ? await mergeFacts(repo, tip, branch, target) : null;
 
   const ctx = await usageContext(deps, []);
   const allowed = allowedUses(request.mode, true);
+  const merged = facts?.state === "merged";
+  // Nothing is left in the folder: the maker's tab in another folder holds
+  // only a branch that is still there and not merged.
   const uses = (await usageOf(ctx, workspace.cwd, await canonicalPath(workspace.cwd), [workspace])).filter(
-    (use) => !allowed?.has(use.kind),
+    (use) => !allowed?.has(use.kind) && heldByMaker(use, !tip || merged),
   );
   if (uses.length) return refuse("IN_USE", inUseText(uses));
-  const merged = facts?.state === "merged";
   if (request.mode === "auto") {
     if (!(await parentHoldsFolders(workspace.cwd))) {
       return refuse("PARENT_MISSING", "The folder above it is gone or empty, so its drive may only be unmounted.");

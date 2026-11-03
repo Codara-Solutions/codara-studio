@@ -31,8 +31,18 @@ export interface WorktreeInUse {
   kind: WorktreeInUseKind;
   /** Plain words for the screen, such as "2 terminals". */
   label: string;
-  /** With "agent": the open tab of the agent that made the worktree, to close. */
-  tab?: { title: string; workspace?: string };
+  /**
+   * With "agent": the open tab of the agent that made the worktree, to close.
+   * `untitled` when the tab has no title: `title` is then the agent's name,
+   * such as "Claude Code".
+   */
+  tab?: { title: string; workspace?: string; untitled?: true };
+  /**
+   * With "agent": its tab works from another folder. It holds the worktree
+   * only while the work there may be unfinished: a branch not merged or files
+   * not committed (see heldByMaker).
+   */
+  elsewhere?: true;
 }
 
 export interface WorktreeSize {
