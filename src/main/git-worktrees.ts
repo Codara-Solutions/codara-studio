@@ -8,7 +8,7 @@ import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
 import { parseWorktreePorcelain, type WorktreeRegistration } from "./git-worktree-porcelain";
 import { prepareWorktreeRemoval, restoreWorktreeLinks } from "./worktree-setup/links";
-import { reservedDirNames } from "./worktree-folders";
+import { reservedDirNames, rowFolders } from "./worktree-folders";
 
 export type { WorktreeRegistration };
 
@@ -1105,4 +1105,41 @@ export async function ignoredEntries(worktreePath: string): Promise<string[]> {
     "-z",
   ]);
   return stdout.split("\0").filter(Boolean);
+}
+
+/**
+ * Create copy from the rail: a new branch, or an existing one checked out,
+ * in a folder no workspace row names. When the rows cannot be read nothing
+ * is made, since a folder a row still names could be handed out.
+ */
+export async function createRailWorktree(
+  input: {
+    repoCwd: string;
+    worktreesRoot: string;
+    checkoutBranch?: string;
+    checkoutIsRemote?: boolean;
+    newBranch?: string;
+  },
+  loadRows: () => Promise<readonly { cwd?: string | null; remote?: unknown }[]>,
+): Promise<GitCopyWorktreeResult> {
+  let takenPaths: string[];
+  try {
+    takenPaths = await rowFolders(loadRows);
+  } catch (err) {
+    return { ok: false, error: `Codara could not read its workspaces, so no worktree was made: ${errorText(err)}` };
+  }
+  return input.checkoutBranch
+    ? createCheckoutWorktree({
+        repoCwd: input.repoCwd,
+        worktreesRoot: input.worktreesRoot,
+        branch: input.checkoutBranch,
+        isRemote: input.checkoutIsRemote,
+        takenPaths,
+      })
+    : createCopyWorktree({
+        repoCwd: input.repoCwd,
+        worktreesRoot: input.worktreesRoot,
+        newBranch: input.newBranch ?? "",
+        takenPaths,
+      });
 }

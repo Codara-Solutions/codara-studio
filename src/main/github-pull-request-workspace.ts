@@ -42,6 +42,7 @@ import {
 } from "./orchestration/run-store";
 import { codaraHome } from "./codara-home";
 import { loadState, updateState } from "./storage";
+import { rowFolders } from "./worktree-folders";
 
 export interface GitHubPullRequestWorkspaceDependencies {
   loadState(): Promise<AppState>;
@@ -349,6 +350,19 @@ async function inspectAndCreate(
       false,
     );
   }
+  // Folders rows still name are not handed out again (reservedDirNames).
+  // Without the rows nothing is written or created.
+  let takenPaths: string[];
+  try {
+    takenPaths = await rowFolders(async () => (await dependencies.loadState()).workspaces);
+  } catch (cause) {
+    return failure(
+      "validate",
+      "state-unreadable",
+      `Codara could not read its workspaces, so nothing was imported: ${safeMessage(cause)}`,
+      false,
+    );
+  }
   const branch = managedPullRequestBranch(origin);
   const transactionId = randomUUID();
   const workspaceId = `ws-pr-${randomUUID()}`;
@@ -398,10 +412,8 @@ async function inspectAndCreate(
       { branch },
     );
   }
-  // Folders rows still name are not handed out again (reservedDirNames).
-  const rows = (await dependencies.loadState().catch(() => null))?.workspaces ?? [];
   const created = await dependencies.createWorktree({
-    takenPaths: rows.filter((workspace) => !workspace.remote && workspace.cwd).map((workspace) => workspace.cwd),
+    takenPaths,
     repoCwd: source.cwd,
     worktreesRoot: journal.git.worktreesRoot,
     repository,

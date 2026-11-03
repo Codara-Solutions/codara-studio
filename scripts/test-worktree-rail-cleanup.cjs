@@ -1112,6 +1112,20 @@ async function main() {
       assert.equal(alone.status, "removed", alone.message);
     });
 
+    await check("a stale row naming a folder that is there in other case stops its removal", async () => {
+      const dir = mergedWith("live-case", "feature/live-case");
+      h.state.workspaces.push(
+        copyWorkspace("ws-live-case-other", path.join(path.dirname(dir), "Live-Case"), repo, "feature/live-case"),
+      );
+      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-live-case", mode: "manual" });
+      assert.equal(result.status, "refused", JSON.stringify(result));
+      assert.match(result.message, /Another workspace row uses this folder/);
+      assert.equal(fs.existsSync(dir), true);
+      h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== "ws-live-case-other");
+      const alone = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-live-case", mode: "manual" });
+      assert.equal(alone.status, "removed", alone.message);
+    });
+
     await check("no rail action touched another worktree or the main checkout", async () => {
       assert.equal(fs.readFileSync(path.join(bystander, "keep.txt"), "utf8"), "keep\n");
       assert.equal(registered(repo, bystander), true);

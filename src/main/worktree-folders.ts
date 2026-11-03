@@ -35,13 +35,23 @@ const fold = (path: string) => path.toLowerCase();
 
 /**
  * Whether two paths name one folder. Two that exist are compared by the file
- * system's own identity; when either is gone, by where they lead, without case.
+ * system's own identity; when either is gone, by where they lead, without
+ * case, as reservations compare them: a row naming `Task` while `task`
+ * exists is taken to share it.
  */
 export async function sameFolder(a: string, b: string): Promise<boolean> {
   const [left, right] = await Promise.all([stat(a).catch(() => null), stat(b).catch(() => null)]);
   if (left && right) return left.dev === right.dev && left.ino === right.ino;
-  if (left || right) return false;
   return fold(await folderIdentity(a)) === fold(await folderIdentity(b));
+}
+
+/**
+ * The folders the workspace rows name, for `reservedDirNames`. Throws when
+ * the rows cannot be read: without them no folder may be handed out.
+ */
+export async function rowFolders(loadRows: () => Promise<readonly { cwd?: string | null; remote?: unknown }[]>): Promise<string[]> {
+  const rows = await loadRows();
+  return rows.filter((row) => !row.remote && typeof row.cwd === "string" && row.cwd).map((row) => row.cwd as string);
 }
 
 /**

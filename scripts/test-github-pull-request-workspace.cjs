@@ -337,6 +337,27 @@ async function main() {
   const { service, cleanup } = await loadService();
   try {
     {
+      // Without the rows nothing is written or created: a folder a row still
+      // names could be handed out.
+      const test = harness();
+      const load = test.dependencies.loadState;
+      let failed = false;
+      test.dependencies.loadState = async () => {
+        // The first read once the pull request is known: the one the
+        // folder reservation needs. Later reads work.
+        if (test.calls.pullRequest >= 1 && !failed) {
+          failed = true;
+          throw new Error("state unreadable");
+        }
+        return load();
+      };
+      const result = await service.startGitHubPullRequestWorkspace(request, test.dependencies);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.code, "state-unreadable", JSON.stringify(result));
+      assert.equal(test.calls.create, 0, "no worktree is created without the rows");
+      assert.deepEqual(await test.dependencies.journal.listActive(), [], "no import is journaled");
+    }
+    {
       const test = harness();
       const [left, right] = await Promise.all([
         service.startGitHubPullRequestWorkspace(
