@@ -74,7 +74,7 @@ submodules, nested checkouts, locked worktrees, the ignored-file scan's
 regenerable list (an ignored file here is one the scan would keep), the
 2-minute uptime rule, the renderer's retry backoff, and real time (only the
 order of events counts). The agent removal is proved against `main` on
-GitHub; an explicit local `target` (`agent-worktrees.ts:2006`) is not
+GitHub; an explicit local `target` (`agent-worktrees.ts:2021`) is not
 modelled, so with one the guarantee is weaker: the work is kept in that
 local branch, not necessarily on GitHub. Paths are the branch's slug and slug-2, as
 `pickCheckoutDirName` makes them.
@@ -148,15 +148,15 @@ that a removed head stays recoverable for 30 days. A fix not in the code yet is 
 model's only behaviour, and a `Bug` flag puts the old code back.
 
 1. **The last check and the delete are two steps** (`late`). Under the lock,
-   `removeOne` checks the folder (`remove.ts:257`), asks the window
-   (`remove.ts:301`), saves the ref, and only then `removeCopyWorktree` runs
+   `removeOne` checks the folder (`remove.ts:245`), asks the window
+   (`remove.ts:289`), saves the ref, and only then `removeCopyWorktree` runs
    `git status` (`git-worktrees.ts:524`) and `git worktree remove`
    (`git-worktrees.ts:540`). git refuses tracked and untracked changes but
    deletes ignored files without asking, so an ignored file written in that
    window (a `.env`, notes, test output) is lost. A tab or terminal opened in
    it is not seen (the window #123 declined as tiny); a commit made in it
    leaves the folder gone and the branch kept. The agent removal has the same
-   window (`agent-worktrees.ts:2619`). Likelihood: low; the window is a
+   window (`agent-worktrees.ts:2634`). Likelihood: low; the window is a
    renderer round trip (up to 5 s) and a few git calls, after 30 quiet
    minutes. Fix `aside`: rename the folder away first (atomic, so nothing new
    can open it by its path), check everything again on the moved folder, and
@@ -187,9 +187,9 @@ model's only behaviour, and a `Bug` flag puts the old code back.
    name then gets the same folder. The automatic removal refuses such a pair
    (`holdsOtherWorkspace`), but `codara_worktree_remove` on the old row
    passes: the registration's branch has the same name
-   (`agent-worktrees.ts:1826`), its tip is the new worktree's, a fresh tip
+   (`agent-worktrees.ts:1841`), its tip is the new worktree's, a fresh tip
    reads as merged, and only the old row's creator pane is checked
-   (`agent-worktrees.ts:1781`). It deletes the new worktree while its agent
+   (`agent-worktrees.ts:1796`). It deletes the new worktree while its agent
    works in it. Uncommitted work still blocks, so the loss is the new
    worktree itself. The automatic removal reads the rows once, at its start
    (`cleanUpRailWorkspace`), then checks and deletes by path: if the row is
@@ -202,13 +202,13 @@ model's only behaviour, and a `Bug` flag puts the old code back.
    at its folder.
 4. **The agent removal does not scan processes under the lock**. The
    re-check in `removeLocked` passes `scanProcesses: false`
-   (`agent-worktrees.ts:2597`); the lock can take up to 60 s, and a process
+   (`agent-worktrees.ts:2612`); the lock can take up to 60 s, and a process
    started in the worktree meanwhile is not seen. The automatic removal
    scans under the lock. Likelihood: low. Fix `rescan`: scan processes in
    the locked re-check too.
 5. **Recovery refs last 29 days and some hours, not 30.** The ref is named
    after the UTC day it was made, and `pruneRecoveryRefs`
-   (`agent-worktrees.ts:2366`) measures 30 days from that day's midnight. A
+   (`agent-worktrees.ts:2381`) measures 30 days from that day's midnight. A
    ref saved at 23:00 UTC is pruned after 29 days and 1 to 2 hours, by the
    next removal or cleanup in the repository. Likelihood: certain, harm
    small. Fix `day_end`: count from the end of the stamped day (or store the
