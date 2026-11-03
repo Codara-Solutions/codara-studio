@@ -2340,17 +2340,27 @@ export interface RemoveWorktreeInput {
   dryRun?: boolean;
 }
 
+// The newest recovery ref saved for a workspace: the latest day, and on that
+// day the highest suffix (a removal cut short leaves the plain name, the next
+// one of that day takes -2, ...).
 async function findRecoveryRef(repoCwd: string, workspaceId: string): Promise<{ ref: string; oid: string } | null> {
   const out = await readGitText(repoCwd, [
     "for-each-ref",
     "--format=%(refname) %(objectname)",
     `${RECOVERY_REF_PREFIX}/`,
   ]);
+  let best: { ref: string; oid: string; day: string; n: number } | null = null;
   for (const line of out.split(/\r?\n/)) {
     const [ref, oid] = line.trim().split(" ");
-    if (ref && oid && ref.endsWith(`/${workspaceId}`)) return { ref, oid };
+    if (!ref || !oid) continue;
+    const [day, name] = ref.slice(RECOVERY_REF_PREFIX.length + 1).split("/");
+    if (!day || !name?.startsWith(workspaceId)) continue;
+    const rest = name.slice(workspaceId.length);
+    const n = rest === "" ? 1 : /^-\d+$/.test(rest) ? Number(rest.slice(1)) : null;
+    if (n === null) continue;
+    if (!best || day > best.day || (day === best.day && n > best.n)) best = { ref, oid, day, n };
   }
-  return null;
+  return best ? { ref: best.ref, oid: best.oid } : null;
 }
 
 export async function pruneRecoveryRefs(repoCwd: string, now: Date): Promise<void> {

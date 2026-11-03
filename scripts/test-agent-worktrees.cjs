@@ -818,6 +818,10 @@ async function main() {
     assert.equal(cutResult.recoveryRef, `${todayRef(cut.workspaceId)}-2`, JSON.stringify(cutResult));
     assert.equal(git(repo, ["rev-parse", cutResult.recoveryRef]), newTip, "the deleted branch's tip stays reachable");
     assert.equal(git(repo, ["rev-parse", todayRef(cut.workspaceId)]), oldTip, "the older ref is never moved");
+    const cutRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: cut.workspaceId }, deps);
+    assert.equal(cutRetry.alreadyRemoved, true, JSON.stringify(cutRetry));
+    assert.equal(cutRetry.recoveryRef, cutResult.recoveryRef, "a retry names the newest save, not the cut-short one");
+    assert.equal(cutRetry.verifiedCommit, newTip);
 
     // No free name at all: the branch stays.
     const full = await aw.createAgentWorktree(terminalAgent, { branch: "agent/no-free-name" }, deps);
