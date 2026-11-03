@@ -46,6 +46,10 @@ async function main() {
     fs.rmSync(path.join(tree, "deleted.md"));
     assert.equal(await filesInsideFolders([path.join(other, "dangling.md")], [tree]), true, "a link whose target inside was deleted");
     assert.equal(await filesInsideFolders([path.join(other, "chained.md")], [tree]), true, "a chain of links ending inside");
+    fs.mkdirSync(path.join(tree, "generated"));
+    fs.symlinkSync(path.join(tree, "generated"), path.join(other, "alias"));
+    fs.rmSync(path.join(tree, "generated"), { recursive: true });
+    assert.equal(await filesInsideFolders([path.join(other, "alias", "draft.md")], [tree]), true, "a file under a folder link whose target inside was deleted");
     fs.symlinkSync(path.join(other, "loop-b"), path.join(other, "loop-a"));
     fs.symlinkSync(path.join(other, "loop-a"), path.join(other, "loop-b"));
     assert.equal(await filesInsideFolders([path.join(other, "loop-a")], [tree]), null, "a link loop: cannot tell");

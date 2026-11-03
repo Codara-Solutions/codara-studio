@@ -1,5 +1,5 @@
 import { promises as fsp } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
 // Whether the window holds a worktree folder before a removal deletes it: it
 // shows the worktree's workspace or has tabs of it, or a tab of any workspace
@@ -21,58 +21,47 @@ function inside(path: string, root: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
-// The real path of a file that may not exist (an editor tab on a deleted
-// file): the deepest folder above it that exists, resolved, plus the rest.
-export async function realpathLoose(path: string): Promise<string> {
-  let head = resolve(path);
-  const rest: string[] = [];
-  for (let depth = 0; depth < 256; depth += 1) {
-    try {
-      const real = await fsp.realpath(head);
-      return rest.length ? join(real, ...rest.reverse()) : real;
-    } catch {
-      const parent = dirname(head);
-      if (parent === head) break;
-      rest.push(basename(head));
-      head = parent;
+// Where a path really leads, component by component: every symlink on the
+// way is followed by hand, so a link whose target was deleted (a file or a
+// folder above it) still points where the buffer came from; from the first
+// missing component on, the rest is kept as written. Null for a link loop.
+export async function resolveLoose(path: string): Promise<string | null> {
+  const absolute = resolve(path);
+  let current = parse(absolute).root;
+  let pending = absolute.slice(current.length).split(sep).filter(Boolean);
+  for (let hops = 0; pending.length > 0; ) {
+    const name = pending.shift()!;
+    if (name === ".") continue;
+    if (name === "..") {
+      current = dirname(current);
+      continue;
     }
-  }
-  return resolve(path);
-}
-
-// Where a tab's file really is: its folder resolved, then each symlink
-// followed by hand, so a link whose target was deleted still points where the
-// buffer came from. Null for a loop.
-async function resolveFile(file: string, folderOf: (dir: string) => Promise<string>): Promise<string | null> {
-  let current = join(await folderOf(dirname(resolve(file))), basename(file));
-  for (let hops = 0; hops < 40; hops += 1) {
-    const stat = await fsp.lstat(current).catch(() => null);
-    if (!stat?.isSymbolicLink()) return current;
-    const target = await fsp.readlink(current).catch(() => null);
+    const next = join(current, name);
+    const stat = await fsp.lstat(next).catch(() => null);
+    if (!stat) return join(next, ...pending);
+    if (!stat.isSymbolicLink()) {
+      current = next;
+      continue;
+    }
+    hops += 1;
+    if (hops > 40) return null;
+    const target = await fsp.readlink(next).catch(() => null);
     if (target === null) return null;
-    const next = resolve(dirname(current), target);
-    current = join(await realpathLoose(dirname(next)), basename(next));
+    const followed = resolve(current, target);
+    current = parse(followed).root;
+    pending = [...followed.slice(current.length).split(sep).filter(Boolean), ...pending];
   }
-  return null;
+  return current;
 }
 
 export async function filesInsideFolders(files: unknown, folders: readonly string[]): Promise<boolean | null> {
   if (!Array.isArray(files) || files.length > MAX_TAB_FILES) return null;
-  const roots = [...new Set([...folders.map((folder) => resolve(folder)), ...(await Promise.all(folders.map(realpathLoose)))])];
-  const parents = new Map<string, Promise<string>>();
+  const resolved = await Promise.all(folders.map(resolveLoose));
+  const roots = [...new Set([...folders.map((folder) => resolve(folder)), ...resolved.filter((root): root is string => root !== null)])];
   for (const file of files) {
     if (typeof file !== "string" || !isAbsolute(file)) continue;
     if (roots.some((root) => inside(resolve(file), root))) return true;
-    // Files of one folder share its resolution.
-    const folderOf = (dir: string): Promise<string> => {
-      let real = parents.get(dir);
-      if (!real) {
-        real = realpathLoose(dir);
-        parents.set(dir, real);
-      }
-      return real;
-    };
-    const real = await resolveFile(file, folderOf);
+    const real = await resolveLoose(file);
     if (real === null) return null;
     if (roots.some((root) => inside(real, root))) return true;
   }
