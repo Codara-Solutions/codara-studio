@@ -224,9 +224,13 @@ async function main() {
       process.env.PATH = `${bin}${path.delimiter}${pathBefore}`;
       try {
         assert.equal((await stateOf(entry.id)).autoRemoveMerged, undefined);
+        // A request queued while it was offered does not go ahead either.
+        // (The test's own git reads go through the failing git too.)
+        await assertStays({ ...entry, branch: undefined }, /could not read the branch/);
       } finally {
         process.env.PATH = pathBefore;
       }
+      assert.equal(branchExists(repo, entry.branch), true);
       assert.equal((await stateOf(entry.id)).autoRemoveMerged, true);
       await assertGone(entry);
     });

@@ -538,7 +538,8 @@ async function cleanUpRegistered(
   request: WorktreeRailCleanupRequest,
   options: RemoveOptions,
 ): Promise<WorktreeRailCleanupResult> {
-  if (request.mode === "auto") {
+  // Neither automatic mode goes ahead on a branch git could not read.
+  if (request.mode !== "manual") {
     const unread = await branchTip(repo.root, workspace.copyBranch?.branch ?? "").then(
       () => null,
       (err: unknown) => errorText(err),
