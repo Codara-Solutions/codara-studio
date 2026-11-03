@@ -238,16 +238,24 @@ async function registrationOf(repo: RepoContext, cwd: string): Promise<WorktreeR
   return undefined;
 }
 
-// Null only when git says the branch is not there (exit 1): a git that
-// failed to answer throws, so a row is never dropped for a check that failed.
+// Null only when git says the branch is not there: a git that failed to
+// answer, or a branch whose commit cannot be read, throws, so a row is never
+// dropped for a check that failed.
 async function branchTip(root: string, branch: string): Promise<string | null> {
   if (!branch) return null;
-  let out: string;
-  try {
-    out = (await runGit(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `refs/heads/${branch}^{commit}`])).stdout.trim();
-  } catch (err) {
-    if ((err as { code?: unknown })?.code === 1) return null;
-    throw new Error(`git could not read the branch ${branch}: ${errorText(err)}`);
+  const read = async (rev: string): Promise<string | null> => {
+    try {
+      return (await runGit(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", rev])).stdout.trim();
+    } catch (err) {
+      if ((err as { code?: unknown })?.code === 1) return null;
+      throw new Error(`git could not read the branch ${branch}: ${errorText(err)}`);
+    }
+  };
+  const out = await read(`refs/heads/${branch}^{commit}`);
+  if (out === null) {
+    // Exit 1 also means a ref whose commit is missing: only no ref is gone.
+    if ((await read(`refs/heads/${branch}`)) === null) return null;
+    throw new Error(`git could not read the commit of the branch ${branch}.`);
   }
   if (!/^[0-9a-f]{40,64}$/i.test(out)) throw new Error(`git gave no commit for the branch ${branch}.`);
   return out.toLowerCase();
@@ -400,7 +408,8 @@ async function statesOf(
       ...("proof" in facts && facts.proof ? { proof: facts.proof } : {}),
       ...("target" in facts && facts.target ? { target: facts.target } : {}),
       // An empty branch loses nothing either, so a missing one goes too.
-      autoCandidate: missing && facts.state === "merged",
+      // Not on a branch git could not read.
+      autoCandidate: missing && facts.state === "merged" && tip !== undefined,
       ...(headAt ? { headAt } : {}),
       ...(offerAuto ? { autoRemoveMerged: true } : {}),
       ...(stale ? { stale: true } : {}),
@@ -506,6 +515,13 @@ async function cleanUpRegistered(
   request: WorktreeRailCleanupRequest,
   options: RemoveOptions,
 ): Promise<WorktreeRailCleanupResult> {
+  if (request.mode === "auto") {
+    const unread = await branchTip(repo.root, workspace.copyBranch?.branch ?? "").then(
+      () => null,
+      (err: unknown) => errorText(err),
+    );
+    if (unread) return refused(`${unread} Nothing was removed.`, workspace.name);
+  }
   const allowInUse = allowedUses(request.mode, await folderGone(path));
   const requireKnownUsage = request.mode === "auto-merged";
   const [check] = await checkCleanupTargets(deps, [{ repoRoot: repo.root, path }], { allowInUse, requireKnownUsage });

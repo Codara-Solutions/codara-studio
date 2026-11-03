@@ -897,6 +897,9 @@ async function main() {
       const gone = mergedWith("git-away-row", "feature/git-away-row");
       git(repo, ["worktree", "remove", gone]);
       git(repo, ["branch", "-D", "feature/git-away-row"]);
+      // Folder gone, still registered.
+      const stillListed = mergedWith("git-away-reg", "feature/git-away-reg");
+      fs.rmSync(stillListed, { recursive: true, force: true });
       // git fails to answer for this branch (a lock, a timeout): a git on
       // PATH that exits 128 for that one read.
       const bin = path.join(scratch, "failing-git");
@@ -904,23 +907,45 @@ async function main() {
       const realGit = execFileSync("sh", ["-c", "command -v git"]).toString().trim();
       fs.writeFileSync(
         path.join(bin, "git"),
-        `#!/bin/sh\ncase "$*" in *refs/heads/feature/git-away-row*) echo "fatal: unable to read" >&2; exit 128;; esac\nexec ${realGit} "$@"\n`,
+        `#!/bin/sh\ncase "$*" in *refs/heads/feature/git-away-*) echo "fatal: unable to read" >&2; exit 128;; esac\nexec ${realGit} "$@"\n`,
         { mode: 0o755 },
       );
       const pathBefore = process.env.PATH;
       process.env.PATH = `${bin}${path.delimiter}${pathBefore}`;
       try {
         const rows = Object.fromEntries((await rail.railWorktreeStates(deps)).map((entry) => [entry.workspaceId, entry]));
-        assert.equal(rows["ws-git-away-row"].autoCandidate, false, "not offered on a failed read");
-        const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-git-away-row", mode: "auto" });
-        assert.equal(result.status, "refused", JSON.stringify(result));
-        assert.match(result.message, /could not read the branch/);
-        assert.equal(has("ws-git-away-row"), true);
+        for (const id of ["ws-git-away-row", "ws-git-away-reg"]) {
+          assert.equal(rows[id].autoCandidate, false, `${id}: not offered on a failed read`);
+          const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: id, mode: "auto" });
+          assert.equal(result.status, "refused", `${id}: ${JSON.stringify(result)}`);
+          assert.match(result.message, /could not read the branch/, id);
+          assert.equal(has(id), true, id);
+        }
+        assert.equal(registered(repo, stillListed), true);
       } finally {
         process.env.PATH = pathBefore;
       }
-      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-git-away-row", mode: "auto" });
-      assert.equal(result.status, "removed", result.message);
+      for (const id of ["ws-git-away-row", "ws-git-away-reg"]) {
+        const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: id, mode: "auto" });
+        assert.equal(result.status, "removed", `${id}: ${result.message}`);
+      }
+    });
+
+    await check("a branch whose commit is missing is not a gone branch", async () => {
+      const dir = mergedWith("bad-ref", "feature/bad-ref");
+      git(repo, ["worktree", "remove", dir]);
+      git(repo, ["branch", "-D", "feature/bad-ref"]);
+      // A ref left pointing at a commit git does not have.
+      const refFile = path.join(repo, ".git", "refs", "heads", "feature", "bad-ref");
+      fs.mkdirSync(path.dirname(refFile), { recursive: true });
+      fs.writeFileSync(refFile, `${"1".repeat(40)}\n`);
+      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-bad-ref", mode: "auto" });
+      assert.equal(result.status, "refused", JSON.stringify(result));
+      assert.match(result.message, /could not read the commit of the branch/);
+      assert.equal(has("ws-bad-ref"), true);
+      fs.rmSync(refFile);
+      const after = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-bad-ref", mode: "auto" });
+      assert.equal(after.status, "removed", after.message);
     });
 
     await check("no rail action touched another worktree or the main checkout", async () => {
