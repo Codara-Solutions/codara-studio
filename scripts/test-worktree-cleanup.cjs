@@ -408,6 +408,35 @@ async function main() {
     });
 
     // ── Removal ────────────────────────────────────────────────────────────
+    await check("a file written after the last check puts the folder back", async () => {
+      const late = path.join(merged, ".env.local");
+      const result = await removeMod.removeCleanupWorktrees(
+        deps,
+        { items: [item(merged)], deleteMergedBranches: true },
+        {
+          // Runs after the last check and before anything is deleted.
+          beforeRemove: async () => {
+            fs.writeFileSync(late, "TOKEN=late\n");
+            return null;
+          },
+        },
+      );
+      const [outcome] = result.outcomes;
+      assert.equal(outcome.code, "CHANGED", JSON.stringify(outcome));
+      assert.equal(fs.readFileSync(late, "utf8"), "TOKEN=late\n", "the ignored file is kept, in its folder");
+      assert.ok(refExists(repo, "refs/heads/feature/merged"));
+      assert.ok(!fs.existsSync(path.join(path.dirname(merged), `.${path.basename(merged)}.codara-removing`)), "nothing is left aside");
+      fs.rmSync(late);
+    });
+
+    await check("a folder a stopped removal left aside goes back first", async () => {
+      const aside = path.join(path.dirname(merged), `.${path.basename(merged)}.codara-removing`);
+      git(repo, ["worktree", "move", merged, aside]);
+      const result = await removeMod.removeCleanupWorktrees(deps, { items: [item(merged)], deleteMergedBranches: true });
+      assert.equal(result.outcomes[0].code, "CHANGED", JSON.stringify(result.outcomes[0]));
+      assert.ok(fs.existsSync(merged) && !fs.existsSync(aside), "it is back where it was");
+    });
+
     await check("a merged worktree goes, with its branch and its rail row", async () => {
       const forgotten = [];
       const result = await removeMod.removeCleanupWorktrees(

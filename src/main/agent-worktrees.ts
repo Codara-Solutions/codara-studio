@@ -31,6 +31,8 @@ import {
   listWorktreeRegistrations,
   populatedSubmodules,
   removeCopyWorktree,
+  restoreAsideWorktrees,
+  worktreeFingerprint,
   resolveDefaultBranch,
   type WorktreeRegistration,
 } from "./git-worktrees";
@@ -2622,6 +2624,37 @@ async function auditRefusal(
     .catch(() => undefined);
 }
 
+// The last check, on the folder moved aside where nothing new can open it
+// by its path: the same files and HEAD as before the checks, and nothing
+// using it under either name. A reason puts it back.
+async function changedWhileAside(
+  ctx: VerifyContext,
+  workspace: Workspace,
+  realBefore: string,
+  aside: string,
+  before: string,
+): Promise<string | null> {
+  const { deps } = ctx;
+  if ((await worktreeFingerprint(aside)) !== before) return "it changed while it was being removed, so it was put back";
+  const realAside = await realpathOrResolve(aside);
+  const fresh: VerifyContext = {
+    ...ctx,
+    runs: deps.listRuns().catch(() => []),
+    rendererTerminals: deps.listRendererTerminals().catch(() => null),
+  };
+  const panes = [
+    ...(await panesUsing(fresh, workspace, workspace.cwd, realBefore)),
+    ...(await panesUsing(fresh, workspace, aside, realAside)),
+  ];
+  const runs = [...(await runsUsing(fresh, workspace, realBefore)), ...(await runsUsing(fresh, workspace, realAside))];
+  if (panes.length || runs.length) return "a terminal or run started in it while it was being removed, so it was put back";
+  const held = await deps.workspaceHeld(workspace.id, [...new Set([workspace.cwd, realBefore, aside])]).catch(() => null);
+  if (held !== false) return "a tab of it was opened while it was being removed, or the window did not answer, so it was put back";
+  const processes = await deps.processesUnderCwd(realAside).catch(() => null);
+  if (processes?.length) return "a process runs in it, so it was put back";
+  return null;
+}
+
 async function removeLocked(
   ctx: VerifyContext,
   workspace: Workspace,
@@ -2631,6 +2664,14 @@ async function removeLocked(
   const { deps, scope } = ctx;
   const repo = scope.repoCwd;
   const branch = workspace.copyBranch!.branch;
+  // A removal Studio did not finish may have left a folder aside: it goes
+  // back first, and if it is this one, the unlocked check saw it gone.
+  const restored = await restoreAsideWorktrees(repo);
+  if (restored.some((path) => resolve(path) === resolve(workspace.cwd))) {
+    return refusal("WORKTREE_CHANGED", "an earlier removal left it aside and it was put back; check it again", {
+      workspaceId: workspace.id,
+    });
+  }
   const latestState = await deps.loadState();
   const stillListed = latestState.workspaces.find((candidate) => candidate.id === workspace.id);
   if (!stillListed) {
@@ -2647,6 +2688,15 @@ async function removeLocked(
   if (!verdict.alreadyRemoved) {
     // The decisive checks again, against the refs already fetched, so a
     // commit, edit or new terminal since the unlocked check cannot slip by.
+    // Taken before the checks, so whatever is written after them shows once
+    // the folder is moved aside.
+    const before = await worktreeFingerprint(workspace.cwd).catch(() => null);
+    if (before === null) {
+      return refusal("WORKTREE_GIT_FAILED", "git could not read the worktree, so nothing was removed", {
+        workspaceId: workspace.id,
+      });
+    }
+    const realBefore = await realpathOrResolve(workspace.cwd);
     const recheckCtx: VerifyContext = {
       ...ctx,
       registrations: await listWorktreeRegistrations(repo).catch(() => [] as WorktreeRegistration[]),
@@ -2656,7 +2706,8 @@ async function removeLocked(
     const again = await verifyRemovable(recheckCtx, stillListed, {
       checkMerge: true,
       fetch: false,
-      scanProcesses: false,
+      // A process started while the removal waited for the lock counts.
+      scanProcesses: true,
       ...(input.target ? { target: input.target } : {}),
       discardIgnoredFiles: input.discardIgnoredFiles === true,
       pinned: {
@@ -2685,7 +2736,11 @@ async function removeLocked(
       force: false,
       deleteBranch: false,
       removeOrphanDir: false,
+      aside: { recheck: (aside) => changedWhileAside(recheckCtx, stillListed, realBefore, aside, before) },
     });
+    if (!removed.ok && removed.changed) {
+      return refusal("WORKTREE_CHANGED", removed.error, { workspaceId: workspace.id, recoveryRef });
+    }
     if (!removed.ok) {
       // The recovery ref stays. git deletes files before it gives up on one
       // it cannot delete, and drops the registration even then, so the ref

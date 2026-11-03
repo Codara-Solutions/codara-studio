@@ -24,7 +24,7 @@ import {
   type WorktreeCaller,
 } from "../agent-worktrees";
 import { deleteBranchIfAt } from "../git-branches";
-import { isAncestor } from "../git-worktrees";
+import { isAncestor, restoreAsideWorktrees } from "../git-worktrees";
 import { errorText, readGitText } from "../git-exec";
 import type { WorktreeRegistration } from "../git-worktree-porcelain";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
@@ -685,6 +685,9 @@ export async function cleanUpRailWorkspace(
     // then let go of it: a registered worktree is removed by
     // removeCleanupWorktrees, which takes the same lock itself.
     const registration = await withRepoLock(repo.root, async () => {
+      // A folder an earlier removal left aside looked gone above.
+      const restored = await restoreAsideWorktrees(repo.root);
+      if (restored.some((path) => pathKey(path) === pathKey(workspace.cwd))) return { putBack: true } as const;
       repo.registrations = (await listWorktrees(repo.root)).registrations;
       const found = await registrationOf(repo, workspace.cwd);
       if (found) return found;
@@ -692,6 +695,7 @@ export async function cleanUpRailWorkspace(
       return { unregistered: await cleanUpUnregistered(deps, repo, workspace, normalized) } as const;
     });
     if (registration === null) return refused("git does not list this folder as a worktree. Use Delete instead.", workspace.name);
+    if ("putBack" in registration) return refused("An earlier removal left it aside, and it was put back.", workspace.name);
     if ("unregistered" in registration) return registration.unregistered;
     if (mode === "auto-merged") {
       // Before the check below, whose git status can itself touch the index.

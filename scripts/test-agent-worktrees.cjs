@@ -630,6 +630,57 @@ async function main() {
       "WORKTREE_CALLER_INSIDE",
     );
 
+    // A process started while the removal waited for the lock is seen under
+    // it: the locked re-check scans processes too.
+    h.afterVerify = async () => {
+      h.processes = [{ pid: 4545, command: "npm run dev" }];
+    };
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    h.afterVerify = null;
+    h.processes = [];
+    assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
+    assert.ok(refused.blockers.includes("WORKTREE_RUNNING_PROCESSES"));
+    assert.ok(fs.existsSync(created.path));
+    // An ignored file written after the last check (git deletes ignored
+    // files without asking): the folder is moved aside, checked again
+    // there, and put back.
+    const isRegistered = (dir) =>
+      git(repo, ["worktree", "list", "--porcelain"]).split("\n").includes(`worktree ${dir}`);
+    const asideOf = (dir) => path.join(path.dirname(dir), `.${path.basename(dir)}.codara-removing`);
+    const lateEnv = path.join(created.path, ".env.local");
+    let heldCalls = 0;
+    h.held = () => {
+      heldCalls += 1;
+      // The second ask is the locked re-check's, after its ignored-file scan.
+      if (heldCalls === 2) fs.writeFileSync(lateEnv, "TOKEN=late\n");
+      return false;
+    };
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    h.held = () => false;
+    assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
+    assert.equal(fs.readFileSync(lateEnv, "utf8"), "TOKEN=late\n", "the late file is kept, in its folder");
+    assert.ok(!fs.existsSync(asideOf(created.path)), "nothing is left aside");
+    assert.ok(isRegistered(created.path), "it is a worktree where it was");
+    fs.rmSync(lateEnv);
+    // A process started in it once it is aside puts it back as well.
+    heldCalls = 0;
+    h.held = () => {
+      heldCalls += 1;
+      if (heldCalls === 3) h.processes = [{ pid: 4646, command: "vim" }];
+      return false;
+    };
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    h.held = () => false;
+    h.processes = [];
+    assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
+    assert.ok(fs.existsSync(created.path) && !fs.existsSync(asideOf(created.path)));
+    // Studio stopped between the move and the delete: the next removal puts
+    // the folder back first and looks again.
+    git(repo, ["worktree", "move", created.path, asideOf(created.path)]);
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
+    assert.ok(isRegistered(created.path) && !fs.existsSync(asideOf(created.path)), "it is back where it was");
+
     // A commit between the check and the locked re-check is caught.
     h.afterVerify = async () => {
       commitFile(created.path, "late.txt", "late\n", "late commit");
@@ -651,7 +702,9 @@ async function main() {
     assert.equal(removed.proof, "ancestor");
     assert.equal(removed.verifiedCommit, mergedTip);
     assert.equal(removed.branchDeleted, true);
-    assert.equal(removed.recoveryRef, `refs/codara/removed-worktrees/2026-10-12/${created.workspaceId}`);
+    // The attempts put back above saved refs of their own (an older tip
+    // among them); this one goes above the newest.
+    assert.match(removed.recoveryRef, new RegExp(`^refs/codara/removed-worktrees/2026-10-12/${created.workspaceId}-\\d+$`));
     assert.equal(git(repo, ["rev-parse", removed.recoveryRef]), mergedTip, "the tip is kept for recovery");
     assert.match(removed.recoverWith, /worktree add .* -b agent\//);
     assert.ok(!fs.existsSync(created.path), "the directory is gone");
@@ -758,8 +811,6 @@ async function main() {
     const unmounted = path.join(scratch, "unmounted-drive", "wt");
     git(repo, ["worktree", "add", "-q", "-b", "on-unmounted-drive", unmounted]);
     fs.rmSync(path.dirname(unmounted), { recursive: true, force: true });
-    const isRegistered = (dir) =>
-      git(repo, ["worktree", "list", "--porcelain"]).split("\n").includes(`worktree ${dir}`);
     assert.ok(isRegistered(unmounted));
     const paneClosed = await aw.removeAgentWorktree(otherPane, { workspaceId: paneOwned.workspaceId }, deps);
     assert.equal(paneClosed.ok, true, JSON.stringify(paneClosed));

@@ -25,7 +25,13 @@ import {
 } from "../agent-worktrees";
 import { deleteBranchIfAt } from "../git-branches";
 import { errorText, readGitText, runGit } from "../git-exec";
-import { dropMissingWorktreeRegistration, isRegisteredWorktree, removeCopyWorktree } from "../git-worktrees";
+import {
+  dropMissingWorktreeRegistration,
+  isRegisteredWorktree,
+  removeCopyWorktree,
+  restoreAsideWorktrees,
+  worktreeFingerprint,
+} from "../git-worktrees";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
 import {
   canonicalPath,
@@ -37,6 +43,7 @@ import {
   pathKey,
   ROW_CONCURRENCY,
   usageContext,
+  usageOf,
   type CheckContext,
   type RepoContext,
   type WorktreeCleanupDeps,
@@ -235,6 +242,31 @@ interface RemovalWork {
   dropWorkspaces: Workspace[];
 }
 
+// The last check, on the folder moved aside where nothing new can open it
+// by its path: the same files and HEAD as before the checks, and nothing
+// using it under either name. A reason puts it back.
+async function changedWhileAside(
+  ctx: CheckContext,
+  path: string,
+  real: string,
+  aside: string,
+  before: string,
+  options: RemoveOptions,
+): Promise<string | null> {
+  if ((await worktreeFingerprint(aside)) !== before) return "It changed while it was being removed, so it was put back.";
+  const realAside = await canonicalPath(aside);
+  const usage = await usageContext(ctx.deps, [realAside]);
+  if (ctx.requireKnownUsage && (usage.terminals === null || usage.processes === null || !usage.runsKnown)) {
+    return "What is running in it could not be read, so it was put back.";
+  }
+  const workspaces = ctx.linked.get(pathKey(real)) ?? [];
+  const uses = [...(await usageOf(usage, path, real, workspaces)), ...(await usageOf(usage, aside, realAside, workspaces))].filter(
+    (use) => !options.allowInUse?.has(use.kind),
+  );
+  if (uses.length) return `In use: ${[...new Set(uses.map((use) => use.label))].join(", ")}, so it was put back.`;
+  return (await options.beforeRemove?.()) ?? null;
+}
+
 async function removeOne(
   ctx: CheckContext,
   item: WorktreeCleanupRemoveItem,
@@ -242,6 +274,9 @@ async function removeOne(
   options: RemoveOptions,
 ): Promise<RemovalWork> {
   const { deps, repo } = ctx;
+  // Taken before the checks, so whatever is written after them shows once
+  // the folder is moved aside.
+  const before = await worktreeFingerprint(item.path).catch(() => null);
   const check = await checkRemoval(ctx, item.path);
   const real = await canonicalPath(check.path);
   const outcome: WorktreeCleanupOutcome = {
@@ -288,6 +323,7 @@ async function removeOne(
   }
   const stopped = await options.beforeRemove?.();
   if (stopped) return refuse("IN_USE", stopped);
+  if (!check.alreadyRemoved && before === null) return refuse("GIT_FAILED", "git could not read it, so nothing was removed.");
 
   const id = refSafe(check.workspace?.id ?? `wt-${createHash("sha256").update(real).digest("hex").slice(0, 12)}`);
   const refBase = `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${id}`;
@@ -322,7 +358,12 @@ async function removeOne(
       deleteBranch: false,
       removeOrphanDir: false,
       timeoutMs: REMOVE_TIMEOUT_MS,
+      aside: { recheck: (aside) => changedWhileAside(ctx, check.path, real, aside, before!, options) },
     });
+    if (!removed.ok && removed.changed) {
+      await audit("refused", { code: "CHANGED", recoveryRef });
+      return { outcome: { ...outcome, status: "refused", code: "CHANGED", message: cleanText(removed.error, 400) }, dropWorkspaces: [] };
+    }
     if (!removed.ok) {
       // The recovery refs stay. git deletes files before it gives up on
       // one it cannot delete, and it drops the worktree's registration even
@@ -465,6 +506,7 @@ export async function removeCleanupWorktrees(
       await withRepoLock(repo.root, async () => {
         // Under the lock, from git's current listing: an agent may have
         // created or removed a worktree since the screen last looked.
+        const restored = new Set((await restoreAsideWorktrees(repo.root)).map((path) => pathKey(path)));
         repo.registrations = (await listWorktrees(repo.root)).registrations;
         const ctx = await contextFor(
           deps,
@@ -481,6 +523,18 @@ export async function removeCleanupWorktrees(
             const left = await Promise.all(repoItems.slice(index).map((entry) => canonicalPath(entry.path)));
             ctx.usage = await usageContext(deps, left);
             usageAt = Date.now();
+          }
+          if (restored.has(pathKey(item.path))) {
+            outcomes.push({
+              repoRoot: repo.root,
+              path: item.path,
+              branch: null,
+              status: "refused",
+              code: "CHANGED",
+              message: "An earlier removal left it aside, and it was put back. Review it again.",
+              branchDeleted: false,
+            });
+            continue;
           }
           const work = await removeOne(ctx, item, normalized, options).catch(
             (err: unknown): RemovalWork => ({

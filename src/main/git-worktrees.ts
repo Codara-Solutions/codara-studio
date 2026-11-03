@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { lstat, readdir, rm } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { lstat, readdir, rename, rm } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import type { GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult } from "@shared/types";
 import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
@@ -56,6 +56,10 @@ export interface RemoveCopyWorktreeInput {
   // build output) can take minutes to delete, and a git killed by the
   // default timeout leaves it half deleted.
   timeoutMs?: number;
+  // Move the folder aside before deleting it: nothing new can open it by its
+  // path once it is moved, `recheck` then checks it again there, and a
+  // reason puts it back. A process that already had it open still can.
+  aside?: { recheck(asidePath: string): Promise<string | null> };
 }
 
 const MANAGED_REPO_HASH_HEX_LENGTH = 12;
@@ -488,6 +492,104 @@ async function removeOrphanWorktreeDir(repoCwd: string, worktreePath: string): P
   }
 }
 
+// ── Moving a folder aside before it is deleted ─────────────────────────────
+
+const ASIDE_SUFFIX = ".codara-removing";
+
+export function asidePathFor(worktreePath: string): string {
+  return join(dirname(worktreePath), `.${basename(worktreePath)}${ASIDE_SUFFIX}`);
+}
+
+function originalOfAside(path: string): string | null {
+  const name = basename(path);
+  if (!name.startsWith(".") || !name.endsWith(ASIDE_SUFFIX)) return null;
+  const original = name.slice(1, -ASIDE_SUFFIX.length);
+  return original ? join(dirname(path), original) : null;
+}
+
+/**
+ * Puts back every worktree of the repository a removal left aside (Studio
+ * stopped between the move and the delete). Runs under the repository lock
+ * before a removal or cleanup looks at anything; returns the folders put
+ * back, which their removal must look at again.
+ */
+export async function restoreAsideWorktrees(repoCwd: string): Promise<string[]> {
+  const restored: string[] = [];
+  for (const entry of await listWorktreeRegistrations(repoCwd).catch(() => [])) {
+    const original = originalOfAside(entry.path);
+    if (!original || (await pathIsAbsent(entry.path)) || !(await pathIsAbsent(original))) continue;
+    try {
+      await runGit(repoCwd, ["worktree", "move", entry.path, original]);
+      restored.push(original);
+    } catch {
+      // Left aside: still a registered worktree, listed under that name.
+    }
+  }
+  return restored;
+}
+
+const FINGERPRINT_MAX_ENTRIES = 20_000;
+
+/**
+ * What a removal would delete, as one digest: HEAD, `git status` with
+ * untracked and ignored entries, and the size and modification time of every
+ * file under those entries (ignored folders walked, up to 20,000 entries).
+ * Links count as nothing: setup's linked folders are released before the
+ * delete, and removing a link loses no data. The same digest before the
+ * last check and after the move means nothing was written in between.
+ */
+export async function worktreeFingerprint(worktreePath: string): Promise<string> {
+  const hash = createHash("sha256");
+  const head = await readGitText(worktreePath, ["rev-parse", "--verify", "HEAD"]);
+  hash.update(`${head}\0`);
+  // Throws when git cannot read it: no digest is not an unchanged one.
+  const { stdout: status } = await runGit(worktreePath, [
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+    "--ignored=matching",
+  ]);
+  const records = status.split("\0");
+  let budget = FINGERPRINT_MAX_ENTRIES;
+  const walk = async (relative: string): Promise<void> => {
+    if (budget <= 0) return;
+    budget -= 1;
+    const absolute = join(worktreePath, relative);
+    const info = await lstat(absolute).catch(() => null);
+    if (!info || info.isSymbolicLink()) return;
+    if (!info.isDirectory()) {
+      hash.update(`${relative}\0f${info.size}:${info.mtimeMs}\0`);
+      return;
+    }
+    hash.update(`${relative}\0d\0`);
+    const names = (await readdir(absolute).catch(() => [] as string[])).sort();
+    for (const name of names) await walk(join(relative, name));
+  };
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (record.length < 4) continue;
+    const code = record.slice(0, 2);
+    const path = record.slice(3).replace(/\/+$/, "");
+    // A rename or copy carries its source in the next record.
+    if (code[0] === "R" || code[0] === "C") index += 1;
+    const info = await lstat(join(worktreePath, path)).catch(() => null);
+    if (info?.isSymbolicLink()) continue;
+    hash.update(`${code}\0`);
+    await walk(path);
+  }
+  return hash.digest("hex");
+}
+
+async function moveWorktree(repoCwd: string, from: string, to: string): Promise<GitOpResult> {
+  try {
+    await runGit(repoCwd, ["worktree", "move", from, to]);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
+}
+
 export interface RemoveCopyWorktreeHooks {
   // Invoked once, the first time removal fails because of a transient directory
   // lock (a process — usually a shell or agent pane — holding the worktree as
@@ -600,42 +702,86 @@ export async function removeCopyWorktree(
     if (!dropped.ok) return dropped;
     return finishBranch(input);
   }
+  const original = input.worktreePath;
+  let askedToRelease = false;
+  const release = async () => {
+    if (askedToRelease || !hooks?.onBusy) return;
+    askedToRelease = true;
+    try {
+      await hooks.onBusy();
+    } catch {
+      /* best-effort: the caller's release hook must never abort the retry */
+    }
+  };
+  let work = input;
+  if (input.aside) {
+    const aside = asidePathFor(original);
+    if (!(await pathIsAbsent(aside))) {
+      return { ok: false, error: `Another folder is where it would be moved aside: ${aside}. Move it away, then try again.` };
+    }
+    let moved: GitOpResult = { ok: false, error: "not moved" };
+    for (const delayMs of backoffMs) {
+      if (delayMs) await sleep(delayMs);
+      moved = await moveWorktree(input.repoCwd, original, aside);
+      if (moved.ok || !(BUSY_GIT_MSG.test(moved.error) || BUSY_FS_CODE.test(moved.error))) break;
+      await release();
+    }
+    if (!moved.ok) return { ok: false, error: moved.error };
+    let reason: string | null;
+    try {
+      reason = await input.aside.recheck(aside);
+    } catch (err) {
+      reason = `It could not be checked again once moved aside: ${errorText(err)}`;
+    }
+    if (reason) {
+      const back = await moveWorktree(input.repoCwd, aside, original);
+      return {
+        ok: false,
+        changed: true,
+        error: back.ok ? reason : `${reason} It could not be moved back and is at ${aside}: ${back.error}`,
+      };
+    }
+    work = { ...input, worktreePath: aside };
+  }
+  // Puts a folder that is still there after a failure back where it was.
+  const putBack = async (): Promise<string> => {
+    if (work === input || (await pathIsAbsent(work.worktreePath))) return "";
+    const back = (await isRegisteredWorktree(input.repoCwd, work.worktreePath))
+      ? await moveWorktree(input.repoCwd, work.worktreePath, original)
+      : await rename(work.worktreePath, original).then(
+          (): GitOpResult => ({ ok: true }),
+          (err: unknown): GitOpResult => ({ ok: false, error: errorText(err) }),
+        );
+    return back.ok ? "" : ` What is left is at ${work.worktreePath}.`;
+  };
   // Folders setup linked in from the main checkout go first, so removal can
   // never reach through them; they come back if the worktree stays.
   let releasedLinks: Awaited<ReturnType<typeof prepareWorktreeRemoval>>;
   try {
-    releasedLinks = await prepareWorktreeRemoval(input.worktreePath);
+    releasedLinks = await prepareWorktreeRemoval(work.worktreePath);
   } catch (err) {
-    return { ok: false, error: errorText(err) };
+    return { ok: false, error: `${errorText(err)}${await putBack()}` };
   }
   let lastError = "worktree removal not attempted";
   let removed = false;
-  let askedToRelease = false;
   for (const delayMs of backoffMs) {
     if (delayMs) await sleep(delayMs);
-    const attempt = await tryRemoveWorktreeOnce(input);
+    const attempt = await tryRemoveWorktreeOnce(work);
     if (attempt.ok) {
       removed = true;
       break;
     }
     lastError = attempt.error;
     if (!attempt.retryable) break;
-    if (!askedToRelease && hooks?.onBusy) {
-      askedToRelease = true;
-      try {
-        await hooks.onBusy();
-      } catch {
-        /* best-effort: the caller's release hook must never abort the retry */
-      }
-    }
+    await release();
   }
   if (!removed) {
-    await restoreWorktreeLinks(input.worktreePath, releasedLinks).catch(() => undefined);
-    return { ok: false, error: lastError };
+    await restoreWorktreeLinks(work.worktreePath, releasedLinks).catch(() => undefined);
+    return { ok: false, error: `${lastError}${await putBack()}` };
   }
 
   // Best-effort: only this worktree's own registration, if one was left.
-  await dropMissingWorktreeRegistration(input.repoCwd, input.worktreePath);
+  await dropMissingWorktreeRegistration(input.repoCwd, work.worktreePath);
   return finishBranch(input);
 }
 

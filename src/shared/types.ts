@@ -2719,9 +2719,11 @@ export type GitOpResult = { ok: true } | { ok: false; error: string };
 // Result of removing a copy-branch worktree. The worktree is gone whenever ok
 // is true; `branchKept` says why a requested branch delete did not happen
 // ("it has unmerged commits"), for a note rather than an error.
+// `changed`: the check after moving it aside found something new, and it
+// was put back.
 export type GitRemoveWorktreeResult =
   | { ok: true; branchKept?: string }
-  | { ok: false; error: string };
+  | { ok: false; error: string; changed?: true };
 
 // Result of git:createCopyWorktree. Shared so renderer + main agree on shape.
 // mode "fork" = new branch created from baseBranch (baseBranch present);
