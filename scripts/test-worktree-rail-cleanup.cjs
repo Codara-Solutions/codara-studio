@@ -802,6 +802,22 @@ async function main() {
       assert.equal(done.status, "removed", done.message);
     });
 
+    await check("the maker's tab elsewhere holds a worktree it has not committed to yet", async () => {
+      const fresh = add("fresh-made", "feature/fresh-made");
+      // Made after its base commit: an ancestor of main with nothing of its own.
+      h.state.workspaces.push(
+        copyWorkspace("ws-fresh-made", fresh, repo, "feature/fresh-made", { createdAt: new Date(Date.now() + 5_000).toISOString() }),
+      );
+      madeBy("ws-fresh-made");
+      const result = await withTab({ title: "coordinator", cwd: coordinator }, () =>
+        rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-fresh-made", mode: "manual" }),
+      );
+      assert.equal(result.status, "refused", result.message);
+      assert.match(result.message, /^Close the tab “coordinator” in AI Continous Improvment first/);
+      assert.equal(fs.existsSync(fresh), true);
+      assert.equal(branchExists(repo, "feature/fresh-made"), true);
+    });
+
     await check("a folder removed by hand leaves the rail on its own while the maker's tab is open", async () => {
       // git worktree remove + branch -D, as an agent or the user does by hand.
       const byHand = mergedWith("by-hand", "feature/by-hand");

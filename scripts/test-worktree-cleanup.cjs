@@ -735,7 +735,9 @@ async function main() {
           repoCwd: repo,
           branch: "feature/fresh",
           city: "fresh",
-          createdAt: "2026-10-01T00:00:00Z",
+          // Made after its base commit and never committed to: its agent has
+          // not started, so its open tab holds it.
+          createdAt: new Date(Date.now() + 5_000).toISOString(),
           createdBy: { kind: "agent", paneId: "pane-agent" },
         },
       });

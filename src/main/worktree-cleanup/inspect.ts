@@ -425,6 +425,26 @@ export function heldByMaker(use: WorktreeInUse, finished: boolean, strict = fals
   return !(use.kind === "agent" && use.elsewhere && finished && !strict);
 }
 
+/**
+ * Whether the worktree's own work is in its base: merged by a pull request
+ * or by content, or merged as an ancestor with a commit made since the
+ * worktree was. A worktree with no commit of its own yet reads as merged
+ * too, but its agent has not started, so its open tab still holds it.
+ */
+export async function finishedWork(
+  repoRoot: string,
+  merge: { state: WorktreeMergeState; proof?: WorktreeMergeProof },
+  head: string | null,
+  workspaces: readonly Workspace[],
+): Promise<boolean> {
+  if (merge.state !== "merged") return false;
+  if (merge.proof !== "ancestor") return true;
+  const made = workspaces.map((workspace) => Date.parse(workspace.copyBranch?.createdAt ?? "")).filter(Number.isFinite);
+  if (!head || !made.length) return false;
+  const seconds = Number(await readGitText(repoRoot, ["log", "-1", "--format=%ct", head]));
+  return Number.isFinite(seconds) && seconds > 0 && seconds * 1000 >= Math.min(...made) - 1_000;
+}
+
 function count(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
@@ -716,7 +736,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     else block(check, "IN_USE", message);
   };
   // The maker's tab open in another folder is judged once the work is known:
-  // it holds an unmerged branch or uncommitted files only.
+  // it holds work not finished (finishedWork) or files not committed.
   const pending = uses.filter((use) => !heldByMaker(use, true, ctx.requireKnownUsage));
   inUse(uses.filter((use) => !pending.includes(use)));
 
@@ -738,7 +758,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   }
   check.branchDeletable = Boolean(branch) && merge.state === "merged" && !isKeptBranch(branch!, merge.target);
 
-  if (merge.state !== "merged") inUse(pending.splice(0));
+  if (pending.length && !(await finishedWork(repo.root, merge, head, workspaces))) inUse(pending.splice(0));
   if (check.alreadyRemoved) return finish();
 
   // Local work a removal deletes.

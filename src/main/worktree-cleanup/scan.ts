@@ -25,6 +25,8 @@ import {
   readStatus,
   targetFor,
   usageContext,
+  finishedWork,
+  heldByMaker,
   usageOf,
   withBudget,
   type MergeFacts,
@@ -106,6 +108,11 @@ async function rowFor(
   const tracking = branch ? repo.tracking.get(branch) : undefined;
   const target = await targetFor(repo, workspaces.find((workspace) => workspace.copyBranch) ?? null);
   const merge = await mergeFacts(repo, head, branch, target);
+  // As checkRemoval judges it, minus ignored files the scan does not read.
+  const uses = missing ? [] : await usageOf(usage, entry.path, real, workspaces);
+  const clean = dirty !== null && dirty.tracked + dirty.untracked === 0 && !dirty.inProgress;
+  const finished =
+    clean && uses.some((use) => !heldByMaker(use, true)) && (await finishedWork(repo.root, merge, head, workspaces));
   return {
     id: real,
     repoRoot: repo.root,
@@ -136,7 +143,7 @@ async function rowFor(
       ...(merge.target ? { target: merge.target } : {}),
     },
     pullRequest: pullRequestFor(repo, branch, head, merge, workspaces),
-    inUse: missing ? [] : await usageOf(usage, entry.path, real, workspaces),
+    inUse: uses.filter((use) => heldByMaker(use, finished)),
     size: options.sizeOf?.(real) ?? null,
     warnings,
   };
