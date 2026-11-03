@@ -1,5 +1,6 @@
 import { guardDraftProblem, normalizeAutomationGuard } from "@shared/automation-guard";
 import { Cron } from "croner";
+import { usdFromEurField } from "@shared/money";
 import type { AutomationLoop, AutomationTrigger, CreateScheduledJobInput, ScheduledJob } from "@shared/types";
 import { DEFAULT_WORKER_EFFORT, DEFAULT_WORKER_MODEL } from "../worker-models";
 
@@ -86,8 +87,7 @@ export function sentenceTrigger(d: SentenceDraft): AutomationTrigger | null {
 }
 
 export function sentenceBudget(d: SentenceDraft): number | undefined {
-  const value = Number(d.budget.trim());
-  return d.budget.trim() && Number.isFinite(value) && value > 0 ? value : undefined;
+  return usdFromEurField(d.budget);
 }
 
 export function sentenceLoop(d: SentenceDraft): AutomationLoop {
@@ -135,7 +135,7 @@ export function sentenceToInput(d: SentenceDraft, ctx: SentenceContext): CreateS
   const prompt = d.prompt.trim();
   const worker = { model: d.model, effort: DEFAULT_WORKER_EFFORT };
   const guard = normalizeAutomationGuard({
-    ...(d.monthlyCap.trim() ? { monthlyCapUsd: Number(d.monthlyCap) } : {}),
+    ...(d.monthlyCap.trim() ? { monthlyCapUsd: usdFromEurField(d.monthlyCap) ?? Number.NaN } : {}),
     ...(d.pauseAfter.trim() ? { pauseAfterFailures: Number(d.pauseAfter) } : {}),
   });
   // A check is skipped on Run now, so by-hand automations have nothing to run it.

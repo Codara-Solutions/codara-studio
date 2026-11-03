@@ -131,16 +131,16 @@ test("limits hold an automation back, say why, and the editor shows the worst ca
     await clickAttached(capped);
     const card = page.getByTestId("automation-result");
     await expect(card).toContainText("Monthly cap reached");
-    await expect(card).toContainText("$21.50 of its $20.00 cap");
-    await expect(page.getByTestId("automation-health")).toContainText("of $20.00 cap");
+    await expect(card).toContainText("≈€17.20 $21.50 of its ≈€16.00 $20.00 cap");
+    await expect(page.getByTestId("automation-health")).toContainText("of ≈€16.00 $20.00 cap");
     await expect(card.getByRole("button", { name: "Fix with Cora" })).toHaveCount(0);
-    await expect(page.getByTestId("automation-worst-case")).toContainText("about $20.00 a month");
-    await expect(page.getByText("$20.00 a month", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("automation-worst-case")).toContainText("about €16.00 $20.00 a month");
+    await expect(page.getByText("≈€16.00 $20.00 a month", { exact: true })).toBeVisible();
     await shot(app, page, "cost-guard-cap");
 
     // Run now is refused: nothing starts, and the row says why.
     await clickAttached(page.getByRole("button", { name: "Run now", exact: true }));
-    await expect(page.getByText(/reached its monthly cap of \$20\.00/).first()).toBeVisible();
+    await expect(page.getByText(/reached its monthly cap of ≈€16\.00 \$20\.00/).first()).toBeVisible();
     await expect(page.locator('[data-testid="history-skip-row"][data-skip-reason="monthlyCap"]')).toBeVisible();
     await expect(capped).not.toContainText("Running");
     expect((await savedJob(userDataDir, "Nightly dependency review")).history).toHaveLength(1);
@@ -169,9 +169,12 @@ test("limits hold an automation back, say why, and the editor shows the worst ca
     await shot(app, page, "cost-guard-no-ceiling");
     await page.getByLabel("Budget cap").fill("5");
     await expect(forecast).toHaveAttribute("data-open", "false");
-    await expect(forecast).toContainText("about $5.00 each time you run it");
+    await expect(forecast).toContainText("about €5.00 $6.25 each time you run it");
     await page.getByLabel("Monthly cap").fill("20");
-    await expect(forecast).toContainText("about $20.00 a month");
+    await expect(forecast).toContainText("about €20.00 $25.00 a month");
+    // Typed in euros; the dollars it stores sit under the field.
+    await expect(page.getByTestId("usd-under-Monthly cap")).toHaveText("≈ $25.00");
+    await expect(page.getByTestId("usd-under-Budget cap")).toHaveText("≈ $6.25");
     // A typo blocks saving, instead of quietly dropping the limit. "1e" matters:
     // a number input would report it as empty, which means "remove the limit".
     await page.getByLabel("Monthly cap").fill("1e");
@@ -186,7 +189,7 @@ test("limits hold an automation back, say why, and the editor shows the worst ca
     await forecast.scrollIntoViewIfNeeded();
     await shot(app, page, "cost-guard-forecast");
     await clickAttached(page.getByRole("button", { name: "Create automation", exact: true }));
-    await expect.poll(async () => (await savedJob(userDataDir, "Sample with limits")).guard).toEqual({ monthlyCapUsd: 20, pauseAfterFailures: 3 });
+    await expect.poll(async () => (await savedJob(userDataDir, "Sample with limits")).guard).toEqual({ monthlyCapUsd: 25, pauseAfterFailures: 3 });
   } finally {
     if (app) await app.close();
   }

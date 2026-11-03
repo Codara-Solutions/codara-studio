@@ -1,3 +1,4 @@
+import { fmtMoney } from "@shared/money";
 import type {
   AutomationLoop,
   AutomationStatus,
@@ -172,9 +173,10 @@ export function fmtClock(value: string | undefined): string {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-export function fmtUsd(value: number | undefined): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "$0.00";
-  return `$${value.toFixed(2)}`;
+/** A dollar amount (how spend is stored) as "≈€1.72 ($2.00)". Render the result
+ *  with <MoneyText> so the bracketed dollars show small and muted. */
+export function fmtCost(value: number | undefined, opts: { approx?: boolean } = {}): string {
+  return fmtMoney(value, opts);
 }
 
 export function fmtElapsed(sinceIso: string | undefined, nowMs: number): string {

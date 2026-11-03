@@ -9,7 +9,7 @@ import type {
   ScheduledJob,
 } from "@shared/types";
 import { AUTOMATION_HISTORY_CAP } from "@shared/types";
-import { fmtUsd, jobWorkerSummary } from "./presentation";
+import { fmtCost, jobWorkerSummary } from "./presentation";
 import { workerModelLabel } from "./worker-models";
 
 // What the Automations inbox says about a job, in plain words and with no DOM:
@@ -55,7 +55,7 @@ export function guardHold(job: ScheduledJob, nowMs: number): { headline: string;
   if (!monthlyCapReached(job, nowMs)) return null;
   return {
     headline: "Monthly cap reached",
-    body: `It has spent ${fmtUsd(monthSpentUsd(job, nowMs))} of its ${fmtUsd(job.guard?.monthlyCapUsd ?? 0)} cap this month, so it will not start again until next month or until you raise the cap.`,
+    body: `It has spent ${fmtCost(monthSpentUsd(job, nowMs))} of its ${fmtCost(job.guard?.monthlyCapUsd ?? 0)} cap this month, so it will not start again until next month or until you raise the cap.`,
   };
 }
 
@@ -298,7 +298,7 @@ export function plainSentence(job: ScheduledJob, names?: ReadonlyMap<string, str
   if (job.loop?.kind === "cadence") say(`, repeating ${everyPhrase(job.loop.everyMs ?? 60_000).toLowerCase()}`);
   const stop = job.loop?.stop ?? {};
   const limits: SentencePart[] = [];
-  if (typeof stop.budgetUsd === "number" && stop.budgetUsd > 0) limits.push({ text: fmtUsd(stop.budgetUsd), strong: true });
+  if (typeof stop.budgetUsd === "number" && stop.budgetUsd > 0) limits.push({ text: fmtCost(stop.budgetUsd), strong: true });
   if (typeof stop.maxIterations === "number" && stop.maxIterations > 1) {
     limits.push({ text: `${stop.maxIterations} runs` });
   }
@@ -528,7 +528,7 @@ export function monthStats(job: ScheduledJob, nowMs: number): string[] {
   else {
     const cap = job.guard?.monthlyCapUsd;
     const costFloor = totals.costIsWhole ? "" : floor;
-    stats.push(`${totals.estimated ? "est. " : ""}${fmtUsd(totals.costUsd)}${costFloor}${cap ? ` of ${fmtUsd(cap)} cap` : ""}`);
+    stats.push(`${totals.estimated ? "est. " : ""}${fmtCost(totals.costUsd, { approx: !totals.estimated })}${costFloor}${cap ? ` of ${fmtCost(cap)} cap` : ""}`);
   }
   if (totals.typicalMs !== null) stats.push(`${fmtSpan(totals.typicalMs)} typical`);
   return stats;
@@ -566,7 +566,7 @@ function factsOf(job: ScheduledJob, rec: AutomationRunRecord, nowMs: number): st
   if (rec.finishedAt) facts.push(fmtSpan(Date.parse(rec.finishedAt) - Date.parse(rec.startedAt)));
   const cost = rec.costUsd ?? 0;
   if (isStepsOnly(job) && cost === 0) facts.push("free");
-  else facts.push(`${cost > (rec.measuredCostUsd ?? 0) ? "est. " : ""}${fmtUsd(cost)}`);
+  else facts.push(`${cost > (rec.measuredCostUsd ?? 0) ? "est. " : ""}${fmtCost(cost, { approx: !(cost > (rec.measuredCostUsd ?? 0)) })}`);
   if (rec.iteration > 0) facts.push(`try ${rec.iteration + 1}`);
   if (rec.catchUp) facts.push("caught up");
   return facts;

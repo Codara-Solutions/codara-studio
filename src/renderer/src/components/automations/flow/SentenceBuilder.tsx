@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { CreateScheduledJobInput, ScheduledJob } from "@shared/types";
 import { costForecast } from "../cost-forecast";
+import { MoneyText } from "../MoneyText";
+import { fmtDollar, moneyRate, rateNote, usdFromEurField } from "@shared/money";
 import { fmtWhen } from "../inbox-model";
 import { WORKER_MODELS } from "../worker-models";
 import { PRESETS, type LoomPreset } from "./presets";
@@ -75,11 +77,11 @@ export default function SentenceBuilder({
           trigger,
           stepsOnly: false,
           budgetUsd: sentenceBudget(draft),
-          monthlyCapUsd: draft.monthlyCap.trim() && Number(draft.monthlyCap) > 0 ? Number(draft.monthlyCap) : undefined,
+          monthlyCapUsd: usdFromEurField(draft.monthlyCap),
         },
         nowMs,
       ),
-    [trigger, draft, nowMs],
+    [trigger, draft, nowMs, moneyRate()],
   );
   const dirty = Boolean(draft.name.trim() || draft.prompt.trim());
   const usesTime = draft.when === "daily" || draft.when === "weekdays";
@@ -174,12 +176,14 @@ export default function SentenceBuilder({
                 <span>tries</span>
               </>
             )}
-            <span>or at $</span>
+            <span>or at €</span>
             <Typed label="Budget" value={draft.budget} width={56} placeholder="none" onChange={(budget) => set({ budget })} />
+            <UsdUnder value={sentenceBudget(draft)} />
           </div>
           <div className="automation-builder__line">
-            <span>No new run past $</span>
+            <span>No new run past €</span>
             <Typed label="Monthly cap" value={draft.monthlyCap} width={56} placeholder="none" onChange={(monthlyCap) => set({ monthlyCap })} />
+            <UsdUnder value={usdFromEurField(draft.monthlyCap)} />
             <span>a month, and pause after</span>
             <Typed label="Pause after" value={draft.pauseAfter} width={48} placeholder="none" onChange={(pauseAfter) => set({ pauseAfter })} />
             <span>failed runs in a row.</span>
@@ -250,9 +254,9 @@ export default function SentenceBuilder({
         )}
         <h4>Cost</h4>
         <p className={forecast.open ? "is-open" : undefined}>
-          <b>{forecast.headline}</b>
+          <b><MoneyText text={forecast.headline} /></b>
         </p>
-        {forecast.detail && <p>{forecast.detail}</p>}
+        {forecast.detail && <p><MoneyText text={forecast.detail} /></p>}
         <h4>It can</h4>
         <p>
           Edit files and run commands in {draft.then === "folder" ? <b>{workspaceName}</b> : <>a separate copy of <b>{workspaceName}</b></>}.
@@ -282,6 +286,15 @@ function Choice<T extends string>({
         </option>
       ))}
     </select>
+  );
+}
+
+/** The dollars a euro field will store, in small print after it. */
+function UsdUnder({ value }: { value: number | undefined }): React.ReactElement | null {
+  return value === undefined ? null : (
+    <small className="automation-money-usd" title={rateNote()}>
+      ≈ {fmtDollar(value)}
+    </small>
   );
 }
 
