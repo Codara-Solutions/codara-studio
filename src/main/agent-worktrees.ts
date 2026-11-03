@@ -2546,6 +2546,12 @@ export async function removeAgentWorktree(
     await deps.audit({ ...auditBase, outcome: "refused", code: outcome.code }).catch(() => undefined);
     return outcome;
   }
+  // A retry that saved a newer ref (only the branch was left) replaces what
+  // a later retry is told, so it never reports the older commit.
+  if (outcome.removed !== true && typeof outcome.recoveryRef === "string") {
+    const before = recentRemovals.get(removalKey(scope.repoCwd, target.id));
+    if (before) rememberRemoval(scope.repoCwd, target, { ...before, ...outcome, removed: true, alreadyRemoved: false });
+  }
   if (outcome.removed === true) {
     rememberRemoval(scope.repoCwd, target, outcome);
     deps.sendAgentEvent({
@@ -2604,6 +2610,9 @@ async function removeLocked(
   }
   const warnings = [...verdict.warnings];
   let recoveryRef: string | null = null;
+  // The commit `recoveryRef` holds, when the removal saved one without a
+  // verified tip of its own (only the branch was left).
+  let savedTip: string | null = null;
   let branchDeleted = false;
   let branchKept: string | null = null;
 
@@ -2697,7 +2706,8 @@ async function removeLocked(
         // plain name with an older commit; the branch goes only once its own
         // tip is saved.
         recoveryRef = await saveRecoveryRef(repo, `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}`, provenTip);
-        if (!recoveryRef) {
+        if (recoveryRef) savedTip = provenTip;
+        else {
           branchKept = "RECOVERY_REF_FAILED";
           provenTip = null;
         }
@@ -2739,7 +2749,7 @@ async function removeLocked(
     branch,
     branchDeleted,
     ...(branchKept ? { branchKeptReason: branchKept } : {}),
-    ...(verdict.tip ? { verifiedCommit: verdict.tip } : {}),
+    ...(verdict.tip ? { verifiedCommit: verdict.tip } : savedTip ? { verifiedCommit: savedTip } : {}),
     ...(verdict.proof ? { proof: verdict.proof } : {}),
     ...(verdict.target ? { target: verdict.target } : {}),
     ...(verdict.pullRequest ? { pullRequest: verdict.pullRequest } : {}),

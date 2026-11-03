@@ -837,6 +837,36 @@ async function main() {
     assert.equal(git(repo, ["rev-parse", flipped.recoveryRef]), flipA);
     assert.equal(refExists(repo, `${todayRef(flip.workspaceId)}-4`), false, "the newest name holds the latest save");
 
+    // The row outlived a removal that kept its branch; the branch moved on
+    // and a retry saved its new tip: a later retry reports that one, not the
+    // first removal's.
+    const stale = await aw.createAgentWorktree(terminalAgent, { branch: "agent/stale-answer" }, deps);
+    const staleA = commitFile(stale.path, "s.txt", "a\n", "stale a");
+    landOnMain("agent/stale-answer");
+    const keepUpdate = deps.updateState;
+    deps.updateState = async () => {
+      throw new Error("disk full");
+    };
+    let staleFirst;
+    try {
+      staleFirst = await aw.removeAgentWorktree(terminalAgent, { workspaceId: stale.workspaceId, deleteBranch: false }, deps);
+    } finally {
+      deps.updateState = keepUpdate;
+    }
+    assert.equal(staleFirst.removed, true, JSON.stringify(staleFirst));
+    assert.equal(staleFirst.verifiedCommit, staleA);
+    const staleB = git(repo, ["commit-tree", `${staleA}^{tree}`, "-p", staleA, "-m", "stale b"]);
+    git(repo, ["update-ref", "refs/heads/agent/stale-answer", staleB]);
+    landOnMain("agent/stale-answer");
+    const staleSecond = await aw.removeAgentWorktree(terminalAgent, { workspaceId: stale.workspaceId }, deps);
+    assert.equal(staleSecond.branchDeleted, true, JSON.stringify(staleSecond));
+    assert.equal(staleSecond.recoveryRef, `${todayRef(stale.workspaceId)}-2`);
+    assert.equal(staleSecond.verifiedCommit, staleB, "the commit the new ref holds");
+    const staleThird = await aw.removeAgentWorktree(terminalAgent, { workspaceId: stale.workspaceId }, deps);
+    assert.equal(staleThird.alreadyRemoved, true, JSON.stringify(staleThird));
+    assert.equal(staleThird.recoveryRef, staleSecond.recoveryRef, "a later retry names the newest save");
+    assert.equal(staleThird.verifiedCommit, staleB);
+
     // No free name at all: the branch stays.
     const full = await aw.createAgentWorktree(terminalAgent, { branch: "agent/no-free-name" }, deps);
     const fullTip = commitFile(full.path, "f.txt", "f\n", "full");
