@@ -156,7 +156,7 @@ model's only behaviour, and a `Bug` flag puts the old code back.
    window (a `.env`, notes, test output) is lost. A tab or terminal opened in
    it is not seen (the window #123 declined as tiny); a commit made in it
    leaves the folder gone and the branch kept. The agent removal has the same
-   window (`agent-worktrees.ts:2634`). Likelihood: low; the window is a
+   window (`agent-worktrees.ts:2653`). Likelihood: low; the window is a
    renderer round trip (up to 5 s) and a few git calls, after 30 quiet
    minutes. Fix `aside`: rename the folder away first (atomic, so nothing new
    can open it by its path), check everything again on the moved folder, and
@@ -202,7 +202,7 @@ model's only behaviour, and a `Bug` flag puts the old code back.
    at its folder.
 4. **The agent removal does not scan processes under the lock**. The
    re-check in `removeLocked` passes `scanProcesses: false`
-   (`agent-worktrees.ts:2612`); the lock can take up to 60 s, and a process
+   (`agent-worktrees.ts:2631`); the lock can take up to 60 s, and a process
    started in the worktree meanwhile is not seen. The automatic removal
    scans under the lock. Likelihood: low. Fix `rescan`: scan processes in
    the locked re-check too.
