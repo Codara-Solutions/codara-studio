@@ -491,6 +491,20 @@ async function agentWorktreeProbes(wt) {
     writeFileSync(envFile, "B=2\n");
     require("node:fs").utimesSync(envFile, 1_700_000_000, 1_700_000_000);
     assert.notStrictEqual(await wt.worktreeFingerprint(printed.path), print2, "a write that hides its time still shows");
+    // An edit to a tracked file git status is told to skip still shows.
+    git(printed.path, ["update-index", "--assume-unchanged", "shared.txt"]);
+    const print3 = await wt.worktreeFingerprint(printed.path);
+    writeFileSync(path.join(printed.path, "shared.txt"), "edited where status cannot see\n");
+    assert.notStrictEqual(await wt.worktreeFingerprint(printed.path), print3, "a hidden tracked edit counts");
+    git(printed.path, ["update-index", "--no-assume-unchanged", "shared.txt"]);
+    git(printed.path, ["checkout", "--", "shared.txt"]);
+    // A setup link released inside an ignored folder that then holds nothing
+    // is no change.
+    mkdirSync(path.join(printed.path, "node_modules", "linked-only"), { recursive: true });
+    symlinkSync(scratch, path.join(printed.path, "node_modules", "linked-only", "shared"), "dir");
+    const print4 = await wt.worktreeFingerprint(printed.path);
+    rmSync(path.join(printed.path, "node_modules", "linked-only", "shared"));
+    assert.strictEqual(await wt.worktreeFingerprint(printed.path), print4, "an emptied folder is not a change");
     if (process.platform !== "win32" && process.getuid?.() !== 0) {
       const sealed = path.join(printed.path, "node_modules", "pkg");
       require("node:fs").chmodSync(sealed, 0o000);
@@ -539,6 +553,10 @@ async function agentWorktreeProbes(wt) {
     stuck = await wt.restoreAsideWorktrees(repo, [printed.path]);
     assert.deepStrictEqual(stuck.restored, [printed.path]);
     assert.ok(await wt.isRegisteredWorktree(repo, printed.path));
+    // Without a row too: git still lists it under its own name.
+    execFileSync("mv", [printed.path, asideOf(printed.path)]);
+    stuck = await wt.restoreAsideWorktrees(repo, []);
+    assert.deepStrictEqual(stuck.restored, [printed.path], "found through git's listing of its own name");
 
     // A nested repository committed as a bare gitlink, with no .gitmodules,
     // is a populated submodule to git's worktree removal.

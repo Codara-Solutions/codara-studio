@@ -522,7 +522,12 @@ export async function restoreAsideWorktrees(
   const restored: string[] = [];
   const stuck: string[] = [];
   const registrations = await listWorktreeRegistrations(repoCwd).catch(() => [] as WorktreeRegistration[]);
-  const asides = new Set<string>(registrations.map((entry) => entry.path).filter((path) => originalOfAside(path) !== null));
+  const asides = new Set<string>();
+  for (const entry of registrations) {
+    // Listed under its aside name (moved, not deleted), or under its own
+    // name with the folder aside (stopped before git noted the move).
+    asides.add(originalOfAside(entry.path) !== null ? entry.path : asidePathFor(entry.path));
+  }
   for (const path of paths) asides.add(asidePathFor(resolve(path)));
   for (const aside of asides) {
     const original = originalOfAside(aside);
@@ -582,11 +587,13 @@ export async function worktreeFingerprint(worktreePath: string, maxEntries = FIN
       if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
       throw err;
     });
-  const walk = async (relative: string, info: Awaited<ReturnType<typeof statOf>>): Promise<void> => {
+  // Files only: a folder holds no data of its own, and one left empty once
+  // setup's links are released drops out of git's listing.
+  const walk = async (code: string, relative: string, info: Awaited<ReturnType<typeof statOf>>): Promise<void> => {
     budget -= 1;
     if (budget < 0) throw new Error("It holds too many files to check again before deleting it.");
     if (!info) {
-      hash.update(`${relative}\0-\0`);
+      hash.update(`${code}\0${relative}\0-\0`);
       return;
     }
     if (info.isSymbolicLink()) return;
@@ -594,14 +601,13 @@ export async function worktreeFingerprint(worktreePath: string, maxEntries = FIN
       // The change time and inode too: a write that keeps the size and sets
       // the old modification time back, or a file replaced by another,
       // still shows.
-      hash.update(`${relative}\0f${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.ino}\0`);
+      hash.update(`${code}\0${relative}\0${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.ino}\0`);
       return;
     }
-    hash.update(`${relative}\0d\0`);
     const absolute = join(worktreePath, relative);
     const names = (await readdir(absolute)).sort();
     const infos = await Promise.all(names.map((name) => statOf(join(absolute, name))));
-    for (const [index, name] of names.entries()) await walk(join(relative, name), infos[index]);
+    for (const [index, name] of names.entries()) await walk(code, join(relative, name), infos[index]);
   };
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
@@ -610,10 +616,17 @@ export async function worktreeFingerprint(worktreePath: string, maxEntries = FIN
     const path = record.slice(3).replace(/\/+$/, "");
     // A rename or copy carries its source in the next record.
     if (code[0] === "R" || code[0] === "C") index += 1;
-    const info = await statOf(join(worktreePath, path));
-    if (info?.isSymbolicLink()) continue;
-    hash.update(`${code}\0`);
-    await walk(path, info);
+    await walk(code, path, await statOf(join(worktreePath, path)));
+  }
+  // Tracked files git status does not look at (assume-unchanged,
+  // skip-worktree): an edit to one shows nowhere else.
+  const { stdout: tagged } = await runGit(worktreePath, ["ls-files", "-v", "-z"]);
+  for (const record of tagged.split("\0")) {
+    if (record.length < 3) continue;
+    const tag = record[0];
+    if (tag !== "S" && tag !== "s" && tag === tag.toUpperCase()) continue;
+    const path = record.slice(2);
+    await walk(`h${tag}`, path, await statOf(join(worktreePath, path)));
   }
   return hash.digest("hex");
 }

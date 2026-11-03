@@ -511,7 +511,7 @@ export async function removeCleanupWorktrees(
         // again. One that cannot go back is named.
         const aside = await restoreAsideWorktrees(
           repo.root,
-          repo.workspaces.map((workspace) => workspace.cwd),
+          [...repo.workspaces.map((workspace) => workspace.cwd), ...repoItems.map((item) => item.path)],
         );
         repo.registrations = (await listWorktrees(repo.root)).registrations;
         const ctx = await contextFor(
