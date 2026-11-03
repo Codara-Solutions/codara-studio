@@ -234,7 +234,17 @@ async function pickCheckoutDirName(
   // the default file systems ignore it.
   const fold = (path: string) =>
     process.platform === "win32" || process.platform === "darwin" ? path.toLowerCase() : path;
-  const real = (path: string) => realpath(path).catch(() => resolve(path));
+  // Through the nearest folder that exists: the root, or a row's parent,
+  // may be gone while a link above it still leads elsewhere.
+  const real = async (path: string): Promise<string> => {
+    const rest: string[] = [];
+    for (let at = resolve(path); ; at = dirname(at)) {
+      const found = await realpath(at).catch(() => null);
+      if (found !== null) return join(found, ...rest.reverse());
+      if (dirname(at) === at) return resolve(path);
+      rest.push(basename(at));
+    }
+  };
   const roots = new Set([fold(resolve(worktreesRoot)), fold(await real(worktreesRoot))]);
   const taken = new Set<string>();
   for (const path of takenPaths) {

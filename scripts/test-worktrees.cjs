@@ -145,19 +145,35 @@ async function main() {
     git(repo, ["branch", "-D", "row-out"]);
     if (process.platform !== "win32") {
       // A row that spells the folder through a link to the same place.
-      const alias = path.join(path.dirname(worktreesRoot), "worktrees-alias");
+      const alias = `${worktreesRoot}-alias`;
       require("node:fs").symlinkSync(worktreesRoot, alias);
-      const viaLink = await wt.createCopyWorktree({
-        repoCwd: repo,
-        worktreesRoot,
-        newBranch: "row-link",
-        takenPaths: [path.join(alias, "row-link")],
-      });
-      assert.ok(viaLink.ok, `create failed: ${viaLink.ok ? "" : viaLink.error}`);
-      assert.strictEqual(path.basename(viaLink.path), "row-link-2", "a row's folder spelled through a link is skipped");
-      git(repo, ["worktree", "remove", viaLink.path]);
-      git(repo, ["branch", "-D", "row-link"]);
-      require("node:fs").rmSync(alias);
+      try {
+        const viaLink = await wt.createCopyWorktree({
+          repoCwd: repo,
+          worktreesRoot,
+          newBranch: "row-link",
+          takenPaths: [path.join(alias, "row-link")],
+        });
+        assert.ok(viaLink.ok, `create failed: ${viaLink.ok ? "" : viaLink.error}`);
+        assert.strictEqual(path.basename(viaLink.path), "row-link-2", "a row's folder spelled through a link is skipped");
+        git(repo, ["worktree", "remove", viaLink.path]);
+        git(repo, ["branch", "-D", "row-link"]);
+        // The root itself not made yet, under a link: the row's folder spelled
+        // the other way is still skipped.
+        const freshRoot = path.join(alias, "not-yet");
+        const viaMissing = await wt.createCopyWorktree({
+          repoCwd: repo,
+          worktreesRoot: freshRoot,
+          newBranch: "row-missing",
+          takenPaths: [path.join(worktreesRoot, "not-yet", "row-missing")],
+        });
+        assert.ok(viaMissing.ok, `create failed: ${viaMissing.ok ? "" : viaMissing.error}`);
+        assert.strictEqual(path.basename(viaMissing.path), "row-missing-2", "a root not made yet is resolved through its parents");
+        git(repo, ["worktree", "remove", viaMissing.path]);
+        git(repo, ["branch", "-D", "row-missing"]);
+      } finally {
+        require("node:fs").rmSync(alias, { force: true });
+      }
     }
 
     // A taken name must surface git's refusal, not silently rename.
