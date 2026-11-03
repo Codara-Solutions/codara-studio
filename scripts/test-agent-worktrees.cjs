@@ -823,6 +823,20 @@ async function main() {
     assert.equal(cutRetry.recoveryRef, cutResult.recoveryRef, "a retry names the newest save, not the cut-short one");
     assert.equal(cutRetry.verifiedCommit, newTip);
 
+    // Saved A, then B, and the branch went back to A: the newest name holds A.
+    const flip = await aw.createAgentWorktree(terminalAgent, { branch: "agent/flip" }, deps);
+    const flipA = commitFile(flip.path, "flip-a.txt", "a\n", "flip a");
+    const flipB = commitFile(flip.path, "flip-b.txt", "b\n", "flip b");
+    git(repo, ["update-ref", todayRef(flip.workspaceId), flipA]);
+    git(repo, ["update-ref", `${todayRef(flip.workspaceId)}-2`, flipB]);
+    git(flip.path, ["reset", "-q", "--hard", flipA]);
+    landOnMain("agent/flip");
+    const flipped = await aw.removeAgentWorktree(terminalAgent, { workspaceId: flip.workspaceId }, deps);
+    assert.equal(flipped.removed, true, JSON.stringify(flipped));
+    assert.equal(flipped.recoveryRef, `${todayRef(flip.workspaceId)}-3`);
+    assert.equal(git(repo, ["rev-parse", flipped.recoveryRef]), flipA);
+    assert.equal(refExists(repo, `${todayRef(flip.workspaceId)}-4`), false, "the newest name holds the latest save");
+
     // No free name at all: the branch stays.
     const full = await aw.createAgentWorktree(terminalAgent, { branch: "agent/no-free-name" }, deps);
     const fullTip = commitFile(full.path, "f.txt", "f\n", "full");

@@ -733,10 +733,25 @@ function dateStamp(date: Date): string {
 
 // Create-only: an existing ref of that name is never moved. A second removal
 // of the same id on the same day (one cut short left its ref) takes the next
-// free suffix. Null when no name could be written.
+// name above the newest one, so the newest name always holds the latest
+// save; it is reused only when it already holds this commit. Null when no
+// name could be written.
+const RECOVERY_REF_SUFFIXES = 20;
+
 export async function saveRecoveryRef(repoRoot: string, base: string, oid: string): Promise<string | null> {
-  for (let attempt = 1; attempt <= 20; attempt += 1) {
-    const ref = attempt === 1 ? base : `${base}-${attempt}`;
+  const nameFor = (n: number) => (n === 1 ? base : `${base}-${n}`);
+  let newest = 0;
+  let newestOid: string | null = null;
+  for (let n = 1; n <= RECOVERY_REF_SUFFIXES; n += 1) {
+    const at = await revParse(repoRoot, nameFor(n));
+    if (at) {
+      newest = n;
+      newestOid = at;
+    }
+  }
+  if (newest && newestOid === oid) return nameFor(newest);
+  for (let n = newest + 1; n <= RECOVERY_REF_SUFFIXES; n += 1) {
+    const ref = nameFor(n);
     try {
       await runGit(repoRoot, ["update-ref", ref, oid, ""]);
       return ref;
