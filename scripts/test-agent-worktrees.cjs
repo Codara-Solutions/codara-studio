@@ -660,6 +660,16 @@ async function main() {
     assert.equal(h.events.at(-1).kind, "removed");
     assert.ok(!refExists(repo, "refs/codara/removed-worktrees/2026-08-01/ws-old"), "recovery refs older than 30 days are pruned");
     assert.ok(refExists(repo, "refs/codara/removed-worktrees/2026-10-01/ws-recent"));
+    // A ref saved late on 2026-09-01 (UTC) lives 30 full days: it is still
+    // there 30 days and an hour after that day's midnight, gone a day later.
+    const lateDay = "refs/codara/removed-worktrees/2026-09-01/ws-late-day";
+    git(repo, ["update-ref", lateDay, mergedTip]);
+    await aw.pruneRecoveryRefs(repo, new Date("2026-10-01T01:00:00Z"));
+    assert.ok(refExists(repo, lateDay), "a ref saved at 23:00 is not pruned after 29 days and 2 hours");
+    await aw.pruneRecoveryRefs(repo, new Date("2026-10-02T00:00:00Z"));
+    assert.ok(refExists(repo, lateDay), "nor at exactly 30 days after the end of its day");
+    await aw.pruneRecoveryRefs(repo, new Date("2026-10-02T01:00:00Z"));
+    assert.ok(!refExists(repo, lateDay), "it goes once 30 days have passed since the end of its day");
 
     const retried = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId }, deps);
     assert.equal(retried.ok, true);

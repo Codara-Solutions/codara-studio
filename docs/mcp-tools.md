@@ -1152,7 +1152,7 @@ The `code` is the first blocker; `blockers` lists them all, and a dry run or
 | `WORKTREE_OPEN_TABS` | The window shows it or has tabs of it, a tab of any workspace shows a file inside it, or the window did not answer. | Close the tabs you opened on its files; otherwise ask you to close them. |
 
 Before deleting anything Codara saves the last commit as
-`refs/codara/removed-worktrees/<date>/<workspace id>`, kept for 30 days, and
+`refs/codara/removed-worktrees/<date>/<workspace id>`, kept 30 full days, and
 the result carries `recoverWith`, the command that restores the worktree. When
 git fails partway (it may already have deleted files), the ref stays and the
 refusal names it in `recoveryRef`. A second removal of the same worktree on the

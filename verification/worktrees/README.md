@@ -124,16 +124,16 @@ assumed empty, which is what today's code relies on.
 | `WorktreeLifecycle_finding_path_reuse` | NoCollateral | Finding 3, the agent removal |
 | `WorktreeLifecycle_finding_auto_rebind` | NoCollateral | Finding 3, the automatic removal (with `paths` on, without `bind`) |
 | `WorktreeLifecycle_finding_agent_process` | NeverRemovedInUse | Finding 4 |
-| `RecoveryWindow_finding_early_prune` | KeptForWindow | Finding 5 |
+| `RecoveryWindow_finding_early_prune` | pass | Finding 5, fixed: a ref lives 30 full days, counted from the end of its day |
 | `WorktreeLifecycle_finding_missing_ref` | pass | Finding 6, fixed |
 | `WorktreeLifecycle_finding_partial_ref` | pass | Finding 7, fixed |
 | `WorktreeLifecycle_limit_aside_handle` | NoIgnoredLost | The limit of finding 1's fix: an open handle still writes into the moved folder |
-| `RecoveryWindow_fixed` | pass | Finding 5's fix |
 | `WorktreeLifecycle_bug_owner_pane` | NeverRemovedInUse | Puts back the bug fixed in 8f142d5b: another agent's removal deleted a fresh worktree its creator was still working in |
 | `WorktreeLifecycle_bug_agent_tabs` | NeverRemovedInUse | Puts back finding 2 in the agent removal: it never asked the window about tabs |
 | `WorktreeLifecycle_bug_foreign_tab` | NeverRemovedInUse | Puts back finding 2 in the automatic removal: the window answered for the worktree's own workspace only |
 | `WorktreeLifecycle_bug_missing_ref` | RemovedReachable | Puts back finding 6: the folder-gone path ignored a failed ref save |
 | `WorktreeLifecycle_bug_partial_ref` | RemovedReachable | Puts back finding 7: a removal that failed halfway deleted its own ref |
+| `RecoveryWindow_bug_early_prune` | KeptForWindow | Puts back finding 5: the age was counted from the stamped day's midnight |
 | `WorktreeLifecycle_bug_own_branch_target` | NoUnsafeRemoved | Puts back the bug fixed in 49306a6f: the worktree's own branch named as the target made the ancestor proof hold for unmerged work |
 
 A `finding` config fails today and passes once its fix lands: flip its first
@@ -144,7 +144,7 @@ only behaviour and drop its `Fix` flag.
 
 Findings 1 to 4 are ranked by what can be lost; 5 to 7 break the promise
 that a removed head stays recoverable for 30 days. A fix not in the code yet is a `Fix` flag that
-`WorktreeLifecycle_fixed` (or `RecoveryWindow_fixed`) turns on; a fix in the code is the
+`WorktreeLifecycle_fixed` turns on; a fix in the code is the
 model's only behaviour, and a `Bug` flag puts the old code back.
 
 1. **The last check and the delete are two steps** (`late`). Under the lock,
@@ -156,7 +156,7 @@ model's only behaviour, and a `Bug` flag puts the old code back.
    window (a `.env`, notes, test output) is lost. A tab or terminal opened in
    it is not seen (the window #123 declined as tiny); a commit made in it
    leaves the folder gone and the branch kept. The agent removal has the same
-   window (`agent-worktrees.ts:2679`). Likelihood: low; the window is a
+   window (`agent-worktrees.ts:2681`). Likelihood: low; the window is a
    renderer round trip (up to 5 s) and a few git calls, after 30 quiet
    minutes. Fix `aside`: rename the folder away first (atomic, so nothing new
    can open it by its path), check everything again on the moved folder, and
@@ -202,17 +202,17 @@ model's only behaviour, and a `Bug` flag puts the old code back.
    at its folder.
 4. **The agent removal does not scan processes under the lock**. The
    re-check in `removeLocked` passes `scanProcesses: false`
-   (`agent-worktrees.ts:2657`); the lock can take up to 60 s, and a process
+   (`agent-worktrees.ts:2659`); the lock can take up to 60 s, and a process
    started in the worktree meanwhile is not seen. The automatic removal
    scans under the lock. Likelihood: low. Fix `rescan`: scan processes in
    the locked re-check too.
-5. **Recovery refs last 29 days and some hours, not 30.** The ref is named
-   after the UTC day it was made, and `pruneRecoveryRefs`
-   (`agent-worktrees.ts:2391`) measures 30 days from that day's midnight. A
-   ref saved at 23:00 UTC is pruned after 29 days and 1 to 2 hours, by the
-   next removal or cleanup in the repository. Likelihood: certain, harm
-   small. Fix `day_end`: count from the end of the stamped day (or store the
-   full time in the ref name).
+5. **Recovery refs lasted 29 days and some hours, not 30.** Fixed:
+   `pruneRecoveryRefs` (`agent-worktrees.ts:2391`) counts the 30 days from
+   the end of the UTC day the ref is named after. Before, it counted from
+   that day's midnight, so a ref saved at 23:00 UTC was pruned after 29 days
+   and 1 to 2 hours, by the next removal or cleanup in the repository
+   (`RecoveryWindow_bug_early_prune`). A ref may now live up to a day longer
+   than 30 days.
 6. **The folder-gone path ignored a failed ref save.** Fixed: it saves the
    ref as the rail does (`saveRecoveryRef`, the next free suffix when the
    name holds another commit) and keeps the branch when no name can be

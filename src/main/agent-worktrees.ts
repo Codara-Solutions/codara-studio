@@ -2399,7 +2399,9 @@ export async function pruneRecoveryRefs(repoCwd: string, now: Date): Promise<voi
     const [ref, oid] = line.trim().split(" ");
     if (!ref || !oid) continue;
     const date = ref.slice(RECOVERY_REF_PREFIX.length + 1).split("/")[0];
-    const at = Date.parse(`${date}T00:00:00Z`);
+    // The name gives only the UTC day it was saved; counting from the end of
+    // that day keeps a ref saved at 23:00 the full 30 days.
+    const at = Date.parse(`${date}T00:00:00Z`) + 24 * 60 * 60 * 1000;
     if (!Number.isFinite(at) || at >= cutoff) continue;
     await runGit(repoCwd, ["update-ref", "-d", ref, oid]).catch(() => undefined);
   }

@@ -3,7 +3,7 @@
 (* How long a recovery ref lives. Code: dateStamp (worktree-cleanup/       *)
 (* remove.ts, agent-worktrees.ts) names the ref after the UTC day it was   *)
 (* made, refs/codara/removed-worktrees/<YYYY-MM-DD>/<id>, and              *)
-(* pruneRecoveryRefs (agent-worktrees.ts) deletes it once midnight of that *)
+(* pruneRecoveryRefs (agent-worktrees.ts) deletes it once the end of that  *)
 (* day is more than RECOVERY_REF_RETENTION_DAYS (30) before now. Every     *)
 (* removal and cleanup in the repository runs the prune, so it can run at  *)
 (* any moment.                                                             *)
@@ -15,7 +15,7 @@ EXTENDS Naturals
 
 CONSTANTS
     Window,   \* days kept (30)
-    Fix       \* {"day_end"}: count the window from the end of the stamped day
+    Bug       \* {"day_start"}: the old code, counting from the day's midnight
 
 H == 24
 MaxTime == (Window + 2) * H
@@ -39,7 +39,7 @@ Tick == now < MaxTime /\ now' = now + 1 /\ UNCHANGED <<made, present, early>>
 (* pruneRecoveryRefs: `at < now - 30 days` deletes it. *)
 Prune ==
     /\ present
-    /\ LET at == IF "day_end" \in Fix THEN Stamp + H ELSE Stamp IN
+    /\ LET at == IF "day_start" \in Bug THEN Stamp ELSE Stamp + H IN
        at < now - Window * H
     /\ present' = FALSE
     /\ early' = (now - made < Window * H)
