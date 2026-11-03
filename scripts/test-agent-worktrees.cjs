@@ -922,6 +922,18 @@ async function main() {
     // Finding 3: a worktree removed with plain git keeps its row until the
     // rail looks again. A new worktree on the same branch name gets another
     // folder, and a removal asked for the old row leaves it alone.
+    // Storage could not read its file and started empty: no worktree is made,
+    // since a folder a row it could not read names could be handed out.
+    const loadState = deps.loadState;
+    deps.loadState = async () => ({ ...(await loadState()), [Symbol.for("codara.unreadableState")]: true });
+    let unreadable;
+    try {
+      unreadable = await aw.createAgentWorktree(terminalAgent, { branch: "agent/unreadable" }, deps);
+    } finally {
+      deps.loadState = loadState;
+    }
+    assert.equal(unreadable.code, "WORKTREE_STATE_FAILED", JSON.stringify(unreadable));
+    assert.throws(() => git(repo, ["rev-parse", "--verify", "--quiet", "refs/heads/agent/unreadable"]), "no branch is made");
     const before = await aw.createAgentWorktree(terminalAgent, { branch: "agent/reused" }, deps);
     commitFile(before.path, "r.txt", "r\n", "reused work");
     landOnMain("agent/reused");

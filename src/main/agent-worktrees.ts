@@ -40,7 +40,7 @@ import { deleteBranch, deleteBranchIfAt } from "./git-branches";
 import { listProcessesWithCommands, processChainIn } from "./owned-process-tree";
 import { setupProvidedEntries } from "./worktree-setup/links";
 import { holdsPullRequestCode, isPullRequestRef } from "./pull-request-code";
-import { sameFolder } from "./worktree-folders";
+import { isUnreadableState, sameFolder } from "./worktree-folders";
 import type { WorktreeSetupStatus } from "@shared/worktree-setup";
 import {
   insertCopyWorkspace,
@@ -1396,6 +1396,10 @@ async function createAgentWorktreeInner(
   try {
     outcome = await withRepoLock(repoCwd, async () => {
       const state = await deps.loadState();
+      // Without the rows a folder one still names could be handed out.
+      if (isUnreadableState(state)) {
+        return refusal("WORKTREE_STATE_FAILED", "Codara could not read its workspaces, so no worktree was made");
+      }
       const current: WorktreeScope = { ...scope, state };
       const registrations = await listWorktreeRegistrations(repoCwd).catch(() => [] as WorktreeRegistration[]);
       const registered = new Set<string>();

@@ -1120,11 +1120,11 @@ export async function createRailWorktree(
     checkoutIsRemote?: boolean;
     newBranch?: string;
   },
-  loadRows: () => Promise<readonly { cwd?: string | null; remote?: unknown }[]>,
+  loadState: () => Promise<{ workspaces: readonly { cwd?: string | null; remote?: unknown }[] }>,
 ): Promise<GitCopyWorktreeResult> {
   let takenPaths: string[];
   try {
-    takenPaths = await rowFolders(loadRows);
+    takenPaths = rowFolders(await loadState());
   } catch (err) {
     return { ok: false, error: `Codara could not read its workspaces, so no worktree was made: ${errorText(err)}` };
   }

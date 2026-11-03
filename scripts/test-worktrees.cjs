@@ -145,10 +145,12 @@ async function main() {
     git(repo, ["branch", "-D", "row-out"]);
     // Create copy from the rail: the rows' folders are skipped, and when the
     // rows cannot be read nothing is made.
-    const fromRail = await wt.createRailWorktree({ repoCwd: repo, worktreesRoot, newBranch: "rail-row" }, async () => [
-      { cwd: path.join(worktreesRoot, "rail-row") },
-      { cwd: path.join(worktreesRoot, "rail-row-2"), remote: { host: "elsewhere" } },
-    ]);
+    const fromRail = await wt.createRailWorktree({ repoCwd: repo, worktreesRoot, newBranch: "rail-row" }, async () => ({
+      workspaces: [
+        { cwd: path.join(worktreesRoot, "rail-row") },
+        { cwd: path.join(worktreesRoot, "rail-row-2"), remote: { host: "elsewhere" } },
+      ],
+    }));
     assert.ok(fromRail.ok, `create failed: ${fromRail.ok ? "" : fromRail.error}`);
     assert.strictEqual(path.basename(fromRail.path), "rail-row-2", "the rail skips a row's folder; a remote row names none here");
     git(repo, ["worktree", "remove", fromRail.path]);
@@ -160,6 +162,13 @@ async function main() {
     assert.match(unread.error, /could not read its workspaces/);
     assert.strictEqual(require("node:fs").existsSync(path.join(worktreesRoot, "rail-unread")), false);
     assert.throws(() => git(repo, ["rev-parse", "--verify", "--quiet", "refs/heads/rail-unread"]), "no branch is made");
+    // Storage starts empty, and marked, when its file could not be read.
+    const marked = await wt.createRailWorktree({ repoCwd: repo, worktreesRoot, newBranch: "rail-marked" }, async () => ({
+      workspaces: [],
+      [Symbol.for("codara.unreadableState")]: true,
+    }));
+    assert.strictEqual(marked.ok, false, "nothing is made from a state storage could not read");
+    assert.strictEqual(require("node:fs").existsSync(path.join(worktreesRoot, "rail-marked")), false);
     // A row naming the folder in other case: some file systems ignore case.
     const cased = await wt.createCopyWorktree({
       repoCwd: repo,

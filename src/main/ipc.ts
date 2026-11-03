@@ -2667,7 +2667,7 @@ export function registerIpc(): void {
       // nothing is made.
       const result = await createRailWorktree(
         { ...input, worktreesRoot: managedWorktreesRoot(codaraHome(), input.repoCwd) },
-        async () => (await loadState()).workspaces,
+        loadState,
       );
       if (result.ok) {
         // The new branch is a shared ref — refresh the source repo's panel.

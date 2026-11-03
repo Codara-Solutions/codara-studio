@@ -358,6 +358,16 @@ async function main() {
       assert.deepEqual(await test.dependencies.journal.listActive(), [], "no import is journaled");
     }
     {
+      // Storage could not read its file and started empty: the same.
+      const test = harness();
+      const load = test.dependencies.loadState;
+      test.dependencies.loadState = async () =>
+        test.calls.pullRequest >= 1 ? { ...(await load()), [Symbol.for("codara.unreadableState")]: true } : load();
+      const result = await service.startGitHubPullRequestWorkspace(request, test.dependencies);
+      assert.equal(result.code, "state-unreadable", JSON.stringify(result));
+      assert.equal(test.calls.create, 0, "no worktree is created from a state storage could not read");
+    }
+    {
       const test = harness();
       const [left, right] = await Promise.all([
         service.startGitHubPullRequestWorkspace(

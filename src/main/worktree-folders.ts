@@ -46,12 +46,25 @@ export async function sameFolder(a: string, b: string): Promise<boolean> {
 }
 
 /**
- * The folders the workspace rows name, for `reservedDirNames`. Throws when
- * the rows cannot be read: without them no folder may be handed out.
+ * Set by storage on the state it starts with when its file could not be read
+ * (not when there is none yet): that state has no rows, yet rows may exist.
+ * The mark goes once a save replaces the state.
  */
-export async function rowFolders(loadRows: () => Promise<readonly { cwd?: string | null; remote?: unknown }[]>): Promise<string[]> {
-  const rows = await loadRows();
-  return rows.filter((row) => !row.remote && typeof row.cwd === "string" && row.cwd).map((row) => row.cwd as string);
+export const UNREADABLE_STATE = Symbol.for("codara.unreadableState");
+
+export function isUnreadableState(state: object | null | undefined): boolean {
+  return Boolean(state && (state as Record<symbol, unknown>)[UNREADABLE_STATE] === true);
+}
+
+type RowsState = { workspaces: readonly { cwd?: string | null; remote?: unknown }[] };
+
+/**
+ * The folders the workspace rows name, for `reservedDirNames`. Throws when
+ * the rows could not be read: without them no folder may be handed out.
+ */
+export function rowFolders(state: RowsState): string[] {
+  if (isUnreadableState(state)) throw new Error("the workspace state file could not be read");
+  return state.workspaces.filter((row) => !row.remote && typeof row.cwd === "string" && row.cwd).map((row) => row.cwd as string);
 }
 
 /**

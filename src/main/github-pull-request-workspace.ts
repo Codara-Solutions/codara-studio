@@ -354,7 +354,7 @@ async function inspectAndCreate(
   // Without the rows nothing is written or created.
   let takenPaths: string[];
   try {
-    takenPaths = await rowFolders(async () => (await dependencies.loadState()).workspaces);
+    takenPaths = rowFolders(await dependencies.loadState());
   } catch (cause) {
     return failure(
       "validate",
