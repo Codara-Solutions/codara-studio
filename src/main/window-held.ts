@@ -1,5 +1,5 @@
 import { promises as fsp } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 // Whether the window holds a worktree folder before a removal deletes it: it
 // shows the worktree's workspace or has tabs of it, or a tab of any workspace
@@ -18,7 +18,7 @@ const fold = (path: string): string => (process.platform === "win32" ? path.toLo
 
 function inside(path: string, root: string): boolean {
   const rel = relative(fold(root), fold(path));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 // The real path of a file that may not exist (an editor tab on a deleted
@@ -40,6 +40,22 @@ export async function realpathLoose(path: string): Promise<string> {
   return resolve(path);
 }
 
+// Where a tab's file really is: its folder resolved, then each symlink
+// followed by hand, so a link whose target was deleted still points where the
+// buffer came from. Null for a loop.
+async function resolveFile(file: string, folderOf: (dir: string) => Promise<string>): Promise<string | null> {
+  let current = join(await folderOf(dirname(resolve(file))), basename(file));
+  for (let hops = 0; hops < 40; hops += 1) {
+    const stat = await fsp.lstat(current).catch(() => null);
+    if (!stat?.isSymbolicLink()) return current;
+    const target = await fsp.readlink(current).catch(() => null);
+    if (target === null) return null;
+    const next = resolve(dirname(current), target);
+    current = join(await realpathLoose(dirname(next)), basename(next));
+  }
+  return null;
+}
+
 export async function filesInsideFolders(files: unknown, folders: readonly string[]): Promise<boolean | null> {
   if (!Array.isArray(files) || files.length > MAX_TAB_FILES) return null;
   const roots = [...new Set([...folders.map((folder) => resolve(folder)), ...(await Promise.all(folders.map(realpathLoose)))])];
@@ -48,15 +64,17 @@ export async function filesInsideFolders(files: unknown, folders: readonly strin
     if (typeof file !== "string" || !isAbsolute(file)) continue;
     if (roots.some((root) => inside(resolve(file), root))) return true;
     // Files of one folder share its resolution.
-    const dir = dirname(resolve(file));
-    let realDir = parents.get(dir);
-    if (!realDir) {
-      realDir = realpathLoose(dir);
-      parents.set(dir, realDir);
-    }
-    const real = join(await realDir, basename(file));
-    const resolved = await fsp.realpath(real).catch(() => real);
-    if (roots.some((root) => inside(resolved, root) || inside(real, root))) return true;
+    const folderOf = (dir: string): Promise<string> => {
+      let real = parents.get(dir);
+      if (!real) {
+        real = realpathLoose(dir);
+        parents.set(dir, real);
+      }
+      return real;
+    };
+    const real = await resolveFile(file, folderOf);
+    if (real === null) return null;
+    if (roots.some((root) => inside(real, root))) return true;
   }
   return false;
 }

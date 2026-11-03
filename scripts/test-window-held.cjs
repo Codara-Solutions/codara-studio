@@ -37,6 +37,18 @@ async function main() {
     assert.equal(await filesInsideFolders([path.join(project, "current-fix", "src", "a.ts")], [tree]), true, "through a symlinked folder");
     assert.equal(await filesInsideFolders([path.join(other, "link-to-a.ts")], [tree]), true, "a symlinked file");
     assert.equal(await filesInsideFolders([path.join(project, "current-fix", "gone", "draft.md")], [tree]), true, "a file that is gone, under a symlinked folder");
+    fs.writeFileSync(path.join(tree, "..draft.md"), "draft\n");
+    fs.symlinkSync(path.join(tree, "..draft.md"), path.join(other, "draft-link.md"));
+    assert.equal(await filesInsideFolders([path.join(other, "draft-link.md")], [tree]), true, "a file whose name starts with two dots");
+    fs.writeFileSync(path.join(tree, "deleted.md"), "gone soon\n");
+    fs.symlinkSync(path.join(tree, "deleted.md"), path.join(other, "dangling.md"));
+    fs.symlinkSync(path.join(other, "dangling.md"), path.join(other, "chained.md"));
+    fs.rmSync(path.join(tree, "deleted.md"));
+    assert.equal(await filesInsideFolders([path.join(other, "dangling.md")], [tree]), true, "a link whose target inside was deleted");
+    assert.equal(await filesInsideFolders([path.join(other, "chained.md")], [tree]), true, "a chain of links ending inside");
+    fs.symlinkSync(path.join(other, "loop-b"), path.join(other, "loop-a"));
+    fs.symlinkSync(path.join(other, "loop-a"), path.join(other, "loop-b"));
+    assert.equal(await filesInsideFolders([path.join(other, "loop-a")], [tree]), null, "a link loop: cannot tell");
     assert.equal(await filesInsideFolders([path.join(other, "b.ts"), "relative/a.ts", 7, null], [tree]), false, "nothing inside");
     assert.equal(await filesInsideFolders([path.join(scratch, "worktrees", "fix-login-2", "a.ts")], [tree]), false, "a sibling with the same prefix");
     assert.equal(await filesInsideFolders(null, [tree]), null, "no list: cannot tell");
