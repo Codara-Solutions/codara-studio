@@ -531,8 +531,9 @@ const OPEN_FILE_TOOL = {
 };
 
 // Agent worktrees. The repository is the caller's own (its run or terminal
-// pane) unless codara_worktree_create names another rail workspace in
-// `workspace`, which the user approves once like a terminal there; the
+// pane) unless codara_worktree_create or codara_worktree_remove names another
+// rail workspace in `workspace`, which the user approves once like a terminal
+// there (a folder inside a workspace picks the repository it is in); the
 // policy is in src/main/agent-worktrees.ts and a refusal comes back as
 // {ok:false, code, hint}.
 const WORKTREE_TOOLS = [
@@ -589,6 +590,7 @@ const WORKTREE_TOOLS = [
       properties: {
         workspaceId: { type: "string", description: "Pass this or path." },
         path: { type: "string", description: "Absolute worktree path." },
+        workspace: { type: "string", description: "Its repository's workspace (id or folder), if not yours." },
         target: { type: "string", description: "Branch it merged into. Default its base." },
         deleteBranch: { type: "boolean", description: "Default true for a new branch." },
         discardIgnoredFiles: { type: "boolean", description: "Delete blocking ignored files such as .env.local." },

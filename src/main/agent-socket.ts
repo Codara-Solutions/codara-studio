@@ -179,6 +179,7 @@ import {
   type CrossWorkspaceDecision,
 } from "./cross-workspace-terminals";
 import { crossWorkspaceApprover } from "./cross-workspace-ipc";
+import type { CrossWorkspaceAction } from "@shared/cross-workspace";
 import {
   CODEX_MODEL_CATALOG,
   normalizeCodexModelId,
@@ -1636,7 +1637,7 @@ async function authorizeWorkspaceTarget(input: {
   requested: string;
   run: RunState | null;
   callerPaneId: string | null;
-  action: "terminal" | "worktree";
+  action: CrossWorkspaceAction;
   precheck?: (target: Workspace) => Promise<string | null>;
 }): Promise<({ ok: true } & CrossWorkspaceTarget) | { ok: false; response: JsonRpcResponse }> {
   const { id, run, callerPaneId, res } = input;
@@ -1691,7 +1692,7 @@ async function authorizeWorkspaceTarget(input: {
       target,
       agent: run ? "Cora" : (runtime && AGENT_NOTIFY_LABELS[runtime]) || null,
       requester: run ? `run:${run.id}` : `pane:${callerPaneId}`,
-      ...(input.action === "worktree" ? { action: "worktree" as const } : {}),
+      ...(input.action !== "terminal" ? { action: input.action } : {}),
     });
   } finally {
     res.off("close", onCallerGone);
@@ -1702,7 +1703,13 @@ async function authorizeWorkspaceTarget(input: {
   if (callerGone || res.destroyed || res.socket?.destroyed) {
     return fail(
       ERR_INTERNAL,
-      `the caller disconnected before the ${input.action === "worktree" ? "worktree was made" : "terminal opened"}`,
+      `the caller disconnected before the ${
+        input.action === "worktree"
+          ? "worktree was made"
+          : input.action === "worktree-remove"
+            ? "worktree was removed"
+            : "terminal opened"
+      }`,
     );
   }
   // The user allowed this folder: if the workspace moved while the card
@@ -2901,6 +2908,7 @@ async function handleWorktree(
             ["deleteBranch", "boolean"],
             ["discardIgnoredFiles", "boolean"],
             ["dryRun", "boolean"],
+            ["workspace", "string"],
           ];
   for (const [key, type] of checks) {
     const problem = optionalTypedParam(params, key, type);
@@ -2943,34 +2951,46 @@ async function handleWorktree(
         ),
       );
     }
-    if (method === "worktree.create") {
-      // Another workspace's repository, under the same consent as a terminal
-      // there; the worktree records who asked, so its row shows them.
-      let creator: WorktreeCaller = caller;
+    // Another workspace's repository, under the same consent as a terminal
+    // there; a worktree made this way records who asked, so its row shows
+    // them. A folder inside a workspace of several repositories picks one.
+    const placeIn = async (
+      action: "worktree" | "worktree-remove",
+    ): Promise<{ ok: true; caller: WorktreeCaller } | { ok: false; response: JsonRpcResponse }> => {
       const requested = str("workspace");
-      if (requested) {
-        const gate = await gateCaller(caller, deps, { mutation: true });
-        if ("ok" in gate && gate.ok === false) return successResponse(id, gate);
-        const run = caller.runId ? await (await getRunStore()).getRun(caller.runId) : null;
-        const placed = await authorizeWorkspaceTarget({
-          params,
-          id,
-          authKind,
-          res,
-          requested,
-          run,
-          callerPaneId: caller.paneId ?? null,
-          action: "worktree",
-        });
-        if (!placed.ok) return placed.response;
-        if (placed.cross) {
-          creator = {
-            ...caller,
-            workspaceId: placed.target.id,
-            origin: { workspaceId: placed.cross.callerId, workspaceName: placed.cross.callerName },
-          };
-        }
-      }
+      if (!requested) return { ok: true, caller };
+      const gate = await gateCaller(caller, deps, { mutation: true });
+      if ("ok" in gate && gate.ok === false) return { ok: false, response: successResponse(id, gate) };
+      const run = caller.runId ? await (await getRunStore()).getRun(caller.runId) : null;
+      const placed = await authorizeWorkspaceTarget({
+        params,
+        id,
+        authKind,
+        res,
+        requested,
+        run,
+        callerPaneId: caller.paneId ?? null,
+        action,
+      });
+      if (!placed.ok) return placed;
+      return {
+        ok: true,
+        caller: {
+          ...caller,
+          ...(placed.cross
+            ? {
+                workspaceId: placed.target.id,
+                origin: { workspaceId: placed.cross.callerId, workspaceName: placed.cross.callerName },
+              }
+            : {}),
+          ...(placed.folder ? { workspaceId: placed.target.id, repoFolder: placed.folder } : {}),
+        },
+      };
+    };
+    if (method === "worktree.create") {
+      const placed = await placeIn("worktree");
+      if (!placed.ok) return placed.response;
+      const creator = placed.caller;
       return successResponse(
         id,
         await createAgentWorktree(
@@ -2996,10 +3016,12 @@ async function handleWorktree(
     if (path && !isAbsolute(path)) {
       return errorResponse(id, ERR_INVALID_PARAMS, "path must be absolute");
     }
+    const placed = await placeIn("worktree-remove");
+    if (!placed.ok) return placed.response;
     return successResponse(
       id,
       await removeAgentWorktree(
-        caller,
+        placed.caller,
         {
           ...(workspaceId ? { workspaceId } : {}),
           ...(path ? { path } : {}),
