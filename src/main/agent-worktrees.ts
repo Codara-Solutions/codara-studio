@@ -2482,8 +2482,24 @@ export async function removeAgentWorktree(
   if (!workspace) {
     const id = input.workspaceId;
     const remembered = id ? recentRemovals.get(removalKey(scope.repoCwd, id)) : undefined;
-    if (remembered) return { ...remembered, alreadyRemoved: true, removed: false };
     const recovery = id ? await findRecoveryRef(scope.repoCwd, id) : null;
+    if (remembered) {
+      // A later attempt, even a failed one, may have saved a newer ref than
+      // the remembered result names: the newest save is the answer.
+      const newer = recovery && recovery.ref !== remembered.recoveryRef ? recovery : null;
+      return {
+        ...remembered,
+        alreadyRemoved: true,
+        removed: false,
+        ...(newer
+          ? {
+              recoveryRef: newer.ref,
+              verifiedCommit: newer.oid,
+              recoverWith: `git -C ${scope.repoCwd} worktree add ${String(remembered.path ?? "<folder>")} -b ${String(remembered.branch ?? "<branch>")} ${newer.ref}`,
+            }
+          : {}),
+      };
+    }
     if (id && recovery) {
       return {
         ok: true,
@@ -2723,6 +2739,16 @@ async function removeLocked(
     }
   }
 
+  if (verdict.alreadyRemoved && !recoveryRef && !(await revParse(repo, `refs/heads/${branch}`))) {
+    // An earlier attempt deleted the branch but could not drop the row: its
+    // ref is what is left to recover from.
+    const earlier = await findRecoveryRef(repo, workspace.id);
+    if (earlier) {
+      recoveryRef = earlier.ref;
+      savedTip = earlier.oid;
+    }
+  }
+
   await pruneRecoveryRefs(repo, deps.now()).catch(() => undefined);
 
   try {
@@ -2735,8 +2761,9 @@ async function removeLocked(
   }
   deps.invalidateGitCache(repo);
 
+  const branchLeft = recoveryRef && !branchDeleted ? await revParse(repo, `refs/heads/${branch}`) : null;
   const recoverWith = recoveryRef
-    ? branchDeleted
+    ? !branchLeft
       ? `git -C ${repo} worktree add ${workspace.cwd} -b ${branch} ${recoveryRef}`
       : `git -C ${repo} worktree add ${workspace.cwd} ${branch}`
     : null;

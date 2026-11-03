@@ -777,30 +777,33 @@ async function main() {
       git(repo, ["merge", "-q", "--ff-only", branch]);
       git(repo, ["push", "-q", "origin", "main"]);
     };
-    // git gives up halfway (a folder it cannot delete in): it has deleted
-    // files and dropped the registration, so the ref may be the last copy.
-    const partial = await aw.createAgentWorktree(terminalAgent, { branch: "agent/partial" }, deps);
-    commitFile(partial.path, "a-first.txt", "a\n", "first");
-    const partialTip = commitFile(partial.path, "stuck/keep.txt", "k\n", "stuck");
-    landOnMain("agent/partial");
-    fs.chmodSync(path.join(partial.path, "stuck"), 0o555);
-    let partialResult;
-    try {
-      partialResult = await aw.removeAgentWorktree(terminalAgent, { workspaceId: partial.workspaceId }, deps);
-    } finally {
-      fs.chmodSync(path.join(partial.path, "stuck"), 0o755);
+    // (A folder mode cannot stop root, and Windows ignores it.)
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      // git gives up halfway (a folder it cannot delete in): it has deleted
+      // files and dropped the registration, so the ref may be the last copy.
+      const partial = await aw.createAgentWorktree(terminalAgent, { branch: "agent/partial" }, deps);
+      commitFile(partial.path, "a-first.txt", "a\n", "first");
+      const partialTip = commitFile(partial.path, "stuck/keep.txt", "k\n", "stuck");
+      landOnMain("agent/partial");
+      fs.chmodSync(path.join(partial.path, "stuck"), 0o555);
+      let partialResult;
+      try {
+        partialResult = await aw.removeAgentWorktree(terminalAgent, { workspaceId: partial.workspaceId }, deps);
+      } finally {
+        fs.chmodSync(path.join(partial.path, "stuck"), 0o755);
+      }
+      assert.equal(partialResult.ok, false, JSON.stringify(partialResult));
+      assert.equal(isRegistered(partial.path), false, "git dropped the registration although it failed");
+      assert.equal(partialResult.recoveryRef, todayRef(partial.workspaceId), JSON.stringify(partialResult));
+      assert.equal(git(repo, ["rev-parse", todayRef(partial.workspaceId)]), partialTip, "the ref of a failed removal stays");
+      // The rest of the folder goes by hand; a retry drops the row and finds
+      // the branch's tip already saved.
+      fs.rmSync(partial.path, { recursive: true, force: true });
+      const partialRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: partial.workspaceId }, deps);
+      assert.equal(partialRetry.ok, true, JSON.stringify(partialRetry));
+      assert.equal(partialRetry.branchDeleted, true);
+      assert.equal(git(repo, ["rev-parse", partialRetry.recoveryRef]), partialTip);
     }
-    assert.equal(partialResult.ok, false, JSON.stringify(partialResult));
-    assert.equal(isRegistered(partial.path), false, "git dropped the registration although it failed");
-    assert.equal(partialResult.recoveryRef, todayRef(partial.workspaceId), JSON.stringify(partialResult));
-    assert.equal(git(repo, ["rev-parse", todayRef(partial.workspaceId)]), partialTip, "the ref of a failed removal stays");
-    // The rest of the folder goes by hand; a retry drops the row and finds
-    // the branch's tip already saved.
-    fs.rmSync(partial.path, { recursive: true, force: true });
-    const partialRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: partial.workspaceId }, deps);
-    assert.equal(partialRetry.ok, true, JSON.stringify(partialRetry));
-    assert.equal(partialRetry.branchDeleted, true);
-    assert.equal(git(repo, ["rev-parse", partialRetry.recoveryRef]), partialTip);
 
     // The folder is gone and an earlier removal of it today, cut short after
     // its ref, left the plain name on an older commit: the branch's newer tip
@@ -866,6 +869,55 @@ async function main() {
     assert.equal(staleThird.alreadyRemoved, true, JSON.stringify(staleThird));
     assert.equal(staleThird.recoveryRef, staleSecond.recoveryRef, "a later retry names the newest save");
     assert.equal(staleThird.verifiedCommit, staleB);
+
+    // A failed attempt saved a newer ref after the remembered removal, then
+    // the row went by hand: a retry reports the newest save.
+    const late = await aw.createAgentWorktree(terminalAgent, { branch: "agent/late-save" }, deps);
+    const lateA = commitFile(late.path, "l.txt", "a\n", "late a");
+    landOnMain("agent/late-save");
+    deps.updateState = async () => {
+      throw new Error("disk full");
+    };
+    let lateFirst;
+    try {
+      lateFirst = await aw.removeAgentWorktree(terminalAgent, { workspaceId: late.workspaceId, deleteBranch: false }, deps);
+    } finally {
+      deps.updateState = keepUpdate;
+    }
+    assert.equal(lateFirst.verifiedCommit, lateA, JSON.stringify(lateFirst));
+    git(repo, ["worktree", "add", "-q", late.path, "agent/late-save"]);
+    const lateB = commitFile(late.path, "l2.txt", "b\n", "late b");
+    landOnMain("agent/late-save");
+    git(repo, ["update-ref", `${todayRef(late.workspaceId)}-2`, lateB]);
+    h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== late.workspaceId);
+    const lateRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: late.workspaceId }, deps);
+    assert.equal(lateRetry.alreadyRemoved, true, JSON.stringify(lateRetry));
+    assert.equal(lateRetry.recoveryRef, `${todayRef(late.workspaceId)}-2`, "the newest save, not the remembered one");
+    assert.equal(lateRetry.verifiedCommit, lateB);
+    assert.match(lateRetry.recoverWith, new RegExp(`-2$`));
+    git(repo, ["worktree", "remove", "--force", late.path]);
+    git(repo, ["branch", "-D", "agent/late-save"]);
+
+    // The branch went but the row could not be dropped: a retry still names
+    // the ref that holds the deleted branch's tip.
+    const kept = await aw.createAgentWorktree(terminalAgent, { branch: "agent/row-kept" }, deps);
+    const keptTip = commitFile(kept.path, "k.txt", "k\n", "row kept");
+    landOnMain("agent/row-kept");
+    deps.updateState = async () => {
+      throw new Error("disk full");
+    };
+    let keptFirst;
+    try {
+      keptFirst = await aw.removeAgentWorktree(terminalAgent, { workspaceId: kept.workspaceId }, deps);
+    } finally {
+      deps.updateState = keepUpdate;
+    }
+    assert.equal(keptFirst.branchDeleted, true, JSON.stringify(keptFirst));
+    const keptRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: kept.workspaceId }, deps);
+    assert.equal(keptRetry.alreadyRemoved, true, JSON.stringify(keptRetry));
+    assert.equal(keptRetry.recoveryRef, keptFirst.recoveryRef);
+    assert.equal(keptRetry.verifiedCommit, keptTip);
+    assert.match(keptRetry.recoverWith, / -b agent\/row-kept /, "the branch is gone, so recovery makes it again");
 
     // No free name at all: the branch stays.
     const full = await aw.createAgentWorktree(terminalAgent, { branch: "agent/no-free-name" }, deps);
