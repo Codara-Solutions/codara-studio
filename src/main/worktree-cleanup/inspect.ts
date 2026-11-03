@@ -427,20 +427,29 @@ export function heldByMaker(use: WorktreeInUse, finished: boolean, strict = fals
 
 /**
  * Whether the worktree's own work is in its base: merged by a pull request
- * or by content, or merged as an ancestor with a commit made since the
- * worktree was. A worktree with no commit of its own yet reads as merged
- * too, but its agent has not started, so its open tab still holds it.
+ * or by content, or merged as an ancestor with a commit of its own. A
+ * worktree with no commit of its own yet reads as merged too, but its agent
+ * has not started, so its open tab still holds it. Its own commit is a head
+ * past the commit its branch was created at (the branch's reflog); without
+ * a reflog, a head committed in a later second than the worktree was made.
  */
 export async function finishedWork(
   repoRoot: string,
   merge: { state: WorktreeMergeState; proof?: WorktreeMergeProof },
   head: string | null,
+  branch: string | null,
   workspaces: readonly Workspace[],
 ): Promise<boolean> {
   if (merge.state !== "merged") return false;
   if (merge.proof !== "ancestor") return true;
+  if (!head) return false;
+  if (branch) {
+    const log = await readGitText(repoRoot, ["reflog", "show", "--format=%H", `refs/heads/${branch}`, "--"]);
+    const start = log.split("\n").filter((line) => /^[0-9a-f]{40,64}$/i.test(line)).pop();
+    if (start) return start.toLowerCase() !== head.toLowerCase();
+  }
   const made = workspaces.map((workspace) => Date.parse(workspace.copyBranch?.createdAt ?? "")).filter(Number.isFinite);
-  if (!head || !made.length) return false;
+  if (!made.length) return false;
   const seconds = Number(await readGitText(repoRoot, ["log", "-1", "--format=%ct", head]));
   // Commit times are whole seconds: only a later second counts, so a base
   // commit made just before the worktree is never taken for its own.
@@ -768,7 +777,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   check.branchDeletable = Boolean(branch) && merge.state === "merged" && !isKeptBranch(branch!, merge.target);
 
   // A folder already gone holds nothing of the maker's: a merged branch is enough.
-  const finished = check.alreadyRemoved ? merge.state === "merged" : await finishedWork(repo.root, merge, head, workspaces);
+  const finished = check.alreadyRemoved ? merge.state === "merged" : await finishedWork(repo.root, merge, head, branch, workspaces);
   if (pending.length && !finished) inUse(pending.splice(0));
   if (check.alreadyRemoved) return finish();
 

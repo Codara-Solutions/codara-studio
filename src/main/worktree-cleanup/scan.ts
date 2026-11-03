@@ -112,7 +112,7 @@ async function rowFor(
   const uses = missing ? [] : await usageOf(usage, entry.path, real, workspaces);
   const clean = dirty !== null && dirty.tracked + dirty.untracked === 0 && !dirty.inProgress;
   const finished =
-    clean && uses.some((use) => !heldByMaker(use, true)) && (await finishedWork(repo.root, merge, head, workspaces));
+    clean && uses.some((use) => !heldByMaker(use, true)) && (await finishedWork(repo.root, merge, head, branch, workspaces));
   return {
     id: real,
     repoRoot: repo.root,

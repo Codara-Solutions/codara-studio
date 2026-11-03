@@ -269,7 +269,7 @@ async function changedWhileAside(
   const finished =
     found.some((use) => !heldByMaker(use, true)) &&
     !check.localWork &&
-    (await finishedWork(ctx.repo.root, check.merge, check.head, workspaces));
+    (await finishedWork(ctx.repo.root, check.merge, check.head, check.branch, workspaces));
   const uses = found.filter(
     (use) => !options.allowInUse?.has(use.kind) && heldByMaker(use, finished, ctx.requireKnownUsage),
   );

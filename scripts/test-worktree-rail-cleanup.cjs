@@ -847,6 +847,23 @@ async function main() {
       assert.equal(branchExists(repo, "feature/fresh-made"), true);
     });
 
+    await check("work committed in the same second the worktree was made is its own", async () => {
+      const quick = add("quick-commit", "feature/quick-commit");
+      const tip = commitFile(quick, "quick.txt", "quick\n", "quick work");
+      mergeIntoMain("feature/quick-commit");
+      // Made late in the second its own commit was made in.
+      const second = Number(git(repo, ["log", "-1", "--format=%ct", tip])) * 1000;
+      h.state.workspaces.push(
+        copyWorkspace("ws-quick-commit", quick, repo, "feature/quick-commit", { createdAt: new Date(second + 900).toISOString() }),
+      );
+      madeBy("ws-quick-commit");
+      const result = await withTab({ title: "coordinator", cwd: coordinator }, () =>
+        rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-quick-commit", mode: "manual" }),
+      );
+      assert.equal(result.status, "removed", result.message);
+      assert.equal(fs.existsSync(quick), false);
+    });
+
     await check("a folder removed by hand leaves the rail on its own while the maker's tab is open", async () => {
       // git worktree remove + branch -D, as an agent or the user does by hand.
       const byHand = mergedWith("by-hand", "feature/by-hand");
