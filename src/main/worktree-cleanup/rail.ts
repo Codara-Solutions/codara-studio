@@ -538,18 +538,21 @@ async function cleanUpRegistered(
   request: WorktreeRailCleanupRequest,
   options: RemoveOptions,
 ): Promise<WorktreeRailCleanupResult> {
-  // Neither automatic mode goes ahead on a branch git could not read.
-  if (request.mode !== "manual") {
-    const unread = await branchTip(repo.root, workspace.copyBranch?.branch ?? "").then(
-      () => null,
-      (err: unknown) => errorText(err),
-    );
-    if (unread) return refused(`${unread} Nothing was removed.`, workspace.name);
-  }
   const allowInUse = allowedUses(request.mode, await folderGone(path));
   const requireKnownUsage = request.mode === "auto-merged";
   const [check] = await checkCleanupTargets(deps, [{ repoRoot: repo.root, path }], { allowInUse, requireKnownUsage });
   if (!check) return refused("The worktree could not be checked.", workspace.name);
+  // Neither automatic mode goes ahead on a branch git could not read: the
+  // one the check judged (the worktree may have switched) and the row's.
+  if (request.mode !== "manual") {
+    for (const branch of new Set([check.branch, workspace.copyBranch?.branch].filter((name): name is string => Boolean(name)))) {
+      const unread = await branchTip(repo.root, branch).then(
+        () => null,
+        (err: unknown) => errorText(err),
+      );
+      if (unread) return refused(`${unread} Nothing was removed.`, workspace.name);
+    }
+  }
   const parentPresent = await parentHoldsFolders(path);
   const why =
     railRefusal(check, request, repo, parentPresent) ??

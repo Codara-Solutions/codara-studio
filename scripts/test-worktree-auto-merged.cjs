@@ -233,6 +233,23 @@ async function main() {
       assert.equal(branchExists(repo, entry.branch), true);
       assert.equal((await stateOf(entry.id)).autoRemoveMerged, true);
       await assertGone(entry);
+
+      // Offered, then the worktree switched to another merged branch, which
+      // git then could not read.
+      const switched = mergedWorktree("switch-branch");
+      assert.equal((await stateOf(switched.id)).autoRemoveMerged, true);
+      git(switched.dir, ["switch", "-q", "-c", "feature/switched-unread"]);
+      fs.writeFileSync(
+        path.join(bin, "git"),
+        `#!/bin/sh\ncase "$*" in *refs/heads/feature/switched-unread*) echo "fatal: unable to read" >&2; exit 128;; esac\nexec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+      process.env.PATH = `${bin}${path.delimiter}${pathBefore}`;
+      try {
+        await assertStays({ ...switched, branch: undefined }, /could not read the branch feature\/switched-unread/);
+      } finally {
+        process.env.PATH = pathBefore;
+      }
     });
 
     await check("regenerable ignored output does not hold a worktree back", async () => {
