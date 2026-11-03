@@ -31,7 +31,6 @@ import {
   listWorktreeRegistrations,
   populatedSubmodules,
   removeCopyWorktree,
-  asidePathFor,
   restoreAsideWorktrees,
   worktreeFingerprint,
   resolveDefaultBranch,
@@ -2669,13 +2668,8 @@ async function removeLocked(
   // A removal Studio did not finish may have left a folder aside: it goes
   // back first, and the unlocked check, which may have seen it gone, is
   // not trusted then. One that cannot go back blocks this removal.
-  // Only this repository's rows: another repository's removal may have its
-  // folder aside right now, under its own lock.
-  const rowPaths = latestState.workspaces
-    .filter((entry) => entry.copyBranch && resolve(entry.copyBranch.repoCwd) === resolve(workspace.copyBranch!.repoCwd))
-    .map((entry) => entry.cwd);
-  const aside = await restoreAsideWorktrees(repo, rowPaths);
-  if (aside.restored.length || aside.stuck.includes(asidePathFor(resolve(workspace.cwd)))) {
+  const aside = await restoreAsideWorktrees(repo);
+  if (aside.restored.length || aside.stuck.length) {
     return refusal(
       "WORKTREE_CHANGED",
       aside.stuck.length

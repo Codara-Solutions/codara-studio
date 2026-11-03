@@ -9,6 +9,18 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
+const leaveAside = (repoDir, dir, aside, how = "git") => {
+  // As a removal Studio stopped in the middle leaves it: moved, and noted
+  // in the repository's git folder.
+  if (how === "git") execFileSync("git", ["-C", repoDir, "worktree", "move", dir, aside]);
+  else require("node:fs").renameSync(dir, aside);
+  const common = path.resolve(repoDir, execFileSync("git", ["-C", repoDir, "rev-parse", "--git-common-dir"], { encoding: "utf8" }).trim());
+  const notes = path.join(common, "codara-aside");
+  require("node:fs").mkdirSync(notes, { recursive: true });
+  const name = `${require("node:crypto").createHash("sha256").update(path.resolve(aside)).digest("hex").slice(0, 24)}.json`;
+  require("node:fs").writeFileSync(path.join(notes, name), JSON.stringify({ original: path.resolve(dir), aside }));
+};
+
 function git(cwd, args) {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
@@ -676,7 +688,7 @@ async function main() {
     assert.ok(fs.existsSync(created.path) && !fs.existsSync(asideOf(created.path)));
     // Studio stopped between the move and the delete: the next removal puts
     // the folder back first and looks again.
-    git(repo, ["worktree", "move", created.path, asideOf(created.path)]);
+    leaveAside(repo, created.path, asideOf(created.path));
     refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
     assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
     assert.ok(isRegistered(created.path) && !fs.existsSync(asideOf(created.path)), "it is back where it was");
@@ -685,7 +697,7 @@ async function main() {
     // blocks the removal: the unlocked check saw it gone, and its row stays.
     if (process.platform !== "win32" && process.getuid?.() !== 0) {
       const stuckTree = await aw.createAgentWorktree(terminalAgent, { branch: "agent/stuck-aside" }, deps);
-      git(repo, ["worktree", "move", stuckTree.path, asideOf(stuckTree.path)]);
+      leaveAside(repo, stuckTree.path, asideOf(stuckTree.path));
       fs.chmodSync(path.dirname(stuckTree.path), 0o555);
       let stuckResult;
       try {

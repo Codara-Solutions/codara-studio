@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { lstat, readdir, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult } from "@shared/types";
 import { gitChildEnv } from "./git-env";
@@ -500,41 +500,63 @@ export function asidePathFor(worktreePath: string): string {
   return join(dirname(worktreePath), `.${basename(worktreePath)}${ASIDE_SUFFIX}`);
 }
 
-function originalOfAside(path: string): string | null {
-  const name = basename(path);
-  if (!name.startsWith(".") || !name.endsWith(ASIDE_SUFFIX)) return null;
-  const original = name.slice(1, -ASIDE_SUFFIX.length);
-  return original ? join(dirname(path), original) : null;
+// Studio's own note that it moved a folder aside, kept in the repository's
+// git folder (never in the folder itself) until the folder is deleted or
+// back: a folder of that name that Studio did not move is never touched.
+interface AsideNote {
+  original: string;
+  aside: string;
+}
+
+async function asideNotesDir(repoCwd: string): Promise<string> {
+  const common = (await runGit(repoCwd, ["rev-parse", "--git-common-dir"])).stdout.trim();
+  return join(resolve(repoCwd, common), "codara-aside");
+}
+
+function asideNoteName(aside: string): string {
+  return `${createHash("sha256").update(resolve(aside)).digest("hex").slice(0, 24)}.json`;
+}
+
+async function noteAside(repoCwd: string, note: AsideNote): Promise<void> {
+  const dir = await asideNotesDir(repoCwd);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, asideNoteName(note.aside)), JSON.stringify(note));
+}
+
+async function clearAsideNote(repoCwd: string, aside: string): Promise<void> {
+  const dir = await asideNotesDir(repoCwd).catch(() => null);
+  if (dir) await rm(join(dir, asideNoteName(aside)), { force: true }).catch(() => undefined);
 }
 
 /**
- * Puts back every folder a removal left aside (Studio stopped between the
- * move and the delete or the move back): those git lists under an aside
- * name, and the aside twin of each folder in `paths` (git may have dropped
- * its registration, or not updated it yet). Runs under the repository lock
- * before a removal or cleanup looks at anything. `restored` lists the
- * folders put back; `stuck` the aside folders that could not be.
+ * Puts back every folder a removal of this repository left aside (Studio
+ * stopped between the move and the delete or the move back), as its notes
+ * say. Runs under the repository lock before a removal or cleanup looks at
+ * anything. `restored` lists the folders put back; `stuck` the aside
+ * folders that could not be.
  */
-export async function restoreAsideWorktrees(
-  repoCwd: string,
-  paths: readonly string[] = [],
-): Promise<{ restored: string[]; stuck: string[] }> {
+export async function restoreAsideWorktrees(repoCwd: string): Promise<{ restored: string[]; stuck: string[] }> {
   const restored: string[] = [];
   const stuck: string[] = [];
-  const registrations = await listWorktreeRegistrations(repoCwd).catch(() => [] as WorktreeRegistration[]);
-  const asides = new Set<string>();
-  for (const entry of registrations) {
-    // Listed under its aside name (moved, not deleted), or under its own
-    // name with the folder aside (stopped before git noted the move).
-    asides.add(originalOfAside(entry.path) !== null ? entry.path : asidePathFor(entry.path));
-  }
-  for (const path of paths) asides.add(asidePathFor(resolve(path)));
-  for (const aside of asides) {
-    const original = originalOfAside(aside);
-    if (!original || (await pathIsAbsent(aside))) continue;
-    const back = await putBackAside(repoCwd, aside, original);
-    if (back.ok) restored.push(original);
-    else stuck.push(aside);
+  const dir = await asideNotesDir(repoCwd).catch(() => null);
+  const names = dir ? await readdir(dir).catch(() => [] as string[]) : [];
+  for (const name of names) {
+    let note: AsideNote | null = null;
+    try {
+      const parsed = JSON.parse(await readFile(join(dir!, name), "utf8")) as Partial<AsideNote>;
+      if (typeof parsed.original === "string" && typeof parsed.aside === "string") note = parsed as AsideNote;
+    } catch {
+      note = null;
+    }
+    if (!note || asideNoteName(note.aside) !== name) continue;
+    if (await pathIsAbsent(note.aside)) {
+      // Deleted, or already back: nothing is left aside.
+      await clearAsideNote(repoCwd, note.aside);
+      continue;
+    }
+    const back = await putBackAside(repoCwd, note.aside, note.original);
+    if (back.ok) restored.push(note.original);
+    else stuck.push(note.aside);
   }
   return { restored, stuck };
 }
@@ -552,6 +574,7 @@ async function putBackAside(repoCwd: string, aside: string, original: string): P
   const registered = await isRegisteredWorktree(repoCwd, aside);
   const back = await moveWorktree(repoCwd, aside, original, registered);
   if (!back.ok) return { ok: false, error: `It could not be moved back and is at ${aside}: ${back.error}` };
+  await clearAsideNote(repoCwd, aside);
   return { ok: true };
 }
 
@@ -807,6 +830,11 @@ export async function removeCopyWorktree(
     if (!(await pathIsAbsent(aside))) {
       return fail(`Another folder is where it would be moved aside: ${aside}. Move it away, then try again.`);
     }
+    try {
+      await noteAside(input.repoCwd, { original: resolve(original), aside });
+    } catch (err) {
+      return fail(`Its move aside could not be noted: ${errorText(err)}`);
+    }
     let moved: GitOpResult = { ok: false, error: "not moved" };
     for (const delayMs of backoffMs) {
       if (delayMs) await sleep(delayMs);
@@ -814,7 +842,10 @@ export async function removeCopyWorktree(
       if (moved.ok || !(BUSY_GIT_MSG.test(moved.error) || BUSY_FS_CODE.test(moved.error))) break;
       await release();
     }
-    if (!moved.ok) return fail(moved.error);
+    if (!moved.ok) {
+      if (await pathIsAbsent(aside)) await clearAsideNote(input.repoCwd, aside);
+      return fail(moved.error);
+    }
     let reason: string | null;
     try {
       reason = await input.aside.recheck(aside);
@@ -855,6 +886,7 @@ export async function removeCopyWorktree(
 
   // Best-effort: only this worktree's own registration, if one was left.
   await dropMissingWorktreeRegistration(input.repoCwd, work.worktreePath);
+  if (work !== input) await clearAsideNote(input.repoCwd, work.worktreePath);
   return finishBranch(input);
 }
 

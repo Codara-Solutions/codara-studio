@@ -12,6 +12,18 @@ const path = require("node:path");
 
 const ROOT = path.join(__dirname, "..");
 
+const leaveAside = (repoDir, dir, aside, how = "git") => {
+  // As a removal Studio stopped in the middle leaves it: moved, and noted
+  // in the repository's git folder.
+  if (how === "git") execFileSync("git", ["-C", repoDir, "worktree", "move", dir, aside]);
+  else require("node:fs").renameSync(dir, aside);
+  const common = path.resolve(repoDir, execFileSync("git", ["-C", repoDir, "rev-parse", "--git-common-dir"], { encoding: "utf8" }).trim());
+  const notes = path.join(common, "codara-aside");
+  require("node:fs").mkdirSync(notes, { recursive: true });
+  const name = `${require("node:crypto").createHash("sha256").update(path.resolve(aside)).digest("hex").slice(0, 24)}.json`;
+  require("node:fs").writeFileSync(path.join(notes, name), JSON.stringify({ original: path.resolve(dir), aside }));
+};
+
 function git(cwd, args) {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
@@ -431,7 +443,7 @@ async function main() {
 
     await check("a folder a stopped removal left aside goes back first", async () => {
       const aside = path.join(path.dirname(merged), `.${path.basename(merged)}.codara-removing`);
-      git(repo, ["worktree", "move", merged, aside]);
+      leaveAside(repo, merged, aside);
       const result = await removeMod.removeCleanupWorktrees(deps, { items: [item(merged)], deleteMergedBranches: true });
       assert.equal(result.outcomes[0].code, "CHANGED", JSON.stringify(result.outcomes[0]));
       assert.ok(fs.existsSync(merged) && !fs.existsSync(aside), "it is back where it was");

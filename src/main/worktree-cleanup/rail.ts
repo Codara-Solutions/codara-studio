@@ -686,7 +686,7 @@ export async function cleanUpRailWorkspace(
     // removeCleanupWorktrees, which takes the same lock itself.
     const registration = await withRepoLock(repo.root, async () => {
       // A folder an earlier removal left aside looked gone above.
-      const aside = await restoreAsideWorktrees(repo.root, repo.workspaces.map((entry) => entry.cwd));
+      const aside = await restoreAsideWorktrees(repo.root);
       if (aside.restored.length || aside.stuck.length) return { putBack: aside.stuck } as const;
       repo.registrations = (await listWorktrees(repo.root)).registrations;
       const found = await registrationOf(repo, workspace.cwd);

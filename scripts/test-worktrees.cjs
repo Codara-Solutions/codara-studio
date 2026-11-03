@@ -19,6 +19,18 @@ const {
 const os = require("node:os");
 const path = require("node:path");
 
+const leaveAside = (repoDir, dir, aside, how = "git") => {
+  // As a removal Studio stopped in the middle leaves it: moved, and noted
+  // in the repository's git folder.
+  if (how === "git") execFileSync("git", ["-C", repoDir, "worktree", "move", dir, aside]);
+  else require("node:fs").renameSync(dir, aside);
+  const common = path.resolve(repoDir, execFileSync("git", ["-C", repoDir, "rev-parse", "--git-common-dir"], { encoding: "utf8" }).trim());
+  const notes = path.join(common, "codara-aside");
+  require("node:fs").mkdirSync(notes, { recursive: true });
+  const name = `${require("node:crypto").createHash("sha256").update(path.resolve(aside)).digest("hex").slice(0, 24)}.json`;
+  require("node:fs").writeFileSync(path.join(notes, name), JSON.stringify({ original: path.resolve(dir), aside }));
+};
+
 function git(cwd, args) {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 }
@@ -541,22 +553,23 @@ async function agentWorktreeProbes(wt) {
     });
     assert.ok(!blocked.ok && blocked.changed && blocked.error.includes(asideOf(printed.path)), JSON.stringify(blocked));
     assert.ok(existsSync(path.join(asideOf(printed.path), ".env.local")), "nothing is moved into the new folder");
-    let stuck = await wt.restoreAsideWorktrees(repo, [printed.path]);
+    let stuck = await wt.restoreAsideWorktrees(repo);
     assert.deepStrictEqual(stuck, { restored: [], stuck: [asideOf(printed.path)] });
     rmSync(printed.path, { recursive: true });
-    stuck = await wt.restoreAsideWorktrees(repo, []);
-    assert.deepStrictEqual(stuck.restored, [printed.path], "git's listing names the folder left aside");
+    stuck = await wt.restoreAsideWorktrees(repo);
+    assert.deepStrictEqual(stuck.restored, [printed.path], "Studio's note names the folder left aside");
     assert.strictEqual(git(printed.path, ["rev-parse", "--abbrev-ref", "HEAD"]), "agent/fingerprint");
-    // Moved by hand, as if Studio stopped before git noted the move: found
-    // through the row's path and renamed back.
-    execFileSync("mv", [printed.path, asideOf(printed.path)]);
-    stuck = await wt.restoreAsideWorktrees(repo, [printed.path]);
+    assert.deepStrictEqual(await wt.restoreAsideWorktrees(repo), { restored: [], stuck: [] }, "once back, the note is gone");
+    // Renamed but not yet noted by git, as if Studio stopped right there.
+    leaveAside(repo, printed.path, asideOf(printed.path), "rename");
+    stuck = await wt.restoreAsideWorktrees(repo);
     assert.deepStrictEqual(stuck.restored, [printed.path]);
     assert.ok(await wt.isRegisteredWorktree(repo, printed.path));
-    // Without a row too: git still lists it under its own name.
-    execFileSync("mv", [printed.path, asideOf(printed.path)]);
-    stuck = await wt.restoreAsideWorktrees(repo, []);
-    assert.deepStrictEqual(stuck.restored, [printed.path], "found through git's listing of its own name");
+    // A folder of that name Studio did not move is never touched.
+    const lookalike = path.join(path.dirname(printed.path), ".lookalike.codara-removing");
+    git(repo, ["worktree", "add", "-q", "-b", "agent/lookalike", lookalike]);
+    assert.deepStrictEqual(await wt.restoreAsideWorktrees(repo), { restored: [], stuck: [] });
+    assert.ok(await wt.isRegisteredWorktree(repo, lookalike), "a worktree that only looks aside stays where it is");
 
     // A nested repository committed as a bare gitlink, with no .gitmodules,
     // is a populated submodule to git's worktree removal.

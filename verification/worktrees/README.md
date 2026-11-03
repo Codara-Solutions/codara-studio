@@ -160,9 +160,9 @@ model's only behaviour, and a `Bug` flag puts the old code back.
    terminal, run, tab or process under either name: `changedWhileAside` in
    `agent-worktrees.ts` and `remove.ts`), and put it back if anything
    changed. A folder left aside by a stopped Studio goes back under the lock
-   before the next removal or cleanup in that repository, found through
-   git's listing and through each row's folder name
-   (`restoreAsideWorktrees`). Before, git deleted ignored files without
+   before the next removal or cleanup in that repository, as the note
+   Studio keeps in the repository's git folder for each move says
+   (`restoreAsideWorktrees`); a folder Studio did not move is never touched. Before, git deleted ignored files without
    asking, so one written between the last check and `git worktree remove`
    (a `.env`, notes, test output) was lost, and a tab or terminal opened in
    that window was not seen (`WorktreeLifecycle_bug_late_write`,

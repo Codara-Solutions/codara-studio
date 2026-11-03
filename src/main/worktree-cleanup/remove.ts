@@ -509,10 +509,7 @@ export async function removeCleanupWorktrees(
         // A folder an earlier removal left aside goes back first; the
         // screen saw this repository without it, so its items are reviewed
         // again. One that cannot go back is named.
-        const aside = await restoreAsideWorktrees(
-          repo.root,
-          [...repo.workspaces.map((workspace) => workspace.cwd), ...repoItems.map((item) => item.path)],
-        );
+        const aside = await restoreAsideWorktrees(repo.root);
         repo.registrations = (await listWorktrees(repo.root)).registrations;
         const ctx = await contextFor(
           deps,
