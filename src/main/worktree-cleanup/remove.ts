@@ -114,6 +114,16 @@ async function refreshRows(deps: WorktreeCleanupDeps, repo: RepoContext): Promis
     else {
       const cwd = await canonicalMaybeMissing(workspace.cwd);
       if (roots.some((root) => isAtOrUnder(cwd, root))) rows.push(workspace);
+      // A row naming a worktree's folder in other case, which only
+      // `sameFolder` sees as the same.
+      else {
+        for (const entry of repo.registrations) {
+          if (await sameFolder(workspace.cwd, entry.path)) {
+            rows.push(workspace);
+            break;
+          }
+        }
+      }
     }
   }
   repo.workspaces = rows;

@@ -1071,6 +1071,47 @@ async function main() {
       assert.equal(alone.status, "removed", alone.message);
     });
 
+    await check("a worktree removed with plain git is not cleaned up for one of two rows that name it", async () => {
+      const dir = mergedWith("plain-two", "feature/plain-two");
+      h.state.workspaces.push(copyWorkspace("ws-plain-two-other", dir, repo, "feature/plain-two"));
+      git(repo, ["worktree", "remove", dir]);
+      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-plain-two", mode: "manual" });
+      assert.equal(result.status, "refused", JSON.stringify(result));
+      assert.match(result.message, /Another workspace row uses this folder/);
+      assert.equal(branchExists(repo, "feature/plain-two"), true);
+      assert.equal(has("ws-plain-two"), true);
+      h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== "ws-plain-two-other");
+      const alone = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-plain-two", mode: "manual" });
+      assert.equal(alone.status, "removed", alone.message);
+    });
+
+    await check("a row naming the folder in other case, made while the removal waited, stops it", async () => {
+      const dir = mergedWith("late-case", "feature/late-case");
+      fs.rmSync(dir, { recursive: true, force: true });
+      const other = copyWorkspace("ws-late-case-other", path.join(path.dirname(dir), "Late-Case"), repo, "feature/late-case");
+      let added = false;
+      const late = {
+        ...deps,
+        async loadState() {
+          const state = await deps.loadState();
+          // Not there when the rail and the removal first look; there when the
+          // rows are read again under the lock.
+          if (/refreshRows/.test(new Error().stack ?? "")) {
+            state.workspaces.push(structuredClone(other));
+            added = true;
+          }
+          return state;
+        },
+      };
+      const result = await rail.cleanUpRailWorkspace(late, { workspaceId: "ws-late-case", mode: "manual" });
+      assert.equal(added, true, "the row was added while the removal held the lock");
+      assert.equal(result.status, "refused", JSON.stringify(result));
+      assert.match(result.message, /Another workspace row uses this folder/);
+      assert.equal(has("ws-late-case"), true);
+      const alone = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-late-case", mode: "manual" });
+      assert.equal(alone.status, "removed", alone.message);
+    });
+
     await check("no rail action touched another worktree or the main checkout", async () => {
       assert.equal(fs.readFileSync(path.join(bystander, "keep.txt"), "utf8"), "keep\n");
       assert.equal(registered(repo, bystander), true);

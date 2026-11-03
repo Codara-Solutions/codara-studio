@@ -28,6 +28,7 @@ import { isAncestor, restoreAsideWorktrees } from "../git-worktrees";
 import { errorText, readGitText, runGit } from "../git-exec";
 import type { WorktreeRegistration } from "../git-worktree-porcelain";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
+import { sameFolder } from "../worktree-folders";
 import {
   ROW_CONCURRENCY,
   canonicalMaybeMissing,
@@ -637,6 +638,18 @@ async function cleanUpUnregistered(
     await audit("refused", { code });
     return refused(message, workspace.name);
   };
+  // Bound to its row, as a registered removal is (`boundTo`): the rows read
+  // again under the lock, another row at the folder stops it.
+  const rows = (await deps.loadState().catch(() => null))?.workspaces ?? null;
+  if (!rows?.some((row) => row.id === workspace.id)) {
+    return refuse("CHANGED", "The workspace rows could not be read, or its row is gone, so nothing was removed.");
+  }
+  for (const other of rows) {
+    if (other.id === workspace.id || other.remote || !other.cwd || isRemotePath(other.cwd)) continue;
+    if (await sameFolder(other.cwd, workspace.cwd)) {
+      return refuse("CHANGED", "Another workspace row uses this folder now, or its row is gone, so nothing was removed.");
+    }
+  }
   try {
     tip = await branchTip(repo.root, branch);
   } catch (err) {
