@@ -13,20 +13,26 @@ export function useMoneyRate(): void {
   const [, bump] = useState(0);
   useEffect(() => {
     let live = true;
-    if (loaded && Date.now() - loadedAt > REFRESH_MS) loaded = null;
-    if (!loaded) loadedAt = Date.now();
-    const pending = (loaded ??= window.spark.money
-      .rate()
-      .then((rate: MoneyRate) => {
-        setMoneyRate(rate);
-        return rate;
-      })
-      .catch(() => undefined));
-    void pending.then((rate) => {
-      if (live && rate) bump((n) => n + 1);
-    });
+    const ask = (): void => {
+      if (loaded && Date.now() - loadedAt > REFRESH_MS) loaded = null;
+      if (!loaded) loadedAt = Date.now();
+      const pending = (loaded ??= window.spark.money
+        .rate()
+        .then((rate: MoneyRate) => {
+          setMoneyRate(rate);
+          return rate;
+        })
+        .catch(() => undefined));
+      void pending.then((rate) => {
+        if (live && rate) bump((n) => n + 1);
+      });
+    };
+    ask();
+    // The page stays mounted for days; the main process answers from its cache.
+    const timer = window.setInterval(ask, REFRESH_MS / 3);
     return () => {
       live = false;
+      window.clearInterval(timer);
     };
   }, []);
 }

@@ -18,6 +18,7 @@ function load() {
     entry,
     `export * from ${JSON.stringify(path.join(ROOT, "src/shared/money.ts"))};\n` +
       `export * from ${JSON.stringify(path.join(ROOT, "src/main/fx-rate.ts"))};\n` +
+      `export { guardDraftProblem } from ${JSON.stringify(path.join(ROOT, "src/shared/automation-guard.ts"))};\n` +
       `export { draftFromJob, buildGuard, buildLoop } from ${JSON.stringify(path.join(ROOT, "src/renderer/src/components/automations/flow/model.ts"))};\n` +
       `export * from ${JSON.stringify(path.join(ROOT, "src/renderer/src/components/automations/flow/sentence-model.ts"))};\n`,
   );
@@ -124,6 +125,11 @@ const R = { usdPerEur: 1.25, date: "2026-11-02", source: "ecb" };
   assert.equal(m.usdFromEurField("-2", R), undefined);
   assert.equal(m.usdFromEurField("abc", R), undefined);
   assert.equal(m.usdFromEurField("0.00001", R), 0.0001, "an amount too small to register still limits, not removes");
+  const tiny = m.usdFromEurField("0.001", R);
+  assert.equal(tiny, 0.0013);
+  assert.ok(Number(m.eurFieldFromUsd(tiny, R)) > 0, "a sub-cent limit reopens as a positive amount: " + m.eurFieldFromUsd(tiny, R));
+  assert.equal(m.usdFromEurFieldKeeping(m.eurFieldFromUsd(tiny, R), m.shownLimit(tiny, R), R), tiny);
+  assert.equal(m.guardDraftProblem ? m.guardDraftProblem(m.eurFieldFromUsd(tiny, R), "") : null, null, "and passes the editor's own check");
   assert.equal(m.usdFromEurField("1,6", R), 2, "a decimal comma reads as a point");
 
   // Through the editor's draft: stored dollars -> field -> stored dollars.

@@ -81,7 +81,10 @@ export function rateNote(rate: MoneyRate = current): string {
 
 /** What a euro field shows for a stored dollar amount: "1.72", no trailing zeros. */
 export function eurFieldFromUsd(usd: number, rate: MoneyRate = current): string {
-  return String(round(usdToEur(usd, rate), 2));
+  const eur = usdToEur(usd, rate);
+  const cents = round(eur, 2);
+  // A tiny limit must not read as 0, which the editor rejects as "no limit".
+  return String(cents === 0 && usd > 0 ? Number(eur.toPrecision(2)) : cents);
 }
 
 /** The dollars to store for a euro field, or undefined when it is not a positive number. */
