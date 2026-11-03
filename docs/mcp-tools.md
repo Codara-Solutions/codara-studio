@@ -1162,6 +1162,13 @@ gone, and checks the commit out detached when the branch moved on. The branch is
 deleted only if it still points at the commit that was checked, and, when the
 folder was already gone, only once its tip is saved (otherwise
 `branchKeptReason` is `RECOVERY_REF_FAILED`).
+To delete the folder, Codara first moves it aside (`.<name>.codara-removing`
+next to it), where nothing new can open it by its path, and checks it again:
+if a file changed, a commit landed, or a terminal, run, tab or process
+appeared since the last check, it moves it back and refuses with
+`WORKTREE_CHANGED`. A process that already had the folder open can still
+write into it until it is deleted. A folder left aside when Codara stopped
+goes back before the next removal in that repository.
 Every create and removal, refused or not, is logged to
 `~/.codarastudio/logs/worktree-audit.jsonl`. **Let agents create and remove
 worktrees** in Settings turns creating and removing off; listing still works.

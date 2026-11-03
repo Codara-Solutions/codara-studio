@@ -74,7 +74,7 @@ submodules, nested checkouts, locked worktrees, the ignored-file scan's
 regenerable list (an ignored file here is one the scan would keep), the
 2-minute uptime rule, the renderer's retry backoff, and real time (only the
 order of events counts). The agent removal is proved against `main` on
-GitHub; an explicit local `target` (`agent-worktrees.ts:2021`) is not
+GitHub; an explicit local `target` (`agent-worktrees.ts:2023`) is not
 modelled, so with one the guarantee is weaker: the work is kept in that
 local branch, not necessarily on GitHub. Paths are the branch's slug and slug-2, as
 `pickCheckoutDirName` makes them.
@@ -88,8 +88,9 @@ file inside the worktree), `ignored`, `self`, `force`, `reuse`, `partial` (a
 `git worktree remove` that fails halfway), `agentrm` (the agent removal runs),
 `noauto` (the automatic removal never starts), `handle` (a process that had
 the folder open before it was moved writes into it afterwards), and `late`: something touches the folder after a
-removal's last check and before its delete. Without `late` that window is
-assumed empty, which is what today's code relies on.
+removal's last check and before its delete. Since the folder is moved
+aside before it is deleted, `late` can only act before the move; `handle`
+is what still acts after it.
 
 ## Invariants
 
@@ -109,30 +110,33 @@ assumed empty, which is what today's code relies on.
 
 | Config | TLC must answer | What it shows |
 |---|---|---|
-| `WorktreeLifecycle_auto` | pass | Today's automatic removal, one row, every actor it is built to handle, one crash |
-| `WorktreeLifecycle_agent` | pass | Today's `codara_worktree_remove` beside it, tabs, failing halfway and a folder already gone included, without stray processes |
+| `WorktreeLifecycle_auto` | pass | Today's automatic removal, one row, every actor it is built to handle, `late` included, one crash |
+| `WorktreeLifecycle_agent` | pass | Today's `codara_worktree_remove` beside it, tabs, stray processes, `late`, failing halfway and a folder already gone included |
 | `WorktreeLifecycle_two_rows` | pass | Today, two rows on one branch: checked out again, force-pushed, failing halfway |
 | `WorktreeLifecycle_reach` | NothingRemoved | Not vacuous: the automatic removal does remove a merged worktree |
 | `WorktreeLifecycle_reach_agent` | NothingRemoved | Not vacuous: the agent removal does too, with the automatic one off |
 | `WorktreeLifecycle_liveness` | pass | A merged, idle worktree leaves on its own |
-| `WorktreeLifecycle_fixed` | pass | With the proposed fixes, every rule holds with every actor on, `late` included (not `handle`) |
-| `WorktreeLifecycle_fixed_two_rows` | pass | With the proposed fixes, two rows never share a folder and no removal deletes another row's folder |
-| `WorktreeLifecycle_finding_late_write` | NoIgnoredLost | Finding 1 |
-| `WorktreeLifecycle_finding_late_use` | NeverRemovedInUse | Finding 1, the window #123 declined |
+| `WorktreeLifecycle_fixed` | pass | With the fixes still proposed (`paths`, `bind`), every rule holds with every actor on, `late` included (not `handle`) |
+| `WorktreeLifecycle_fixed_two_rows` | pass | With the fixes still proposed, two rows never share a folder and no removal deletes another row's folder |
+| `WorktreeLifecycle_finding_late_write` | pass | Finding 1, fixed: a late ignored file is seen once the folder is moved aside |
+| `WorktreeLifecycle_finding_late_use` | pass | Finding 1, fixed: so is a late tab (the window #123 declined) |
 | `WorktreeLifecycle_finding_agent_tabs` | pass | Finding 2, fixed: tabs hold a worktree against the agent removal |
 | `WorktreeLifecycle_finding_foreign_tab` | pass | Finding 2, fixed: another workspace's tab on a file inside holds it against the automatic removal |
 | `WorktreeLifecycle_finding_path_reuse` | NoCollateral | Finding 3, the agent removal |
 | `WorktreeLifecycle_finding_auto_rebind` | NoCollateral | Finding 3, the automatic removal (with `paths` on, without `bind`) |
-| `WorktreeLifecycle_finding_agent_process` | NeverRemovedInUse | Finding 4 |
+| `WorktreeLifecycle_finding_agent_process` | pass | Finding 4, fixed: the agent removal scans processes under the lock |
 | `RecoveryWindow_finding_early_prune` | pass | Finding 5, fixed: a ref lives 30 full days, counted from the end of its day |
 | `WorktreeLifecycle_finding_missing_ref` | pass | Finding 6, fixed |
 | `WorktreeLifecycle_finding_partial_ref` | pass | Finding 7, fixed |
-| `WorktreeLifecycle_limit_aside_handle` | NoIgnoredLost | The limit of finding 1's fix: an open handle still writes into the moved folder |
+| `WorktreeLifecycle_limit_aside_handle` | NoIgnoredLost | The limit of finding 1's fix: a handle opened before the move still writes into the moved folder |
 | `WorktreeLifecycle_bug_owner_pane` | NeverRemovedInUse | Puts back the bug fixed in 8f142d5b: another agent's removal deleted a fresh worktree its creator was still working in |
 | `WorktreeLifecycle_bug_agent_tabs` | NeverRemovedInUse | Puts back finding 2 in the agent removal: it never asked the window about tabs |
 | `WorktreeLifecycle_bug_foreign_tab` | NeverRemovedInUse | Puts back finding 2 in the automatic removal: the window answered for the worktree's own workspace only |
 | `WorktreeLifecycle_bug_missing_ref` | RemovedReachable | Puts back finding 6: the folder-gone path ignored a failed ref save |
 | `WorktreeLifecycle_bug_partial_ref` | RemovedReachable | Puts back finding 7: a removal that failed halfway deleted its own ref |
+| `WorktreeLifecycle_bug_late_write` | NoIgnoredLost | Puts back finding 1: deleted in place, a late ignored file goes with the folder |
+| `WorktreeLifecycle_bug_late_use` | NeverRemovedInUse | Puts back finding 1: a late tab |
+| `WorktreeLifecycle_bug_agent_process` | NeverRemovedInUse | Puts back finding 4: no process scan under the lock |
 | `RecoveryWindow_bug_early_prune` | KeptForWindow | Puts back finding 5: the age was counted from the stamped day's midnight |
 | `WorktreeLifecycle_bug_own_branch_target` | NoUnsafeRemoved | Puts back the bug fixed in 49306a6f: the worktree's own branch named as the target made the ancestor proof hold for unmerged work |
 
@@ -147,25 +151,26 @@ that a removed head stays recoverable for 30 days. A fix not in the code yet is 
 `WorktreeLifecycle_fixed` turns on; a fix in the code is the
 model's only behaviour, and a `Bug` flag puts the old code back.
 
-1. **The last check and the delete are two steps** (`late`). Under the lock,
-   `removeOne` checks the folder (`remove.ts:245`), asks the window
-   (`remove.ts:289`), saves the ref, and only then `removeCopyWorktree` runs
-   `git status` (`git-worktrees.ts:524`) and `git worktree remove`
-   (`git-worktrees.ts:540`). git refuses tracked and untracked changes but
-   deletes ignored files without asking, so an ignored file written in that
-   window (a `.env`, notes, test output) is lost. A tab or terminal opened in
-   it is not seen (the window #123 declined as tiny); a commit made in it
-   leaves the folder gone and the branch kept. The agent removal has the same
-   window (`agent-worktrees.ts:2681`). Likelihood: low; the window is a
-   renderer round trip (up to 5 s) and a few git calls, after 30 quiet
-   minutes. Fix `aside`: rename the folder away first (atomic, so nothing new
-   can open it by its path), check everything again on the moved folder, and
-   put it back if anything changed; Studio's startup puts back a folder left
-   aside by a crash. This narrows the window but does not close it: a
-   process that already had the folder open (its working directory or a
-   file handle) still writes into the moved folder after the last check
-   (`WorktreeLifecycle_limit_aside_handle`). Closing it fully needs the
-   ignored files copied aside before the delete, or every writer stopped.
+1. **The last check and the delete were two steps** (`late`). Fixed in
+   part: both removals take a fingerprint of what git would delete (HEAD,
+   `git status` with untracked and ignored entries, the size and time of
+   every file under them) before their last check, then move the folder
+   aside with `git worktree move` (`removeCopyWorktree`,
+   `git-worktrees.ts`), check it again there (the same fingerprint, and no
+   terminal, run, tab or process under either name: `changedWhileAside` in
+   `agent-worktrees.ts` and `remove.ts`), and put it back if anything
+   changed. A folder left aside by a stopped Studio goes back under the lock
+   before the next removal or cleanup in that repository
+   (`restoreAsideWorktrees`). Before, git deleted ignored files without
+   asking, so one written between the last check and `git worktree remove`
+   (a `.env`, notes, test output) was lost, and a tab or terminal opened in
+   that window was not seen (`WorktreeLifecycle_bug_late_write`,
+   `_bug_late_use`). The limit stays: a process that already had the folder
+   open (its working directory or a file handle) still writes into the
+   moved folder after the last check (`WorktreeLifecycle_limit_aside_handle`).
+   Closing it fully needs the ignored files copied aside before the delete,
+   or every writer stopped. The fingerprint walks at most 20,000 entries, so
+   a change deep in a very large ignored folder can go unseen.
 2. **Editor tabs did not hold a worktree everywhere** (`tabs`, `ftab`).
    Fixed: both removals ask the window, under the lock, one question for
    the folder: does the window show the worktree's workspace or hold tabs of
@@ -180,16 +185,16 @@ model's only behaviour, and a `Bug` flag puts the old code back.
    workspace) did not hold it. `WorktreeLifecycle_bug_agent_tabs` and
    `WorktreeLifecycle_bug_foreign_tab` put each half back.
 3. **A row left behind keeps its folder name for a new worktree**
-   (`self`, two rows). `pickCheckoutDirName` (`git-worktrees.ts:215`) only
+   (`self`, two rows). `pickCheckoutDirName` (`git-worktrees.ts:219`) only
    avoids folders on disk. When an agent removed a worktree with plain
    `git worktree remove` (or Studio crashed between delete and row drop), its
    row stays until the rail's next poll; a new worktree on the same branch
    name then gets the same folder. The automatic removal refuses such a pair
    (`holdsOtherWorkspace`), but `codara_worktree_remove` on the old row
    passes: the registration's branch has the same name
-   (`agent-worktrees.ts:1841`), its tip is the new worktree's, a fresh tip
+   (`agent-worktrees.ts:1843`), its tip is the new worktree's, a fresh tip
    reads as merged, and only the old row's creator pane is checked
-   (`agent-worktrees.ts:1796`). It deletes the new worktree while its agent
+   (`agent-worktrees.ts:1798`). It deletes the new worktree while its agent
    works in it. Uncommitted work still blocks, so the loss is the new
    worktree itself. The automatic removal reads the rows once, at its start
    (`cleanUpRailWorkspace`), then checks and deletes by path: if the row is
@@ -200,14 +205,13 @@ model's only behaviour, and a `Bug` flag puts the old code back.
    row names when picking one. Fix `bind`: in both locked re-checks, read the
    rows again and refuse unless the row asked for is still there and alone
    at its folder.
-4. **The agent removal does not scan processes under the lock**. The
-   re-check in `removeLocked` passes `scanProcesses: false`
-   (`agent-worktrees.ts:2659`); the lock can take up to 60 s, and a process
-   started in the worktree meanwhile is not seen. The automatic removal
-   scans under the lock. Likelihood: low. Fix `rescan`: scan processes in
-   the locked re-check too.
+4. **The agent removal did not scan processes under the lock.** Fixed: the
+   re-check in `removeLocked` scans processes (`scanProcesses: true`), and
+   so does the check once the folder is aside. Before, a process started in
+   the worktree while the removal waited for the lock (up to 60 s) was not
+   seen (`WorktreeLifecycle_bug_agent_process`).
 5. **Recovery refs lasted 29 days and some hours, not 30.** Fixed:
-   `pruneRecoveryRefs` (`agent-worktrees.ts:2391`) counts the 30 days from
+   `pruneRecoveryRefs` (`agent-worktrees.ts:2393`) counts the 30 days from
    the end of the UTC day the ref is named after. Before, it counted from
    that day's midnight, so a ref saved at 23:00 UTC was pruned after 29 days
    and 1 to 2 hours, by the next removal or cleanup in the repository

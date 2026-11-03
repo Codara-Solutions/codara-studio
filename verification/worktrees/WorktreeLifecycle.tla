@@ -44,7 +44,7 @@ Commits == 0..MaxCommits
 
 VARIABLES
     row,      \* Studio's rows: [st, p (folder), b (branch), owner (creating pane open), tab, born]
-    disk,     \* per folder: "none", "yes", or "aside" (only with Fix "aside")
+    disk,     \* per folder: "none", "yes", or "aside" (moved aside to be deleted)
     reg,      \* per folder: the branch git has checked out there, or "none"
     dirty,    \* per folder: {"tracked"} (tracked or untracked changes), {"ignored"} (kept ignored files)
     term,     \* per folder: a terminal pane, Cora run or dev server Studio lists there
@@ -280,7 +280,7 @@ AGit ==
     /\ LET p == a.p IN
        IF "tracked" \in dirty[p]
        THEN AStop /\ UNCHANGED <<wt, ghost>>
-       ELSE IF "aside" \in Fix
+       ELSE IF "no_aside" \notin Bug
        THEN /\ AGo("aside") /\ disk' = [disk EXCEPT ![p] = "aside"]
             /\ UNCHANGED <<lock, row, reg, dirty, term, proc, ftab, quiet, ghost>>
        ELSE \E part \in Partial :
@@ -289,10 +289,11 @@ AGit ==
               /\ UNCHANGED row
     /\ UNCHANGED <<gitv, rref, rec, g, crashes>>
 
-(* Fix "aside": the folder is renamed away first, so nothing new can     *)
-(* start using or writing it; then everything is checked again, and it   *)
-(* is put back if anything showed up. A handle opened before the rename  *)
-(* still writes (Act "handle").                                           *)
+(* The folder is moved aside first (git worktree move), so nothing new   *)
+(* can start using or writing it by its path; then everything is checked *)
+(* again, and it is put back if anything showed up. A handle opened      *)
+(* before the move still writes (Act "handle"). Bug "no_aside": before   *)
+(* fix/worktree-move-aside it was deleted in place.                      *)
 AAside ==
     /\ a.pc = "aside"
     /\ LET p == a.p IN
@@ -374,12 +375,13 @@ GLock ==
     /\ lock' = "agent" /\ GGo("recheck")
     /\ UNCHANGED <<wt, gitv, rref, rec, a, crashes, ghost>>
 
-(* removeLocked: verifyRemovable again, pinned target, scanProcesses false. *)
+(* removeLocked: verifyRemovable again, pinned target, scanProcesses true *)
+(* (Bug "no_rescan": false, before fix/worktree-move-aside).              *)
 GRecheck ==
     /\ g.pc = "recheck"
     /\ LET r == g.r  p == g.p  b == g.b IN
        IF row[r].st = "live" /\ disk[p] = "yes" /\ reg[p] = b /\ lb[b] = g.head /\ Bound(r, p)
-          /\ ~AgentBlocked(r, g.caller, p, "rescan" \in Fix)
+          /\ ~AgentBlocked(r, g.caller, p, "no_rescan" \notin Bug)
           /\ AgentProof(b, g.head, g.tm)
        THEN GGo("ref") /\ UNCHANGED lock
        ELSE GStop
@@ -411,7 +413,7 @@ GGit ==
     /\ LET p == g.p IN
        IF "tracked" \in dirty[p]
        THEN GStop /\ DropAgentRef /\ UNCHANGED <<wt, ghost>>
-       ELSE IF "aside" \in Fix
+       ELSE IF "no_aside" \notin Bug
        THEN /\ GGo("aside") /\ disk' = [disk EXCEPT ![p] = "aside"]
             /\ UNCHANGED <<lock, row, reg, dirty, term, proc, ftab, quiet, rref, ghost>>
        ELSE \E part \in Partial :
@@ -423,7 +425,7 @@ GGit ==
 GAside ==
     /\ g.pc = "aside"
     /\ LET p == g.p IN
-       IF dirty[p] # {} \/ Head(p) # g.head \/ AgentBlocked(g.r, g.caller, p, "rescan" \in Fix)
+       IF dirty[p] # {} \/ Head(p) # g.head \/ AgentBlocked(g.r, g.caller, p, "no_rescan" \notin Bug)
        THEN /\ disk' = [disk EXCEPT ![p] = "yes"] /\ GStop /\ DropAgentRef
             /\ UNCHANGED <<row, reg, dirty, term, proc, ftab, quiet, ghost>>
        ELSE GGo("del") /\ UNCHANGED <<wt, lock, rref, ghost>>
@@ -618,7 +620,8 @@ Fetch ==
     /\ UNCHANGED <<wt, lb, rb, up, openPr, merged, rmain, par, cont, nc, Others>>
 
 (* Studio quits or crashes: the in-memory lock and both removals are gone. *)
-(* With Fix "aside", startup puts back a folder left aside.               *)
+(* A folder left aside goes back (restoreAsideWorktrees, under the lock  *)
+(* before the next removal or cleanup; here at once).                    *)
 Crash ==
     /\ crashes < MaxCrashes /\ (a.pc # "idle" \/ g.pc # "idle")
     /\ crashes' = crashes + 1
