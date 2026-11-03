@@ -209,6 +209,28 @@ async function main() {
       assert.ok(audit.some((line) => line.caller.client === "workspace-rail-auto-merged" && line.outcome === "removed" && line.branch === entry.branch));
     });
 
+    await check("a branch git could not read is not offered", async () => {
+      if (process.platform === "win32") return; // The failing git is a shell script.
+      const entry = mergedWorktree("unread-branch");
+      const bin = path.join(scratch, "failing-git");
+      fs.mkdirSync(bin, { recursive: true });
+      const realGit = execFileSync("sh", ["-c", "command -v git"]).toString().trim();
+      fs.writeFileSync(
+        path.join(bin, "git"),
+        `#!/bin/sh\ncase "$*" in *refs/heads/${entry.branch}*) echo "fatal: unable to read" >&2; exit 128;; esac\nexec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const pathBefore = process.env.PATH;
+      process.env.PATH = `${bin}${path.delimiter}${pathBefore}`;
+      try {
+        assert.equal((await stateOf(entry.id)).autoRemoveMerged, undefined);
+      } finally {
+        process.env.PATH = pathBefore;
+      }
+      assert.equal((await stateOf(entry.id)).autoRemoveMerged, true);
+      await assertGone(entry);
+    });
+
     await check("regenerable ignored output does not hold a worktree back", async () => {
       const entry = mergedWorktree("with-output");
       fs.mkdirSync(path.join(entry.dir, "node_modules", "left-pad"), { recursive: true });

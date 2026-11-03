@@ -943,9 +943,49 @@ async function main() {
       assert.equal(result.status, "refused", JSON.stringify(result));
       assert.match(result.message, /could not read the commit of the branch/);
       assert.equal(has("ws-bad-ref"), true);
+      // A symbolic ref that leads nowhere.
+      fs.rmSync(refFile);
+      git(repo, ["symbolic-ref", "refs/heads/feature/bad-ref", "refs/heads/feature/nowhere"]);
+      const dangling = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-bad-ref", mode: "auto" });
+      assert.equal(dangling.status, "refused", JSON.stringify(dangling));
+      assert.equal(has("ws-bad-ref"), true);
       fs.rmSync(refFile);
       const after = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-bad-ref", mode: "auto" });
       assert.equal(after.status, "removed", after.message);
+    });
+
+    await check("the maker's tab opening elsewhere during a removal of unfinished work puts it back", async () => {
+      const open = add("late-maker", "feature/late-maker");
+      commitFile(open, "late.txt", "late\n", "unmerged work");
+      h.state.workspaces.push(copyWorkspace("ws-late-maker", open, repo, "feature/late-maker"));
+      madeBy("ws-late-maker");
+      // Checked with no maker tab, then removed with the unmerged commits confirmed.
+      const [checked] = await remove.checkCleanupTargets(deps, [{ repoRoot: repo, path: open }]);
+      assert.deepEqual(checked.blockers, []);
+      assert.ok(checked.unmerged);
+      try {
+        const { outcomes } = await remove.removeCleanupWorktrees(
+          deps,
+          {
+            items: [{ repoRoot: repo, path: open, fingerprint: checked.fingerprint, confirmDirty: false, confirmUnmerged: true }],
+            deleteMergedBranches: true,
+          },
+          {
+            beforeRemove: async () => {
+              if (!h.terminals.some((entry) => entry.paneId === "pane-coord")) {
+                h.terminals.push({ paneId: "pane-coord", workspaceId: "ws-coord", title: "coordinator", cwd: coordinator });
+              }
+              return null;
+            },
+          },
+        );
+        assert.equal(outcomes[0].status, "refused", JSON.stringify(outcomes[0]));
+        assert.match(outcomes[0].message, /coordinator/);
+      } finally {
+        h.terminals = h.terminals.filter((entry) => entry.paneId !== "pane-coord");
+      }
+      assert.equal(fs.existsSync(path.join(open, "late.txt")), true);
+      assert.equal(branchExists(repo, "feature/late-maker"), true);
     });
 
     await check("no rail action touched another worktree or the main checkout", async () => {

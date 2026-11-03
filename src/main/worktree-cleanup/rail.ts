@@ -238,6 +238,27 @@ async function registrationOf(repo: RepoContext, cwd: string): Promise<WorktreeR
   return undefined;
 }
 
+// Whether the ref itself is missing, without resolving it. `show-ref
+// --exists` (git 2.43) answers 2 for missing; an older git falls back to
+// both of: not a symbolic ref, and not readable.
+async function refAbsent(root: string, ref: string): Promise<boolean> {
+  const code = await runGit(root, ["show-ref", "--exists", ref]).then(
+    () => 0,
+    (err: unknown) => (err as { code?: unknown })?.code,
+  );
+  if (code === 0 || code === 1) return false;
+  if (code === 2) return true;
+  const symbolic = await runGit(root, ["symbolic-ref", "-q", ref]).then(
+    () => true,
+    (err: unknown) => (err as { code?: unknown })?.code !== 1,
+  );
+  if (symbolic) return false;
+  return runGit(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", ref]).then(
+    () => false,
+    (err: unknown) => (err as { code?: unknown })?.code === 1,
+  );
+}
+
 // Null only when git says the branch is not there: a git that failed to
 // answer, or a branch whose commit cannot be read, throws, so a row is never
 // dropped for a check that failed.
@@ -253,8 +274,9 @@ async function branchTip(root: string, branch: string): Promise<string | null> {
   };
   const out = await read(`refs/heads/${branch}^{commit}`);
   if (out === null) {
-    // Exit 1 also means a ref whose commit is missing: only no ref is gone.
-    if ((await read(`refs/heads/${branch}`)) === null) return null;
+    // Exit 1 also means a ref whose commit is missing, or a symbolic ref
+    // that leads nowhere: only no ref at all is gone.
+    if (await refAbsent(root, `refs/heads/${branch}`)) return null;
     throw new Error(`git could not read the commit of the branch ${branch}.`);
   }
   if (!/^[0-9a-f]{40,64}$/i.test(out)) throw new Error(`git gave no commit for the branch ${branch}.`);
@@ -393,6 +415,7 @@ async function statesOf(
     // Only rows that passed the cheap facts pay for reading their activity.
     const offerAuto =
       autoMerged?.enabled === true &&
+      tip !== undefined &&
       upLongEnough(autoMerged) &&
       !missing &&
       registered !== null &&

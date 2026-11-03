@@ -43,6 +43,7 @@ import {
   pathKey,
   ROW_CONCURRENCY,
   usageContext,
+  finishedWork,
   heldByMaker,
   usageOf,
   type CheckContext,
@@ -248,12 +249,13 @@ interface RemovalWork {
 // using it under either name. A reason puts it back.
 async function changedWhileAside(
   ctx: CheckContext,
-  path: string,
+  check: WorktreeRemovalCheck,
   real: string,
   aside: string,
   before: string,
   options: RemoveOptions,
 ): Promise<string | null> {
+  const path = check.path;
   if ((await worktreeFingerprint(aside)) !== before) return "It changed while it was being removed, so it was put back.";
   const realAside = await canonicalPath(aside);
   const usage = await usageContext(ctx.deps, [realAside]);
@@ -261,10 +263,15 @@ async function changedWhileAside(
     return "What is running in it could not be read, so it was put back.";
   }
   const workspaces = ctx.linked.get(pathKey(real)) ?? [];
-  // The check let the maker's tab in another folder go only for finished
-  // work, and the fingerprint just showed nothing changed since.
-  const uses = [...(await usageOf(usage, path, real, workspaces)), ...(await usageOf(usage, aside, realAside, workspaces))].filter(
-    (use) => !options.allowInUse?.has(use.kind) && heldByMaker(use, true, ctx.requireKnownUsage),
+  const found = [...(await usageOf(usage, path, real, workspaces)), ...(await usageOf(usage, aside, realAside, workspaces))];
+  // The maker's tab in another folder goes only for finished work, judged
+  // as the check did: it may have opened since.
+  const finished =
+    found.some((use) => !heldByMaker(use, true)) &&
+    !check.localWork &&
+    (await finishedWork(ctx.repo.root, check.merge, check.head, workspaces));
+  const uses = found.filter(
+    (use) => !options.allowInUse?.has(use.kind) && heldByMaker(use, finished, ctx.requireKnownUsage),
   );
   if (uses.length) return `In use: ${[...new Set(uses.map((use) => use.label))].join(", ")}, so it was put back.`;
   return (await options.beforeRemove?.()) ?? null;
@@ -361,7 +368,7 @@ async function removeOne(
       deleteBranch: false,
       removeOrphanDir: false,
       timeoutMs: REMOVE_TIMEOUT_MS,
-      aside: { recheck: (aside) => changedWhileAside(ctx, check.path, real, aside, before!, options) },
+      aside: { recheck: (aside) => changedWhileAside(ctx, check, real, aside, before!, options) },
     });
     if (!removed.ok && removed.changed) {
       await audit("refused", { code: "CHANGED", recoveryRef });
