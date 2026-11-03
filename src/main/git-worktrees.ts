@@ -1,13 +1,14 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { lstat, readdir, rm } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import type { GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult } from "@shared/types";
 import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
 import { parseWorktreePorcelain, type WorktreeRegistration } from "./git-worktree-porcelain";
 import { prepareWorktreeRemoval, restoreWorktreeLinks } from "./worktree-setup/links";
+import { reservedDirNames, rowFolders } from "./worktree-folders";
 
 export type { WorktreeRegistration };
 
@@ -30,6 +31,8 @@ export interface CreateCopyWorktreeInput {
   // SHA here sets no upstream on the new branch and can never be read as an
   // option, which is why agent-created worktrees pass the resolved commit.
   startPoint?: string;
+  // Folders workspace rows still name, never handed out (pickCheckoutDirName).
+  takenPaths?: readonly string[];
 }
 
 export interface CreateCheckoutWorktreeInput {
@@ -39,6 +42,8 @@ export interface CreateCheckoutWorktreeInput {
   // "origin/feature/x" when isRemote is set.
   branch: string;
   isRemote?: boolean;
+  // Folders workspace rows still name, never handed out (pickCheckoutDirName).
+  takenPaths?: readonly string[];
 }
 
 export interface RemoveCopyWorktreeInput {
@@ -56,6 +61,10 @@ export interface RemoveCopyWorktreeInput {
   // build output) can take minutes to delete, and a git killed by the
   // default timeout leaves it half deleted.
   timeoutMs?: number;
+  // Move the folder aside before deleting it: nothing new can open it by its
+  // path once it is moved, `recheck` then checks it again there, and a
+  // reason puts it back. A process that already had it open still can.
+  aside?: { recheck(asidePath: string): Promise<string | null> };
 }
 
 const MANAGED_REPO_HASH_HEX_LENGTH = 12;
@@ -182,7 +191,7 @@ export async function createCopyWorktree(
     const branch = input.newBranch.trim();
     if (!branch) return { ok: false, error: "No branch name given." };
     const baseBranch = input.baseBranch?.trim() || (await resolveDefaultBranch(input.repoCwd));
-    const dirName = await pickCheckoutDirName(input.worktreesRoot, branch);
+    const dirName = await pickCheckoutDirName(input.worktreesRoot, branch, input.takenPaths);
     const path = join(input.worktreesRoot, dirName);
     if (existsSync(path)) {
       return { ok: false, error: `Worktree path already exists: ${path}` };
@@ -211,14 +220,21 @@ export function slugifyBranchName(name: string): string {
 
 // Worktree directory name for a branch: the slug, with a numeric suffix on
 // collision. Only directory collisions matter — the slug never becomes a
-// branch name (the real, possibly-slashed name is what git checks out).
-async function pickCheckoutDirName(worktreesRoot: string, branchName: string): Promise<string> {
+// branch name (the real, possibly-slashed name is what git checks out). A
+// folder a row still names counts as taken (reservedDirNames).
+async function pickCheckoutDirName(
+  worktreesRoot: string,
+  branchName: string,
+  takenPaths: readonly string[] = [],
+): Promise<string> {
   const used = await existingWorktreeDirs(worktreesRoot);
+  const reserved = await reservedDirNames(worktreesRoot, takenPaths);
+  const isUsed = (name: string) => used.has(name) || reserved(name);
   const base = slugifyBranchName(branchName);
-  if (!used.has(base)) return base;
+  if (!isUsed(base)) return base;
   for (let n = 2; ; n += 1) {
     const candidate = `${base}-${n}`;
-    if (!used.has(candidate)) return candidate;
+    if (!isUsed(candidate)) return candidate;
   }
 }
 
@@ -263,7 +279,7 @@ export async function createCheckoutWorktree(
       addArgs = [shortName];
     }
 
-    const dirName = await pickCheckoutDirName(input.worktreesRoot, shortName);
+    const dirName = await pickCheckoutDirName(input.worktreesRoot, shortName, input.takenPaths);
     const path = join(input.worktreesRoot, dirName);
     if (existsSync(path)) {
       return { ok: false, error: `Worktree path already exists: ${path}` };
@@ -488,6 +504,202 @@ async function removeOrphanWorktreeDir(repoCwd: string, worktreePath: string): P
   }
 }
 
+// ── Moving a folder aside before it is deleted ─────────────────────────────
+
+const ASIDE_SUFFIX = ".codara-removing";
+
+export function asidePathFor(worktreePath: string): string {
+  return join(dirname(worktreePath), `.${basename(worktreePath)}${ASIDE_SUFFIX}`);
+}
+
+// Studio's own note that it moved a folder aside, kept in the repository's
+// git folder (never in the folder itself) until the folder is deleted or
+// back: a folder of that name that Studio did not move is never touched.
+interface AsideNote {
+  original: string;
+  aside: string;
+}
+
+async function asideNotesDir(repoCwd: string): Promise<string> {
+  const common = (await runGit(repoCwd, ["rev-parse", "--git-common-dir"])).stdout.trim();
+  return join(resolve(repoCwd, common), "codara-aside");
+}
+
+function asideNoteName(aside: string): string {
+  return `${createHash("sha256").update(resolve(aside)).digest("hex").slice(0, 24)}.json`;
+}
+
+async function noteAside(repoCwd: string, note: AsideNote): Promise<void> {
+  const dir = await asideNotesDir(repoCwd);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, asideNoteName(note.aside)), JSON.stringify(note));
+}
+
+async function clearAsideNote(repoCwd: string, aside: string): Promise<void> {
+  const dir = await asideNotesDir(repoCwd).catch(() => null);
+  if (dir) await rm(join(dir, asideNoteName(aside)), { force: true }).catch(() => undefined);
+}
+
+/**
+ * Puts back every folder a removal of this repository left aside (Studio
+ * stopped between the move and the delete or the move back), as its notes
+ * say. Runs under the repository lock before a removal or cleanup looks at
+ * anything. `restored` lists the folders put back; `stuck` the aside
+ * folders that could not be.
+ */
+export async function restoreAsideWorktrees(repoCwd: string): Promise<{ restored: string[]; stuck: string[] }> {
+  const restored: string[] = [];
+  const stuck: string[] = [];
+  const dir = await asideNotesDir(repoCwd).catch(() => null);
+  const names = dir ? await readdir(dir).catch(() => [] as string[]) : [];
+  for (const name of names) {
+    let note: AsideNote | null = null;
+    try {
+      const parsed = JSON.parse(await readFile(join(dir!, name), "utf8")) as Partial<AsideNote>;
+      if (typeof parsed.original === "string" && typeof parsed.aside === "string") note = parsed as AsideNote;
+    } catch {
+      note = null;
+    }
+    if (!note || asideNoteName(note.aside) !== name) continue;
+    if (await pathIsAbsent(note.aside)) {
+      // Deleted, or already back: nothing is left aside.
+      await clearAsideNote(repoCwd, note.aside);
+      continue;
+    }
+    const back = await putBackAside(repoCwd, note.aside, note.original);
+    if (back.ok) restored.push(note.original);
+    else stuck.push(note.aside);
+  }
+  return { restored, stuck };
+}
+
+/**
+ * Moves an aside folder back to its own name: with git while git lists it
+ * there, by a plain rename once git has dropped it (a removal that failed
+ * halfway). Never into a folder that took its place: git would move it
+ * inside that one.
+ */
+async function putBackAside(repoCwd: string, aside: string, original: string): Promise<GitOpResult> {
+  if (!(await pathIsAbsent(original))) {
+    return { ok: false, error: `Something now exists at ${original}, so the folder stays at ${aside}.` };
+  }
+  const registered = await isRegisteredWorktree(repoCwd, aside);
+  const back = await moveWorktree(repoCwd, aside, original, registered);
+  if (!back.ok) return { ok: false, error: `It could not be moved back and is at ${aside}: ${back.error}` };
+  await clearAsideNote(repoCwd, aside);
+  return { ok: true };
+}
+
+const FINGERPRINT_MAX_ENTRIES = 500_000;
+
+/**
+ * What a removal would delete, as one digest: HEAD, `git status` with
+ * untracked and ignored entries, and the size, times and inode of every
+ * file under those entries (ignored folders walked). Throws past 500,000
+ * entries: a folder too large to compare is not removed.
+ * Links count as nothing: setup's linked folders are released before the
+ * delete, and removing a link loses no data. The same digest before the
+ * last check and after the move means nothing was written in between.
+ */
+export async function worktreeFingerprint(worktreePath: string, maxEntries = FINGERPRINT_MAX_ENTRIES): Promise<string> {
+  const hash = createHash("sha256");
+  const head = await readGitText(worktreePath, ["rev-parse", "--verify", "HEAD"]);
+  hash.update(`${head}\0`);
+  // Throws when git cannot read it: no digest is not an unchanged one.
+  const { stdout: status } = await runGit(worktreePath, [
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+    "--ignored=matching",
+  ]);
+  const records = status.split("\0");
+  let budget = maxEntries;
+  // A missing entry (gone since git listed it) is part of the digest; one
+  // that cannot be read makes it fail, since its change would go unseen.
+  const statOf = (absolute: string) =>
+    lstat(absolute).catch((err: NodeJS.ErrnoException) => {
+      if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
+      throw err;
+    });
+  // Files only: a folder holds no data of its own, and one left empty once
+  // setup's links are released drops out of git's listing.
+  const walk = async (code: string, relative: string, info: Awaited<ReturnType<typeof statOf>>): Promise<void> => {
+    budget -= 1;
+    if (budget < 0) throw new Error("It holds too many files to check again before deleting it.");
+    if (!info) {
+      hash.update(`${code}\0${relative}\0-\0`);
+      return;
+    }
+    if (info.isSymbolicLink()) return;
+    if (!info.isDirectory()) {
+      // The change time and inode too: a write that keeps the size and sets
+      // the old modification time back, or a file replaced by another,
+      // still shows.
+      hash.update(`${code}\0${relative}\0${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.ino}\0`);
+      return;
+    }
+    const absolute = join(worktreePath, relative);
+    const names = (await readdir(absolute)).sort();
+    const infos = await Promise.all(names.map((name) => statOf(join(absolute, name))));
+    for (const [index, name] of names.entries()) await walk(code, join(relative, name), infos[index]);
+  };
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (record.length < 4) continue;
+    const code = record.slice(0, 2);
+    const path = record.slice(3).replace(/\/+$/, "");
+    // A rename or copy carries its source in the next record.
+    if (code[0] === "R" || code[0] === "C") index += 1;
+    await walk(code, path, await statOf(join(worktreePath, path)));
+  }
+  // Tracked files git status does not look at (assume-unchanged,
+  // skip-worktree): an edit to one shows nowhere else.
+  const { stdout: tagged } = await runGit(worktreePath, ["ls-files", "-v", "-z"]);
+  for (const record of tagged.split("\0")) {
+    if (record.length < 3) continue;
+    const tag = record[0];
+    if (tag !== "S" && tag !== "s" && tag === tag.toUpperCase()) continue;
+    const path = record.slice(2);
+    await walk(`h${tag}`, path, await statOf(join(worktreePath, path)));
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * Renames a worktree's folder to exactly `to`, then has git note it (`git
+ * worktree repair`). A plain rename never lands inside a folder that took
+ * that name, as `git worktree move` would: it fails on one that holds
+ * anything. When git cannot note the move, the folder goes back.
+ */
+async function moveWorktree(repoCwd: string, from: string, to: string, registered = true): Promise<GitOpResult> {
+  try {
+    await rename(from, to);
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
+  if (!registered) {
+    // git no longer lists it (a removal that failed halfway); a repair
+    // brings back nothing, and may fail.
+    await runGit(repoCwd, ["worktree", "repair", to]).catch(() => undefined);
+    return { ok: true };
+  }
+  try {
+    await runGit(repoCwd, ["worktree", "repair", to]);
+    return { ok: true };
+  } catch (err) {
+    const undone = await rename(to, from).then(
+      () => true,
+      () => false,
+    );
+    if (undone) await runGit(repoCwd, ["worktree", "repair", from]).catch(() => undefined);
+    return {
+      ok: false,
+      error: `git could not note the move: ${errorText(err)}${undone ? "" : ` It is at ${to}.`}`,
+    };
+  }
+}
+
 export interface RemoveCopyWorktreeHooks {
   // Invoked once, the first time removal fails because of a transient directory
   // lock (a process — usually a shell or agent pane — holding the worktree as
@@ -600,42 +812,93 @@ export async function removeCopyWorktree(
     if (!dropped.ok) return dropped;
     return finishBranch(input);
   }
+  const original = input.worktreePath;
+  let askedToRelease = false;
+  const release = async () => {
+    if (askedToRelease || !hooks?.onBusy) return;
+    askedToRelease = true;
+    try {
+      await hooks.onBusy();
+    } catch {
+      /* best-effort: the caller's release hook must never abort the retry */
+    }
+  };
   // Folders setup linked in from the main checkout go first, so removal can
-  // never reach through them; they come back if the worktree stays.
+  // never reach through them; they come back if the worktree stays. Its
+  // setup is stopped by the folder's own name, before any move.
   let releasedLinks: Awaited<ReturnType<typeof prepareWorktreeRemoval>>;
   try {
-    releasedLinks = await prepareWorktreeRemoval(input.worktreePath);
+    releasedLinks = await prepareWorktreeRemoval(original);
   } catch (err) {
     return { ok: false, error: errorText(err) };
   }
+  let work = input;
+  if (input.aside) {
+    const aside = asidePathFor(original);
+    const fail = async (error: string, changed = false): Promise<GitRemoveWorktreeResult> => {
+      await restoreWorktreeLinks(original, releasedLinks).catch(() => undefined);
+      return changed ? { ok: false, changed: true, error } : { ok: false, error };
+    };
+    if (!(await pathIsAbsent(aside))) {
+      return fail(`Another folder is where it would be moved aside: ${aside}. Move it away, then try again.`);
+    }
+    try {
+      await noteAside(input.repoCwd, { original: resolve(original), aside });
+    } catch (err) {
+      return fail(`Its move aside could not be noted: ${errorText(err)}`);
+    }
+    let moved: GitOpResult = { ok: false, error: "not moved" };
+    for (const delayMs of backoffMs) {
+      if (delayMs) await sleep(delayMs);
+      moved = await moveWorktree(input.repoCwd, original, aside);
+      if (moved.ok || !(BUSY_GIT_MSG.test(moved.error) || BUSY_FS_CODE.test(moved.error))) break;
+      await release();
+    }
+    if (!moved.ok) {
+      if (await pathIsAbsent(aside)) await clearAsideNote(input.repoCwd, aside);
+      return fail(moved.error);
+    }
+    let reason: string | null;
+    try {
+      reason = await input.aside.recheck(aside);
+    } catch (err) {
+      reason = `It could not be checked again once moved aside: ${errorText(err)}`;
+    }
+    if (reason) {
+      const back = await putBackAside(input.repoCwd, aside, original);
+      if (!back.ok) return { ok: false, changed: true, error: `${reason} ${back.error}` };
+      return fail(reason, true);
+    }
+    work = { ...input, worktreePath: aside };
+  }
+  // Puts a folder that is still there after a failure back where it was.
+  const putBack = async (): Promise<string> => {
+    if (work === input || (await pathIsAbsent(work.worktreePath))) return "";
+    const back = await putBackAside(input.repoCwd, work.worktreePath, original);
+    return back.ok ? "" : ` ${back.error}`;
+  };
   let lastError = "worktree removal not attempted";
   let removed = false;
-  let askedToRelease = false;
   for (const delayMs of backoffMs) {
     if (delayMs) await sleep(delayMs);
-    const attempt = await tryRemoveWorktreeOnce(input);
+    const attempt = await tryRemoveWorktreeOnce(work);
     if (attempt.ok) {
       removed = true;
       break;
     }
     lastError = attempt.error;
     if (!attempt.retryable) break;
-    if (!askedToRelease && hooks?.onBusy) {
-      askedToRelease = true;
-      try {
-        await hooks.onBusy();
-      } catch {
-        /* best-effort: the caller's release hook must never abort the retry */
-      }
-    }
+    await release();
   }
   if (!removed) {
-    await restoreWorktreeLinks(input.worktreePath, releasedLinks).catch(() => undefined);
-    return { ok: false, error: lastError };
+    const stuck = await putBack();
+    await restoreWorktreeLinks(stuck ? work.worktreePath : original, releasedLinks).catch(() => undefined);
+    return { ok: false, error: `${lastError}${stuck}` };
   }
 
   // Best-effort: only this worktree's own registration, if one was left.
-  await dropMissingWorktreeRegistration(input.repoCwd, input.worktreePath);
+  await dropMissingWorktreeRegistration(input.repoCwd, work.worktreePath);
+  if (work !== input) await clearAsideNote(input.repoCwd, work.worktreePath);
   return finishBranch(input);
 }
 
@@ -842,4 +1105,41 @@ export async function ignoredEntries(worktreePath: string): Promise<string[]> {
     "-z",
   ]);
   return stdout.split("\0").filter(Boolean);
+}
+
+/**
+ * Create copy from the rail: a new branch, or an existing one checked out,
+ * in a folder no workspace row names. When the rows cannot be read nothing
+ * is made, since a folder a row still names could be handed out.
+ */
+export async function createRailWorktree(
+  input: {
+    repoCwd: string;
+    worktreesRoot: string;
+    checkoutBranch?: string;
+    checkoutIsRemote?: boolean;
+    newBranch?: string;
+  },
+  loadState: () => Promise<{ workspaces: readonly { cwd?: string | null; remote?: unknown }[] }>,
+): Promise<GitCopyWorktreeResult> {
+  let takenPaths: string[];
+  try {
+    takenPaths = rowFolders(await loadState());
+  } catch (err) {
+    return { ok: false, error: `Codara could not read its workspaces, so no worktree was made: ${errorText(err)}` };
+  }
+  return input.checkoutBranch
+    ? createCheckoutWorktree({
+        repoCwd: input.repoCwd,
+        worktreesRoot: input.worktreesRoot,
+        branch: input.checkoutBranch,
+        isRemote: input.checkoutIsRemote,
+        takenPaths,
+      })
+    : createCopyWorktree({
+        repoCwd: input.repoCwd,
+        worktreesRoot: input.worktreesRoot,
+        newBranch: input.newBranch ?? "",
+        takenPaths,
+      });
 }

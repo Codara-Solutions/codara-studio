@@ -1068,6 +1068,11 @@ worktree, deletes the merged branch and drops the row in one click, with the
 same checks and recovery ref as Clean up worktrees. Its own idle terminals
 close with it; uncommitted work, a branch that is not merged, a running
 program, an active Cora run or a dev server stop it, and the toast says why.
+The tab of the agent that made it (such as a chat in another workspace that
+made it for a background agent) holds it only while that agent works inside
+it or its work is not done: once commits of its own are merged and nothing
+is left uncommitted, Clean up goes ahead with that tab open. When the tab does hold
+it, the toast names the tab and its workspace.
 A worktree with no commits of its own yet is not called merged. After a week
 untouched with no agent on it, such an empty worktree offers **Clean up** too,
 and never goes on its own.
@@ -1094,8 +1099,10 @@ row and git's record of the worktree; for a worktree it deletes the branch
 only when it is merged, and keeps one with unmerged commits.
 
 When a worktree's folder is already gone and its branch is merged or gone
-too, Codara cleans it up by itself (git's record, the merged branch and the row) and says so. It never does that while a
-terminal, run or dev server of that workspace is open, while the branch has
+too, Codara cleans it up by itself (git's record, the merged branch and the row) and says so, at the rail's next
+check (every 3 minutes and when the window comes back to the front), even with the
+tab of the agent that made it still open. It never does that while a
+terminal, run or dev server of that workspace is open, when git could not read the branch, while the branch has
 commits its upstream lacks, for a locked worktree, or when the folder above
 it is gone too (a drive that may only be unmounted). Deleting a worktree
 workspace with **Also delete the branch** no longer fails when the branch was

@@ -8,6 +8,7 @@ import {
 import { sanitizeTerminalAgentOwner, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import { makeId } from "@shared/ids";
 import { basename } from "../path-utils";
+import { tabFilePaths } from "./tabsShowingPath";
 import {
   collectLeaves,
   findLeaf,
@@ -577,6 +578,24 @@ export function savedLayoutHoldsWork(workspaceId: string): boolean {
     );
   } catch {
     return true;
+  }
+}
+
+/**
+ * The files a workspace's saved layout shows in tabs (editors, previews of
+ * file:// URLs). A layout that cannot be read restores no tabs (loadPersisted
+ * gives up on it too), so it shows none.
+ */
+export function savedLayoutFilePaths(workspaceId: string): string[] {
+  const key = storageKey(workspaceId);
+  if (!key) return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = migratePersisted(JSON.parse(raw) as PersistedShape);
+    return parsed ? tabFilePaths(parsed.tabs) : [];
+  } catch {
+    return [];
   }
 }
 

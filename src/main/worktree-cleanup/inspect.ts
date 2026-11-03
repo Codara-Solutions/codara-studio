@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, promises as fsp } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
-import type { AppState, RunState, Workspace } from "@shared/types";
+import type { AppState, CopyBranchCreator, RunState, Workspace } from "@shared/types";
 import type {
   WorktreeCleanupCode,
   WorktreeInUse,
@@ -36,6 +36,7 @@ import {
   resolveDefaultBranch,
 } from "../git-worktrees";
 import { setupProvidedEntries } from "../worktree-setup/links";
+import { folderIdentity } from "../worktree-folders";
 
 // Facts about every worktree of the repositories behind the user's
 // workspaces, and the full check a removal from the cleanup screen runs. No
@@ -73,9 +74,10 @@ export interface WorktreeCleanupDeps {
   sessionPid?(paneId: string): number | null;
   // Null when the renderer did not answer.
   listRendererTerminals(): Promise<RendererTerminal[] | null>;
-  // Whether the window has tabs of this workspace or shows it; null when it
-  // did not answer. Absent counts as held.
-  workspaceHeld?(workspaceId: string): Promise<boolean | null>;
+  // Whether the window has tabs of this workspace or shows it, or (with
+  // paths) a tab of any workspace shows a file inside one of them; null when
+  // it did not answer. Absent counts as held.
+  workspaceHeld?(workspaceId: string, paths?: readonly string[]): Promise<boolean | null>;
   // Null when the platform offers no process scan.
   processesUnderCwds(dirs: readonly string[]): Promise<Map<string, ProcessUse[]> | null>;
   runningServers(workspaceId: string): number;
@@ -110,6 +112,11 @@ export async function canonicalPath(path: string): Promise<string> {
     return resolve(path);
   }
 }
+
+// A path that may be gone, spelled as git spells it: resolved through links
+// (a dangling one too) and its nearest folder that exists, so a missing
+// folder under a symlinked parent still matches.
+export const canonicalMaybeMissing = folderIdentity;
 
 // Case-insensitive on the platforms whose default file systems are.
 export function pathKey(path: string, platform: NodeJS.Platform = process.platform): string {
@@ -324,11 +331,11 @@ export function isKeptBranch(branch: string, target: string | undefined | null):
 /** Each Codara workspace of the repository, under the deepest worktree that holds its folder. */
 export async function linkWorkspaces(repo: RepoContext): Promise<Map<string, Workspace[]>> {
   const paths = await Promise.all(
-    repo.registrations.map(async (entry) => ({ entry, real: await canonicalPath(entry.path) })),
+    repo.registrations.map(async (entry) => ({ entry, real: await canonicalMaybeMissing(entry.path) })),
   );
   const linked = new Map<string, Workspace[]>();
   for (const workspace of repo.workspaces) {
-    const cwd = await canonicalPath(workspace.cwd);
+    const cwd = await canonicalMaybeMissing(workspace.cwd);
     let best: { key: string; length: number } | null = null;
     for (const { real } of paths) {
       if (isAtOrUnder(cwd, real) && (!best || real.length > best.length)) best = { key: pathKey(real), length: real.length };
@@ -384,18 +391,75 @@ export async function usageContext(deps: WorktreeCleanupDeps, dirs: readonly str
   return { deps, runs, runsKnown, terminals, processes };
 }
 
-// Names the tab to close. A tab counts while it is open, even when its agent
-// has exited, so its title is what the user needs to find it.
-async function agentTabUse(deps: WorktreeCleanupDeps, tab: RendererTerminal | undefined): Promise<WorktreeInUse> {
-  const title = cleanText(tab?.title ?? "", 60);
-  if (!title) return { kind: "agent", label: "the agent that made it is still open" };
+const CLIENT_NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", cora: "Cora" };
+
+// Names the tab to close: its title and its workspace. A tab counts while it
+// is open, even when its agent has exited, so these are what the user needs
+// to find it. A tab with no title is named by its agent, and its workspace
+// by where the agent called from.
+async function agentTabUse(
+  deps: WorktreeCleanupDeps,
+  tab: RendererTerminal | undefined,
+  owner: CopyBranchCreator,
+  inside: boolean,
+): Promise<WorktreeInUse> {
+  const titled = cleanText(tab?.title ?? "", 60);
+  const title = titled || CLIENT_NAMES[owner.client ?? ""] || "agent";
   const state = await deps.loadState().catch(() => null);
-  const workspace = cleanText(state?.workspaces.find((entry) => entry.id === tab?.workspaceId)?.name ?? "", 60);
+  const nameOf = (id: string | undefined) => (id ? state?.workspaces.find((entry) => entry.id === id)?.name : undefined);
+  const workspace = cleanText(nameOf(tab?.workspaceId) ?? nameOf(owner.fromWorkspaceId) ?? owner.fromWorkspaceName ?? "", 60);
+  const where = workspace ? ` in ${workspace}` : "";
+  const named = titled ? `the tab “${title}”${where}` : `the ${title} tab${where}`;
   return {
     kind: "agent",
-    label: `the tab “${title}”${workspace ? ` in ${workspace}` : ""} of the agent that made it is still open`,
-    tab: { title, ...(workspace ? { workspace } : {}) },
+    label: `${named} of the agent that made it ${inside ? "works in it" : "is still open"}`,
+    tab: { title, ...(workspace ? { workspace } : {}), ...(titled ? {} : { untitled: true as const }) },
+    ...(inside ? {} : { elsewhere: true as const }),
   };
+}
+
+/**
+ * Whether a use holds the worktree once its work is done. The tab of the
+ * agent that made it, open while it works from another folder (a coordinator
+ * chat in another workspace, say), holds it only while that work may be
+ * unfinished: once the branch is merged and no files are left uncommitted,
+ * nothing of it is in the folder. A run, terminal or process inside still
+ * holds it, the maker's own tab included. Nobody watching (strict) keeps
+ * the open tab as a hold too, as anything else that cannot be ruled out.
+ */
+export function heldByMaker(use: WorktreeInUse, finished: boolean, strict = false): boolean {
+  return !(use.kind === "agent" && use.elsewhere && finished && !strict);
+}
+
+/**
+ * Whether the worktree's own work is in its base: merged by a pull request
+ * or by content, or merged as an ancestor with a commit of its own. A
+ * worktree with no commit of its own yet reads as merged too, but its agent
+ * has not started, so its open tab still holds it. Its own commit is a head
+ * past the commit its branch was created at (the branch's reflog); without
+ * a reflog, a head committed in a later second than the worktree was made.
+ */
+export async function finishedWork(
+  repoRoot: string,
+  merge: { state: WorktreeMergeState; proof?: WorktreeMergeProof },
+  head: string | null,
+  branch: string | null,
+  workspaces: readonly Workspace[],
+): Promise<boolean> {
+  if (merge.state !== "merged") return false;
+  if (merge.proof !== "ancestor") return true;
+  if (!head) return false;
+  if (branch) {
+    const log = await readGitText(repoRoot, ["reflog", "show", "--format=%H", `refs/heads/${branch}`, "--"]);
+    const start = log.split("\n").filter((line) => /^[0-9a-f]{40,64}$/i.test(line)).pop();
+    if (start) return start.toLowerCase() !== head.toLowerCase();
+  }
+  const made = workspaces.map((workspace) => Date.parse(workspace.copyBranch?.createdAt ?? "")).filter(Number.isFinite);
+  if (!made.length) return false;
+  const seconds = Number(await readGitText(repoRoot, ["log", "-1", "--format=%ct", head]));
+  // Commit times are whole seconds: only a later second counts, so a base
+  // commit made just before the worktree is never taken for its own.
+  return Number.isFinite(seconds) && seconds > 0 && seconds * 1000 > Math.min(...made);
 }
 
 function count(n: number, one: string, many = `${one}s`): string {
@@ -423,7 +487,30 @@ export async function usageOf(
       if (isAtOrUnder(cwd, path) || isAtOrUnder(await canonicalPath(cwd), real)) panes.add(terminal.paneId);
     }
   }
-  if (panes.size) uses.push({ kind: "terminal", label: count(panes.size, "open terminal") });
+  // The agent that made the worktree, while its tab is open. It works inside
+  // when its pane's folder is in it, or its shell moved in with cd (seen by
+  // the process scan only). It is named as that tab, not counted again
+  // among the terminals or processes inside.
+  const found = ctx.processes?.get(real) ?? ctx.processes?.get(path) ?? [];
+  let maker: WorktreeInUse | null = null;
+  let makerPid: number | null = null;
+  let makerPane: string | null = null;
+  for (const workspace of workspaces) {
+    const owner = workspace.copyBranch?.createdBy;
+    if (owner?.kind !== "agent" || !owner.paneId) continue;
+    const tab = (ctx.terminals ?? []).find((t) => t.paneId === owner.paneId);
+    const pid = deps.sessionPid?.(owner.paneId) ?? null;
+    const shellInside = pid !== null && found.some((entry) => entry.pid === pid);
+    const inside = panes.has(owner.paneId) || shellInside;
+    if (inside || deps.sessionCwd(owner.paneId) !== null || tab) {
+      maker = await agentTabUse(deps, tab, owner, inside);
+      if (shellInside) makerPid = pid;
+      if (panes.has(owner.paneId)) makerPane = owner.paneId;
+      break;
+    }
+  }
+  const others = makerPane ? panes.size - 1 : panes.size;
+  if (others) uses.push({ kind: "terminal", label: count(others, "open terminal") });
 
   let runs = 0;
   for (const run of ctx.runs) {
@@ -451,27 +538,17 @@ export async function usageOf(
 
   // An agent that made the worktree from another pane works in it through
   // absolute paths, so neither its pane nor its processes sit inside it.
-  for (const workspace of workspaces) {
-    const owner = workspace.copyBranch?.createdBy;
-    if (owner?.kind !== "agent" || !owner.paneId || panes.has(owner.paneId)) continue;
-    const tab = (ctx.terminals ?? []).find((t) => t.paneId === owner.paneId);
-    if (deps.sessionCwd(owner.paneId) !== null || tab) {
-      uses.push(await agentTabUse(deps, tab));
-      break;
-    }
-  }
+  if (maker) uses.push(maker);
 
   // The shell of a pane counted above is that open terminal. Any other
   // shell found inside (a terminal opened elsewhere that moved here with
   // cd) is seen only by the process scan, and counts as a process.
-  const counted = new Set<number>();
+  const counted = new Set<number>(makerPid === null ? [] : [makerPid]);
   for (const pane of panes) {
     const pid = deps.sessionPid?.(pane) ?? null;
     if (pid !== null) counted.add(pid);
   }
-  const processes = (ctx.processes?.get(real) ?? ctx.processes?.get(path) ?? []).filter(
-    (entry) => !counted.has(entry.pid),
-  );
+  const processes = found.filter((entry) => !counted.has(entry.pid));
   if (processes.length) uses.push({ kind: "process", label: count(processes.length, "running process", "running processes") });
 
   if (deps.appPaths().some((appPath) => appPath && isAtOrUnder(appPath, real))) {
@@ -674,10 +751,18 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   const uses = (await usageOf(ctx.usage, registration.path, real, workspaces)).filter(
     (use) => !ctx.allowInUse?.has(use.kind),
   );
-  if (uses.length) {
-    check.inUse = uses;
-    block(check, "IN_USE", `In use: ${uses.map((use) => use.label).join(", ")}.`);
-  }
+  const inUse = (held: WorktreeInUse[]) => {
+    if (!held.length) return;
+    check.inUse = [...(check.inUse ?? []), ...held];
+    const message = `In use: ${check.inUse.map((use) => use.label).join(", ")}.`;
+    const blocker = check.blockers.find((entry) => entry.code === "IN_USE");
+    if (blocker) blocker.message = message;
+    else block(check, "IN_USE", message);
+  };
+  // The maker's tab open in another folder is judged once the work is known:
+  // it holds work not finished (finishedWork) or files not committed.
+  const pending = uses.filter((use) => !heldByMaker(use, true, ctx.requireKnownUsage));
+  inUse(uses.filter((use) => !pending.includes(use)));
 
   const target = await targetFor(repo, workspaces.find((workspace) => workspace.copyBranch) ?? null);
   const merge = await mergeFacts(repo, head, branch, target);
@@ -697,6 +782,9 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   }
   check.branchDeletable = Boolean(branch) && merge.state === "merged" && !isKeptBranch(branch!, merge.target);
 
+  // A folder already gone holds nothing of the maker's: a merged branch is enough.
+  const finished = check.alreadyRemoved ? merge.state === "merged" : await finishedWork(repo.root, merge, head, branch, workspaces);
+  if (pending.length && !finished) inUse(pending.splice(0));
   if (check.alreadyRemoved) return finish();
 
   // Local work a removal deletes.
@@ -807,6 +895,9 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
       `Another checkout sits inside it: ${[...new Set(nested)].slice(0, 5).join(", ")}. Move or remove it first.`,
     );
   }
-  if (workFound) check.localWork = work;
+  if (workFound) {
+    check.localWork = work;
+    inUse(pending.splice(0));
+  }
   return finish();
 }

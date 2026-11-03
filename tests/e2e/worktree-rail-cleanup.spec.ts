@@ -316,19 +316,32 @@ test("Clean up on the merged fold always says what it did", async ({}, testInfo)
       expect(branchExists(other, "feat/secrets", gitEnv)).toBe(false);
     });
 
-    await test.step("a worktree an open tab owns names that tab", async () => {
+    // The shell prints the sum, not the command line it echoes.
+    const cdTo = async (dir: string, mark: number) => {
+      const { cursor } = await request("terminal.read", { paneId: pane.paneId });
+      await request("terminal.write", { paneId: pane.paneId, text: `cd ${JSON.stringify(dir)} && echo moved-$((${mark}+1))` });
+      await expect
+        .poll(async () => (await request("terminal.read", { paneId: pane.paneId, since: cursor })).text, { timeout: 15_000 })
+        .toContain(`moved-${mark + 1}`);
+    };
+
+    await test.step("the maker's tab working inside a merged worktree holds it, and is named", async () => {
+      await cdTo(held.path, 40);
       await expect(fold("ws-repo")).toContainText("1 merged", { timeout: 30_000 });
       await fold("ws-repo").getByTestId("workspace-merged-clean-up").click();
       await expect(notice("ws-repo")).toContainText("Close the tab “usage agent” in Repo first", { timeout: 30_000 });
       await list.screenshot({ path: testInfo.outputPath("rail-clean-up-held.png") });
       expect(existsSync(held.path)).toBe(true);
+    });
 
-      await request("terminal.close", { paneId: pane.paneId });
+    await test.step("the maker's tab open elsewhere does not hold its merged, clean worktree", async () => {
+      await cdTo(repo, 50);
       await fold("ws-repo").getByTestId("workspace-merged-clean-up").click();
       await expect(fold("ws-repo")).toHaveCount(0, { timeout: 30_000 });
       expect(existsSync(held.path)).toBe(false);
       await expect(notice("ws-repo")).toHaveCount(0);
       await list.screenshot({ path: testInfo.outputPath("rail-clean-up-after.png") });
+      await request("terminal.close", { paneId: pane.paneId });
     });
   } finally {
     await app.close();

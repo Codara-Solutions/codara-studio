@@ -46,6 +46,7 @@ export type TerminalOpName =
   | "list"
   | "agentCounts"
   | "workspaceHeld"
+  | "tabFiles"
   | "overlay"
   | "closeOverlay"
   | "panes"

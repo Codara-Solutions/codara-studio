@@ -42,6 +42,7 @@ import {
 } from "./orchestration/run-store";
 import { codaraHome } from "./codara-home";
 import { loadState, updateState } from "./storage";
+import { rowFolders } from "./worktree-folders";
 
 export interface GitHubPullRequestWorkspaceDependencies {
   loadState(): Promise<AppState>;
@@ -64,6 +65,7 @@ export interface GitHubPullRequestWorkspaceDependencies {
     baseBranch: string;
     transactionId?: string;
     onProgress?: (progress: PullRequestGitProgress) => Promise<void>;
+    takenPaths?: readonly string[];
   }): Promise<CreatePullRequestWorktreeResult>;
   cleanupWorktree(input: {
     repoCwd: string;
@@ -348,6 +350,19 @@ async function inspectAndCreate(
       false,
     );
   }
+  // Folders rows still name are not handed out again (reservedDirNames).
+  // Without the rows nothing is written or created.
+  let takenPaths: string[];
+  try {
+    takenPaths = rowFolders(await dependencies.loadState());
+  } catch (cause) {
+    return failure(
+      "validate",
+      "state-unreadable",
+      `Codara could not read its workspaces, so nothing was imported: ${safeMessage(cause)}`,
+      false,
+    );
+  }
   const branch = managedPullRequestBranch(origin);
   const transactionId = randomUUID();
   const workspaceId = `ws-pr-${randomUUID()}`;
@@ -398,6 +413,7 @@ async function inspectAndCreate(
     );
   }
   const created = await dependencies.createWorktree({
+    takenPaths,
     repoCwd: source.cwd,
     worktreesRoot: journal.git.worktreesRoot,
     repository,

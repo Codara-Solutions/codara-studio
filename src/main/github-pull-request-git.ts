@@ -12,6 +12,7 @@ import {
 } from "./git-exec";
 import { parseWorktreePorcelain } from "./git-worktree-porcelain";
 import { slugifyBranchName } from "./git-worktrees";
+import { reservedDirNames } from "./worktree-folders";
 
 const MAX_REMOTE_COUNT = 64;
 const MAX_REMOTE_NAME = 256;
@@ -56,6 +57,8 @@ export interface CreatePullRequestWorktreeInput {
   transactionId?: string;
   /** Awaited before/after every import side-effect boundary. */
   onProgress?: (progress: PullRequestGitProgress) => Promise<void>;
+  /** Folders workspace rows still name, never handed out (reservedDirNames). */
+  takenPaths?: readonly string[];
 }
 
 export type PullRequestGitProgress =
@@ -340,6 +343,7 @@ export async function createPullRequestWorktree(
       input.worktreesRoot,
       input.localBranch,
       dependencies,
+      input.takenPaths,
     );
     createdPath = join(input.worktreesRoot, city);
     if (dependencies.pathExists(createdPath)) {
@@ -887,8 +891,11 @@ async function pickDirectoryName(
   root: string,
   branch: string,
   dependencies: PullRequestGitDependencies,
+  takenPaths: readonly string[] = [],
 ): Promise<string> {
-  const used = new Set(await dependencies.listDirectories(root));
+  const listed = new Set(await dependencies.listDirectories(root));
+  const reserved = await reservedDirNames(root, takenPaths);
+  const used = { has: (name: string) => listed.has(name) || reserved(name) };
   const base = slugifyBranchName(branch);
   if (!used.has(base)) return base;
   for (let index = 2; index <= 10_000; index += 1) {

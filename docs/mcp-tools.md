@@ -1121,8 +1121,9 @@ the `blockers` and a `hint`:
   terminal created is kept while that terminal is open, because such an
   agent works there through absolute paths and `git -C` and no usage check
   can see it;
-- no terminal, active Cora run or process uses it, and the caller is not
-  inside it.
+- no terminal, active Cora run or process uses it, the window does not show
+  it or hold tabs of it, no tab of any workspace shows a file inside it (an
+  editor may hold unsaved edits), and the caller is not inside it.
 
 The `code` is the first blocker; `blockers` lists them all, and a dry run or
 `codara_worktree_list` reports the same codes without removing anything:
@@ -1148,11 +1149,33 @@ The `code` is the first blocker; `blockers` lists them all, and a dry run or
 | `WORKTREE_ACTIVE_RUNS` | Active Cora runs work in it. | Wait for them to finish, or ask you. |
 | `WORKTREE_RUNNING_PROCESSES` | Processes run in it. | Stop them, or wait or ask you. |
 | `WORKTREE_CALLER_INSIDE` | The caller runs inside it. | Call from the source workspace, or ask you to delete it from the rail. |
+| `WORKTREE_OPEN_TABS` | The window shows it or has tabs of it, a tab of any workspace shows a file inside it, or the window did not answer. | Close the tabs you opened on its files; otherwise ask you to close them. |
 
 Before deleting anything Codara saves the last commit as
-`refs/codara/removed-worktrees/<date>/<workspace id>`, kept for 30 days, and
-the result carries `recoverWith`, the command that restores the worktree. The
-branch is deleted only if it still points at the commit that was checked.
+`refs/codara/removed-worktrees/<date>/<workspace id>`, kept 30 full days, and
+the result carries `recoverWith`, the command that restores the worktree. When
+git fails partway (it may already have deleted files), the ref stays and the
+refusal names it in `recoveryRef`. A second removal of the same worktree on the
+same day saves above the newest name (`<workspace id>-2`, ...), and a retry
+answers with the newest save. `recoverWith` makes the branch again when it is
+gone, and checks the commit out detached when the branch moved on. The branch is
+deleted only if it still points at the commit that was checked, and, when the
+folder was already gone, only once its tip is saved (otherwise
+`branchKeptReason` is `RECOVERY_REF_FAILED`).
+Under the lock the workspace rows are read again: if another row now names the
+same folder (a new worktree made where one removed outside Codara was), it
+refuses with `WORKTREE_CHANGED`. A new
+worktree never gets a folder a row still names, even one whose folder is gone,
+so it gets `<branch>-2` instead.
+To delete the folder, Codara first moves it aside (`.<name>.codara-removing`
+next to it), where nothing new can open it by its path, and checks it again:
+if a file changed, a commit landed, or a terminal, run, tab or process
+appeared since the last check, it moves it back and refuses with
+`WORKTREE_CHANGED`. A process that already had the folder open can still
+write into it until it is deleted. A folder left aside when Codara stopped
+goes back before the next removal in that repository; one that cannot go
+back blocks removals there until it can. A worktree of more than 500,000
+files and folders is not removed: it is too large to check again.
 Every create and removal, refused or not, is logged to
 `~/.codarastudio/logs/worktree-audit.jsonl`. **Let agents create and remove
 worktrees** in Settings turns creating and removing off; listing still works.

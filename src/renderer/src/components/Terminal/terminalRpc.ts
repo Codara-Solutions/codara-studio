@@ -66,16 +66,34 @@ export function registerTerminalRpcHandler(): void {
 
 // App knows every workspace's tabs; until it says otherwise, every workspace is
 // held, so a removal asked for before it is ready refuses.
-let workspaceHeldProbe: (workspaceId: string) => boolean = () => true;
+type WorkspaceHeldProbe = (workspaceId: string, folders: readonly string[]) => boolean;
+let workspaceHeldProbe: WorkspaceHeldProbe = () => true;
 
-export function setWorkspaceHeldProbe(probe: (workspaceId: string) => boolean): void {
+export function setWorkspaceHeldProbe(probe: WorkspaceHeldProbe): void {
   workspaceHeldProbe = probe;
+}
+
+// Every file a tab of any workspace shows; null until App can say.
+let tabFilesProbe: () => string[] | null = () => null;
+
+export function setTabFilesProbe(probe: () => string[] | null): void {
+  tabFilesProbe = probe;
+}
+
+function heldFolders(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0).slice(0, 8);
 }
 
 async function dispatch(req: BridgeRequest): Promise<unknown> {
   switch (req.op) {
     case "workspaceHeld":
-      return workspaceHeldProbe(String((req.params as { workspaceId?: unknown }).workspaceId ?? ""));
+    {
+      const params = req.params as { workspaceId?: unknown; paths?: unknown };
+      return workspaceHeldProbe(String(params.workspaceId ?? ""), heldFolders(params.paths));
+    }
+    case "tabFiles":
+      return tabFilesProbe();
     case "agentCounts":
       return getWorkspaceAgentCounts();
     case "list":

@@ -31,6 +31,8 @@ import {
   listWorktreeRegistrations,
   populatedSubmodules,
   removeCopyWorktree,
+  restoreAsideWorktrees,
+  worktreeFingerprint,
   resolveDefaultBranch,
   type WorktreeRegistration,
 } from "./git-worktrees";
@@ -38,6 +40,7 @@ import { deleteBranch, deleteBranchIfAt } from "./git-branches";
 import { listProcessesWithCommands, processChainIn } from "./owned-process-tree";
 import { setupProvidedEntries } from "./worktree-setup/links";
 import { holdsPullRequestCode, isPullRequestRef } from "./pull-request-code";
+import { isUnreadableState, sameFolder } from "./worktree-folders";
 import type { WorktreeSetupStatus } from "@shared/worktree-setup";
 import {
   insertCopyWorkspace,
@@ -120,6 +123,7 @@ export type WorktreeCode =
   | "WORKTREE_ACTIVE_RUNS"
   | "WORKTREE_RUNNING_PROCESSES"
   | "WORKTREE_CALLER_INSIDE"
+  | "WORKTREE_OPEN_TABS"
   | "WORKTREE_CHANGED"
   | "WORKTREE_BUSY"
   | "WORKTREE_REPO_BUSY";
@@ -179,6 +183,10 @@ export interface AgentWorktreeDeps {
   sessionsUnderCwd(dir: string): string[];
   // Null when the renderer did not answer.
   listRendererTerminals(): Promise<RendererTerminal[] | null>;
+  // Whether the window shows this workspace, has tabs of it, or has a tab of
+  // any workspace on a file inside one of paths (an editor buffer may hold
+  // unsaved work). Null when it did not answer.
+  workspaceHeld(workspaceId: string, paths: readonly string[]): Promise<boolean | null>;
   // Null when the platform offers no process scan.
   processesUnderCwd(dir: string): Promise<ProcessUse[] | null>;
   github: {
@@ -325,6 +333,7 @@ const MESSAGES: Record<WorktreeCode, string> = {
   WORKTREE_ACTIVE_RUNS: "active Cora runs use the worktree",
   WORKTREE_RUNNING_PROCESSES: "processes use the worktree",
   WORKTREE_CALLER_INSIDE: "you are running inside this worktree",
+  WORKTREE_OPEN_TABS: "the window shows the worktree or has tabs of it, or a tab shows a file inside it",
   WORKTREE_CHANGED: "the worktree changed during the check",
   WORKTREE_BUSY: "git could not remove the directory (in use)",
   WORKTREE_REPO_BUSY: "another worktree operation on this repository is running",
@@ -356,6 +365,7 @@ const HINTS: Partial<Record<WorktreeCode, string>> = {
   WORKTREE_OWNED_BY_LIVE_AGENT: "leave it to that agent, or ask the user",
   WORKTREE_RUNNING_PROCESSES: "stop them, or wait or ask the user",
   WORKTREE_CALLER_INSIDE: "call from the source workspace, or ask the user to delete it from the rail",
+  WORKTREE_OPEN_TABS: "close the tabs you opened on its files; otherwise ask the user to close them",
   WORKTREE_CHANGED: "retry",
   WORKTREE_BUSY: "retry later",
   WORKTREE_REPO_BUSY: "retry shortly",
@@ -724,6 +734,37 @@ function dateStamp(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
+// Create-only: an existing ref of that name is never moved. A second removal
+// of the same id on the same day (one cut short left its ref) takes the next
+// name above the newest one, so the newest name always holds the latest
+// save; it is reused only when it already holds this commit. Null when no
+// name could be written.
+const RECOVERY_REF_SUFFIXES = 20;
+
+export async function saveRecoveryRef(repoRoot: string, base: string, oid: string): Promise<string | null> {
+  const nameFor = (n: number) => (n === 1 ? base : `${base}-${n}`);
+  let newest = 0;
+  let newestOid: string | null = null;
+  for (let n = 1; n <= RECOVERY_REF_SUFFIXES; n += 1) {
+    const at = await revParse(repoRoot, nameFor(n));
+    if (at) {
+      newest = n;
+      newestOid = at;
+    }
+  }
+  if (newest && newestOid === oid) return nameFor(newest);
+  for (let n = newest + 1; n <= RECOVERY_REF_SUFFIXES; n += 1) {
+    const ref = nameFor(n);
+    try {
+      await runGit(repoRoot, ["update-ref", ref, oid, ""]);
+      return ref;
+    } catch {
+      if ((await revParse(repoRoot, ref)) === oid) return ref;
+    }
+  }
+  return null;
+}
+
 // ── Gate and scope ─────────────────────────────────────────────────────────
 
 export async function gateCaller(
@@ -753,6 +794,11 @@ export async function gateCaller(
     return refusal("WORKTREE_FORBIDDEN", undefined, { reason: "automation runs cannot manage worktrees" });
   }
   return { run, preferences };
+}
+
+// The local folders workspace rows name, for a new worktree to keep clear of.
+export function rowPaths(state: AppState | null | undefined): string[] {
+  return (state?.workspaces ?? []).filter((workspace) => !workspace.remote && workspace.cwd).map((workspace) => workspace.cwd);
 }
 
 export interface WorktreeScope {
@@ -1350,6 +1396,10 @@ async function createAgentWorktreeInner(
   try {
     outcome = await withRepoLock(repoCwd, async () => {
       const state = await deps.loadState();
+      // Without the rows a folder one still names could be handed out.
+      if (isUnreadableState(state)) {
+        return refusal("WORKTREE_STATE_FAILED", "Codara could not read its workspaces, so no worktree was made");
+      }
       const current: WorktreeScope = { ...scope, state };
       const registrations = await listWorktreeRegistrations(repoCwd).catch(() => [] as WorktreeRegistration[]);
       const registered = new Set<string>();
@@ -1405,6 +1455,7 @@ async function createAgentWorktreeInner(
           worktreesRoot: scope.root,
           branch: remoteOnly ? `origin/${branch}` : branch,
           isRemote: remoteOnly,
+          takenPaths: rowPaths(state),
         });
       } else {
         const remoteBase = baseName && baseName !== "HEAD" ? await splitRemoteRef(repoCwd, baseName) : null;
@@ -1419,6 +1470,7 @@ async function createAgentWorktreeInner(
           baseBranch: baseName!,
           startPoint: baseCommit!,
           newBranch: branch,
+          takenPaths: rowPaths(state),
         });
       }
       if (!created.ok) {
@@ -1923,6 +1975,13 @@ export async function verifyRemovable(
     if (paneIds.length) block("WORKTREE_RUNNING_PANES");
     if (runIds.length) block("WORKTREE_ACTIVE_RUNS");
   }
+  // Tabs are the renderer's alone: an editor tab with unsaved edits is in
+  // no terminal, run or process list. A window that does not answer holds it.
+  const held = await deps.workspaceHeld(workspace.id, [...new Set([path, realPath])]).catch(() => null);
+  if (held !== false) {
+    block("WORKTREE_OPEN_TABS");
+    if (held === null) verdict.warnings.push("the window did not answer whether a tab shows the worktree");
+  }
   if (options.scanProcesses) {
     const processes = await deps.processesUnderCwd(realPath).catch(() => null);
     if (processes === null) {
@@ -2310,17 +2369,37 @@ export interface RemoveWorktreeInput {
   dryRun?: boolean;
 }
 
+// The newest recovery ref saved for a workspace: the latest day, and on that
+// day the highest suffix (a removal cut short leaves the plain name, the next
+// one of that day takes -2, ...).
+// How to get a removed worktree back from its recovery ref: on its branch
+// when the branch still holds the saved commit, a new branch when it is
+// gone, and detached when the branch moved on (it is never reset).
+async function recoverCommand(repo: string, path: string, branch: string, ref: string, oid: string): Promise<string> {
+  const tip = await revParse(repo, `refs/heads/${branch}`);
+  if (!tip) return `git -C ${repo} worktree add ${path} -b ${branch} ${ref}`;
+  if (tip === oid) return `git -C ${repo} worktree add ${path} ${branch}`;
+  return `git -C ${repo} worktree add --detach ${path} ${ref}`;
+}
+
 async function findRecoveryRef(repoCwd: string, workspaceId: string): Promise<{ ref: string; oid: string } | null> {
   const out = await readGitText(repoCwd, [
     "for-each-ref",
     "--format=%(refname) %(objectname)",
     `${RECOVERY_REF_PREFIX}/`,
   ]);
+  let best: { ref: string; oid: string; day: string; n: number } | null = null;
   for (const line of out.split(/\r?\n/)) {
     const [ref, oid] = line.trim().split(" ");
-    if (ref && oid && ref.endsWith(`/${workspaceId}`)) return { ref, oid };
+    if (!ref || !oid) continue;
+    const [day, name] = ref.slice(RECOVERY_REF_PREFIX.length + 1).split("/");
+    if (!day || !name?.startsWith(workspaceId)) continue;
+    const rest = name.slice(workspaceId.length);
+    const n = rest === "" ? 1 : /^-\d+$/.test(rest) ? Number(rest.slice(1)) : null;
+    if (n === null) continue;
+    if (!best || day > best.day || (day === best.day && n > best.n)) best = { ref, oid, day, n };
   }
-  return null;
+  return best ? { ref: best.ref, oid: best.oid } : null;
 }
 
 export async function pruneRecoveryRefs(repoCwd: string, now: Date): Promise<void> {
@@ -2334,7 +2413,9 @@ export async function pruneRecoveryRefs(repoCwd: string, now: Date): Promise<voi
     const [ref, oid] = line.trim().split(" ");
     if (!ref || !oid) continue;
     const date = ref.slice(RECOVERY_REF_PREFIX.length + 1).split("/")[0];
-    const at = Date.parse(`${date}T00:00:00Z`);
+    // The name gives only the UTC day it was saved; counting from the end of
+    // that day keeps a ref saved at 23:00 the full 30 days.
+    const at = Date.parse(`${date}T00:00:00Z`) + 24 * 60 * 60 * 1000;
     if (!Number.isFinite(at) || at >= cutoff) continue;
     await runGit(repoCwd, ["update-ref", "-d", ref, oid]).catch(() => undefined);
   }
@@ -2427,8 +2508,24 @@ export async function removeAgentWorktree(
   if (!workspace) {
     const id = input.workspaceId;
     const remembered = id ? recentRemovals.get(removalKey(scope.repoCwd, id)) : undefined;
-    if (remembered) return { ...remembered, alreadyRemoved: true, removed: false };
     const recovery = id ? await findRecoveryRef(scope.repoCwd, id) : null;
+    if (remembered) {
+      // A later attempt, even a failed one, may have saved a newer ref than
+      // the remembered result names: the newest save is the answer.
+      const newer = recovery && recovery.ref !== remembered.recoveryRef ? recovery : null;
+      return {
+        ...remembered,
+        alreadyRemoved: true,
+        removed: false,
+        ...(newer
+          ? {
+              recoveryRef: newer.ref,
+              verifiedCommit: newer.oid,
+              recoverWith: await recoverCommand(scope.repoCwd, String(remembered.path), String(remembered.branch), newer.ref, newer.oid),
+            }
+          : {}),
+      };
+    }
     if (id && recovery) {
       return {
         ok: true,
@@ -2491,6 +2588,12 @@ export async function removeAgentWorktree(
     await deps.audit({ ...auditBase, outcome: "refused", code: outcome.code }).catch(() => undefined);
     return outcome;
   }
+  // A retry that saved a newer ref (only the branch was left) replaces what
+  // a later retry is told, so it never reports the older commit.
+  if (outcome.removed !== true && typeof outcome.recoveryRef === "string") {
+    const before = recentRemovals.get(removalKey(scope.repoCwd, target.id));
+    if (before) rememberRemoval(scope.repoCwd, target, { ...before, ...outcome, removed: true, alreadyRemoved: false });
+  }
   if (outcome.removed === true) {
     rememberRemoval(scope.repoCwd, target, outcome);
     deps.sendAgentEvent({
@@ -2533,6 +2636,37 @@ async function auditRefusal(
     .catch(() => undefined);
 }
 
+// The last check, on the folder moved aside where nothing new can open it
+// by its path: the same files and HEAD as before the checks, and nothing
+// using it under either name. A reason puts it back.
+async function changedWhileAside(
+  ctx: VerifyContext,
+  workspace: Workspace,
+  realBefore: string,
+  aside: string,
+  before: string,
+): Promise<string | null> {
+  const { deps } = ctx;
+  if ((await worktreeFingerprint(aside)) !== before) return "it changed while it was being removed, so it was put back";
+  const realAside = await realpathOrResolve(aside);
+  const fresh: VerifyContext = {
+    ...ctx,
+    runs: deps.listRuns().catch(() => []),
+    rendererTerminals: deps.listRendererTerminals().catch(() => null),
+  };
+  const panes = [
+    ...(await panesUsing(fresh, workspace, workspace.cwd, realBefore)),
+    ...(await panesUsing(fresh, workspace, aside, realAside)),
+  ];
+  const runs = [...(await runsUsing(fresh, workspace, realBefore)), ...(await runsUsing(fresh, workspace, realAside))];
+  if (panes.length || runs.length) return "a terminal or run started in it while it was being removed, so it was put back";
+  const held = await deps.workspaceHeld(workspace.id, [...new Set([workspace.cwd, realBefore, aside])]).catch(() => null);
+  if (held !== false) return "a tab of it was opened while it was being removed, or the window did not answer, so it was put back";
+  const processes = await deps.processesUnderCwd(realAside).catch(() => null);
+  if (processes?.length) return "a process runs in it, so it was put back";
+  return null;
+}
+
 async function removeLocked(
   ctx: VerifyContext,
   workspace: Workspace,
@@ -2543,18 +2677,54 @@ async function removeLocked(
   const repo = scope.repoCwd;
   const branch = workspace.copyBranch!.branch;
   const latestState = await deps.loadState();
+  // A removal Studio did not finish may have left a folder aside: it goes
+  // back first, and the unlocked check, which may have seen it gone, is
+  // not trusted then. One that cannot go back blocks this removal.
+  const aside = await restoreAsideWorktrees(repo);
+  if (aside.restored.length || aside.stuck.length) {
+    return refusal(
+      "WORKTREE_CHANGED",
+      aside.stuck.length
+        ? `an earlier removal left a folder aside that could not be put back: ${aside.stuck.join(", ")}`
+        : "an earlier removal left a folder aside and it was put back; check again",
+      { workspaceId: workspace.id },
+    );
+  }
   const stillListed = latestState.workspaces.find((candidate) => candidate.id === workspace.id);
   if (!stillListed) {
     return { ok: true, removed: false, alreadyRemoved: true, workspaceId: workspace.id, path: workspace.cwd, branch };
   }
+  // The row asked for must still be the only one at its folder: another row
+  // there (a new worktree made in the folder of one removed outside Studio)
+  // would have its worktree judged, and deleted, in this row's name.
+  for (const other of latestState.workspaces) {
+    if (other.id === workspace.id || other.remote || !other.cwd) continue;
+    if (await sameFolder(other.cwd, stillListed.cwd)) {
+      return refusal("WORKTREE_CHANGED", `another workspace (${other.name}) now uses this folder; nothing was removed`, {
+        workspaceId: workspace.id,
+      });
+    }
+  }
   const warnings = [...verdict.warnings];
   let recoveryRef: string | null = null;
+  // The commit `recoveryRef` holds, when the removal saved one without a
+  // verified tip of its own (only the branch was left).
+  let savedTip: string | null = null;
   let branchDeleted = false;
   let branchKept: string | null = null;
 
   if (!verdict.alreadyRemoved) {
     // The decisive checks again, against the refs already fetched, so a
     // commit, edit or new terminal since the unlocked check cannot slip by.
+    // Taken before the checks, so whatever is written after them shows once
+    // the folder is moved aside.
+    const before = await worktreeFingerprint(workspace.cwd).catch(() => null);
+    if (before === null) {
+      return refusal("WORKTREE_GIT_FAILED", "git could not read the worktree, so nothing was removed", {
+        workspaceId: workspace.id,
+      });
+    }
+    const realBefore = await realpathOrResolve(workspace.cwd);
     const recheckCtx: VerifyContext = {
       ...ctx,
       registrations: await listWorktreeRegistrations(repo).catch(() => [] as WorktreeRegistration[]),
@@ -2564,7 +2734,8 @@ async function removeLocked(
     const again = await verifyRemovable(recheckCtx, stillListed, {
       checkMerge: true,
       fetch: false,
-      scanProcesses: false,
+      // A process started while the removal waited for the lock counts.
+      scanProcesses: true,
       ...(input.target ? { target: input.target } : {}),
       discardIgnoredFiles: input.discardIgnoredFiles === true,
       pinned: {
@@ -2579,16 +2750,11 @@ async function removeLocked(
       });
     }
 
-    recoveryRef = `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}`;
-    try {
-      await runGit(repo, ["update-ref", recoveryRef, verdict.tip!, ""]);
-    } catch (err) {
-      const existing = await revParse(repo, recoveryRef);
-      if (existing !== verdict.tip) {
-        return refusal("WORKTREE_GIT_FAILED", `could not save the recovery ref: ${cleanText(errorText(err), 300)}`, {
-          workspaceId: workspace.id,
-        });
-      }
+    recoveryRef = await saveRecoveryRef(repo, `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}`, verdict.tip!);
+    if (!recoveryRef) {
+      return refusal("WORKTREE_GIT_FAILED", "could not save the recovery ref, so nothing was removed", {
+        workspaceId: workspace.id,
+      });
     }
     // No onBusy hook: Codara never kills anything on an agent's behalf.
     const removed = await removeCopyWorktree({
@@ -2598,10 +2764,21 @@ async function removeLocked(
       force: false,
       deleteBranch: false,
       removeOrphanDir: false,
+      aside: { recheck: (aside) => changedWhileAside(recheckCtx, stillListed, realBefore, aside, before) },
     });
+    if (!removed.ok && removed.changed) {
+      return refusal("WORKTREE_CHANGED", removed.error, { workspaceId: workspace.id, recoveryRef });
+    }
     if (!removed.ok) {
-      await runGit(repo, ["update-ref", "-d", recoveryRef, verdict.tip!]).catch(() => undefined);
-      return refusal(mapRemoveError(removed.error), removed.error, { workspaceId: workspace.id, path: workspace.cwd });
+      // The recovery ref stays. git deletes files before it gives up on one
+      // it cannot delete, and drops the registration even then, so the ref
+      // may be the only copy of the last commit left. It expires like the
+      // others.
+      return refusal(mapRemoveError(removed.error), removed.error, {
+        workspaceId: workspace.id,
+        path: workspace.cwd,
+        recoveryRef,
+      });
     }
   } else {
     const dropped = await dropMissingWorktreeRegistration(repo, workspace.cwd);
@@ -2635,11 +2812,18 @@ async function removeLocked(
         }
         if (!provenTip) branchKept = "NOT_MERGED";
       }
-      if (provenTip) {
-        if (!recoveryRef) {
-          recoveryRef = `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}`;
-          await runGit(repo, ["update-ref", recoveryRef, provenTip, ""]).catch(() => undefined);
+      if (provenTip && !recoveryRef) {
+        // An earlier removal of this worktree cut short today may hold the
+        // plain name with an older commit; the branch goes only once its own
+        // tip is saved.
+        recoveryRef = await saveRecoveryRef(repo, `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}`, provenTip);
+        if (recoveryRef) savedTip = provenTip;
+        else {
+          branchKept = "RECOVERY_REF_FAILED";
+          provenTip = null;
         }
+      }
+      if (provenTip) {
         const deleted = await deleteBranchIfAt(repo, branch, provenTip);
         if (deleted.ok) branchDeleted = true;
         else branchKept = deleted.reason;
@@ -2647,6 +2831,16 @@ async function removeLocked(
     }
     if (branchKept && branchKept !== "BRANCH_MISSING") {
       warnings.push(`branch '${branch}' was kept (${branchKept})`);
+    }
+  }
+
+  if (verdict.alreadyRemoved && !recoveryRef) {
+    // An earlier attempt could not drop the row: the ref it saved is what is
+    // left to recover from.
+    const earlier = await findRecoveryRef(repo, workspace.id);
+    if (earlier) {
+      recoveryRef = earlier.ref;
+      savedTip = earlier.oid;
     }
   }
 
@@ -2662,11 +2856,8 @@ async function removeLocked(
   }
   deps.invalidateGitCache(repo);
 
-  const recoverWith = recoveryRef
-    ? branchDeleted
-      ? `git -C ${repo} worktree add ${workspace.cwd} -b ${branch} ${recoveryRef}`
-      : `git -C ${repo} worktree add ${workspace.cwd} ${branch}`
-    : null;
+  const savedCommit = savedTip ?? verdict.tip;
+  const recoverWith = recoveryRef && savedCommit ? await recoverCommand(repo, workspace.cwd, branch, recoveryRef, savedCommit) : null;
   return {
     ok: true,
     removed: !verdict.alreadyRemoved,
@@ -2676,7 +2867,7 @@ async function removeLocked(
     branch,
     branchDeleted,
     ...(branchKept ? { branchKeptReason: branchKept } : {}),
-    ...(verdict.tip ? { verifiedCommit: verdict.tip } : {}),
+    ...(savedCommit ? { verifiedCommit: savedCommit } : {}),
     ...(verdict.proof ? { proof: verdict.proof } : {}),
     ...(verdict.target ? { target: verdict.target } : {}),
     ...(verdict.pullRequest ? { pullRequest: verdict.pullRequest } : {}),

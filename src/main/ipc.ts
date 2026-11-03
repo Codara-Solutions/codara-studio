@@ -2663,24 +2663,13 @@ export function registerIpc(): void {
         newBranch?: string;
       },
     ): Promise<GitCopyWorktreeResult> => {
-      const {
-        createCopyWorktree,
-        createCheckoutWorktree,
-        managedWorktreesRoot,
-      } = await getGitWorktrees();
-      const worktreesRoot = managedWorktreesRoot(codaraHome(), input.repoCwd);
-      const result = input.checkoutBranch
-        ? await createCheckoutWorktree({
-            repoCwd: input.repoCwd,
-            worktreesRoot,
-            branch: input.checkoutBranch,
-            isRemote: input.checkoutIsRemote,
-          })
-        : await createCopyWorktree({
-            repoCwd: input.repoCwd,
-            worktreesRoot,
-            newBranch: input.newBranch ?? "",
-          });
+      const { createRailWorktree, managedWorktreesRoot } = await getGitWorktrees();
+      // Folders rows still name are not handed out again; without the rows,
+      // nothing is made.
+      const result = await createRailWorktree(
+        { ...input, worktreesRoot: managedWorktreesRoot(codaraHome(), input.repoCwd) },
+        loadState,
+      );
       if (result.ok) {
         // The new branch is a shared ref — refresh the source repo's panel.
         const { invalidateGitCache } = await getGitOps();

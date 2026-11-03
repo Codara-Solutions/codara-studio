@@ -94,7 +94,8 @@ import {
   type ShareableStudioTerminal,
 } from "./components/Terminal/terminalRegistry";
 import { setPaneOverlayHostLocator } from "./components/Terminal/paneOverlays";
-import { setWorkspaceHeldProbe } from "./components/Terminal/terminalRpc";
+import { setTabFilesProbe, setWorkspaceHeldProbe } from "./components/Terminal/terminalRpc";
+import { pathIsInside, tabFilePaths } from "./tabs/tabsShowingPath";
 import { deliverablePanes } from "./routing/agent-destinations";
 import { forgetTerminalSessionMemory } from "./components/Terminal/useTerminalSession";
 import {
@@ -124,6 +125,7 @@ import {
   restoredChatRunIds,
   sameWorkerMeta,
   savedLayoutHoldsWork,
+  savedLayoutFilePaths,
 } from "./tabs/useTabs";
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useAgentHibernation } from "./lib/useAgentHibernation";
@@ -881,10 +883,16 @@ export default function App() {
     `${activeWorkspace?.cwd ?? ""}:${sharedGit.status?.branch ?? ""}`,
   );
 
-  const railWorkspaceHeldRef = useRef<(workspaceId: string) => boolean>(() => true);
-  // Main asks again right before an automatic removal: the answer above can be
-  // old by the time its checks and the repository lock are through.
-  useEffect(() => setWorkspaceHeldProbe((workspaceId) => railWorkspaceHeldRef.current(workspaceId)), []);
+  const railWorkspaceHeldRef = useRef<(workspaceId: string, folders?: readonly string[]) => boolean>(() => true);
+  // Main asks again right before a removal (the automatic one and
+  // codara_worktree_remove), under the repository lock: the answer above can
+  // be old by then. With the worktree's folders it also counts a tab of any
+  // workspace on a file inside them.
+  const openTabFilesRef = useRef<() => string[] | null>(() => null);
+  useEffect(() => {
+    setWorkspaceHeldProbe((workspaceId, folders) => railWorkspaceHeldRef.current(workspaceId, folders));
+    setTabFilesProbe(() => openTabFilesRef.current());
+  }, []);
   // Merged and missing copy-branch workspaces for the rail. A missing one
   // whose branch is merged or gone is cleaned up without asking, and so is a
   // merged one nothing is left in or using (main refuses anything in use,
@@ -904,7 +912,10 @@ export default function App() {
         result.branchKept ? `${why} Branch kept: ${result.branchKept}.` : why,
       );
     }, []),
-    useCallback((workspaceId: string) => railWorkspaceHeldRef.current(workspaceId), []),
+    useCallback(
+      (workspaceId: string, folders: readonly string[]) => railWorkspaceHeldRef.current(workspaceId, folders),
+      [],
+    ),
   );
 
   // Switch HUD: bumps once per real workspace change (never on first load),
@@ -4366,14 +4377,25 @@ export default function App() {
   });
   const jumpSourcesRef = useRef(jumpSources);
   jumpSourcesRef.current = jumpSources;
-  railWorkspaceHeldRef.current = (workspaceId) => {
+  railWorkspaceHeldRef.current = (workspaceId, folders = []) => {
     if (!booted || workspaceId === activeId) return true;
     const layout =
       tabs.tabsWorkspaceId === workspaceId
         ? { tabs: tabs.tabs }
         : tabs.inactiveWorkspaceLayouts.find((entry) => entry.workspaceId === workspaceId);
-    return layout ? layout.tabs.length > 0 : savedLayoutHoldsWork(workspaceId);
+    if (layout ? layout.tabs.length > 0 : savedLayoutHoldsWork(workspaceId)) return true;
+    return folders.length > 0 && openTabFiles().some((file) => pathIsInside(file, folders));
   };
+  // Every file a tab of any workspace shows. Saved layouts count beside the
+  // loaded ones: a workspace given a background terminal before it was ever
+  // opened keeps its saved tabs aside until then. Main resolves symlinks.
+  const openTabFiles = (): string[] => {
+    const files = tabFilePaths(tabs.tabs);
+    for (const entry of tabs.inactiveWorkspaceLayouts) files.push(...tabFilePaths(entry.tabs));
+    for (const workspace of workspaces) files.push(...savedLayoutFilePaths(workspace.id));
+    return [...new Set(files)];
+  };
+  openTabFilesRef.current = () => (booted ? openTabFiles() : null);
   const focusNextTerminal = useCallback(
     (scope: TerminalSwitchScope) => {
       const next = nextTerminalStop(jumpSourcesRef.current(), scope);

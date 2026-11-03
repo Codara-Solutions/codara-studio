@@ -12,6 +12,18 @@ const path = require("node:path");
 
 const ROOT = path.join(__dirname, "..");
 
+const leaveAside = (repoDir, dir, aside, how = "git") => {
+  // As a removal Studio stopped in the middle leaves it: moved, and noted
+  // in the repository's git folder.
+  if (how === "git") execFileSync("git", ["-C", repoDir, "worktree", "move", dir, aside]);
+  else require("node:fs").renameSync(dir, aside);
+  const common = path.resolve(repoDir, execFileSync("git", ["-C", repoDir, "rev-parse", "--git-common-dir"], { encoding: "utf8" }).trim());
+  const notes = path.join(common, "codara-aside");
+  require("node:fs").mkdirSync(notes, { recursive: true });
+  const name = `${require("node:crypto").createHash("sha256").update(path.resolve(aside)).digest("hex").slice(0, 24)}.json`;
+  require("node:fs").writeFileSync(path.join(notes, name), JSON.stringify({ original: path.resolve(dir), aside }));
+};
+
 function git(cwd, args) {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
@@ -408,6 +420,35 @@ async function main() {
     });
 
     // ── Removal ────────────────────────────────────────────────────────────
+    await check("a file written after the last check puts the folder back", async () => {
+      const late = path.join(merged, ".env.local");
+      const result = await removeMod.removeCleanupWorktrees(
+        deps,
+        { items: [item(merged)], deleteMergedBranches: true },
+        {
+          // Runs after the last check and before anything is deleted.
+          beforeRemove: async () => {
+            fs.writeFileSync(late, "TOKEN=late\n");
+            return null;
+          },
+        },
+      );
+      const [outcome] = result.outcomes;
+      assert.equal(outcome.code, "CHANGED", JSON.stringify(outcome));
+      assert.equal(fs.readFileSync(late, "utf8"), "TOKEN=late\n", "the ignored file is kept, in its folder");
+      assert.ok(refExists(repo, "refs/heads/feature/merged"));
+      assert.ok(!fs.existsSync(path.join(path.dirname(merged), `.${path.basename(merged)}.codara-removing`)), "nothing is left aside");
+      fs.rmSync(late);
+    });
+
+    await check("a folder a stopped removal left aside goes back first", async () => {
+      const aside = path.join(path.dirname(merged), `.${path.basename(merged)}.codara-removing`);
+      leaveAside(repo, merged, aside);
+      const result = await removeMod.removeCleanupWorktrees(deps, { items: [item(merged)], deleteMergedBranches: true });
+      assert.equal(result.outcomes[0].code, "CHANGED", JSON.stringify(result.outcomes[0]));
+      assert.ok(fs.existsSync(merged) && !fs.existsSync(aside), "it is back where it was");
+    });
+
     await check("a merged worktree goes, with its branch and its rail row", async () => {
       const forgotten = [];
       const result = await removeMod.removeCleanupWorktrees(
@@ -694,7 +735,9 @@ async function main() {
           repoCwd: repo,
           branch: "feature/fresh",
           city: "fresh",
-          createdAt: "2026-10-01T00:00:00Z",
+          // Made after its base commit and never committed to: its agent has
+          // not started, so its open tab holds it.
+          createdAt: new Date(Date.now() + 5_000).toISOString(),
           createdBy: { kind: "agent", paneId: "pane-agent" },
         },
       });

@@ -209,6 +209,49 @@ async function main() {
       assert.ok(audit.some((line) => line.caller.client === "workspace-rail-auto-merged" && line.outcome === "removed" && line.branch === entry.branch));
     });
 
+    await check("a branch git could not read is not offered", async () => {
+      if (process.platform === "win32") return; // The failing git is a shell script.
+      const entry = mergedWorktree("unread-branch");
+      const bin = path.join(scratch, "failing-git");
+      fs.mkdirSync(bin, { recursive: true });
+      const realGit = execFileSync("sh", ["-c", "command -v git"]).toString().trim();
+      fs.writeFileSync(
+        path.join(bin, "git"),
+        `#!/bin/sh\ncase "$*" in *refs/heads/${entry.branch}*) echo "fatal: unable to read" >&2; exit 128;; esac\nexec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const pathBefore = process.env.PATH;
+      process.env.PATH = `${bin}${path.delimiter}${pathBefore}`;
+      try {
+        assert.equal((await stateOf(entry.id)).autoRemoveMerged, undefined);
+        // A request queued while it was offered does not go ahead either.
+        // (The test's own git reads go through the failing git too.)
+        await assertStays({ ...entry, branch: undefined }, /could not read the branch/);
+      } finally {
+        process.env.PATH = pathBefore;
+      }
+      assert.equal(branchExists(repo, entry.branch), true);
+      assert.equal((await stateOf(entry.id)).autoRemoveMerged, true);
+      await assertGone(entry);
+
+      // Offered, then the worktree switched to another merged branch, which
+      // git then could not read.
+      const switched = mergedWorktree("switch-branch");
+      assert.equal((await stateOf(switched.id)).autoRemoveMerged, true);
+      git(switched.dir, ["switch", "-q", "-c", "feature/switched-unread"]);
+      fs.writeFileSync(
+        path.join(bin, "git"),
+        `#!/bin/sh\ncase "$*" in *refs/heads/feature/switched-unread*) echo "fatal: unable to read" >&2; exit 128;; esac\nexec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+      process.env.PATH = `${bin}${path.delimiter}${pathBefore}`;
+      try {
+        await assertStays({ ...switched, branch: undefined }, /could not read the branch feature\/switched-unread/);
+      } finally {
+        process.env.PATH = pathBefore;
+      }
+    });
+
     await check("regenerable ignored output does not hold a worktree back", async () => {
       const entry = mergedWorktree("with-output");
       fs.mkdirSync(path.join(entry.dir, "node_modules", "left-pad"), { recursive: true });
@@ -592,6 +635,24 @@ async function main() {
       assert.equal((await auto(opened.id, ON, noProbe)).status, "refused", "no way to ask counts as held");
       delete h.held[opened.id];
       await assertGone(opened);
+    });
+
+    await check("a tab of another workspace on a file inside it holds it, asked by folder", async () => {
+      const shown = mergedWorktree("shown-elsewhere");
+      const asked = [];
+      const elsewhere = {
+        ...deps,
+        workspaceHeld: async (id, paths = []) => {
+          asked.push({ id, paths });
+          return paths.includes(shown.dir);
+        },
+      };
+      const result = await auto(shown.id, ON, elsewhere);
+      assert.equal(result.status, "refused");
+      assert.match(result.message, /a tab shows a file in it/);
+      assert.equal(fs.existsSync(shown.dir), true);
+      assert.ok(asked.some((entry) => entry.id === shown.id && entry.paths.includes(shown.dir)), JSON.stringify(asked));
+      await assertGone(shown);
     });
 
     await check("switching to the workspace while the checks run stops the removal", async () => {

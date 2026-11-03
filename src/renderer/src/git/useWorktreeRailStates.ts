@@ -21,9 +21,10 @@ import type {
 // up to once an hour.
 //
 // A row main offers as merged and safe (autoRemoveMerged) goes the same way,
-// unless isHeld says it has tabs: an editor buffer or a draft is invisible to
-// main. A held row is not asked about at all, so its wait does not grow and
-// it leaves soon after its last tab closes.
+// unless isHeld says it has tabs, or a tab of any workspace shows a file in
+// its folder: an editor buffer or a draft is invisible to main. A held row is
+// not asked about at all, so its wait does not grow and it leaves soon after
+// its last tab closes.
 const POLL_MS = 3 * 60_000;
 const FOCUS_GAP_MS = 20_000;
 const AUTO_RETRY_MS = 5 * 60_000;
@@ -40,7 +41,7 @@ const NO_EXTERNAL: readonly WorktreeRailExternal[] = [];
 export function useWorktreeRailStates(
   workspaces: Workspace[],
   onAutoRemoved: (result: WorktreeRailCleanupResult, mode: WorktreeRailCleanupRequest["mode"]) => void,
-  isHeld: (workspaceId: string) => boolean,
+  isHeld: (workspaceId: string, folders: readonly string[]) => boolean,
 ): {
   states: Record<string, WorktreeRailState>;
   external: readonly WorktreeRailExternal[];
@@ -58,6 +59,8 @@ export function useWorktreeRailStates(
   onAutoRemovedRef.current = onAutoRemoved;
   const isHeldRef = useRef(isHeld);
   isHeldRef.current = isHeld;
+  const workspacesRef = useRef(workspaces);
+  workspacesRef.current = workspaces;
   const [refreshTick, setRefreshTick] = useState(0);
   const refresh = useCallback(() => setRefreshTick((tick) => tick + 1), []);
   // Every local workspace: a project with no copy-branch row can still have
@@ -101,7 +104,8 @@ export function useWorktreeRailStates(
         const now = Date.now();
         for (const state of list) {
           const mode = state.autoCandidate ? "auto" : state.autoRemoveMerged ? "auto-merged" : null;
-          if (!mode || (mode === "auto-merged" && isHeldRef.current(state.workspaceId))) continue;
+          const cwd = workspacesRef.current.find((ws) => ws.id === state.workspaceId)?.cwd;
+          if (!mode || (mode === "auto-merged" && isHeldRef.current(state.workspaceId, cwd ? [cwd] : []))) continue;
           const tried = autoTried.current.get(state.workspaceId);
           if (tried && now - tried.at < tried.waitMs) continue;
           autoTried.current.set(state.workspaceId, {

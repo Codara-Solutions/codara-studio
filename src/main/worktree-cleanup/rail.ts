@@ -1,5 +1,5 @@
 import { promises as fsp } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import type { AppState, Workspace } from "@shared/types";
 import type {
@@ -24,12 +24,14 @@ import {
   type WorktreeCaller,
 } from "../agent-worktrees";
 import { deleteBranchIfAt } from "../git-branches";
-import { isAncestor } from "../git-worktrees";
-import { errorText, readGitText } from "../git-exec";
+import { isAncestor, restoreAsideWorktrees } from "../git-worktrees";
+import { errorText, readGitText, runGit } from "../git-exec";
 import type { WorktreeRegistration } from "../git-worktree-porcelain";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
+import { sameFolder } from "../worktree-folders";
 import {
   ROW_CONCURRENCY,
+  canonicalMaybeMissing,
   canonicalPath,
   discoverRepos,
   isKeptBranch,
@@ -41,7 +43,9 @@ import {
   pathKey,
   targetFor,
   usageContext,
+  heldByMaker,
   usageOf,
+  type MergeFacts,
   type RepoContext,
   type WorktreeCleanupDeps,
 } from "./inspect";
@@ -175,12 +179,15 @@ async function quietRefusal(path: string, head: string | null, root: string, now
 }
 
 // The checks and the wait for the repository lock take time, in which the user
-// can open this workspace and start typing in a buffer nothing in main can see.
-async function lastMomentRefusal(deps: WorktreeCleanupDeps, workspace: Workspace): Promise<string | null> {
+// can open this workspace and start typing in a buffer nothing in main can see,
+// or open a file inside it from another workspace (an agent's codara_open_file
+// lands in the agent's own workspace).
+async function lastMomentRefusal(deps: WorktreeCleanupDeps, workspace: Workspace, path: string): Promise<string | null> {
   const state = await deps.loadState().catch(() => null);
   if (!state || state.activeWorkspaceId === workspace.id) return "It is the workspace on screen.";
-  const held = await deps.workspaceHeld?.(workspace.id).catch(() => null);
-  return held === false ? null : "It has open tabs, or the window did not answer.";
+  const paths = [...new Set([path, await canonicalPath(path)])];
+  const held = await deps.workspaceHeld?.(workspace.id, paths).catch(() => null);
+  return held === false ? null : "It has open tabs, a tab shows a file in it, or the window did not answer.";
 }
 
 // A workspace row inside this worktree has tabs and state of its own, which
@@ -217,14 +224,6 @@ async function parentHoldsFolders(path: string): Promise<boolean> {
 
 // canonicalPath falls back to the path as given once it is gone, which no
 // longer matches git's real path when a parent folder is a symlink.
-async function canonicalMaybeMissing(path: string): Promise<string> {
-  try {
-    return await fsp.realpath(path);
-  } catch {
-    return join(await canonicalPath(dirname(path)), basename(path));
-  }
-}
-
 async function registrationOf(repo: RepoContext, cwd: string): Promise<WorktreeRegistration | undefined> {
   const key = pathKey(await canonicalMaybeMissing(cwd));
   for (const entry of repo.registrations) {
@@ -233,10 +232,49 @@ async function registrationOf(repo: RepoContext, cwd: string): Promise<WorktreeR
   return undefined;
 }
 
+// Whether the ref itself is missing, without resolving it. `show-ref
+// --exists` (git 2.43) answers 2 for missing; an older git falls back to
+// both of: not a symbolic ref, and not readable.
+async function refAbsent(root: string, ref: string): Promise<boolean> {
+  const code = await runGit(root, ["show-ref", "--exists", ref]).then(
+    () => 0,
+    (err: unknown) => (err as { code?: unknown })?.code,
+  );
+  if (code === 0 || code === 1) return false;
+  if (code === 2) return true;
+  const symbolic = await runGit(root, ["symbolic-ref", "-q", ref]).then(
+    () => true,
+    (err: unknown) => (err as { code?: unknown })?.code !== 1,
+  );
+  if (symbolic) return false;
+  return runGit(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", ref]).then(
+    () => false,
+    (err: unknown) => (err as { code?: unknown })?.code === 1,
+  );
+}
+
+// Null only when git says the branch is not there: a git that failed to
+// answer, or a branch whose commit cannot be read, throws, so a row is never
+// dropped for a check that failed.
 async function branchTip(root: string, branch: string): Promise<string | null> {
   if (!branch) return null;
-  const out = await readGitText(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `refs/heads/${branch}^{commit}`]);
-  return /^[0-9a-f]{40,64}$/i.test(out) ? out.toLowerCase() : null;
+  const read = async (rev: string): Promise<string | null> => {
+    try {
+      return (await runGit(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", rev])).stdout.trim();
+    } catch (err) {
+      if ((err as { code?: unknown })?.code === 1) return null;
+      throw new Error(`git could not read the branch ${branch}: ${errorText(err)}`);
+    }
+  };
+  const out = await read(`refs/heads/${branch}^{commit}`);
+  if (out === null) {
+    // Exit 1 also means a ref whose commit is missing, or a symbolic ref
+    // that leads nowhere: only no ref at all is gone.
+    if (await refAbsent(root, `refs/heads/${branch}`)) return null;
+    throw new Error(`git could not read the commit of the branch ${branch}.`);
+  }
+  if (!/^[0-9a-f]{40,64}$/i.test(out)) throw new Error(`git gave no commit for the branch ${branch}.`);
+  return out.toLowerCase();
 }
 
 function shortName(ref: string | null | undefined): string | null {
@@ -360,9 +398,10 @@ async function statesOf(
     const registration = await registrationOf(repo, workspace.cwd);
     const branch = shortName(registration?.branch) ?? workspace.copyBranch.branch;
     const registered = registration?.head && !/^0+$/.test(registration.head) ? registration.head : null;
-    const tip = await branchTip(repo.root, branch);
-    const head = registered ?? tip;
+    const tip = await branchTip(repo.root, branch).catch(() => undefined);
     const base = { workspaceId: workspace.id, missing, branch, branchGone: tip === null };
+    if (tip === undefined && !registered) return { ...base, merge: "unknown", autoCandidate: false };
+    const head = registered ?? tip ?? null;
     if (!head) return { ...base, merge: "gone", autoCandidate: missing };
     const headAt = await commitTime(repo.root, head);
     const facts = await mergeFacts(repo, head, branch, await targetFor(repo, workspace)).catch(() => ({ state: "unknown" as const }));
@@ -370,6 +409,7 @@ async function statesOf(
     // Only rows that passed the cheap facts pay for reading their activity.
     const offerAuto =
       autoMerged?.enabled === true &&
+      tip !== undefined &&
       upLongEnough(autoMerged) &&
       !missing &&
       registered !== null &&
@@ -385,7 +425,8 @@ async function statesOf(
       ...("proof" in facts && facts.proof ? { proof: facts.proof } : {}),
       ...("target" in facts && facts.target ? { target: facts.target } : {}),
       // An empty branch loses nothing either, so a missing one goes too.
-      autoCandidate: missing && facts.state === "merged",
+      // Not on a branch git could not read.
+      autoCandidate: missing && facts.state === "merged" && tip !== undefined,
       ...(headAt ? { headAt } : {}),
       ...(offerAuto ? { autoRemoveMerged: true } : {}),
       ...(stale ? { stale: true } : {}),
@@ -428,9 +469,8 @@ function inUseText(uses: readonly WorktreeInUse[]): string {
   for (const use of uses) {
     if (use.kind === "agent" && use.tab) {
       const where = use.tab.workspace ? ` in ${use.tab.workspace}` : "";
-      parts.push(`Close the tab “${use.tab.title}”${where} first: its agent still owns this worktree.`);
-    } else if (use.kind === "agent") {
-      parts.push("Close the tab of the agent that made it first.");
+      const tab = use.tab.untitled ? `the ${use.tab.title} tab${where}` : `the tab “${use.tab.title}”${where}`;
+      parts.push(`Close ${tab} first: its agent still owns this worktree.`);
     } else if (use.kind === "app") {
       parts.push("Codara itself runs from it.");
     } else {
@@ -496,6 +536,17 @@ async function cleanUpRegistered(
   const requireKnownUsage = request.mode === "auto-merged";
   const [check] = await checkCleanupTargets(deps, [{ repoRoot: repo.root, path }], { allowInUse, requireKnownUsage });
   if (!check) return refused("The worktree could not be checked.", workspace.name);
+  // Neither automatic mode goes ahead on a branch git could not read: the
+  // one the check judged (the worktree may have switched) and the row's.
+  if (request.mode !== "manual") {
+    for (const branch of new Set([check.branch, workspace.copyBranch?.branch].filter((name): name is string => Boolean(name)))) {
+      const unread = await branchTip(repo.root, branch).then(
+        () => null,
+        (err: unknown) => errorText(err),
+      );
+      if (unread) return refused(`${unread} Nothing was removed.`, workspace.name);
+    }
+  }
   const parentPresent = await parentHoldsFolders(path);
   const why =
     railRefusal(check, request, repo, parentPresent) ??
@@ -525,8 +576,9 @@ async function cleanUpRegistered(
     {
       ...options,
       caller: callerFor(request.mode),
+      boundTo: workspace.id,
       ...(allowInUse ? { allowInUse } : {}),
-      ...(requireKnownUsage ? { requireKnownUsage, beforeRemove: () => lastMomentRefusal(deps, workspace) } : {}),
+      ...(requireKnownUsage ? { requireKnownUsage, beforeRemove: () => lastMomentRefusal(deps, workspace, path) } : {}),
     },
   );
   const outcome = outcomes[0];
@@ -561,9 +613,9 @@ async function cleanUpUnregistered(
 ): Promise<WorktreeRailCleanupResult> {
   const caller = callerFor(request.mode);
   const branch = workspace.copyBranch.branch;
-  const tip = await branchTip(repo.root, branch);
+  let tip: string | null = null;
+  let facts: MergeFacts | null = null;
   const target = await targetFor(repo, workspace);
-  const facts = tip ? await mergeFacts(repo, tip, branch, target) : null;
   const audit = (outcome: "removed" | "refused", extra: { code?: string; recoveryRef?: string | null } = {}) =>
     deps
       .audit({
@@ -586,14 +638,34 @@ async function cleanUpUnregistered(
     await audit("refused", { code });
     return refused(message, workspace.name);
   };
+  // Bound to its row, as a registered removal is (`boundTo`): the rows read
+  // again under the lock, another row at the folder stops it.
+  const rows = (await deps.loadState().catch(() => null))?.workspaces ?? null;
+  if (!rows?.some((row) => row.id === workspace.id)) {
+    return refuse("CHANGED", "The workspace rows could not be read, or its row is gone, so nothing was removed.");
+  }
+  for (const other of rows) {
+    if (other.id === workspace.id || other.remote || !other.cwd || isRemotePath(other.cwd)) continue;
+    if (await sameFolder(other.cwd, workspace.cwd)) {
+      return refuse("CHANGED", "Another workspace row uses this folder now, or its row is gone, so nothing was removed.");
+    }
+  }
+  try {
+    tip = await branchTip(repo.root, branch);
+  } catch (err) {
+    return refuse("GIT_FAILED", `${errorText(err)} Nothing was removed.`);
+  }
+  facts = tip ? await mergeFacts(repo, tip, branch, target) : null;
 
   const ctx = await usageContext(deps, []);
   const allowed = allowedUses(request.mode, true);
+  const merged = facts?.state === "merged";
+  // Nothing is left in the folder: the maker's tab in another folder holds
+  // only a branch that is still there and not merged.
   const uses = (await usageOf(ctx, workspace.cwd, await canonicalPath(workspace.cwd), [workspace])).filter(
-    (use) => !allowed?.has(use.kind),
+    (use) => !allowed?.has(use.kind) && heldByMaker(use, !tip || merged),
   );
   if (uses.length) return refuse("IN_USE", inUseText(uses));
-  const merged = facts?.state === "merged";
   if (request.mode === "auto") {
     if (!(await parentHoldsFolders(workspace.cwd))) {
       return refuse("PARENT_MISSING", "The folder above it is gone or empty, so its drive may only be unmounted.");
@@ -682,6 +754,9 @@ export async function cleanUpRailWorkspace(
     // then let go of it: a registered worktree is removed by
     // removeCleanupWorktrees, which takes the same lock itself.
     const registration = await withRepoLock(repo.root, async () => {
+      // A folder an earlier removal left aside looked gone above.
+      const aside = await restoreAsideWorktrees(repo.root);
+      if (aside.restored.length || aside.stuck.length) return { putBack: aside.stuck } as const;
       repo.registrations = (await listWorktrees(repo.root)).registrations;
       const found = await registrationOf(repo, workspace.cwd);
       if (found) return found;
@@ -689,6 +764,15 @@ export async function cleanUpRailWorkspace(
       return { unregistered: await cleanUpUnregistered(deps, repo, workspace, normalized) } as const;
     });
     if (registration === null) return refused("git does not list this folder as a worktree. Use Delete instead.", workspace.name);
+    if ("putBack" in registration) {
+      const stuck = registration.putBack ?? [];
+      return refused(
+        stuck.length
+          ? `An earlier removal left a folder aside that could not be put back: ${stuck.join(", ")}.`
+          : "An earlier removal left a folder aside, and it was put back.",
+        workspace.name,
+      );
+    }
     if ("unregistered" in registration) return registration.unregistered;
     if (mode === "auto-merged") {
       // Before the check below, whose git status can itself touch the index.
