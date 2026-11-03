@@ -56,7 +56,9 @@ VARIABLES
     merged,   \* <<branch, head>> of every merged pull request (GitHub keeps their heads)
     rmain, tmain,      \* main on GitHub, and origin/main here
     par, cont, nc,     \* commit parents and content, next commit number
-    rec,      \* commits held by refs/codara/removed-worktrees/* (never pruned here)
+    rref,     \* per row: refs/codara/removed-worktrees/<day>/<row id>, or NONE
+              \* (one day: the date part is RecoveryWindow.tla's question)
+    rref, rec,      \* commits held by the rail's suffixed refs (<id>-2, -3, ...)
     lock,     \* the repository lock: "free", "auto", "agent"
     a,        \* the automatic removal in progress
     g,        \* an agent's codara_worktree_remove in progress
@@ -65,7 +67,7 @@ VARIABLES
 
 wt   == <<row, disk, reg, dirty, term, proc, ftab, quiet>>
 gitv == <<lb, rb, trk, up, openPr, merged, rmain, tmain, par, cont, nc>>
-vars == <<wt, gitv, rec, lock, a, g, crashes, ghost>>
+vars == <<wt, gitv, rref, rref, rec, lock, a, g, crashes, ghost>>
 
 NoRow == [st |-> "none", p |-> NoPath, b |-> "none", owner |-> FALSE, tab |-> FALSE, born |-> 0]
 Idle  == [pc |-> "idle", r |-> "none", p |-> NoPath, b |-> "none", head |-> NONE,
@@ -80,7 +82,8 @@ Init ==
     /\ proc = [p \in Paths |-> FALSE]
     /\ ftab = [p \in Paths |-> FALSE]
     /\ quiet = [p \in Paths |-> FALSE]
-    /\ lb = [b \in Branches |-> NONE]
+    \* With Act "reuse", a branch may exist before any worktree (made by hand).
+    /\ lb \in [Branches -> IF "reuse" \in Act THEN {NONE, 0} ELSE {NONE}]
     /\ rb = [b \in Branches |-> NONE]
     /\ trk = [b \in Branches |-> NONE]
     /\ up = [b \in Branches |-> FALSE]
@@ -90,6 +93,7 @@ Init ==
     /\ par = [c \in Commits |-> {}]
     /\ cont = [c \in Commits |-> {}]
     /\ nc = 1
+    /\ rref = [r \in Rows |-> NONE]
     /\ rec = {}
     /\ lock = "free"
     /\ a = Idle /\ g = Idle
@@ -107,7 +111,7 @@ Head(p) == IF reg[p] = "none" THEN NONE ELSE lb[reg[p]]
 CheckedOut(b) == \E q \in Paths : reg[q] = b
 
 LocalReach == UNION {Anc(c) : c \in {lb[b] : b \in Branches} \cup {trk[b] : b \in Branches}
-                                     \cup {tmain} \cup rec}
+                                     \cup {tmain} \cup {rref[r] : r \in Rows} \cup rec}
 RemoteReach == UNION {Anc(c) : c \in {rb[b] : b \in Branches} \cup {openPr[b] : b \in Branches}
                                       \cup {m[2] : m \in merged} \cup {rmain}}
 (* Nothing of commit c is lost: its content is in main on GitHub, or     *)
@@ -162,22 +166,24 @@ Bound(r, p) == "bind" \notin Fix \/ (row[r].st = "live" /\ LiveAt(p) = {r})
 
 (* Between a removal's last check under the lock and its delete. Unless  *)
 (* Act holds "late", nothing touches that folder in that window.          *)
-InWindow(p) == (a.p = p /\ a.pc \in {"last", "ref", "git", "aside"})
-               \/ (g.p = p /\ g.pc \in {"git", "aside"})
+InWindow(p) == (a.p = p /\ a.pc \in {"last", "ref", "git", "aside", "del"})
+               \/ (g.p = p /\ g.pc \in {"ref", "git", "aside", "del"})
 ActOk(p) == disk[p] = "yes" /\ ("late" \in Act \/ ~InWindow(p))
 
 -----------------------------------------------------------------------------
 (* Studio deletes folder p for row r. `except` is the row whose own open  *)
-(* pane does not count: the agent that asked.                             *)
+(* pane does not count: the agent that asked. A partial delete (Act       *)
+(* "partial": git deletes files until one fails, drops the registration   *)
+(* and reports a failure) leaves the folder with what was not deleted.    *)
 
-Delete(p, r, except) ==
+Delete(p, r, except, partial) ==
     /\ ghost' = [ghost EXCEPT
           !.ignored = (@ \/ ("ignored" \in dirty[p])),
           !.inUse = (@ \/ InUse(p, except)),
           !.unsafe = (@ \/ ~Safe(Head(p))),
           !.collateral = (@ \/ (\E s \in LiveAt(p) : s # r)),
           !.heads = (@ \cup (IF Head(p) = NONE THEN {} ELSE {Head(p)}))]
-    /\ disk' = [disk EXCEPT ![p] = "none"]
+    /\ disk' = [disk EXCEPT ![p] = IF partial THEN "yes" ELSE "none"]
     /\ reg' = [reg EXCEPT ![p] = "none"]
     /\ dirty' = [dirty EXCEPT ![p] = {}]
     /\ term' = [term EXCEPT ![p] = FALSE]
@@ -185,11 +191,20 @@ Delete(p, r, except) ==
     /\ ftab' = [ftab EXCEPT ![p] = FALSE]
     /\ quiet' = [quiet EXCEPT ![p] = FALSE]
 
+Partial == IF "partial" \in Act THEN BOOLEAN ELSE {FALSE}
+
+(* deleteBranchIfAt: compare-and-delete, never a checked-out branch. *)
 DropBranch(b, tip) ==
     IF lb[b] = tip /\ ~CheckedOut(b)
     THEN /\ lb' = [lb EXCEPT ![b] = NONE]
-         /\ ghost' = [ghost EXCEPT !.unsafe = (@ \/ ~Safe(tip))]
+         /\ ghost' = [ghost EXCEPT !.unsafe = (@ \/ ~Safe(tip)), !.heads = (@ \cup {tip})]
     ELSE UNCHANGED <<lb, ghost>>
+
+(* saveRecoveryRef (remove.ts): create-only, the next free suffix when taken. *)
+SaveRail(r, c) ==
+    IF rref[r] = NONE THEN rref' = [rref EXCEPT ![r] = c] /\ UNCHANGED rec
+    ELSE IF rref[r] = c THEN UNCHANGED <<rref, rec>>
+    ELSE rec' = rec \cup {c} /\ UNCHANGED rref
 
 -----------------------------------------------------------------------------
 (* Automatic removal of a merged worktree (mode "auto-merged") *)
@@ -199,14 +214,14 @@ AStop == a' = Idle /\ lock' = "free"
 
 (* railWorktreeOverview offers the row; the renderer skips a held row. *)
 AScan ==
-    /\ a.pc = "idle"
+    /\ a.pc = "idle" /\ "noauto" \notin Act
     /\ \E r \in Rows :
          LET p == row[r].p IN
          /\ row[r].st = "live" /\ disk[p] = "yes" /\ reg[p] # "none"
          /\ ~row[r].tab /\ quiet[p]
          /\ AutoProof(r, reg[p], Head(p))
          /\ a' = [Idle EXCEPT !.pc = "entry", !.r = r, !.p = p]
-    /\ UNCHANGED <<wt, gitv, rec, lock, g, crashes, ghost>>
+    /\ UNCHANGED <<wt, gitv, rref, rec, lock, g, crashes, ghost>>
 
 (* cleanUpRailWorkspace: on screen, another workspace inside, the        *)
 (* registration read under the lock, then quietRefusal.                  *)
@@ -216,7 +231,7 @@ AEntry ==
        IF row[r].st = "live" /\ disk[p] = "yes" /\ ~row[r].tab /\ LiveAt(p) = {r}
           /\ reg[p] # "none" /\ quiet[p]
        THEN AGo("check") ELSE a' = Idle
-    /\ UNCHANGED <<wt, gitv, rec, lock, g, crashes, ghost>>
+    /\ UNCHANGED <<wt, gitv, rref, rec, lock, g, crashes, ghost>>
 
 (* checkCleanupTargets, railRefusal and autoMergedRefusal, unlocked. *)
 ACheck ==
@@ -225,12 +240,12 @@ ACheck ==
        IF b # "none" /\ ~AutoUse(p) /\ dirty[p] = {} /\ AutoProof(a.r, b, Head(p))
        THEN a' = [a EXCEPT !.pc = "lock", !.b = b, !.head = Head(p)]
        ELSE a' = Idle
-    /\ UNCHANGED <<wt, gitv, rec, lock, g, crashes, ghost>>
+    /\ UNCHANGED <<wt, gitv, rref, rec, lock, g, crashes, ghost>>
 
 ALock ==
     /\ a.pc = "lock" /\ lock = "free"
     /\ lock' = "auto" /\ AGo("recheck")
-    /\ UNCHANGED <<wt, gitv, rec, g, crashes, ghost>>
+    /\ UNCHANGED <<wt, gitv, rref, rec, g, crashes, ghost>>
 
 (* removeOne: checkRemoval again under the lock and the same fingerprint *)
 (* (head, branch, blockers, local work, merge state; not the proof kind). *)
@@ -241,23 +256,22 @@ ARecheck ==
           /\ Proof(a.b, a.head) # "none" /\ Bound(a.r, p)
        THEN AGo("last") /\ UNCHANGED lock
        ELSE AStop
-    /\ UNCHANGED <<wt, gitv, rec, g, crashes, ghost>>
+    /\ UNCHANGED <<wt, gitv, rref, rec, g, crashes, ghost>>
 
 (* beforeRemove = lastMomentRefusal: on screen, or held by its tabs. *)
 ALast ==
     /\ a.pc = "last"
     /\ IF ~HeldSeen(a.p) THEN AGo("ref") /\ UNCHANGED lock ELSE AStop
-    /\ UNCHANGED <<wt, gitv, rec, g, crashes, ghost>>
+    /\ UNCHANGED <<wt, gitv, rref, rec, g, crashes, ghost>>
 
-(* saveRecoveryRef for the checked head. *)
 ARef ==
     /\ a.pc = "ref"
-    /\ rec' = rec \cup {a.head} /\ AGo("git")
+    /\ SaveRail(a.r, a.head) /\ AGo("git")
     /\ UNCHANGED <<wt, gitv, lock, g, crashes, ghost>>
 
 (* removeCopyWorktree without force: tryRemoveWorktreeOnce's status sees *)
 (* tracked and untracked changes; `git worktree remove` deletes ignored  *)
-(* files without asking.                                                 *)
+(* files without asking. On a failure the refs stay.                     *)
 AGit ==
     /\ a.pc = "git"
     /\ LET p == a.p IN
@@ -266,46 +280,57 @@ AGit ==
        ELSE IF "aside" \in Fix
        THEN /\ AGo("aside") /\ disk' = [disk EXCEPT ![p] = "aside"]
             /\ UNCHANGED <<lock, row, reg, dirty, term, proc, ftab, quiet, ghost>>
-       ELSE AGo("branch") /\ Delete(p, a.r, "none") /\ UNCHANGED <<lock, row>>
-    /\ UNCHANGED <<gitv, rec, g, crashes>>
+       ELSE \E part \in Partial :
+              /\ Delete(p, a.r, "none", part)
+              /\ IF part THEN AStop ELSE AGo("branch") /\ UNCHANGED lock
+              /\ UNCHANGED row
+    /\ UNCHANGED <<gitv, rref, rec, g, crashes>>
 
-(* Fix "aside": the folder is renamed away first, so nothing can start   *)
-(* using or writing it; then everything is checked again, and it is put   *)
-(* back if anything showed up.                                            *)
+(* Fix "aside": the folder is renamed away first, so nothing new can     *)
+(* start using or writing it; then everything is checked again, and it   *)
+(* is put back if anything showed up. A handle opened before the rename  *)
+(* still writes (Act "handle").                                           *)
 AAside ==
     /\ a.pc = "aside"
     /\ LET p == a.p IN
        IF dirty[p] # {} \/ Head(p) # a.head \/ AutoUse(p) \/ HeldSeen(p)
        THEN /\ disk' = [disk EXCEPT ![p] = "yes"] /\ AStop
             /\ UNCHANGED <<row, reg, dirty, term, proc, ftab, quiet, ghost>>
-       ELSE AGo("branch") /\ Delete(p, a.r, "none") /\ UNCHANGED <<lock, row>>
-    /\ UNCHANGED <<gitv, rec, g, crashes>>
+       ELSE AGo("del") /\ UNCHANGED <<wt, lock, ghost>>
+    /\ UNCHANGED <<gitv, rref, rec, g, crashes>>
+
+ADel ==
+    /\ a.pc = "del"
+    /\ \E part \in Partial :
+         /\ Delete(a.p, a.r, "none", FALSE)
+         /\ IF part THEN AStop ELSE AGo("branch") /\ UNCHANGED lock
+    /\ UNCHANGED <<row, gitv, rref, rec, g, crashes>>
 
 (* deleteBranchIfAt; the lock is let go before the state update. *)
 ABranch ==
     /\ a.pc = "branch"
     /\ DropBranch(a.b, a.head)
     /\ AGo("row") /\ lock' = "free"
-    /\ UNCHANGED <<wt, rb, trk, up, openPr, merged, rmain, tmain, par, cont, nc, rec, g, crashes>>
+    /\ UNCHANGED <<wt, rb, trk, up, openPr, merged, rmain, tmain, par, cont, nc, rref, rec, g, crashes>>
 
 ARow ==
     /\ a.pc = "row"
     /\ row' = [row EXCEPT ![a.r].st = "gone"] /\ a' = Idle
-    /\ UNCHANGED <<disk, reg, dirty, term, proc, ftab, quiet, gitv, rec, lock, g, crashes, ghost>>
+    /\ UNCHANGED <<disk, reg, dirty, term, proc, ftab, quiet, gitv, rref, rec, lock, g, crashes, ghost>>
 
 (* Mode "auto": the folder and its registration are gone; under the lock *)
 (* the branch goes if merged and pushed, with a recovery ref, and the row *)
 (* is dropped (cleanUpUnregistered).                                      *)
 AMissing ==
-    /\ a.pc = "idle" /\ lock = "free"
+    /\ a.pc = "idle" /\ lock = "free" /\ "noauto" \notin Act
     /\ \E r \in Rows :
          LET p == row[r].p  b == row[r].b  tip == lb[b] IN
          /\ row[r].st = "live" /\ disk[p] = "none" /\ reg[p] = "none"
          /\ ~row[r].owner
          /\ tip # NONE => (Proof(b, tip) # "none" /\ ~Unpushed(b))
          /\ IF tip # NONE /\ ~CheckedOut(b)
-            THEN rec' = rec \cup {tip} /\ DropBranch(b, tip)
-            ELSE UNCHANGED <<rec, lb, ghost>>
+            THEN SaveRail(r, tip) /\ DropBranch(b, tip)
+            ELSE UNCHANGED <<rref, rec, lb, ghost>>
          /\ row' = [row EXCEPT ![r].st = "gone"]
     /\ UNCHANGED <<disk, reg, dirty, term, proc, ftab, quiet,
                    rb, trk, up, openPr, merged, rmain, tmain, par, cont, nc, lock, a, g, crashes>>
@@ -316,10 +341,11 @@ AMissing ==
 GGo(pc) == g' = [g EXCEPT !.pc = pc]
 GStop == g' = Idle /\ lock' = "free"
 Except(x) == IF x.caller = "owner" THEN x.r ELSE "none"
+OwnerBlocks(r, caller) == caller = "other" /\ row[r].owner /\ "owner_pane" \notin Bug
 
 (* verifyRemovable's blockers; `scan` is whether processes are scanned. *)
 AgentBlocked(r, caller, p, scan) ==
-    \/ caller = "other" /\ row[r].owner /\ "owner_pane" \notin Bug
+    \/ OwnerBlocks(r, caller)
     \/ dirty[p] # {}
     \/ term[p]
     \/ scan /\ proc[p]
@@ -337,12 +363,12 @@ GVerify ==
          /\ tmain' = rmain
          /\ g' = [Idle EXCEPT !.pc = "lock", !.r = r, !.p = p, !.b = b, !.head = lb[b],
                               !.caller = caller, !.tm = rmain]
-    /\ UNCHANGED <<wt, lb, rb, trk, up, openPr, merged, rmain, par, cont, nc, rec, lock, a, crashes, ghost>>
+    /\ UNCHANGED <<wt, lb, rb, trk, up, openPr, merged, rmain, par, cont, nc, rref, rec, lock, a, crashes, ghost>>
 
 GLock ==
     /\ g.pc = "lock" /\ lock = "free"
     /\ lock' = "agent" /\ GGo("recheck")
-    /\ UNCHANGED <<wt, gitv, rec, a, crashes, ghost>>
+    /\ UNCHANGED <<wt, gitv, rref, rec, a, crashes, ghost>>
 
 (* removeLocked: verifyRemovable again, pinned target, scanProcesses false. *)
 GRecheck ==
@@ -351,42 +377,88 @@ GRecheck ==
        IF row[r].st = "live" /\ disk[p] = "yes" /\ reg[p] = b /\ lb[b] = g.head /\ Bound(r, p)
           /\ ~AgentBlocked(r, g.caller, p, "rescan" \in Fix)
           /\ AgentProof(b, g.head, g.tm)
-       THEN GGo("git") /\ UNCHANGED lock
+       THEN GGo("ref") /\ UNCHANGED lock
        ELSE GStop
+    /\ UNCHANGED <<wt, gitv, rref, rec, a, crashes, ghost>>
+
+(* update-ref <ref> <tip> "": refused when the name holds another commit. *)
+GRef ==
+    /\ g.pc = "ref"
+    /\ IF rref[g.r] \in {NONE, g.head}
+       THEN rref' = [rref EXCEPT ![g.r] = g.head] /\ GGo("git") /\ UNCHANGED lock
+       ELSE GStop /\ UNCHANGED rref
     /\ UNCHANGED <<wt, gitv, rec, a, crashes, ghost>>
 
-(* Recovery ref, then removeCopyWorktree; on a failure the ref goes again. *)
+(* A failed removeCopyWorktree deletes that ref again (update-ref -d). *)
+DropAgentRef == rref' = IF rref[g.r] = g.head THEN [rref EXCEPT ![g.r] = NONE] ELSE rref
+
+(* After a partial delete the ref may be the only copy left, yet the     *)
+(* agent path deletes it all the same. Fix "keepref": keep it then, as   *)
+(* remove.ts does.                                                        *)
+DropAgentRefAfterPartial ==
+    IF "keepref" \in Fix THEN UNCHANGED rref ELSE DropAgentRef
+
 GGit ==
     /\ g.pc = "git"
     /\ LET p == g.p IN
        IF "tracked" \in dirty[p]
-       THEN GStop /\ UNCHANGED <<wt, rec, ghost>>
+       THEN GStop /\ DropAgentRef /\ UNCHANGED <<wt, ghost>>
        ELSE IF "aside" \in Fix
        THEN /\ GGo("aside") /\ disk' = [disk EXCEPT ![p] = "aside"]
-            /\ UNCHANGED <<lock, row, reg, dirty, term, proc, ftab, quiet, rec, ghost>>
-       ELSE /\ GGo("branch") /\ rec' = rec \cup {g.head}
-            /\ Delete(p, g.r, Except(g)) /\ UNCHANGED <<lock, row>>
-    /\ UNCHANGED <<gitv, a, crashes>>
+            /\ UNCHANGED <<lock, row, reg, dirty, term, proc, ftab, quiet, rref, ghost>>
+       ELSE \E part \in Partial :
+              /\ Delete(p, g.r, Except(g), part)
+              /\ IF part THEN GStop /\ DropAgentRefAfterPartial ELSE GGo("branch") /\ UNCHANGED <<lock, rref>>
+              /\ UNCHANGED row
+    /\ UNCHANGED <<gitv, rec, a, crashes>>
 
 GAside ==
     /\ g.pc = "aside"
     /\ LET p == g.p IN
        IF dirty[p] # {} \/ Head(p) # g.head \/ AgentBlocked(g.r, g.caller, p, "rescan" \in Fix)
-       THEN /\ disk' = [disk EXCEPT ![p] = "yes"] /\ GStop
-            /\ UNCHANGED <<row, reg, dirty, term, proc, ftab, quiet, rec, ghost>>
-       ELSE /\ GGo("branch") /\ rec' = rec \cup {g.head}
-            /\ Delete(p, g.r, Except(g)) /\ UNCHANGED <<lock, row>>
-    /\ UNCHANGED <<gitv, a, crashes>>
+       THEN /\ disk' = [disk EXCEPT ![p] = "yes"] /\ GStop /\ DropAgentRef
+            /\ UNCHANGED <<row, reg, dirty, term, proc, ftab, quiet, ghost>>
+       ELSE GGo("del") /\ UNCHANGED <<wt, lock, rref, ghost>>
+    /\ UNCHANGED <<gitv, rec, a, crashes>>
+
+GDel ==
+    /\ g.pc = "del"
+    /\ \E part \in Partial :
+         /\ Delete(g.p, g.r, Except(g), FALSE)
+         /\ IF part THEN GStop /\ DropAgentRefAfterPartial ELSE GGo("branch") /\ UNCHANGED <<lock, rref>>
+    /\ UNCHANGED <<row, gitv, rec, a, crashes>>
 
 GBranch ==
     /\ g.pc = "branch"
     /\ DropBranch(g.b, g.head) /\ GGo("row")
-    /\ UNCHANGED <<wt, rb, trk, up, openPr, merged, rmain, tmain, par, cont, nc, rec, lock, a, crashes>>
+    /\ UNCHANGED <<wt, rb, trk, up, openPr, merged, rmain, tmain, par, cont, nc, rref, rec, lock, a, crashes>>
 
 GRow ==
     /\ g.pc = "row"
     /\ row' = [row EXCEPT ![g.r].st = "gone"] /\ GStop
-    /\ UNCHANGED <<disk, reg, dirty, term, proc, ftab, quiet, gitv, rec, a, crashes, ghost>>
+    /\ UNCHANGED <<disk, reg, dirty, term, proc, ftab, quiet, gitv, rref, rec, a, crashes, ghost>>
+
+(* The folder is already gone (verifyRemovable's alreadyRemoved; the     *)
+(* creator's open pane still blocks another agent). Under the lock the    *)
+(* branch goes if its tip is merged by ancestry or content, after a       *)
+(* recovery ref whose failure is ignored (`.catch(() => undefined)`).     *)
+(* Fix "refsave": save it like the rail does, with a free suffix.         *)
+GMissing ==
+    /\ "agentrm" \in Act /\ g.pc = "idle" /\ lock = "free"
+    /\ \E r \in Rows, caller \in {"owner", "other"} :
+         LET p == row[r].p  b == row[r].b  tip == lb[b] IN
+         /\ row[r].st = "live" /\ disk[p] = "none"
+         /\ caller = "owner" => row[r].owner
+         /\ ~OwnerBlocks(r, caller)
+         /\ IF tip # NONE /\ ~CheckedOut(b) /\ (tip \in Anc(tmain) \/ cont[tip] \subseteq cont[tmain])
+            THEN /\ IF "refsave" \in Fix THEN SaveRail(r, tip)
+                    ELSE /\ rref' = IF rref[r] = NONE THEN [rref EXCEPT ![r] = tip] ELSE rref
+                         /\ UNCHANGED rec
+                 /\ DropBranch(b, tip)
+            ELSE UNCHANGED <<rref, rec, lb, ghost>>
+         /\ row' = [row EXCEPT ![r].st = "gone"]
+    /\ UNCHANGED <<disk, reg, dirty, term, proc, ftab, quiet,
+                   rb, trk, up, openPr, merged, rmain, tmain, par, cont, nc, lock, a, g, crashes>>
 
 -----------------------------------------------------------------------------
 (* Creating a worktree, under the lock: a new branch from origin/main, or *)
@@ -410,12 +482,12 @@ Create(r, b, mode) ==
     /\ lb' = IF mode = "new" THEN [lb EXCEPT ![b] = tmain] ELSE lb
     /\ up' = IF mode = "new" THEN [up EXCEPT ![b] = FALSE] ELSE up
     /\ UNCHANGED <<term, proc, ftab, rb, trk, openPr, merged, rmain, tmain, par, cont, nc,
-                   rec, lock, a, g, crashes, ghost>>
+                   rref, rec, lock, a, g, crashes, ghost>>
 
 -----------------------------------------------------------------------------
 (* Agents, the user and their tools, on a folder *)
 
-Others == <<rec, lock, a, g, crashes, ghost>>
+Others == <<rref, rec, lock, a, g, crashes, ghost>>
 
 SetDirty(p, d) ==
     /\ dirty' = [dirty EXCEPT ![p] = d]
@@ -423,7 +495,8 @@ SetDirty(p, d) ==
 
 Edit(p)         == ActOk(p) /\ reg[p] # "none" /\ SetDirty(p, dirty[p] \cup {"tracked"})
 Discard(p)      == "tracked" \in dirty[p] /\ SetDirty(p, dirty[p] \ {"tracked"})
-WriteIgnored(p) == "ignored" \in Act /\ ActOk(p) /\ SetDirty(p, dirty[p] \cup {"ignored"})
+WriteIgnored(p) == "ignored" \in Act /\ (ActOk(p) \/ ("handle" \in Act /\ disk[p] = "aside"))
+                   /\ SetDirty(p, dirty[p] \cup {"ignored"})
 DropIgnored(p)  == "ignored" \in dirty[p] /\ SetDirty(p, dirty[p] \ {"ignored"})
 
 Commit(p) ==
@@ -475,6 +548,16 @@ OwnerCloses(r) ==
     /\ row[r].st = "live" /\ row[r].owner
     /\ row' = [row EXCEPT ![r].owner = FALSE]
     /\ UNCHANGED <<disk, reg, dirty, term, proc, ftab, quiet, gitv, Others>>
+
+(* Act "partial": the user deletes what a failed removal left. *)
+DeleteRest(p) ==
+    /\ "partial" \in Act /\ disk[p] = "yes" /\ reg[p] = "none"
+    /\ disk' = [disk EXCEPT ![p] = "none"]
+    /\ dirty' = [dirty EXCEPT ![p] = {}]
+    /\ term' = [term EXCEPT ![p] = FALSE]
+    /\ proc' = [proc EXCEPT ![p] = FALSE]
+    /\ ftab' = [ftab EXCEPT ![p] = FALSE]
+    /\ UNCHANGED <<row, reg, quiet, gitv, Others>>
 
 (* Act "self": an agent runs `git worktree remove` itself (git refuses    *)
 (* changes, deletes ignored files), maybe deleting its merged branch;    *)
@@ -532,13 +615,13 @@ Crash ==
     /\ crashes' = crashes + 1
     /\ a' = Idle /\ g' = Idle /\ lock' = "free"
     /\ disk' = [p \in Paths |-> IF disk[p] = "aside" THEN "yes" ELSE disk[p]]
-    /\ UNCHANGED <<row, reg, dirty, term, proc, ftab, quiet, gitv, rec, ghost>>
+    /\ UNCHANGED <<row, reg, dirty, term, proc, ftab, quiet, gitv, rref, rec, ghost>>
 
 -----------------------------------------------------------------------------
 
 AutoStep  == AEntry \/ ACheck \/ ALock \/ ARecheck \/ ALast \/ ARef \/ AGit \/ AAside
-             \/ ABranch \/ ARow
-AgentStep == GLock \/ GRecheck \/ GGit \/ GAside \/ GBranch \/ GRow
+             \/ ADel \/ ABranch \/ ARow
+AgentStep == GLock \/ GRecheck \/ GRef \/ GGit \/ GAside \/ GDel \/ GBranch \/ GRow
 
 World ==
     \/ \E r \in Rows, b \in Branches, m \in {"new", "checkout"} : Create(r, b, m)
@@ -546,12 +629,13 @@ World ==
                         \/ Commit(p) \/ Push(p) \/ Quiet(p)
                         \/ \E on \in BOOLEAN : TermFlip(p, on) \/ ProcFlip(p, on) \/ FTabFlip(p, on)
                         \/ \E d \in BOOLEAN : SelfRemove(p, d)
+                        \/ DeleteRest(p)
     \/ \E r \in Rows : OwnerCloses(r) \/ \E on \in BOOLEAN : TabFlip(r, on)
     \/ \E b \in Branches : OpenPr(b) \/ DeleteRemote(b) \/ ForcePush(b)
                            \/ \E k \in {"squash", "merge"} : MergePr(b, k)
     \/ Fetch
 
-Next == AScan \/ AutoStep \/ AMissing \/ GVerify \/ AgentStep \/ World \/ Crash
+Next == AScan \/ AutoStep \/ AMissing \/ GVerify \/ GMissing \/ AgentStep \/ World \/ Crash
 
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(AScan) /\ WF_vars(AutoStep) /\ WF_vars(AMissing) /\ WF_vars(AgentStep)
