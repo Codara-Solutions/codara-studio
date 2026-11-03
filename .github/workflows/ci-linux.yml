@@ -34,7 +34,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           # zsh: the shell integration suites drive a real zsh as well as bash.
-          sudo apt-get install -y -qq xvfb zsh
+          # dbus-daemon, libnotify4, python3-gi: test-notify-linux-click runs a
+          # fake notification server on a private bus.
+          sudo apt-get install -y -qq xvfb zsh dbus-daemon libnotify4 python3-gi gir1.2-glib-2.0
           # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor,
           # and Electron's sandbox cannot start without them.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

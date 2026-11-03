@@ -41,6 +41,9 @@ function harness(e2e) {
       `export const E2E_BACKGROUND = ${e2e};\n` +
       "export function revealWindow(win) { globalThis.__reveals.push(win); }\n",
     "../file-log": "export function logMain() {}\n",
+    // The real one may run cosmic-activate, which would raise the Studio on
+    // the desktop of whoever runs the suite.
+    "./compositor-raise": "export function raiseIfStillBehind(win) { globalThis.__raises.push(win); }\n",
   };
   return {
     name: "notify-deliver-harness",
@@ -48,7 +51,7 @@ function harness(e2e) {
       build.onResolve({ filter: /^@shared\// }, (args) => ({
         path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
       }));
-      build.onResolve({ filter: /^(electron|\.\.\/e2e-background|\.\.\/file-log)$/ }, (args) => ({
+      build.onResolve({ filter: /^(electron|\.\.\/e2e-background|\.\.\/file-log|\.\/compositor-raise)$/ }, (args) => ({
         path: args.path,
         namespace: "stub",
       }));
@@ -141,6 +144,7 @@ function fakeWindow({ focused = true, minimized = false, visible = true } = {}) 
 async function main() {
   globalThis.__createdNotifications = [];
   globalThis.__reveals = [];
+  globalThis.__raises = [];
 
   const real = await buildDeliver(false);
   const e2e = await buildDeliver(true);
@@ -198,6 +202,7 @@ async function main() {
   shown.emit("click");
   const focus = awayWin.sent.filter((m) => m.channel === "notify:focus");
   check("a click reveals the window", globalThis.__reveals.at(-1) === awayWin);
+  check("a click hands the window to the compositor fallback", globalThis.__raises.length === 1 && globalThis.__raises[0] === awayWin);
   check(
     "a click routes the target with its center row",
     focus.length === 1 && focus[0].payload[0] === runTarget && focus[0].payload[1] === away.id,
@@ -223,6 +228,7 @@ async function main() {
     "a click fired from the seam routes like a real one",
     seamFocus?.payload[0] === terminalTarget && seamFocus?.payload[1] === seamEvent.id,
   );
+  check("an e2e app never asks the compositor to raise a window", globalThis.__raises.length === 1);
 
   // ── Native channel off, or in-app off while focused ────────────────────
   const count = globalThis.__createdNotifications.length;

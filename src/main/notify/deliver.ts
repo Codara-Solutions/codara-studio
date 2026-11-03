@@ -8,6 +8,7 @@ import type {
 } from "@shared/types";
 import { E2E_BACKGROUND, revealWindow } from "../e2e-background";
 import { logMain } from "../file-log";
+import { raiseIfStillBehind } from "./compositor-raise";
 import { createNotificationRetainer } from "./native-retain";
 
 // The four delivery transports for an alert the policy let through, gated by
@@ -18,7 +19,9 @@ import { createNotificationRetainer } from "./native-retain";
 //   - native  → Electron Notification; click focuses the window and routes
 //               the event's NavigationTarget through "notify:focus". Each
 //               one stays held (native-retain.ts) until the OS is done with
-//               it, or its click would never arrive
+//               it, or its click would never arrive. On COSMIC Wayland a
+//               window the compositor kept behind is raised through
+//               compositor-raise.ts
 //   - sound   → renderer chime via "notification:sound"
 //   - osCues  → Windows taskbar flash (cleared on focus). The macOS dock
 //               badge is owned by center-store (unread count), not here.
@@ -91,6 +94,18 @@ export function focusTarget(target: NavigationTarget, entryId?: string): void {
   }
 }
 
+// A click on a native notification. Logged, because whether the click reached
+// Studio at all, and whether the desktop then let the window come forward, is
+// otherwise invisible after the fact.
+function openFromNativeClick(event: NotifyEvent): void {
+  logMain("notify", `native click id=${event.id} kind=${event.kind}`);
+  focusTarget(event.target, event.id);
+  const win = activeWindow();
+  if (win && !E2E_BACKGROUND) {
+    raiseIfStillBehind(win, { log: (message) => logMain("notify", `id=${event.id} ${message}`) });
+  }
+}
+
 const retainedNotifications = createNotificationRetainer<Notification>();
 
 interface E2eNativeNotification {
@@ -132,7 +147,7 @@ function showNative(event: NotifyEvent): void {
           body: event.body,
         },
   );
-  retainedNotifications.hold(notification, () => focusTarget(event.target, event.id));
+  retainedNotifications.hold(notification, () => openFromNativeClick(event));
   // An e2e app is never focused, so every alert it raised would become a
   // real OS notification on the desktop of whoever ran the suite.
   if (E2E_BACKGROUND) {
