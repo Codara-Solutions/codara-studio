@@ -34,6 +34,7 @@ import {
   worktreeFingerprint,
 } from "../git-worktrees";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
+import { sameFolder } from "../worktree-folders";
 import {
   canonicalMaybeMissing,
   canonicalPath,
@@ -352,7 +353,12 @@ async function removeOne(
   if (check.blockers.length) return refuse(check.blockers[0].code, check.blockers[0].message);
   if (options.boundTo) {
     const rows = ctx.linked.get(pathKey(await canonicalMaybeMissing(check.path))) ?? [];
-    if (rows.length !== 1 || rows[0].id !== options.boundTo) {
+    let shared = rows.length !== 1 || rows[0].id !== options.boundTo;
+    for (const other of ctx.repo.workspaces) {
+      if (shared) break;
+      if (other.id !== options.boundTo && (await sameFolder(other.cwd, check.path))) shared = true;
+    }
+    if (shared) {
       return refuse("CHANGED", "Another workspace row uses this folder now, or its row is gone, so nothing was removed.");
     }
   }

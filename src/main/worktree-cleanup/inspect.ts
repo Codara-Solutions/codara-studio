@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, promises as fsp } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import type { AppState, CopyBranchCreator, RunState, Workspace } from "@shared/types";
 import type {
@@ -36,6 +36,7 @@ import {
   resolveDefaultBranch,
 } from "../git-worktrees";
 import { setupProvidedEntries } from "../worktree-setup/links";
+import { folderIdentity } from "../worktree-folders";
 
 // Facts about every worktree of the repositories behind the user's
 // workspaces, and the full check a removal from the cleanup screen runs. No
@@ -112,15 +113,10 @@ export async function canonicalPath(path: string): Promise<string> {
   }
 }
 
-// A path that may be gone, spelled as git spells it: its parent resolved
-// through links, so a missing folder under a symlinked parent still matches.
-export async function canonicalMaybeMissing(path: string): Promise<string> {
-  try {
-    return await fsp.realpath(path);
-  } catch {
-    return join(await canonicalPath(dirname(path)), basename(path));
-  }
-}
+// A path that may be gone, spelled as git spells it: resolved through links
+// (a dangling one too) and its nearest folder that exists, so a missing
+// folder under a symlinked parent still matches.
+export const canonicalMaybeMissing = folderIdentity;
 
 // Case-insensitive on the platforms whose default file systems are.
 export function pathKey(path: string, platform: NodeJS.Platform = process.platform): string {

@@ -143,6 +143,17 @@ async function main() {
     assert.strictEqual(path.basename(out.path), "row-out-3", "checkout skips them too; a relative path is no row folder");
     git(repo, ["worktree", "remove", out.path]);
     git(repo, ["branch", "-D", "row-out"]);
+    // A row naming the folder in other case: some file systems ignore case.
+    const cased = await wt.createCopyWorktree({
+      repoCwd: repo,
+      worktreesRoot,
+      newBranch: "row-case",
+      takenPaths: [path.join(worktreesRoot, "Row-Case")],
+    });
+    assert.ok(cased.ok, `create failed: ${cased.ok ? "" : cased.error}`);
+    assert.strictEqual(path.basename(cased.path), "row-case-2", "a row's folder in other case is skipped");
+    git(repo, ["worktree", "remove", cased.path]);
+    git(repo, ["branch", "-D", "row-case"]);
     if (process.platform !== "win32") {
       // A row that spells the folder through a link to the same place.
       const alias = `${worktreesRoot}-alias`;
@@ -171,8 +182,23 @@ async function main() {
         assert.strictEqual(path.basename(viaMissing.path), "row-missing-2", "a root not made yet is resolved through its parents");
         git(repo, ["worktree", "remove", viaMissing.path]);
         git(repo, ["branch", "-D", "row-missing"]);
+        // A row spelled through a link of its own whose folder is gone: the
+        // link leads to the folder, so the folder is still the row's.
+        const dangling = `${worktreesRoot}-dangling`;
+        require("node:fs").symlinkSync(path.join(worktreesRoot, "row-dangle"), dangling);
+        const viaDangling = await wt.createCopyWorktree({
+          repoCwd: repo,
+          worktreesRoot,
+          newBranch: "row-dangle",
+          takenPaths: [dangling],
+        });
+        assert.ok(viaDangling.ok, `create failed: ${viaDangling.ok ? "" : viaDangling.error}`);
+        assert.strictEqual(path.basename(viaDangling.path), "row-dangle-2", "a row's dangling link still reserves its folder");
+        git(repo, ["worktree", "remove", viaDangling.path]);
+        git(repo, ["branch", "-D", "row-dangle"]);
       } finally {
         require("node:fs").rmSync(alias, { force: true });
+        require("node:fs").rmSync(`${worktreesRoot}-dangling`, { force: true });
       }
     }
 

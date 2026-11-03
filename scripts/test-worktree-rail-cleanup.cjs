@@ -1037,6 +1037,40 @@ async function main() {
       }
     });
 
+    await check("a missing folder whose row is a link to it is still its row's", async () => {
+      if (process.platform === "win32") return; // Links need privileges there.
+      const dir = mergedWith("own-link", "feature/own-link");
+      const link = path.join(scratch, "own-link-alias");
+      fs.symlinkSync(dir, link);
+      const row = h.state.workspaces.find((workspace) => workspace.id === "ws-own-link");
+      row.cwd = link;
+      fs.rmSync(dir, { recursive: true, force: true });
+      try {
+        // The link itself is still there, so only Clean up removes it.
+        const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-own-link", mode: "manual" });
+        assert.equal(result.status, "removed", JSON.stringify(result));
+        assert.equal(registered(repo, dir), false);
+        assert.equal(has("ws-own-link"), false);
+      } finally {
+        fs.rmSync(link, { force: true });
+      }
+    });
+
+    await check("a missing folder a second row names in other case is not removed for one of them", async () => {
+      const dir = mergedWith("cased-rows", "feature/cased-rows");
+      h.state.workspaces.push(
+        copyWorkspace("ws-cased-rows-other", path.join(path.dirname(dir), "Cased-Rows"), repo, "feature/cased-rows"),
+      );
+      fs.rmSync(dir, { recursive: true, force: true });
+      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-cased-rows", mode: "manual" });
+      assert.equal(result.status, "refused", JSON.stringify(result));
+      assert.match(result.message, /Another workspace row uses this folder/);
+      assert.equal(has("ws-cased-rows"), true);
+      h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== "ws-cased-rows-other");
+      const alone = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-cased-rows", mode: "manual" });
+      assert.equal(alone.status, "removed", alone.message);
+    });
+
     await check("no rail action touched another worktree or the main checkout", async () => {
       assert.equal(fs.readFileSync(path.join(bystander, "keep.txt"), "utf8"), "keep\n");
       assert.equal(registered(repo, bystander), true);

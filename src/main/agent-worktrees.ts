@@ -40,6 +40,7 @@ import { deleteBranch, deleteBranchIfAt } from "./git-branches";
 import { listProcessesWithCommands, processChainIn } from "./owned-process-tree";
 import { setupProvidedEntries } from "./worktree-setup/links";
 import { holdsPullRequestCode, isPullRequestRef } from "./pull-request-code";
+import { sameFolder } from "./worktree-folders";
 import type { WorktreeSetupStatus } from "@shared/worktree-setup";
 import {
   insertCopyWorkspace,
@@ -2692,10 +2693,9 @@ async function removeLocked(
   // The row asked for must still be the only one at its folder: another row
   // there (a new worktree made in the folder of one removed outside Studio)
   // would have its worktree judged, and deleted, in this row's name.
-  const folder = await realpathOrResolve(stillListed.cwd);
   for (const other of latestState.workspaces) {
     if (other.id === workspace.id || other.remote || !other.cwd) continue;
-    if ((await realpathOrResolve(other.cwd)) === folder) {
+    if (await sameFolder(other.cwd, stillListed.cwd)) {
       return refusal("WORKTREE_CHANGED", `another workspace (${other.name}) now uses this folder; nothing was removed`, {
         workspaceId: workspace.id,
       });

@@ -931,6 +931,27 @@ async function main() {
     const after = await aw.createAgentWorktree(terminalAgent, { branch: "agent/reused" }, deps);
     assert.equal(after.ok, true, JSON.stringify(after));
     assert.notEqual(after.path, before.path, "the folder the old row names is not handed out");
+    // The folder is gone and a second row names it spelled another way,
+    // through a link or in other case: the removal is not bound to one row.
+    const treesAlias = `${path.dirname(before.path)}-alias`;
+    if (process.platform !== "win32") fs.symlinkSync(path.dirname(before.path), treesAlias);
+    try {
+      const spellings = [path.join(path.dirname(before.path), path.basename(before.path).toUpperCase())];
+      if (process.platform !== "win32") spellings.push(path.join(treesAlias, path.basename(before.path)));
+      for (const cwd of spellings) {
+        h.state.workspaces.push({ ...workspaceOf(before.workspaceId), id: "ws-old-spelling", name: "old spelling", cwd });
+        let spelled;
+        try {
+          spelled = await aw.removeAgentWorktree(terminalAgent, { workspaceId: before.workspaceId }, deps);
+        } finally {
+          h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== "ws-old-spelling");
+        }
+        assert.equal(spelled.code, "WORKTREE_CHANGED", `${cwd}: ${JSON.stringify(spelled)}`);
+        assert.ok(workspaceOf(before.workspaceId), "its row stays");
+      }
+    } finally {
+      fs.rmSync(treesAlias, { force: true });
+    }
     const oldRow = await aw.removeAgentWorktree(terminalAgent, { workspaceId: before.workspaceId }, deps);
     assert.equal(oldRow.ok, true, JSON.stringify(oldRow));
     assert.equal(oldRow.alreadyRemoved, true);

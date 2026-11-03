@@ -370,6 +370,8 @@ async function main() {
         test.calls.worktreeInput.expectedHeadCommitOid,
         "b".repeat(40),
       );
+      // The rows' folders go to the folder picker, which keeps clear of them.
+      assert.deepEqual(test.calls.worktreeInput.takenPaths, ["/repo"]);
       assert.match(test.calls.prompt, /untrusted task data/);
       assert.match(test.calls.prompt, /Repository-owned AGENTS\.md/);
       assert.match(test.calls.prompt, /Do not push, comment, approve/);
