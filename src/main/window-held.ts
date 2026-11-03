@@ -21,14 +21,25 @@ function inside(path: string, root: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
+const SEPARATORS = process.platform === "win32" ? /[\\/]+/ : /\/+/;
+
+// Components exactly as written: ".." is applied only once the links before
+// it are followed, as the kernel does.
+function components(path: string): { root: string; names: string[] } {
+  const root = parse(path).root;
+  return { root, names: path.slice(root.length).split(SEPARATORS).filter(Boolean) };
+}
+
 // Where a path really leads, component by component: every symlink on the
 // way is followed by hand, so a link whose target was deleted (a file or a
 // folder above it) still points where the buffer came from; from the first
-// missing component on, the rest is kept as written. Null for a link loop.
+// missing component on, the rest is kept as written. Null when that cannot
+// be told: a link loop, or a component that cannot be read.
 export async function resolveLoose(path: string): Promise<string | null> {
-  const absolute = resolve(path);
-  let current = parse(absolute).root;
-  let pending = absolute.slice(current.length).split(sep).filter(Boolean);
+  if (!isAbsolute(path)) return null;
+  const start = components(path);
+  let current = start.root;
+  let pending = start.names;
   for (let hops = 0; pending.length > 0; ) {
     const name = pending.shift()!;
     if (name === ".") continue;
@@ -37,8 +48,13 @@ export async function resolveLoose(path: string): Promise<string | null> {
       continue;
     }
     const next = join(current, name);
-    const stat = await fsp.lstat(next).catch(() => null);
-    if (!stat) return join(next, ...pending);
+    let stat: Awaited<ReturnType<typeof fsp.lstat>>;
+    try {
+      stat = await fsp.lstat(next);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      return code === "ENOENT" || code === "ENOTDIR" ? join(next, ...pending) : null;
+    }
     if (!stat.isSymbolicLink()) {
       current = next;
       continue;
@@ -47,9 +63,14 @@ export async function resolveLoose(path: string): Promise<string | null> {
     if (hops > 40) return null;
     const target = await fsp.readlink(next).catch(() => null);
     if (target === null) return null;
-    const followed = resolve(current, target);
-    current = parse(followed).root;
-    pending = [...followed.slice(current.length).split(sep).filter(Boolean), ...pending];
+    if (isAbsolute(target)) {
+      const followed = components(target);
+      current = followed.root;
+      pending = [...followed.names, ...pending];
+    } else {
+      // Relative to the folder holding the link, which is `current`.
+      pending = [...target.split(SEPARATORS).filter(Boolean), ...pending];
+    }
   }
   return current;
 }

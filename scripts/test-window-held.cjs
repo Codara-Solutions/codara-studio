@@ -50,6 +50,23 @@ async function main() {
     fs.symlinkSync(path.join(tree, "generated"), path.join(other, "alias"));
     fs.rmSync(path.join(tree, "generated"), { recursive: true });
     assert.equal(await filesInsideFolders([path.join(other, "alias", "draft.md")], [tree]), true, "a file under a folder link whose target inside was deleted");
+    fs.mkdirSync(path.join(tree, "subdir"));
+    fs.writeFileSync(path.join(tree, "notes.md"), "notes\n");
+    fs.symlinkSync(path.join(tree, "subdir"), path.join(other, "hop"));
+    fs.symlinkSync("hop/../notes.md", path.join(other, "editor.md"));
+    assert.equal(await filesInsideFolders([path.join(other, "editor.md")], [tree]), true, "dot-dot in a link target is applied after the link before it");
+    assert.equal(await filesInsideFolders([`${other}/hop/../notes.md`], [tree]), true, "and in the path as the tab spells it");
+    const locked = path.join(scratch, "locked");
+    fs.mkdirSync(locked);
+    fs.symlinkSync(path.join(tree, "notes.md"), path.join(locked, "into.md"));
+    fs.chmodSync(locked, 0o000);
+    try {
+      if (process.getuid && process.getuid() !== 0) {
+        assert.equal(await filesInsideFolders([path.join(locked, "into.md")], [tree]), null, "a folder that cannot be read: cannot tell");
+      }
+    } finally {
+      fs.chmodSync(locked, 0o755);
+    }
     fs.symlinkSync(path.join(other, "loop-b"), path.join(other, "loop-a"));
     fs.symlinkSync(path.join(other, "loop-a"), path.join(other, "loop-b"));
     assert.equal(await filesInsideFolders([path.join(other, "loop-a")], [tree]), null, "a link loop: cannot tell");
