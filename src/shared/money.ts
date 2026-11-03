@@ -90,10 +90,20 @@ export function eurFieldFromUsd(usd: number, rate: MoneyRate = current): string 
 
 /** The dollars to store for a euro field, or undefined when it is not a positive number. */
 export function usdFromEurField(text: string, rate: MoneyRate = current): number | undefined {
+  const parsed = parseEurText(text);
+  if (parsed === undefined) return undefined;
   // Capped so an absurd amount stays a (huge) limit instead of overflowing to Infinity.
-  const value = Math.min(MAX_EUR, Number(text.trim().replace(",", ".")));
   // A positive amount too small to register is still a limit, never "no limit".
-  return text.trim() && Number.isFinite(value) && value > 0 ? Math.max(MIN_USD, eurToUsd(value, rate)) : undefined;
+  return Math.max(MIN_USD, eurToUsd(Math.min(MAX_EUR, parsed), rate));
+}
+
+/** The one reading of a euro field, for conversion and for the form's own
+ *  validation: a positive number, a decimal comma allowed. */
+export function parseEurText(text: string): number | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  const value = Number(trimmed.replace(",", "."));
+  return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 /** A saved amount as the editor first showed it. */

@@ -1,6 +1,6 @@
 import { guardDraftProblem, normalizeAutomationGuard } from "@shared/automation-guard";
 import { Cron } from "croner";
-import { usdFromEurField } from "@shared/money";
+import { parseEurText, usdFromEurField } from "@shared/money";
 import type { AutomationLoop, AutomationTrigger, CreateScheduledJobInput, ScheduledJob } from "@shared/types";
 import { DEFAULT_WORKER_EFFORT, DEFAULT_WORKER_MODEL } from "../worker-models";
 
@@ -106,7 +106,7 @@ export function sentenceLoop(d: SentenceDraft): AutomationLoop {
 export function sentenceMistake(d: SentenceDraft): string | null {
   if ((d.when === "daily" || d.when === "weekdays") && !timeParts(d.time)) return "Write the time like 02:00.";
   if (d.when === "every" && !sentenceTrigger(d)) return `Say how many minutes between runs, up to ${MAX_EVERY_MINUTES}.`;
-  if (d.budget.trim() && !(Number.isFinite(Number(d.budget.trim())) && Number(d.budget.trim()) > 0)) {
+  if (d.budget.trim() && parseEurText(d.budget) === undefined) {
     return "The budget must be a number above 0. Leave it blank for no budget.";
   }
   if (d.stop !== "once" && d.maxTries.trim() && !wholeAboveZero(d.maxTries)) {

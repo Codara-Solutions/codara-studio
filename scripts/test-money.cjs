@@ -125,6 +125,11 @@ const R = { usdPerEur: 1.25, date: "2026-11-02", source: "ecb" };
   assert.equal(m.usdFromEurField("-2", R), undefined);
   assert.equal(m.usdFromEurField("abc", R), undefined);
   assert.equal(m.usdFromEurField("0.00001", R), 0.0001, "an amount too small to register still limits, not removes");
+  // The form's own checks read a field the way the conversion does.
+  assert.equal(m.guardDraftProblem("1,6", ""), null, "a decimal comma in the monthly cap saves");
+  assert.equal(m.sentenceMistake({ ...m.emptySentence(), budget: "1,6", monthlyCap: "2,5" }), null, "and in the builder's budget and cap");
+  assert.match(m.guardDraftProblem("1e", ""), /monthly cap/);
+  assert.match(m.sentenceMistake({ ...m.emptySentence(), budget: "1,6,2" }), /budget/);
   const tiny = m.usdFromEurField("0.001", R);
   assert.equal(tiny, 0.0013);
   assert.ok(Number(m.eurFieldFromUsd(tiny, R)) > 0, "a sub-cent limit reopens as a positive amount: " + m.eurFieldFromUsd(tiny, R));

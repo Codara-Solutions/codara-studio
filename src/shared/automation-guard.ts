@@ -2,6 +2,7 @@
 // pause after failed runs in a row. Both are opt-in per automation. Shared so the
 // loop driver that enforces them and the page that shows them read one number.
 
+import { parseEurText } from "./money";
 import type { AutomationGuard, AutomationMonthSpend, AutomationRunRecord, ScheduledJob } from "./types";
 
 export const MAX_PAUSE_AFTER_FAILURES = 50;
@@ -102,7 +103,7 @@ export function normalizeAutomationGuard(value: unknown): AutomationGuard | unde
  *  limit: saving a typo must not quietly drop the one already protecting the user. */
 export function guardDraftProblem(monthlyCap: string, pauseAfter: string): string | null {
   const cap = monthlyCap.trim();
-  if (cap && !normalizeAutomationGuard({ monthlyCapUsd: Number(cap) })) {
+  if (cap && parseEurText(cap) === undefined) {
     return "The monthly cap must be a number above 0. Leave it blank for no cap.";
   }
   const pause = pauseAfter.trim();
