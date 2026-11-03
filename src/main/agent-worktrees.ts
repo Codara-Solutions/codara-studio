@@ -2358,6 +2358,16 @@ export interface RemoveWorktreeInput {
 // The newest recovery ref saved for a workspace: the latest day, and on that
 // day the highest suffix (a removal cut short leaves the plain name, the next
 // one of that day takes -2, ...).
+// How to get a removed worktree back from its recovery ref: on its branch
+// when the branch still holds the saved commit, a new branch when it is
+// gone, and detached when the branch moved on (it is never reset).
+async function recoverCommand(repo: string, path: string, branch: string, ref: string, oid: string): Promise<string> {
+  const tip = await revParse(repo, `refs/heads/${branch}`);
+  if (!tip) return `git -C ${repo} worktree add ${path} -b ${branch} ${ref}`;
+  if (tip === oid) return `git -C ${repo} worktree add ${path} ${branch}`;
+  return `git -C ${repo} worktree add --detach ${path} ${ref}`;
+}
+
 async function findRecoveryRef(repoCwd: string, workspaceId: string): Promise<{ ref: string; oid: string } | null> {
   const out = await readGitText(repoCwd, [
     "for-each-ref",
@@ -2495,7 +2505,7 @@ export async function removeAgentWorktree(
           ? {
               recoveryRef: newer.ref,
               verifiedCommit: newer.oid,
-              recoverWith: `git -C ${scope.repoCwd} worktree add ${String(remembered.path ?? "<folder>")} -b ${String(remembered.branch ?? "<branch>")} ${newer.ref}`,
+              recoverWith: await recoverCommand(scope.repoCwd, String(remembered.path), String(remembered.branch), newer.ref, newer.oid),
             }
           : {}),
       };
@@ -2739,9 +2749,9 @@ async function removeLocked(
     }
   }
 
-  if (verdict.alreadyRemoved && !recoveryRef && !(await revParse(repo, `refs/heads/${branch}`))) {
-    // An earlier attempt deleted the branch but could not drop the row: its
-    // ref is what is left to recover from.
+  if (verdict.alreadyRemoved && !recoveryRef) {
+    // An earlier attempt could not drop the row: the ref it saved is what is
+    // left to recover from.
     const earlier = await findRecoveryRef(repo, workspace.id);
     if (earlier) {
       recoveryRef = earlier.ref;
@@ -2761,12 +2771,8 @@ async function removeLocked(
   }
   deps.invalidateGitCache(repo);
 
-  const branchLeft = recoveryRef && !branchDeleted ? await revParse(repo, `refs/heads/${branch}`) : null;
-  const recoverWith = recoveryRef
-    ? !branchLeft
-      ? `git -C ${repo} worktree add ${workspace.cwd} -b ${branch} ${recoveryRef}`
-      : `git -C ${repo} worktree add ${workspace.cwd} ${branch}`
-    : null;
+  const savedCommit = savedTip ?? verdict.tip;
+  const recoverWith = recoveryRef && savedCommit ? await recoverCommand(repo, workspace.cwd, branch, recoveryRef, savedCommit) : null;
   return {
     ok: true,
     removed: !verdict.alreadyRemoved,
@@ -2776,7 +2782,7 @@ async function removeLocked(
     branch,
     branchDeleted,
     ...(branchKept ? { branchKeptReason: branchKept } : {}),
-    ...(verdict.tip ? { verifiedCommit: verdict.tip } : savedTip ? { verifiedCommit: savedTip } : {}),
+    ...(savedCommit ? { verifiedCommit: savedCommit } : {}),
     ...(verdict.proof ? { proof: verdict.proof } : {}),
     ...(verdict.target ? { target: verdict.target } : {}),
     ...(verdict.pullRequest ? { pullRequest: verdict.pullRequest } : {}),

@@ -773,6 +773,11 @@ async function main() {
 
     // Recovery refs outlive a removal that fails or is cut short.
     const todayRef = (id) => `refs/codara/removed-worktrees/2026-10-12/${id}`;
+    const runRecovery = (command) => {
+      assert.equal(typeof command, "string", "a recovery command is given");
+      const [program, ...args] = command.split(" ");
+      execFileSync(program, args, { stdio: ["ignore", "pipe", "pipe"] });
+    };
     const landOnMain = (branch) => {
       git(repo, ["merge", "-q", "--ff-only", branch]);
       git(repo, ["push", "-q", "origin", "main"]);
@@ -889,12 +894,18 @@ async function main() {
     const lateB = commitFile(late.path, "l2.txt", "b\n", "late b");
     landOnMain("agent/late-save");
     git(repo, ["update-ref", `${todayRef(late.workspaceId)}-2`, lateB]);
+    git(repo, ["worktree", "remove", "--force", late.path]);
     h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== late.workspaceId);
+    // The kept branch moved on since: recovery must not need to reset it.
+    const lateC = git(repo, ["commit-tree", `${lateB}^{tree}`, "-p", lateB, "-m", "late c"]);
+    git(repo, ["update-ref", "refs/heads/agent/late-save", lateC]);
     const lateRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: late.workspaceId }, deps);
     assert.equal(lateRetry.alreadyRemoved, true, JSON.stringify(lateRetry));
     assert.equal(lateRetry.recoveryRef, `${todayRef(late.workspaceId)}-2`, "the newest save, not the remembered one");
     assert.equal(lateRetry.verifiedCommit, lateB);
-    assert.match(lateRetry.recoverWith, new RegExp(`-2$`));
+    runRecovery(lateRetry.recoverWith);
+    assert.equal(git(late.path, ["rev-parse", "HEAD"]), lateB, "the command brings back the saved commit");
+    assert.equal(git(repo, ["rev-parse", "refs/heads/agent/late-save"]), lateC, "and leaves the branch where it is");
     git(repo, ["worktree", "remove", "--force", late.path]);
     git(repo, ["branch", "-D", "agent/late-save"]);
 
@@ -917,7 +928,32 @@ async function main() {
     assert.equal(keptRetry.alreadyRemoved, true, JSON.stringify(keptRetry));
     assert.equal(keptRetry.recoveryRef, keptFirst.recoveryRef);
     assert.equal(keptRetry.verifiedCommit, keptTip);
-    assert.match(keptRetry.recoverWith, / -b agent\/row-kept /, "the branch is gone, so recovery makes it again");
+    runRecovery(keptRetry.recoverWith);
+    assert.equal(git(repo, ["rev-parse", "refs/heads/agent/row-kept"]), keptTip, "the command makes the branch again");
+    git(repo, ["worktree", "remove", "--force", kept.path]);
+    git(repo, ["branch", "-D", "agent/row-kept"]);
+
+    // Same, but the first removal kept the branch: a retry that keeps it
+    // too still names the saved ref.
+    const both = await aw.createAgentWorktree(terminalAgent, { branch: "agent/both-kept" }, deps);
+    const bothTip = commitFile(both.path, "both-kept.txt", "both\n", "both kept");
+    landOnMain("agent/both-kept");
+    deps.updateState = async () => {
+      throw new Error("disk full");
+    };
+    try {
+      await aw.removeAgentWorktree(terminalAgent, { workspaceId: both.workspaceId, deleteBranch: false }, deps);
+    } finally {
+      deps.updateState = keepUpdate;
+    }
+    const bothRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: both.workspaceId, deleteBranch: false }, deps);
+    assert.equal(bothRetry.alreadyRemoved, true, JSON.stringify(bothRetry));
+    assert.equal(bothRetry.recoveryRef, todayRef(both.workspaceId));
+    assert.equal(bothRetry.verifiedCommit, bothTip);
+    runRecovery(bothRetry.recoverWith);
+    assert.equal(git(both.path, ["rev-parse", "--abbrev-ref", "HEAD"]), "agent/both-kept", "back on its own branch");
+    git(repo, ["worktree", "remove", "--force", both.path]);
+    git(repo, ["branch", "-D", "agent/both-kept"]);
 
     // No free name at all: the branch stays.
     const full = await aw.createAgentWorktree(terminalAgent, { branch: "agent/no-free-name" }, deps);
