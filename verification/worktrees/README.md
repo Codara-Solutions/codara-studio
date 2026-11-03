@@ -14,7 +14,7 @@ They are not part of `npm test`. Run them when you change worktree create,
 removal, cleanup or the recovery refs:
 
 ```sh
-npm run verify:worktrees                                    # every config, about 3 min on 4 cores
+npm run verify:worktrees                                    # every config, about 6 min on 4 cores
 verification/worktrees/check.sh WorktreeLifecycle_auto      # one config
 TLC_CPUS=8 TLC_MEM=8g verification/worktrees/check.sh       # more room (memory in g)
 ```
