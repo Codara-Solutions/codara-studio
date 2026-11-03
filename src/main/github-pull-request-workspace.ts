@@ -64,6 +64,7 @@ export interface GitHubPullRequestWorkspaceDependencies {
     baseBranch: string;
     transactionId?: string;
     onProgress?: (progress: PullRequestGitProgress) => Promise<void>;
+    takenPaths?: readonly string[];
   }): Promise<CreatePullRequestWorktreeResult>;
   cleanupWorktree(input: {
     repoCwd: string;
@@ -397,7 +398,10 @@ async function inspectAndCreate(
       { branch },
     );
   }
+  // Folders rows still name are not handed out again (reservedDirNames).
+  const rows = (await dependencies.loadState().catch(() => null))?.workspaces ?? [];
   const created = await dependencies.createWorktree({
+    takenPaths: rows.filter((workspace) => !workspace.remote && workspace.cwd).map((workspace) => workspace.cwd),
     repoCwd: source.cwd,
     worktreesRoot: journal.git.worktreesRoot,
     repository,

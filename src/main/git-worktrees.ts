@@ -1,13 +1,14 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import type { GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult } from "@shared/types";
 import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
 import { parseWorktreePorcelain, type WorktreeRegistration } from "./git-worktree-porcelain";
 import { prepareWorktreeRemoval, restoreWorktreeLinks } from "./worktree-setup/links";
+import { reservedDirNames } from "./worktree-folders";
 
 export type { WorktreeRegistration };
 
@@ -220,41 +221,15 @@ export function slugifyBranchName(name: string): string {
 // Worktree directory name for a branch: the slug, with a numeric suffix on
 // collision. Only directory collisions matter — the slug never becomes a
 // branch name (the real, possibly-slashed name is what git checks out). A
-// folder a row still names counts as taken, even when it is gone: a row
-// whose worktree was removed outside Studio (plain `git worktree remove`)
-// stays until the rail's next look, and a removal asked for that old row
-// would judge, and delete, a new worktree made in its folder.
+// folder a row still names counts as taken (reservedDirNames).
 async function pickCheckoutDirName(
   worktreesRoot: string,
   branchName: string,
   takenPaths: readonly string[] = [],
 ): Promise<string> {
   const used = await existingWorktreeDirs(worktreesRoot);
-  // Compared as the file system does: through links, and without case where
-  // the default file systems ignore it.
-  const fold = (path: string) =>
-    process.platform === "win32" || process.platform === "darwin" ? path.toLowerCase() : path;
-  // Through the nearest folder that exists: the root, or a row's parent,
-  // may be gone while a link above it still leads elsewhere.
-  const real = async (path: string): Promise<string> => {
-    const rest: string[] = [];
-    for (let at = resolve(path); ; at = dirname(at)) {
-      const found = await realpath(at).catch(() => null);
-      if (found !== null) return join(found, ...rest.reverse());
-      if (dirname(at) === at) return resolve(path);
-      rest.push(basename(at));
-    }
-  };
-  const roots = new Set([fold(resolve(worktreesRoot)), fold(await real(worktreesRoot))]);
-  const taken = new Set<string>();
-  for (const path of takenPaths) {
-    if (typeof path !== "string" || !path || !isAbsolute(path)) continue;
-    const at = resolve(path);
-    for (const parent of new Set([dirname(at), await real(dirname(at))])) {
-      if (roots.has(fold(parent))) taken.add(fold(basename(at)));
-    }
-  }
-  const isUsed = (name: string) => used.has(name) || taken.has(fold(name));
+  const reserved = await reservedDirNames(worktreesRoot, takenPaths);
+  const isUsed = (name: string) => used.has(name) || reserved(name);
   const base = slugifyBranchName(branchName);
   if (!isUsed(base)) return base;
   for (let n = 2; ; n += 1) {
