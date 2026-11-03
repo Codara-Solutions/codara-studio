@@ -776,6 +776,33 @@ async function main() {
       assert.equal(after.status, "removed", after.message);
     });
 
+    await check("the maker's shell moved in with cd, seen only by the process scan, is named as its tab", async () => {
+      const cdIn = mergedWith("merged-cd", "feature/merged-cd");
+      madeBy("ws-merged-cd");
+      const scanned = {
+        ...deps,
+        sessionPid: (pane) => (pane === "pane-coord" ? 7777 : null),
+        processesUnderCwds: async (dirs) =>
+          new Map(dirs.map((dir) => [dir, dir === cdIn ? [{ pid: 7777, command: "zsh" }] : []])),
+      };
+      const result = await withTab({ title: "usage agent", cwd: coordinator }, () =>
+        rail.cleanUpRailWorkspace(scanned, { workspaceId: "ws-merged-cd", mode: "manual" }),
+      );
+      assert.equal(result.status, "refused");
+      assert.equal(
+        result.message,
+        "Close the tab “usage agent” in AI Continous Improvment first: its agent still owns this worktree.",
+      );
+      assert.equal(fs.existsSync(cdIn), true);
+      const after = await withTab({ title: "usage agent", cwd: coordinator }, () =>
+        rail.cleanUpRailWorkspace({ ...scanned, processesUnderCwds: async (dirs) => new Map(dirs.map((dir) => [dir, []])) }, {
+          workspaceId: "ws-merged-cd",
+          mode: "manual",
+        }),
+      );
+      assert.equal(after.status, "removed", after.message);
+    });
+
     await check("the maker's tab elsewhere still holds unfinished work, named even without a title", async () => {
       const open = mergedWith("merged-open", "feature/merged-open");
       madeBy("ws-merged-open");

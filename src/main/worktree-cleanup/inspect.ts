@@ -470,20 +470,29 @@ export async function usageOf(
       if (isAtOrUnder(cwd, path) || isAtOrUnder(await canonicalPath(cwd), real)) panes.add(terminal.paneId);
     }
   }
-  // The agent that made the worktree, while its tab is open. Its pane is
-  // named as that tab, not counted again among the terminals inside.
+  // The agent that made the worktree, while its tab is open. It works inside
+  // when its pane's folder is in it, or its shell moved in with cd (seen by
+  // the process scan only). It is named as that tab, not counted again
+  // among the terminals or processes inside.
+  const found = ctx.processes?.get(real) ?? ctx.processes?.get(path) ?? [];
   let maker: WorktreeInUse | null = null;
+  let makerPid: number | null = null;
+  let makerPane: string | null = null;
   for (const workspace of workspaces) {
     const owner = workspace.copyBranch?.createdBy;
     if (owner?.kind !== "agent" || !owner.paneId) continue;
     const tab = (ctx.terminals ?? []).find((t) => t.paneId === owner.paneId);
-    const inside = panes.has(owner.paneId);
+    const pid = deps.sessionPid?.(owner.paneId) ?? null;
+    const shellInside = pid !== null && found.some((entry) => entry.pid === pid);
+    const inside = panes.has(owner.paneId) || shellInside;
     if (inside || deps.sessionCwd(owner.paneId) !== null || tab) {
       maker = await agentTabUse(deps, tab, owner, inside);
+      if (shellInside) makerPid = pid;
+      if (panes.has(owner.paneId)) makerPane = owner.paneId;
       break;
     }
   }
-  const others = maker && !maker.elsewhere ? panes.size - 1 : panes.size;
+  const others = makerPane ? panes.size - 1 : panes.size;
   if (others) uses.push({ kind: "terminal", label: count(others, "open terminal") });
 
   let runs = 0;
@@ -517,14 +526,12 @@ export async function usageOf(
   // The shell of a pane counted above is that open terminal. Any other
   // shell found inside (a terminal opened elsewhere that moved here with
   // cd) is seen only by the process scan, and counts as a process.
-  const counted = new Set<number>();
+  const counted = new Set<number>(makerPid === null ? [] : [makerPid]);
   for (const pane of panes) {
     const pid = deps.sessionPid?.(pane) ?? null;
     if (pid !== null) counted.add(pid);
   }
-  const processes = (ctx.processes?.get(real) ?? ctx.processes?.get(path) ?? []).filter(
-    (entry) => !counted.has(entry.pid),
-  );
+  const processes = found.filter((entry) => !counted.has(entry.pid));
   if (processes.length) uses.push({ kind: "process", label: count(processes.length, "running process", "running processes") });
 
   if (deps.appPaths().some((appPath) => appPath && isAtOrUnder(appPath, real))) {
