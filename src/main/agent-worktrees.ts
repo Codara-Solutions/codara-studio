@@ -31,6 +31,7 @@ import {
   listWorktreeRegistrations,
   populatedSubmodules,
   removeCopyWorktree,
+  asidePathFor,
   restoreAsideWorktrees,
   worktreeFingerprint,
   resolveDefaultBranch,
@@ -2664,15 +2665,21 @@ async function removeLocked(
   const { deps, scope } = ctx;
   const repo = scope.repoCwd;
   const branch = workspace.copyBranch!.branch;
-  // A removal Studio did not finish may have left a folder aside: it goes
-  // back first, and if it is this one, the unlocked check saw it gone.
-  const restored = await restoreAsideWorktrees(repo);
-  if (restored.some((path) => resolve(path) === resolve(workspace.cwd))) {
-    return refusal("WORKTREE_CHANGED", "an earlier removal left it aside and it was put back; check it again", {
-      workspaceId: workspace.id,
-    });
-  }
   const latestState = await deps.loadState();
+  // A removal Studio did not finish may have left a folder aside: it goes
+  // back first, and the unlocked check, which may have seen it gone, is
+  // not trusted then. One that cannot go back blocks this removal.
+  const rowPaths = latestState.workspaces.filter((entry) => entry.copyBranch).map((entry) => entry.cwd);
+  const aside = await restoreAsideWorktrees(repo, rowPaths);
+  if (aside.restored.length || aside.stuck.includes(asidePathFor(resolve(workspace.cwd)))) {
+    return refusal(
+      "WORKTREE_CHANGED",
+      aside.stuck.length
+        ? `an earlier removal left a folder aside that could not be put back: ${aside.stuck.join(", ")}`
+        : "an earlier removal left a folder aside and it was put back; check again",
+      { workspaceId: workspace.id },
+    );
+  }
   const stillListed = latestState.workspaces.find((candidate) => candidate.id === workspace.id);
   if (!stillListed) {
     return { ok: true, removed: false, alreadyRemoved: true, workspaceId: workspace.id, path: workspace.cwd, branch };

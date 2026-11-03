@@ -686,8 +686,8 @@ export async function cleanUpRailWorkspace(
     // removeCleanupWorktrees, which takes the same lock itself.
     const registration = await withRepoLock(repo.root, async () => {
       // A folder an earlier removal left aside looked gone above.
-      const restored = await restoreAsideWorktrees(repo.root);
-      if (restored.some((path) => pathKey(path) === pathKey(workspace.cwd))) return { putBack: true } as const;
+      const aside = await restoreAsideWorktrees(repo.root, repo.workspaces.map((entry) => entry.cwd));
+      if (aside.restored.length || aside.stuck.length) return { putBack: aside.stuck } as const;
       repo.registrations = (await listWorktrees(repo.root)).registrations;
       const found = await registrationOf(repo, workspace.cwd);
       if (found) return found;
@@ -695,7 +695,15 @@ export async function cleanUpRailWorkspace(
       return { unregistered: await cleanUpUnregistered(deps, repo, workspace, normalized) } as const;
     });
     if (registration === null) return refused("git does not list this folder as a worktree. Use Delete instead.", workspace.name);
-    if ("putBack" in registration) return refused("An earlier removal left it aside, and it was put back.", workspace.name);
+    if ("putBack" in registration) {
+      const stuck = registration.putBack ?? [];
+      return refused(
+        stuck.length
+          ? `An earlier removal left a folder aside that could not be put back: ${stuck.join(", ")}.`
+          : "An earlier removal left a folder aside, and it was put back.",
+        workspace.name,
+      );
+    }
     if ("unregistered" in registration) return registration.unregistered;
     if (mode === "auto-merged") {
       // Before the check below, whose git status can itself touch the index.

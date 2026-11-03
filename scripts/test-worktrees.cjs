@@ -471,6 +471,58 @@ async function agentWorktreeProbes(wt) {
     rmSync(path.join(hidden.path, "shared.txt"));
     assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), [], "a sparse, absent file is no edit");
 
+    // The fingerprint a removal compares across its move aside: an ignored
+    // file written or changed shows; a folder too large to compare throws.
+    const printed = await fork("agent/fingerprint");
+    const print0 = await wt.worktreeFingerprint(printed.path);
+    assert.strictEqual(await wt.worktreeFingerprint(printed.path), print0, "the same folder, the same digest");
+    mkdirSync(path.join(printed.path, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(path.join(printed.path, "node_modules", "pkg", "index.js"), "x\n");
+    const print1 = await wt.worktreeFingerprint(printed.path);
+    assert.notStrictEqual(print1, print0, "a file deep in an ignored folder counts");
+    writeFileSync(path.join(printed.path, ".env.local"), "A=1\n");
+    assert.notStrictEqual(await wt.worktreeFingerprint(printed.path), print1, "a new ignored file counts");
+    await assert.rejects(wt.worktreeFingerprint(printed.path, 2), /too many files/);
+
+    // The move aside: a change found there puts it back; a folder that took
+    // its place is never moved into, the aside folder stays and is named.
+    const asideOf = (dir) => path.join(path.dirname(dir), `.${path.basename(dir)}.codara-removing`);
+    const putBack = await wt.removeCopyWorktree({
+      repoCwd: repo,
+      worktreePath: printed.path,
+      branch: "agent/fingerprint",
+      force: true,
+      aside: { recheck: async (aside) => (existsSync(aside) && !existsSync(printed.path) ? "changed" : "not moved") },
+    });
+    assert.ok(!putBack.ok && putBack.changed && putBack.error === "changed", JSON.stringify(putBack));
+    assert.ok(existsSync(path.join(printed.path, ".env.local")) && !existsSync(asideOf(printed.path)), "it is back, whole");
+    const blocked = await wt.removeCopyWorktree({
+      repoCwd: repo,
+      worktreePath: printed.path,
+      branch: "agent/fingerprint",
+      force: true,
+      aside: {
+        recheck: async () => {
+          mkdirSync(printed.path);
+          return "changed";
+        },
+      },
+    });
+    assert.ok(!blocked.ok && blocked.changed && blocked.error.includes(asideOf(printed.path)), JSON.stringify(blocked));
+    assert.ok(existsSync(path.join(asideOf(printed.path), ".env.local")), "nothing is moved into the new folder");
+    let stuck = await wt.restoreAsideWorktrees(repo, [printed.path]);
+    assert.deepStrictEqual(stuck, { restored: [], stuck: [asideOf(printed.path)] });
+    rmSync(printed.path, { recursive: true });
+    stuck = await wt.restoreAsideWorktrees(repo, []);
+    assert.deepStrictEqual(stuck.restored, [printed.path], "git's listing names the folder left aside");
+    assert.strictEqual(git(printed.path, ["rev-parse", "--abbrev-ref", "HEAD"]), "agent/fingerprint");
+    // Moved by hand, as if Studio stopped before git noted the move: found
+    // through the row's path and renamed back.
+    execFileSync("mv", [printed.path, asideOf(printed.path)]);
+    stuck = await wt.restoreAsideWorktrees(repo, [printed.path]);
+    assert.deepStrictEqual(stuck.restored, [printed.path]);
+    assert.ok(await wt.isRegisteredWorktree(repo, printed.path));
+
     // A nested repository committed as a bare gitlink, with no .gitmodules,
     // is a populated submodule to git's worktree removal.
     const vendoring = await fork("agent/vendoring");

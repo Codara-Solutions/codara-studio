@@ -681,6 +681,28 @@ async function main() {
     assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
     assert.ok(isRegistered(created.path) && !fs.existsSync(asideOf(created.path)), "it is back where it was");
 
+    // A folder left aside that cannot go back (its parent cannot be written)
+    // blocks the removal: the unlocked check saw it gone, and its row stays.
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      const stuckTree = await aw.createAgentWorktree(terminalAgent, { branch: "agent/stuck-aside" }, deps);
+      git(repo, ["worktree", "move", stuckTree.path, asideOf(stuckTree.path)]);
+      fs.chmodSync(path.dirname(stuckTree.path), 0o555);
+      let stuckResult;
+      try {
+        stuckResult = await aw.removeAgentWorktree(terminalAgent, { workspaceId: stuckTree.workspaceId }, deps);
+      } finally {
+        fs.chmodSync(path.dirname(stuckTree.path), 0o755);
+      }
+      assert.equal(stuckResult.code, "WORKTREE_CHANGED", JSON.stringify(stuckResult));
+      assert.match(stuckResult.error, /could not be put back/);
+      assert.ok(workspaceOf(stuckTree.workspaceId), "its row stays");
+      assert.ok(fs.existsSync(asideOf(stuckTree.path)));
+      assert.equal((await aw.removeAgentWorktree(terminalAgent, { workspaceId: stuckTree.workspaceId }, deps)).code, "WORKTREE_CHANGED");
+      assert.ok(isRegistered(stuckTree.path), "once it can, it goes back");
+      const gone = await aw.removeAgentWorktree(terminalAgent, { workspaceId: stuckTree.workspaceId }, deps);
+      assert.equal(gone.removed, true, JSON.stringify(gone));
+    }
+
     // A commit between the check and the locked re-check is caught.
     h.afterVerify = async () => {
       commitFile(created.path, "late.txt", "late\n", "late commit");

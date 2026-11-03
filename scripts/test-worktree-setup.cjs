@@ -72,6 +72,7 @@ async function main() {
         'export * as files from "./src/main/worktree-setup/files";',
         'export * as approvals from "./src/main/worktree-setup/approvals";',
         'export * as agent from "./src/main/agent-worktrees";',
+        'export * as gitWorktrees from "./src/main/git-worktrees";',
       ].join("\n"),
       resolveDir: ROOT,
       loader: "ts",
@@ -109,7 +110,7 @@ async function main() {
 }
 
 async function runSuite(m, scratch) {
-  const { shared, gitignore, plan, materialize, links, service, files, agent, approvals, cmdScript } = m;
+  const { shared, gitignore, plan, materialize, links, service, files, agent, approvals, cmdScript, gitWorktrees } = m;
 
   // ── Parser ───────────────────────────────────────────────────────────────
   await check("the Windows setup script runs every line in one cmd, stopping at the first failure", () => {
@@ -1338,6 +1339,44 @@ async function runSuite(m, scratch) {
       assert.deepEqual(released.map((link) => link.path), ["cache"]);
       assert.equal(fs.existsSync(path.join(wt, "cache")), false);
       assert.equal(fs.readFileSync(path.join(lone, "cache", "blob.bin"), "utf8"), "cached\n");
+    });
+
+    await check("a removal that moves the folder aside stops setup by the folder's own name first", async () => {
+      const wt = loneWorktree("lone-aside");
+      const setupDir = await links.setupDirFor(wt);
+      fs.mkdirSync(setupDir, { recursive: true });
+      fs.symlinkSync(path.join(lone, "cache"), path.join(wt, "cache"), "dir");
+      fs.writeFileSync(
+        path.join(setupDir, links.SETUP_MANIFEST_FILE),
+        JSON.stringify({ version: 1, sourceRoot: lone, copies: [], links: [{ path: "cache", target: path.join(lone, "cache") }] }),
+      );
+      const asked = [];
+      links.setBeforeWorktreeRemoval(async (dir) => {
+        asked.push(dir);
+        return true;
+      });
+      try {
+        const result = await gitWorktrees.removeCopyWorktree({
+          repoCwd: lone,
+          worktreePath: wt,
+          branch: "lone-aside",
+          aside: { recheck: async () => "changed" },
+        });
+        assert.equal(result.ok, false, JSON.stringify(result));
+        assert.deepEqual(asked, [wt], "the setup is stopped by the name it runs under, before the move");
+        assert.equal(fs.lstatSync(path.join(wt, "cache")).isSymbolicLink(), true, "put back, its link comes back too");
+        const gone = await gitWorktrees.removeCopyWorktree({
+          repoCwd: lone,
+          worktreePath: wt,
+          branch: "lone-aside",
+          aside: { recheck: async () => null },
+        });
+        assert.equal(gone.ok, true, JSON.stringify(gone));
+        assert.equal(fs.existsSync(wt), false);
+        assert.equal(fs.readFileSync(path.join(lone, "cache", "blob.bin"), "utf8"), "cached\n", "never reached through the link");
+      } finally {
+        links.setBeforeWorktreeRemoval(null);
+      }
     });
 
     await check("removal stops setup and waits until it no longer writes", async () => {

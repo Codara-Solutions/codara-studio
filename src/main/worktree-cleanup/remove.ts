@@ -506,7 +506,13 @@ export async function removeCleanupWorktrees(
       await withRepoLock(repo.root, async () => {
         // Under the lock, from git's current listing: an agent may have
         // created or removed a worktree since the screen last looked.
-        const restored = new Set((await restoreAsideWorktrees(repo.root)).map((path) => pathKey(path)));
+        // A folder an earlier removal left aside goes back first; the
+        // screen saw this repository without it, so its items are reviewed
+        // again. One that cannot go back is named.
+        const aside = await restoreAsideWorktrees(
+          repo.root,
+          repo.workspaces.map((workspace) => workspace.cwd),
+        );
         repo.registrations = (await listWorktrees(repo.root)).registrations;
         const ctx = await contextFor(
           deps,
@@ -524,14 +530,16 @@ export async function removeCleanupWorktrees(
             ctx.usage = await usageContext(deps, left);
             usageAt = Date.now();
           }
-          if (restored.has(pathKey(item.path))) {
+          if (aside.restored.length || aside.stuck.length) {
             outcomes.push({
               repoRoot: repo.root,
               path: item.path,
               branch: null,
               status: "refused",
               code: "CHANGED",
-              message: "An earlier removal left it aside, and it was put back. Review it again.",
+              message: aside.stuck.length
+                ? `An earlier removal left a folder aside that could not be put back: ${aside.stuck.join(", ")}.`
+                : "An earlier removal left a folder aside, and it was put back. Review again.",
               branchDeleted: false,
             });
             continue;

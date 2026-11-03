@@ -160,7 +160,8 @@ model's only behaviour, and a `Bug` flag puts the old code back.
    terminal, run, tab or process under either name: `changedWhileAside` in
    `agent-worktrees.ts` and `remove.ts`), and put it back if anything
    changed. A folder left aside by a stopped Studio goes back under the lock
-   before the next removal or cleanup in that repository
+   before the next removal or cleanup in that repository, found through
+   git's listing and through each row's folder name
    (`restoreAsideWorktrees`). Before, git deleted ignored files without
    asking, so one written between the last check and `git worktree remove`
    (a `.env`, notes, test output) was lost, and a tab or terminal opened in
@@ -169,8 +170,10 @@ model's only behaviour, and a `Bug` flag puts the old code back.
    open (its working directory or a file handle) still writes into the
    moved folder after the last check (`WorktreeLifecycle_limit_aside_handle`).
    Closing it fully needs the ignored files copied aside before the delete,
-   or every writer stopped. The fingerprint walks at most 20,000 entries, so
-   a change deep in a very large ignored folder can go unseen.
+   or every writer stopped. A folder of more than 500,000 entries is not
+   removed: it is too large to compare. A folder that cannot be put back
+   (something took its name, or its parent cannot be written) stays aside
+   and blocks the removal and the cleanup until it can.
 2. **Editor tabs did not hold a worktree everywhere** (`tabs`, `ftab`).
    Fixed: both removals ask the window, under the lock, one question for
    the folder: does the window show the worktree's workspace or hold tabs of

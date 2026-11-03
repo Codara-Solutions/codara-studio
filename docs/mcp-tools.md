@@ -1168,7 +1168,9 @@ if a file changed, a commit landed, or a terminal, run, tab or process
 appeared since the last check, it moves it back and refuses with
 `WORKTREE_CHANGED`. A process that already had the folder open can still
 write into it until it is deleted. A folder left aside when Codara stopped
-goes back before the next removal in that repository.
+goes back before the next removal in that repository; one that cannot go
+back blocks removals there until it can. A worktree of more than 500,000
+files and folders is not removed: it is too large to check again.
 Every create and removal, refused or not, is logged to
 `~/.codarastudio/logs/worktree-audit.jsonl`. **Let agents create and remove
 worktrees** in Settings turns creating and removing off; listing still works.

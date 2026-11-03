@@ -508,37 +508,65 @@ function originalOfAside(path: string): string | null {
 }
 
 /**
- * Puts back every worktree of the repository a removal left aside (Studio
- * stopped between the move and the delete). Runs under the repository lock
- * before a removal or cleanup looks at anything; returns the folders put
- * back, which their removal must look at again.
+ * Puts back every folder a removal left aside (Studio stopped between the
+ * move and the delete or the move back): those git lists under an aside
+ * name, and the aside twin of each folder in `paths` (git may have dropped
+ * its registration, or not updated it yet). Runs under the repository lock
+ * before a removal or cleanup looks at anything. `restored` lists the
+ * folders put back; `stuck` the aside folders that could not be.
  */
-export async function restoreAsideWorktrees(repoCwd: string): Promise<string[]> {
+export async function restoreAsideWorktrees(
+  repoCwd: string,
+  paths: readonly string[] = [],
+): Promise<{ restored: string[]; stuck: string[] }> {
   const restored: string[] = [];
-  for (const entry of await listWorktreeRegistrations(repoCwd).catch(() => [])) {
-    const original = originalOfAside(entry.path);
-    if (!original || (await pathIsAbsent(entry.path)) || !(await pathIsAbsent(original))) continue;
-    try {
-      await runGit(repoCwd, ["worktree", "move", entry.path, original]);
-      restored.push(original);
-    } catch {
-      // Left aside: still a registered worktree, listed under that name.
-    }
+  const stuck: string[] = [];
+  const registrations = await listWorktreeRegistrations(repoCwd).catch(() => [] as WorktreeRegistration[]);
+  const asides = new Set<string>(registrations.map((entry) => entry.path).filter((path) => originalOfAside(path) !== null));
+  for (const path of paths) asides.add(asidePathFor(resolve(path)));
+  for (const aside of asides) {
+    const original = originalOfAside(aside);
+    if (!original || (await pathIsAbsent(aside))) continue;
+    const back = await putBackAside(repoCwd, aside, original);
+    if (back.ok) restored.push(original);
+    else stuck.push(aside);
   }
-  return restored;
+  return { restored, stuck };
 }
 
-const FINGERPRINT_MAX_ENTRIES = 20_000;
+/**
+ * Moves an aside folder back to its own name: with git while git lists it
+ * there, by a plain rename once git has dropped it (a removal that failed
+ * halfway). Never into a folder that took its place: git would move it
+ * inside that one.
+ */
+async function putBackAside(repoCwd: string, aside: string, original: string): Promise<GitOpResult> {
+  if (!(await pathIsAbsent(original))) {
+    return { ok: false, error: `Something now exists at ${original}, so the folder stays at ${aside}.` };
+  }
+  const back = (await isRegisteredWorktree(repoCwd, aside))
+    ? await moveWorktree(repoCwd, aside, original)
+    : await rename(aside, original).then(
+        (): GitOpResult => ({ ok: true }),
+        (err: unknown): GitOpResult => ({ ok: false, error: errorText(err) }),
+      );
+  if (!back.ok) return { ok: false, error: `It could not be moved back and is at ${aside}: ${back.error}` };
+  if (!(await pathIsAbsent(aside))) return { ok: false, error: `It is still at ${aside}.` };
+  return { ok: true };
+}
+
+const FINGERPRINT_MAX_ENTRIES = 500_000;
 
 /**
  * What a removal would delete, as one digest: HEAD, `git status` with
  * untracked and ignored entries, and the size and modification time of every
- * file under those entries (ignored folders walked, up to 20,000 entries).
+ * file under those entries (ignored folders walked). Throws past 500,000
+ * entries: a folder too large to compare is not removed.
  * Links count as nothing: setup's linked folders are released before the
  * delete, and removing a link loses no data. The same digest before the
  * last check and after the move means nothing was written in between.
  */
-export async function worktreeFingerprint(worktreePath: string): Promise<string> {
+export async function worktreeFingerprint(worktreePath: string, maxEntries = FINGERPRINT_MAX_ENTRIES): Promise<string> {
   const hash = createHash("sha256");
   const head = await readGitText(worktreePath, ["rev-parse", "--verify", "HEAD"]);
   hash.update(`${head}\0`);
@@ -551,10 +579,10 @@ export async function worktreeFingerprint(worktreePath: string): Promise<string>
     "--ignored=matching",
   ]);
   const records = status.split("\0");
-  let budget = FINGERPRINT_MAX_ENTRIES;
+  let budget = maxEntries;
   const walk = async (relative: string): Promise<void> => {
-    if (budget <= 0) return;
     budget -= 1;
+    if (budget < 0) throw new Error("It holds too many files to check again before deleting it.");
     const absolute = join(worktreePath, relative);
     const info = await lstat(absolute).catch(() => null);
     if (!info || info.isSymbolicLink()) return;
@@ -713,11 +741,24 @@ export async function removeCopyWorktree(
       /* best-effort: the caller's release hook must never abort the retry */
     }
   };
+  // Folders setup linked in from the main checkout go first, so removal can
+  // never reach through them; they come back if the worktree stays. Its
+  // setup is stopped by the folder's own name, before any move.
+  let releasedLinks: Awaited<ReturnType<typeof prepareWorktreeRemoval>>;
+  try {
+    releasedLinks = await prepareWorktreeRemoval(original);
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
   let work = input;
   if (input.aside) {
     const aside = asidePathFor(original);
+    const fail = async (error: string, changed = false): Promise<GitRemoveWorktreeResult> => {
+      await restoreWorktreeLinks(original, releasedLinks).catch(() => undefined);
+      return changed ? { ok: false, changed: true, error } : { ok: false, error };
+    };
     if (!(await pathIsAbsent(aside))) {
-      return { ok: false, error: `Another folder is where it would be moved aside: ${aside}. Move it away, then try again.` };
+      return fail(`Another folder is where it would be moved aside: ${aside}. Move it away, then try again.`);
     }
     let moved: GitOpResult = { ok: false, error: "not moved" };
     for (const delayMs of backoffMs) {
@@ -726,7 +767,7 @@ export async function removeCopyWorktree(
       if (moved.ok || !(BUSY_GIT_MSG.test(moved.error) || BUSY_FS_CODE.test(moved.error))) break;
       await release();
     }
-    if (!moved.ok) return { ok: false, error: moved.error };
+    if (!moved.ok) return fail(moved.error);
     let reason: string | null;
     try {
       reason = await input.aside.recheck(aside);
@@ -734,34 +775,18 @@ export async function removeCopyWorktree(
       reason = `It could not be checked again once moved aside: ${errorText(err)}`;
     }
     if (reason) {
-      const back = await moveWorktree(input.repoCwd, aside, original);
-      return {
-        ok: false,
-        changed: true,
-        error: back.ok ? reason : `${reason} It could not be moved back and is at ${aside}: ${back.error}`,
-      };
+      const back = await putBackAside(input.repoCwd, aside, original);
+      if (!back.ok) return { ok: false, changed: true, error: `${reason} ${back.error}` };
+      return fail(reason, true);
     }
     work = { ...input, worktreePath: aside };
   }
   // Puts a folder that is still there after a failure back where it was.
   const putBack = async (): Promise<string> => {
     if (work === input || (await pathIsAbsent(work.worktreePath))) return "";
-    const back = (await isRegisteredWorktree(input.repoCwd, work.worktreePath))
-      ? await moveWorktree(input.repoCwd, work.worktreePath, original)
-      : await rename(work.worktreePath, original).then(
-          (): GitOpResult => ({ ok: true }),
-          (err: unknown): GitOpResult => ({ ok: false, error: errorText(err) }),
-        );
-    return back.ok ? "" : ` What is left is at ${work.worktreePath}.`;
+    const back = await putBackAside(input.repoCwd, work.worktreePath, original);
+    return back.ok ? "" : ` ${back.error}`;
   };
-  // Folders setup linked in from the main checkout go first, so removal can
-  // never reach through them; they come back if the worktree stays.
-  let releasedLinks: Awaited<ReturnType<typeof prepareWorktreeRemoval>>;
-  try {
-    releasedLinks = await prepareWorktreeRemoval(work.worktreePath);
-  } catch (err) {
-    return { ok: false, error: `${errorText(err)}${await putBack()}` };
-  }
   let lastError = "worktree removal not attempted";
   let removed = false;
   for (const delayMs of backoffMs) {
@@ -776,8 +801,9 @@ export async function removeCopyWorktree(
     await release();
   }
   if (!removed) {
-    await restoreWorktreeLinks(work.worktreePath, releasedLinks).catch(() => undefined);
-    return { ok: false, error: `${lastError}${await putBack()}` };
+    const stuck = await putBack();
+    await restoreWorktreeLinks(stuck ? work.worktreePath : original, releasedLinks).catch(() => undefined);
+    return { ok: false, error: `${lastError}${stuck}` };
   }
 
   // Best-effort: only this worktree's own registration, if one was left.
