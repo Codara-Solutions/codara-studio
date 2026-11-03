@@ -35,6 +35,7 @@ import {
 } from "../git-worktrees";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
 import {
+  canonicalMaybeMissing,
   canonicalPath,
   checkRemoval,
   discoverRepos,
@@ -104,13 +105,13 @@ async function refreshRows(deps: WorktreeCleanupDeps, repo: RepoContext): Promis
   const state = await deps.loadState().catch(() => null);
   if (!state) return false;
   const known = new Set(repo.workspaces.map((workspace) => workspace.id));
-  const roots = await Promise.all(repo.registrations.map((entry) => canonicalPath(entry.path)));
+  const roots = await Promise.all(repo.registrations.map((entry) => canonicalMaybeMissing(entry.path)));
   const rows: Workspace[] = [];
   for (const workspace of state.workspaces) {
     if (workspace.remote || !workspace.cwd || isRemotePath(workspace.cwd)) continue;
     if (known.has(workspace.id)) rows.push(workspace);
     else {
-      const cwd = await canonicalPath(workspace.cwd);
+      const cwd = await canonicalMaybeMissing(workspace.cwd);
       if (roots.some((root) => isAtOrUnder(cwd, root))) rows.push(workspace);
     }
   }
@@ -350,7 +351,7 @@ async function removeOne(
 
   if (check.blockers.length) return refuse(check.blockers[0].code, check.blockers[0].message);
   if (options.boundTo) {
-    const rows = ctx.linked.get(pathKey(real)) ?? [];
+    const rows = ctx.linked.get(pathKey(await canonicalMaybeMissing(check.path))) ?? [];
     if (rows.length !== 1 || rows[0].id !== options.boundTo) {
       return refuse("CHANGED", "Another workspace row uses this folder now, or its row is gone, so nothing was removed.");
     }

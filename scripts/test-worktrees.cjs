@@ -143,6 +143,22 @@ async function main() {
     assert.strictEqual(path.basename(out.path), "row-out-3", "checkout skips them too; a relative path is no row folder");
     git(repo, ["worktree", "remove", out.path]);
     git(repo, ["branch", "-D", "row-out"]);
+    if (process.platform !== "win32") {
+      // A row that spells the folder through a link to the same place.
+      const alias = path.join(path.dirname(worktreesRoot), "worktrees-alias");
+      require("node:fs").symlinkSync(worktreesRoot, alias);
+      const viaLink = await wt.createCopyWorktree({
+        repoCwd: repo,
+        worktreesRoot,
+        newBranch: "row-link",
+        takenPaths: [path.join(alias, "row-link")],
+      });
+      assert.ok(viaLink.ok, `create failed: ${viaLink.ok ? "" : viaLink.error}`);
+      assert.strictEqual(path.basename(viaLink.path), "row-link-2", "a row's folder spelled through a link is skipped");
+      git(repo, ["worktree", "remove", viaLink.path]);
+      git(repo, ["branch", "-D", "row-link"]);
+      require("node:fs").rmSync(alias);
+    }
 
     // A taken name must surface git's refusal, not silently rename.
     const dup = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot, newBranch: "main" });

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, promises as fsp } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import type { AppState, CopyBranchCreator, RunState, Workspace } from "@shared/types";
 import type {
@@ -109,6 +109,16 @@ export async function canonicalPath(path: string): Promise<string> {
     return await fsp.realpath(path);
   } catch {
     return resolve(path);
+  }
+}
+
+// A path that may be gone, spelled as git spells it: its parent resolved
+// through links, so a missing folder under a symlinked parent still matches.
+export async function canonicalMaybeMissing(path: string): Promise<string> {
+  try {
+    return await fsp.realpath(path);
+  } catch {
+    return join(await canonicalPath(dirname(path)), basename(path));
   }
 }
 
@@ -325,11 +335,11 @@ export function isKeptBranch(branch: string, target: string | undefined | null):
 /** Each Codara workspace of the repository, under the deepest worktree that holds its folder. */
 export async function linkWorkspaces(repo: RepoContext): Promise<Map<string, Workspace[]>> {
   const paths = await Promise.all(
-    repo.registrations.map(async (entry) => ({ entry, real: await canonicalPath(entry.path) })),
+    repo.registrations.map(async (entry) => ({ entry, real: await canonicalMaybeMissing(entry.path) })),
   );
   const linked = new Map<string, Workspace[]>();
   for (const workspace of repo.workspaces) {
-    const cwd = await canonicalPath(workspace.cwd);
+    const cwd = await canonicalMaybeMissing(workspace.cwd);
     let best: { key: string; length: number } | null = null;
     for (const { real } of paths) {
       if (isAtOrUnder(cwd, real) && (!best || real.length > best.length)) best = { key: pathKey(real), length: real.length };

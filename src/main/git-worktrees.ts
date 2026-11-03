@@ -230,18 +230,26 @@ async function pickCheckoutDirName(
   takenPaths: readonly string[] = [],
 ): Promise<string> {
   const used = await existingWorktreeDirs(worktreesRoot);
-  const fold = (path: string) => (process.platform === "win32" ? path.toLowerCase() : path);
-  const roots = new Set([fold(resolve(worktreesRoot)), fold(await realpath(worktreesRoot).catch(() => resolve(worktreesRoot)))]);
-  for (const taken of takenPaths) {
-    if (typeof taken !== "string" || !taken || !isAbsolute(taken)) continue;
-    const at = resolve(taken);
-    if (roots.has(fold(dirname(at)))) used.add(basename(at));
+  // Compared as the file system does: through links, and without case where
+  // the default file systems ignore it.
+  const fold = (path: string) =>
+    process.platform === "win32" || process.platform === "darwin" ? path.toLowerCase() : path;
+  const real = (path: string) => realpath(path).catch(() => resolve(path));
+  const roots = new Set([fold(resolve(worktreesRoot)), fold(await real(worktreesRoot))]);
+  const taken = new Set<string>();
+  for (const path of takenPaths) {
+    if (typeof path !== "string" || !path || !isAbsolute(path)) continue;
+    const at = resolve(path);
+    for (const parent of new Set([dirname(at), await real(dirname(at))])) {
+      if (roots.has(fold(parent))) taken.add(fold(basename(at)));
+    }
   }
+  const isUsed = (name: string) => used.has(name) || taken.has(fold(name));
   const base = slugifyBranchName(branchName);
-  if (!used.has(base)) return base;
+  if (!isUsed(base)) return base;
   for (let n = 2; ; n += 1) {
     const candidate = `${base}-${n}`;
-    if (!used.has(candidate)) return candidate;
+    if (!isUsed(candidate)) return candidate;
   }
 }
 

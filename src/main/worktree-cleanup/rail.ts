@@ -1,5 +1,5 @@
 import { promises as fsp } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import type { AppState, Workspace } from "@shared/types";
 import type {
@@ -30,6 +30,7 @@ import type { WorktreeRegistration } from "../git-worktree-porcelain";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
 import {
   ROW_CONCURRENCY,
+  canonicalMaybeMissing,
   canonicalPath,
   discoverRepos,
   isKeptBranch,
@@ -222,14 +223,6 @@ async function parentHoldsFolders(path: string): Promise<boolean> {
 
 // canonicalPath falls back to the path as given once it is gone, which no
 // longer matches git's real path when a parent folder is a symlink.
-async function canonicalMaybeMissing(path: string): Promise<string> {
-  try {
-    return await fsp.realpath(path);
-  } catch {
-    return join(await canonicalPath(dirname(path)), basename(path));
-  }
-}
-
 async function registrationOf(repo: RepoContext, cwd: string): Promise<WorktreeRegistration | undefined> {
   const key = pathKey(await canonicalMaybeMissing(cwd));
   for (const entry of repo.registrations) {

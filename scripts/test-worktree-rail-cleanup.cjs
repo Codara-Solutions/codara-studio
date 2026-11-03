@@ -1019,6 +1019,24 @@ async function main() {
       assert.equal(alone.status, "removed", alone.message);
     });
 
+    await check("a missing folder whose row spells it through a linked parent is still its row's", async () => {
+      if (process.platform === "win32") return; // Links need privileges there.
+      const dir = mergedWith("via-link", "feature/via-link");
+      const alias = path.join(scratch, "trees-alias");
+      fs.symlinkSync(trees, alias);
+      const row = h.state.workspaces.find((workspace) => workspace.id === "ws-via-link");
+      row.cwd = path.join(alias, "via-link");
+      fs.rmSync(dir, { recursive: true, force: true });
+      try {
+        const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-via-link", mode: "auto" });
+        assert.equal(result.status, "removed", JSON.stringify(result));
+        assert.equal(registered(repo, dir), false);
+        assert.equal(has("ws-via-link"), false);
+      } finally {
+        fs.rmSync(alias);
+      }
+    });
+
     await check("no rail action touched another worktree or the main checkout", async () => {
       assert.equal(fs.readFileSync(path.join(bystander, "keep.txt"), "utf8"), "keep\n");
       assert.equal(registered(repo, bystander), true);
