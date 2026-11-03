@@ -42,6 +42,8 @@ const round = (value: number, places: number): number => {
   return Math.round((value + Number.EPSILON) * k) / k;
 };
 
+const MIN_USD = 0.0001;
+
 export function usdToEur(usd: number, rate: MoneyRate = current): number {
   return usd / rate.usdPerEur;
 }
@@ -85,13 +87,25 @@ export function eurFieldFromUsd(usd: number, rate: MoneyRate = current): string 
 /** The dollars to store for a euro field, or undefined when it is not a positive number. */
 export function usdFromEurField(text: string, rate: MoneyRate = current): number | undefined {
   const value = Number(text.trim().replace(",", "."));
-  return text.trim() && Number.isFinite(value) && value > 0 ? eurToUsd(value, rate) : undefined;
+  // A positive amount too small to register is still a limit, never "no limit".
+  return text.trim() && Number.isFinite(value) && value > 0 ? Math.max(MIN_USD, eurToUsd(value, rate)) : undefined;
 }
 
-/** Like usdFromEurField, but a field left as it was shown keeps the stored
- *  dollars exactly: opening a saved cap and saving something else must not
- *  nudge it by the rounding of a euro cent. */
-export function usdFromEurFieldKeeping(text: string, storedUsd: number | undefined, rate: MoneyRate = current): number | undefined {
-  if (storedUsd !== undefined && text.trim() === eurFieldFromUsd(storedUsd, rate)) return storedUsd;
+/** A saved amount as the editor first showed it. */
+export interface ShownLimit {
+  usd: number;
+  /** The euro text the field held when it opened. */
+  shown: string;
+}
+
+export function shownLimit(usd: number, rate: MoneyRate = current): ShownLimit {
+  return { usd, shown: eurFieldFromUsd(usd, rate) };
+}
+
+/** Like usdFromEurField, but a field left as it was first shown keeps the stored
+ *  dollars exactly: opening a saved cap and saving something else must not nudge
+ *  it by a euro cent's rounding, nor by a rate that arrived in between. */
+export function usdFromEurFieldKeeping(text: string, kept: ShownLimit | undefined, rate: MoneyRate = current): number | undefined {
+  if (kept && text.trim() === kept.shown) return kept.usd;
   return usdFromEurField(text, rate);
 }

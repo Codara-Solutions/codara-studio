@@ -99,7 +99,7 @@ export default function LoopInspector({
             <CapBox
               label="Budget cap"
               suffix="€"
-              usd={usdFromEurFieldKeeping(loop.budget, loop.budgetUsd0)}
+              usd={usdFromEurFieldKeeping(loop.budget, loop.budgetKept)}
               value={loop.budget}
               placeholder="—"
               step={0.5}
@@ -111,7 +111,7 @@ export default function LoopInspector({
             <CapBox
               label="Monthly cap"
               suffix="€"
-              usd={usdFromEurFieldKeeping(loop.monthlyCap, loop.monthlyCapUsd0)}
+              usd={usdFromEurFieldKeeping(loop.monthlyCap, loop.monthlyCapKept)}
               value={loop.monthlyCap}
               placeholder="—"
               step={1}

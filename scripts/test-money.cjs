@@ -123,6 +123,7 @@ const R = { usdPerEur: 1.25, date: "2026-11-02", source: "ecb" };
   assert.equal(m.usdFromEurField("0", R), undefined);
   assert.equal(m.usdFromEurField("-2", R), undefined);
   assert.equal(m.usdFromEurField("abc", R), undefined);
+  assert.equal(m.usdFromEurField("0.00001", R), 0.0001, "an amount too small to register still limits, not removes");
   assert.equal(m.usdFromEurField("1,6", R), 2, "a decimal comma reads as a point");
 
   // Through the editor's draft: stored dollars -> field -> stored dollars.
@@ -140,6 +141,11 @@ const R = { usdPerEur: 1.25, date: "2026-11-02", source: "ecb" };
   assert.equal(draft.loop.budget, "1.78");
   assert.deepEqual(m.buildGuard(draft.loop), { monthlyCapUsd: 20 }, "left alone, the stored dollars do not move");
   assert.equal(m.buildLoop(draft.loop).stop.budgetUsd, 2);
+  // The rate arrives after the editor opened: untouched fields still keep their dollars.
+  m.setMoneyRate({ usdPerEur: 1.2, date: "2026-11-03", source: "ecb" });
+  assert.deepEqual(m.buildGuard(draft.loop), { monthlyCapUsd: 20 }, "a rate that moved meanwhile does not nudge an untouched cap");
+  assert.equal(m.buildLoop(draft.loop).stop.budgetUsd, 2);
+  m.setMoneyRate({ usdPerEur: 1.1216, date: "2026-11-02", source: "ecb" });
   draft.loop.monthlyCap = "25";
   assert.deepEqual(m.buildGuard(draft.loop), { monthlyCapUsd: 28.04 }, "edited, euros convert at today's rate");
   assert.equal(m.eurFieldFromUsd(28.04), "25");
