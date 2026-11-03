@@ -69,6 +69,20 @@ async function main() {
     assert.equal(fs.existsSync(stale), false, "the row's folder is not handed out");
     assert.throws(() => git(repo, ["rev-parse", "--verify", "--quiet", "refs/heads/task"]), "no branch is made");
 
+    // A failed save keeps the mark; a save of the loaded state itself, or of
+    // a spread of it, clears it: what was written is known.
+    const isUnreadable = (state) => state[Symbol.for("codara.unreadableState")] === true;
+    assert.equal(isUnreadable(await loadState()), true);
+    fs.chmodSync(home, 0o500);
+    try {
+      if (process.getuid?.() !== 0) await assert.rejects(saveState({ ...unread }));
+    } finally {
+      fs.chmodSync(home, 0o700);
+    }
+    assert.equal(isUnreadable(await loadState()), true, "a failed save keeps the mark");
+    await saveState({ ...unread });
+    assert.equal(isUnreadable(await loadState()), false, "a saved spread of the loaded state is known");
+    assert.equal(isUnreadable(unread), true, "the loaded state is left as it was");
     // Once a save replaces the state, the rows are known again.
     await saveState({
       workspaces: [{ id: "ws-stale", name: "stale", cwd: stale, color: "#2AA298", workers: [] }],

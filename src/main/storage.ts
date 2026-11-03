@@ -130,7 +130,8 @@ async function readFromDisk(): Promise<AppState> {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ...EMPTY };
     console.error("[storage] failed to read state, starting empty:", err);
     // Marked, so no new worktree takes a folder a row it could not read names.
-    return { ...EMPTY, [UNREADABLE_STATE]: true } as AppState;
+    // Not enumerable: a spread or clone of it, saved, is a state of its own.
+    return Object.defineProperty({ ...EMPTY }, UNREADABLE_STATE, { value: true, enumerable: false, configurable: true });
   }
 }
 
@@ -599,6 +600,8 @@ async function enqueueStateWrite(
   const operation = writing.then(async () => {
     const next = await produce();
     await writeToDisk(next);
+    // What was just written is known; an unreadable mark never outlives it.
+    delete (next as unknown as Record<symbol, unknown>)[UNREADABLE_STATE];
     cache = next;
     durable?.(next);
     for (const listener of stateSavedListeners) {
