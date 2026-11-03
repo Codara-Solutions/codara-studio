@@ -831,9 +831,11 @@ async function main() {
 
     await check("the maker's tab elsewhere holds a worktree it has not committed to yet", async () => {
       const fresh = add("fresh-made", "feature/fresh-made");
-      // Made after its base commit: an ancestor of main with nothing of its own.
+      // Made half a second after its base commit, in the same second: an
+      // ancestor of main with nothing of its own.
+      const based = Number(git(repo, ["log", "-1", "--format=%ct", "HEAD"])) * 1000;
       h.state.workspaces.push(
-        copyWorkspace("ws-fresh-made", fresh, repo, "feature/fresh-made", { createdAt: new Date(Date.now() + 5_000).toISOString() }),
+        copyWorkspace("ws-fresh-made", fresh, repo, "feature/fresh-made", { createdAt: new Date(based + 500).toISOString() }),
       );
       madeBy("ws-fresh-made");
       const result = await withTab({ title: "coordinator", cwd: coordinator }, () =>
@@ -855,6 +857,13 @@ async function main() {
       const rmOnly = mergedWith("rm-only", "feature/rm-only");
       madeBy("ws-rm-only");
       fs.rmSync(rmOnly, { recursive: true, force: true });
+      // Only the folder deleted, with no commit of its own: nothing is lost.
+      const rmEmpty = add("rm-empty", "feature/rm-empty");
+      h.state.workspaces.push(
+        copyWorkspace("ws-rm-empty", rmEmpty, repo, "feature/rm-empty", { createdAt: new Date(Date.now() + 5_000).toISOString() }),
+      );
+      madeBy("ws-rm-empty");
+      fs.rmSync(rmEmpty, { recursive: true, force: true });
       // Branch kept and merged.
       const kept = mergedWith("kept-branch", "feature/kept-branch");
       madeBy("ws-kept-branch");
@@ -867,7 +876,7 @@ async function main() {
       git(repo, ["worktree", "remove", unfinished]);
       await withTab({ title: "coordinator", cwd: coordinator }, async () => {
         const rows = Object.fromEntries((await rail.railWorktreeStates(deps)).map((entry) => [entry.workspaceId, entry]));
-        for (const id of ["ws-by-hand", "ws-rm-only", "ws-kept-branch"]) {
+        for (const id of ["ws-by-hand", "ws-rm-only", "ws-rm-empty", "ws-kept-branch"]) {
           assert.equal(rows[id].autoCandidate, true, id);
           const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: id, mode: "auto" });
           assert.equal(result.status, "removed", `${id}: ${result.message}`);

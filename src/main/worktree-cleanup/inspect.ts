@@ -442,7 +442,9 @@ export async function finishedWork(
   const made = workspaces.map((workspace) => Date.parse(workspace.copyBranch?.createdAt ?? "")).filter(Number.isFinite);
   if (!head || !made.length) return false;
   const seconds = Number(await readGitText(repoRoot, ["log", "-1", "--format=%ct", head]));
-  return Number.isFinite(seconds) && seconds > 0 && seconds * 1000 >= Math.min(...made) - 1_000;
+  // Commit times are whole seconds: only a later second counts, so a base
+  // commit made just before the worktree is never taken for its own.
+  return Number.isFinite(seconds) && seconds > 0 && seconds * 1000 > Math.min(...made);
 }
 
 function count(n: number, one: string, many = `${one}s`): string {
@@ -765,7 +767,9 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   }
   check.branchDeletable = Boolean(branch) && merge.state === "merged" && !isKeptBranch(branch!, merge.target);
 
-  if (pending.length && !(await finishedWork(repo.root, merge, head, workspaces))) inUse(pending.splice(0));
+  // A folder already gone holds nothing of the maker's: a merged branch is enough.
+  const finished = check.alreadyRemoved ? merge.state === "merged" : await finishedWork(repo.root, merge, head, workspaces);
+  if (pending.length && !finished) inUse(pending.splice(0));
   if (check.alreadyRemoved) return finish();
 
   // Local work a removal deletes.
