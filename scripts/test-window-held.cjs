@@ -56,6 +56,8 @@ async function main() {
     fs.symlinkSync("hop/../notes.md", path.join(other, "editor.md"));
     assert.equal(await filesInsideFolders([path.join(other, "editor.md")], [tree]), true, "dot-dot in a link target is applied after the link before it");
     assert.equal(await filesInsideFolders([`${other}/hop/../notes.md`], [tree]), true, "and in the path as the tab spells it");
+    fs.symlinkSync("gone/../hop/../notes.md", path.join(other, "via-gone.md"));
+    assert.equal(await filesInsideFolders([path.join(other, "via-gone.md")], [tree]), null, "dot-dot after a missing folder: cannot tell");
     const locked = path.join(scratch, "locked");
     fs.mkdirSync(locked);
     fs.symlinkSync(path.join(tree, "notes.md"), path.join(locked, "into.md"));

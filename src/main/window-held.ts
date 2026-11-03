@@ -34,7 +34,8 @@ function components(path: string): { root: string; names: string[] } {
 // way is followed by hand, so a link whose target was deleted (a file or a
 // folder above it) still points where the buffer came from; from the first
 // missing component on, the rest is kept as written. Null when that cannot
-// be told: a link loop, or a component that cannot be read.
+// be told: a link loop, a component that cannot be read, or ".." after a
+// missing component.
 export async function resolveLoose(path: string): Promise<string | null> {
   if (!isAbsolute(path)) return null;
   const start = components(path);
@@ -53,7 +54,10 @@ export async function resolveLoose(path: string): Promise<string | null> {
       stat = await fsp.lstat(next);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
-      return code === "ENOENT" || code === "ENOTDIR" ? join(next, ...pending) : null;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return null;
+      // Below a missing component nothing is a link, unless ".." climbs back
+      // out of it to where one may be.
+      return pending.includes("..") ? null : join(next, ...pending);
     }
     if (!stat.isSymbolicLink()) {
       current = next;
