@@ -130,6 +130,7 @@ const R = { usdPerEur: 1.25, date: "2026-11-02", source: "ecb" };
   assert.ok(Number(m.eurFieldFromUsd(tiny, R)) > 0, "a sub-cent limit reopens as a positive amount: " + m.eurFieldFromUsd(tiny, R));
   assert.equal(m.usdFromEurFieldKeeping(m.eurFieldFromUsd(tiny, R), m.shownLimit(tiny, R), R), tiny);
   assert.equal(m.guardDraftProblem ? m.guardDraftProblem(m.eurFieldFromUsd(tiny, R), "") : null, null, "and passes the editor's own check");
+  assert.ok(Number.isFinite(m.usdFromEurField("1e305", R)) && m.usdFromEurField("1e305", R) > 1e9, "an absurd amount stays a huge limit");
   assert.equal(m.usdFromEurField("1,6", R), 2, "a decimal comma reads as a point");
 
   // Through the editor's draft: stored dollars -> field -> stored dollars.

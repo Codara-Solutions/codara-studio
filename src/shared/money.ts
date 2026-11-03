@@ -43,6 +43,7 @@ const round = (value: number, places: number): number => {
 };
 
 const MIN_USD = 0.0001;
+const MAX_EUR = 1e12;
 
 export function usdToEur(usd: number, rate: MoneyRate = current): number {
   return usd / rate.usdPerEur;
@@ -89,7 +90,8 @@ export function eurFieldFromUsd(usd: number, rate: MoneyRate = current): string 
 
 /** The dollars to store for a euro field, or undefined when it is not a positive number. */
 export function usdFromEurField(text: string, rate: MoneyRate = current): number | undefined {
-  const value = Number(text.trim().replace(",", "."));
+  // Capped so an absurd amount stays a (huge) limit instead of overflowing to Infinity.
+  const value = Math.min(MAX_EUR, Number(text.trim().replace(",", ".")));
   // A positive amount too small to register is still a limit, never "no limit".
   return text.trim() && Number.isFinite(value) && value > 0 ? Math.max(MIN_USD, eurToUsd(value, rate)) : undefined;
 }

@@ -4,8 +4,9 @@ import { MONEY_USD_PART, rateNote } from "@shared/money";
 /** Text that may hold "≈€1.72 ($2.00)" amounts (see fmtCost). The euros stay as
  *  they are; the bracketed dollars drop to small, muted print, and the rate that
  *  made the conversion is the tooltip. Re-created on every render so a rate that
- *  arrives late (useMoneyRate) is picked up. */
-export function MoneyText({ text }: { text: string }): React.ReactElement {
+ *  arrives late (useMoneyRate) is picked up. `historical` is for text saved with
+ *  the run: its euros were worked out at the rate of that day, not today's. */
+export function MoneyText({ text, historical }: { text: string; historical?: boolean }): React.ReactElement {
   const parts: React.ReactNode[] = [];
   let at = 0;
   let found = false;
@@ -14,7 +15,7 @@ export function MoneyText({ text }: { text: string }): React.ReactElement {
     const start = m.index ?? 0;
     if (start > at) parts.push(text.slice(at, start));
     parts.push(
-      <small key={start} className="automation-money-usd" title={rateNote()}>
+      <small key={start} className="automation-money-usd" title={historical ? "Converted when it was recorded" : rateNote()}>
         {m[0].slice(1, -1)}
       </small>,
     );
