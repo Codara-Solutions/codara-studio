@@ -1156,7 +1156,9 @@ Before deleting anything Codara saves the last commit as
 the result carries `recoverWith`, the command that restores the worktree. When
 git fails partway (it may already have deleted files), the ref stays and the
 refusal names it in `recoveryRef`. A second removal of the same worktree on the
-same day saves under the next free name (`<workspace id>-2`, ...). The branch is
+same day saves above the newest name (`<workspace id>-2`, ...), and a retry
+answers with the newest save. `recoverWith` makes the branch again when it is
+gone, and checks the commit out detached when the branch moved on. The branch is
 deleted only if it still points at the commit that was checked, and, when the
 folder was already gone, only once its tip is saved (otherwise
 `branchKeptReason` is `RECOVERY_REF_FAILED`).
