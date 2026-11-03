@@ -795,6 +795,11 @@ export async function gateCaller(
   return { run, preferences };
 }
 
+// The local folders workspace rows name, for a new worktree to keep clear of.
+export function rowPaths(state: AppState | null | undefined): string[] {
+  return (state?.workspaces ?? []).filter((workspace) => !workspace.remote && workspace.cwd).map((workspace) => workspace.cwd);
+}
+
 export interface WorktreeScope {
   state: AppState;
   callerWorkspace: Workspace;
@@ -1445,6 +1450,7 @@ async function createAgentWorktreeInner(
           worktreesRoot: scope.root,
           branch: remoteOnly ? `origin/${branch}` : branch,
           isRemote: remoteOnly,
+          takenPaths: rowPaths(state),
         });
       } else {
         const remoteBase = baseName && baseName !== "HEAD" ? await splitRemoteRef(repoCwd, baseName) : null;
@@ -1459,6 +1465,7 @@ async function createAgentWorktreeInner(
           baseBranch: baseName!,
           startPoint: baseCommit!,
           newBranch: branch,
+          takenPaths: rowPaths(state),
         });
       }
       if (!created.ok) {
@@ -2681,6 +2688,18 @@ async function removeLocked(
   const stillListed = latestState.workspaces.find((candidate) => candidate.id === workspace.id);
   if (!stillListed) {
     return { ok: true, removed: false, alreadyRemoved: true, workspaceId: workspace.id, path: workspace.cwd, branch };
+  }
+  // The row asked for must still be the only one at its folder: another row
+  // there (a new worktree made in the folder of one removed outside Studio)
+  // would have its worktree judged, and deleted, in this row's name.
+  const folder = await realpathOrResolve(stillListed.cwd);
+  for (const other of latestState.workspaces) {
+    if (other.id === workspace.id || other.remote || !other.cwd) continue;
+    if ((await realpathOrResolve(other.cwd)) === folder) {
+      return refusal("WORKTREE_CHANGED", `another workspace (${other.name}) now uses this folder; nothing was removed`, {
+        workspaceId: workspace.id,
+      });
+    }
   }
   const warnings = [...verdict.warnings];
   let recoveryRef: string | null = null;

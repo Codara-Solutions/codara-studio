@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult } from "@shared/types";
 import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
@@ -30,6 +30,8 @@ export interface CreateCopyWorktreeInput {
   // SHA here sets no upstream on the new branch and can never be read as an
   // option, which is why agent-created worktrees pass the resolved commit.
   startPoint?: string;
+  // Folders workspace rows still name, never handed out (pickCheckoutDirName).
+  takenPaths?: readonly string[];
 }
 
 export interface CreateCheckoutWorktreeInput {
@@ -39,6 +41,8 @@ export interface CreateCheckoutWorktreeInput {
   // "origin/feature/x" when isRemote is set.
   branch: string;
   isRemote?: boolean;
+  // Folders workspace rows still name, never handed out (pickCheckoutDirName).
+  takenPaths?: readonly string[];
 }
 
 export interface RemoveCopyWorktreeInput {
@@ -186,7 +190,7 @@ export async function createCopyWorktree(
     const branch = input.newBranch.trim();
     if (!branch) return { ok: false, error: "No branch name given." };
     const baseBranch = input.baseBranch?.trim() || (await resolveDefaultBranch(input.repoCwd));
-    const dirName = await pickCheckoutDirName(input.worktreesRoot, branch);
+    const dirName = await pickCheckoutDirName(input.worktreesRoot, branch, input.takenPaths);
     const path = join(input.worktreesRoot, dirName);
     if (existsSync(path)) {
       return { ok: false, error: `Worktree path already exists: ${path}` };
@@ -215,9 +219,24 @@ export function slugifyBranchName(name: string): string {
 
 // Worktree directory name for a branch: the slug, with a numeric suffix on
 // collision. Only directory collisions matter — the slug never becomes a
-// branch name (the real, possibly-slashed name is what git checks out).
-async function pickCheckoutDirName(worktreesRoot: string, branchName: string): Promise<string> {
+// branch name (the real, possibly-slashed name is what git checks out). A
+// folder a row still names counts as taken, even when it is gone: a row
+// whose worktree was removed outside Studio (plain `git worktree remove`)
+// stays until the rail's next look, and a removal asked for that old row
+// would judge, and delete, a new worktree made in its folder.
+async function pickCheckoutDirName(
+  worktreesRoot: string,
+  branchName: string,
+  takenPaths: readonly string[] = [],
+): Promise<string> {
   const used = await existingWorktreeDirs(worktreesRoot);
+  const fold = (path: string) => (process.platform === "win32" ? path.toLowerCase() : path);
+  const roots = new Set([fold(resolve(worktreesRoot)), fold(await realpath(worktreesRoot).catch(() => resolve(worktreesRoot)))]);
+  for (const taken of takenPaths) {
+    if (typeof taken !== "string" || !taken || !isAbsolute(taken)) continue;
+    const at = resolve(taken);
+    if (roots.has(fold(dirname(at)))) used.add(basename(at));
+  }
   const base = slugifyBranchName(branchName);
   if (!used.has(base)) return base;
   for (let n = 2; ; n += 1) {
@@ -267,7 +286,7 @@ export async function createCheckoutWorktree(
       addArgs = [shortName];
     }
 
-    const dirName = await pickCheckoutDirName(input.worktreesRoot, shortName);
+    const dirName = await pickCheckoutDirName(input.worktreesRoot, shortName, input.takenPaths);
     const path = join(input.worktreesRoot, dirName);
     if (existsSync(path)) {
       return { ok: false, error: `Worktree path already exists: ${path}` };

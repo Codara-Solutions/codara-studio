@@ -1162,6 +1162,11 @@ gone, and checks the commit out detached when the branch moved on. The branch is
 deleted only if it still points at the commit that was checked, and, when the
 folder was already gone, only once its tip is saved (otherwise
 `branchKeptReason` is `RECOVERY_REF_FAILED`).
+Under the lock the workspace rows are read again: if another row now names the
+same folder (a new worktree made where one removed outside Codara was), it
+refuses with `WORKTREE_CHANGED`. A new
+worktree never gets a folder a row still names, even one whose folder is gone,
+so it gets `<branch>-2` instead.
 To delete the folder, Codara first moves it aside (`.<name>.codara-removing`
 next to it), where nothing new can open it by its path, and checks it again:
 if a file changed, a commit landed, or a terminal, run, tab or process

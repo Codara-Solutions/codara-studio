@@ -582,6 +582,7 @@ async function cleanUpRegistered(
     {
       ...options,
       caller: callerFor(request.mode),
+      boundTo: workspace.id,
       ...(allowInUse ? { allowInUse } : {}),
       ...(requireKnownUsage ? { requireKnownUsage, beforeRemove: () => lastMomentRefusal(deps, workspace, path) } : {}),
     },

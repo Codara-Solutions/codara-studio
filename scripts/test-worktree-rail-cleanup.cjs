@@ -1005,6 +1005,20 @@ async function main() {
       assert.equal(branchExists(repo, "feature/late-maker"), true);
     });
 
+    await check("a rail removal is bound to its row: a second row at the folder stops it", async () => {
+      const shared = mergedWith("two-rows", "feature/two-rows");
+      // A new worktree's row made in the folder of one removed outside Studio.
+      h.state.workspaces.push(copyWorkspace("ws-two-rows-new", shared, repo, "feature/two-rows"));
+      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-two-rows", mode: "manual" });
+      assert.equal(result.status, "refused", JSON.stringify(result));
+      assert.match(result.message, /Another workspace row uses this folder/);
+      assert.equal(fs.existsSync(shared), true);
+      assert.equal(has("ws-two-rows-new"), true);
+      h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== "ws-two-rows-new");
+      const alone = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-two-rows", mode: "manual" });
+      assert.equal(alone.status, "removed", alone.message);
+    });
+
     await check("no rail action touched another worktree or the main checkout", async () => {
       assert.equal(fs.readFileSync(path.join(bystander, "keep.txt"), "utf8"), "keep\n");
       assert.equal(registered(repo, bystander), true);

@@ -123,6 +123,27 @@ async function main() {
     assert.strictEqual(r.baseBranch, "main", "baseBranch should be main");
     assert.ok(r.fileCount >= 1, `fileCount should be >= 1, got ${r.fileCount}`);
 
+    // A folder a workspace row still names is never handed out again, even
+    // when it is gone: the row of a worktree removed outside Studio lasts
+    // until the rail's next look.
+    const stale = path.join(worktreesRoot, "row-kept");
+    const kept = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot, newBranch: "row-kept", takenPaths: [stale] });
+    assert.ok(kept.ok, `create failed: ${kept.ok ? "" : kept.error}`);
+    assert.strictEqual(path.basename(kept.path), "row-kept-2", "the folder a row names is skipped");
+    git(repo, ["worktree", "remove", kept.path]);
+    git(repo, ["branch", "-D", "row-kept"]);
+    git(repo, ["branch", "row-out", "main"]);
+    const out = await wt.createCheckoutWorktree({
+      repoCwd: repo,
+      worktreesRoot,
+      branch: "row-out",
+      takenPaths: [path.join(worktreesRoot, "row-out"), path.join(worktreesRoot, "row-out-2"), "relative/row-out-3"],
+    });
+    assert.ok(out.ok, `checkout failed: ${out.ok ? "" : out.error}`);
+    assert.strictEqual(path.basename(out.path), "row-out-3", "checkout skips them too; a relative path is no row folder");
+    git(repo, ["worktree", "remove", out.path]);
+    git(repo, ["branch", "-D", "row-out"]);
+
     // A taken name must surface git's refusal, not silently rename.
     const dup = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot, newBranch: "main" });
     assert.ok(!dup.ok, "creating a branch that already exists should fail");

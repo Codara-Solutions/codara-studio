@@ -61,6 +61,7 @@ export interface GitHubIssueWorkspaceDependencies {
     worktreesRoot: string;
     baseBranch?: string;
     newBranch: string;
+    takenPaths?: readonly string[];
   }): Promise<GitCopyWorktreeResult>;
   removeCopyWorktree(input: {
     repoCwd: string;
@@ -267,6 +268,7 @@ async function createOrResumeIssueWorkspace(
     worktreesRoot: dependencies.worktreesRoot(source.cwd),
     baseBranch,
     newBranch: branch,
+    takenPaths: refreshedState.workspaces.filter((workspace) => !workspace.remote && workspace.cwd).map((workspace) => workspace.cwd),
   });
   if (!created.ok) {
     return failure(

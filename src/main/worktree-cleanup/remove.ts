@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { isRemotePath } from "@shared/remote";
 import type { AppState, Workspace } from "@shared/types";
 import type {
   WorktreeCleanupOutcome,
@@ -45,6 +46,7 @@ import {
   usageContext,
   finishedWork,
   heldByMaker,
+  isAtOrUnder,
   usageOf,
   type CheckContext,
   type RepoContext,
@@ -87,6 +89,33 @@ export interface RemoveOptions {
   usageFreshMs?: number;
   /** Who asked, for the audit log; the cleanup screen when absent. */
   caller?: WorktreeCaller;
+  /**
+   * The workspace row the removal was asked for (the rail's row). Under the
+   * lock, with the rows read again, it must still be there and the only row
+   * at the folder; otherwise nothing is removed.
+   */
+  boundTo?: string;
+}
+
+// The rows as they are now, read under the lock: a row removed, or a new
+// worktree's row made in the same folder, since the screen or the rail read
+// them must count. False when the state could not be read.
+async function refreshRows(deps: WorktreeCleanupDeps, repo: RepoContext): Promise<boolean> {
+  const state = await deps.loadState().catch(() => null);
+  if (!state) return false;
+  const known = new Set(repo.workspaces.map((workspace) => workspace.id));
+  const roots = await Promise.all(repo.registrations.map((entry) => canonicalPath(entry.path)));
+  const rows: Workspace[] = [];
+  for (const workspace of state.workspaces) {
+    if (workspace.remote || !workspace.cwd || isRemotePath(workspace.cwd)) continue;
+    if (known.has(workspace.id)) rows.push(workspace);
+    else {
+      const cwd = await canonicalPath(workspace.cwd);
+      if (roots.some((root) => isAtOrUnder(cwd, root))) rows.push(workspace);
+    }
+  }
+  repo.workspaces = rows;
+  return true;
 }
 
 function sameRepo(repos: readonly RepoContext[], root: string): RepoContext | undefined {
@@ -320,6 +349,12 @@ async function removeOne(
   };
 
   if (check.blockers.length) return refuse(check.blockers[0].code, check.blockers[0].message);
+  if (options.boundTo) {
+    const rows = ctx.linked.get(pathKey(real)) ?? [];
+    if (rows.length !== 1 || rows[0].id !== options.boundTo) {
+      return refuse("CHANGED", "Another workspace row uses this folder now, or its row is gone, so nothing was removed.");
+    }
+  }
   if (check.fingerprint !== item.fingerprint) {
     return refuse("CHANGED", "It changed since you reviewed it. Review it again.");
   }
@@ -521,6 +556,7 @@ export async function removeCleanupWorktrees(
         // again. One that cannot go back is named.
         const aside = await restoreAsideWorktrees(repo.root);
         repo.registrations = (await listWorktrees(repo.root)).registrations;
+        const rowsRead = await refreshRows(deps, repo);
         const ctx = await contextFor(
           deps,
           repo,
@@ -536,6 +572,18 @@ export async function removeCleanupWorktrees(
             const left = await Promise.all(repoItems.slice(index).map((entry) => canonicalPath(entry.path)));
             ctx.usage = await usageContext(deps, left);
             usageAt = Date.now();
+          }
+          if (options.boundTo && !rowsRead) {
+            outcomes.push({
+              repoRoot: repo.root,
+              path: item.path,
+              branch: null,
+              status: "refused",
+              code: "CHANGED",
+              message: "The workspace rows could not be read, so nothing was removed.",
+              branchDeleted: false,
+            });
+            continue;
           }
           if (aside.restored.length || aside.stuck.length) {
             outcomes.push({

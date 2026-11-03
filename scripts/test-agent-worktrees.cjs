@@ -919,6 +919,43 @@ async function main() {
       assert.equal(git(repo, ["rev-parse", partialRetry.recoveryRef]), partialTip);
     }
 
+    // Finding 3: a worktree removed with plain git keeps its row until the
+    // rail looks again. A new worktree on the same branch name gets another
+    // folder, and a removal asked for the old row leaves it alone.
+    const before = await aw.createAgentWorktree(terminalAgent, { branch: "agent/reused" }, deps);
+    commitFile(before.path, "r.txt", "r\n", "reused work");
+    landOnMain("agent/reused");
+    git(repo, ["worktree", "remove", before.path]);
+    git(repo, ["branch", "-D", "agent/reused"]);
+    assert.ok(workspaceOf(before.workspaceId), "its row stays");
+    const after = await aw.createAgentWorktree(terminalAgent, { branch: "agent/reused" }, deps);
+    assert.equal(after.ok, true, JSON.stringify(after));
+    assert.notEqual(after.path, before.path, "the folder the old row names is not handed out");
+    const oldRow = await aw.removeAgentWorktree(terminalAgent, { workspaceId: before.workspaceId }, deps);
+    assert.equal(oldRow.ok, true, JSON.stringify(oldRow));
+    assert.equal(oldRow.alreadyRemoved, true);
+    assert.ok(fs.existsSync(after.path), "the new worktree stays");
+    assert.ok(isRegistered(after.path));
+    // A second row at a worktree's folder, made while the removal waited for
+    // the lock: the removal is no longer bound to one row, so it stops.
+    commitFile(after.path, "r2.txt", "r2\n", "more reused work");
+    landOnMain("agent/reused");
+    h.afterVerify = async () => {
+      h.state.workspaces.push({ ...workspaceOf(after.workspaceId), id: "ws-same-folder", name: "same folder" });
+    };
+    let bound;
+    try {
+      bound = await aw.removeAgentWorktree(terminalAgent, { workspaceId: after.workspaceId }, deps);
+    } finally {
+      h.afterVerify = null;
+      h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== "ws-same-folder");
+    }
+    assert.equal(bound.code, "WORKTREE_CHANGED", JSON.stringify(bound));
+    assert.match(bound.reason ?? bound.message ?? JSON.stringify(bound), /same folder/);
+    assert.ok(fs.existsSync(after.path), "a worktree two rows name stays");
+    const unbound = await aw.removeAgentWorktree(terminalAgent, { workspaceId: after.workspaceId }, deps);
+    assert.equal(unbound.ok, true, JSON.stringify(unbound));
+
     // The folder is gone and an earlier removal of it today, cut short after
     // its ref, left the plain name on an older commit: the branch's newer tip
     // is saved under the next free name before the branch goes.

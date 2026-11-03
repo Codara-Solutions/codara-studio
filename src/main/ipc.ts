@@ -2668,17 +2668,23 @@ export function registerIpc(): void {
         managedWorktreesRoot,
       } = await getGitWorktrees();
       const worktreesRoot = managedWorktreesRoot(codaraHome(), input.repoCwd);
+      // Folders rows still name are not handed out again (pickCheckoutDirName).
+      const takenPaths = ((await loadState().catch(() => null))?.workspaces ?? [])
+        .filter((workspace) => !workspace.remote && workspace.cwd)
+        .map((workspace) => workspace.cwd);
       const result = input.checkoutBranch
         ? await createCheckoutWorktree({
             repoCwd: input.repoCwd,
             worktreesRoot,
             branch: input.checkoutBranch,
             isRemote: input.checkoutIsRemote,
+            takenPaths,
           })
         : await createCopyWorktree({
             repoCwd: input.repoCwd,
             worktreesRoot,
             newBranch: input.newBranch ?? "",
+            takenPaths,
           });
       if (result.ok) {
         // The new branch is a shared ref — refresh the source repo's panel.
