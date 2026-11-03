@@ -350,6 +350,28 @@ async function main() {
       "WORKTREE_FORBIDDEN",
       "a folder outside the caller's workspace is not a way into another repository",
     );
+    // base HEAD is the named repository's HEAD, not the enclosing folder's.
+    const clientHead = commitFile(clientRepo, "CHANGELOG.md", "one\n", "work on main");
+    const fromHead = await aw.createAgentWorktree(
+      { ...clientAgent, repoFolder: clientRepo },
+      { branch: "agent/client-head", base: "HEAD" },
+      deps,
+    );
+    assert.equal(fromHead.ok, true, JSON.stringify(fromHead));
+    assert.equal(git(fromHead.path, ["rev-parse", "HEAD"]), clientHead);
+    // A folder inside a managed worktree's checkout names that worktree's
+    // repository: an allowed agent reaches it as from the worktree's row.
+    const inWorktree = path.join(fromHead.path, "docs");
+    fs.mkdirSync(inWorktree);
+    const viaSubfolder = await aw.removeAgentWorktree(
+      { ...bystander, workspaceId: fromHead.workspaceId, repoFolder: inWorktree, origin: { workspaceId: "ws-notes", workspaceName: "notes" } },
+      { path: fromHead.path, dryRun: true },
+      deps,
+    );
+    assert.equal(viaSubfolder.ok, true, JSON.stringify(viaSubfolder));
+    assert.equal(viaSubfolder.workspaceId, fromHead.workspaceId);
+    fs.rmdirSync(inWorktree);
+    assert.equal((await aw.removeAgentWorktree(clientAgent, { path: fromHead.path }, deps)).removed, true);
     const clientRemoved = await aw.removeAgentWorktree(clientAgent, { path: inClient.path }, deps);
     assert.equal(clientRemoved.removed, true, JSON.stringify(clientRemoved));
     assert.equal(fs.existsSync(inClient.path), false);

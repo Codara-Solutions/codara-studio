@@ -762,6 +762,8 @@ export interface WorktreeScope {
   // Canonical repository root; every comparison uses canonical paths.
   repoCwd: string;
   root: string;
+  // The checkout whose HEAD base:"HEAD" means.
+  headCwd: string;
   run?: RunState;
 }
 
@@ -869,6 +871,17 @@ export async function resolveWorktreeScope(
       return refusal("WORKTREE_FORBIDDEN", undefined, { reason: `the folder is not inside ${callerWorkspace.name}` });
     }
     folderRepo = caller.repoFolder;
+    // A folder inside a managed worktree's own checkout means that worktree:
+    // its repository is the recorded main checkout, which git's toplevel of
+    // the folder (the worktree itself) is not.
+    if (callerWorkspace.copyBranch) {
+      const top = await fsp
+        .realpath(caller.repoFolder)
+        .then((real) => runGit(real, ["rev-parse", "--show-toplevel"]))
+        .then((out) => out.stdout.trim())
+        .catch(() => "");
+      if (top && (await realpathOrResolve(top)) === (await realpathOrResolve(callerWorkspace.cwd))) folderRepo = null;
+    }
   }
   const source = madeRepo ?? folderRepo ?? callerWorkspace.copyBranch?.repoCwd ?? callerWorkspace.cwd;
   let repoCwd: string;
@@ -894,6 +907,7 @@ export async function resolveWorktreeScope(
     parentWorkspace,
     repoCwd,
     root: deps.worktreesRoot(repoCwd),
+    headCwd: folderRepo ?? callerWorkspace.cwd,
     ...(run ? { run } : {}),
   };
 }
@@ -1319,7 +1333,7 @@ async function createAgentWorktreeInner(
     }
     if (requested === "HEAD") {
       baseName = "HEAD";
-      baseCommit = await revParse(scope.callerWorkspace.cwd, "HEAD^{commit}");
+      baseCommit = await revParse(scope.headCwd, "HEAD^{commit}");
     } else {
       baseName = requested || (await resolveDefaultBranch(repoCwd));
       baseCommit = await revParse(repoCwd, `${baseName}^{commit}`);
