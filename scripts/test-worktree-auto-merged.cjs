@@ -594,6 +594,24 @@ async function main() {
       await assertGone(opened);
     });
 
+    await check("a tab of another workspace on a file inside it holds it, asked by folder", async () => {
+      const shown = mergedWorktree("shown-elsewhere");
+      const asked = [];
+      const elsewhere = {
+        ...deps,
+        workspaceHeld: async (id, paths = []) => {
+          asked.push({ id, paths });
+          return paths.includes(shown.dir);
+        },
+      };
+      const result = await auto(shown.id, ON, elsewhere);
+      assert.equal(result.status, "refused");
+      assert.match(result.message, /a tab shows a file in it/);
+      assert.equal(fs.existsSync(shown.dir), true);
+      assert.ok(asked.some((entry) => entry.id === shown.id && entry.paths.includes(shown.dir)), JSON.stringify(asked));
+      await assertGone(shown);
+    });
+
     await check("switching to the workspace while the checks run stops the removal", async () => {
       const entry = mergedWorktree("switched-to");
       let calls = 0;

@@ -8,6 +8,7 @@ import {
 import { sanitizeTerminalAgentOwner, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import { makeId } from "@shared/ids";
 import { basename } from "../path-utils";
+import { tabsShowPathInside } from "./tabsShowingPath";
 import {
   collectLeaves,
   findLeaf,
@@ -577,6 +578,24 @@ export function savedLayoutHoldsWork(workspaceId: string): boolean {
     );
   } catch {
     return true;
+  }
+}
+
+/**
+ * Whether a workspace's saved layout, not loaded this session, has a tab on a
+ * file inside one of `folders`. A layout that cannot be read restores no tabs
+ * (loadPersisted gives up on it too), so it shows nothing.
+ */
+export function savedLayoutShowsPathInside(workspaceId: string, folders: readonly string[]): boolean {
+  const key = storageKey(workspaceId);
+  if (!key || folders.length === 0) return false;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return false;
+    const parsed = migratePersisted(JSON.parse(raw) as PersistedShape);
+    return parsed ? tabsShowPathInside(parsed.tabs, folders) : false;
+  } catch {
+    return false;
   }
 }
 

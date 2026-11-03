@@ -101,6 +101,8 @@ async function main() {
       published: 0,
       now: new Date("2026-10-12T10:00:00Z"),
       afterVerify: null,
+      held: () => false,
+      heldAsked: [],
     };
     const deps = {
       loadState: async () => structuredClone(h.state),
@@ -119,6 +121,10 @@ async function main() {
       sessionCwd: (paneId) => h.sessionCwds[paneId] ?? null,
       sessionsUnderCwd: (dir) => h.sessionsUnder(dir),
       listRendererTerminals: async () => h.terminals,
+      workspaceHeld: async (workspaceId, paths) => {
+        h.heldAsked.push({ workspaceId, paths });
+        return h.held(workspaceId, paths);
+      },
       processesUnderCwd: async () => h.processes,
       github: {
         listPullRequestsForHead: async () => h.pulls,
@@ -591,6 +597,34 @@ async function main() {
     assert.equal(refused.code, "WORKTREE_RUNNING_PROCESSES");
     assert.equal(refused.running.processes, 1);
     h.processes = [];
+    // Tabs hold it: its own workspace's, and an editor tab of any workspace
+    // on a file inside it (the window answers for the folder's paths).
+    h.heldAsked = [];
+    h.held = (workspaceId) => workspaceId === created.workspaceId;
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    assert.equal(refused.code, "WORKTREE_OPEN_TABS", JSON.stringify(refused));
+    assert.ok(h.heldAsked.some((ask) => ask.workspaceId === created.workspaceId && ask.paths.includes(created.path)), "it asks about the folder");
+    h.held = (_workspaceId, paths) => paths.includes(created.path);
+    assert.equal(
+      (await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps)).code,
+      "WORKTREE_OPEN_TABS",
+      "a tab of another workspace on a file inside it holds it",
+    );
+    h.held = () => null;
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    assert.equal(refused.code, "WORKTREE_OPEN_TABS", "a window that does not answer holds it");
+    assert.ok(refused.warnings.some((warning) => /did not answer/.test(warning)));
+    // A tab opened while the removal waits for the lock is seen under it.
+    h.held = () => false;
+    h.afterVerify = async () => {
+      h.held = (_workspaceId, paths) => paths.includes(created.path);
+    };
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
+    assert.ok(refused.blockers.includes("WORKTREE_OPEN_TABS"));
+    assert.ok(fs.existsSync(created.path), "a held worktree stays");
+    h.afterVerify = null;
+    h.held = () => false;
     assert.equal(
       (await aw.removeAgentWorktree({ role: "studio", client: "codex", paneId: "pane-inside" }, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps)).code,
       "WORKTREE_CALLER_INSIDE",

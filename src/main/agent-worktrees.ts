@@ -120,6 +120,7 @@ export type WorktreeCode =
   | "WORKTREE_ACTIVE_RUNS"
   | "WORKTREE_RUNNING_PROCESSES"
   | "WORKTREE_CALLER_INSIDE"
+  | "WORKTREE_OPEN_TABS"
   | "WORKTREE_CHANGED"
   | "WORKTREE_BUSY"
   | "WORKTREE_REPO_BUSY";
@@ -179,6 +180,10 @@ export interface AgentWorktreeDeps {
   sessionsUnderCwd(dir: string): string[];
   // Null when the renderer did not answer.
   listRendererTerminals(): Promise<RendererTerminal[] | null>;
+  // Whether the window shows this workspace, has tabs of it, or has a tab of
+  // any workspace on a file inside one of paths (an editor buffer may hold
+  // unsaved work). Null when it did not answer.
+  workspaceHeld(workspaceId: string, paths: readonly string[]): Promise<boolean | null>;
   // Null when the platform offers no process scan.
   processesUnderCwd(dir: string): Promise<ProcessUse[] | null>;
   github: {
@@ -325,6 +330,7 @@ const MESSAGES: Record<WorktreeCode, string> = {
   WORKTREE_ACTIVE_RUNS: "active Cora runs use the worktree",
   WORKTREE_RUNNING_PROCESSES: "processes use the worktree",
   WORKTREE_CALLER_INSIDE: "you are running inside this worktree",
+  WORKTREE_OPEN_TABS: "the window shows the worktree or has tabs of it, or a tab shows a file inside it",
   WORKTREE_CHANGED: "the worktree changed during the check",
   WORKTREE_BUSY: "git could not remove the directory (in use)",
   WORKTREE_REPO_BUSY: "another worktree operation on this repository is running",
@@ -356,6 +362,7 @@ const HINTS: Partial<Record<WorktreeCode, string>> = {
   WORKTREE_OWNED_BY_LIVE_AGENT: "leave it to that agent, or ask the user",
   WORKTREE_RUNNING_PROCESSES: "stop them, or wait or ask the user",
   WORKTREE_CALLER_INSIDE: "call from the source workspace, or ask the user to delete it from the rail",
+  WORKTREE_OPEN_TABS: "close the tabs you opened on its files; otherwise ask the user to close them",
   WORKTREE_CHANGED: "retry",
   WORKTREE_BUSY: "retry later",
   WORKTREE_REPO_BUSY: "retry shortly",
@@ -1922,6 +1929,13 @@ export async function verifyRemovable(
   else {
     if (paneIds.length) block("WORKTREE_RUNNING_PANES");
     if (runIds.length) block("WORKTREE_ACTIVE_RUNS");
+  }
+  // Tabs are the renderer's alone: an editor tab with unsaved edits is in
+  // no terminal, run or process list. A window that does not answer holds it.
+  const held = await deps.workspaceHeld(workspace.id, [...new Set([path, realPath])]).catch(() => null);
+  if (held !== false) {
+    block("WORKTREE_OPEN_TABS");
+    if (held === null) verdict.warnings.push("the window did not answer whether a tab shows the worktree");
   }
   if (options.scanProcesses) {
     const processes = await deps.processesUnderCwd(realPath).catch(() => null);

@@ -175,12 +175,15 @@ async function quietRefusal(path: string, head: string | null, root: string, now
 }
 
 // The checks and the wait for the repository lock take time, in which the user
-// can open this workspace and start typing in a buffer nothing in main can see.
-async function lastMomentRefusal(deps: WorktreeCleanupDeps, workspace: Workspace): Promise<string | null> {
+// can open this workspace and start typing in a buffer nothing in main can see,
+// or open a file inside it from another workspace (an agent's codara_open_file
+// lands in the agent's own workspace).
+async function lastMomentRefusal(deps: WorktreeCleanupDeps, workspace: Workspace, path: string): Promise<string | null> {
   const state = await deps.loadState().catch(() => null);
   if (!state || state.activeWorkspaceId === workspace.id) return "It is the workspace on screen.";
-  const held = await deps.workspaceHeld?.(workspace.id).catch(() => null);
-  return held === false ? null : "It has open tabs, or the window did not answer.";
+  const paths = [...new Set([path, await canonicalPath(path)])];
+  const held = await deps.workspaceHeld?.(workspace.id, paths).catch(() => null);
+  return held === false ? null : "It has open tabs, a tab shows a file in it, or the window did not answer.";
 }
 
 // A workspace row inside this worktree has tabs and state of its own, which
@@ -526,7 +529,7 @@ async function cleanUpRegistered(
       ...options,
       caller: callerFor(request.mode),
       ...(allowInUse ? { allowInUse } : {}),
-      ...(requireKnownUsage ? { requireKnownUsage, beforeRemove: () => lastMomentRefusal(deps, workspace) } : {}),
+      ...(requireKnownUsage ? { requireKnownUsage, beforeRemove: () => lastMomentRefusal(deps, workspace, path) } : {}),
     },
   );
   const outcome = outcomes[0];

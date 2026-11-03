@@ -1121,8 +1121,9 @@ the `blockers` and a `hint`:
   terminal created is kept while that terminal is open, because such an
   agent works there through absolute paths and `git -C` and no usage check
   can see it;
-- no terminal, active Cora run or process uses it, and the caller is not
-  inside it.
+- no terminal, active Cora run or process uses it, the window does not show
+  it or hold tabs of it, no tab of any workspace shows a file inside it (an
+  editor may hold unsaved edits), and the caller is not inside it.
 
 The `code` is the first blocker; `blockers` lists them all, and a dry run or
 `codara_worktree_list` reports the same codes without removing anything:
@@ -1148,6 +1149,7 @@ The `code` is the first blocker; `blockers` lists them all, and a dry run or
 | `WORKTREE_ACTIVE_RUNS` | Active Cora runs work in it. | Wait for them to finish, or ask you. |
 | `WORKTREE_RUNNING_PROCESSES` | Processes run in it. | Stop them, or wait or ask you. |
 | `WORKTREE_CALLER_INSIDE` | The caller runs inside it. | Call from the source workspace, or ask you to delete it from the rail. |
+| `WORKTREE_OPEN_TABS` | The window shows it or has tabs of it, a tab of any workspace shows a file inside it, or the window did not answer. | Close the tabs you opened on its files; otherwise ask you to close them. |
 
 Before deleting anything Codara saves the last commit as
 `refs/codara/removed-worktrees/<date>/<workspace id>`, kept for 30 days, and

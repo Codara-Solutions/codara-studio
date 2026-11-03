@@ -1502,6 +1502,7 @@ function agentDeps({ getState, setState, root, runner, workspaceId }) {
     sessionCwd: () => null,
     sessionsUnderCwd: () => [],
     listRendererTerminals: async () => [],
+    workspaceHeld: async () => false,
     processesUnderCwd: async () => [],
     github: { listPullRequestsForHead: async () => [], listMergedPullRequests: async () => [] },
     sendAgentEvent: () => {},

@@ -74,7 +74,7 @@ submodules, nested checkouts, locked worktrees, the ignored-file scan's
 regenerable list (an ignored file here is one the scan would keep), the
 2-minute uptime rule, the renderer's retry backoff, and real time (only the
 order of events counts). The agent removal is proved against `main` on
-GitHub; an explicit local `target` (`agent-worktrees.ts:1976`) is not
+GitHub; an explicit local `target` (`agent-worktrees.ts:1990`) is not
 modelled, so with one the guarantee is weaker: the work is kept in that
 local branch, not necessarily on GitHub. Paths are the branch's slug and slug-2, as
 `pickCheckoutDirName` makes them.
@@ -110,7 +110,7 @@ assumed empty, which is what today's code relies on.
 | Config | TLC must answer | What it shows |
 |---|---|---|
 | `WorktreeLifecycle_auto` | pass | Today's automatic removal, one row, every actor it is built to handle, one crash |
-| `WorktreeLifecycle_agent` | pass | Today's `codara_worktree_remove` beside it, without tabs and stray processes, `RemovedReachable` left out (findings 6 and 7) |
+| `WorktreeLifecycle_agent` | pass | Today's `codara_worktree_remove` beside it, tabs included, without stray processes, `RemovedReachable` left out (findings 6 and 7) |
 | `WorktreeLifecycle_two_rows` | pass | Today, two rows on one branch: checked out again, force-pushed, failing halfway |
 | `WorktreeLifecycle_reach` | NothingRemoved | Not vacuous: the automatic removal does remove a merged worktree |
 | `WorktreeLifecycle_reach_agent` | NothingRemoved | Not vacuous: the agent removal does too, with the automatic one off |
@@ -119,8 +119,8 @@ assumed empty, which is what today's code relies on.
 | `WorktreeLifecycle_fixed_two_rows` | pass | With the proposed fixes, two rows never share a folder and no removal deletes another row's folder |
 | `WorktreeLifecycle_finding_late_write` | NoIgnoredLost | Finding 1 |
 | `WorktreeLifecycle_finding_late_use` | NeverRemovedInUse | Finding 1, the window #123 declined |
-| `WorktreeLifecycle_finding_agent_tabs` | NeverRemovedInUse | Finding 2, the agent removal |
-| `WorktreeLifecycle_finding_foreign_tab` | NeverRemovedInUse | Finding 2, the automatic removal |
+| `WorktreeLifecycle_finding_agent_tabs` | pass | Finding 2, fixed: tabs hold a worktree against the agent removal |
+| `WorktreeLifecycle_finding_foreign_tab` | pass | Finding 2, fixed: another workspace's tab on a file inside holds it against the automatic removal |
 | `WorktreeLifecycle_finding_path_reuse` | NoCollateral | Finding 3, the agent removal |
 | `WorktreeLifecycle_finding_auto_rebind` | NoCollateral | Finding 3, the automatic removal (with `paths` on, without `bind`) |
 | `WorktreeLifecycle_finding_agent_process` | NeverRemovedInUse | Finding 4 |
@@ -130,6 +130,8 @@ assumed empty, which is what today's code relies on.
 | `WorktreeLifecycle_limit_aside_handle` | NoIgnoredLost | The limit of finding 1's fix: an open handle still writes into the moved folder |
 | `RecoveryWindow_fixed` | pass | Finding 5's fix |
 | `WorktreeLifecycle_bug_owner_pane` | NeverRemovedInUse | Puts back the bug fixed in 8f142d5b: another agent's removal deleted a fresh worktree its creator was still working in |
+| `WorktreeLifecycle_bug_agent_tabs` | NeverRemovedInUse | Puts back finding 2 in the agent removal: it never asked the window about tabs |
+| `WorktreeLifecycle_bug_foreign_tab` | NeverRemovedInUse | Puts back finding 2 in the automatic removal: the window answered for the worktree's own workspace only |
 | `WorktreeLifecycle_bug_own_branch_target` | NoUnsafeRemoved | Puts back the bug fixed in 49306a6f: the worktree's own branch named as the target made the ancestor proof hold for unmerged work |
 
 A `finding` config fails today and passes once its fix lands: flip its first
@@ -139,8 +141,9 @@ only behaviour and drop its `Fix` flag.
 ## Findings
 
 Findings 1 to 4 are ranked by what can be lost; 5 to 7 break the promise
-that a removed head stays recoverable for 30 days. None is fixed here; each fix is a `Fix` flag that
-`WorktreeLifecycle_fixed` (or `RecoveryWindow_fixed`) turns on.
+that a removed head stays recoverable for 30 days. A fix not in the code yet is a `Fix` flag that
+`WorktreeLifecycle_fixed` (or `RecoveryWindow_fixed`) turns on; a fix in the code is the
+model's only behaviour, and a `Bug` flag puts the old code back.
 
 1. **The last check and the delete are two steps** (`late`). Under the lock,
    `removeOne` checks the folder (`remove.ts:257`), asks the window
@@ -151,7 +154,7 @@ that a removed head stays recoverable for 30 days. None is fixed here; each fix 
    window (a `.env`, notes, test output) is lost. A tab or terminal opened in
    it is not seen (the window #123 declined as tiny); a commit made in it
    leaves the folder gone and the branch kept. The agent removal has the same
-   window (`agent-worktrees.ts:2594`). Likelihood: low; the window is a
+   window (`agent-worktrees.ts:2608`). Likelihood: low; the window is a
    renderer round trip (up to 5 s) and a few git calls, after 30 quiet
    minutes. Fix `aside`: rename the folder away first (atomic, so nothing new
    can open it by its path), check everything again on the moved folder, and
@@ -161,17 +164,19 @@ that a removed head stays recoverable for 30 days. None is fixed here; each fix 
    file handle) still writes into the moved folder after the last check
    (`WorktreeLifecycle_limit_aside_handle`). Closing it fully needs the
    ignored files copied aside before the delete, or every writer stopped.
-2. **Editor tabs do not hold a worktree everywhere** (`tabs`, `ftab`). The
-   agent removal never asks the window: `verifyRemovable` counts terminals
-   only (`agent-worktrees.ts:1630`), so a worktree whose workspace has an
-   editor tab open (an unsaved buffer) can be removed by
-   `codara_worktree_remove`. The automatic removal asks the window about the
-   worktree's own workspace only (`rail.ts:179`, `App.tsx:4369`), so a file
-   inside the worktree opened from another workspace (an agent's
-   `codara_open_file` lands in the agent's own workspace) does not hold it.
-   Likelihood: medium for the agent removal, low for the other. Fix `tabs`:
-   one held probe for a folder, "any tab of any workspace showing a path
-   inside it", asked by both paths under the lock.
+2. **Editor tabs did not hold a worktree everywhere** (`tabs`, `ftab`).
+   Fixed: both removals ask the window, under the lock, one question for
+   the folder: does the window show the worktree's workspace or hold tabs of
+   it, or does a tab of any workspace show a file inside it
+   (`verifyRemovable`, `lastMomentRefusal` in `rail.ts`, the probe in
+   `App.tsx` and `tabs/tabsShowingPath.ts`). Before, the agent removal never
+   asked the window (`verifyRemovable` counted terminals only), so a worktree
+   whose workspace had an editor tab open (an unsaved buffer) could be
+   removed by `codara_worktree_remove`; and the automatic removal asked about
+   the worktree's own workspace only, so a file inside it opened from another
+   workspace (an agent's `codara_open_file` lands in the agent's own
+   workspace) did not hold it. `WorktreeLifecycle_bug_agent_tabs` and
+   `WorktreeLifecycle_bug_foreign_tab` put each half back.
 3. **A row left behind keeps its folder name for a new worktree**
    (`self`, two rows). `pickCheckoutDirName` (`git-worktrees.ts:215`) only
    avoids folders on disk. When an agent removed a worktree with plain
@@ -180,9 +185,9 @@ that a removed head stays recoverable for 30 days. None is fixed here; each fix 
    name then gets the same folder. The automatic removal refuses such a pair
    (`holdsOtherWorkspace`), but `codara_worktree_remove` on the old row
    passes: the registration's branch has the same name
-   (`agent-worktrees.ts:1803`), its tip is the new worktree's, a fresh tip
+   (`agent-worktrees.ts:1810`), its tip is the new worktree's, a fresh tip
    reads as merged, and only the old row's creator pane is checked
-   (`agent-worktrees.ts:1758`). It deletes the new worktree while its agent
+   (`agent-worktrees.ts:1765`). It deletes the new worktree while its agent
    works in it. Uncommitted work still blocks, so the loss is the new
    worktree itself. The automatic removal reads the rows once, at its start
    (`cleanUpRailWorkspace`), then checks and deletes by path: if the row is
@@ -195,13 +200,13 @@ that a removed head stays recoverable for 30 days. None is fixed here; each fix 
    at its folder.
 4. **The agent removal does not scan processes under the lock**. The
    re-check in `removeLocked` passes `scanProcesses: false`
-   (`agent-worktrees.ts:2567`); the lock can take up to 60 s, and a process
+   (`agent-worktrees.ts:2581`); the lock can take up to 60 s, and a process
    started in the worktree meanwhile is not seen. The automatic removal
    scans under the lock. Likelihood: low. Fix `rescan`: scan processes in
    the locked re-check too.
 5. **Recovery refs last 29 days and some hours, not 30.** The ref is named
    after the UTC day it was made, and `pruneRecoveryRefs`
-   (`agent-worktrees.ts:2336`) measures 30 days from that day's midnight. A
+   (`agent-worktrees.ts:2350`) measures 30 days from that day's midnight. A
    ref saved at 23:00 UTC is pruned after 29 days and 1 to 2 hours, by the
    next removal or cleanup in the repository. Likelihood: certain, harm
    small. Fix `day_end`: count from the end of the stamped day (or store the
@@ -209,7 +214,7 @@ that a removed head stays recoverable for 30 days. None is fixed here; each fix 
 6. **The folder-gone path ignores a failed ref save.** When the folder is
    already gone, `removeAgentWorktree` saves
    `refs/codara/removed-worktrees/<day>/<id>` create-only and ignores the
-   error (`agent-worktrees.ts:2641`), then deletes the branch. If an earlier
+   error (`agent-worktrees.ts:2655`), then deletes the branch. If an earlier
    removal of the same worktree on the same UTC day was cut short (a crash
    after its ref, before the folder went) and the branch got commits since,
    the name is taken by the old commit, the save fails silently, and the
@@ -219,7 +224,7 @@ that a removed head stays recoverable for 30 days. None is fixed here; each fix 
    the next free suffix, and keep the branch if that fails too.
 7. **A removal that fails halfway deletes its own recovery ref.** When
    `removeCopyWorktree` fails, `removeLocked` deletes the ref it just made
-   (`agent-worktrees.ts:2603`). git deletes files before it gives up on one
+   (`agent-worktrees.ts:2617`). git deletes files before it gives up on one
    it cannot delete and drops the registration even then; `remove.ts:339`
    keeps its refs for exactly this reason. Afterwards the branch is the only
    copy; once it goes (an agent deletes it, or it is merged and cleaned up

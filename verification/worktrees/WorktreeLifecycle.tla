@@ -157,8 +157,11 @@ TabAt(p) == \E s \in LiveAt(p) : row[s].tab
 InUse(p, except) == OwnerOpenAt(p, except) \/ TabAt(p) \/ term[p] \/ proc[p] \/ ftab[p]
 (* What checkRemoval's usageOf sees under requireKnownUsage. *)
 AutoUse(p) == OwnerOpenAt(p, "none") \/ term[p] \/ proc[p]
-(* What the window's held probe answers (lastMomentRefusal). *)
-HeldSeen(p) == TabAt(p) \/ ("tabs" \in Fix /\ ftab[p])
+(* What the window's held probe answers for the folder: the worktree's own *)
+(* workspace's tabs, and a tab of any workspace on a file inside it        *)
+(* (lastMomentRefusal, verifyRemovable). Bug "foreign_tab": before the fix *)
+(* it answered for the worktree's own workspace only.                      *)
+HeldSeen(p) == TabAt(p) \/ ("foreign_tab" \notin Bug /\ ftab[p])
 
 (* Fix "bind": under the lock, the rows are read again, and the row asked *)
 (* for must still be there and alone at its folder.                       *)
@@ -343,13 +346,14 @@ GStop == g' = Idle /\ lock' = "free"
 Except(x) == IF x.caller = "owner" THEN x.r ELSE "none"
 OwnerBlocks(r, caller) == caller = "other" /\ row[r].owner /\ "owner_pane" \notin Bug
 
-(* verifyRemovable's blockers; `scan` is whether processes are scanned. *)
+(* verifyRemovable's blockers; `scan` is whether processes are scanned.   *)
+(* Bug "agent_tabs": before the fix it never asked the window about tabs. *)
 AgentBlocked(r, caller, p, scan) ==
     \/ OwnerBlocks(r, caller)
     \/ dirty[p] # {}
     \/ term[p]
     \/ scan /\ proc[p]
-    \/ "tabs" \in Fix /\ HeldSeen(p)
+    \/ "agent_tabs" \notin Bug /\ HeldSeen(p)
 
 (* Unlocked check, with the fetch of the target and the process scan. *)
 GVerify ==

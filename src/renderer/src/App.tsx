@@ -95,6 +95,7 @@ import {
 } from "./components/Terminal/terminalRegistry";
 import { setPaneOverlayHostLocator } from "./components/Terminal/paneOverlays";
 import { setWorkspaceHeldProbe } from "./components/Terminal/terminalRpc";
+import { tabsShowPathInside } from "./tabs/tabsShowingPath";
 import { deliverablePanes } from "./routing/agent-destinations";
 import { forgetTerminalSessionMemory } from "./components/Terminal/useTerminalSession";
 import {
@@ -124,6 +125,7 @@ import {
   restoredChatRunIds,
   sameWorkerMeta,
   savedLayoutHoldsWork,
+  savedLayoutShowsPathInside,
 } from "./tabs/useTabs";
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useAgentHibernation } from "./lib/useAgentHibernation";
@@ -881,10 +883,15 @@ export default function App() {
     `${activeWorkspace?.cwd ?? ""}:${sharedGit.status?.branch ?? ""}`,
   );
 
-  const railWorkspaceHeldRef = useRef<(workspaceId: string) => boolean>(() => true);
-  // Main asks again right before an automatic removal: the answer above can be
-  // old by the time its checks and the repository lock are through.
-  useEffect(() => setWorkspaceHeldProbe((workspaceId) => railWorkspaceHeldRef.current(workspaceId)), []);
+  const railWorkspaceHeldRef = useRef<(workspaceId: string, folders?: readonly string[]) => boolean>(() => true);
+  // Main asks again right before a removal (the automatic one and
+  // codara_worktree_remove), under the repository lock: the answer above can
+  // be old by then. With the worktree's folders it also counts a tab of any
+  // workspace on a file inside them.
+  useEffect(
+    () => setWorkspaceHeldProbe((workspaceId, folders) => railWorkspaceHeldRef.current(workspaceId, folders)),
+    [],
+  );
   // Merged and missing copy-branch workspaces for the rail. A missing one
   // whose branch is merged or gone is cleaned up without asking, and so is a
   // merged one nothing is left in or using (main refuses anything in use,
@@ -4366,13 +4373,22 @@ export default function App() {
   });
   const jumpSourcesRef = useRef(jumpSources);
   jumpSourcesRef.current = jumpSources;
-  railWorkspaceHeldRef.current = (workspaceId) => {
+  railWorkspaceHeldRef.current = (workspaceId, folders = []) => {
     if (!booted || workspaceId === activeId) return true;
     const layout =
       tabs.tabsWorkspaceId === workspaceId
         ? { tabs: tabs.tabs }
         : tabs.inactiveWorkspaceLayouts.find((entry) => entry.workspaceId === workspaceId);
-    return layout ? layout.tabs.length > 0 : savedLayoutHoldsWork(workspaceId);
+    if (layout ? layout.tabs.length > 0 : savedLayoutHoldsWork(workspaceId)) return true;
+    if (folders.length === 0) return false;
+    if (tabs.tabsWorkspaceId && tabsShowPathInside(tabs.tabs, folders)) return true;
+    if (tabs.inactiveWorkspaceLayouts.some((entry) => tabsShowPathInside(entry.tabs, folders))) return true;
+    return workspaces.some(
+      (workspace) =>
+        workspace.id !== tabs.tabsWorkspaceId &&
+        !tabs.inactiveWorkspaceLayouts.some((entry) => entry.workspaceId === workspace.id) &&
+        savedLayoutShowsPathInside(workspace.id, folders),
+    );
   };
   const focusNextTerminal = useCallback(
     (scope: TerminalSwitchScope) => {

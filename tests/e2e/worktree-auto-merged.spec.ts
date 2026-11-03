@@ -159,6 +159,14 @@ test("a merged worktree with nothing left in it leaves on its own; what holds on
   await writeFile(join(cold, "pricing.txt"), "sample\n");
   git(cold, ["add", "pricing.txt"], world.gitEnv);
   git(cold, ["commit", "-q", "-m", "pricing work"], world.gitEnv);
+  // Merged only once a tab of another workspace shows one of its files.
+  const shown = join(world.trees, "release-notes");
+  git(world.repo, ["worktree", "add", "-q", "-b", "docs/release-notes", shown], world.gitEnv);
+  await writeFile(join(shown, "notes.md"), "notes\n");
+  git(shown, ["add", "notes.md"], world.gitEnv);
+  git(shown, ["commit", "-q", "-m", "release notes"], world.gitEnv);
+  const side = join(world.root, "handbook");
+  await mkdir(side);
   await writeFile(
     join(world.home, "spark-state.json"),
     JSON.stringify({
@@ -170,6 +178,8 @@ test("a merged worktree with nothing left in it leaves on its own; what holds on
         copyWorkspace(world, "ws-notes", "Search filters", notes, "feat/search-filters", before),
         copyWorkspace(world, "ws-tabbed", "Checkout copy", tabbed, "fix/checkout-copy", before),
         copyWorkspace(world, "ws-cold", "Pricing table", cold, "feat/pricing-table", before),
+        copyWorkspace(world, "ws-shown", "Release notes", shown, "docs/release-notes", before),
+        { id: "ws-side", name: "handbook", cwd: side, color: "#42D6C7", workers: [] },
       ],
     }),
   );
@@ -203,14 +213,30 @@ test("a merged worktree with nothing left in it leaves on its own; what holds on
     await saveLayout(page, "ws-cold", [{ id: "t1", kind: "editor", title: "notes.md" }]);
     git(world.repo, ["merge", "-q", "--no-ff", "-m", "merge feat/pricing-table", "feat/pricing-table"], world.gitEnv);
     git(world.repo, ["push", "-q", "origin", "main"], world.gitEnv);
+    // An editor tab of another workspace, not opened this session, on a file
+    // inside a worktree holds that worktree too: its buffer is nowhere else.
+    const shownFile = join(shown, "notes.md");
+    await saveLayout(page, "ws-side", [
+      {
+        id: "t3",
+        kind: "editor",
+        title: "notes.md",
+        path: shownFile,
+        entry: { path: shownFile, name: "notes.md", isDir: false },
+        dirty: false,
+      },
+    ]);
+    git(world.repo, ["merge", "-q", "--no-ff", "-m", "merge docs/release-notes", "docs/release-notes"], world.gitEnv);
+    git(world.repo, ["push", "-q", "origin", "main"], world.gitEnv);
 
     await reread(page);
     await page.waitForTimeout(3_000);
     expect(existsSync(tabbed), "a tab keeps it").toBe(true);
     expect(existsSync(notes), "an untracked file keeps it").toBe(true);
     expect(existsSync(cold), "a saved editor tab keeps it").toBe(true);
+    expect(existsSync(shown), "an editor tab of another workspace on a file in it keeps it").toBe(true);
     const fold = page.locator('[data-rail-children-of="ws-repo"]').getByTestId("workspace-merged-fold");
-    await expect(fold).toContainText("3 merged", { timeout: 15_000 });
+    await expect(fold).toContainText("4 merged", { timeout: 15_000 });
     await fold.getByTestId("workspace-merged-toggle").click();
     await expect(row("ws-notes").getByTestId("workspace-merged")).toBeVisible();
     await expect(row("ws-tabbed").getByTestId("workspace-merged")).toBeVisible();
@@ -234,6 +260,9 @@ test("a merged worktree with nothing left in it leaves on its own; what holds on
     await reread(page);
     await expect.poll(() => existsSync(tabbed), { timeout: 30_000, message: "it goes once its tab is closed" }).toBe(false);
     await expect.poll(() => existsSync(cold), { timeout: 30_000, message: "a plain shell does not hold it" }).toBe(false);
+    await saveLayout(page, "ws-side", []);
+    await reread(page);
+    await expect.poll(() => existsSync(shown), { timeout: 30_000, message: "it goes once that tab is gone" }).toBe(false);
     await expect(page.locator('[data-workspace-id="ws-tabbed"]')).toHaveCount(0);
     expect(existsSync(join(notes, "todo.txt"))).toBe(true);
   } finally {

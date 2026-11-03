@@ -2804,6 +2804,14 @@ function worktreeDeps(): AgentWorktreeDeps {
         return null;
       }
     },
+    workspaceHeld: async (workspaceId, paths) => {
+      try {
+        const held = await requestTerminalOp<unknown>("workspaceHeld", { workspaceId, paths }, { timeoutMs: 5_000 });
+        return typeof held === "boolean" ? held : null;
+      } catch {
+        return null;
+      }
+    },
     processesUnderCwd: (dir) =>
       scanProcessesUnderCwd(dir, { appPid: process.pid, sessionPids: pty.sessionPids() }),
     github: {

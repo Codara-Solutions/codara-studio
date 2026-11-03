@@ -92,7 +92,10 @@ test("an agent's worktree shows up in the rail and leaves it once merged", async
     await expect(secondRow).toBeVisible({ timeout: 15_000 });
     // Tabs the renderer saved for it must go with it.
     const secondTabsKey = `spark.tabs:${second.workspaceId}`;
-    await page.evaluate((key) => window.localStorage.setItem(key, JSON.stringify({ tabs: [] })), secondTabsKey);
+    await page.evaluate(
+      (key) => window.localStorage.setItem(key, JSON.stringify({ v: 7, activeId: null, tabs: [] })),
+      secondTabsKey,
+    );
 
     const listed = await request("worktree.list", caller);
     expect(listed.ok).toBe(true);
@@ -102,6 +105,20 @@ test("an agent's worktree shows up in the rail and leaves it once merged", async
     // A worker never gets to remove anything.
     const forbidden = await request("worktree.remove", { callerRole: "worker", workspaceId: second.workspaceId });
     expect(forbidden.code).toBe("WORKTREE_FORBIDDEN");
+
+    // An editor tab on one of its files holds it, though the tab sits in the
+    // agent's own workspace (where codara_open_file opens it), not the
+    // worktree's. Closing the tab lets it go.
+    const opened = await request("file.open", { ...caller, path: join(second.path, "README.md") });
+    expect(opened.opened, JSON.stringify(opened)).toBe(true);
+    const editorTab = page.getByRole("tab", { name: /README\.md/ }).first();
+    await expect(editorTab).toBeVisible({ timeout: 10_000 });
+    const held = await request("worktree.remove", { ...caller, workspaceId: second.workspaceId });
+    expect(held.code, JSON.stringify(held)).toBe("WORKTREE_OPEN_TABS");
+    expect(existsSync(second.path)).toBe(true);
+    await editorTab.hover();
+    await editorTab.getByRole("button", { name: "Close tab" }).click();
+    await expect(page.getByRole("tab", { name: /README\.md/ })).toHaveCount(0);
 
     const removed = await request("worktree.remove", { ...caller, workspaceId: second.workspaceId });
     expect(removed.ok, JSON.stringify(removed)).toBe(true);
