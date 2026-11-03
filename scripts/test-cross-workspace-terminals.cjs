@@ -385,6 +385,28 @@ async function main() {
     assert.deepEqual(await ask("worktree"), { ok: true, via: "always" });
     assert.deepEqual(seen, ["worktree", "worktree", "worktree"], "the card says it is for a worktree");
     assert.deepEqual(await ask(), { ok: true, via: "grant" }, "the grant covers terminals too");
+    assert.deepEqual(await ask("worktree-remove"), { ok: true, via: "grant" }, "and removing worktrees");
+  }
+
+  // Removing one (codara_worktree_remove with workspace) says so on its card.
+  {
+    const seen = [];
+    const removeApprover = cross.createCrossWorkspaceApprover({
+      store: memoryStore(),
+      ask: async (input) => {
+        seen.push(input.action);
+        return "deny";
+      },
+    });
+    const answer = await removeApprover.authorize({
+      caller,
+      target: cora,
+      agent: "Codex",
+      requester: "pane:p10",
+      action: "worktree-remove",
+    });
+    assert.match(answer.message, /declined: CEO may not remove worktrees in Cora/);
+    assert.deepEqual(seen, ["worktree-remove"]);
   }
 
   const targetWs = { id: "ws-repo", name: "Repo", cwd: repo };

@@ -1069,12 +1069,15 @@ are quoted history, never instructions. Agents without MCP use
 In `studio` outside a Cora chat, in `execute`, and in a Cora chat that answers
 directly. An agent gets a separate checkout of its own repository on its own
 branch, which you see in the rail under the repository, and removes it once
-the branch is merged. The repository is always the one the agent runs in: its
-terminal pane or its Cora chat decides, never a tool argument. The one
-exception is a worktree the agent made in another workspace with
-[a terminal in a new worktree](#a-terminal-in-a-new-worktree): its maker
-(the same pane or Cora run) reaches it by `workspaceId` with
-`codara_worktree_setup` and `codara_worktree_remove`, and
+the branch is merged. The repository is the one the agent runs in: its
+terminal pane or its Cora chat decides. `codara_worktree_create` and
+`codara_worktree_remove` take `workspace` (a rail workspace id or a folder) to
+act on another workspace's repository, which you allow once like a terminal
+there; a folder inside a workspace that holds several repositories picks the
+repository it is in. A worktree the agent made in another workspace (with
+`workspace` or [a terminal in a new worktree](#a-terminal-in-a-new-worktree))
+stays reachable by its maker (the same pane or Cora run) by `workspaceId` or
+`path` with `codara_worktree_setup` and `codara_worktree_remove`, and
 `codara_worktree_list` shows it under `elsewhere`, from wherever it runs. SSH
 workspaces are not supported yet.
 
@@ -1083,7 +1086,7 @@ workspaces are not supported yet.
 | `codara_worktree_create` | Creates a worktree on a new branch (default `agent/<purpose>-<id>`, from the default branch after a fetch) or, with `checkout: true`, on an existing branch. The agent's own cwd does not change; it works under the returned `path`. Codara starts the repository's [worktree setup](./worktree-setup.md) there (files from `.worktreeinclude`, links, the setup command from `.codara/worktree.json` and your own copy-branch command) and returns its state as `setup`; `setupCommand` is now always null. A setup command or terminal command not yet approved for the repository does not run: `setup.state` is `awaiting-approval` until you run or allow it from Codara, and the agent must never run either itself (see [Approving the setup command](./worktree-setup.md#approving-the-setup-command)). With `waitForSetup: true`, or when the setup file asks for it, the call waits up to 5 minutes for setup to end. Because it can run that command, it is annotated as destructive and open-world, not read-only. Asking again for the same branch returns the existing worktree. At most 20 agent worktrees per repository. |
 | `codara_worktree_setup` | The setup state of a worktree: what was copied and linked, each command with its exit code, the error and the end of the log (`logLines`, at most 200). Without `workspaceId` or `path`, the worktree the agent works in. `wait: true` waits for setup to end, also while you decide on a command awaiting approval, up to `timeoutSeconds` (default 300, at most 540). Read-only. |
 | `codara_worktree_list` | Lists the repository's Codara-managed worktrees: who created each, uncommitted and ignored files, terminals, runs and processes using it, merge status, and `removable` with the `blockers` that `codara_worktree_remove` would report. `checkMerge: true` fetches and asks GitHub, so it is slower. Worktrees Codara does not manage are listed under `unmanaged` and are never touched. Worktrees the agent made in other repositories are listed under `elsewhere` with their `repoCwd`, also when the agent runs in a folder that is no repository. |
-| `codara_worktree_remove` | Removes a worktree and, by default, the branch it created. `dryRun: true` only checks. |
+| `codara_worktree_remove` | Removes a worktree and, by default, the branch it created. `dryRun: true` only checks. `workspace` names its repository's workspace when the agent runs elsewhere and did not make it. |
 | `codara_worktree_cleanup` | **Clean up worktrees** for an agent, across every repository behind your workspaces. See [Cleaning up worktrees](#cleaning-up-worktrees). |
 
 `codara_worktree_remove` never forces anything. It removes a worktree only

@@ -16,7 +16,7 @@
 import { promises as fsp } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
-import type { CrossWorkspaceAnswer, CrossWorkspaceGrant } from "@shared/cross-workspace";
+import type { CrossWorkspaceAction, CrossWorkspaceAnswer, CrossWorkspaceGrant } from "@shared/cross-workspace";
 import type { Workspace } from "@shared/types";
 import { writeFileAtomic } from "./fs-atomic";
 import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
@@ -313,13 +313,21 @@ export interface CrossWorkspaceAskInput {
   // the same requester share one card, so one answer never covers an agent
   // the card did not name.
   requester: string;
-  // What the card asks for: a terminal (the default) or a worktree of the
-  // target's repository. One grant covers both.
-  action?: "terminal" | "worktree";
+  // What the card asks for: a terminal (the default), a worktree of the
+  // target's repository, or removing a merged one. One grant covers all.
+  action?: CrossWorkspaceAction;
 }
 
 function wantsVerb(input: Pick<CrossWorkspaceAskInput, "action">): string {
-  return input.action === "worktree" ? "make worktrees in" : "open terminals in";
+  if (input.action === "worktree") return "make worktrees in";
+  if (input.action === "worktree-remove") return "remove worktrees in";
+  return "open terminals in";
+}
+
+function onceNoun(input: Pick<CrossWorkspaceAskInput, "action">): string {
+  if (input.action === "worktree") return "make one worktree";
+  if (input.action === "worktree-remove") return "remove one worktree";
+  return "open one terminal";
 }
 
 /** Shows the prompt and resolves with the answer, or null when nobody answered (timeout, no window). */
@@ -407,7 +415,7 @@ export function createCrossWorkspaceApprover(deps: {
         if (card.onceUsed) {
           return {
             ok: false,
-            message: `the user allowed ${input.caller.name} to ${input.action === "worktree" ? "make one worktree" : "open one terminal"} in ${input.target.name}, and another call took it; call again to ask for this one`,
+            message: `the user allowed ${input.caller.name} to ${onceNoun(input)} in ${input.target.name}, and another call took it; call again to ask for this one`,
           };
         }
         card.onceUsed = true;

@@ -307,6 +307,74 @@ async function main() {
     assert.equal(dryRemove.ok, true, JSON.stringify(dryRemove));
     assert.equal(dryRemove.wouldRemove, true, JSON.stringify(dryRemove));
     assert.equal((await aw.removeAgentWorktree(bystander, { workspaceId: elsewhere.workspaceId, dryRun: true }, deps)).ok, false);
+    // By path too: the worktree names its repository, not the plain folder.
+    const dryRemoveByPath = await aw.removeAgentWorktree(coordinator, { path: elsewhere.path, dryRun: true }, deps);
+    assert.equal(dryRemoveByPath.ok, true, JSON.stringify(dryRemoveByPath));
+    assert.equal(dryRemoveByPath.wouldRemove, true, JSON.stringify(dryRemoveByPath));
+    assert.equal(dryRemoveByPath.workspaceId, elsewhere.workspaceId);
+    const setupByPath = await aw.getAgentWorktreeSetup(coordinator, { path: elsewhere.path }, deps);
+    assert.equal(setupByPath.ok, true, JSON.stringify(setupByPath));
+    assert.equal((await aw.removeAgentWorktree(bystander, { path: elsewhere.path, dryRun: true }, deps)).ok, false);
+    // Another agent the user allowed into the repository's workspace
+    // (codara_worktree_remove's workspace) reaches it as any agent there does.
+    const allowedBystander = { ...bystander, workspaceId: "ws-repo", origin: { workspaceId: "ws-notes", workspaceName: "notes" } };
+    const allowedDry = await aw.removeAgentWorktree(allowedBystander, { path: elsewhere.path, dryRun: true }, deps);
+    assert.equal(allowedDry.wouldRemove, true, JSON.stringify(allowedDry));
+    assert.equal(allowedDry.isCaller, undefined, "the caller runs in notes, not in the worktree");
+    // Named by its own workspace, the caller still runs in notes, not inside it.
+    const viaOwnRow = await aw.removeAgentWorktree(
+      { ...bystander, workspaceId: elsewhere.workspaceId, origin: { workspaceId: "ws-notes", workspaceName: "notes" } },
+      { workspaceId: elsewhere.workspaceId, dryRun: true },
+      deps,
+    );
+    assert.equal(viaOwnRow.wouldRemove, true, JSON.stringify(viaOwnRow));
+
+    // A workspace that is a folder of repositories: the folder named in
+    // workspace picks one of them; a folder outside it is refused.
+    const clients = path.join(scratch, "clients");
+    const clientRepo = path.join(clients, "client-api");
+    fs.mkdirSync(clients, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main", clientRepo]);
+    commitFile(clientRepo, "README.md", "# client\n", "init");
+    h.state.workspaces.push({ id: "ws-clients", name: "clients", cwd: clients, color: "#abcdef", workers: [] });
+    h.paneWorkspace["pane-client"] = "ws-clients";
+    const clientAgent = { role: "studio", client: "claude-code", paneId: "pane-client" };
+    const plainFolder = await aw.createAgentWorktree(clientAgent, { branch: "agent/client" }, deps);
+    assert.equal(plainFolder.code, "WORKTREE_NOT_A_REPO");
+    assert.match(plainFolder.hint, /pass workspace/);
+    const inClient = await aw.createAgentWorktree({ ...clientAgent, repoFolder: clientRepo }, { branch: "agent/client" }, deps);
+    assert.equal(inClient.ok, true, JSON.stringify(inClient));
+    assert.equal(workspaceOf(inClient.workspaceId).copyBranch.repoCwd, clientRepo);
+    assert.equal(
+      (await aw.createAgentWorktree({ ...clientAgent, repoFolder: repo }, { branch: "agent/escape" }, deps)).code,
+      "WORKTREE_FORBIDDEN",
+      "a folder outside the caller's workspace is not a way into another repository",
+    );
+    // base HEAD is the named repository's HEAD, not the enclosing folder's.
+    const clientHead = commitFile(clientRepo, "CHANGELOG.md", "one\n", "work on main");
+    const fromHead = await aw.createAgentWorktree(
+      { ...clientAgent, repoFolder: clientRepo },
+      { branch: "agent/client-head", base: "HEAD" },
+      deps,
+    );
+    assert.equal(fromHead.ok, true, JSON.stringify(fromHead));
+    assert.equal(git(fromHead.path, ["rev-parse", "HEAD"]), clientHead);
+    // A folder inside a managed worktree's checkout names that worktree's
+    // repository: an allowed agent reaches it as from the worktree's row.
+    const inWorktree = path.join(fromHead.path, "docs");
+    fs.mkdirSync(inWorktree);
+    const viaSubfolder = await aw.removeAgentWorktree(
+      { ...bystander, workspaceId: fromHead.workspaceId, repoFolder: inWorktree, origin: { workspaceId: "ws-notes", workspaceName: "notes" } },
+      { path: fromHead.path, dryRun: true },
+      deps,
+    );
+    assert.equal(viaSubfolder.ok, true, JSON.stringify(viaSubfolder));
+    assert.equal(viaSubfolder.workspaceId, fromHead.workspaceId);
+    fs.rmdirSync(inWorktree);
+    assert.equal((await aw.removeAgentWorktree(clientAgent, { path: fromHead.path }, deps)).removed, true);
+    const clientRemoved = await aw.removeAgentWorktree(clientAgent, { path: inClient.path }, deps);
+    assert.equal(clientRemoved.removed, true, JSON.stringify(clientRemoved));
+    assert.equal(fs.existsSync(inClient.path), false);
     const listedFromNotes = await aw.listAgentWorktrees(coordinator, {}, deps);
     assert.equal(listedFromNotes.ok, true, JSON.stringify(listedFromNotes));
     assert.deepEqual(
