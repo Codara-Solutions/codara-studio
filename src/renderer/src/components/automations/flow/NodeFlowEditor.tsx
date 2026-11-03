@@ -24,6 +24,7 @@ import NodeContextPanel from "./NodeContextPanel";
 import { guardDraftProblem } from "@shared/automation-guard";
 import LoopInspector from "./LoopInspector";
 import { costForecast } from "../cost-forecast";
+import { eurFieldFromUsd, moneyRate } from "@shared/money";
 import AddNodePalette, { type PaletteState } from "./AddNodePalette";
 import { edgeTypes, nodeTypes } from "./FlowNodes";
 import { PRESETS, type LoomPreset } from "./presets";
@@ -373,7 +374,7 @@ function Editor({
           };
         }
         if (typeof preset.loop.stop.maxIterations === "number") next.loop.maxIters = String(preset.loop.stop.maxIterations);
-        if (typeof preset.loop.stop.budgetUsd === "number") next.loop.budget = String(preset.loop.stop.budgetUsd);
+        if (typeof preset.loop.stop.budgetUsd === "number") next.loop.budget = eurFieldFromUsd(preset.loop.stop.budgetUsd);
         next.loop.untilTests = Boolean(preset.loop.stop.untilTestsPass);
         if (preset.loop.stop.testCommand) next.loop.testCommand = preset.loop.stop.testCommand;
         next.loop.untilGit = Boolean(preset.loop.stop.untilGitClean);
@@ -418,7 +419,7 @@ function Editor({
         },
         Date.now(),
       ),
-    [draft.trigger, draft.loop, nodes],
+    [draft.trigger, draft.loop, nodes, moneyRate()],
   );
   const nameMissing = draft.name.trim().length === 0;
   const graphProblem = useMemo(() => validateGraph(nodes, edges), [nodes, edges]);

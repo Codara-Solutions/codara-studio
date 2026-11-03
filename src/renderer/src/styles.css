@@ -2241,6 +2241,15 @@ a { color: inherit; }
   gap: 6px;
   margin-top: 9px;
 }
+/* The stored dollars beside a euro amount: small, muted, never the headline. */
+.automation-money-usd {
+  font-size: 0.82em;
+  color: var(--muted-2);
+  margin-left: 0.3em;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
 .automation-chip {
   display: inline-flex;
   align-items: center;

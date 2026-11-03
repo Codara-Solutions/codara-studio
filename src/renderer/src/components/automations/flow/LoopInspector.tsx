@@ -3,6 +3,8 @@ import type { AutomationLoopKind } from "@shared/types";
 import { DEFAULT_AGENT_MAX_ITERATIONS } from "@shared/types";
 import { Check, Segmented } from "../FormKit";
 import type { CostForecast } from "../cost-forecast";
+import { MoneyText } from "../MoneyText";
+import { fmtDollar, rateNote, usdFromEurFieldKeeping } from "@shared/money";
 import type { LoopDraft } from "./model";
 
 // The "Loop & stops" side inspector — REDESIGN of the old cramped loop form.
@@ -96,7 +98,8 @@ export default function LoopInspector({
             />
             <CapBox
               label="Budget cap"
-              suffix="$"
+              suffix="€"
+              usd={usdFromEurFieldKeeping(loop.budget, loop.budgetKept)}
               value={loop.budget}
               placeholder="—"
               step={0.5}
@@ -107,7 +110,8 @@ export default function LoopInspector({
           <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
             <CapBox
               label="Monthly cap"
-              suffix="$"
+              suffix="€"
+              usd={usdFromEurFieldKeeping(loop.monthlyCap, loop.monthlyCapKept)}
               value={loop.monthlyCap}
               placeholder="—"
               step={1}
@@ -126,8 +130,8 @@ export default function LoopInspector({
             />
           </div>
           <div data-testid="cost-forecast" data-open={forecast.open} style={{ marginTop: 12, fontSize: 11.5, lineHeight: 1.5 }}>
-            <div style={{ fontWeight: 600, color: forecast.open ? "color-mix(in oklab, var(--danger) 70%, var(--ink))" : "var(--ink-dim)" }}>{forecast.headline}</div>
-            {forecast.detail && <div style={{ color: "var(--muted)" }}>{forecast.detail}</div>}
+            <div style={{ fontWeight: 600, color: forecast.open ? "color-mix(in oklab, var(--danger) 70%, var(--ink))" : "var(--ink-dim)" }}><MoneyText text={forecast.headline} /></div>
+            {forecast.detail && <div style={{ color: "var(--muted)" }}><MoneyText text={forecast.detail} /></div>}
           </div>
         </Group>
 
@@ -306,6 +310,7 @@ function NumberRow({
 function CapBox({
   label,
   suffix,
+  usd,
   value,
   placeholder,
   step,
@@ -315,6 +320,8 @@ function CapBox({
 }: {
   label: string;
   suffix: string;
+  /** The dollars the field stores, shown under it. */
+  usd?: number;
   value: string;
   placeholder: string;
   step?: number;
@@ -353,6 +360,11 @@ function CapBox({
           style={{ flex: 1, height: 26, minWidth: 0 }}
         />
       </div>
+      {usd !== undefined && (
+        <span className="automation-money-usd" style={{ marginLeft: 0 }} title={rateNote()} data-testid={`usd-under-${label}`}>
+          ≈ {fmtDollar(usd)}
+        </span>
+      )}
       <span style={{ fontSize: 9.5, color: "var(--muted-2)" }}>{hint}</span>
     </div>
   );

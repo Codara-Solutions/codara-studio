@@ -665,7 +665,7 @@ and GitHub Actions' row of recent results for the bar of ticks.
   that cannot cover the whole month the numbers carry a `+` and a tooltip that
   says so. Never show a floor as if it were the total.
 - Spending limits sit with the other caps in the Loop panel, with one line under
-  them saying the worst case for a month in dollars. That line is danger only when
+  them saying the worst case for a month in euros. That line is danger only when
   nothing bounds the spend, so it stays quiet once a limit is set. An automation
   held back by a limit sits on Needs you, because it stopped doing its job and
   will not say so again.
@@ -676,8 +676,15 @@ and GitHub Actions' row of recent results for the bar of ticks.
   anything else is the flow editor's: "Open in flow editor" carries the sentence
   over. Edit always opens the flow editor. Every choice is a plain native select,
   so a keyboard and a screen reader work without new widgets.
-- The sentence starts with a $2 budget filled in, and no monthly cap. Clearing the
+- The sentence starts with a 2 euro budget filled in, and no monthly cap. Clearing the
   budget is one keystroke, and the cost line turns red when nothing bounds the spend.
+- Money is euros first with the dollars in small, muted print beside it
+  ("≈€1.72 $2.00"), picked by Etienne. Spend and caps stay stored in USD; a cap is
+  typed in euros, stored at the day's rate, and the dollars sit under the field.
+  The rate is the ECB daily reference rate (src/main/fx-rate.ts: one request a
+  day, cached in Studio's home, then the last cached rate, then a built-in
+  constant), and the tooltip on the dollars names it. "≈" shows on amounts that are
+  converted, except in a line that already says "about" or "est.".
 - Delete sits at the bottom of Details, well away from Run now.
 - "Fix with Cora" fills a new chat's message box and sends nothing. The user
   reads it first.

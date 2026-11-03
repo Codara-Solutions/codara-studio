@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { RunState } from "@shared/types";
 import { runStatusColor } from "../../lib/run-status";
-import { fmtTime, fmtUsd } from "./presentation";
+import { fmtTime, fmtCost } from "./presentation";
+import { MoneyText } from "./MoneyText";
 
 // Inline run drawer for the history timeline's "Peek run" — shows a past
 // iteration's transcript without ever leaving the Automations tab (loom runs
@@ -94,16 +95,18 @@ export default function RunPeek({
             title={
               (run.estimatedWorkerCostUsd ?? 0) > 0
                 ? "Includes estimated value of subscription usage priced at public list rates; billed spend: " +
-                  fmtUsd((run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0))
+                  fmtCost((run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0))
                 : "Billed spend"
             }
           >
             {(run.estimatedWorkerCostUsd ?? 0) > 0 ? "est. " : ""}
-            {fmtUsd(
-              (run.totalCostUsd ?? 0) +
-                (run.measuredWorkerCostUsd ?? 0) +
-                (run.estimatedWorkerCostUsd ?? 0),
-            )}
+            <MoneyText
+              text={fmtCost(
+                (run.totalCostUsd ?? 0) +
+                  (run.measuredWorkerCostUsd ?? 0) +
+                  (run.estimatedWorkerCostUsd ?? 0),
+              )}
+            />
           </span>
         )}
         <button

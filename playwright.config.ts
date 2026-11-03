@@ -20,6 +20,9 @@ process.env.CODARA_E2E_SEED_TERMINAL ??= "1";
 // user's own browser in place of their Codara. The spec that covers the link
 // turns it back on, on a port of its own.
 process.env.CODARA_CHROME_LINK ??= "0";
+// Fixed euro rate (and no ECB request) so the euro amounts specs assert on do
+// not move with the day's rate. src/main/fx-rate.ts reads it.
+process.env.CODARA_FX_RATE ??= "1.25";
 
 // On Linux the run's windows open on a private Xvfb display instead of the
 // desktop (scripts/virtual-display.cjs). The runner starts it while loading

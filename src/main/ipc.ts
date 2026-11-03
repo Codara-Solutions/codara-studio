@@ -71,6 +71,7 @@ import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { workspaceAllowedRoots } from "./workspace-state-edits";
 import { loadOnboardingProgress, saveOnboardingProgress, setupService } from "./onboarding";
 import { codaraHome } from "./codara-home";
+import type { MoneyRate } from "@shared/money";
 import { logMain } from "./file-log";
 import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
 import { detectAgentRuntimes } from "./agent-runtimes";
@@ -3180,6 +3181,12 @@ export function registerIpc(): void {
       return runAutomationPrecheck(precheck, { cwd, env: { CODARA_AUTOMATION_PRECHECK: "1" } });
     },
   );
+
+  // The euro rate behind the Automations money display (ECB, cached daily).
+  handle("money:rate", async (): Promise<MoneyRate> => {
+    const { refreshFxRate } = await import("./fx-rate");
+    return refreshFxRate(codaraHome());
+  });
 
   // Looms v2: live direct-worker inventory for the Hub's Workers sub-tab.
   handle("automations:listActiveWorkers", async (): Promise<AutomationWorkerInfo[]> => {
