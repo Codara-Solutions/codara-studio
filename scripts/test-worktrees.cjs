@@ -483,6 +483,15 @@ async function agentWorktreeProbes(wt) {
     writeFileSync(path.join(printed.path, ".env.local"), "A=1\n");
     assert.notStrictEqual(await wt.worktreeFingerprint(printed.path), print1, "a new ignored file counts");
     await assert.rejects(wt.worktreeFingerprint(printed.path, 2), /too many files/);
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      const sealed = path.join(printed.path, "node_modules", "pkg");
+      require("node:fs").chmodSync(sealed, 0o000);
+      try {
+        await assert.rejects(wt.worktreeFingerprint(printed.path), /EACCES/, "a folder it cannot read is not taken as unchanged");
+      } finally {
+        require("node:fs").chmodSync(sealed, 0o755);
+      }
+    }
 
     // The move aside: a change found there puts it back; a folder that took
     // its place is never moved into, the aside folder stays and is named.

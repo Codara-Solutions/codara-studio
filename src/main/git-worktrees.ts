@@ -580,19 +580,30 @@ export async function worktreeFingerprint(worktreePath: string, maxEntries = FIN
   ]);
   const records = status.split("\0");
   let budget = maxEntries;
-  const walk = async (relative: string): Promise<void> => {
+  // A missing entry (gone since git listed it) is part of the digest; one
+  // that cannot be read makes it fail, since its change would go unseen.
+  const statOf = (absolute: string) =>
+    lstat(absolute).catch((err: NodeJS.ErrnoException) => {
+      if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
+      throw err;
+    });
+  const walk = async (relative: string, info: Awaited<ReturnType<typeof statOf>>): Promise<void> => {
     budget -= 1;
     if (budget < 0) throw new Error("It holds too many files to check again before deleting it.");
-    const absolute = join(worktreePath, relative);
-    const info = await lstat(absolute).catch(() => null);
-    if (!info || info.isSymbolicLink()) return;
+    if (!info) {
+      hash.update(`${relative}\0-\0`);
+      return;
+    }
+    if (info.isSymbolicLink()) return;
     if (!info.isDirectory()) {
       hash.update(`${relative}\0f${info.size}:${info.mtimeMs}\0`);
       return;
     }
     hash.update(`${relative}\0d\0`);
-    const names = (await readdir(absolute).catch(() => [] as string[])).sort();
-    for (const name of names) await walk(join(relative, name));
+    const absolute = join(worktreePath, relative);
+    const names = (await readdir(absolute)).sort();
+    const infos = await Promise.all(names.map((name) => statOf(join(absolute, name))));
+    for (const [index, name] of names.entries()) await walk(join(relative, name), infos[index]);
   };
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
@@ -601,10 +612,10 @@ export async function worktreeFingerprint(worktreePath: string, maxEntries = FIN
     const path = record.slice(3).replace(/\/+$/, "");
     // A rename or copy carries its source in the next record.
     if (code[0] === "R" || code[0] === "C") index += 1;
-    const info = await lstat(join(worktreePath, path)).catch(() => null);
+    const info = await statOf(join(worktreePath, path));
     if (info?.isSymbolicLink()) continue;
     hash.update(`${code}\0`);
-    await walk(path);
+    await walk(path, info);
   }
   return hash.digest("hex");
 }
