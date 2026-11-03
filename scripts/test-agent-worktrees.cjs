@@ -771,6 +771,68 @@ async function main() {
     git(repo, ["worktree", "remove", unmounted]);
     git(repo, ["branch", "-D", "on-unmounted-drive"]);
 
+    // Recovery refs outlive a removal that fails or is cut short.
+    const todayRef = (id) => `refs/codara/removed-worktrees/2026-10-12/${id}`;
+    const landOnMain = (branch) => {
+      git(repo, ["merge", "-q", "--ff-only", branch]);
+      git(repo, ["push", "-q", "origin", "main"]);
+    };
+    // git gives up halfway (a folder it cannot delete in): it has deleted
+    // files and dropped the registration, so the ref may be the last copy.
+    const partial = await aw.createAgentWorktree(terminalAgent, { branch: "agent/partial" }, deps);
+    commitFile(partial.path, "a-first.txt", "a\n", "first");
+    const partialTip = commitFile(partial.path, "stuck/keep.txt", "k\n", "stuck");
+    landOnMain("agent/partial");
+    fs.chmodSync(path.join(partial.path, "stuck"), 0o555);
+    let partialResult;
+    try {
+      partialResult = await aw.removeAgentWorktree(terminalAgent, { workspaceId: partial.workspaceId }, deps);
+    } finally {
+      fs.chmodSync(path.join(partial.path, "stuck"), 0o755);
+    }
+    assert.equal(partialResult.ok, false, JSON.stringify(partialResult));
+    assert.equal(isRegistered(partial.path), false, "git dropped the registration although it failed");
+    assert.equal(partialResult.recoveryRef, todayRef(partial.workspaceId), JSON.stringify(partialResult));
+    assert.equal(git(repo, ["rev-parse", todayRef(partial.workspaceId)]), partialTip, "the ref of a failed removal stays");
+    // The rest of the folder goes by hand; a retry drops the row and finds
+    // the branch's tip already saved.
+    fs.rmSync(partial.path, { recursive: true, force: true });
+    const partialRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: partial.workspaceId }, deps);
+    assert.equal(partialRetry.ok, true, JSON.stringify(partialRetry));
+    assert.equal(partialRetry.branchDeleted, true);
+    assert.equal(git(repo, ["rev-parse", partialRetry.recoveryRef]), partialTip);
+
+    // The folder is gone and an earlier removal of it today, cut short after
+    // its ref, left the plain name on an older commit: the branch's newer tip
+    // is saved under the next free name before the branch goes.
+    const cut = await aw.createAgentWorktree(terminalAgent, { branch: "agent/cut-short" }, deps);
+    const oldTip = commitFile(cut.path, "c1.txt", "1\n", "first");
+    git(repo, ["update-ref", todayRef(cut.workspaceId), oldTip]);
+    const newTip = commitFile(cut.path, "c2.txt", "2\n", "second");
+    landOnMain("agent/cut-short");
+    fs.rmSync(cut.path, { recursive: true, force: true });
+    const cutResult = await aw.removeAgentWorktree(terminalAgent, { workspaceId: cut.workspaceId }, deps);
+    assert.equal(cutResult.ok, true, JSON.stringify(cutResult));
+    assert.equal(cutResult.alreadyRemoved, true);
+    assert.equal(cutResult.branchDeleted, true);
+    assert.equal(cutResult.recoveryRef, `${todayRef(cut.workspaceId)}-2`, JSON.stringify(cutResult));
+    assert.equal(git(repo, ["rev-parse", cutResult.recoveryRef]), newTip, "the deleted branch's tip stays reachable");
+    assert.equal(git(repo, ["rev-parse", todayRef(cut.workspaceId)]), oldTip, "the older ref is never moved");
+
+    // No free name at all: the branch stays.
+    const full = await aw.createAgentWorktree(terminalAgent, { branch: "agent/no-free-name" }, deps);
+    const fullTip = commitFile(full.path, "f.txt", "f\n", "full");
+    landOnMain("agent/no-free-name");
+    for (let n = 1; n <= 20; n += 1) {
+      git(repo, ["update-ref", n === 1 ? todayRef(full.workspaceId) : `${todayRef(full.workspaceId)}-${n}`, oldTip]);
+    }
+    fs.rmSync(full.path, { recursive: true, force: true });
+    const fullResult = await aw.removeAgentWorktree(terminalAgent, { workspaceId: full.workspaceId }, deps);
+    assert.equal(fullResult.ok, true, JSON.stringify(fullResult));
+    assert.equal(fullResult.branchDeleted, false);
+    assert.equal(fullResult.branchKeptReason, "RECOVERY_REF_FAILED");
+    assert.equal(git(repo, ["rev-parse", "refs/heads/agent/no-free-name"]), fullTip, "a tip that could not be saved keeps its branch");
+
     // ── List ───────────────────────────────────────────────────────────────
     const listed = await aw.createAgentWorktree(terminalAgent, { branch: "agent/listed" }, deps);
     const manual = path.join(scratch, "manual-wt");

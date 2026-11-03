@@ -385,22 +385,26 @@ GRecheck ==
        ELSE GStop
     /\ UNCHANGED <<wt, gitv, rref, rec, a, crashes, ghost>>
 
-(* update-ref <ref> <tip> "": refused when the name holds another commit. *)
+(* saveRecoveryRef, as the rail does: create-only, the next free suffix *)
+(* when the name holds another commit. Bug "drop_ref" (before            *)
+(* fix/worktree-recovery-refs): a plain create-only update-ref, refused  *)
+(* when the name was taken.                                               *)
 GRef ==
     /\ g.pc = "ref"
-    /\ IF rref[g.r] \in {NONE, g.head}
-       THEN rref' = [rref EXCEPT ![g.r] = g.head] /\ GGo("git") /\ UNCHANGED lock
-       ELSE GStop /\ UNCHANGED rref
-    /\ UNCHANGED <<wt, gitv, rec, a, crashes, ghost>>
+    /\ IF "drop_ref" \notin Bug
+       THEN SaveRail(g.r, g.head) /\ GGo("git") /\ UNCHANGED lock
+       ELSE IF rref[g.r] \in {NONE, g.head}
+       THEN rref' = [rref EXCEPT ![g.r] = g.head] /\ GGo("git") /\ UNCHANGED <<lock, rec>>
+       ELSE GStop /\ UNCHANGED <<rref, rec>>
+    /\ UNCHANGED <<wt, gitv, a, crashes, ghost>>
 
-(* A failed removeCopyWorktree deletes that ref again (update-ref -d). *)
-DropAgentRef == rref' = IF rref[g.r] = g.head THEN [rref EXCEPT ![g.r] = NONE] ELSE rref
-
-(* After a partial delete the ref may be the only copy left, yet the     *)
-(* agent path deletes it all the same. Fix "keepref": keep it then, as   *)
-(* remove.ts does.                                                        *)
-DropAgentRefAfterPartial ==
-    IF "keepref" \in Fix THEN UNCHANGED rref ELSE DropAgentRef
+(* A failed removeCopyWorktree keeps its ref: git may have deleted files *)
+(* and the registration before it failed, so the ref may be the only     *)
+(* copy left (finding 7). Bug "drop_ref": it was deleted again then.     *)
+DropAgentRef ==
+    IF "drop_ref" \in Bug
+    THEN rref' = IF rref[g.r] = g.head THEN [rref EXCEPT ![g.r] = NONE] ELSE rref
+    ELSE UNCHANGED rref
 
 GGit ==
     /\ g.pc = "git"
@@ -412,7 +416,7 @@ GGit ==
             /\ UNCHANGED <<lock, row, reg, dirty, term, proc, ftab, quiet, rref, ghost>>
        ELSE \E part \in Partial :
               /\ Delete(p, g.r, Except(g), part)
-              /\ IF part THEN GStop /\ DropAgentRefAfterPartial ELSE GGo("branch") /\ UNCHANGED <<lock, rref>>
+              /\ IF part THEN GStop /\ DropAgentRef ELSE GGo("branch") /\ UNCHANGED <<lock, rref>>
               /\ UNCHANGED row
     /\ UNCHANGED <<gitv, rec, a, crashes>>
 
@@ -429,7 +433,7 @@ GDel ==
     /\ g.pc = "del"
     /\ \E part \in Partial :
          /\ Delete(g.p, g.r, Except(g), FALSE)
-         /\ IF part THEN GStop /\ DropAgentRefAfterPartial ELSE GGo("branch") /\ UNCHANGED <<lock, rref>>
+         /\ IF part THEN GStop /\ DropAgentRef ELSE GGo("branch") /\ UNCHANGED <<lock, rref>>
     /\ UNCHANGED <<row, gitv, rec, a, crashes>>
 
 GBranch ==
@@ -445,8 +449,9 @@ GRow ==
 (* The folder is already gone (verifyRemovable's alreadyRemoved; the     *)
 (* creator's open pane still blocks another agent). Under the lock the    *)
 (* branch goes if its tip is merged by ancestry or content, after a       *)
-(* recovery ref whose failure is ignored (`.catch(() => undefined)`).     *)
-(* Fix "refsave": save it like the rail does, with a free suffix.         *)
+(* recovery ref saved like the rail's, with a free suffix; when none can  *)
+(* be written the branch stays (finding 6). Bug "ignore_ref_save": a      *)
+(* create-only save whose failure was ignored.                            *)
 GMissing ==
     /\ "agentrm" \in Act /\ g.pc = "idle" /\ lock = "free"
     /\ \E r \in Rows, caller \in {"owner", "other"} :
@@ -455,7 +460,7 @@ GMissing ==
          /\ caller = "owner" => row[r].owner
          /\ ~OwnerBlocks(r, caller)
          /\ IF tip # NONE /\ ~CheckedOut(b) /\ (tip \in Anc(tmain) \/ cont[tip] \subseteq cont[tmain])
-            THEN /\ IF "refsave" \in Fix THEN SaveRail(r, tip)
+            THEN /\ IF "ignore_ref_save" \notin Bug THEN SaveRail(r, tip)
                     ELSE /\ rref' = IF rref[r] = NONE THEN [rref EXCEPT ![r] = tip] ELSE rref
                          /\ UNCHANGED rec
                  /\ DropBranch(b, tip)

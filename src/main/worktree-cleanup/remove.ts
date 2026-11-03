@@ -19,6 +19,7 @@ import {
   RepoLockTimeoutError,
   cleanText,
   pruneRecoveryRefs,
+  saveRecoveryRef,
   withRepoLock,
   type WorktreeCaller,
 } from "../agent-worktrees";
@@ -176,20 +177,7 @@ async function revParse(cwd: string, rev: string): Promise<string | null> {
   return /^[0-9a-f]{40,64}$/i.test(out) ? out.toLowerCase() : null;
 }
 
-// Create-only: an existing ref of that name is never moved. A second removal
-// of the same id on the same day takes the next free suffix.
-export async function saveRecoveryRef(repoRoot: string, base: string, oid: string): Promise<string | null> {
-  for (let attempt = 1; attempt <= 20; attempt += 1) {
-    const ref = attempt === 1 ? base : `${base}-${attempt}`;
-    try {
-      await runGit(repoRoot, ["update-ref", ref, oid, ""]);
-      return ref;
-    } catch {
-      if ((await revParse(repoRoot, ref)) === oid) return ref;
-    }
-  }
-  return null;
-}
+export { saveRecoveryRef };
 
 // The uncommitted changes, untracked files included, as a commit on top of
 // HEAD, built in a throwaway index so the worktree's own index is never

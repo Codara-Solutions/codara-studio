@@ -1153,8 +1153,13 @@ The `code` is the first blocker; `blockers` lists them all, and a dry run or
 
 Before deleting anything Codara saves the last commit as
 `refs/codara/removed-worktrees/<date>/<workspace id>`, kept for 30 days, and
-the result carries `recoverWith`, the command that restores the worktree. The
-branch is deleted only if it still points at the commit that was checked.
+the result carries `recoverWith`, the command that restores the worktree. When
+git fails partway (it may already have deleted files), the ref stays and the
+refusal names it in `recoveryRef`. A second removal of the same worktree on the
+same day saves under the next free name (`<workspace id>-2`, ...). The branch is
+deleted only if it still points at the commit that was checked, and, when the
+folder was already gone, only once its tip is saved (otherwise
+`branchKeptReason` is `RECOVERY_REF_FAILED`).
 Every create and removal, refused or not, is logged to
 `~/.codarastudio/logs/worktree-audit.jsonl`. **Let agents create and remove
 worktrees** in Settings turns creating and removing off; listing still works.

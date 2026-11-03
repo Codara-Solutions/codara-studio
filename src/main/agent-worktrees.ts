@@ -731,6 +731,22 @@ function dateStamp(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
+// Create-only: an existing ref of that name is never moved. A second removal
+// of the same id on the same day (one cut short left its ref) takes the next
+// free suffix. Null when no name could be written.
+export async function saveRecoveryRef(repoRoot: string, base: string, oid: string): Promise<string | null> {
+  for (let attempt = 1; attempt <= 20; attempt += 1) {
+    const ref = attempt === 1 ? base : `${base}-${attempt}`;
+    try {
+      await runGit(repoRoot, ["update-ref", ref, oid, ""]);
+      return ref;
+    } catch {
+      if ((await revParse(repoRoot, ref)) === oid) return ref;
+    }
+  }
+  return null;
+}
+
 // ── Gate and scope ─────────────────────────────────────────────────────────
 
 export async function gateCaller(
@@ -2593,16 +2609,11 @@ async function removeLocked(
       });
     }
 
-    recoveryRef = `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}`;
-    try {
-      await runGit(repo, ["update-ref", recoveryRef, verdict.tip!, ""]);
-    } catch (err) {
-      const existing = await revParse(repo, recoveryRef);
-      if (existing !== verdict.tip) {
-        return refusal("WORKTREE_GIT_FAILED", `could not save the recovery ref: ${cleanText(errorText(err), 300)}`, {
-          workspaceId: workspace.id,
-        });
-      }
+    recoveryRef = await saveRecoveryRef(repo, `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}`, verdict.tip!);
+    if (!recoveryRef) {
+      return refusal("WORKTREE_GIT_FAILED", "could not save the recovery ref, so nothing was removed", {
+        workspaceId: workspace.id,
+      });
     }
     // No onBusy hook: Codara never kills anything on an agent's behalf.
     const removed = await removeCopyWorktree({
@@ -2614,8 +2625,15 @@ async function removeLocked(
       removeOrphanDir: false,
     });
     if (!removed.ok) {
-      await runGit(repo, ["update-ref", "-d", recoveryRef, verdict.tip!]).catch(() => undefined);
-      return refusal(mapRemoveError(removed.error), removed.error, { workspaceId: workspace.id, path: workspace.cwd });
+      // The recovery ref stays. git deletes files before it gives up on one
+      // it cannot delete, and drops the registration even then, so the ref
+      // may be the only copy of the last commit left. It expires like the
+      // others.
+      return refusal(mapRemoveError(removed.error), removed.error, {
+        workspaceId: workspace.id,
+        path: workspace.cwd,
+        recoveryRef,
+      });
     }
   } else {
     const dropped = await dropMissingWorktreeRegistration(repo, workspace.cwd);
@@ -2649,11 +2667,17 @@ async function removeLocked(
         }
         if (!provenTip) branchKept = "NOT_MERGED";
       }
-      if (provenTip) {
+      if (provenTip && !recoveryRef) {
+        // An earlier removal of this worktree cut short today may hold the
+        // plain name with an older commit; the branch goes only once its own
+        // tip is saved.
+        recoveryRef = await saveRecoveryRef(repo, `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}`, provenTip);
         if (!recoveryRef) {
-          recoveryRef = `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}`;
-          await runGit(repo, ["update-ref", recoveryRef, provenTip, ""]).catch(() => undefined);
+          branchKept = "RECOVERY_REF_FAILED";
+          provenTip = null;
         }
+      }
+      if (provenTip) {
         const deleted = await deleteBranchIfAt(repo, branch, provenTip);
         if (deleted.ok) branchDeleted = true;
         else branchKept = deleted.reason;
