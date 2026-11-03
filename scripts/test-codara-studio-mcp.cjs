@@ -129,8 +129,11 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // session that outlives it; studio and execute by 800 for
 // codara_review_findings, so any agent the user picks can hand a review back;
 // execute by 400 for the github automation trigger's fields, about 360, by 300
-// for own_branch, about 270, and by 200 for guard, about 180).
-const LIST_BUDGET = { studio: 37_950, run: 39_000, worker: 35_000, execute: 104_100, automation: 69_000 };
+// for own_branch, about 270, and by 200 for guard, about 180; studio and
+// execute by 100 for codara_worktree_remove's workspace, about 80, so an
+// agent in a folder that is no repository can remove a worktree it did not
+// make).
+const LIST_BUDGET = { studio: 38_050, run: 39_000, worker: 35_000, execute: 104_200, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
