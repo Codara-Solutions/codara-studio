@@ -544,14 +544,9 @@ async function putBackAside(repoCwd: string, aside: string, original: string): P
   if (!(await pathIsAbsent(original))) {
     return { ok: false, error: `Something now exists at ${original}, so the folder stays at ${aside}.` };
   }
-  const back = (await isRegisteredWorktree(repoCwd, aside))
-    ? await moveWorktree(repoCwd, aside, original)
-    : await rename(aside, original).then(
-        (): GitOpResult => ({ ok: true }),
-        (err: unknown): GitOpResult => ({ ok: false, error: errorText(err) }),
-      );
+  const registered = await isRegisteredWorktree(repoCwd, aside);
+  const back = await moveWorktree(repoCwd, aside, original, registered);
   if (!back.ok) return { ok: false, error: `It could not be moved back and is at ${aside}: ${back.error}` };
-  if (!(await pathIsAbsent(aside))) return { ok: false, error: `It is still at ${aside}.` };
   return { ok: true };
 }
 
@@ -559,7 +554,7 @@ const FINGERPRINT_MAX_ENTRIES = 500_000;
 
 /**
  * What a removal would delete, as one digest: HEAD, `git status` with
- * untracked and ignored entries, and the size and modification time of every
+ * untracked and ignored entries, and the size, times and inode of every
  * file under those entries (ignored folders walked). Throws past 500,000
  * entries: a folder too large to compare is not removed.
  * Links count as nothing: setup's linked folders are released before the
@@ -596,7 +591,10 @@ export async function worktreeFingerprint(worktreePath: string, maxEntries = FIN
     }
     if (info.isSymbolicLink()) return;
     if (!info.isDirectory()) {
-      hash.update(`${relative}\0f${info.size}:${info.mtimeMs}\0`);
+      // The change time and inode too: a write that keeps the size and sets
+      // the old modification time back, or a file replaced by another,
+      // still shows.
+      hash.update(`${relative}\0f${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.ino}\0`);
       return;
     }
     hash.update(`${relative}\0d\0`);
@@ -620,12 +618,37 @@ export async function worktreeFingerprint(worktreePath: string, maxEntries = FIN
   return hash.digest("hex");
 }
 
-async function moveWorktree(repoCwd: string, from: string, to: string): Promise<GitOpResult> {
+/**
+ * Renames a worktree's folder to exactly `to`, then has git note it (`git
+ * worktree repair`). A plain rename never lands inside a folder that took
+ * that name, as `git worktree move` would: it fails on one that holds
+ * anything. When git cannot note the move, the folder goes back.
+ */
+async function moveWorktree(repoCwd: string, from: string, to: string, registered = true): Promise<GitOpResult> {
   try {
-    await runGit(repoCwd, ["worktree", "move", from, to]);
-    return { ok: true };
+    await rename(from, to);
   } catch (err) {
     return { ok: false, error: errorText(err) };
+  }
+  if (!registered) {
+    // git no longer lists it (a removal that failed halfway); a repair
+    // brings back nothing, and may fail.
+    await runGit(repoCwd, ["worktree", "repair", to]).catch(() => undefined);
+    return { ok: true };
+  }
+  try {
+    await runGit(repoCwd, ["worktree", "repair", to]);
+    return { ok: true };
+  } catch (err) {
+    const undone = await rename(to, from).then(
+      () => true,
+      () => false,
+    );
+    if (undone) await runGit(repoCwd, ["worktree", "repair", from]).catch(() => undefined);
+    return {
+      ok: false,
+      error: `git could not note the move: ${errorText(err)}${undone ? "" : ` It is at ${to}.`}`,
+    };
   }
 }
 

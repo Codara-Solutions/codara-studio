@@ -699,8 +699,22 @@ async function main() {
       assert.ok(fs.existsSync(asideOf(stuckTree.path)));
       assert.equal((await aw.removeAgentWorktree(terminalAgent, { workspaceId: stuckTree.workspaceId }, deps)).code, "WORKTREE_CHANGED");
       assert.ok(isRegistered(stuckTree.path), "once it can, it goes back");
+      // Another repository's folder aside is that removal's own business,
+      // under its own lock: this one leaves it alone.
+      const foreignTree = path.join(scratch, "elsewhere", "wt");
+      const foreignAside = asideOf(foreignTree);
+      fs.mkdirSync(foreignAside, { recursive: true });
+      h.state.workspaces.push({
+        ...workspaceOf(stuckTree.workspaceId),
+        id: "ws-foreign-repo",
+        cwd: foreignTree,
+        copyBranch: { ...workspaceOf(stuckTree.workspaceId).copyBranch, repoCwd: path.join(scratch, "elsewhere-repo") },
+      });
       const gone = await aw.removeAgentWorktree(terminalAgent, { workspaceId: stuckTree.workspaceId }, deps);
+      h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== "ws-foreign-repo");
       assert.equal(gone.removed, true, JSON.stringify(gone));
+      assert.ok(fs.existsSync(foreignAside) && !fs.existsSync(foreignTree), "another repository's folder aside is not touched");
+      fs.rmSync(path.join(scratch, "elsewhere"), { recursive: true, force: true });
     }
 
     // A commit between the check and the locked re-check is caught.

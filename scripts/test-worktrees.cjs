@@ -483,6 +483,14 @@ async function agentWorktreeProbes(wt) {
     writeFileSync(path.join(printed.path, ".env.local"), "A=1\n");
     assert.notStrictEqual(await wt.worktreeFingerprint(printed.path), print1, "a new ignored file counts");
     await assert.rejects(wt.worktreeFingerprint(printed.path, 2), /too many files/);
+    // Rewritten with the same size and its old modification time set back.
+    const envFile = path.join(printed.path, ".env.local");
+    require("node:fs").utimesSync(envFile, 1_700_000_000, 1_700_000_000);
+    const print2 = await wt.worktreeFingerprint(printed.path);
+    await new Promise((done) => setTimeout(done, 20));
+    writeFileSync(envFile, "B=2\n");
+    require("node:fs").utimesSync(envFile, 1_700_000_000, 1_700_000_000);
+    assert.notStrictEqual(await wt.worktreeFingerprint(printed.path), print2, "a write that hides its time still shows");
     if (process.platform !== "win32" && process.getuid?.() !== 0) {
       const sealed = path.join(printed.path, "node_modules", "pkg");
       require("node:fs").chmodSync(sealed, 0o000);
