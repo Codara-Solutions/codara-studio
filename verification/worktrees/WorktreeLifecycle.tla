@@ -324,13 +324,14 @@ ARow ==
 
 (* Mode "auto": the folder and its registration are gone; under the lock *)
 (* the branch goes if merged and pushed, with a recovery ref, and the row *)
-(* is dropped (cleanUpUnregistered).                                      *)
+(* is dropped (cleanUpUnregistered). The open pane of the agent that made *)
+(* it no longer holds it (heldByMaker): nothing of it is left in a folder *)
+(* that is gone, and its branch is merged or gone too.                    *)
 AMissing ==
     /\ a.pc = "idle" /\ lock = "free" /\ "noauto" \notin Act
     /\ \E r \in Rows :
          LET p == row[r].p  b == row[r].b  tip == lb[b] IN
          /\ row[r].st = "live" /\ disk[p] = "none" /\ reg[p] = "none"
-         /\ ~row[r].owner
          /\ tip # NONE => (Proof(b, tip) # "none" /\ ~Unpushed(b))
          /\ IF tip # NONE /\ ~CheckedOut(b)
             THEN SaveRail(r, tip) /\ DropBranch(b, tip)

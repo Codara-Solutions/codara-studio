@@ -45,7 +45,8 @@ Actions in `WorktreeLifecycle.tla`:
   `partial`, git deletes some files, drops the registration and fails),
   `ABranch` (`deleteBranchIfAt`, then the lock is let go), `ARow` (the row
   goes). `AMissing` is mode `auto`: a row whose folder and registration are
-  gone.
+  gone, with its branch merged or gone; the open pane of the agent that made
+  it does not hold it (`heldByMaker`).
 - `G*`, an agent's `codara_worktree_remove`, asked by the agent that made the
   worktree or by another: `GVerify` (unlocked, with fetch and process scan),
   `GLock`, `GRecheck` (pinned target, no process scan), `GRef` (the

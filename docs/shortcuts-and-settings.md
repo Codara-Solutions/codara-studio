@@ -1070,8 +1070,8 @@ close with it; uncommitted work, a branch that is not merged, a running
 program, an active Cora run or a dev server stop it, and the toast says why.
 The tab of the agent that made it (such as a chat in another workspace that
 made it for a background agent) holds it only while that agent works inside
-it or its work is not done: once the branch is merged and nothing is left
-uncommitted, Clean up goes ahead with that tab open. When the tab does hold
+it or its work is not done: once commits of its own are merged and nothing
+is left uncommitted, Clean up goes ahead with that tab open. When the tab does hold
 it, the toast names the tab and its workspace.
 A worktree with no commits of its own yet is not called merged. After a week
 untouched with no agent on it, such an empty worktree offers **Clean up** too,
