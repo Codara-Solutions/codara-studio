@@ -72,8 +72,8 @@ test("the inbox groups automations and explains the open one in plain words", as
     // The open automation's sentence, recent runs and month.
     await clickAttached(nightly);
     const sentence = page.getByTestId("automation-sentence");
-    await expect(sentence).toHaveText("Every weekday at 02:00, Opus 5 works in sample-repo, until the tests pass, stopping at $2.00.");
-    await expect(sentence.locator("b")).toHaveText(["Opus 5", "sample-repo", "$2.00"]);
+    await expect(sentence).toHaveText("Every weekday at 02:00, Opus 5 works in sample-repo, until the tests pass, stopping at ≈€1.60 $2.00.");
+    await expect(sentence.locator("b")).toHaveText(["Opus 5", "sample-repo", "≈€1.60 $2.00"]);
     const result = page.getByTestId("automation-result");
     await expect(result).toContainText("Stopped: budget reached");
     await expect(result).toContainText("login.spec.ts still times out");
@@ -82,7 +82,7 @@ test("the inbox groups automations and explains the open one in plain words", as
     await expect(health).toContainText("Last 6 runs, 2 failed, 1 skipped");
     await expect(health).toContainText("5 runs this month");
     await expect(health).toContainText("2 failed");
-    await expect(health).toContainText("est. $2.90");
+    await expect(health).toContainText("est. €2.32 $2.90");
     await shot(page, "inbox-failed");
 
     await clickAttached(page.locator(".automation-row", { hasText: "Dependency audit" }));

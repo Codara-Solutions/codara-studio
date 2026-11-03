@@ -1,7 +1,7 @@
 import { Cron } from "croner";
 import { monthKey } from "@shared/automation-guard";
 import type { AutomationTrigger } from "@shared/types";
-import { fmtUsd } from "./presentation";
+import { fmtCost } from "./presentation";
 
 // The most an automation can spend in a month, in words, before it is saved.
 // Pure, so scripts/test-automation-guard.cjs can exercise it.
@@ -53,6 +53,8 @@ export function startsPerMonth(trigger: AutomationTrigger | null, nowMs: number)
   }
 }
 
+// Every sentence here already says "about" or "up to".
+const NO_SIGN = { approx: false };
 const BETWEEN_RUNS = "Limits are checked between runs, so one long run can go past them. Estimates count as spend.";
 
 export function costForecast(input: CostForecastInput, nowMs: number): CostForecast {
@@ -62,22 +64,22 @@ export function costForecast(input: CostForecastInput, nowMs: number): CostForec
   const starts = startsPerMonth(input.trigger, nowMs);
   const byBudget = perRun !== null && starts ? perRun * starts.runs : null;
   if (cap !== null && (byBudget === null || starts?.floor || cap <= byBudget)) {
-    return { headline: `Worst case about ${fmtUsd(cap)} a month: its monthly cap.`, detail: BETWEEN_RUNS, open: false };
+    return { headline: `Worst case about ${fmtCost(cap, NO_SIGN)} a month: its monthly cap.`, detail: BETWEEN_RUNS, open: false };
   }
   if (byBudget !== null && starts) {
     const runs = `${starts.runs}${starts.floor ? "+" : ""} run${starts.runs === 1 ? "" : "s"}`;
     return {
-      headline: `On its schedule, worst case about ${fmtUsd(byBudget)}${starts.floor ? " or more" : ""} a month: ${fmtUsd(perRun as number)} a run, up to ${runs}.`,
+      headline: `On its schedule, worst case about ${fmtCost(byBudget, NO_SIGN)}${starts.floor ? " or more" : ""} a month: ${fmtCost(perRun as number, NO_SIGN)} a run, up to ${runs}.`,
       // Only the cap also refuses a run started by hand.
-      detail: `${cap !== null ? `Running it by hand adds to that, up to its ${fmtUsd(cap)} cap.` : "Running it by hand adds to that."} ${BETWEEN_RUNS}`,
+      detail: `${cap !== null ? `Running it by hand adds to that, up to its ${fmtCost(cap, NO_SIGN)} cap.` : "Running it by hand adds to that."} ${BETWEEN_RUNS}`,
       open: false,
     };
   }
   if (perRun !== null) {
     return input.trigger?.kind === "manual"
-      ? { headline: `Up to about ${fmtUsd(perRun)} each time you run it.`, detail: BETWEEN_RUNS, open: false }
+      ? { headline: `Up to about ${fmtCost(perRun, NO_SIGN)} each time you run it.`, detail: BETWEEN_RUNS, open: false }
       : {
-          headline: `Up to about ${fmtUsd(perRun)} each time it starts, and nothing limits how often.`,
+          headline: `Up to about ${fmtCost(perRun, NO_SIGN)} each time it starts, and nothing limits how often.`,
           detail: "A monthly cap would set a ceiling.",
           open: true,
         };

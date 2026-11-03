@@ -41,12 +41,12 @@ for (const time of ["25:00", "02:60", "2", "", "soon"]) assert.equal(s.sentenceT
 for (const everyMin of ["0", "-5", "1.5", "", "x", "35792", "43200"]) assert.equal(s.sentenceTrigger(draft({ when: "every", everyMin })), null, everyMin);
 
 // Stop.
-assert.deepEqual(s.sentenceLoop(draft()), { kind: "once", stop: { budgetUsd: 2 } });
+assert.deepEqual(s.sentenceLoop(draft()), { kind: "once", stop: { budgetUsd: 2.2432 } });
 assert.deepEqual(s.sentenceLoop(draft({ budget: "" })), { kind: "once", stop: {} });
-assert.deepEqual(s.sentenceLoop(draft({ stop: "agent", maxTries: "9", budget: "5" })), { kind: "agent", stop: { budgetUsd: 5, maxIterations: 9 } });
+assert.deepEqual(s.sentenceLoop(draft({ stop: "agent", maxTries: "9", budget: "5" })), { kind: "agent", stop: { budgetUsd: 5.608, maxIterations: 9 } });
 assert.deepEqual(s.sentenceLoop(draft({ stop: "tests", testCommand: " make test ", maxTries: "" })), {
   kind: "until",
-  stop: { budgetUsd: 2, untilTestsPass: true, testCommand: "make test" },
+  stop: { budgetUsd: 2.2432, untilTestsPass: true, testCommand: "make test" },
 });
 
 // What stops it being saved. A limit goes only when its field is blank.
@@ -72,7 +72,7 @@ assert.match(s.sentenceProblem(draft({ pauseAfter: "0" })), /Pause after must be
   assert.equal(input.name, "Sample");
   assert.equal(input.enabled, true);
   assert.deepEqual(input.precheck, { command: "./check.sh" });
-  assert.deepEqual(input.guard, { monthlyCapUsd: 20, pauseAfterFailures: 3 });
+  assert.deepEqual(input.guard, { monthlyCapUsd: 22.432, pauseAfterFailures: 3 });
   assert.deepEqual(input.ownBranch, { draftPr: true });
   assert.equal(input.input.cwd, ctx.cwd);
   assert.equal(input.input.initialUserNote, "Tidy the readme");

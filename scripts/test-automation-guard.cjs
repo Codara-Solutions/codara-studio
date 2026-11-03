@@ -151,14 +151,14 @@ assert.deepEqual(g.startsPerMonth({ kind: "cron", expr: "* * * * *" }, NOW), { r
 // The worst case, in words.
 const says = (input) => g.costForecast({ stepsOnly: false, trigger: daily, ...input }, NOW);
 assert.equal(says({ stepsOnly: true, budgetUsd: 5 }).headline, "Free: it has no AI steps.");
-assert.equal(says({ budgetUsd: 5 }).headline, "On its schedule, worst case about $155.00 a month: $5.00 a run, up to 31 runs.");
+assert.equal(says({ budgetUsd: 5 }).headline, "On its schedule, worst case about €138.20 ($155.00) a month: €4.46 ($5.00) a run, up to 31 runs.");
 assert.match(says({ budgetUsd: 5 }).detail, /Running it by hand adds to that\./, "a schedule is no ceiling on Run now");
 assert.equal(says({ budgetUsd: 5 }).open, false);
-assert.equal(says({ budgetUsd: 5, monthlyCapUsd: 20 }).headline, "Worst case about $20.00 a month: its monthly cap.");
-assert.equal(says({ budgetUsd: 5, monthlyCapUsd: 500 }).headline, "On its schedule, worst case about $155.00 a month: $5.00 a run, up to 31 runs.");
-assert.match(says({ budgetUsd: 5, monthlyCapUsd: 500 }).detail, /up to its \$500\.00 cap/);
-assert.match(says({ trigger: { kind: "cron", expr: "0 9 1 1 *" }, budgetUsd: 5 }).headline, /\$5\.00 a month.*up to 1 run\./, "never $0 for a schedule that does fire");
-assert.equal(says({ monthlyCapUsd: 20 }).headline, "Worst case about $20.00 a month: its monthly cap.");
+assert.equal(says({ budgetUsd: 5, monthlyCapUsd: 20 }).headline, "Worst case about €17.83 ($20.00) a month: its monthly cap.");
+assert.equal(says({ budgetUsd: 5, monthlyCapUsd: 500 }).headline, "On its schedule, worst case about €138.20 ($155.00) a month: €4.46 ($5.00) a run, up to 31 runs.");
+assert.match(says({ budgetUsd: 5, monthlyCapUsd: 500 }).detail, /up to its €445\.79 \(\$500\.00\) cap/);
+assert.match(says({ trigger: { kind: "cron", expr: "0 9 1 1 *" }, budgetUsd: 5 }).headline, /€4\.46 \(\$5\.00\) a month.*up to 1 run\./, "never $0 for a schedule that does fire");
+assert.equal(says({ monthlyCapUsd: 20 }).headline, "Worst case about €17.83 ($20.00) a month: its monthly cap.");
 assert.match(says({ monthlyCapUsd: 20 }).detail, /between runs/, "never firmer than the engine enforces");
 assert.equal(says({}).open, true);
 assert.match(says({}).headline, /^No ceiling/);
@@ -167,6 +167,6 @@ assert.equal(says({ trigger: { kind: "manual" }, budgetUsd: 5 }).open, false);
 assert.match(says({ trigger: { kind: "github", events: ["ciFailed"] }, budgetUsd: 5 }).headline, /nothing limits how often/);
 assert.equal(says({ trigger: { kind: "github", events: ["ciFailed"] }, budgetUsd: 5 }).open, true);
 assert.equal(says({ trigger: { kind: "github", events: ["ciFailed"] }, budgetUsd: 5, monthlyCapUsd: 9 }).open, false);
-assert.match(says({ trigger: { kind: "cron", expr: "* * * * *" }, budgetUsd: 1 }).headline, /\$1000\.00 or more a month.*1000\+ runs/);
+assert.match(says({ trigger: { kind: "cron", expr: "* * * * *" }, budgetUsd: 1 }).headline, /€891\.58 \(\$1000\.00\) or more a month.*1000\+ runs/);
 
 console.log("automation guard: ok");

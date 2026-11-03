@@ -81,7 +81,7 @@ test("a sentence becomes an automation, and can carry on in the flow editor", as
     const preview = page.getByTestId("automation-builder-preview");
     await expect(builder).toBeVisible();
     await expect(preview).toContainText("Only when you run it.");
-    await expect(preview).toContainText("Up to about $2.00 each time you run it.");
+    await expect(preview).toContainText("Up to about €2.00 $2.50 each time you run it.");
     await expect(create).toBeDisabled();
     await expect(builder).toContainText("Name the automation.");
 
@@ -92,7 +92,7 @@ test("a sentence becomes an automation, and can carry on in the flow editor", as
 
     await page.getByLabel("When it starts").selectOption("daily");
     await expect(preview.locator(".automation-builder__times > div")).toHaveCount(3);
-    await expect(preview).toContainText("On its schedule, worst case about $62.00 a month");
+    await expect(preview).toContainText("On its schedule, worst case about €62.00 $77.50 a month");
 
     // A mistake blocks saving, and a blank budget says nothing bounds it.
     await page.getByLabel("Time", { exact: true }).fill("26:00");
@@ -112,7 +112,7 @@ test("a sentence becomes an automation, and can carry on in the flow editor", as
     await page.getByLabel("Monthly cap", { exact: true }).fill("20");
     await page.getByLabel("Pause after", { exact: true }).fill("3");
     await page.getByLabel("What happens to its work").selectOption("draftPr");
-    await expect(preview).toContainText("Worst case about $20.00 a month: its monthly cap.");
+    await expect(preview).toContainText("Worst case about €20.00 $25.00 a month: its monthly cap.");
     await expect(preview).toContainText("a separate copy of sample-repo");
     await shot(app, page, "builder-sentence");
 
@@ -121,8 +121,8 @@ test("a sentence becomes an automation, and can carry on in the flow editor", as
     await expect(page.locator(".automation-row", { hasText: "Nightly readme tidy" })).toBeVisible();
     const made = await savedJob(userDataDir, "Nightly readme tidy");
     expect(made.trigger).toEqual({ kind: "cron", expr: "30 3 * * *" });
-    expect(made.loop).toMatchObject({ kind: "until", stop: { budgetUsd: 2, untilTestsPass: true, testCommand: "npm test", maxIterations: 15 } });
-    expect(made.guard).toEqual({ monthlyCapUsd: 20, pauseAfterFailures: 3 });
+    expect(made.loop).toMatchObject({ kind: "until", stop: { budgetUsd: 2.5, untilTestsPass: true, testCommand: "npm test", maxIterations: 15 } });
+    expect(made.guard).toEqual({ monthlyCapUsd: 25, pauseAfterFailures: 3 });
     expect(made.ownBranch).toEqual({ draftPr: true });
     expect((made.precheck as { command: string }).command).toBe("./has-changes.sh");
     expect((made.prompt as { template: string }).template).toBe("Tidy the readme and fix broken links.");
@@ -145,8 +145,8 @@ test("a sentence becomes an automation, and can carry on in the flow editor", as
     await expect(page.locator(".automation-row", { hasText: "Carried over" })).toBeVisible();
     const carried = await savedJob(userDataDir, "Carried over");
     expect(carried.trigger).toMatchObject({ kind: "cron", expr: "0 2 * * 1-5" });
-    expect(carried.loop).toMatchObject({ kind: "once", stop: { budgetUsd: 2 } });
-    expect(carried.guard).toEqual({ monthlyCapUsd: 12 });
+    expect(carried.loop).toMatchObject({ kind: "once", stop: { budgetUsd: 2.5 } });
+    expect(carried.guard).toEqual({ monthlyCapUsd: 15 });
     expect((carried.precheck as { command: string }).command).toBe("./ready.sh");
     expect(carried.ownBranch).toEqual({ draftPr: false });
     expect((carried.prompt as { template: string }).template).toBe("Review the open issues.");

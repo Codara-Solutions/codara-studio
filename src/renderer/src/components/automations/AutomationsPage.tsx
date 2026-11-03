@@ -1,4 +1,6 @@
 import { costForecast } from "./cost-forecast";
+import { MoneyText } from "./MoneyText";
+import { useMoneyRate } from "./useMoneyRate";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AutomationRunRecord,
@@ -20,7 +22,7 @@ import {
   fmtClock,
   fmtElapsed,
   fmtTime,
-  fmtUsd,
+  fmtCost,
   loopSummary,
   triggerSummary,
   jobWorkerSummary,
@@ -166,6 +168,7 @@ export default function AutomationsPage({
   // worker clicked twice re-fires LiveBoard's focus effect.
   const [boardFocusWorkerId, setBoardFocusWorkerId] = useState<string | null>(null);
 
+  useMoneyRate();
   const workers = useAutomationWorkers(active);
   const workspaceWorkers = useMemo(
     () => workers.filter((w) => jobs.some((j) => j.id === w.automationId)),
@@ -1053,7 +1056,7 @@ function AutomationDetail({
           </div>
           <p className="automation-sentence" data-testid="automation-sentence">
             {plainSentence(job, names).map((part, i) =>
-              part.strong ? <b key={i}>{part.text}</b> : <React.Fragment key={i}>{part.text}</React.Fragment>,
+              part.strong ? <b key={i}><MoneyText text={part.text} /></b> : <React.Fragment key={i}>{part.text}</React.Fragment>,
             )}
           </p>
         </div>
@@ -1464,7 +1467,7 @@ function ResultCard({
   return (
     <div className={`automation-result${card.failed ? " is-failed" : ""}`} data-testid="automation-result">
       <div className="automation-result__headline">{card.headline}</div>
-      <div className="automation-result__body">{card.body}</div>
+      <div className="automation-result__body"><MoneyText text={card.body} /></div>
       {pendingQuestion && liveRun && (
         <div className="automation-ask">
           <span style={{ whiteSpace: "pre-wrap" }}>{pendingQuestion.message}</span>
@@ -1496,7 +1499,7 @@ function ResultCard({
         <div className="automation-facts">
           {card.facts.map((fact) => (
             <span key={fact} className="automation-chip spark-num">
-              {fact}
+              <MoneyText text={fact} />
             </span>
           ))}
           <span style={{ flex: 1 }} />
@@ -1568,7 +1571,7 @@ function RecentRunsBar({ job, nowMs }: { job: ScheduledJob; nowMs: number }): Re
         title={partial ? `Only the last ${AUTOMATION_HISTORY_CAP} runs are kept, so the month's real totals can be higher.` : undefined}
       >
         {monthStats(job, nowMs).map((stat) => (
-          <span key={stat}>{stat}</span>
+          <span key={stat}><MoneyText text={stat} /></span>
         ))}
       </div>
     </div>
@@ -1679,13 +1682,13 @@ function HistoryTimeline({
                   title={
                     (rec.costUsd ?? 0) > (rec.measuredCostUsd ?? 0)
                       ? "Includes estimated value of subscription usage priced at public list rates; billed spend: " +
-                        fmtUsd(rec.measuredCostUsd ?? 0)
+                        fmtCost(rec.measuredCostUsd ?? 0)
                       : "Billed spend"
                   }
                 >
                   {rec.finishedAt ? `${fmtSpan(Date.parse(rec.finishedAt) - Date.parse(rec.startedAt))} · ` : ""}
                   {(rec.costUsd ?? 0) > (rec.measuredCostUsd ?? 0) ? "est. " : ""}
-                  {fmtUsd(rec.costUsd)}
+                  <MoneyText text={fmtCost(rec.costUsd)} />
                 </span>
               </button>
               <RunIdChip runId={rec.runId} compact />
@@ -1897,7 +1900,7 @@ function ConfigSummary({ job, names }: { job: ScheduledJob; names: ReadonlyMap<s
   }
   if (job.guard?.monthlyCapUsd) {
     chips.push({
-      label: `${fmtUsd(job.guard.monthlyCapUsd)} a month`,
+      label: `${fmtCost(job.guard.monthlyCapUsd)} a month`,
       hint: "No new run starts once this month's spend reaches this, Run now included. Edit: Loop node → Safety caps.",
     });
   }
@@ -1911,7 +1914,7 @@ function ConfigSummary({ job, names }: { job: ScheduledJob; names: ReadonlyMap<s
   // stop would be a lie.
   if (typeof stop.budgetUsd === "number" && stop.budgetUsd > 0) {
     chips.push({
-      label: `budget ${fmtUsd(stop.budgetUsd)}`,
+      label: `budget ${fmtCost(stop.budgetUsd)}`,
       hint: "Hard stop once the loop's estimated AI spend reaches this. Edit: Loop node → Safety caps → Est. budget.",
     });
   }
@@ -1956,7 +1959,7 @@ function ConfigSummary({ job, names }: { job: ScheduledJob; names: ReadonlyMap<s
       <div style={{ display: "flex", gap: 8 }} data-testid="automation-worst-case">
         <ConfigKey label="Worst case" />
         <span style={{ fontSize: 11, lineHeight: 1.5, color: forecast.open ? "color-mix(in oklab, var(--danger) 70%, var(--ink))" : "var(--muted)" }}>
-          {forecast.headline}
+          <MoneyText text={forecast.headline} />
         </span>
       </div>
       <div style={{ display: "flex", gap: 8 }}>
@@ -1972,7 +1975,7 @@ function ConfigSummary({ job, names }: { job: ScheduledJob; names: ReadonlyMap<s
           ) : (
             chips.map((c) => (
               <span key={c.label} className="spark-badge" title={c.hint}>
-                {c.label}
+                <MoneyText text={c.label} />
               </span>
             ))
           )}

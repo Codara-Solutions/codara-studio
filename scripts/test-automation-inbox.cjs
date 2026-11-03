@@ -212,8 +212,8 @@ async function main() {
     trigger: { kind: "cron", expr: "0 2 * * 1-5" },
     loop: { kind: "until", stop: { untilTestsPass: true, budgetUsd: 2, maxIterations: 5 } },
   });
-  assert.equal(sentence(capped), "Every weekday at 02:00, Opus 5 works in sample-repo, until the tests pass, stopping at $2.00 or 5 runs.");
-  assert.deepEqual(strong(capped), ["Opus 5", "sample-repo", "$2.00"]);
+  assert.equal(sentence(capped), "Every weekday at 02:00, Opus 5 works in sample-repo, until the tests pass, stopping at ≈€1.78 ($2.00) or 5 runs.");
+  assert.deepEqual(strong(capped), ["Opus 5", "sample-repo", "≈€1.78 ($2.00)"]);
   assert.equal(
     sentence(job({ trigger: { kind: "cron", expr: "0 6 * * *" }, graph: steps })),
     "Every day at 06:00, 2 steps run in sample-repo. No AI.",
@@ -304,7 +304,7 @@ async function main() {
   assert.equal(totals.typicalMs, (600_000 + 1_800_000) / 2, "the median ignores runs still going");
   assert.equal(totals.partial, false);
   assert.deepEqual(m.monthStats(job(), NOW), ["No runs this month"]);
-  assert.deepEqual(m.monthStats(job({ history: [rec()] }), NOW), ["1 run this month", "$0.50", "10m typical"]);
+  assert.deepEqual(m.monthStats(job({ history: [rec()] }), NOW), ["1 run this month", "≈€0.45 ($0.50)", "10m typical"]);
   assert.deepEqual(
     m.monthStats(job({ graph: steps, history: [rec({ costUsd: 0, measuredCostUsd: 0 })] }), NOW),
     ["1 run this month", "free", "10m typical"],
@@ -330,7 +330,7 @@ async function main() {
   const done = m.resultCard(job({ history: [rec({ stopReason: "once", iteration: 2, catchUp: { scheduledFor: t(60), missedCount: 2 } })] }), NOW);
   assert.equal(done.headline, "Done");
   assert.match(done.body, /without leaving a summary/);
-  assert.deepEqual(done.facts.slice(1), ["10m", "$0.50", "try 3", "caught up"]);
+  assert.deepEqual(done.facts.slice(1), ["10m", "≈€0.45 ($0.50)", "try 3", "caught up"]);
   assert.equal(m.resultCard(job({ history: [rec({ status: "cancelled", stopReason: "user-stop" })] }), NOW).headline, "Stopped by you");
   assert.equal(m.resultCard(job({ state: { status: "paused", iteration: 1 }, history: [rec()] }), NOW).headline, "On hold");
   assert.equal(m.resultCard(job({ history: [rec({ status: "running", finishedAt: undefined })] }), NOW).headline, "Did not finish");
@@ -383,8 +383,8 @@ async function main() {
     assert.equal(m.statusWord(capped, NOW).word, "Needs you");
     assert.equal(m.resultCard(capped, NOW).headline, "Monthly cap reached");
     assert.equal(m.resultCard(capped, NOW).heldByLimit, true, "a cap is not a failure to fix");
-    assert.match(m.resultCard(capped, NOW).body, /\$21\.00 of its \$20\.00 cap/);
-    assert.ok(m.monthStats(capped, NOW).some((stat) => stat.includes("$21.00 of $20.00 cap")));
+    assert.match(m.resultCard(capped, NOW).body, /≈€18\.72 \(\$21\.00\) of its ≈€17\.83 \(\$20\.00\) cap/);
+    assert.ok(m.monthStats(capped, NOW).some((stat) => stat.includes("€18.72 ($21.00) of ≈€17.83 ($20.00) cap")));
     // Under the cap, next month, switched off or mid-run: not held back.
     const under = { ...capped, guard: { monthlyCapUsd: 50 } };
     assert.equal(m.inboxGroup(under, NOW), "scheduled");
@@ -407,7 +407,7 @@ async function main() {
     const whole = job({ history: busy, monthSpend: { month: "2026-11", costUsd: 80, measuredCostUsd: 80 } });
     const stats = m.monthStats(whole, NOW);
     assert.ok(stats.includes("50+ runs this month"));
-    assert.ok(stats.includes("$80.00"), "the cost needs no plus sign");
+    assert.ok(stats.includes("≈€71.33 ($80.00)"), "the cost needs no plus sign");
   }
 
   console.log("automation inbox model: ok");

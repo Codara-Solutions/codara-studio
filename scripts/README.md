@@ -97,6 +97,7 @@ Most suites need only `npm install`. These are the exceptions:
 |---|---|---|
 | A build in `out/` | `test-agent-socket.cjs`, `test-app-exit-electron.cjs` | Launches `out/main/index.js` under Electron with a temporary home. Run `npm run build` (which is `electron-vite build`) first. Without a build the app never writes its handshake file and the suite fails. |
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
+| `dbus-daemon`, `libnotify4`, `python3-gi`, Xvfb (Linux) | `test-notify-linux-click.cjs` | Runs a private bus with a fake notification server. Prints SKIP without them, and fails on CI. |
 | Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-browser-devtools.cjs`, `test-browser-cdp-access.cjs`, `test-browser-insight.cjs`, `test-browser-capture-chromium.cjs`, `test-preview-waits.cjs`, `test-preview-dialogs.cjs`, `test-preview-find-outline.cjs`, `test-preview-console-filter.cjs`, `test-studio-csp.cjs`, `test-browser-code.cjs` | Install it with `npx playwright install chromium`. Without it they print SKIP for the real-page checks. |
 | Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-worktree-cleanup.cjs`, `test-worktree-cleanup-agent.cjs`, `test-worktree-setup.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-review-diff.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
@@ -523,7 +524,11 @@ restart and the agent tools; the POSIX-only checks skip on Windows).
 ### Notifications
 
 `test-notify-policy`, `test-notify-deliver` (which transports fire and the
-chime burst filter), `test-notify-center-store` (persistence, mutes, the
+chime burst filter), `test-notify-linux-click` (a real Electron clicked over
+a private D-Bus by a fake notification server: the default action, a click
+after garbage collection, the routed target, and the COSMIC raise when the
+compositor keeps the window behind), `test-notify-compositor-raise` (when a
+click asks `cosmic-activate` to raise Studio), `test-notify-center-store` (persistence, mutes, the
 summary push), `test-notify-center-model` (folding, eviction, age limits,
 settling, the badge count), `test-notify-center-view` (the bell panel's
 sections, stacks, times, that the badge, tab and pinned header agree, and

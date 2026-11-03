@@ -40,6 +40,7 @@ import { resolveInlineNodes, stepNoteMessage, type Projection } from "./loom-res
 // and these StopConditions settle identically without a run-store↔automation-loop
 // static import cycle (automation-loop lazy-imports run-store).
 import { gitClean, runShellCheck } from "./loom-predicates";
+import { fmtMoney } from "@shared/money";
 
 // ── The Loop Driver ─────────────────────────────────────────────────────────
 // Owns iterations 1..N for every automation: it renders the per-iteration
@@ -351,7 +352,7 @@ function capRefusal(job: ScheduledJob): string {
 }
 
 function fmtCapUsd(value: number | undefined): string {
-  return `$${(value ?? 0).toFixed(2)}`;
+  return fmtMoney(value ?? 0);
 }
 
 // A stopped worker reports what it really spent as it exits, after its row was

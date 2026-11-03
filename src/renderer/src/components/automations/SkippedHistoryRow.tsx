@@ -1,3 +1,4 @@
+import { MoneyText } from "./MoneyText";
 import React, { useState } from "react";
 import type { AutomationRunRecord, AutomationSkipRecord } from "@shared/types";
 import { fmtTime } from "./presentation";
@@ -96,7 +97,7 @@ export default function SkippedHistoryRow({
             }}
             title={skip.detail}
           >
-            {skip.detail}
+            <MoneyText text={skip.detail} historical />
           </span>
           <span className="spark-mono automation-runs__meta">{label}</span>
         </button>
@@ -112,7 +113,7 @@ export default function SkippedHistoryRow({
             gap: 6,
           }}
         >
-          <div style={{ fontSize: 11, color: "var(--ink-dim)", lineHeight: 1.5 }}>{skip.detail}</div>
+          <div style={{ fontSize: 11, color: "var(--ink-dim)", lineHeight: 1.5 }}><MoneyText text={skip.detail} historical /></div>
           {repeats ? (
             <div style={{ fontSize: 10.5, color: "var(--muted)" }}>
               The same skip {repeats} times in a row, from {fmtTime(skip.firstAt ?? skip.at)} to{" "}

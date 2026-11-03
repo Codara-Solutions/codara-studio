@@ -1,5 +1,6 @@
 import { normalizeAutomationGuard } from "@shared/automation-guard";
 import type { AutomationGuard } from "@shared/types";
+import { eurFieldFromUsd, shownLimit, usdFromEurFieldKeeping, type ShownLimit } from "@shared/money";
 import type {
   AgentEffortLevel,
   AutomationActivityEvent,
@@ -60,7 +61,10 @@ export interface LoopDraft {
   ownBranch: boolean;
   draftPr: boolean;
   maxIters: string;
+  /** In euros, as typed. The stored dollars are budgetKept until it is edited. */
   budget: string;
+  budgetKept?: ShownLimit;
+  monthlyCapKept?: ShownLimit;
   monthlyCap: string;
   pauseAfter: string;
   untilTests: boolean;
@@ -209,8 +213,14 @@ export function draftFromJob(job: ScheduledJob): LoomDraft {
   if (stop.maxIterations !== undefined && job.loop.kind !== "count") {
     d.loop.maxIters = String(stop.maxIterations);
   }
-  if (stop.budgetUsd !== undefined) d.loop.budget = String(stop.budgetUsd);
-  if (job.guard?.monthlyCapUsd !== undefined) d.loop.monthlyCap = String(job.guard.monthlyCapUsd);
+  if (stop.budgetUsd !== undefined) {
+    d.loop.budget = eurFieldFromUsd(stop.budgetUsd);
+    d.loop.budgetKept = shownLimit(stop.budgetUsd);
+  }
+  if (job.guard?.monthlyCapUsd !== undefined) {
+    d.loop.monthlyCap = eurFieldFromUsd(job.guard.monthlyCapUsd);
+    d.loop.monthlyCapKept = shownLimit(job.guard.monthlyCapUsd);
+  }
   if (job.guard?.pauseAfterFailures !== undefined) d.loop.pauseAfter = String(job.guard.pauseAfterFailures);
   d.loop.untilTests = Boolean(stop.untilTestsPass);
   d.loop.testCommand = stop.testCommand ?? "npm test";
@@ -296,7 +306,8 @@ export function buildTrigger(d: TriggerDraft): AutomationTrigger | null {
 
 export function buildGuard(d: LoopDraft): AutomationGuard | undefined {
   return normalizeAutomationGuard({
-    ...(d.monthlyCap.trim() ? { monthlyCapUsd: Number(d.monthlyCap) } : {}),
+    // The field is euros; a value that is not a number stays NaN so the guard drops it.
+    ...(d.monthlyCap.trim() ? { monthlyCapUsd: usdFromEurFieldKeeping(d.monthlyCap, d.monthlyCapKept) ?? Number.NaN } : {}),
     ...(d.pauseAfter.trim() ? { pauseAfterFailures: Number(d.pauseAfter) } : {}),
   });
 }
@@ -305,8 +316,8 @@ export function buildLoop(d: LoopDraft): AutomationLoop {
   const stop: StopConditions = {};
   const mi = Number(d.maxIters);
   if (d.maxIters.trim() && Number.isFinite(mi) && mi > 0) stop.maxIterations = Math.round(mi);
-  const b = Number(d.budget);
-  if (d.budget.trim() && Number.isFinite(b) && b > 0) stop.budgetUsd = b;
+  const b = usdFromEurFieldKeeping(d.budget, d.budgetKept);
+  if (b !== undefined) stop.budgetUsd = b;
   if (d.untilTests) {
     stop.untilTestsPass = true;
     if (d.testCommand.trim()) stop.testCommand = d.testCommand.trim();

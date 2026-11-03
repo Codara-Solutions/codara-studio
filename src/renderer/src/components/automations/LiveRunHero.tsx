@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { AutomationWorkerInfo, RunState, ScheduledJob } from "@shared/types";
 import { resolveOpenRunQuestion, runQuestionDraftScopeKey } from "@shared/run-questions";
-import { capLabel, fmtClock, fmtElapsed, fmtUsd } from "./presentation";
+import { MoneyText } from "./MoneyText";
+import { capLabel, fmtClock, fmtElapsed, fmtCost } from "./presentation";
 import { workerModelLabel } from "./worker-models";
 import { describeWorkerLogFailure } from "./worker-log-tail";
 import RunIdChip from "../RunIdChip";
@@ -143,8 +144,8 @@ export default function LiveRunHero({
           );
         })()}
         <span className="loom-hero__meta spark-mono spark-num">
-          est. {fmtUsd(job.state.spentUsd)}
-          {typeof budget === "number" ? ` / ${fmtUsd(budget)}` : ""}
+          est. <MoneyText text={fmtCost(job.state.spentUsd, { approx: false })} />
+          {typeof budget === "number" ? <> / <MoneyText text={fmtCost(budget, { approx: false })} /></> : null}
         </span>
         <span style={{ flex: 1 }} />
         {liveRunId && <RunIdChip runId={liveRunId} maxChars={24} />}

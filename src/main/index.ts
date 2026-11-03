@@ -1678,6 +1678,11 @@ app.whenReady().then(async () => {
     } catch (err) {
       console.warn("[main] workflow recovery failed:", err);
     }
+    // The cap messages the scheduler writes are in euros. Not awaited: a slow
+    // ECB must not hold the scheduler back (the built-in rate covers the gap).
+    void import("./fx-rate")
+      .then(({ refreshFxRate }) => refreshFxRate(codaraHome()))
+      .catch((err) => console.warn("[main] euro rate failed to load:", err));
     try {
       const { startScheduler } = await import("./orchestration/scheduler");
       await startScheduler();
