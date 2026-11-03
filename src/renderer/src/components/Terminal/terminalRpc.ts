@@ -73,6 +73,13 @@ export function setWorkspaceHeldProbe(probe: WorkspaceHeldProbe): void {
   workspaceHeldProbe = probe;
 }
 
+// Every file a tab of any workspace shows; null until App can say.
+let tabFilesProbe: () => string[] | null = () => null;
+
+export function setTabFilesProbe(probe: () => string[] | null): void {
+  tabFilesProbe = probe;
+}
+
 function heldFolders(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0).slice(0, 8);
@@ -85,6 +92,8 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       const params = req.params as { workspaceId?: unknown; paths?: unknown };
       return workspaceHeldProbe(String(params.workspaceId ?? ""), heldFolders(params.paths));
     }
+    case "tabFiles":
+      return tabFilesProbe();
     case "agentCounts":
       return getWorkspaceAgentCounts();
     case "list":

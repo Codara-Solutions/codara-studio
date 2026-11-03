@@ -30,6 +30,7 @@ import * as pty from "../pty-manager";
 import { serversService } from "../servers/service";
 import { loadState, updateState } from "../storage";
 import { requestTerminalOp } from "../terminal-bridge";
+import { windowHoldsFolder } from "../window-held";
 import { publishState } from "../workspace-state-publish";
 import type { AgentCleanupDeps, ApprovalAsker } from "./agent-tool";
 import type { RepoPullRequests, WorktreeCleanupDeps } from "./inspect";
@@ -124,14 +125,8 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
         return null;
       }
     },
-    workspaceHeld: async (workspaceId, paths = []) => {
-      try {
-        const held = await requestTerminalOp<unknown>("workspaceHeld", { workspaceId, paths }, { timeoutMs: 5_000 });
-        return typeof held === "boolean" ? held : null;
-      } catch {
-        return null;
-      }
-    },
+    workspaceHeld: (workspaceId, paths = []) =>
+      windowHoldsFolder((op, params) => requestTerminalOp<unknown>(op, params, { timeoutMs: 5_000 }), workspaceId, paths),
     // Shells stay in the list: one whose pane opened elsewhere and moved
     // into the worktree with cd is only seen here. usageOf drops the shells
     // of panes it already counts as open terminals.

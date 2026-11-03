@@ -94,8 +94,8 @@ import {
   type ShareableStudioTerminal,
 } from "./components/Terminal/terminalRegistry";
 import { setPaneOverlayHostLocator } from "./components/Terminal/paneOverlays";
-import { setWorkspaceHeldProbe } from "./components/Terminal/terminalRpc";
-import { tabsShowPathInside } from "./tabs/tabsShowingPath";
+import { setTabFilesProbe, setWorkspaceHeldProbe } from "./components/Terminal/terminalRpc";
+import { pathIsInside, tabFilePaths } from "./tabs/tabsShowingPath";
 import { deliverablePanes } from "./routing/agent-destinations";
 import { forgetTerminalSessionMemory } from "./components/Terminal/useTerminalSession";
 import {
@@ -125,7 +125,7 @@ import {
   restoredChatRunIds,
   sameWorkerMeta,
   savedLayoutHoldsWork,
-  savedLayoutShowsPathInside,
+  savedLayoutFilePaths,
 } from "./tabs/useTabs";
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useAgentHibernation } from "./lib/useAgentHibernation";
@@ -888,10 +888,11 @@ export default function App() {
   // codara_worktree_remove), under the repository lock: the answer above can
   // be old by then. With the worktree's folders it also counts a tab of any
   // workspace on a file inside them.
-  useEffect(
-    () => setWorkspaceHeldProbe((workspaceId, folders) => railWorkspaceHeldRef.current(workspaceId, folders)),
-    [],
-  );
+  const openTabFilesRef = useRef<() => string[] | null>(() => null);
+  useEffect(() => {
+    setWorkspaceHeldProbe((workspaceId, folders) => railWorkspaceHeldRef.current(workspaceId, folders));
+    setTabFilesProbe(() => openTabFilesRef.current());
+  }, []);
   // Merged and missing copy-branch workspaces for the rail. A missing one
   // whose branch is merged or gone is cleaned up without asking, and so is a
   // merged one nothing is left in or using (main refuses anything in use,
@@ -911,7 +912,10 @@ export default function App() {
         result.branchKept ? `${why} Branch kept: ${result.branchKept}.` : why,
       );
     }, []),
-    useCallback((workspaceId: string) => railWorkspaceHeldRef.current(workspaceId), []),
+    useCallback(
+      (workspaceId: string, folders: readonly string[]) => railWorkspaceHeldRef.current(workspaceId, folders),
+      [],
+    ),
   );
 
   // Switch HUD: bumps once per real workspace change (never on first load),
@@ -4380,16 +4384,18 @@ export default function App() {
         ? { tabs: tabs.tabs }
         : tabs.inactiveWorkspaceLayouts.find((entry) => entry.workspaceId === workspaceId);
     if (layout ? layout.tabs.length > 0 : savedLayoutHoldsWork(workspaceId)) return true;
-    if (folders.length === 0) return false;
-    if (tabs.tabsWorkspaceId && tabsShowPathInside(tabs.tabs, folders)) return true;
-    if (tabs.inactiveWorkspaceLayouts.some((entry) => tabsShowPathInside(entry.tabs, folders))) return true;
-    return workspaces.some(
-      (workspace) =>
-        workspace.id !== tabs.tabsWorkspaceId &&
-        !tabs.inactiveWorkspaceLayouts.some((entry) => entry.workspaceId === workspace.id) &&
-        savedLayoutShowsPathInside(workspace.id, folders),
-    );
+    return folders.length > 0 && openTabFiles().some((file) => pathIsInside(file, folders));
   };
+  // Every file a tab of any workspace shows. Saved layouts count beside the
+  // loaded ones: a workspace given a background terminal before it was ever
+  // opened keeps its saved tabs aside until then. Main resolves symlinks.
+  const openTabFiles = (): string[] => {
+    const files = tabFilePaths(tabs.tabs);
+    for (const entry of tabs.inactiveWorkspaceLayouts) files.push(...tabFilePaths(entry.tabs));
+    for (const workspace of workspaces) files.push(...savedLayoutFilePaths(workspace.id));
+    return [...new Set(files)];
+  };
+  openTabFilesRef.current = () => (booted ? openTabFiles() : null);
   const focusNextTerminal = useCallback(
     (scope: TerminalSwitchScope) => {
       const next = nextTerminalStop(jumpSourcesRef.current(), scope);

@@ -1,6 +1,7 @@
 // Which tabs hold a worktree that is about to be removed
-// (src/renderer/src/tabs/tabsShowingPath.ts and savedLayoutShowsPathInside in
-// useTabs.ts). The window answers main's held probe with these: an editor tab
+// (src/renderer/src/tabs/tabsShowingPath.ts and savedLayoutFilePaths in
+// useTabs.ts) and their real paths in main (src/main/window-held.ts). The
+// window answers main's held probe with these: an editor tab
 // of any workspace on a file inside the folder keeps the folder, because its
 // buffer may hold unsaved edits that no terminal, run or process list shows.
 //
@@ -75,17 +76,23 @@ async function main() {
     );
     assert.equal(tabsShowPathInside([null, { kind: "editor" }], [tree]), false, "malformed tabs are skipped");
 
+    const { tabFilePaths } = require(helperOut);
+    assert.deepEqual(
+      tabFilePaths([editor(`${tree}/a.ts`), { id: "p", kind: "preview", title: "page", url: "file:///srv/site/index%20page.html" }, { id: "c", kind: "chat", title: "Cora" }]),
+      [`${tree}/a.ts`, "/srv/site/index page.html"],
+      "editors and file previews, as the tabs spell them",
+    );
+
     const store = new Map();
     global.window = { localStorage: { getItem: (key) => (store.has(key) ? store.get(key) : null), setItem: (key, value) => store.set(key, value) } };
-    const { savedLayoutShowsPathInside } = require(useTabsOut);
+    const { savedLayoutFilePaths } = require(useTabsOut);
     store.set("spark.tabs:ws-other", JSON.stringify({ v: 7, activeId: null, tabs: [editor(`${tree}/notes.md`)] }));
-    assert.equal(savedLayoutShowsPathInside("ws-other", [tree]), true, "a saved editor tab of a workspace not opened yet");
-    assert.equal(savedLayoutShowsPathInside("ws-other", ["/somewhere/else"]), false);
-    assert.equal(savedLayoutShowsPathInside("ws-none", [tree]), false, "nothing saved");
+    assert.deepEqual(savedLayoutFilePaths("ws-other"), [`${tree}/notes.md`], "a saved editor tab of a workspace not opened yet");
+    assert.deepEqual(savedLayoutFilePaths("ws-none"), [], "nothing saved");
     store.set("spark.tabs:ws-broken", "{not json");
-    assert.equal(savedLayoutShowsPathInside("ws-broken", [tree]), false, "a layout that cannot be read restores no tabs");
+    assert.deepEqual(savedLayoutFilePaths("ws-broken"), [], "a layout that cannot be read restores no tabs");
     store.set("spark.tabs:ws-old", JSON.stringify({ v: 3, activeId: null, tabs: [editor(`${tree}/notes.md`)] }));
-    assert.equal(savedLayoutShowsPathInside("ws-old", [tree]), false, "nor does one of a version it drops");
+    assert.deepEqual(savedLayoutFilePaths("ws-old"), [], "nor does one of a version it drops");
     console.log("tabs-showing-path: all checks passed");
   } finally {
     fs.rmSync(outdir, { recursive: true, force: true });

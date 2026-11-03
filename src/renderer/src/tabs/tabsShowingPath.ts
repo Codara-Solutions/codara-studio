@@ -30,16 +30,24 @@ function fileUrlPath(url: string): string | null {
   }
 }
 
-export function tabShowsPathInside(tab: Tab, folders: readonly string[]): boolean {
-  if (!tab || typeof tab !== "object") return false;
-  if (tab.kind === "editor") return typeof tab.path === "string" && pathIsInside(tab.path, folders);
-  if (tab.kind === "preview") {
-    const file = typeof tab.url === "string" ? fileUrlPath(tab.url) : null;
-    return file !== null && pathIsInside(file, folders);
+// The file a tab shows, as the tab spells it: an editor's path or a preview's
+// file:// URL. Main resolves symlinks; this side cannot.
+export function tabFilePath(tab: Tab): string | null {
+  if (!tab || typeof tab !== "object") return null;
+  if (tab.kind === "editor") return typeof tab.path === "string" && tab.path ? tab.path : null;
+  if (tab.kind === "preview") return typeof tab.url === "string" ? fileUrlPath(tab.url) : null;
+  return null;
+}
+
+export function tabFilePaths(tabs: readonly Tab[]): string[] {
+  const files: string[] = [];
+  for (const tab of tabs) {
+    const file = tabFilePath(tab);
+    if (file) files.push(file);
   }
-  return false;
+  return files;
 }
 
 export function tabsShowPathInside(tabs: readonly Tab[], folders: readonly string[]): boolean {
-  return folders.length > 0 && tabs.some((tab) => tabShowsPathInside(tab, folders));
+  return folders.length > 0 && tabFilePaths(tabs).some((file) => pathIsInside(file, folders));
 }

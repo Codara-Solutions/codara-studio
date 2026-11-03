@@ -109,6 +109,9 @@ test("an agent's worktree shows up in the rail and leaves it once merged", async
     // An editor tab on one of its files holds it, though the tab sits in the
     // agent's own workspace (where codara_open_file opens it), not the
     // worktree's. Closing the tab lets it go.
+    const repoRow = page.locator('[data-workspace-id="ws-repo"]');
+    if ((await repoRow.getAttribute("data-active")) !== "true") await repoRow.click();
+    await expect(repoRow).toHaveAttribute("data-active", "true");
     const opened = await request("file.open", { ...caller, path: join(second.path, "README.md") });
     expect(opened.opened, JSON.stringify(opened)).toBe(true);
     const editorTab = page.getByRole("tab", { name: /README\.md/ }).first();
@@ -159,10 +162,17 @@ test("an agent's worktree shows up in the rail and leaves it once merged", async
     expect(busy.code, JSON.stringify(busy)).toBe("WORKTREE_RUNNING_PANES");
     expect(busy.running.paneIds.length).toBe(1);
 
-    // Once the user closes that terminal, the agent removes the worktree.
+    // Once the user closes that terminal, and every other tab of the
+    // worktree's workspace (tabs hold it too), the agent removes the worktree.
     await firstRow.click();
     await expect(firstRow).toHaveAttribute("data-active", "true");
-    await page.getByRole("button", { name: "Close tab" }).first().click();
+    const worktreeTabs = page.locator('[role="tab"][data-tab-id]:visible');
+    for (let left = await worktreeTabs.count(); left > 0; left = await worktreeTabs.count()) {
+      const tab = worktreeTabs.first();
+      await tab.hover();
+      await tab.getByRole("button", { name: /^Close (tab|chat)$/ }).click();
+      await expect(worktreeTabs).toHaveCount(left - 1);
+    }
     await page.locator('[data-workspace-id="ws-repo"]').click();
     await expect
       .poll(async () => (await request("worktree.list", caller)).worktrees[0]?.running?.paneIds?.length ?? 0, {
