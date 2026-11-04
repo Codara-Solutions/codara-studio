@@ -16,6 +16,7 @@
 // it without the app.
 
 import {
+  agentBoardRuntimeLabel,
   agentBoardWorkspaceColor,
   type AgentBoardCard,
   type AgentBoardModel,
@@ -29,7 +30,16 @@ export const BACKGROUND_RECENT_MS = 10 * 60_000;
 /** While the creator itself works (or runs background tasks), this long. */
 export const BACKGROUND_CREATOR_WORKING_MS = 2 * 60 * 60_000;
 
-export const BACKGROUND_AGENT_LABEL = "Background agent";
+/**
+ * "Claude subagent", "Codex subagent": the runtime's display name (the board's
+ * own map, minus a trailing " Code") and what the agent is to the session that
+ * started it. Studio cannot tell a subagent from the session itself, since
+ * both make the same MCP call (codara_worktree_create / codara_workspace_status),
+ * so "subagent" names the usual case, not something Studio verified.
+ */
+export function backgroundAgentLabel(runtime: AgentBoardRuntime): string {
+  return `${agentBoardRuntimeLabel(runtime).replace(/ Code$/, "")} subagent`;
+}
 
 export interface BackgroundWorktree {
   /** The worktree's own rail workspace. */
@@ -112,6 +122,13 @@ export function backgroundAgentCards(input: BackgroundAgentInput): AgentBoardCar
     }
     const fromName =
       (fromId ? input.workspaces.get(fromId)?.name : undefined) ?? creator?.fromWorkspaceName ?? note?.from?.workspaceName ?? null;
+    // The starting tab's name, only when its card was found and the tab has a
+    // name of its own (a default title just repeats the runtime).
+    const creatorTab =
+      creatorCard?.tabTitle && creatorCard.tabTitle !== creatorCard.agentLabel && creatorCard.tabTitle !== fromName
+        ? creatorCard.tabTitle
+        : null;
+    const runtime = creatorCard?.source === "terminal" ? creatorCard.runtime : runtimeOf(creator?.client);
     const noteAt = note?.entry.updatedAt ?? 0;
     const lastActivity = Math.max(worktree.createdAt, noteAt, worktree.headAt ?? 0);
     const quiet = input.now - lastActivity;
@@ -135,11 +152,11 @@ export function backgroundAgentCards(input: BackgroundAgentInput): AgentBoardCar
       workspaceName: project?.name ?? workspace.name,
       workspaceColor: agentBoardWorkspaceColor(project ?? workspace),
       workspaceIcon: (project ?? workspace).icon ?? null,
-      runtime: creatorCard?.source === "terminal" ? creatorCard.runtime : runtimeOf(creator?.client),
-      agentLabel: BACKGROUND_AGENT_LABEL,
+      runtime,
+      agentLabel: backgroundAgentLabel(runtime),
       account: null,
       title: creator?.purpose || text || workspace.name,
-      tabTitle: fromName ? `from ${fromName}` : null,
+      tabTitle: fromName ? `from ${fromName}${creatorTab ? ` \u203a ${creatorTab}` : ""}` : null,
       message: text,
       tool: null,
       detail: null,

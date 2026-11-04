@@ -188,7 +188,7 @@ export function WorktreeAgentLine({
   const loud = first.state === "needs-you" || first.state === "working";
   const others = agents.length - 1;
   // An agent with no pane here (background-agents.ts) is named, since
-  // opening the row shows no tab of it: "Background agent · from X".
+  // opening the row shows no tab of it: "Claude subagent · from X › its tab".
   const background = isWorktreeNoteKey(first.key);
   const description = agents
     .map((line) => [`${line.name}: ${AGENT_LINE_STATE_LABELS[line.state]}.`, line.text ?? ""].filter(Boolean).join(" "))

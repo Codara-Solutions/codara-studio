@@ -391,7 +391,7 @@ child row lighter than its parent), GitHub's PR list for the check glyphs.
   repository, which has no pane there) shows on the worktree it made with
   codara_worktree_create and `workspace`, or wrote a note on with
   codara_workspace_status and `worktree`. The row gains one muted line above
-  the state line, "Background agent · from <workspace>", since the rail is
+  the state line, "Claude subagent · from <workspace> › <its tab>" (runtime name, tab only when known), since the rail is
   too narrow for both on one line; the state line is unchanged. It stays
   until the branch merges or the worktree goes. It is not counted at the
   right edge: its coordinator's pane already is, in its own workspace.
