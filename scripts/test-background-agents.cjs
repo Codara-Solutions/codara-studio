@@ -163,6 +163,27 @@ test("the label names the runtime and, when the creator's tab has a name, that t
   assert.equal(claudeLost.tabTitle, "from PIOS");
 });
 
+test("default tab titles are never shown as the starting tab's name", ({ mod }) => {
+  for (const title of ["terminals", "terminals 2", "split", "split 12"]) {
+    const [card] = cards(mod, { worktrees: [worktree()], cards: [{ ...creatorCard(), tabTitle: title }] });
+    assert.equal(card.tabTitle, "from AI Continous Improvment", title);
+  }
+  const [real] = cards(mod, { worktrees: [worktree()], cards: [{ ...creatorCard(), tabTitle: "terminals for PIOS" }] });
+  assert.equal(real.tabTitle, "from AI Continous Improvment \u203a terminals for PIOS");
+});
+
+test("an unknown or missing client is not called Claude; a Pi coordinator reads the same live or gone", ({ mod }) => {
+  const label = (creator, extra = {}) =>
+    cards(mod, { worktrees: [worktree({ creator: { fromWorkspaceId: "ws-ai", ...creator } })], cards: [], ...extra })[0].agentLabel;
+  assert.equal(label({}), "Background agent");
+  assert.equal(label({ client: "gemini-cli" }), "Background agent");
+  assert.equal(label({ client: "cursor" }), "Background agent");
+  assert.equal(label({ client: "claude-code" }), "Claude subagent");
+  const pi = { ...creatorCard(), runtime: "pi", agentLabel: "Pi" };
+  assert.equal(cards(mod, { worktrees: [worktree()], cards: [pi] })[0].agentLabel, "Cora subagent");
+  assert.equal(label({ paneId: "p-gone", client: "pi" }), "Cora subagent");
+});
+
 test("a worktree made from its own project gets no card: its creator shows on the row already", ({ mod }) => {
   const own = worktree({ creator: { paneId: "p-coord", fromWorkspaceId: "ws-cloud" } });
   const ownCreator = { ...creatorCard(), workspaceId: "ws-cloud" };
