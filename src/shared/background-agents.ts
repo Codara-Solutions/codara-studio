@@ -16,12 +16,14 @@
 // it without the app.
 
 import {
+  agentBoardRuntimeLabel,
   agentBoardWorkspaceColor,
   type AgentBoardCard,
   type AgentBoardModel,
   type AgentBoardRuntime,
   type AgentBoardWorkspace,
 } from "./agent-board";
+import { isDefaultTabTitle } from "./tab-default-titles";
 import { worktreeNoteKey, type AgentNoteMap } from "./agent-status";
 
 /** This long after the last sign of work (a note, a commit, its creation) still reads as working. */
@@ -29,7 +31,19 @@ export const BACKGROUND_RECENT_MS = 10 * 60_000;
 /** While the creator itself works (or runs background tasks), this long. */
 export const BACKGROUND_CREATOR_WORKING_MS = 2 * 60 * 60_000;
 
+/**
+ * "Claude subagent", "Codex subagent": the runtime's display name (the board's
+ * own map, minus a trailing " Code") and what the agent is to the session that
+ * started it. Studio cannot tell a subagent from the session itself, since
+ * both make the same MCP call (codara_worktree_create / codara_workspace_status),
+ * so "subagent" names the usual case, not something Studio verified.
+ */
+/** Used when neither the creator's tab nor its client says which runtime started the agent. */
 export const BACKGROUND_AGENT_LABEL = "Background agent";
+
+export function backgroundAgentLabel(runtime: AgentBoardRuntime): string {
+  return `${agentBoardRuntimeLabel(runtime).replace(/ Code$/, "")} subagent`;
+}
 
 export interface BackgroundWorktree {
   /** The worktree's own rail workspace. */
@@ -81,12 +95,14 @@ export function withBackgroundAgents(
   };
 }
 
-function runtimeOf(client: string | undefined): AgentBoardRuntime {
+/** The runtime a client name stands for; null when it is missing or not one Studio knows. */
+function runtimeOf(client: string | undefined): AgentBoardRuntime | null {
   const name = (client ?? "").toLowerCase();
+  if (name.includes("claude")) return "claude";
   if (name.includes("codex")) return "codex";
   if (name.includes("grok")) return "grok";
   if (name === "cora" || name.startsWith("pi")) return "cora";
-  return "claude";
+  return null;
 }
 
 /** One card per worktree a background agent works in; none for a worktree whose agent shows by itself. */
@@ -112,6 +128,17 @@ export function backgroundAgentCards(input: BackgroundAgentInput): AgentBoardCar
     }
     const fromName =
       (fromId ? input.workspaces.get(fromId)?.name : undefined) ?? creator?.fromWorkspaceName ?? note?.from?.workspaceName ?? null;
+    // The starting tab's name, only when its card was found and the tab has a
+    // name of its own (a default title just repeats the runtime).
+    const creatorTab =
+      creatorCard?.tabTitle && creatorCard.tabTitle !== creatorCard.agentLabel &&
+      !isDefaultTabTitle(creatorCard.tabTitle) && creatorCard.tabTitle !== fromName
+        ? creatorCard.tabTitle
+        : null;
+    // A live Pi pane reads "pi"; the same coordinator later (pane gone) reads
+    // "cora" from its client name. Name both the same way.
+    const found = creatorCard?.source === "terminal" ? (creatorCard.runtime === "pi" ? "cora" : creatorCard.runtime) : runtimeOf(creator?.client);
+    const runtime = found ?? "claude";
     const noteAt = note?.entry.updatedAt ?? 0;
     const lastActivity = Math.max(worktree.createdAt, noteAt, worktree.headAt ?? 0);
     const quiet = input.now - lastActivity;
@@ -135,11 +162,11 @@ export function backgroundAgentCards(input: BackgroundAgentInput): AgentBoardCar
       workspaceName: project?.name ?? workspace.name,
       workspaceColor: agentBoardWorkspaceColor(project ?? workspace),
       workspaceIcon: (project ?? workspace).icon ?? null,
-      runtime: creatorCard?.source === "terminal" ? creatorCard.runtime : runtimeOf(creator?.client),
-      agentLabel: BACKGROUND_AGENT_LABEL,
+      runtime,
+      agentLabel: found ? backgroundAgentLabel(found) : BACKGROUND_AGENT_LABEL,
       account: null,
       title: creator?.purpose || text || workspace.name,
-      tabTitle: fromName ? `from ${fromName}` : null,
+      tabTitle: fromName ? `from ${fromName}${creatorTab ? ` \u203a ${creatorTab}` : ""}` : null,
       message: text,
       tool: null,
       detail: null,

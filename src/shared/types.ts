@@ -547,7 +547,7 @@ export interface CopyBranchCreator {
   purpose?: string;
   // The workspace the agent called from, as it was named then. Set when an
   // agent made the worktree, so a worktree made for another workspace's
-  // repository says who works in it ("Background agent · from <name>").
+  // repository says who works in it ("Claude subagent · from <name>").
   fromWorkspaceId?: string;
   fromWorkspaceName?: string;
 }

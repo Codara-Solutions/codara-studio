@@ -7,6 +7,7 @@ import {
 } from "@shared/types";
 import { sanitizeTerminalAgentOwner, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import { makeId } from "@shared/ids";
+import { SPLIT_TITLE_BASE, TERMINAL_TITLE_BASE } from "@shared/tab-default-titles";
 import { basename } from "../path-utils";
 import { tabFilePaths } from "./tabsShowingPath";
 import {
@@ -274,8 +275,6 @@ function buildWeightedPaneLine(
 // by side. Calling that "terminals" in the strip would be a lie, so the two
 // families are numbered separately — and a container that later gains a shell
 // keeps whatever unique title it already has rather than churning.
-const TERMINAL_TITLE_BASE = "terminals";
-const SPLIT_TITLE_BASE = "split";
 
 function terminalTitleBaseFor(tab: TerminalTab): string {
   return collectTerminalLeaves(tab.root).length > 0 ? TERMINAL_TITLE_BASE : SPLIT_TITLE_BASE;

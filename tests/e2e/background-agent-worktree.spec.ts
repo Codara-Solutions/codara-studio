@@ -14,7 +14,7 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 // `workspace` (codara_worktree_create), the user allows it once with the
 // cross-workspace card, and it reports with workspace.status and `worktree`
 // (codara_workspace_status). Repo's rail then shows the worktree's row with
-// "Background agent · from Notes", its state and the note, the Agents tab
+// "Claude subagent · from Notes", its state and the note, the Agents tab
 // lists it under Repo, and a worktree made with plain `git worktree add`
 // is listed too, as an external one, and keeps its note once opened.
 //
@@ -133,7 +133,7 @@ test("a background agent working in another workspace's repository shows on that
       await expect(page.locator(`[data-rail-children-of="ws-repo"] [data-workspace-id="${made.workspaceId}"]`)).toBeVisible({
         timeout: 15_000,
       });
-      await expect(row.getByTestId("worktree-background-agent")).toHaveText("Background agent · from Notes", { timeout: 15_000 });
+      await expect(row.getByTestId("worktree-background-agent")).toHaveText(/^Claude subagent · from Notes/, { timeout: 15_000 });
       const line = row.getByTestId("worktree-agent-line");
       await expect(line).toHaveAttribute("data-state", "working");
       await expect(line).toContainText("working");
