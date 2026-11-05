@@ -319,7 +319,7 @@ async function main() {
       assert.match(item(dirty).reason, /Unsaved changes: 1 new file/);
       assert.equal(item(dirty).dirtyFiles, 1);
       assert.equal(item(busy).recommendation, "keep");
-      assert.deepEqual(item(busy).inUse, ["1 running process"]);
+      assert.deepEqual(item(busy).inUse, ["1 running process (node, pid 999999)"]);
       assert.equal(item(openpr).recommendation, "keep");
       assert.equal(item(openpr).pullRequest.state, "open");
       assert.equal(item(moved).recommendation, "safe to remove");

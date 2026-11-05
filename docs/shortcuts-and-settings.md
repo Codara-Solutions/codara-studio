@@ -1068,14 +1068,17 @@ worktree, deletes the merged branch and drops the row in one click, with the
 same checks and recovery ref as Clean up worktrees. Its own idle terminals
 close with it; uncommitted work, a branch that is not merged, a running
 program, an active Cora run or a dev server stop it, and the toast says why.
-The tab of the agent that made it (such as a chat in another workspace that
-made it for a background agent) holds it only while that agent works inside
-it or its work is not done: once commits of its own are merged and nothing
-is left uncommitted, Clean up goes ahead with that tab open. When the tab does hold
-it, the toast names the tab and its workspace.
-A worktree with no commits of its own yet is not called merged. After a week
-untouched with no agent on it, such an empty worktree offers **Clean up** too,
-and never goes on its own.
+Having made a worktree is not using it: the tab of the agent that made it
+(such as a coordinator chat in another workspace, open for days) holds it
+only while that agent works inside it (its folder or shell is in the
+worktree). Ignored files alone (local data, build output) are asked about,
+not held. When an agent's tab does hold it, the line under the row names
+that tab and its workspace, and for a tab still called after its agent
+("Claude Code") the session's name and the tab's group.
+A worktree with no commits of its own yet is not called merged, and the tab
+of the agent that made it holds it, since that agent may be about to start.
+After a week untouched, such an empty worktree offers **Clean up** too, even
+with that tab open, and never goes on its own.
 
 A merged worktree goes on its own, with a toast, once nothing is left in it or
 using it. **Settings, Git, Worktrees, Remove merged worktrees on their own**

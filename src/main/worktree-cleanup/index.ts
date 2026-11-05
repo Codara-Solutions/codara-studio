@@ -143,7 +143,23 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
     protectedRoots: () => [homedir(), ...protectedCliPaths()],
     audit: (entry) => audit!(entry),
     now: () => new Date(),
+    agentSessionName,
   };
+}
+
+// The name the user gave the pane's agent session, else the session's own
+// title from its transcript.
+async function agentSessionName(paneId: string): Promise<string | null> {
+  const { latestSessionStart } = await import("../agent-session-registry");
+  const record = latestSessionStart(paneId);
+  if (!record || (record.runtime !== "claude" && record.runtime !== "codex")) return null;
+  const [{ withSessionNames }, { transcriptSessionTitle }] = await Promise.all([
+    import("../session-search/service"),
+    import("../worker-sessions"),
+  ]);
+  const [named] = await withSessionNames([{ runtime: record.runtime, sessionId: record.sessionId, title: "" }]);
+  if (named?.title) return named.title;
+  return record.transcriptPath ? transcriptSessionTitle(record.runtime, record.transcriptPath) : null;
 }
 
 async function sizes(): Promise<{ store: SizeStore; measurer: SizeMeasurer }> {
