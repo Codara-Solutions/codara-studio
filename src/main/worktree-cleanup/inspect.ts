@@ -534,14 +534,12 @@ function count(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-// Which programs, so the user knows what to stop: the program's name only
-// (its arguments can hold a token), and the pid of a lone one.
+// Which processes, so the user knows what to stop: each program's name only
+// (its arguments can hold a token) and its pid, the first few of them.
 function programsText(processes: readonly ProcessUse[]): string {
   const name = (entry: ProcessUse) => cleanText(basename(entry.command.trim().split(/\s+/)[0] ?? ""), 40) || "unknown";
-  if (processes.length === 1) return `${name(processes[0])}, pid ${processes[0].pid}`;
-  const names = [...new Set(processes.map(name))];
-  const shown = names.slice(0, 3).join(", ");
-  return names.length > 3 ? `${shown} and ${names.length - 3} more` : shown;
+  const shown = processes.slice(0, 3).map((entry) => `${name(entry)}, pid ${entry.pid}`).join("; ");
+  return processes.length > 3 ? `${shown}; and ${processes.length - 3} more` : shown;
 }
 
 /** Everything that keeps the worktree busy: open terminals, live Cora runs, dev servers, processes, Codara itself. */

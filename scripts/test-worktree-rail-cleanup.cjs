@@ -542,7 +542,7 @@ async function main() {
         assert.equal(result.status, "refused");
         assert.equal(result.message, "Stop 1 running process (claude, pid 4242) in it first.");
         assert.equal(fs.existsSync(merged), true);
-        // Several are named by program only: arguments can hold a token.
+        // Several are named by program and pid only: arguments can hold a token.
         deps.processesUnderCwds = async (dirs) =>
           new Map(
             dirs.map((dir) => [
@@ -557,7 +557,8 @@ async function main() {
             ]),
           );
         const several = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged", mode: "manual" });
-        assert.equal(several.message, "Stop 3 running processes (node, vite) in it first.");
+        assert.equal(several.message, "Stop 3 running processes (node, pid 1; node, pid 2; vite, pid 3) in it first.");
+        assert.doesNotMatch(several.message, /FAKE_SECRET/);
       } finally {
         deps.processesUnderCwds = original;
       }
