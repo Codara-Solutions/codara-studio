@@ -153,7 +153,7 @@ test("the cleanup screen removes only what it may, and what was confirmed", asyn
     await expect(row(busy).getByText("In use: 1 open terminal.", { exact: true })).toBeVisible();
     if (process.platform !== "win32") {
       await expect(row(moved).getByRole("checkbox")).toBeDisabled();
-      await expect(row(moved).getByText("In use: 1 running process.", { exact: true })).toBeVisible();
+      await expect(row(moved).getByText(/^In use: 1 running process \(sleep, pid \d+\)\.$/)).toBeVisible();
     }
     await expect(row(merged).getByText("Merged", { exact: true })).toBeVisible();
     await expect(row(merged).getByText("Workspace Merged copy")).toBeVisible();

@@ -34,6 +34,7 @@ import {
   canonicalMaybeMissing,
   canonicalPath,
   discoverRepos,
+  finishedWork,
   isKeptBranch,
   listWorktrees,
   mapLimited,
@@ -43,6 +44,7 @@ import {
   pathKey,
   targetFor,
   usageContext,
+  agentTabText,
   heldByMaker,
   usageOf,
   type MergeFacts,
@@ -434,6 +436,21 @@ async function statesOf(
   });
 }
 
+// Nothing committed in it yet (its head is in the base and is where its
+// branch started, as the removal check judges it: finishedWork), and not
+// stale either. Fails closed: what git cannot say counts as freshly made,
+// which keeps the maker's tab a hold.
+async function freshlyMade(deps: WorktreeCleanupDeps, repo: RepoContext, workspace: Workspace, path: string): Promise<boolean> {
+  const registration = await registrationOf(repo, path);
+  const head = registration?.head && !/^0+$/.test(registration.head) ? registration.head : null;
+  const target = await targetFor(repo, workspace).catch(() => null);
+  if (!head || !target) return true;
+  if (!(await isAncestor(repo.root, head, target.commit).catch(() => true))) return false;
+  const merge = { state: "merged" as const, proof: "ancestor" as const };
+  if (await finishedWork(repo.root, merge, head, shortName(registration?.branch), [workspace]).catch(() => false)) return false;
+  return !(await isStale(workspace, head, repo.root, deps.now().getTime()).catch(() => false));
+}
+
 // Created long ago and not touched since. A worktree of no known age is not
 // old enough to offer: only a row that says when it was made counts.
 async function isStale(workspace: Workspace, head: string, root: string, now: number): Promise<boolean> {
@@ -468,9 +485,12 @@ function inUseText(uses: readonly WorktreeInUse[]): string {
   const parts: string[] = [];
   for (const use of uses) {
     if (use.kind === "agent" && use.tab) {
-      const where = use.tab.workspace ? ` in ${use.tab.workspace}` : "";
-      const tab = use.tab.untitled ? `the ${use.tab.title} tab${where}` : `the tab “${use.tab.title}”${where}`;
-      parts.push(`Close ${tab} first: its agent still owns this worktree.`);
+      const tab = agentTabText(use.tab);
+      parts.push(
+        use.elsewhere
+          ? `The agent in ${tab} made it and has not finished with it. Close that tab first if it is done.`
+          : `The agent in ${tab} works in it. Close that tab first.`,
+      );
     } else if (use.kind === "app") {
       parts.push("Codara itself runs from it.");
     } else {
@@ -534,7 +554,16 @@ async function cleanUpRegistered(
 ): Promise<WorktreeRailCleanupResult> {
   const allowInUse = allowedUses(request.mode, await folderGone(path));
   const requireKnownUsage = request.mode === "auto-merged";
-  const [check] = await checkCleanupTargets(deps, [{ repoRoot: repo.root, path }], { allowInUse, requireKnownUsage });
+  // A click takes only merged, committed work (railRefusal), so the maker's
+  // tab in another folder (a coordinator open for days) does not hold it.
+  // A worktree just made, with nothing committed yet, is where that agent
+  // is about to start; the rail offers it only once it is stale.
+  const makerElsewhereOk = request.mode === "manual" && !(await freshlyMade(deps, repo, workspace, path));
+  const [check] = await checkCleanupTargets(deps, [{ repoRoot: repo.root, path }], {
+    allowInUse,
+    requireKnownUsage,
+    makerElsewhereOk,
+  });
   if (!check) return refused("The worktree could not be checked.", workspace.name);
   // Neither automatic mode goes ahead on a branch git could not read: the
   // one the check judged (the worktree may have switched) and the row's.
@@ -578,6 +607,7 @@ async function cleanUpRegistered(
       caller: callerFor(request.mode),
       boundTo: workspace.id,
       ...(allowInUse ? { allowInUse } : {}),
+      ...(makerElsewhereOk ? { makerElsewhereOk } : {}),
       ...(requireKnownUsage ? { requireKnownUsage, beforeRemove: () => lastMomentRefusal(deps, workspace, path) } : {}),
     },
   );

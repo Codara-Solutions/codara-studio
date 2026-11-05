@@ -144,6 +144,8 @@ export interface RendererTerminal {
   cwd?: string;
   /** The tab's title, to name it when it holds a worktree. */
   title?: string;
+  /** The name of the tab group the tab is in. */
+  group?: string;
 }
 
 export interface ProcessUse {

@@ -33,14 +33,17 @@ export interface WorktreeInUse {
   label: string;
   /**
    * With "agent": the open tab of the agent that made the worktree, to close.
-   * `untitled` when the tab has no title: `title` is then the agent's name,
-   * such as "Claude Code".
+   * `untitled` when the tab has no name of its own (none, "terminals", or
+   * its runtime's): `title` is then the agent's runtime, such as "Claude
+   * Code", and `session` (the agent session's name) and `group` (the tab's
+   * group) tell it apart when known.
    */
-  tab?: { title: string; workspace?: string; untitled?: true };
+  tab?: { title: string; workspace?: string; untitled?: true; session?: string; group?: string };
   /**
    * With "agent": its tab works from another folder. It holds the worktree
    * only while the work there may be unfinished: a branch not merged or files
-   * not committed (see heldByMaker).
+   * not committed, ignored files aside (see heldByMaker). The rail's Clean
+   * up does not count it at all.
    */
   elsewhere?: true;
 }

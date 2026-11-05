@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, promises as fsp } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
+import { isDefaultTabTitle } from "@shared/tab-default-titles";
 import type { AppState, CopyBranchCreator, RunState, Workspace } from "@shared/types";
 import type {
   WorktreeCleanupCode,
@@ -13,6 +14,7 @@ import type {
   WorktreeMergeState,
   WorktreeRemovalCheck,
 } from "@shared/worktree-cleanup";
+import { onlyIgnoredWork } from "@shared/worktree-cleanup-agent";
 import {
   checkoutsInIgnored,
   cleanText,
@@ -95,6 +97,10 @@ export interface WorktreeCleanupDeps {
   audit(entry: AgentWorktreeAuditEntry): Promise<void>;
   now(): Date;
   nestedScanMaxDirs?: number;
+  // The name of the agent session in a pane (the one the user gave it, or
+  // the agent's own title for it), to tell apart tabs with no name of their
+  // own. Null when it has none or cannot be read.
+  agentSessionName?(paneId: string): Promise<string | null>;
 }
 
 export const ROW_BUDGET_MS = 12_000;
@@ -371,6 +377,8 @@ const TERMINAL_RUN_STATUSES = new Set(["complete", "failed", "cancelled"]);
 
 export interface UsageContext {
   deps: WorktreeCleanupDeps;
+  /** Session names already asked for, by pane: one read per pane per check. */
+  sessionNames: Map<string, Promise<string | null>>;
   runs: RunState[];
   /** False when the Cora runs could not be read, so `runs` says nothing. */
   runsKnown: boolean;
@@ -388,32 +396,69 @@ export async function usageContext(deps: WorktreeCleanupDeps, dirs: readonly str
     deps.listRendererTerminals().catch(() => null),
     dirs.length ? deps.processesUnderCwds(dirs).catch(() => null) : Promise.resolve(new Map<string, ProcessUse[]>()),
   ]);
-  return { deps, runs, runsKnown, terminals, processes };
+  return { deps, sessionNames: new Map(), runs, runsKnown, terminals, processes };
 }
 
 const CLIENT_NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", cora: "Cora" };
+// What an agent tab is called before anyone names it: its runtime. Saying
+// "the tab “Claude Code”" names nothing the user can find among several.
+const RUNTIME_TITLES = new Set(["claude code", "claude", "codex", "cora", "pi", "grok", "agent"]);
 
-// Names the tab to close: its title and its workspace. A tab counts while it
-// is open, even when its agent has exited, so these are what the user needs
-// to find it. A tab with no title is named by its agent, and its workspace
-// by where the agent called from.
+function ownTabTitle(title: string): boolean {
+  return Boolean(title) && !isDefaultTabTitle(title) && !RUNTIME_TITLES.has(title.toLowerCase());
+}
+
+/** "the tab “X” in Workspace B", or for a tab with no name of its own its runtime, session and group. */
+export function agentTabText(tab: NonNullable<WorktreeInUse["tab"]>): string {
+  const where = tab.workspace ? ` in ${tab.workspace}` : "";
+  if (!tab.untitled) return `the tab “${tab.title}”${where}`;
+  const session = tab.session ? ` for “${tab.session}”` : "";
+  const group = tab.group ? ` in the group “${tab.group}”` : "";
+  return `the ${tab.title} tab${session}${group}${where}`;
+}
+
+// Names the agent's tab and its workspace: a tab counts while it is open,
+// even when its agent has exited, so these are what the user needs to find
+// it. A tab still called after its runtime (or "terminals") is named by
+// that runtime plus what tells it apart: the session's name and the tab's
+// group. Its workspace, when the tab is not listed, is where the agent
+// called from.
 async function agentTabUse(
-  deps: WorktreeCleanupDeps,
+  ctx: UsageContext,
   tab: RendererTerminal | undefined,
   owner: CopyBranchCreator,
   inside: boolean,
 ): Promise<WorktreeInUse> {
+  const { deps } = ctx;
   const titled = cleanText(tab?.title ?? "", 60);
-  const title = titled || CLIENT_NAMES[owner.client ?? ""] || "agent";
+  const own = ownTabTitle(titled);
+  const runtime = CLIENT_NAMES[owner.client ?? ""] || (RUNTIME_TITLES.has(titled.toLowerCase()) ? titled : "agent");
   const state = await deps.loadState().catch(() => null);
   const nameOf = (id: string | undefined) => (id ? state?.workspaces.find((entry) => entry.id === id)?.name : undefined);
   const workspace = cleanText(nameOf(tab?.workspaceId) ?? nameOf(owner.fromWorkspaceId) ?? owner.fromWorkspaceName ?? "", 60);
-  const where = workspace ? ` in ${workspace}` : "";
-  const named = titled ? `the tab “${title}”${where}` : `the ${title} tab${where}`;
+  let session = "";
+  let group = "";
+  if (!own) {
+    const paneId = owner.paneId!;
+    let named = ctx.sessionNames.get(paneId);
+    if (!named) {
+      named = deps.agentSessionName ? deps.agentSessionName(paneId).catch(() => null) : Promise.resolve(null);
+      ctx.sessionNames.set(paneId, named);
+    }
+    session = cleanText((await named) ?? "", 60);
+    group = cleanText(tab?.group ?? "", 40);
+  }
+  const named: NonNullable<WorktreeInUse["tab"]> = {
+    title: own ? titled : runtime,
+    ...(workspace ? { workspace } : {}),
+    ...(own ? {} : { untitled: true as const }),
+    ...(session ? { session } : {}),
+    ...(group ? { group } : {}),
+  };
   return {
     kind: "agent",
-    label: `${named} of the agent that made it ${inside ? "works in it" : "is still open"}`,
-    tab: { title, ...(workspace ? { workspace } : {}), ...(titled ? {} : { untitled: true as const }) },
+    label: inside ? `the agent in ${agentTabText(named)}, which works in it` : `the agent in ${agentTabText(named)}, which made it`,
+    tab: named,
     ...(inside ? {} : { elsewhere: true as const }),
   };
 }
@@ -429,6 +474,29 @@ async function agentTabUse(
  */
 export function heldByMaker(use: WorktreeInUse, finished: boolean, strict = false): boolean {
   return !(use.kind === "agent" && use.elsewhere && finished && !strict);
+}
+
+/**
+ * Whether a use counts at all for this caller: kinds it accepts (the
+ * workspace's own idle shells for the rail), and the maker's tab in another
+ * folder for a caller that judges unfinished work itself (makerElsewhereOk).
+ */
+export function countsAsUse(
+  use: WorktreeInUse,
+  options: { allowInUse?: ReadonlySet<WorktreeInUseKind>; makerElsewhereOk?: boolean },
+): boolean {
+  if (options.allowInUse?.has(use.kind)) return false;
+  return !(options.makerElsewhereOk && use.kind === "agent" && use.elsewhere);
+}
+
+/**
+ * Whether local work found in a worktree keeps the maker's tab elsewhere as
+ * a hold. Ignored files alone do not: they are asked about on their own (the
+ * rail's confirm, the screen's review), and the cleanup scan, which does not
+ * read them, already shows such a worktree as free.
+ */
+export function workHoldsForMaker(work: WorktreeLocalWork | null): boolean {
+  return work !== null && !onlyIgnoredWork(work);
 }
 
 /**
@@ -464,6 +532,14 @@ export async function finishedWork(
 
 function count(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
+}
+
+// Which processes, so the user knows what to stop: each program's name only
+// (its arguments can hold a token) and its pid, the first few of them.
+function programsText(processes: readonly ProcessUse[]): string {
+  const name = (entry: ProcessUse) => cleanText(basename(entry.command.trim().split(/\s+/)[0] ?? ""), 40) || "unknown";
+  const shown = processes.slice(0, 3).map((entry) => `${name(entry)}, pid ${entry.pid}`).join("; ");
+  return processes.length > 3 ? `${shown}; and ${processes.length - 3} more` : shown;
 }
 
 /** Everything that keeps the worktree busy: open terminals, live Cora runs, dev servers, processes, Codara itself. */
@@ -503,7 +579,7 @@ export async function usageOf(
     const shellInside = pid !== null && found.some((entry) => entry.pid === pid);
     const inside = panes.has(owner.paneId) || shellInside;
     if (inside || deps.sessionCwd(owner.paneId) !== null || tab) {
-      maker = await agentTabUse(deps, tab, owner, inside);
+      maker = await agentTabUse(ctx, tab, owner, inside);
       if (shellInside) makerPid = pid;
       if (panes.has(owner.paneId)) makerPane = owner.paneId;
       break;
@@ -549,7 +625,9 @@ export async function usageOf(
     if (pid !== null) counted.add(pid);
   }
   const processes = found.filter((entry) => !counted.has(entry.pid));
-  if (processes.length) uses.push({ kind: "process", label: count(processes.length, "running process", "running processes") });
+  if (processes.length) {
+    uses.push({ kind: "process", label: `${count(processes.length, "running process", "running processes")} (${programsText(processes)})` });
+  }
 
   if (deps.appPaths().some((appPath) => appPath && isAtOrUnder(appPath, real))) {
     uses.push({ kind: "app", label: "Codara runs from here" });
@@ -656,6 +734,11 @@ export interface CheckContext {
   // Nobody is watching this removal, so what could not be read counts as in
   // use: no terminal list, no process scan or no run list blocks.
   requireKnownUsage?: boolean;
+  // The tab of the agent that made the worktree, open in another folder, is
+  // not a use: the caller refuses unfinished work itself (the rail's Clean
+  // up takes only merged, committed work). The agent's tab with its folder
+  // or shell inside still is.
+  makerElsewhereOk?: boolean;
 }
 
 function block(check: WorktreeRemovalCheck, code: WorktreeCleanupCode, message: string): void {
@@ -748,9 +831,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   if (ctx.requireKnownUsage && (ctx.usage.terminals === null || ctx.usage.processes === null || !ctx.usage.runsKnown)) {
     block(check, "UNCHECKED", "What is running in it could not be read, so it is not removed on its own.");
   }
-  const uses = (await usageOf(ctx.usage, registration.path, real, workspaces)).filter(
-    (use) => !ctx.allowInUse?.has(use.kind),
-  );
+  const uses = (await usageOf(ctx.usage, registration.path, real, workspaces)).filter((use) => countsAsUse(use, ctx));
   const inUse = (held: WorktreeInUse[]) => {
     if (!held.length) return;
     check.inUse = [...(check.inUse ?? []), ...held];
@@ -760,7 +841,8 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     else block(check, "IN_USE", message);
   };
   // The maker's tab open in another folder is judged once the work is known:
-  // it holds work not finished (finishedWork) or files not committed.
+  // it holds work not finished (finishedWork) or files not committed
+  // (workHoldsForMaker).
   const pending = uses.filter((use) => !heldByMaker(use, true, ctx.requireKnownUsage));
   inUse(uses.filter((use) => !pending.includes(use)));
 
@@ -897,7 +979,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   }
   if (workFound) {
     check.localWork = work;
-    inUse(pending.splice(0));
+    if (workHoldsForMaker(work)) inUse(pending.splice(0));
   }
   return finish();
 }

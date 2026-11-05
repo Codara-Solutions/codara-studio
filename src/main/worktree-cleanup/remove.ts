@@ -46,10 +46,12 @@ import {
   pathKey,
   ROW_CONCURRENCY,
   usageContext,
+  countsAsUse,
   finishedWork,
   heldByMaker,
   isAtOrUnder,
   usageOf,
+  workHoldsForMaker,
   type CheckContext,
   type RepoContext,
   type WorktreeCleanupDeps,
@@ -85,6 +87,8 @@ export interface RemoveOptions {
   allowInUse?: ReadonlySet<WorktreeInUseKind>;
   /** As in CheckContext.requireKnownUsage. */
   requireKnownUsage?: boolean;
+  /** As in CheckContext.makerElsewhereOk. */
+  makerElsewhereOk?: boolean;
   /** Runs under the lock after the last check, right before anything changes: a reason stops the removal. */
   beforeRemove?: () => Promise<string | null>;
   forgetSize?: (id: string) => void;
@@ -145,12 +149,13 @@ function validTarget(target: unknown): target is WorktreeCleanupTarget {
   );
 }
 
+type UseOptions = Pick<RemoveOptions, "allowInUse" | "requireKnownUsage" | "makerElsewhereOk">;
+
 async function contextFor(
   deps: WorktreeCleanupDeps,
   repo: RepoContext,
   paths: string[],
-  allowInUse?: ReadonlySet<WorktreeInUseKind>,
-  requireKnownUsage?: boolean,
+  { allowInUse, requireKnownUsage, makerElsewhereOk }: UseOptions,
 ): Promise<CheckContext> {
   const reals = await Promise.all(paths.map((path) => canonicalPath(path)));
   return {
@@ -158,6 +163,7 @@ async function contextFor(
     repo,
     ...(allowInUse ? { allowInUse } : {}),
     ...(requireKnownUsage ? { requireKnownUsage } : {}),
+    ...(makerElsewhereOk ? { makerElsewhereOk } : {}),
     usage: await usageContext(deps, reals),
     linked: await linkWorkspaces(repo),
     regenerable: await deps
@@ -186,7 +192,7 @@ function missingRepoCheck(target: WorktreeCleanupTarget): WorktreeRemovalCheck {
 export async function checkCleanupTargets(
   deps: WorktreeCleanupDeps,
   targets: readonly unknown[],
-  options: { allowInUse?: ReadonlySet<WorktreeInUseKind>; requireKnownUsage?: boolean } = {},
+  options: UseOptions = {},
 ): Promise<WorktreeRemovalCheck[]> {
   const valid = targets.filter(validTarget).slice(0, MAX_ITEMS);
   const state = await deps.loadState();
@@ -205,8 +211,7 @@ export async function checkCleanupTargets(
         deps,
         repo,
         valid.filter((item) => pathKey(item.repoRoot) === pathKey(repo.root)).map((item) => item.path),
-        options.allowInUse,
-        options.requireKnownUsage,
+        options,
       );
       contexts.set(repo, ctx);
     }
@@ -309,11 +314,9 @@ async function changedWhileAside(
   // as the check did: it may have opened since.
   const finished =
     found.some((use) => !heldByMaker(use, true)) &&
-    !check.localWork &&
+    !workHoldsForMaker(check.localWork) &&
     (await finishedWork(ctx.repo.root, check.merge, check.head, check.branch, workspaces));
-  const uses = found.filter(
-    (use) => !options.allowInUse?.has(use.kind) && heldByMaker(use, finished, ctx.requireKnownUsage),
-  );
+  const uses = found.filter((use) => countsAsUse(use, options) && heldByMaker(use, finished, ctx.requireKnownUsage));
   if (uses.length) return `In use: ${[...new Set(uses.map((use) => use.label))].join(", ")}, so it was put back.`;
   return (await options.beforeRemove?.()) ?? null;
 }
@@ -578,8 +581,7 @@ export async function removeCleanupWorktrees(
           deps,
           repo,
           repoItems.map((item) => item.path),
-          options.allowInUse,
-          options.requireKnownUsage,
+          options,
         );
         let usageAt = Date.now();
         for (const [index, item] of repoItems.entries()) {

@@ -75,7 +75,7 @@ submodules, nested checkouts, locked worktrees, the ignored-file scan's
 regenerable list (an ignored file here is one the scan would keep), the
 2-minute uptime rule, the renderer's retry backoff, and real time (only the
 order of events counts). The agent removal is proved against `main` on
-GitHub; an explicit local `target` (`agent-worktrees.ts:2023`) is not
+GitHub; an explicit local `target` (`agent-worktrees.ts:2009`) is not
 modelled, so with one the guarantee is weaker: the work is kept in that
 local branch, not necessarily on GitHub. Paths are the branch's slug and slug-2, as
 `pickCheckoutDirName` makes them.
@@ -216,7 +216,7 @@ fix proposed but not in the code yet would be a `Fix` flag that
    the worktree while the removal waited for the lock (up to 60 s) was not
    seen (`WorktreeLifecycle_bug_agent_process`).
 5. **Recovery refs lasted 29 days and some hours, not 30.** Fixed:
-   `pruneRecoveryRefs` (`agent-worktrees.ts:2393`) counts the 30 days from
+   `pruneRecoveryRefs` (`agent-worktrees.ts:2407`) counts the 30 days from
    the end of the UTC day the ref is named after. Before, it counted from
    that day's midnight, so a ref saved at 23:00 UTC was pruned after 29 days
    and 1 to 2 hours, by the next removal or cleanup in the repository

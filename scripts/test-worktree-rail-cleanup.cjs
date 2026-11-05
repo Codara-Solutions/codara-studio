@@ -540,8 +540,25 @@ async function main() {
       try {
         const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged", mode: "manual" });
         assert.equal(result.status, "refused");
-        assert.match(result.message, /running process/);
+        assert.equal(result.message, "Stop 1 running process (claude, pid 4242) in it first.");
         assert.equal(fs.existsSync(merged), true);
+        // Several are named by program and pid only: arguments can hold a token.
+        deps.processesUnderCwds = async (dirs) =>
+          new Map(
+            dirs.map((dir) => [
+              dir,
+              dir === merged
+                ? [
+                    { pid: 1, command: "/usr/bin/node server.js --token=FAKE_SECRET" },
+                    { pid: 2, command: "node worker.js" },
+                    { pid: 3, command: "vite" },
+                  ]
+                : [],
+            ]),
+          );
+        const several = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged", mode: "manual" });
+        assert.equal(several.message, "Stop 3 running processes (node, pid 1; node, pid 2; vite, pid 3) in it first.");
+        assert.doesNotMatch(several.message, /FAKE_SECRET/);
       } finally {
         deps.processesUnderCwds = original;
       }
@@ -769,7 +786,7 @@ async function main() {
       assert.equal(result.status, "refused");
       assert.equal(
         result.message,
-        "Close the tab “usage agent” in AI Continous Improvment first: its agent still owns this worktree.",
+        "The agent in the tab “usage agent” in AI Continous Improvment works in it. Close that tab first.",
       );
       assert.equal(fs.existsSync(held), true);
       const after = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-held", mode: "manual" });
@@ -791,7 +808,7 @@ async function main() {
       assert.equal(result.status, "refused");
       assert.equal(
         result.message,
-        "Close the tab “usage agent” in AI Continous Improvment first: its agent still owns this worktree.",
+        "The agent in the tab “usage agent” in AI Continous Improvment works in it. Close that tab first.",
       );
       assert.equal(fs.existsSync(cdIn), true);
       const after = await withTab({ title: "usage agent", cwd: coordinator }, () =>
@@ -803,7 +820,34 @@ async function main() {
       assert.equal(after.status, "removed", after.message);
     });
 
-    await check("the maker's tab elsewhere still holds unfinished work, named even without a title", async () => {
+    await check("a tab named after its runtime is named by its session and group instead", async () => {
+      const busy = mergedWith("merged-runtime-tab", "feature/merged-runtime-tab");
+      madeBy("ws-merged-runtime-tab");
+      const named = { ...deps, agentSessionName: async (pane) => (pane === "pane-coord" ? "Rail cleanup fixes" : null) };
+      for (const title of ["Claude Code", "", "terminals 2"]) {
+        const result = await withTab({ title, group: "Cleanup", cwd: busy }, () =>
+          rail.cleanUpRailWorkspace(named, { workspaceId: "ws-merged-runtime-tab", mode: "manual" }),
+        );
+        assert.equal(result.status, "refused", title);
+        assert.equal(
+          result.message,
+          "The agent in the Claude Code tab for “Rail cleanup fixes” in the group “Cleanup” in AI Continous Improvment works in it. Close that tab first.",
+          title,
+        );
+      }
+      // A session name it cannot read leaves the runtime, group and workspace.
+      const unnamed = await withTab({ title: "Claude Code", cwd: busy }, () =>
+        rail.cleanUpRailWorkspace({ ...deps, agentSessionName: async () => { throw new Error("unreadable"); } }, {
+          workspaceId: "ws-merged-runtime-tab",
+          mode: "manual",
+        }),
+      );
+      assert.equal(unnamed.message, "The agent in the Claude Code tab in AI Continous Improvment works in it. Close that tab first.");
+      const done = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-runtime-tab", mode: "manual" });
+      assert.equal(done.status, "removed", done.message);
+    });
+
+    await check("the maker's tab elsewhere does not stand in for what Clean up refuses itself", async () => {
       const open = mergedWith("merged-open", "feature/merged-open");
       madeBy("ws-merged-open");
       commitFile(open, "more.txt", "more\n", "work after the merge");
@@ -811,25 +855,54 @@ async function main() {
         rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-open", mode: "manual" }),
       );
       assert.equal(unmergedResult.status, "refused");
-      assert.match(unmergedResult.message, /^Close the tab “coordinator” in AI Continous Improvment first/);
+      assert.equal(unmergedResult.message, "Its branch is not merged yet.");
       git(open, ["reset", "-q", "--hard", "HEAD~1"]);
       fs.writeFileSync(path.join(open, "draft.txt"), "not committed\n");
-      // No tab listed, only a live session: named by its agent and the
-      // workspace it called from.
       const live = { ...deps, sessionCwd: (pane) => (pane === "pane-coord" ? coordinator : null) };
       const dirtyResult = await rail.cleanUpRailWorkspace(live, { workspaceId: "ws-merged-open", mode: "manual" });
       assert.equal(dirtyResult.status, "refused");
-      assert.equal(
-        dirtyResult.message,
-        "Close the Claude Code tab in AI Continous Improvment first: its agent still owns this worktree.",
-      );
+      assert.match(dirtyResult.message, /^It has uncommitted work \(draft\.txt\)/);
       assert.equal(fs.existsSync(path.join(open, "draft.txt")), true);
+      // The cleanup screen, where uncommitted work can be confirmed away,
+      // still keeps it while the maker is open.
+      const [screen] = await remove.checkCleanupTargets(live, [{ repoRoot: repo, path: open }]);
+      assert.ok(screen.inUse?.some((use) => use.kind === "agent" && use.elsewhere), JSON.stringify(screen.inUse));
       fs.rmSync(path.join(open, "draft.txt"));
       const done = await rail.cleanUpRailWorkspace(live, { workspaceId: "ws-merged-open", mode: "manual" });
       assert.equal(done.status, "removed", done.message);
     });
 
-    await check("the maker's tab elsewhere holds a worktree it has not committed to yet", async () => {
+    await check("ignored files alone do not make the maker's tab elsewhere a hold: they are asked about", async () => {
+      // A coordinator's worktree with local data its tests wrote: the rail
+      // offered Clean up, then refused it until the coordinator's tab closed.
+      fs.writeFileSync(path.join(repo, ".git", "info", "exclude"), "data/\n");
+      try {
+        const kept = mergedWith("merged-kept", "feature/merged-kept");
+        madeBy("ws-merged-kept");
+        fs.mkdirSync(path.join(kept, "data", "ledger"), { recursive: true });
+        fs.writeFileSync(path.join(kept, "data", "ledger", "entries.jsonl"), "{}\n");
+        const live = { ...deps, sessionCwd: (pane) => (pane === "pane-coord" ? coordinator : null) };
+        // The cleanup screen's check, which the rail's Clean up shares.
+        const [screen] = await remove.checkCleanupTargets(live, [{ repoRoot: repo, path: kept }]);
+        assert.deepEqual(screen.blockers, [], JSON.stringify(screen.blockers));
+        assert.equal(screen.inUse, undefined);
+        const asked = await withTab({ title: "coordinator", cwd: coordinator }, () =>
+          rail.cleanUpRailWorkspace(live, { workspaceId: "ws-merged-kept", mode: "manual" }),
+        );
+        assert.equal(asked.status, "confirm", asked.message);
+        assert.deepEqual(asked.holds, ["data/"]);
+        const removed = await withTab({ title: "coordinator", cwd: coordinator }, () =>
+          rail.cleanUpRailWorkspace(live, { workspaceId: "ws-merged-kept", mode: "manual", confirmIgnored: asked.fingerprint }),
+        );
+        assert.equal(removed.status, "removed", removed.message);
+        assert.equal(fs.existsSync(kept), false);
+        assert.equal(has("ws-merged-kept"), false);
+      } finally {
+        fs.rmSync(path.join(repo, ".git", "info", "exclude"), { force: true });
+      }
+    });
+
+    await check("the maker's tab elsewhere holds a worktree it has not committed to yet, until it is stale", async () => {
       const fresh = add("fresh-made", "feature/fresh-made");
       // Made half a second after its base commit, in the same second: an
       // ancestor of main with nothing of its own.
@@ -842,9 +915,28 @@ async function main() {
         rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-fresh-made", mode: "manual" }),
       );
       assert.equal(result.status, "refused", result.message);
-      assert.match(result.message, /^Close the tab “coordinator” in AI Continous Improvment first/);
+      assert.equal(
+        result.message,
+        "The agent in the tab “coordinator” in AI Continous Improvment made it and has not finished with it. Close that tab first if it is done.",
+      );
+      // No tab listed, only a live session: named by its agent and the
+      // workspace it called from.
+      const live = { ...deps, sessionCwd: (pane) => (pane === "pane-coord" ? coordinator : null) };
+      const untitled = await rail.cleanUpRailWorkspace(live, { workspaceId: "ws-fresh-made", mode: "manual" });
+      assert.equal(
+        untitled.message,
+        "The agent in the Claude Code tab in AI Continous Improvment made it and has not finished with it. Close that tab first if it is done.",
+      );
       assert.equal(fs.existsSync(fresh), true);
       assert.equal(branchExists(repo, "feature/fresh-made"), true);
+      // A week on with nothing done in it, the rail offers it as stale, and
+      // its maker's tab, open all along, no longer holds it.
+      const later = { ...live, now: () => new Date(Date.now() + 8 * 24 * 60 * 60_000) };
+      const stale = await withTab({ title: "coordinator", cwd: coordinator }, () =>
+        rail.cleanUpRailWorkspace(later, { workspaceId: "ws-fresh-made", mode: "manual" }),
+      );
+      assert.equal(stale.status, "removed", stale.message);
+      assert.equal(fs.existsSync(fresh), false);
     });
 
     await check("work committed in the same second the worktree was made is its own", async () => {

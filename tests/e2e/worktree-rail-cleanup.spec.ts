@@ -329,7 +329,7 @@ test("Clean up on the merged fold always says what it did", async ({}, testInfo)
       await cdTo(held.path, 40);
       await expect(fold("ws-repo")).toContainText("1 merged", { timeout: 30_000 });
       await fold("ws-repo").getByTestId("workspace-merged-clean-up").click();
-      await expect(notice("ws-repo")).toContainText("Close the tab “usage agent” in Repo first", { timeout: 30_000 });
+      await expect(notice("ws-repo")).toContainText("The agent in the tab “usage agent” in Repo works in it. Close that tab first.", { timeout: 30_000 });
       await list.screenshot({ path: testInfo.outputPath("rail-clean-up-held.png") });
       expect(existsSync(held.path)).toBe(true);
     });
