@@ -58,6 +58,9 @@ interface Recorded {
 }
 
 test("a right-click pastes the clipboard into the terminal exactly once", async () => {
+  // The steps type a POSIX command line (Ctrl+U, a quoted program path);
+  // PowerShell, Windows' default shell, reads neither that way.
+  test.skip(process.platform === "win32", "drives a POSIX shell");
   test.setTimeout(90_000);
   const fixture = await prepareFixture();
   let app: ElectronApplication | null = null;
