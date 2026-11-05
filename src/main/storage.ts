@@ -17,6 +17,7 @@ import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
 import { writeFileAtomic } from "./fs-atomic";
 import { removeWorkspaceFromAppState } from "./workspace-state-edits";
+import { UNREADABLE_STATE } from "./worktree-folders";
 import { normalizeWorkspaceColor } from "@shared/workspace-colors";
 import { normalizeAutoCompactPercent } from "@shared/context-compaction";
 import { ALLOWED_WORKER_MODELS, DEFAULT_CORA_WORKER_MODELS } from "@shared/worker-model-roster";
@@ -128,7 +129,9 @@ async function readFromDisk(): Promise<AppState> {
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ...EMPTY };
     console.error("[storage] failed to read state, starting empty:", err);
-    return { ...EMPTY };
+    // Marked, so no new worktree takes a folder a row it could not read names.
+    // Not enumerable: a spread or clone of it, saved, is a state of its own.
+    return Object.defineProperty({ ...EMPTY }, UNREADABLE_STATE, { value: true, enumerable: false, configurable: true });
   }
 }
 
@@ -597,6 +600,8 @@ async function enqueueStateWrite(
   const operation = writing.then(async () => {
     const next = await produce();
     await writeToDisk(next);
+    // What was just written is known; an unreadable mark never outlives it.
+    delete (next as unknown as Record<symbol, unknown>)[UNREADABLE_STATE];
     cache = next;
     durable?.(next);
     for (const listener of stateSavedListeners) {

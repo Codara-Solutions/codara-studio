@@ -21,6 +21,7 @@ import type {
 } from "@shared/worktree-cleanup-agent";
 import { createWorktreeAuditLog, scanProcessesUnderCwds, type RendererTerminal, type WorktreeCaller } from "../agent-worktrees";
 import { codaraHome } from "../codara-home";
+import { E2E_BACKGROUND } from "../e2e-background";
 import type { IpcHandle } from "../ipc";
 import { getTrustedMainWindow } from "../main-window-trust";
 import { isProtectedCliPath, protectedCliPaths } from "../outside-write-guard";
@@ -29,9 +30,11 @@ import * as pty from "../pty-manager";
 import { serversService } from "../servers/service";
 import { loadState, updateState } from "../storage";
 import { requestTerminalOp } from "../terminal-bridge";
+import { windowHoldsFolder } from "../window-held";
 import { publishState } from "../workspace-state-publish";
 import type { AgentCleanupDeps, ApprovalAsker } from "./agent-tool";
 import type { RepoPullRequests, WorktreeCleanupDeps } from "./inspect";
+import type { AutoRemoveMergedOptions } from "./rail";
 import type { ScannedWorktree } from "./scan";
 import type { SizeMeasurer, SizeStore } from "./space";
 
@@ -117,11 +120,13 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
     listRendererTerminals: async () => {
       try {
         const listed = await requestTerminalOp<RendererTerminal[]>("list", {}, { timeoutMs: 5_000 });
-        return Array.isArray(listed) ? listed : [];
+        return Array.isArray(listed) ? listed : null;
       } catch {
         return null;
       }
     },
+    workspaceHeld: (workspaceId, paths = []) =>
+      windowHoldsFolder((op, params) => requestTerminalOp<unknown>(op, params, { timeoutMs: 5_000 }), workspaceId, paths),
     // Shells stay in the list: one whose pane opened elsewhere and moved
     // into the worktree with cd is only seen here. usageOf drops the shells
     // of panes it already counts as open terminals.
@@ -138,7 +143,23 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
     protectedRoots: () => [homedir(), ...protectedCliPaths()],
     audit: (entry) => audit!(entry),
     now: () => new Date(),
+    agentSessionName,
   };
+}
+
+// The name the user gave the pane's agent session, else the session's own
+// title from its transcript.
+async function agentSessionName(paneId: string): Promise<string | null> {
+  const { latestSessionStart } = await import("../agent-session-registry");
+  const record = latestSessionStart(paneId);
+  if (!record || (record.runtime !== "claude" && record.runtime !== "codex")) return null;
+  const [{ withSessionNames }, { transcriptSessionTitle }] = await Promise.all([
+    import("../session-search/service"),
+    import("../worker-sessions"),
+  ]);
+  const [named] = await withSessionNames([{ runtime: record.runtime, sessionId: record.sessionId, title: "" }]);
+  if (named?.title) return named.title;
+  return record.transcriptPath ? transcriptSessionTitle(record.runtime, record.transcriptPath) : null;
 }
 
 async function sizes(): Promise<{ store: SizeStore; measurer: SizeMeasurer }> {
@@ -157,6 +178,23 @@ async function sizes(): Promise<{ store: SizeStore; measurer: SizeMeasurer }> {
 async function gitCacheInvalidator(): Promise<(cwd: string) => void> {
   const { invalidateGitCache } = await import("../git-ops");
   return invalidateGitCache;
+}
+
+function e2eOverrideMs(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!E2E_BACKGROUND || raw === undefined) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+async function autoRemoveMergedOptions(): Promise<AutoRemoveMergedOptions> {
+  const quietMs = e2eOverrideMs("CODARA_E2E_WORKTREE_AUTO_QUIET_MS");
+  const minUptimeMs = e2eOverrideMs("CODARA_E2E_WORKTREE_AUTO_UPTIME_MS");
+  return {
+    enabled: (await loadPreferences()).worktreeAutoRemoveMerged !== false,
+    ...(quietMs !== undefined ? { quietMs } : {}),
+    ...(minUptimeMs !== undefined ? { minUptimeMs } : {}),
+  };
 }
 
 function stringList(value: unknown): string[] | null {
@@ -223,14 +261,13 @@ export function registerWorktreeCleanupIpc(handle: IpcHandle): void {
   // row (rail.ts).
   handle("worktreeCleanup:railStates", async () => {
     const { railWorktreeOverview } = await import("./rail");
-    return railWorktreeOverview(deps(await gitCacheInvalidator()));
+    return railWorktreeOverview(deps(await gitCacheInvalidator()), { autoRemoveMerged: await autoRemoveMergedOptions() });
   });
 
   handle("worktreeCleanup:railCleanUp", async (_event, request: WorktreeRailCleanupRequest) => {
     const { store: cache, measurer: queue } = await sizes();
-    // As for the screen's removal, unless only missing folders can go: the
-    // automatic cleanup never removes a folder that is there, so it leaves
-    // measuring alone.
+    // As for the screen's removal, unless only missing folders can go: "auto"
+    // never removes a folder that is there, so it leaves measuring alone.
     if (request?.mode !== "auto") {
       queue.cancel();
       await queue.settled(5_000);
@@ -239,6 +276,7 @@ export function registerWorktreeCleanupIpc(handle: IpcHandle): void {
     const result = await cleanUpRailWorkspace(deps(await gitCacheInvalidator()), request, {
       sizeOf: (id) => cache.get(id),
       forgetSize: (id) => cache.delete(id),
+      autoRemoveMerged: await autoRemoveMergedOptions(),
     });
     return result;
   });

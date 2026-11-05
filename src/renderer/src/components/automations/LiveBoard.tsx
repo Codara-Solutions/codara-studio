@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MoneyText } from "./MoneyText";
 import {
   Background,
   BackgroundVariant,
@@ -21,7 +22,7 @@ import {
   capLabel,
   fmtClock,
   fmtElapsed,
-  fmtUsd,
+  fmtCost,
   loopSummary,
   statusWord,
   triggerSummary,
@@ -474,7 +475,8 @@ export default function LiveBoard({
           }}
         >
           <span style={{ color: dot }}>{statusWord(status)}</span>
-          {` · pass ${job.state.iteration}/${capLabel(job)} · est. ${fmtUsd(job.state.spentUsd)}`}
+          {` · pass ${job.state.iteration}/${capLabel(job)} · est. `}
+          <MoneyText text={fmtCost(job.state.spentUsd, { approx: false })} />
           {workers.length > 0 ? ` · ${workers.length} worker${workers.length === 1 ? "" : "s"}` : ""}
           {anyLive && current?.startedAt ? ` · ${fmtElapsed(current.startedAt, now)}` : ""}
           {run && !loomLive ? ` · last run ${run.status}` : ""}

@@ -1,6 +1,6 @@
 "use strict";
 
-// `cora status` — is the app up, and what is Cora doing right now?
+// `cora studio status` — is the app up, and what is Cora doing right now?
 
 const { rpcRaw, homeDir } = require("../lib/rpc.cjs");
 const { listRuns } = require("../lib/store.cjs");
@@ -61,7 +61,7 @@ async function status(args, flags) {
 
   console.log("");
   if (active.length === 0) {
-    console.log(c.dim(`no active runs (${runs.length} total — \`cora runs\` to list)`));
+    console.log(c.dim(`no active runs (${runs.length} total — \`cora studio runs\` to list)`));
     return;
   }
   console.log(c.bold(`${active.length} active run${active.length === 1 ? "" : "s"}`));
@@ -76,7 +76,7 @@ async function status(args, flags) {
       ]),
     ),
   );
-  console.log(c.dim("\n`cora watch` for the live dashboard"));
+  console.log(c.dim("\n`cora studio watch` for the live dashboard"));
 }
 
 module.exports = { status };

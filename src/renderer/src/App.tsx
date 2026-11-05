@@ -30,7 +30,7 @@ import {
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   runtimeStateIsBusy,
 } from "@shared/types";
-import type { WorktreeRailCleanupResult, WorktreeRailExternal } from "@shared/worktree-cleanup";
+import type { WorktreeRailCleanupRequest, WorktreeRailCleanupResult, WorktreeRailExternal } from "@shared/worktree-cleanup";
 import type {
   GitHubIssueSummary,
   GitHubWorkQueueItem,
@@ -45,14 +45,18 @@ import {
 } from "@shared/workspace-colors";
 import WindowChrome from "./components/WindowChrome";
 import { requestAutomationFocus, requestWorkflowRunFocus } from "./components/automations/focus-request";
+import { requestDraftPrefill } from "./components/chat/composer/pending-prefill";
 import WorkspaceRail from "./components/WorkspaceRail";
 import { publishAgentBoardSources } from "./components/agent-board/agentBoardSources";
-import { setRailView } from "./components/agent-board/railView";
+import { BackgroundAgentNotice } from "./components/workspace-status/BackgroundAgentNotice";
 import {
+  onSessionSearchRequest,
   publishSessionSearchHost,
-  requestSessionSearch,
+  offerWorkerSessions,
+  type SessionSearchRequest,
+  type WorkerSessionsOffer,
 } from "./components/session-search/sessionSearchStore";
-import { isSafeSessionId, type SessionSearchHit } from "@shared/session-search";
+import { isSafeSessionId, normalizeSessionSearchPreferences, type SessionSearchHit } from "@shared/session-search";
 import StatusBar from "./components/StatusBar";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
@@ -90,6 +94,8 @@ import {
   type ShareableStudioTerminal,
 } from "./components/Terminal/terminalRegistry";
 import { setPaneOverlayHostLocator } from "./components/Terminal/paneOverlays";
+import { setTabFilesProbe, setWorkspaceHeldProbe } from "./components/Terminal/terminalRpc";
+import { pathIsInside, tabFilePaths } from "./tabs/tabsShowingPath";
 import { deliverablePanes } from "./routing/agent-destinations";
 import { forgetTerminalSessionMemory } from "./components/Terminal/useTerminalSession";
 import {
@@ -118,6 +124,8 @@ import {
   persistedTerminalPaneIds,
   restoredChatRunIds,
   sameWorkerMeta,
+  savedLayoutHoldsWork,
+  savedLayoutFilePaths,
 } from "./tabs/useTabs";
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useAgentHibernation } from "./lib/useAgentHibernation";
@@ -177,7 +185,7 @@ import {
 import type { CoraView } from "./components/chat/cora-view";
 import { basename } from "./path-utils";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
-import { buildBindingTable, digitFromEvent, type BindingTable } from "./shortcuts/bindings";
+import { buildBindingTable, digitFromEvent, terminalKeepsChord, type BindingTable } from "./shortcuts/bindings";
 import { chordToHint } from "./shortcuts/chord";
 import type { CommandId } from "./shortcuts/commands";
 import { isRecording } from "./shortcuts/recording";
@@ -191,7 +199,13 @@ import {
   type AgentSessionResumeRequest,
   runtimeFromAgentSessionLaunchCommand,
 } from "./workers/launch-commands";
-import { hasWorkspaceFolder, sessionResumeLaunch, workspaceForSessionFolder } from "./workers/session-resume";
+import {
+  findOpenSessionPane,
+  hasWorkspaceFolder,
+  sessionForkLaunch,
+  sessionResumeLaunch,
+  workspaceForSessionFolder,
+} from "./workers/session-resume";
 import { agentBrandColor, agentBrandRuntime } from "./lib/agent-brand";
 import { applyWorkspaceAccent } from "./lib/workspace-accent";
 import { useTheme } from "./theme/theme-context";
@@ -253,6 +267,7 @@ const SessionInspector = lazy(() => import("./components/SessionInspector"));
 const AgentCapabilitiesDialog = lazy(loadAgentCapabilitiesDialog);
 const RunSwitcher = lazy(() => import("./components/RunSwitcher"));
 const JumpPalette = lazy(() => import("./components/jump/JumpPalette"));
+const SessionPicker = lazy(() => import("./components/session-search/SessionPicker"));
 const CreateCopyDialog = lazy(() => import("./components/CreateCopyDialog"));
 const WorktreeSetupTray = lazy(() => import("./components/worktree-setup/WorktreeSetupTray"));
 const CopyBranchDeleteDialog = lazy(() =>
@@ -646,6 +661,12 @@ export default function App() {
   const [runSwitcherOpen, setRunSwitcherOpen] = useState(false);
   // Jump palette (jump.open): mounted only while open, like the run switcher.
   const [jumpPaletteOpen, setJumpPaletteOpen] = useState(false);
+  // What the open picker was asked for; the chord and the + menu ask for nothing.
+  const [sessionPicker, setSessionPicker] = useState<
+    (Partial<SessionSearchRequest> & { offer?: WorkerSessionsOffer }) | null
+  >(null);
+  const openSessionPicker = useCallback(() => setSessionPicker({}), []);
+  useEffect(() => onSessionSearchRequest(setSessionPicker), []);
   // Single "While you were away" digest surfaced on window focus-after-away.
   // Holds the snapshot computed at focus time; null when nothing landed or the
   // user dismissed it.
@@ -862,9 +883,21 @@ export default function App() {
     `${activeWorkspace?.cwd ?? ""}:${sharedGit.status?.branch ?? ""}`,
   );
 
-  // Merged and missing copy-branch workspaces for the rail; a missing one
-  // whose branch is merged or gone is cleaned up without asking (main
-  // refuses anything in use, unpushed or possibly only unmounted).
+  const railWorkspaceHeldRef = useRef<(workspaceId: string, folders?: readonly string[]) => boolean>(() => true);
+  // Main asks again right before a removal (the automatic one and
+  // codara_worktree_remove), under the repository lock: the answer above can
+  // be old by then. With the worktree's folders it also counts a tab of any
+  // workspace on a file inside them.
+  const openTabFilesRef = useRef<() => string[] | null>(() => null);
+  useEffect(() => {
+    setWorkspaceHeldProbe((workspaceId, folders) => railWorkspaceHeldRef.current(workspaceId, folders));
+    setTabFilesProbe(() => openTabFilesRef.current());
+  }, []);
+  // Merged and missing copy-branch workspaces for the rail. A missing one
+  // whose branch is merged or gone is cleaned up without asking, and so is a
+  // merged one nothing is left in or using (main refuses anything in use,
+  // unpushed or possibly only unmounted). What main cannot see stays here:
+  // a tab of the workspace, whatever it holds, keeps it.
   const {
     states: worktreeByWorkspaceId,
     external: externalWorktrees,
@@ -872,14 +905,17 @@ export default function App() {
     refresh: refreshWorktreeStates,
   } = useWorktreeRailStates(
     workspaces,
-    useCallback((result: WorktreeRailCleanupResult) => {
+    useCallback((result: WorktreeRailCleanupResult, mode: WorktreeRailCleanupRequest["mode"]) => {
+      const why = mode === "auto-merged" ? "Its work is merged and nothing was left in it." : "Its folder was gone and its work is merged.";
       emitLocalToast(
         `Removed ${result.workspaceName ?? "a merged workspace"}`,
-        result.branchKept
-          ? `Its folder was gone and its work is merged. Branch kept: ${result.branchKept}.`
-          : "Its folder was gone and its work is merged.",
+        result.branchKept ? `${why} Branch kept: ${result.branchKept}.` : why,
       );
     }, []),
+    useCallback(
+      (workspaceId: string, folders: readonly string[]) => railWorkspaceHeldRef.current(workspaceId, folders),
+      [],
+    ),
   );
 
   // Switch HUD: bumps once per real workspace change (never on first load),
@@ -4341,6 +4377,25 @@ export default function App() {
   });
   const jumpSourcesRef = useRef(jumpSources);
   jumpSourcesRef.current = jumpSources;
+  railWorkspaceHeldRef.current = (workspaceId, folders = []) => {
+    if (!booted || workspaceId === activeId) return true;
+    const layout =
+      tabs.tabsWorkspaceId === workspaceId
+        ? { tabs: tabs.tabs }
+        : tabs.inactiveWorkspaceLayouts.find((entry) => entry.workspaceId === workspaceId);
+    if (layout ? layout.tabs.length > 0 : savedLayoutHoldsWork(workspaceId)) return true;
+    return folders.length > 0 && openTabFiles().some((file) => pathIsInside(file, folders));
+  };
+  // Every file a tab of any workspace shows. Saved layouts count beside the
+  // loaded ones: a workspace given a background terminal before it was ever
+  // opened keeps its saved tabs aside until then. Main resolves symlinks.
+  const openTabFiles = (): string[] => {
+    const files = tabFilePaths(tabs.tabs);
+    for (const entry of tabs.inactiveWorkspaceLayouts) files.push(...tabFilePaths(entry.tabs));
+    for (const workspace of workspaces) files.push(...savedLayoutFilePaths(workspace.id));
+    return [...new Set(files)];
+  };
+  openTabFilesRef.current = () => (booted ? openTabFiles() : null);
   const focusNextTerminal = useCallback(
     (scope: TerminalSwitchScope) => {
       const next = nextTerminalStop(jumpSourcesRef.current(), scope);
@@ -4563,6 +4618,7 @@ export default function App() {
   // always the working-tree (unstaged) diff — matching VS Code's entry point.
   const activeCwdRef = useRef<string | null>(activeWorkspace?.cwd ?? null);
   activeCwdRef.current = activeWorkspace?.cwd ?? null;
+  const pendingReviewWorkspaceRef = useRef<string | null>(null);
   const handleOpenDiffForPath = useCallback((absolutePath: string) => {
     const cwd = activeCwdRef.current;
     if (!cwd || !absolutePath) return;
@@ -4594,7 +4650,13 @@ export default function App() {
       if (path) handleOpenDiffForPath(path);
     };
     // The Source Control header and the Markdown preview's notes bar open the review tab.
-    const openReview = () => {
+    const openReview = (event: Event) => {
+      const workspaceId = (event as CustomEvent<{ workspaceId?: string } | undefined>).detail?.workspaceId;
+      if (workspaceId && workspaceId !== tabsRef.current.tabsWorkspaceId) {
+        pendingReviewWorkspaceRef.current = workspaceId;
+        if (workspaceId !== activeIdRef.current) handleActivateWorkspace(workspaceId);
+        return;
+      }
       tabsRef.current.openReviewTab();
     };
     window.addEventListener("spark:open-file", openFile);
@@ -4605,7 +4667,21 @@ export default function App() {
       window.removeEventListener("spark:open-diff", openDiff);
       window.removeEventListener("spark:open-review", openReview);
     };
-  }, [handleOpenDiffForPath, openFileByPath]);
+  }, [handleActivateWorkspace, handleOpenDiffForPath, openFileByPath]);
+
+  // A review asked for from another workspace's lane waits until that
+  // workspace's tabs are the ones on screen.
+  useEffect(() => {
+    const pending = pendingReviewWorkspaceRef.current;
+    if (!pending) return;
+    if (pending !== activeId) {
+      pendingReviewWorkspaceRef.current = null;
+      return;
+    }
+    if (pending !== tabs.tabsWorkspaceId) return;
+    pendingReviewWorkspaceRef.current = null;
+    tabsRef.current.openReviewTab();
+  }, [activeId, tabs.tabsWorkspaceId]);
 
   // An agent offered to share a page it wrote (codara_share_offer): open the
   // file and its Share prompt. Nothing is uploaded until the user clicks Share.
@@ -4990,9 +5066,8 @@ export default function App() {
     return activeWorkspace?.cwd ?? null;
   }, [activeWorkspace?.cwd]);
 
-  // The tab-strip "+" worker rows: a new session of that agent in its own
-  // terminal tab, in the folder the active terminal is in. Earlier sessions
-  // are resumed from the Sessions view instead.
+  // A new session of that agent in its own terminal tab, in the folder the
+  // active terminal is in.
   const launchNewWorkerTab = useCallback(
     (command: string) => {
       const cwd = resolveWorkerLaunchCwd();
@@ -5000,37 +5075,65 @@ export default function App() {
     },
     [launchWorkerInNewTerminalTab, resolveWorkerLaunchCwd],
   );
+  // The tab-strip "+" worker rows show that agent's past sessions first.
+  const offerWorkerTab = useCallback(
+    (runtime: WorkerSessionsOffer["runtime"], command: string) => {
+      offerWorkerSessions({
+        runtime,
+        cwd: resolveWorkerLaunchCwd(),
+        placement: "tab",
+        startNew: () => launchNewWorkerTab(command),
+      });
+    },
+    [launchNewWorkerTab, resolveWorkerLaunchCwd],
+  );
   // Bound per runtime so the memoized TabBar gets stable callbacks.
   const openClaudeWorker = useCallback(
-    () => launchNewWorkerTab(CLAUDE_LAUNCH_COMMAND),
-    [launchNewWorkerTab],
+    () => offerWorkerTab("claude", CLAUDE_LAUNCH_COMMAND),
+    [offerWorkerTab],
   );
   const openCodexWorker = useCallback(
-    () => launchNewWorkerTab(CODEX_LAUNCH_COMMAND),
-    [launchNewWorkerTab],
+    () => offerWorkerTab("codex", CODEX_LAUNCH_COMMAND),
+    [offerWorkerTab],
   );
   const openGrokWorker = useCallback(
-    () => launchNewWorkerTab(GROK_LAUNCH_COMMAND),
-    [launchNewWorkerTab],
+    () => offerWorkerTab("grok", GROK_LAUNCH_COMMAND),
+    [offerWorkerTab],
+  );
+  // The "... worker sessions" commands. "New ... worker pane" stays separate
+  // so a binding made for an instant session never grows a dialog.
+  const offerWorkerPane = useCallback(
+    (runtime: WorkerSessionsOffer["runtime"], command: string) => {
+      if (visibleModalDialog()) return;
+      const cwd = resolveWorkerLaunchCwd();
+      offerWorkerSessions({
+        runtime,
+        cwd,
+        placement: "pane",
+        startNew: () => handleNewWorkerPane(command, cwd ? { cwd } : undefined),
+      });
+    },
+    [handleNewWorkerPane, resolveWorkerLaunchCwd],
   );
   const openPiWorker = useCallback(
     () => launchNewWorkerTab(PI_LAUNCH_COMMAND),
     [launchNewWorkerTab],
   );
 
-  // Resuming a past session: Settings' session list and the rail's Sessions
-  // view. The session opens in a new terminal tab of the workspace that holds
+  // Resuming a past session: Settings' session list and the session picker.
+  // The session opens in a new terminal tab of the workspace that holds
   // its folder (added first when none does), through the same resume command
   // a restored pane uses.
   const pendingSessionResumeRef = useRef<(AgentSessionResumeRequest & { workspaceId: string }) | null>(null);
 
   const launchSessionResume = useCallback((request: AgentSessionResumeRequest) => {
-    const launch = sessionResumeLaunch(request, new Date().toISOString());
+    const launch = (request.fork ? sessionForkLaunch : sessionResumeLaunch)(request, new Date().toISOString());
     if (!launch) return;
     tabsRef.current.newTerminalTab(request.cwd, launch.command, {
       agentSession: launch.pointer,
       manualAgentRuntime: request.runtime,
       color: workerTabBrandColor(request.runtime),
+      ...(request.title ? { title: request.title } : {}),
     });
   }, []);
 
@@ -5094,7 +5197,10 @@ export default function App() {
     [resumeAgentSession],
   );
 
-  // The rail's Sessions view opens what it found through here.
+  const workspaceJumpRef = useRef(workspaceJump);
+  workspaceJumpRef.current = workspaceJump;
+  // The session picker opens what it found through here. A session already running in a pane is gone to, not resumed
+  // a second time: two agents on one transcript would corrupt it.
   const openSearchedSession = useCallback(
     (hit: SessionSearchHit) => {
       if (hit.agent === "cora") {
@@ -5102,27 +5208,89 @@ export default function App() {
         return;
       }
       if (!hit.cwd) return;
-      void resumeAgentSession({ runtime: hit.agent, cwd: hit.cwd, sessionId: hit.sessionId });
+      const pane = findOpenSessionPane(jumpSourcesRef.current().layouts, hit.agent, hit.sessionId);
+      if (pane) {
+        workspaceJumpRef.current.jumpTo(pane);
+        return;
+      }
+      void resumeAgentSession({
+        runtime: hit.agent,
+        cwd: hit.cwd,
+        sessionId: hit.sessionId,
+        ...(hit.originalTitle ? { title: hit.title } : {}),
+      });
     },
     [handleSelectRunAnywhere, resumeAgentSession],
   );
+  const forkSearchedSession = useCallback(
+    (hit: SessionSearchHit) => {
+      if (hit.agent === "cora" || !hit.cwd) return;
+      void resumeAgentSession({ runtime: hit.agent, cwd: hit.cwd, sessionId: hit.sessionId, fork: true });
+    },
+    [resumeAgentSession],
+  );
+  const handleNewWorkerPaneRef = useRef(handleNewWorkerPane);
+  handleNewWorkerPaneRef.current = handleNewWorkerPane;
+  const canSplitSearchedSession = useCallback(
+    (hit: SessionSearchHit) => {
+      if (hit.agent === "cora" || !hit.cwd || !hit.cwdExists) return false;
+      const current = tabsRef.current;
+      if (current.tabs.find((tab) => tab.id === current.activeId)?.kind !== "terminal") return false;
+      const workspace = workspaceForSessionFolder(workspacesRef.current, hit.cwd, platform);
+      return !!workspace && workspace.id === current.tabsWorkspaceId;
+    },
+    [platform],
+  );
+  const splitSearchedSession = useCallback(
+    (hit: SessionSearchHit) => {
+      if (hit.agent === "cora" || !hit.cwd || !canSplitSearchedSession(hit)) return;
+      const launch = sessionResumeLaunch(
+        { runtime: hit.agent, cwd: hit.cwd, sessionId: hit.sessionId },
+        new Date().toISOString(),
+      );
+      if (launch) handleNewWorkerPaneRef.current(launch.command, { cwd: hit.cwd, session: launch.pointer });
+    },
+    [canSplitSearchedSession],
+  );
+  const isSearchedSessionOpen = useCallback(
+    (hit: SessionSearchHit) =>
+      hit.agent !== "cora" && !!findOpenSessionPane(jumpSourcesRef.current().layouts, hit.agent, hit.sessionId),
+    [],
+  );
   const sessionSearchCwd = activeWorkspace && !activeWorkspace.remote ? activeWorkspace.cwd : null;
+  // The index holds this computer's sessions, of the agents Settings picked.
+  // Anywhere else there is no history to show, so the worker just starts.
+  const offerSessionsForWorker = useCallback(
+    (offer: WorkerSessionsOffer) => {
+      const prefs = normalizeSessionSearchPreferences(preferencesRef.current.sessionSearch);
+      if (!offer.cwd || !sessionSearchCwd || !prefs.enabled || !prefs.agents.includes(offer.runtime)) {
+        offer.startNew();
+        return;
+      }
+      setSessionPicker({ offer });
+    },
+    [sessionSearchCwd],
+  );
   useEffect(() => {
-    publishSessionSearchHost({ workspaceCwd: sessionSearchCwd, openSession: openSearchedSession });
-  }, [sessionSearchCwd, openSearchedSession]);
+    publishSessionSearchHost({
+      offerWorkerSessions: offerSessionsForWorker,
+      workspaceCwd: sessionSearchCwd,
+      openSession: openSearchedSession,
+      forkSession: forkSearchedSession,
+      splitSession: splitSearchedSession,
+      canSplitSession: canSplitSearchedSession,
+      isSessionOpen: isSearchedSessionOpen,
+    });
+  }, [
+    sessionSearchCwd,
+    openSearchedSession,
+    forkSearchedSession,
+    splitSearchedSession,
+    canSplitSearchedSession,
+    isSearchedSessionOpen,
+    offerSessionsForWorker,
+  ]);
   useEffect(() => () => publishSessionSearchHost(null), []);
-
-  // The jump palette's "Search agent sessions": the rail's Sessions view,
-  // made visible, with the query in its box.
-  const openSessionSearch = useCallback((query: string) => {
-    const side: PanelSide = panelsRef.current.sections.left.includes("workspaces") ? "left" : "right";
-    if (compactWorkbenchRef.current) setCompactPanel(side);
-    else if (side === "left") setShowLeft(true);
-    else setShowRight(true);
-    panelsRef.current.revealSection("workspaces");
-    setRailView("sessions");
-    requestSessionSearch(query, "all");
-  }, []);
 
   const handleNewEditorTab = useCallback(() => {
     setSearchOpen(false);
@@ -5923,6 +6091,12 @@ export default function App() {
     () => ({
       "shortcuts.open": () => setShortcutsOpen((open) => !open),
       "runSwitcher.open": () => setRunSwitcherOpen((open) => !open),
+      "sessions.openPicker": () => {
+        // As with the jump palette: not under another dialog holding the keyboard.
+        const modal = visibleModalDialog();
+        if (modal && !modal.matches('[data-testid="session-picker"]')) return;
+        setSessionPicker((open) => (open ? null : {}));
+      },
       "jump.open": () => {
         // Not over another dialog (Settings, Fix with agent, quick commands):
         // the palette would open under it while the dialog keeps the keyboard.
@@ -6019,6 +6193,9 @@ export default function App() {
       "worker.newCodex": () => handleNewWorkerPane(CODEX_LAUNCH_COMMAND),
       "worker.newGrok": () => handleNewWorkerPane(GROK_LAUNCH_COMMAND),
       "worker.newPi": () => handleNewWorkerPane(PI_LAUNCH_COMMAND),
+      "worker.claudeSessions": () => offerWorkerPane("claude", CLAUDE_LAUNCH_COMMAND),
+      "worker.codexSessions": () => offerWorkerPane("codex", CODEX_LAUNCH_COMMAND),
+      "worker.grokSessions": () => offerWorkerPane("grok", GROK_LAUNCH_COMMAND),
       "tab.close": () => {
         if (!activeVisibleTabId) return;
         const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
@@ -6203,6 +6380,11 @@ export default function App() {
         if (!/\.(md|markdown|mdown|mkd|mkdn)$/i.test(active.path)) return;
         window.dispatchEvent(new CustomEvent("spark:markdown.togglePreview"));
       },
+      // Only a focused file editor listens; it saves the opposite of what the
+      // file does now as the user's own choice.
+      "editor.toggleWordWrap": () => {
+        window.dispatchEvent(new CustomEvent("spark:editor.toggleWordWrap"));
+      },
       "browser.pickElement": () => dispatchBrowserPoint("pick"),
       "browser.comment": () => dispatchBrowserPoint("comment"),
       "browser.fullScreen": () => dispatchBrowserAction("fullScreen"),
@@ -6216,6 +6398,7 @@ export default function App() {
       handleNewTerminalTab,
       handleNewWhiteboard,
       handleNewWorkerPane,
+      offerWorkerPane,
       handleCloseChatTab,
       handleToggleLeft,
       handleToggleRight,
@@ -6286,6 +6469,9 @@ export default function App() {
       ) {
         return true;
       }
+      // Alt+Z is also a shell's meta-z (readline, zsh), and the toggle only
+      // acts on a file editor, so a terminal keeps the key.
+      if (terminalKeepsChord(id, event.target)) return true;
       // The terminal split chords only act on terminal tabs; swallowing them
       // at capture phase elsewhere would kill surface-local bindings that
       // share the chord (the whiteboard's Ctrl+D duplicate).
@@ -6341,6 +6527,7 @@ export default function App() {
       chat: hintForCommand(bindingTable, "chat.new"),
       terminal: hintForCommand(bindingTable, "tab.newTerminal"),
       preview: hintForCommand(bindingTable, "tab.newPreview"),
+      sessions: hintForCommand(bindingTable, "sessions.openPicker"),
     }),
     [bindingTable],
   );
@@ -6987,6 +7174,7 @@ export default function App() {
               onNewCodexWorker={openCodexWorker}
               onNewGrokWorker={openGrokWorker}
               onNewPiWorker={openPiWorker}
+              onOpenSessionPicker={openSessionPicker}
               onNewChat={handleNewChat}
               onOpenBoardCardRun={handleOpenBoardCardRun}
               onRenameChat={handleRenameChatTab}
@@ -7186,8 +7374,19 @@ export default function App() {
               onCreateWorktree={handleJumpCreateWorktree}
               onSearchSessions={(query) => {
                 setJumpPaletteOpen(false);
-                openSessionSearch(query);
+                setSessionPicker({ query, scope: "all" });
               }}
+            />
+          </Suspense>
+        ) : null}
+
+        {sessionPicker ? (
+          <Suspense fallback={null}>
+            <SessionPicker
+              initialQuery={sessionPicker.query}
+              initialScope={sessionPicker.scope}
+              offer={sessionPicker.offer}
+              onClose={() => setSessionPicker(null)}
             />
           </Suspense>
         ) : null}
@@ -7594,6 +7793,7 @@ interface WorkspaceProps {
   onNewCodexWorker: () => void;
   onNewGrokWorker: () => void;
   onNewPiWorker: () => void;
+  onOpenSessionPicker: () => void;
   onNewChat: () => void;
   // "Open chat" on a Cora Board card with a live run — App's run-selection
   // path, threaded down to the chat panel's embedded board sub-view.
@@ -7650,6 +7850,7 @@ const Workspace = React.memo(function Workspace({
   onNewCodexWorker,
   onNewGrokWorker,
   onNewPiWorker,
+  onOpenSessionPicker,
   onNewChat,
   onOpenBoardCardRun,
   onRenameChat,
@@ -8014,6 +8215,18 @@ const Workspace = React.memo(function Workspace({
     },
     [onOpenBoardCardRun, rememberChatView],
   );
+  // A surface outside the chat stack hands Cora a message to review and send.
+  // The draft may last have shown its board, where the composer is hidden.
+  const handleAskCora = useCallback(
+    (prompt: string) => {
+      if (!workspace) return;
+      const chatTabId = tabs.openChatTab({ runId: null, focus: true });
+      rememberChatView(chatTabId, "chat");
+      setChatView("chat");
+      requestDraftPrefill(workspace.id, prompt);
+    },
+    [tabs, workspace, rememberChatView],
+  );
   // First card mutation on a DRAFT chat's board: mint the run WITHOUT starting
   // autopilot, persist the cards on its board, then promote the draft tab via
   // the same snapshot path a first message uses. The user is looking at the
@@ -8373,6 +8586,7 @@ const Workspace = React.memo(function Workspace({
         onNewCodexWorker={onNewCodexWorker}
         onNewGrokWorker={onNewGrokWorker}
         onNewPiWorker={onNewPiWorker}
+        onOpenSessionPicker={onOpenSessionPicker}
         onNewChat={onNewChat}
         onRenameChat={onRenameChat}
         onCloseChat={onCloseChat}
@@ -8401,6 +8615,7 @@ const Workspace = React.memo(function Workspace({
           onSelectTab={handleInnerSelectTab}
         />
       )}
+      {workspace && <BackgroundAgentNotice workspaceId={workspace.id} />}
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
         {/* Also when effectiveActiveId is null with tabs present: every
             remaining tab is run-owned with no owning chat open (nothing is
@@ -8567,6 +8782,7 @@ const Workspace = React.memo(function Workspace({
               dockIndex={dockIndex}
               workspace={workspace}
               onOpenRunChat={handleOpenBoardCardRunInChat}
+              onAskCora={handleAskCora}
             />
           </Suspense>
         )}

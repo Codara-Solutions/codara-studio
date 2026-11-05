@@ -7,7 +7,9 @@ import {
 } from "@shared/types";
 import { sanitizeTerminalAgentOwner, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import { makeId } from "@shared/ids";
+import { SPLIT_TITLE_BASE, TERMINAL_TITLE_BASE } from "@shared/tab-default-titles";
 import { basename } from "../path-utils";
+import { tabFilePaths } from "./tabsShowingPath";
 import {
   collectLeaves,
   findLeaf,
@@ -273,8 +275,6 @@ function buildWeightedPaneLine(
 // by side. Calling that "terminals" in the strip would be a lie, so the two
 // families are numbered separately — and a container that later gains a shell
 // keeps whatever unique title it already has rather than churning.
-const TERMINAL_TITLE_BASE = "terminals";
-const SPLIT_TITLE_BASE = "split";
 
 function terminalTitleBaseFor(tab: TerminalTab): string {
   return collectTerminalLeaves(tab.root).length > 0 ? TERMINAL_TITLE_BASE : SPLIT_TITLE_BASE;
@@ -550,6 +550,52 @@ export function validateDockLeaves(tabs: Tab[]): Tab[] {
     out.push({ ...tab, root, activePaneId, zoomedPaneId });
   }
   return out;
+}
+
+/**
+ * Whether a workspace's saved layout, not loaded this session, holds anything
+ * a removal of its folder would take away. A plain shell does not: it comes
+ * back empty anywhere. Anything unreadable counts as holding work.
+ */
+export function savedLayoutHoldsWork(workspaceId: string): boolean {
+  const key = storageKey(workspaceId);
+  if (!key) return true;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return false;
+    const parsed = migratePersisted(JSON.parse(raw) as PersistedShape);
+    if (!parsed) return true;
+    return parsed.tabs.some(
+      (tab) =>
+        tab.kind !== "terminal" ||
+        Boolean(tab.scope) ||
+        collectLeaves(tab.root).some(
+          (leaf) =>
+            Boolean(leaf.content && leaf.content.type !== "terminal") ||
+            Boolean(leaf.worker || leaf.agentSession || leaf.autorun || leaf.agentOwner),
+        ),
+    );
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The files a workspace's saved layout shows in tabs (editors, previews of
+ * file:// URLs). A layout that cannot be read restores no tabs (loadPersisted
+ * gives up on it too), so it shows none.
+ */
+export function savedLayoutFilePaths(workspaceId: string): string[] {
+  const key = storageKey(workspaceId);
+  if (!key) return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = migratePersisted(JSON.parse(raw) as PersistedShape);
+    return parsed ? tabFilePaths(parsed.tabs) : [];
+  } catch {
+    return [];
+  }
 }
 
 function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number): PersistedShape | null {
@@ -3469,30 +3515,28 @@ export function useTabs(
         agentSession?: TerminalAgentSession | null;
       },
     ): boolean => {
-      let added = false;
+      const rootWidth = options?.rootWidth ?? 1600;
+      const rootHeight = options?.rootHeight ?? 900;
+      // Answered before setTabs: React defers the updater whenever this
+      // component has another update pending, and a caller told "not added"
+      // opens a new tab too, which would launch the same command twice.
+      const current = tabsRef.current.find((t) => t.id === tabId);
+      if (current?.kind !== "terminal") return false;
+      if (findLeaf(current.root, paneId)) return true;
+      if (!smartAddTarget(current.root, rootWidth, rootHeight)) return false;
       setTabs((curr) =>
         curr.map((t) => {
-          if (t.id !== tabId || t.kind !== "terminal") return t;
-          if (findLeaf(t.root, paneId)) {
-            // already present; nothing to do but treat as success
-            added = true;
-            return t;
-          }
-          const target = smartAddTarget(
-            t.root,
-            options?.rootWidth ?? 1600,
-            options?.rootHeight ?? 900,
-          );
+          if (t.id !== tabId || t.kind !== "terminal" || findLeaf(t.root, paneId)) return t;
+          const target = smartAddTarget(t.root, rootWidth, rootHeight);
           if (!target) return t;
           const newLeaf = leaf(paneId, options?.cwd, options?.autorun);
           if (options?.worker !== undefined) newLeaf.worker = options.worker;
           if (options?.agentSession) newLeaf.agentSession = options.agentSession;
           const root = splitAtLeaf(t.root, target.paneId, target.direction, newLeaf);
-          added = true;
           return { ...t, root, activePaneId: paneId };
         }),
       );
-      return added;
+      return true;
     },
     [],
   );

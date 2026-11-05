@@ -8,8 +8,8 @@ import { join } from "node:path";
 // The Agents tab as an inbox (after T3 Code) against a throwaway Codara
 // home. Main's per-pane activity, the pull request watcher and GitHub are
 // stood in for from the main process, so the rows are a fixed, realistic day
-// with no real agent, account or network: what needs you and what finished
-// on top, the Working, Snoozed and Settled shelves, hover actions, the menu,
+// with no real agent, account or network: every row under its heading
+// (Needs you, Done, Working, Snoozed, Settled), hover actions, the menu,
 // snooze, settle with undo, one-click merge into a non-main base, the
 // confirmation for main, and a merged pull request that settles itself.
 //
@@ -243,6 +243,28 @@ const viewTab = (page: Page, name: "Workspaces" | "Agents") =>
 const row = (page: Page, paneId: string) => page.locator(`[data-agent-card="pane:${paneId}"]`);
 const shelf = (page: Page, name: string) => page.locator(".agent-inbox__shelf-btn", { hasText: name });
 
+// Every row sits under a heading, in the headings' order, and an open
+// heading's count is the rows under it: no row floats above the sections.
+async function headingsAgree(page: Page): Promise<void> {
+  const layout = await page.locator(".agent-inbox__scroll").evaluate((scroll) => {
+    const sections = Array.from(scroll.querySelectorAll<HTMLElement>("[data-agent-section]")).map((section) => ({
+      id: section.dataset.agentSection ?? "",
+      count: Number(section.querySelector(".agent-inbox__shelf-count")?.textContent ?? Number.NaN),
+      open: section.querySelector(".agent-inbox__shelf-btn")?.getAttribute("aria-expanded") === "true",
+      rows: section.querySelectorAll("[data-agent-card]").length,
+    }));
+    const outside = Array.from(scroll.querySelectorAll("[data-agent-card]")).filter(
+      (card) => !card.closest("[data-agent-section]"),
+    ).length;
+    return { sections, outside };
+  });
+  expect(layout.outside, "rows outside any heading").toBe(0);
+  expect(layout.sections.map((section) => section.id)).toEqual(["needs", "done", "working", "snoozed", "settled"]);
+  for (const section of layout.sections) {
+    expect(section.rows, `rows under ${section.id}`).toBe(section.open ? section.count : 0);
+  }
+}
+
 async function railShot(page: Page, name: string, extra?: { height?: number }): Promise<void> {
   if (!SHOTS) return;
   const box = await page.locator(".agent-inbox").boundingBox();
@@ -310,6 +332,25 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
       await expect(row(page, "p-forge").locator('[data-agent-runtime="codex"]')).toHaveAttribute("title", "Codex");
       // The question stays one hover away.
       await expect(row(page, "p-invoice").locator("[data-agent-card-open]")).toHaveAttribute("title", /October hosting invoice/);
+    });
+
+    await test.step("every row sits under Needs you, Done, Working, Snoozed or Settled", async () => {
+      await expect(shelf(page, "Needs you")).toHaveAccessibleName("Needs you, 2");
+      await expect(shelf(page, "Done")).toHaveAccessibleName("Done, 3");
+      await expect(page.locator('[data-agent-section="needs"] [data-agent-card]')).toHaveCount(2);
+      await expect(page.locator('[data-agent-section="needs"] [data-agent-card="pane:p-invoice"]')).toHaveCount(1);
+      await expect(page.locator('[data-agent-section="needs"] [data-agent-card="pane:p-pr30"]')).toHaveCount(1);
+      await expect(page.locator('[data-agent-section="done"] [data-agent-card="pane:p-usage"]')).toHaveCount(1);
+      await expect(page.locator('[data-agent-section="done"] [data-agent-card="pane:p-forge"]')).toHaveCount(1);
+      await headingsAgree(page);
+      // A folded heading hides its rows and keeps its count.
+      await shelf(page, "Done").click();
+      await expect(shelf(page, "Done")).toHaveAttribute("aria-expanded", "false");
+      await expect(row(page, "p-usage")).toHaveCount(0);
+      await expect(shelf(page, "Done")).toHaveAccessibleName("Done, 3");
+      await headingsAgree(page);
+      await shelf(page, "Done").click();
+      await expect(row(page, "p-usage")).toHaveCount(1);
     });
 
     await test.step("working agents sit on the Working shelf with a live timer", async () => {
@@ -437,6 +478,7 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
       await expect(page.locator('[data-agent-shelf="settled"]')).toHaveCount(3);
       await expect(row(page, "p-ctrlt").getByTestId("agent-inbox-pr")).toHaveText("#59merged");
       await page.mouse.move(0, 0);
+      await headingsAgree(page);
       await railShot(page, "agents-settled.png");
     });
 
@@ -462,7 +504,10 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
       await expect(row(page, "p-forge").locator(".agent-inbox-row__title")).toHaveText("Backtest 2026");
       await row(page, "p-forge").locator("[data-agent-card-open]").click({ button: "right" });
       await page.getByRole("menu", { name: "Actions for Backtest 2026" }).getByRole("menuitem", { name: "Pin" }).click();
-      await expect(page.locator('[data-agent-shelf="inbox"]').first()).toHaveAttribute("data-agent-card", "pane:p-forge");
+      await expect(page.locator('[data-agent-section="done"] [data-agent-card]').first()).toHaveAttribute(
+        "data-agent-card",
+        "pane:p-forge",
+      );
     });
 
     await test.step("what the user decided survives a reload", async () => {

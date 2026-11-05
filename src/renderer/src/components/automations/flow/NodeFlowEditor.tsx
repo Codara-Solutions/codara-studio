@@ -21,13 +21,17 @@ import type {
 import { isStepsOnly, type PaletteChoice } from "./model";
 import { loopSummary, triggerSummary } from "../presentation";
 import NodeContextPanel from "./NodeContextPanel";
+import { guardDraftProblem } from "@shared/automation-guard";
 import LoopInspector from "./LoopInspector";
+import { costForecast } from "../cost-forecast";
+import { eurFieldFromUsd, moneyRate } from "@shared/money";
 import AddNodePalette, { type PaletteState } from "./AddNodePalette";
 import { edgeTypes, nodeTypes } from "./FlowNodes";
 import { PRESETS, type LoomPreset } from "./presets";
 import { buildGate } from "./gate-model";
 import {
   TRIGGER_ID,
+  buildGuard,
   buildLoop,
   buildTrigger,
   buildWorker,
@@ -49,6 +53,11 @@ import {
 
 export interface NodeFlowEditorProps {
   initial?: ScheduledJob;
+  /** A new automation carried over from the sentence screen, not yet saved. */
+  seed?: ScheduledJob;
+  /** A new automation starting from a proven workflow. */
+  startPreset?: LoomPreset;
+  startName?: string;
   jobs: ScheduledJob[];
   workspaceId: string;
   workspaceName: string;
@@ -70,6 +79,9 @@ export default function NodeFlowEditor(props: NodeFlowEditorProps): React.ReactE
 
 function Editor({
   initial,
+  seed,
+  startPreset,
+  startName,
   jobs,
   workspaceId,
   workspaceName,
@@ -83,12 +95,12 @@ function Editor({
   // The draft holds name + trigger + loop + (worker defaults). The GRAPH lives
   // in ReactFlow state. Worker node data carries its own LoomWorkerConfig.
   const [draft, setDraft] = useState<LoomDraft>(() =>
-    initial ? draftFromJob(initial) : emptyDraft(),
+    initial || seed ? draftFromJob((initial ?? seed) as ScheduledJob) : { ...emptyDraft(), name: startName ?? "" },
   );
 
   const initialFlow = useMemo(() => {
-    if (initial) {
-      const flow = flowFromGraph(initial);
+    if (initial || seed) {
+      const flow = flowFromGraph((initial ?? seed) as ScheduledJob);
       // Open with the trigger selected so its config panel is showing.
       flow.nodes = flow.nodes.map((n) => ({ ...n, selected: n.id === TRIGGER_ID }));
       return flow;
@@ -119,9 +131,9 @@ function Editor({
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>(initialFlow.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>(initialFlow.edges);
   const [selectedId, setSelectedId] = useState<string | null>(TRIGGER_ID);
-  const [dirty, setDirty] = useState(false);
+  const [dirty, setDirty] = useState(Boolean(seed));
   const [confirmDiscard, setConfirmDiscard] = useState(false);
-  const [presetsOpen, setPresetsOpen] = useState(!editing);
+  const [presetsOpen, setPresetsOpen] = useState(!editing && !seed && !startPreset);
   const [loopOpen, setLoopOpen] = useState(false);
   const [palette, setPalette] = useState<PaletteState | null>(null);
   const [showMiniMap, setShowMiniMap] = useState(true);
@@ -355,8 +367,14 @@ function Editor({
           next.trigger.cronTz = preset.trigger.tz ?? "";
         }
         if (preset.trigger.kind === "folder") next.trigger.folderPath = preset.trigger.path || cwd;
+        if (preset.trigger.kind === "github") {
+          next.trigger.githubEvents = {
+            prOpened: preset.trigger.events.includes("prOpened"),
+            ciFailed: preset.trigger.events.includes("ciFailed"),
+          };
+        }
         if (typeof preset.loop.stop.maxIterations === "number") next.loop.maxIters = String(preset.loop.stop.maxIterations);
-        if (typeof preset.loop.stop.budgetUsd === "number") next.loop.budget = String(preset.loop.stop.budgetUsd);
+        if (typeof preset.loop.stop.budgetUsd === "number") next.loop.budget = eurFieldFromUsd(preset.loop.stop.budgetUsd);
         next.loop.untilTests = Boolean(preset.loop.stop.untilTestsPass);
         if (preset.loop.stop.testCommand) next.loop.testCommand = preset.loop.stop.testCommand;
         next.loop.untilGit = Boolean(preset.loop.stop.untilGitClean);
@@ -381,17 +399,40 @@ function Editor({
     [cwd, rf, setNodes, setEdges],
   );
 
+  useEffect(() => {
+    if (startPreset) applyPreset(startPreset);
+    // Once, on opening: the choice was made on the screen before this one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── validation ────────────────────────────────────────────────────────────
   const triggerBuilt = buildTrigger(draft.trigger);
+  // Walks a year of the schedule, and the canvas re-renders on every drag.
+  const forecast = useMemo(
+    () =>
+      costForecast(
+        {
+          trigger: buildTrigger(draft.trigger),
+          stepsOnly: isStepsOnly(nodes),
+          budgetUsd: buildLoop(draft.loop).stop.budgetUsd,
+          monthlyCapUsd: buildGuard(draft.loop)?.monthlyCapUsd,
+        },
+        Date.now(),
+      ),
+    [draft.trigger, draft.loop, nodes, moneyRate()],
+  );
   const nameMissing = draft.name.trim().length === 0;
   const graphProblem = useMemo(() => validateGraph(nodes, edges), [nodes, edges]);
   const triggerInvalid = !triggerBuilt;
+  const guardProblem = guardDraftProblem(draft.loop.monthlyCap, draft.loop.pauseAfter);
   const firstProblem: { message: string; focusNodeId?: string } | null = nameMissing
     ? { message: "Name the automation." }
     : triggerInvalid
       ? { message: "Finish the trigger setup.", focusNodeId: TRIGGER_ID }
-      : graphProblem;
-  const canSubmit = !nameMissing && !triggerInvalid && !graphProblem;
+      : guardProblem
+        ? { message: guardProblem }
+        : graphProblem;
+  const canSubmit = !nameMissing && !triggerInvalid && !guardProblem && !graphProblem;
 
   // ── save ────────────────────────────────────────────────────────────────────
   const handleSubmit = useCallback(() => {
@@ -432,6 +473,8 @@ function Editor({
         graph,
         precheck: gate.precheck ?? null,
         missedRuns: gate.missedRuns ?? null,
+        ownBranch: draft.loop.ownBranch ? { draftPr: draft.loop.draftPr } : null,
+        guard: buildGuard(draft.loop) ?? null,
       });
     } else if (onCreate) {
       onCreate({
@@ -444,6 +487,8 @@ function Editor({
         graph,
         enabled: true,
         ...gate,
+        ...(draft.loop.ownBranch ? { ownBranch: { draftPr: draft.loop.draftPr } } : {}),
+        ...(buildGuard(draft.loop) ? { guard: buildGuard(draft.loop) } : {}),
       });
     }
   }, [canSubmit, draft, nodes, edges, editing, initial, onCreate, onSave, workspaceId, workspaceName, cwd]);
@@ -799,6 +844,7 @@ function Editor({
             {loopOpen ? (
               <LoopInspector
                 loop={draft.loop}
+                forecast={forecast}
                 onChange={(loop) => {
                   setDraft((d) => ({ ...d, loop }));
                   markDirty();

@@ -90,6 +90,20 @@ export function toolInputSummary(toolName: string, input: unknown): string {
 // One human line per tool call: a verb-first title ("Read README.md") and an
 // optional muted detail (the full path, pattern, or command). Raw payloads
 // stay behind the disclosure — the headline is what the conversation needs.
+export type ToolActivityKind = "read" | "search" | "run" | "edit" | "web" | "worker" | "other";
+
+/** What a call did, for its icon. The name lists match toolCallHeadline's. */
+export function toolActivityKind(toolName: string): ToolActivityKind {
+  const normalized = toolName.replace(/^mcp__codara-studio__/, "").toLowerCase();
+  if (["read", "read_file", "readfile", "cat", "view", "open", "ls", "list", "list_dir", "list_directory", "listdirectory"].includes(normalized)) return "read";
+  if (["write", "write_file", "writefile", "create_file", "save", "edit", "multiedit", "multi_edit", "str_replace", "str_replace_editor", "apply_patch", "patch"].includes(normalized)) return "edit";
+  if (["grep", "rg", "ripgrep", "search", "code_search", "find", "glob"].includes(normalized)) return "search";
+  if (["webfetch", "fetch", "web_fetch", "curl", "websearch", "web_search"].includes(normalized)) return "web";
+  if (normalized === "shell" || normalized === "bash") return "run";
+  if (normalized.includes("worker")) return "worker";
+  return "other";
+}
+
 export function toolCallHeadline(toolName: string, input: unknown): { title: string; detail: string } {
   const value = input && typeof input === "object" && !Array.isArray(input)
     ? (input as Record<string, unknown>)

@@ -35,6 +35,7 @@ import FastModeToggle from "./composer/FastModeToggle";
 import ModelThinkingPicker from "./composer/ModelThinkingPicker";
 import { readModelVisibility, shownModelGroups } from "./composer/model-visibility";
 import { prefillDraft } from "./composer/prefill-draft";
+import { DRAFT_PREFILL_PENDING_EVENT, consumeDraftPrefill } from "./composer/pending-prefill";
 import ProfilePicker from "./composer/ProfilePicker";
 import CapabilitiesButton from "./composer/CapabilitiesButton";
 import {
@@ -534,6 +535,22 @@ export default function ChatComposer({
     window.addEventListener("spark:prefill-composer", handler);
     return () => window.removeEventListener("spark:prefill-composer", handler);
   }, [suspendGlobalEvents]);
+
+  // A message handed to this workspace's draft chat from another surface: taken
+  // only by the draft on screen, so it can never land in another conversation.
+  const isDraftChat = !run;
+  useEffect(() => {
+    if (suspendGlobalEvents || !isDraftChat) return;
+    const take = () => {
+      const text = consumeDraftPrefill(draftKey);
+      if (!text) return;
+      setDraft((current) => prefillDraft(current, text));
+      window.setTimeout(() => textareaRef.current?.focus({ preventScroll: true }), 0);
+    };
+    take();
+    window.addEventListener(DRAFT_PREFILL_PENDING_EVENT, take);
+    return () => window.removeEventListener(DRAFT_PREFILL_PENDING_EVENT, take);
+  }, [suspendGlobalEvents, isDraftChat, draftKey]);
 
   // Grow the textarea with its content up to a cap, then scroll internally.
   // Measuring is only valid while the composer is actually laid out: ChatPanel
@@ -2344,20 +2361,20 @@ function StopButton({ onClick, stopping }: { onClick: () => void; stopping: bool
       onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
-        width: 26,
-        height: 26,
-        flex: "0 0 26px",
+        width: 32,
+        height: 32,
+        flex: "0 0 32px",
         border: "none",
-        borderRadius: "var(--radius-control, 7px)",
-        background: hover ? "var(--panel-3)" : "var(--panel-2)",
+        borderRadius: "50%",
+        background: hover ? "color-mix(in oklch, var(--accent) 88%, var(--ink))" : "var(--accent)",
         // Keyboard focus restores the accent ring (the inline box-shadow would
         // otherwise clobber the global :focus-visible rule).
         boxShadow: focusRing
           ? "var(--focus-ring)"
           : pressed
             ? "var(--well)"
-            : "inset 0 0 0 1px var(--rule)",
-        color: "var(--ink)",
+            : "var(--lift-hi)",
+        color: "var(--accent-ink)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -2414,13 +2431,13 @@ function SendButton({
       onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
-        width: 26,
-        height: 26,
-        flex: "0 0 26px",
+        width: 32,
+        height: 32,
+        flex: "0 0 32px",
         border: "none",
-        borderRadius: "var(--radius-control, 7px)",
+        borderRadius: "50%",
         background: disabled
-          ? "color-mix(in oklab, var(--ink) 7%, transparent)"
+          ? "var(--panel-3)"
           : hover
             ? "color-mix(in oklch, var(--accent) 88%, var(--ink))"
             : "var(--accent)",
@@ -2435,7 +2452,7 @@ function SendButton({
               : hover
                 ? "var(--shadow-glow)"
                 : "var(--lift-hi)",
-        color: disabled ? "var(--muted)" : "var(--accent-ink)",
+        color: disabled ? "var(--ink-dim)" : "var(--accent-ink)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",

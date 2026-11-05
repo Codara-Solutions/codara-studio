@@ -210,6 +210,15 @@ async function main() {
   const { loaded, cleanup } = await loadService();
   const { startGitHubIssueWorkspace } = loaded;
   try {
+    {
+      // Storage could not read its file and started empty: nothing is made.
+      const unread = harness();
+      unread.dependencies.loadState = async () => ({ ...unread.state, [Symbol.for("codara.unreadableState")]: true });
+      const refused = await startGitHubIssueWorkspace({ sourceWorkspaceId: "ws-source", issueNumber: 42 }, unread.dependencies);
+      assert.equal(refused.ok, false, JSON.stringify(refused));
+      assert.equal(refused.code, "state-unreadable", JSON.stringify(refused));
+      assert.equal(unread.calls.includes("create"), false, "no worktree is created without the rows");
+    }
     const happy = harness();
     const created = await startGitHubIssueWorkspace(
       { sourceWorkspaceId: "ws-source", issueNumber: 42 },

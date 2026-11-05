@@ -47,6 +47,7 @@ async function main() {
     listWorkerSessions,
     parseClaudeSessionHead,
     parseCodexSessionHead,
+    transcriptSessionTitle,
   } = require(outfile);
 
   let failures = 0;
@@ -967,6 +968,26 @@ async function main() {
     "codex-all is scoped to the explicitly selected home",
     fs.existsSync(path.join(otherCodexHome, "memories", "keep.md")) &&
       fs.readFileSync(path.join(otherCodexHome, "history.jsonl"), "utf8").includes(otherCodexId),
+  );
+
+  // The name a worktree refusal gives an agent tab with no name of its own.
+  const titled = path.join(fixtureRoot, "titled.jsonl");
+  fs.writeFileSync(titled, jsonl(
+    { type: "user", isSidechain: false, message: { role: "user", content: "First prompt of the session" } },
+    { type: "ai-title", aiTitle: "Rail cleanup fixes" },
+  ));
+  check("Pane session name prefers the Claude ai-title", (await transcriptSessionTitle("claude", titled)) === "Rail cleanup fixes");
+  const untitledClaude = path.join(fixtureRoot, "untitled.jsonl");
+  fs.writeFileSync(untitledClaude, jsonl({ type: "user", isSidechain: false, message: { role: "user", content: "Coordinate the batch" } }));
+  check("Pane session name falls back to the first prompt", (await transcriptSessionTitle("claude", untitledClaude)) === "Coordinate the batch");
+  const codexNamed = path.join(fixtureRoot, "rollout-named.jsonl");
+  fs.writeFileSync(codexNamed, jsonl({ type: "event_msg", payload: { type: "user_message", message: "Review the diff" } }));
+  check("Pane session name of a Codex rollout is its first prompt", (await transcriptSessionTitle("codex", codexNamed)) === "Review the diff");
+  const notTranscript = path.join(fixtureRoot, "notes.txt");
+  fs.writeFileSync(notTranscript, jsonl({ type: "ai-title", aiTitle: "nope" }));
+  check(
+    "Pane session name reads only an absolute .jsonl transcript",
+    (await transcriptSessionTitle("claude", notTranscript)) === null && (await transcriptSessionTitle("claude", "titled.jsonl")) === null,
   );
 
   if (failures > 0) {

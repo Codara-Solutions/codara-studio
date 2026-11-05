@@ -373,7 +373,7 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     expect(serializedSubscriptionStatus).not.toContain("synthetic-openai-access");
     expect(serializedSubscriptionStatus).not.toContain("synthetic-openai-refresh");
 
-    await clickAttached(page.getByRole("button", { name: "Sessions" }));
+    await clickAttached(settingsNav(page).getByRole("button", { name: "Sessions", exact: true }));
     const restoreSessions = page.getByRole("switch", {
       name: "Resume running agent sessions when Codara reopens",
     });

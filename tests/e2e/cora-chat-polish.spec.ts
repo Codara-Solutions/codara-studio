@@ -86,7 +86,7 @@ test("Cora messages keep a readable measure and the terminal remains healthy beh
     expect(geometry.assistant?.width).toBeLessThanOrEqual(769);
     expect(geometry.overflow).toBeLessThanOrEqual(1);
     expect(geometry.userSurface.background).not.toBe("rgba(0, 0, 0, 0)");
-    expect(geometry.userSurface.border).toBe("1px");
+    expect(geometry.userSurface.border).toBe("0px");
     expect(geometry.assistantSurface.background).toBe("rgba(0, 0, 0, 0)");
     expect(geometry.assistantSurface.border).toBe("0px");
     expect(geometry.assistantSurface.shadow).toBe("none");
@@ -140,7 +140,7 @@ test("Cora messages keep a readable measure and the terminal remains healthy beh
   }
 });
 
-test("completed Cora turns retain provider-ordered text and tools without duplicating the final answer", async () => {
+test("a completed Cora turn folds its work behind Worked for, one click from every step", async () => {
   const fixture = await prepareFixture("codara-ordered-trace-");
   const runId = "run-ordered-trace";
   await seedPersistedExecutionRun(fixture.userDataDir, fixture.workspaceDir, runId);
@@ -165,14 +165,22 @@ test("completed Cora turns retain provider-ordered text and tools without duplic
     await selectCoraTab(page);
     await selectChatFromHistory(page, "Ordered execution", runId);
 
-    // The settled chat turn keeps its streamed prose and tool rows INLINE in
-    // the transcript (no disclosure to open): text and tools stay visible in
-    // provider order, and the trailing streamed copy of the final answer is
-    // deduped against the durable message below.
-    const worked = page.getByText(/Worked for 4\s*s/);
+    // Closed, the turn is its Worked for line and the durable answer below it.
+    const worked = page.getByRole("button", { name: /Worked for 4\s*s/ });
     await expect(worked).toBeVisible({ timeout: 15_000 });
+    await expect(worked).toHaveAttribute("aria-expanded", "false");
     const manager = page.locator('.cora-settled-turn[data-manager-call-id="spark-ordered"]');
     await expect(manager).toBeVisible();
+    await expect(manager.locator("[data-execution-kind]")).toHaveCount(0);
+    await expect(page.locator('[data-message-author="cora"]').last()).toContainText(
+      "The durable final answer.",
+    );
+
+    // One click opens every step: text and tools in provider order, with the
+    // trailing streamed copy of the final answer deduped against the durable
+    // message below.
+    await worked.click();
+    await expect(worked).toHaveAttribute("aria-expanded", "true");
     await expect(manager).toContainText("I’ll inspect the package metadata first.");
     await expect(manager).toContainText("The entry point is clear; now I’ll inspect the runtime.");
     await expect(manager.getByText("The durable final answer.")).toHaveCount(0);
@@ -182,6 +190,127 @@ test("completed Cora turns retain provider-ordered text and tools without duplic
     expect(await manager.locator("[data-execution-kind]").evaluateAll((nodes) =>
       nodes.map((node) => node.getAttribute("data-execution-kind")),
     )).toEqual(["text", "tool", "text", "tool"]);
+
+    await worked.click();
+    await expect(manager.locator("[data-execution-kind]")).toHaveCount(0);
+  } finally {
+    await app?.close();
+  }
+});
+
+test("a new Cora chat offers its starters as pills that frame the first message", async () => {
+  const fixture = await prepareFixture("codara-chat-empty-");
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...process.env,
+        SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
+        SPARK_NO_SHELL_INTEGRATION: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    const starters = page.locator(".cora-starter");
+    await expect(starters).toHaveCount(4);
+    await expect(starters.first()).toHaveText("Map this project");
+    await expect(starters.first()).toHaveAttribute("title", /Architecture/);
+    if (process.env.SPARK_CHAT_LOOK_DIR) {
+      await page.screenshot({ path: join(process.env.SPARK_CHAT_LOOK_DIR, "chat-empty.png") });
+    }
+    await starters.first().click();
+    await expect(page.getByPlaceholder("Tell Cora what to build, or describe a task.")).toHaveValue(/^Map this project/);
+  } finally {
+    await app?.close();
+  }
+});
+
+test("the chat keeps failures open, folds long messages, and find opens what it lands in", async () => {
+  const fixture = await prepareFixture("codara-chat-look-");
+  const runId = "run-chat-look";
+  await seedPersistedLookRun(fixture.userDataDir, fixture.workspaceDir, runId);
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...process.env,
+        SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
+        SPARK_NO_SHELL_INTEGRATION: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    const proof = process.env.SPARK_CHAT_LOOK_DIR;
+    await selectCoraTab(page);
+    await selectChatFromHistory(page, "Chat look", runId);
+
+    const worked = page.getByRole("button", { name: /Worked for 42\s*s/ });
+    await expect(worked).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(".cora-md-code__lang").first()).toHaveText("js");
+
+    // A failed turn is when the steps matter: no fold, the tool stays on screen.
+    const failed = page.locator('.cora-settled-turn[data-manager-call-id="spark-look-2"]');
+    await expect(failed).toContainText("Turn failed");
+    await expect(failed.getByRole("button", { name: /Worked/ })).toHaveCount(0);
+    await expect(failed.locator('[data-execution-kind="tool"]')).toHaveCount(1);
+
+    // A tool that failed inside a finished turn stays out of the fold.
+    const recovered = page.locator('.cora-settled-turn[data-manager-call-id="spark-look-3"]');
+    await expect(recovered.getByRole("button", { name: /Worked for 19\s*s/ })).toHaveAttribute("aria-expanded", "false");
+    await expect(recovered.locator('[data-execution-kind="tool"]')).toHaveCount(1);
+    await expect(recovered.locator('[data-execution-kind="tool"]')).toContainText("exit 1");
+
+    const more = page.getByRole("button", { name: "Show full message" });
+    await expect(more).toBeVisible();
+    await expect(page.locator(".cora-user-md.is-collapsed")).toHaveCount(1);
+
+    if (proof) {
+      for (const theme of ["codara-classic", "codara-daylight"] as const) {
+        await page.evaluate((value) => window.spark.preferences.set("theme", value), theme);
+        await page.waitForTimeout(250);
+        await page.screenshot({ path: join(proof, `chat-${theme}.png`) });
+        await page.locator('[data-testid="cora-conversation"] [data-virtuoso-scroller]').evaluate((node) => {
+          node.scrollTop = 0;
+        });
+        await page.waitForTimeout(250);
+        await page.screenshot({ path: join(proof, `chat-top-${theme}.png`) });
+        await page.locator('[data-testid="cora-conversation"] [data-virtuoso-scroller]').evaluate((node) => {
+          node.scrollTop = node.scrollHeight;
+        });
+        await page.waitForTimeout(250);
+      }
+      await page.evaluate(() => window.spark.preferences.set("theme", "codara-classic"));
+    }
+
+    await more.click();
+    await expect(page.getByRole("button", { name: "Show less" })).toBeVisible();
+    await expect(page.locator(".cora-user-md.is-collapsed")).toHaveCount(0);
+    await page.getByRole("button", { name: "Show less" }).click();
+    await expect(more).toBeVisible();
+
+    // Find must reach narration behind a closed fold.
+    await page.locator('[data-testid="cora-conversation"]').click();
+    await page.keyboard.press("Control+f");
+    const find = page.getByRole("textbox", { name: "Find in chat" });
+    await find.fill("narration behind the fold");
+    await find.press("Enter");
+    await expect(worked).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator('.cora-settled-turn[data-manager-call-id="spark-look-1"]'))
+      .toContainText("narration behind the fold");
+
+    // Find must reach the tail of a collapsed message too.
+    await find.fill("the very last words");
+    await find.press("Enter");
+    await expect(page.locator(".cora-user-md.is-collapsed")).toHaveCount(0);
+    if (proof) await page.screenshot({ path: join(proof, "chat-opened.png") });
   } finally {
     await app?.close();
   }
@@ -445,6 +574,9 @@ test("message roles stay explicit, explicit rewind works, and Stop preserves cha
     await composer.fill("");
     const stop = page.getByRole("button", { name: "Stop Cora" });
     await expect(stop).toBeVisible();
+    if (process.env.SPARK_CHAT_LOOK_DIR) {
+      await page.screenshot({ path: join(process.env.SPARK_CHAT_LOOK_DIR, "chat-running.png") });
+    }
     await stop.click();
 
     // Stop is an execution control, not a hidden rewind. All submitted and
@@ -700,6 +832,79 @@ async function seedPersistedExecutionRun(
     event(5, "chat.tool_use", { kind: "tool_use", toolUseId: "tool-2", toolName: "Glob", input: { pattern: "src/**/*.ts" }, conversationEpoch: 0 }),
     event(6, "chat.tool_result", { kind: "tool_result", toolUseId: "tool-2", output: "src/main.ts", conversationEpoch: 0 }),
     event(7, "chat.assistant_block", { kind: "assistant_block", messageId: "provider-final", text: "The durable final answer.", conversationEpoch: 0 }),
+  ].join("\n") + "\n", "utf8");
+}
+
+async function seedPersistedLookRun(
+  userDataDir: string,
+  workspaceDir: string,
+  runId: string,
+): Promise<void> {
+  const runDir = join(userDataDir, "runs", runId);
+  await mkdir(runDir, { recursive: true });
+  const longMessage = [
+    "New account is on, so retry that. While you are in there:",
+    "",
+    ...Array.from({ length: 12 }, (_, index) => `${index + 1}. Step ${index + 1} of the release cleanup, with enough words to wrap.`),
+    "",
+    "And here are the very last words of this message.",
+  ].join("\n");
+  const answer = "The packer hard-codes a `/`, so on Windows the archive lands in the wrong folder.\n\n```js\nconst out = path.join(dist, `${name}.zip`);\n```\n\nThe other 13 calls are fine.";
+  const message = (id: string, author: string, turn: string, text: string, at: string) => ({
+    id, runId, author, kind: "note", intent: author === "user" ? "turn" : "answer", deliveryState: "acknowledged",
+    backendTurnId: turn, conversationEpoch: 0, message: text, attachments: [], createdAt: at,
+  });
+  const call = (id: string, status: string, start: string, end: string, durationMs: number, extra = {}) => ({
+    id, runId, mode: "chat", model: "claude-opus-4-8", status, inputMessageIds: [], conversationEpoch: 0,
+    createdAt: start, completedAt: end, durationMs, ...extra,
+  });
+  await writeFile(join(runDir, "run.json"), JSON.stringify({
+    id: runId,
+    workspaceId: "ws-e2e",
+    title: "Chat look",
+    status: "complete",
+    settingsSnapshot: { workspaceCwd: workspaceDir },
+    artifactDir: runDir,
+    createdAt: "2026-07-13T09:00:00.000Z",
+    updatedAt: "2026-07-13T09:05:00.000Z",
+    completedAt: "2026-07-13T09:05:00.000Z",
+    conversationEpoch: 0,
+    plans: [], steps: [], workerTasks: [], workerAttempts: [], checkpoints: [], assumptions: [],
+    sparkCalls: [
+      call("spark-look-1", "completed", "2026-07-13T09:00:01.000Z", "2026-07-13T09:00:43.000Z", 42_000),
+      call("spark-look-2", "failed", "2026-07-13T09:02:01.000Z", "2026-07-13T09:02:05.000Z", 4_000, { error: "Claude's usage limit ran out. It resets at 17:00." }),
+      call("spark-look-3", "completed", "2026-07-13T09:04:01.000Z", "2026-07-13T09:04:20.000Z", 19_000),
+    ],
+    humanMessages: [
+      message("msg-1", "user", "spark-look-1", "why is the nightly failing on windows?", "2026-07-13T09:00:00.500Z"),
+      message("msg-2", "spark", "spark-look-1", answer, "2026-07-13T09:00:42.900Z"),
+      message("msg-3", "user", "spark-look-2", "yes, open it", "2026-07-13T09:02:00.500Z"),
+      message("msg-4", "user", "spark-look-3", longMessage, "2026-07-13T09:04:00.500Z"),
+      message("msg-5", "spark", "spark-look-3", "Both changes are in.", "2026-07-13T09:04:19.900Z"),
+    ],
+    autopilot: { status: "complete", updatedAt: "2026-07-13T09:05:00.000Z" },
+    chatBackend: "pi", chatMode: "auto",
+  }, null, 2), "utf8");
+  let sequence = 0;
+  const event = (call: string, at: string, type: string, payload: Record<string, unknown>) => {
+    sequence += 1;
+    return JSON.stringify({
+      id: `evt-look-${sequence}`, timestamp: at, eventVersion: 1,
+      sequence, workspaceId: "ws-e2e", runId, sparkCallId: call, type, payload,
+    });
+  };
+  const toolPair = (call: string, id: string, atUse: string, atResult: string, toolName: string, input: unknown, output: string) => [
+    event(call, atUse, "chat.tool_use", { kind: "tool_use", toolUseId: id, toolName, input, conversationEpoch: 0 }),
+    event(call, atResult, "chat.tool_result", { kind: "tool_result", toolUseId: id, output, conversationEpoch: 0 }),
+  ];
+  await writeFile(join(runDir, "events.jsonl"), [
+    event("spark-look-1", "2026-07-13T09:00:02.000Z", "chat.assistant_block", { kind: "assistant_block", messageId: "p-1", text: "Some narration behind the fold.", conversationEpoch: 0 }),
+    ...toolPair("spark-look-1", "t-1", "2026-07-13T09:00:03.000Z", "2026-07-13T09:00:04.000Z", "Read", { file_path: "scripts/pack.mjs" }, "contents"),
+    ...toolPair("spark-look-1", "t-2", "2026-07-13T09:00:05.000Z", "2026-07-13T09:00:06.000Z", "Bash", { command: "npm test -- pack" }, "1 failed"),
+    ...toolPair("spark-look-2", "t-3", "2026-07-13T09:02:02.000Z", "2026-07-13T09:02:03.000Z", "Read", { file_path: "scripts/upload.mjs" }, "contents"),
+    event("spark-look-3", "2026-07-13T09:04:01.200Z", "chat.tool_use", { kind: "tool_use", toolUseId: "t-failed", toolName: "Bash", input: { command: "npm run upload" }, conversationEpoch: 0 }),
+    event("spark-look-3", "2026-07-13T09:04:01.600Z", "chat.tool_result", { kind: "tool_result", toolUseId: "t-failed", output: "exit 1", isError: true, conversationEpoch: 0 }),
+    ...toolPair("spark-look-3", "t-4", "2026-07-13T09:04:02.000Z", "2026-07-13T09:04:03.000Z", "Edit", { file_path: "scripts/upload.mjs", old_string: "a", new_string: "b" }, "ok"),
   ].join("\n") + "\n", "utf8");
 }
 

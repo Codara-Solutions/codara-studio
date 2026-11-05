@@ -337,6 +337,37 @@ async function main() {
   const { service, cleanup } = await loadService();
   try {
     {
+      // Without the rows nothing is written or created: a folder a row still
+      // names could be handed out.
+      const test = harness();
+      const load = test.dependencies.loadState;
+      let failed = false;
+      test.dependencies.loadState = async () => {
+        // The first read once the pull request is known: the one the
+        // folder reservation needs. Later reads work.
+        if (test.calls.pullRequest >= 1 && !failed) {
+          failed = true;
+          throw new Error("state unreadable");
+        }
+        return load();
+      };
+      const result = await service.startGitHubPullRequestWorkspace(request, test.dependencies);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.code, "state-unreadable", JSON.stringify(result));
+      assert.equal(test.calls.create, 0, "no worktree is created without the rows");
+      assert.deepEqual(await test.dependencies.journal.listActive(), [], "no import is journaled");
+    }
+    {
+      // Storage could not read its file and started empty: the same.
+      const test = harness();
+      const load = test.dependencies.loadState;
+      test.dependencies.loadState = async () =>
+        test.calls.pullRequest >= 1 ? { ...(await load()), [Symbol.for("codara.unreadableState")]: true } : load();
+      const result = await service.startGitHubPullRequestWorkspace(request, test.dependencies);
+      assert.equal(result.code, "state-unreadable", JSON.stringify(result));
+      assert.equal(test.calls.create, 0, "no worktree is created from a state storage could not read");
+    }
+    {
       const test = harness();
       const [left, right] = await Promise.all([
         service.startGitHubPullRequestWorkspace(
@@ -370,6 +401,8 @@ async function main() {
         test.calls.worktreeInput.expectedHeadCommitOid,
         "b".repeat(40),
       );
+      // The rows' folders go to the folder picker, which keeps clear of them.
+      assert.deepEqual(test.calls.worktreeInput.takenPaths, ["/repo"]);
       assert.match(test.calls.prompt, /untrusted task data/);
       assert.match(test.calls.prompt, /Repository-owned AGENTS\.md/);
       assert.match(test.calls.prompt, /Do not push, comment, approve/);

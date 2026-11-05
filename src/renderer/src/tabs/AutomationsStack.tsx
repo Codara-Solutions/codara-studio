@@ -22,6 +22,8 @@ interface Props {
   // Opens a run's chat surface (chat tab + chat sub-view). Used by the page's
   // "Open chat" on an automation's creator run.
   onOpenRunChat?: (runId: string) => void;
+  // Opens a Cora chat with text waiting in its message box.
+  onAskCora?: (prompt: string) => void;
 }
 
 // React.memo so AutomationsStack only re-renders when its real inputs change
@@ -33,6 +35,7 @@ function AutomationsStack({
   dockIndex,
   workspace,
   onOpenRunChat,
+  onAskCora,
 }: Props) {
   // Memoize the filtered list so it isn't reallocated on every render.
   const automationsTabs = useMemo(
@@ -61,6 +64,7 @@ function AutomationsStack({
                 cwd={workspace.cwd}
                 active={visible}
                 onOpenRunChat={onOpenRunChat}
+                onAskCora={onAskCora}
               />
             ) : (
               <div

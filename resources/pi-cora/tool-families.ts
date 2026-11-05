@@ -40,6 +40,7 @@ export const STUDIO_TOOL_LOADER_NAME = "codara_tools";
 export function studioToolFamily(name: string): StudioToolFamily | null {
   if (name.startsWith("codara_preview_") || name === "codara_browser_use") return "browser";
   if (name.startsWith("codara_terminal_")) return "terminal";
+  if (/^codara_session_(?:start|wait|status|message)$|^codara_review_findings$/.test(name)) return "terminal";
   if (name.startsWith("codara_whiteboard_")) return "whiteboard";
   if (name.startsWith("codara_board_")) return "board";
   if (/^codara_[a-z_]*automation/.test(name)) return "automations";
@@ -55,7 +56,7 @@ export function isStudioToolFamily(value: unknown): value is StudioToolFamily {
 const FAMILY_SIGNALS: Record<StudioToolFamily, RegExp> = {
   browser:
     /\b(?:browser|preview|localhost|website|web ?page|web ?site|screenshot|homepage|landing page|click|https?:\/\/\S+)/i,
-  terminal: /\b(?:terminal|dev server|watch(?:er)?|npm run dev|pnpm dev|yarn dev|start the (?:app|server)|run the (?:app|server))\b/i,
+  terminal: /\b(?:terminal|dev server|watch(?:er)?|npm run dev|pnpm dev|yarn dev|start the (?:app|server)|run the (?:app|server))\b|codara_review_findings/i,
   whiteboard: /\b(?:whiteboard|diagram|draw|sketch|visuali[sz]e|project map|architecture map)\b/i,
   board: /\b(?:board|kanban|cards?)\b|codara_board_/i,
   automations:
@@ -139,7 +140,11 @@ running across restarts and never starts a second copy.
 Terminal tabs: start watchers and anything else that does not exit with
 codara_terminal_create (retention "service" only when the user needs it
 afterwards), poll codara_terminal_read for the ready line, then verify with the
-Browser. Close temporary terminals with codara_terminal_close when done.`,
+Browser. Close temporary terminals with codara_terminal_close when done.
+Agent sessions: codara_session_start opens a real Claude Code or Codex session in
+a tab of any workspace with its brief submitted; it outlives this chat. Read it
+with codara_session_wait or codara_session_status, follow up with
+codara_session_message. Prefer codara_spawn_workers for work this chat verifies.`,
   whiteboard: `Whiteboard: build an explanation through investigation, draft, inspection,
 and revision. A single write is not a finished board. First read with
 codara_whiteboard_get, preserve human edits, and pass baseRevision to

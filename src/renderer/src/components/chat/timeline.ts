@@ -284,6 +284,9 @@ export type ChatTimelineItem =
       // as a half-open [from, to) window over block timestamps. Absent on
       // unsegmented rows, which render the whole trace.
       traceWindow?: { from?: string; to?: string };
+      // The whole SparkCall's status. `status` on a slice before a mid-turn
+      // question always reads completed, so it cannot say how the turn ended.
+      turnStatus?: "started" | "completed" | "failed";
       // The manager turn is open but suspended inside ask_user, waiting for
       // the user's answer. The row must read as waiting, never as working:
       // the run header already says "Needs you", and a live "Working for Ns"
@@ -811,6 +814,7 @@ function sparkCallTimelineItem(
             ? managerModeCompletedDetail(call)
             : "",
     status: isLast ? call.status : "completed",
+    turnStatus: call.status,
     tone: failed ? "failed" : live ? "live" : "done",
     awaitingReply: awaiting || undefined,
     maintenance: compaction ? "compaction" : undefined,

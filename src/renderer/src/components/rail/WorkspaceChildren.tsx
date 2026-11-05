@@ -34,25 +34,9 @@ export function WorkspaceChildren({
   ownAgents: readonly AgentLine[];
   /** Worktree rows still in play, already sorted. */
   active: ReactNode[];
-  merged: {
-    count: number;
-    open: boolean;
-    onToggle: () => void;
-    /** The worktrees Clean up removes; more than one asks first, and none hides it. */
-    cleanUps: readonly RailCleanUpEntry[];
-    rows: ReactNode[];
-  };
+  merged: MergedWorktrees;
 }) {
   const now = useMinuteClock(ownAgents.length > 0);
-  const [confirming, setConfirming] = useState(false);
-  const cleanUps = merged.cleanUps;
-  const cleanUp = useRailCleanUp(cleanUps.map((entry) => entry.id));
-  const asks = cleanUps.length > 1;
-  // Once there is nothing left to ask about, the question is over: a later
-  // merge must not bring it back by itself.
-  useEffect(() => {
-    if (!asks) setConfirming(false);
-  }, [asks]);
   return (
     <div
       data-rail-children-of={parentId}
@@ -71,6 +55,33 @@ export function WorkspaceChildren({
         </ul>
       )}
       {active}
+      <MergedFold merged={merged} />
+    </div>
+  );
+}
+
+export interface MergedWorktrees {
+  count: number;
+  open: boolean;
+  onToggle: () => void;
+  /** The worktrees Clean up removes; more than one asks first, and none hides it. */
+  cleanUps: readonly RailCleanUpEntry[];
+  rows: ReactNode[];
+}
+
+/** The "N merged · Clean up" line and its rows, in the rail and in Source Control's lanes. */
+export function MergedFold({ merged }: { merged: MergedWorktrees }) {
+  const [confirming, setConfirming] = useState(false);
+  const cleanUps = merged.cleanUps;
+  const cleanUp = useRailCleanUp(cleanUps.map((entry) => entry.id));
+  const asks = cleanUps.length > 1;
+  // Once there is nothing left to ask about, the question is over: a later
+  // merge must not bring it back by itself.
+  useEffect(() => {
+    if (!asks) setConfirming(false);
+  }, [asks]);
+  return (
+    <>
       {merged.count > 0 && (
         <div className="rail-child rail-merged-fold" data-testid="workspace-merged-fold">
           <button
@@ -129,7 +140,7 @@ export function WorkspaceChildren({
         />
       )}
       {merged.open && merged.rows}
-    </div>
+    </>
   );
 }
 
@@ -177,7 +188,7 @@ export function WorktreeAgentLine({
   const loud = first.state === "needs-you" || first.state === "working";
   const others = agents.length - 1;
   // An agent with no pane here (background-agents.ts) is named, since
-  // opening the row shows no tab of it: "Background agent · from X".
+  // opening the row shows no tab of it: "Claude subagent · from X › its tab".
   const background = isWorktreeNoteKey(first.key);
   const description = agents
     .map((line) => [`${line.name}: ${AGENT_LINE_STATE_LABELS[line.state]}.`, line.text ?? ""].filter(Boolean).join(" "))

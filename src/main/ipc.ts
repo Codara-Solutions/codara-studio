@@ -40,6 +40,7 @@ import {
 import { createMachinesService, readLocalStats } from "./remote/machines";
 import type { MachinesSnapshot } from "@shared/machines";
 import { isRemotePath } from "@shared/remote";
+import type { LaneChanges } from "@shared/source-lanes";
 import { MUTE_KEY_PATTERN } from "@shared/notify-center";
 import type { UsageSummaryInput } from "@shared/usage-analytics";
 import type {
@@ -70,6 +71,7 @@ import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { workspaceAllowedRoots } from "./workspace-state-edits";
 import { loadOnboardingProgress, saveOnboardingProgress, setupService } from "./onboarding";
 import { codaraHome } from "./codara-home";
+import type { MoneyRate } from "@shared/money";
 import { logMain } from "./file-log";
 import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
 import { detectAgentRuntimes } from "./agent-runtimes";
@@ -512,11 +514,11 @@ import { registerCaptureIpc } from "./browser/capture/ipc";
 import { registerPreviewTabsIpc } from "./browser/preview-tabs";
 import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerPointIpc } from "./browser/point";
-import { registerReviewIpc } from "./review";
+import { registerReviewIpc, reviewBaseDeps } from "./review";
 import { registerGitFixIpc } from "./git-fix-ipc";
 import { registerDiagnosticsIpc } from "./diagnostics";
 import { registerFeatureTipsIpc } from "./feature-tips";
-import { registerSessionSearchIpc } from "./session-search/service";
+import { registerSessionSearchIpc, withSessionNames } from "./session-search/service";
 import { registerServersIpc } from "./servers";
 import { registerWorkspaceStatusIpc } from "./workspace-status";
 import { registerPullRequestWatchIpc } from "./pull-request-watch-ipc";
@@ -2253,6 +2255,20 @@ export function registerIpc(): void {
     return getGitDiffStats(cwd);
   });
 
+  handle("git:laneChanges", async (_e, cwds: unknown): Promise<Record<string, LaneChanges>> => {
+    if (!Array.isArray(cwds)) return {};
+    const wanted = cwds.filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0 && cwd.length <= 16_384);
+    const { readLaneChanges } = await import("./git-lanes");
+    return readLaneChanges(wanted, reviewBaseDeps);
+  });
+
+  handle("git:laneCollisions", async (_e, cwds: unknown) => {
+    if (!Array.isArray(cwds)) return {};
+    const wanted = cwds.filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0 && cwd.length <= 16_384);
+    const { readLaneCollisions } = await import("./git-lane-collisions");
+    return readLaneCollisions(wanted);
+  });
+
   handle("github:status", async (_e, request: unknown): Promise<GitHubWorkspaceStatus> => {
     const candidate =
       request && typeof request === "object" && !Array.isArray(request)
@@ -2647,24 +2663,13 @@ export function registerIpc(): void {
         newBranch?: string;
       },
     ): Promise<GitCopyWorktreeResult> => {
-      const {
-        createCopyWorktree,
-        createCheckoutWorktree,
-        managedWorktreesRoot,
-      } = await getGitWorktrees();
-      const worktreesRoot = managedWorktreesRoot(codaraHome(), input.repoCwd);
-      const result = input.checkoutBranch
-        ? await createCheckoutWorktree({
-            repoCwd: input.repoCwd,
-            worktreesRoot,
-            branch: input.checkoutBranch,
-            isRemote: input.checkoutIsRemote,
-          })
-        : await createCopyWorktree({
-            repoCwd: input.repoCwd,
-            worktreesRoot,
-            newBranch: input.newBranch ?? "",
-          });
+      const { createRailWorktree, managedWorktreesRoot } = await getGitWorktrees();
+      // Folders rows still name are not handed out again; without the rows,
+      // nothing is made.
+      const result = await createRailWorktree(
+        { ...input, worktreesRoot: managedWorktreesRoot(codaraHome(), input.repoCwd) },
+        loadState,
+      );
       if (result.ok) {
         // The new branch is a shared ref — refresh the source repo's panel.
         const { invalidateGitCache } = await getGitOps();
@@ -3166,6 +3171,12 @@ export function registerIpc(): void {
     },
   );
 
+  // The euro rate behind the Automations money display (ECB, cached daily).
+  handle("money:rate", async (): Promise<MoneyRate> => {
+    const { refreshFxRate } = await import("./fx-rate");
+    return refreshFxRate(codaraHome());
+  });
+
   // Looms v2: live direct-worker inventory for the Hub's Workers sub-tab.
   handle("automations:listActiveWorkers", async (): Promise<AutomationWorkerInfo[]> => {
     const { listActiveAutomationWorkers } = await import("./orchestration/direct-worker");
@@ -3429,7 +3440,7 @@ export function registerIpc(): void {
           claudeExecution.env.CLAUDE_CONFIG_DIR ?? null,
         grokHome: grokExecution.env.GROK_HOME,
       });
-      return items.map((item) =>
+      return (await withSessionNames(items)).map((item) =>
         item.runtime === "codex"
           ? { ...item, nativeCodexProfileId: execution.profileId }
           : item.runtime === "grok"

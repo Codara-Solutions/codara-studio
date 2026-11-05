@@ -14,7 +14,7 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 // `workspace` (codara_worktree_create), the user allows it once with the
 // cross-workspace card, and it reports with workspace.status and `worktree`
 // (codara_workspace_status). Repo's rail then shows the worktree's row with
-// "Background agent · from Notes", its state and the note, the Agents tab
+// "Claude subagent · from Notes", its state and the note, the Agents tab
 // lists it under Repo, and a worktree made with plain `git worktree add`
 // is listed too, as an external one, and keeps its note once opened.
 //
@@ -133,7 +133,7 @@ test("a background agent working in another workspace's repository shows on that
       await expect(page.locator(`[data-rail-children-of="ws-repo"] [data-workspace-id="${made.workspaceId}"]`)).toBeVisible({
         timeout: 15_000,
       });
-      await expect(row.getByTestId("worktree-background-agent")).toHaveText("Background agent · from Notes", { timeout: 15_000 });
+      await expect(row.getByTestId("worktree-background-agent")).toHaveText(/^Claude subagent · from Notes/, { timeout: 15_000 });
       const line = row.getByTestId("worktree-agent-line");
       await expect(line).toHaveAttribute("data-state", "working");
       await expect(line).toContainText("working");
@@ -162,6 +162,33 @@ test("a background agent working in another workspace's repository shows on that
       await expect(card.locator(".agent-inbox-row__status")).toHaveText("Done");
       await shot(page, "agents-tab-background-agent.png", ".agent-inbox", ".agent-inbox");
       await page.getByRole("tablist", { name: "Rail view" }).getByRole("tab", { name: /^Workspaces/ }).click();
+    });
+
+    await test.step("codara_worktree_remove reaches it from Notes: by path for its maker, with workspace for another agent", async () => {
+      // Notes is no git repository: the worktree's own record names Repo.
+      const byMaker = await request("worktree.remove", { ...caller, path: made.path, dryRun: true });
+      expect(byMaker.ok, JSON.stringify(byMaker)).toBe(true);
+      expect(byMaker.wouldRemove, JSON.stringify(byMaker)).toBe(true);
+      const other = await request("terminal.create", { cwd: notes, title: "other agent" });
+      const otherCaller = { callerRole: "studio", callerClient: "codex", callerPaneId: other.paneId };
+      const unplaced = await request("worktree.remove", { ...otherCaller, path: made.path, dryRun: true });
+      expect(unplaced.code, JSON.stringify(unplaced)).toBe("WORKTREE_NOT_A_REPO");
+      const card = page.getByRole("dialog", { name: "Allow removing a worktree in another workspace" });
+      const pending = call("worktree.remove", { ...otherCaller, workspace: repo, path: made.path, dryRun: true });
+      await expect(card).toBeVisible({ timeout: 15_000 });
+      await expect(card).toContainText("remove a worktree of Repo");
+      await card.getByRole("button", { name: "Allow once", exact: true }).click();
+      const placed = await pending;
+      expect(placed.error, JSON.stringify(placed.error)).toBeUndefined();
+      // It reached Repo and proved the merge; the agent that made it is still
+      // live, so it stays theirs to remove.
+      expect(placed.result.merge.status, JSON.stringify(placed.result)).toBe("merged");
+      expect(placed.result.blockers).toEqual(["WORKTREE_OWNED_BY_LIVE_AGENT"]);
+      await request("terminal.close", { paneId: other.paneId }).catch(() => undefined);
+      const removed = await request("worktree.remove", { ...caller, path: made.path });
+      expect(removed.removed, JSON.stringify(removed)).toBe(true);
+      expect(existsSync(made.path)).toBe(false);
+      await expect(page.locator(`[data-workspace-id="${made.workspaceId}"]`)).toHaveCount(0, { timeout: 15_000 });
     });
 
     await test.step("clicking the external worktree opens it in the rail as a worktree of Repo, its note kept", async () => {

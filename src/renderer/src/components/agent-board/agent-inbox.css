@@ -19,22 +19,11 @@
   flex-direction: column;
 }
 
-.agent-inbox__empty,
-.agent-inbox__clear {
+.agent-inbox__empty {
   margin: 10px 6px;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
-}
-
-.agent-inbox__clear {
-  margin: 6px 10px;
-}
-
-/* Pushes the shelves to the bottom while the inbox is short. */
-.agent-inbox__spacer {
-  flex: 1 1 auto;
-  min-height: 8px;
 }
 
 .agent-inbox__rows {
@@ -363,6 +352,10 @@
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--rule-soft);
+}
+
+.agent-inbox__shelf:first-child {
+  border-top: 0;
 }
 
 .agent-inbox__shelf-heading {

@@ -232,7 +232,13 @@ async function main() {
         ctx(),
       );
       assert.strictEqual(r.ok, true, r.error);
-      assert.strictEqual(r.output, "-|-|-|-|1|/usr/share/");
+      // A login profile may append its own entries (Ubuntu's snapd adds
+      // /var/lib/snapd/desktop); only the mount's entry must be gone.
+      const [launchVars, dataDirs] = [r.output.split("|").slice(0, 5).join("|"), r.output.split("|")[5]];
+      assert.strictEqual(launchVars, "-|-|-|-|1");
+      const entries = dataDirs.split(":");
+      assert.strictEqual(entries[0], "/usr/share/", dataDirs);
+      assert(!entries.some((dir) => dir.includes(".mount_CodaraAb12Cd")), dataDirs);
     } finally {
       for (const [key, value] of Object.entries(saved)) {
         if (value === undefined) delete process.env[key];

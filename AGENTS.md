@@ -47,7 +47,13 @@ of suites by area). `CONTRIBUTING.md` covers setup and pull requests.
   `BREAKING CHANGE:` footer.
 - Never commit secrets. `.env.releases` is untracked and must stay that way;
   do not read its values into tracked files or logs. A gitleaks pre-commit
-  hook scans staged changes.
+  hook scans staged changes and the `Gitleaks` workflow scans every pull
+  request. Made-up test keys go in `tests/` or `scripts/test-*`, or carry
+  `FAKE_` on the same line (CONTRIBUTING.md, "Secrets").
+- Keep pull requests under 800 changed lines where you can; above 2,000 the
+  `PR hygiene` check fails without the `large-pr` label. Cut the branch from
+  the base you open it against, or the check fails on the merged commits it
+  carries.
 
 ## Releases
 
@@ -101,7 +107,8 @@ of suites by area). `CONTRIBUTING.md` covers setup and pull requests.
   that implements Cora in `resources/pi-cora/`, shell integration in
   `resources/shell-integration/`, orchestration prompts in
   `resources/orchestration/`.
-- The `cora` CLI is `cli/`. Unit tests are `scripts/test-*.cjs` and
+- The `cora` CLI is `cli/`: the standalone agent in `cli/harness/`, the Studio
+  remote in `cli/studio.cjs`. Unit tests are `scripts/test-*.cjs` and
   `scripts/test-*.mjs`; Playwright specs are `tests/e2e/`.
 - Environment variables that form the contract with child CLIs, hooks, and
   shells keep the legacy `SPARK_*` prefix (`SPARK_PANE_ID`, `SPARK_MCP_MODE`,

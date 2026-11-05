@@ -1,0 +1,56 @@
+name: Budgets
+
+# Bundle size budgets (fail) and startup time and memory (report only) for
+# pull requests into Cora and pushes to it. Limits and warn levels live in
+# scripts/bundle-budgets.json; scripts/README.md explains how to change them.
+
+on:
+  pull_request:
+    branches: [Cora]
+  push:
+    branches: [Cora]
+  workflow_dispatch:
+
+concurrency:
+  group: budgets-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  budgets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Xvfb, and the user namespaces Chromium's sandbox needs
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+          # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor,
+          # and Electron's sandbox cannot start without them.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: npm ci
+      - run: npm run build
+      - name: Bundle sizes
+        run: node scripts/check-bundle-budgets.cjs --json budgets-report/bundles.json
+      - name: Startup and memory (report only)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        # A wedged app must not eat the job's time; 4 boots take under 1 min.
+        timeout-minutes: 6
+        run: node scripts/measure-startup.cjs --runs 3 --json budgets-report/startup.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: budgets-report
+          path: budgets-report/
+          if-no-files-found: ignore
+          retention-days: 30

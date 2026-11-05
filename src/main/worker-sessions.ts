@@ -231,6 +231,19 @@ export function parseCodexSessionHead(text: string): {
   return { cwd, startedAtMs, title: fallbackTitle, source, originator, isSubagent };
 }
 
+/**
+ * A session's own name from the head of its transcript: Claude's ai-title,
+ * else the first prompt; Codex's first prompt. Null when it has none or the
+ * file is not a transcript.
+ */
+export async function transcriptSessionTitle(runtime: "claude" | "codex", path: string): Promise<string | null> {
+  if (!isAbsolute(path) || extname(path) !== ".jsonl") return null;
+  const head = await readHead(path);
+  if (runtime === "codex") return parseCodexSessionHead(head).title;
+  const parsed = parseClaudeSessionHead(head);
+  return parsed.aiTitle ?? parsed.title;
+}
+
 function normalizedPath(path: string): string {
   const absolute = resolve(path).replace(/[\\/]+/g, "/").replace(/\/+$/, "");
   return process.platform === "win32" ? absolute.toLowerCase() : absolute;

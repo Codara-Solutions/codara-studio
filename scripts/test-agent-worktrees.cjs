@@ -9,6 +9,18 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
+const leaveAside = (repoDir, dir, aside, how = "git") => {
+  // As a removal Studio stopped in the middle leaves it: moved, and noted
+  // in the repository's git folder.
+  if (how === "git") execFileSync("git", ["-C", repoDir, "worktree", "move", dir, aside]);
+  else require("node:fs").renameSync(dir, aside);
+  const common = path.resolve(repoDir, execFileSync("git", ["-C", repoDir, "rev-parse", "--git-common-dir"], { encoding: "utf8" }).trim());
+  const notes = path.join(common, "codara-aside");
+  require("node:fs").mkdirSync(notes, { recursive: true });
+  const name = `${require("node:crypto").createHash("sha256").update(path.resolve(aside)).digest("hex").slice(0, 24)}.json`;
+  require("node:fs").writeFileSync(path.join(notes, name), JSON.stringify({ original: path.resolve(dir), aside }));
+};
+
 function git(cwd, args) {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
@@ -101,6 +113,8 @@ async function main() {
       published: 0,
       now: new Date("2026-10-12T10:00:00Z"),
       afterVerify: null,
+      held: () => false,
+      heldAsked: [],
     };
     const deps = {
       loadState: async () => structuredClone(h.state),
@@ -119,6 +133,10 @@ async function main() {
       sessionCwd: (paneId) => h.sessionCwds[paneId] ?? null,
       sessionsUnderCwd: (dir) => h.sessionsUnder(dir),
       listRendererTerminals: async () => h.terminals,
+      workspaceHeld: async (workspaceId, paths) => {
+        h.heldAsked.push({ workspaceId, paths });
+        return h.held(workspaceId, paths);
+      },
       processesUnderCwd: async () => h.processes,
       github: {
         listPullRequestsForHead: async () => h.pulls,
@@ -307,6 +325,74 @@ async function main() {
     assert.equal(dryRemove.ok, true, JSON.stringify(dryRemove));
     assert.equal(dryRemove.wouldRemove, true, JSON.stringify(dryRemove));
     assert.equal((await aw.removeAgentWorktree(bystander, { workspaceId: elsewhere.workspaceId, dryRun: true }, deps)).ok, false);
+    // By path too: the worktree names its repository, not the plain folder.
+    const dryRemoveByPath = await aw.removeAgentWorktree(coordinator, { path: elsewhere.path, dryRun: true }, deps);
+    assert.equal(dryRemoveByPath.ok, true, JSON.stringify(dryRemoveByPath));
+    assert.equal(dryRemoveByPath.wouldRemove, true, JSON.stringify(dryRemoveByPath));
+    assert.equal(dryRemoveByPath.workspaceId, elsewhere.workspaceId);
+    const setupByPath = await aw.getAgentWorktreeSetup(coordinator, { path: elsewhere.path }, deps);
+    assert.equal(setupByPath.ok, true, JSON.stringify(setupByPath));
+    assert.equal((await aw.removeAgentWorktree(bystander, { path: elsewhere.path, dryRun: true }, deps)).ok, false);
+    // Another agent the user allowed into the repository's workspace
+    // (codara_worktree_remove's workspace) reaches it as any agent there does.
+    const allowedBystander = { ...bystander, workspaceId: "ws-repo", origin: { workspaceId: "ws-notes", workspaceName: "notes" } };
+    const allowedDry = await aw.removeAgentWorktree(allowedBystander, { path: elsewhere.path, dryRun: true }, deps);
+    assert.equal(allowedDry.wouldRemove, true, JSON.stringify(allowedDry));
+    assert.equal(allowedDry.isCaller, undefined, "the caller runs in notes, not in the worktree");
+    // Named by its own workspace, the caller still runs in notes, not inside it.
+    const viaOwnRow = await aw.removeAgentWorktree(
+      { ...bystander, workspaceId: elsewhere.workspaceId, origin: { workspaceId: "ws-notes", workspaceName: "notes" } },
+      { workspaceId: elsewhere.workspaceId, dryRun: true },
+      deps,
+    );
+    assert.equal(viaOwnRow.wouldRemove, true, JSON.stringify(viaOwnRow));
+
+    // A workspace that is a folder of repositories: the folder named in
+    // workspace picks one of them; a folder outside it is refused.
+    const clients = path.join(scratch, "clients");
+    const clientRepo = path.join(clients, "client-api");
+    fs.mkdirSync(clients, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main", clientRepo]);
+    commitFile(clientRepo, "README.md", "# client\n", "init");
+    h.state.workspaces.push({ id: "ws-clients", name: "clients", cwd: clients, color: "#abcdef", workers: [] });
+    h.paneWorkspace["pane-client"] = "ws-clients";
+    const clientAgent = { role: "studio", client: "claude-code", paneId: "pane-client" };
+    const plainFolder = await aw.createAgentWorktree(clientAgent, { branch: "agent/client" }, deps);
+    assert.equal(plainFolder.code, "WORKTREE_NOT_A_REPO");
+    assert.match(plainFolder.hint, /pass workspace/);
+    const inClient = await aw.createAgentWorktree({ ...clientAgent, repoFolder: clientRepo }, { branch: "agent/client" }, deps);
+    assert.equal(inClient.ok, true, JSON.stringify(inClient));
+    assert.equal(workspaceOf(inClient.workspaceId).copyBranch.repoCwd, clientRepo);
+    assert.equal(
+      (await aw.createAgentWorktree({ ...clientAgent, repoFolder: repo }, { branch: "agent/escape" }, deps)).code,
+      "WORKTREE_FORBIDDEN",
+      "a folder outside the caller's workspace is not a way into another repository",
+    );
+    // base HEAD is the named repository's HEAD, not the enclosing folder's.
+    const clientHead = commitFile(clientRepo, "CHANGELOG.md", "one\n", "work on main");
+    const fromHead = await aw.createAgentWorktree(
+      { ...clientAgent, repoFolder: clientRepo },
+      { branch: "agent/client-head", base: "HEAD" },
+      deps,
+    );
+    assert.equal(fromHead.ok, true, JSON.stringify(fromHead));
+    assert.equal(git(fromHead.path, ["rev-parse", "HEAD"]), clientHead);
+    // A folder inside a managed worktree's checkout names that worktree's
+    // repository: an allowed agent reaches it as from the worktree's row.
+    const inWorktree = path.join(fromHead.path, "docs");
+    fs.mkdirSync(inWorktree);
+    const viaSubfolder = await aw.removeAgentWorktree(
+      { ...bystander, workspaceId: fromHead.workspaceId, repoFolder: inWorktree, origin: { workspaceId: "ws-notes", workspaceName: "notes" } },
+      { path: fromHead.path, dryRun: true },
+      deps,
+    );
+    assert.equal(viaSubfolder.ok, true, JSON.stringify(viaSubfolder));
+    assert.equal(viaSubfolder.workspaceId, fromHead.workspaceId);
+    fs.rmdirSync(inWorktree);
+    assert.equal((await aw.removeAgentWorktree(clientAgent, { path: fromHead.path }, deps)).removed, true);
+    const clientRemoved = await aw.removeAgentWorktree(clientAgent, { path: inClient.path }, deps);
+    assert.equal(clientRemoved.removed, true, JSON.stringify(clientRemoved));
+    assert.equal(fs.existsSync(inClient.path), false);
     const listedFromNotes = await aw.listAgentWorktrees(coordinator, {}, deps);
     assert.equal(listedFromNotes.ok, true, JSON.stringify(listedFromNotes));
     assert.deepEqual(
@@ -523,10 +609,125 @@ async function main() {
     assert.equal(refused.code, "WORKTREE_RUNNING_PROCESSES");
     assert.equal(refused.running.processes, 1);
     h.processes = [];
+    // Tabs hold it: its own workspace's, and an editor tab of any workspace
+    // on a file inside it (the window answers for the folder's paths).
+    h.heldAsked = [];
+    h.held = (workspaceId) => workspaceId === created.workspaceId;
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    assert.equal(refused.code, "WORKTREE_OPEN_TABS", JSON.stringify(refused));
+    assert.ok(h.heldAsked.some((ask) => ask.workspaceId === created.workspaceId && ask.paths.includes(created.path)), "it asks about the folder");
+    h.held = (_workspaceId, paths) => paths.includes(created.path);
+    assert.equal(
+      (await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps)).code,
+      "WORKTREE_OPEN_TABS",
+      "a tab of another workspace on a file inside it holds it",
+    );
+    h.held = () => null;
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    assert.equal(refused.code, "WORKTREE_OPEN_TABS", "a window that does not answer holds it");
+    assert.ok(refused.warnings.some((warning) => /did not answer/.test(warning)));
+    // A tab opened while the removal waits for the lock is seen under it.
+    h.held = () => false;
+    h.afterVerify = async () => {
+      h.held = (_workspaceId, paths) => paths.includes(created.path);
+    };
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
+    assert.ok(refused.blockers.includes("WORKTREE_OPEN_TABS"));
+    assert.ok(fs.existsSync(created.path), "a held worktree stays");
+    h.afterVerify = null;
+    h.held = () => false;
     assert.equal(
       (await aw.removeAgentWorktree({ role: "studio", client: "codex", paneId: "pane-inside" }, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps)).code,
       "WORKTREE_CALLER_INSIDE",
     );
+
+    // A process started while the removal waited for the lock is seen under
+    // it: the locked re-check scans processes too.
+    h.afterVerify = async () => {
+      h.processes = [{ pid: 4545, command: "npm run dev" }];
+    };
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    h.afterVerify = null;
+    h.processes = [];
+    assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
+    assert.ok(refused.blockers.includes("WORKTREE_RUNNING_PROCESSES"));
+    assert.ok(fs.existsSync(created.path));
+    // An ignored file written after the last check (git deletes ignored
+    // files without asking): the folder is moved aside, checked again
+    // there, and put back.
+    const isRegistered = (dir) =>
+      git(repo, ["worktree", "list", "--porcelain"]).split("\n").includes(`worktree ${dir}`);
+    const asideOf = (dir) => path.join(path.dirname(dir), `.${path.basename(dir)}.codara-removing`);
+    const lateEnv = path.join(created.path, ".env.local");
+    let heldCalls = 0;
+    h.held = () => {
+      heldCalls += 1;
+      // The second ask is the locked re-check's, after its ignored-file scan.
+      if (heldCalls === 2) fs.writeFileSync(lateEnv, "TOKEN=late\n");
+      return false;
+    };
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    h.held = () => false;
+    assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
+    assert.equal(fs.readFileSync(lateEnv, "utf8"), "TOKEN=late\n", "the late file is kept, in its folder");
+    assert.ok(!fs.existsSync(asideOf(created.path)), "nothing is left aside");
+    assert.ok(isRegistered(created.path), "it is a worktree where it was");
+    fs.rmSync(lateEnv);
+    // A process started in it once it is aside puts it back as well.
+    heldCalls = 0;
+    h.held = () => {
+      heldCalls += 1;
+      if (heldCalls === 3) h.processes = [{ pid: 4646, command: "vim" }];
+      return false;
+    };
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    h.held = () => false;
+    h.processes = [];
+    assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
+    assert.ok(fs.existsSync(created.path) && !fs.existsSync(asideOf(created.path)));
+    // Studio stopped between the move and the delete: the next removal puts
+    // the folder back first and looks again.
+    leaveAside(repo, created.path, asideOf(created.path));
+    refused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId, discardIgnoredFiles: true }, deps);
+    assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
+    assert.ok(isRegistered(created.path) && !fs.existsSync(asideOf(created.path)), "it is back where it was");
+
+    // A folder left aside that cannot go back (its parent cannot be written)
+    // blocks the removal: the unlocked check saw it gone, and its row stays.
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      const stuckTree = await aw.createAgentWorktree(terminalAgent, { branch: "agent/stuck-aside" }, deps);
+      leaveAside(repo, stuckTree.path, asideOf(stuckTree.path));
+      fs.chmodSync(path.dirname(stuckTree.path), 0o555);
+      let stuckResult;
+      try {
+        stuckResult = await aw.removeAgentWorktree(terminalAgent, { workspaceId: stuckTree.workspaceId }, deps);
+      } finally {
+        fs.chmodSync(path.dirname(stuckTree.path), 0o755);
+      }
+      assert.equal(stuckResult.code, "WORKTREE_CHANGED", JSON.stringify(stuckResult));
+      assert.match(stuckResult.error, /could not be put back/);
+      assert.ok(workspaceOf(stuckTree.workspaceId), "its row stays");
+      assert.ok(fs.existsSync(asideOf(stuckTree.path)));
+      assert.equal((await aw.removeAgentWorktree(terminalAgent, { workspaceId: stuckTree.workspaceId }, deps)).code, "WORKTREE_CHANGED");
+      assert.ok(isRegistered(stuckTree.path), "once it can, it goes back");
+      // Another repository's folder aside is that removal's own business,
+      // under its own lock: this one leaves it alone.
+      const foreignTree = path.join(scratch, "elsewhere", "wt");
+      const foreignAside = asideOf(foreignTree);
+      fs.mkdirSync(foreignAside, { recursive: true });
+      h.state.workspaces.push({
+        ...workspaceOf(stuckTree.workspaceId),
+        id: "ws-foreign-repo",
+        cwd: foreignTree,
+        copyBranch: { ...workspaceOf(stuckTree.workspaceId).copyBranch, repoCwd: path.join(scratch, "elsewhere-repo") },
+      });
+      const gone = await aw.removeAgentWorktree(terminalAgent, { workspaceId: stuckTree.workspaceId }, deps);
+      h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== "ws-foreign-repo");
+      assert.equal(gone.removed, true, JSON.stringify(gone));
+      assert.ok(fs.existsSync(foreignAside) && !fs.existsSync(foreignTree), "another repository's folder aside is not touched");
+      fs.rmSync(path.join(scratch, "elsewhere"), { recursive: true, force: true });
+    }
 
     // A commit between the check and the locked re-check is caught.
     h.afterVerify = async () => {
@@ -549,7 +750,9 @@ async function main() {
     assert.equal(removed.proof, "ancestor");
     assert.equal(removed.verifiedCommit, mergedTip);
     assert.equal(removed.branchDeleted, true);
-    assert.equal(removed.recoveryRef, `refs/codara/removed-worktrees/2026-10-12/${created.workspaceId}`);
+    // The attempts put back above saved refs of their own (an older tip
+    // among them); this one goes above the newest.
+    assert.match(removed.recoveryRef, new RegExp(`^refs/codara/removed-worktrees/2026-10-12/${created.workspaceId}-\\d+$`));
     assert.equal(git(repo, ["rev-parse", removed.recoveryRef]), mergedTip, "the tip is kept for recovery");
     assert.match(removed.recoverWith, /worktree add .* -b agent\//);
     assert.ok(!fs.existsSync(created.path), "the directory is gone");
@@ -558,6 +761,16 @@ async function main() {
     assert.equal(h.events.at(-1).kind, "removed");
     assert.ok(!refExists(repo, "refs/codara/removed-worktrees/2026-08-01/ws-old"), "recovery refs older than 30 days are pruned");
     assert.ok(refExists(repo, "refs/codara/removed-worktrees/2026-10-01/ws-recent"));
+    // A ref saved late on 2026-09-01 (UTC) lives 30 full days: it is still
+    // there 30 days and an hour after that day's midnight, gone a day later.
+    const lateDay = "refs/codara/removed-worktrees/2026-09-01/ws-late-day";
+    git(repo, ["update-ref", lateDay, mergedTip]);
+    await aw.pruneRecoveryRefs(repo, new Date("2026-10-01T01:00:00Z"));
+    assert.ok(refExists(repo, lateDay), "a ref saved at 23:00 is not pruned after 29 days and 2 hours");
+    await aw.pruneRecoveryRefs(repo, new Date("2026-10-02T00:00:00Z"));
+    assert.ok(refExists(repo, lateDay), "nor at exactly 30 days after the end of its day");
+    await aw.pruneRecoveryRefs(repo, new Date("2026-10-02T01:00:00Z"));
+    assert.ok(!refExists(repo, lateDay), "it goes once 30 days have passed since the end of its day");
 
     const retried = await aw.removeAgentWorktree(terminalAgent, { workspaceId: created.workspaceId }, deps);
     assert.equal(retried.ok, true);
@@ -646,8 +859,6 @@ async function main() {
     const unmounted = path.join(scratch, "unmounted-drive", "wt");
     git(repo, ["worktree", "add", "-q", "-b", "on-unmounted-drive", unmounted]);
     fs.rmSync(path.dirname(unmounted), { recursive: true, force: true });
-    const isRegistered = (dir) =>
-      git(repo, ["worktree", "list", "--porcelain"]).split("\n").includes(`worktree ${dir}`);
     assert.ok(isRegistered(unmounted));
     const paneClosed = await aw.removeAgentWorktree(otherPane, { workspaceId: paneOwned.workspaceId }, deps);
     assert.equal(paneClosed.ok, true, JSON.stringify(paneClosed));
@@ -668,6 +879,274 @@ async function main() {
     assert.ok(isRegistered(unmounted), "a missing folder elsewhere keeps its registration");
     git(repo, ["worktree", "remove", unmounted]);
     git(repo, ["branch", "-D", "on-unmounted-drive"]);
+
+    // Recovery refs outlive a removal that fails or is cut short.
+    const todayRef = (id) => `refs/codara/removed-worktrees/2026-10-12/${id}`;
+    const runRecovery = (command) => {
+      assert.equal(typeof command, "string", "a recovery command is given");
+      const [program, ...args] = command.split(" ");
+      execFileSync(program, args, { stdio: ["ignore", "pipe", "pipe"] });
+    };
+    const landOnMain = (branch) => {
+      git(repo, ["merge", "-q", "--ff-only", branch]);
+      git(repo, ["push", "-q", "origin", "main"]);
+    };
+    // (A folder mode cannot stop root, and Windows ignores it.)
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      // git gives up halfway (a folder it cannot delete in): it has deleted
+      // files and dropped the registration, so the ref may be the last copy.
+      const partial = await aw.createAgentWorktree(terminalAgent, { branch: "agent/partial" }, deps);
+      commitFile(partial.path, "a-first.txt", "a\n", "first");
+      const partialTip = commitFile(partial.path, "stuck/keep.txt", "k\n", "stuck");
+      landOnMain("agent/partial");
+      fs.chmodSync(path.join(partial.path, "stuck"), 0o555);
+      let partialResult;
+      try {
+        partialResult = await aw.removeAgentWorktree(terminalAgent, { workspaceId: partial.workspaceId }, deps);
+      } finally {
+        fs.chmodSync(path.join(partial.path, "stuck"), 0o755);
+      }
+      assert.equal(partialResult.ok, false, JSON.stringify(partialResult));
+      assert.equal(isRegistered(partial.path), false, "git dropped the registration although it failed");
+      assert.equal(partialResult.recoveryRef, todayRef(partial.workspaceId), JSON.stringify(partialResult));
+      assert.equal(git(repo, ["rev-parse", todayRef(partial.workspaceId)]), partialTip, "the ref of a failed removal stays");
+      // The rest of the folder goes by hand; a retry drops the row and finds
+      // the branch's tip already saved.
+      fs.rmSync(partial.path, { recursive: true, force: true });
+      const partialRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: partial.workspaceId }, deps);
+      assert.equal(partialRetry.ok, true, JSON.stringify(partialRetry));
+      assert.equal(partialRetry.branchDeleted, true);
+      assert.equal(git(repo, ["rev-parse", partialRetry.recoveryRef]), partialTip);
+    }
+
+    // Finding 3: a worktree removed with plain git keeps its row until the
+    // rail looks again. A new worktree on the same branch name gets another
+    // folder, and a removal asked for the old row leaves it alone.
+    // Storage could not read its file and started empty: no worktree is made,
+    // since a folder a row it could not read names could be handed out.
+    const loadState = deps.loadState;
+    deps.loadState = async () => ({ ...(await loadState()), [Symbol.for("codara.unreadableState")]: true });
+    let unreadable;
+    try {
+      unreadable = await aw.createAgentWorktree(terminalAgent, { branch: "agent/unreadable" }, deps);
+    } finally {
+      deps.loadState = loadState;
+    }
+    assert.equal(unreadable.code, "WORKTREE_STATE_FAILED", JSON.stringify(unreadable));
+    assert.throws(() => git(repo, ["rev-parse", "--verify", "--quiet", "refs/heads/agent/unreadable"]), "no branch is made");
+    const before = await aw.createAgentWorktree(terminalAgent, { branch: "agent/reused" }, deps);
+    commitFile(before.path, "r.txt", "r\n", "reused work");
+    landOnMain("agent/reused");
+    git(repo, ["worktree", "remove", before.path]);
+    git(repo, ["branch", "-D", "agent/reused"]);
+    assert.ok(workspaceOf(before.workspaceId), "its row stays");
+    const after = await aw.createAgentWorktree(terminalAgent, { branch: "agent/reused" }, deps);
+    assert.equal(after.ok, true, JSON.stringify(after));
+    assert.notEqual(after.path, before.path, "the folder the old row names is not handed out");
+    // The folder is gone and a second row names it spelled another way,
+    // through a link or in other case: the removal is not bound to one row.
+    const treesAlias = `${path.dirname(before.path)}-alias`;
+    if (process.platform !== "win32") fs.symlinkSync(path.dirname(before.path), treesAlias);
+    try {
+      const spellings = [path.join(path.dirname(before.path), path.basename(before.path).toUpperCase())];
+      if (process.platform !== "win32") spellings.push(path.join(treesAlias, path.basename(before.path)));
+      for (const cwd of spellings) {
+        h.state.workspaces.push({ ...workspaceOf(before.workspaceId), id: "ws-old-spelling", name: "old spelling", cwd });
+        let spelled;
+        try {
+          spelled = await aw.removeAgentWorktree(terminalAgent, { workspaceId: before.workspaceId }, deps);
+        } finally {
+          h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== "ws-old-spelling");
+        }
+        assert.equal(spelled.code, "WORKTREE_CHANGED", `${cwd}: ${JSON.stringify(spelled)}`);
+        assert.ok(workspaceOf(before.workspaceId), "its row stays");
+      }
+    } finally {
+      fs.rmSync(treesAlias, { force: true });
+    }
+    const oldRow = await aw.removeAgentWorktree(terminalAgent, { workspaceId: before.workspaceId }, deps);
+    assert.equal(oldRow.ok, true, JSON.stringify(oldRow));
+    assert.equal(oldRow.alreadyRemoved, true);
+    assert.ok(fs.existsSync(after.path), "the new worktree stays");
+    assert.ok(isRegistered(after.path));
+    // A second row at a worktree's folder, made while the removal waited for
+    // the lock: the removal is no longer bound to one row, so it stops.
+    commitFile(after.path, "r2.txt", "r2\n", "more reused work");
+    landOnMain("agent/reused");
+    h.afterVerify = async () => {
+      h.state.workspaces.push({ ...workspaceOf(after.workspaceId), id: "ws-same-folder", name: "same folder" });
+    };
+    let bound;
+    try {
+      bound = await aw.removeAgentWorktree(terminalAgent, { workspaceId: after.workspaceId }, deps);
+    } finally {
+      h.afterVerify = null;
+      h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== "ws-same-folder");
+    }
+    assert.equal(bound.code, "WORKTREE_CHANGED", JSON.stringify(bound));
+    assert.match(bound.reason ?? bound.message ?? JSON.stringify(bound), /same folder/);
+    assert.ok(fs.existsSync(after.path), "a worktree two rows name stays");
+    const unbound = await aw.removeAgentWorktree(terminalAgent, { workspaceId: after.workspaceId }, deps);
+    assert.equal(unbound.ok, true, JSON.stringify(unbound));
+
+    // The folder is gone and an earlier removal of it today, cut short after
+    // its ref, left the plain name on an older commit: the branch's newer tip
+    // is saved under the next free name before the branch goes.
+    const cut = await aw.createAgentWorktree(terminalAgent, { branch: "agent/cut-short" }, deps);
+    const oldTip = commitFile(cut.path, "c1.txt", "1\n", "first");
+    git(repo, ["update-ref", todayRef(cut.workspaceId), oldTip]);
+    const newTip = commitFile(cut.path, "c2.txt", "2\n", "second");
+    landOnMain("agent/cut-short");
+    fs.rmSync(cut.path, { recursive: true, force: true });
+    const cutResult = await aw.removeAgentWorktree(terminalAgent, { workspaceId: cut.workspaceId }, deps);
+    assert.equal(cutResult.ok, true, JSON.stringify(cutResult));
+    assert.equal(cutResult.alreadyRemoved, true);
+    assert.equal(cutResult.branchDeleted, true);
+    assert.equal(cutResult.recoveryRef, `${todayRef(cut.workspaceId)}-2`, JSON.stringify(cutResult));
+    assert.equal(git(repo, ["rev-parse", cutResult.recoveryRef]), newTip, "the deleted branch's tip stays reachable");
+    assert.equal(git(repo, ["rev-parse", todayRef(cut.workspaceId)]), oldTip, "the older ref is never moved");
+    const cutRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: cut.workspaceId }, deps);
+    assert.equal(cutRetry.alreadyRemoved, true, JSON.stringify(cutRetry));
+    assert.equal(cutRetry.recoveryRef, cutResult.recoveryRef, "a retry names the newest save, not the cut-short one");
+    assert.equal(cutRetry.verifiedCommit, newTip);
+
+    // Saved A, then B, and the branch went back to A: the newest name holds A.
+    const flip = await aw.createAgentWorktree(terminalAgent, { branch: "agent/flip" }, deps);
+    const flipA = commitFile(flip.path, "flip-a.txt", "a\n", "flip a");
+    const flipB = commitFile(flip.path, "flip-b.txt", "b\n", "flip b");
+    git(repo, ["update-ref", todayRef(flip.workspaceId), flipA]);
+    git(repo, ["update-ref", `${todayRef(flip.workspaceId)}-2`, flipB]);
+    git(flip.path, ["reset", "-q", "--hard", flipA]);
+    landOnMain("agent/flip");
+    const flipped = await aw.removeAgentWorktree(terminalAgent, { workspaceId: flip.workspaceId }, deps);
+    assert.equal(flipped.removed, true, JSON.stringify(flipped));
+    assert.equal(flipped.recoveryRef, `${todayRef(flip.workspaceId)}-3`);
+    assert.equal(git(repo, ["rev-parse", flipped.recoveryRef]), flipA);
+    assert.equal(refExists(repo, `${todayRef(flip.workspaceId)}-4`), false, "the newest name holds the latest save");
+
+    // The row outlived a removal that kept its branch; the branch moved on
+    // and a retry saved its new tip: a later retry reports that one, not the
+    // first removal's.
+    const stale = await aw.createAgentWorktree(terminalAgent, { branch: "agent/stale-answer" }, deps);
+    const staleA = commitFile(stale.path, "s.txt", "a\n", "stale a");
+    landOnMain("agent/stale-answer");
+    const keepUpdate = deps.updateState;
+    deps.updateState = async () => {
+      throw new Error("disk full");
+    };
+    let staleFirst;
+    try {
+      staleFirst = await aw.removeAgentWorktree(terminalAgent, { workspaceId: stale.workspaceId, deleteBranch: false }, deps);
+    } finally {
+      deps.updateState = keepUpdate;
+    }
+    assert.equal(staleFirst.removed, true, JSON.stringify(staleFirst));
+    assert.equal(staleFirst.verifiedCommit, staleA);
+    const staleB = git(repo, ["commit-tree", `${staleA}^{tree}`, "-p", staleA, "-m", "stale b"]);
+    git(repo, ["update-ref", "refs/heads/agent/stale-answer", staleB]);
+    landOnMain("agent/stale-answer");
+    const staleSecond = await aw.removeAgentWorktree(terminalAgent, { workspaceId: stale.workspaceId }, deps);
+    assert.equal(staleSecond.branchDeleted, true, JSON.stringify(staleSecond));
+    assert.equal(staleSecond.recoveryRef, `${todayRef(stale.workspaceId)}-2`);
+    assert.equal(staleSecond.verifiedCommit, staleB, "the commit the new ref holds");
+    const staleThird = await aw.removeAgentWorktree(terminalAgent, { workspaceId: stale.workspaceId }, deps);
+    assert.equal(staleThird.alreadyRemoved, true, JSON.stringify(staleThird));
+    assert.equal(staleThird.recoveryRef, staleSecond.recoveryRef, "a later retry names the newest save");
+    assert.equal(staleThird.verifiedCommit, staleB);
+
+    // A failed attempt saved a newer ref after the remembered removal, then
+    // the row went by hand: a retry reports the newest save.
+    const late = await aw.createAgentWorktree(terminalAgent, { branch: "agent/late-save" }, deps);
+    const lateA = commitFile(late.path, "l.txt", "a\n", "late a");
+    landOnMain("agent/late-save");
+    deps.updateState = async () => {
+      throw new Error("disk full");
+    };
+    let lateFirst;
+    try {
+      lateFirst = await aw.removeAgentWorktree(terminalAgent, { workspaceId: late.workspaceId, deleteBranch: false }, deps);
+    } finally {
+      deps.updateState = keepUpdate;
+    }
+    assert.equal(lateFirst.verifiedCommit, lateA, JSON.stringify(lateFirst));
+    git(repo, ["worktree", "add", "-q", late.path, "agent/late-save"]);
+    const lateB = commitFile(late.path, "l2.txt", "b\n", "late b");
+    landOnMain("agent/late-save");
+    git(repo, ["update-ref", `${todayRef(late.workspaceId)}-2`, lateB]);
+    git(repo, ["worktree", "remove", "--force", late.path]);
+    h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id !== late.workspaceId);
+    // The kept branch moved on since: recovery must not need to reset it.
+    const lateC = git(repo, ["commit-tree", `${lateB}^{tree}`, "-p", lateB, "-m", "late c"]);
+    git(repo, ["update-ref", "refs/heads/agent/late-save", lateC]);
+    const lateRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: late.workspaceId }, deps);
+    assert.equal(lateRetry.alreadyRemoved, true, JSON.stringify(lateRetry));
+    assert.equal(lateRetry.recoveryRef, `${todayRef(late.workspaceId)}-2`, "the newest save, not the remembered one");
+    assert.equal(lateRetry.verifiedCommit, lateB);
+    runRecovery(lateRetry.recoverWith);
+    assert.equal(git(late.path, ["rev-parse", "HEAD"]), lateB, "the command brings back the saved commit");
+    assert.equal(git(repo, ["rev-parse", "refs/heads/agent/late-save"]), lateC, "and leaves the branch where it is");
+    git(repo, ["worktree", "remove", "--force", late.path]);
+    git(repo, ["branch", "-D", "agent/late-save"]);
+
+    // The branch went but the row could not be dropped: a retry still names
+    // the ref that holds the deleted branch's tip.
+    const kept = await aw.createAgentWorktree(terminalAgent, { branch: "agent/row-kept" }, deps);
+    const keptTip = commitFile(kept.path, "k.txt", "k\n", "row kept");
+    landOnMain("agent/row-kept");
+    deps.updateState = async () => {
+      throw new Error("disk full");
+    };
+    let keptFirst;
+    try {
+      keptFirst = await aw.removeAgentWorktree(terminalAgent, { workspaceId: kept.workspaceId }, deps);
+    } finally {
+      deps.updateState = keepUpdate;
+    }
+    assert.equal(keptFirst.branchDeleted, true, JSON.stringify(keptFirst));
+    const keptRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: kept.workspaceId }, deps);
+    assert.equal(keptRetry.alreadyRemoved, true, JSON.stringify(keptRetry));
+    assert.equal(keptRetry.recoveryRef, keptFirst.recoveryRef);
+    assert.equal(keptRetry.verifiedCommit, keptTip);
+    runRecovery(keptRetry.recoverWith);
+    assert.equal(git(repo, ["rev-parse", "refs/heads/agent/row-kept"]), keptTip, "the command makes the branch again");
+    git(repo, ["worktree", "remove", "--force", kept.path]);
+    git(repo, ["branch", "-D", "agent/row-kept"]);
+
+    // Same, but the first removal kept the branch: a retry that keeps it
+    // too still names the saved ref.
+    const both = await aw.createAgentWorktree(terminalAgent, { branch: "agent/both-kept" }, deps);
+    const bothTip = commitFile(both.path, "both-kept.txt", "both\n", "both kept");
+    landOnMain("agent/both-kept");
+    deps.updateState = async () => {
+      throw new Error("disk full");
+    };
+    try {
+      await aw.removeAgentWorktree(terminalAgent, { workspaceId: both.workspaceId, deleteBranch: false }, deps);
+    } finally {
+      deps.updateState = keepUpdate;
+    }
+    const bothRetry = await aw.removeAgentWorktree(terminalAgent, { workspaceId: both.workspaceId, deleteBranch: false }, deps);
+    assert.equal(bothRetry.alreadyRemoved, true, JSON.stringify(bothRetry));
+    assert.equal(bothRetry.recoveryRef, todayRef(both.workspaceId));
+    assert.equal(bothRetry.verifiedCommit, bothTip);
+    runRecovery(bothRetry.recoverWith);
+    assert.equal(git(both.path, ["rev-parse", "--abbrev-ref", "HEAD"]), "agent/both-kept", "back on its own branch");
+    git(repo, ["worktree", "remove", "--force", both.path]);
+    git(repo, ["branch", "-D", "agent/both-kept"]);
+
+    // No free name at all: the branch stays.
+    const full = await aw.createAgentWorktree(terminalAgent, { branch: "agent/no-free-name" }, deps);
+    const fullTip = commitFile(full.path, "f.txt", "f\n", "full");
+    landOnMain("agent/no-free-name");
+    for (let n = 1; n <= 20; n += 1) {
+      git(repo, ["update-ref", n === 1 ? todayRef(full.workspaceId) : `${todayRef(full.workspaceId)}-${n}`, oldTip]);
+    }
+    fs.rmSync(full.path, { recursive: true, force: true });
+    const fullResult = await aw.removeAgentWorktree(terminalAgent, { workspaceId: full.workspaceId }, deps);
+    assert.equal(fullResult.ok, true, JSON.stringify(fullResult));
+    assert.equal(fullResult.branchDeleted, false);
+    assert.equal(fullResult.branchKeptReason, "RECOVERY_REF_FAILED");
+    assert.equal(git(repo, ["rev-parse", "refs/heads/agent/no-free-name"]), fullTip, "a tip that could not be saved keeps its branch");
 
     // ── List ───────────────────────────────────────────────────────────────
     const listed = await aw.createAgentWorktree(terminalAgent, { branch: "agent/listed" }, deps);

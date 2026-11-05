@@ -31,8 +31,21 @@ export interface WorktreeInUse {
   kind: WorktreeInUseKind;
   /** Plain words for the screen, such as "2 terminals". */
   label: string;
-  /** With "agent": the open tab of the agent that made the worktree, to close. */
-  tab?: { title: string; workspace?: string };
+  /**
+   * With "agent": the open tab of the agent that made the worktree, to close.
+   * `untitled` when the tab has no name of its own (none, "terminals", or
+   * its runtime's): `title` is then the agent's runtime, such as "Claude
+   * Code", and `session` (the agent session's name) and `group` (the tab's
+   * group) tell it apart when known.
+   */
+  tab?: { title: string; workspace?: string; untitled?: true; session?: string; group?: string };
+  /**
+   * With "agent": its tab works from another folder. It holds the worktree
+   * only while the work there may be unfinished: a branch not merged or files
+   * not committed, ignored files aside (see heldByMaker). The rail's Clean
+   * up does not count it at all.
+   */
+  elsewhere?: true;
 }
 
 export interface WorktreeSize {
@@ -359,6 +372,17 @@ export interface WorktreeRailState {
   autoCandidate: boolean;
   /** When its checked-out commit was made (ms), the activity a background agent leaves behind. */
   headAt?: number;
+  /**
+   * Its folder is there, its work is provably merged and nothing has touched
+   * it for a while: the rail may ask main to remove it (mode "auto-merged"),
+   * and main checks everything again. Off with the user's setting.
+   */
+  autoRemoveMerged?: boolean;
+  /**
+   * Nothing was ever committed in it and it has sat untouched for days: the
+   * row offers Clean up. Never removed on its own.
+   */
+  stale?: boolean;
 }
 
 /**
@@ -391,7 +415,12 @@ export interface WorktreeRailOverview {
  */
 export interface WorktreeRailCleanupRequest {
   workspaceId: string;
-  mode: "manual" | "auto";
+  /**
+   * "manual" is a click on the row. "auto" clears a row whose folder is
+   * already gone. "auto-merged" removes a merged worktree whose folder is
+   * still there, under the strictest rules (rail.ts).
+   */
+  mode: "manual" | "auto" | "auto-merged";
   /**
    * The fingerprint of a "confirm" answer the user accepted: its ignored
    * files go with the folder. Anything changed since refuses again.

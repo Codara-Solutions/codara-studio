@@ -43,6 +43,7 @@ export const PREFERENCE_TOGGLES = {
   terminalLinkMenu: defaultOn("terminalLinkMenu"),
   agentWorktreesEnabled: defaultOn("agentWorktreesEnabled"),
   agentsMayRemoveUserWorktrees: defaultOff("agentsMayRemoveUserWorktrees"),
+  worktreeAutoRemoveMerged: defaultOn("worktreeAutoRemoveMerged"),
   closeTabsOnMiddleClick: defaultOff("closeTabsOnMiddleClick"),
   notifyInApp: channel("inApp"),
   notifyNative: channel("native"),

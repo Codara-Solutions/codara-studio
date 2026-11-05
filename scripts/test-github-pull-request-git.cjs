@@ -534,6 +534,18 @@ async function main() {
     }
 
     {
+      // A folder a workspace row still names (its worktree removed outside
+      // Studio) is not handed out to the import.
+      const mock = dependencies();
+      const result = await module.createPullRequestWorktree(
+        input({ takenPaths: ["/managed/codara-pr-0123456789ab-42-feature"] }),
+        mock.value,
+      );
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.path, "/managed/codara-pr-0123456789ab-42-feature-2");
+    }
+
+    {
       const mock = dependencies();
       const result = await module.createPullRequestWorktree(input(), mock.value);
       assert.equal(result.ok, true);

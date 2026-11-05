@@ -379,6 +379,108 @@ const TASK_TOOL_TO_RPC = {
 // src/main/preview-tools/session-search.ts). Read only. Codara limits it to
 // the caller's own project unless the person allowed every session in
 // Settings, so the tool takes no scope.
+// Sessions one agent starts for another: a real agent CLI in a visible tab of
+// a workspace. The user's own agents and Cora's chats get them; a worker or an
+// automation pass never leaves something running behind it.
+const SESSION_TOOLS = [
+  {
+    name: "codara_session_start",
+    description:
+      "Start a real agent session in a visible tab of workspace (id or folder; the user approves once; default yours) or a new worktree of it, brief already submitted. It outlives you. Returns id for codara_session_wait.",
+    inputSchema: {
+      type: "object",
+      required: ["brief", "runtime"],
+      properties: {
+        brief: { type: "string", description: "The whole task; max 60000 characters." },
+        runtime: { type: "string", enum: ["claude", "codex"] },
+        model: { type: "string", description: "Default the CLI's own." },
+        effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max"] },
+        workspace: { type: "string" },
+        worktree: {
+          type: "object",
+          properties: { branch: { type: "string" }, base: { type: "string" }, purpose: { type: "string" } },
+        },
+        title: { type: "string" },
+        group: { type: "string", description: "Tab group, named after your task." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_review_findings",
+    description:
+      "Hand back a code review you were asked for: the reviewId from your prompt, once, with every finding (an empty list if none). Each lands on the diff as a note.",
+    inputSchema: {
+      type: "object",
+      required: ["reviewId", "findings"],
+      properties: {
+        reviewId: { type: "string" },
+        findings: {
+          type: "array",
+          maxItems: 100,
+          items: {
+            type: "object",
+            required: ["path", "text"],
+            properties: {
+              path: { type: "string", description: "From the repository's top folder." },
+              line: { type: "number" },
+              endLine: { type: "number" },
+              severity: { type: "string", enum: ["blocking", "should-fix", "minor"] },
+              text: { type: "string" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_session_wait",
+    description:
+      "Wait until sessions finish, fail or need the user; returns their status and final messages, or reason timeout while they keep running.",
+    inputSchema: {
+      type: "object",
+      required: ["ids"],
+      properties: {
+        ids: { type: "array", items: { type: "string" } },
+        mode: { type: "string", enum: ["any", "all"], description: "Default any." },
+        timeoutSeconds: { type: "number", description: "Default 120, max 540." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_session_status",
+    description:
+      "One session's status and final message, or without id every session started from your workspace: starting, working, needs_you, finished, failed or closed.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_session_message",
+    description:
+      "Send a follow-up to a finished or failed session you started; codara_session_wait then waits for the new turn.",
+    inputSchema: {
+      type: "object",
+      required: ["id", "text"],
+      properties: { id: { type: "string" }, text: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+];
+
+const SESSION_TOOL_TO_RPC = {
+  codara_session_start: "session.start",
+  codara_session_wait: "session.wait",
+  codara_session_status: "session.status",
+  codara_session_message: "session.message",
+  codara_review_findings: "review.findings",
+};
+
 const SESSION_SEARCH_TOOL = {
   name: "codara_session_search",
   description:
@@ -429,8 +531,9 @@ const OPEN_FILE_TOOL = {
 };
 
 // Agent worktrees. The repository is the caller's own (its run or terminal
-// pane) unless codara_worktree_create names another rail workspace in
-// `workspace`, which the user approves once like a terminal there; the
+// pane) unless codara_worktree_create or codara_worktree_remove names another
+// rail workspace in `workspace`, which the user approves once like a terminal
+// there (a folder inside a workspace picks the repository it is in); the
 // policy is in src/main/agent-worktrees.ts and a refusal comes back as
 // {ok:false, code, hint}.
 const WORKTREE_TOOLS = [
@@ -487,6 +590,7 @@ const WORKTREE_TOOLS = [
       properties: {
         workspaceId: { type: "string", description: "Pass this or path." },
         path: { type: "string", description: "Absolute worktree path." },
+        workspace: { type: "string", description: "Its repository's workspace (id or folder), if not yours." },
         target: { type: "string", description: "Branch it merged into. Default its base." },
         deleteBranch: { type: "boolean", description: "Default true for a new branch." },
         discardIgnoredFiles: { type: "boolean", description: "Delete blocking ignored files such as .env.local." },
@@ -853,7 +957,8 @@ const TRIGGER_SCHEMA = {
     "manual only fires via codara_run_automation or the Hub. " +
     "continuous re-fires immediately after each run finishes. " +
     "git REQUIRES an `events` array (remoteUpdated: the workspace repo's tracked remote gained commits: the user's own push, or a teammate's push arriving via fetch; localBranchMoved: the checked-out branch tip changed (commit, pull, merge)); optional `branch` limits firing to one branch, e.g. 'main'. " +
-    "onAutomationActivity REQUIRES an `events` array (finished|failed) and fires when automations reach that outcome: ANY automation when `automationId` is omitted, or just that one when set (never fires for itself).",
+    "onAutomationActivity REQUIRES an `events` array (finished|failed) and fires when automations reach that outcome: ANY automation when `automationId` is omitted, or just that one when set (never fires for itself). " +
+    "github REQUIRES `events` (prOpened|ciFailed): pull requests on the origin repo from its owners, members or collaborators; optional `branch` (target), `includeDrafts`. Adds {{pr_url}}, {{pr_number}}, {{pr_head}}.",
   required: ["kind"],
   properties: {
     kind: {
@@ -867,6 +972,7 @@ const TRIGGER_SCHEMA = {
         "onFinishOf",
         "git",
         "onAutomationActivity",
+        "github",
       ],
     },
     expr: { type: "string", description: "cron (REQUIRED): valid 5/6-field cron expression, e.g. '0 9 * * 1-5'." },
@@ -876,10 +982,10 @@ const TRIGGER_SCHEMA = {
     events: {
       type: "array",
       description:
-        "folder: which fs events fire (add|change|unlink). git (REQUIRED): remoteUpdated|localBranchMoved. onAutomationActivity (REQUIRED): finished|failed.",
+        "folder: which fs events fire (add|change|unlink). git (REQUIRED): remoteUpdated|localBranchMoved. onAutomationActivity (REQUIRED): finished|failed. github (REQUIRED): prOpened|ciFailed.",
       items: {
         type: "string",
-        enum: ["add", "change", "unlink", "remoteUpdated", "localBranchMoved", "finished", "failed"],
+        enum: ["add", "change", "unlink", "remoteUpdated", "localBranchMoved", "finished", "failed", "prOpened", "ciFailed"],
       },
     },
     glob: { type: "string", description: "folder only: optional basename glob, e.g. '*.md'. Omit to match every file." },
@@ -891,7 +997,11 @@ const TRIGGER_SCHEMA = {
     },
     branch: {
       type: "string",
-      description: "git only: optional branch name (e.g. 'main') to scope firing; omit for any branch.",
+      description: "git or github: optional branch name (e.g. 'main') to scope firing; omit for any branch.",
+    },
+    includeDrafts: {
+      type: "boolean",
+      description: "github only: also fire for drafts.",
     },
   },
   additionalProperties: false,
@@ -1104,6 +1214,8 @@ const AUTOMATION_TOOLS = [
         graph: GRAPH_SCHEMA,
         precheck: PRECHECK_SCHEMA,
         missed_runs: MISSED_RUNS_SCHEMA,
+        own_branch: { type: "object", description: "Work on a new branch in a separate copy: {draft_pr: bool} (draft pull request when a run goes well)." },
+        guard: { type: "object", description: "Spending limits: {monthly_cap_usd, pause_after_failures}. Checked between runs, so a run already going can finish over the cap." },
       },
       additionalProperties: false,
     },
@@ -1127,6 +1239,8 @@ const AUTOMATION_TOOLS = [
         graph: sameShapeAsCreate("graph"),
         precheck: { type: "object", description: "As in create; an empty command removes it." },
         missed_runs: { type: "object", description: "As in create." },
+        own_branch: { type: "object", description: "As in create; null goes back to the workspace folder." },
+        guard: { type: "object", description: "As in create; replaces both limits, null removes them." },
       },
       additionalProperties: false,
     },
@@ -1853,6 +1967,7 @@ if (IS_AUTOMATION_MODE) {
     ...WORKTREE_TOOLS,
     ...WORKFLOW_TOOLS,
     ...TASK_TOOLS,
+    ...SESSION_TOOLS,
     SESSION_SEARCH_TOOL,
     SHARE_TOOL,
     OPEN_FILE_TOOL,
@@ -1864,6 +1979,7 @@ if (IS_AUTOMATION_MODE) {
     ...WORKTREE_TOOL_TO_RPC,
     ...WORKFLOW_TOOL_TO_RPC,
     ...TASK_TOOL_TO_RPC,
+    ...SESSION_TOOL_TO_RPC,
     codara_session_search: "session.search",
     codara_share_offer: "share.offer",
     codara_open_file: "file.open",
@@ -1872,12 +1988,13 @@ if (IS_AUTOMATION_MODE) {
   TOOLS = WORKER_TOOLS;
   TOOL_TO_RPC = WORKER_TOOL_TO_RPC;
 } else if (process.env.CODARA_PI_DIRECT_TASK === "1") {
-  TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL, RECALL_TOOL, ...WORKTREE_TOOLS, SHARE_TOOL, OPEN_FILE_TOOL];
+  TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL, RECALL_TOOL, ...WORKTREE_TOOLS, ...SESSION_TOOLS, SHARE_TOOL, OPEN_FILE_TOOL];
   TOOL_TO_RPC = {
     ...STUDIO_TOOL_TO_RPC,
     codara_remember: "orchestrator.remember",
     codara_recall: "orchestrator.recall",
     ...WORKTREE_TOOL_TO_RPC,
+    ...SESSION_TOOL_TO_RPC,
     codara_share_offer: "share.offer",
     codara_open_file: "file.open",
   };
@@ -1895,6 +2012,7 @@ if (IS_AUTOMATION_MODE) {
     WORKSPACE_STATUS_TOOL,
     ...TASK_TOOLS,
     ...WORKTREE_TOOLS,
+    ...SESSION_TOOLS,
     SESSION_SEARCH_TOOL,
     SHARE_TOOL,
     OPEN_FILE_TOOL,
@@ -1905,6 +2023,7 @@ if (IS_AUTOMATION_MODE) {
     codara_workspace_status: "workspace.status",
     ...TASK_TOOL_TO_RPC,
     ...WORKTREE_TOOL_TO_RPC,
+    ...SESSION_TOOL_TO_RPC,
     codara_session_search: "session.search",
     codara_share_offer: "share.offer",
     codara_open_file: "file.open",
@@ -1945,6 +2064,8 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "codara_workflow_status",
   "codara_workflow_wait",
   "codara_session_search",
+  "codara_session_status",
+  "codara_session_wait",
   "codara_task_list",
 ]);
 // Anything that runs a caller-chosen shell command or page script can destroy
@@ -1956,6 +2077,9 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "codara_terminal_write",
   "codara_spawn_terminals",
   "codara_terminal_close",
+  // Run an agent that can do anything the user's own agents can.
+  "codara_session_start",
+  "codara_session_message",
   "codara_whiteboard_update",
   "codara_board_update",
   "codara_delete_automation",
@@ -2035,6 +2159,11 @@ function buildInstructions() {
   if (listed.has("codara_terminal_run")) {
     parts.push(
       "Terminals: codara_terminal_run runs a command and returns its exit code and output. Start watchers with codara_terminal_create, then poll codara_terminal_read with since=<cursor> to get only new output, or mode=\"screen\" for full-screen programs. codara_terminal_list shows the workspace's panes; you can read any of them but only write to terminals you created.",
+    );
+  }
+  if (listed.has("codara_session_start")) {
+    parts.push(
+      "Sessions: to hand work to an agent in another workspace, or work that should outlive you, call codara_session_start: a real session opens in a tab of that workspace and the user can open it. Then codara_session_wait (it returns on a timeout too, so wait in short steps), codara_session_status to find sessions, and codara_session_message for a follow-up. A session that reads needs_you waits for the user: tell them. A started session can use its own subagents.",
     );
   }
   if (listed.has("codara_preview_navigate") || listed.has("codara_terminal_create")) {
@@ -2123,6 +2252,7 @@ function isLongPollRpc(rpc) {
 const PROGRESS_RPCS = new Set([
   ...LONG_POLL_RPCS,
   "terminal.run",
+  "session.wait",
   "browser.use",
   "automation.update",
   "automation.delete",
@@ -2133,10 +2263,21 @@ const PROGRESS_RPCS = new Set([
   "worktree.cleanup",
 ]);
 const PROGRESS_INTERVAL_MS = 10_000;
+const SESSION_WAIT_DEFAULT_SECONDS = 120;
+const SESSION_WAIT_MAX_SECONDS = 540;
+const SESSION_WAIT_MARGIN_SECONDS = 30;
+
+// Past the wait itself, so Codara, not the transport, ends it on time.
+function sessionWaitTimeoutMs(args) {
+  const seconds = args && typeof args.timeoutSeconds === "number" ? args.timeoutSeconds : SESSION_WAIT_DEFAULT_SECONDS;
+  return (Math.min(Math.max(0, seconds), SESSION_WAIT_MAX_SECONDS) + SESSION_WAIT_MARGIN_SECONDS) * 1000;
+}
 
 function rpcTimeoutMs(rpc, args) {
   if (isOrchestrationRpc(rpc)) return ORCHESTRATION_TIMEOUT_MS;
   if (rpc === "terminal.create" && args && args.worktree) return TERMINAL_WORKTREE_TIMEOUT_MS;
+  if (rpc === "session.start" && args && args.worktree) return TERMINAL_WORKTREE_TIMEOUT_MS;
+  if (rpc === "session.wait") return sessionWaitTimeoutMs(args);
   if (rpc === "terminal.run") return TERMINAL_RUN_TIMEOUT_MS;
   if (rpc === "browser.use") return BROWSER_USE_TIMEOUT_MS;
   if (rpc === "worktree.create") return args && args.workspace ? WORKTREE_CREATE_ELSEWHERE_TIMEOUT_MS : WORKTREE_CREATE_TIMEOUT_MS;
@@ -2171,6 +2312,11 @@ const CALLER_LOCATED_RPCS = new Set([
   "task.list",
   "inbox.add",
   "tab.action",
+  "session.start",
+  "session.status",
+  "session.wait",
+  "session.message",
+  "review.findings",
 ]);
 // The browser code tool is scoped like the single browser tools it drives.
 function isBrowserRpc(rpc) {
@@ -2221,7 +2367,7 @@ function worktreeCallerRole() {
 let CLIENT_NAME = "";
 
 function stampWorktreeCaller(rpc, args, ctx) {
-  if (!rpc.startsWith("worktree.") && !(rpc === "terminal.create" && args.worktree)) return;
+  if (!rpc.startsWith("worktree.") && !(rpc === "terminal.create" && args.worktree) && rpc !== "session.start") return;
   for (const key of ["runId", "callerPaneId", "callerPid", "callerRole", "callerClient"]) delete args[key];
   const envRunId = (process.env.SPARK_RUN_ID || "").trim();
   if (envRunId) args.runId = envRunId;
@@ -2953,7 +3099,7 @@ function toolManifest() {
     orchestration: names(EXECUTE_TOOLS),
     automation: names(AUTOMATION_TOOLS),
     workflow: names(WORKFLOW_TOOLS),
-    sessions: names([SESSION_SEARCH_TOOL]),
+    sessions: names([...SESSION_TOOLS, SESSION_SEARCH_TOOL]),
   };
 }
 

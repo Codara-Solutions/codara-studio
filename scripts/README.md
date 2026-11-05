@@ -40,8 +40,11 @@ How `scripts/run-all-tests.cjs` works:
   - A file with a `// test-runner: heavy (why)` line never runs next to
     another heavy one. Tag a suite heavy when it launches Chromium or
     Electron, or when its process peaks above about 200 MB.
+  - A file with a `// test-runner: timeout=600` line gets that many seconds
+    instead of 180.
   - A file with a `// test-runner: serial (why)` line runs after the pool,
-    with nothing else running. Today that is `test-renderer-chunks.mjs` (a
+    with nothing else running. Today that is `test-cora-harness.mjs` (its
+    timing checks), `test-renderer-chunks.mjs` (a
     production Vite build, about 2 GB) and `test-workflow-sandbox.cjs` (its
     heap-limit case grows QuickJS's WebAssembly memory to 2 GB).
   - No suite starts while `MemAvailable` is below `CODARA_TEST_MIN_FREE_MB`
@@ -94,15 +97,18 @@ Most suites need only `npm install`. These are the exceptions:
 |---|---|---|
 | A build in `out/` | `test-agent-socket.cjs`, `test-app-exit-electron.cjs` | Launches `out/main/index.js` under Electron with a temporary home. Run `npm run build` (which is `electron-vite build`) first. Without a build the app never writes its handshake file and the suite fails. |
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
+| `dbus-daemon`, `libnotify4`, `python3-gi`, Xvfb (Linux) | `test-notify-linux-click.cjs` | Runs a private bus with a fake notification server. Prints SKIP without them, and fails on CI. |
 | Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-browser-devtools.cjs`, `test-browser-cdp-access.cjs`, `test-browser-insight.cjs`, `test-browser-capture-chromium.cjs`, `test-preview-waits.cjs`, `test-preview-dialogs.cjs`, `test-preview-find-outline.cjs`, `test-preview-console-filter.cjs`, `test-studio-csp.cjs`, `test-browser-code.cjs` | Install it with `npx playwright install chromium`. Without it they print SKIP for the real-page checks. |
 | Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-worktree-cleanup.cjs`, `test-worktree-cleanup-agent.cjs`, `test-worktree-setup.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-review-diff.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
 
-CI (`.github/workflows/ci.yml`, macOS) runs the three typechecks, then
-`npm run build`, then `npx playwright install chromium`, then
-`npm run test:all`. On your machine, run the same steps to reproduce a CI
-failure.
+CI (`.github/workflows/ci.yml`, macOS, pull requests into `main`) runs the
+three typechecks, then `npm run build`, then `npx playwright install
+chromium`, then `npm run test:all`. `.github/workflows/ci-linux.yml` runs the
+same on Linux under Xvfb for pull requests into `Cora`, then a smoke set of
+Playwright specs (listed in the workflow). On your machine, run the same
+steps to reproduce a CI failure.
 
 ## Isolation: suites leave your real data alone
 
@@ -192,6 +198,7 @@ calls.
 |---|---|
 | `test-worker-*` (access, cleanup-safety, diff, independence, model-hint, pane-harness-gate, prompt-budget, session-memory-options, session-reuse, sessions; `test-worker-terminal-controls` belongs to remote access) | Worker prompts, tool access, sessions, diffs, and the pane a worker runs in. |
 | `test-spawn-batch-guard`, `test-parallel-wave`, `test-autopilot-wave`, `test-peer-comms-opt-in`, `test-verifier-scoping`, `test-direct-worker` | How workers are batched and scheduled (`src/shared/parallel-wave.ts`, `autopilot-wave.ts`), and verifiers. |
+| `test-agent-sessions` | Sessions one agent starts for another (`agent-sessions.ts`, `src/shared/agent-sessions.ts`): statuses, the live cap, waits, the launch command, and a brief passed whole through real bash, sh and zsh. |
 | `test-agent-terminal-cleanup`, `test-agent-terminal-lifecycle`, `test-agent-terminal-placement` | Terminals that agents open (`agent-terminal-registry.ts`, `agent-terminal-lifecycle.ts`). |
 
 ### Pi runtime, the Cora extension and subscriptions
@@ -199,6 +206,7 @@ calls.
 | Suites | Covers |
 |---|---|
 | `test-pi-runtime`, `test-pi-backend-session-lifecycle`, `test-pi-rpc-client`, `test-pi-turn`, `test-pi-turn-cost`, `test-pi-mcp-config`, `test-pi-commit-message` | Starting Pi (`pi-runtime.ts`, `pi-runtime-electron.ts`), the RPC client, turns and their cost, the MCP bridge config. |
+| `test-cora-harness` | The standalone `cora` CLI end to end: a real child process against the stub model in `cora-stub-model.mjs`, in a throwaway HOME, with non-loopback network blocked. Exit codes, retries, resume, token refresh rules, MCP, and the terminal interface. |
 | `test-pi-cora-extension`, `test-pi-cora-abandonable-wait`, `test-repeat-guard`, `test-deep-search`, `test-whiteboard-review-extension`, `test-whiteboard-quality` | The Pi extension in `resources/pi-cora/`. |
 | `test-pi-manager-compaction`, `test-pi-worker-compaction`, `test-pi-manager-compaction-integration.mjs`, `test-pi-worker-compaction-integration.mjs` | Context compaction for the manager and for workers, including the mid-turn pause and the summary recovery ladder. |
 | `test-pi-fast-mode-fallback-integration.mjs` (with the fast-mode block in `test-pi-cora-extension`) | Fast mode for the manager and workers: request shaping per provider and model, and the standard-speed fallback through a real offline Pi session. |
@@ -262,6 +270,7 @@ its first send (`run-store.ts`).
 | `test-clipboard-files` | Pasting files into a terminal on macOS. |
 | `test-terminal-unicode-width` | Character widths (`src/shared/terminal-unicode.ts`): emoji and CJK take two cells and box drawing one in every pane, the headless screens in main (`codara_terminal_read`, the Codex mirror) wrap where the pane wraps, and file links (`file-link-provider.ts`) underline the right cells after wide characters. |
 | `test-terminal-osc52` | OSC 52 copies from programs in a pane (`osc52.ts`, `terminalClipboard.ts`): parsing as tmux, Neovim and SSH send them, a size cap, clipboard reads never answered, the setting, replayed history, hidden panes and mirrors blocking copies, a burst collapsing to its last copy. |
+| `test-terminal-xtversion` | The pane's answer to XTVERSION (`terminalVersion.ts`): CSI > q gets one reply naming xterm.js and its version, so Claude Code leaves a right-click paste to the pane instead of pasting a second time; other sequences, mirrors and replayed history get none. `tests/e2e/terminal-right-click-paste.spec.ts` covers the right-click end to end. |
 | `test-terminal-context` | "Copy terminal context" (`terminalContext.ts`) and terminal link clicks (`terminalLinks.ts`): recent output read back as logical lines, the pasted block and its fence, a plain click opening the link menu, Ctrl or Cmd+click opening the link, and the menu rows per scheme. |
 | `test-terminal-text` | Text Codara types into a terminal (`src/shared/terminal-text.ts`): a bracketed paste no text can end early, even with nested markers, page text without control characters, the worker prompt paste, and every paste writer using them. |
 | `test-servers` | Dev servers, the status view and launch arguments (`src/main/servers/`): the keeper with real processes and fixture servers on free ports (never two copies, port conflicts named, env names without values, logs by cursor and to a file, stop, restart, exit codes, auto-start after a restart), the saved server named when a preview navigates to its down port, learning servers from pane output, adopted agent terminals, tool hellos, the per-runtime startup flags and `--chrome`, and `cora server`. |
@@ -516,7 +525,11 @@ restart and the agent tools; the POSIX-only checks skip on Windows).
 ### Notifications
 
 `test-notify-policy`, `test-notify-deliver` (which transports fire and the
-chime burst filter), `test-notify-center-store` (persistence, mutes, the
+chime burst filter), `test-notify-linux-click` (a real Electron clicked over
+a private D-Bus by a fake notification server: the default action, a click
+after garbage collection, the routed target, and the COSMIC raise when the
+compositor keeps the window behind), `test-notify-compositor-raise` (when a
+click asks `cosmic-activate` to raise Studio), `test-notify-center-store` (persistence, mutes, the
 summary push), `test-notify-center-model` (folding, eviction, age limits,
 settling, the badge count), `test-notify-center-view` (the bell panel's
 sections, stacks, times, that the badge, tab and pinned header agree, and
@@ -592,6 +605,8 @@ None of these are in the registry.
 | Script | When it runs | What it does |
 |---|---|---|
 | `run-all-tests.cjs` | `npm test`, `npm run test:all` | The test runner described above. |
+| `check-bundle-budgets.cjs` | `.github/workflows/budgets.yml`, on pull requests into `Cora`; by hand after `npm run build` | Measures raw and gzip bytes of `out/` (the renderer entry chunk, what `index.html` loads before first paint, all renderer files, the main entry, all main files, the preloads) and fails when one is over its limit in `bundle-budgets.json`. The limits started at the 2026-11-02 build plus 3%. When growth is intended, raise the limit in the same pull request and say why; `--update` rewrites every limit to today's size plus 3%. After a size win, lower the limit so the win sticks. Checked by `test-bundle-budgets`. |
+| `measure-startup.cjs` | `.github/workflows/budgets.yml`; by hand after `npm run build` | Boots the built app three times on fresh homes (on Linux inside Xvfb) and reports the median time to the first window and to a visible workspace, and the resident memory of all app processes after 5 s idle. It only warns, against the `startup` levels in `bundle-budgets.json`, because CI machines are noisy. |
 | `stamp-dev-electron-icon.cjs` | `postinstall`, `predev`, `prestart` | Puts the Codara icon and version strings on the development Electron binary. |
 | `brand-pi-oauth-page.cjs` | `postinstall` | Puts Codara's mark on the page a subscription sign-in ends on. Checked by `test-pi-oauth-branding`. |
 | `patch-macos-keychain.cjs` | `postinstall` | Adds an unreleased electron-builder fix for macOS signing. Checked by `test-macos-keychain`. |
@@ -599,6 +614,7 @@ None of these are in the registry.
 | `dev-commit-message-preview.cjs` | By hand | Runs the real commit message pipeline against a repository. |
 | `release.cjs`, `publish-release.cjs` | `npm run release:mac\|win\|all` | The manual release, built from a clean worktree. Needs the untracked `.env.releases`. |
 | `ci-version.cjs`, `release-github.cjs`, `release-bundle.cjs`, `publish-release-bundle.cjs`, `release-storage.cjs`, `notify-release.cjs` | `.github/workflows/release.yml` | The steps of the nightly release: pick the version, save the build bundle, tag, publish, announce. |
+| `check-pr-hygiene.cjs` | `.github/workflows/pr-hygiene.yml`, on every pull request | Warns above 800 changed lines, fails above 2,000 without the `large-pr` label, and fails when the branch carries already merged pull requests. Run it locally with `node scripts/check-pr-hygiene.cjs --base origin/Cora`. Checked by `test-pr-hygiene`. |
 | `setup-release-app.cjs` | Once, by an organization owner | Creates the GitHub App that tags releases. |
 
 [docs/releasing.md](../docs/releasing.md) covers both release paths.

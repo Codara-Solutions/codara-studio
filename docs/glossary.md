@@ -42,7 +42,8 @@ that defines it (types are in `src/shared/types.ts` unless noted).
 ## Automations
 
 - **Automation.** Work that runs by itself: on a schedule, on a git or folder
-  event, when another automation finishes, or on demand, with a budget and
+  event, when a pull request opens or its CI fails, when another automation
+  finishes, or on demand, with a budget and
   loop limits (`AutomationState`, driven by
   `src/main/orchestration/automation-loop.ts`).
 - **Loom.** The graph an automation runs (`LoomGraph`), made of worker,
@@ -115,6 +116,6 @@ See [accounts.md](./accounts.md) for how these fit together.
 - **Remote access.** Pairing with the Codara phone app over the local
   network or the Codara relay (`src/main/remote-access/`). See
   [remote-access.md](./remote-access.md).
-- **Harness benchmark.** `cora bench`, which scores the whole orchestration
+- **Harness benchmark.** `cora studio bench`, which scores the whole orchestration
   harness on seeded tasks (correctness, efficiency, discipline,
   orchestration). See [cli/README.md](../cli/README.md).

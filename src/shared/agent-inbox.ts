@@ -1,6 +1,6 @@
 // The Agents tab as an inbox, after T3 Code's thread sidebar
-// (github.com/pingdotgg/t3code, MIT, by Theo / Ping Labs): agents that need
-// you or finished sit on top, then the Working, Snoozed and Settled shelves.
+// (github.com/pingdotgg/t3code, MIT, by Theo / Ping Labs): every agent sits
+// under one heading, Needs you, Done, Working, Snoozed or Settled.
 // The behaviour follows T3 Code's (settle, snooze presets, a merged pull
 // request settles itself, a request for the user ends a snooze early); the
 // code is Codara's own.
@@ -269,12 +269,14 @@ export interface AgentInboxRow {
 }
 
 export interface AgentInboxView {
-  /** Needs you and finished, pinned first. */
-  inbox: AgentInboxRow[];
+  /** Asking for input or stopped, pinned first: the Needs you section. */
+  needs: AgentInboxRow[];
+  /** Finished and not yet settled, pinned first: the Done section. */
+  done: AgentInboxRow[];
   working: AgentInboxRow[];
   snoozed: AgentInboxRow[];
   settled: AgentInboxRow[];
-  /** Rows in the inbox that wait on the user: the switch's badge. */
+  /** Rows that wait on the user: the switch's badge and the Needs you count. */
   needsYou: number;
   total: number;
 }
@@ -329,7 +331,8 @@ export function buildAgentInbox(
   prefs: AgentInboxPrefs,
   context: AgentInboxContext,
 ): AgentInboxView {
-  const inbox: AgentInboxRow[] = [];
+  const needs: AgentInboxRow[] = [];
+  const done: AgentInboxRow[] = [];
   const working: AgentInboxRow[] = [];
   const snoozed: AgentInboxRow[] = [];
   const settled: AgentInboxRow[] = [];
@@ -339,26 +342,29 @@ export function buildAgentInbox(
     if (prefs.settled[card.key]) settled.push(entry);
     else if (snooze && context.now < snooze.until) snoozed.push(entry);
     else if (card.bucket === "working") working.push(entry);
-    else inbox.push(entry);
+    else if (card.bucket === "needs-you") needs.push(entry);
+    else done.push(entry);
   }
   // Pinned rows lead, the earliest pin first; the board's order stays
-  // otherwise (Needs you before finished, each in its own order).
+  // otherwise.
   const pinnedOrder = (entry: AgentInboxRow) => prefs.pinned[entry.key] ?? Number.POSITIVE_INFINITY;
   const byPin = (a: AgentInboxRow, b: AgentInboxRow) => {
     const pa = pinnedOrder(a);
     const pb = pinnedOrder(b);
     return pa === pb ? 0 : pa < pb ? -1 : 1;
   };
-  inbox.sort(byPin);
+  needs.sort(byPin);
+  done.sort(byPin);
   working.sort(byPin);
   snoozed.sort((a, b) => (a.snoozedUntil ?? 0) - (b.snoozedUntil ?? 0));
   settled.sort((a, b) => (b.settledAt ?? 0) - (a.settledAt ?? 0));
   return {
-    inbox,
+    needs,
+    done,
     working,
     snoozed,
     settled,
-    needsYou: inbox.filter((entry) => entry.card.bucket === "needs-you").length,
+    needsYou: needs.length,
     total: model.total,
   };
 }

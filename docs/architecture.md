@@ -333,6 +333,10 @@ terminals: interactive Claude Code, Codex, Grok or Pi sessions for you to drive
 (`codara_spawn_terminals`), and terminals the agent drives itself
 (`codara_terminal_create`, tracked by `agent-terminal-lifecycle.ts` and
 closed when the run ends).
+Any agent can also start a session (`codara_session_start`): a real agent CLI
+in a tab of any workspace, with its brief submitted and its final message
+reported back (`agent-sessions.ts`). It is such a terminal, kept after its
+caller ends.
 
 **Direct lane.** A chat's first message goes through `shouldUseDirectExecution`
 (`direct-execution.ts`). A bounded request (a question, a focused fix) runs as
@@ -413,10 +417,26 @@ stopped in its preflight can still record that prompt after the next turn
 sent it again.
 
 **Automations and looms.** `scheduler.ts` arms triggers (cron, interval,
-folder, git, manual, and others). `automation-loop.ts` starts iterations.
+folder, git, pull requests, manual, and others). `automation-loop.ts` starts
+iterations.
 `loom-graph.ts`, `loom-resolve.ts` and `loom-steps.ts` run a loom's graph of
 workers, guards, merges and fixed steps (shell, script, HTTP, file,
 notification).
+
+An automation can opt in to its own branch (`automation-branch.ts`): each cycle
+gets a new branch in a separate worktree under the managed worktrees folder, and
+when the loop ends its work is committed and, if it went well and the automation
+asked, pushed as a draft pull request. It never falls back to the user's
+checkout: if the worktree cannot be made, the run does not start. Pull requests
+from these branches never start a pull request trigger.
+
+The pull request trigger (`github-trigger.ts`) polls the repository behind the
+workspace's origin remote through the user's own `gh`, with conditional reads so
+a quiet minute costs no rate limit. It keeps what it acted on in the job, so
+events from while the app was closed still fire and nothing fires twice. Only
+authors GitHub lists as owner, member or collaborator count, and a pull
+request's title, branch and check names reach a worker only as labelled data and
+never reach a step's shell command.
 
 Before a pass that a trigger or a cadence loop starts, `automation-loop.ts`
 runs the automation's optional precheck (`automation-precheck.ts`: one shell

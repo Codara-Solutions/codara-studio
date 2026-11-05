@@ -5,10 +5,10 @@ import { splitSnippetMarks, trimSnippetLead } from "@shared/session-search";
 const SNIPPET_LEAD_CHARS = 28;
 
 /** A snippet from the index, its matched words marked and kept in view. */
-export function SnippetText({ snippet }: { snippet: string }) {
+export function SnippetText({ snippet, lead = SNIPPET_LEAD_CHARS }: { snippet: string; lead?: number }) {
   return (
     <>
-      {trimSnippetLead(splitSnippetMarks(snippet), SNIPPET_LEAD_CHARS).map((part, index) =>
+      {trimSnippetLead(splitSnippetMarks(snippet), lead).map((part, index) =>
         part.mark ? (
           <mark key={index} className="ss-hl">
             {part.text}

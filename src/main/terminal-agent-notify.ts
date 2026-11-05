@@ -26,6 +26,7 @@ import { BackgroundWork, claudeBackgroundPaths, probeBackgroundFiles } from "./a
 import { nextWorkingSince, type TerminalAgentActivity } from "@shared/agent-board";
 import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 import type { AgentHibernationEvidence } from "@shared/agent-hibernation";
+import type { AgentSessionLive } from "@shared/agent-sessions";
 
 // Terminal-agent notifier: tells the user when a Claude Code, Codex, Grok
 // or Pi CLI they ran in a NORMAL terminal pane finished a turn, or stopped to
@@ -240,6 +241,10 @@ interface PaneWatcher {
   lastToolDetail: string | null;
   // What the rail's Agents view shows for this pane.
   activity: PaneActivity;
+  // The latest turn's start, kept after it ends, and its final message whole.
+  // codara_session_status answers from these; the board keeps one line.
+  lastTurnStartedAt: number;
+  finalMessage: string | null;
   // The UserPromptSubmit that started the current Claude activity was a
   // background task reporting back, not the user.
   hookFollowUp: boolean;
@@ -398,6 +403,8 @@ export function syncTerminalNotifyPanes(input: {
       pendingToolCalls: 0,
       lastToolDetail: null,
       activity: emptyActivity(),
+      lastTurnStartedAt: 0,
+      finalMessage: null,
       hookFollowUp: false,
       background: new BackgroundWork(),
       backgroundSessionId: null,
@@ -873,6 +880,8 @@ function startTurn(w: PaneWatcher, now: number, source: AgentTurn["source"], ses
     w.lastWorkingAt = 0;
   }
   w.turn = { startedAt: now, source, sessionId, announced: false, announcedAt: 0 };
+  w.lastTurnStartedAt = now;
+  w.finalMessage = null;
   // A turn held for background work is superseded; this one is announced.
   w.heldDone = null;
   w.screenIdleSince = null;
@@ -915,6 +924,10 @@ function requestDone(
   if (w.replayingTail || w.excluded) return;
   if (req.body && req.body.trim()) noteActivity(w, { message: req.body.slice(0, ACTIVITY_TEXT_MAX) });
   if (!req.followUp && !turnActive(w)) {
+    // A prompt given on the command line submits nothing Codara sees, so an
+    // agent that reports the end of that first turn has no turn open here.
+    // Nothing to alert, but a session waiting on it must hear.
+    if (w.turn === null && req.origin !== "heuristic") emitTurnEnded(w, false, req.body ?? null);
     tanLog(`pane=${w.paneId} done (${req.origin}) ignored: no unannounced turn`);
     return;
   }
@@ -1305,6 +1318,7 @@ function handleClaudeStop(
   payload: Record<string, unknown> | null,
 ): void {
   const message = summarizeAgentMessage(payload?.last_assistant_message);
+  if (typeof payload?.last_assistant_message === "string") w.finalMessage = payload.last_assistant_message;
   const followUp = w.hookFollowUp;
   w.hookFollowUp = false;
   w.pendingToolCalls = 0;
@@ -1364,6 +1378,7 @@ function codexCompleted(
   why: string,
 ): void {
   if (!rememberCodexTurn(w, turnId)) return;
+  if (typeof message === "string") w.finalMessage = message;
   w.state = "idle";
   w.codexIdleSince = null;
   w.codexAwaitingIdle = true;
@@ -1379,6 +1394,8 @@ function codexCompleted(
     if (w.turn?.announced && now - w.turn.announcedAt < 5_000) return;
     if (userInput !== true) return;
     startTurn(w, now, "prompt", null);
+    // A new turn starts with no answer; this message is that turn's.
+    if (typeof message === "string") w.finalMessage = message;
   }
   requestDone(w, { origin: "codex", body: summarizeAgentMessage(message), delayMs: 0 });
 }
@@ -1704,6 +1721,7 @@ function blockedBody(kind: string | null, msg: string | null): string {
 }
 
 function handleProgramStatus(w: PaneWatcher, report: ProgramStatusReport, now: number): void {
+  if (report.state === "done" && !report.id && report.msg) w.finalMessage = report.msg;
   // Child records describe background tasks (agents, teammates, workflows;
   // not shells): they run on after the parent reports its turn done.
   if (report.id) {
@@ -2322,6 +2340,34 @@ function compactDuration(ms: number | null | undefined): string | null {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+export interface TerminalAgentTurnEnd {
+  paneId: string;
+  failed: boolean;
+  /** The agent's whole final message, or what went wrong. */
+  message: string | null;
+  at: number;
+}
+
+const turnEndListeners = new Set<(event: TerminalAgentTurnEnd) => void>();
+
+// A turn counts as ended where its alert goes out: after the confirm delay,
+// and only once the background work it started has drained.
+export function onTerminalAgentTurnEnded(listener: (event: TerminalAgentTurnEnd) => void): () => void {
+  turnEndListeners.add(listener);
+  return () => turnEndListeners.delete(listener);
+}
+
+function emitTurnEnded(w: PaneWatcher, failed: boolean, body: string | null): void {
+  const event = { paneId: w.paneId, failed, message: failed ? body : (w.finalMessage ?? body), at: Date.now() };
+  for (const listener of turnEndListeners) {
+    try {
+      listener(event);
+    } catch (err) {
+      console.warn("[terminal-agent-notify] turn-end listener failed:", err);
+    }
+  }
+}
+
 // Publish a turn-boundary alert into the unified pipeline. Suppression (the
 // user looking at the pane, same-kind repeats) is the notify policy's job.
 function deliver(
@@ -2341,6 +2387,7 @@ function deliver(
     return;
   }
   tanLog(`pane=${w.paneId} ALERT kind=${kind} runtime=${w.runtime} ws=${w.workspaceId} tab=${w.tabId}`);
+  if (kind !== "blocked") emitTurnEnded(w, kind === "failed", detail.body ?? null);
   const label = detail.plain ? "Terminal" : runtimeLabel(w.runtime);
   const where = w.tabTitle ? ` · ${w.tabTitle}` : "";
   const status =
@@ -2455,6 +2502,21 @@ export function terminalAgentActivitySnapshot(): TerminalAgentActivity[] {
     });
   }
   return out;
+}
+
+// What codara_session_status reads of one pane; null when no watcher holds it.
+export function terminalAgentSessionLive(paneId: string): AgentSessionLive | null {
+  const w = watchers.get(paneId);
+  if (!w || w.excluded || w.disposing) return null;
+  const state = w.lastEmittedState ?? "launching";
+  return {
+    runtime: w.runtime,
+    state,
+    tool: w.activity.tool,
+    question: state === "blocked" ? w.activity.question : null,
+    lastTurnStartedAt: w.lastTurnStartedAt,
+    turnActive: turnActive(w),
+  };
 }
 
 // Test/maintenance escape hatch: drop every watcher. Safe to call repeatedly.

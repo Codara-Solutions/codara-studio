@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Workspace } from "@shared/types";
-import type { WorktreeRailCleanupResult, WorktreeRailExternal, WorktreeRailState } from "@shared/worktree-cleanup";
+import type {
+  WorktreeRailCleanupRequest,
+  WorktreeRailCleanupResult,
+  WorktreeRailExternal,
+  WorktreeRailState,
+} from "@shared/worktree-cleanup";
 
 // Merge and folder state of every copy-branch workspace, for the rail's
 // "merged" mark and its one-click cleanup, and the worktrees of the rail's
@@ -14,6 +19,12 @@ import type { WorktreeRailCleanupResult, WorktreeRailExternal, WorktreeRailState
 // and refuses anything in use, unpushed, locked or on a drive that may only
 // be unmounted. A refused row stays and is asked about less often each time,
 // up to once an hour.
+//
+// A row main offers as merged and safe (autoRemoveMerged) goes the same way,
+// unless isHeld says it has tabs, or a tab of any workspace shows a file in
+// its folder: an editor buffer or a draft is invisible to main. A held row is
+// not asked about at all, so its wait does not grow and it leaves soon after
+// its last tab closes.
 const POLL_MS = 3 * 60_000;
 const FOCUS_GAP_MS = 20_000;
 const AUTO_RETRY_MS = 5 * 60_000;
@@ -29,7 +40,8 @@ const NO_EXTERNAL: readonly WorktreeRailExternal[] = [];
 
 export function useWorktreeRailStates(
   workspaces: Workspace[],
-  onAutoRemoved: (result: WorktreeRailCleanupResult) => void,
+  onAutoRemoved: (result: WorktreeRailCleanupResult, mode: WorktreeRailCleanupRequest["mode"]) => void,
+  isHeld: (workspaceId: string, folders: readonly string[]) => boolean,
 ): {
   states: Record<string, WorktreeRailState>;
   external: readonly WorktreeRailExternal[];
@@ -45,6 +57,10 @@ export function useWorktreeRailStates(
   const autoTried = useRef(new Map<string, { at: number; waitMs: number }>());
   const onAutoRemovedRef = useRef(onAutoRemoved);
   onAutoRemovedRef.current = onAutoRemoved;
+  const isHeldRef = useRef(isHeld);
+  isHeldRef.current = isHeld;
+  const workspacesRef = useRef(workspaces);
+  workspacesRef.current = workspaces;
   const [refreshTick, setRefreshTick] = useState(0);
   const refresh = useCallback(() => setRefreshTick((tick) => tick + 1), []);
   // Every local workspace: a project with no copy-branch row can still have
@@ -87,17 +103,19 @@ export function useWorktreeRailStates(
         setStates((prev) => (sameStates(prev, next) ? prev : next));
         const now = Date.now();
         for (const state of list) {
-          if (!state.autoCandidate) continue;
+          const mode = state.autoCandidate ? "auto" : state.autoRemoveMerged ? "auto-merged" : null;
+          const cwd = workspacesRef.current.find((ws) => ws.id === state.workspaceId)?.cwd;
+          if (!mode || (mode === "auto-merged" && isHeldRef.current(state.workspaceId, cwd ? [cwd] : []))) continue;
           const tried = autoTried.current.get(state.workspaceId);
           if (tried && now - tried.at < tried.waitMs) continue;
           autoTried.current.set(state.workspaceId, {
             at: now,
             waitMs: tried ? Math.min(tried.waitMs * 2, AUTO_RETRY_MAX_MS) : AUTO_RETRY_MS,
           });
-          const result = await api.railCleanUp({ workspaceId: state.workspaceId, mode: "auto" }).catch(() => null);
+          const result = await api.railCleanUp({ workspaceId: state.workspaceId, mode }).catch(() => null);
           // Reported even when the removal's own state change already
           // restarted this effect.
-          if (result?.status === "removed") onAutoRemovedRef.current(result);
+          if (result?.status === "removed") onAutoRemovedRef.current(result, mode);
           if (cancelled) return;
         }
       } finally {

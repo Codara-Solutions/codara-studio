@@ -42,6 +42,7 @@ import { loadPreferences } from "./preferences-store";
 import { codaraHome } from "./codara-home";
 import { startWorktreeSetup } from "./worktree-setup";
 import { loadState, updateState } from "./storage";
+import { rowFolders } from "./worktree-folders";
 
 export interface GitHubIssueWorkspaceDependencies {
   loadState(): Promise<AppState>;
@@ -61,6 +62,7 @@ export interface GitHubIssueWorkspaceDependencies {
     worktreesRoot: string;
     baseBranch?: string;
     newBranch: string;
+    takenPaths?: readonly string[];
   }): Promise<GitCopyWorktreeResult>;
   removeCopyWorktree(input: {
     repoCwd: string;
@@ -233,6 +235,19 @@ async function createOrResumeIssueWorkspace(
     issue.number,
   );
   if (replay) return resumeIssueWorkspace(replay, dependencies);
+  // Folders rows still name are not handed out again (reservedDirNames).
+  // Without the rows nothing is created.
+  let takenPaths: string[];
+  try {
+    takenPaths = rowFolders(refreshedState);
+  } catch (cause) {
+    return failure(
+      "validate",
+      "state-unreadable",
+      `Codara could not read its workspaces, so no worktree was made: ${safeMessage(cause)}`,
+      false,
+    );
+  }
 
   let branches: GitBranchList;
   let baseBranch: string;
@@ -267,6 +282,7 @@ async function createOrResumeIssueWorkspace(
     worktreesRoot: dependencies.worktreesRoot(source.cwd),
     baseBranch,
     newBranch: branch,
+    takenPaths,
   });
   if (!created.ok) {
     return failure(

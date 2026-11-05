@@ -2,7 +2,7 @@
 "use strict";
 
 // Unit tests for src/shared/background-agents.ts: which worktrees get a
-// "Background agent" card (a coordinator's subagent working in another
+// background-agent card (a coordinator's subagent working in another
 // workspace's repository), its state from the note, the creator and the
 // worktree's activity, and how the card reaches the worktree's rail row
 // (buildAgentLines, buildRailFamily) and the Agents tab's shelves.
@@ -136,11 +136,52 @@ test("a worktree made from another workspace gets a working background card unde
   assert.equal(card.bucket, "working");
   assert.equal(card.workspaceId, "wt-cloud", "the card sits in the worktree's own workspace");
   assert.equal(card.workspaceName, "Cloud platform", "the Agents tab names the project");
-  assert.equal(card.agentLabel, "Background agent");
-  assert.equal(card.tabTitle, "from AI Continous Improvment");
+  assert.equal(card.agentLabel, "Claude subagent");
+  assert.equal(card.tabTitle, "from AI Continous Improvment", "the creator tab is the default title, so it is not repeated");
   assert.equal(card.title, "Fix the MCP node path");
   assert.equal(card.since, NOW - 12 * MIN, "working since the worktree was made");
   assert.deepEqual(card.target, { type: "workspace", workspaceId: "wt-cloud" });
+});
+
+test("the label names the runtime and, when the creator's tab has a name, that tab", ({ mod }) => {
+  const named = { ...creatorCard(), tabTitle: "Cloud coordinator" };
+  const claude = cards(mod, { worktrees: [worktree()], cards: [named] })[0];
+  assert.equal(claude.agentLabel, "Claude subagent");
+  assert.equal(claude.tabTitle, "from AI Continous Improvment \u203a Cloud coordinator");
+  const lines = mod.buildAgentLines({ board: { needsYou: [], working: [named, claude], done: [], total: 2 }, notes: {} });
+  assert.equal(lines["wt-cloud"][0].name, "Claude subagent \u00b7 from AI Continous Improvment \u203a Cloud coordinator");
+  const codexCreator = { ...named, runtime: "codex", agentLabel: "Codex" };
+  const codex = cards(mod, { worktrees: [worktree({ creator: { ...worktree().creator, client: "codex" } })], cards: [codexCreator] })[0];
+  assert.equal(codex.agentLabel, "Codex subagent");
+  assert.equal(codex.tabTitle, "from AI Continous Improvment \u203a Cloud coordinator");
+  // Creator tab not found: runtime from the client, no tab name, no ids.
+  const codexLost = cards(mod, { worktrees: [worktree({ creator: { paneId: "p-gone", client: "codex", fromWorkspaceId: "ws-gone", fromWorkspaceName: "PIOS" } })], cards: [] })[0];
+  assert.equal(codexLost.agentLabel, "Codex subagent");
+  assert.equal(codexLost.tabTitle, "from PIOS");
+  const claudeLost = cards(mod, { worktrees: [worktree({ creator: { paneId: "p-gone", client: "claude-code", fromWorkspaceId: "ws-gone", fromWorkspaceName: "PIOS" } })], cards: [] })[0];
+  assert.equal(claudeLost.agentLabel, "Claude subagent");
+  assert.equal(claudeLost.tabTitle, "from PIOS");
+});
+
+test("default tab titles are never shown as the starting tab's name", ({ mod }) => {
+  for (const title of ["terminals", "terminals 2", "split", "split 12"]) {
+    const [card] = cards(mod, { worktrees: [worktree()], cards: [{ ...creatorCard(), tabTitle: title }] });
+    assert.equal(card.tabTitle, "from AI Continous Improvment", title);
+  }
+  const [real] = cards(mod, { worktrees: [worktree()], cards: [{ ...creatorCard(), tabTitle: "terminals for PIOS" }] });
+  assert.equal(real.tabTitle, "from AI Continous Improvment \u203a terminals for PIOS");
+});
+
+test("an unknown or missing client is not called Claude; a Pi coordinator reads the same live or gone", ({ mod }) => {
+  const label = (creator, extra = {}) =>
+    cards(mod, { worktrees: [worktree({ creator: { fromWorkspaceId: "ws-ai", ...creator } })], cards: [], ...extra })[0].agentLabel;
+  assert.equal(label({}), "Background agent");
+  assert.equal(label({ client: "gemini-cli" }), "Background agent");
+  assert.equal(label({ client: "cursor" }), "Background agent");
+  assert.equal(label({ client: "claude-code" }), "Claude subagent");
+  const pi = { ...creatorCard(), runtime: "pi", agentLabel: "Pi" };
+  assert.equal(cards(mod, { worktrees: [worktree()], cards: [pi] })[0].agentLabel, "Cora subagent");
+  assert.equal(label({ paneId: "p-gone", client: "pi" }), "Cora subagent");
 });
 
 test("a worktree made from its own project gets no card: its creator shows on the row already", ({ mod }) => {
@@ -205,7 +246,7 @@ test("the card puts a background line on the worktree's row and keeps the creato
   assert.equal(model.total, 2);
   const lines = mod.buildAgentLines({ board: model, notes: note("Running the e2e") });
   const [line] = lines["wt-cloud"];
-  assert.equal(line.name, "Background agent · from AI Continous Improvment");
+  assert.equal(line.name, "Claude subagent · from AI Continous Improvment");
   assert.equal(line.state, "working");
   assert.equal(line.text, "Running the e2e");
   assert.equal(line.fromNote, true);

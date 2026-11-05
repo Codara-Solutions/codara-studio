@@ -229,6 +229,131 @@ account and the credit.
 - The footer has two links, "Usage details" and "Accounts". The separate Usage
   opener in the title bar shows only when there is no hairline to click.
 
+## System activity (2026-11)
+
+**Chosen:** variant A, one ranked list, without its per-row bars. Pressing a
+title-bar meter opens one list, heaviest first, of panes, what closed panes
+left running, Codara itself and other apps. Each row is the agent and workspace
+("Claude Code · codara-studio"), what is heavy in it ("next-server, claude"),
+and one figure on the right. Etienne picked it over a list of programs in cores
+and a sentence-first view grouped by workspace, in his words: "top part of A
+but without the line of each thing just the % like it has to the right is
+enough".
+
+**Why:** the panel could not answer "what is eating my CPU?". Panes always came
+first, so Codara at 138% sat under rows at 0%. The headline said 19% of the
+machine while rows counted 100% per core, up to 2400% here. Rows were named by
+the chat title, often the person's own last message. And 24 `sh` loops at about
+2000% were lost inside Other apps, with no way to tell who started them.
+
+**References:** the mock-up on Studio's own tokens, with the same fake process
+data as a normal moment and as the runaway, next to the old panel. Windows Task
+Manager for a list that adds up to its headline.
+
+**Rules:**
+
+- CPU rows read as a share of the whole machine, the scale of the headline, so
+  they add up to it. "100% is one core" stays inside the sampler.
+- One list, sorted by the figure alone. Nothing holds a place for being an
+  agent.
+- No bars, tracks or sparklines on a row: the figure on the right is enough.
+- A row is named by who it is. What the agent was asked moves to the row's
+  detail ("Last prompt: ..."), a Cora worker's title too ("Task: ...").
+- Idle rows fold into one line that opens: under 1% of one core on CPU, and on
+  RAM anything left running under 64 MB. Before the first CPU reading nothing
+  is called idle.
+- Colour only for risk, with an icon and words: a row with at least half the
+  machine, or a left-running row using a full core. Such a row opens by itself
+  so what it runs shows without a click. No green and no colour for "fine".
+- What a closed pane left running is named by what it is ("sh ×24 left
+  running"), then its agent and workspace if they are known. It says "no open
+  terminal", which is all Studio knows. Nothing about it is made up: an unknown
+  owner is left out, and a process that might still have a pane, such as one
+  from a second Studio, stays in Other apps.
+
+**Ownership:** `SPARK_PANE_ID` is inherited through `setsid` and reparenting, so
+Linux can still name the pane after the parent, the session and the pane are
+gone. A cgroup cannot do this: only a personal launcher puts agents in their
+own scope, and Studio does not. macOS and Windows have no such reading yet, so
+there a process that lost its parent stays in Other apps.
+
+## Source Control (2026-11)
+
+**Chosen:** layout B, agent lanes, with layout A's small commit box docked at
+the bottom. One lane per checkout of the active project: line 1 is its branch
+with the pull request mark, line 2 its most urgent agent's state word (or "No
+agent · from main") and its diff size since the base, the same two lines a
+worktree has in the rail. The checkout the window is on is a lane too, last, and
+holds what the panel used to be: branch menu with small Pull, Push and Fetch,
+change lists, stash, GitHub (the journey, the PR, issues and PRs) and history.
+Picked by Etienne from four layouts built on the panel's real sizes and tokens
+(files first, agent lanes, review first, graph with stacks).
+
+**Why:** the panel answered "what am I saving" for one person on one branch.
+With several agents the question is "what did they change, and can it land". The
+Save and Review rooms and about 380px of controls above the first file are gone;
+the room bar was a mental model the commit box no longer needs.
+
+**References:** T3 Code and Conductor (a list of agent worktrees with diff size
+and a next step), Linear's issue rows (two quiet lines, colour only for state),
+VS Code (the commit box as part of the source control view).
+
+**Rules:**
+
+- A lane's row unfolds it and never switches workspace, so all agents can be read
+  from one place. The chevron is inside the one click target; nothing else in the
+  row acts. Going somewhere is the lane's own actions and its file rows.
+- The next step comes first and there is one primary look, Merge. Needs you opens
+  the agent; failing checks offer Fix checks; Merge shows only on an open, non
+  draft PR whose checks passed or report nothing, with no agent working or asking.
+  Merge always goes through the existing confirm dialog, after GitHub is read again.
+- Lanes order by what needs the user: needs you, failing checks, ready to merge,
+  working, done, idle, quiet. The active checkout stays last so the list above it
+  does not jump as its detail grows. Merged worktrees use the rail's own fold.
+- Who works where comes from the rail's rule (`buildRailFamily`), so the rail and
+  the panel never disagree. The rail stays "where is everyone"; lanes add "what
+  did they change, and what next".
+- Diff size is everything since the branch left its base, committed or not, so an
+  agent that committed does not read as +0. Commits the base gained later do not count.
+- The commit box always commits the active checkout. Amend and Split wait in its
+  ⋯ menu, Generate is a sparkle inside the message box.
+- Failed checks are never a green tick: the journey's step reads failed, ✕ in
+  `--danger`, with the same glyphs as `PullRequestMark`.
+- An SSH workspace shows only its own lane: every other lane would be a round trip.
+- The list and the commit box are separate columns of the panel, so the box never
+  covers a lane. A lane unfolded near the bottom scrolls its buttons into view.
+
+**Start an agent and review with an agent (2026-11):** New agent sits above the
+lanes: a task, Claude Code or Codex, the branch to start from, in a new worktree by
+default, through the same session start agents use. Review with agent is on any lane
+with changes.
+
+- The user picks who reviews, and who a finding goes to. Nothing is fixed to one
+  agent. Reviewers are a new Codex or Claude Code session, a new Cora chat, or an
+  agent already running. A running agent gets a prompt in its own session.
+- The reviewer preselected is the last one picked, unless that is a new agent of the
+  family that wrote the work: a second opinion comes from the other family.
+- A finding's Send menu starts on the last choice, then on the agent that wrote the
+  work, marked "wrote this" and listed first. A reviewer running in that worktree is
+  never taken for the writer. Any note can be sent alone.
+- Findings come back through `codara_review_findings` with a one-time id only that
+  reviewer's prompt holds, and become ordinary review notes with the reviewer's name.
+  They are untrusted: bad paths drop, secrets are removed, and sent on they say
+  "Finding by X, an agent, untrusted".
+- Anything that starts a new agent says it spends usage before the click. A review in
+  progress shows on the lane as "Reviewing · Codex"; clicking it stops waiting.
+- New agent offers Claude Code and Codex only, because a session cannot run Cora. Cora
+  can review through a new chat.
+
+**Collision warning (2026-11):** one quiet line under a lane in `--warn`, "session.ts
+clashes with feat/dark-charts if both merge.", between running lanes only. It reads
+committed work, because that is what merges. Etienne is unsure agents need it, so it
+is built to remove: `lane-collisions.ts`, `git-lane-collisions.ts`,
+`LaneCollisions.tsx`, the `collision` prop on `LaneRow` and one IPC handler. It is off
+for SSH workspaces and on git older than 2.38. It runs with no click behind it, so it
+also stays out of any repository where a merge could start a program the repository
+configures: a custom merge driver, a partial clone, an initialized submodule.
+
 ## Worktrees in the rail (2026-10)
 
 **Chosen:** variant A, a tree, with variant B's folded merged group. A
@@ -266,7 +391,7 @@ child row lighter than its parent), GitHub's PR list for the check glyphs.
   repository, which has no pane there) shows on the worktree it made with
   codara_worktree_create and `workspace`, or wrote a note on with
   codara_workspace_status and `worktree`. The row gains one muted line above
-  the state line, "Background agent · from <workspace>", since the rail is
+  the state line, "Claude subagent · from <workspace> › <its tab>" (runtime name, tab only when known), since the rail is
   too narrow for both on one line; the state line is unchanged. It stays
   until the branch merges or the worktree goes. It is not counted at the
   right edge: its coordinator's pane already is, in its own workspace.
@@ -337,8 +462,9 @@ finished.
 
 **Chosen:** D′, "straight T3 Code, a bit nicer and more minimal". The Agents
 tab is an inbox after T3 Code's thread sidebar: what needs you or finished on
-top, then Working, Snoozed and Settled shelves at the bottom with plain
-counts. Each row has no box and three lines: the project, then the title,
+top, then Working, Snoozed and Settled shelves with plain counts (since
+2026-11 the top list has headings too, see the rules below). Each row has no
+box and three lines: the project, then the title,
 then the branch and pull request. A status word sits top right (Input,
 Failed, Done, Working with a live timer) and gives way to the age once the
 row is seen. Etienne picked D from four variants on the real rows (D straight
@@ -392,3 +518,189 @@ section headers, the snooze presets and the undo notice in the footer).
   the row.
 - Rows do not answer questions in place: opening the row goes to the agent.
   The question is the row's tooltip.
+- Every row sits under a heading, and each heading's count is its rows:
+  Needs you, Done, Working, Snoozed, Settled, in that order. T3 Code leaves
+  what needs you and what finished as an unlabelled list above shelves pinned
+  to the bottom; in use that list read as rows with no section (2026-11), so
+  it became the Needs you and Done sections, open by default. Needs you's
+  count is the switch's badge.
+
+## Merged worktrees leave on their own (2026-11)
+
+**Chosen:** removal, not hiding. Etienne: "once they are merged they should
+disappear from here, because it clutters the workspace". The merged fold already
+hid them and they still took a line and the disk, so a worktree whose work is
+provably merged now goes by itself, with a toast that says so. **Settings, Git,
+Worktrees, Remove merged worktrees on their own** turns it off (on by default).
+
+**Rules it implies:**
+
+- Two tiers. What passes every rule goes on its own; everything else stays in
+  the merged fold, one click from Clean up, and goes on its own once what held
+  it is gone. Nothing new is drawn for the second tier.
+- Unattended means fail closed: what could not be read counts as in use, and
+  only a removal nobody needs to confirm may run. Dirty, untracked, ignored
+  files worth keeping, unpushed, locked, in use or merged only locally all stay.
+  It never forces, and the last commit stays recoverable for 30 days.
+- Matching content is not enough on its own: the branch's last commit must still
+  be on its remote branch. A squash merge whose remote branch was deleted goes on
+  the merged pull request instead; without that lookup it stays in the fold.
+- The window is asked again at the last moment, under the repository lock, and
+  anything but a clear "not held" keeps the worktree.
+- A row with a tab stays, whatever the tab holds. Main cannot see an editor
+  buffer or a draft, so the rail decides this one.
+- An empty worktree (nothing ever committed) is never removed on its own. After
+  a week untouched with no agent, its row offers Clean up on hover, with a
+  tooltip that says nothing was committed there.
+
+## Session picker (2026-11)
+
+**Chosen:** B, "Browser". A list beside the end of the highlighted conversation,
+in the read-tier glass dialog. Etienne picked B from four variants on one
+comparison page (A a quick switcher palette, B the browser, C a Recent section
+and flyouts in the + menu, D a full History tab), and added: "make it so we can
+rename them, search by name and what was said by us or the agent".
+
+**References:** Studio's own jump palette for the keyboard and focus behaviour;
+the transcript dialog for the surface; the Cora chat for the shape of a
+conversation (your words in a bubble, the reply without one).
+
+**Rules it implies:**
+
+- Color marks state only: the selected row, a matched word, the primary action,
+  the destructive one. Agent marks keep their brand colors; nothing else in the
+  list is tinted.
+- A result always says what matched: **Name**, **You** or the agent's name. A
+  highlighted word with no label does not answer the question.
+- The search box keeps the keyboard. Rows are chosen with `aria-activedescendant`,
+  so typing never needs a click back into the box.
+- The end of the conversation shows first, pinned to the bottom of the pane: it
+  is what tells you whether this is the session you meant.
+- A Claude, Codex or Grok row in a + menu opens the picker for that agent first,
+  because seeing past sessions when opening a worker is the point. **New session**
+  is the default: Enter starts one, so it costs one key, and a session is only
+  resumed on purpose. A chord bound to "New ... worker pane" never shows it.
+- The picker is the one place for past sessions. The rail's Sessions tab is gone:
+  a small history button beside the Workspaces and Agents switch opens the picker
+  on the current workspace, and that opening does not change the remembered
+  scope. A session row has nowhere else to live in the rail, so naming stays here.
+- A session running in a pane offers **Go to its tab**, never a second resume.
+- A name lives outside the index and outside the transcripts. The index is a
+  cache and the transcripts belong to the CLIs, so neither may be its only home.
+
+## Cora chat (2026-11)
+
+**Chosen:** B, "T3 in Studio colours". The chat takes T3 Code's shape and keeps
+Studio's warm tokens, so it follows every theme. Etienne picked B from four
+variants on one made-up conversation, each in dark and light with a replay of
+a message going out and a reply streaming back (A straight T3 in its own greys,
+B T3 in Studio colours, C compact at split-pane size, D T3 with every step left
+open on a thin trail).
+
+**References:** T3 Code's `TimelineUserMessageRow`, `TimelineAssistantRows`,
+`WorkLog`, `TimelineWorkGroupRows`, the fold rules in `MessagesTimeline.logic`,
+and its published desktop screenshot.
+
+**Credit:** the design and the fold rules come from T3 Code
+(github.com/pingdotgg/t3code, MIT, by Theo / Ping Labs). The code is Codara's
+own; the header of `turn-fold.ts` names the source too.
+
+**Rules**
+
+- The reply has no bubble and no name. The user's message is a `--panel-2`
+  bubble, 16px radius, no border, at most 80% wide.
+- Reply text is 14px at 1.625 line height.
+- A finished turn folds behind "Worked for 42s" and opens with one click. The
+  fold hides tool calls and the narration between them, never the answer, an
+  error or a failed tool call.
+- Only a completed turn folds. A failed or stopped turn stays open, every slice
+  of it: that is when the steps matter. A turn still running does not fold
+  either, even the part before a question it asked.
+- Find opens whatever it lands in, a fold or a long message. An opened fold
+  stays open when the list scrolls it away and back.
+- A user message past 600 characters or 8 lines collapses to 176px with a fade
+  behind "Show full message".
+- Tool rows are one 24px line with a plain mark per kind of tool. Running and
+  failed calls keep the status icon.
+- Colour means state. The only other colour is the workspace accent, on send,
+  stop and the working dot.
+- An error row is a soft 8% `--danger` tint with no border, so it reads as part
+  of the conversation.
+- Send and stop are one 32px round button in the same place. Starters are pills
+  showing a title, with the description in the tooltip.
+- A code block in the chat is one bordered surface with its bar always showing.
+
+**Where it differs from T3 on purpose:** the composer stays docked at the bottom
+of a new chat, because centring it would make it jump on the first send. It
+keeps Studio's own control order. Worker rows stay separate timeline items. The
+composer uses `--panel`, so in the light themes it stays warm rather than near
+white.
+
+## Automations (2026-11)
+
+**Chosen:** variant A, inbox and run history, from four variants built with the
+real tokens and sample content (A inbox, B the day on a timeline, C cards and
+templates, D a When, do, then builder). Etienne picked A for the page and D's
+builder for the New automation screen, which comes in a later change. The rail
+has shelves in the order Needs you, Failed, Running, Scheduled, Paused. The
+page opens on one plain sentence, then the last result, the bar of recent runs
+with the month so far, the runs, how it runs, and the details.
+
+**Why:** the old page answered "how is this wired?" when the reader asked "did
+it work, and what did it do?". A row said `cron 0 2 * * 1-5 · once` and `armed`;
+the page led with the flow, and the outcome sat in a card that spoke in passes
+and iterations. A failed automation looked like any other.
+
+**References:** the Agents tab's inbox in this repo (shelves, rows with no box,
+a status word at the end of the row, the word giving way to an action on hover)
+and GitHub Actions' row of recent results for the bar of ticks.
+
+**Rules:**
+
+- Colour is for state only: danger for needs you and failed, info for running.
+  A run that went fine is a neutral tick, not a green one, so a failure stands
+  out in a row of them. Tone text mixes in ink to read at 4.5:1 on every theme.
+- Plain words on this page: run, not pass or iteration. Paused and Turn on, not
+  armed. A schedule is a phrase ("Every weekday at 02:00"); the raw expression
+  stays in Details, and a cron shape the phrase cannot read shows the expression
+  rather than a guess.
+- In the sentence, only the model, the folder and money are strong: they are
+  what a reader checks first.
+- A switched-off automation sits on Paused even if its last run failed: it has
+  been looked at. A question outranks the switch and stays on Needs you.
+- Month totals come from the kept history, which holds the last 50 runs. When
+  that cannot cover the whole month the numbers carry a `+` and a tooltip that
+  says so. Never show a floor as if it were the total.
+- Spending limits sit with the other caps in the Loop panel, with one line under
+  them saying the worst case for a month in euros. That line is danger only when
+  nothing bounds the spend, so it stays quiet once a limit is set. An automation
+  held back by a limit sits on Needs you, because it stopped doing its job and
+  will not say so again.
+- The forecast says "about" and says limits are checked between runs. Never show a
+  ceiling firmer than the engine enforces.
+- New automation opens on a sentence (When, Do, Stop, Then) with what will happen
+  beside it, from variant D. It only ever makes one worker, so it maps one way, and
+  anything else is the flow editor's: "Open in flow editor" carries the sentence
+  over. Edit always opens the flow editor. Every choice is a plain native select,
+  so a keyboard and a screen reader work without new widgets.
+- The sentence starts with a 2 euro budget filled in, and no monthly cap. Clearing the
+  budget is one keystroke, and the cost line turns red when nothing bounds the spend.
+- Money is euros first with the dollars in small, muted print beside it
+  ("≈€1.72 $2.00"), picked by Etienne. Spend and caps stay stored in USD; a cap is
+  typed in euros, stored at the day's rate, and the dollars sit under the field.
+  The rate is the ECB daily reference rate (src/main/fx-rate.ts: one request a
+  day, cached in Studio's home, then the last cached rate, then a built-in
+  constant), and the tooltip on the dollars names it. "≈" shows on amounts that are
+  converted, except in a line that already says "about" or "est.".
+- Delete sits at the bottom of Details, well away from Run now.
+- "Fix with Cora" fills a new chat's message box and sends nothing. The user
+  reads it first.
+- Narrow window: the rail gives up width first (264px), then the run rows drop
+  their stop badge. The dot and the summary still carry the result.
+- Pull request triggers read as a sentence too ("When CI fails on a pull request
+  into main") and use the existing check and field controls. Trouble reaching
+  GitHub, or a pull request at its daily limit, is a "not started" row in Runs,
+  not a new surface.
+- An automation on its own branch says so in the sentence. The result card points
+  to the draft pull request when there is one, and otherwise says in one line
+  where the work is. The switch is in the Loop panel, off by default.

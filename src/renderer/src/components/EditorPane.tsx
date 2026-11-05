@@ -27,8 +27,11 @@ import {
   languageCompartment,
   themeCompartment,
   vimCompartment,
+  wrapCompartment,
 } from "./editor-cm/extensions";
 import { EDITOR_THEME_EXT } from "./editor-cm/themes";
+import { resolveWordWrap } from "./editor-cm/wordWrap";
+import { commandHint } from "../shortcuts/bindings";
 import { initVimGlobals, vimHandlersExtension } from "./editor-cm/vim";
 import { languageLabel, resolveLanguage } from "./editor-cm/languageResolver";
 import { useDocument } from "./editor-cm/useDocument";
@@ -163,7 +166,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const shareable = useMemo(() => !secret && shareableKind(path) !== null, [path, secret]);
 
   const cmRef = useRef<ReactCodeMirrorRef>(null);
-  const { preferences } = usePreferences();
+  const { preferences, setPreference } = usePreferences();
+  const wrapOn = resolveWordWrap(preferences.editorWordWrap, path);
+  const wrapOnRef = useRef(wrapOn);
+  wrapOnRef.current = wrapOn;
+  const wrapShortcutLabel = commandHint(preferences.keybindings, "editor.toggleWordWrap");
   const previewVisible = secretKnown && (previewOnly || (hasViewToggle && viewMode === "preview"));
   const { fullscreen, toggleFullscreen } = usePreviewFullscreen(active && previewVisible);
   const fullscreenAction = previewVisible ? (
@@ -284,6 +291,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           : githubDark,
       ),
       languageCompartment.of([]),
+      wrapCompartment.of(
+        resolveWordWrap(prefsRef.current.editorWordWrap, pathRef.current)
+          ? EditorView.lineWrapping
+          : [],
+      ),
       inlineCompletion({
         getPrefs: () => ({
           // A .env or key file's text never goes to the completion model.
@@ -325,6 +337,42 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       ),
     });
   }, [preferences.vimMode]);
+
+  // A view is built from the seed above, which knows neither the saved
+  // preference nor the file, and it appears a frame after its props change, so
+  // it takes its wrap when it is created. The effect below keeps it current.
+  const onCreateEditor = useCallback(
+    (view: EditorView) => {
+      view.dispatch({
+        effects: wrapCompartment.reconfigure(wrapOnRef.current ? EditorView.lineWrapping : []),
+      });
+      editorFind.onViewCreated();
+    },
+    [editorFind.onViewCreated],
+  );
+
+  // Word wrap follows the preference, or the file type while it is "auto".
+  useEffect(() => {
+    const view = cmRef.current?.view;
+    if (!view) return;
+    view.dispatch({
+      effects: wrapCompartment.reconfigure(wrapOn ? EditorView.lineWrapping : []),
+    });
+  }, [wrapOn]);
+
+  // Alt+Z (editor.toggleWordWrap) saves an explicit choice, the opposite of
+  // what this file does now, so it wins over the file-type default.
+  const toggleWrap = useCallback(() => {
+    void setPreference("editorWordWrap", wrapOn ? "off" : "on");
+  }, [setPreference, wrapOn]);
+  useEffect(() => {
+    const onToggle = () => {
+      if (!focused || !codeVisible) return;
+      toggleWrap();
+    };
+    window.addEventListener("spark:editor.toggleWordWrap", onToggle);
+    return () => window.removeEventListener("spark:editor.toggleWordWrap", onToggle);
+  }, [focused, codeVisible, toggleWrap]);
 
   // Theme swap — EDITOR_THEME_EXT entries are lazy loaders, so resolve the
   // selected theme's promise and reconfigure once it lands. The eagerly
@@ -646,7 +694,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               ref={cmRef}
               value={doc.content}
               onChange={onChange}
-              onCreateEditor={editorFind.onViewCreated}
+              onCreateEditor={onCreateEditor}
               extensions={extensions}
               theme="none"
               height="100%"
@@ -698,6 +746,31 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           </span>
         )}
         <span style={{ flex: 1 }} />
+        {doc.status === "ready" && codeVisible && (
+          <button
+            type="button"
+            // Keep the editor focused: a click must not steal typing, and
+            // Space or Enter would otherwise toggle the control again.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={toggleWrap}
+            aria-pressed={wrapOn}
+            aria-label="Word wrap"
+            title={`Word wrap ${wrapOn ? "on" : "off"} (${wrapShortcutLabel})`}
+            style={{
+              background: "transparent",
+              border: "none",
+              padding: 0,
+              cursor: "default",
+              fontFamily: "var(--font-mono)",
+              fontSize: "inherit",
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              color: wrapOn ? "var(--ink)" : "var(--muted-2)",
+            }}
+          >
+            Wrap
+          </button>
+        )}
         <AIStatusFooter
           statusRef={aiStatusRef}
           enabled={preferences.inlineAutocompleteEnabled}

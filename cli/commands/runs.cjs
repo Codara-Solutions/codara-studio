@@ -24,7 +24,7 @@ function runs(args, flags) {
 }
 
 function run(args, flags) {
-  if (!args[0]) fail("usage: cora run <id-or-prefix>");
+  if (!args[0]) fail("usage: cora studio run <id-or-prefix>");
   const match = findRun(flags, args[0]);
   if (flags.json) return console.log(JSON.stringify(match, null, 2));
   console.log(`${c.cyan(match.id)}  ${statusColor(match.status)}`);
@@ -38,11 +38,11 @@ function run(args, flags) {
     console.log("");
     console.log(table(steps.map((step) => [`  ${statusColor(step.status)}`, step.title ?? ""])));
   }
-  console.log(c.dim(`\nmore: cora agents ${match.id.slice(0, 12)} · cora log ${match.id.slice(0, 12)} · cora watch ${match.id.slice(0, 12)}`));
+  console.log(c.dim(`\nmore: cora studio agents ${match.id.slice(0, 12)} · cora studio log ${match.id.slice(0, 12)} · cora studio watch ${match.id.slice(0, 12)}`));
 }
 
 function log(args, flags) {
-  if (!args[0]) fail("usage: cora log <id-or-prefix>");
+  if (!args[0]) fail("usage: cora studio log <id-or-prefix>");
   const match = findRun(flags, args[0]);
   if (flags.json) return console.log(JSON.stringify(match.humanMessages ?? [], null, 2));
   console.log(`${c.cyan(match.id)}  ${statusColor(match.status)}  ${match.title ?? ""}`);

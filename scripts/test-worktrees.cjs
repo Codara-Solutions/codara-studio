@@ -19,6 +19,18 @@ const {
 const os = require("node:os");
 const path = require("node:path");
 
+const leaveAside = (repoDir, dir, aside, how = "git") => {
+  // As a removal Studio stopped in the middle leaves it: moved, and noted
+  // in the repository's git folder.
+  if (how === "git") execFileSync("git", ["-C", repoDir, "worktree", "move", dir, aside]);
+  else require("node:fs").renameSync(dir, aside);
+  const common = path.resolve(repoDir, execFileSync("git", ["-C", repoDir, "rev-parse", "--git-common-dir"], { encoding: "utf8" }).trim());
+  const notes = path.join(common, "codara-aside");
+  require("node:fs").mkdirSync(notes, { recursive: true });
+  const name = `${require("node:crypto").createHash("sha256").update(path.resolve(aside)).digest("hex").slice(0, 24)}.json`;
+  require("node:fs").writeFileSync(path.join(notes, name), JSON.stringify({ original: path.resolve(dir), aside }));
+};
+
 function git(cwd, args) {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 }
@@ -110,6 +122,111 @@ async function main() {
     );
     assert.strictEqual(r.baseBranch, "main", "baseBranch should be main");
     assert.ok(r.fileCount >= 1, `fileCount should be >= 1, got ${r.fileCount}`);
+
+    // A folder a workspace row still names is never handed out again, even
+    // when it is gone: the row of a worktree removed outside Studio lasts
+    // until the rail's next look.
+    const stale = path.join(worktreesRoot, "row-kept");
+    const kept = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot, newBranch: "row-kept", takenPaths: [stale] });
+    assert.ok(kept.ok, `create failed: ${kept.ok ? "" : kept.error}`);
+    assert.strictEqual(path.basename(kept.path), "row-kept-2", "the folder a row names is skipped");
+    git(repo, ["worktree", "remove", kept.path]);
+    git(repo, ["branch", "-D", "row-kept"]);
+    git(repo, ["branch", "row-out", "main"]);
+    const out = await wt.createCheckoutWorktree({
+      repoCwd: repo,
+      worktreesRoot,
+      branch: "row-out",
+      takenPaths: [path.join(worktreesRoot, "row-out"), path.join(worktreesRoot, "row-out-2"), "relative/row-out-3"],
+    });
+    assert.ok(out.ok, `checkout failed: ${out.ok ? "" : out.error}`);
+    assert.strictEqual(path.basename(out.path), "row-out-3", "checkout skips them too; a relative path is no row folder");
+    git(repo, ["worktree", "remove", out.path]);
+    git(repo, ["branch", "-D", "row-out"]);
+    // Create copy from the rail: the rows' folders are skipped, and when the
+    // rows cannot be read nothing is made.
+    const fromRail = await wt.createRailWorktree({ repoCwd: repo, worktreesRoot, newBranch: "rail-row" }, async () => ({
+      workspaces: [
+        { cwd: path.join(worktreesRoot, "rail-row") },
+        { cwd: path.join(worktreesRoot, "rail-row-2"), remote: { host: "elsewhere" } },
+      ],
+    }));
+    assert.ok(fromRail.ok, `create failed: ${fromRail.ok ? "" : fromRail.error}`);
+    assert.strictEqual(path.basename(fromRail.path), "rail-row-2", "the rail skips a row's folder; a remote row names none here");
+    git(repo, ["worktree", "remove", fromRail.path]);
+    git(repo, ["branch", "-D", "rail-row"]);
+    const unread = await wt.createRailWorktree({ repoCwd: repo, worktreesRoot, newBranch: "rail-unread" }, async () => {
+      throw new Error("state unreadable");
+    });
+    assert.strictEqual(unread.ok, false, "nothing is made without the rows");
+    assert.match(unread.error, /could not read its workspaces/);
+    assert.strictEqual(require("node:fs").existsSync(path.join(worktreesRoot, "rail-unread")), false);
+    assert.throws(() => git(repo, ["rev-parse", "--verify", "--quiet", "refs/heads/rail-unread"]), "no branch is made");
+    // Storage starts empty, and marked, when its file could not be read.
+    const marked = await wt.createRailWorktree({ repoCwd: repo, worktreesRoot, newBranch: "rail-marked" }, async () => ({
+      workspaces: [],
+      [Symbol.for("codara.unreadableState")]: true,
+    }));
+    assert.strictEqual(marked.ok, false, "nothing is made from a state storage could not read");
+    assert.strictEqual(require("node:fs").existsSync(path.join(worktreesRoot, "rail-marked")), false);
+    // A row naming the folder in other case: some file systems ignore case.
+    const cased = await wt.createCopyWorktree({
+      repoCwd: repo,
+      worktreesRoot,
+      newBranch: "row-case",
+      takenPaths: [path.join(worktreesRoot, "Row-Case")],
+    });
+    assert.ok(cased.ok, `create failed: ${cased.ok ? "" : cased.error}`);
+    assert.strictEqual(path.basename(cased.path), "row-case-2", "a row's folder in other case is skipped");
+    git(repo, ["worktree", "remove", cased.path]);
+    git(repo, ["branch", "-D", "row-case"]);
+    if (process.platform !== "win32") {
+      // A row that spells the folder through a link to the same place.
+      const alias = `${worktreesRoot}-alias`;
+      require("node:fs").symlinkSync(worktreesRoot, alias);
+      try {
+        const viaLink = await wt.createCopyWorktree({
+          repoCwd: repo,
+          worktreesRoot,
+          newBranch: "row-link",
+          takenPaths: [path.join(alias, "row-link")],
+        });
+        assert.ok(viaLink.ok, `create failed: ${viaLink.ok ? "" : viaLink.error}`);
+        assert.strictEqual(path.basename(viaLink.path), "row-link-2", "a row's folder spelled through a link is skipped");
+        git(repo, ["worktree", "remove", viaLink.path]);
+        git(repo, ["branch", "-D", "row-link"]);
+        // The root itself not made yet, under a link: the row's folder spelled
+        // the other way is still skipped.
+        const freshRoot = path.join(alias, "not-yet");
+        const viaMissing = await wt.createCopyWorktree({
+          repoCwd: repo,
+          worktreesRoot: freshRoot,
+          newBranch: "row-missing",
+          takenPaths: [path.join(worktreesRoot, "not-yet", "row-missing")],
+        });
+        assert.ok(viaMissing.ok, `create failed: ${viaMissing.ok ? "" : viaMissing.error}`);
+        assert.strictEqual(path.basename(viaMissing.path), "row-missing-2", "a root not made yet is resolved through its parents");
+        git(repo, ["worktree", "remove", viaMissing.path]);
+        git(repo, ["branch", "-D", "row-missing"]);
+        // A row spelled through a link of its own whose folder is gone: the
+        // link leads to the folder, so the folder is still the row's.
+        const dangling = `${worktreesRoot}-dangling`;
+        require("node:fs").symlinkSync(path.join(worktreesRoot, "row-dangle"), dangling);
+        const viaDangling = await wt.createCopyWorktree({
+          repoCwd: repo,
+          worktreesRoot,
+          newBranch: "row-dangle",
+          takenPaths: [dangling],
+        });
+        assert.ok(viaDangling.ok, `create failed: ${viaDangling.ok ? "" : viaDangling.error}`);
+        assert.strictEqual(path.basename(viaDangling.path), "row-dangle-2", "a row's dangling link still reserves its folder");
+        git(repo, ["worktree", "remove", viaDangling.path]);
+        git(repo, ["branch", "-D", "row-dangle"]);
+      } finally {
+        require("node:fs").rmSync(alias, { force: true });
+        require("node:fs").rmSync(`${worktreesRoot}-dangling`, { force: true });
+      }
+    }
 
     // A taken name must surface git's refusal, not silently rename.
     const dup = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot, newBranch: "main" });
@@ -470,6 +587,94 @@ async function agentWorktreeProbes(wt) {
     assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), ["shared.txt"]);
     rmSync(path.join(hidden.path, "shared.txt"));
     assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), [], "a sparse, absent file is no edit");
+
+    // The fingerprint a removal compares across its move aside: an ignored
+    // file written or changed shows; a folder too large to compare throws.
+    const printed = await fork("agent/fingerprint");
+    const print0 = await wt.worktreeFingerprint(printed.path);
+    assert.strictEqual(await wt.worktreeFingerprint(printed.path), print0, "the same folder, the same digest");
+    mkdirSync(path.join(printed.path, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(path.join(printed.path, "node_modules", "pkg", "index.js"), "x\n");
+    const print1 = await wt.worktreeFingerprint(printed.path);
+    assert.notStrictEqual(print1, print0, "a file deep in an ignored folder counts");
+    writeFileSync(path.join(printed.path, ".env.local"), "A=1\n");
+    assert.notStrictEqual(await wt.worktreeFingerprint(printed.path), print1, "a new ignored file counts");
+    await assert.rejects(wt.worktreeFingerprint(printed.path, 2), /too many files/);
+    // Rewritten with the same size and its old modification time set back.
+    const envFile = path.join(printed.path, ".env.local");
+    require("node:fs").utimesSync(envFile, 1_700_000_000, 1_700_000_000);
+    const print2 = await wt.worktreeFingerprint(printed.path);
+    await new Promise((done) => setTimeout(done, 20));
+    writeFileSync(envFile, "B=2\n");
+    require("node:fs").utimesSync(envFile, 1_700_000_000, 1_700_000_000);
+    assert.notStrictEqual(await wt.worktreeFingerprint(printed.path), print2, "a write that hides its time still shows");
+    // An edit to a tracked file git status is told to skip still shows.
+    git(printed.path, ["update-index", "--assume-unchanged", "shared.txt"]);
+    const print3 = await wt.worktreeFingerprint(printed.path);
+    writeFileSync(path.join(printed.path, "shared.txt"), "edited where status cannot see\n");
+    assert.notStrictEqual(await wt.worktreeFingerprint(printed.path), print3, "a hidden tracked edit counts");
+    git(printed.path, ["update-index", "--no-assume-unchanged", "shared.txt"]);
+    git(printed.path, ["checkout", "--", "shared.txt"]);
+    // A setup link released inside an ignored folder that then holds nothing
+    // is no change.
+    mkdirSync(path.join(printed.path, "node_modules", "linked-only"), { recursive: true });
+    symlinkSync(scratch, path.join(printed.path, "node_modules", "linked-only", "shared"), "dir");
+    const print4 = await wt.worktreeFingerprint(printed.path);
+    rmSync(path.join(printed.path, "node_modules", "linked-only", "shared"));
+    assert.strictEqual(await wt.worktreeFingerprint(printed.path), print4, "an emptied folder is not a change");
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      const sealed = path.join(printed.path, "node_modules", "pkg");
+      require("node:fs").chmodSync(sealed, 0o000);
+      try {
+        await assert.rejects(wt.worktreeFingerprint(printed.path), /EACCES/, "a folder it cannot read is not taken as unchanged");
+      } finally {
+        require("node:fs").chmodSync(sealed, 0o755);
+      }
+    }
+
+    // The move aside: a change found there puts it back; a folder that took
+    // its place is never moved into, the aside folder stays and is named.
+    const asideOf = (dir) => path.join(path.dirname(dir), `.${path.basename(dir)}.codara-removing`);
+    const putBack = await wt.removeCopyWorktree({
+      repoCwd: repo,
+      worktreePath: printed.path,
+      branch: "agent/fingerprint",
+      force: true,
+      aside: { recheck: async (aside) => (existsSync(aside) && !existsSync(printed.path) ? "changed" : "not moved") },
+    });
+    assert.ok(!putBack.ok && putBack.changed && putBack.error === "changed", JSON.stringify(putBack));
+    assert.ok(existsSync(path.join(printed.path, ".env.local")) && !existsSync(asideOf(printed.path)), "it is back, whole");
+    const blocked = await wt.removeCopyWorktree({
+      repoCwd: repo,
+      worktreePath: printed.path,
+      branch: "agent/fingerprint",
+      force: true,
+      aside: {
+        recheck: async () => {
+          mkdirSync(printed.path);
+          return "changed";
+        },
+      },
+    });
+    assert.ok(!blocked.ok && blocked.changed && blocked.error.includes(asideOf(printed.path)), JSON.stringify(blocked));
+    assert.ok(existsSync(path.join(asideOf(printed.path), ".env.local")), "nothing is moved into the new folder");
+    let stuck = await wt.restoreAsideWorktrees(repo);
+    assert.deepStrictEqual(stuck, { restored: [], stuck: [asideOf(printed.path)] });
+    rmSync(printed.path, { recursive: true });
+    stuck = await wt.restoreAsideWorktrees(repo);
+    assert.deepStrictEqual(stuck.restored, [printed.path], "Studio's note names the folder left aside");
+    assert.strictEqual(git(printed.path, ["rev-parse", "--abbrev-ref", "HEAD"]), "agent/fingerprint");
+    assert.deepStrictEqual(await wt.restoreAsideWorktrees(repo), { restored: [], stuck: [] }, "once back, the note is gone");
+    // Renamed but not yet noted by git, as if Studio stopped right there.
+    leaveAside(repo, printed.path, asideOf(printed.path), "rename");
+    stuck = await wt.restoreAsideWorktrees(repo);
+    assert.deepStrictEqual(stuck.restored, [printed.path]);
+    assert.ok(await wt.isRegisteredWorktree(repo, printed.path));
+    // A folder of that name Studio did not move is never touched.
+    const lookalike = path.join(path.dirname(printed.path), ".lookalike.codara-removing");
+    git(repo, ["worktree", "add", "-q", "-b", "agent/lookalike", lookalike]);
+    assert.deepStrictEqual(await wt.restoreAsideWorktrees(repo), { restored: [], stuck: [] });
+    assert.ok(await wt.isRegisteredWorktree(repo, lookalike), "a worktree that only looks aside stays where it is");
 
     // A nested repository committed as a bare gitlink, with no .gitmodules,
     // is a populated submodule to git's worktree removal.

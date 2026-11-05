@@ -547,7 +547,7 @@ export interface CopyBranchCreator {
   purpose?: string;
   // The workspace the agent called from, as it was named then. Set when an
   // agent made the worktree, so a worktree made for another workspace's
-  // repository says who works in it ("Background agent · from <name>").
+  // repository says who works in it ("Claude subagent · from <name>").
   fromWorkspaceId?: string;
   fromWorkspaceName?: string;
 }
@@ -1297,9 +1297,15 @@ export interface NotificationChannelsPref {
   osCues: boolean;
 }
 
+// "auto" wraps prose and plain files (.txt, .md, .log, no extension) and
+// leaves code unwrapped; "on" and "off" are the user's own choice for every file.
+export type EditorWordWrap = "auto" | "on" | "off";
+export const EDITOR_WORD_WRAP_VALUES: readonly EditorWordWrap[] = ["auto", "on", "off"];
+
 export interface AppPreferences {
   theme: ThemePref;
   vimMode: boolean;
+  editorWordWrap: EditorWordWrap;
   editorTheme: EditorThemeId;
   // When true, the editor saves a dirty buffer automatically after typing
   // pauses (debounced by autosaveDelayMs). Off by default: autosave writes
@@ -1410,6 +1416,10 @@ export interface AppPreferences {
   // Lets agents remove merged worktrees the user created too. Default off:
   // agents remove only worktrees an agent created.
   agentsMayRemoveUserWorktrees?: boolean;
+  // Removes a worktree from the rail on its own once its work is provably
+  // merged and nothing is left in it or using it. Default on. Off leaves such
+  // a worktree in its project's merged group, one click from removal.
+  worktreeAutoRemoveMerged?: boolean;
   // Extra git-ignored paths, per repo, that removal may delete because a
   // build regenerates them (on top of node_modules/, dist/, ...). Entries are
   // a first path segment ("generated/") or a basename glob ("*.log").
@@ -1598,6 +1608,7 @@ export const DEFAULT_COPY_BRANCH_SETUP_COMMAND = "";
 export const DEFAULT_PREFERENCES: AppPreferences = {
   theme: "codara-classic",
   vimMode: false,
+  editorWordWrap: "auto",
   editorTheme: "github-dark",
   autosaveEnabled: false,
   autosaveDelayMs: DEFAULT_AUTOSAVE_DELAY_MS,
@@ -1628,6 +1639,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   terminalRightClick: "paste",
   agentWorktreesEnabled: true,
   agentsMayRemoveUserWorktrees: false,
+  worktreeAutoRemoveMerged: true,
   agentWorktreeRegenerableIgnoredByRepo: {},
   restoreAgentSessions: false,
   restoreTerminalOutput: true,
@@ -1793,7 +1805,7 @@ export interface SystemProcessSnapshot {
   swapBytes: number | null;
 }
 
-/** Processes outside Codara added up by program name ("chrome", "slack"). */
+/** Processes added up by program name ("chrome", "sh"). */
 export interface SystemAppUsage {
   name: string;
   processCount: number;
@@ -1809,7 +1821,8 @@ export interface SystemAppUsage {
  * else on the machine.
  */
 export interface SystemProcessGroup {
-  owner: "pane" | "codara" | "outside";
+  owner: "pane" | "left-running" | "codara" | "outside";
+  /** For left-running: the pane that started them, no longer open here. */
   paneId: string | null;
   /** Main's last known placement of the pane, for panes the window has not loaded. */
   workspaceId: string | null;
@@ -1820,6 +1833,8 @@ export interface SystemProcessGroup {
   runtime: string | null;
   /** The agent's latest prompt, one line, when its hooks report it. */
   task: string | null;
+  /** Left-running only: the folder the heaviest process runs in, which finds its workspace. */
+  cwd: string | null;
   cpuPercent: number;
   memoryBytes: number;
   gpuMemoryBytes: number | null;
@@ -1827,7 +1842,7 @@ export interface SystemProcessGroup {
   processCount: number;
   /** The group's heaviest processes by each resource. */
   processes: SystemProcessSnapshot[];
-  /** Outside Codara only: the heaviest programs by each resource. */
+  /** The heaviest programs by each resource, folded by name; empty for Codara itself. */
   apps: SystemAppUsage[];
 }
 
@@ -2704,9 +2719,11 @@ export type GitOpResult = { ok: true } | { ok: false; error: string };
 // Result of removing a copy-branch worktree. The worktree is gone whenever ok
 // is true; `branchKept` says why a requested branch delete did not happen
 // ("it has unmerged commits"), for a note rather than an error.
+// `changed`: the check after moving it aside found something new, and it
+// was put back.
 export type GitRemoveWorktreeResult =
   | { ok: true; branchKept?: string }
-  | { ok: false; error: string };
+  | { ok: false; error: string; changed?: true };
 
 // Result of git:createCopyWorktree. Shared so renderer + main agree on shape.
 // mode "fork" = new branch created from baseBranch (baseBranch present);
@@ -5287,6 +5304,9 @@ export interface StartSearchResponse {
 //                 tip moving (commit, pull, merge).
 //   onAutomationActivity — fires when automations finish/fail: any automation
 //                 in the app, or one specific automation when scoped.
+//   github      — fires when a pull request is opened or CI fails on one, in
+//                 the repository behind the workspace's origin remote, for
+//                 authors who belong to that repository.
 export type FolderTriggerEvent = "add" | "change" | "unlink";
 
 // git trigger events:
@@ -5296,6 +5316,8 @@ export type FolderTriggerEvent = "add" | "change" | "unlink";
 //   localBranchMoved — the checked-out branch's tip changed (commit, pull,
 //                      merge, reset).
 export type GitTriggerEvent = "remoteUpdated" | "localBranchMoved";
+
+export type GitHubTriggerEvent = "prOpened" | "ciFailed";
 
 // onAutomationActivity events map to the loop's terminal outcome.
 export type AutomationActivityEvent = "finished" | "failed";
@@ -5330,7 +5352,42 @@ export type AutomationTrigger =
       // Scope to one automation. Omitted = ANY automation (the triggered
       // automation itself is always excluded to prevent self-firing).
       automationId?: string;
+    }
+  | {
+      kind: "github";
+      events: GitHubTriggerEvent[];
+      // Only pull requests into this branch (e.g. "main"). Omitted = any branch.
+      branch?: string;
+      // prOpened only: also fire for a draft. Otherwise a draft fires when it
+      // is marked ready.
+      includeDrafts?: boolean;
     };
+
+/** What a github trigger has already acted on. PERSISTED so what happens while
+ *  the app is closed still fires, and nothing fires twice across a restart. */
+export interface GitHubTriggerMemory {
+  /** When it was armed: a check that failed earlier is not news. */
+  seededAt: number;
+  /** Pull requests up to this number existed when it was armed. */
+  seededMaxPr: number;
+  /** `pr:<n>` and `ci:<n>:<sha>` keys already fired or ruled out, with when. */
+  seen: Record<string, number>;
+  /** Recent fires, for the per-pull-request limit. */
+  fires: { pr: number; at: number }[];
+}
+
+/** The pull request event behind the latest run of a github trigger. */
+export interface GitHubTriggerFire {
+  event: GitHubTriggerEvent;
+  number: number;
+  url: string;
+  headSha: string;
+  // Written by other people: never put these in a {{var}} a shell step can see.
+  title: string;
+  headRef: string;
+  baseRef: string;
+  failedChecks: string[];
+}
 
 // LOOP kinds — how an automation REPEATS once started:
 //   once        — a single iteration (legacy behaviour).
@@ -5833,6 +5890,7 @@ export type AutomationStopReason =
   | "once"
   | "iteration-failed"
   | "user-stop"
+  | "monthly-cap"
   // Legacy: pre-Pi builds recorded this when the loom's CLI engine was not
   // installed. Never produced anymore (Pi is bundled with the app); kept so
   // persisted history records still typecheck and render.
@@ -5849,6 +5907,33 @@ export type AutomationContinuationSource =
   | "agent";
 
 // One iteration in an automation's history.
+/** Branches an automation creates start with this. A pull request from one
+ *  never starts a github trigger, so automations cannot feed each other. */
+export const AUTOMATION_BRANCH_PREFIX = "codara-automation/";
+
+/** Opt-in: this automation works in a separate checkout on a new branch. */
+export interface AutomationOwnBranch {
+  /** Open a draft pull request when a run goes well. */
+  draftPr: boolean;
+}
+
+/** The checkout of the cycle in progress. Survives a restart with the loop. */
+export interface AutomationOwnBranchState {
+  path: string;
+  branch: string;
+  baseSha: string;
+  baseBranch?: string;
+}
+
+/** What became of a run's work on its own branch. */
+export interface AutomationBranchResult {
+  branch: string;
+  changed: boolean;
+  prUrl?: string;
+  /** One plain line when there is no pull request to point at. */
+  note?: string;
+}
+
 export interface AutomationRunRecord {
   iteration: number; // 0-based
   runId: string;
@@ -5863,6 +5948,11 @@ export interface AutomationRunRecord {
   /** Set when this pass ran to catch up a scheduled time Codara missed
    *  (closed or asleep) under the "run once when back" policy. */
   catchUp?: AutomationCatchUp;
+  /** Set on the record the loop ended on, for an automation on its own branch. */
+  branchResult?: AutomationBranchResult;
+  /** On a stopped run's record: its run's total so far as charged to the month.
+   *  Its worker reports the real figure later, and only the difference is owed. */
+  chargedRunUsd?: number;
 }
 
 // ── Precheck and missed-run catch-up ────────────────────────────────────────
@@ -5919,7 +6009,7 @@ export interface AutomationCatchUp {
 export interface AutomationSkipRecord {
   id: string;
   at: string; // ISO time the skip was recorded
-  reason: "precheck" | "missed";
+  reason: "precheck" | "missed" | "github" | "ownBranch" | "monthlyCap";
   /** One plain-words line for the history row. */
   detail: string;
   precheck?: AutomationPrecheckResult & { command: string };
@@ -5929,6 +6019,23 @@ export interface AutomationSkipRecord {
   repeats?: number;
   /** ISO time of the first of those repeated skips (absent means `at`). */
   firstAt?: string;
+}
+
+/** Opt-in limits that outlast a loop's cycle. Shapes and checks live in
+ *  src/shared/automation-guard.ts. */
+export interface AutomationGuard {
+  /** No run starts once this calendar month's spend reaches it. */
+  monthlyCapUsd?: number;
+  /** Paused until resumed after this many failed runs in a row. */
+  pauseAfterFailures?: number;
+}
+
+/** Spend of one calendar month. The state's tally resets each cycle and the
+ *  history is capped, so neither can answer what a month cost. */
+export interface AutomationMonthSpend {
+  month: string; // YYYY-MM, local time
+  costUsd: number;
+  measuredCostUsd: number;
 }
 
 // Persisted live state of an automation's loop.
@@ -5949,6 +6056,7 @@ export interface AutomationState {
   /** Persisted mirror of the in-memory agent signal — survives a restart
    *  that lands between worker-finish and onTerminal. Read-once. */
   pendingAgentSignal?: AgentLoopSignal;
+  ownBranch?: AutomationOwnBranchState;
 }
 
 // An "automation" / loom. ScheduledJob's field set is a strict superset of the
@@ -5979,6 +6087,18 @@ export interface ScheduledJob {
   lastRunAt?: string; // ISO timestamp of the most recent firing
   lastRunId?: string; // runId produced by the most recent firing
   lastFiredPath?: string; // folder triggers: the path whose change last fired it
+  /** Absent means it works in the workspace folder, as every automation did before this existed. */
+  ownBranch?: AutomationOwnBranch;
+  guard?: AutomationGuard;
+  monthSpend?: AutomationMonthSpend;
+  /** Failed runs in a row, counted only while a pause limit is set. */
+  failureStreak?: number;
+  /** Set while the state is paused because of that limit. */
+  autoPaused?: { at: string; failures: number };
+  /** Month and cap the user was last told about, so it is said once. */
+  capNotice?: string;
+  githubTrigger?: GitHubTriggerMemory;
+  lastGitHubFire?: GitHubTriggerFire;
   /** git triggers: the remote / local commit the trigger last settled on.
    *  PERSISTED so a push that lands while the app is closed (or before the
    *  background auto-fetch's first pass) still fires at the next arm instead
@@ -6019,6 +6139,8 @@ export interface CreateScheduledJobInput {
   createdByRunId?: string; // the chat run that authored this loom (assist or ordinary chat, never a loom run)
   precheck?: AutomationPrecheck;
   missedRuns?: AutomationMissedRuns;
+  ownBranch?: AutomationOwnBranch;
+  guard?: AutomationGuard;
 }
 
 // Edit payload (scheduler:update). Partial; id required. enabled/state/history
@@ -6036,6 +6158,9 @@ export interface UpdateScheduledJobInput {
   precheck?: AutomationPrecheck | null;
   /** null restores the default (skip). */
   missedRuns?: AutomationMissedRuns | null;
+  /** null goes back to working in the workspace folder. */
+  ownBranch?: AutomationOwnBranch | null;
+  guard?: AutomationGuard | null;
 }
 
 /** automations:testPrecheck: run a precheck once from the editor. */

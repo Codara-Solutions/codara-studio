@@ -74,7 +74,7 @@ const askInWindow: CrossWorkspaceAsk = async ({ caller, target, agent, action })
     callerName: caller.name,
     targetName: target.name,
     agent,
-    ...(action === "worktree" ? { action } : {}),
+    ...(action === "worktree" || action === "worktree-remove" ? { action } : {}),
     expiresAt: Date.now() + CROSS_WORKSPACE_APPROVAL_TIMEOUT_MS,
   };
   return new Promise<CrossWorkspaceAnswer | null>((resolve) => {

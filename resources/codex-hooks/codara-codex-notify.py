@@ -29,7 +29,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
-_STRING_CAP = 4_000
+_STRING_CAP = 16_000
 _MAX_INPUTS = 8
 
 

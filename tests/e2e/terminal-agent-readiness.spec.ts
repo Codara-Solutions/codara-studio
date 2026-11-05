@@ -64,20 +64,23 @@ async function openSession(
     return;
   }
   if (launchKind === "fresh") {
-    // The tab strip's worker row starts a new session in a new tab at once.
+    // The tab strip's worker row shows past sessions; New session starts one
+    // in a new tab.
     await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
     const picker = page.locator(".spark-tabbar-picker");
     const workerLabel = runtime === "claude" ? "Claude worker" : "Codex worker";
     await picker.getByRole("button", { name: workerLabel }).dispatchEvent("click");
+    await page.getByTestId("session-picker-new").click();
     return;
   }
-  // An earlier session is resumed from the rail's Sessions view.
-  await page.getByRole("tablist", { name: "Rail view" }).getByRole("tab", { name: /^Sessions/ }).click();
-  const sessions = page.getByTestId("session-search");
-  await sessions.getByRole("searchbox", { name: "Search agent sessions" }).fill("readiness fixture");
+  // An earlier session is resumed from the session picker.
+  await page.getByTestId("rail-sessions-button").click();
+  const sessions = page.getByTestId("session-picker");
+  const search = sessions.getByRole("combobox", { name: "Search session names and what was said" });
+  await search.fill("readiness fixture");
   const row = sessions.locator(`[data-session-row][data-session-agent="${runtime}"]`);
   await expect(row).toBeVisible({ timeout: 20_000 });
-  await row.click();
+  await row.dblclick();
 }
 
 async function prepareFixture(): Promise<{

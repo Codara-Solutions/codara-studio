@@ -1,6 +1,8 @@
+import { monthSpentUsd, normalizeAutomationGuard } from "@shared/automation-guard";
 import { app, BrowserWindow } from "electron";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createServer, IncomingMessage, type Server, ServerResponse } from "node:http";
+import { Socket } from "node:net";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -21,6 +23,7 @@ import { latestSessionStart } from "./agent-session-registry";
 import { CallerPaneResolver } from "./caller-pane";
 import { processCwds } from "./pi-session-tracker";
 import { requestTerminalOp } from "./terminal-bridge";
+import { windowHoldsFolder } from "./window-held";
 import {
   cleanTerminalText,
   PaneOutputCursors,
@@ -29,7 +32,36 @@ import {
   shellActivity,
   type PaneIo,
 } from "./agent-terminal-io";
-import { terminalAgentStateSnapshot, terminalAgentTurnsSignaled, terminalPanePlacement } from "./terminal-agent-notify";
+import {
+  noteTerminalUserInput,
+  onTerminalAgentTurnEnded,
+  terminalAgentHibernationEvidence,
+  onTerminalPaneRemoved,
+  terminalAgentSessionLive,
+  terminalAgentStateSnapshot,
+  terminalAgentTurnsSignaled,
+  terminalPanePlacement,
+} from "./terminal-agent-notify";
+import {
+  AGENT_SESSION_LIST_LIMIT,
+  AgentSessions,
+  agentSessionCommand,
+  agentSessionMessageRefusal,
+  agentSessionShellRefusal,
+  agentSessionWaitMs,
+  parseAgentSessionStart,
+  type AgentSessionCaller,
+  type AgentSessionView,
+} from "./agent-sessions";
+import { AGENT_SESSION_BRIEF_MAX_CHARS, AGENT_SESSION_MAX_LIVE, type AgentSessionRecord } from "@shared/agent-sessions";
+import {
+  codexTrustOverride,
+  integrationFilesReady,
+  planClaudeLaunch,
+  planCodexLaunch,
+} from "./agent-launch-integration";
+import { standingTerminalCompaction } from "./orchestration/cli-autocompact";
+import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
 import { paneAgentRuntime } from "./pane-agent-runtime";
 import {
   AgentTerminalOwnershipError,
@@ -43,6 +75,7 @@ import {
   registerAgentTerminal,
 } from "./agent-terminal-lifecycle";
 import { serversService } from "./servers/service";
+import { defaultShell } from "./shells";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { loadSettings, loadState, saveState, updateState } from "./storage";
 import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
@@ -147,6 +180,7 @@ import {
   type CrossWorkspaceDecision,
 } from "./cross-workspace-terminals";
 import { crossWorkspaceApprover } from "./cross-workspace-ipc";
+import type { CrossWorkspaceAction } from "@shared/cross-workspace";
 import {
   CODEX_MODEL_CATALOG,
   normalizeCodexModelId,
@@ -204,6 +238,8 @@ import type {
   PrefKey,
   AutomationLoop,
   AutomationMissedRuns,
+  AutomationGuard,
+  AutomationOwnBranch,
   AutomationPrecheck,
   AutomationTrigger,
   CreateScheduledJobInput,
@@ -348,6 +384,7 @@ let currentHandle: ServerHandle | null = null;
  * existing handle.
  */
 export async function startAgentSocket(): Promise<ServerHandle> {
+  void agentSessions().load();
   if (currentHandle) return currentHandle;
 
   const token = randomBytes(32).toString("hex");
@@ -624,6 +661,9 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "workflow.save",
   "worktree.create",
   "worktree.remove",
+  "session.start",
+  "session.message",
+  "review.findings",
 ]);
 
 // The in-process Pi extension and MCP roster both hide these capabilities for
@@ -648,6 +688,10 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "worktree.remove",
   "worktree.setup",
   "worktree.cleanup",
+  "session.start",
+  "session.status",
+  "session.wait",
+  "session.message",
 ]);
 
 // A terminal that makes a worktree changes worktrees like worktree.create.
@@ -737,6 +781,16 @@ async function dispatch(
         return await handleTerminalRead(params, id);
       case "terminal.create":
         return await handleTerminalCreate(params, id, auth.kind, res);
+      case "session.start":
+        return await handleSessionStart(params, id, auth.kind, res);
+      case "review.findings":
+        return await handleReviewFindings(params, id);
+      case "session.status":
+        return await handleSessionStatus(params, id);
+      case "session.wait":
+        return await handleSessionWait(params, id, res);
+      case "session.message":
+        return await handleSessionMessage(params, id);
       case "terminal.write":
         return await handleTerminalWrite(params, id);
       case "terminal.close":
@@ -1584,7 +1638,7 @@ async function authorizeWorkspaceTarget(input: {
   requested: string;
   run: RunState | null;
   callerPaneId: string | null;
-  action: "terminal" | "worktree";
+  action: CrossWorkspaceAction;
   precheck?: (target: Workspace) => Promise<string | null>;
 }): Promise<({ ok: true } & CrossWorkspaceTarget) | { ok: false; response: JsonRpcResponse }> {
   const { id, run, callerPaneId, res } = input;
@@ -1604,7 +1658,7 @@ async function authorizeWorkspaceTarget(input: {
       ? await paneWorkspaceId(callerPaneId)
       : null;
   const caller = state.workspaces.find((workspace) => workspace.id === callerWorkspaceId) ?? null;
-  if (caller?.id === target.id) {
+  if (caller?.id === target.id || userSessionStarts.has(input.params)) {
     return { ok: true, target, ...(resolved.folder ? { folder: resolved.folder } : {}), cross: null };
   }
   const refusal = crossWorkspaceRefusal({
@@ -1639,7 +1693,7 @@ async function authorizeWorkspaceTarget(input: {
       target,
       agent: run ? "Cora" : (runtime && AGENT_NOTIFY_LABELS[runtime]) || null,
       requester: run ? `run:${run.id}` : `pane:${callerPaneId}`,
-      ...(input.action === "worktree" ? { action: "worktree" as const } : {}),
+      ...(input.action !== "terminal" ? { action: input.action } : {}),
     });
   } finally {
     res.off("close", onCallerGone);
@@ -1650,7 +1704,13 @@ async function authorizeWorkspaceTarget(input: {
   if (callerGone || res.destroyed || res.socket?.destroyed) {
     return fail(
       ERR_INTERNAL,
-      `the caller disconnected before the ${input.action === "worktree" ? "worktree was made" : "terminal opened"}`,
+      `the caller disconnected before the ${
+        input.action === "worktree"
+          ? "worktree was made"
+          : input.action === "worktree-remove"
+            ? "worktree was removed"
+            : "terminal opened"
+      }`,
     );
   }
   // The user allowed this folder: if the workspace moved while the card
@@ -1677,9 +1737,10 @@ async function handleTerminalCreate(
   id: JsonRpcId,
   authKind: AgentSocketAuth["kind"],
   res: ServerResponse,
+  launch?: TerminalLaunch,
 ): Promise<JsonRpcResponse> {
   const made: TerminalWorktreeMade = { caller: null, worktree: null };
-  const response = await createTerminal(params, id, authKind, res, made);
+  const response = await createTerminal(params, id, authKind, res, made, launch);
   if (!response.error || !made.caller || !made.worktree) return response;
   // A worktree with no terminal would be an orphan that still counts toward
   // the repository's limit: remove it, or say where it stays.
@@ -1693,12 +1754,18 @@ async function handleTerminalCreate(
   return errorResponse(id, response.error.code, message, { worktree: kept });
 }
 
+// What runs in a terminal when the command depends on its folder, which a new
+// worktree only settles inside createTerminal. Returns the command, or throws
+// to refuse: the failed call then takes the worktree back like any other.
+type TerminalLaunch = (cwd: string) => Promise<string>;
+
 async function createTerminal(
   params: Record<string, unknown>,
   id: JsonRpcId,
   authKind: AgentSocketAuth["kind"],
   res: ServerResponse,
   made: TerminalWorktreeMade,
+  launch?: TerminalLaunch,
 ): Promise<JsonRpcResponse> {
   const startedAt = Date.now();
   let cwd = stringParam(params, "cwd");
@@ -1709,7 +1776,7 @@ async function createTerminal(
   const worktreeRequest = terminalWorktreeParam(params.worktree);
   if (typeof worktreeRequest === "string") return errorResponse(id, ERR_INVALID_PARAMS, worktreeRequest);
   if (worktreeRequest && cwd) return errorResponse(id, ERR_INVALID_PARAMS, "pass cwd or worktree, not both");
-  const command = stringParam(params, "command");
+  let command = stringParam(params, "command");
   const title = stringParam(params, "title");
   const group = tabGroupParam(params);
   if (group === undefined) return errorResponse(id, ERR_INVALID_PARAMS, TAB_GROUP_PARAM_ERROR);
@@ -1807,6 +1874,7 @@ async function createTerminal(
     try {
       const caller = {
         ...(await worktreeCaller(params)),
+        ...(userSessionStarts.has(params) && workspaceId ? { workspaceId } : {}),
         ...(crossWorkspace
           ? {
               workspaceId: crossWorkspace.target.id,
@@ -1835,6 +1903,13 @@ async function createTerminal(
     // Nobody would drive a terminal opened after the caller gave up.
     if (res.destroyed || res.socket?.destroyed) {
       return errorResponse(id, ERR_INTERNAL, "the caller disconnected before the terminal opened");
+    }
+  }
+  if (launch) {
+    try {
+      command = await launch(cwd ?? workspaceCwd ?? "");
+    } catch (error) {
+      return errorResponse(id, ERR_FORBIDDEN, error instanceof Error ? error.message : String(error));
     }
   }
   const callerPane =
@@ -1981,6 +2056,315 @@ async function createTerminal(
     const message = err instanceof Error ? err.message : String(err);
     return errorResponse(id, ERR_INTERNAL, message);
   }
+}
+
+// ── Sessions one agent starts for another ───────────────────────────────────
+// codara_session_*: see agent-sessions.ts. A start is terminal.create with a
+// launch, so the approval card, the worktree and its rollback, the tab and the
+// ownership ledger are terminal.create's own.
+
+let agentSessionStore: AgentSessions | null = null;
+
+function agentSessions(): AgentSessions {
+  if (!agentSessionStore) {
+    agentSessionStore = new AgentSessions({
+      dir: codaraHome(),
+      live: terminalAgentSessionLive,
+      log: (message) => console.warn(`[agent-sessions] ${message}`),
+    });
+    const store = agentSessionStore;
+    onTerminalAgentTurnEnded((event) => store.noteTurnEnd(event));
+    onTerminalPaneRemoved((paneId) => store.notePaneClosed(paneId));
+    // A dev server started inside a session must not open it to other agents.
+    agentTerminals.keepOwnerOf((paneId) => store.holdsPane(paneId));
+  }
+  return agentSessionStore;
+}
+
+// Who is asking: the workspace comes from its run or the pane it runs in,
+// never from tool JSON, and decides which sessions it can see.
+async function agentSessionCaller(
+  params: Record<string, unknown>,
+): Promise<AgentSessionCaller & { paneId: string | null; run: RunState | null }> {
+  const runId = stringParam(params, "runId");
+  if (runId) {
+    const run = await (await getRunStore()).getRun(runId);
+    return { workspaceId: run?.workspaceId ?? null, process: null, paneId: null, run: run ?? null };
+  }
+  const agent = await resolveAgentCaller(params);
+  return {
+    workspaceId: agent.paneId ? await paneWorkspaceId(agent.paneId) : null,
+    process: agent.process ?? null,
+    paneId: agent.paneId,
+    run: null,
+  };
+}
+
+// An agent in an imported pull request may not start agents anywhere: what it
+// reads steers it, and a started session keeps running after it. The same
+// check as a terminal in another workspace, for the caller's own one too.
+async function agentSessionCallerRefusal(
+  params: Record<string, unknown>,
+  callerWorkspaceId: string | null,
+  run: RunState | null,
+  state: AppState,
+): Promise<string | null> {
+  if (run) return runProjectPolicyMode(run) === "untrusted-pull-request" ? "an imported pull-request run cannot start sessions" : null;
+  const caller = state.workspaces.find((workspace) => workspace.id === callerWorkspaceId);
+  if (!caller) return null;
+  const trust = await callerPullRequestTrust({
+    caller,
+    processCwds: await callerProcessCwds(params),
+    workspaces: state.workspaces,
+  });
+  return trust === "trusted" ? null : "an agent in an imported pull request cannot start sessions";
+}
+
+// A session the user asked for with a click in Source Control. The click is the
+// approval a cross-workspace call would otherwise ask for, so only main can put
+// params in here: the socket's params are parsed JSON and never in the set.
+const userSessionStarts = new WeakSet<Record<string, unknown>>();
+
+/** session.start for the user's own click: the same path an agent's call takes. */
+export async function startAgentSessionForUser(input: {
+  brief: string;
+  runtime: "claude" | "codex";
+  workspace: string;
+  title?: string;
+  worktree?: { branch?: string; base?: string; purpose?: string };
+  group?: string;
+}): Promise<AgentSessionView> {
+  // Names the worktree's maker, which later says which model family wrote the work.
+  const params: Record<string, unknown> = { ...input, callerClient: input.runtime === "codex" ? "codex" : "claude-code" };
+  userSessionStarts.add(params);
+  const response = await handleSessionStart(params, 0, "root", new ServerResponse(new IncomingMessage(new Socket())));
+  if (response.error) throw new Error(response.error.message);
+  return response.result as AgentSessionView;
+}
+
+export async function agentSessionViewForUser(sessionId: string): Promise<AgentSessionView | null> {
+  const sessions = agentSessions();
+  await sessions.load();
+  const record = sessions.get(sessionId);
+  return record ? sessions.view(record) : null;
+}
+
+async function handleReviewFindings(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const reviewId = stringParam(params, "reviewId");
+  if (!reviewId) return errorResponse(id, ERR_INVALID_PARAMS, "reviewId is required: the id in your review prompt");
+  const { agentReviews } = await import("./review");
+  const result = await agentReviews().submit(reviewId, params.findings);
+  if (!result.accepted) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "no review is waiting for that id; it was answered or stopped");
+  }
+  return successResponse(id, { accepted: result.count });
+}
+
+function sessionCapMessage(): string {
+  return `${AGENT_SESSION_MAX_LIVE} sessions are already running; wait for one to finish or ask the user`;
+}
+
+async function handleSessionStart(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  authKind: AgentSocketAuth["kind"],
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const request = parseAgentSessionStart(params);
+  if (typeof request === "string") return errorResponse(id, ERR_INVALID_PARAMS, request);
+  const role = stringParam(params, "callerRole");
+  if (role && role !== "studio" && role !== "manager") {
+    return errorResponse(id, ERR_FORBIDDEN, "only an agent the user runs, or Cora's own chat, can start sessions");
+  }
+  const sessions = agentSessions();
+  await sessions.load();
+  const caller = await agentSessionCaller(params);
+  const state = await loadState();
+  const refusal = await agentSessionCallerRefusal(params, caller.workspaceId, caller.run, state);
+  if (refusal) return errorResponse(id, ERR_FORBIDDEN, refusal);
+  const workspace = stringParam(params, "workspace") ?? caller.workspaceId;
+  if (!workspace) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "Codara could not tell which workspace you run in; pass workspace");
+  }
+  const shellRefusal = agentSessionShellRefusal((await defaultShell())?.family ?? null);
+  if (shellRefusal) return errorResponse(id, ERR_INVALID_PARAMS, shellRefusal);
+  const release = sessions.reserve();
+  if (!release) {
+    return errorResponse(id, ERR_INVALID_PARAMS, sessionCapMessage());
+  }
+  const sessionId = `as-${randomUUID()}`;
+  try {
+    const briefPath = await sessions.writeBrief(sessionId, request.brief);
+    const settings = await loadSettings().catch(() => null);
+    // The hooks or notify program and the codara-studio server every Studio
+    // Claude or Codex gets: a session reports its turns and has the current
+    // tools only through them. The first sessions after boot wait for them,
+    // before a compaction --settings file is written to carry those hooks.
+    await integrationFilesReady();
+    const compaction = await standingTerminalCompaction(settings?.coraAutoCompactPercent ?? null, [request.runtime]);
+    params.workspace = workspace;
+    params.title = request.title;
+    delete params.cwd;
+    delete params.command;
+    // A run's temporary terminals close with it, and a session outlives its caller.
+    if (caller.run) params.retention = "service";
+    else delete params.retention;
+    // Set once the worktree exists: the agent cannot have answered before this.
+    let launchedAt = Date.now();
+    const response = await handleTerminalCreate(params, id, authKind, res, async (cwd) => {
+      launchedAt = Date.now();
+      if (!cwd || isRemotePath(cwd)) throw new Error("sessions can only start in a local workspace");
+      if ((await workspaceProjectPolicyModeForTerminalCwd(cwd, state.workspaces)) === "untrusted-pull-request") {
+        throw new Error("a session cannot start in an imported pull request");
+      }
+      return agentSessionCommand({
+        runtime: request.runtime,
+        model: request.model,
+        effort: request.effort,
+        briefPath,
+        codexTrust: codexTrustOverride(cwd),
+        compaction,
+        launchArgs: (sessionArgs) =>
+          request.runtime === "codex"
+            ? planCodexLaunch({ userArgs: sessionArgs }).argvPrefix
+            : planClaudeLaunch({ userArgs: sessionArgs }).argvPrefix,
+      });
+    });
+    if (response.error) {
+      await sessions.removeBrief(sessionId);
+      return response;
+    }
+    const opened = response.result as {
+      tabId: string;
+      paneId: string;
+      cwd: string;
+      group?: string;
+      workspaceId?: string;
+      workspace?: string;
+      worktree?: { branch?: string };
+    };
+    const workspaceId = opened.workspaceId ?? caller.workspaceId ?? terminalPanePlacement(opened.paneId)?.workspaceId ?? "";
+    const record: AgentSessionRecord = {
+      id: sessionId,
+      runtime: request.runtime,
+      model: request.model,
+      effort: request.effort,
+      title: request.title,
+      paneId: opened.paneId,
+      tabId: opened.tabId,
+      workspaceId,
+      workspaceName: opened.workspace ?? state.workspaces.find((entry) => entry.id === workspaceId)?.name ?? "",
+      cwd: opened.cwd,
+      branch: opened.worktree?.branch ?? null,
+      callerWorkspaceId: caller.workspaceId,
+      ownerProcess: caller.process,
+      startedAt: launchedAt,
+      promptAt: launchedAt,
+      turnEndedAt: null,
+      failure: null,
+      finalMessage: null,
+      closedAt: null,
+    };
+    await sessions.add(record);
+    return successResponse(id, {
+      ...sessions.view(record),
+      ...(opened.group ? { group: opened.group } : {}),
+    });
+  } finally {
+    release();
+  }
+}
+
+// Unknown and not visible read the same: an id proves nothing about access.
+function visibleSession(
+  sessions: AgentSessions,
+  caller: AgentSessionCaller,
+  sessionId: string,
+): AgentSessionRecord | null {
+  return sessions.visibleTo(caller).find((record) => record.id === sessionId) ?? null;
+}
+
+async function handleSessionStatus(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const sessions = agentSessions();
+  await sessions.load();
+  const caller = await agentSessionCaller(params);
+  const sessionId = stringParam(params, "id");
+  if (sessionId) {
+    const record = visibleSession(sessions, caller, sessionId);
+    if (!record) return errorResponse(id, ERR_INVALID_PARAMS, `no session ${sessionId.slice(0, 80)} was started from your workspace`);
+    return successResponse(id, sessions.view(record));
+  }
+  const records = sessions.visibleTo(caller).slice(0, AGENT_SESSION_LIST_LIMIT);
+  return successResponse(id, { sessions: records.map((record) => sessions.view(record, { cut: true })) });
+}
+
+async function handleSessionWait(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const ids = Array.isArray(params.ids) ? params.ids.filter((value): value is string => typeof value === "string") : [];
+  if (ids.length === 0) return errorResponse(id, ERR_INVALID_PARAMS, "ids is required: the sessions to wait for");
+  if (ids.length > AGENT_SESSION_MAX_LIVE * 2) return errorResponse(id, ERR_INVALID_PARAMS, "too many ids");
+  const mode = params.mode === undefined || params.mode === null ? "any" : params.mode;
+  if (mode !== "any" && mode !== "all") return errorResponse(id, ERR_INVALID_PARAMS, "mode must be any or all");
+  const timeoutMs = agentSessionWaitMs(params.timeoutSeconds);
+  if (typeof timeoutMs === "string") return errorResponse(id, ERR_INVALID_PARAMS, timeoutMs);
+  const sessions = agentSessions();
+  await sessions.load();
+  const caller = await agentSessionCaller(params);
+  const records: AgentSessionRecord[] = [];
+  for (const sessionId of ids) {
+    const record = visibleSession(sessions, caller, sessionId);
+    if (!record) return errorResponse(id, ERR_INVALID_PARAMS, `no session ${sessionId.slice(0, 80)} was started from your workspace`);
+    records.push(record);
+  }
+  const result = await sessions.wait({ records, mode, timeoutMs, cancelled: () => clientGone(res) });
+  if (result.reason === "cancelled") return errorResponse(id, ERR_INTERNAL, "session.wait aborted: client disconnected");
+  return successResponse(id, result);
+}
+
+async function handleSessionMessage(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const sessionId = stringParam(params, "id");
+  if (!sessionId) return errorResponse(id, ERR_INVALID_PARAMS, "id is required");
+  const text = params.text;
+  if (typeof text !== "string" || !text.trim()) return errorResponse(id, ERR_INVALID_PARAMS, "text is required");
+  if (text.length > AGENT_SESSION_BRIEF_MAX_CHARS) {
+    return errorResponse(id, ERR_INVALID_PARAMS, `text is limited to ${AGENT_SESSION_BRIEF_MAX_CHARS} characters`);
+  }
+  const sessions = agentSessions();
+  await sessions.load();
+  const caller = await agentSessionCaller(params);
+  const record = visibleSession(sessions, caller, sessionId);
+  if (!record) return errorResponse(id, ERR_INVALID_PARAMS, `no session ${sessionId.slice(0, 80)} was started from your workspace`);
+  const { paneId } = record;
+  await adoptRestoredAgentTerminal(paneId, params);
+  if (!agentTerminals.isActiveOwnedBy(paneId, stringParam(params, "runId"), await callerForOwnedTerminal(paneId, params))) {
+    return errorResponse(id, ERR_FORBIDDEN, "only the agent that started a session can message it");
+  }
+  const evidence = terminalAgentHibernationEvidence(paneId);
+  const refusal = agentSessionMessageRefusal({
+    status: sessions.state(record).status,
+    runtime: evidence?.runtime ?? null,
+    running: pty.hasSession(paneId),
+    lastUserInputAt: evidence?.lastUserInputAt ?? 0,
+    lastSubmitAt: evidence?.lastSubmitAt ?? 0,
+    now: Date.now(),
+  });
+  if (refusal) return errorResponse(id, ERR_INVALID_PARAMS, refusal);
+  // Nothing below awaits before the prompt is recorded, so a check is enough.
+  const release = sessions.reserve();
+  if (!release) return errorResponse(id, ERR_INVALID_PARAMS, sessionCapMessage());
+  release();
+  try {
+    pty.inject(paneId, text, { submit: true, stashDraft: record.runtime === "claude" });
+  } catch (err) {
+    if (err instanceof pty.RemotePaneDisconnectedError) return errorResponse(id, ERR_INVALID_PARAMS, err.message);
+    throw err;
+  }
+  noteTerminalUserInput(paneId);
+  sessions.notePrompt(record.id);
+  return successResponse(id, sessions.view(record));
 }
 
 // Deliver text to a terminal pane's PTY. paneId is the pty session id, so this
@@ -2421,6 +2805,8 @@ function worktreeDeps(): AgentWorktreeDeps {
         return null;
       }
     },
+    workspaceHeld: (workspaceId, paths) =>
+      windowHoldsFolder((op, params) => requestTerminalOp<unknown>(op, params, { timeoutMs: 5_000 }), workspaceId, paths),
     processesUnderCwd: (dir) =>
       scanProcessesUnderCwd(dir, { appPid: process.pid, sessionPids: pty.sessionPids() }),
     github: {
@@ -2525,6 +2911,7 @@ async function handleWorktree(
             ["deleteBranch", "boolean"],
             ["discardIgnoredFiles", "boolean"],
             ["dryRun", "boolean"],
+            ["workspace", "string"],
           ];
   for (const [key, type] of checks) {
     const problem = optionalTypedParam(params, key, type);
@@ -2567,34 +2954,46 @@ async function handleWorktree(
         ),
       );
     }
-    if (method === "worktree.create") {
-      // Another workspace's repository, under the same consent as a terminal
-      // there; the worktree records who asked, so its row shows them.
-      let creator: WorktreeCaller = caller;
+    // Another workspace's repository, under the same consent as a terminal
+    // there; a worktree made this way records who asked, so its row shows
+    // them. A folder inside a workspace of several repositories picks one.
+    const placeIn = async (
+      action: "worktree" | "worktree-remove",
+    ): Promise<{ ok: true; caller: WorktreeCaller } | { ok: false; response: JsonRpcResponse }> => {
       const requested = str("workspace");
-      if (requested) {
-        const gate = await gateCaller(caller, deps, { mutation: true });
-        if ("ok" in gate && gate.ok === false) return successResponse(id, gate);
-        const run = caller.runId ? await (await getRunStore()).getRun(caller.runId) : null;
-        const placed = await authorizeWorkspaceTarget({
-          params,
-          id,
-          authKind,
-          res,
-          requested,
-          run,
-          callerPaneId: caller.paneId ?? null,
-          action: "worktree",
-        });
-        if (!placed.ok) return placed.response;
-        if (placed.cross) {
-          creator = {
-            ...caller,
-            workspaceId: placed.target.id,
-            origin: { workspaceId: placed.cross.callerId, workspaceName: placed.cross.callerName },
-          };
-        }
-      }
+      if (!requested) return { ok: true, caller };
+      const gate = await gateCaller(caller, deps, { mutation: true });
+      if ("ok" in gate && gate.ok === false) return { ok: false, response: successResponse(id, gate) };
+      const run = caller.runId ? await (await getRunStore()).getRun(caller.runId) : null;
+      const placed = await authorizeWorkspaceTarget({
+        params,
+        id,
+        authKind,
+        res,
+        requested,
+        run,
+        callerPaneId: caller.paneId ?? null,
+        action,
+      });
+      if (!placed.ok) return placed;
+      return {
+        ok: true,
+        caller: {
+          ...caller,
+          ...(placed.cross
+            ? {
+                workspaceId: placed.target.id,
+                origin: { workspaceId: placed.cross.callerId, workspaceName: placed.cross.callerName },
+              }
+            : {}),
+          ...(placed.folder ? { workspaceId: placed.target.id, repoFolder: placed.folder } : {}),
+        },
+      };
+    };
+    if (method === "worktree.create") {
+      const placed = await placeIn("worktree");
+      if (!placed.ok) return placed.response;
+      const creator = placed.caller;
       return successResponse(
         id,
         await createAgentWorktree(
@@ -2620,10 +3019,12 @@ async function handleWorktree(
     if (path && !isAbsolute(path)) {
       return errorResponse(id, ERR_INVALID_PARAMS, "path must be absolute");
     }
+    const placed = await placeIn("worktree-remove");
+    if (!placed.ok) return placed.response;
     return successResponse(
       id,
       await removeAgentWorktree(
-        caller,
+        placed.caller,
         {
           ...(workspaceId ? { workspaceId } : {}),
           ...(path ? { path } : {}),
@@ -6396,6 +6797,8 @@ function summarizeTrigger(t: AutomationTrigger): string {
       return `git([${(t.events ?? []).join(",")}]${t.branch ? ` ${t.branch}` : ""})`;
     case "onAutomationActivity":
       return `onAutomationActivity([${(t.events ?? []).join(",")}]${t.automationId ? ` ${t.automationId}` : " any"})`;
+    case "github":
+      return `github([${(t.events ?? []).join(",")}]${t.branch ? ` ${t.branch}` : ""})`;
     default:
       return "unknown";
   }
@@ -6434,9 +6837,13 @@ function summarizeJob(job: ScheduledJob): Record<string, unknown> {
       stopReason: h.stopReason ?? null,
       costUsd: h.costUsd ?? null,
       ...(h.catchUp ? { caughtUpMissedRunAt: h.catchUp.scheduledFor } : {}),
+      ...(h.branchResult ? { branch: h.branchResult.branch, pullRequest: h.branchResult.prUrl ?? null } : {}),
     })),
     ...(precheckSummary(job.precheck) ? { precheck: precheckSummary(job.precheck) } : {}),
     ...(missedRunsSummary(job) ? { missedRuns: missedRunsSummary(job) } : {}),
+    ...(job.ownBranch ? { ownBranch: job.ownBranch } : {}),
+    ...(job.guard ? { guard: job.guard, spentThisMonthUsd: monthSpentUsd(job, Date.now()) } : {}),
+    ...(job.autoPaused ? { pausedAfterFailures: job.autoPaused.failures } : {}),
     ...(job.skips?.length
       ? {
           skipped: job.skips
@@ -6680,7 +7087,9 @@ async function validateTriggerLoopWorker(opts: {
     "onFinishOf",
     "git",
     "onAutomationActivity",
+    "github",
   ]);
+  const GITHUB_TRIGGER_EVENTS = new Set(["prOpened", "ciFailed"]);
   const GIT_TRIGGER_EVENTS = new Set(["remoteUpdated", "localBranchMoved"]);
   const ACTIVITY_TRIGGER_EVENTS = new Set(["finished", "failed"]);
   const LOOP_KINDS = new Set(["once", "count", "cadence", "until", "continuous", "agent"]);
@@ -6693,9 +7102,10 @@ async function validateTriggerLoopWorker(opts: {
       automationId?: unknown;
       events?: unknown;
       branch?: unknown;
+      includeDrafts?: unknown;
     };
     if (typeof t.kind !== "string" || !TRIGGER_KINDS.has(t.kind)) {
-      return `trigger.kind '${String(t.kind)}' is invalid (expected cron|interval|folder|manual|continuous|onFinishOf|git|onAutomationActivity)`;
+      return `trigger.kind '${String(t.kind)}' is invalid (expected cron|interval|folder|manual|continuous|onFinishOf|git|onAutomationActivity|github)`;
     }
     // Per-kind required payload - the scheduler arms these directly, so a bad
     // payload becomes a hot loop / crash at arm time rather than a fixable error.
@@ -6741,6 +7151,20 @@ async function validateTriggerLoopWorker(opts: {
       }
       if (t.branch !== undefined && (typeof t.branch !== "string" || t.branch.trim().length === 0)) {
         return "trigger.branch must be a non-empty branch name when provided (omit it to fire for any branch)";
+      }
+    } else if (t.kind === "github") {
+      if (
+        !Array.isArray(t.events) ||
+        t.events.length === 0 ||
+        !t.events.every((e) => typeof e === "string" && GITHUB_TRIGGER_EVENTS.has(e))
+      ) {
+        return "trigger kind 'github' requires a non-empty 'events' array of prOpened|ciFailed";
+      }
+      if (t.branch !== undefined && (typeof t.branch !== "string" || t.branch.trim().length === 0)) {
+        return "trigger.branch must be a non-empty branch name when provided (omit it for pull requests into any branch)";
+      }
+      if (t.includeDrafts !== undefined && typeof t.includeDrafts !== "boolean") {
+        return "trigger.includeDrafts must be true or false when provided";
       }
     } else if (t.kind === "onAutomationActivity") {
       if (
@@ -6815,9 +7239,27 @@ function paramGraph(params: Record<string, unknown>): LoomGraph | undefined {
  *  precheck command also removes it. Any other value that does not normalize
  *  is an error, so a typo is never saved as "no precheck". */
 function paramGate(params: Record<string, unknown>):
-  | { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null }
+  | { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null; ownBranch?: AutomationOwnBranch | null; guard?: AutomationGuard | null }
   | { error: string } {
-  const out: { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null } = {};
+  const out: { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null; ownBranch?: AutomationOwnBranch | null; guard?: AutomationGuard | null } = {};
+  if (params.guard === null) out.guard = null;
+  else if (params.guard !== undefined) {
+    const raw = (params.guard ?? {}) as { monthly_cap_usd?: unknown; pause_after_failures?: unknown };
+    const guard = normalizeAutomationGuard({ monthlyCapUsd: raw.monthly_cap_usd, pauseAfterFailures: raw.pause_after_failures });
+    // A typo must not read as "no limit", and half of a pair must not silently drop.
+    const wanted = (raw.monthly_cap_usd !== undefined ? 1 : 0) + (raw.pause_after_failures !== undefined ? 1 : 0);
+    const kept = (guard?.monthlyCapUsd !== undefined ? 1 : 0) + (guard?.pauseAfterFailures !== undefined ? 1 : 0);
+    if (!guard || kept !== wanted) {
+      return { error: "guard must be { monthly_cap_usd: a number above 0, pause_after_failures: a whole number from 1 to 50 } (or null to remove them)" };
+    }
+    out.guard = guard;
+  }
+  if (params.own_branch === null) out.ownBranch = null;
+  else if (params.own_branch !== undefined) {
+    const draftPr = (params.own_branch as { draft_pr?: unknown } | undefined)?.draft_pr;
+    if (typeof draftPr !== "boolean") return { error: "own_branch must be { draft_pr: true|false } (or null to work in the workspace folder)" };
+    out.ownBranch = { draftPr };
+  }
   const rawPrecheck = params.precheck;
   if (rawPrecheck === null) out.precheck = null;
   else if (rawPrecheck !== undefined) {
@@ -6965,6 +7407,8 @@ async function handleAutomationCreate(
     graph,
     ...(gate.precheck ? { precheck: gate.precheck } : {}),
     ...(gate.missedRuns ? { missedRuns: gate.missedRuns } : {}),
+    ...(gate.ownBranch ? { ownBranch: gate.ownBranch } : {}),
+    ...(gate.guard ? { guard: gate.guard } : {}),
     input: {
       workspaceId: run.workspaceId,
       workspaceName,
@@ -7036,6 +7480,23 @@ function describeUpdate(existing: ScheduledJob, update: UpdateScheduledJobInput)
     const next = { trigger: update.trigger ?? existing.trigger, missedRuns: update.missedRuns ?? undefined };
     lines.push(`if a run is missed: ${missedRunsSummary(existing) ?? "skip"} → ${missedRunsSummary(next) ?? "skip"}`);
   }
+  if (update.ownBranch !== undefined) {
+    // It pushes and opens pull requests in the user's name, so it is shown.
+    const where = (own: AutomationOwnBranch | null | undefined): string =>
+      own ? (own.draftPr ? "own branch, opening a draft pull request" : "own branch") : "workspace folder";
+    lines.push(`works in: ${where(existing.ownBranch)} → ${where(update.ownBranch)}`);
+  }
+  if (update.guard !== undefined) {
+    // A limit on the user's money: raising or removing one is always spelled out.
+    const limits = (g: AutomationGuard | null | undefined): string =>
+      [
+        g?.monthlyCapUsd !== undefined ? `$${g.monthlyCapUsd} a month` : "",
+        g?.pauseAfterFailures !== undefined ? `pause after ${g.pauseAfterFailures} failed runs` : "",
+      ]
+        .filter(Boolean)
+        .join(", ") || "none";
+    lines.push(`spending limits: ${limits(existing.guard)} → ${limits(update.guard)}`);
+  }
   if (update.graph !== undefined) {
     const n = update.graph.nodes?.length ?? 0;
     const e = update.graph.edges?.length ?? 0;
@@ -7076,6 +7537,8 @@ async function handleAutomationUpdate(
     id: automationId,
     ...(gate.precheck !== undefined ? { precheck: gate.precheck } : {}),
     ...(gate.missedRuns !== undefined ? { missedRuns: gate.missedRuns } : {}),
+    ...(gate.ownBranch !== undefined ? { ownBranch: gate.ownBranch } : {}),
+    ...(gate.guard !== undefined ? { guard: gate.guard } : {}),
     ...(name ? { name } : {}),
     ...(paramTrigger(params) ? { trigger: paramTrigger(params) } : {}),
     ...(paramLoop(params) ? { loop: paramLoop(params) } : {}),

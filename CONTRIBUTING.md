@@ -13,7 +13,8 @@ You need:
   (`node-pty`, `sodium-native`) for Electron.
 - **Python 3.8 or newer.** The Claude Code hook script needs it.
 - **gitleaks.** The pre-commit hook refuses to commit without it:
-  `brew install gitleaks` or `winget install Gitleaks.Gitleaks`.
+  `brew install gitleaks`, `winget install Gitleaks.Gitleaks`, or a binary
+  from [its releases](https://github.com/gitleaks/gitleaks/releases) on Linux.
 
 Then:
 
@@ -22,9 +23,10 @@ npm install     # also installs the git hooks and patches the bundled Pi sign-in
 npm run dev     # starts the app with hot reload
 ```
 
-CI runs only on macOS. The app also packages for Windows and Linux
-(`npm run package:win`, `npm run package:linux`), but CI does not test
-them.
+CI tests macOS on pull requests into `main` (`ci.yml`) and Linux, headless
+under Xvfb, on pull requests into `Cora` and pushes to it (`ci-linux.yml`:
+typechecks, build, every unit suite and an e2e smoke set). The app also
+packages for Windows (`npm run package:win`), but CI does not test it.
 
 **Your real data.** A dev build uses the same `~/.codarastudio` as an
 installed Codara Studio. It also writes the same hooks and MCP entries into
@@ -78,6 +80,11 @@ with no filter runs everything and takes a while. If your change is visible
 in the app, try it in `npm run dev`. `npm run test:e2e` builds the app and
 runs the Playwright specs.
 
+If your change adds code the window loads at startup, also run
+`npm run build && node scripts/check-bundle-budgets.cjs`: CI fails a pull
+request into `Cora` that grows a bundle past its budget
+([scripts/README.md](./scripts/README.md) says how to change one).
+
 Suites that need real subscriptions or the network are the `smoke:*`
 scripts. They are not part of `npm test` and you do not need them for a
 normal change.
@@ -95,7 +102,27 @@ normal change.
 - Do not start a subject with `release:`. That prefix is reserved for the
   version-bump commits the manual release script creates.
 - Never commit secrets. `.env.releases` is untracked and must stay that way.
-  The gitleaks hook scans every commit.
+  See "Secrets" below.
+
+### Secrets
+
+gitleaks scans twice, with the same `.gitleaks.toml`: the pre-commit hook
+scans what you stage, and the `Gitleaks` workflow scans every commit a pull
+request adds. Tests often need values that look like real keys. Make them
+obviously fake so neither scan stops you:
+
+- Put them in a fixture path: `tests/`, `fixtures/`, `__mocks__/`, or a unit
+  suite directly in `scripts/` (`scripts/test-*.cjs`, `scripts/test-*.mjs`).
+- Anywhere else, put `FAKE_` (capitals) on the same line, in the value or the
+  name: `const FAKE_GITHUB_TOKEN = "ghp_..."` or `"sk-ant-api03-FAKE_0123..."`.
+- Placeholders such as `YOUR_API_KEY`, `CHANGE_ME` or `<token>` are allowed
+  everywhere.
+
+If the scan flags a real secret, take it out of the history (not just the
+latest commit) and rotate it. Do not widen the allowlist to make a finding go
+away. The workflow takes `.gitleaks.toml` and `.gitleaksignore` from the base
+branch and ignores inline `gitleaks:allow` comments, so a pull request cannot
+allowlist its own finding anyway.
 
 ## 6. Open a pull request
 
@@ -104,6 +131,13 @@ normal change.
   UI changes.
 - CI (`.github/workflows/ci.yml`) runs the three typechecks, a build and
   every unit suite on macOS. Keep it green.
+- Keep it small. `PR hygiene` (`scripts/check-pr-hygiene.cjs`) counts the
+  added and deleted lines, leaving out lockfiles and `docs/`: above 800 it
+  warns, above 2,000 it fails unless the pull request has the `large-pr`
+  label. Split big work behind a flag instead where you can.
+- Branch from the branch you merge into. `PR hygiene` also fails when your
+  branch carries pull requests that are already merged (squash commits
+  ending in `(#123)`), and prints the `git rebase --onto` that removes them.
 - A maintainer must approve the pull request before it merges.
   `.github/CODEOWNERS` requests the reviewers automatically.
 - You do not release anything yourself. A nightly workflow ships everything

@@ -21,6 +21,7 @@ export type CommandId =
   | "shortcuts.open"
   | "runSwitcher.open"
   | "jump.open"
+  | "sessions.openPicker"
   | "workspace.selectByIndex"
   | "workspace.back"
   | "workspace.forward"
@@ -65,12 +66,16 @@ export type CommandId =
   | "worker.newCodex"
   | "worker.newGrok"
   | "worker.newPi"
+  | "worker.claudeSessions"
+  | "worker.codexSessions"
+  | "worker.grokSessions"
   | "agent.cycleModel"
   | "agent.cycleEffort"
   | "agent.openModelPicker"
   | "agent.openEffortPicker"
   | "chat.stop"
   | "markdown.togglePreview"
+  | "editor.toggleWordWrap"
   | "browser.pickElement"
   | "browser.comment"
   | "browser.fullScreen"
@@ -139,6 +144,12 @@ export const COMMANDS: Command[] = [
     label: "Jump to a workspace, tab or agent",
     group: "Navigation",
     defaultChords: [jumpPaletteDefaultChord(IS_MAC)],
+  },
+  {
+    id: "sessions.openPicker",
+    label: "Resume a session",
+    group: "Navigation",
+    defaultChords: [mod("h", { shift: true })],
   },
   {
     id: "workspace.selectByIndex",
@@ -463,8 +474,10 @@ export const COMMANDS: Command[] = [
   // CLI worker spawners. No default chord — the chord-space we'd want
   // (Mod+Shift+C/Mod+Alt+C/…) all collide with built-in or browser
   // bindings. Users bind their own from Settings → Keybindings.
-  // Each launches a new session at once; earlier sessions are resumed from
-  // the Sessions view.
+  // "New ... worker pane" starts a new session at once. The "... worker
+  // sessions" variants show that agent's past sessions first, as its row in the
+  // + menus does. Split on purpose: a binding made for an instant session must
+  // not grow a dialog in front of it.
   {
     id: "worker.newClaude",
     label: "New Claude worker pane",
@@ -486,6 +499,24 @@ export const COMMANDS: Command[] = [
   {
     id: "worker.newPi",
     label: "New Pi worker pane",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.claudeSessions",
+    label: "Open Claude worker sessions…",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.codexSessions",
+    label: "Open Codex worker sessions…",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.grokSessions",
+    label: "Open Grok worker sessions…",
     group: "Workers",
     defaultChords: [],
   },
@@ -542,6 +573,19 @@ export const COMMANDS: Command[] = [
     label: "Toggle markdown preview",
     group: "View",
     defaultChords: [mod("v", { shift: true })],
+  },
+  {
+    // VS Code's "View: Toggle Word Wrap" is Alt+Z. On macOS Option+Z types a
+    // character, which the matcher (it reads e.key) never sees as "z", so
+    // there it is Cmd+Option+Z. Only the focused file editor reacts.
+    id: "editor.toggleWordWrap",
+    label: "Toggle word wrap in the editor",
+    group: "View",
+    defaultChords: [
+      IS_MAC
+        ? mod("z", { alt: true })
+        : { ctrl: false, meta: false, alt: true, shift: false, key: "z" },
+    ],
   },
   {
     // Mod+Shift+E sits next to Mod+E (new browser tab) and is otherwise free.

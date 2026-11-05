@@ -1,241 +1,79 @@
 #!/usr/bin/env node
 "use strict";
 
-// cora — Codara Studio's orchestrator, from your terminal.
+// cora: a terminal coding harness that runs by itself, with no Studio app.
 //
-// Talks to the running app over its authenticated loopback socket
-// (lib/rpc.cjs); run inspection also works offline straight from ~/.codarastudio
-// (lib/store.cjs). One file per command group under commands/.
+//   cora                      interactive session in the current folder
+//   cora exec "prompt"        one-shot run
+//   cora studio <command>     drive a running Codara Studio (studio.cjs)
 //
-//   node cli/cora.cjs help        (or `npm run cora -- help`)
+// This file stays dependency free so `--help`, `--version` and `studio` never
+// load the agent engine.
 
-const { c, logo, fail } = require("./lib/ui.cjs");
+const { UsageError, parseArgs } = require("./harness/args.cjs");
 
-const HELP = `
-${logo()}
+const HELP = `cora: a coding agent in your terminal
 
-  ${c.bold("cora")} — drive Cora, Codara Studio's orchestrator, from your terminal
+  cora [prompt]                      interactive session in this folder
+  cora exec [prompt]                 one-shot run; prompt from stdin when omitted
+  cora resume [id]                   continue a session (picker without an id)
+  cora login [claude|chatgpt]        sign in; no provider lists what is signed in
+  cora logout <claude|chatgpt>       remove a Cora sign-in
+  cora models [search]               list the models you can use
+  cora studio <command>              drive a running Codara Studio (cora studio help)
+  cora tool|task|inbox|inspect|server|workflow  Studio's tools, also under cora studio
 
-${c.bold("SESSIONS")}
-  chat [run] [--cwd DIR --profile NAME --direct]            ${c.cyan("fullscreen Cora chat")}
-  start <prompt> [--cwd DIR --profile NAME --direct]        start a Cora run
-  send <run> <message|option#> [--wait]                    reply / answer a question
-  wait <run> [--timeout SECONDS]                           block until it needs you
-  tail <run> [--all]                                       stream live events
-  cancel <run> [reason]                                    stop a run
+Options
+  --model NAME        sonnet, opus, terra, sol (newest you can use), or any provider/id
+  --effort LEVEL      off, minimal, low, medium, high, xhigh, max
+  --resume [id]       same as cora resume; works with exec
+  -c, --continue      continue the most recent session
+  --json              exec: one JSON event per line, ending with cora_result
+  --no-limit-wait     stop at a usage limit instead of waiting for its reset
+  --mcp-config FILE   add MCP servers from a file (.mcp.json format)
+  -v, --version       print the version
 
-${c.bold("PROFILES & MEMORY")}
-  profile list                         list named Cora identities
-  profile create <name> [--description TEXT --instructions TEXT]
-                                       create isolated profile + memory
-  profile use <name|id>                select the default for new chats
+exec exit codes
+  0  finished, and the model did not report otherwise
+  1  a provider or runtime failure stopped the run
+  2  bad usage or no sign-in
+  3  the model reported partial, blocked or failed
+  130  stopped by Ctrl+C while waiting for a usage limit
 
-${c.bold("ACCOUNTS")}
-  auth list [provider]                 list accounts (Cora and CLI sides)
-  auth add <provider> [label]          sign in to another account
-  auth use <provider> <#|label|id>     make it the Active account (Cora + CLI)
-  auth use <provider> system           new sessions use the CLI's own login
-  auth login|rename|remove <provider> …
-  auth cli list [claude|codex|grok]    list the CLI side of each account
-  auth cli rename|remove <runtime> …   rename a CLI side, remove an unused one
-
-${c.bold("RUNS & AGENTS")}
-  runs                         list runs (works offline)
-  run <run>                    one run in detail
-  log <run>                    the conversation transcript
-  agents [run]                 subagents: every worker, its status and model
-  watch [run]                  ${c.cyan("live dashboard")} of a run and its subagents
-  agent spawn <run> <prompt> [--title T --runtime claude|codex|grok --effort E]
-  agent message <run> <all|task-id> <message>
-
-${c.bold("TASKS")}  the workspace's one task list and inbox (TASKS.md), shared with its agents
-  task list [--state S --all]  open tasks, what needs you, the inbox
-  task add <title> --done "how to tell it is finished" [--done …] [--kind K --state S --from I1]
-  task move <T1|I1> <state> [reason]   verifying runs the repo's .codara/verify.json
-  task merge <I1> <T1>         fold an inbox item into a task
-  task worktree <T1> <claude|codex> <path> [--branch B]
-  inbox add <text> [--link URL]
-
-${c.bold("SURFACES")}
-  board <run>                  the run's kanban board
-  whiteboard <run>             the run's whiteboard markdown
-  auto list                    automations in the workspace
-  auto run|pause|resume|on|off <automation-id>
-  workflow list|show|check|run|status|wait|stop|resume|save
-                               workflows: scripts that fan work out to many
-                               agents (\`cora workflow help\`)
-
-${c.bold("BENCH")}
-  bench [--split train|holdout|all] [--task NAME[,NAME]] [--repeat N] [--keep]
-                               harness benchmark via the live app: 0-100 score
-                               (correctness, par efficiency, post-green
-                               discipline, orchestration); appends history.jsonl
-  bench --agent hermes|codex|claude [--model M --effort E]
-                               same-model comparison through Hermes Agent
-  bench matrix --models all|M1,M2 --output DIR [--task NAME --repeat N]
-                               run a model matrix with per-model artifacts
-  bench --output FILE          save a new JSON artifact with every check
-  bench list                   show the suite's tasks (tier, split)
-  bench history                score trajectory across runs
-  ws prune                     remove workspaces whose directory is gone
-
-${c.bold("APP")}
-  status                       is Codara running? version + activity
-  read <paneId> [--lines N]    read a terminal pane
-  rpc <method> [params-json]   raw JSON-RPC escape hatch
-
-${c.bold("TOOLS")}  the codara-studio tools, for agents without MCP
-  tool list                    browser, terminal, worktree and other tools here
-  tool help <name>             a tool's description and arguments
-  tool <name> [json] [--arg v] call it; images are saved and their paths printed
-  inbox [--peek --limit N]     what the user picked or commented on for you
-  inspect <@ref|selector>      describe an element to edit it: box model, styles,
-          [--x N --y N --tabId ID]  CSS rules, source file:line, image
-  server list|start|stop|restart|logs|save|forget [id] [--command C --port N]
-                               this workspace's dev servers, kept running by
-                               Codara apart from any agent (\`cora server help\`)
-
-${c.bold("FLAGS")}  --json (raw output)   --home DIR (Codara home, default ~/.codarastudio)
-
-  <run> accepts a full id or any unique prefix.
+Files live in ~/.cora (CORA_HOME): auth.json, settings.json, models.json,
+mcp.json, skills/, sessions/.
 `;
 
-function parseArgs(argv) {
-  const flags = {};
-  const args = [];
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (!arg.startsWith("--")) {
-      args.push(arg);
-      continue;
-    }
-    const name = arg.slice(2);
-    const boolFlags = new Set(["json", "wait", "all", "keep", "verbose", "direct", "managed", "default", "yes"]);
-    if (boolFlags.has(name)) flags[name] = true;
-    else flags[name] = argv[++i];
+function main() {
+  const argv = process.argv.slice(2);
+  const [first] = argv;
+  if (first === "help" || first === "--help" || first === "-h") {
+    process.stdout.write(HELP);
+    return;
   }
-  return { args, flags };
+  if (first === "--version" || first === "-v" || first === "version") {
+    console.log(require("./package.json").version);
+    return;
+  }
+  let cli;
+  try {
+    cli = parseArgs(argv);
+  } catch (error) {
+    if (!(error instanceof UsageError)) throw error;
+    console.error(`cora: ${error.message}`);
+    process.exitCode = 2;
+    return;
+  }
+  if (cli.studioArgs) return require("./studio.cjs").run(cli.studioArgs);
+  if (!process.features.typescript) {
+    console.error(`cora needs Node 22.18 or newer (this is ${process.version}).`);
+    process.exitCode = 2;
+    return;
+  }
+  import("./harness/main.mjs").then(({ run }) => run(cli)).catch((error) => {
+    console.error(`cora: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  });
 }
 
-async function main() {
-  const [command, ...rest] = process.argv.slice(2);
-  const { args, flags } = parseArgs(rest);
-
-  switch (command) {
-    case undefined:
-      if (process.stdin.isTTY && process.stdout.isTTY) {
-        return require("./commands/chat.cjs").chat([], flags);
-      }
-      console.log(HELP);
-      return;
-
-    case "help":
-    case "--help":
-    case "-h":
-      console.log(HELP);
-      return;
-
-    case "chat":
-      return require("./commands/chat.cjs").chat(args, flags);
-
-    case "profile":
-      return require("./commands/profiles.cjs").profile(args, flags);
-
-    case "auth":
-    case "accounts":
-      return require("./commands/auth.cjs").auth(args, flags);
-
-    case "status":
-      return require("./commands/status.cjs").status(args, flags);
-
-    case "start":
-    case "send":
-    case "wait":
-    case "tail":
-    case "cancel":
-      return require("./commands/session.cjs")[command](args, flags);
-
-    case "runs":
-    case "run":
-    case "log":
-      return require("./commands/runs.cjs")[command](args, flags);
-
-    case "agents":
-    case "watch":
-    case "agent":
-      return require("./commands/agents.cjs")[command](args, flags);
-
-    case "board":
-      return require("./commands/board.cjs").board(args, flags);
-    case "whiteboard":
-      return require("./commands/board.cjs").whiteboard(args, flags);
-
-    case "auto":
-      return require("./commands/automations.cjs").auto(args, flags);
-
-    case "workflow":
-    case "workflows":
-      return require("./commands/workflow.cjs").workflow(args, flags);
-
-    case "bench":
-      return require("./commands/bench.cjs").bench(args, flags);
-
-    case "ws": {
-      const { rpc } = require("./lib/rpc.cjs");
-      const { c } = require("./lib/ui.cjs");
-      if (args[0] !== "prune") fail("usage: cora ws prune  (removes workspaces whose directory is gone)");
-      const { removed } = await rpc(flags, "workspace.prune", {});
-      if (removed.length === 0) return console.log(c.dim("nothing to prune"));
-      for (const workspace of removed) console.log(`${c.red("−")} ${workspace.name}  ${c.dim(workspace.cwd)}`);
-      console.log(`pruned ${c.bold(String(removed.length))} workspace${removed.length === 1 ? "" : "s"}`);
-      return;
-    }
-
-    case "read": {
-      const { rpc } = require("./lib/rpc.cjs");
-      if (!args[0]) fail("usage: cora read <paneId> [--lines N]");
-      const params = { paneId: args[0] };
-      if (flags.lines) params.lines = Number(flags.lines);
-      const result = await rpc(flags, "terminal.read", params);
-      console.log(flags.json ? JSON.stringify(result, null, 2) : result.text);
-      return;
-    }
-
-    case "task":
-    case "tasks":
-      // Repeated flags (--done) skip parseArgs.
-      return require("./commands/tasks.cjs").task(rest);
-
-    case "inbox":
-      if (rest[0] === "add") return require("./commands/tasks.cjs").inboxAdd(rest.slice(1));
-    // falls through: `cora inbox` alone reads the preview inbox
-    case "inspect": {
-      const point = require("./commands/point.cjs");
-      const parsed = point.parsePointArgs(rest);
-      return point[command](parsed.args, parsed.flags);
-    }
-
-    case "tool":
-    case "tools":
-      // Tool arguments are the tool's own flags, so they skip parseArgs.
-      return require("./commands/tool.cjs").tool(rest);
-
-    case "server":
-    case "servers":
-      return require("./commands/servers.cjs").servers(rest);
-
-    case "rpc": {
-      const { rpcRaw } = require("./lib/rpc.cjs");
-      if (!args[0]) fail("usage: cora rpc <method> [params-json]");
-      const res = await rpcRaw(flags, args[0], args[1] ? JSON.parse(args[1]) : {});
-      console.log(JSON.stringify(res.error ?? res.result, null, 2));
-      if (res.error) process.exit(1);
-      return;
-    }
-
-    default:
-      fail(`unknown command: ${command}\nRun \`cora help\` for usage.`);
-  }
-}
-
-main().catch((err) => fail(err instanceof Error ? err.message : String(err)));
+main();

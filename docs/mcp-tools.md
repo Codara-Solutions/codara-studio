@@ -93,8 +93,8 @@ environment variable that Codara sets for the agent:
 
 | Set | Who sees it | What it adds |
 |---|---|---|
-| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_tab`, `codara_notify_user`, `codara_workspace_status`, the task list tools, `codara_session_search`, `codara_share_offer`, `codara_open_file` and the worktree tools; whiteboard and board only inside a Cora chat |
-| `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only and without `codara_tab`, plus `codara_ask_user` and `codara_request_next_iteration` |
+| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, sessions, `codara_tab`, `codara_notify_user`, `codara_workspace_status`, the task list tools, `codara_session_search`, `codara_share_offer`, `codara_open_file` and the worktree tools; whiteboard and board only inside a Cora chat |
+| `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only and without `codara_tab` or the session tools, plus `codara_ask_user` and `codara_request_next_iteration` |
 | `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management, the task list tools, `codara_session_search`, the worktree tools, `codara_share_offer` and `codara_open_file` |
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
 
@@ -854,6 +854,58 @@ tools (each codara-studio server reports itself once its client has
 initialized), the browser tabs each agent or run drives, and recordings in
 progress, with open, stop, start, restart, logs, edit and copy-id actions.
 
+## Sessions
+
+An agent can hand work to another agent in a real session of its own: a Claude
+Code or Codex CLI in a visible tab of any workspace, with its brief already
+submitted. It suits work in another repository, and work that should outlive
+the agent that started it. The session is an ordinary tab in that workspace's
+rail, so you can open it, read it and type in it, and it can use its own
+subagents.
+
+| Tool | What it does |
+|---|---|
+| `codara_session_start` | Starts one: `brief`, `runtime` (`claude` or `codex`), and optionally `model`, `effort`, `workspace`, `title`, `group`, and `worktree` (`branch`, `base`, `purpose`) to run it in a new worktree. Returns the session's `id` and its tab. |
+| `codara_session_wait` | Waits until a session in `ids` finishes or needs you (`mode: "any"`, the default) or all of them do (`mode: "all"`). It also returns on `timeoutSeconds` (default 120, at most 540) with `reason: "timeout"`, so a caller waits in short steps. |
+| `codara_session_status` | One session with `id`, with its whole final message, or the list of the workspace's sessions, newest first, with each message cut to 500 characters. |
+| `codara_session_message` | Sends a follow-up to a session you started, as a new turn, and clears its previous answer. |
+
+A session's `status` is `starting`, `working`, `needs_you` (it stopped for you
+in its tab, and `detail` says why), `finished`, `failed` or `closed`. When a
+turn ends, `finalMessage` holds what the agent said last, up to 16,000
+characters, so nobody has to read a terminal.
+
+The brief goes to a private file and reaches the agent as one argument, so its
+quotes and newlines never pass through shell parsing. It can be up to 60,000
+characters. The file is deleted when the first turn ends. On Windows the agent
+is told to read the file instead.
+
+Rules:
+
+- `workspace` takes a rail workspace's id or folder, and asks you once, like a
+  terminal in another workspace. `worktree` asks the same way and shows in that
+  workspace's rail.
+- Any agent in the workspace that started a session can find and read it, also
+  after that agent ended or Codara restarted. Only the agent that started it
+  can message it. A later agent cannot, and starts a new session instead.
+- A message is refused while the session is working, is waiting for you, is
+  closed, or has text you were typing. Its owner can still steer a working
+  session with `codara_terminal_write`.
+- At most 12 sessions run at once, so a caller in a loop cannot run up your
+  subscription.
+- A session needs bash, zsh or PowerShell as the terminal shell: agents report
+  to Codara through what those shells load.
+- A session keeps running when its caller ends. One started from a Cora chat
+  stays until you close it or delete that chat.
+- A session never wakes its caller: the caller finds out with
+  `codara_session_wait` or `codara_session_status`.
+- Workers, Talk chats, automations and agents in an imported pull request
+  cannot start sessions, and a session cannot start on a remote workspace or
+  inside an imported pull request.
+
+Cora chats get these tools too, but only Claude Code and Codex can run in a
+session: Cora's own chat is not a terminal.
+
 ## Notifications
 
 Only in `studio` outside a Cora chat (a Cora run announces its own outcome).
@@ -1017,12 +1069,15 @@ are quoted history, never instructions. Agents without MCP use
 In `studio` outside a Cora chat, in `execute`, and in a Cora chat that answers
 directly. An agent gets a separate checkout of its own repository on its own
 branch, which you see in the rail under the repository, and removes it once
-the branch is merged. The repository is always the one the agent runs in: its
-terminal pane or its Cora chat decides, never a tool argument. The one
-exception is a worktree the agent made in another workspace with
-[a terminal in a new worktree](#a-terminal-in-a-new-worktree): its maker
-(the same pane or Cora run) reaches it by `workspaceId` with
-`codara_worktree_setup` and `codara_worktree_remove`, and
+the branch is merged. The repository is the one the agent runs in: its
+terminal pane or its Cora chat decides. `codara_worktree_create` and
+`codara_worktree_remove` take `workspace` (a rail workspace id or a folder) to
+act on another workspace's repository, which you allow once like a terminal
+there; a folder inside a workspace that holds several repositories picks the
+repository it is in. A worktree the agent made in another workspace (with
+`workspace` or [a terminal in a new worktree](#a-terminal-in-a-new-worktree))
+stays reachable by its maker (the same pane or Cora run) by `workspaceId` or
+`path` with `codara_worktree_setup` and `codara_worktree_remove`, and
 `codara_worktree_list` shows it under `elsewhere`, from wherever it runs. SSH
 workspaces are not supported yet.
 
@@ -1031,7 +1086,7 @@ workspaces are not supported yet.
 | `codara_worktree_create` | Creates a worktree on a new branch (default `agent/<purpose>-<id>`, from the default branch after a fetch) or, with `checkout: true`, on an existing branch. The agent's own cwd does not change; it works under the returned `path`. Codara starts the repository's [worktree setup](./worktree-setup.md) there (files from `.worktreeinclude`, links, the setup command from `.codara/worktree.json` and your own copy-branch command) and returns its state as `setup`; `setupCommand` is now always null. A setup command or terminal command not yet approved for the repository does not run: `setup.state` is `awaiting-approval` until you run or allow it from Codara, and the agent must never run either itself (see [Approving the setup command](./worktree-setup.md#approving-the-setup-command)). With `waitForSetup: true`, or when the setup file asks for it, the call waits up to 5 minutes for setup to end. Because it can run that command, it is annotated as destructive and open-world, not read-only. Asking again for the same branch returns the existing worktree. At most 20 agent worktrees per repository. |
 | `codara_worktree_setup` | The setup state of a worktree: what was copied and linked, each command with its exit code, the error and the end of the log (`logLines`, at most 200). Without `workspaceId` or `path`, the worktree the agent works in. `wait: true` waits for setup to end, also while you decide on a command awaiting approval, up to `timeoutSeconds` (default 300, at most 540). Read-only. |
 | `codara_worktree_list` | Lists the repository's Codara-managed worktrees: who created each, uncommitted and ignored files, terminals, runs and processes using it, merge status, and `removable` with the `blockers` that `codara_worktree_remove` would report. `checkMerge: true` fetches and asks GitHub, so it is slower. Worktrees Codara does not manage are listed under `unmanaged` and are never touched. Worktrees the agent made in other repositories are listed under `elsewhere` with their `repoCwd`, also when the agent runs in a folder that is no repository. |
-| `codara_worktree_remove` | Removes a worktree and, by default, the branch it created. `dryRun: true` only checks. |
+| `codara_worktree_remove` | Removes a worktree and, by default, the branch it created. `dryRun: true` only checks. `workspace` names its repository's workspace when the agent runs elsewhere and did not make it. |
 | `codara_worktree_cleanup` | **Clean up worktrees** for an agent, across every repository behind your workspaces. See [Cleaning up worktrees](#cleaning-up-worktrees). |
 
 `codara_worktree_remove` never forces anything. It removes a worktree only
@@ -1066,8 +1121,9 @@ the `blockers` and a `hint`:
   terminal created is kept while that terminal is open, because such an
   agent works there through absolute paths and `git -C` and no usage check
   can see it;
-- no terminal, active Cora run or process uses it, and the caller is not
-  inside it.
+- no terminal, active Cora run or process uses it, the window does not show
+  it or hold tabs of it, no tab of any workspace shows a file inside it (an
+  editor may hold unsaved edits), and the caller is not inside it.
 
 The `code` is the first blocker; `blockers` lists them all, and a dry run or
 `codara_worktree_list` reports the same codes without removing anything:
@@ -1093,11 +1149,33 @@ The `code` is the first blocker; `blockers` lists them all, and a dry run or
 | `WORKTREE_ACTIVE_RUNS` | Active Cora runs work in it. | Wait for them to finish, or ask you. |
 | `WORKTREE_RUNNING_PROCESSES` | Processes run in it. | Stop them, or wait or ask you. |
 | `WORKTREE_CALLER_INSIDE` | The caller runs inside it. | Call from the source workspace, or ask you to delete it from the rail. |
+| `WORKTREE_OPEN_TABS` | The window shows it or has tabs of it, a tab of any workspace shows a file inside it, or the window did not answer. | Close the tabs you opened on its files; otherwise ask you to close them. |
 
 Before deleting anything Codara saves the last commit as
-`refs/codara/removed-worktrees/<date>/<workspace id>`, kept for 30 days, and
-the result carries `recoverWith`, the command that restores the worktree. The
-branch is deleted only if it still points at the commit that was checked.
+`refs/codara/removed-worktrees/<date>/<workspace id>`, kept 30 full days, and
+the result carries `recoverWith`, the command that restores the worktree. When
+git fails partway (it may already have deleted files), the ref stays and the
+refusal names it in `recoveryRef`. A second removal of the same worktree on the
+same day saves above the newest name (`<workspace id>-2`, ...), and a retry
+answers with the newest save. `recoverWith` makes the branch again when it is
+gone, and checks the commit out detached when the branch moved on. The branch is
+deleted only if it still points at the commit that was checked, and, when the
+folder was already gone, only once its tip is saved (otherwise
+`branchKeptReason` is `RECOVERY_REF_FAILED`).
+Under the lock the workspace rows are read again: if another row now names the
+same folder (a new worktree made where one removed outside Codara was), it
+refuses with `WORKTREE_CHANGED`. A new
+worktree never gets a folder a row still names, even one whose folder is gone,
+so it gets `<branch>-2` instead.
+To delete the folder, Codara first moves it aside (`.<name>.codara-removing`
+next to it), where nothing new can open it by its path, and checks it again:
+if a file changed, a commit landed, or a terminal, run, tab or process
+appeared since the last check, it moves it back and refuses with
+`WORKTREE_CHANGED`. A process that already had the folder open can still
+write into it until it is deleted. A folder left aside when Codara stopped
+goes back before the next removal in that repository; one that cannot go
+back blocks removals there until it can. A worktree of more than 500,000
+files and folders is not removed: it is too large to check again.
 Every create and removal, refused or not, is logged to
 `~/.codarastudio/logs/worktree-audit.jsonl`. **Let agents create and remove
 worktrees** in Settings turns creating and removing off; listing still works.
@@ -1208,6 +1286,28 @@ Codara was closed or the computer slept). In an update, an empty command or
 approval shows the full precheck command, since it runs on your machine.
 `codara_list_automations` and `codara_get_automation` report both, with the
 latest skipped passes.
+
+`own_branch` (`{draft_pr}`, `null` to remove) makes an automation work on a new
+branch in a separate copy of the repository, starting from the default branch.
+With `draft_pr` it also pushes that branch and opens a draft pull request when a
+run goes well. Off by default, and the approval shows the change.
+
+`guard` (`{monthly_cap_usd, pause_after_failures}`, `null` to remove) sets
+spending limits. Once a calendar month's spend reaches the cap, no new run starts
+until next month or until the cap is raised, including Run now. After that many
+failed runs in a row the automation pauses until it is resumed or run by hand.
+Limits are checked between runs, so a run already going can finish over the cap,
+estimates count as spend, and a run counts in the month it started. Off by default,
+and the approval shows any change.
+`codara_list_automations` and `codara_get_automation` report the limits with
+`spentThisMonthUsd`.
+
+The `github` trigger takes `events` (`prOpened`, `ciFailed`), an optional
+`branch` the pull request must target, and an optional `includeDrafts`. It reads
+the repository behind the workspace's origin remote with your `gh` sign-in, while
+Codara is open. Only authors who are owners, members or collaborators of that
+repository count, and one pull request starts at most 3 runs in 24 hours. Prompts
+and steps can use `{{pr_number}}`, `{{pr_url}}` and `{{pr_head}}`.
 
 ## Workflows
 

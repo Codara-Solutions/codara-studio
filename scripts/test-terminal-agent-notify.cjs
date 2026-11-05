@@ -1194,6 +1194,91 @@ async function main() {
     alertCount() === beforeApproval + 4 && /build is green/.test(T.alerts.at(-1).body) && !/took/.test(T.alerts.at(-1).body),
   );
 
+  // A prompt on the command line starts no turn Codara sees, so Codex's own
+  // report opens and ends it. A session waiting hears the whole answer.
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-cli-prompt", panes: [
+    { paneId: "c-cli", tabId: "tc-cli", tabTitle: "Codex", excluded: false },
+  ] });
+  const turnEnds = [];
+  const stopHearing = mod.onTerminalAgentTurnEnded((event) => turnEnds.push(event));
+  feed("c-cli", "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.162.1)                          │\r\n");
+  const fullAnswer = "The whole answer, line by line. ".repeat(40);
+  mod.noteTerminalHookEvent("c-cli", "CodexNotify", {
+    type: "agent-turn-complete",
+    "turn-id": "cli-1",
+    "input-messages": ["the brief"],
+    "last-assistant-message": fullAnswer,
+  });
+  check("codex: a command-line prompt's turn reports its whole final message", turnEnds.at(-1)?.message === fullAnswer);
+  stopHearing();
+
+  // A Codex session another agent started (codara_session_start), wired as
+  // agent-socket.ts wires it: its status comes from this notifier, and Codex's
+  // notify program is what ends each turn. Without notify it would read
+  // "starting" forever, since a prompt on the command line submits nothing.
+  const sessionsOut = path.join(os.tmpdir(), "spark-tan-test", "agent-sessions.cjs");
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, "src", "main", "agent-sessions.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile: sessionsOut,
+    external: ["electron"],
+    alias: { "@shared": SHARED_DIR },
+    logLevel: "silent",
+  });
+  const { AgentSessions } = require(sessionsOut);
+  const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), "spark-tan-sessions-"));
+  const store = new AgentSessions({ dir: sessionsDir, live: (paneId) => mod.terminalAgentSessionLive(paneId), bootAt: Date.now() - 1 });
+  await store.load();
+  const stopStore = mod.onTerminalAgentTurnEnded((event) => store.noteTurnEnd(event));
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-session", panes: [
+    { paneId: "c-session", tabId: "tc-session", tabTitle: "Codex", excluded: false },
+  ] });
+  const startedAt = Date.now();
+  const sessionRecord = {
+    id: "as-codex-1", runtime: "codex", model: null, effort: null, title: "Brief", paneId: "c-session", tabId: "tc-session",
+    workspaceId: "ws-session", workspaceName: "Session", cwd: "/w", branch: null, callerWorkspaceId: "ws-caller",
+    ownerProcess: null, startedAt, promptAt: startedAt, turnEndedAt: null, failure: null, finalMessage: null, closedAt: null,
+  };
+  await store.add(sessionRecord);
+  const sessionView = () => store.view(store.get("as-codex-1"));
+  check("codex session: reads starting before Codex shows up", sessionView().status === "starting");
+  feed("c-session", "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.163.0)                          │\r\n");
+  await sleep(200);
+  check("codex session: still starting at its banner, not finished", sessionView().status === "starting");
+  mod.noteTerminalHookEvent("c-session", "CodexNotify", {
+    type: "agent-turn-complete",
+    "turn-id": "s-1",
+    "input-messages": ["the brief"],
+    "last-assistant-message": "Shipped it. PR is open.",
+  });
+  await sleep(50);
+  check(
+    "codex session: notify finishes it with Codex's own final message",
+    sessionView().status === "finished" && sessionView().finalMessage === "Shipped it. PR is open.",
+  );
+  // A follow-up (codara_session_message) types into the pane and submits it.
+  await sleep(1_000);
+  store.notePrompt("as-codex-1");
+  mod.noteTerminalUserInput("c-session", "now add a test\r");
+  await sleep(50);
+  check("codex session: a follow-up reads working, and its earlier answer is gone", sessionView().status === "working" && sessionView().finalMessage === null);
+  mod.noteTerminalHookEvent("c-session", "CodexNotify", {
+    type: "agent-turn-complete",
+    "turn-id": "s-2",
+    "input-messages": ["now add a test"],
+    "last-assistant-message": "Added the test.",
+  });
+  await sleep(50);
+  check(
+    "codex session: the follow-up's notify finishes it with the new message",
+    sessionView().status === "finished" && sessionView().finalMessage === "Added the test.",
+  );
+  stopStore();
+  await store.flush();
+  fs.rmSync(sessionsDir, { recursive: true, force: true });
+
   // With Codara's notify on Codex launches, a screen-read finish waits a
   // moment for Codex's own message, but only in a pane whose shell passes
   // the program on: a typed `codex` in fish or cmd never sends one.

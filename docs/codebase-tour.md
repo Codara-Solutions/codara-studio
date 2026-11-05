@@ -213,6 +213,12 @@ With `workspace` it opens in another workspace after the user's one-time
 approval (`cross-workspace-terminals.ts` resolves and gates the target,
 `cross-workspace-ipc.ts` shows the prompt and keeps the "Always" grants).
 
+`codara_session_start` builds on that: it opens a terminal with an agent CLI
+and its brief already submitted, and keeps a small record of it
+(`agent-sessions.ts`, `src/shared/agent-sessions.ts`). The answer comes from
+the pane's notifier (`terminal-agent-notify.ts`), so sessions add no second
+worker system: a session is a terminal with an owner and a record.
+
 **Which Pi runs Cora.** `resolveCodaraPiRuntime` in `pi-runtime-electron.ts`
 picks the user's own Pi install (`npm install -g
 @earendil-works/pi-coding-agent`, 0.85.1 or newer) when there is one, and
@@ -649,7 +655,7 @@ Debugging:
   `app.info` is always available.
 - **A run that went wrong.** `npm run inspect-run -- <run-id>` writes a
   markdown dump of the run: `run.json`, events, manager calls, worker
-  prompts, logs and reports. `cora runs`, `cora run` and `cora log` also
+  prompts, logs and reports. `cora studio runs`, `cora studio run` and `cora studio log` also
   read runs offline ([cli.md](./cli.md)).
 - **Terminal agent detection.** The notifier writes a diagnostic trail of
   state changes to `<tmpdir>/spark-terminal-notify.log`. Set
@@ -672,7 +678,8 @@ Debugging:
 | Tabs, splits, docking | `src/renderer/src/tabs/useTabs.ts` | `paneTree.ts`, `dock.ts`, `TerminalStack.tsx` |
 | Detecting an agent's state in a pane | `src/shared/agent-patterns.ts` | `src/main/terminal-agent-notify.ts`, `src/main/agent-background-work.ts` (work still running after a turn); `test-agent-patterns`, `test-terminal-agent-notify`, `test-agent-background-work` |
 | Notifications | `src/main/notify/policy.ts` (whether to deliver) | `deliver.ts`; `src/renderer/src/notifications/` |
-| Agent session search (the rail's Sessions view) | `src/main/session-search/session-index.ts` (the index, no Electron) | `transcript-parsers.ts`, `session-index-worker.ts` (its thread), `service.ts` (pacing, IPC, the agent tool); `components/session-search/`; `test-session-search`, `tests/e2e/session-search.spec.ts`; [agent-session-search.md](./agent-session-search.md) |
+| Agent session search (the session picker) | `src/main/session-search/session-index.ts` (the index, no Electron) | `transcript-parsers.ts`, `session-index-worker.ts` (its thread), `service.ts` (pacing, IPC, the agent tool); `components/session-search/`; `test-session-search`, `tests/e2e/session-search.spec.ts`; [agent-session-search.md](./agent-session-search.md) |
+| A session one agent starts for another (`codara_session_*`) | `src/shared/agent-sessions.ts` (its status) | `src/main/agent-sessions.ts` (records, the brief file, the launch command), `handleSessionStart` in `agent-socket.ts`; `test-agent-sessions`, `tests/e2e/agent-sessions.spec.ts` |
 | The rail's Agents view | `src/shared/agent-board.ts` (which group a card lands in) | `components/agent-board/`; `src/main/agent-board.ts` and `terminalAgentActivitySnapshot` in `terminal-agent-notify.ts`; `test-agent-board`, `tests/e2e/agent-board.spec.ts` |
 | A workspace's status line and its agent lines in the rail | `src/shared/agent-status.ts` (each agent's state, the summary line) | `components/workspace-status/WorkspaceAgentsLine.tsx`, `agentLinesStore.ts`; `src/main/workspace-status/agent-notes.ts` and `preview-tools/workspace-status.ts` (the note an agent writes); `test-agent-status`, `test-workspace-status` |
 | Worktrees nested under their project in the rail, each agent on its row, the merged fold | `src/shared/rail-tree.ts` (which worktree nests where, which row each agent shows on, the order) | `WorkspaceFamily` and the nested `WorkspaceRow` in `components/WorkspaceRail.tsx`, `components/rail/WorkspaceChildren.tsx`, `rail/railFolds.ts`; DESIGN.md "Worktrees in the rail"; `test-rail-tree`, e2e `rail-worktrees` |
@@ -681,9 +688,12 @@ Debugging:
 | Automations and looms | `scheduler.ts`, `automation-loop.ts`, `loom-*.ts` | `components/automations/` |
 | Workflows | `workflow-driver.ts` (runs), `workflow-runtime.ts` (script API, journal) | `components/workflows/`; `test-workflow-*`, `tests/e2e/workflow-run.spec.ts` |
 | Git or GitHub features | `src/main/git-*.ts`, `src/main/github-*.ts` | `components/git/` |
+| Source Control's agent lanes | `src/shared/source-lanes.ts` (order and next step), `src/main/git-lanes.ts` (what each checkout changed) | `components/git/lanes/` |
+| Start an agent or review with one from Source Control | `src/main/review/agent-review.ts` (a review's life), `src/shared/agent-review.ts` (findings as data, the prompt) | `review.findings` and `startAgentSessionForUser` in `agent-socket.ts`; `git/lanes/NewAgentDialog.tsx`, `LaneReviewButton.tsx`, `reviewer-targets.ts`; `review/agentReviewStore.ts`, `review/review-send.ts`; `test-agent-review`, `tests/e2e/source-agents.spec.ts` |
+| Warning that two lanes would clash | `src/main/git-lane-collisions.ts` (`git merge-tree` between lanes' commits), `src/shared/lane-collisions.ts` | `git/lanes/LaneCollisions.tsx`; `test-lane-collisions`, `tests/e2e/source-collisions.spec.ts` |
 | Worktrees agents create and remove | `src/main/agent-worktrees.ts` (the policy, no Electron) | The `worktree.*` handlers in `agent-socket.ts`; `workspace-state-edits.ts`; `test-agent-worktrees`, `tests/e2e/agent-worktree.spec.ts` |
 | Pull requests on the rail, and the agent told when CI fails | `src/main/github-ci-watch.ts` (the watcher: reads, backoff, rows, alerts) | `github-conditional.ts` (ETag reads through `gh api`), `ci-agent-nudge.ts` (which agent, when it is free), `pull-request-watch-ipc.ts`; `src/shared/pull-request-watch.ts`; `git/pullRequestWatchStore.ts`, `git/PullRequestMark.tsx`; `test-github-ci-watch`, `test-ci-agent-nudge`, `tests/e2e/pr-watch-agent.spec.ts` |
-| Clean up worktrees | `src/main/worktree-cleanup/` (`inspect.ts` the facts and the full check, `scan.ts` the list, `remove.ts` the guarded removal, `rail.ts` the rail's merged mark, Clean up and automatic cleanup of missing folders, `space.ts` sizes; only `index.ts` touches Electron) | `src/shared/worktree-cleanup.ts` (filters, the removal outlook); `components/worktree-cleanup/`, `git/useWorktreeRailStates.ts` and `components/rail/RailCleanUp.tsx` (the rail: its confirm and what held a Clean up back); `test-worktree-cleanup`, `test-worktree-rail-cleanup`, `tests/e2e/worktree-cleanup.spec.ts`, `tests/e2e/worktree-rail-cleanup.spec.ts` |
+| Clean up worktrees | `src/main/worktree-cleanup/` (`inspect.ts` the facts and the full check, `scan.ts` the list, `remove.ts` the guarded removal, `rail.ts` the rail's merged mark, Clean up, automatic cleanup of missing folders and of merged worktrees, `space.ts` sizes; only `index.ts` touches Electron) | `src/shared/worktree-cleanup.ts` (filters, the removal outlook); `components/worktree-cleanup/`, `git/useWorktreeRailStates.ts` and `components/rail/RailCleanUp.tsx` (the rail: its confirm and what held a Clean up back); `test-worktree-cleanup`, `test-worktree-rail-cleanup`, `test-worktree-auto-merged`, `tests/e2e/worktree-cleanup.spec.ts`, `tests/e2e/worktree-rail-cleanup.spec.ts` |
 | What a new worktree gets (copied files, links, setup commands) | `src/main/worktree-setup/` (`service.ts` runs it, `plan.ts` and `materialize.ts` decide and copy), `src/shared/worktree-setup.ts` (the file format) | `components/worktree-setup/` (the tray, the log, the setup file dialog); `test-worktree-setup`, `tests/e2e/worktree-setup.spec.ts`; [worktree-setup.md](./worktree-setup.md) |
 | The phone protocol | `remote-access/rpc.ts` | `production.ts`; the interop suites in [scripts/README.md](../scripts/README.md#remote-access-phone-and-ssh-workspaces) |
 | The Claude Code hook | `src/main/hook-installer.ts` | `resources/claude-hooks/codara-hook.py`, `hook-watcher.ts` |

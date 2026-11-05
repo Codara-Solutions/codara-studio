@@ -109,6 +109,9 @@ function pr(overrides = {}) {
 }
 
 const keys = (rows) => rows.map((row) => row.key);
+const SECTIONS = ["needs", "done", "working", "snoozed", "settled"];
+// What sat in the old unlabelled list on top, now two headed sections.
+const top = (view) => [...view.needs, ...view.done];
 
 function testGrouping(I) {
   console.log("grouping");
@@ -132,12 +135,16 @@ function testGrouping(I) {
     branches: { "ws-a": "usage-panel-hairlines", "ws-b": "fix/model", "ws-c": null },
   };
   const view = I.buildAgentInbox(model(cards), prefs, context);
-  check("the inbox holds needs-you and finished agents, pinned first", JSON.stringify(keys(view.inbox)) === JSON.stringify(["pane:old", "pane:ask", "pane:stopped", "pane:fresh"]), keys(view.inbox));
+  check("Needs you holds the agents that ask or stopped", JSON.stringify(keys(view.needs)) === JSON.stringify(["pane:ask", "pane:stopped"]), keys(view.needs));
+  check("Done holds the finished agents, pinned first", JSON.stringify(keys(view.done)) === JSON.stringify(["pane:old", "pane:fresh"]), keys(view.done));
+  const placed = SECTIONS.flatMap((section) => keys(view[section]));
+  check("every agent sits in exactly one headed section", placed.length === cards.length && new Set(placed).size === cards.length && cards.every((c) => placed.includes(c.key)), placed);
+  check("the sections hold nothing outside a heading", Object.keys(view).every((field) => SECTIONS.includes(field) || !Array.isArray(view[field])), Object.keys(view));
   check("working agents sit on the Working shelf", JSON.stringify(keys(view.working)) === JSON.stringify(["pane:busy", "run:plan"]), keys(view.working));
   check("a snoozed agent sits on the Snoozed shelf until it wakes", JSON.stringify(keys(view.snoozed)) === JSON.stringify(["pane:snoozed"]));
   check("a settled agent sits on the Settled shelf", JSON.stringify(keys(view.settled)) === JSON.stringify(["pane:settled"]));
-  check("the badge counts the agents that wait on you", view.needsYou === 2, view.needsYou);
-  const by = Object.fromEntries([...view.inbox, ...view.working].map((row) => [row.key, row]));
+  check("the badge counts the agents that wait on you, the Needs you heading's count", view.needsYou === 2 && view.needsYou === view.needs.length, view.needsYou);
+  const by = Object.fromEntries([...top(view), ...view.working].map((row) => [row.key, row]));
   check("a question reads Input", by["pane:ask"].statusWord === "Input" && by["pane:ask"].status === "input");
   check("an agent stopped by an error reads Failed", by["pane:stopped"].statusWord === "Failed");
   check("an unseen finish reads Done", by["pane:fresh"].statusWord === "Done" && !by["pane:fresh"].read);
@@ -154,12 +161,12 @@ function testGrouping(I) {
 
   const renamed = I.renameAgent(prefs, "pane:fresh", "  Usage\npanel ");
   const again = I.buildAgentInbox(model(cards), renamed, context);
-  const fresh = again.inbox.find((row) => row.key === "pane:fresh");
+  const fresh = top(again).find((row) => row.key === "pane:fresh");
   check("a rename is one clean line", fresh.title === "Usage panel" && fresh.renamed, fresh.title);
   check("an empty rename restores the agent's title", I.renameAgent(renamed, "pane:fresh", "  ").names["pane:fresh"] === undefined);
 
   const unread = I.setAgentUnread(prefs, "pane:old", true, NOW);
-  const old = I.buildAgentInbox(model(cards), unread, context).inbox.find((row) => row.key === "pane:old");
+  const old = top(I.buildAgentInbox(model(cards), unread, context)).find((row) => row.key === "pane:old");
   check("mark unread brightens the title and says Done", !old.read && old.statusWord === "Done");
   check("mark read on a row that is not unread changes nothing", I.setAgentUnread(prefs, "pane:old", false, NOW) === prefs);
 }
@@ -187,7 +194,7 @@ function testShelvesOverTime(I) {
   check("the view keeps it snoozed before its time", I.buildAgentInbox(model([s]), prefs, { ...empty, now: NOW + 59 * MIN }).snoozed.length === 1);
   r = I.reconcileAgentInbox(model([s]), prefs, { ...empty, now: NOW + HOUR });
   check("a snooze wakes at its time", r.changed && !r.prefs.snoozed["pane:s"]);
-  check("the view wakes it at its time even before the reconcile", I.buildAgentInbox(model([s]), prefs, { ...empty, now: NOW + HOUR }).inbox.length === 1);
+  check("the view wakes it at its time even before the reconcile", top(I.buildAgentInbox(model([s]), prefs, { ...empty, now: NOW + HOUR })).length === 1);
   r = I.reconcileAgentInbox(model([card("pane:s", { since: NOW + MIN, unseen: true })]), prefs, { ...empty, now: NOW + 2 * MIN });
   check("a finished turn never ends a snooze early", !r.changed);
   r = I.reconcileAgentInbox(model([card("pane:s", { bucket: "needs-you", tone: "warn", since: NOW + MIN })]), prefs, { ...empty, now: NOW + 2 * MIN });
@@ -251,7 +258,7 @@ function testAutoSettle(I) {
   check("a working, waiting, pinned or other agent is left alone", !r.prefs.settled["pane:busy"] && !r.prefs.settled["pane:asks"] && !r.prefs.settled["pane:pinned"] && !r.prefs.settled["pane:elsewhere"]);
   check("an open pull request settles nothing", !I.reconcileAgentInbox(model(cards), I.emptyAgentInboxPrefs(), { now: NOW, pullRequests: { "ws-a": pr() } }).changed);
   const view = I.buildAgentInbox(model(cards), r.prefs, merged);
-  check("the settled agents leave the inbox", !keys(view.inbox).includes("pane:done") && keys(view.settled).includes("pane:done"));
+  check("the settled agents leave the inbox", !keys(top(view)).includes("pane:done") && keys(view.settled).includes("pane:done"));
 
   const failed = I.reconcileAgentInbox(model([card("run:failed", { tone: "danger", status: "Failed" })]), I.emptyAgentInboxPrefs(), merged);
   check("a failure is never auto-settled", !failed.changed);

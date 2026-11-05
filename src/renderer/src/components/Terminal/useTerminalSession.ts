@@ -73,6 +73,7 @@ import { createTerminalWakeRecovery, type TerminalRecoveryReason } from "./termi
 import { asciiBytes, indexOfBytes } from "./terminalByteScan";
 import { isParsingReplay, writeAsReplay } from "./osc52";
 import { registerOsc52Clipboard } from "./terminalClipboard";
+import { registerXtversionReply } from "./terminalVersion";
 import { readRecentOutput, registerTerminalContextSource } from "./terminalContext";
 import { fileLinkTarget, followsHiddenTargetLink, resolveTerminalLinkClick } from "./terminalLinks";
 import { isTabLink, TAB_LINK_TEXT_PATTERN } from "@shared/tab-links";
@@ -1872,6 +1873,14 @@ export function useTerminalSession({
           onCwdRef.current?.(cwd);
         }),
         registerSparkOpenHandler(term, (input) => onSparkOpenRef.current?.(input)),
+        // Tells Claude Code it runs in xterm.js, so it leaves the right-click
+        // paste to this pane's quick edit instead of pasting a second time.
+        // A mirror stays silent (the owning pane answers), and so does
+        // history written back into the pane: that program asked long ago.
+        registerXtversionReply(term, {
+          silent: () => readOnlyRef.current || inputBlockedRef.current || isParsingReplay(term),
+          send: (reply) => void window.spark.pty.write(sessionId, reply),
+        }),
         prompt.dispose,
       );
       // "Copy terminal context" reads the pane that owns the session, never a

@@ -60,6 +60,7 @@ export default function CrossWorkspacePrompt(): React.ReactElement | null {
 
   if (!request) return null;
   const worktree = request.action === "worktree";
+  const removal = request.action === "worktree-remove";
 
   const decide = async (answer: CrossWorkspaceAnswer) => {
     setBusy(true);
@@ -80,7 +81,7 @@ export default function CrossWorkspacePrompt(): React.ReactElement | null {
     return (
       <section
         role="status"
-        aria-label={worktree ? "Worktree request expired" : "Terminal request expired"}
+        aria-label={worktree || removal ? "Worktree request expired" : "Terminal request expired"}
         data-cross-workspace-approval={request.id}
         data-expired="true"
         className="spark-glass--strong spark-overlay-surface chrome-pairing"
@@ -88,8 +89,8 @@ export default function CrossWorkspacePrompt(): React.ReactElement | null {
         <div className="chrome-pairing__title">Request expired</div>
         <p className="chrome-pairing__body">
           {request.agent ?? "An agent"} in {request.callerName} stopped waiting to{" "}
-          {worktree ? "make a worktree of" : "open a terminal in"} {request.targetName}.{" "}
-          {worktree ? "Nothing was made" : "Nothing was opened"}; it can ask again.
+          {worktree ? "make a worktree of" : removal ? "remove a worktree of" : "open a terminal in"} {request.targetName}.{" "}
+          {worktree ? "Nothing was made" : removal ? "Nothing was removed" : "Nothing was opened"}; it can ask again.
         </p>
         <div className="chrome-pairing__actions">
           <button type="button" className="spark-btn" onClick={() => dismiss(request.id)}>
@@ -104,17 +105,29 @@ export default function CrossWorkspacePrompt(): React.ReactElement | null {
   return (
     <section
       role="dialog"
-      aria-label={worktree ? "Allow a worktree in another workspace" : "Allow terminals in another workspace"}
+      aria-label={
+        worktree
+          ? "Allow a worktree in another workspace"
+          : removal
+            ? "Allow removing a worktree in another workspace"
+            : "Allow terminals in another workspace"
+      }
       data-cross-workspace-approval={request.id}
       className="spark-glass--strong spark-overlay-surface chrome-pairing"
     >
       <div className="chrome-pairing__title">
-        Allow {request.callerName} to {worktree ? "work in" : "open terminals in"} {request.targetName}?
+        Allow {request.callerName} to {worktree || removal ? "work in" : "open terminals in"} {request.targetName}?
       </div>
       {worktree ? (
         <p className="chrome-pairing__body">
           {request.agent ?? "An agent"} in {request.callerName} wants to make a worktree of {request.targetName} on a
           new branch and work there. It shows in {request.targetName}'s rail. Allow once covers this one worktree.
+        </p>
+      ) : removal ? (
+        <p className="chrome-pairing__body">
+          {request.agent ?? "An agent"} in {request.callerName} wants to remove a worktree of {request.targetName}. Codara
+          removes it only if its branch is merged and nothing is left in it or running there. Allow once covers this one
+          removal.
         </p>
       ) : (
         <p className="chrome-pairing__body">

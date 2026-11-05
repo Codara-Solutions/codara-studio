@@ -167,7 +167,7 @@ const featureOnlyPackages = [
   },
 ];
 const closedSurfaceModules = [
-  "components/session-search/SessionSearchList.tsx",
+  "components/session-search/SessionPicker.tsx",
   "components/session-search/SessionSearchIntro.tsx",
   "components/RunSwitcher.tsx",
   "components/CreateCopyDialog.tsx",

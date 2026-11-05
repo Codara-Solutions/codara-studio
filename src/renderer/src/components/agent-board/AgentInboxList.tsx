@@ -3,11 +3,12 @@
  *
  * Design source: T3 Code's thread sidebar (github.com/pingdotgg/t3code, MIT,
  * by Theo / Ping Labs): three-line rows with no box, a status word top right,
- * Working, Snoozed and Settled shelves at the bottom, Snooze and Settle on
+ * Working, Snoozed and Settled shelves, Snooze and Settle on
  * hover, a merged pull request that settles itself, and undo as one quiet
  * line in the footer. The look and the behaviour follow T3 Code; this code is
- * Codara's own. Merge PR in the menu is our addition. See DESIGN.md, "Agents
- * tab".
+ * Codara's own. Merge PR in the menu is our addition, and so are the Needs
+ * you and Done headings: every row sits under a heading whose count is its
+ * rows. See DESIGN.md, "Agents tab".
  */
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -50,15 +51,19 @@ const MergePullRequestDialog = lazy(() =>
   import("../git/GitHubSection").then((module) => ({ default: module.MergePullRequestDialog })),
 );
 
-type ShelfId = "working" | "snoozed" | "settled";
-const SHELVES: { id: ShelfId; label: string }[] = [
-  { id: "working", label: "Working" },
-  { id: "snoozed", label: "Snoozed" },
-  { id: "settled", label: "Settled" },
+type ShelfId = "needs" | "done" | "working" | "snoozed" | "settled";
+// Needs you and Done hold what the unlabelled top list used to hold: their
+// rows act as inbox rows, and the sections are open until the user folds
+// them. Snoozed and Settled start folded.
+const SHELVES: { id: ShelfId; label: string; shelf: AgentInboxShelf }[] = [
+  { id: "needs", label: "Needs you", shelf: "inbox" },
+  { id: "done", label: "Done", shelf: "inbox" },
+  { id: "working", label: "Working", shelf: "working" },
+  { id: "snoozed", label: "Snoozed", shelf: "snoozed" },
+  { id: "settled", label: "Settled", shelf: "settled" },
 ];
 const SHELVES_KEY = "codara.rail.agents.shelves";
-// Working is open until the user folds it; the other two start folded.
-const DEFAULT_OPEN: Record<ShelfId, boolean> = { working: true, snoozed: false, settled: false };
+const DEFAULT_OPEN: Record<ShelfId, boolean> = { needs: true, done: true, working: true, snoozed: false, settled: false };
 
 function readShelves(): Record<ShelfId, boolean> {
   try {
@@ -98,11 +103,10 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
   const pointAnchor = useRef<HTMLSpanElement | null>(null);
   const [point, setPoint] = useState<{ x: number; y: number } | null>(null);
 
-  const sections = useMemo(() => {
-    const out: { shelf: AgentInboxShelf; rows: Row[] }[] = [{ shelf: "inbox", rows: view.inbox }];
-    for (const shelf of SHELVES) out.push({ shelf: shelf.id, rows: view[shelf.id] });
-    return out;
-  }, [view]);
+  const sections = useMemo(
+    () => SHELVES.map((section) => ({ id: section.id, shelf: section.shelf, rows: view[section.id] })),
+    [view],
+  );
   const byKey = useMemo(() => {
     const map = new Map<string, { row: Row; shelf: AgentInboxShelf }>();
     for (const section of sections) for (const row of section.rows) map.set(row.key, { row, shelf: section.shelf });
@@ -114,7 +118,7 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
   const latestRow = useCallback((key: string) => byKeyRef.current.get(key)?.row ?? null, []);
   const visible = useMemo(() => {
     const out: Row[] = [];
-    for (const section of sections) if (section.shelf === "inbox" || shelves[section.shelf]) out.push(...section.rows);
+    for (const section of sections) if (shelves[section.id]) out.push(...section.rows);
     return out;
   }, [sections, shelves]);
   const tabStop =
@@ -138,7 +142,7 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
   const onOpen = useCallback(
     (row: Row) => {
       updateAgentInbox((current) => setAgentUnread(current, row.key, false, Date.now()));
-      navigate?.(row.card.target);
+      navigate?.(row.card.origin?.target ?? row.card.target);
     },
     [navigate],
   );
@@ -321,20 +325,17 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
           </p>
         ) : (
           <>
-            <section className="agent-inbox__section is-inbox" aria-label={`Inbox, ${view.inbox.length}`}>
-              {view.inbox.length === 0 ? (
-                <p className="agent-inbox__clear">Nothing needs you.</p>
-              ) : (
-                renderRows("inbox", view.inbox)
-              )}
-            </section>
-            <div className="agent-inbox__spacer" />
             {SHELVES.map((shelf) => {
               const rows = view[shelf.id];
               const open = shelves[shelf.id];
               const headingId = `agent-inbox-shelf-${shelf.id}`;
               return (
-                <section key={shelf.id} className={`agent-inbox__shelf is-${shelf.id}`} aria-labelledby={headingId}>
+                <section
+                  key={shelf.id}
+                  className={`agent-inbox__shelf is-${shelf.id}`}
+                  aria-labelledby={headingId}
+                  data-agent-section={shelf.id}
+                >
                   <h3 className="agent-inbox__shelf-heading">
                     <button
                       type="button"
@@ -351,7 +352,7 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
                       </span>
                     </button>
                   </h3>
-                  {open && rows.length > 0 && renderRows(shelf.id, rows)}
+                  {open && rows.length > 0 && renderRows(shelf.shelf, rows)}
                 </section>
               );
             })}

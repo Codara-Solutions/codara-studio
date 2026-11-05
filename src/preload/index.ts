@@ -37,7 +37,10 @@ import type {
   GitSplitGroup,
   GitSplitPlanResult,
 } from "@shared/git-split";
+import type { LaneChanges } from "@shared/source-lanes";
+import type { LaneCollisions } from "@shared/lane-collisions";
 import type { BrowserFullScreenRequest, BrowserTabMemory } from "@shared/browser-tabs";
+import type { MoneyRate } from "@shared/money";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import type { ClaudeFollowStatus } from "@shared/claude-follow";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-delivery";
@@ -1020,6 +1023,11 @@ const api = {
     diffStats: (cwd: string): Promise<GitDiffStats> =>
       ipcRenderer.invoke("git:diffStats", cwd),
 
+    // What each checkout changed since its base, for the agent lanes.
+    laneChanges: (cwds: string[]): Promise<Record<string, LaneChanges>> =>
+      ipcRenderer.invoke("git:laneChanges", cwds),
+    laneCollisions: (cwds: string[]): Promise<LaneCollisions> => ipcRenderer.invoke("git:laneCollisions", cwds),
+
     // Partial staging + conflict resolution
     applyPatch: (
       cwd: string,
@@ -1210,6 +1218,9 @@ const api = {
       ipcRenderer.invoke("automations:testStep", input),
     testPrecheck: (input: TestPrecheckInput): Promise<AutomationPrecheckResult> =>
       ipcRenderer.invoke("automations:testPrecheck", input),
+  },
+  money: {
+    rate: (): Promise<MoneyRate> => ipcRenderer.invoke("money:rate"),
   },
   // Workflows: saved scripts and their runs (src/main/orchestration/workflow-driver.ts).
   workflows: {
