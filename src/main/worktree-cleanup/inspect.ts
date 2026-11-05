@@ -408,7 +408,7 @@ function ownTabTitle(title: string): boolean {
   return Boolean(title) && !isDefaultTabTitle(title) && !RUNTIME_TITLES.has(title.toLowerCase());
 }
 
-/** "the tab “X” in PIOS", or for a tab with no name of its own its runtime, session and group. */
+/** "the tab “X” in Workspace B", or for a tab with no name of its own its runtime, session and group. */
 export function agentTabText(tab: NonNullable<WorktreeInUse["tab"]>): string {
   const where = tab.workspace ? ` in ${tab.workspace}` : "";
   if (!tab.untitled) return `the tab “${tab.title}”${where}`;

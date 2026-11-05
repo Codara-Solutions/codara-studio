@@ -879,8 +879,8 @@ async function main() {
       try {
         const kept = mergedWith("merged-kept", "feature/merged-kept");
         madeBy("ws-merged-kept");
-        fs.mkdirSync(path.join(kept, "data", "finance"), { recursive: true });
-        fs.writeFileSync(path.join(kept, "data", "finance", "terms.jsonl"), "{}\n");
+        fs.mkdirSync(path.join(kept, "data", "ledger"), { recursive: true });
+        fs.writeFileSync(path.join(kept, "data", "ledger", "entries.jsonl"), "{}\n");
         const live = { ...deps, sessionCwd: (pane) => (pane === "pane-coord" ? coordinator : null) };
         // The cleanup screen's check, which the rail's Clean up shares.
         const [screen] = await remove.checkCleanupTargets(live, [{ repoRoot: repo, path: kept }]);
