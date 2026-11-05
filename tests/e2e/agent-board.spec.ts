@@ -389,6 +389,12 @@ test("a waiting Cora chat opens from its row, by keyboard, and the view is remem
 
     await test.step("Tab reaches the row and Enter opens its chat in its workspace", async () => {
       await viewTab(page, "Agents").focus();
+      // Past sessions sits beside the switch; then the row's heading, then
+      // the row under it.
+      await page.keyboard.press("Tab");
+      await expect(page.getByTestId("rail-sessions-button")).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(page.locator(".agent-inbox__shelf-btn", { hasText: "Needs you" })).toBeFocused();
       await page.keyboard.press("Tab");
       await expect(chat.locator("[data-agent-card-open]")).toBeFocused();
       await page.keyboard.press("Enter");
