@@ -462,8 +462,9 @@ finished.
 
 **Chosen:** D′, "straight T3 Code, a bit nicer and more minimal". The Agents
 tab is an inbox after T3 Code's thread sidebar: what needs you or finished on
-top, then Working, Snoozed and Settled shelves at the bottom with plain
-counts. Each row has no box and three lines: the project, then the title,
+top, then Working, Snoozed and Settled shelves with plain counts (since
+2026-11 the top list has headings too, see the rules below). Each row has no
+box and three lines: the project, then the title,
 then the branch and pull request. A status word sits top right (Input,
 Failed, Done, Working with a live timer) and gives way to the age once the
 row is seen. Etienne picked D from four variants on the real rows (D straight
@@ -517,6 +518,12 @@ section headers, the snooze presets and the undo notice in the footer).
   the row.
 - Rows do not answer questions in place: opening the row goes to the agent.
   The question is the row's tooltip.
+- Every row sits under a heading, and each heading's count is its rows:
+  Needs you, Done, Working, Snoozed, Settled, in that order. T3 Code leaves
+  what needs you and what finished as an unlabelled list above shelves pinned
+  to the bottom; in use that list read as rows with no section (2026-11), so
+  it became the Needs you and Done sections, open by default. Needs you's
+  count is the switch's badge.
 
 ## Merged worktrees leave on their own (2026-11)
 
