@@ -382,6 +382,8 @@ export function createCrossWorkspaceApprover(deps: {
   const deniedAt = new Map<string, number>();
   const pairKey = (input: CrossWorkspaceAskInput) => JSON.stringify([input.caller.id, input.target.id]);
   const decide = async (input: CrossWorkspaceAskInput): Promise<CrossWorkspaceDecision> => {
+    // The switch may have been turned on while this call waited its turn.
+    if (await deps.store.allowAll?.().catch(() => false)) return { ok: true, via: "grant" };
     const answer = await deps.ask(input).catch(() => null);
     if (answer === "all") {
       // Allow all workspaces: the switch in Settings, kept in the same file.
