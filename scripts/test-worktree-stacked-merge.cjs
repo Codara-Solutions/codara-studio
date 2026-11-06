@@ -208,11 +208,11 @@ async function main() {
     // ── The proof itself ───────────────────────────────────────────────────
     await check("a tip behind a merged head, merged into a branch whose own pull request landed, is merged", async () => {
       const proof = await prove(apiTip, "feat/roles-api", [pr454, pr453]);
-      assert.deepEqual(proof, { pullRequest: { number: 454, url: pr454.url }, via: [453] });
+      assert.deepEqual(proof, { pullRequest: { number: 454, url: pr454.url }, via: [453], landedIn: { kind: "default" } });
     });
 
     await check("a tip behind the head of a pull request merged into the default branch is merged", async () => {
-      assert.deepEqual(await prove(rolesTip, "feat/roles", [pr454, pr453]), { pullRequest: { number: 453, url: pr453.url }, via: [] });
+      assert.deepEqual(await prove(rolesTip, "feat/roles", [pr454, pr453]), { pullRequest: { number: 453, url: pr453.url }, via: [], landedIn: { kind: "default" } });
     });
 
     await check("a stacked merge the base's pull request did not take proves nothing", async () => {
@@ -257,12 +257,12 @@ async function main() {
     await check("an exact head merged into a branch that never landed proves nothing", async () => {
       assert.equal(await prove(apiHead, "feat/roles-api", [pr454]), null);
       assert.equal(await prove(apiHead, "feat/roles-api", [pr454, { ...pr453, headRefOid: rolesHead0 }]), null);
-      assert.deepEqual(await prove(apiHead, "feat/roles-api", [pr454, pr453]), { pullRequest: { number: 454, url: pr454.url }, via: [453] });
+      assert.deepEqual(await prove(apiHead, "feat/roles-api", [pr454, pr453]), { pullRequest: { number: 454, url: pr454.url }, via: [453], landedIn: { kind: "default" } });
     });
 
     await check("a base still on the remote lands only while it holds the merge", async () => {
       const holds = await prove(apiTip, "feat/roles-api", [pr454], { remoteCommit: async (name) => (name === "feat/roles" ? merge454 : null) });
-      assert.deepEqual(holds, { pullRequest: { number: 454, url: pr454.url }, via: [] });
+      assert.deepEqual(holds, { pullRequest: { number: 454, url: pr454.url }, via: [], landedIn: { kind: "remote-base", branch: "feat/roles", commit: merge454 } });
       // Force-pushed back to before the merge: the merge is no longer in it.
       const lost = await prove(apiTip, "feat/roles-api", [pr454], { remoteCommit: async (name) => (name === "feat/roles" ? rolesHead0 : null) });
       assert.equal(lost, null);
@@ -278,7 +278,7 @@ async function main() {
       const withMerge = git(hub2, ["rev-parse", "HEAD"]);
       git(repo, ["fetch", "-q", hub2, `${withMerge}:refs/heads/scratch-main`]);
       const proof = await prove(apiTip, "feat/roles-api", [pr454], { defaultCommit: withMerge });
-      assert.deepEqual(proof, { pullRequest: { number: 454, url: pr454.url }, via: [] });
+      assert.deepEqual(proof, { pullRequest: { number: 454, url: pr454.url }, via: [], landedIn: { kind: "default" } });
       git(repo, ["branch", "-D", "scratch-main"]);
     });
 
@@ -478,6 +478,8 @@ async function main() {
       ctx.base = { name: "origin/main", commit: git(repo, ["rev-parse", "origin/main"]) };
       const facts = await inspect.mergeFacts(ctx, b2Tip, "feat/b2", await inspect.targetFor(ctx, b2Workspace));
       assert.equal(facts.state, "merged", JSON.stringify(facts));
+      assert.equal(facts.target, "origin/feat/b1", "judged where it landed: the remote's copy of its base, not main");
+      assert.equal(facts.targetCommit, squash);
       // Deleted on the remote, never merged on: the stale copy proves nothing to a removal.
       git(hub, ["push", "-q", "origin", "--delete", "feat/b1"]);
       const gone = await aw.removeAgentWorktree(other, { workspaceId: b2.workspaceId, dryRun: true }, deps);

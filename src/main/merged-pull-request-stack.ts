@@ -47,6 +47,12 @@ export interface StackProof {
   pullRequest: { number: number; url: string };
   /** The pull requests that carried it on, nearest first; empty when it was merged into a landed base. */
   via: number[];
+  /**
+   * Where it landed: "default" (a landed base, or a merge commit found in the
+   * default branch) or "remote-base" (the named base, as the remote has it,
+   * holds the merge).
+   */
+  landedIn: { kind: "default" } | { kind: "remote-base"; branch: string; commit: string };
 }
 
 /** How many pull requests up a stack is followed. */
@@ -75,31 +81,34 @@ export async function proveByMergedPullRequestStack(input: StackProofInput): Pro
   const contains = async (ancestor: string, descendant: string): Promise<boolean> =>
     ancestor.toLowerCase() === descendant.toLowerCase() || (await isAncestor(input.repo, ancestor, descendant));
 
-  const landed = async (pr: StackPullRequest, depth: number, seen: Set<number>): Promise<number[] | null> => {
+  type Landed = { via: number[]; landedIn: StackProof["landedIn"] };
+  const landed = async (pr: StackPullRequest, depth: number, seen: Set<number>): Promise<Landed | null> => {
     const base = pr.baseRefName;
     if (!base) return null;
-    if (input.landedBases.has(base)) return [];
+    if (input.landedBases.has(base)) return { via: [], landedIn: { kind: "default" } };
     const merged = pr.mergeCommitOid && OID.test(pr.mergeCommitOid) ? pr.mergeCommitOid : null;
     if (!merged) return null;
-    if (input.defaultCommit && (await contains(merged, input.defaultCommit))) return [];
+    if (input.defaultCommit && (await contains(merged, input.defaultCommit))) return { via: [], landedIn: { kind: "default" } };
     // A base still on the remote that holds the merge.
     const live = await (input.remoteCommit?.(base) ?? Promise.resolve(null)).catch(() => null);
-    if (live && OID.test(live) && (await contains(merged, live))) return [];
+    if (live && OID.test(live) && (await contains(merged, live))) {
+      return { via: [], landedIn: { kind: "remote-base", branch: base, commit: live.toLowerCase() } };
+    }
     if (depth >= MAX_STACK_DEPTH || base === input.branch) return null;
     for (const parent of await mergedFor(base)) {
       if (seen.has(parent.number)) continue;
       // The parent's merge took this merge with it only when its head holds it.
       if (!(await contains(merged, parent.headRefOid))) continue;
       const rest = await landed(parent, depth + 1, new Set([...seen, parent.number]));
-      if (rest) return [parent.number, ...rest];
+      if (rest) return { via: [parent.number, ...rest.via], landedIn: rest.landedIn };
     }
     return null;
   };
 
   for (const pr of await mergedFor(input.branch)) {
     if (!(await contains(tip, pr.headRefOid))) continue;
-    const via = await landed(pr, 0, new Set([pr.number]));
-    if (via) return { pullRequest: { number: pr.number, url: pr.url }, via };
+    const found = await landed(pr, 0, new Set([pr.number]));
+    if (found) return { pullRequest: { number: pr.number, url: pr.url }, ...found };
   }
   return null;
 }

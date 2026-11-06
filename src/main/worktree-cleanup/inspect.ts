@@ -707,13 +707,17 @@ export async function mergeFacts(
         remoteCommit: async (base) => (base === ownBase ? ownCommit : null),
       });
       if (!stacked) continue;
-      // Judged against where it landed when the base is not on the remote:
-      // a local-only base proves nothing (the rail's unattended removal asks
-      // for a remote one).
+      // Judged against where it landed, never a local-only base (the rail's
+      // unattended removal asks for a remote one): the default branch, or
+      // the remote's copy of the worktree's own base.
+      const where =
+        stacked.landedIn.kind === "remote-base"
+          ? { name: targetIsRemote ? target.name : `origin/${stacked.landedIn.branch}`, commit: stacked.landedIn.commit }
+          : fallback;
       const landed =
-        targetIsRemote || !fallback
+        !where || (where.name === target.name && where.commit === target.commit)
           ? facts
-          : { target: fallback.name, targetCommit: fallback.commit, ...(await aheadBehind(repo.root, fallback.commit, head)) };
+          : { target: where.name, targetCommit: where.commit, ...(await aheadBehind(repo.root, where.commit, head)) };
       return {
         state: "merged",
         proof: "pull-request",

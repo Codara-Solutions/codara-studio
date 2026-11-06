@@ -136,7 +136,7 @@ async function rowFor(
       : null,
     base:
       target && merge.ahead !== undefined
-        ? { name: target.name, ahead: merge.ahead, behind: merge.behind ?? 0 }
+        ? { name: merge.target ?? target.name, ahead: merge.ahead, behind: merge.behind ?? 0 }
         : null,
     merge: {
       state: merge.state,
