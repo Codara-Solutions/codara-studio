@@ -2249,7 +2249,7 @@ export default function App() {
 
   // Subscribe to renderer-side notification channels. The toast channel is
   // owned by <ToastHost/> below; this effect handles the embedded-sound
-  // channel by playing the right WAV clip whenever main fires
+  // channel by synthesizing the kind's chime whenever main fires
   // "notification:sound". The main process has already filtered against
   // the user's preferences before sending — by the time we get here, the
   // user has the sound channel enabled, so we just play.

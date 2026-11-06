@@ -102,7 +102,7 @@ export interface CiNotifyInput {
   title: string;
   body: string;
   tone: "danger" | "success";
-  soundKind: "needs-you" | "done";
+  soundKind: "failed" | "done";
   silent?: boolean;
   target: { type: "workspace"; workspaceId: string; panel: "git" };
 }
@@ -316,7 +316,7 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
       title,
       body,
       tone: "danger",
-      soundKind: "needs-you",
+      soundKind: "failed",
       target: { type: "workspace", workspaceId: workspace.id, panel: "git" },
     });
     return nudging;

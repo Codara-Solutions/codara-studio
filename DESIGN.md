@@ -704,3 +704,11 @@ and GitHub Actions' row of recent results for the bar of ticks.
 - An automation on its own branch says so in the sentence. The result card points
   to the draft pull request when there is one, and otherwise says in one line
   where the work is. The switch is in the Loop panel, off by default.
+
+## Notification sounds (2026-11)
+
+**Chosen:** one chime per state. Needs you and done stay as they were; failed
+is new (two soft notes falling a fifth, as loud as done), so a failure no
+longer sounds like a question or a success. Every failure kind plays failed
+(`notifySoundKind`, enforced at publish). Native notifications are always
+silent, so the Sound setting is the only switch for sound.

@@ -403,7 +403,7 @@ async function noticeMonthlyCap(id: string): Promise<void> {
     tone: "danger",
     title: "Automation reached its monthly cap",
     body: `“${job.name}” will not start again this month unless you raise its cap of ${fmtCapUsd(job.guard?.monthlyCapUsd)}.`,
-    soundKind: "needs-you",
+    soundKind: "failed",
     target: { type: "automation", jobId: id, workspaceId: job.input.workspaceId },
   });
 }
@@ -2028,7 +2028,7 @@ async function finalize(
       tone: "danger",
       title: "Automation paused after repeated failures",
       body: `“${finalJob.name}” failed ${pausedAfterFailures} time${pausedAfterFailures === 1 ? "" : "s"} in a row, so it will not start again until you resume it.`,
-      soundKind: "needs-you",
+      soundKind: "failed",
       target: { type: "automation", jobId: id, runId: finalizedRunId, workspaceId: finalJob.input.workspaceId },
     });
   } else if (finalJob && reason !== "user-stop" && reason !== "monthly-cap") {
@@ -2043,7 +2043,7 @@ async function finalize(
       body: failed
         ? `“${finalJob.name}” stopped after ${passes} (${reason}).`
         : `“${finalJob.name}” finished after ${passes} (${reason}).`,
-      soundKind: failed ? "needs-you" : "done",
+      soundKind: failed ? "failed" : "done",
       // workspaceId lets a cross-workspace notification click switch projects
       // before landing on this loom's hub/run (see notifications/routing.ts).
       target: {

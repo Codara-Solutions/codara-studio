@@ -224,7 +224,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "notifications", title: "In-app toast", desc: "A card in the top right while the app is focused.", section: "In the app", keywords: "alert popup notify notification", toggle: "notifyInApp" },
   { tab: "notifications", title: "Toast duration", desc: "How long a toast stays on screen.", section: "In the app", keywords: "seconds timeout stay notification" },
   { tab: "notifications", title: "Native OS notification", desc: "A system notification when the window is in the background.", section: "On your computer", keywords: "system notification center alert desktop", toggle: "notifyNative" },
-  { tab: "notifications", title: "Sound", desc: "A short chime with each notification.", section: "On your computer", keywords: "chime audio mute sound notification", toggle: "notifySound" },
+  { tab: "notifications", title: "Sound", desc: "A short chime: one for needs you, one for done, one for failed.", section: "On your computer", keywords: "chime audio mute sound notification", toggle: "notifySound" },
   { tab: "notifications", title: "Dock badge and taskbar flash", desc: "The macOS dock badge or Windows taskbar flash.", section: "On your computer", keywords: "os-specific cues macos windows badge", toggle: "notifyOsCues" },
   { tab: "git", title: "Fetch remotes in the background", desc: "Keep ahead and behind counts current.", section: "Remotes", keywords: "auto-fetch autofetch pull ahead behind network", toggle: "gitAutoFetchEnabled" },
   { tab: "git", title: "Fetch interval", desc: "How often remotes are fetched.", section: "Remotes", keywords: "minutes cadence auto-fetch" },

@@ -1909,7 +1909,9 @@ export interface SystemResourceSnapshotOptions {
   focus?: SystemResource;
 }
 
-export type NotificationSoundKind = "needs-you" | "done";
+// One chime per state: a question, a success, a failure. Every failure kind
+// plays "failed" (notifySoundKind in notify-center.ts enforces it at publish).
+export type NotificationSoundKind = "needs-you" | "done" | "failed";
 
 // ── Unified notifications pipeline (src/main/notify) ────────────────────────
 
