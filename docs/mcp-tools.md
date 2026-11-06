@@ -1102,8 +1102,8 @@ the `blockers` and a `hint`:
   merged pull request from the same repository has it as head or a later
   head and that pull request landed, or merging it into the target changes
   nothing (a squash merge). A pull request landed when it was merged into
-  the default branch (or the named `target`), its merge commit is still in
-  its base branch on the remote or in the default branch, or the merged pull
+  the default branch (or the named `target`), its merge commit is in the
+  default branch or still in the worktree's own base on the remote, or the merged pull
   request of its base branch took that merge, followed up the stack. A
   recorded base that no longer exists is replaced by the default branch. A
   `target` the agent names must be another local or remote-tracking

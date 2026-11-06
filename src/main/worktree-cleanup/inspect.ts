@@ -688,6 +688,11 @@ export async function mergeFacts(
   // A detached HEAD is judged by the branches of the pull requests with it as head.
   const branches = branch ? [branch] : [...new Set(all.filter((pr) => pr.headRefOid.toLowerCase() === head).map((pr) => pr.headRefName))];
   if (repo.pullRequests && !onDefault) {
+    // The worktree's own base, when it is a remote branch, as trusted as the
+    // ancestor proof above trusts it; any other branch's tracking ref may be
+    // stale (deleted or force-pushed since the last fetch) and proves nothing.
+    const targetIsRemote = await refPresent(repo.root, `refs/remotes/${target.name}`);
+    const ownBase = targetIsRemote ? shortBranch(target.name) : null;
     for (const name of branches) {
       const stacked = await proveByMergedPullRequestStack({
         repo: repo.root,
@@ -696,13 +701,12 @@ export async function mergeFacts(
         mergedFor: async (headName) => all.filter((pr) => pr.headRefName === headName),
         landedBases: new Set(fallback ? [shortBranch(fallback.name)] : []),
         defaultCommit: fallback?.commit ?? null,
-        remoteCommit: (base) => revParse(repo.root, `refs/remotes/origin/${base}^{commit}`),
+        remoteCommit: async (base) => (base === ownBase ? target.commit : null),
       });
       if (!stacked) continue;
       // Judged against where it landed when the base is not on the remote:
       // a local-only base proves nothing (the rail's unattended removal asks
       // for a remote one).
-      const targetIsRemote = await refPresent(repo.root, `refs/remotes/${target.name}`);
       const landed =
         targetIsRemote || !fallback
           ? facts

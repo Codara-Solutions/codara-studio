@@ -323,18 +323,33 @@ async function main() {
       assert.equal((await inspect.mergeFacts(ctx, apiHead, "feat/roles-api", target)).state, "unmerged");
     });
 
-    await check("cleanup: a remote base counts only while it still holds the merge", async () => {
-      const ctx = repoContext([pr454]);
-      const target = await inspect.targetFor(ctx, apiWorkspace());
+    await check("cleanup: the worktree's remote base counts only while it holds the merge; other tracking refs never", async () => {
+      // Recorded as the remote branch, as an agent that forked from origin/feat/roles has it.
+      const onRemote = () => ({ ...apiWorkspace(), copyBranch: { ...apiWorkspace().copyBranch, baseBranch: "origin/feat/roles" } });
       try {
         git(repo, ["update-ref", "refs/remotes/origin/feat/roles", rolesHead0]); // force-pushed past the merge
+        let ctx = repoContext([pr454]);
+        let target = await inspect.targetFor(ctx, onRemote());
+        assert.equal(target.name, "origin/feat/roles");
         assert.equal((await inspect.mergeFacts(ctx, apiTip, "feat/roles-api", target)).state, "unmerged");
         git(repo, ["update-ref", "refs/remotes/origin/feat/roles", merge454]);
-        const facts = await inspect.mergeFacts(repoContext([pr454]), apiTip, "feat/roles-api", target);
-        assert.equal(facts.state, "merged", JSON.stringify(facts));
-        assert.equal(facts.proof, "pull-request");
-      } finally {
+        ctx = repoContext([pr454]);
+        target = await inspect.targetFor(ctx, onRemote());
+        assert.equal((await inspect.mergeFacts(ctx, apiTip, "feat/roles-api", target)).state, "merged");
         git(repo, ["update-ref", "-d", "refs/remotes/origin/feat/roles"]);
+        // A tracking ref of some other branch may be stale: it proves nothing.
+        git(repo, ["update-ref", "refs/remotes/origin/feat/other", merge454]);
+        ctx = repoContext([{ ...pr454, baseRefName: "feat/other" }]);
+        target = await inspect.targetFor(ctx, apiWorkspace());
+        assert.equal((await inspect.mergeFacts(ctx, apiTip, "feat/roles-api", target)).state, "unmerged");
+      } finally {
+        for (const ref of ["refs/remotes/origin/feat/roles", "refs/remotes/origin/feat/other"]) {
+          try {
+            git(repo, ["update-ref", "-d", ref]);
+          } catch {
+            /* already gone */
+          }
+        }
       }
     });
 
@@ -367,6 +382,21 @@ async function main() {
         assert.equal(merged.merge.status, "merged", JSON.stringify(merged));
       } finally {
         git(api.path, ["reset", "-q", "--hard", apiTip]);
+      }
+    });
+
+    await check("remove: a named local target is that branch, not one named like its last part", async () => {
+      git(repo, ["branch", "feat/release", "origin/main"]);
+      try {
+        h.pulls = [{ ...pr454, baseRefName: "release", headRefOid: apiTip, mergeCommitOid: null }];
+        const dry = await aw.removeAgentWorktree(other, { workspaceId: api.workspaceId, target: "feat/release", dryRun: true }, deps);
+        assert.ok(dry.blockers.includes("WORKTREE_NOT_MERGED"), JSON.stringify(dry));
+        h.pulls = [{ ...pr454, baseRefName: "feat/release", headRefOid: apiTip, mergeCommitOid: null }];
+        const named = await aw.removeAgentWorktree(other, { workspaceId: api.workspaceId, target: "feat/release", dryRun: true }, deps);
+        assert.equal(named.merge.status, "merged", JSON.stringify(named));
+      } finally {
+        h.pulls = [pr454, pr453];
+        git(repo, ["branch", "-D", "feat/release"]);
       }
     });
 
