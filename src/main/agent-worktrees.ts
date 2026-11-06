@@ -3039,6 +3039,12 @@ async function removeLocked(
           now: deps.now(),
         });
         archived = { path: done.dir, files: done.files, bytes: done.bytes };
+        // A file written while the copy ran is in neither the copy nor the check.
+        if ((await worktreeFingerprint(aside)) !== before) {
+          archived = undefined;
+          await fsp.rm(done.dir, { recursive: true, force: true }).catch(() => undefined);
+          return "it changed while its ignored files were being archived, so it was put back";
+        }
         return null;
       } catch (err) {
         archiveError = `${MESSAGES.WORKTREE_ARCHIVE_FAILED}: ${cleanText(errorText(err), 200)}`;

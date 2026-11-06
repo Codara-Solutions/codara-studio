@@ -34,9 +34,10 @@ function safeName(text: string): string {
 }
 
 // The entries as git lists them, folders with a trailing slash; one inside
-// another listed folder is copied with that folder.
+// another listed folder is copied with that folder. Names are kept exactly:
+// on Linux "a\\b" and "a/b" are two files.
 function topEntries(entries: readonly string[]): string[] {
-  const clean = [...new Set(entries.map((entry) => entry.replace(/\\/g, "/").replace(/\/+$/, "")).filter(Boolean))].sort();
+  const clean = [...new Set(entries.map((entry) => entry.replace(/\/+$/, "")).filter(Boolean))].sort();
   return clean.filter((entry, index) => !clean.slice(0, index).some((other) => entry.startsWith(`${other}/`)));
 }
 

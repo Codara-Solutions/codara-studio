@@ -35,6 +35,7 @@ import {
 } from "../git-worktrees";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
 import { archiveIgnoredFiles } from "./archive";
+import { onlyIgnoredWork } from "@shared/worktree-cleanup-agent";
 import { sameFolder } from "../worktree-folders";
 import {
   canonicalMaybeMissing,
@@ -418,6 +419,13 @@ async function removeOne(
         now: deps.now(),
       });
       archived = { path: done.dir, files: done.files, bytes: done.bytes };
+      // A file written while the copy ran (an editor that had it open) is
+      // in neither the copy nor the check: the folder goes back.
+      if ((await worktreeFingerprint(aside)) !== before) {
+        archived = undefined;
+        await fsp.rm(done.dir, { recursive: true, force: true }).catch(() => undefined);
+        return "It changed while its ignored files were being archived, so it was put back.";
+      }
       return null;
     } catch (err) {
       archiveError = `Its ignored files could not be archived (${cleanText(errorText(err), 200)}), so it was kept.`;
@@ -454,7 +462,9 @@ async function removeOne(
       worktreePath: check.path,
       branch: check.branch ?? "",
       // Only after the per-item confirmation above: it discards local work.
-      force: check.localWork !== null,
+      // Ignored files alone, archived first, need no force: git deletes
+      // those, and refuses anything else that appeared.
+      force: check.localWork !== null && !(archiveRoot && onlyIgnoredWork(check.localWork)),
       deleteBranch: false,
       removeOrphanDir: false,
       timeoutMs: REMOVE_TIMEOUT_MS,

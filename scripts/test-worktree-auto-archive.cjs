@@ -158,7 +158,13 @@ async function main() {
       appPaths: () => [path.join(scratch, "app-not-here")],
       isProtectedPath: () => false,
       audit: agent.createWorktreeAuditLog(path.join(scratch, "audit.jsonl")),
-      now: () => h.now,
+      now: () => {
+        // Called once more as the archive starts, the folder aside.
+        const hook = h.onNow;
+        h.onNow = null;
+        hook?.();
+        return h.now;
+      },
       archiveRoot: () => h.archiveRoot,
     };
     const ON = { autoRemoveMerged: { enabled: true, minUptimeMs: 0 } };
@@ -237,6 +243,35 @@ async function main() {
         h.archiveRoot = archiveRoot;
       }
       assert.equal((await auto(entry.id)).status, "removed", "it goes once the archive can be written");
+    });
+
+    await check("a file written while the copy runs puts the folder back, and the copy is dropped", async () => {
+      const entry = merged("written");
+      addData(entry.dir);
+      let calls = 0;
+      const aside = path.join(trees, ".written.codara-removing");
+      const arm = () => {
+        h.onNow = () => {
+          if (fs.existsSync(aside)) fs.writeFileSync(path.join(aside, "written.txt"), "edited while archiving\n");
+          else if (++calls < 20) arm();
+        };
+      };
+      arm();
+      const result = await assertKept(entry, /changed/);
+      assert.equal(fs.readFileSync(path.join(entry.dir, "written.txt"), "utf8"), "edited while archiving\n");
+      assert.equal(fs.existsSync(path.join(archiveRoot, day(), "repo--feature-written")), false, "no stale copy is left");
+      h.onNow = null;
+    });
+
+    await check("names are kept exactly: a backslash in a name is not a folder", async () => {
+      const entry = merged("names");
+      fs.appendFileSync(path.join(repo, ".git", "info", "exclude"), "*.keep\n");
+      fs.mkdirSync(path.join(entry.dir, "x"));
+      fs.writeFileSync(path.join(entry.dir, "x", "y.keep"), "slash\n");
+      fs.writeFileSync(path.join(entry.dir, "x\\y.keep"), "backslash\n");
+      const result = await auto(entry.id);
+      assert.equal(result.status, "removed", JSON.stringify(result));
+      assert.deepEqual(filesUnder(result.archived.path), ["x/y.keep", "x\\y.keep"]);
     });
 
     await check("without an archive to keep them in, kept ignored files still hold it", async () => {
