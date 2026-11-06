@@ -1143,7 +1143,7 @@ The `code` is the first blocker; `blockers` lists them all, and a dry run or
 | `WORKTREE_OWNED_BY_LIVE_AGENT` | An agent in another terminal created it and that terminal is still open (`details.ownerPaneId`). | Leave it to that agent, or ask you. When it is merged and nothing else holds it, the hint points to `codara_worktree_cleanup`, where you approve the removal. |
 | `WORKTREE_NOT_MANAGED` | The folder cannot be read, so it may still hold work, or it is no longer a git worktree in Codara's worktrees folder. | Ask you. |
 | `WORKTREE_LOCKED` | `git worktree lock` protects it. | Ask you. |
-| `WORKTREE_DETACHED_HEAD`, `WORKTREE_BRANCH_MISMATCH` | It is not on the branch Codara recorded. | Check out that branch again, or ask you. |
+| `WORKTREE_DETACHED_HEAD`, `WORKTREE_BRANCH_MISMATCH` | It is not on the branch Codara recorded, and the branch it has checked out is not proven merged (or is a long-lived, base or default branch). A switched-to branch that is proven merged does not block: the removal deletes it, deletes the recorded branch only when its own tip is merged, and lists both in `branches` (`checkedOutBranch` names the one checked out). | Check out that branch again, or ask you. |
 | `WORKTREE_DIRTY` | Uncommitted, untracked or hidden (`assume-unchanged`, `skip-worktree`) changes. | Commit or discard them yourself. |
 | `WORKTREE_OPERATION_IN_PROGRESS` | A merge, rebase, cherry-pick or similar is in progress. | Finish or abort it. |
 | `WORKTREE_IGNORED_FILES` | Ignored files that are not build output or caches. | Move them, or pass `discardIgnoredFiles: true`. |

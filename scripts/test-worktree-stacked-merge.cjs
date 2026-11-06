@@ -485,6 +485,87 @@ async function main() {
       h.pulls = [pr454, pr453];
     });
 
+    // A worktree whose agent switched it to a follow-up branch, both merged
+    // by squash on GitHub.
+    const switchedWorktree = async (name) => {
+      const made = await aw.createAgentWorktree(owner, { branch: `fix/${name}` }, deps);
+      const first = commitFile(made.path, `${name}.txt`, "1\n", `${name} 1`);
+      git(made.path, ["push", "-q", "-u", "origin", `fix/${name}`]);
+      git(made.path, ["switch", "-q", "-c", `fix/${name}-cli`]);
+      const second = commitFile(made.path, `${name}-cli.txt`, "2\n", `${name} 2`);
+      git(made.path, ["push", "-q", "-u", "origin", `fix/${name}-cli`]);
+      git(hub, ["fetch", "-q", "origin"]);
+      git(hub, ["checkout", "-q", "main"]);
+      git(hub, ["reset", "-q", "--hard", "origin/main"]);
+      const squash = (branch, n) => {
+        git(hub, ["merge", "-q", "--squash", `origin/${branch}`]);
+        git(hub, ["commit", "-q", "-m", `${branch} (#${n})`]);
+        return git(hub, ["rev-parse", "HEAD"]);
+      };
+      const pr = (branch, head, n, merge) => ({ number: n, url: `https://github.com/acme/app/pull/${n}`, headRefName: branch, headRefOid: head, baseRefName: "main", isCrossRepository: false, mergeCommitOid: merge });
+      const prFirst = pr(`fix/${name}`, first, 20, squash(`fix/${name}`, 20));
+      const prSecond = pr(`fix/${name}-cli`, second, 21, squash(`fix/${name}-cli`, 21));
+      git(hub, ["push", "-q", "origin", "main"]);
+      git(hub, ["push", "-q", "origin", "--delete", `fix/${name}`, `fix/${name}-cli`]);
+      git(repo, ["fetch", "-q", "--prune", "origin"]);
+      return { made, first, second, prFirst, prSecond };
+    };
+    const hasBranch = (name) => {
+      try {
+        git(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${name}`]);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    await check("switched: a worktree on a merged follow-up branch is removed, and both merged branches go", async () => {
+      const { made, second, prFirst, prSecond } = await switchedWorktree("wording");
+      h.pulls = [prFirst, prSecond];
+      // Unmerged work on the branch checked out: refused as before.
+      commitFile(made.path, "later.txt", "later\n", "not merged");
+      const unmerged = await aw.removeAgentWorktree(other, { workspaceId: made.workspaceId, dryRun: true }, deps);
+      assert.ok(unmerged.blockers.includes("WORKTREE_BRANCH_MISMATCH"), JSON.stringify(unmerged));
+      assert.equal(unmerged.wouldRemove, false);
+      git(made.path, ["reset", "-q", "--hard", second]);
+      const dry = await aw.removeAgentWorktree(other, { workspaceId: made.workspaceId, dryRun: true }, deps);
+      assert.equal(dry.wouldRemove, true, JSON.stringify(dry));
+      const gone = await aw.removeAgentWorktree(other, { workspaceId: made.workspaceId }, deps);
+      assert.equal(gone.removed, true, JSON.stringify(gone));
+      assert.equal(gone.checkedOutBranch, "fix/wording-cli");
+      assert.deepEqual(gone.branches, [
+        { branch: "fix/wording-cli", deleted: true },
+        { branch: "fix/wording", deleted: true },
+      ]);
+      assert.equal(hasBranch("fix/wording-cli") || hasBranch("fix/wording"), false);
+    });
+
+    await check("switched: the recorded branch stays when its own tip is not merged", async () => {
+      const { made, prFirst, prSecond } = await switchedWorktree("label");
+      // A commit on the recorded branch that no pull request merged.
+      git(made.path, ["switch", "-q", "fix/label"]);
+      const extra = commitFile(made.path, "local.txt", "only here\n", "local only");
+      git(made.path, ["switch", "-q", "fix/label-cli"]);
+      h.pulls = [prFirst, prSecond];
+      const gone = await aw.removeAgentWorktree(other, { workspaceId: made.workspaceId }, deps);
+      assert.equal(gone.removed, true, JSON.stringify(gone));
+      assert.deepEqual(gone.branches[1], { branch: "fix/label", deleted: false, keptReason: "NOT_MERGED" });
+      assert.equal(git(repo, ["rev-parse", "refs/heads/fix/label"]), extra, "its unmerged commit is kept");
+      git(repo, ["branch", "-D", "fix/label"]);
+    });
+
+    await check("switched: a long-lived branch checked out is never taken for merged work", async () => {
+      const made = await aw.createAgentWorktree(owner, { branch: "fix/develop-switch" }, deps);
+      git(repo, ["branch", "develop", "origin/main"]);
+      git(made.path, ["switch", "-q", "develop"]);
+      const dry = await aw.removeAgentWorktree(other, { workspaceId: made.workspaceId, dryRun: true }, deps);
+      assert.equal(dry.wouldRemove, false, JSON.stringify(dry));
+      assert.ok(dry.blockers.includes("WORKTREE_BRANCH_MISMATCH"));
+      git(made.path, ["switch", "-q", "fix/develop-switch"]);
+      git(repo, ["branch", "-D", "develop"]);
+      h.pulls = [pr454, pr453];
+    });
+
     // ── What the cleanup tool tells the user ───────────────────────────────
     await check("advice: names the stack and the maker's open tab", async () => {
       const result = advice.adviseWorktree(
