@@ -832,7 +832,7 @@ async function spawnWithSessionLock(
         ? await resolveNewNativeCodexProfile()
         : await resolveFrozenNativeCodexProfile(opts.nativeCodexProfileId);
     const nativeCodexHome = execution.stateHome;
-    const releaseNativeCodexProfileLease = acquireNativeCodexProfileLease(
+    const releaseNativeCodexProfileLease = await acquireNativeCodexProfileLease(
       execution.profileId,
       `terminal:${opts.id}`,
     );

@@ -2,6 +2,7 @@ import type {
   NavigationTarget,
   NotificationCenterEntry,
   NotificationMute,
+  NotificationSoundKind,
   NotificationViewSnapshot,
   NotifyEvent,
   NotifyKind,
@@ -44,6 +45,13 @@ export function notifyState(kind: NotifyKind): NotifyState {
   if (FAILED_KINDS.has(kind)) return "failed";
   if (DONE_KINDS.has(kind)) return "done";
   return "info";
+}
+
+// The chime an event plays. A failure always plays "failed", whatever its
+// producer passed, so a failed run or agent can never sound like a success or
+// a question. Every other kind keeps the producer's choice.
+export function notifySoundKind(kind: NotifyKind, requested: NotificationSoundKind): NotificationSoundKind {
+  return FAILED_KINDS.has(kind) ? "failed" : requested;
 }
 
 export function targetWorkspaceId(target: NavigationTarget): string | undefined {

@@ -500,7 +500,7 @@ test("a new head commit that fails alerts once, with the workspace as target", a
     title: "CI failed on pull request #42",
     body: "build, lint · Add widgets",
     tone: "danger",
-    soundKind: "needs-you",
+    soundKind: "failed",
     target: { type: "workspace", workspaceId: "ws-1", panel: "git" },
   });
   assert.deepEqual(h.rearmed, ["github-ci:acme/widgets#42"]);

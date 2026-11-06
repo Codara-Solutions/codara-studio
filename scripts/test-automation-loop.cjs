@@ -1084,6 +1084,11 @@ async function main() {
     await settle();
     const st = await getState(job.id);
     ok("once the whole wave fails, the loop records iteration-failed", st.status === "stopped" && st.lastStopReason === "iteration-failed");
+    const failedAlert = globalThis.__NOTIFY.published.filter((e) => e.target?.jobId === job.id).at(-1);
+    ok(
+      "the failed loop's alert plays the failed chime",
+      failedAlert?.kind === "automation.failed" && failedAlert.soundKind === "failed",
+    );
   }
 
   // ── 24) SLICE 7: a LEAKED watchdog timer for an already-settled pass no-ops ──

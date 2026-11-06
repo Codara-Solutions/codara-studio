@@ -109,7 +109,7 @@ const harnessPlugin = {
           "  const watching = terminalAlertWatched(event.kind, { selected: visible && T.activeContext.paneId === t.paneId, visible });\n" +
           "  const d = decide({ kind: event.kind, sourceKey: event.sourceKey }, { watching, dnd: false }, state);\n" +
           "  if (!d.deliver) return;\n" +
-          "  T.alerts.push({ kind: event.kind === 'terminal.agent.done' ? 'complete' : event.kind === 'terminal.agent.failed' ? 'failed' : 'blocked', title: event.title, body: event.body, workspaceName: event.workspaceName, target: t });\n" +
+          "  T.alerts.push({ kind: event.kind === 'terminal.agent.done' ? 'complete' : event.kind === 'terminal.agent.failed' ? 'failed' : 'blocked', title: event.title, body: event.body, workspaceName: event.workspaceName, target: t, soundKind: event.soundKind });\n" +
           "}\n",
         loader: "js",
         resolveDir: path.join(ROOT, "src", "main", "notify"),
@@ -782,6 +782,7 @@ async function main() {
     "usage-limit terminal outcome is a failure, not a successful completion",
     alertCount() === beforeLimit + 1 && T.alerts.at(-1).kind === "failed",
   );
+  check("a usage-limit failure plays the failed chime", T.alerts.at(-1).soundKind === "failed");
 
   // ── Scenario 10: non-zero PTY exit while an agent is live alerts ──
   const beforeCrash = alertCount();
@@ -793,6 +794,7 @@ async function main() {
       T.alerts.at(-1).kind === "failed" &&
       /code 9/.test(T.alerts.at(-1).body),
   );
+  check("a crashed agent plays the failed chime", T.alerts.at(-1).soundKind === "failed");
 
   const beforeIntentionalClose = alertCount();
   feed("p7", "\x1b]633;E;claude\x07Claude Code v2.1.209\r\n");

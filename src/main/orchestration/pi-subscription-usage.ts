@@ -241,9 +241,12 @@ function accountIdFromAccessToken(access: string): string | null {
 async function refreshCredential(
   profileId: string,
   provider: PiSubscriptionProvider,
+  rejection?: { rejectedAccess: string; expectedAccountId?: string },
 ): Promise<string | null> {
   const { refreshPiSubscriptionProfileCredential } = await import("./pi-subscription-auth");
-  return refreshPiSubscriptionProfileCredential(profileId, provider).catch(() => null);
+  return refreshPiSubscriptionProfileCredential(profileId, provider, rejection ?? {}).catch(
+    () => null,
+  );
 }
 
 async function fetchJsonRecord(
@@ -635,13 +638,13 @@ function profileProblem(
 }
 
 /**
- * Resolve a usable access token, refreshing first when the stored one has
- * expired. Returns null when the provider is not connected at all.
+ * The account's stored credential after a reconcile with its CLI half.
+ * Never refreshes anything. Null when the provider is not connected at all.
  */
-async function usableAccessToken(
+async function reconciledCredential(
   profileId: string,
   provider: PiSubscriptionProvider,
-): Promise<{ credential: StoredCredential; access: string } | null> {
+): Promise<StoredCredential | null> {
   // Cheap, and it catches a rotation by the CLI (a Keychain-only one for
   // Claude Code) before the probe would report a needless "session expired".
   const { unifiedAccountsFor } = await import("./unified-account-registry");
@@ -651,7 +654,18 @@ async function usableAccessToken(
     preferredAccountProfileId: profileId,
     requirePreferred: true,
   });
-  const credential = await readStoredCredential(provider, selected.authFile);
+  return readStoredCredential(provider, selected.authFile);
+}
+
+/**
+ * Resolve a usable access token, refreshing first when the stored one has
+ * expired. Returns null when the provider is not connected at all.
+ */
+async function usableAccessToken(
+  profileId: string,
+  provider: PiSubscriptionProvider,
+): Promise<{ credential: StoredCredential; access: string } | null> {
+  const credential = await reconciledCredential(profileId, provider);
   if (!credential) return null;
   // Same 60s headroom as the in-lock re-check in refreshPiSubscriptionCredential:
   // a token expiring in a few seconds would 401 mid-request and the card would
@@ -661,6 +675,67 @@ async function usableAccessToken(
   const refreshed = await refreshCredential(profileId, provider);
   if (!refreshed) return { credential, access: "" };
   return { credential, access: refreshed };
+}
+
+type ResolvedAccess = { credential: StoredCredential; access: string };
+
+function codexAccountId(resolved: ResolvedAccess): string | null {
+  return resolved.credential.accountId ?? accountIdFromAccessToken(resolved.access);
+}
+
+/**
+ * The one ChatGPT account a stored credential names: null when it names
+ * none, or when its metadata and its token's claim disagree. A retry only
+ * ever uses a credential whose identity positively matches.
+ */
+function codexIdentity(credential: StoredCredential): string | null {
+  const claim = accountIdFromAccessToken(credential.access);
+  if (claim && credential.accountId && claim !== credential.accountId) return null;
+  return claim ?? credential.accountId;
+}
+
+/**
+ * The one retry after ChatGPT refused (401) a token Codara still dates as
+ * valid. ChatGPT can end an access token well before its `exp`, and a Codex
+ * session on the same grant may have rotated it meanwhile; the Codex CLI
+ * answers a 401 the same way, by reloading its login and refreshing once.
+ *
+ * Order matters, since a refresh spends a rotating refresh token: re-read
+ * the credential without refreshing (the reconcile adopts a newer copy from
+ * the account's Codex home), check it is still this ChatGPT account, use a
+ * newer copy as it is, and only when the store still holds the refused token
+ * and no Codex process runs on the account's home (it refreshes the grant on
+ * its own 401, and two refreshers would race; one starting meanwhile waits)
+ * refresh it, exactly once, with the account checked again under the
+ * store's lock.
+ *
+ * "busy" means a running Codex owns the refresh: read again shortly. Null
+ * when nothing better exists, or when the store no longer positively names
+ * `accountId` (another account, none, or two that disagree): those limits
+ * are not this card's to show.
+ */
+async function codexAccessAfterRejection(
+  profileId: string,
+  rejectedAccess: string,
+  accountId: string,
+): Promise<{ access: string; accountId: string } | "busy" | null> {
+  const stored = await reconciledCredential(profileId, "openai-codex");
+  if (!stored || codexIdentity(stored) !== accountId) return null;
+  if (stored.access !== rejectedAccess) return { access: stored.access, accountId };
+  const { unifiedAccountsFor } = await import("./unified-account-registry");
+  const refreshed = await unifiedAccountsFor("openai-codex")
+    .refreshWhileCliIdle(profileId, () =>
+      refreshCredential(profileId, "openai-codex", {
+        rejectedAccess,
+        expectedAccountId: accountId,
+      }),
+    )
+    .catch(() => null);
+  if (refreshed === "busy") return "busy";
+  if (!refreshed || refreshed === rejectedAccess) return null;
+  const renewed = await reconciledCredential(profileId, "openai-codex");
+  if (!renewed || renewed.access !== refreshed || codexIdentity(renewed) !== accountId) return null;
+  return { access: refreshed, accountId };
 }
 
 async function anthropicUsage(
@@ -692,8 +767,18 @@ async function anthropicUsage(
     "user-agent": CLAUDE_CODE_USER_AGENT,
   });
   if (!result.ok) {
-    if (result.status === 401 || result.status === 403) {
+    if (result.status === 401) {
       return profileProblem(profile, checkedAt, "expired", "Claude rejected the stored session. Reconnect.");
+    }
+    // A 403 refuses this request (a scope or policy), not the sign-in, so
+    // the card does not ask for a reconnect over it.
+    if (result.status === 403) {
+      return profileProblem(
+        profile,
+        checkedAt,
+        "error",
+        "Claude refused the usage check (HTTP 403). The account is still connected; retry later.",
+      );
     }
     if (result.status === 429) {
       const waitMs = result.retryAfterMs ?? DEFAULT_ANTHROPIC_BACKOFF_MS;
@@ -798,7 +883,7 @@ async function codexUsage(
   if (!resolved.access) {
     return profileProblem(profile, checkedAt, "expired", "Session expired. Reconnect this ChatGPT account.");
   }
-  const accountId = resolved.credential.accountId ?? accountIdFromAccessToken(resolved.access);
+  let accountId = codexAccountId(resolved);
   if (!accountId) {
     return profileProblem(
       profile,
@@ -807,11 +892,37 @@ async function codexUsage(
       "ChatGPT usage needs an account id that this session did not provide. Reconnect.",
     );
   }
-  const headers = codexHeaders(resolved.access, accountId);
-  const result = await fetchJsonRecord(CODEX_USAGE_URL, headers);
+  let headers = codexHeaders(resolved.access, accountId);
+  let result = await fetchJsonRecord(CODEX_USAGE_URL, headers);
+  if (!result.ok && result.status === 401) {
+    const retry = await codexAccessAfterRejection(profile.id, resolved.access, accountId);
+    if (retry === "busy") {
+      return profileProblem(
+        profile,
+        checkedAt,
+        "error",
+        "ChatGPT refused this session. The Codex session running on this account renews it; retry in a moment.",
+      );
+    }
+    if (retry) {
+      accountId = retry.accountId;
+      headers = codexHeaders(retry.access, accountId);
+      result = await fetchJsonRecord(CODEX_USAGE_URL, headers);
+    }
+  }
   if (!result.ok) {
-    if (result.status === 401 || result.status === 403) {
+    if (result.status === 401) {
       return profileProblem(profile, checkedAt, "expired", "ChatGPT rejected the stored session. Reconnect.");
+    }
+    // A 403 is a refusal of this request (a policy or edge block), not of
+    // the sign-in: refreshing cannot fix it, so it is no reason to reconnect.
+    if (result.status === 403) {
+      return profileProblem(
+        profile,
+        checkedAt,
+        "error",
+        "ChatGPT refused the usage check (HTTP 403). The account is still connected; retry later.",
+      );
     }
     return profileProblem(profile, checkedAt, "error", `ChatGPT usage check failed (HTTP ${result.status}).`);
   }

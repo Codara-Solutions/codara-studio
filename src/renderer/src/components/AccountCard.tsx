@@ -67,6 +67,12 @@ export interface AccountCardView {
     error?: string;
     /** False when the row holds no Cora grant at all (a System row before Connect Cora). */
     held?: boolean;
+    /**
+     * Why the provider refused this grant on its last limits read, after
+     * Codara's own retry. Main's sign-in status only knows the stored expiry,
+     * which a refused grant can still be inside.
+     */
+    rejected?: string;
   };
   terminal?: {
     connected: boolean;
@@ -97,12 +103,16 @@ export interface AccountCardActions {
   onDelete: (card: AccountCardView) => void;
 }
 
-/** Usable the way Cora counts it: held, present, and not expired without a way back. */
+/**
+ * Usable the way Cora counts it: held, present, not expired without a way
+ * back, and not refused by the provider.
+ */
 function coraUsable(card: AccountCardView): boolean {
   return (
     card.cora?.held !== false &&
     Boolean(card.cora?.connected) &&
-    !(card.cora?.expired && !card.cora.canRefresh)
+    !(card.cora?.expired && !card.cora.canRefresh) &&
+    !card.cora?.rejected
   );
 }
 
@@ -163,7 +173,7 @@ function connectionState(
         ? { ok: true, text: "Signed in" }
         : { ok: false, text: `${cliLabel} on this computer is signed out.` };
     case "needs-reconnect":
-      return { ok: false, text: "Sign-in expired.", danger: true };
+      return { ok: false, text: card.cora?.rejected ?? "Sign-in expired.", danger: true };
     case "cora-only":
       return {
         ok: false,
@@ -463,7 +473,8 @@ export default function AccountCard({
             <UsagePlaceholder
               labels={descriptor.usageWindows}
               note={card.usageNote ?? "Not available"}
-              message={card.usageMessage}
+              // A refusal is already the status line, beside its Reconnect.
+              message={state === "needs-reconnect" && card.cora?.rejected ? undefined : card.usageMessage}
             />
           )}
         </div>

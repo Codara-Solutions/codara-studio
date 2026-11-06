@@ -1357,12 +1357,12 @@ function NotificationSettings() {
       <SettingsSection title="On your computer">
         <ToggleRow
           title="Native OS notification"
-          desc="A system alert, only while Codara Studio is minimized or in the background, so it never doubles the toast."
+          desc="A silent system alert, only while Codara Studio is minimized or in the background, so it never doubles the toast. The Sound setting below is the only sound."
           {...bindToggle("notifyNative", preferences, setPreference)}
         />
         <ToggleRow
           title="Sound"
-          desc="A short chime: one for needs you, one for done."
+          desc="A short chime: one for needs you, one for done, one for failed."
           {...bindToggle("notifySound", preferences, setPreference)}
         />
         <ToggleRow
@@ -2358,6 +2358,9 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
             canRefresh: profile.canRefresh,
             ...(profile.error && coraHeld ? { error: profile.error } : {}),
             ...(coraHeld ? {} : { held: false }),
+            ...(coraHeld && usage?.status === "expired"
+              ? { rejected: usage.message || "Sign-in expired." }
+              : {}),
           },
           ...(profile.terminal ? { terminal: profile.terminal } : {}),
           busy: accountMutationId === profile.id,

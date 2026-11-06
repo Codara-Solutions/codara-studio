@@ -1,5 +1,6 @@
 import type { BrowserWindow } from "electron";
 import { makeId } from "@shared/ids";
+import { notifySoundKind } from "@shared/notify-center";
 import type {
   NavigationTarget,
   NotifyEvent,
@@ -99,6 +100,7 @@ function workspaceNameFor(target: NavigationTarget): string | undefined {
 export function publish(input: PublishInput): void {
   const event: NotifyEvent = {
     ...input,
+    soundKind: notifySoundKind(input.kind, input.soundKind),
     id: makeId("notify"),
     createdAt: new Date().toISOString(),
   };
@@ -360,7 +362,7 @@ function handleRunEvent(event: SparkEvent): void {
       tone: ok ? "success" : "danger",
       title: ok ? "Codara Studio is done" : "Codara Studio failed",
       body,
-      soundKind: "done",
+      soundKind: ok ? "done" : "failed",
       target: { type: "run", runId, workspaceId },
     });
   }

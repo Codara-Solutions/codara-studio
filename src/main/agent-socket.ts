@@ -4090,7 +4090,7 @@ const NOTIFY_TONES: ReadonlySet<string> = new Set<InAppNotificationTone>([
   "warning",
   "danger",
 ]);
-const NOTIFY_SOUNDS: ReadonlySet<string> = new Set<NotificationSoundKind>(["needs-you", "done"]);
+const NOTIFY_SOUNDS: ReadonlySet<string> = new Set<NotificationSoundKind>(["needs-you", "done", "failed"]);
 
 async function handleAppNotify(
   params: Record<string, unknown>,
@@ -4115,7 +4115,8 @@ async function handleAppNotify(
   if (!NOTIFY_TONES.has(tone)) {
     return errorResponse(id, ERR_INVALID_PARAMS, `unknown tone: ${tone}`);
   }
-  const sound = stringParam(params, "sound") ?? (tone === "success" ? "done" : "needs-you");
+  const sound =
+    stringParam(params, "sound") ?? (tone === "success" ? "done" : tone === "danger" ? "failed" : "needs-you");
   if (!NOTIFY_SOUNDS.has(sound)) {
     return errorResponse(id, ERR_INVALID_PARAMS, `unknown sound: ${sound}`);
   }
