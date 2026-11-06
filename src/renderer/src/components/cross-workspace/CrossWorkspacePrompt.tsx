@@ -137,7 +137,7 @@ export default function CrossWorkspacePrompt(): React.ReactElement | null {
       )}
       <p className="chrome-pairing__body">
         Always lets every agent in {request.callerName} open terminals and make worktrees in {request.targetName}{" "}
-        without asking from now on, including other sessions and Cora runs there. Revoke it in Settings, Agents.
+        without asking from now on, including other sessions and Cora runs there. Allow all workspaces turns on the switch that lets agents open terminals in any workspace. Change either in Settings, Agents.
       </p>
       <div className="chrome-pairing__actions">
         <span className="chrome-pairing__countdown" aria-live="off">
@@ -148,6 +148,9 @@ export default function CrossWorkspacePrompt(): React.ReactElement | null {
         </button>
         <button type="button" className="spark-btn" disabled={busy} onClick={() => void decide("once")}>
           Allow once
+        </button>
+        <button type="button" className="spark-btn" disabled={busy} onClick={() => void decide("all")}>
+          Allow all workspaces
         </button>
         <button type="button" className="spark-btn is-primary" disabled={busy} onClick={() => void decide("always")}>
           Always
