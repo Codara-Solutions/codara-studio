@@ -331,6 +331,8 @@ function runMode(dir, rendererEntry, pctEntry, mode) {
 }
 
 function main() {
+  // The probe opens real windows: on a private display, never on the desktop.
+  require("./virtual-display.cjs").keepTestAppOffDesktop();
   const { dir, rendererEntry, pctEntry } = build();
   let failures = 0;
   const check = (name, cond) => {

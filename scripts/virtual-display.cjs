@@ -119,4 +119,35 @@ function useVirtualDisplay(env = process.env) {
   return null;
 }
 
-module.exports = { useVirtualDisplay };
+/** Why a run that is about to open app windows would show them, or null. */
+function visibleDesktopReason(env, display) {
+  if (process.platform !== "linux" || display) return null;
+  const ci = (env.CI ?? "").trim().toLowerCase();
+  if ((ci && ci !== "false" && ci !== "0") || env.CODARA_TEST_ALLOW_VISIBLE === "1") return null;
+  if (env.WAYLAND_DISPLAY) return `WAYLAND_DISPLAY is set (${env.WAYLAND_DISPLAY})`;
+  if (env.DISPLAY) return `DISPLAY points at a real display (${env.DISPLAY})`;
+  return null;
+}
+
+/**
+ * For a suite that boots the app or opens Electron windows, run directly
+ * (`node scripts/test-x.cjs`) as well as from the runner: points this process,
+ * and so every child it starts, at the run's private display. When none can be
+ * had on a Linux desktop, the suite refuses to start rather than open windows
+ * in front of the person at the machine. CI, or CODARA_TEST_ALLOW_VISIBLE=1,
+ * lets it go ahead anyway.
+ */
+function keepTestAppOffDesktop(env = process.env, options = {}) {
+  const display = useVirtualDisplay(env);
+  const reason = visibleDesktopReason(env, display);
+  if (!reason) return display;
+  const message =
+    `[virtual-display] Refusing to boot the app: its windows would open on your desktop (${reason}) ` +
+    "and no private Xvfb display could be started. Install Xvfb (`sudo apt install xvfb`), point CODARA_XVFB " +
+    "at one, or set CODARA_TEST_ALLOW_VISIBLE=1 to show the windows on purpose.";
+  if (options.throwInstead) throw new Error(message);
+  console.error(message);
+  process.exit(2);
+}
+
+module.exports = { useVirtualDisplay, keepTestAppOffDesktop };
