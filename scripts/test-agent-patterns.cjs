@@ -696,6 +696,12 @@ check(
   ap.sniffRuntime(" \u2580\u2580\u2588  v1.5.0\r\r\n \u2588\u2580 \u2588 escape interrupt \u00b7 ctrl+c/ctrl+d clear/exit"),
   "pi",
 );
+// Apple Terminal gets the text wordmark instead of the block logo (pi 1.5.0
+// piWordmark(): coloured `P` and `i`, then the dim version, then the hints).
+const PI_1X_WORDMARK_HEADER =
+  " \x1b[38;2;228;138;122mP\x1b[0m\x1b[38;2;234;182;93mi\x1b[0m \x1b[2mv1.5.0\x1b[22m\r\r\n \x1b[2mescape\x1b[22m\x1b[2m interrupt\x1b[22m \u00b7 ctrl+c/ctrl+d clear/exit";
+check("pi 1.x text-wordmark header (Apple Terminal)", ap.sniffRuntime(PI_1X_WORDMARK_HEADER), "pi");
+check("pi 1.x text-wordmark header keeps the Pi UI present", ap.agentUiPresent("pi", PI_1X_WORDMARK_HEADER), true);
 check("a version beside box drawing is not a Pi banner", ap.sniffRuntime("\u2588\u2588 v1.2.3 done"), null);
 check("pi onboarding line (80 cols, wrapped)", ap.sniffRuntime(PI_ONBOARDING_80), "pi");
 check("pi is a public runtime", ap.coercePublicRuntime("pi"), "pi");

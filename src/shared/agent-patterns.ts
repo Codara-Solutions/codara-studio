@@ -56,8 +56,10 @@ export function coercePublicRuntime(runtime: AgentRuntime): PublicAgentRuntime |
 // version beside its top row and the hint beside its bottom row
 // (`▀▀█  v1.5.0` then `█▀ █ escape interrupt · …`, live pi 1.5.0 capture). In
 // both, only the interrupt hint right after the version makes it a banner.
+// Where the block logo cannot draw (Apple Terminal), 1.x writes the text
+// wordmark `Pi v1.5.0` instead, hence `[Pp]i`.
 const PI_HEADER_RE =
-  /\bpi\s*v\d+\.\d+\.\d+\s+\S+\s+(?:to\s+)?interrupt\b|[▀█]\s*v\d+\.\d+\.\d+\s+[▀█][▀█\s]*\S+\s+(?:to\s+)?interrupt\b/;
+  /\b[Pp]i\s*v\d+\.\d+\.\d+\s+\S+\s+(?:to\s+)?interrupt\b|[▀█]\s*v\d+\.\d+\.\d+\s+[▀█][▀█\s]*\S+\s+(?:to\s+)?interrupt\b/;
 
 // Banner / first-prompt boilerplate patterns. Order is significant: more
 // specific patterns sit before broader ones so a vendor that includes a
