@@ -580,7 +580,10 @@ async function runSuite(m, scratch) {
     const summary = service.agentSetupSummary(done, "tail");
     assert.equal(summary.state, "succeeded");
     assert.equal(summary.logTail, "tail");
-    // A fresh service (Codara restarted) reads the stored status.
+    // A fresh service (Codara restarted) reads the stored status. waitFor
+    // answers from memory as soon as setup ends, while the record is still
+    // being written; a restart only comes after this service stopped writing.
+    assert.equal(await svc.quiesce(first.id), true);
     const later = await makeService().get(wt);
     assert.equal(later.state, "succeeded");
     assert.equal(later.id, first.id);

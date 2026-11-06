@@ -303,6 +303,35 @@ async function main() {
     assert.equal(after.projects["/locked"].hasTrustDialogAccepted, true);
   });
 
+  await check("half a file, read while Claude Code saves under its lock, is read again inside the lock", async () => {
+    const { lock } = require("proper-lockfile");
+    const home = liveHome("mid-save");
+    const file = path.join(home.configDir, ".claude.json");
+    const release = await lock(file, { realpath: false, lockfilePath: `${file}.lock` });
+    // Claude Code rewrites the file in place: a read now sees a cut-off save.
+    fs.writeFileSync(file, '{\n  "projects": {\n   ');
+    let settled = false;
+    const write = trust.addClaudeFolderTrust(home, "/mid-save").finally(() => {
+      settled = true;
+    });
+    for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(settled, false, "half a file is not an answer while Claude Code holds the lock");
+    writeJson(file, { projects: {}, numStartups: 4 });
+    await release();
+    assert.equal(await write, "added");
+    const after = readJson(file);
+    assert.equal(after.numStartups, 4);
+    assert.equal(after.projects["/mid-save"].hasTrustDialogAccepted, true);
+  });
+
+  await check("a config that is still not JSON inside Claude Code's lock is an error, never replaced", async () => {
+    const home = liveHome("broken");
+    const file = path.join(home.configDir, ".claude.json");
+    fs.writeFileSync(file, "{ not json");
+    await assert.rejects(trust.addClaudeFolderTrust(home, "/broken"), SyntaxError);
+    assert.equal(fs.readFileSync(file, "utf8"), "{ not json");
+  });
+
   const listed = (home) => {
     try {
       return readJson(path.join(path.dirname(home.configDir), "pretrusted-folders.json")).folders;

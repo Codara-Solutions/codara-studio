@@ -96,6 +96,49 @@ check("useVirtualDisplay points a child environment at the display and leaves op
   assert.equal(child.WAYLAND_DISPLAY, undefined);
 });
 
+check("every unit suite that boots Electron puts it on the private display first", () => {
+  // A suite run on its own (`node scripts/test-x.cjs`) skips the runner, and
+  // with it the runner's private display: it must ask for one itself.
+  const launches = /\b(?:spawn|spawnSync|execFile|execFileSync)\(\s*(?:electron\b|require\("electron"\))|\b_electron\b/;
+  const offenders = [];
+  for (const name of fs.readdirSync(__dirname)) {
+    if (!/^test-.*\.(cjs|mjs)$/.test(name)) continue;
+    const text = fs.readFileSync(path.join(__dirname, name), "utf8");
+    if (!launches.test(text)) continue;
+    // Electron as plain Node opens no window.
+    if (/ELECTRON_RUN_AS_NODE/.test(text) && !/BrowserWindow/.test(text)) continue;
+    if (!/keepTestAppOffDesktop\(|useVirtualDisplay\(/.test(text)) offenders.push(name);
+  }
+  assert.deepEqual(offenders, [], "call keepTestAppOffDesktop() (scripts/virtual-display.cjs) before launching Electron");
+});
+
+check("a suite refuses to boot the app onto a real Linux desktop it cannot hide from", () => {
+  if (process.platform !== "linux") return;
+  const { keepTestAppOffDesktop } = require("./virtual-display.cjs");
+  const noXvfb = { PATH: "", CODARA_XVFB: "/nonexistent/Xvfb" };
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.throws(
+      () => keepTestAppOffDesktop({ ...noXvfb, WAYLAND_DISPLAY: "wayland-1" }, { throwInstead: true }),
+      /Refusing to boot the app.*WAYLAND_DISPLAY/,
+    );
+    assert.throws(
+      () => keepTestAppOffDesktop({ ...noXvfb, DISPLAY: ":0" }, { throwInstead: true }),
+      /Refusing to boot the app.*DISPLAY/,
+    );
+    // No desktop at all, CI, or an explicit opt-in: it goes ahead.
+    assert.equal(keepTestAppOffDesktop({ ...noXvfb }, { throwInstead: true }), null);
+    assert.equal(keepTestAppOffDesktop({ ...noXvfb, DISPLAY: ":0", CI: "true" }, { throwInstead: true }), null);
+    assert.equal(
+      keepTestAppOffDesktop({ ...noXvfb, WAYLAND_DISPLAY: "wayland-1", CODARA_TEST_ALLOW_VISIBLE: "1" }, { throwInstead: true }),
+      null,
+    );
+  } finally {
+    console.warn = warn;
+  }
+});
+
 check("playwright.config.ts defaults the suite to background mode", () => {
   const config = fs.readFileSync(path.join(ROOT, "playwright.config.ts"), "utf8");
   assert.match(config, /process\.env\.SPARK_E2E_BACKGROUND \?\?= "1"/);

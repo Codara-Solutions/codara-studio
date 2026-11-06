@@ -180,6 +180,34 @@ async function readJsonObject(file: string): Promise<Record<string, unknown> | n
   return parsed;
 }
 
+const CLAUDE_CONFIG_LOCK = {
+  realpath: false,
+  retries: { retries: 20, minTimeout: 50, maxTimeout: 500 },
+  stale: 10_000,
+} as const;
+
+/**
+ * The first look at `.claude.json`, before Codara's record changes. It is
+ * taken without Claude Code's lock, so a running Claude Code is not held up,
+ * but Claude Code rewrites the file in place while it holds that lock: the
+ * read can land mid-save and see half a file. Only then is it read again
+ * inside the lock, where the save is whole; a file that is still not JSON
+ * there is really broken and the error stands.
+ */
+async function readConfigOutsideItsLock(file: string): Promise<Record<string, unknown> | null> {
+  try {
+    return await readJsonObject(file);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+  }
+  const release = await lock(file, { ...CLAUDE_CONFIG_LOCK, lockfilePath: `${file}.lock` });
+  try {
+    return await readJsonObject(file);
+  } finally {
+    await release().catch(() => undefined);
+  }
+}
+
 /**
  * Add `projects[key].hasTrustDialogAccepted = true` to a live slot's
  * `.claude.json` under Claude Code's own lock. A folder Claude Code has no
@@ -201,7 +229,7 @@ export async function addClaudeFolderTrust(home: ClaudeLiveHome, key: string): P
     stale: 10_000,
   });
   try {
-    const current = await readJsonObject(file);
+    const current = await readConfigOutsideItsLock(file);
     if (!current) return "no-config";
     // An unreadable list is never rewritten: the folders it held would leave
     // it and claude-follow would copy their trust to the user's file.

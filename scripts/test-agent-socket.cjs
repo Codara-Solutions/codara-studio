@@ -26,11 +26,62 @@ const os = require("node:os");
 const http = require("node:http");
 
 const ROOT = path.resolve(__dirname, "..");
+// The booted app opens its window on a private display, never on the desktop;
+// checked before anything is created, since a refusal exits at once.
+require("./virtual-display.cjs").keepTestAppOffDesktop();
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "cora-socket-test-"));
 const HANDSHAKE = path.join(HOME, "agent-socket.json");
 const ACCOUNT_ACCESS_SECRET = "account-access-secret-must-never-leak";
 const ACCOUNT_REFRESH_SECRET = "account-refresh-secret-must-never-leak";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Every process the booted app started, helpers included, inherits its
+// CODARA_HOME_DIR (this test's own folder). Linux only: elsewhere none is
+// listed, and the removal below goes ahead at once.
+function appProcessesLeft() {
+  if (process.platform !== "linux") return [];
+  const marker = `\0CODARA_HOME_DIR=${HOME}\0`;
+  const left = [];
+  for (const entry of fs.readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue;
+    let environ;
+    try {
+      environ = `\0${fs.readFileSync(`/proc/${entry}/environ`, "utf8")}`;
+    } catch {
+      continue;
+    }
+    if (environ.includes(marker)) left.push(Number(entry));
+  }
+  return left;
+}
+
+/** Waits until none is left; past `timeoutMs` the rest are killed, and waited for. */
+async function appProcessesGone(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let left = appProcessesLeft();
+  while (left.length && Date.now() < deadline) {
+    await sleep(50);
+    left = appProcessesLeft();
+  }
+  if (!left.length) return;
+  const named = left.map((pid) => {
+    try {
+      return `${pid} ${fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").slice(0, 120)}`;
+    } catch {
+      return String(pid);
+    }
+  });
+  console.log(`  note: still running ${timeoutMs} ms after the app exited, killed:\n    ${named.join("\n    ")}`);
+  for (const pid of left) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
+  const killDeadline = Date.now() + 5_000;
+  while (appProcessesLeft().length && Date.now() < killDeadline) await sleep(50);
+}
 
 let failures = 0;
 function check(name, cond, detail) {
@@ -2194,22 +2245,22 @@ async function main() {
   } finally {
     // Launch the binary directly and await its exit: killing Electron's Node
     // CLI wrapper leaves the app writing into the directory being removed.
-    const forceStop = setTimeout(() => app.kill("SIGKILL"), 5_000);
+    const forceStop = setTimeout(() => {
+      console.log("  note: the app did not quit within 5 s of SIGTERM; killed");
+      app.kill("SIGKILL");
+    }, 5_000);
     try {
       app.kill("SIGTERM");
       await appClosed;
     } finally {
       clearTimeout(forceStop);
     }
-    // Chromium helpers can release their last userData file a few milliseconds
-    // after the parent process exits. Let Node retry transient ENOTEMPTY/EPERM
-    // teardown races so a fully-passing socket run does not report an abort.
-    fs.rmSync(HOME, {
-      recursive: true,
-      force: true,
-      maxRetries: 5,
-      retryDelay: 100,
-    });
+    // The main process going is not the app going: Chromium's crash handler
+    // and helpers, and the metric streams the app reads, end after it, and
+    // until then they can still create files in HOME, which then fails to be
+    // removed (ENOTEMPTY). On a loaded runner that takes seconds.
+    await appProcessesGone(15_000);
+    fs.rmSync(HOME, { recursive: true, force: true });
   }
 
   if (failures > 0) {
