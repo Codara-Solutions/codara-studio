@@ -1086,12 +1086,16 @@ export async function refreshPiSubscriptionProfileCredential(
       if (!isRecord(current) || current.type !== "oauth") return undefined;
       const credential = current as unknown as OAuthCredential;
       if (nonEmptyString(options.expectedAccountId)) {
+        // A positive match only: a credential that names no account, or whose
+        // metadata and token claim disagree, is not refreshed for this caller.
         const record = current as Record<string, unknown>;
-        const stored =
-          (nonEmptyString(record.accountId) && record.accountId) ||
-          (nonEmptyString(credential.access) && codexAccountIdFromAccessToken(credential.access)) ||
-          null;
-        if (stored && stored !== options.expectedAccountId) return undefined;
+        const named = [
+          nonEmptyString(record.accountId) ? record.accountId : undefined,
+          nonEmptyString(credential.access) ? codexAccountIdFromAccessToken(credential.access) : undefined,
+        ].filter((id): id is string => Boolean(id));
+        if (named.length === 0 || named.some((id) => id !== options.expectedAccountId)) {
+          return undefined;
+        }
       }
       const named = nonEmptyString(options.rejectedAccess);
       const rejected = named && credential.access === options.rejectedAccess;

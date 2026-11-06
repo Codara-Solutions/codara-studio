@@ -209,14 +209,20 @@ export class CodexCliProfileLeaseRegistry {
    * Codex started meanwhile would spend the same rotating refresh token on
    * its first 401. The check and the registration are one synchronous step,
    * so no lease can slip in between. Null, with nothing run, while the
-   * profile is leased or another refresh of it is in flight.
+   * profile is leased, being deleted, or already being refreshed.
    */
   runRefreshWhileUnleased<T>(
     rawProfileId: CodexCliProfileId,
     operation: () => Promise<T>,
   ): Promise<T> | null {
     const profileId = normalizeCodexCliProfileId(rawProfileId);
-    if (this.isLeased(profileId) || this.refreshes.has(profileId)) return null;
+    if (
+      this.isLeased(profileId) ||
+      this.refreshes.has(profileId) ||
+      this.exclusiveProfiles.has(profileId)
+    ) {
+      return null;
+    }
     let settle!: () => void;
     this.refreshes.set(profileId, new Promise<void>((resolve) => (settle = resolve)));
     return Promise.resolve()
@@ -237,7 +243,13 @@ export class CodexCliProfileLeaseRegistry {
     operation: () => Promise<T>,
   ): Promise<T> {
     const profileId = normalizeCodexCliProfileId(rawProfileId);
-    if (this.exclusiveProfiles.has(profileId) || this.isLeased(profileId)) {
+    // A refresh in flight counts as a holder: a profile is never deleted
+    // under a refresh of its grant.
+    if (
+      this.exclusiveProfiles.has(profileId) ||
+      this.isLeased(profileId) ||
+      this.refreshes.has(profileId)
+    ) {
       throw new CodexCliAccountProfileLeasedError(profileId);
     }
     this.exclusiveProfiles.add(profileId);

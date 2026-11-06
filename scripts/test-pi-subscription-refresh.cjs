@@ -613,6 +613,20 @@ async function main() {
       assert.strictEqual(wrongAccount, null);
       assert.deepStrictEqual(refusedGrants, ["live"]);
     });
+    // No account metadata and an opaque token: the identity is unknown, so
+    // the refresh is not spent on the caller's word alone.
+    const anonymous = JSON.parse(fs.readFileSync(codexAuthFile, "utf8"));
+    const { accountId: _dropped, ...withoutAccount } = anonymous["openai-codex"];
+    anonymous["openai-codex"] = { ...withoutAccount, access: "opaque-refused-access" };
+    fs.writeFileSync(codexAuthFile, JSON.stringify(anonymous), { mode: 0o600 });
+    const unknownIdentity = await refreshPiSubscriptionProfileCredential(codexCase.profileId, "openai-codex", {
+      rejectedAccess: "opaque-refused-access",
+      expectedAccountId: "acct-1",
+    });
+    check("a refused token whose account is unknown is not refreshed", () => {
+      assert.strictEqual(unknownIdentity, null);
+      assert.deepStrictEqual(refusedGrants, ["live"]);
+    });
   }
 
   // With Studio's keeper running (production), a Claude refresh is renewed

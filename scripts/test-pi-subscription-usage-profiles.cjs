@@ -825,6 +825,50 @@ async function main() {
     JSON.stringify({ foreign, usageRequests, calls: globalThis.__profileUsageRefreshCalls }),
   );
 
+  // Identity must match positively. A replacement that names no account, or
+  // whose metadata and token claim disagree, is neither sent nor refreshed.
+  const b64 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const jwtFor = (accountClaim) =>
+    `${b64({ alg: "none" })}.${b64({ "https://api.openai.com/auth": { chatgpt_account_id: accountClaim } })}.sig`;
+  const noRefresh = () => {
+    throw new Error("a credential without a matching identity is never refreshed");
+  };
+  for (const [name, access, metadata] of [
+    ["names no account", "access-secret-anonymous", null],
+    ["metadata and claim disagree", jwtFor("vendor-account-second"), "vendor-account-other"],
+  ]) {
+    resetStale("access-secret-stale");
+    onRefusal = () => {
+      onRefusal = null;
+      resetStale(access, metadata);
+    };
+    globalThis.__profileUsageRefresh = noRefresh;
+    const unidentified = await staleUsage();
+    check(
+      `a replacement that ${name} is rejected`,
+      unidentified.status === "expired" &&
+        globalThis.__profileUsageRefreshCalls.length === 0 &&
+        !usageRequests.some((request) => request.authorization === `Bearer ${access}`),
+      JSON.stringify({ unidentified, usageRequests, calls: globalThis.__profileUsageRefreshCalls }),
+    );
+  }
+
+  // The retry carries the account it validated, whatever header came first.
+  const validatedAccess = jwtFor("vendor-account-second");
+  resetStale("access-secret-stale");
+  onRefusal = () => {
+    onRefusal = null;
+    resetStale(validatedAccess, "vendor-account-second");
+  };
+  globalThis.__profileUsageRefresh = noRefresh;
+  const validated = await staleUsage();
+  const retried = usageRequests.find((request) => request.authorization === `Bearer ${validatedAccess}`);
+  check(
+    "the retry header is the validated account id",
+    validated.status === "ok" && retried?.account === "vendor-account-second",
+    JSON.stringify({ validated, usageRequests }),
+  );
+
   // A 403 refuses the request, not the sign-in: no refresh, no Reconnect.
   resetStale("access-secret-stale");
   refused.clear();
@@ -847,7 +891,7 @@ async function main() {
   );
   check(
     "the retry keeps tokens off the DTO",
-    !JSON.stringify([renewed, rotated, mixed, dead, busy, busyNearExpiry, failedOnce, foreign, forbidden]).includes("access-secret"),
+    !JSON.stringify([renewed, rotated, mixed, dead, busy, busyNearExpiry, failedOnce, foreign, validated, forbidden]).includes("access-secret"),
   );
   globalThis.__profileUsageRefresh = null;
   Date.now = realDateNow;

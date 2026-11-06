@@ -111,6 +111,52 @@ async function main() {
   );
   release();
   console.log("PASS a grant refresh and a Codex starting on the same account never overlap");
+
+  // Refresh and deletion exclude each other, and a launch that waited on a
+  // refresh does not lease a profile that is gone by then.
+  let finishGuarded;
+  const guarded = leases.runRefreshWhileUnleased(shared.id, async () => {
+    await new Promise((resolve) => (finishGuarded = resolve));
+  });
+  await assert.rejects(
+    store.deleteProfile(shared.id),
+    (error) => error.name === "CodexCliAccountProfileLeasedError",
+    "an account is not deleted under a refresh of its grant",
+  );
+  finishGuarded();
+  await guarded;
+  let releaseDelete;
+  const deleting = leases.runWhileUnleased(shared.id, async () => {
+    await new Promise((resolve) => (releaseDelete = resolve));
+  });
+  assert.equal(
+    leases.runRefreshWhileUnleased(shared.id, async () => "refused"),
+    null,
+    "an account being deleted is not refreshed",
+  );
+  releaseDelete();
+  await deleting;
+
+  const { profile: doomed } = await store.createProfile({ label: "Doomed" });
+  let finishDoomed;
+  const doomedRefresh = leases.runRefreshWhileUnleased(doomed.id, async () => {
+    await new Promise((resolve) => (finishDoomed = resolve));
+  });
+  const waiting = runtime.acquireNativeCodexProfileLease(doomed.id, "terminal:doomed");
+  const registry = path.join(store.rootDir, "account-profiles.json");
+  const listed = JSON.parse(fs.readFileSync(registry, "utf8"));
+  listed.profiles = listed.profiles.filter((entry) => entry.id !== doomed.id);
+  fs.writeFileSync(registry, JSON.stringify(listed), { mode: 0o600 });
+  await new Promise((resolve) => setImmediate(resolve));
+  finishDoomed();
+  await doomedRefresh;
+  await assert.rejects(
+    waiting,
+    (error) => error.name === "CodexCliAccountProfileNotFoundError",
+    "a launch that waited does not lease a profile removed meanwhile",
+  );
+  assert.equal(leases.isLeased(doomed.id), false);
+  console.log("PASS refresh and deletion exclude each other, and a waiting launch rechecks its profile");
 }
 
 main()

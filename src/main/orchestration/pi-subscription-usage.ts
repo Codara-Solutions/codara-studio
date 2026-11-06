@@ -684,6 +684,17 @@ function codexAccountId(resolved: ResolvedAccess): string | null {
 }
 
 /**
+ * The one ChatGPT account a stored credential names: null when it names
+ * none, or when its metadata and its token's claim disagree. A retry only
+ * ever uses a credential whose identity positively matches.
+ */
+function codexIdentity(credential: StoredCredential): string | null {
+  const claim = accountIdFromAccessToken(credential.access);
+  if (claim && credential.accountId && claim !== credential.accountId) return null;
+  return claim ?? credential.accountId;
+}
+
+/**
  * The one retry after ChatGPT refused (401) a token Codara still dates as
  * valid. ChatGPT can end an access token well before its `exp`, and a Codex
  * session on the same grant may have rotated it meanwhile; the Codex CLI
@@ -699,35 +710,32 @@ function codexAccountId(resolved: ResolvedAccess): string | null {
  * store's lock.
  *
  * "busy" means a running Codex owns the refresh: read again shortly. Null
- * when nothing better exists, or when the store now names another ChatGPT
- * account, whose limits are not this card's to show.
+ * when nothing better exists, or when the store no longer positively names
+ * `accountId` (another account, none, or two that disagree): those limits
+ * are not this card's to show.
  */
 async function codexAccessAfterRejection(
   profileId: string,
-  rejected: ResolvedAccess,
-): Promise<ResolvedAccess | "busy" | null> {
-  const accountId = codexAccountId(rejected);
-  const accountOf = (credential: StoredCredential): string | null =>
-    accountIdFromAccessToken(credential.access) ?? credential.accountId;
+  rejectedAccess: string,
+  accountId: string,
+): Promise<{ access: string; accountId: string } | "busy" | null> {
   const stored = await reconciledCredential(profileId, "openai-codex");
-  if (!stored) return null;
-  const storedAccount = accountOf(stored);
-  if (accountId && storedAccount && storedAccount !== accountId) return null;
-  if (stored.access !== rejected.access) return { credential: stored, access: stored.access };
+  if (!stored || codexIdentity(stored) !== accountId) return null;
+  if (stored.access !== rejectedAccess) return { access: stored.access, accountId };
   const { unifiedAccountsFor } = await import("./unified-account-registry");
   const refreshed = await unifiedAccountsFor("openai-codex")
     .refreshWhileCliIdle(profileId, () =>
       refreshCredential(profileId, "openai-codex", {
-        rejectedAccess: rejected.access,
-        ...(accountId ? { expectedAccountId: accountId } : {}),
+        rejectedAccess,
+        expectedAccountId: accountId,
       }),
     )
     .catch(() => null);
   if (refreshed === "busy") return "busy";
-  if (!refreshed || refreshed === rejected.access) return null;
-  const renewedAccount = accountIdFromAccessToken(refreshed);
-  if (accountId && renewedAccount && renewedAccount !== accountId) return null;
-  return { credential: stored, access: refreshed };
+  if (!refreshed || refreshed === rejectedAccess) return null;
+  const renewed = await reconciledCredential(profileId, "openai-codex");
+  if (!renewed || renewed.access !== refreshed || codexIdentity(renewed) !== accountId) return null;
+  return { access: refreshed, accountId };
 }
 
 async function anthropicUsage(
@@ -887,7 +895,7 @@ async function codexUsage(
   let headers = codexHeaders(resolved.access, accountId);
   let result = await fetchJsonRecord(CODEX_USAGE_URL, headers);
   if (!result.ok && result.status === 401) {
-    const retry = await codexAccessAfterRejection(profile.id, resolved);
+    const retry = await codexAccessAfterRejection(profile.id, resolved.access, accountId);
     if (retry === "busy") {
       return profileProblem(
         profile,
@@ -897,7 +905,7 @@ async function codexUsage(
       );
     }
     if (retry) {
-      accountId = codexAccountId(retry) ?? accountId;
+      accountId = retry.accountId;
       headers = codexHeaders(retry.access, accountId);
       result = await fetchJsonRecord(CODEX_USAGE_URL, headers);
     }
