@@ -52,12 +52,21 @@ async function load() {
   return require(outfile);
 }
 
-const TARGET = { id: "pane-1", title: "Fix the docs", workspaceId: "ws-1", workspace: "api", runtime: "claude" };
+const TARGET = {
+  id: "pane-1",
+  title: "Fix the docs",
+  workspaceId: "ws-1",
+  workspace: "api",
+  runtime: "claude",
+  sessionSince: 1_000,
+};
 
 function harness(lib) {
   const h = {
     now: Date.UTC(2026, 10, 6, 12),
     alive: new Set(["pane-1", "pane-2"]),
+    // Overrides of the live session in a pane: a new agent, another workspace.
+    swapped: new Map(),
     busy: new Map(),
     throws: null,
     delivered: [],
@@ -70,7 +79,7 @@ function harness(lib) {
   h.relays = new lib.SessionRelays({
     now: () => h.now,
     newId: () => `relay-${++h.ids}`,
-    resolveTarget: (id) => (h.alive.has(id) ? { ...TARGET, id } : "no live session has that id"),
+    resolveTarget: (id) => (h.alive.has(id) ? { ...TARGET, id, ...h.swapped.get(id) } : "no live session has that id"),
     busy: (target) => h.busy.get(target.id) ?? null,
     deliver: (target, prompt) => {
       if (h.throws) throw new Error(h.throws);
@@ -202,6 +211,17 @@ function harness(lib) {
     assert.equal(h.delivered.length, 1);
 
     h.alive.add("pane-1");
+    for (const swap of [{ runtime: "codex", sessionSince: 2_000 }, { sessionSince: 2_000 }, { workspaceId: "ws-2" }]) {
+      const approved = h.ask().relay;
+      h.swapped.set("pane-1", swap);
+      const moved = h.relays.decide(approved.id, "send");
+      assert.equal(moved.ok, false, `a pane whose session changed (${JSON.stringify(swap)}) is not the approved target`);
+      assert.match(moved.error, /a different session now runs in that tab/);
+      assert.equal(h.relays.status(approved.id), "undeliverable");
+      h.swapped.delete("pane-1");
+    }
+    assert.equal(h.delivered.length, 1);
+
     const broken = h.ask().relay;
     h.throws = "the remote machine disconnected";
     const failed = h.relays.decide(broken.id, "send");
@@ -254,6 +274,14 @@ function harness(lib) {
     const main = fs.readFileSync(path.join(ROOT, "src", "main", "session-relay", "index.ts"), "utf8");
     assert.match(main, /handle\("relay:decide"/, "Send is an IPC channel of the trusted window (handle gates the sender)");
     assert.doesNotMatch(main, /ipcMain\./, "no ungated channel");
+    assert.match(
+      main,
+      /decision === "send" && Date\.now\(\) - \(lastGestureAt\.get\(event\.sender\) \?\? 0\) > GESTURE_WINDOW_MS/,
+      "Send needs real input in the window, which renderer script (app.evaluate) cannot make",
+    );
+    assert.match(main, /if \(logQueued >= LOG_QUEUE_MAX\)/, "a refusal flood cannot grow the log queue");
+    const listAll = socket.slice(socket.indexOf("async function handleSessionListAll"));
+    assert.match(listAll.slice(0, 600), /agentSessionCallerRefusal/, "list_all checks the caller like relay does");
   }
 
   console.log("session-relay: ok");

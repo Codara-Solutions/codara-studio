@@ -8,6 +8,7 @@ import {
   RELAY_MAX_PENDING,
   RELAY_TTL_MS,
   relayPrompt,
+  sameRelayTarget,
   type PendingRelay,
   type RelayDecision,
   type RelayOutcome,
@@ -98,7 +99,13 @@ export class SessionRelays {
       this.finish(relay, "dismissed");
       return { ok: true, outcome: "dismissed" };
     }
-    const target = this.deps.resolveTarget(relay.target.id);
+    const resolved = this.deps.resolveTarget(relay.target.id);
+    // A new agent in the same pane, or the pane moved to another workspace,
+    // is not the session the user approved sending to.
+    const target =
+      typeof resolved === "string" || sameRelayTarget(resolved, relay.target)
+        ? resolved
+        : "a different session now runs in that tab";
     if (typeof target === "string") {
       this.finish(relay, "undeliverable", target);
       return { ok: false, error: `Not sent: ${target}.`, stillPending: false };

@@ -23,6 +23,13 @@ export interface RelayTarget {
   workspaceId: string;
   workspace: string;
   runtime: string;
+  /** When the agent now in the pane started: a new agent there is a new session. */
+  sessionSince: number;
+}
+
+/** The pane still holds the session the user was shown, in the same workspace. */
+export function sameRelayTarget(a: RelayTarget, b: RelayTarget): boolean {
+  return a.id === b.id && a.runtime === b.runtime && a.workspaceId === b.workspaceId && a.sessionSince === b.sessionSince;
 }
 
 export interface PendingRelay {

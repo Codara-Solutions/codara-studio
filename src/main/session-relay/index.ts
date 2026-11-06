@@ -6,6 +6,7 @@
 // relay:decide is an IPC channel of the trusted main window only.
 
 import { randomUUID } from "node:crypto";
+import type { WebContents } from "electron";
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import { buildLiveSessions } from "@shared/live-sessions";
@@ -53,7 +54,14 @@ function resolveTarget(id: string): RelayTarget | string {
   const [live] = buildLiveSessions(activity, workspaces);
   if (!live) return "its workspace was removed";
   if (!RELAY_RUNTIMES.includes(live.runtime)) return "only Claude Code and Codex sessions take relayed messages";
-  return { id: live.id, title: live.title, workspaceId: live.workspaceId, workspace: live.workspace, runtime: live.runtime };
+  return {
+    id: live.id,
+    title: live.title,
+    workspaceId: live.workspaceId,
+    workspace: live.workspace,
+    runtime: live.runtime,
+    sessionSince: activity[0].sessionSince,
+  };
 }
 
 function busy(target: RelayTarget): string | null {
@@ -98,17 +106,35 @@ function changed(): void {
   if (win && !win.webContents.isDestroyed()) win.webContents.send("relay:changed");
 }
 
+// A caller flooding refusals must not grow an unbounded write queue: past
+// LOG_QUEUE_MAX lines in flight, lines are counted and one summary is written.
+const LOG_QUEUE_MAX = 50;
 let logChain: Promise<void> = Promise.resolve();
+let logQueued = 0;
+let logDropped = 0;
 
 function appendLog(entry: RelayLogEntry): void {
+  if (logQueued >= LOG_QUEUE_MAX) {
+    logDropped += 1;
+    return;
+  }
+  logQueued += 1;
   const file = join(codaraHome(), RELAY_LOG_FILE);
   logChain = logChain
     .then(async () => {
       const size = (await fsp.stat(file).catch(() => null))?.size ?? 0;
       if (size > LOG_ROTATE_BYTES) await fsp.rename(file, `${file}.1`).catch(() => undefined);
-      await fsp.appendFile(file, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
+      let lines = `${JSON.stringify(entry)}\n`;
+      if (logDropped > 0) {
+        lines += `${JSON.stringify({ time: entry.time, outcome: "not-logged", count: logDropped })}\n`;
+        logDropped = 0;
+      }
+      await fsp.appendFile(file, lines, { encoding: "utf8", mode: 0o600 });
     })
-    .catch((err) => console.warn("[relay] log write failed:", err));
+    .catch((err) => console.warn("[relay] log write failed:", err))
+    .finally(() => {
+      logQueued -= 1;
+    });
 }
 
 const relays = new SessionRelays({
@@ -154,12 +180,37 @@ export async function handleSessionRelay(input: {
   };
 }
 
+// Send must follow a real click or key press in the window, and each one
+// answers at most one Send. A dev build lets an agent run script in the
+// renderer (app.evaluate), which can call the bridge or click the button, but
+// script never produces browser input events.
+const GESTURE_WINDOW_MS = 1_500;
+const lastGestureAt = new WeakMap<WebContents, number>();
+
+function watchGestures(contents: WebContents): void {
+  if (lastGestureAt.has(contents)) return;
+  lastGestureAt.set(contents, 0);
+  contents.on("input-event", (_event, input) => {
+    if (input.type === "mouseUp" || input.type === "keyDown" || input.type === "rawKeyDown") {
+      lastGestureAt.set(contents, Date.now());
+    }
+  });
+}
+
 export function registerSessionRelayIpc(handle: IpcHandle): void {
-  handle("relay:list", async () => ({ pending: relays.pending(), outcomes: relays.outcomes() }));
-  handle("relay:decide", async (_event, relayId: unknown, decision: unknown) => {
+  handle("relay:list", async (event) => {
+    watchGestures(event.sender);
+    return { pending: relays.pending(), outcomes: relays.outcomes() };
+  });
+  handle("relay:decide", async (event, relayId: unknown, decision: unknown) => {
     if (typeof relayId !== "string" || (decision !== "send" && decision !== "dismiss")) {
       return { ok: false, error: "Unknown relay action.", stillPending: false };
     }
+    watchGestures(event.sender);
+    if (decision === "send" && Date.now() - (lastGestureAt.get(event.sender) ?? 0) > GESTURE_WINDOW_MS) {
+      return { ok: false, error: "Send needs your click or key press in Codara.", stillPending: true };
+    }
+    if (decision === "send") lastGestureAt.set(event.sender, 0);
     await refreshWorkspaces();
     return relays.decide(relayId, decision as RelayDecision);
   });

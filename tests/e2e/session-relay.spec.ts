@@ -150,6 +150,17 @@ test("a relayed message reaches a session only after the user presses Send", asy
       await expect(card.locator(".nc-relay-text b, .nc-relay-text a")).toHaveCount(0);
       const dir = process.env.CODARA_PROOF_DIR;
       if (dir) await page.screenshot({ path: join(dir, "relay-approval.png") });
+      // Script in the renderer (what app.evaluate runs) cannot press Send
+      // without a real click or key press just before it.
+      await page.waitForTimeout(2_000);
+      const scripted = await page.evaluate(async (id) => {
+        (document.querySelector(`[data-relay-id="${id}"] [data-recommended="true"]`) as HTMLButtonElement | null)?.click();
+        return window.spark.sessionRelay.decide(id, "send");
+      }, relayId);
+      expect(scripted).toMatchObject({ ok: false, stillPending: true });
+      expect((await request("session.relay", { relayId })).status).toBe("pending");
+      await page.waitForTimeout(3_500);
+      expect(await finalMessage()).toContain("Answer 1 to: hello");
       await card.getByRole("button", { name: "Send" }).click();
       await expect(card).toHaveCount(0);
       await expect(page.locator(".nc-row", { hasText: "Grok Bot wants to message \u201cFix the docs\u201d" }).locator(".nc-tag", { hasText: "Sent" })).toBeVisible();
