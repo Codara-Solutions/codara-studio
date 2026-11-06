@@ -603,6 +603,16 @@ async function main() {
       assert.strictEqual(nearExpiry, soonAccess);
       assert.deepStrictEqual(refusedGrants, ["live"]);
     });
+    // The refused token is still stored but the caller expected another
+    // ChatGPT account: its refresh token is not spent for that caller.
+    const wrongAccount = await refreshPiSubscriptionProfileCredential(codexCase.profileId, "openai-codex", {
+      rejectedAccess: soonAccess,
+      expectedAccountId: "acct-other",
+    });
+    check("a refused token of another account than the caller expects is not refreshed", () => {
+      assert.strictEqual(wrongAccount, null);
+      assert.deepStrictEqual(refusedGrants, ["live"]);
+    });
   }
 
   // With Studio's keeper running (production), a Claude refresh is renewed

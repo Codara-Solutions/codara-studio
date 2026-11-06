@@ -241,14 +241,12 @@ function accountIdFromAccessToken(access: string): string | null {
 async function refreshCredential(
   profileId: string,
   provider: PiSubscriptionProvider,
-  rejectedAccess?: string,
+  rejection?: { rejectedAccess: string; expectedAccountId?: string },
 ): Promise<string | null> {
   const { refreshPiSubscriptionProfileCredential } = await import("./pi-subscription-auth");
-  return refreshPiSubscriptionProfileCredential(
-    profileId,
-    provider,
-    rejectedAccess ? { rejectedAccess } : {},
-  ).catch(() => null);
+  return refreshPiSubscriptionProfileCredential(profileId, provider, rejection ?? {}).catch(
+    () => null,
+  );
 }
 
 async function fetchJsonRecord(
@@ -640,13 +638,13 @@ function profileProblem(
 }
 
 /**
- * Resolve a usable access token, refreshing first when the stored one has
- * expired. Returns null when the provider is not connected at all.
+ * The account's stored credential after a reconcile with its CLI half.
+ * Never refreshes anything. Null when the provider is not connected at all.
  */
-async function usableAccessToken(
+async function reconciledCredential(
   profileId: string,
   provider: PiSubscriptionProvider,
-): Promise<{ credential: StoredCredential; access: string } | null> {
+): Promise<StoredCredential | null> {
   // Cheap, and it catches a rotation by the CLI (a Keychain-only one for
   // Claude Code) before the probe would report a needless "session expired".
   const { unifiedAccountsFor } = await import("./unified-account-registry");
@@ -656,7 +654,18 @@ async function usableAccessToken(
     preferredAccountProfileId: profileId,
     requirePreferred: true,
   });
-  const credential = await readStoredCredential(provider, selected.authFile);
+  return readStoredCredential(provider, selected.authFile);
+}
+
+/**
+ * Resolve a usable access token, refreshing first when the stored one has
+ * expired. Returns null when the provider is not connected at all.
+ */
+async function usableAccessToken(
+  profileId: string,
+  provider: PiSubscriptionProvider,
+): Promise<{ credential: StoredCredential; access: string } | null> {
+  const credential = await reconciledCredential(profileId, provider);
   if (!credential) return null;
   // Same 60s headroom as the in-lock re-check in refreshPiSubscriptionCredential:
   // a token expiring in a few seconds would 401 mid-request and the card would
@@ -679,12 +688,17 @@ function codexAccountId(resolved: ResolvedAccess): string | null {
  * valid. ChatGPT can end an access token well before its `exp`, and a Codex
  * session on the same grant may have rotated it meanwhile; the Codex CLI
  * answers a 401 the same way, by reloading its login and refreshing once.
- * So: read the account's credential again (the reconcile adopts a newer copy
- * from its Codex home), and when it still holds the refused token, refresh
- * that one, unless a Codex process runs on the account's home: it refreshes
- * the grant on its own 401, and two refreshers would race for one rotating
- * refresh token. "busy" then means: read again shortly. Null when nothing
- * better exists, or when what the store now holds names another ChatGPT
+ *
+ * Order matters, since a refresh spends a rotating refresh token: re-read
+ * the credential without refreshing (the reconcile adopts a newer copy from
+ * the account's Codex home), check it is still this ChatGPT account, use a
+ * newer copy as it is, and only when the store still holds the refused token
+ * and no Codex process runs on the account's home (it refreshes the grant on
+ * its own 401, and two refreshers would race) refresh it, exactly once,
+ * with the account checked again under the store's lock.
+ *
+ * "busy" means a running Codex owns the refresh: read again shortly. Null
+ * when nothing better exists, or when the store now names another ChatGPT
  * account, whose limits are not this card's to show.
  */
 async function codexAccessAfterRejection(
@@ -692,23 +706,26 @@ async function codexAccessAfterRejection(
   rejected: ResolvedAccess,
 ): Promise<ResolvedAccess | "busy" | null> {
   const accountId = codexAccountId(rejected);
-  const sameAccount = (candidate: ResolvedAccess): boolean => {
-    const candidateId = accountIdFromAccessToken(candidate.access) ?? candidate.credential.accountId;
-    return !accountId || !candidateId || candidateId === accountId;
-  };
-  const reread = await usableAccessToken(profileId, "openai-codex");
-  if (reread?.access && reread.access !== rejected.access) {
-    return sameAccount(reread) ? reread : null;
-  }
+  const accountOf = (credential: StoredCredential): string | null =>
+    accountIdFromAccessToken(credential.access) ?? credential.accountId;
+  const stored = await reconciledCredential(profileId, "openai-codex");
+  if (!stored) return null;
+  const storedAccount = accountOf(stored);
+  if (accountId && storedAccount && storedAccount !== accountId) return null;
+  if (stored.access !== rejected.access) return { credential: stored, access: stored.access };
   const { unifiedAccountsFor } = await import("./unified-account-registry");
   const inUse = await unifiedAccountsFor("openai-codex")
     .cliHalfInUse(profileId)
     .catch(() => false);
   if (inUse) return "busy";
-  const refreshed = await refreshCredential(profileId, "openai-codex", rejected.access);
+  const refreshed = await refreshCredential(profileId, "openai-codex", {
+    rejectedAccess: rejected.access,
+    ...(accountId ? { expectedAccountId: accountId } : {}),
+  });
   if (!refreshed || refreshed === rejected.access) return null;
-  const renewed = { credential: reread?.credential ?? rejected.credential, access: refreshed };
-  return sameAccount(renewed) ? renewed : null;
+  const renewedAccount = accountIdFromAccessToken(refreshed);
+  if (accountId && renewedAccount && renewedAccount !== accountId) return null;
+  return { credential: stored, access: refreshed };
 }
 
 async function anthropicUsage(

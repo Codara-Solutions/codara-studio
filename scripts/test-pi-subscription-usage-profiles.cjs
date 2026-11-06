@@ -627,7 +627,7 @@ async function main() {
   const stale = profiles[1];
   const staleAuthFile = authFiles[stale.id];
   const storedAccess = (file) => JSON.parse(fs.readFileSync(file, "utf8"))["openai-codex"].access;
-  const resetStale = (access, accountId = "vendor-account-second") => {
+  const resetStale = (access, accountId = "vendor-account-second", expiresIn = 7 * 86_400_000) => {
     fs.writeFileSync(
       staleAuthFile,
       JSON.stringify({
@@ -635,7 +635,7 @@ async function main() {
           type: "oauth",
           access,
           refresh: "refresh-secret",
-          expires: Date.now() + 7 * 86_400_000,
+          expires: Date.now() + expiresIn,
           accountId,
         },
       }),
@@ -771,6 +771,60 @@ async function main() {
     JSON.stringify({ busy, calls: globalThis.__profileUsageRefreshCalls }),
   );
 
+  // The refused token crosses the near-expiry line while the read is in
+  // flight. The re-read must not refresh on its own: the guards below still
+  // decide whether the single refresh happens.
+  const nearExpiry = 30_000;
+  resetStale("access-secret-stale");
+  onRefusal = () => {
+    onRefusal = null;
+    resetStale("access-secret-stale", "vendor-account-second", nearExpiry);
+  };
+  globalThis.__profileUsageHalvesInUse.add(stale.id);
+  globalThis.__profileUsageRefresh = () => {
+    throw new Error("a running Codex session owns the refresh");
+  };
+  const busyNearExpiry = await staleUsage();
+  globalThis.__profileUsageHalvesInUse.delete(stale.id);
+  check(
+    "a refusal near expiry while Codex runs on the account is still not refreshed",
+    busyNearExpiry.status === "error" && globalThis.__profileUsageRefreshCalls.length === 0,
+    JSON.stringify({ busyNearExpiry, calls: globalThis.__profileUsageRefreshCalls }),
+  );
+
+  resetStale("access-secret-stale");
+  onRefusal = () => {
+    onRefusal = null;
+    resetStale("access-secret-stale", "vendor-account-second", nearExpiry);
+  };
+  globalThis.__profileUsageRefresh = () => null;
+  const failedOnce = await staleUsage();
+  check(
+    "a failed refresh near expiry is attempted exactly once",
+    failedOnce.status === "expired" &&
+      globalThis.__profileUsageRefreshCalls.length === 1 &&
+      globalThis.__profileUsageRefreshCalls[0].options?.rejectedAccess === "access-secret-stale" &&
+      globalThis.__profileUsageRefreshCalls[0].options?.expectedAccountId === "vendor-account-second",
+    JSON.stringify({ failedOnce, calls: globalThis.__profileUsageRefreshCalls }),
+  );
+
+  resetStale("access-secret-stale");
+  onRefusal = () => {
+    onRefusal = null;
+    resetStale("access-secret-other-account", "vendor-account-other", nearExpiry);
+  };
+  globalThis.__profileUsageRefresh = () => {
+    throw new Error("another account's credential is never refreshed for this card");
+  };
+  const foreign = await staleUsage();
+  check(
+    "a store that switched accounts near expiry is neither refreshed nor sent",
+    foreign.status === "expired" &&
+      globalThis.__profileUsageRefreshCalls.length === 0 &&
+      !usageRequests.some((request) => request.authorization === "Bearer access-secret-other-account"),
+    JSON.stringify({ foreign, usageRequests, calls: globalThis.__profileUsageRefreshCalls }),
+  );
+
   // A 403 refuses the request, not the sign-in: no refresh, no Reconnect.
   resetStale("access-secret-stale");
   refused.clear();
@@ -793,7 +847,7 @@ async function main() {
   );
   check(
     "the retry keeps tokens off the DTO",
-    !JSON.stringify([renewed, rotated, mixed, dead, busy, forbidden]).includes("access-secret"),
+    !JSON.stringify([renewed, rotated, mixed, dead, busy, busyNearExpiry, failedOnce, foreign, forbidden]).includes("access-secret"),
   );
   globalThis.__profileUsageRefresh = null;
   Date.now = realDateNow;
