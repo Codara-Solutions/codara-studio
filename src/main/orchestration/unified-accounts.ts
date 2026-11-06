@@ -177,6 +177,8 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   private tail: Promise<void> = Promise.resolve();
   /** Rows mid-delete: every reconcile entry point answers null for them. */
   private readonly deleting = new Set<string>();
+  /** Grant refreshes in flight per row, which a delete waits for. */
+  private readonly refreshing = new Map<string, Promise<void>>();
   private broadcastHook: (() => void) | null;
   private sessionsHook: UnifiedTerminalSessions | null;
   private readonly defaultsChangedHook: (() => void | Promise<void>) | null;
@@ -856,14 +858,30 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     refresh: () => Promise<T>,
   ): Promise<T | "busy"> {
     const profile = await this.piStore.registry.getProfile(coraProfileId).catch(() => undefined);
-    if (profile?.cli.kind !== "managed") return refresh();
-    const cliProfileId = profile.cli.profileId;
-    if (!this.adapter.managedHome(cliProfileId).holdsSessions) return refresh();
-    this.sweepLeases();
-    if (!this.leases.runRefreshWhileUnleased) {
-      return this.leases.isLeased(cliProfileId) ? "busy" : refresh();
-    }
-    return this.leases.runRefreshWhileUnleased(cliProfileId, refresh) ?? "busy";
+    // A row being deleted is not refreshed, and a delete waits for a refresh
+    // already running: the check, the start and the registration below are
+    // one synchronous step, as is deleteAccount's mark.
+    if (this.deleting.has(coraProfileId) || this.refreshing.has(coraProfileId)) return "busy";
+    const start = (): Promise<T | "busy"> => {
+      if (profile?.cli.kind !== "managed") return refresh();
+      const cliProfileId = profile.cli.profileId;
+      if (!this.adapter.managedHome(cliProfileId).holdsSessions) return refresh();
+      this.sweepLeases();
+      if (!this.leases.runRefreshWhileUnleased) {
+        return this.leases.isLeased(cliProfileId) ? Promise.resolve("busy") : refresh();
+      }
+      return this.leases.runRefreshWhileUnleased(cliProfileId, refresh) ?? Promise.resolve("busy");
+    };
+    const pending = start();
+    const settled = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.refreshing.set(coraProfileId, settled);
+    void settled.then(() => {
+      if (this.refreshing.get(coraProfileId) === settled) this.refreshing.delete(coraProfileId);
+    });
+    return pending;
   }
 
   /** Whether a terminal still runs in the managed home of a CLI half. */
@@ -925,6 +943,8 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       let purgePending = held;
       this.deleting.add(profile.id);
       try {
+        // A grant refresh already running finishes before either half goes.
+        await this.refreshing.get(profile.id);
         // Unwatched first, so no reconcile racing the delete can rebuild a
         // half from the other once its file is gone.
         await this.mirror.unwatch(profile.id);
