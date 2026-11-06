@@ -566,7 +566,8 @@ Cancel; every search result is rendered; the face is opaque; a menu closes on
 a scroll only when its anchor moved), `test-settings-search` (every rendered
 Settings row has a search entry; ranking, typos, synonyms and highlights),
 `test-account-card-keys` (an account
-card keeps its key while it gains or loses a half), `test-quick-commands`
+card keeps its key while it gains or loses a half), `test-account-card-rejected`
+(a grant the provider refused shows Reconnect, not "Signed in"), `test-quick-commands`
 (saved shell commands and agent prompts: the stored list, repository scope,
 `{branch}` and `{cwd}`, the terminal right-click choice and where a command
 goes), `test-feature-tips` (the feature tips catalog, when a tip may appear

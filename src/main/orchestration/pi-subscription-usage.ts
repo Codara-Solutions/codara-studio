@@ -241,9 +241,14 @@ function accountIdFromAccessToken(access: string): string | null {
 async function refreshCredential(
   profileId: string,
   provider: PiSubscriptionProvider,
+  rejectedAccess?: string,
 ): Promise<string | null> {
   const { refreshPiSubscriptionProfileCredential } = await import("./pi-subscription-auth");
-  return refreshPiSubscriptionProfileCredential(profileId, provider).catch(() => null);
+  return refreshPiSubscriptionProfileCredential(
+    profileId,
+    provider,
+    rejectedAccess ? { rejectedAccess } : {},
+  ).catch(() => null);
 }
 
 async function fetchJsonRecord(
@@ -663,6 +668,41 @@ async function usableAccessToken(
   return { credential, access: refreshed };
 }
 
+type ResolvedAccess = { credential: StoredCredential; access: string };
+
+function codexAccountId(resolved: ResolvedAccess): string | null {
+  return resolved.credential.accountId ?? accountIdFromAccessToken(resolved.access);
+}
+
+/**
+ * The one retry after ChatGPT refused a token Codara still dates as valid.
+ * ChatGPT can end an access token well before its `exp`, and a Codex session
+ * on the same grant may have rotated it meanwhile; the Codex CLI answers a
+ * 401 the same way, by reloading its login and refreshing once. So: read the
+ * account's credential again (the reconcile adopts a newer copy from its
+ * Codex home), and when it still holds the refused token, refresh that one.
+ * Null when nothing better exists, or when what the store now holds names
+ * another ChatGPT account, whose limits are not this card's to show.
+ */
+async function codexAccessAfterRejection(
+  profileId: string,
+  rejected: ResolvedAccess,
+): Promise<ResolvedAccess | null> {
+  const accountId = codexAccountId(rejected);
+  const sameAccount = (candidate: ResolvedAccess): boolean => {
+    const candidateId = accountIdFromAccessToken(candidate.access) ?? candidate.credential.accountId;
+    return !accountId || !candidateId || candidateId === accountId;
+  };
+  const reread = await usableAccessToken(profileId, "openai-codex");
+  if (reread?.access && reread.access !== rejected.access) {
+    return sameAccount(reread) ? reread : null;
+  }
+  const refreshed = await refreshCredential(profileId, "openai-codex", rejected.access);
+  if (!refreshed || refreshed === rejected.access) return null;
+  const renewed = { credential: reread?.credential ?? rejected.credential, access: refreshed };
+  return sameAccount(renewed) ? renewed : null;
+}
+
 async function anthropicUsage(
   profile: PiAccountProfile,
   checkedAt: string,
@@ -798,7 +838,7 @@ async function codexUsage(
   if (!resolved.access) {
     return profileProblem(profile, checkedAt, "expired", "Session expired. Reconnect this ChatGPT account.");
   }
-  const accountId = resolved.credential.accountId ?? accountIdFromAccessToken(resolved.access);
+  let accountId = codexAccountId(resolved);
   if (!accountId) {
     return profileProblem(
       profile,
@@ -807,8 +847,16 @@ async function codexUsage(
       "ChatGPT usage needs an account id that this session did not provide. Reconnect.",
     );
   }
-  const headers = codexHeaders(resolved.access, accountId);
-  const result = await fetchJsonRecord(CODEX_USAGE_URL, headers);
+  let headers = codexHeaders(resolved.access, accountId);
+  let result = await fetchJsonRecord(CODEX_USAGE_URL, headers);
+  if (!result.ok && (result.status === 401 || result.status === 403)) {
+    const retry = await codexAccessAfterRejection(profile.id, resolved);
+    if (retry) {
+      accountId = codexAccountId(retry) ?? accountId;
+      headers = codexHeaders(retry.access, accountId);
+      result = await fetchJsonRecord(CODEX_USAGE_URL, headers);
+    }
+  }
   if (!result.ok) {
     if (result.status === 401 || result.status === 403) {
       return profileProblem(profile, checkedAt, "expired", "ChatGPT rejected the stored session. Reconnect.");

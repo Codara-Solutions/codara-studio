@@ -1047,10 +1047,17 @@ export function cancelPiSubscriptionLoginForOwner(
  * a superseded token and silently sign the user out. Under the lock we also
  * re-check expiry, because the session that beat us here may have already
  * produced a perfectly good token.
+ *
+ * `rejectedAccess` is an access token the provider has just refused although
+ * its stored expiry is still ahead (ChatGPT ends tokens before their `exp`).
+ * While the store still holds that token it is refreshed whatever its expiry
+ * says; once the store holds another one, that one is answered unrefreshed,
+ * since whoever replaced it already did the refresh.
  */
 export async function refreshPiSubscriptionProfileCredential(
   rawProfileId: unknown,
   rawProvider?: unknown,
+  options: { rejectedAccess?: string } = {},
 ): Promise<string | null> {
   const profileId = typeof rawProfileId === "string" ? rawProfileId : "";
   const inspection = await inspectPiAccountProfileAuthStore();
@@ -1075,10 +1082,13 @@ export async function refreshPiSubscriptionProfileCredential(
     await storage.modify(provider, async (current) => {
       if (!isRecord(current) || current.type !== "oauth") return undefined;
       const credential = current as unknown as OAuthCredential;
+      const rejected =
+        nonEmptyString(options.rejectedAccess) && credential.access === options.rejectedAccess;
       // Headroom past Pi's own window (0.87 refreshes five minutes before its
       // stored expiry), so a Pi process handed this credential right after
       // never finds it due and refreshes it on its own.
       if (
+        !rejected &&
         typeof credential.expires === "number" &&
         credential.expires > Date.now() + REFRESH_HEADROOM_MS
       ) {

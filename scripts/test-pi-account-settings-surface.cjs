@@ -187,6 +187,8 @@ assert.doesNotMatch(
 // with the rows. A row whose Cora half reports an error offers a fix
 // instead, so it is not ready. It is omitted when there are none.
 assert.match(settings, /const ready = cards\.filter\(accountCardReady\)\.length;/);
+// A grant the provider refused on its limits read is drawn as one to reconnect.
+assert.match(settings, /coraHeld && usage\?\.status === "expired"\s*\? \{ rejected: usage\.message \|\| "Sign-in expired\." \}/);
 assert.match(
   card,
   /export function accountCardReady\(card: AccountCardView\): boolean \{\s*const state = accountCardState\(card\);\s*if \(state === "system"\) return terminalUsable\(card\);\s*return \(state === "active" \|\| state === "signed-in"\) && !card\.cora\?\.error;/,
