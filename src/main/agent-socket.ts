@@ -53,6 +53,8 @@ import {
   type AgentSessionCaller,
   type AgentSessionView,
 } from "./agent-sessions";
+import { buildLiveSessions } from "@shared/live-sessions";
+import { agentBoardActivity } from "./agent-board";
 import { AGENT_SESSION_BRIEF_MAX_CHARS, AGENT_SESSION_MAX_LIVE, type AgentSessionRecord } from "@shared/agent-sessions";
 import {
   codexTrustOverride,
@@ -692,6 +694,7 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "session.status",
   "session.wait",
   "session.message",
+  "session.list_all",
 ]);
 
 // A terminal that makes a worktree changes worktrees like worktree.create.
@@ -791,6 +794,8 @@ async function dispatch(
         return await handleSessionWait(params, id, res);
       case "session.message":
         return await handleSessionMessage(params, id);
+      case "session.list_all":
+        return await handleSessionListAll(id);
       case "terminal.write":
         return await handleTerminalWrite(params, id);
       case "terminal.close":
@@ -2365,6 +2370,14 @@ async function handleSessionMessage(params: Record<string, unknown>, id: JsonRpc
   noteTerminalUserInput(paneId);
   sessions.notePrompt(record.id);
   return successResponse(id, sessions.view(record));
+}
+
+// Every agent session in a terminal pane, in every workspace, as the rail's
+// Agents view reads it. Read-only: messaging one still takes ownership
+// (session.message) or the user's approval.
+async function handleSessionListAll(id: JsonRpcId): Promise<JsonRpcResponse> {
+  const state = await loadState();
+  return successResponse(id, { sessions: buildLiveSessions(agentBoardActivity(), state.workspaces) });
 }
 
 // Deliver text to a terminal pane's PTY. paneId is the pty session id, so this
