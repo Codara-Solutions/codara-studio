@@ -48,6 +48,7 @@ import {
   rollbackCreatedWorktree,
 } from "./workspace-state-edits";
 import type { GitHubMergedPullRequest } from "./github-cli";
+import { proveByMergedPullRequestStack } from "./merged-pull-request-stack";
 
 // Agent-managed worktrees: the logic behind the worktree.create/list/remove
 // agent-socket methods and the codara_worktree_* MCP tools.
@@ -1997,6 +1998,26 @@ export async function verifyRemovable(
   return verdict;
 }
 
+// The repository's default branch as the remote has it, fetched like any
+// target, when it is not the target already judged and not the worktree's
+// own branch. Null otherwise.
+async function defaultBranchTarget(
+  ctx: VerifyContext,
+  judged: string,
+  ownBranch: string,
+  options: VerifyOptions,
+): Promise<{ name: string; commit: string } | null> {
+  const name = await resolveDefaultBranch(ctx.scope.repoCwd);
+  if (!name || shortBranch(name) === ownBranch || name === ownBranch) return null;
+  let resolved = await resolveTarget(ctx, name);
+  if (!resolved.commit || resolved.commit === judged) return null;
+  if (options.fetch && !options.pinned) {
+    await fetchTargetOnce(ctx, resolved.name);
+    resolved = await resolveTarget(ctx, name);
+  }
+  return resolved.commit && resolved.commit !== judged ? { name: resolved.name, commit: resolved.commit } : null;
+}
+
 async function proveMerged(
   ctx: VerifyContext,
   verdict: RemovalVerdict,
@@ -2028,6 +2049,15 @@ async function proveMerged(
       }
     }
   }
+  // Merged pull requests by head branch, for following a stack: the list
+  // already holds them; a removal asks GitHub per branch.
+  const listed = ctx.mergedPullRequests && "list" in ctx.mergedPullRequests ? ctx.mergedPullRequests.list : null;
+  const own = candidates;
+  const mergedFor = async (head: string): Promise<GitHubMergedPullRequest[]> => {
+    if (listed) return listed.filter((pr) => pr.headRefName === head);
+    if (head === copy.branch) return own;
+    return deps.github.listPullRequestsForHead(repo, head);
+  };
   candidates = candidates.filter((pr) => pr.headRefName === copy.branch && !pr.isCrossRepository);
 
   let targetName = explicitTarget ?? copy.baseBranch ?? null;
@@ -2073,9 +2103,41 @@ async function proveMerged(
       verdict.proof = "pull-request";
       verdict.pullRequest = { number: matching.number, url: matching.url };
     } else {
-      const content = await contentInTarget(repo, tip, target.commit);
-      if (content === true) verdict.proof = "content-in-target";
-      else if (content === "unsupported") verdict.warnings.push("git 2.38 or newer is needed for the squash-merge proof");
+      // A recorded base other than the default branch (a stacked pull
+      // request's branch, often deleted once merged) can lag behind where
+      // the work went: the default branch counts too, unless the caller
+      // named the target.
+      const fallback = explicitTarget ? null : await defaultBranchTarget(ctx, target.commit, copy.branch, options);
+      if (fallback && (await isAncestor(repo, tip, fallback.commit))) {
+        verdict.proof = "ancestor";
+        verdict.target = fallback.name;
+        verdict.targetCommit = fallback.commit;
+      } else if (wantPullRequests && !ghError) {
+        const landedBases = new Set<string>();
+        if (explicitTarget) landedBases.add(targetBranch);
+        else {
+          if (fallback) landedBases.add(shortBranch(fallback.name));
+          if (await refIsPresent(repo, `refs/remotes/${target.name}`)) landedBases.add(targetBranch);
+        }
+        const stacked = await proveByMergedPullRequestStack({
+          repo,
+          tip,
+          branch: copy.branch,
+          mergedFor,
+          landedBases,
+          defaultCommit: explicitTarget ? target.commit : (fallback?.commit ?? null),
+        });
+        if (stacked) {
+          verdict.proof = "pull-request";
+          verdict.pullRequest = stacked.pullRequest;
+          if (stacked.via.length) verdict.details.via = stacked.via;
+        }
+      }
+      if (!verdict.proof) {
+        const content = await contentInTarget(repo, tip, target.commit);
+        if (content === true) verdict.proof = "content-in-target";
+        else if (content === "unsupported") verdict.warnings.push("git 2.38 or newer is needed for the squash-merge proof");
+      }
     }
   }
   if (verdict.proof) {
@@ -2433,10 +2495,19 @@ function mapRemoveError(message: string): WorktreeCode {
   return "WORKTREE_GIT_FAILED";
 }
 
+// Merged, and held back only by the open tab of the agent that made it: an
+// agent never removes it on its own, but the user may, through the cleanup
+// tool's approval.
+const OWNED_BUT_MERGED_HINT =
+  "it is merged and nothing else holds it: call codara_worktree_cleanup, then call it again with action:\"remove\" and this path; the user approves the removal in Codara";
+
 function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): WorktreeRefusal {
   const code = verdict.blockers[0];
   const item = verdictItem(ctx, verdict);
+  const ownedButMerged =
+    verdict.mergeStatus === "merged" && verdict.blockers.every((blocker) => blocker === "WORKTREE_OWNED_BY_LIVE_AGENT");
   return refusal(code, blockerMessage(verdict, code), {
+    ...(ownedButMerged ? { hint: OWNED_BUT_MERGED_HINT } : {}),
     blockers: verdict.blockers,
     workspaceId: verdict.workspace.id,
     path: verdict.path,

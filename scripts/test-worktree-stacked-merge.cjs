@@ -1,0 +1,432 @@
+// Merge proof for worktrees whose pull request was stacked on another one:
+// src/main/merged-pull-request-stack.ts, as the agent tools
+// (agent-worktrees.ts: codara_worktree_remove) and the cleanup screen and rail
+// (worktree-cleanup/inspect.ts: mergeFacts) use it, and the advice the cleanup
+// tool gives when the agent that made the worktree still has its tab open.
+//
+// The shape: feat/roles-api was merged into feat/roles (pull request #454),
+// then feat/roles into main (#453), squashed. GitHub then deleted both
+// branches. Each worktree tip is an ancestor of its pull request's head (a
+// commit was pushed from elsewhere after the worktree's last one), and the
+// worktree of feat/roles-api still records feat/roles as its base, which now
+// resolves to the stale local branch only. GitHub is stubbed; git is real.
+const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const ROOT = path.join(__dirname, "..");
+
+function git(cwd, args) {
+  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
+function commitFile(cwd, name, content, message) {
+  fs.mkdirSync(path.dirname(path.join(cwd, name)), { recursive: true });
+  fs.writeFileSync(path.join(cwd, name), content);
+  git(cwd, ["add", name]);
+  git(cwd, ["commit", "-q", "-m", message]);
+  return git(cwd, ["rev-parse", "HEAD"]);
+}
+
+const outputs = [];
+async function bundle(entry, name) {
+  const esbuild = require("esbuild");
+  const cacheDir = path.join(ROOT, "node_modules", ".cache");
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const outfile = path.join(cacheDir, `spark-stacked-merge-${name}-${process.pid}.cjs`);
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, entry)],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    alias: { "@shared": path.join(ROOT, "src", "shared") },
+    external: ["electron", "ssh2", "cpu-features"],
+    logLevel: "silent",
+  });
+  outputs.push(outfile);
+  return require(outfile);
+}
+
+let passed = 0;
+async function check(name, fn) {
+  await fn();
+  passed += 1;
+  console.log(`ok - ${name}`);
+}
+
+async function main() {
+  const [stack, inspect, aw, advice, github] = await Promise.all([
+    bundle("src/main/merged-pull-request-stack.ts", "stack"),
+    bundle("src/main/worktree-cleanup/inspect.ts", "inspect"),
+    bundle("src/main/agent-worktrees.ts", "agent"),
+    bundle("src/shared/worktree-cleanup-agent.ts", "advice"),
+    bundle("src/main/github-cli.ts", "github"),
+  ]);
+
+  const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-stacked-merge-")));
+  const home = path.join(scratch, "home");
+  fs.mkdirSync(home, { recursive: true });
+  const gitConfig = path.join(scratch, "gitconfig");
+  fs.writeFileSync(gitConfig, "[user]\n\tname = Test\n\temail = test@example.com\n[init]\n\tdefaultBranch = main\n");
+  process.env.GIT_CONFIG_GLOBAL = gitConfig;
+  process.env.GIT_CONFIG_NOSYSTEM = "1";
+  process.env.HOME = home;
+
+  try {
+    // ── Repositories ───────────────────────────────────────────────────────
+    const origin = path.join(scratch, "origin.git");
+    const repo = path.join(scratch, "repo");
+    const hub = path.join(scratch, "hub"); // where "GitHub" merges
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+    execFileSync("git", ["init", "-q", "-b", "main", repo]);
+    commitFile(repo, "README.md", "# test\n", "init");
+    git(repo, ["remote", "add", "origin", origin]);
+    git(repo, ["push", "-q", "-u", "origin", "main"]);
+    git(repo, ["remote", "set-head", "origin", "main"]);
+    const notes = path.join(scratch, "notes");
+    fs.mkdirSync(notes);
+
+    // ── Agent-tool harness (as test-agent-worktrees.cjs) ───────────────────
+    let ids = 0;
+    const h = {
+      state: {
+        workspaces: [
+          { id: "ws-repo", name: "repo", cwd: repo, color: "#123456", workers: [] },
+          { id: "ws-notes", name: "notes", cwd: notes, color: "#654321", workers: [] },
+        ],
+        workspaceRailOrder: ["ws-repo", "ws-notes"],
+        activeWorkspaceId: "ws-notes",
+      },
+      prefs: { agentWorktreesEnabled: true, agentsMayRemoveUserWorktrees: false, agentWorktreeRegenerableIgnoredByRepo: {} },
+      paneWorkspace: { "pane-owner": "ws-repo", "pane-other": "ws-repo" },
+      sessionCwds: {},
+      pulls: [],
+      githubDown: false,
+      asked: [],
+    };
+    const lookup = async (_cwd, head) => {
+      h.asked.push(head);
+      if (h.githubDown) throw new Error("gh: not logged in");
+      return h.pulls.filter((pr) => pr.headRefName === head);
+    };
+    const deps = {
+      loadState: async () => structuredClone(h.state),
+      updateState: async (mutator) => {
+        h.state = await mutator(structuredClone(h.state));
+        return h.state;
+      },
+      loadPreferences: async () => h.prefs,
+      publishState: () => {},
+      invalidateGitCache: () => {},
+      getRun: async () => null,
+      listRuns: async () => [],
+      paneWorkspaceId: async (paneId) => h.paneWorkspace[paneId] ?? null,
+      sessionCwd: (paneId) => h.sessionCwds[paneId] ?? null,
+      sessionsUnderCwd: () => [],
+      listRendererTerminals: async () => [],
+      workspaceHeld: async () => false,
+      processesUnderCwd: async () => [],
+      github: {
+        listPullRequestsForHead: lookup,
+        listMergedPullRequests: async () => {
+          if (h.githubDown) throw new Error("gh: not logged in");
+          return h.pulls;
+        },
+      },
+      sendAgentEvent: () => {},
+      audit: aw.createWorktreeAuditLog(path.join(home, "logs", "worktree-audit.jsonl")),
+      worktreesRoot: (repoCwd) => path.join(home, "worktrees", path.basename(repoCwd)),
+      now: () => new Date("2026-11-06T10:00:00Z"),
+      randomId: () => (++ids).toString(16).padStart(8, "a"),
+      pretrustClaude: async () => {},
+    };
+    const owner = { role: "studio", client: "claude-code", paneId: "pane-owner" };
+    const other = { role: "studio", client: "codex", paneId: "pane-other" };
+
+    // ── The stack, as the agents made it ───────────────────────────────────
+    const roles = await aw.createAgentWorktree(owner, { branch: "feat/roles" }, deps);
+    assert.equal(roles.ok, true, JSON.stringify(roles));
+    const rolesTip = commitFile(roles.path, "roles.sql", "create role reader;\n", "add roles");
+    git(roles.path, ["push", "-q", "-u", "origin", "feat/roles"]);
+    const api = await aw.createAgentWorktree(owner, { branch: "feat/roles-api", base: "feat/roles" }, deps);
+    assert.equal(api.ok, true, JSON.stringify(api));
+    const apiTip = commitFile(api.path, "api.ts", "export const roles = [];\n", "roles api");
+    git(api.path, ["push", "-q", "-u", "origin", "feat/roles-api"]);
+
+    // ── On GitHub: more commits, the stacked merge, the squash into main ───
+    execFileSync("git", ["clone", "-q", origin, hub]);
+    git(hub, ["checkout", "-q", "feat/roles-api"]);
+    const apiHead = commitFile(hub, "api.ts", "export const roles = ['reader'];\n", "review fix");
+    git(hub, ["checkout", "-q", "feat/roles"]);
+    const rolesHead0 = commitFile(hub, "roles.sql", "create role reader;\ncreate role writer;\n", "review fix roles");
+    git(hub, ["merge", "-q", "--no-ff", "-m", "Merge pull request #454", "feat/roles-api"]);
+    const merge454 = git(hub, ["rev-parse", "HEAD"]);
+    git(hub, ["checkout", "-q", "main"]);
+    git(hub, ["merge", "-q", "--squash", "feat/roles"]);
+    git(hub, ["commit", "-q", "-m", "Database roles (#453)"]);
+    const squash453 = git(hub, ["rev-parse", "HEAD"]);
+    git(hub, ["push", "-q", "origin", "main", "feat/roles", "feat/roles-api"]);
+    // The user's clone fetched before GitHub deleted the branches.
+    git(repo, ["fetch", "-q", "origin"]);
+    git(hub, ["push", "-q", "origin", "--delete", "feat/roles", "feat/roles-api"]);
+    git(repo, ["fetch", "-q", "--prune", "origin"]);
+    assert.throws(() => git(repo, ["merge-base", "--is-ancestor", apiTip, "origin/main"]), "squashed: not in main's history");
+
+    const pr454 = {
+      number: 454,
+      url: "https://github.com/acme/app/pull/454",
+      headRefName: "feat/roles-api",
+      headRefOid: apiHead,
+      baseRefName: "feat/roles",
+      isCrossRepository: false,
+      mergeCommitOid: merge454,
+    };
+    const pr453 = {
+      number: 453,
+      url: "https://github.com/acme/app/pull/453",
+      headRefName: "feat/roles",
+      headRefOid: merge454,
+      baseRefName: "main",
+      isCrossRepository: false,
+      mergeCommitOid: squash453,
+    };
+    const main = git(repo, ["rev-parse", "origin/main"]);
+    const prove = (tip, branch, pulls, extra = {}) =>
+      stack.proveByMergedPullRequestStack({
+        repo,
+        tip,
+        branch,
+        mergedFor: async (head) => pulls.filter((pr) => pr.headRefName === head),
+        landedBases: new Set(["main"]),
+        defaultCommit: main,
+        ...extra,
+      });
+
+    // ── The proof itself ───────────────────────────────────────────────────
+    await check("a tip behind a merged head, merged into a branch whose own pull request landed, is merged", async () => {
+      const proof = await prove(apiTip, "feat/roles-api", [pr454, pr453]);
+      assert.deepEqual(proof, { pullRequest: { number: 454, url: pr454.url }, via: [453] });
+    });
+
+    await check("a tip behind the head of a pull request merged into the default branch is merged", async () => {
+      assert.deepEqual(await prove(rolesTip, "feat/roles", [pr454, pr453]), { pullRequest: { number: 453, url: pr453.url }, via: [] });
+    });
+
+    await check("a stacked merge the base's pull request did not take proves nothing", async () => {
+      // #453 merged before #454 landed on feat/roles: its head lacks that merge.
+      const early = { ...pr453, headRefOid: rolesHead0 };
+      assert.equal(await prove(apiTip, "feat/roles-api", [pr454, early]), null);
+      // No pull request merged feat/roles at all.
+      assert.equal(await prove(apiTip, "feat/roles-api", [pr454]), null);
+      // No merge commit known for #454.
+      assert.equal(await prove(apiTip, "feat/roles-api", [{ ...pr454, mergeCommitOid: null }, pr453]), null);
+    });
+
+    await check("commits past every merged head, forks and unknown commits prove nothing", async () => {
+      git(api.path, ["checkout", "-q", "-b", "scratch-extra"]);
+      const extra = commitFile(api.path, "later.ts", "x\n", "not pushed");
+      git(api.path, ["checkout", "-q", "feat/roles-api"]);
+      assert.equal(await prove(extra, "feat/roles-api", [pr454, pr453]), null);
+      assert.equal(await prove(apiTip, "feat/roles-api", [{ ...pr454, isCrossRepository: true }, pr453]), null);
+      assert.equal(await prove(apiTip, "feat/roles-api", [{ ...pr454, headRefOid: "e".repeat(40) }, pr453]), null);
+      assert.equal(await prove(apiTip, "feat/roles-api", [{ ...pr454, headRefName: "other" }, pr453]), null);
+      git(repo, ["branch", "-D", "scratch-extra"]);
+    });
+
+    await check("a stack that loops back or never lands ends", async () => {
+      const loopA = { ...pr454, baseRefName: "feat/b" };
+      const loopB = { ...pr453, number: 9, headRefName: "feat/b", baseRefName: "feat/roles-api", headRefOid: merge454, mergeCommitOid: merge454 };
+      assert.equal(await prove(apiTip, "feat/roles-api", [loopA, loopB]), null);
+      const failing = await stack.proveByMergedPullRequestStack({
+        repo,
+        tip: apiTip,
+        branch: "feat/roles-api",
+        mergedFor: async (head) => {
+          if (head === "feat/roles") throw new Error("GitHub did not answer");
+          return [pr454];
+        },
+        landedBases: new Set(["main"]),
+        defaultCommit: main,
+      });
+      assert.equal(failing, null, "a lookup that fails proves nothing");
+    });
+
+    await check("a merge commit already in the default branch lands without its base's pull request", async () => {
+      const hub2 = path.join(scratch, "hub2");
+      execFileSync("git", ["clone", "-q", origin, hub2]);
+      git(hub2, ["checkout", "-q", "-b", "side", "origin/main"]);
+      git(hub2, ["fetch", "-q", path.join(repo), `${merge454}:refs/heads/stack-tip`]);
+      git(hub2, ["checkout", "-q", "main"]);
+      git(hub2, ["merge", "-q", "--no-ff", "-m", "bring the stack", "stack-tip"]);
+      const withMerge = git(hub2, ["rev-parse", "HEAD"]);
+      git(repo, ["fetch", "-q", hub2, `${withMerge}:refs/heads/scratch-main`]);
+      const proof = await prove(apiTip, "feat/roles-api", [pr454], { defaultCommit: withMerge });
+      assert.deepEqual(proof, { pullRequest: { number: 454, url: pr454.url }, via: [] });
+      git(repo, ["branch", "-D", "scratch-main"]);
+    });
+
+    // ── The cleanup screen and rail (mergeFacts) ───────────────────────────
+    const repoContext = (merged) => ({
+      root: repo,
+      name: "repo",
+      registrations: [],
+      mainPath: repo,
+      workspaces: [],
+      base: { name: "origin/main", commit: main },
+      tracking: new Map(),
+      targets: new Map(),
+      pullRequests: merged ? { open: [], merged } : null,
+    });
+    const apiWorkspace = () => h.state.workspaces.find((workspace) => workspace.id === api.workspaceId);
+
+    await check("cleanup: the stacked worktree reads merged against the default branch, not the stale local base", async () => {
+      const ctx = repoContext([pr454, pr453]);
+      const target = await inspect.targetFor(ctx, apiWorkspace());
+      assert.equal(target.name, "feat/roles", "the recorded base resolves to the stale local branch");
+      const facts = await inspect.mergeFacts(ctx, apiTip, "feat/roles-api", target);
+      assert.equal(facts.state, "merged", JSON.stringify(facts));
+      assert.equal(facts.proof, "pull-request");
+      assert.deepEqual(facts.pullRequest, { number: 454, url: pr454.url });
+      assert.deepEqual(facts.via, [453]);
+      assert.equal(facts.target, "origin/main", "judged where it landed, a remote base");
+      assert.equal(facts.ahead, 2, "its own commits do not show in main's history (squash)");
+    });
+
+    await check("cleanup: without the base's pull request it stays unmerged", async () => {
+      const ctx = repoContext([pr454]);
+      const facts = await inspect.mergeFacts(ctx, apiTip, "feat/roles-api", await inspect.targetFor(ctx, apiWorkspace()));
+      assert.equal(facts.state, "unmerged", JSON.stringify(facts));
+      const offline = repoContext(null);
+      assert.equal((await inspect.mergeFacts(offline, apiTip, "feat/roles-api", await inspect.targetFor(offline, apiWorkspace()))).state, "unmerged");
+    });
+
+    // ── The agent tool (codara_worktree_remove) ────────────────────────────
+    h.pulls = [pr454, pr453];
+    h.sessionCwds["pane-owner"] = notes; // the maker's tab is open, idle elsewhere
+
+    await check("remove: the stacked worktree is merged, and the open maker tab alone holds it", async () => {
+      const dry = await aw.removeAgentWorktree(other, { workspaceId: api.workspaceId, dryRun: true }, deps);
+      assert.equal(dry.ok, true, JSON.stringify(dry));
+      assert.deepEqual(dry.blockers, ["WORKTREE_OWNED_BY_LIVE_AGENT"], JSON.stringify(dry));
+      assert.equal(dry.merge.status, "merged", JSON.stringify(dry.merge));
+      assert.equal(dry.merge.proof, "pull-request");
+      assert.ok(h.asked.includes("feat/roles"), "the base branch's pull requests were looked up");
+      const refused = await aw.removeAgentWorktree(other, { workspaceId: api.workspaceId }, deps);
+      assert.equal(refused.ok, false);
+      assert.equal(refused.code, "WORKTREE_OWNED_BY_LIVE_AGENT");
+      assert.match(refused.hint, /codara_worktree_cleanup/, "it points at the approval flow");
+      assert.ok(fs.existsSync(api.path), "an agent never removes it while the maker's tab is open");
+    });
+
+    await check("remove: an owner-held worktree that is not merged keeps the plain hint", async () => {
+      h.pulls = [pr454];
+      const refused = await aw.removeAgentWorktree(other, { workspaceId: api.workspaceId }, deps);
+      assert.deepEqual(refused.blockers, ["WORKTREE_OWNED_BY_LIVE_AGENT", "WORKTREE_NOT_MERGED"], JSON.stringify(refused));
+      assert.doesNotMatch(refused.hint, /codara_worktree_cleanup/);
+      h.pulls = [pr454, pr453];
+    });
+
+    await check("remove: once the maker's tab closes, both worktrees of the stack are removed", async () => {
+      delete h.sessionCwds["pane-owner"];
+      const apiGone = await aw.removeAgentWorktree(other, { workspaceId: api.workspaceId }, deps);
+      assert.equal(apiGone.ok, true, JSON.stringify(apiGone));
+      assert.equal(apiGone.removed, true);
+      assert.equal(fs.existsSync(api.path), false);
+      const rolesGone = await aw.removeAgentWorktree(other, { workspaceId: roles.workspaceId }, deps);
+      assert.equal(rolesGone.ok, true, JSON.stringify(rolesGone));
+      assert.equal(rolesGone.removed, true);
+    });
+
+    await check("remove: commits reachable from the default branch count when the recorded base is gone", async () => {
+      const base = await aw.createAgentWorktree(owner, { branch: "feat/base" }, deps);
+      commitFile(base.path, "base.txt", "base\n", "base");
+      git(base.path, ["push", "-q", "-u", "origin", "feat/base"]);
+      const top = await aw.createAgentWorktree(owner, { branch: "feat/top", base: "feat/base" }, deps);
+      const topTip = commitFile(top.path, "top.txt", "top\n", "top");
+      git(top.path, ["push", "-q", "-u", "origin", "feat/top"]);
+      // GitHub: feat/top into feat/base, then feat/base into main, merge commits.
+      git(hub, ["fetch", "-q", "origin"]);
+      git(hub, ["checkout", "-q", "-B", "feat/base", "origin/feat/base"]);
+      git(hub, ["merge", "-q", "--no-ff", "-m", "Merge #2", "origin/feat/top"]);
+      git(hub, ["checkout", "-q", "main"]);
+      git(hub, ["reset", "-q", "--hard", "origin/main"]);
+      git(hub, ["merge", "-q", "--no-ff", "-m", "Merge #1", "feat/base"]);
+      git(hub, ["push", "-q", "origin", "main"]);
+      git(hub, ["push", "-q", "origin", "--delete", "feat/base", "feat/top"]);
+      git(repo, ["fetch", "-q", "--prune", "origin"]);
+      h.githubDown = true; // no pull request facts at all
+      const dry = await aw.removeAgentWorktree(other, { workspaceId: top.workspaceId, dryRun: true }, deps);
+      assert.equal(dry.wouldRemove, true, JSON.stringify(dry));
+      assert.equal(dry.merge.proof, "ancestor");
+      assert.equal(dry.merge.target, "origin/main");
+      const gone = await aw.removeAgentWorktree(other, { workspaceId: top.workspaceId }, deps);
+      assert.equal(gone.removed, true, JSON.stringify(gone));
+      assert.equal(git(repo, ["merge-base", "--is-ancestor", topTip, "origin/main"]), "");
+      // Named by the caller, the target is the only one judged.
+      const named = await aw.removeAgentWorktree(other, { workspaceId: base.workspaceId, target: "feat/top", dryRun: true }, deps);
+      assert.notEqual(named.merge?.proof, "ancestor", JSON.stringify(named));
+      h.githubDown = false;
+    });
+
+    // ── What the cleanup tool tells the user ───────────────────────────────
+    await check("advice: names the stack and the maker's open tab", async () => {
+      const result = advice.adviseWorktree(
+        {
+          missing: false,
+          locked: false,
+          inUse: [],
+          hardBlockers: [],
+          dirty: { tracked: 0, untracked: 0, inProgress: null },
+          localWork: null,
+          merge: { state: "merged", proof: "pull-request", target: "origin/main", via: [453] },
+          makerOpen: "the tab “Coordinator” in notes",
+          ahead: 2,
+          pullRequest: { number: 454, state: "merged" },
+          onRemote: false,
+          unpushed: null,
+          lastActivityAt: Date.parse("2026-11-04T10:00:00Z"),
+        },
+        Date.parse("2026-11-06T10:00:00Z"),
+      );
+      assert.equal(result.advice, "safe");
+      assert.equal(
+        result.reason,
+        "Merged through pull request #454, which landed through #453, clean and idle. The agent that made it still has the tab “Coordinator” in notes open, but none of its work is left here.",
+      );
+    });
+
+    // ── GitHub: the merge commit is read ───────────────────────────────────
+    await check("github: merged pull requests carry their merge commit", async () => {
+      const calls = [];
+      const adapter = github.createGitHubCliAdapter({
+        resolveBinary: async () => "/usr/bin/gh",
+        runCommand: async (command) => {
+          calls.push(command);
+          return {
+            stdout: JSON.stringify([
+              { ...pr454, mergeCommitOid: undefined, mergeCommit: { oid: merge454.toUpperCase() } },
+              { ...pr453, mergeCommitOid: undefined, mergeCommit: null },
+            ]),
+            stderr: "",
+          };
+        },
+      });
+      const listed = await adapter.listMergedPullRequests("/repo", 100);
+      assert.equal(listed[0].mergeCommitOid, merge454);
+      assert.equal(listed[1].mergeCommitOid, null);
+      assert.match(calls[0].args.join(" "), /(^|,)mergeCommit(,|\s|$)/);
+    });
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+    for (const file of outputs) fs.rmSync(file, { force: true });
+  }
+  console.log(`${passed} checks passed`);
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

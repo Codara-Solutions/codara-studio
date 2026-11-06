@@ -37,6 +37,7 @@ import {
   populatedSubmodules,
   resolveDefaultBranch,
 } from "../git-worktrees";
+import { proveByMergedPullRequestStack } from "../merged-pull-request-stack";
 import { setupProvidedEntries } from "../worktree-setup/links";
 import { folderIdentity } from "../worktree-folders";
 
@@ -59,7 +60,9 @@ export interface RepoPullRequests {
     url: string;
     headRefName: string;
     headRefOid: string;
+    baseRefName?: string;
     isCrossRepository: boolean;
+    mergeCommitOid?: string | null;
   }>;
 }
 
@@ -645,6 +648,16 @@ export interface MergeFacts {
   ahead?: number;
   behind?: number;
   pullRequest?: { number: number; url: string };
+  /** With a pull-request proof: the stacked pull requests that carried it into the base, nearest first. */
+  via?: number[];
+}
+
+async function aheadBehind(root: string, base: string, head: string): Promise<{ ahead: number; behind: number }> {
+  const counts = (await readGitText(root, ["rev-list", "--left-right", "--count", `${base}...${head}`])).split(/\s+/).map(Number);
+  return {
+    behind: Number.isFinite(counts[0]) ? counts[0] : 0,
+    ahead: Number.isFinite(counts[1]) ? counts[1] : 0,
+  };
 }
 
 export async function mergeFacts(
@@ -656,11 +669,7 @@ export async function mergeFacts(
   if (!target || !head) return { state: "unknown", ...(target ? { target: target.name } : {}) };
   const base = { target: target.name, targetCommit: target.commit };
   if (branch && (branch === shortBranch(target.name) || branch === target.name)) return { state: "base", ...base };
-  const counts = (await readGitText(repo.root, ["rev-list", "--left-right", "--count", `${target.commit}...${head}`]))
-    .split(/\s+/)
-    .map(Number);
-  const behind = Number.isFinite(counts[0]) ? counts[0] : 0;
-  const ahead = Number.isFinite(counts[1]) ? counts[1] : 0;
+  const { ahead, behind } = await aheadBehind(repo.root, target.commit, head);
   const facts = { ...base, ahead, behind };
   if (ahead === 0 && (await isAncestor(repo.root, head, target.commit))) return { state: "merged", proof: "ancestor", ...facts };
   const merged = (repo.pullRequests?.merged ?? []).find(
@@ -668,6 +677,47 @@ export async function mergeFacts(
   );
   if (merged) {
     return { state: "merged", proof: "pull-request", pullRequest: { number: merged.number, url: merged.url }, ...facts };
+  }
+  // A base that is not the default branch (a stacked pull request's branch,
+  // often deleted once merged) can lag behind where the work went. The
+  // default branch, as the remote has it, counts as well.
+  const fallback = repo.base;
+  const onDefault = fallback && branch && (branch === shortBranch(fallback.name) || branch === fallback.name);
+  if (fallback && !onDefault && fallback.commit !== target.commit && (await isAncestor(repo.root, head, fallback.commit))) {
+    const counts = await aheadBehind(repo.root, fallback.commit, head);
+    return { state: "merged", proof: "ancestor", target: fallback.name, targetCommit: fallback.commit, ...counts };
+  }
+  // A merged pull request whose head holds this tip, into the base or into
+  // a branch whose own pull request then landed (a stack).
+  if (branch && repo.pullRequests && !onDefault) {
+    const targetIsRemote = await refPresent(repo.root, `refs/remotes/${target.name}`);
+    const landedBases = new Set<string>();
+    if (fallback) landedBases.add(shortBranch(fallback.name));
+    if (targetIsRemote) landedBases.add(shortBranch(target.name));
+    const all = repo.pullRequests.merged;
+    const stacked = await proveByMergedPullRequestStack({
+      repo: repo.root,
+      tip: head,
+      branch,
+      mergedFor: async (name) => all.filter((pr) => pr.headRefName === name),
+      landedBases,
+      defaultCommit: fallback?.commit ?? null,
+    });
+    if (stacked) {
+      // Judged against where it landed: a local-only base proves nothing on
+      // its own (the rail's unattended removal asks for a remote one).
+      const landed =
+        targetIsRemote || !fallback
+          ? facts
+          : { target: fallback.name, targetCommit: fallback.commit, ...(await aheadBehind(repo.root, fallback.commit, head)) };
+      return {
+        state: "merged",
+        proof: "pull-request",
+        pullRequest: stacked.pullRequest,
+        ...(stacked.via.length ? { via: stacked.via } : {}),
+        ...landed,
+      };
+    }
   }
   if ((await contentInTarget(repo.root, head, target.commit)) === true) {
     return { state: "merged", proof: "content-in-target", ...facts };
@@ -852,6 +902,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     state: merge.state,
     ...(merge.proof ? { proof: merge.proof } : {}),
     ...(merge.target ? { target: merge.target } : {}),
+    ...(merge.via ? { via: merge.via } : {}),
   };
   if (merge.state === "unmerged" || merge.state === "unknown") {
     const commits = head && merge.targetCommit ? await commitSubjectsBetween(repo.root, merge.targetCommit, head, 10) : [];

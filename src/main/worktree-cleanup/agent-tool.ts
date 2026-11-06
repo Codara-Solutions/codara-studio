@@ -21,7 +21,7 @@ import {
 import { cleanText, type WorktreeCaller } from "../agent-worktrees";
 import { NETWORK_TIMEOUT_MS, errorText, readGitText, runGit } from "../git-exec";
 import { isAncestor } from "../git-worktrees";
-import { canonicalPath, pathKey, type RepoPullRequests, type WorktreeCleanupDeps } from "./inspect";
+import { agentTabText, canonicalPath, pathKey, type RepoPullRequests, type WorktreeCleanupDeps } from "./inspect";
 import { checkCleanupTargets, removeCleanupWorktrees } from "./remove";
 import { scanWorktreeCleanup } from "./scan";
 
@@ -220,6 +220,7 @@ async function factsFor(
       dirty: row.dirty,
       localWork: check?.localWork ?? null,
       merge: check?.merge ?? row.merge,
+      ...(row.makerOpen?.tab ? { makerOpen: agentTabText(row.makerOpen.tab) } : {}),
       ahead: check?.unmerged?.ahead ?? row.base?.ahead ?? 0,
       pullRequest: pullRequest ? { number: pullRequest.number, state: prState } : null,
       onRemote,
