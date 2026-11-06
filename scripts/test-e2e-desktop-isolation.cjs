@@ -127,6 +127,11 @@ check("a suite refuses to boot the app onto a real Linux desktop it cannot hide 
       () => keepTestAppOffDesktop({ ...noXvfb, DISPLAY: ":0" }, { throwInstead: true }),
       /Refusing to boot the app.*DISPLAY/,
     );
+    assert.throws(
+      () => keepTestAppOffDesktop({ ...noXvfb, DISPLAY: ":0", CI: "false" }, { throwInstead: true }),
+      /Refusing to boot the app/,
+      "CI=false is not CI",
+    );
     // No desktop at all, CI, or an explicit opt-in: it goes ahead.
     assert.equal(keepTestAppOffDesktop({ ...noXvfb }, { throwInstead: true }), null);
     assert.equal(keepTestAppOffDesktop({ ...noXvfb, DISPLAY: ":0", CI: "true" }, { throwInstead: true }), null);

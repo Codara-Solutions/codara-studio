@@ -2260,7 +2260,13 @@ async function main() {
     // until then they can still create files in HOME, which then fails to be
     // removed (ENOTEMPTY). On a loaded runner that takes seconds.
     await appProcessesGone(15_000);
-    fs.rmSync(HOME, { recursive: true, force: true });
+    // Elsewhere nothing is tracked, so the removal still allows for a helper
+    // letting go of its last file a moment after the app exited.
+    fs.rmSync(HOME, {
+      recursive: true,
+      force: true,
+      ...(process.platform === "linux" ? {} : { maxRetries: 5, retryDelay: 100 }),
+    });
   }
 
   if (failures > 0) {

@@ -122,7 +122,8 @@ function useVirtualDisplay(env = process.env) {
 /** Why a run that is about to open app windows would show them, or null. */
 function visibleDesktopReason(env, display) {
   if (process.platform !== "linux" || display) return null;
-  if (env.CI || env.CODARA_TEST_ALLOW_VISIBLE === "1") return null;
+  const ci = (env.CI ?? "").trim().toLowerCase();
+  if ((ci && ci !== "false" && ci !== "0") || env.CODARA_TEST_ALLOW_VISIBLE === "1") return null;
   if (env.WAYLAND_DISPLAY) return `WAYLAND_DISPLAY is set (${env.WAYLAND_DISPLAY})`;
   if (env.DISPLAY) return `DISPLAY points at a real display (${env.DISPLAY})`;
   return null;
