@@ -260,6 +260,7 @@ async function main() {
     rendered["shared-pages"] = new Set(
       renderedRows(read(path.join(COMPONENTS, "share", "SharedPagesSettings.tsx"))).map((row) => row.name),
     );
+    for (const row of renderedRows(read(path.join(COMPONENTS, "cross-workspace", "CrossWorkspaceTerminalsSetting.tsx")))) rendered.agents.add(row.name);
     for (const row of launchArgsRows()) rendered.agents.add(row.name);
     rendered["quick-commands"] = new Set(renderedRows(read(QUICK_COMMANDS_PAGE)).map((row) => row.name));
     rendered.capabilities = new Set([

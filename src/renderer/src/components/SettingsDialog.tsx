@@ -124,6 +124,7 @@ import KeepAwakeSettings from "./keep-awake/KeepAwakeSettings";
 import QuickCommandsSettings from "../quick-commands/QuickCommandsSettings";
 import { useDiagnostics } from "./settings/DiagnosticsControls";
 import WorktreeSetupSettingsControl from "./worktree-setup/WorktreeSetupSettingsControl";
+import CrossWorkspaceTerminalsSetting from "./cross-workspace/CrossWorkspaceTerminalsSetting";
 import CrossWorkspaceGrantsList, { tabActionGrantSource } from "./cross-workspace/CrossWorkspaceGrantsList";
 
 export type { SettingsTab } from "./settings/settings-index";
@@ -2911,13 +2912,7 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
       <LaunchArgsSection />
 
       <SettingsSection title="Workspaces">
-        <SettingRow
-          title="Terminals in other workspaces"
-          desc="When an agent opens a terminal in another workspace, Codara asks you first. Pairs you always allow are listed here: every agent in the first workspace, including Cora runs and later sessions, may open terminals in the second without asking. Revoke one to be asked again."
-          stacked
-        >
-          <CrossWorkspaceGrantsList />
-        </SettingRow>
+        <CrossWorkspaceTerminalsSetting />
         <SettingRow
           title="Tabs agents did not open"
           desc="An agent that wants to close, split or unsplit tabs it did not open asks you first. Pairs you always allow are listed here, for closing and for moving (split and unsplit) separately: agents in the first workspace may do that to tabs in the second without asking, except closing a tab with a running agent or unsaved edits, which Codara always asks about. Revoke one to be asked again."

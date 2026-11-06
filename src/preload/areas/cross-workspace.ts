@@ -28,6 +28,8 @@ export const crossWorkspaceApi = {
   /** False when the request is no longer waited for. */
   answer: (id: string, answer: CrossWorkspaceAnswer): Promise<boolean> =>
     ipcRenderer.invoke("crossWorkspace:answer", { id, answer }),
+  allowAll: (): Promise<boolean> => ipcRenderer.invoke("crossWorkspace:allowAll"),
+  setAllowAll: (value: boolean): Promise<boolean> => ipcRenderer.invoke("crossWorkspace:setAllowAll", value),
   grants: (): Promise<CrossWorkspaceGrant[]> => ipcRenderer.invoke("crossWorkspace:grants"),
   /** A grant was added or revoked. */
   onGrantsChanged: (listener: () => void): (() => void) => {

@@ -212,11 +212,18 @@ export interface CrossWorkspaceGrantStore {
   grant(entry: Omit<CrossWorkspaceGrant, "grantedAt">): Promise<void>;
   /** Resolves true when a grant was removed. */
   revoke(callerWorkspaceId: string, targetWorkspaceId: string): Promise<boolean>;
+  /**
+   * The "any workspace" switch: when on, every pair is allowed and the stored
+   * pairs are only kept for when it goes off again. Off when absent.
+   */
+  allowAll?(): Promise<boolean>;
+  setAllowAll?(value: boolean): Promise<void>;
 }
 
 interface GrantFile {
   version: 1;
   grants: CrossWorkspaceGrant[];
+  allowAll?: boolean;
 }
 
 const MAX_GRANTS = 500;
@@ -241,7 +248,7 @@ function parseGrants(text: string): GrantFile {
   try {
     const parsed = JSON.parse(text) as Partial<GrantFile> | null;
     if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.grants)) return { version: 1, grants: [] };
-    return { version: 1, grants: parsed.grants.filter(validGrant) };
+    return { version: 1, grants: parsed.grants.filter(validGrant), ...(parsed.allowAll === true ? { allowAll: true } : {}) };
   } catch {
     return { version: 1, grants: [] };
   }
@@ -288,7 +295,17 @@ export function fileGrantStore(file: string): CrossWorkspaceGrantStore {
           targetName: entry.targetName.slice(0, MAX_NAME_CHARS),
           grantedAt: new Date().toISOString(),
         });
-        await write({ version: 1, grants: grants.slice(-MAX_GRANTS) });
+        await write({ ...data, grants: grants.slice(-MAX_GRANTS) });
+      });
+    },
+    async allowAll() {
+      await chain.catch(() => undefined);
+      return (await read()).allowAll === true;
+    },
+    setAllowAll(value) {
+      return serialized(async () => {
+        const { allowAll: _old, ...rest } = await read();
+        await write(value ? { ...rest, allowAll: true } : rest);
       });
     },
     revoke(caller, target) {
@@ -296,7 +313,7 @@ export function fileGrantStore(file: string): CrossWorkspaceGrantStore {
         const data = await read();
         const grants = data.grants.filter((grant) => !same(grant, caller, target));
         if (grants.length === data.grants.length) return false;
-        await write({ version: 1, grants });
+        await write({ ...data, grants });
         return true;
       });
     },
@@ -366,6 +383,11 @@ export function createCrossWorkspaceApprover(deps: {
   const pairKey = (input: CrossWorkspaceAskInput) => JSON.stringify([input.caller.id, input.target.id]);
   const decide = async (input: CrossWorkspaceAskInput): Promise<CrossWorkspaceDecision> => {
     const answer = await deps.ask(input).catch(() => null);
+    if (answer === "all") {
+      // Allow all workspaces: the switch in Settings, kept in the same file.
+      await deps.store.setAllowAll?.(true).catch(() => undefined);
+      return { ok: true, via: "always" };
+    }
     if (answer === "always") {
       // The user said yes; a grant that fails to save only means asking again.
       await deps.store
@@ -394,6 +416,8 @@ export function createCrossWorkspaceApprover(deps: {
   return {
     async authorize(input) {
       if (input.caller.id === input.target.id) return { ok: true, via: "same-workspace" };
+      // The one check: the "any workspace" switch first, then the saved pairs.
+      if (await deps.store.allowAll?.().catch(() => false)) return { ok: true, via: "grant" };
       if (await deps.store.has(input.caller.id, input.target.id)) return { ok: true, via: "grant" };
       const denied = deniedAt.get(pairKey(input));
       if (denied !== undefined && now() - denied < CROSS_WORKSPACE_DENY_COOLDOWN_MS) {
