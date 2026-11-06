@@ -1097,13 +1097,16 @@ the `blockers` and a `hint`:
   created** in Settings > Git; GitHub issue and pull-request workspaces
   are removed from the rail only;
 - its exact last commit is merged into the target (its base, or `target`):
-  the target contains it, a merged pull request from the same repository has
-  it as head, or merging it into the target changes nothing (a squash merge).
-  Without a `target`, the default branch counts too (a stacked base that
-  GitHub deleted once merged), and so does a merged pull request whose head
-  holds the commit when that pull request landed: merged into the default
-  branch or the base, or into a branch whose own merged pull request took
-  that merge, followed up the stack. A `target` the agent names must be another local or remote-tracking
+  the target contains it, the default branch contains it (unless the agent
+  names `target`; this covers a stacked base GitHub deleted once merged), a
+  merged pull request from the same repository has it as head or a later
+  head and that pull request landed, or merging it into the target changes
+  nothing (a squash merge). A pull request landed when it was merged into
+  the default branch (or the named `target`), its merge commit is still in
+  its base branch on the remote or in the default branch, or the merged pull
+  request of its base branch took that merge, followed up the stack. A
+  recorded base that no longer exists is replaced by the default branch. A
+  `target` the agent names must be another local or remote-tracking
   branch, never the worktree's own branch, its pushed copy or a commit id;
 - it has no uncommitted or untracked files (edits hidden by
   `assume-unchanged` or `skip-worktree` count), no merge or rebase in

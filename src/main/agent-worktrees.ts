@@ -2073,6 +2073,15 @@ async function proveMerged(
     block("WORKTREE_TARGET_NOT_FOUND");
     return;
   }
+  if (!explicitTarget && !target.commit) {
+    // The recorded base is gone (a stacked pull request's branch, deleted
+    // once merged): the default branch is where its work went, if anywhere.
+    const fallbackName = await resolveDefaultBranch(repo);
+    if (fallbackName && shortBranch(fallbackName) !== copy.branch && fallbackName !== copy.branch) {
+      verdict.warnings.push(`the recorded base '${target.name}' is gone; judged against ${fallbackName}`);
+      target = await resolveTarget(ctx, fallbackName);
+    }
+  }
   if (options.pinned) {
     target = { name: target.name, commit: options.pinned.targetCommit };
   } else if (options.fetch && target.commit) {
@@ -2096,48 +2105,40 @@ async function proveMerged(
     verdict.proof = "pull-request";
   } else {
     const targetBranch = shortBranch(target.name);
-    const matching = candidates.find(
-      (pr) => pr.headRefOid === tip && (!explicitTarget || pr.baseRefName === targetBranch),
-    );
-    if (matching) {
-      verdict.proof = "pull-request";
-      verdict.pullRequest = { number: matching.number, url: matching.url };
-    } else {
-      // A recorded base other than the default branch (a stacked pull
-      // request's branch, often deleted once merged) can lag behind where
-      // the work went: the default branch counts too, unless the caller
-      // named the target.
-      const fallback = explicitTarget ? null : await defaultBranchTarget(ctx, target.commit, copy.branch, options);
-      if (fallback && (await isAncestor(repo, tip, fallback.commit))) {
-        verdict.proof = "ancestor";
-        verdict.target = fallback.name;
-        verdict.targetCommit = fallback.commit;
-      } else if (wantPullRequests && !ghError) {
-        const landedBases = new Set<string>();
-        if (explicitTarget) landedBases.add(targetBranch);
-        else {
-          if (fallback) landedBases.add(shortBranch(fallback.name));
-          if (await refIsPresent(repo, `refs/remotes/${target.name}`)) landedBases.add(targetBranch);
-        }
-        const stacked = await proveByMergedPullRequestStack({
-          repo,
-          tip,
-          branch: copy.branch,
-          mergedFor,
-          landedBases,
-          defaultCommit: explicitTarget ? target.commit : (fallback?.commit ?? null),
-        });
-        if (stacked) {
-          verdict.proof = "pull-request";
-          verdict.pullRequest = stacked.pullRequest;
-          if (stacked.via.length) verdict.details.via = stacked.via;
-        }
+    // A recorded base other than the default branch (a stacked pull
+    // request's branch, often deleted once merged) can lag behind where
+    // the work went: the default branch counts too, unless the caller
+    // named the target.
+    const fallback = explicitTarget ? null : await defaultBranchTarget(ctx, target.commit, copy.branch, options);
+    const defaultCommit = explicitTarget ? target.commit : (fallback?.commit ?? target.commit);
+    const defaultName = explicitTarget ? targetBranch : shortBranch(fallback?.name ?? (await resolveDefaultBranch(repo)));
+    if (fallback && (await isAncestor(repo, tip, fallback.commit))) {
+      verdict.proof = "ancestor";
+      verdict.target = fallback.name;
+      verdict.targetCommit = fallback.commit;
+    } else if (wantPullRequests && !ghError) {
+      // A merged pull request whose head holds the tip and that landed:
+      // into the default branch (or the named target), into a base that
+      // still holds its merge on the remote, or up a stack of them.
+      const stacked = await proveByMergedPullRequestStack({
+        repo,
+        tip,
+        branch: copy.branch,
+        mergedFor,
+        landedBases: new Set([defaultName]),
+        defaultCommit,
+        ...(explicitTarget ? {} : { remoteCommit: (base: string) => revParse(repo, `refs/remotes/origin/${base}^{commit}`) }),
+      });
+      if (stacked) {
+        verdict.proof = "pull-request";
+        verdict.pullRequest = stacked.pullRequest;
+        if (stacked.via.length) verdict.details.via = stacked.via;
       }
-      if (!verdict.proof) {
-        const content = await contentInTarget(repo, tip, target.commit);
-        if (content === true) verdict.proof = "content-in-target";
-        else if (content === "unsupported") verdict.warnings.push("git 2.38 or newer is needed for the squash-merge proof");
-      }
+    }
+    if (!verdict.proof) {
+      const content = await contentInTarget(repo, tip, target.commit);
+      if (content === true) verdict.proof = "content-in-target";
+      else if (content === "unsupported") verdict.warnings.push("git 2.38 or newer is needed for the squash-merge proof");
     }
   }
   if (verdict.proof) {

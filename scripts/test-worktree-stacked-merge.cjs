@@ -254,6 +254,20 @@ async function main() {
       assert.equal(failing, null, "a lookup that fails proves nothing");
     });
 
+    await check("an exact head merged into a branch that never landed proves nothing", async () => {
+      assert.equal(await prove(apiHead, "feat/roles-api", [pr454]), null);
+      assert.equal(await prove(apiHead, "feat/roles-api", [pr454, { ...pr453, headRefOid: rolesHead0 }]), null);
+      assert.deepEqual(await prove(apiHead, "feat/roles-api", [pr454, pr453]), { pullRequest: { number: 454, url: pr454.url }, via: [453] });
+    });
+
+    await check("a base still on the remote lands only while it holds the merge", async () => {
+      const holds = await prove(apiTip, "feat/roles-api", [pr454], { remoteCommit: async (name) => (name === "feat/roles" ? merge454 : null) });
+      assert.deepEqual(holds, { pullRequest: { number: 454, url: pr454.url }, via: [] });
+      // Force-pushed back to before the merge: the merge is no longer in it.
+      const lost = await prove(apiTip, "feat/roles-api", [pr454], { remoteCommit: async (name) => (name === "feat/roles" ? rolesHead0 : null) });
+      assert.equal(lost, null);
+    });
+
     await check("a merge commit already in the default branch lands without its base's pull request", async () => {
       const hub2 = path.join(scratch, "hub2");
       execFileSync("git", ["clone", "-q", origin, hub2]);
@@ -303,6 +317,27 @@ async function main() {
       assert.equal((await inspect.mergeFacts(offline, apiTip, "feat/roles-api", await inspect.targetFor(offline, apiWorkspace()))).state, "unmerged");
     });
 
+    await check("cleanup: an exact head merged into a branch that never landed is not merged", async () => {
+      const ctx = repoContext([pr454]);
+      const target = await inspect.targetFor(ctx, apiWorkspace());
+      assert.equal((await inspect.mergeFacts(ctx, apiHead, "feat/roles-api", target)).state, "unmerged");
+    });
+
+    await check("cleanup: a remote base counts only while it still holds the merge", async () => {
+      const ctx = repoContext([pr454]);
+      const target = await inspect.targetFor(ctx, apiWorkspace());
+      try {
+        git(repo, ["update-ref", "refs/remotes/origin/feat/roles", rolesHead0]); // force-pushed past the merge
+        assert.equal((await inspect.mergeFacts(ctx, apiTip, "feat/roles-api", target)).state, "unmerged");
+        git(repo, ["update-ref", "refs/remotes/origin/feat/roles", merge454]);
+        const facts = await inspect.mergeFacts(repoContext([pr454]), apiTip, "feat/roles-api", target);
+        assert.equal(facts.state, "merged", JSON.stringify(facts));
+        assert.equal(facts.proof, "pull-request");
+      } finally {
+        git(repo, ["update-ref", "-d", "refs/remotes/origin/feat/roles"]);
+      }
+    });
+
     // ── The agent tool (codara_worktree_remove) ────────────────────────────
     h.pulls = [pr454, pr453];
     h.sessionCwds["pane-owner"] = notes; // the maker's tab is open, idle elsewhere
@@ -321,6 +356,20 @@ async function main() {
       assert.ok(fs.existsSync(api.path), "an agent never removes it while the maker's tab is open");
     });
 
+    await check("remove: an exact head merged into a branch that never landed is not merged", async () => {
+      git(api.path, ["merge", "-q", "--ff-only", apiHead]);
+      try {
+        h.pulls = [pr454];
+        const dry = await aw.removeAgentWorktree(other, { workspaceId: api.workspaceId, dryRun: true }, deps);
+        assert.ok(dry.blockers.includes("WORKTREE_NOT_MERGED"), JSON.stringify(dry));
+        h.pulls = [pr454, pr453];
+        const merged = await aw.removeAgentWorktree(other, { workspaceId: api.workspaceId, dryRun: true }, deps);
+        assert.equal(merged.merge.status, "merged", JSON.stringify(merged));
+      } finally {
+        git(api.path, ["reset", "-q", "--hard", apiTip]);
+      }
+    });
+
     await check("remove: an owner-held worktree that is not merged keeps the plain hint", async () => {
       h.pulls = [pr454];
       const refused = await aw.removeAgentWorktree(other, { workspaceId: api.workspaceId }, deps);
@@ -329,15 +378,17 @@ async function main() {
       h.pulls = [pr454, pr453];
     });
 
-    await check("remove: once the maker's tab closes, both worktrees of the stack are removed", async () => {
+    await check("remove: once the maker's tab closes, both worktrees of the stack go, the base first", async () => {
       delete h.sessionCwds["pane-owner"];
+      const rolesGone = await aw.removeAgentWorktree(other, { workspaceId: roles.workspaceId }, deps);
+      assert.equal(rolesGone.ok, true, JSON.stringify(rolesGone));
+      assert.equal(rolesGone.removed, true);
+      assert.throws(() => git(repo, ["rev-parse", "--verify", "--quiet", "refs/heads/feat/roles"]), "its branch went too");
+      // The child's recorded base is now gone everywhere.
       const apiGone = await aw.removeAgentWorktree(other, { workspaceId: api.workspaceId }, deps);
       assert.equal(apiGone.ok, true, JSON.stringify(apiGone));
       assert.equal(apiGone.removed, true);
       assert.equal(fs.existsSync(api.path), false);
-      const rolesGone = await aw.removeAgentWorktree(other, { workspaceId: roles.workspaceId }, deps);
-      assert.equal(rolesGone.ok, true, JSON.stringify(rolesGone));
-      assert.equal(rolesGone.removed, true);
     });
 
     await check("remove: commits reachable from the default branch count when the recorded base is gone", async () => {

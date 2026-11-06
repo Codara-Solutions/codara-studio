@@ -8,16 +8,15 @@ import { isAncestor } from "./git-worktrees";
 // A tip counts as merged when:
 // - it is a merged pull request's head, or an ancestor of it (the branch got
 //   more commits after this worktree's last one, all merged), and
-// - that pull request landed: its base is a branch that counts as landed
-//   (the default branch, or the worktree's own base while it is still on the
-//   remote), or its merge commit is in the default branch, or its merge
-//   commit is in the head of a merged pull request of its base branch that
-//   itself landed, following the stack up.
+// - that pull request landed: its base is the default branch (or the target
+//   the caller named), or its merge commit is in the default branch, or in
+//   its base branch as the remote has it now, or in the head of a merged pull
+//   request of its base branch that itself landed, following the stack up.
 //
 // It fails closed. A commit git does not have locally is no proof, a pull
-// request merged into a branch whose own pull request did not take that
-// merge (merged before it, or never) is no proof, and a fork's pull request
-// never counts.
+// request merged into a branch that later lost that merge (force-pushed) or
+// whose own pull request did not take it (merged before it, or never) is no
+// proof, and a fork's pull request never counts.
 
 export interface StackPullRequest {
   number: number;
@@ -36,10 +35,12 @@ export interface StackProofInput {
   branch: string;
   /** Merged pull requests whose head branch is `head`. May reject; a lookup that fails proves nothing. */
   mergedFor(head: string): Promise<readonly StackPullRequest[]>;
-  /** Short branch names a merge into which counts as landed. */
+  /** Short branch names a merge into which counts as landed: the default branch, or the target the caller named. */
   landedBases: ReadonlySet<string>;
   /** The default branch's commit, so a merge commit found in it counts as landed. */
   defaultCommit: string | null;
+  /** A branch's commit on the remote now; null when it is gone or unknown. */
+  remoteCommit?(branch: string): Promise<string | null>;
 }
 
 export interface StackProof {
@@ -81,6 +82,9 @@ export async function proveByMergedPullRequestStack(input: StackProofInput): Pro
     const merged = pr.mergeCommitOid && OID.test(pr.mergeCommitOid) ? pr.mergeCommitOid : null;
     if (!merged) return null;
     if (input.defaultCommit && (await contains(merged, input.defaultCommit))) return [];
+    // A base still on the remote that holds the merge.
+    const live = await (input.remoteCommit?.(base) ?? Promise.resolve(null)).catch(() => null);
+    if (live && OID.test(live) && (await contains(merged, live))) return [];
     if (depth >= MAX_STACK_DEPTH || base === input.branch) return null;
     for (const parent of await mergedFor(base)) {
       if (seen.has(parent.number)) continue;

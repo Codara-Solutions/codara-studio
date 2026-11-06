@@ -672,40 +672,37 @@ export async function mergeFacts(
   const { ahead, behind } = await aheadBehind(repo.root, target.commit, head);
   const facts = { ...base, ahead, behind };
   if (ahead === 0 && (await isAncestor(repo.root, head, target.commit))) return { state: "merged", proof: "ancestor", ...facts };
-  const merged = (repo.pullRequests?.merged ?? []).find(
-    (pr) => pr.headRefOid.toLowerCase() === head && !pr.isCrossRepository && (!branch || pr.headRefName === branch),
-  );
-  if (merged) {
-    return { state: "merged", proof: "pull-request", pullRequest: { number: merged.number, url: merged.url }, ...facts };
-  }
   // A base that is not the default branch (a stacked pull request's branch,
   // often deleted once merged) can lag behind where the work went. The
   // default branch, as the remote has it, counts as well.
   const fallback = repo.base;
-  const onDefault = fallback && branch && (branch === shortBranch(fallback.name) || branch === fallback.name);
+  const onDefault = Boolean(fallback && branch && (branch === shortBranch(fallback.name) || branch === fallback.name));
   if (fallback && !onDefault && fallback.commit !== target.commit && (await isAncestor(repo.root, head, fallback.commit))) {
     const counts = await aheadBehind(repo.root, fallback.commit, head);
     return { state: "merged", proof: "ancestor", target: fallback.name, targetCommit: fallback.commit, ...counts };
   }
-  // A merged pull request whose head holds this tip, into the base or into
-  // a branch whose own pull request then landed (a stack).
-  if (branch && repo.pullRequests && !onDefault) {
-    const targetIsRemote = await refPresent(repo.root, `refs/remotes/${target.name}`);
-    const landedBases = new Set<string>();
-    if (fallback) landedBases.add(shortBranch(fallback.name));
-    if (targetIsRemote) landedBases.add(shortBranch(target.name));
-    const all = repo.pullRequests.merged;
-    const stacked = await proveByMergedPullRequestStack({
-      repo: repo.root,
-      tip: head,
-      branch,
-      mergedFor: async (name) => all.filter((pr) => pr.headRefName === name),
-      landedBases,
-      defaultCommit: fallback?.commit ?? null,
-    });
-    if (stacked) {
-      // Judged against where it landed: a local-only base proves nothing on
-      // its own (the rail's unattended removal asks for a remote one).
+  // A merged pull request whose head holds this tip and that landed: into
+  // the default branch, into a base that still holds its merge, or into a
+  // branch whose own pull request then landed (a stack).
+  const all = repo.pullRequests?.merged ?? [];
+  // A detached HEAD is judged by the branches of the pull requests with it as head.
+  const branches = branch ? [branch] : [...new Set(all.filter((pr) => pr.headRefOid.toLowerCase() === head).map((pr) => pr.headRefName))];
+  if (repo.pullRequests && !onDefault) {
+    for (const name of branches) {
+      const stacked = await proveByMergedPullRequestStack({
+        repo: repo.root,
+        tip: head,
+        branch: name,
+        mergedFor: async (headName) => all.filter((pr) => pr.headRefName === headName),
+        landedBases: new Set(fallback ? [shortBranch(fallback.name)] : []),
+        defaultCommit: fallback?.commit ?? null,
+        remoteCommit: (base) => revParse(repo.root, `refs/remotes/origin/${base}^{commit}`),
+      });
+      if (!stacked) continue;
+      // Judged against where it landed when the base is not on the remote:
+      // a local-only base proves nothing (the rail's unattended removal asks
+      // for a remote one).
+      const targetIsRemote = await refPresent(repo.root, `refs/remotes/${target.name}`);
       const landed =
         targetIsRemote || !fallback
           ? facts
