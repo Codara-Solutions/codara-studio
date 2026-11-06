@@ -31,6 +31,77 @@ const leaveAside = (repoDir, dir, aside, how = "git") => {
   require("node:fs").writeFileSync(path.join(notes, name), JSON.stringify({ original: path.resolve(dir), aside }));
 };
 
+// A minimal .asar archive (Electron's format: a size pickle, a header
+// pickle holding the JSON index, then the files' bytes).
+function writeAsar(file, entries) {
+  const header = { files: {} };
+  const bodies = [];
+  let offset = 0;
+  for (const [name, text] of entries) {
+    const body = Buffer.from(text);
+    header.files[name] = { size: body.length, offset: String(offset) };
+    offset += body.length;
+    bodies.push(body);
+  }
+  const json = Buffer.from(JSON.stringify(header));
+  const padded = Math.ceil(json.length / 4) * 4;
+  const headerPickle = Buffer.alloc(8 + padded);
+  headerPickle.writeUInt32LE(4 + padded, 0);
+  headerPickle.writeUInt32LE(json.length, 4);
+  json.copy(headerPickle, 8);
+  const sizePickle = Buffer.alloc(8);
+  sizePickle.writeUInt32LE(4, 0);
+  sizePickle.writeUInt32LE(headerPickle.length, 4);
+  writeFileSync(file, Buffer.concat([sizePickle, headerPickle, ...bodies]));
+}
+
+// Run under Electron (as Node): its fs reads an .asar file as a folder and
+// makes up a new inode for each entry on every look, which plain Node
+// never shows.
+const ELECTRON_FINGERPRINT_CHILD = String.raw`
+const assert = require("node:assert");
+const fs = require("node:fs");
+const path = require("node:path");
+const plainFs = process.getBuiltinModule("original-fs");
+const [bundle, repo, clean, dirty, archive] = process.argv.slice(2);
+const wt = require(bundle);
+(async () => {
+  assert.ok(fs.statSync(path.join(clean, archive)).isDirectory(), "Electron reads the archive as a folder, so this test can show the bug");
+  const recheckAgainst = (before, write) => async (aside) => {
+    write?.(aside);
+    return (await wt.worktreeFingerprint(aside)) === before ? null : "changed";
+  };
+  const removal = (worktreePath, branch, aside) => ({
+    repoCwd: repo, worktreePath, branch, force: false, deleteBranch: false, removeOrphanDir: false, ...(aside ? { aside } : {}),
+  });
+  // A merged, clean worktree with an installed node_modules goes.
+  const before = await wt.worktreeFingerprint(clean);
+  assert.strictEqual(await wt.worktreeFingerprint(clean), before, "an installed node_modules holding an .asar gives the same digest twice");
+  const removed = await wt.removeCopyWorktree(removal(clean, "agent/electron-deps", { recheck: recheckAgainst(before) }));
+  assert.ok(removed.ok, JSON.stringify(removed));
+  assert.ok(!fs.existsSync(clean), "the worktree is gone");
+  // The archive still counts, as one file: rewriting it is a change.
+  const sealed = await wt.worktreeFingerprint(dirty);
+  const asar = path.join(dirty, archive);
+  plainFs.writeFileSync(asar, Buffer.concat([plainFs.readFileSync(asar), Buffer.from("more")]));
+  assert.notStrictEqual(await wt.worktreeFingerprint(dirty), sealed, "a rewritten archive counts");
+  // An untracked file written once it is moved aside puts it back.
+  const kept = await wt.worktreeFingerprint(dirty);
+  const back = await wt.removeCopyWorktree(
+    removal(dirty, "agent/electron-untracked", { recheck: recheckAgainst(kept, (aside) => fs.writeFileSync(path.join(aside, "notes.txt"), "mine\n")) }),
+  );
+  assert.ok(!back.ok && back.changed, JSON.stringify(back));
+  assert.ok(fs.existsSync(path.join(dirty, "notes.txt")), "it is back, with the new file");
+  // And an untracked file blocks the removal itself.
+  const refused = await wt.removeCopyWorktree(removal(dirty, "agent/electron-untracked"));
+  assert.ok(!refused.ok && fs.existsSync(path.join(dirty, "notes.txt")), JSON.stringify(refused));
+  console.log("electron fingerprint ok");
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+`;
+
 function git(cwd, args) {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 }
@@ -430,7 +501,7 @@ async function main() {
       "pre-existing branch must survive worktree removal",
     );
 
-    await agentWorktreeProbes(wt);
+    await agentWorktreeProbes(wt, outFile);
 
     console.log("PASS: git-worktrees");
   } finally {
@@ -458,7 +529,7 @@ function gitFails(cwd, args) {
 // The read-only probes agent-worktrees.ts combines into a removal verdict:
 // start points, merge proofs for every way a branch lands, registrations and
 // leftover local work. Its own repository, with a repo-local identity.
-async function agentWorktreeProbes(wt) {
+async function agentWorktreeProbes(wt, outFile) {
   const scratch = realpathSync(mkdtempSync(path.join(os.tmpdir(), "spark-proofs-")));
   try {
     const repo = path.join(scratch, "repo");
@@ -705,6 +776,32 @@ async function agentWorktreeProbes(wt) {
     });
     assert.ok(!refused.ok && /submodule/i.test(refused.error), JSON.stringify(refused));
     assert.ok(existsSync(path.join(vendored, "only-copy.txt")), "the nested repository's only copy survives");
+
+    // Issue #152: in Studio (Electron), a worktree with an installed
+    // node_modules (electron's default_app.asar in it) never had the same
+    // fingerprint twice, so its removal was always put back.
+    {
+      const archive = path.join("node_modules", "electron", "dist", "resources", "default_app.asar");
+      const installDeps = (dir) => {
+        for (let n = 0; n < 2000; n += 1) {
+          mkdirSync(path.join(dir, "node_modules", `pkg-${n}`), { recursive: true });
+          writeFileSync(path.join(dir, "node_modules", `pkg-${n}`, "index.js"), `module.exports = ${n};\n`);
+        }
+        mkdirSync(path.dirname(path.join(dir, archive)), { recursive: true });
+        writeAsar(path.join(dir, archive), [["main.js", "console.log(1);\n"], ["package.json", "{}\n"]]);
+      };
+      const clean = await fork("agent/electron-deps");
+      const dirty = await fork("agent/electron-untracked");
+      installDeps(clean.path);
+      installDeps(dirty.path);
+      const child = path.join(scratch, "electron-fingerprint.cjs");
+      writeFileSync(child, ELECTRON_FINGERPRINT_CHILD);
+      execFileSync(require("electron"), ["--no-deprecation", child, outFile, repo, clean.path, dirty.path, archive], {
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        stdio: "inherit",
+        timeout: 120_000,
+      });
+    }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

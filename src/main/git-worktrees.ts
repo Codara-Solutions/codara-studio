@@ -592,6 +592,15 @@ async function putBackAside(repoCwd: string, aside: string, original: string): P
 
 const FINGERPRINT_MAX_ENTRIES = 500_000;
 
+// Electron's fs reads an .asar file as a folder and makes up the times and
+// inode of every entry in it, a new inode on each look: a worktree holding
+// one (an installed electron package has default_app.asar) never had the
+// same digest twice, so its removal was always put back. The fingerprint
+// reads the disk as it is through Electron's unpatched fs, where an archive
+// is one file like any other; plain Node has no such layer.
+const fingerprintFs: { lstat: typeof lstat; readdir: (path: string) => Promise<string[]> } =
+  (process.getBuiltinModule?.("original-fs") as typeof import("node:fs") | undefined)?.promises ?? { lstat, readdir };
+
 /**
  * What a removal would delete, as one digest: HEAD, `git status` with
  * untracked and ignored entries, and the size, times and inode of every
@@ -618,7 +627,7 @@ export async function worktreeFingerprint(worktreePath: string, maxEntries = FIN
   // A missing entry (gone since git listed it) is part of the digest; one
   // that cannot be read makes it fail, since its change would go unseen.
   const statOf = (absolute: string) =>
-    lstat(absolute).catch((err: NodeJS.ErrnoException) => {
+    fingerprintFs.lstat(absolute).catch((err: NodeJS.ErrnoException) => {
       if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
       throw err;
     });
@@ -640,7 +649,7 @@ export async function worktreeFingerprint(worktreePath: string, maxEntries = FIN
       return;
     }
     const absolute = join(worktreePath, relative);
-    const names = (await readdir(absolute)).sort();
+    const names = (await fingerprintFs.readdir(absolute)).sort();
     const infos = await Promise.all(names.map((name) => statOf(join(absolute, name))));
     for (const [index, name] of names.entries()) await walk(code, join(relative, name), infos[index]);
   };
