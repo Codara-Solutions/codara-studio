@@ -49,6 +49,7 @@ import {
 } from "./workspace-state-edits";
 import type { GitHubMergedPullRequest } from "./github-cli";
 import { PROTECTED_REMOTE_BRANCHES } from "@shared/worktree-cleanup-agent";
+import { isKeptBranch } from "./worktree-cleanup/kept-branches";
 import { proveByMergedPullRequestStack } from "./merged-pull-request-stack";
 
 // Agent-managed worktrees: the logic behind the worktree.create/list/remove
@@ -1762,6 +1763,23 @@ async function fetchTargetOnce(ctx: VerifyContext, target: string): Promise<stri
   return pending;
 }
 
+// True only when the remote answers and does not have the branch; an
+// unreachable remote says nothing.
+async function remoteBranchGone(ctx: VerifyContext, target: string): Promise<boolean> {
+  const remote = await splitRemoteRef(ctx.scope.repoCwd, target);
+  if (!remote) return false;
+  try {
+    const { stdout } = await runGit(
+      ctx.scope.repoCwd,
+      ["ls-remote", "--heads", "--end-of-options", remote.remote, `refs/heads/${remote.branch}`],
+      { timeout: FETCH_TIMEOUT_MS },
+    );
+    return !stdout.split(/\r?\n/).some((line) => line.endsWith(`\trefs/heads/${remote.branch}`));
+  } catch {
+    return false;
+  }
+}
+
 function shortBranch(target: string): string {
   return target.replace(/^[^/]+\//, "");
 }
@@ -1870,9 +1888,13 @@ export async function verifyRemovable(
     // Never a long-lived branch, the base or the default branch: removal
     // would delete it.
     const base = copy.baseBranch ? shortBranch(copy.baseBranch) : null;
+    const defaultBranch = await resolveDefaultBranch(scope.repoCwd);
     if (
       checkedOut === base ||
       checkedOut === copy.baseBranch ||
+      checkedOut === defaultBranch ||
+      checkedOut === shortBranch(defaultBranch) ||
+      isKeptBranch(checkedOut, copy.baseBranch) ||
       PROTECTED_REMOTE_BRANCHES.has(checkedOut) ||
       (await validateBranchName(scope.repoCwd, checkedOut)) !== null
     ) {
@@ -2124,14 +2146,31 @@ async function proveMerged(
       target = await resolveTarget(ctx, fallbackName);
     }
   }
+  // A target that could not be fetched (deleted on the remote, say) may be
+  // a stale copy: it proves no merge into it beyond what it already held.
+  let targetFetchFailed = false;
   if (options.pinned) {
     target = { name: target.name, commit: options.pinned.targetCommit };
   } else if (options.fetch && target.commit) {
     const failure = await fetchTargetOnce(ctx, target.name);
     if (failure) verdict.warnings.push(`fetch failed: ${failure}`);
+    targetFetchFailed = failure !== null;
     target = target.ref
       ? { ...target, commit: await revParse(repo, `${target.ref}^{commit}`) }
       : await resolveTarget(ctx, target.name);
+    // Deleted on the remote: its tracking ref is a stale copy that may hold
+    // merges the branch never landed anywhere. Judged as a gone base: the
+    // default branch, fetched.
+    if (failure && !explicitTarget && (await remoteBranchGone(ctx, target.name))) {
+      const fallbackName = await resolveDefaultBranch(repo);
+      if (fallbackName && shortBranch(fallbackName) !== branch && fallbackName !== shortBranch(target.name)) {
+        verdict.warnings.push(`the recorded base '${target.name}' is gone on the remote; judged against ${fallbackName}`);
+        const fetched = await fetchTargetOnce(ctx, fallbackName);
+        if (fetched) verdict.warnings.push(`fetch failed: ${fetched}`);
+        targetFetchFailed = fetched !== null;
+        target = await resolveTarget(ctx, fallbackName);
+      }
+    }
   }
   verdict.target = target.name;
   verdict.targetCommit = target.commit;
@@ -2158,7 +2197,7 @@ async function proveMerged(
     // The worktree's own base on the remote: the target when it is remote,
     // or the remote's copy of a base recorded by its local name, fetched
     // first before a removal.
-    let ownBaseCommit: string | null = targetIsRemote ? target.commit : null;
+    let ownBaseCommit: string | null = targetIsRemote && !targetFetchFailed ? target.commit : null;
     if (!explicitTarget && !targetIsRemote && (await refIsPresent(repo, `refs/remotes/origin/${targetBranch}`))) {
       // A fetch that fails (the branch was deleted) leaves a stale copy: no proof.
       const failure = options.fetch && !options.pinned ? await fetchTargetOnce(ctx, `origin/${targetBranch}`) : null;
@@ -2926,7 +2965,7 @@ async function removeLocked(
   // The branch whose tip was verified: the one checked out, when the agent
   // switched away from the recorded one.
   const ownBranch = verdict.switched?.branch ?? branch;
-  let recordedOutcome: { branch: string; deleted: boolean; keptReason?: string } | null = null;
+  let recordedOutcome: { branch: string; deleted: boolean; keptReason?: string; recoveryRef?: string } | null = null;
   if (input.deleteBranch) {
     const currentTip = await revParse(repo, `refs/heads/${ownBranch}`);
     if (!currentTip) {
@@ -2981,8 +3020,16 @@ async function removeLocked(
       if (!recordedTip) recordedOutcome = { branch, deleted: false, keptReason: "BRANCH_MISSING" };
       else if (!recordedMerged) recordedOutcome = { branch, deleted: false, keptReason: "NOT_MERGED" };
       else {
-        const deleted = await deleteBranchIfAt(repo, branch, recordedTip);
-        recordedOutcome = deleted.ok ? { branch, deleted: true } : { branch, deleted: false, keptReason: deleted.reason };
+        // Its tip saved first, as for the branch checked out; a name of its
+        // own, so the worktree's recovery ref stays the one to restore from.
+        const saved = await saveRecoveryRef(repo, `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}-recorded`, recordedTip);
+        if (!saved) recordedOutcome = { branch, deleted: false, keptReason: "RECOVERY_REF_FAILED" };
+        else {
+          const deleted = await deleteBranchIfAt(repo, branch, recordedTip);
+          recordedOutcome = deleted.ok
+            ? { branch, deleted: true, recoveryRef: saved }
+            : { branch, deleted: false, keptReason: deleted.reason };
+        }
       }
       if (recordedOutcome.keptReason && recordedOutcome.keptReason !== "BRANCH_MISSING") {
         warnings.push(`branch '${branch}' was kept (${recordedOutcome.keptReason})`);

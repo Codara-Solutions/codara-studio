@@ -38,6 +38,7 @@ import {
   resolveDefaultBranch,
 } from "../git-worktrees";
 import { proveByMergedPullRequestStack } from "../merged-pull-request-stack";
+import { isKeptBranch } from "./kept-branches";
 import { setupProvidedEntries } from "../worktree-setup/links";
 import { folderIdentity } from "../worktree-folders";
 
@@ -108,9 +109,6 @@ export interface WorktreeCleanupDeps {
 
 export const ROW_BUDGET_MS = 12_000;
 const MAX_LISTED = 20;
-// Branch names that stay after a removal even when merged: deleting a long
-// lived branch someone checked out in a worktree is never what cleanup means.
-const PROTECTED_BRANCHES = new Set(["main", "master", "develop", "development", "trunk", "staging", "production"]);
 
 // ── Paths ──────────────────────────────────────────────────────────────────
 
@@ -205,8 +203,37 @@ export interface RepoContext {
   tracking: Map<string, BranchTracking>;
   targets: Map<string, Promise<{ name: string; commit: string } | null>>;
   pullRequests: RepoPullRequests | null;
+  /**
+   * A branch's commit as the remote has it now (not the last fetch), asked
+   * once per scan; null when it is gone or the remote did not answer. A
+   * fake in tests. Absent: asked with git ls-remote.
+   */
+  remoteHeads?: Map<string, Promise<string | null>>;
   /** Why its base branch or branch tracking could not be read, when they could not. */
   error?: string;
+}
+
+const LS_REMOTE_TIMEOUT_MS = 15_000;
+
+// The branch on origin now. Its tracking ref can be stale: deleted or
+// force-pushed on GitHub since the last fetch.
+function remoteHead(repo: RepoContext, branch: string): Promise<string | null> {
+  repo.remoteHeads ??= new Map();
+  let pending = repo.remoteHeads.get(branch);
+  if (!pending) {
+    pending = runGit(repo.root, ["ls-remote", "--heads", "--end-of-options", "origin", `refs/heads/${branch}`], {
+      timeout: LS_REMOTE_TIMEOUT_MS,
+    }).then(
+      ({ stdout }) => {
+        const line = stdout.split(/\r?\n/).find((entry) => entry.endsWith(`\trefs/heads/${branch}`));
+        const oid = line?.split("\t")[0]?.trim().toLowerCase() ?? "";
+        return /^[0-9a-f]{40,64}$/.test(oid) ? oid : null;
+      },
+      () => null,
+    );
+    repo.remoteHeads.set(branch, pending);
+  }
+  return pending;
 }
 
 interface WorktreeListing {
@@ -330,10 +357,7 @@ function shortBranch(target: string): string {
   return target.replace(/^[^/]+\//, "");
 }
 
-/** A long-lived branch, or the base itself, which cleanup never deletes even when merged. */
-export function isKeptBranch(branch: string, target: string | undefined | null): boolean {
-  return PROTECTED_BRANCHES.has(branch) || branch === shortBranch(target ?? "");
-}
+export { isKeptBranch };
 
 // ── Linked workspaces ──────────────────────────────────────────────────────
 
@@ -695,7 +719,13 @@ export async function mergeFacts(
     // remote's copy too.
     const targetIsRemote = await refPresent(repo.root, `refs/remotes/${target.name}`);
     const ownBase = targetIsRemote ? shortBranch(target.name) : target.name;
-    const ownCommit = targetIsRemote ? target.commit : await revParse(repo.root, `refs/remotes/origin/${target.name}^{commit}`);
+    // Only as the remote has it now: a stale tracking ref may still hold a
+    // merge the branch lost (deleted unmerged, force-pushed). Its commit must
+    // be here too, or the merge cannot be found in it.
+    const ownCommit = async (): Promise<string | null> => {
+      const now = await remoteHead(repo, ownBase);
+      return now && (await revParse(repo.root, `${now}^{commit}`)) ? now : null;
+    };
     for (const name of branches) {
       const stacked = await proveByMergedPullRequestStack({
         repo: repo.root,
@@ -704,7 +734,7 @@ export async function mergeFacts(
         mergedFor: async (headName) => all.filter((pr) => pr.headRefName === headName),
         landedBases: new Set(fallback ? [shortBranch(fallback.name)] : []),
         defaultCommit: fallback?.commit ?? null,
-        remoteCommit: async (base) => (base === ownBase ? ownCommit : null),
+        remoteCommit: async (base) => (base === ownBase ? ownCommit() : null),
       });
       if (!stacked) continue;
       // Judged against where it landed, never a local-only base (the rail's

@@ -487,6 +487,50 @@ async function main() {
       h.pulls = [pr454, pr453];
     });
 
+    await check("a base deleted on the remote proves nothing through its stale tracking ref", async () => {
+      // feat/sq on the remote; the worktree's child branch forks from it.
+      git(hub, ["fetch", "-q", "origin"]);
+      git(hub, ["checkout", "-q", "-B", "feat/sq", "origin/main"]);
+      commitFile(hub, "sq.txt", "base\n", "sq base");
+      git(hub, ["push", "-q", "origin", "feat/sq"]);
+      git(repo, ["fetch", "-q", "origin"]);
+      const child = await aw.createAgentWorktree(owner, { branch: "feat/sq-child", base: "origin/feat/sq" }, deps);
+      const c1 = commitFile(child.path, "x.txt", "1\n", "child 1");
+      git(child.path, ["push", "-q", "-u", "origin", "feat/sq-child"]);
+      // On GitHub: a later commit rewrites the file, then the child is squashed into feat/sq.
+      git(hub, ["fetch", "-q", "origin"]);
+      git(hub, ["checkout", "-q", "-B", "feat/sq-child", "origin/feat/sq-child"]);
+      const c2 = commitFile(hub, "x.txt", "2\n", "child 2");
+      git(hub, ["push", "-q", "origin", "feat/sq-child"]);
+      git(hub, ["checkout", "-q", "feat/sq"]);
+      git(hub, ["merge", "-q", "--squash", "feat/sq-child"]);
+      git(hub, ["commit", "-q", "-m", "child (#30)"]);
+      const sq = git(hub, ["rev-parse", "HEAD"]);
+      git(hub, ["push", "-q", "origin", "feat/sq"]);
+      git(repo, ["fetch", "-q", "origin"]);
+      const pr30 = { number: 30, url: "https://github.com/acme/app/pull/30", headRefName: "feat/sq-child", headRefOid: c2, baseRefName: "feat/sq", isCrossRepository: false, mergeCommitOid: sq };
+      h.pulls = [pr30];
+      const childWorkspace = () => h.state.workspaces.find((workspace) => workspace.id === child.workspaceId);
+      const facts = async () => {
+        const ctx = repoContext([pr30]);
+        ctx.base = { name: "origin/main", commit: git(repo, ["rev-parse", "origin/main"]) };
+        return inspect.mergeFacts(ctx, c1, "feat/sq-child", await inspect.targetFor(ctx, childWorkspace()));
+      };
+      // While the remote's feat/sq holds the squash, it landed there.
+      assert.equal((await facts()).state, "merged");
+      assert.equal((await aw.removeAgentWorktree(other, { workspaceId: child.workspaceId, dryRun: true }, deps)).merge.status, "merged");
+      // feat/sq deleted on GitHub without landing; the local tracking ref still holds the squash.
+      git(hub, ["push", "-q", "origin", "--delete", "feat/sq", "feat/sq-child"]);
+      assert.equal(git(repo, ["rev-parse", "refs/remotes/origin/feat/sq"]), sq, "stale tracking ref");
+      const stale = await facts();
+      assert.equal(stale.state, "unmerged", JSON.stringify(stale));
+      const dry = await aw.removeAgentWorktree(other, { workspaceId: child.workspaceId, dryRun: true }, deps);
+      assert.notEqual(dry.merge.status, "merged", JSON.stringify(dry));
+      assert.ok(dry.blockers.includes("WORKTREE_NOT_MERGED"));
+      assert.match((dry.warnings ?? []).join(" "), /gone on the remote/);
+      h.pulls = [pr454, pr453];
+    });
+
     // A worktree whose agent switched it to a follow-up branch, both merged
     // by squash on GitHub.
     const switchedWorktree = async (name) => {
@@ -522,7 +566,7 @@ async function main() {
     };
 
     await check("switched: a worktree on a merged follow-up branch is removed, and both merged branches go", async () => {
-      const { made, second, prFirst, prSecond } = await switchedWorktree("wording");
+      const { made, first, second, prFirst, prSecond } = await switchedWorktree("wording");
       h.pulls = [prFirst, prSecond];
       // Unmerged work on the branch checked out: refused as before.
       commitFile(made.path, "later.txt", "later\n", "not merged");
@@ -535,10 +579,13 @@ async function main() {
       const gone = await aw.removeAgentWorktree(other, { workspaceId: made.workspaceId }, deps);
       assert.equal(gone.removed, true, JSON.stringify(gone));
       assert.equal(gone.checkedOutBranch, "fix/wording-cli");
-      assert.deepEqual(gone.branches, [
-        { branch: "fix/wording-cli", deleted: true },
-        { branch: "fix/wording", deleted: true },
-      ]);
+      assert.deepEqual(gone.branches[0], { branch: "fix/wording-cli", deleted: true });
+      assert.equal(gone.branches[1].branch, "fix/wording");
+      assert.equal(gone.branches[1].deleted, true);
+      // The recorded branch's tip is saved too, under a name of its own.
+      assert.match(gone.branches[1].recoveryRef, /^refs\/codara\/removed-worktrees\/.+-recorded$/);
+      assert.equal(git(repo, ["rev-parse", gone.branches[1].recoveryRef]), first);
+      assert.equal(git(repo, ["rev-parse", gone.recoveryRef]), second, "the worktree's own recovery ref is unchanged");
       assert.equal(hasBranch("fix/wording-cli") || hasBranch("fix/wording"), false);
     });
 
@@ -565,6 +612,21 @@ async function main() {
       assert.ok(dry.blockers.includes("WORKTREE_BRANCH_MISMATCH"));
       git(made.path, ["switch", "-q", "fix/develop-switch"]);
       git(repo, ["branch", "-D", "develop"]);
+      // The repository's own default branch, whatever its name, and the base.
+      git(hub, ["push", "-q", "origin", "origin/main:refs/heads/line"]);
+      git(repo, ["fetch", "-q", "origin"]);
+      git(repo, ["remote", "set-head", "origin", "line"]);
+      try {
+        git(repo, ["branch", "line", "origin/line"]);
+        git(made.path, ["switch", "-q", "line"]);
+        const onDefault = await aw.removeAgentWorktree(other, { workspaceId: made.workspaceId, dryRun: true }, deps);
+        assert.equal(onDefault.wouldRemove, false, JSON.stringify(onDefault));
+        assert.ok(onDefault.blockers.includes("WORKTREE_BRANCH_MISMATCH"));
+      } finally {
+        git(made.path, ["switch", "-q", "fix/develop-switch"]);
+        git(repo, ["branch", "-D", "line"]);
+        git(repo, ["remote", "set-head", "origin", "main"]);
+      }
       h.pulls = [pr454, pr453];
     });
 
