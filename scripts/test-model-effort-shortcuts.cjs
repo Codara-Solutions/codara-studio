@@ -178,10 +178,11 @@ assert.match(
   toast,
   /!isLocalToast\(toast\) && isNotificationTargetViewed\(toast\.target, (?:view|activeView), toast\.kind\)/,
 );
-// A local toast is clickable only when it was emitted with a target.
+// A local toast is clickable only when it was emitted with a target, or a
+// folder to open.
 assert.match(
   toast,
-  /const clickable =\s*Boolean\(navigateTo\) && \(!isLocalToast\(toast\) \|\| isNavigableLocalToast\(toast\)\)/,
+  /const clickable =\s*reveal !== null \|\| \(Boolean\(navigateTo\) && \(!isLocalToast\(toast\) \|\| isNavigableLocalToast\(toast\)\)\)/,
 );
 
 // ── The routing rules themselves ───────────────────────────────────────────

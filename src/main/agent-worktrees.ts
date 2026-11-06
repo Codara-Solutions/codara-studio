@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, promises as fsp } from "node:fs";
 import { readlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import {
   COPY_BRANCH_CREATOR_LIMITS,
@@ -50,6 +50,7 @@ import {
 import type { GitHubMergedPullRequest } from "./github-cli";
 import { PROTECTED_REMOTE_BRANCHES } from "@shared/worktree-cleanup-agent";
 import { isKeptBranch } from "./worktree-cleanup/kept-branches";
+import { archiveIgnoredFiles } from "./worktree-cleanup/archive";
 import { proveByMergedPullRequestStack } from "./merged-pull-request-stack";
 
 // Agent-managed worktrees: the logic behind the worktree.create/list/remove
@@ -117,6 +118,7 @@ export type WorktreeCode =
   | "WORKTREE_DIRTY"
   | "WORKTREE_OPERATION_IN_PROGRESS"
   | "WORKTREE_IGNORED_FILES"
+  | "WORKTREE_ARCHIVE_FAILED"
   | "WORKTREE_SUBMODULES"
   | "WORKTREE_NESTED_REPOSITORY"
   | "WORKTREE_NESTED_SCAN_INCOMPLETE"
@@ -209,6 +211,15 @@ export interface AgentWorktreeDeps {
   // How many ignored directories the nested-checkout scan may visit. Tests
   // lower it to reach the limit without building a huge tree.
   nestedScanMaxDirs?: number;
+  // How long a pane has had no input or output (ms), and its shell's pid;
+  // null when unknown. The maker's tab quiet for MAKER_IDLE_MS holds only
+  // unfinished work.
+  paneIdleMs?(paneId: string): number | null;
+  sessionPid?(paneId: string): number | null;
+  // Where a removal keeps the ignored files a fresh checkout cannot bring
+  // back (worktree-cleanup/archive.ts). Absent: they block, or are deleted
+  // with discardIgnoredFiles.
+  archiveRoot?(): string;
   // Worktree setup kept in the repository (.worktreeinclude and
   // .codara/worktree.json, src/main/worktree-setup). Without it a created
   // worktree only reports the user's setup command for the agent to run.
@@ -328,6 +339,7 @@ const MESSAGES: Record<WorktreeCode, string> = {
   WORKTREE_DIRTY: "the worktree has uncommitted or untracked files",
   WORKTREE_OPERATION_IN_PROGRESS: "an operation is in progress in the worktree",
   WORKTREE_IGNORED_FILES: "the worktree has ignored files that cannot be regenerated",
+  WORKTREE_ARCHIVE_FAILED: "its ignored files could not be copied to the archive, so it was kept",
   WORKTREE_SUBMODULES: "initialized submodules block removal",
   WORKTREE_NESTED_REPOSITORY: "another git checkout or worktree is nested inside this worktree",
   WORKTREE_NESTED_SCAN_INCOMPLETE:
@@ -358,6 +370,7 @@ const HINTS: Partial<Record<WorktreeCode, string>> = {
   WORKTREE_ORIGIN_MANAGED: "remove it from the rail",
   WORKTREE_DIRTY: "commit or discard them yourself",
   WORKTREE_IGNORED_FILES: "move them, or pass discardIgnoredFiles:true",
+  WORKTREE_ARCHIVE_FAILED: "free some disk space or move them yourself, then retry",
   WORKTREE_SUBMODULES: "ask the user",
   WORKTREE_NESTED_REPOSITORY: "move or remove the nested checkout first, or ask the user",
   WORKTREE_NESTED_SCAN_INCOMPLETE:
@@ -1611,6 +1624,40 @@ interface VerifyOptions {
   pinned?: { targetCommit: string; pullRequestTip?: string };
 }
 
+/** How long the tab of the agent that made a worktree must be quiet before it stops holding finished work. */
+export const MAKER_IDLE_MS = 30 * 60_000;
+
+/**
+ * Whether the worktree's own work is in its base: merged by a pull request
+ * or by content, or merged as an ancestor with a commit of its own. A
+ * worktree with no commit of its own yet reads as merged too, but its agent
+ * has not started, so its open tab still holds it. Its own commit is a head
+ * past the commit its branch was created at (the branch's reflog); without
+ * a reflog, a head committed in a later second than the worktree was made.
+ */
+export async function finishedWork(
+  repoRoot: string,
+  merge: { state: string; proof?: string },
+  head: string | null,
+  branch: string | null,
+  workspaces: readonly Workspace[],
+): Promise<boolean> {
+  if (merge.state !== "merged") return false;
+  if (merge.proof !== "ancestor") return true;
+  if (!head) return false;
+  if (branch) {
+    const log = await readGitText(repoRoot, ["reflog", "show", "--format=%H", `refs/heads/${branch}`, "--"]);
+    const start = log.split("\n").filter((line) => /^[0-9a-f]{40,64}$/i.test(line)).pop();
+    if (start) return start.toLowerCase() !== head.toLowerCase();
+  }
+  const made = workspaces.map((workspace) => Date.parse(workspace.copyBranch?.createdAt ?? "")).filter(Number.isFinite);
+  if (!made.length) return false;
+  const seconds = Number(await readGitText(repoRoot, ["log", "-1", "--format=%ct", head]));
+  // Commit times are whole seconds: only a later second counts, so a base
+  // commit made just before the worktree is never taken for its own.
+  return Number.isFinite(seconds) && seconds > 0 && seconds * 1000 > Math.min(...made);
+}
+
 export interface RemovalVerdict {
   workspace: Workspace;
   path: string;
@@ -1631,6 +1678,8 @@ export interface RemovalVerdict {
   // or not.
   switched?: { branch: string; recordedTip: string | null; recordedMerged: boolean };
   dirty: { tracked: number; untracked: number; ignoredBlocking: string[]; inProgress: string | null };
+  // Every kept ignored entry, copied to the archive before the removal.
+  archive: string[];
   running: { paneIds: string[]; runIds: string[]; processes: number };
 }
 
@@ -1812,6 +1861,7 @@ export async function verifyRemovable(
     warnings: [],
     alreadyRemoved: false,
     dirty: { tracked: 0, untracked: 0, ignoredBlocking: [], inProgress: null },
+    archive: [],
     running: { paneIds: [], runIds: [], processes: 0 },
   };
   const block = (code: WorktreeCode) => {
@@ -1834,11 +1884,17 @@ export async function verifyRemovable(
   // An agent in a pane works in its worktree through absolute paths and
   // `git -C`, so neither its pane nor its processes sit under the worktree
   // and the usage checks below cannot see it. Its pane being open is the
-  // only sign that it may still be working there.
+  // only sign that it may still be working there. Once its work is merged
+  // it holds no more when its shell is in another folder or it has been
+  // quiet for MAKER_IDLE_MS (judged at the end, with the merge and the usage).
+  let ownerPane: string | null = null;
   if (createdBy?.paneId && createdBy.paneId !== caller.paneId && (await paneIsOpen(ctx, createdBy.paneId))) {
     block("WORKTREE_OWNED_BY_LIVE_AGENT");
+    ownerPane = createdBy.paneId;
     verdict.details.ownerPaneId = createdBy.paneId;
   }
+  // Kept ignored files go to the archive instead of blocking or being deleted.
+  const canArchive = Boolean(deps.archiveRoot);
 
   // Only a path that does not exist reads as already removed; one that cannot
   // be read (permissions, a stalled mount) may still hold work.
@@ -1948,9 +2004,12 @@ export async function verifyRemovable(
     const provided = await setupProvidedEntries(realPath, all).catch(() => new Set<string>());
     ignored = all.filter((entry) => !provided.has(entry));
     const blocking = ignored.filter((entry) => !isRegenerableIgnored(entry, extra, packageRootTester(realPath)));
+    verdict.archive = blocking;
     if (blocking.length) {
       verdict.dirty.ignoredBlocking = blocking.slice(0, MAX_LISTED_PATHS);
-      if (options.discardIgnoredFiles) {
+      if (canArchive) {
+        verdict.warnings.push(`ignored files will be archived: ${blocking.slice(0, MAX_LISTED_PATHS).join(", ")}`);
+      } else if (options.discardIgnoredFiles) {
         verdict.warnings.push(`ignored files will be deleted: ${blocking.slice(0, MAX_LISTED_PATHS).join(", ")}`);
       } else {
         block("WORKTREE_IGNORED_FILES");
@@ -1991,7 +2050,9 @@ export async function verifyRemovable(
     );
     if (hidden.length) {
       verdict.dirty.ignoredBlocking = [...verdict.dirty.ignoredBlocking, ...hidden].slice(0, MAX_LISTED_PATHS);
-      if (options.discardIgnoredFiles) verdict.warnings.push(`ignored files will be deleted: ${hidden.join(", ")}`);
+      verdict.archive = [...verdict.archive, ...hidden];
+      if (canArchive) verdict.warnings.push(`ignored files will be archived: ${hidden.join(", ")}`);
+      else if (options.discardIgnoredFiles) verdict.warnings.push(`ignored files will be deleted: ${hidden.join(", ")}`);
       else block("WORKTREE_IGNORED_FILES");
     }
   }
@@ -2023,8 +2084,12 @@ export async function verifyRemovable(
     verdict.switched = { branch: switched, recordedTip, recordedMerged };
   }
 
-  // Nothing using it.
-  const paneIds = await panesUsing(ctx, workspace, path, realPath);
+  // Nothing using it. The maker's tab quiet for MAKER_IDLE_MS, with its
+  // shell inside, is judged as the maker below, not as a terminal or process.
+  const ownerIdle = ownerPane !== null && (deps.paneIdleMs?.(ownerPane) ?? -1) >= MAKER_IDLE_MS;
+  const ownerPid = ownerPane !== null ? (deps.sessionPid?.(ownerPane) ?? null) : null;
+  const allPanes = await panesUsing(ctx, workspace, path, realPath);
+  const paneIds = ownerIdle ? allPanes.filter((id) => id !== ownerPane) : allPanes;
   const runIds = await runsUsing(ctx, workspace, realPath);
   verdict.running.paneIds = paneIds;
   verdict.running.runIds = runIds;
@@ -2044,15 +2109,32 @@ export async function verifyRemovable(
     block("WORKTREE_OPEN_TABS");
     if (held === null) verdict.warnings.push("the window did not answer whether a tab shows the worktree");
   }
+  let ownerShellInside = false;
+  // Without a process scan the owner's shell may have moved in with cd.
+  let processesKnown = false;
   if (options.scanProcesses) {
     const processes = await deps.processesUnderCwd(realPath).catch(() => null);
+    processesKnown = processes !== null;
     if (processes === null) {
       verdict.warnings.push("the process scan is unavailable on this system");
-    } else if (processes.length) {
-      verdict.running.processes = processes.length;
-      verdict.details.processes = processes.slice(0, 10);
-      if (!callerInside) block("WORKTREE_RUNNING_PROCESSES");
+    } else {
+      const others = processes.filter((entry) => !(ownerIdle && entry.pid === ownerPid));
+      if (others.length) {
+        verdict.running.processes = others.length;
+        verdict.details.processes = others.slice(0, 10);
+        if (!callerInside) block("WORKTREE_RUNNING_PROCESSES");
+      }
+      if (ownerPid !== null && processes.some((entry) => entry.pid === ownerPid)) ownerShellInside = true;
     }
+  }
+  if (ownerPane !== null) {
+    const ownerInside = allPanes.includes(ownerPane) || ownerShellInside || !processesKnown;
+    const finished =
+      (ownerIdle || !ownerInside) &&
+      (await finishedWork(scope.repoCwd, { state: verdict.mergeStatus, proof: verdict.proof }, verdict.tip, switched ?? copy.branch, [workspace]).catch(
+        () => false,
+      ));
+    if (finished) verdict.blockers = verdict.blockers.filter((code) => code !== "WORKTREE_OWNED_BY_LIVE_AGENT");
   }
   return verdict;
 }
@@ -2834,16 +2916,20 @@ async function changedWhileAside(
     runs: deps.listRuns().catch(() => []),
     rendererTerminals: deps.listRendererTerminals().catch(() => null),
   };
+  // The maker's quiet tab with its shell inside was judged by the check.
+  const owner = workspace.copyBranch?.createdBy?.paneId;
+  const ownerIdle = owner !== undefined && owner !== ctx.caller.paneId && (deps.paneIdleMs?.(owner) ?? -1) >= MAKER_IDLE_MS;
+  const ownerPid = ownerIdle ? (deps.sessionPid?.(owner!) ?? null) : null;
   const panes = [
     ...(await panesUsing(fresh, workspace, workspace.cwd, realBefore)),
     ...(await panesUsing(fresh, workspace, aside, realAside)),
-  ];
+  ].filter((id) => !(ownerIdle && id === owner));
   const runs = [...(await runsUsing(fresh, workspace, realBefore)), ...(await runsUsing(fresh, workspace, realAside))];
   if (panes.length || runs.length) return "a terminal or run started in it while it was being removed, so it was put back";
   const held = await deps.workspaceHeld(workspace.id, [...new Set([workspace.cwd, realBefore, aside])]).catch(() => null);
   if (held !== false) return "a tab of it was opened while it was being removed, or the window did not answer, so it was put back";
   const processes = await deps.processesUnderCwd(realAside).catch(() => null);
-  if (processes?.length) return "a process runs in it, so it was put back";
+  if (processes?.some((entry) => !(ownerPid !== null && entry.pid === ownerPid))) return "a process runs in it, so it was put back";
   return null;
 }
 
@@ -2892,6 +2978,7 @@ async function removeLocked(
   let savedTip: string | null = null;
   let branchDeleted = false;
   let branchKept: string | null = null;
+  let archived = undefined as { path: string; files: number; bytes: number } | undefined;
 
   if (!verdict.alreadyRemoved) {
     // The decisive checks again, against the refs already fetched, so a
@@ -2936,6 +3023,28 @@ async function removeLocked(
         workspaceId: workspace.id,
       });
     }
+    // Copied from the folder moved aside, after its last check: nothing new
+    // can be written there by its path, so the copy is what git deletes.
+    const archiveRoot = again.archive.length ? deps.archiveRoot?.() : undefined;
+    let archiveError = null as string | null;
+    const archiveFrom = async (aside: string): Promise<string | null> => {
+      if (!archiveRoot) return null;
+      try {
+        const done = await archiveIgnoredFiles({
+          worktree: aside,
+          entries: again.archive,
+          root: archiveRoot,
+          repoName: basename(repo),
+          branch: verdict.switched?.branch ?? branch,
+          now: deps.now(),
+        });
+        archived = { path: done.dir, files: done.files, bytes: done.bytes };
+        return null;
+      } catch (err) {
+        archiveError = `${MESSAGES.WORKTREE_ARCHIVE_FAILED}: ${cleanText(errorText(err), 200)}`;
+        return archiveError;
+      }
+    };
     // No onBusy hook: Codara never kills anything on an agent's behalf.
     const removed = await removeCopyWorktree({
       repoCwd: repo,
@@ -2944,8 +3053,14 @@ async function removeLocked(
       force: false,
       deleteBranch: false,
       removeOrphanDir: false,
-      aside: { recheck: (aside) => changedWhileAside(recheckCtx, stillListed, realBefore, aside, before) },
+      aside: {
+        recheck: async (aside) =>
+          (await changedWhileAside(recheckCtx, stillListed, realBefore, aside, before)) ?? archiveFrom(aside),
+      },
     });
+    if (!removed.ok && archiveError) {
+      return refusal("WORKTREE_ARCHIVE_FAILED", archiveError, { workspaceId: workspace.id, recoveryRef });
+    }
     if (!removed.ok && removed.changed) {
       return refusal("WORKTREE_CHANGED", removed.error, { workspaceId: workspace.id, recoveryRef });
     }
@@ -3089,6 +3204,7 @@ async function removeLocked(
     ...(verdict.pullRequest ? { pullRequest: verdict.pullRequest } : {}),
     ...(recoveryRef ? { recoveryRef } : {}),
     ...(recoverWith ? { recoverWith } : {}),
+    ...(archived ? { archived } : {}),
     ...(warnings.length ? { warnings } : {}),
   };
 }

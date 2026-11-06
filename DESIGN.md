@@ -552,6 +552,15 @@ Worktrees, Remove merged worktrees on their own** turns it off (on by default).
 - An empty worktree (nothing ever committed) is never removed on its own. After
   a week untouched with no agent, its row offers Clean up on hover, with a
   tooltip that says nothing was committed there.
+- Ignored data never holds merged work back (2026-11-06, "4 merged · Clean up"
+  sat for days on `data/` folders): it is copied to the archive
+  (`~/.codarastudio/worktree-archive/<date>/<repo>--<branch>/`, 30 days) and
+  counted before anything is deleted. The maker's tab holds merged work only
+  while its shell is inside and it was active in the last 30 minutes. Clean up
+  is left for what needs a human: unmerged and stale, dirty or detached.
+- One toast per pass, not one per worktree: "Removed 4 merged worktrees" with
+  "1.6 GB freed, data kept in the archive (click to open it)". The existing
+  local toast, success tone; a click opens the archive folder. No dialog.
 
 ## Session picker (2026-11)
 

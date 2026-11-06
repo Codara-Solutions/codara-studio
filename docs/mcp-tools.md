@@ -1113,8 +1113,10 @@ the `blockers` and a `hint`:
   progress, and no ignored files beyond build output and caches
   (`node_modules/`, `dist/`, `.venv/` and similar, plus the patterns you add
   for the repository in Settings, and the files worktree setup copied or
-  linked while they are unchanged); `discardIgnoredFiles: true` deletes the
-  rest;
+  linked while they are unchanged). The rest (`data/`, `.env.local`) is
+  copied to `~/.codarastudio/worktree-archive/<date>/<repo>--<branch>/`, counted,
+  and kept 30 days; with or without `discardIgnoredFiles`, a copy that fails
+  keeps the worktree (`WORKTREE_ARCHIVE_FAILED`) and the result names `archived`;
 - no submodule or nested repository is checked out in it, and no other
   checkout or worktree sits inside it, ignored folders included. The search
   through ignored folders visits at most 50,000 folders; when it runs out,
@@ -1140,7 +1142,7 @@ The `code` is the first blocker; `blockers` lists them all, and a dry run or
 | `WORKTREE_USER_CREATED` | You created it and agents may not remove your worktrees. | Ask you. |
 | `WORKTREE_ORIGIN_MANAGED` | It is a GitHub issue or pull-request workspace. | Leave it; you remove it from the rail. |
 | `WORKTREE_OWNED_BY_ACTIVE_RUN` | Another Cora run created it and is still active (`details.ownerRunId`). | Leave it to that run; ask you if it must go now. |
-| `WORKTREE_OWNED_BY_LIVE_AGENT` | An agent in another terminal created it and that terminal is still open (`details.ownerPaneId`). | Leave it to that agent, or ask you. When it is merged and nothing else holds it, the hint points to `codara_worktree_cleanup`, where you approve the removal. |
+| `WORKTREE_OWNED_BY_LIVE_AGENT` | An agent in another terminal created it and that terminal is still open (`details.ownerPaneId`). Merged work is held only while that terminal's shell is inside the worktree and it was active in the last 30 minutes. | Leave it to that agent, or ask you. When it is merged and nothing else holds it, the hint points to `codara_worktree_cleanup`, where you approve the removal. |
 | `WORKTREE_NOT_MANAGED` | The folder cannot be read, so it may still hold work, or it is no longer a git worktree in Codara's worktrees folder. | Ask you. |
 | `WORKTREE_LOCKED` | `git worktree lock` protects it. | Ask you. |
 | `WORKTREE_DETACHED_HEAD`, `WORKTREE_BRANCH_MISMATCH` | It is not on the branch Codara recorded, and the branch it has checked out is not proven merged (or is a long-lived, base or default branch). A switched-to branch that is proven merged does not block: the removal deletes it, deletes the recorded branch only when its own tip is merged, and lists both in `branches` (`checkedOutBranch` names the one checked out). | Check out that branch again, or ask you. |

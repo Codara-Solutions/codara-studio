@@ -34,6 +34,7 @@ import {
   worktreeFingerprint,
 } from "../git-worktrees";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
+import { archiveIgnoredFiles } from "./archive";
 import { sameFolder } from "../worktree-folders";
 import {
   canonicalMaybeMissing,
@@ -101,6 +102,12 @@ export interface RemoveOptions {
    * at the folder; otherwise nothing is removed.
    */
   boundTo?: string;
+  /**
+   * Copy the kept ignored files into the archive (archive.ts) once the folder
+   * is aside, before git deletes it; a copy that fails keeps the worktree.
+   * Needs deps.archiveRoot.
+   */
+  archiveIgnored?: boolean;
 }
 
 // The rows as they are now, read under the lock: a row removed, or a new
@@ -166,6 +173,7 @@ async function contextFor(
     ...(makerElsewhereOk ? { makerElsewhereOk } : {}),
     usage: await usageContext(deps, reals),
     linked: await linkWorkspaces(repo),
+    keptIgnored: new Map(),
     regenerable: await deps
       .regenerableIgnored([repo.root, ...repo.workspaces.map((workspace) => workspace.cwd)])
       .catch(() => []),
@@ -316,7 +324,7 @@ async function changedWhileAside(
     found.some((use) => !heldByMaker(use, true)) &&
     !workHoldsForMaker(check.localWork) &&
     (await finishedWork(ctx.repo.root, check.merge, check.head, check.branch, workspaces));
-  const uses = found.filter((use) => countsAsUse(use, options) && heldByMaker(use, finished, ctx.requireKnownUsage));
+  const uses = found.filter((use) => countsAsUse(use, options) && heldByMaker(use, finished));
   if (uses.length) return `In use: ${[...new Set(uses.map((use) => use.label))].join(", ")}, so it was put back.`;
   return (await options.beforeRemove?.()) ?? null;
 }
@@ -389,6 +397,33 @@ async function removeOne(
   const stopped = await options.beforeRemove?.();
   if (stopped) return refuse("IN_USE", stopped);
   if (!check.alreadyRemoved && before === null) return refuse("GIT_FAILED", "git could not read it, so nothing was removed.");
+  const keep = check.alreadyRemoved ? [] : (ctx.keptIgnored?.get(pathKey(real)) ?? []);
+  const archiveRoot = options.archiveIgnored && keep.length ? deps.archiveRoot?.() : undefined;
+  if (options.archiveIgnored && keep.length && !archiveRoot) {
+    return refuse("ARCHIVE_FAILED", "Its ignored files have nowhere to be kept, so nothing was removed.");
+  }
+  let archived = undefined as WorktreeCleanupOutcome["archived"];
+  let archiveError = null as string | null;
+  // Copied from the folder moved aside, after its last check: nothing new
+  // can be written there by its path, so the copy is what git deletes.
+  const archiveFrom = async (aside: string): Promise<string | null> => {
+    if (!archiveRoot) return null;
+    try {
+      const done = await archiveIgnoredFiles({
+        worktree: aside,
+        entries: keep,
+        root: archiveRoot,
+        repoName: repo.name,
+        branch: check.branch,
+        now: deps.now(),
+      });
+      archived = { path: done.dir, files: done.files, bytes: done.bytes };
+      return null;
+    } catch (err) {
+      archiveError = `Its ignored files could not be archived (${cleanText(errorText(err), 200)}), so it was kept.`;
+      return archiveError;
+    }
+  };
 
   const id = refSafe(check.workspace?.id ?? `wt-${createHash("sha256").update(real).digest("hex").slice(0, 12)}`);
   const refBase = `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${id}`;
@@ -423,8 +458,14 @@ async function removeOne(
       deleteBranch: false,
       removeOrphanDir: false,
       timeoutMs: REMOVE_TIMEOUT_MS,
-      aside: { recheck: (aside) => changedWhileAside(ctx, check, real, aside, before!, options) },
+      aside: {
+        recheck: async (aside) => (await changedWhileAside(ctx, check, real, aside, before!, options)) ?? archiveFrom(aside),
+      },
     });
+    if (!removed.ok && archiveError) {
+      await audit("refused", { code: "ARCHIVE_FAILED", recoveryRef });
+      return { outcome: { ...outcome, status: "refused", code: "ARCHIVE_FAILED", message: archiveError }, dropWorkspaces: [] };
+    }
     if (!removed.ok && removed.changed) {
       await audit("refused", { code: "CHANGED", recoveryRef });
       return { outcome: { ...outcome, status: "refused", code: "CHANGED", message: cleanText(removed.error, 400) }, dropWorkspaces: [] };
@@ -451,11 +492,13 @@ async function removeOne(
             .join(" "),
           ...(recoveryRef ? { recoveryRef } : {}),
           ...(changesRef ? { changesRef } : {}),
+          ...(archived ? { archived } : {}),
         },
         dropWorkspaces: [],
       };
     }
     outcome.status = "removed";
+    if (archived) outcome.archived = archived;
   } else {
     const dropped = await dropMissingWorktreeRegistration(repo.root, check.path);
     if (!dropped.ok) {
