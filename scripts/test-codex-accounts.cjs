@@ -380,8 +380,44 @@ async function main() {
   assert.ok(await piStore.registry.isTombstoned("openai-codex", { identityFingerprint: fingerprintOf(WORK_ACCOUNT) }));
   pass("delete tombstones the account and purges its home once the last terminal exits");
 
+  // A grant refresh and a delete of the same account never overlap: the
+  // delete waits for a refresh already running, and no refresh starts once
+  // the delete has begun.
+  const events = [];
+  let finishRefresh;
+  const refreshing = service.refreshWhileCliIdle(homeRow.id, async () => {
+    events.push("refresh started");
+    await new Promise((resolve) => (finishRefresh = resolve));
+    events.push("refresh done");
+    return "renewed";
+  });
+  for (let i = 0; i < 200 && !finishRefresh; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  const deletingHome = service.deleteAccount(homeRow.id).then((result) => {
+    events.push("deleted");
+    return result;
+  });
+  for (let i = 0; i < 200 && !service.deleting.has(homeRow.id); i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(
+    await service.refreshWhileCliIdle(homeRow.id, async () => {
+      throw new Error("no refresh starts once the delete has begun");
+    }),
+    "busy",
+  );
+  // Give a delete that did not wait time to remove the row and the login.
+  for (let i = 0; i < 40 && (await piStore.registry.getProfile(homeRow.id)); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok(await piStore.registry.getProfile(homeRow.id), "the delete waits for the refresh");
+  assert.equal(fs.existsSync(homeOf(homeCli).authFile), true, "the login stays until the refresh ends");
+  finishRefresh();
+  assert.equal(await refreshing, "renewed");
+  const deletedHome = await deletingHome;
+  assert.deepEqual(events, ["refresh started", "refresh done", "deleted"]);
+  pass("a grant refresh and a delete of the same account never overlap");
+
   // A home with no terminal goes at once.
-  const deletedHome = await service.deleteAccount(homeRow.id);
   assert.deepEqual(deletedHome, { deleted: true, purgePending: false });
   assert.equal(fs.existsSync(homeOf(homeCli).profileDir), false);
   pass("a home no terminal holds is purged at once");

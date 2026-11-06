@@ -128,6 +128,7 @@ globalThis.__profileUsageInspection = {
 };
 globalThis.__profileUsageAuthFiles = authFiles;
 globalThis.__profileUsageRefreshCalls = [];
+globalThis.__profileUsageHalvesInUse = new Set();
 
 const stubPlugin = {
   name: "profile-usage-harness",
@@ -170,6 +171,23 @@ const stubPlugin = {
       loader: "js",
       contents: "export function logMain() {}",
     }));
+    build.onResolve({ filter: /unified-account-registry$/ }, () => ({
+      path: "account-registry",
+      namespace: "stub",
+    }));
+    build.onLoad({ filter: /^account-registry$/, namespace: "stub" }, () => ({
+      loader: "js",
+      contents: `
+        export function unifiedAccountsFor() {
+          return {
+            async reconcileProfile() { return null; },
+            async refreshWhileCliIdle(profileId, refresh) {
+              return globalThis.__profileUsageHalvesInUse.has(profileId) ? "busy" : refresh();
+            },
+          };
+        }
+      `,
+    }));
     build.onResolve({ filter: /pi-subscription-auth$/ }, () => ({
       path: "subscription-auth",
       namespace: "stub",
@@ -177,9 +195,11 @@ const stubPlugin = {
     build.onLoad({ filter: /subscription-auth/, namespace: "stub" }, () => ({
       loader: "js",
       contents: `
-        export async function refreshPiSubscriptionProfileCredential(profileId) {
-          globalThis.__profileUsageRefreshCalls.push(profileId);
-          return null;
+        export async function refreshPiSubscriptionProfileCredential(profileId, provider, options) {
+          globalThis.__profileUsageRefreshCalls.push({ profileId, provider, options });
+          return globalThis.__profileUsageRefresh
+            ? globalThis.__profileUsageRefresh(profileId, provider, options)
+            : null;
         }
       `,
     }));
@@ -600,6 +620,280 @@ async function main() {
     transportError === "The reset could not be sent. Check your connection and try again.",
     transportError,
   );
+  // ChatGPT refused a token whose stored expiry is still days ahead (it ends
+  // tokens before their exp; the Codex CLI copes by refreshing on a 401).
+  // The card must retry once with a renewed token instead of reporting a
+  // dead session while Codex itself keeps working on the same account.
+  const stale = profiles[1];
+  const staleAuthFile = authFiles[stale.id];
+  const storedAccess = (file) => JSON.parse(fs.readFileSync(file, "utf8"))["openai-codex"].access;
+  const resetStale = (access, accountId = "vendor-account-second", expiresIn = 7 * 86_400_000) => {
+    fs.writeFileSync(
+      staleAuthFile,
+      JSON.stringify({
+        "openai-codex": {
+          type: "oauth",
+          access,
+          refresh: "refresh-secret",
+          expires: Date.now() + expiresIn,
+          accountId,
+        },
+      }),
+      { mode: 0o600 },
+    );
+  };
+  const refused = new Set();
+  const usageRequests = [];
+  let onRefusal = null;
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("api.anthropic.com")) {
+      return new Response(JSON.stringify({ five_hour: { utilization: 5 } }), { status: 200 });
+    }
+    const authorization = options.headers.authorization;
+    usageRequests.push({ authorization, account: options.headers["chatgpt-account-id"] });
+    if (refused.has(authorization)) {
+      onRefusal?.();
+      return new Response(JSON.stringify({ detail: { code: "token_expired" } }), { status: 401 });
+    }
+    return new Response(
+      JSON.stringify({
+        plan_type: "pro",
+        rate_limit: {
+          primary_window: { used_percent: 41, limit_window_seconds: 18_000, reset_after_seconds: 600 },
+        },
+      }),
+      { status: 200 },
+    );
+  };
+  const staleUsage = async () => {
+    usage.invalidatePiSubscriptionUsageCache();
+    usageRequests.length = 0;
+    globalThis.__profileUsageRefreshCalls.length = 0;
+    return (await usage.inspectPiSubscriptionUsage(true)).profiles.find(
+      (entry) => entry.profileId === stale.id,
+    );
+  };
+
+  resetStale("access-secret-stale");
+  refused.add("Bearer access-secret-stale");
+  globalThis.__profileUsageRefresh = (profileId, provider, options) => {
+    if (options?.rejectedAccess !== "access-secret-stale") return null;
+    resetStale("access-secret-renewed");
+    return "access-secret-renewed";
+  };
+  const renewed = await staleUsage();
+  const secondRequests = usageRequests.filter(
+    (request) => request.account === "vendor-account-second",
+  );
+  check(
+    "a refused token that is not due yet is refreshed once and the read retried",
+    renewed.status === "ok" &&
+      renewed.windows[0]?.usedPercent === 41 &&
+      secondRequests.map((request) => request.authorization).join(",") ===
+        "Bearer access-secret-stale,Bearer access-secret-renewed" &&
+      globalThis.__profileUsageRefreshCalls.filter((call) => call.profileId === stale.id).length === 1,
+    JSON.stringify({ renewed, secondRequests, calls: globalThis.__profileUsageRefreshCalls }),
+  );
+  check(
+    "the forced refresh names the refused token, so a newer one is never spent",
+    globalThis.__profileUsageRefreshCalls.some(
+      (call) =>
+        call.profileId === stale.id &&
+        call.provider === "openai-codex" &&
+        call.options?.rejectedAccess === "access-secret-stale",
+    ),
+    JSON.stringify(globalThis.__profileUsageRefreshCalls),
+  );
+
+  // A Codex session on the same grant rotated it while the read was in
+  // flight: the newer copy is used as it is, without spending another refresh.
+  resetStale("access-secret-stale");
+  onRefusal = () => {
+    onRefusal = null;
+    resetStale("access-secret-rotated");
+  };
+  globalThis.__profileUsageRefresh = () => {
+    throw new Error("no refresh is needed when the store already holds a newer token");
+  };
+  const rotated = await staleUsage();
+  check(
+    "a newer copy of the same account is retried without a refresh",
+    rotated.status === "ok" &&
+      usageRequests.some((request) => request.authorization === "Bearer access-secret-rotated") &&
+      globalThis.__profileUsageRefreshCalls.length === 0,
+    JSON.stringify({ rotated, usageRequests, calls: globalThis.__profileUsageRefreshCalls }),
+  );
+
+  // The store now names another ChatGPT account: its token is never sent
+  // for this card, and the card says the session needs a reconnect.
+  resetStale("access-secret-stale");
+  onRefusal = () => {
+    onRefusal = null;
+    resetStale("access-secret-other-account", "vendor-account-other");
+  };
+  globalThis.__profileUsageRefresh = null;
+  const mixed = await staleUsage();
+  check(
+    "a copy that names another account is not used for this card",
+    mixed.status === "expired" &&
+      !usageRequests.some((request) => request.authorization === "Bearer access-secret-other-account"),
+    JSON.stringify({ mixed, usageRequests }),
+  );
+
+  // Nothing renews it: one refused read, one refresh attempt, then Reconnect.
+  resetStale("access-secret-stale");
+  globalThis.__profileUsageRefresh = () => null;
+  const dead = await staleUsage();
+  check(
+    "a session nothing can renew is reported expired after one retry",
+    dead.status === "expired" &&
+      dead.message === "ChatGPT rejected the stored session. Reconnect." &&
+      usageRequests.filter((request) => request.account === "vendor-account-second").length === 1 &&
+      globalThis.__profileUsageRefreshCalls.length === 1 &&
+      storedAccess(staleAuthFile) === "access-secret-stale",
+    JSON.stringify({ dead, usageRequests, calls: globalThis.__profileUsageRefreshCalls }),
+  );
+  // A Codex process runs on the account's home: it renews the grant on its
+  // own 401, so the card waits for it instead of racing it with a refresh.
+  resetStale("access-secret-stale");
+  globalThis.__profileUsageHalvesInUse.add(stale.id);
+  globalThis.__profileUsageRefresh = () => {
+    throw new Error("a running Codex session owns the refresh");
+  };
+  const busy = await staleUsage();
+  globalThis.__profileUsageHalvesInUse.delete(stale.id);
+  check(
+    "a refusal while Codex runs on the account is not refreshed and asks for no reconnect",
+    busy.status === "error" &&
+      busy.message.includes("retry in a moment") &&
+      globalThis.__profileUsageRefreshCalls.length === 0,
+    JSON.stringify({ busy, calls: globalThis.__profileUsageRefreshCalls }),
+  );
+
+  // The refused token crosses the near-expiry line while the read is in
+  // flight. The re-read must not refresh on its own: the guards below still
+  // decide whether the single refresh happens.
+  const nearExpiry = 30_000;
+  resetStale("access-secret-stale");
+  onRefusal = () => {
+    onRefusal = null;
+    resetStale("access-secret-stale", "vendor-account-second", nearExpiry);
+  };
+  globalThis.__profileUsageHalvesInUse.add(stale.id);
+  globalThis.__profileUsageRefresh = () => {
+    throw new Error("a running Codex session owns the refresh");
+  };
+  const busyNearExpiry = await staleUsage();
+  globalThis.__profileUsageHalvesInUse.delete(stale.id);
+  check(
+    "a refusal near expiry while Codex runs on the account is still not refreshed",
+    busyNearExpiry.status === "error" && globalThis.__profileUsageRefreshCalls.length === 0,
+    JSON.stringify({ busyNearExpiry, calls: globalThis.__profileUsageRefreshCalls }),
+  );
+
+  resetStale("access-secret-stale");
+  onRefusal = () => {
+    onRefusal = null;
+    resetStale("access-secret-stale", "vendor-account-second", nearExpiry);
+  };
+  globalThis.__profileUsageRefresh = () => null;
+  const failedOnce = await staleUsage();
+  check(
+    "a failed refresh near expiry is attempted exactly once",
+    failedOnce.status === "expired" &&
+      globalThis.__profileUsageRefreshCalls.length === 1 &&
+      globalThis.__profileUsageRefreshCalls[0].options?.rejectedAccess === "access-secret-stale" &&
+      globalThis.__profileUsageRefreshCalls[0].options?.expectedAccountId === "vendor-account-second",
+    JSON.stringify({ failedOnce, calls: globalThis.__profileUsageRefreshCalls }),
+  );
+
+  resetStale("access-secret-stale");
+  onRefusal = () => {
+    onRefusal = null;
+    resetStale("access-secret-other-account", "vendor-account-other", nearExpiry);
+  };
+  globalThis.__profileUsageRefresh = () => {
+    throw new Error("another account's credential is never refreshed for this card");
+  };
+  const foreign = await staleUsage();
+  check(
+    "a store that switched accounts near expiry is neither refreshed nor sent",
+    foreign.status === "expired" &&
+      globalThis.__profileUsageRefreshCalls.length === 0 &&
+      !usageRequests.some((request) => request.authorization === "Bearer access-secret-other-account"),
+    JSON.stringify({ foreign, usageRequests, calls: globalThis.__profileUsageRefreshCalls }),
+  );
+
+  // Identity must match positively. A replacement that names no account, or
+  // whose metadata and token claim disagree, is neither sent nor refreshed.
+  const b64 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const jwtFor = (accountClaim) =>
+    `${b64({ alg: "none" })}.${b64({ "https://api.openai.com/auth": { chatgpt_account_id: accountClaim } })}.sig`;
+  const noRefresh = () => {
+    throw new Error("a credential without a matching identity is never refreshed");
+  };
+  for (const [name, access, metadata] of [
+    ["names no account", "access-secret-anonymous", null],
+    ["metadata and claim disagree", jwtFor("vendor-account-second"), "vendor-account-other"],
+  ]) {
+    resetStale("access-secret-stale");
+    onRefusal = () => {
+      onRefusal = null;
+      resetStale(access, metadata);
+    };
+    globalThis.__profileUsageRefresh = noRefresh;
+    const unidentified = await staleUsage();
+    check(
+      `a replacement that ${name} is rejected`,
+      unidentified.status === "expired" &&
+        globalThis.__profileUsageRefreshCalls.length === 0 &&
+        !usageRequests.some((request) => request.authorization === `Bearer ${access}`),
+      JSON.stringify({ unidentified, usageRequests, calls: globalThis.__profileUsageRefreshCalls }),
+    );
+  }
+
+  // The retry carries the account it validated, whatever header came first.
+  const validatedAccess = jwtFor("vendor-account-second");
+  resetStale("access-secret-stale");
+  onRefusal = () => {
+    onRefusal = null;
+    resetStale(validatedAccess, "vendor-account-second");
+  };
+  globalThis.__profileUsageRefresh = noRefresh;
+  const validated = await staleUsage();
+  const retried = usageRequests.find((request) => request.authorization === `Bearer ${validatedAccess}`);
+  check(
+    "the retry header is the validated account id",
+    validated.status === "ok" && retried?.account === "vendor-account-second",
+    JSON.stringify({ validated, usageRequests }),
+  );
+
+  // A 403 refuses the request, not the sign-in: no refresh, no Reconnect.
+  resetStale("access-secret-stale");
+  refused.clear();
+  const forbiddenFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) =>
+    options.headers?.["chatgpt-account-id"] === "vendor-account-second"
+      ? new Response("<html>blocked</html>", { status: 403 })
+      : forbiddenFetch(url, options);
+  globalThis.__profileUsageRefresh = () => {
+    throw new Error("a 403 is never answered with a refresh");
+  };
+  const forbidden = await staleUsage();
+  globalThis.fetch = forbiddenFetch;
+  check(
+    "a 403 is reported as a failed check, not an expired sign-in",
+    forbidden.status === "error" &&
+      forbidden.message.includes("HTTP 403") &&
+      globalThis.__profileUsageRefreshCalls.length === 0,
+    JSON.stringify({ forbidden, calls: globalThis.__profileUsageRefreshCalls }),
+  );
+  check(
+    "the retry keeps tokens off the DTO",
+    !JSON.stringify([renewed, rotated, mixed, dead, busy, busyNearExpiry, failedOnce, foreign, validated, forbidden]).includes("access-secret"),
+  );
+  globalThis.__profileUsageRefresh = null;
   Date.now = realDateNow;
 
   if (failures > 0) {

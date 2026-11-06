@@ -75,6 +75,88 @@ async function main() {
   assert.equal(unknown.profileId, "personal");
   assert.equal(fs.existsSync(accountDir(never)), false, "an unknown id got a home");
   console.log("PASS an id the store never listed gets no home");
+
+  // A refresh of an account's grant and a Codex starting on it never overlap:
+  // the refresh starts only while nothing holds the account, and a lease
+  // asked for meanwhile waits until the refresh (and its mirror write) ends.
+  const leases = runtime.nativeCodexProfileLeases;
+  const { profile: shared } = await store.createProfile({ label: "Shared" });
+  const events = [];
+  let finishRefresh;
+  const refresh = leases.runRefreshWhileUnleased(shared.id, async () => {
+    events.push("refresh started");
+    await new Promise((resolve) => (finishRefresh = resolve));
+    events.push("refresh done");
+    return "renewed";
+  });
+  assert.ok(refresh, "an unleased account can be refreshed");
+  assert.equal(leases.runRefreshWhileUnleased(shared.id, async () => "second"), null, "one refresh at a time");
+  const leased = runtime.acquireNativeCodexProfileLease(shared.id, "terminal:late").then((release) => {
+    events.push("lease acquired");
+    return release;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(leases.isLeased(shared.id), false, "the lease waits for the refresh");
+  finishRefresh();
+  assert.equal(await refresh, "renewed");
+  const release = await leased;
+  assert.deepEqual(events, ["refresh started", "refresh done", "lease acquired"]);
+  assert.equal(leases.isLeased(shared.id), true);
+  assert.equal(
+    leases.runRefreshWhileUnleased(shared.id, async () => {
+      throw new Error("a leased account must not be refreshed by Studio");
+    }),
+    null,
+    "a leased account is not refreshed",
+  );
+  release();
+  console.log("PASS a grant refresh and a Codex starting on the same account never overlap");
+
+  // Refresh and deletion exclude each other, and a launch that waited on a
+  // refresh does not lease a profile that is gone by then.
+  let finishGuarded;
+  const guarded = leases.runRefreshWhileUnleased(shared.id, async () => {
+    await new Promise((resolve) => (finishGuarded = resolve));
+  });
+  await assert.rejects(
+    store.deleteProfile(shared.id),
+    (error) => error.name === "CodexCliAccountProfileLeasedError",
+    "an account is not deleted under a refresh of its grant",
+  );
+  finishGuarded();
+  await guarded;
+  let releaseDelete;
+  const deleting = leases.runWhileUnleased(shared.id, async () => {
+    await new Promise((resolve) => (releaseDelete = resolve));
+  });
+  assert.equal(
+    leases.runRefreshWhileUnleased(shared.id, async () => "refused"),
+    null,
+    "an account being deleted is not refreshed",
+  );
+  releaseDelete();
+  await deleting;
+
+  const { profile: doomed } = await store.createProfile({ label: "Doomed" });
+  let finishDoomed;
+  const doomedRefresh = leases.runRefreshWhileUnleased(doomed.id, async () => {
+    await new Promise((resolve) => (finishDoomed = resolve));
+  });
+  const waiting = runtime.acquireNativeCodexProfileLease(doomed.id, "terminal:doomed");
+  const registry = path.join(store.rootDir, "account-profiles.json");
+  const listed = JSON.parse(fs.readFileSync(registry, "utf8"));
+  listed.profiles = listed.profiles.filter((entry) => entry.id !== doomed.id);
+  fs.writeFileSync(registry, JSON.stringify(listed), { mode: 0o600 });
+  await new Promise((resolve) => setImmediate(resolve));
+  finishDoomed();
+  await doomedRefresh;
+  await assert.rejects(
+    waiting,
+    (error) => error.name === "CodexCliAccountProfileNotFoundError",
+    "a launch that waited does not lease a profile removed meanwhile",
+  );
+  assert.equal(leases.isLeased(doomed.id), false);
+  console.log("PASS refresh and deletion exclude each other, and a waiting launch rechecks its profile");
 }
 
 main()

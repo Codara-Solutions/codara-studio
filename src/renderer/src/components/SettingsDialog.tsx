@@ -2358,6 +2358,9 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
             canRefresh: profile.canRefresh,
             ...(profile.error && coraHeld ? { error: profile.error } : {}),
             ...(coraHeld ? {} : { held: false }),
+            ...(coraHeld && usage?.status === "expired"
+              ? { rejected: usage.message || "Sign-in expired." }
+              : {}),
           },
           ...(profile.terminal ? { terminal: profile.terminal } : {}),
           busy: accountMutationId === profile.id,

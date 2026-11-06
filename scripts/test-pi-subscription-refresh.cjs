@@ -499,6 +499,136 @@ async function main() {
     });
   }
 
+  // ChatGPT refused an access token whose stored expiry is still days ahead.
+  // Named as refused, it is refreshed anyway; a store that already holds a
+  // newer token answers that one, so a second caller never spends it again.
+  {
+    const codexCase = cases.find((entry) => entry.provider === "openai-codex");
+    const codexAuthFile = path.join(TMP, "openai-codex", "auth.json");
+    globalThis.__refreshHarness = {
+      ...globalThis.__refreshHarness,
+      authFile: codexAuthFile,
+      profileId: codexCase.profileId,
+      cliProfileId: codexCase.cliProfileId,
+      provider: "openai-codex",
+    };
+    const refusedNow = Date.now();
+    const day = 86_400_000;
+    const accessFor = (iatMs, expMs) =>
+      jwt({
+        iat: Math.floor(iatMs / 1000),
+        exp: Math.floor(expMs / 1000),
+        "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+      });
+    // Real ChatGPT tokens live ten days; this one was issued three days ago.
+    const refusedAccess = accessFor(refusedNow - 3 * day, refusedNow + 7 * day);
+    const renewedAccess = accessFor(refusedNow, refusedNow + 10 * day);
+    fs.writeFileSync(
+      codexAuthFile,
+      JSON.stringify({
+        "openai-codex": {
+          type: "oauth",
+          access: refusedAccess,
+          refresh: "live-refresh",
+          expires: refusedNow + 7 * 86_400_000,
+          accountId: "acct-1",
+        },
+      }),
+      { mode: 0o600 },
+    );
+    fs.writeFileSync(
+      codexCase.terminalFile,
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        OPENAI_API_KEY: null,
+        tokens: {
+          id_token: jwt({ exp: Math.floor((refusedNow + 7 * 86_400_000) / 1000), email: "codex@example.com" }),
+          access_token: refusedAccess,
+          refresh_token: "live-refresh",
+          account_id: "acct-1",
+        },
+        last_refresh: new Date(refusedNow).toISOString(),
+      }),
+      { mode: 0o600 },
+    );
+    const refusedGrants = [];
+    globalThis.fetch = async (_url, options) => {
+      refusedGrants.push(String(options && options.body).includes("live-refresh") ? "live" : "other");
+      return new Response(
+        JSON.stringify({ access_token: renewedAccess, refresh_token: "renewed-live-refresh", expires_in: 10 * 86_400 }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    };
+    const unforced = await refreshPiSubscriptionProfileCredential(codexCase.profileId, "openai-codex");
+    check("a token that is not due is answered as it is when nobody refused it", () => {
+      assert.strictEqual(unforced, refusedAccess);
+      assert.deepStrictEqual(refusedGrants, []);
+    });
+    const forced = await refreshPiSubscriptionProfileCredential(codexCase.profileId, "openai-codex", {
+      rejectedAccess: refusedAccess,
+    });
+    check("a refused token is refreshed although its stored expiry is ahead", () => {
+      assert.deepStrictEqual(refusedGrants, ["live"]);
+      assert.strictEqual(forced, renewedAccess);
+      const stored = JSON.parse(fs.readFileSync(codexAuthFile, "utf8"))["openai-codex"];
+      assert.strictEqual(stored.access, renewedAccess);
+      assert.strictEqual(stored.refresh, "renewed-live-refresh");
+      const terminal = codexCase.readTerminal(codexCase.terminalFile);
+      assert.strictEqual(terminal.access, renewedAccess, "the Codex home receives the renewal");
+      assert.strictEqual(terminal.refresh, "renewed-live-refresh");
+    });
+    const again = await refreshPiSubscriptionProfileCredential(codexCase.profileId, "openai-codex", {
+      rejectedAccess: refusedAccess,
+    });
+    check("once the store holds a newer token, naming the old one refreshes nothing", () => {
+      assert.strictEqual(again, forced);
+      assert.deepStrictEqual(refusedGrants, ["live"]);
+    });
+    // Even when that newer token is close to its own expiry: the caller named
+    // the token it saw refused, and this is not it.
+    const soonAccess = accessFor(Date.now(), Date.now() + 5 * 60_000);
+    const piRecord = JSON.parse(fs.readFileSync(codexAuthFile, "utf8"));
+    piRecord["openai-codex"] = { ...piRecord["openai-codex"], access: soonAccess, expires: Date.now() + 5 * 60_000 };
+    fs.writeFileSync(codexAuthFile, JSON.stringify(piRecord), { mode: 0o600 });
+    const terminalRecord = JSON.parse(fs.readFileSync(codexCase.terminalFile, "utf8"));
+    terminalRecord.tokens.access_token = soonAccess;
+    fs.writeFileSync(codexCase.terminalFile, JSON.stringify(terminalRecord), { mode: 0o600 });
+    const nearExpiry = await refreshPiSubscriptionProfileCredential(codexCase.profileId, "openai-codex", {
+      rejectedAccess: refusedAccess,
+    });
+    check("a replacement near its own expiry is not refreshed for another token's refusal", () => {
+      assert.strictEqual(nearExpiry, soonAccess);
+      assert.deepStrictEqual(refusedGrants, ["live"]);
+    });
+    // The refused token is still stored but the caller expected another
+    // ChatGPT account: its refresh token is not spent for that caller.
+    const wrongAccount = await refreshPiSubscriptionProfileCredential(codexCase.profileId, "openai-codex", {
+      rejectedAccess: soonAccess,
+      expectedAccountId: "acct-other",
+    });
+    check("a refused token of another account than the caller expects is not refreshed", () => {
+      assert.strictEqual(wrongAccount, null);
+      assert.deepStrictEqual(refusedGrants, ["live"]);
+    });
+    // No account metadata and an opaque token: the identity is unknown, so
+    // the refresh is not spent on the caller's word alone.
+    const anonymous = JSON.parse(fs.readFileSync(codexAuthFile, "utf8"));
+    const { accountId: _dropped, ...withoutAccount } = anonymous["openai-codex"];
+    anonymous["openai-codex"] = { ...withoutAccount, access: "opaque-refused-access" };
+    fs.writeFileSync(codexAuthFile, JSON.stringify(anonymous), { mode: 0o600 });
+    const unknownIdentity = await refreshPiSubscriptionProfileCredential(codexCase.profileId, "openai-codex", {
+      rejectedAccess: "opaque-refused-access",
+      expectedAccountId: "acct-1",
+    });
+    check("a refused token whose account is unknown is not refreshed", () => {
+      assert.strictEqual(unknownIdentity, null);
+      assert.deepStrictEqual(refusedGrants, ["live"]);
+    });
+  }
+
   // With Studio's keeper running (production), a Claude refresh is renewed
   // through the account's Claude slot: the vault's own token is spent, never
   // Cora's dead copy, and both halves end on the result.
