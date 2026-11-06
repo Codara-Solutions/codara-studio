@@ -799,7 +799,7 @@ async function dispatch(
       case "session.message":
         return await handleSessionMessage(params, id);
       case "session.list_all":
-        return await handleSessionListAll(id);
+        return await handleSessionListAll(params, id);
       case "session.relay":
         return await handleSessionRelayRpc(params, id);
       case "terminal.write":
@@ -2381,8 +2381,11 @@ async function handleSessionMessage(params: Record<string, unknown>, id: JsonRpc
 // Every agent session in a terminal pane, in every workspace, as the rail's
 // Agents view reads it. Read-only: messaging one still takes ownership
 // (session.message) or the user's approval.
-async function handleSessionListAll(id: JsonRpcId): Promise<JsonRpcResponse> {
+async function handleSessionListAll(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
   const state = await loadState();
+  const caller = await agentSessionCaller(params);
+  const refusal = await agentSessionCallerRefusal(params, caller.workspaceId, caller.run, state);
+  if (refusal) return errorResponse(id, ERR_FORBIDDEN, refusal.replace("start sessions", "list sessions"));
   return successResponse(id, { sessions: buildLiveSessions(agentBoardActivity(), state.workspaces) });
 }
 
