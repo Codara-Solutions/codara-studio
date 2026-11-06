@@ -844,6 +844,18 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
 
   // Delete.
 
+  /**
+   * Whether a CLI process Codara started runs on this row's managed half.
+   * Such a process refreshes the shared grant itself when the provider
+   * refuses it, and a second refresher would race it for one rotating
+   * refresh token.
+   */
+  async cliHalfInUse(coraProfileId: string): Promise<boolean> {
+    const profile = await this.piStore.registry.getProfile(coraProfileId).catch(() => undefined);
+    if (profile?.cli.kind !== "managed") return false;
+    return this.homeHeld(profile.cli.profileId);
+  }
+
   /** Whether a terminal still runs in the managed home of a CLI half. */
   private homeHeld(cliProfileId: string): boolean {
     if (!this.adapter.managedHome(cliProfileId).holdsSessions) return false;

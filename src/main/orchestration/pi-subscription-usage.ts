@@ -675,19 +675,22 @@ function codexAccountId(resolved: ResolvedAccess): string | null {
 }
 
 /**
- * The one retry after ChatGPT refused a token Codara still dates as valid.
- * ChatGPT can end an access token well before its `exp`, and a Codex session
- * on the same grant may have rotated it meanwhile; the Codex CLI answers a
- * 401 the same way, by reloading its login and refreshing once. So: read the
- * account's credential again (the reconcile adopts a newer copy from its
- * Codex home), and when it still holds the refused token, refresh that one.
- * Null when nothing better exists, or when what the store now holds names
- * another ChatGPT account, whose limits are not this card's to show.
+ * The one retry after ChatGPT refused (401) a token Codara still dates as
+ * valid. ChatGPT can end an access token well before its `exp`, and a Codex
+ * session on the same grant may have rotated it meanwhile; the Codex CLI
+ * answers a 401 the same way, by reloading its login and refreshing once.
+ * So: read the account's credential again (the reconcile adopts a newer copy
+ * from its Codex home), and when it still holds the refused token, refresh
+ * that one, unless a Codex process runs on the account's home: it refreshes
+ * the grant on its own 401, and two refreshers would race for one rotating
+ * refresh token. "busy" then means: read again shortly. Null when nothing
+ * better exists, or when what the store now holds names another ChatGPT
+ * account, whose limits are not this card's to show.
  */
 async function codexAccessAfterRejection(
   profileId: string,
   rejected: ResolvedAccess,
-): Promise<ResolvedAccess | null> {
+): Promise<ResolvedAccess | "busy" | null> {
   const accountId = codexAccountId(rejected);
   const sameAccount = (candidate: ResolvedAccess): boolean => {
     const candidateId = accountIdFromAccessToken(candidate.access) ?? candidate.credential.accountId;
@@ -697,6 +700,11 @@ async function codexAccessAfterRejection(
   if (reread?.access && reread.access !== rejected.access) {
     return sameAccount(reread) ? reread : null;
   }
+  const { unifiedAccountsFor } = await import("./unified-account-registry");
+  const inUse = await unifiedAccountsFor("openai-codex")
+    .cliHalfInUse(profileId)
+    .catch(() => false);
+  if (inUse) return "busy";
   const refreshed = await refreshCredential(profileId, "openai-codex", rejected.access);
   if (!refreshed || refreshed === rejected.access) return null;
   const renewed = { credential: reread?.credential ?? rejected.credential, access: refreshed };
@@ -732,8 +740,18 @@ async function anthropicUsage(
     "user-agent": CLAUDE_CODE_USER_AGENT,
   });
   if (!result.ok) {
-    if (result.status === 401 || result.status === 403) {
+    if (result.status === 401) {
       return profileProblem(profile, checkedAt, "expired", "Claude rejected the stored session. Reconnect.");
+    }
+    // A 403 refuses this request (a scope or policy), not the sign-in, so
+    // the card does not ask for a reconnect over it.
+    if (result.status === 403) {
+      return profileProblem(
+        profile,
+        checkedAt,
+        "error",
+        "Claude refused the usage check (HTTP 403). The account is still connected; retry later.",
+      );
     }
     if (result.status === 429) {
       const waitMs = result.retryAfterMs ?? DEFAULT_ANTHROPIC_BACKOFF_MS;
@@ -849,8 +867,16 @@ async function codexUsage(
   }
   let headers = codexHeaders(resolved.access, accountId);
   let result = await fetchJsonRecord(CODEX_USAGE_URL, headers);
-  if (!result.ok && (result.status === 401 || result.status === 403)) {
+  if (!result.ok && result.status === 401) {
     const retry = await codexAccessAfterRejection(profile.id, resolved);
+    if (retry === "busy") {
+      return profileProblem(
+        profile,
+        checkedAt,
+        "error",
+        "ChatGPT refused this session. The Codex session running on this account renews it; retry in a moment.",
+      );
+    }
     if (retry) {
       accountId = codexAccountId(retry) ?? accountId;
       headers = codexHeaders(retry.access, accountId);
@@ -858,8 +884,18 @@ async function codexUsage(
     }
   }
   if (!result.ok) {
-    if (result.status === 401 || result.status === 403) {
+    if (result.status === 401) {
       return profileProblem(profile, checkedAt, "expired", "ChatGPT rejected the stored session. Reconnect.");
+    }
+    // A 403 is a refusal of this request (a policy or edge block), not of
+    // the sign-in: refreshing cannot fix it, so it is no reason to reconnect.
+    if (result.status === 403) {
+      return profileProblem(
+        profile,
+        checkedAt,
+        "error",
+        "ChatGPT refused the usage check (HTTP 403). The account is still connected; retry later.",
+      );
     }
     return profileProblem(profile, checkedAt, "error", `ChatGPT usage check failed (HTTP ${result.status}).`);
   }

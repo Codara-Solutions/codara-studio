@@ -128,6 +128,7 @@ globalThis.__profileUsageInspection = {
 };
 globalThis.__profileUsageAuthFiles = authFiles;
 globalThis.__profileUsageRefreshCalls = [];
+globalThis.__profileUsageHalvesInUse = new Set();
 
 const stubPlugin = {
   name: "profile-usage-harness",
@@ -169,6 +170,23 @@ const stubPlugin = {
     build.onLoad({ filter: /^file-log$/, namespace: "stub" }, () => ({
       loader: "js",
       contents: "export function logMain() {}",
+    }));
+    build.onResolve({ filter: /unified-account-registry$/ }, () => ({
+      path: "account-registry",
+      namespace: "stub",
+    }));
+    build.onLoad({ filter: /^account-registry$/, namespace: "stub" }, () => ({
+      loader: "js",
+      contents: `
+        export function unifiedAccountsFor() {
+          return {
+            async reconcileProfile() { return null; },
+            async cliHalfInUse(profileId) {
+              return globalThis.__profileUsageHalvesInUse.has(profileId);
+            },
+          };
+        }
+      `,
     }));
     build.onResolve({ filter: /pi-subscription-auth$/ }, () => ({
       path: "subscription-auth",
@@ -736,9 +754,46 @@ async function main() {
       storedAccess(staleAuthFile) === "access-secret-stale",
     JSON.stringify({ dead, usageRequests, calls: globalThis.__profileUsageRefreshCalls }),
   );
+  // A Codex process runs on the account's home: it renews the grant on its
+  // own 401, so the card waits for it instead of racing it with a refresh.
+  resetStale("access-secret-stale");
+  globalThis.__profileUsageHalvesInUse.add(stale.id);
+  globalThis.__profileUsageRefresh = () => {
+    throw new Error("a running Codex session owns the refresh");
+  };
+  const busy = await staleUsage();
+  globalThis.__profileUsageHalvesInUse.delete(stale.id);
+  check(
+    "a refusal while Codex runs on the account is not refreshed and asks for no reconnect",
+    busy.status === "error" &&
+      busy.message.includes("retry in a moment") &&
+      globalThis.__profileUsageRefreshCalls.length === 0,
+    JSON.stringify({ busy, calls: globalThis.__profileUsageRefreshCalls }),
+  );
+
+  // A 403 refuses the request, not the sign-in: no refresh, no Reconnect.
+  resetStale("access-secret-stale");
+  refused.clear();
+  const forbiddenFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) =>
+    options.headers?.["chatgpt-account-id"] === "vendor-account-second"
+      ? new Response("<html>blocked</html>", { status: 403 })
+      : forbiddenFetch(url, options);
+  globalThis.__profileUsageRefresh = () => {
+    throw new Error("a 403 is never answered with a refresh");
+  };
+  const forbidden = await staleUsage();
+  globalThis.fetch = forbiddenFetch;
+  check(
+    "a 403 is reported as a failed check, not an expired sign-in",
+    forbidden.status === "error" &&
+      forbidden.message.includes("HTTP 403") &&
+      globalThis.__profileUsageRefreshCalls.length === 0,
+    JSON.stringify({ forbidden, calls: globalThis.__profileUsageRefreshCalls }),
+  );
   check(
     "the retry keeps tokens off the DTO",
-    !JSON.stringify([renewed, rotated, mixed, dead]).includes("access-secret"),
+    !JSON.stringify([renewed, rotated, mixed, dead, busy, forbidden]).includes("access-secret"),
   );
   globalThis.__profileUsageRefresh = null;
   Date.now = realDateNow;

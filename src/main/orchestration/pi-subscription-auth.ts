@@ -1082,15 +1082,16 @@ export async function refreshPiSubscriptionProfileCredential(
     await storage.modify(provider, async (current) => {
       if (!isRecord(current) || current.type !== "oauth") return undefined;
       const credential = current as unknown as OAuthCredential;
-      const rejected =
-        nonEmptyString(options.rejectedAccess) && credential.access === options.rejectedAccess;
+      const named = nonEmptyString(options.rejectedAccess);
+      const rejected = named && credential.access === options.rejectedAccess;
       // Headroom past Pi's own window (0.87 refreshes five minutes before its
       // stored expiry), so a Pi process handed this credential right after
       // never finds it due and refreshes it on its own.
       if (
-        !rejected &&
-        typeof credential.expires === "number" &&
-        credential.expires > Date.now() + REFRESH_HEADROOM_MS
+        (named && !rejected) ||
+        (!rejected &&
+          typeof credential.expires === "number" &&
+          credential.expires > Date.now() + REFRESH_HEADROOM_MS)
       ) {
         access = nonEmptyString(credential.access) ? credential.access : null;
         return undefined;

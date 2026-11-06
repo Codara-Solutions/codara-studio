@@ -587,6 +587,22 @@ async function main() {
       assert.strictEqual(again, forced);
       assert.deepStrictEqual(refusedGrants, ["live"]);
     });
+    // Even when that newer token is close to its own expiry: the caller named
+    // the token it saw refused, and this is not it.
+    const soonAccess = accessFor(Date.now(), Date.now() + 5 * 60_000);
+    const piRecord = JSON.parse(fs.readFileSync(codexAuthFile, "utf8"));
+    piRecord["openai-codex"] = { ...piRecord["openai-codex"], access: soonAccess, expires: Date.now() + 5 * 60_000 };
+    fs.writeFileSync(codexAuthFile, JSON.stringify(piRecord), { mode: 0o600 });
+    const terminalRecord = JSON.parse(fs.readFileSync(codexCase.terminalFile, "utf8"));
+    terminalRecord.tokens.access_token = soonAccess;
+    fs.writeFileSync(codexCase.terminalFile, JSON.stringify(terminalRecord), { mode: 0o600 });
+    const nearExpiry = await refreshPiSubscriptionProfileCredential(codexCase.profileId, "openai-codex", {
+      rejectedAccess: refusedAccess,
+    });
+    check("a replacement near its own expiry is not refreshed for another token's refusal", () => {
+      assert.strictEqual(nearExpiry, soonAccess);
+      assert.deepStrictEqual(refusedGrants, ["live"]);
+    });
   }
 
   // With Studio's keeper running (production), a Claude refresh is renewed
