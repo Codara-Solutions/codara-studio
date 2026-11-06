@@ -619,7 +619,7 @@ depend on them.
 ```sh
 npm install        # Node 22+, a C++ toolchain, Python 3.8+ (see CONTRIBUTING.md)
 npm run dev        # the app with hot reload (electron-vite dev)
-npm run typecheck  # node, web and e2e projects
+npm run typecheck  # node, web, e2e and pi-cora projects
 npm test           # every unit suite; npm test -- <regex> for some
 npm run test:e2e   # build, then the Playwright specs
 ```

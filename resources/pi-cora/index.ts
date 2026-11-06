@@ -289,7 +289,9 @@ ${mcp?.promptSuffix() ?? ""}`,
     // signal and keeps the cached prefix valid.
     pi.on("before_agent_start", (event, ctx) => {
       if (branchHasAssistantTurn(ctx.sessionManager.getBranch())) return undefined;
-      activateFamilies(familiesForRequest(event.prompt ?? ""));
+      // Pi 1.2+ also fires this for runs a custom message starts, which carry
+      // no prompt.
+      activateFamilies(familiesForRequest(("prompt" in event && event.prompt) || ""));
       return undefined;
     });
     pi.registerTool({

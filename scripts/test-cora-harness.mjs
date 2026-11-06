@@ -1293,7 +1293,11 @@ test("a quick command is untouched, Pi's shell settings still apply and the mode
   assert.match(bash.description, /killed after 120 seconds unless timeout sets a longer limit, up to 1800/);
   assert.match(bash.description, /in the background with nohup/);
   assert.doesNotMatch(JSON.stringify(bash), /no default timeout/);
-  assert.match(bash.input_schema.properties.timeout.description, /Default 120, maximum 1800/);
+  // Pi 0.86+ sends built-in tools in strict mode, where an optional parameter
+  // becomes `anyOf: [its schema, null]` and its description moves inside.
+  const timeout = bash.input_schema.properties.timeout;
+  const timeoutDescription = timeout.description ?? timeout.anyOf?.find((branch) => branch.description)?.description;
+  assert.match(timeoutDescription, /Default 120, maximum 1800/);
 });
 
 test("an untrusted repo cannot choose the shell, and a trusted one still can", async () => {

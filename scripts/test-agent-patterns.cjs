@@ -683,6 +683,20 @@ const PI_TURN_END_FRAME =
 const PI_SELECTOR =
   " \x1b[38;2;138;190;183m\x1b[1mAllow?\x1b[22m\x1b[39m    \x1b[0m\x1b]8;;\x07\r\r\n\x1b[2K\x1b[0m\x1b]8;;\x07\r\r\n\x1b[2K \x1b[38;2;138;190;183m→ \x1b[39m\x1b[38;2;138;190;183mYes\x1b[39m    \x1b[0m\x1b]8;;\x07\r\r\n\x1b[2K   \x1b[38;2;212;212;212mNo\x1b[39m    \x1b[0m\x1b]8;;\x07\r\r\n\x1b[2K\x1b[0m\x1b]8;;\x07\r\r\n\x1b[2K \x1b[38;2;102;102;102m↑↓\x1b[39m\x1b[38;2;128;128;128m navigate\x1b[39m  \x1b[38;2;102;102;102menter\x1b[39m\x1b[38;2;128;128;128m select\x1b[39m  \x1b[38;2;102;102;102mescape/ctrl+c\x1b[39m\x1b[38;2;128;128;128m cancel\x1b[39m";
 check("pi banner (120 cols)", ap.sniffRuntime(PI_BANNER_120), "pi");
+// Pi 1.x replaced the `pi` wordmark with a block logo (live pi 1.5.0 capture,
+// fullscreen TUI at 120 columns: rows are placed with cursor moves, not newlines).
+const PI_1X_HEADER =
+  "\x1b[?2026h\x1b[2;1H\x1b[2K \x1b[38;2;228;138;122m\x1b[48;2;79;142;179m\u2580\x1b[0m\x1b[38;2;228;138;122m\u2580\u2588\x1b[0m  \x1b[39m\x1b[2mv1.5.0\x1b[22;39m" +
+  " ".repeat(108) +
+  "\x1b[0m\x1b]8;;\x07\x1b[3;1H\x1b[2K \x1b[38;2;79;142;179m\u2588\u2580\x1b[0m \x1b[38;2;234;182;93m\u2588\x1b[0m \x1b[39m\x1b[2mescape\x1b[22;39m\x1b[39m\x1b[2m interrupt\x1b[22;39m\x1b[39m\x1b[2m \u00b7 \x1b[22;39m\x1b[39m\x1b[2mctrl+c/ctrl+d\x1b[22;39m\x1b[39m\x1b[2m clear/exit\x1b[22;39m";
+check("pi 1.x block-logo header", ap.sniffRuntime(PI_1X_HEADER), "pi");
+check("pi 1.x header keeps the Pi UI present", ap.agentUiPresent("pi", PI_1X_HEADER), true);
+check(
+  "pi 1.x header after leaving fullscreen (newline-separated rows)",
+  ap.sniffRuntime(" \u2580\u2580\u2588  v1.5.0\r\r\n \u2588\u2580 \u2588 escape interrupt \u00b7 ctrl+c/ctrl+d clear/exit"),
+  "pi",
+);
+check("a version beside box drawing is not a Pi banner", ap.sniffRuntime("\u2588\u2588 v1.2.3 done"), null);
 check("pi onboarding line (80 cols, wrapped)", ap.sniffRuntime(PI_ONBOARDING_80), "pi");
 check("pi is a public runtime", ap.coercePublicRuntime("pi"), "pi");
 check("a bare `Pi v2` mention is not a Pi banner", ap.sniffRuntime("Pi v2 shipped last week"), null);

@@ -30,6 +30,7 @@
 
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -39,9 +40,19 @@ import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager
 
 const VERBOSE = process.argv.includes("--verbose");
 const sdkDir = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+// pi-ai is nested under pi-coding-agent when another copy is hoisted, and
+// hoisted otherwise; load the copy the SDK itself resolves.
+function piAiModuleUrl(...segments) {
+  for (let dir = sdkDir; ; dir = dirname(dir)) {
+    const candidate = join(dir, "node_modules", "@earendil-works", "pi-ai", ...segments);
+    if (existsSync(candidate)) return pathToFileURL(candidate).href;
+    if (dirname(dir) === dir) throw new Error(`pi-ai ${segments.join("/")} not found above ${sdkDir}`);
+  }
+}
 const { AssistantMessageEventStream } = await import(
-  pathToFileURL(join(sdkDir, "../node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js")).href
+  piAiModuleUrl("dist", "utils", "event-stream.js")
 );
+const { getCurrentSystemPrompt } = await import(piAiModuleUrl("dist", "utils", "transcript.js"));
 
 async function loadTs(file) {
   const exports = {};
@@ -197,7 +208,7 @@ function messageText(message) {
     : Array.isArray(message.content) ? message.content.map(blockText).join("\n") : "";
 }
 function contextText(context) {
-  return [context.systemPrompt ?? "", ...context.messages.map(messageText)].join("\n");
+  return [getCurrentSystemPrompt(context.messages), ...context.messages.filter((message) => message.role !== "system").map(messageText)].join("\n");
 }
 const tokensOf = (text) => Math.ceil(text.length / 4);
 
@@ -231,7 +242,7 @@ async function runScenario({ host, summarizer, variant = "base" }) {
           const input = tokensOf(text);
           const base = { role: "assistant", api: model.api, provider: model.provider, model: model.id, timestamp: Date.now() };
           const usage = { input, output: 40, cacheRead: 0, cacheWrite: 0, totalTokens: input + 40, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-          if (/summariz/i.test(context.systemPrompt ?? "")) {
+          if (/summariz/i.test(getCurrentSystemPrompt(context.messages))) {
             state.summaryCalls += 1;
             if (summarizer === "failing") {
               const error = { ...base, content: [], stopReason: "error", errorMessage: "summarizer unavailable (503)", usage };

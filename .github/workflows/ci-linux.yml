@@ -44,6 +44,7 @@ jobs:
       - run: npm run typecheck:node
       - run: npm run typecheck:web
       - run: npm run typecheck:e2e
+      - run: npm run typecheck:pi-cora
       # Some suites drive the BUILT app surface (agent-socket handshake) or a
       # real Chromium (chat-surface-routing).
       - run: npm run build

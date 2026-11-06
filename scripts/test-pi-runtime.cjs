@@ -185,7 +185,7 @@ function installFakeGlobalPi() {
 
 async function main() {
   const globalPiEntrypoint = installFakeGlobalPi();
-  assert.equal(runtime.CODARA_PI_VERSION, "0.85.1");
+  assert.equal(runtime.CODARA_PI_VERSION, "1.5.0");
   assert.equal(
     runtime.CLAUDE_SUBSCRIPTION_SYSTEM_PROMPT,
     "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -193,7 +193,7 @@ async function main() {
   const installedRuntime = await runtime.resolvePinnedPiRuntime([
     path.join(__dirname, "..", "node_modules"),
   ]);
-  assert.equal(installedRuntime.version, "0.85.1");
+  assert.equal(installedRuntime.version, "1.5.0");
   assert.equal(installedRuntime.source, "bundled");
   assert.equal(path.basename(installedRuntime.entrypoint), "cli.js");
 
@@ -207,12 +207,12 @@ async function main() {
     fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true });
     fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({
       name: "@earendil-works/pi-coding-agent",
-      version: "0.85.1",
+      version: "1.5.0",
       bin: { pi: "dist/cli.js" },
     }));
     fs.writeFileSync(path.join(packageRoot, "dist", "cli.js"), "// fixture\n");
     const located = await runtime.resolvePinnedPiRuntime([path.join(directory, "node_modules")]);
-    assert.equal(located.version, "0.85.1");
+    assert.equal(located.version, "1.5.0");
     assert.equal(located.entrypoint, path.join(packageRoot, "dist", "cli.js"));
 
     fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({
@@ -231,8 +231,8 @@ async function main() {
   assert.equal(runtime.CODARA_PI_MIN_VERSION, "0.85.1");
   // The Install button pins the tested minor line; npm's latest may be a
   // major version Codara never ran.
-  assert.equal(runtime.CODARA_PI_INSTALL_SPEC, "@earendil-works/pi-coding-agent@~0.85.1");
-  assert.equal(runtime.PI_INSTALL_COMMAND, "npm install -g @earendil-works/pi-coding-agent@~0.85.1");
+  assert.equal(runtime.CODARA_PI_INSTALL_SPEC, "@earendil-works/pi-coding-agent@~1.5.0");
+  assert.equal(runtime.PI_INSTALL_COMMAND, "npm install -g @earendil-works/pi-coding-agent@~1.5.0");
   const installSource = fs.readFileSync(
     path.join(ROOT, "src", "main", "orchestration", "pi-runtime-install.ts"),
     "utf8",

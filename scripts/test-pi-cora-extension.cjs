@@ -1166,10 +1166,14 @@ const noInput = {};
   }
 
   // Refusal classification: only failures that can be about fast mode.
-  const piAiDist = path.join(
-    __dirname, "..", "node_modules", "@earendil-works", "pi-coding-agent", "node_modules",
-    "@earendil-works", "pi-ai", "dist",
-  );
+  // The pi-ai the pinned Pi loads: nested under it when another copy is
+  // hoisted, the top-level one otherwise.
+  const piModules = path.join(__dirname, "..", "node_modules", "@earendil-works");
+  const piAiDist = [
+    path.join(piModules, "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai", "dist"),
+    path.join(piModules, "pi-ai", "dist"),
+  ].find((dir) => fs.existsSync(dir));
+  assert.ok(piAiDist, "pi-ai is not installed");
   const { isRetryableAssistantError } = await import(
     require("node:url").pathToFileURL(path.join(piAiDist, "utils", "retry.js")).href
   );
