@@ -263,6 +263,52 @@ async function main() {
       h.onNow = null;
     });
 
+    await check("a program started inside while the copy runs puts the folder back too", async () => {
+      const entry = merged("started");
+      addData(entry.dir);
+      const aside = path.join(trees, ".started.codara-removing");
+      let calls = 0;
+      const arm = () => {
+        h.onNow = () => {
+          if (fs.existsSync(aside)) h.processes[aside] = [{ pid: 7777, command: "node" }];
+          else if (++calls < 20) arm();
+        };
+      };
+      arm();
+      try {
+        await assertKept(entry, /running process|In use/);
+        assert.equal(fs.existsSync(path.join(archiveRoot, day(), "repo--feature-started")), false, "no stale copy is left");
+      } finally {
+        h.onNow = null;
+        h.processes = {};
+      }
+    });
+
+    await check("a link swapped after it was copied fails the archive, and the copy is dropped", async () => {
+      const src = path.join(scratch, "links");
+      fs.mkdirSync(path.join(src, "data"), { recursive: true });
+      fs.symlinkSync("one", path.join(src, "data", "current"));
+      const root = path.join(scratch, "links-archive");
+      await assert.rejects(
+        archive.archiveIgnoredFiles({
+          worktree: src,
+          entries: ["data/"],
+          root,
+          repoName: "repo",
+          branch: "x",
+          now: h.now,
+          afterCopy: async () => {
+            fs.rmSync(path.join(src, "data", "current"));
+            fs.symlinkSync("two", path.join(src, "data", "current"));
+          },
+        }),
+        /changed while/,
+      );
+      assert.deepEqual(filesUnder(path.join(root, day())), []);
+      const kept = await archive.archiveIgnoredFiles({ worktree: src, entries: ["data/"], root, repoName: "repo", branch: "x", now: h.now });
+      assert.equal(fs.readlinkSync(path.join(kept.dir, "data", "current")), "two", "a link is copied as a link");
+    });
+
     await check("names are kept exactly: a backslash in a name is not a folder", async () => {
       const entry = merged("names");
       fs.appendFileSync(path.join(repo, ".git", "info", "exclude"), "*.keep\n");

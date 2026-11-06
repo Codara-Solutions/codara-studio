@@ -419,12 +419,14 @@ async function removeOne(
         now: deps.now(),
       });
       archived = { path: done.dir, files: done.files, bytes: done.bytes };
-      // A file written while the copy ran (an editor that had it open) is
-      // in neither the copy nor the check: the folder goes back.
-      if ((await worktreeFingerprint(aside)) !== before) {
+      // A file written or a program started while the copy ran (an editor
+      // that had it open) is in neither the copy nor the check: all of it
+      // is checked again, and anything new puts the folder back.
+      const again = await changedWhileAside(ctx, check, real, aside, before!, options);
+      if (again) {
         archived = undefined;
         await fsp.rm(done.dir, { recursive: true, force: true }).catch(() => undefined);
-        return "It changed while its ignored files were being archived, so it was put back.";
+        return again;
       }
       return null;
     } catch (err) {

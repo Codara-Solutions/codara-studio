@@ -3039,11 +3039,13 @@ async function removeLocked(
           now: deps.now(),
         });
         archived = { path: done.dir, files: done.files, bytes: done.bytes };
-        // A file written while the copy ran is in neither the copy nor the check.
-        if ((await worktreeFingerprint(aside)) !== before) {
+        // A file written or a program started while the copy ran is in
+        // neither the copy nor the check: all of it is checked again.
+        const changed = await changedWhileAside(recheckCtx, stillListed, realBefore, aside, before);
+        if (changed) {
           archived = undefined;
           await fsp.rm(done.dir, { recursive: true, force: true }).catch(() => undefined);
-          return "it changed while its ignored files were being archived, so it was put back";
+          return changed;
         }
         return null;
       } catch (err) {

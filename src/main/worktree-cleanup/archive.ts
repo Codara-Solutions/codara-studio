@@ -1,3 +1,4 @@
+import { createHash, type Hash } from "node:crypto";
 import { constants, promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 
@@ -27,6 +28,10 @@ export interface ArchiveResult {
 interface Tally {
   files: number;
   bytes: number;
+  // Of the source only: every entry's kind, size, times and inode, and each
+  // link's target, so a change during the copy shows (a link swapped for
+  // another counts the same in files and bytes).
+  digest?: Hash;
 }
 
 function safeName(text: string): string {
@@ -43,11 +48,16 @@ function topEntries(entries: readonly string[]): string[] {
 
 async function tally(path: string, into: Tally): Promise<void> {
   const info = await fsp.lstat(path);
-  if (info.isSymbolicLink()) into.files += 1;
-  else if (info.isFile()) {
+  const stamp = `${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.ino}`;
+  if (info.isSymbolicLink()) {
+    into.files += 1;
+    into.digest?.update(`${path}\0l\0${await fsp.readlink(path)}\0${stamp}\0`);
+  } else if (info.isFile()) {
     into.files += 1;
     into.bytes += info.size;
+    into.digest?.update(`${path}\0f\0${stamp}\0`);
   } else if (info.isDirectory()) {
+    into.digest?.update(`${path}\0d\0`);
     for (const name of await fsp.readdir(path)) await tally(join(path, name), into);
   } else {
     throw new Error(`${path} is not a file, folder or link`);
@@ -102,15 +112,22 @@ export async function archiveIgnoredFiles(input: {
   repoName: string;
   branch: string | null;
   now: Date;
+  // Tests change the source here, between the copy and its last count.
+  afterCopy?: () => Promise<void>;
 }): Promise<ArchiveResult> {
   const base = resolve(input.worktree);
   const entries = topEntries(input.entries);
-  const source: Tally = { files: 0, bytes: 0 };
-  for (const entry of entries) {
-    const from = resolve(base, entry);
-    if (!from.startsWith(`${base}${sep}`)) throw new Error(`${entry} is outside the worktree`);
-    await tally(from, source);
-  }
+  const sourceTally = async (): Promise<Tally & { digest: Hash }> => {
+    const out = { files: 0, bytes: 0, digest: createHash("sha256") };
+    for (const entry of entries) {
+      const from = resolve(base, entry);
+      if (!from.startsWith(`${base}${sep}`)) throw new Error(`${entry} is outside the worktree`);
+      await tally(from, out);
+    }
+    return out;
+  };
+  const source = await sourceTally();
+  const before = source.digest.digest("hex");
   await fsp.mkdir(input.root, { recursive: true, mode: 0o700 });
   const free = await fsp.statfs(input.root).then(
     (stats) => stats.bavail * stats.bsize,
@@ -134,6 +151,8 @@ export async function archiveIgnoredFiles(input: {
         `the copy holds ${copied.files} files and ${copied.bytes} bytes, the worktree ${source.files} and ${source.bytes}`,
       );
     }
+    await input.afterCopy?.();
+    if ((await sourceTally()).digest.digest("hex") !== before) throw new Error("they changed while they were being copied");
     return { dir, ...copied };
   } catch (err) {
     await fsp.rm(dir, { recursive: true, force: true }).catch(() => undefined);
