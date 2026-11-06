@@ -547,6 +547,7 @@ async function integrationChecks({ sched, loop }, workspace) {
     assert.strictEqual(globalThis.__CU.launches.length, n + 1, "no second run");
     assert.strictEqual(notices(capped.id).length, 1);
     assert.match(notices(capped.id)[0].title, /monthly cap/);
+    assert.strictEqual(notices(capped.id)[0].soundKind, "failed", "a loop the cap ended plays the failed chime");
 
     // Any later fire is refused, spends nothing, and says so once. A pass in the same
     // millisecond as a skip counts as after it and splits the row, so the clock moves on.
@@ -728,6 +729,7 @@ async function integrationChecks({ sched, loop }, workspace) {
     assert.strictEqual(job.state.iteration, 0, "resuming waits for the trigger");
     assert.strictEqual(job.autoPaused.failures, 2);
     assert.match(notices(flaky.id).at(-1).title, /paused after repeated failures/);
+    assert.strictEqual(notices(flaky.id).at(-1).soundKind, "failed", "repeated failures play the failed chime");
     n = globalThis.__CU.launches.length;
     await loop.startIteration(flaky.id, { source: "trigger" });
     assert.strictEqual(globalThis.__CU.launches.length, n, "paused means paused");

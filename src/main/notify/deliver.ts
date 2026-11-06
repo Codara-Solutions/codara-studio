@@ -134,17 +134,21 @@ function recordForE2e(event: NotifyEvent, notification: Notification): void {
 function showNative(event: NotifyEvent): void {
   if (!E2E_BACKGROUND && !Notification.isSupported()) return;
   // macOS has a subtitle line for the workspace; elsewhere it rides on
-  // the title so the origin is never lost in a one-line banner.
+  // the title so the origin is never lost in a one-line banner. Always
+  // silent: Studio's own chime is the only sound, so the Sound setting
+  // silences everything and the OS never doubles the chime.
   const notification = new Notification(
     process.platform === "darwin"
       ? {
           title: event.title,
           body: event.body,
+          silent: true,
           ...(event.workspaceName ? { subtitle: event.workspaceName } : {}),
         }
       : {
           title: event.workspaceName ? `${event.title} · ${event.workspaceName}` : event.title,
           body: event.body,
+          silent: true,
         },
   );
   retainedNotifications.hold(notification, () => openFromNativeClick(event));
@@ -180,8 +184,8 @@ export function signalTerminalAttention(event: NotifyEvent): void {
 // Several panes can finish in the same second (a split of agents fed one
 // prompt each). One chime says "look"; a stack of them is noise, so a chime
 // inside this window of the previous one of the same kind is dropped. A
-// different kind (a prompt right after a finish) still sounds, since it asks
-// for something else. The toast and the native notification for each event
+// different kind (a prompt or a failure right after a finish) still sounds,
+// since it says something else. The toast and the native notification for each event
 // still fire.
 const SOUND_BURST_MS = 1_500;
 const lastSoundAt = new Map<NotificationSoundKind, number>();

@@ -2422,7 +2422,7 @@ function deliver(
     title: `${label} ${status}${where}`,
     ...(w.workspaceName ? { workspaceName: w.workspaceName } : {}),
     body: parts.join(" · "),
-    soundKind: kind === "done" ? "done" : "needs-you",
+    soundKind: kind === "done" ? "done" : kind === "failed" ? "failed" : "needs-you",
     target: { type: "terminal", workspaceId: w.workspaceId, tabId: w.tabId, paneId: w.paneId },
   });
   // A finished turn is when the subscription quota actually moved.
