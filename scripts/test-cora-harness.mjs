@@ -2632,6 +2632,8 @@ test("cora opens Pi's terminal interface in a real terminal, and /compact takes 
   const exited = new Promise((resolve) => child.on("exit", resolve));
   try {
     await until(() => output.includes("claude-sonnet-5-5"), "the footer");
+    // Pi 1.x defaults to fullscreen; cora keeps the terminal's scrollback.
+    assert.ok(!output.includes("\x1b[?1049h"), "cora switched to the alternate screen");
     await settle();
     await type("PLAIN_TEXT hello input.txt");
     await until(() => output.includes("STUB-FINAL"), "the reply");

@@ -223,8 +223,13 @@ function bashStartsOff({ passthrough }, defaultTools) {
   return passthrough.includes("--no-builtin-tools") || Boolean(defaultTools && !defaultTools.includes("bash"));
 }
 
-function piArguments(cli, model, effort, { exec, prompt }) {
+function piArguments(cli, model, effort, { exec, prompt, settings = {} }) {
   const args = ["--no-extensions", ...cli.passthrough];
+  // Pi 1.0 made fullscreen its default; cora keeps the terminal's own
+  // scrollback unless the user picks a mode in settings.json or on the line.
+  if (!exec && settings.tuiMode === undefined && !cli.passthrough.includes("--tui-mode")) {
+    args.push("--tui-mode", "regular");
+  }
   if (model?.provider) args.push("--provider", model.provider);
   if (model?.id) args.push("--model", model.id);
   if (effort) args.push("--thinking", effort);
@@ -380,7 +385,7 @@ async function runAgent(cli, pi, home) {
   });
   const args = [
     "--system-prompt", coraSystemPrompt({ exec }),
-    ...piArguments(cli, model, effort, { exec, prompt }),
+    ...piArguments(cli, model, effort, { exec, prompt, settings }),
   ];
   // Pi's own exit code misses most failures (--mode json always reports 0), so
   // the code set below decides, and only ever makes it worse.

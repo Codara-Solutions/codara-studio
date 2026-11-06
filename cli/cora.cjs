@@ -66,7 +66,7 @@ function main() {
   }
   if (cli.studioArgs) return require("./studio.cjs").run(cli.studioArgs);
   if (!process.features.typescript) {
-    console.error(`cora needs Node 22.18 or newer (this is ${process.version}).`);
+    console.error(`cora needs Node 22.19 or newer (this is ${process.version}).`);
     process.exitCode = 2;
     return;
   }

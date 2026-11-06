@@ -5,7 +5,7 @@
   "license": "MIT",
   "private": true,
   "engines": {
-    "node": ">=22.18"
+    "node": ">=22.19"
   },
   "bin": {
     "cora": "cora.cjs"
