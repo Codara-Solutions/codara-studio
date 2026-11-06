@@ -181,8 +181,8 @@ const stubPlugin = {
         export function unifiedAccountsFor() {
           return {
             async reconcileProfile() { return null; },
-            async cliHalfInUse(profileId) {
-              return globalThis.__profileUsageHalvesInUse.has(profileId);
+            async refreshWhileCliIdle(profileId, refresh) {
+              return globalThis.__profileUsageHalvesInUse.has(profileId) ? "busy" : refresh();
             },
           };
         }

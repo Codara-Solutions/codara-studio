@@ -75,6 +75,42 @@ async function main() {
   assert.equal(unknown.profileId, "personal");
   assert.equal(fs.existsSync(accountDir(never)), false, "an unknown id got a home");
   console.log("PASS an id the store never listed gets no home");
+
+  // A refresh of an account's grant and a Codex starting on it never overlap:
+  // the refresh starts only while nothing holds the account, and a lease
+  // asked for meanwhile waits until the refresh (and its mirror write) ends.
+  const leases = runtime.nativeCodexProfileLeases;
+  const { profile: shared } = await store.createProfile({ label: "Shared" });
+  const events = [];
+  let finishRefresh;
+  const refresh = leases.runRefreshWhileUnleased(shared.id, async () => {
+    events.push("refresh started");
+    await new Promise((resolve) => (finishRefresh = resolve));
+    events.push("refresh done");
+    return "renewed";
+  });
+  assert.ok(refresh, "an unleased account can be refreshed");
+  assert.equal(leases.runRefreshWhileUnleased(shared.id, async () => "second"), null, "one refresh at a time");
+  const leased = runtime.acquireNativeCodexProfileLease(shared.id, "terminal:late").then((release) => {
+    events.push("lease acquired");
+    return release;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(leases.isLeased(shared.id), false, "the lease waits for the refresh");
+  finishRefresh();
+  assert.equal(await refresh, "renewed");
+  const release = await leased;
+  assert.deepEqual(events, ["refresh started", "refresh done", "lease acquired"]);
+  assert.equal(leases.isLeased(shared.id), true);
+  assert.equal(
+    leases.runRefreshWhileUnleased(shared.id, async () => {
+      throw new Error("a leased account must not be refreshed by Studio");
+    }),
+    null,
+    "a leased account is not refreshed",
+  );
+  release();
+  console.log("PASS a grant refresh and a Codex starting on the same account never overlap");
 }
 
 main()

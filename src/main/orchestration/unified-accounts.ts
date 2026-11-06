@@ -845,15 +845,25 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   // Delete.
 
   /**
-   * Whether a CLI process Codara started runs on this row's managed half.
-   * Such a process refreshes the shared grant itself when the provider
-   * refuses it, and a second refresher would race it for one rotating
-   * refresh token.
+   * Run `refresh` on a row's grant unless a CLI process Codara started runs
+   * on its managed half ("busy"): such a process refreshes the shared grant
+   * itself when the provider refuses it, and a second refresher would race
+   * it for one rotating refresh token. CLI processes starting meanwhile wait
+   * for the refresh to settle.
    */
-  async cliHalfInUse(coraProfileId: string): Promise<boolean> {
+  async refreshWhileCliIdle<T>(
+    coraProfileId: string,
+    refresh: () => Promise<T>,
+  ): Promise<T | "busy"> {
     const profile = await this.piStore.registry.getProfile(coraProfileId).catch(() => undefined);
-    if (profile?.cli.kind !== "managed") return false;
-    return this.homeHeld(profile.cli.profileId);
+    if (profile?.cli.kind !== "managed") return refresh();
+    const cliProfileId = profile.cli.profileId;
+    if (!this.adapter.managedHome(cliProfileId).holdsSessions) return refresh();
+    this.sweepLeases();
+    if (!this.leases.runRefreshWhileUnleased) {
+      return this.leases.isLeased(cliProfileId) ? "busy" : refresh();
+    }
+    return this.leases.runRefreshWhileUnleased(cliProfileId, refresh) ?? "busy";
   }
 
   /** Whether a terminal still runs in the managed home of a CLI half. */

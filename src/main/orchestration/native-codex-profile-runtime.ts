@@ -139,9 +139,21 @@ export function notifyNativeCodexProfileLeaseReleased(profileId: CodexCliProfile
   void resolutionHooks?.afterLeaseReleased(profileId).catch(() => undefined);
 }
 
-export function acquireNativeCodexProfileLease(
+/**
+ * Lease a profile for a starting Codex, after any refresh of its grant that
+ * Studio has in flight. The last in-flight check and the acquire run in one
+ * synchronous step, so a refresh cannot start between them.
+ */
+export async function acquireNativeCodexProfileLease(
   profileId: CodexCliProfileId,
   ownerId: string,
-): () => void {
+): Promise<() => void> {
+  for (
+    let pending = nativeCodexProfileLeases.refreshInFlight(profileId);
+    pending;
+    pending = nativeCodexProfileLeases.refreshInFlight(profileId)
+  ) {
+    await pending;
+  }
   return nativeCodexProfileLeases.acquire(profileId, ownerId);
 }

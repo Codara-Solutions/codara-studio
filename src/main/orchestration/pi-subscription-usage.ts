@@ -694,8 +694,9 @@ function codexAccountId(resolved: ResolvedAccess): string | null {
  * the account's Codex home), check it is still this ChatGPT account, use a
  * newer copy as it is, and only when the store still holds the refused token
  * and no Codex process runs on the account's home (it refreshes the grant on
- * its own 401, and two refreshers would race) refresh it, exactly once,
- * with the account checked again under the store's lock.
+ * its own 401, and two refreshers would race; one starting meanwhile waits)
+ * refresh it, exactly once, with the account checked again under the
+ * store's lock.
  *
  * "busy" means a running Codex owns the refresh: read again shortly. Null
  * when nothing better exists, or when the store now names another ChatGPT
@@ -714,14 +715,15 @@ async function codexAccessAfterRejection(
   if (accountId && storedAccount && storedAccount !== accountId) return null;
   if (stored.access !== rejected.access) return { credential: stored, access: stored.access };
   const { unifiedAccountsFor } = await import("./unified-account-registry");
-  const inUse = await unifiedAccountsFor("openai-codex")
-    .cliHalfInUse(profileId)
-    .catch(() => false);
-  if (inUse) return "busy";
-  const refreshed = await refreshCredential(profileId, "openai-codex", {
-    rejectedAccess: rejected.access,
-    ...(accountId ? { expectedAccountId: accountId } : {}),
-  });
+  const refreshed = await unifiedAccountsFor("openai-codex")
+    .refreshWhileCliIdle(profileId, () =>
+      refreshCredential(profileId, "openai-codex", {
+        rejectedAccess: rejected.access,
+        ...(accountId ? { expectedAccountId: accountId } : {}),
+      }),
+    )
+    .catch(() => null);
+  if (refreshed === "busy") return "busy";
   if (!refreshed || refreshed === rejected.access) return null;
   const renewedAccount = accountIdFromAccessToken(refreshed);
   if (accountId && renewedAccount && renewedAccount !== accountId) return null;

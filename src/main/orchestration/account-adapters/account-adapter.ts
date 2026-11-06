@@ -54,6 +54,8 @@ export interface AccountCliLeases {
   isLeased(profileId: string): boolean;
   owners(profileId: string): string[];
   sweep(liveOwnerIds: ReadonlySet<string>, ownerPrefix?: string): string[];
+  /** Run a grant refresh that new leases wait for; null while leased. */
+  runRefreshWhileUnleased?<T>(profileId: string, operation: () => Promise<T>): Promise<T> | null;
 }
 
 /** A managed account's directory, removed when its account is deleted. */

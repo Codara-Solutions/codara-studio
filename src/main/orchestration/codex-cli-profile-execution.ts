@@ -118,6 +118,7 @@ export class CodexCliProfileLeaseRegistry {
   >();
   private readonly profileToOwners = new Map<CodexCliProfileId, Set<string>>();
   private readonly exclusiveProfiles = new Set<CodexCliProfileId>();
+  private readonly refreshes = new Map<CodexCliProfileId, Promise<void>>();
 
   acquire(
     rawProfileId: string | null | undefined,
@@ -202,6 +203,35 @@ export class CodexCliProfileLeaseRegistry {
     return released.sort();
   }
 
+  /**
+   * Run a refresh of the profile's grant while no process holds the profile,
+   * and keep new leases waiting (see refreshInFlight) until it settles: a
+   * Codex started meanwhile would spend the same rotating refresh token on
+   * its first 401. The check and the registration are one synchronous step,
+   * so no lease can slip in between. Null, with nothing run, while the
+   * profile is leased or another refresh of it is in flight.
+   */
+  runRefreshWhileUnleased<T>(
+    rawProfileId: CodexCliProfileId,
+    operation: () => Promise<T>,
+  ): Promise<T> | null {
+    const profileId = normalizeCodexCliProfileId(rawProfileId);
+    if (this.isLeased(profileId) || this.refreshes.has(profileId)) return null;
+    let settle!: () => void;
+    this.refreshes.set(profileId, new Promise<void>((resolve) => (settle = resolve)));
+    return Promise.resolve()
+      .then(operation)
+      .finally(() => {
+        this.refreshes.delete(profileId);
+        settle();
+      });
+  }
+
+  /** The refresh a new lease must wait for, if one is in flight. */
+  refreshInFlight(rawProfileId: CodexCliProfileId): Promise<void> | undefined {
+    return this.refreshes.get(normalizeCodexCliProfileId(rawProfileId));
+  }
+
   async runWhileUnleased<T>(
     rawProfileId: CodexCliProfileId,
     operation: () => Promise<T>,
@@ -222,6 +252,7 @@ export class CodexCliProfileLeaseRegistry {
     this.ownerToProfile.clear();
     this.profileToOwners.clear();
     this.exclusiveProfiles.clear();
+    this.refreshes.clear();
   }
 }
 
