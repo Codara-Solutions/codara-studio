@@ -119,6 +119,9 @@ function pane(paneId, workspaceId, state, stateSince, extra = {}) {
   const blocked = socket.slice(socket.indexOf("UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set"));
   assert.match(blocked.slice(0, blocked.indexOf("]);")), /"session\.list_all"/, "an imported pull request cannot list sessions");
 
+  const handler = socket.slice(socket.indexOf("async function handleSessionListAll"));
+  assert.match(handler.slice(0, 600), /agentSessionCallerRefusal/, "a caller in an imported pull request is refused even without a runId");
+
   console.log("live-sessions: ok");
 })().catch((err) => {
   console.error(err);
