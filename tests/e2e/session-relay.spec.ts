@@ -174,15 +174,38 @@ test("a relayed message reaches a session only after the user presses Send", asy
       expect(await readdir(root)).not.toContain("pwned");
     });
 
-    await test.step("Dismiss sends nothing", async () => {
+    await test.step("its native notification opens the card; removing the row dismisses it", async () => {
       const relay = await request("session.relay", { target: started.paneId, sender: "Grok Bot", text: "Delete the branch" });
+      await page.keyboard.press("Escape");
+      const panel = page.getByRole("dialog", { name: "Notifications" });
+      await expect(panel).toHaveCount(0);
+      let clicked = false;
+      await expect
+        .poll(async () => {
+          clicked = await app.evaluate((_electron, title) => {
+            const list = (globalThis as {
+              __codaraNativeNotifications?: Array<{ title: string; notification: WeakRef<{ emit(event: string): boolean }> }>;
+            }).__codaraNativeNotifications ?? [];
+            const hits = list.filter((n) => n.title.startsWith(title));
+            const native = hits.length >= 2 ? hits[hits.length - 1]!.notification.deref() : undefined;
+            if (!native) return false;
+            native.emit("click");
+            return true;
+          }, "Grok Bot wants to message");
+          return clicked;
+        }, { timeout: 15_000 })
+        .toBe(true);
       const card = page.locator(`[data-relay-id="${relay.relayId}"]`);
+      await expect(panel).toBeVisible();
       await expect(card).toBeVisible({ timeout: 10_000 });
-      await card.getByRole("button", { name: "Dismiss" }).click();
+      const row = page.locator(".nc-row", { has: card });
+      await row.hover();
+      await row.locator('.nc-actions button[aria-label="Dismiss"]').click();
       await expect(card).toHaveCount(0);
-      expect((await request("session.relay", { relayId: relay.relayId })).status).toBe("dismissed");
+      await expect.poll(async () => (await request("session.relay", { relayId: relay.relayId })).status).toBe("dismissed");
       await page.waitForTimeout(1_500);
       expect(await finalMessage()).toContain("Answer 2 to:");
+      await expect(panel).toBeVisible();
     });
 
     await test.step("Enter on a focused Send sends it", async () => {

@@ -1957,7 +1957,7 @@ export type NavigationTarget =
   | { type: "run"; runId: string; workspaceId?: string }
   | { type: "terminal"; workspaceId: string; tabId: string; paneId: string }
   | { type: "automation"; jobId: string; runId?: string; workspaceId?: string }
-  | { type: "workspace"; workspaceId: string; panel?: "git" };
+  | { type: "workspace"; workspaceId: string; panel?: "git" | "notifications" };
 
 // The one event shape every producer publishes and every surface consumes:
 // the in-app toast payload ("notification:in-app"), the native-notification

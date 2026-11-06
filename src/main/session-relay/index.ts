@@ -96,7 +96,8 @@ function announce(relay: PendingRelay): void {
     tone: "warning",
     soundKind: "needs-you",
     // Not the target pane: looking at it would mark the question read.
-    target: { type: "workspace", workspaceId: relay.target.workspaceId },
+    // Opening it opens the notification center, where Send and Dismiss are.
+    target: { type: "workspace", workspaceId: relay.target.workspaceId, panel: "notifications" },
     workspaceName: relay.target.workspace,
   });
 }

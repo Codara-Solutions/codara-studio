@@ -34,7 +34,13 @@ import {
 } from "./center-view";
 import { useNotificationCenter } from "./useNotificationCenter";
 import { relayIdOfSource } from "@shared/session-relay";
-import { RELAY_OUTCOME_LABEL, RelayApproval, useSessionRelays, type RelayRowState } from "./RelayApproval";
+import {
+  RELAY_OUTCOME_LABEL,
+  RelayApproval,
+  onOpenNotificationCenter,
+  useSessionRelays,
+  type RelayRowState,
+} from "./RelayApproval";
 
 // Notification center: a bell in the window chrome and the panel it opens
 // over the persisted history (main-side, see src/main/notify/center-store).
@@ -161,6 +167,7 @@ export default function NotificationCenter({
   const listRef = useRef<HTMLDivElement | null>(null);
   const center = useNotificationCenter(open);
   const relayOf = useSessionRelays();
+  useEffect(() => onOpenNotificationCenter(() => setOpen(true)), []);
   const centerRef = useRef(center);
   centerRef.current = center;
   const [dnd, setDnd] = useState(false);
@@ -372,7 +379,13 @@ export default function NotificationCenter({
         close(false);
       },
       setRead: (entry, read) => centerRef.current.setRead([entry.id], read),
-      dismiss: (entry) => centerRef.current.dismiss([entry.id]),
+      dismiss: (entry) => {
+        // Removing a relay's row is the same answer as its Dismiss: no other
+        // surface could send it afterwards.
+        const relayId = entry.kind === "session.relay" ? relayIdOfSource(entry.sourceKey) : null;
+        if (relayId) void window.spark.sessionRelay.decide(relayId, "dismiss").catch(() => undefined);
+        centerRef.current.dismiss([entry.id]);
+      },
       toggleMenu: (entryId) => setMenuFor((current) => (current === entryId ? null : entryId)),
       mute: (entryId, key, label, durationMs) => {
         centerRef.current.mute(key, label, durationMs);

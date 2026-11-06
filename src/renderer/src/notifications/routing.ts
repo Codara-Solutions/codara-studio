@@ -15,8 +15,10 @@ export interface NavigationHandlers {
   // automation, or on the workflow run when the target names one.
   openAutomation: (target: AutomationTarget) => void;
   // Switch to the workspace and, for panel "git", reveal its Source Control
-  // section (teammate-push alerts from the background auto-fetcher).
-  openWorkspace: (workspaceId: string, panel?: "git") => void;
+  // section (teammate-push alerts from the background auto-fetcher); for
+  // "notifications", open the notification center, where a relayed message
+  // waits for Send.
+  openWorkspace: (workspaceId: string, panel?: "git" | "notifications") => void;
   // Whether the target still exists. A row whose pane was closed or whose
   // run was deleted (or swept by retention) is "gone", and opening it lands
   // on its workspace instead.

@@ -138,6 +138,7 @@ import {
   type AutomationTarget,
   type NotifyTargetStatus,
 } from "./notifications/routing";
+import { openNotificationCenter } from "./notifications/RelayApproval";
 import { targetWorkspaceId as notifyTargetWorkspaceId } from "@shared/notify-center";
 import { emitLocalToast } from "./notifications/local-toast";
 import { startNewWorktreeSetup } from "./components/worktree-setup/start";
@@ -3158,9 +3159,10 @@ export default function App() {
   const compactWorkbenchRef = useRef(compactWorkbench);
   compactWorkbenchRef.current = compactWorkbench;
   const openWorkspacePanel = useCallback(
-    (workspaceId: string, panel?: "git") => {
+    (workspaceId: string, panel?: "git" | "notifications") => {
       if (!workspacesRef.current.some((workspace) => workspace.id === workspaceId)) return;
       if (activeIdRef.current !== workspaceId) handleActivateWorkspace(workspaceId);
+      if (panel === "notifications") openNotificationCenter();
       if (panel !== "git") return;
       const side: PanelSide = panelsRef.current.sections.left.includes("graph")
         ? "left"

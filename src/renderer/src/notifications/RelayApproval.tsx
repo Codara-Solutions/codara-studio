@@ -20,6 +20,18 @@ export const RELAY_OUTCOME_LABEL: Record<RelayOutcome, string> = {
 
 const EMPTY: RelayRowState = { pending: null, outcome: null };
 
+const OPEN_EVENT = "codara:open-notification-center";
+
+/** A relay's toast or native notification opens the center, where its card is. */
+export function openNotificationCenter(): void {
+  window.dispatchEvent(new Event(OPEN_EVENT));
+}
+
+export function onOpenNotificationCenter(listener: () => void): () => void {
+  window.addEventListener(OPEN_EVENT, listener);
+  return () => window.removeEventListener(OPEN_EVENT, listener);
+}
+
 /** Pending relays and recent outcomes, by relay id; refreshed when main says so. */
 export function useSessionRelays(): (relayId: string | null) => RelayRowState {
   const [list, setList] = useState<{ pending: Map<string, PendingRelay>; outcomes: Record<string, RelayOutcome> }>(

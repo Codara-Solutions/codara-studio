@@ -934,7 +934,8 @@ you to send one for it. Nothing is sent until you press **Send**.
 The call returns a `relayId` and `status: "pending"`. You get a notification
 (in the notification center, and a native one) naming the sender, the target
 session and its workspace, the reason and the exact text, with **Send** and
-**Dismiss**. Send types the text into the session as your next prompt, the way
+**Dismiss**. Clicking the native notification or the toast opens the
+notification center on it; removing its row there dismisses it. Send types the text into the session as your next prompt, the way
 Codara submits any prompt there, prefixed with
 `[Relayed from <sender>, approved by you] `.
 
