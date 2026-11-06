@@ -113,6 +113,7 @@ async function rowFor(
   const clean = dirty !== null && dirty.tracked + dirty.untracked === 0 && !dirty.inProgress;
   const finished =
     clean && uses.some((use) => !heldByMaker(use, true)) && (await finishedWork(repo.root, merge, head, branch, workspaces));
+  const maker = uses.find((use) => !heldByMaker(use, finished));
   return {
     id: real,
     repoRoot: repo.root,
@@ -135,15 +136,17 @@ async function rowFor(
       : null,
     base:
       target && merge.ahead !== undefined
-        ? { name: target.name, ahead: merge.ahead, behind: merge.behind ?? 0 }
+        ? { name: merge.target ?? target.name, ahead: merge.ahead, behind: merge.behind ?? 0 }
         : null,
     merge: {
       state: merge.state,
       ...(merge.proof ? { proof: merge.proof } : {}),
       ...(merge.target ? { target: merge.target } : {}),
+      ...(merge.via ? { via: merge.via } : {}),
     },
     pullRequest: pullRequestFor(repo, branch, head, merge, workspaces),
     inUse: uses.filter((use) => heldByMaker(use, finished)),
+    ...(maker ? { makerOpen: maker } : {}),
     size: options.sizeOf?.(real) ?? null,
     warnings,
   };

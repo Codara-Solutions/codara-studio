@@ -14,6 +14,14 @@ export type WorktreeMergeProof = "ancestor" | "content-in-target" | "pull-reques
  */
 export type WorktreeMergeState = "merged" | "unmerged" | "base" | "unknown";
 
+export interface WorktreeMergeFacts {
+  state: WorktreeMergeState;
+  proof?: WorktreeMergeProof;
+  target?: string;
+  /** With a pull-request proof: the stacked pull requests that carried it into the base, nearest first. */
+  via?: number[];
+}
+
 /** unknown: the worktree came from this pull request, but GitHub did not say its state. */
 export type WorktreePullRequestState = "open" | "draft" | "merged" | "unknown";
 
@@ -85,9 +93,15 @@ export interface WorktreeCleanupRow {
   dirty: { tracked: number; untracked: number; inProgress: string | null } | null;
   upstream: { name: string; ahead: number; behind: number; gone: boolean } | null;
   base: { name: string; ahead: number; behind: number } | null;
-  merge: { state: WorktreeMergeState; proof?: WorktreeMergeProof; target?: string };
+  merge: WorktreeMergeFacts;
   pullRequest: WorktreeCleanupPullRequest | null;
   inUse: WorktreeInUse[];
+  /**
+   * The agent that made it, whose tab is still open in another folder, when
+   * that tab no longer holds it: its work is merged and nothing is left
+   * uncommitted. Shown so the user knows why it is offered anyway.
+   */
+  makerOpen?: WorktreeInUse;
   size: WorktreeSize | null;
   warnings: string[];
 }
@@ -303,7 +317,7 @@ export interface WorktreeRemovalCheck extends WorktreeCleanupTarget {
   inUse?: WorktreeInUse[];
   localWork: WorktreeLocalWork | null;
   unmerged: WorktreeUnmergedWork | null;
-  merge: { state: WorktreeMergeState; proof?: WorktreeMergeProof; target?: string };
+  merge: WorktreeMergeFacts;
   /** The branch a removal deletes when merged branches are deleted; null keeps it. */
   branchDeletable: boolean;
   /** Ties a confirmation to the exact state the user saw. */
