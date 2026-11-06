@@ -191,7 +191,12 @@ function watchGestures(contents: WebContents): void {
   if (lastGestureAt.has(contents)) return;
   lastGestureAt.set(contents, 0);
   contents.on("input-event", (_event, input) => {
-    if (input.type === "mouseUp" || input.type === "keyDown" || input.type === "rawKeyDown") {
+    // Only what presses a button: a click, or Enter or Space on a focused one.
+    const key = input as { keyCode?: string; key?: string };
+    const pressKey =
+      (input.type === "keyDown" || input.type === "rawKeyDown") &&
+      [key.keyCode, key.key].some((name) => name === "Enter" || name === "Return" || name === "Space" || name === " ");
+    if (input.type === "mouseUp" || pressKey) {
       lastGestureAt.set(contents, Date.now());
     }
   });

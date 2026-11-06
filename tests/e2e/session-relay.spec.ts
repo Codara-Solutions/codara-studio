@@ -153,6 +153,8 @@ test("a relayed message reaches a session only after the user presses Send", asy
       // Script in the renderer (what app.evaluate runs) cannot press Send
       // without a real click or key press just before it.
       await page.waitForTimeout(2_000);
+      // Nor right after an unrelated key press.
+      await page.keyboard.press("a");
       const scripted = await page.evaluate(async (id) => {
         (document.querySelector(`[data-relay-id="${id}"] [data-recommended="true"]`) as HTMLButtonElement | null)?.click();
         return window.spark.sessionRelay.decide(id, "send");
@@ -183,6 +185,14 @@ test("a relayed message reaches a session only after the user presses Send", asy
       expect(await finalMessage()).toContain("Answer 2 to:");
     });
 
+    await test.step("Enter on a focused Send sends it", async () => {
+      const relay = await request("session.relay", { target: started.paneId, sender: "Grok Bot", text: "Keyboard approval" });
+      const send = page.locator(`[data-relay-id="${relay.relayId}"]`).getByRole("button", { name: "Send" });
+      await send.focus();
+      await page.keyboard.press("Enter");
+      await expect.poll(finalMessage, { timeout: 20_000 }).toContain("Answer 3 to: [Relayed from Grok Bot, approved by you] Keyboard approval");
+    });
+
     await test.step("a busy or unknown target is refused at once", async () => {
       await request("session.message", { ...starter, id: started.id, text: "slow follow up" });
       const busy = await call("session.relay", { target: started.paneId, sender: "Grok Bot", text: "now please" });
@@ -190,7 +200,7 @@ test("a relayed message reaches a session only after the user presses Send", asy
       const unknown = await call("session.relay", { target: "pane-nope", sender: "Grok Bot", text: "hi" });
       expect(unknown.error?.message).toMatch(/no live session/);
       const log = (await readFile(join(home, "relay-log.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-      expect(log.map((entry) => entry.outcome)).toEqual(["pending", "sent", "pending", "dismissed", "refused", "refused"]);
+      expect(log.map((entry) => entry.outcome)).toEqual(["pending", "sent", "pending", "dismissed", "pending", "sent", "refused", "refused"]);
       expect(log[0]).toMatchObject({ sender: "Grok Bot", target: { id: started.paneId, title: "Fix the docs", workspace: "Notes" } });
       expect(log[0].text).toBe(hostile.slice(0, 200));
     });
