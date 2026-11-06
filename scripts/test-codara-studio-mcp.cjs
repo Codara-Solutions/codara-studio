@@ -101,6 +101,7 @@ const TERMINAL_STUDIO_TOOLS = [
   ...WORKTREE_TOOLS,
   ...SESSION_TOOLS,
   "codara_session_list_all",
+  "codara_session_relay",
   "codara_session_search",
   "codara_share_offer",
   "codara_open_file",
@@ -134,8 +135,10 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // execute by 100 for codara_worktree_remove's workspace, about 80, so an
 // agent in a folder that is no repository can remove a worktree it did not
 // make; studio by 400 for codara_session_list_all, about 350, so an agent
-// can name a session in another workspace).
-const LIST_BUDGET = { studio: 38_450, run: 39_000, worker: 35_000, execute: 104_200, automation: 69_000 };
+// can name a session in another workspace; studio by 700 for
+// codara_session_relay, about 660, so a caller can ask the user to send a
+// session a message).
+const LIST_BUDGET = { studio: 39_150, run: 39_000, worker: 35_000, execute: 104_200, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",

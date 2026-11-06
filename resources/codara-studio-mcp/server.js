@@ -490,10 +490,27 @@ const SESSION_RELAY_TOOLS = [
       "Every agent session in a terminal pane, in every workspace: id, title, workspace, runtime, state (working, needs_you, idle or done) and lastActivity. Read-only.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
+  {
+    name: "codara_session_relay",
+    description:
+      "Ask the user to send text to a session you did not start. Nothing is sent: the user sees it and picks Send or Dismiss. Refused for a dead or busy target. With only relayId, returns pending, sent, dismissed, expired or undeliverable.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        target: { type: "string", description: "Session id from codara_session_list_all." },
+        text: { type: "string", description: "Max 4000 characters." },
+        sender: { type: "string", description: "Who asks, e.g. Grok Bot." },
+        reason: { type: "string" },
+        relayId: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 const SESSION_RELAY_TOOL_TO_RPC = {
   codara_session_list_all: "session.list_all",
+  codara_session_relay: "session.relay",
 };
 
 const SESSION_SEARCH_TOOL = {
@@ -2335,6 +2352,7 @@ const CALLER_LOCATED_RPCS = new Set([
   "session.wait",
   "session.message",
   "session.list_all",
+  "session.relay",
   "review.findings",
 ]);
 // The browser code tool is scoped like the single browser tools it drives.

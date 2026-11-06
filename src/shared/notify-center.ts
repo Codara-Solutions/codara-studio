@@ -19,6 +19,7 @@ const NEEDS_YOU_KINDS: ReadonlySet<NotifyKind> = new Set([
   "terminal.agent.needs-input",
   "automation.blocked",
   "worktree.setup-approval",
+  "session.relay",
 ]);
 
 const FAILED_KINDS: ReadonlySet<NotifyKind> = new Set([
