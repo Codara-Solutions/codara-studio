@@ -19,7 +19,7 @@
 //
 // Exits non-zero on any failed assertion.
 
-const { spawn } = require("node:child_process");
+const { execFileSync, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
@@ -35,24 +35,47 @@ const ACCOUNT_ACCESS_SECRET = "account-access-secret-must-never-leak";
 const ACCOUNT_REFRESH_SECRET = "account-refresh-secret-must-never-leak";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Every process the booted app started, helpers included, inherits its
-// CODARA_HOME_DIR (this test's own folder). Linux only: elsewhere none is
-// listed, and the removal below goes ahead at once.
+// Every process the booted app started, helpers included, names this test's
+// own folder: on Linux each inherits it as CODARA_HOME_DIR; on macOS, where
+// another process's environment is not readable, Chromium passes it on the
+// command line (the crash handler's database, the helpers' user data dir).
+// Elsewhere none is listed, and the removal below goes ahead at once.
 function appProcessesLeft() {
-  if (process.platform !== "linux") return [];
-  const marker = `\0CODARA_HOME_DIR=${HOME}\0`;
-  const left = [];
-  for (const entry of fs.readdirSync("/proc")) {
-    if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue;
-    let environ;
-    try {
-      environ = `\0${fs.readFileSync(`/proc/${entry}/environ`, "utf8")}`;
-    } catch {
-      continue;
+  if (process.platform === "linux") {
+    const marker = `\0CODARA_HOME_DIR=${HOME}\0`;
+    const left = [];
+    for (const entry of fs.readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue;
+      let environ;
+      try {
+        environ = `\0${fs.readFileSync(`/proc/${entry}/environ`, "utf8")}`;
+      } catch {
+        continue;
+      }
+      if (!environ.includes(marker)) continue;
+      let command = "";
+      try {
+        command = fs.readFileSync(`/proc/${entry}/cmdline`, "utf8").replace(/\0/g, " ");
+      } catch {
+        /* exited meanwhile */
+      }
+      left.push({ pid: Number(entry), command });
     }
-    if (environ.includes(marker)) left.push(Number(entry));
+    return left;
   }
-  return left;
+  if (process.platform === "darwin") {
+    // os.tmpdir() is under /var, which the processes may see as /private/var.
+    const homes = [...new Set([HOME, fs.realpathSync(HOME)])];
+    const listing = execFileSync("ps", ["-A", "-ww", "-o", "pid=,command="], { encoding: "utf8" });
+    const left = [];
+    for (const line of listing.split("\n")) {
+      const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+      if (!match || Number(match[1]) === process.pid) continue;
+      if (homes.some((home) => match[2].includes(home))) left.push({ pid: Number(match[1]), command: match[2] });
+    }
+    return left;
+  }
+  return [];
 }
 
 /** Waits until none is left; past `timeoutMs` the rest are killed, and waited for. */
@@ -64,15 +87,9 @@ async function appProcessesGone(timeoutMs) {
     left = appProcessesLeft();
   }
   if (!left.length) return;
-  const named = left.map((pid) => {
-    try {
-      return `${pid} ${fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").slice(0, 120)}`;
-    } catch {
-      return String(pid);
-    }
-  });
+  const named = left.map(({ pid, command }) => `${pid} ${command.slice(0, 120)}`.trim());
   console.log(`  note: still running ${timeoutMs} ms after the app exited, killed:\n    ${named.join("\n    ")}`);
-  for (const pid of left) {
+  for (const { pid } of left) {
     try {
       process.kill(pid, "SIGKILL");
     } catch {
@@ -81,6 +98,33 @@ async function appProcessesGone(timeoutMs) {
   }
   const killDeadline = Date.now() + 5_000;
   while (appProcessesLeft().length && Date.now() < killDeadline) await sleep(50);
+}
+
+/**
+ * Removes HOME, retrying while something still lets go of a file in it, for
+ * up to `timeoutMs`. On failure it names what was left, so the next report
+ * shows which process kept writing.
+ */
+async function removeHome(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      fs.rmSync(HOME, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (!["ENOTEMPTY", "EBUSY", "EPERM"].includes(error.code) || Date.now() >= deadline) {
+        let left = [];
+        try {
+          left = fs.readdirSync(HOME, { recursive: true }).slice(0, 20);
+        } catch {
+          /* listed nothing */
+        }
+        error.message += ` (still in it: ${left.join(", ") || "nothing listed"})`;
+        throw error;
+      }
+    }
+    await sleep(100);
+  }
 }
 
 let failures = 0;
@@ -2260,13 +2304,9 @@ async function main() {
     // until then they can still create files in HOME, which then fails to be
     // removed (ENOTEMPTY). On a loaded runner that takes seconds.
     await appProcessesGone(15_000);
-    // Elsewhere nothing is tracked, so the removal still allows for a helper
-    // letting go of its last file a moment after the app exited.
-    fs.rmSync(HOME, {
-      recursive: true,
-      force: true,
-      ...(process.platform === "linux" ? {} : { maxRetries: 5, retryDelay: 100 }),
-    });
+    // A process no listing matched can still let go of its last file a
+    // moment after the app exited.
+    await removeHome(10_000);
   }
 
   if (failures > 0) {
