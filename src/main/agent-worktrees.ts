@@ -2114,6 +2114,15 @@ async function proveMerged(
         ? targetRef.slice("refs/heads/".length)
         : target.name;
     const targetIsRemote = Boolean(targetRef?.startsWith("refs/remotes/"));
+    // The worktree's own base on the remote: the target when it is remote,
+    // or the remote's copy of a base recorded by its local name, fetched
+    // first before a removal.
+    let ownBaseCommit: string | null = targetIsRemote ? target.commit : null;
+    if (!explicitTarget && !targetIsRemote && (await refIsPresent(repo, `refs/remotes/origin/${targetBranch}`))) {
+      // A fetch that fails (the branch was deleted) leaves a stale copy: no proof.
+      const failure = options.fetch && !options.pinned ? await fetchTargetOnce(ctx, `origin/${targetBranch}`) : null;
+      ownBaseCommit = failure ? null : await revParse(repo, `refs/remotes/origin/${targetBranch}^{commit}`);
+    }
     // A recorded base other than the default branch (a stacked pull
     // request's branch, often deleted once merged) can lag behind where
     // the work went: the default branch counts too, unless the caller
@@ -2141,7 +2150,7 @@ async function proveMerged(
         // be stale and proves nothing.
         ...(explicitTarget
           ? {}
-          : { remoteCommit: async (base: string) => (targetIsRemote && base === targetBranch ? target.commit : null) }),
+          : { remoteCommit: async (base: string) => (base === targetBranch ? ownBaseCommit : null) }),
       });
       if (stacked) {
         verdict.proof = "pull-request";

@@ -452,6 +452,39 @@ async function main() {
       h.githubDown = false;
     });
 
+    await check("a base recorded by its local name is judged by the remote's copy, fetched, and not when it is gone", async () => {
+      const b1 = await aw.createAgentWorktree(owner, { branch: "feat/b1" }, deps);
+      commitFile(b1.path, "b1.txt", "b1\n", "b1");
+      git(b1.path, ["push", "-q", "-u", "origin", "feat/b1"]);
+      const b2 = await aw.createAgentWorktree(owner, { branch: "feat/b2", base: "feat/b1" }, deps);
+      const b2Tip = commitFile(b2.path, "b2.txt", "b2\n", "b2");
+      git(b2.path, ["push", "-q", "-u", "origin", "feat/b2"]);
+      // GitHub squashes feat/b2 into feat/b1; the local feat/b1 stays behind
+      // and feat/b1 is not merged anywhere yet.
+      git(hub, ["fetch", "-q", "origin"]);
+      git(hub, ["checkout", "-q", "-B", "feat/b1", "origin/feat/b1"]);
+      git(hub, ["merge", "-q", "--squash", "origin/feat/b2"]);
+      git(hub, ["commit", "-q", "-m", "b2 (#5)"]);
+      const squash = git(hub, ["rev-parse", "HEAD"]);
+      git(hub, ["push", "-q", "origin", "feat/b1"]);
+      git(repo, ["fetch", "-q", "origin"]);
+      const pr5 = { number: 5, url: "https://github.com/acme/app/pull/5", headRefName: "feat/b2", headRefOid: b2Tip, baseRefName: "feat/b1", isCrossRepository: false, mergeCommitOid: squash };
+      h.pulls = [pr5];
+      const dry = await aw.removeAgentWorktree(other, { workspaceId: b2.workspaceId, dryRun: true }, deps);
+      assert.equal(dry.merge.status, "merged", JSON.stringify(dry));
+      assert.equal(dry.merge.proof, "pull-request");
+      const b2Workspace = h.state.workspaces.find((workspace) => workspace.id === b2.workspaceId);
+      const ctx = repoContext([pr5]);
+      ctx.base = { name: "origin/main", commit: git(repo, ["rev-parse", "origin/main"]) };
+      const facts = await inspect.mergeFacts(ctx, b2Tip, "feat/b2", await inspect.targetFor(ctx, b2Workspace));
+      assert.equal(facts.state, "merged", JSON.stringify(facts));
+      // Deleted on the remote, never merged on: the stale copy proves nothing to a removal.
+      git(hub, ["push", "-q", "origin", "--delete", "feat/b1"]);
+      const gone = await aw.removeAgentWorktree(other, { workspaceId: b2.workspaceId, dryRun: true }, deps);
+      assert.notEqual(gone.merge.status, "merged", JSON.stringify(gone));
+      h.pulls = [pr454, pr453];
+    });
+
     // ── What the cleanup tool tells the user ───────────────────────────────
     await check("advice: names the stack and the maker's open tab", async () => {
       const result = advice.adviseWorktree(

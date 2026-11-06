@@ -691,8 +691,11 @@ export async function mergeFacts(
     // The worktree's own base, when it is a remote branch, as trusted as the
     // ancestor proof above trusts it; any other branch's tracking ref may be
     // stale (deleted or force-pushed since the last fetch) and proves nothing.
+    // A base recorded by its local name (feat/base) is judged by the
+    // remote's copy too.
     const targetIsRemote = await refPresent(repo.root, `refs/remotes/${target.name}`);
-    const ownBase = targetIsRemote ? shortBranch(target.name) : null;
+    const ownBase = targetIsRemote ? shortBranch(target.name) : target.name;
+    const ownCommit = targetIsRemote ? target.commit : await revParse(repo.root, `refs/remotes/origin/${target.name}^{commit}`);
     for (const name of branches) {
       const stacked = await proveByMergedPullRequestStack({
         repo: repo.root,
@@ -701,7 +704,7 @@ export async function mergeFacts(
         mergedFor: async (headName) => all.filter((pr) => pr.headRefName === headName),
         landedBases: new Set(fallback ? [shortBranch(fallback.name)] : []),
         defaultCommit: fallback?.commit ?? null,
-        remoteCommit: async (base) => (base === ownBase ? target.commit : null),
+        remoteCommit: async (base) => (base === ownBase ? ownCommit : null),
       });
       if (!stacked) continue;
       // Judged against where it landed when the base is not on the remote:
