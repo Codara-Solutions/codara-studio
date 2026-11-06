@@ -531,6 +531,60 @@ async function main() {
       h.pulls = [pr454, pr453];
     });
 
+    await check("a base on another remote (a fork) never proves a merge into origin's branch of that name", async () => {
+      const fork = path.join(scratch, "fork.git");
+      execFileSync("git", ["init", "-q", "--bare", "-b", "main", fork]);
+      git(repo, ["remote", "add", "upstream", fork]);
+      try {
+        // origin's feat/up lacks the squash; the fork's feat/up has it.
+        git(hub, ["fetch", "-q", "origin"]);
+        git(hub, ["checkout", "-q", "-B", "feat/up", "origin/main"]);
+        commitFile(hub, "up.txt", "base\n", "up base");
+        git(hub, ["push", "-q", "origin", "feat/up"]);
+        git(hub, ["checkout", "-q", "-B", "feat/up-child", "feat/up"]);
+        const c1 = commitFile(hub, "y.txt", "1\n", "up child 1");
+        const c2 = commitFile(hub, "y.txt", "2\n", "up child 2");
+        git(hub, ["push", "-q", "origin", "feat/up-child"]);
+        git(hub, ["checkout", "-q", "feat/up"]);
+        git(hub, ["merge", "-q", "--squash", "feat/up-child"]);
+        git(hub, ["commit", "-q", "-m", "up child (#40)"]);
+        const sq = git(hub, ["rev-parse", "HEAD"]);
+        git(hub, ["push", "-q", fork, "feat/up"]);
+        git(repo, ["fetch", "-q", "origin"]);
+        git(repo, ["fetch", "-q", "upstream"]);
+        const child = await aw.createAgentWorktree(owner, { branch: "feat/up-child", base: "upstream/feat/up" }, deps);
+        assert.equal(child.ok, true, JSON.stringify(child));
+        git(child.path, ["reset", "-q", "--hard", c1]);
+        const pr40 = { number: 40, url: "https://github.com/acme/app/pull/40", headRefName: "feat/up-child", headRefOid: c2, baseRefName: "feat/up", isCrossRepository: false, mergeCommitOid: sq };
+        h.pulls = [pr40];
+        const childWorkspace = h.state.workspaces.find((workspace) => workspace.id === child.workspaceId);
+        assert.equal(childWorkspace.copyBranch.baseBranch, "upstream/feat/up");
+        const ctx = repoContext([pr40]);
+        ctx.base = { name: "origin/main", commit: git(repo, ["rev-parse", "origin/main"]) };
+        const target = await inspect.targetFor(ctx, childWorkspace);
+        assert.equal(target.name, "upstream/feat/up");
+        const facts = await inspect.mergeFacts(ctx, c1, "feat/up-child", target);
+        assert.equal(facts.state, "unmerged", JSON.stringify(facts));
+        const dry = await aw.removeAgentWorktree(other, { workspaceId: child.workspaceId, dryRun: true }, deps);
+        assert.notEqual(dry.merge.status, "merged", JSON.stringify(dry));
+        assert.ok(dry.blockers.includes("WORKTREE_NOT_MERGED"));
+        // Once origin's feat/up holds the squash, it landed there.
+        git(hub, ["push", "-q", "-f", "origin", "feat/up"]);
+        const landed = await inspect.mergeFacts(repoContext([pr40]), c1, "feat/up-child", target);
+        assert.equal(landed.state, "unmerged", "the base recorded on the fork is still not origin's");
+        const onOrigin = { ...childWorkspace, copyBranch: { ...childWorkspace.copyBranch, baseBranch: "origin/feat/up" } };
+        git(repo, ["fetch", "-q", "origin"]);
+        const originCtx = repoContext([pr40]);
+        originCtx.base = ctx.base;
+        const viaOrigin = await inspect.mergeFacts(originCtx, c1, "feat/up-child", await inspect.targetFor(originCtx, onOrigin));
+        assert.equal(viaOrigin.state, "merged", JSON.stringify(viaOrigin));
+        assert.equal(viaOrigin.target, "origin/feat/up");
+      } finally {
+        git(repo, ["remote", "remove", "upstream"]);
+        h.pulls = [pr454, pr453];
+      }
+    });
+
     // A worktree whose agent switched it to a follow-up branch, both merged
     // by squash on GitHub.
     const switchedWorktree = async (name) => {

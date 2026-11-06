@@ -215,8 +215,9 @@ export interface RepoContext {
 
 const LS_REMOTE_TIMEOUT_MS = 15_000;
 
-// The branch on origin now. Its tracking ref can be stale: deleted or
-// force-pushed on GitHub since the last fetch.
+// The branch on origin now, the remote whose pull requests are judged. Its
+// tracking ref can be stale: deleted or force-pushed on GitHub since the
+// last fetch.
 function remoteHead(repo: RepoContext, branch: string): Promise<string | null> {
   repo.remoteHeads ??= new Map();
   let pending = repo.remoteHeads.get(branch);
@@ -718,11 +719,15 @@ export async function mergeFacts(
     // A base recorded by its local name (feat/base) is judged by the
     // remote's copy too.
     const targetIsRemote = await refPresent(repo.root, `refs/remotes/${target.name}`);
-    const ownBase = targetIsRemote ? shortBranch(target.name) : target.name;
-    // Only as the remote has it now: a stale tracking ref may still hold a
-    // merge the branch lost (deleted unmerged, force-pushed). Its commit must
-    // be here too, or the merge cannot be found in it.
+    // Pull requests are origin's, so only origin's copy of the base can hold
+    // their merges. A base on another remote (upstream/feat/x, a fork) gives
+    // no such proof: its feat/x is not the branch the pull request merged into.
+    const ownBase = !targetIsRemote ? target.name : target.name.startsWith("origin/") ? target.name.slice("origin/".length) : null;
+    // Only as origin has it now: a stale tracking ref may still hold a merge
+    // the branch lost (deleted unmerged, force-pushed). Its commit must be
+    // here too, or the merge cannot be found in it.
     const ownCommit = async (): Promise<string | null> => {
+      if (!ownBase) return null;
       const now = await remoteHead(repo, ownBase);
       return now && (await revParse(repo.root, `${now}^{commit}`)) ? now : null;
     };
@@ -734,7 +739,7 @@ export async function mergeFacts(
         mergedFor: async (headName) => all.filter((pr) => pr.headRefName === headName),
         landedBases: new Set(fallback ? [shortBranch(fallback.name)] : []),
         defaultCommit: fallback?.commit ?? null,
-        remoteCommit: async (base) => (base === ownBase ? ownCommit() : null),
+        remoteCommit: async (base) => (ownBase !== null && base === ownBase ? ownCommit() : null),
       });
       if (!stacked) continue;
       // Judged against where it landed, never a local-only base (the rail's
@@ -742,7 +747,7 @@ export async function mergeFacts(
       // the remote's copy of the worktree's own base.
       const where =
         stacked.landedIn.kind === "remote-base"
-          ? { name: targetIsRemote ? target.name : `origin/${stacked.landedIn.branch}`, commit: stacked.landedIn.commit }
+          ? { name: `origin/${stacked.landedIn.branch}`, commit: stacked.landedIn.commit }
           : fallback;
       const landed =
         !where || (where.name === target.name && where.commit === target.commit)

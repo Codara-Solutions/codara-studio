@@ -2197,7 +2197,10 @@ async function proveMerged(
     // The worktree's own base on the remote: the target when it is remote,
     // or the remote's copy of a base recorded by its local name, fetched
     // first before a removal.
-    let ownBaseCommit: string | null = targetIsRemote && !targetFetchFailed ? target.commit : null;
+    // Pull requests are origin's: a base on another remote (upstream/feat/x,
+    // a fork) is not the branch they merged into and proves nothing.
+    const targetOnOrigin = Boolean(targetRef?.startsWith("refs/remotes/origin/"));
+    let ownBaseCommit: string | null = targetOnOrigin && !targetFetchFailed ? target.commit : null;
     if (!explicitTarget && !targetIsRemote && (await refIsPresent(repo, `refs/remotes/origin/${targetBranch}`))) {
       // A fetch that fails (the branch was deleted) leaves a stale copy: no proof.
       const failure = options.fetch && !options.pinned ? await fetchTargetOnce(ctx, `origin/${targetBranch}`) : null;
