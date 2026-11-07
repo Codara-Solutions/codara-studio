@@ -906,6 +906,17 @@ Rules:
 Cora chats get these tools too, but only Claude Code and Codex can run in a
 session: Cora's own chat is not a terminal.
 
+### Every live session
+
+`codara_session_list_all` lists every agent session in a terminal pane, in
+every workspace, as the rail's Agents view shows it. It is read-only and takes
+no parameters. Each entry has `id` (the pane id), `title` (the tab's title),
+`workspaceId`, `workspace` (its name), `runtime` (`claude`, `codex`, `grok` or
+`pi`), `state` and `lastActivity` (when it entered that state, ISO 8601). The
+`state` is `needs_you`, `working`, `done` (its turn just ended) or `idle`, in
+that order, the latest first within each, at most 100. Only agents you run
+outside a Cora chat get it, and an agent in an imported pull request is refused.
+
 ## Notifications
 
 Only in `studio` outside a Cora chat (a Cora run announces its own outcome).
