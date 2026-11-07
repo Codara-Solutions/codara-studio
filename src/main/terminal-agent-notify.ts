@@ -2025,7 +2025,11 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       newMatches(w.runtime === "pi" ? PI_PROMPT_MARKER_G : PROMPT_MARKER_G, text, carryLen).length > 0;
     const leftAltScreen = text.indexOf(ALT_SCREEN_LEAVE, Math.max(0, carryLen - ALT_SCREEN_LEAVE.length + 1)) !== -1;
     const piQuit = w.runtime === "pi" && newMatches(PI_EXIT_LINE_G, plain, fresh).length > 0;
-    if (promptReturned || (leftAltScreen && !w.codexScreen) || piQuit) {
+    // Pi 1.x draws fullscreen and leaves the alternate screen while it keeps
+    // running (Ctrl+G opens the editor). Its quit prints the resume line and
+    // gives the shell its prompt back, so those two end a Pi session.
+    const altScreenExit = leftAltScreen && !w.codexScreen && w.runtime !== "pi";
+    if (promptReturned || altScreenExit || piQuit) {
       markAgentExited(w, now, piQuit ? "pi exit line" : "prompt marker / alt-screen leave");
     }
     // Codex also leaves the alternate screen when closing transcript views;

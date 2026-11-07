@@ -1,6 +1,7 @@
 // test-runner: heavy (peaks near 210 MB)
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -9,7 +10,17 @@ import ts from "typescript";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 const sdkDir = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
-const { AssistantMessageEventStream } = await import(pathToFileURL(join(sdkDir, "../node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js")).href);
+// pi-ai is nested under pi-coding-agent when another copy is hoisted, and
+// hoisted otherwise; load the copy the SDK itself resolves.
+function piAiModuleUrl(...segments) {
+  for (let dir = sdkDir; ; dir = dirname(dir)) {
+    const candidate = join(dir, "node_modules", "@earendil-works", "pi-ai", ...segments);
+    if (existsSync(candidate)) return pathToFileURL(candidate).href;
+    if (dirname(dir) === dir) throw new Error(`pi-ai ${segments.join("/")} not found above ${sdkDir}`);
+  }
+}
+const { AssistantMessageEventStream } = await import(piAiModuleUrl("dist", "utils", "event-stream.js"));
+const { getCurrentSystemPrompt } = await import(piAiModuleUrl("dist", "utils", "transcript.js"));
 async function loadTs(file) {
   const exports = {};
   const url = new URL(file, import.meta.url);
@@ -40,7 +51,7 @@ try {
     streamSimple(model, context) {
       const stream = new AssistantMessageEventStream();
       queueMicrotask(() => {
-        const summary = /summariz/i.test(context.systemPrompt);
+        const summary = /summariz/i.test(getCurrentSystemPrompt(context.messages));
         if (summary) summaryCalls += 1; else normalCalls += 1;
         const tool = !summary && normalCalls === 1;
         const content = tool ? [{ type: "toolCall", id: "probe-once", name: "probe", arguments: {} }]

@@ -120,6 +120,12 @@ const SELECTOR =
 const TUI_STOP = " \x1b[4B\r\r\n";
 const EXIT_LINE =
   "\x1b[?25h\x1b[?2004l\x1b]0;π - proj\x07\x1b[2mTo resume this session:\x1b[22m pi --session 01a0d846-6ded-7009-8e06-51c7f805f522\r\n";
+const ALT_ENTER = "\x1b[?1049h";
+const ALT_LEAVE = "\x1b[?1049l";
+// Live pi 1.5.0 fullscreen header: the block logo, version beside its top row
+// and the key hints beside its bottom row, placed with cursor moves.
+const PI_1X_HEADER =
+  "\x1b[?2026h\x1b[2;1H\x1b[2K \x1b[38;2;228;138;122m\x1b[48;2;79;142;179m\u2580\x1b[0m\x1b[38;2;228;138;122m\u2580\u2588\x1b[0m  \x1b[39m\x1b[2mv1.5.0\x1b[22;39m\x1b[0m\x1b]8;;\x07\x1b[3;1H\x1b[2K \x1b[38;2;79;142;179m\u2588\u2580\x1b[0m \x1b[38;2;234;182;93m\u2588\x1b[0m \x1b[39m\x1b[2mescape\x1b[22;39m\x1b[39m\x1b[2m interrupt\x1b[22;39m\x1b[39m\x1b[2m \u00b7 ctrl+c/ctrl+d clear/exit\x1b[22;39m\x1b[?2026l";
 const ZSH_PROMPT = "\x1b]133;D;0\x1b\\\x1b]7;file://host/proj\x1b\\\x1b]133;A\x1b\\% ";
 
 async function main() {
@@ -172,9 +178,10 @@ async function main() {
       { paneId: "pi2", tabId: "t2", tabTitle: "Quiet Pi", excluded: false },
       { paneId: "pi3", tabId: "t3", tabTitle: "Restored Pi", excluded: false, runtimeHint: "pi" },
       { paneId: "pi4", tabId: "t4", tabTitle: "Late Pi", excluded: false },
+      { paneId: "pi5", tabId: "t5", tabTitle: "Fullscreen Pi", excluded: false },
     ],
   });
-  check("taps attached", T.taps.size === 4);
+  check("taps attached", T.taps.size === 5);
   check("a restored Pi pointer hints the runtime", mod.activeTerminalAgentPaneIds().includes("pi3"));
 
   // ── The startup header identifies Pi ──
@@ -258,6 +265,22 @@ async function main() {
   T.processes.set(4040, []);
   await sleep(4200);
   check("the Pi process leaving ends the session", lastChip("pi4")?.state === "done");
+
+  // ── Pi 1.x fullscreen: leaving the alternate screen is not an exit ──
+  // Pi 1.x opens on the alternate screen (live pi 1.5.0 block-logo header) and
+  // leaves it while still running, e.g. for Ctrl+G's external editor.
+  feed("pi5", ALT_ENTER + PI_1X_HEADER + FOOTER);
+  check("a fullscreen pi 1.x header identifies the runtime", lastChip("pi5")?.runtime === "pi");
+  feed("pi5", ALT_LEAVE + "\x1b[?25h");
+  check("pi 1.x leaving the alternate screen is not an exit", lastChip("pi5")?.state !== "done");
+  check("pi 1.x stays an active agent outside the alternate screen", mod.activeTerminalAgentPaneIds().includes("pi5"));
+  feed("pi5", ALT_ENTER + FOOTER);
+  // On quit pi-tui leaves the alternate screen, reprints the transcript onto
+  // the normal screen and ends it with a newline (tui-alt-screen.js stop()).
+  feed("pi5", "\x1b[?2026h" + ALT_LEAVE + "\x1b[?7l\r\x1b[2K Here is a slow answer.\x1b[0m\x1b[?7h\r\n\x1b[?25h\x1b[?2026l");
+  check("pi 1.x reprinting its transcript on the way out is not yet an exit", lastChip("pi5")?.state !== "done");
+  feed("pi5", EXIT_LINE);
+  check("pi 1.x quit: the resume line after the alternate screen ends it", lastChip("pi5")?.state === "done");
 
   mod.disposeAllTerminalAgentWatchers();
   console.log(`\n${pass} Pi notifier checks passed.`);

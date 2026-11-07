@@ -112,32 +112,50 @@ function anthropicView(body) {
     }
   }
   const system = Array.isArray(body.system) ? body.system.map((block) => block.text ?? "").join("\n") : String(body.system ?? "");
-  return { model: body.model, tools: (body.tools ?? []).map((tool) => tool.name), toolSpecs: body.tools ?? [], system, events };
+  // A deferred tool (`defer_loading`) is not shown to the model until loaded;
+  // Pi 1.x declares a placeholder of that kind on every request.
+  const offered = (body.tools ?? []).filter((tool) => !tool.defer_loading);
+  return { model: body.model, tools: offered.map((tool) => tool.name), toolSpecs: offered, system, events };
 }
 
 function responsesView(body) {
   const events = [];
+  // Pi 1.x declares Codex tools in the input, as `additional_tools` items, so
+  // a tool added mid-conversation keeps the cached prefix; older Pi sent `tools`.
+  const tools = [...(body.tools ?? [])];
   for (const item of body.input ?? []) {
-    if (item.type === "function_call_output") events.push({ kind: "result", text: textOf(item.output) });
+    if (item.type === "additional_tools") tools.push(...(item.tools ?? []));
+    else if (item.type === "function_call_output") events.push({ kind: "result", text: textOf(item.output) });
     else if (item.type === "function_call") events.push({ kind: "call", name: item.name });
     else if (item.role === "user") events.push({ kind: "user", text: textOf(item.content) });
   }
-  return { model: body.model, tools: (body.tools ?? []).map((tool) => tool.name), system: String(body.instructions ?? ""), events };
+  return { model: body.model, tools: tools.map((tool) => tool.name), system: String(body.instructions ?? ""), events };
 }
 
 const findTool = (tools, name) => tools.find((tool) => tool.toLowerCase() === name) ?? null;
 
-function planSummary() {
+// Pi 0.86+ also compacts mid-run right after an oversized tool result, which
+// can come before the read; an honest summary then names only what was done.
+const BEFORE_READ = NARRATIVE.replace("- [x] Read `input.txt`.", "- [x] Ran the setup command.")
+  .replace("Proven: input.txt was read.", "Proven: the setup command ran.");
+
+function planSummary(view) {
   const mode = summaryQueue.shift() ?? "ok";
   if (mode === "bad") return { mode, text: "I could not do that." };
   if (mode === "invented") return { mode, text: NARRATIVE.replace("`input.txt`", "`src/never-touched.ts`") };
-  if (mode === "huge") return { mode, text: `${NARRATIVE}${"padding ".repeat(50_000)}` };
+  // The story so far may name input.txt as the goal; only the new part counts.
+  const conversation = view.events
+    .map((event) => (event.text ?? "").replace(/<previous-summary>[\s\S]*?<\/previous-summary>/g, ""))
+    .join("\n");
+  const read = conversation.includes("input.txt");
+  const narrative = read ? NARRATIVE : BEFORE_READ;
+  if (mode === "huge") return { mode, text: `${narrative}${"padding ".repeat(50_000)}` };
   if (mode === "ok") reportedContext = 120;
-  return { mode, text: NARRATIVE };
+  return { mode, text: narrative };
 }
 
 function plan(view) {
-  if (view.system.includes("context summarization assistant")) return planSummary();
+  if (view.system.includes("context summarization assistant")) return planSummary(view);
   // The note a usage limit wait leaves is not a new task.
   const lastUser = view.events.findLastIndex((event) => event.kind === "user" && !event.text.includes(CONTINUE_NOTE));
   const prompt = lastUser >= 0 ? view.events[lastUser].text : "";

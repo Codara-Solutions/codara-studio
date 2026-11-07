@@ -51,6 +51,16 @@ export function coercePublicRuntime(runtime: AgentRuntime): PublicAgentRuntime |
   return KNOWN_PUBLIC_RUNTIMES.has(runtime) ? (runtime as PublicAgentRuntime) : null;
 }
 
+// Pi's startup header line followed by its key-hint line. Through 0.87 the
+// header reads `pi v0.85.1`; from 0.99 it is a two-row block logo with the
+// version beside its top row and the hint beside its bottom row
+// (`▀▀█  v1.5.0` then `█▀ █ escape interrupt · …`, live pi 1.5.0 capture). In
+// both, only the interrupt hint right after the version makes it a banner.
+// Where the block logo cannot draw (Apple Terminal), 1.x writes the text
+// wordmark `Pi v1.5.0` instead, hence `[Pp]i`.
+const PI_HEADER_RE =
+  /\b[Pp]i\s*v\d+\.\d+\.\d+\s+\S+\s+(?:to\s+)?interrupt\b|[▀█]\s*v\d+\.\d+\.\d+\s+[▀█][▀█\s]*\S+\s+(?:to\s+)?interrupt\b/;
+
 // Banner / first-prompt boilerplate patterns. Order is significant: more
 // specific patterns sit before broader ones so a vendor that includes a
 // generic keyword (e.g. "Grok") in their banner can't be mis-tagged by a
@@ -89,8 +99,8 @@ export const RUNTIME_BANNERS: ReadonlyArray<{ runtime: AgentRuntime; pattern: Re
   { runtime: "kimi",       pattern: /\bKimi\s*v\d|\bkimi-code\b/i },
   { runtime: "kiro",       pattern: /\bKiro\s*v\d|\bkiro-cli\b/i },
   { runtime: "opencode",   pattern: /\bOpenCode\s*v\d|\bopencode\b/i },
-  // Pi's startup header (verified against a live pi 0.85.1 pty capture): a
-  // lowercase `pi v0.85.1` line directly followed by the key-hint line
+  // Pi's startup header (verified against live pi 0.85.1 and 1.5.0 pty
+  // captures): the version directly followed by the key-hint line
   // (`escape interrupt · ctrl+c/ctrl+d clear/exit · …`, or `escape to
   // interrupt` when expanded), then the fixed onboarding sentence. A bare
   // `pi v1` is too generic for shell output, so the version must be followed
@@ -99,7 +109,7 @@ export const RUNTIME_BANNERS: ReadonlyArray<{ runtime: AgentRuntime; pattern: Re
   // whole header; PI_LIVE_IDENTITY and the process tree cover that case.
   {
     runtime: "pi",
-    pattern: /\bpi\s*v\d+\.\d+\.\d+\s+\S+\s+(?:to\s+)?interrupt\b|\bPi\s*can\s*explain\s*its\s*own\s*features\b/,
+    pattern: new RegExp(`${PI_HEADER_RE.source}|\\bPi\\s*can\\s*explain\\s*its\\s*own\\s*features\\b`),
   },
 ];
 
@@ -891,7 +901,7 @@ const AGENT_UI_ANCHORS: Record<PublicAgentRuntime, RegExp[]> = {
   // does not require it.
   pi: [
     PI_FOOTER_CONTEXT_RE,
-    /\bpi\s*v\d+\.\d+\.\d+\s+\S+\s+(?:to\s+)?interrupt\b/,
+    PI_HEADER_RE,
   ],
 };
 

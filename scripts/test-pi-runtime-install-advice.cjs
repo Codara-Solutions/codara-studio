@@ -15,7 +15,7 @@ const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "codara-pi-install-advice-"));
-const INSTALL_SPEC = "@earendil-works/pi-coding-agent@~0.85.1";
+const INSTALL_SPEC = "@earendil-works/pi-coding-agent@~1.5.0";
 const INSTALL_COMMAND = `npm install -g ${INSTALL_SPEC}`;
 
 const stubs = {
