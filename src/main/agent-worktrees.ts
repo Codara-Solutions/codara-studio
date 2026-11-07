@@ -51,6 +51,7 @@ import type { GitHubMergedPullRequest } from "./github-cli";
 import { PROTECTED_REMOTE_BRANCHES } from "@shared/worktree-cleanup-agent";
 import { isKeptBranch } from "./worktree-cleanup/kept-branches";
 import { archiveIgnoredFiles } from "./worktree-cleanup/archive";
+import { mountRefusal } from "./worktree-cleanup/mounts";
 import { proveByMergedPullRequestStack } from "./merged-pull-request-stack";
 
 // Agent-managed worktrees: the logic behind the worktree.create/list/remove
@@ -119,6 +120,7 @@ export type WorktreeCode =
   | "WORKTREE_OPERATION_IN_PROGRESS"
   | "WORKTREE_IGNORED_FILES"
   | "WORKTREE_ARCHIVE_FAILED"
+  | "WORKTREE_MOUNT_INSIDE"
   | "WORKTREE_SUBMODULES"
   | "WORKTREE_NESTED_REPOSITORY"
   | "WORKTREE_NESTED_SCAN_INCOMPLETE"
@@ -220,6 +222,9 @@ export interface AgentWorktreeDeps {
   // back (worktree-cleanup/archive.ts). Absent: they block, or are deleted
   // with discardIgnoredFiles.
   archiveRoot?(): string;
+  // Why a folder with a drive mounted inside must stay, or null. Absent: the
+  // real check (worktree-cleanup/mounts.ts); tests stand in for it here.
+  mountRefusal?(path: string): Promise<string | null>;
   // Worktree setup kept in the repository (.worktreeinclude and
   // .codara/worktree.json, src/main/worktree-setup). Without it a created
   // worktree only reports the user's setup command for the agent to run.
@@ -340,6 +345,7 @@ const MESSAGES: Record<WorktreeCode, string> = {
   WORKTREE_OPERATION_IN_PROGRESS: "an operation is in progress in the worktree",
   WORKTREE_IGNORED_FILES: "the worktree has ignored files that cannot be regenerated",
   WORKTREE_ARCHIVE_FAILED: "its ignored files could not be copied to the archive, so it was kept",
+  WORKTREE_MOUNT_INSIDE: "a drive is mounted inside the worktree, so it was kept",
   WORKTREE_SUBMODULES: "initialized submodules block removal",
   WORKTREE_NESTED_REPOSITORY: "another git checkout or worktree is nested inside this worktree",
   WORKTREE_NESTED_SCAN_INCOMPLETE:
@@ -371,6 +377,7 @@ const HINTS: Partial<Record<WorktreeCode, string>> = {
   WORKTREE_DIRTY: "commit or discard them yourself",
   WORKTREE_IGNORED_FILES: "move them, or pass discardIgnoredFiles:true",
   WORKTREE_ARCHIVE_FAILED: "free some disk space or move them yourself, then retry",
+  WORKTREE_MOUNT_INSIDE: "ask the user to unmount it, then retry",
   WORKTREE_SUBMODULES: "ask the user",
   WORKTREE_NESTED_REPOSITORY: "move or remove the nested checkout first, or ask the user",
   WORKTREE_NESTED_SCAN_INCOMPLETE:
@@ -3017,6 +3024,10 @@ async function removeLocked(
       });
     }
 
+    // Before anything is copied or deleted: git would delete through a mount.
+    const mounted = await (deps.mountRefusal ?? mountRefusal)(workspace.cwd);
+    if (mounted) return refusal("WORKTREE_MOUNT_INSIDE", mounted, { workspaceId: workspace.id });
+
     recoveryRef = await saveRecoveryRef(repo, `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}`, verdict.tip!);
     if (!recoveryRef) {
       return refusal("WORKTREE_GIT_FAILED", "could not save the recovery ref, so nothing was removed", {
@@ -3219,42 +3230,122 @@ async function removeLocked(
 
 // ── Process scan ───────────────────────────────────────────────────────────
 
-// Processes whose working directory is the worktree or inside it. Codara's
-// own process tree is excluded (its helpers, git children, the MCP servers)
-// except below a terminal session, where the user's and agents' commands run.
-// Best effort: null when the platform offers no scan or it timed out.
+// Processes whose working directory is the worktree or inside it, and on
+// Linux those with a file open inside it (an editor, a tail -f, a server
+// holding a log or a database). Codara's own process tree is excluded (its
+// helpers, git children, the MCP servers) except below a terminal session,
+// where the user's and agents' commands run. Best effort: null when the
+// platform offers no scan or it timed out.
 export async function scanProcessesUnderCwd(
   dir: string,
-  options: { appPid: number; sessionPids: readonly number[]; timeoutMs?: number },
+  options: ProcessScanOptions,
 ): Promise<ProcessUse[] | null> {
   const found = await scanProcessesUnderCwds([dir], options);
   return found ? found.get(dir) ?? [] : null;
+}
+
+export interface ProcessScanOptions {
+  appPid: number;
+  sessionPids: readonly number[];
+  timeoutMs?: number;
+  /** Tests stand in for the system here. */
+  readers?: Partial<ProcessScanReaders>;
+}
+
+export interface ProcessScanReaders {
+  platform: NodeJS.Platform;
+  list(): Promise<readonly { pid: number; parentPid: number; command: string }[] | null>;
+  cwds(pids: number[]): Promise<Map<number, string> | null>;
+  /** Linux: a /proc/<pid>/fd folder's entries, and one entry's target. */
+  readdir(path: string): Promise<string[]>;
+  readlink(path: string): Promise<string>;
+}
+
+// Open files read in one scan, across every process. Past it the scan
+// cannot say what is open, so it answers "unknown" (null) as a timeout does.
+export const OPEN_FILE_SCAN_MAX = 50_000;
+const OPEN_FILE_SCAN_CONCURRENCY = 32;
+
+const systemProcessScanReaders: ProcessScanReaders = {
+  platform: process.platform,
+  list: () => listProcessesWithCommands(0),
+  cwds: (pids) => processCwds(pids),
+  readdir: (path) => fsp.readdir(path),
+  readlink: (path) => readlink(path),
+};
+
+// The paths each process has open, from /proc/<pid>/fd. A process that is
+// gone or not ours (ENOENT, EACCES) has none we can see. Sockets, pipes and
+// anonymous inodes are not paths. Null when the budget ran out.
+export async function openPathsOf(
+  pids: readonly number[],
+  readers: Pick<ProcessScanReaders, "readdir" | "readlink">,
+  budget = OPEN_FILE_SCAN_MAX,
+): Promise<Map<number, string[]> | null> {
+  const out = new Map<number, string[]>();
+  let left = budget;
+  for (let i = 0; i < pids.length; i += OPEN_FILE_SCAN_CONCURRENCY) {
+    const batch = pids.slice(i, i + OPEN_FILE_SCAN_CONCURRENCY);
+    const fds = await Promise.all(batch.map((pid) => readers.readdir(`/proc/${pid}/fd`).catch(() => [] as string[])));
+    const count = fds.reduce((sum, names) => sum + names.length, 0);
+    if (count > left) return null;
+    left -= count;
+    const paths = await Promise.all(
+      batch.map(async (pid, index) => {
+        const targets = await Promise.all(
+          fds[index].map((fd) => readers.readlink(`/proc/${pid}/fd/${fd}`).catch(() => null)),
+        );
+        return targets
+          .filter((target): target is string => typeof target === "string" && target.startsWith("/"))
+          .map((target) => target.replace(/ \(deleted\)$/, ""));
+      }),
+    );
+    batch.forEach((pid, index) => {
+      if (paths[index].length) out.set(pid, paths[index]);
+    });
+  }
+  return out;
 }
 
 // The same scan for many directories from one process listing, so the
 // worktree cleanup screen does not list every process once per worktree.
 export async function scanProcessesUnderCwds(
   dirs: readonly string[],
-  options: { appPid: number; sessionPids: readonly number[]; timeoutMs?: number },
+  options: ProcessScanOptions,
 ): Promise<Map<string, ProcessUse[]> | null> {
-  if (process.platform === "win32") return null;
+  const readers: ProcessScanReaders = { ...systemProcessScanReaders, ...options.readers };
+  if (readers.platform === "win32") return null;
   const scan = (async (): Promise<Map<string, ProcessUse[]> | null> => {
-    const listed = await listProcessesWithCommands(0);
+    const listed = await readers.list();
     if (!listed) return null;
-    const cwds = await processCwds(listed.map((entry) => entry.pid));
+    const cwds = await readers.cwds(listed.map((entry) => entry.pid));
     if (!cwds) return null;
     const sessions = new Set(options.sessionPids);
     const appAncestors = new Set(processChainIn(listed, options.appPid) ?? [options.appPid]);
+    const parentOf = new Map(listed.map((entry) => [entry.pid, entry.parentPid]));
+    // Codara's own processes, the main one with them, are not counted
+    // unless they run below a terminal session: walking up, a session
+    // reached before the app counts it.
+    const counted = listed.filter((entry) => {
+      if (appAncestors.has(entry.pid)) return false;
+      const seen = new Set<number>();
+      for (let pid: number | undefined = entry.pid; pid !== undefined && pid > 0 && !seen.has(pid); pid = parentOf.get(pid)) {
+        if (sessions.has(pid)) return true;
+        if (pid === options.appPid) return false;
+        seen.add(pid);
+      }
+      return true;
+    });
+    // Linux only: macOS would need lsof over every process, too slow here.
+    const open = readers.platform === "linux" ? await openPathsOf(counted.map((entry) => entry.pid), readers) : new Map();
+    if (!open) return null;
     const out = new Map<string, ProcessUse[]>(dirs.map((dir) => [dir, []]));
-    for (const entry of listed) {
+    for (const entry of counted) {
       const cwd = cwds.get(entry.pid);
-      if (!cwd) continue;
-      const inside = dirs.filter((dir) => isAtOrUnder(cwd, dir));
-      if (!inside.length || appAncestors.has(entry.pid)) continue;
-      const chain = processChainIn(listed, entry.pid) ?? [entry.pid];
-      const sessionIndex = chain.findIndex((pid) => sessions.has(pid));
-      const appIndex = chain.indexOf(options.appPid);
-      if (appIndex >= 0 && (sessionIndex < 0 || sessionIndex > appIndex)) continue;
+      const paths = open.get(entry.pid) ?? [];
+      const inside = dirs.filter(
+        (dir) => (cwd !== undefined && isAtOrUnder(cwd, dir)) || paths.some((path: string) => isAtOrUnder(path, dir)),
+      );
       for (const dir of inside) out.get(dir)!.push({ pid: entry.pid, command: cleanText(entry.command, 200) });
     }
     return out;

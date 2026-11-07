@@ -1,6 +1,7 @@
 import { createHash, type Hash } from "node:crypto";
 import { constants, promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { WORKTREE_ARCHIVE_RETENTION_DAYS } from "@shared/worktree-cleanup";
 
 // Ignored files a fresh checkout cannot bring back (data/, .env.local) are
 // copied out of a worktree before it is removed, into
@@ -9,7 +10,8 @@ import { dirname, join, resolve, sep } from "node:path";
 // deleted: a copy that does not match is removed and the worktree stays.
 // Day folders older than ARCHIVE_RETENTION_DAYS go at startup.
 
-export const ARCHIVE_RETENTION_DAYS = 30;
+// The toast that reports an archive says how long it is kept, from the same number.
+export const ARCHIVE_RETENTION_DAYS = WORKTREE_ARCHIVE_RETENTION_DAYS;
 
 /** ~/.codarastudio/worktree-archive, under Codara's own home. */
 export function worktreeArchiveRoot(home: string): string {
@@ -46,8 +48,12 @@ function topEntries(entries: readonly string[]): string[] {
   return clean.filter((entry, index) => !clean.slice(0, index).some((other) => entry.startsWith(`${other}/`)));
 }
 
-async function tally(path: string, into: Tally): Promise<void> {
+// `device`, for the source: everything must be on the worktree's own disk.
+// A mount inside (rclone, sshfs, a bind mount) is not copied, and the
+// worktree is kept, since its removal would delete through the mount.
+async function tally(path: string, into: Tally, device?: number): Promise<void> {
   const info = await fsp.lstat(path);
+  if (device !== undefined && info.dev !== device) throw new Error(`${path} is on another drive (a mount)`);
   const stamp = `${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.ino}`;
   if (info.isSymbolicLink()) {
     into.files += 1;
@@ -58,7 +64,7 @@ async function tally(path: string, into: Tally): Promise<void> {
     into.digest?.update(`${path}\0f\0${stamp}\0`);
   } else if (info.isDirectory()) {
     into.digest?.update(`${path}\0d\0`);
-    for (const name of await fsp.readdir(path)) await tally(join(path, name), into);
+    for (const name of await fsp.readdir(path)) await tally(join(path, name), into, device);
   } else {
     throw new Error(`${path} is not a file, folder or link`);
   }
@@ -117,12 +123,13 @@ export async function archiveIgnoredFiles(input: {
 }): Promise<ArchiveResult> {
   const base = resolve(input.worktree);
   const entries = topEntries(input.entries);
+  const device = (await fsp.lstat(base)).dev;
   const sourceTally = async (): Promise<Tally & { digest: Hash }> => {
     const out = { files: 0, bytes: 0, digest: createHash("sha256") };
     for (const entry of entries) {
       const from = resolve(base, entry);
       if (!from.startsWith(`${base}${sep}`)) throw new Error(`${entry} is outside the worktree`);
-      await tally(from, out);
+      await tally(from, out, device);
     }
     return out;
   };

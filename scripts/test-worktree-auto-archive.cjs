@@ -85,11 +85,12 @@ function filesUnder(dir) {
 }
 
 async function main() {
-  const [rail, agent, archive, shared] = await Promise.all([
+  const [rail, agent, archive, shared, mounts] = await Promise.all([
     bundle("src/main/worktree-cleanup/rail.ts", "rail"),
     bundle("src/main/agent-worktrees.ts", "agent"),
     bundle("src/main/worktree-cleanup/archive.ts", "archive"),
     bundle("src/shared/worktree-cleanup.ts", "shared"),
+    bundle("src/main/worktree-cleanup/mounts.ts", "mounts"),
   ]);
 
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-wt-archive-")));
@@ -514,6 +515,21 @@ async function main() {
       }
     });
 
+    await check("codara_worktree_remove: a drive mounted inside keeps it, with its own code", async () => {
+      const made = await agentMerged("agent/mounted");
+      agentDeps.mountRefusal = async () => "data/remote is a mounted drive or on another disk, so it was kept. Unmount it first.";
+      try {
+        const refused = await agent.removeAgentWorktree(maker, { workspaceId: made.workspaceId }, agentDeps);
+        assert.equal(refused.ok, false);
+        assert.equal(refused.code, "WORKTREE_MOUNT_INSIDE", JSON.stringify(refused));
+        assert.match(refused.error, /mounted drive/);
+        assert.equal(fs.readFileSync(path.join(made.path, ".env.local"), "utf8"), "TOKEN=FAKE_sample\n");
+        assert.equal(branchExists(repo, "agent/mounted"), true);
+      } finally {
+        delete agentDeps.mountRefusal;
+      }
+    });
+
     await check("codara_worktree_remove: a copy that fails keeps it, with its own code", async () => {
       const made = await agentMerged("agent/nocopy");
       h.archiveRoot = path.join(scratch, "archive-is-a-file");
@@ -528,6 +544,157 @@ async function main() {
       }
     });
 
+    // ── A drive mounted inside ──────────────────────────────────────────
+    // A fake file system: path -> { dev, dir, entries }. The root is on dev 1.
+    const fakeReader = (tree, mountPoints = null) => ({
+      lstat: async (p) => {
+        const node = tree[p];
+        if (!node) throw Object.assign(new Error(`ENOENT ${p}`), { code: "ENOENT" });
+        if (node.denied) throw Object.assign(new Error(`EACCES ${p}`), { code: "EACCES" });
+        return { dev: node.dev ?? 1, isDirectory: () => Boolean(node.entries), isSymbolicLink: () => Boolean(node.link) };
+      },
+      readdir: async (p) => {
+        const node = tree[p];
+        if (node?.unreadable) throw Object.assign(new Error(`EACCES ${p}`), { code: "EACCES" });
+        if (!node?.entries) throw Object.assign(new Error(`ENOTDIR ${p}`), { code: "ENOTDIR" });
+        return node.entries;
+      },
+      mountPoints: async () => mountPoints,
+    });
+
+    await check("mounts: a folder or a file on another device inside the worktree is found, links are not followed", async () => {
+      const tree = {
+        "/w": { entries: ["src", "data", "link"] },
+        "/w/src": { entries: ["a.ts"] },
+        "/w/src/a.ts": {},
+        "/w/link": { link: true, dev: 1 },
+        "/w/data": { entries: ["remote"] },
+        "/w/data/remote": { dev: 2, entries: ["f"] },
+        "/w/data/remote/f": { dev: 2 },
+      };
+      assert.equal(await mounts.mountInside("/w", fakeReader(tree)), "data/remote");
+      const file = { "/w": { entries: ["x"] }, "/w/x": { dev: 9 } };
+      assert.equal(await mounts.mountInside("/w", fakeReader(file)), "x", "a file on another device counts");
+      const clean = { "/w": { entries: ["src"] }, "/w/src": { entries: ["a"] }, "/w/src/a": {} };
+      assert.equal(await mounts.mountInside("/w", fakeReader(clean)), null);
+    });
+
+    await check("mounts: a bind mount on the same device is found from the mount list", async () => {
+      const tree = { "/w": { entries: ["data"] }, "/w/data": { entries: [] } };
+      const listed = mounts.mountPointsFromMountinfo(
+        "22 1 8:2 / / rw - ext4 /dev/sda2 rw\n90 22 8:2 /elsewhere /w/data/my\\040drive rw - ext4 /dev/sda2 rw\n",
+      );
+      assert.deepEqual(listed, ["/", "/w/data/my drive"]);
+      assert.equal(await mounts.mountInside("/w", fakeReader(tree, listed)), "data/my drive");
+      assert.equal(await mounts.mountInside("/w", fakeReader(tree, ["/", "/w", "/wx/data"])), null, "the root itself and a sibling do not count");
+    });
+
+    await check("mounts: a folder that cannot be read refuses (fails closed); real folders here pass", async () => {
+      const tree = { "/w": { entries: ["data"] }, "/w/data": { entries: [], unreadable: true } };
+      assert.match(await mounts.mountRefusal("/w", fakeReader(tree)), /could not be checked for mounted drives/);
+      const mounted = { "/w": { entries: ["m"] }, "/w/m": { dev: 3, entries: [] } };
+      assert.match(await mounts.mountRefusal("/w", fakeReader(mounted)), /^m is a mounted drive/);
+      const real = path.join(scratch, "no-mounts");
+      fs.mkdirSync(path.join(real, "data", "raw"), { recursive: true });
+      fs.writeFileSync(path.join(real, "data", "raw", "f"), "x");
+      assert.equal(await mounts.mountRefusal(real), null);
+    });
+
+    await check("a merged worktree with a drive mounted inside is kept: nothing copied or deleted, and it says why", async () => {
+      const entry = merged("mounted");
+      addData(entry.dir);
+      deps.mountRefusal = async (dir) => (dir === entry.dir ? "data/remote is a mounted drive or on another disk, so it was kept. Unmount it first." : null);
+      try {
+        await assertKept(entry, /mounted drive/);
+        assert.equal(fs.existsSync(path.join(archiveRoot, day(), "repo--feature-mounted")), false, "nothing is copied");
+        assert.equal(fs.existsSync(path.join(entry.dir, ".env.local")), true);
+        const audited = fs.readFileSync(path.join(scratch, "audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+        assert.ok(audited.some((line) => line.code === "MOUNT_INSIDE" && line.path === entry.dir), "the refusal is in the audit log");
+      } finally {
+        delete deps.mountRefusal;
+      }
+      assert.equal((await auto(entry.id)).status, "removed", "it goes once the mount is gone");
+    });
+
+    // ── Open files count as use (Linux) ─────────────────────────────────
+    const W = "/work/tree";
+    const procs = {
+      list: async () => [
+        { pid: 1, parentPid: 0, command: "init" },
+        { pid: 100, parentPid: 1, command: "codara" },
+        { pid: 200, parentPid: 1, command: "vim notes.txt" },
+        { pid: 300, parentPid: 100, command: "codara helper" },
+        { pid: 400, parentPid: 100, command: "zsh" },
+        { pid: 401, parentPid: 400, command: "tail -f log" },
+        { pid: 500, parentPid: 1, command: "someone else's" },
+        { pid: 600, parentPid: 1, command: "sleep" },
+      ],
+      cwds: async () => new Map([[200, "/home/u"], [300, "/home/u"], [401, "/home/u"], [600, `${W}/src`]]),
+      readdir: async (p) => {
+        const fds = { 200: ["0", "1", "5"], 300: ["7"], 400: ["0"], 401: ["3", "4"], 600: [] }[p.split("/")[2]];
+        if (p.includes("/500/")) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+        if (!fds) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return fds;
+      },
+      readlink: async (p) => {
+        const links = {
+          "/proc/200/fd/0": "/dev/pts/1",
+          "/proc/200/fd/1": "socket:[1234]",
+          "/proc/200/fd/5": `${W}/.notes.txt.swp (deleted)`,
+          "/proc/300/fd/7": `${W}/data/db.sqlite`,
+          "/proc/400/fd/0": "/dev/pts/2",
+          "/proc/401/fd/3": "pipe:[99]",
+          "/proc/401/fd/4": `${W}/server.log`,
+        };
+        if (!(p in links)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return links[p];
+      },
+    };
+    const pids = (found) => found.get(W).map((use) => use.pid).sort((a, b) => a - b);
+
+    await check("process scan: on Linux a program with a file open inside counts, Codara's own helpers do not", async () => {
+      const found = await agent.scanProcessesUnderCwds([W, "/other"], {
+        appPid: 100,
+        sessionPids: [400],
+        readers: { platform: "linux", ...procs },
+      });
+      assert.deepEqual(pids(found), [200, 401, 600], "the editor, the session's tail and the cwd-inside process");
+      assert.deepEqual(found.get("/other"), []);
+      const single = await agent.scanProcessesUnderCwd(W, { appPid: 100, sessionPids: [], readers: { platform: "linux", ...procs } });
+      assert.deepEqual(single.map((use) => use.pid).sort((a, b) => a - b), [200, 600], "outside a session the helpers are not counted");
+    });
+
+    await check("process scan: macOS keeps the working-directory check only; Windows has no scan", async () => {
+      const mac = await agent.scanProcessesUnderCwds([W], { appPid: 100, sessionPids: [400], readers: { platform: "darwin", ...procs } });
+      assert.deepEqual(pids(mac), [600]);
+      assert.equal(await agent.scanProcessesUnderCwds([W], { appPid: 100, sessionPids: [], readers: { platform: "win32", ...procs } }), null);
+    });
+
+    await check("process scan: the open-file read is bounded; past it the answer is unknown", async () => {
+      const open = await agent.openPathsOf([200, 401, 500, 999], procs);
+      assert.deepEqual([...open.keys()].sort(), [200, 401]);
+      assert.deepEqual(open.get(200), ["/dev/pts/1", `${W}/.notes.txt.swp`]);
+      assert.equal(await agent.openPathsOf([200, 401], procs, 3), null, "5 descriptors do not fit a budget of 3");
+    });
+
+    if (process.platform === "linux") {
+      await check("process scan, for real: a program elsewhere with a file open inside counts", async () => {
+        const { spawn } = require("node:child_process");
+        const held = path.join(scratch, "held");
+        fs.mkdirSync(held);
+        const out = fs.openSync(path.join(held, "server.log"), "a");
+        const child = spawn("sleep", ["30"], { cwd: scratch, stdio: ["ignore", out, "ignore"] });
+        fs.closeSync(out);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          const found = await agent.scanProcessesUnderCwd(held, { appPid: 2 ** 22 + 7, sessionPids: [], timeoutMs: 10_000 });
+          assert.ok(found && found.some((use) => use.pid === child.pid), JSON.stringify(found));
+        } finally {
+          child.kill("SIGKILL");
+        }
+      });
+    }
+
     // ── The rail's one line ─────────────────────────────────────────────
     await check("one quiet line for a pass, with the space freed and a link to the archive", async () => {
       const gb = 1024 * 1024 * 1024;
@@ -538,7 +705,7 @@ async function main() {
         { mode: "auto-merged", result: { status: "removed", branchDeleted: true } },
       ]);
       assert.equal(line.title, "Removed 4 merged worktrees");
-      assert.equal(line.body, "1.5 GB freed, data kept in the archive (click to open it).");
+      assert.equal(line.body, "1.5 GB freed, data archived for 30 days (click to open it).");
       assert.equal(line.reveal, "/a/2026-11-06");
       const one = shared.autoCleanSummary([{ mode: "auto-merged", result: { status: "removed", branchDeleted: true, workspaceName: "fix-x" } }]);
       assert.equal(one.title, "Removed fix-x");

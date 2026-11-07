@@ -559,7 +559,7 @@ Worktrees, Remove merged worktrees on their own** turns it off (on by default).
   while its shell is inside and it was active in the last 30 minutes. Clean up
   is left for what needs a human: unmerged and stale, dirty or detached.
 - One toast per pass, not one per worktree: "Removed 4 merged worktrees" with
-  "1.6 GB freed, data kept in the archive (click to open it)". The existing
+  "1.6 GB freed, data archived for 30 days (click to open it)". The existing
   local toast, success tone; a click opens the archive folder. No dialog.
 
 ## Session picker (2026-11)

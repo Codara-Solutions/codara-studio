@@ -1117,6 +1117,10 @@ the `blockers` and a `hint`:
   copied to `~/.codarastudio/worktree-archive/<date>/<repo>--<branch>/`, counted,
   and kept 30 days; with or without `discardIgnoredFiles`, a copy that fails
   keeps the worktree (`WORKTREE_ARCHIVE_FAILED`) and the result names `archived`;
+- no drive is mounted inside it (an rclone or sshfs folder, a bind mount, or
+  anything on another disk than the worktree's own folder), since git would
+  delete through the mount; such a worktree is kept with
+  `WORKTREE_MOUNT_INSIDE`, as is one whose folders cannot all be read;
 - no submodule or nested repository is checked out in it, and no other
   checkout or worktree sits inside it, ignored folders included. The search
   through ignored folders visits at most 50,000 folders; when it runs out,

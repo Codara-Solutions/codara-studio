@@ -1095,8 +1095,10 @@ has touched it for 30 minutes. Ignored files a fresh checkout cannot bring back
 (`data/`, `.env.local`, not `node_modules/` or build output) are first copied to
 `~/.codarastudio/worktree-archive/<date>/<repo>--<branch>/` and counted; a copy
 that fails keeps the worktree. Archives older than 30 days go at startup. One
-toast sums up each pass ("Removed 4 merged worktrees, 1.6 GB freed, data kept in
-the archive"); clicking it opens the archive. What could not be read counts as in use.
+toast sums up each pass ("Removed 4 merged worktrees, 1.6 GB freed, data archived
+for 30 days"); clicking it opens the archive. What could not be read counts as in use,
+and on Linux a program with a file open inside it counts as running in it. A
+worktree with a drive mounted inside it (rclone, sshfs, a bind mount) is kept.
 Anything else stays in the merged group, one click from **Clean up**, and goes
 on its own once what held it is gone. It never forces, and the last commit stays
 recoverable under `refs/codara/removed-worktrees/` for 30 days. Windows offers

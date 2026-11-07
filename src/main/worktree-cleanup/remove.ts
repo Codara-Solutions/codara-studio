@@ -35,6 +35,7 @@ import {
 } from "../git-worktrees";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
 import { archiveIgnoredFiles } from "./archive";
+import { mountRefusal } from "./mounts";
 import { onlyIgnoredWork } from "@shared/worktree-cleanup-agent";
 import { sameFolder } from "../worktree-folders";
 import {
@@ -397,6 +398,11 @@ async function removeOne(
   }
   const stopped = await options.beforeRemove?.();
   if (stopped) return refuse("IN_USE", stopped);
+  // Before anything is copied or deleted: git would delete through a mount.
+  if (!check.alreadyRemoved) {
+    const mounted = await (deps.mountRefusal ?? mountRefusal)(check.path);
+    if (mounted) return refuse("MOUNT_INSIDE", mounted);
+  }
   if (!check.alreadyRemoved && before === null) return refuse("GIT_FAILED", "git could not read it, so nothing was removed.");
   const keep = check.alreadyRemoved ? [] : (ctx.keptIgnored?.get(pathKey(real)) ?? []);
   const archiveRoot = options.archiveIgnored && keep.length ? deps.archiveRoot?.() : undefined;

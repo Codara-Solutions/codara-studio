@@ -295,7 +295,8 @@ export type WorktreeCleanupCode =
   | "GIT_FAILED"
   | "DIRTY_NOT_CONFIRMED"
   | "UNMERGED_NOT_CONFIRMED"
-  | "ARCHIVE_FAILED";
+  | "ARCHIVE_FAILED"
+  | "MOUNT_INSIDE";
 
 export interface WorktreeLocalWork {
   tracked: number;
@@ -478,6 +479,9 @@ export interface WorktreeRailCleanupResult {
 
 // ── Formatting ─────────────────────────────────────────────────────────────
 
+/** Days a removed worktree's archived ignored files are kept before they are pruned. */
+export const WORKTREE_ARCHIVE_RETENTION_DAYS = 30;
+
 /**
  * The one quiet line after the rail removed worktrees on its own: how many,
  * the space freed when it was measured, and where kept ignored files went.
@@ -498,7 +502,7 @@ export function autoCleanSummary(
   }
   const parts = [
     ...(freed > 0 ? [`${formatBytes(freed)} freed`] : []),
-    ...(archived.length ? ["data kept in the archive (click to open it)"] : []),
+    ...(archived.length ? [`data archived for ${WORKTREE_ARCHIVE_RETENTION_DAYS} days (click to open it)`] : []),
   ];
   const title = `Removed ${removed.length === 1 ? removed[0].result.workspaceName ?? "1 merged worktree" : `${removed.length} merged worktrees`}`;
   // The day's folder holds every worktree archived that day.

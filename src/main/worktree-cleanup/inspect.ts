@@ -113,6 +113,9 @@ export interface WorktreeCleanupDeps {
   // Where the ignored files of a removed worktree are kept. Absent: they are
   // not kept, so a removal that would delete them is asked about.
   archiveRoot?(): string;
+  // Why a folder with a drive mounted inside must stay, or null. Absent: the
+  // real check (mounts.ts mountRefusal); tests stand in for it here.
+  mountRefusal?(path: string): Promise<string | null>;
 }
 
 export const ROW_BUDGET_MS = 12_000;
