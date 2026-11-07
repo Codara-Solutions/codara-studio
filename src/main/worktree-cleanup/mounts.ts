@@ -17,6 +17,8 @@ export interface MountReader {
 }
 
 const WALK_CONCURRENCY = 32;
+// A walk that has not finished by then refuses: an unfinished walk proves nothing.
+export const MOUNT_WALK_LIMIT_MS = 30_000;
 
 // /proc/self/mountinfo escapes space, tab, newline and backslash as octal.
 function unescapeMountPath(text: string): string {
@@ -52,7 +54,12 @@ function missing(err: unknown): boolean {
  * another device than `root`, or null when there is none. Links are not
  * followed. Throws when a folder cannot be read, so a caller refuses.
  */
-export async function mountInside(root: string, reader: MountReader = systemMountReader): Promise<string | null> {
+export async function mountInside(
+  root: string,
+  reader: MountReader = systemMountReader,
+  limitMs = MOUNT_WALK_LIMIT_MS,
+): Promise<string | null> {
+  const started = Date.now();
   const base = resolve(root);
   const show = (path: string) => relative(base, path).split(sep).join("/") || ".";
   const listed = await reader.mountPoints();
@@ -67,6 +74,7 @@ export async function mountInside(root: string, reader: MountReader = systemMoun
   while (level.length) {
     const next: string[] = [];
     for (let i = 0; i < level.length; i += WALK_CONCURRENCY) {
+      if (Date.now() - started > limitMs) throw new Error(`the walk took longer than ${Math.round(limitMs / 1000)}s`);
       const batch = level.slice(i, i + WALK_CONCURRENCY);
       const children = await Promise.all(
         batch.map(async (dir) => {
@@ -101,9 +109,9 @@ export async function mountInside(root: string, reader: MountReader = systemMoun
 }
 
 /** The refusal for a worktree with a mount inside, or null when it has none. */
-export async function mountRefusal(root: string, reader?: MountReader): Promise<string | null> {
+export async function mountRefusal(root: string, reader?: MountReader, limitMs?: number): Promise<string | null> {
   try {
-    const found = await mountInside(root, reader);
+    const found = await mountInside(root, reader, limitMs);
     return found ? `${found} is a mounted drive or on another disk, so it was kept. Unmount it first.` : null;
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err);

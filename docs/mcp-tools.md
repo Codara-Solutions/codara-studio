@@ -1172,6 +1172,7 @@ The `code` is the first blocker; `blockers` lists them all, and a dry run or
 | `WORKTREE_RUNNING_PANES` | Terminals are open in it. | Close your own with `codara_terminal_close`; otherwise wait or ask you. |
 | `WORKTREE_ACTIVE_RUNS` | Active Cora runs work in it. | Wait for them to finish, or ask you. |
 | `WORKTREE_RUNNING_PROCESSES` | Processes run in it. | Stop them, or wait or ask you. |
+| `WORKTREE_USAGE_UNKNOWN` | The process scan failed or timed out, or could not read every open file (Linux), so it cannot rule out a program using it. Not on Windows, which has no scan. | Try again in a minute; if it keeps failing, ask you to remove it from the workspace rail. |
 | `WORKTREE_CALLER_INSIDE` | The caller runs inside it. | Call from the source workspace, or ask you to delete it from the rail. |
 | `WORKTREE_OPEN_TABS` | The window shows it or has tabs of it, a tab of any workspace shows a file inside it, or the window did not answer. | Close the tabs you opened on its files; otherwise ask you to close them. |
 

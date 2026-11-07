@@ -129,6 +129,7 @@ export type WorktreeCode =
   | "WORKTREE_RUNNING_PANES"
   | "WORKTREE_ACTIVE_RUNS"
   | "WORKTREE_RUNNING_PROCESSES"
+  | "WORKTREE_USAGE_UNKNOWN"
   | "WORKTREE_CALLER_INSIDE"
   | "WORKTREE_OPEN_TABS"
   | "WORKTREE_CHANGED"
@@ -197,7 +198,7 @@ export interface AgentWorktreeDeps {
   // unsaved work). Null when it did not answer.
   workspaceHeld(workspaceId: string, paths: readonly string[]): Promise<boolean | null>;
   // Null when the platform offers no process scan.
-  processesUnderCwd(dir: string): Promise<ProcessUse[] | null>;
+  processesUnderCwd(dir: string): Promise<ProcessUseList | null>;
   github: {
     listPullRequestsForHead(cwd: string, branch: string): Promise<GitHubMergedPullRequest[]>;
     listMergedPullRequests(cwd: string, limit: number): Promise<GitHubMergedPullRequest[]>;
@@ -355,6 +356,7 @@ const MESSAGES: Record<WorktreeCode, string> = {
   WORKTREE_RUNNING_PANES: "terminals use the worktree",
   WORKTREE_ACTIVE_RUNS: "active Cora runs use the worktree",
   WORKTREE_RUNNING_PROCESSES: "processes use the worktree",
+  WORKTREE_USAGE_UNKNOWN: "what runs in the worktree could not be read (the process scan failed or timed out)",
   WORKTREE_CALLER_INSIDE: "you are running inside this worktree",
   WORKTREE_OPEN_TABS: "the window shows the worktree or has tabs of it, or a tab shows a file inside it",
   WORKTREE_CHANGED: "the worktree changed during the check",
@@ -389,6 +391,7 @@ const HINTS: Partial<Record<WorktreeCode, string>> = {
   WORKTREE_ACTIVE_RUNS: "wait for the runs to finish or ask the user",
   WORKTREE_OWNED_BY_LIVE_AGENT: "leave it to that agent, or ask the user",
   WORKTREE_RUNNING_PROCESSES: "stop them, or wait or ask the user",
+  WORKTREE_USAGE_UNKNOWN: "try again in a minute; if it keeps failing, ask the user to remove it from the workspace rail",
   WORKTREE_CALLER_INSIDE: "call from the source workspace, or ask the user to delete it from the rail",
   WORKTREE_OPEN_TABS: "close the tabs you opened on its files; otherwise ask the user to close them",
   WORKTREE_CHANGED: "retry",
@@ -2121,7 +2124,11 @@ export async function verifyRemovable(
   let processesKnown = false;
   if (options.scanProcesses) {
     const processes = await deps.processesUnderCwd(realPath).catch(() => null);
-    processesKnown = processes !== null;
+    processesKnown = !processUsageUnknown(processes);
+    // Windows has no scan at all: git's own delete fails on an open file
+    // there. Elsewhere a scan that failed, or saw only part of the open
+    // files, cannot rule a program out, and removing deletes.
+    if (!processesKnown && process.platform !== "win32") block("WORKTREE_USAGE_UNKNOWN");
     if (processes === null) {
       verdict.warnings.push("the process scan is unavailable on this system");
     } else {
@@ -2693,7 +2700,8 @@ function mapRemoveError(message: string): WorktreeCode {
 
 // Merged, and held back only by the open tab of the agent that made it: an
 // agent never removes it on its own, but the user may, through the cleanup
-// tool's approval.
+// tool's approval (which a process scan that could not run does not stop:
+// the user is the one deciding there).
 const OWNED_BUT_MERGED_HINT =
   "it is merged and nothing else holds it: call codara_worktree_cleanup, then call it again with action:\"remove\" and this path; the user approves the removal in Codara";
 
@@ -2701,7 +2709,9 @@ function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): Worktr
   const code = verdict.blockers[0];
   const item = verdictItem(ctx, verdict);
   const ownedButMerged =
-    verdict.mergeStatus === "merged" && verdict.blockers.every((blocker) => blocker === "WORKTREE_OWNED_BY_LIVE_AGENT");
+    verdict.mergeStatus === "merged" &&
+    verdict.blockers.includes("WORKTREE_OWNED_BY_LIVE_AGENT") &&
+    verdict.blockers.every((blocker) => blocker === "WORKTREE_OWNED_BY_LIVE_AGENT" || blocker === "WORKTREE_USAGE_UNKNOWN");
   return refusal(code, blockerMessage(verdict, code), {
     ...(ownedButMerged ? { hint: OWNED_BUT_MERGED_HINT } : {}),
     blockers: verdict.blockers,
@@ -2937,6 +2947,9 @@ async function changedWhileAside(
   if (held !== false) return "a tab of it was opened while it was being removed, or the window did not answer, so it was put back";
   const processes = await deps.processesUnderCwd(realAside).catch(() => null);
   if (processes?.some((entry) => !(ownerPid !== null && entry.pid === ownerPid))) return "a process runs in it, so it was put back";
+  if (processUsageUnknown(processes) && process.platform !== "win32") {
+    return "what runs in it could not be read, so it was put back; try again in a minute";
+  }
   return null;
 }
 
@@ -3235,19 +3248,35 @@ async function removeLocked(
 // holding a log or a database). Codara's own process tree is excluded (its
 // helpers, git children, the MCP servers) except below a terminal session,
 // where the user's and agents' commands run. Best effort: null when the
-// platform offers no scan or it timed out.
+// platform offers no scan or the listing timed out. When only the open-file
+// part ran out of time or budget, the working-directory hits are kept and
+// the result says `openFilesUnknown`: a caller that deletes must treat it as
+// unknown (processUsageUnknown).
 export async function scanProcessesUnderCwd(
   dir: string,
   options: ProcessScanOptions,
-): Promise<ProcessUse[] | null> {
+): Promise<ProcessUseList | null> {
   const found = await scanProcessesUnderCwds([dir], options);
-  return found ? found.get(dir) ?? [] : null;
+  if (!found) return null;
+  const list: ProcessUseList = [...(found.get(dir) ?? [])];
+  if (found.openFilesUnknown) list.openFilesUnknown = true;
+  return list;
+}
+
+export type ProcessUseList = ProcessUse[] & { openFilesUnknown?: boolean };
+export type ProcessScan = Map<string, ProcessUse[]> & { openFilesUnknown?: boolean };
+
+/** True when a scan could not say everything that uses the folder: none ran, or its open-file part did not finish. */
+export function processUsageUnknown(scan: { openFilesUnknown?: boolean } | null | undefined): boolean {
+  return !scan || scan.openFilesUnknown === true;
 }
 
 export interface ProcessScanOptions {
   appPid: number;
   sessionPids: readonly number[];
   timeoutMs?: number;
+  /** Open files read per scan; tests lower it to reach the cap. */
+  openFileBudget?: number;
   /** Tests stand in for the system here. */
   readers?: Partial<ProcessScanReaders>;
 }
@@ -3281,10 +3310,12 @@ export async function openPathsOf(
   pids: readonly number[],
   readers: Pick<ProcessScanReaders, "readdir" | "readlink">,
   budget = OPEN_FILE_SCAN_MAX,
+  deadline = Number.POSITIVE_INFINITY,
 ): Promise<Map<number, string[]> | null> {
   const out = new Map<number, string[]>();
   let left = budget;
   for (let i = 0; i < pids.length; i += OPEN_FILE_SCAN_CONCURRENCY) {
+    if (Date.now() > deadline) return null;
     const batch = pids.slice(i, i + OPEN_FILE_SCAN_CONCURRENCY);
     const fds = await Promise.all(batch.map((pid) => readers.readdir(`/proc/${pid}/fd`).catch(() => [] as string[])));
     const count = fds.reduce((sum, names) => sum + names.length, 0);
@@ -3312,45 +3343,67 @@ export async function openPathsOf(
 export async function scanProcessesUnderCwds(
   dirs: readonly string[],
   options: ProcessScanOptions,
-): Promise<Map<string, ProcessUse[]> | null> {
+): Promise<ProcessScan | null> {
   const readers: ProcessScanReaders = { ...systemProcessScanReaders, ...options.readers };
   if (readers.platform === "win32") return null;
-  const scan = (async (): Promise<Map<string, ProcessUse[]> | null> => {
-    const listed = await readers.list();
-    if (!listed) return null;
-    const cwds = await readers.cwds(listed.map((entry) => entry.pid));
-    if (!cwds) return null;
-    const sessions = new Set(options.sessionPids);
-    const appAncestors = new Set(processChainIn(listed, options.appPid) ?? [options.appPid]);
-    const parentOf = new Map(listed.map((entry) => [entry.pid, entry.parentPid]));
-    // Codara's own processes, the main one with them, are not counted
-    // unless they run below a terminal session: walking up, a session
-    // reached before the app counts it.
-    const counted = listed.filter((entry) => {
-      if (appAncestors.has(entry.pid)) return false;
-      const seen = new Set<number>();
-      for (let pid: number | undefined = entry.pid; pid !== undefined && pid > 0 && !seen.has(pid); pid = parentOf.get(pid)) {
-        if (sessions.has(pid)) return true;
-        if (pid === options.appPid) return false;
-        seen.add(pid);
-      }
-      return true;
-    });
-    // Linux only: macOS would need lsof over every process, too slow here.
-    const open = readers.platform === "linux" ? await openPathsOf(counted.map((entry) => entry.pid), readers) : new Map();
-    if (!open) return null;
-    const out = new Map<string, ProcessUse[]>(dirs.map((dir) => [dir, []]));
-    for (const entry of counted) {
-      const cwd = cwds.get(entry.pid);
-      const paths = open.get(entry.pid) ?? [];
-      const inside = dirs.filter(
-        (dir) => (cwd !== undefined && isAtOrUnder(cwd, dir)) || paths.some((path: string) => isAtOrUnder(path, dir)),
-      );
-      for (const dir of inside) out.get(dir)!.push({ pid: entry.pid, command: cleanText(entry.command, 200) });
+  const timeoutMs = options.timeoutMs ?? 3_000;
+  const deadline = Date.now() + timeoutMs;
+  // The listing and the working directories: without them nothing is known.
+  const base = await withTimeout(
+    (async () => {
+      const listed = await readers.list();
+      if (!listed) return null;
+      const cwds = await readers.cwds(listed.map((entry) => entry.pid));
+      return cwds ? { listed, cwds } : null;
+    })().catch(() => null),
+    timeoutMs,
+    null,
+  );
+  if (!base) return null;
+  const { listed, cwds } = base;
+  const sessions = new Set(options.sessionPids);
+  const appAncestors = new Set(processChainIn(listed, options.appPid) ?? [options.appPid]);
+  const parentOf = new Map(listed.map((entry) => [entry.pid, entry.parentPid]));
+  // Codara's own processes, the main one with them, are not counted
+  // unless they run below a terminal session: walking up, a session
+  // reached before the app counts it.
+  const counted = listed.filter((entry) => {
+    if (appAncestors.has(entry.pid)) return false;
+    const seen = new Set<number>();
+    for (let pid: number | undefined = entry.pid; pid !== undefined && pid > 0 && !seen.has(pid); pid = parentOf.get(pid)) {
+      if (sessions.has(pid)) return true;
+      if (pid === options.appPid) return false;
+      seen.add(pid);
     }
-    return out;
-  })();
-  return withTimeout(scan.catch(() => null), options.timeoutMs ?? 3_000, null);
+    return true;
+  });
+  // Linux only: macOS would need lsof over every process, too slow here.
+  // Past its budget or the time left, the open files are unknown but the
+  // working-directory hits still stand.
+  const open =
+    readers.platform === "linux"
+      ? await withTimeout(
+          openPathsOf(
+            counted.map((entry) => entry.pid),
+            readers,
+            options.openFileBudget ?? OPEN_FILE_SCAN_MAX,
+            deadline,
+          ).catch(() => null),
+          Math.max(0, deadline - Date.now()),
+          null,
+        )
+      : new Map<number, string[]>();
+  const out: ProcessScan = new Map<string, ProcessUse[]>(dirs.map((dir) => [dir, []]));
+  if (!open) out.openFilesUnknown = true;
+  for (const entry of counted) {
+    const cwd = cwds.get(entry.pid);
+    const paths = open?.get(entry.pid) ?? [];
+    const inside = dirs.filter(
+      (dir) => (cwd !== undefined && isAtOrUnder(cwd, dir)) || paths.some((path: string) => isAtOrUnder(path, dir)),
+    );
+    for (const dir of inside) out.get(dir)!.push({ pid: entry.pid, command: cleanText(entry.command, 200) });
+  }
+  return out;
 }
 
 async function processCwds(pids: number[]): Promise<Map<number, string> | null> {

@@ -24,6 +24,8 @@ import {
   isSecretFile,
   packageRootTester,
   type AgentWorktreeAuditEntry,
+  processUsageUnknown,
+  type ProcessScan,
   type ProcessUse,
   type RendererTerminal,
 } from "../agent-worktrees";
@@ -87,7 +89,7 @@ export interface WorktreeCleanupDeps {
   // it did not answer. Absent counts as held.
   workspaceHeld?(workspaceId: string, paths?: readonly string[]): Promise<boolean | null>;
   // Null when the platform offers no process scan.
-  processesUnderCwds(dirs: readonly string[]): Promise<Map<string, ProcessUse[]> | null>;
+  processesUnderCwds(dirs: readonly string[]): Promise<ProcessScan | null>;
   runningServers(workspaceId: string): number;
   // Rejects when GitHub is unavailable; the screen then shows no pull requests.
   pullRequests(repoRoot: string): Promise<RepoPullRequests>;
@@ -422,7 +424,12 @@ export interface UsageContext {
   /** False when the Cora runs could not be read, so `runs` says nothing. */
   runsKnown: boolean;
   terminals: RendererTerminal[] | null;
-  processes: Map<string, ProcessUse[]> | null;
+  processes: ProcessScan | null;
+}
+
+/** Terminals, runs or programs that could not all be read: a removal nobody confirmed must not go ahead. */
+export function usageUnknown(usage: UsageContext): boolean {
+  return usage.terminals === null || processUsageUnknown(usage.processes) || !usage.runsKnown;
 }
 
 export async function usageContext(deps: WorktreeCleanupDeps, dirs: readonly string[]): Promise<UsageContext> {
@@ -905,8 +912,8 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   // drive that is not mounted), so a locked one stays even when it looks gone.
   if (registration.locked) block(check, "LOCKED", "Locked with git worktree lock. Unlock it first.");
   if (stat === null) check.alreadyRemoved = true;
-  if (ctx.requireKnownUsage && (ctx.usage.terminals === null || ctx.usage.processes === null || !ctx.usage.runsKnown)) {
-    block(check, "UNCHECKED", "What is running in it could not be read, so it is not removed on its own.");
+  if (ctx.requireKnownUsage && usageUnknown(ctx.usage)) {
+    block(check, "UNCHECKED", "What is running in it could not be read, so it is not removed on its own. Codara tries again later.");
   }
   const uses = (await usageOf(ctx.usage, registration.path, real, workspaces)).filter((use) => countsAsUse(use, ctx));
   const inUse = (held: WorktreeInUse[]) => {

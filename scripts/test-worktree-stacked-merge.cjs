@@ -363,12 +363,13 @@ async function main() {
       assert.equal(dry.wouldRemove, true);
     });
 
-    // Without a process scan its shell may have moved in with cd: it holds.
+    // Without a process scan its shell may have moved in with cd: it holds,
+    // and the scan that could not run refuses on its own too.
     h.noProcessScan = true;
     await check("remove: the stacked worktree is merged, and the open maker tab alone holds it", async () => {
       const dry = await aw.removeAgentWorktree(other, { workspaceId: api.workspaceId, dryRun: true }, deps);
       assert.equal(dry.ok, true, JSON.stringify(dry));
-      assert.deepEqual(dry.blockers, ["WORKTREE_OWNED_BY_LIVE_AGENT"], JSON.stringify(dry));
+      assert.deepEqual(dry.blockers, ["WORKTREE_OWNED_BY_LIVE_AGENT", "WORKTREE_USAGE_UNKNOWN"], JSON.stringify(dry));
       assert.equal(dry.merge.status, "merged", JSON.stringify(dry.merge));
       assert.equal(dry.merge.proof, "pull-request");
       assert.ok(h.asked.includes("feat/roles"), "the base branch's pull requests were looked up");
@@ -411,7 +412,7 @@ async function main() {
     await check("remove: an owner-held worktree that is not merged keeps the plain hint", async () => {
       h.pulls = [pr454];
       const refused = await aw.removeAgentWorktree(other, { workspaceId: api.workspaceId }, deps);
-      assert.deepEqual(refused.blockers, ["WORKTREE_OWNED_BY_LIVE_AGENT", "WORKTREE_NOT_MERGED"], JSON.stringify(refused));
+      assert.deepEqual(refused.blockers, ["WORKTREE_OWNED_BY_LIVE_AGENT", "WORKTREE_NOT_MERGED", "WORKTREE_USAGE_UNKNOWN"], JSON.stringify(refused));
       assert.doesNotMatch(refused.hint, /codara_worktree_cleanup/);
       h.pulls = [pr454, pr453];
     });

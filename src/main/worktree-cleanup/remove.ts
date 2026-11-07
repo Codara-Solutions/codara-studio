@@ -49,6 +49,7 @@ import {
   pathKey,
   ROW_CONCURRENCY,
   usageContext,
+  usageUnknown,
   countsAsUse,
   finishedWork,
   heldByMaker,
@@ -315,7 +316,7 @@ async function changedWhileAside(
   if ((await worktreeFingerprint(aside)) !== before) return "It changed while it was being removed, so it was put back.";
   const realAside = await canonicalPath(aside);
   const usage = await usageContext(ctx.deps, [realAside]);
-  if (ctx.requireKnownUsage && (usage.terminals === null || usage.processes === null || !usage.runsKnown)) {
+  if (ctx.requireKnownUsage && usageUnknown(usage)) {
     return "What is running in it could not be read, so it was put back.";
   }
   const workspaces = ctx.linked.get(pathKey(real)) ?? [];

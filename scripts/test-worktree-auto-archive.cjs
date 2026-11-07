@@ -530,6 +530,32 @@ async function main() {
       }
     });
 
+    await check("codara_worktree_remove: usage that cannot be read refuses, with a reason to retry", async () => {
+      const made = await agentMerged("agent/unknown");
+      const original = agentDeps.processesUnderCwd;
+      try {
+        for (const answer of [null, Object.assign([], { openFilesUnknown: true })]) {
+          agentDeps.processesUnderCwd = async () => answer;
+          const refused = await agent.removeAgentWorktree(maker, { workspaceId: made.workspaceId }, agentDeps);
+          assert.equal(refused.ok, false);
+          assert.equal(refused.code, "WORKTREE_USAGE_UNKNOWN", JSON.stringify(refused));
+          assert.match(refused.hint, /try again/);
+          assert.equal(fs.existsSync(path.join(made.path, "data", "model.bin")), true);
+        }
+        // Known at the check, unknown at the last look before the delete: put back.
+        agentDeps.processesUnderCwd = async (dir) => (dir.includes("codara-removing") ? null : []);
+        const late = await agent.removeAgentWorktree(maker, { workspaceId: made.workspaceId }, agentDeps);
+        assert.equal(late.ok, false);
+        assert.match(late.error, /could not be read, so it was put back/, JSON.stringify(late));
+        assert.equal(fs.readFileSync(path.join(made.path, ".env.local"), "utf8"), "TOKEN=FAKE_sample\n");
+        assert.equal(branchExists(repo, "agent/unknown"), true);
+      } finally {
+        agentDeps.processesUnderCwd = original;
+      }
+      const removed = await agent.removeAgentWorktree(maker, { workspaceId: made.workspaceId }, agentDeps);
+      assert.equal(removed.ok, true, JSON.stringify(removed));
+    });
+
     await check("codara_worktree_remove: a copy that fails keeps it, with its own code", async () => {
       const made = await agentMerged("agent/nocopy");
       h.archiveRoot = path.join(scratch, "archive-is-a-file");
@@ -616,6 +642,36 @@ async function main() {
       assert.equal((await auto(entry.id)).status, "removed", "it goes once the mount is gone");
     });
 
+    await check("usage only partly known (open files unread) keeps a merged worktree on the auto path", async () => {
+      const entry = merged("partly");
+      addData(entry.dir);
+      const original = deps.processesUnderCwds;
+      deps.processesUnderCwds = async (dirs) => Object.assign(new Map(dirs.map((dir) => [dir, []])), { openFilesUnknown: true });
+      try {
+        await assertKept(entry, /could not be read/);
+        assert.equal(fs.existsSync(path.join(archiveRoot, day(), "repo--feature-partly")), false, "nothing is copied");
+      } finally {
+        deps.processesUnderCwds = original;
+      }
+      assert.equal((await auto(entry.id)).status, "removed", "it goes once the scan sees everything");
+    });
+
+    await check("mounts: a walk past its time limit refuses", async () => {
+      const slow = {
+        "/w": { entries: ["a"] },
+        "/w/a": { entries: ["b"] },
+        "/w/a/b": { entries: [] },
+      };
+      const reader = fakeReader(slow);
+      const readdir = reader.readdir;
+      reader.readdir = async (p) => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return readdir(p);
+      };
+      assert.match(await mounts.mountRefusal("/w", reader, 10), /could not be checked for mounted drives \(the walk took longer/);
+      assert.equal(await mounts.mountRefusal("/w", reader, 10_000), null);
+    });
+
     // ── Open files count as use (Linux) ─────────────────────────────────
     const W = "/work/tree";
     const procs = {
@@ -668,6 +724,32 @@ async function main() {
       const mac = await agent.scanProcessesUnderCwds([W], { appPid: 100, sessionPids: [400], readers: { platform: "darwin", ...procs } });
       assert.deepEqual(pids(mac), [600]);
       assert.equal(await agent.scanProcessesUnderCwds([W], { appPid: 100, sessionPids: [], readers: { platform: "win32", ...procs } }), null);
+    });
+
+    await check("process scan: past the open-file cap or the time limit, working-directory hits survive and it says unknown", async () => {
+      const capped = await agent.scanProcessesUnderCwds([W], {
+        appPid: 100,
+        sessionPids: [400],
+        openFileBudget: 2,
+        readers: { platform: "linux", ...procs },
+      });
+      assert.deepEqual(pids(capped), [600], "the process whose cwd is inside still counts");
+      assert.equal(capped.openFilesUnknown, true);
+      assert.equal(agent.processUsageUnknown(capped), true);
+      const hung = await agent.scanProcessesUnderCwds([W], {
+        appPid: 100,
+        sessionPids: [400],
+        timeoutMs: 150,
+        readers: { platform: "linux", ...procs, readdir: () => new Promise(() => undefined) },
+      });
+      assert.deepEqual(pids(hung), [600]);
+      assert.equal(hung.openFilesUnknown, true);
+      const single = await agent.scanProcessesUnderCwd(W, { appPid: 100, sessionPids: [], openFileBudget: 2, readers: { platform: "linux", ...procs } });
+      assert.deepEqual(single.map((use) => use.pid), [600]);
+      assert.equal(single.openFilesUnknown, true);
+      const whole = await agent.scanProcessesUnderCwds([W], { appPid: 100, sessionPids: [400], readers: { platform: "linux", ...procs } });
+      assert.equal(agent.processUsageUnknown(whole), false);
+      assert.equal(agent.processUsageUnknown(null), true);
     });
 
     await check("process scan: the open-file read is bounded; past it the answer is unknown", async () => {
