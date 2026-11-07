@@ -34,6 +34,7 @@ import {
   restoreAsideWorktrees,
   worktreeFingerprint,
   resolveDefaultBranch,
+  resolveMergeDefaultBranch,
   type FingerprintRegenerable,
   type WorktreeRegistration,
 } from "./git-worktrees";
@@ -2200,7 +2201,7 @@ async function defaultBranchTarget(
   ownBranch: string,
   options: VerifyOptions,
 ): Promise<{ name: string; commit: string } | null> {
-  const name = await resolveDefaultBranch(ctx.scope.repoCwd);
+  const name = await resolveMergeDefaultBranch(ctx.scope.repoCwd);
   if (!name || shortBranch(name) === ownBranch || name === ownBranch) return null;
   let resolved = await resolveTarget(ctx, name);
   // Fetched before it is compared: a stale default branch can sit at the
@@ -2260,7 +2261,8 @@ async function proveMerged(
 
   let targetName = explicitTarget ?? copy.baseBranch ?? null;
   if (!targetName && candidates.length) targetName = candidates[0].baseRefName;
-  if (!targetName || targetName === "HEAD") targetName = await resolveDefaultBranch(repo);
+  // With no default branch either, origin/HEAD names nothing: not found.
+  if (!targetName || targetName === "HEAD") targetName = (await resolveMergeDefaultBranch(repo)) ?? "origin/HEAD";
   let target: { name: string; ref?: string | null; commit: string | null; problem?: string } = explicitTarget
     ? await resolveExplicitTarget(ctx, explicitTarget, branch)
     : await resolveTarget(ctx, targetName);
@@ -2274,7 +2276,7 @@ async function proveMerged(
   if (!explicitTarget && !target.commit) {
     // The recorded base is gone (a stacked pull request's branch, deleted
     // once merged): the default branch is where its work went, if anywhere.
-    const fallbackName = await resolveDefaultBranch(repo);
+    const fallbackName = await resolveMergeDefaultBranch(repo);
     const fallback =
       fallbackName && shortBranch(fallbackName) !== branch && fallbackName !== branch ? await resolveTarget(ctx, fallbackName) : null;
     if (fallback?.commit) {
@@ -2298,7 +2300,7 @@ async function proveMerged(
     // merges the branch never landed anywhere. Judged as a gone base: the
     // default branch, fetched.
     if (failure && !explicitTarget && (await remoteBranchGone(ctx, target.name))) {
-      const fallbackName = await resolveDefaultBranch(repo);
+      const fallbackName = await resolveMergeDefaultBranch(repo);
       if (fallbackName && shortBranch(fallbackName) !== branch && fallbackName !== shortBranch(target.name)) {
         verdict.warnings.push(`the recorded base '${target.name}' is gone on the remote; judged against ${fallbackName}`);
         const fetched = await fetchTargetOnce(ctx, fallbackName);
@@ -2348,7 +2350,7 @@ async function proveMerged(
     // named the target.
     const fallback = explicitTarget ? null : await defaultBranchTarget(ctx, target.commit, branch, options);
     const defaultCommit = explicitTarget ? target.commit : (fallback?.commit ?? target.commit);
-    const defaultName = explicitTarget ? targetBranch : shortBranch(fallback?.name ?? (await resolveDefaultBranch(repo)));
+    const defaultName = explicitTarget ? targetBranch : shortBranch(fallback?.name ?? (await resolveMergeDefaultBranch(repo)) ?? targetBranch);
     if (fallback && (await isAncestor(repo, tip, fallback.commit))) {
       verdict.proof = "ancestor";
       verdict.target = fallback.name;

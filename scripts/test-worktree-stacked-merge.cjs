@@ -498,13 +498,31 @@ async function main() {
         assert.equal(gone.removed, true, JSON.stringify(gone));
         // Its absence never proves a merge: unmerged work on a deleted base stays.
         const kept = await aw.createAgentWorktree(owner, { branch: "chore/not-landed", base: "origin/main" }, deps);
-        commitFile(kept.path, "kept.txt", "kept\n", "never merged");
+        const keptTip = commitFile(kept.path, "kept.txt", "kept\n", "never merged");
         const workspace = h.state.workspaces.find((entry) => entry.id === kept.workspaceId);
         workspace.copyBranch.baseBranch = "origin/trunk";
         const refused = await aw.removeAgentWorktree(other, { workspaceId: kept.workspaceId, dryRun: true }, deps);
         assert.equal(refused.wouldRemove, false, JSON.stringify(refused));
         assert.ok(refused.blockers.includes("WORKTREE_NOT_MERGED"), JSON.stringify(refused));
         assert.ok(!refused.blockers.includes("WORKTREE_TARGET_NOT_FOUND"));
+        // No main or master either, and the main checkout detached at the
+        // worktree's own tip: HEAD is no default branch to prove it against.
+        const originMain = git(repo, ["rev-parse", "refs/remotes/origin/main"]);
+        git(repo, ["checkout", "-q", "--detach", keptTip]);
+        git(repo, ["branch", "-q", "-m", "main", "saved-main"]);
+        git(repo, ["update-ref", "-d", "refs/remotes/origin/main"]);
+        try {
+          const detached = await aw.removeAgentWorktree(other, { workspaceId: kept.workspaceId, dryRun: true }, deps);
+          assert.equal(detached.wouldRemove, false, JSON.stringify(detached));
+          assert.ok(detached.blockers.includes("WORKTREE_TARGET_NOT_FOUND"), JSON.stringify(detached));
+          const notRemoved = await aw.removeAgentWorktree(other, { workspaceId: kept.workspaceId }, deps);
+          assert.equal(notRemoved.code, "WORKTREE_TARGET_NOT_FOUND", JSON.stringify(notRemoved));
+          assert.ok(fs.existsSync(kept.path) && git(repo, ["rev-parse", "refs/heads/chore/not-landed"]) === keptTip);
+        } finally {
+          git(repo, ["update-ref", "refs/remotes/origin/main", originMain]);
+          git(repo, ["branch", "-q", "-m", "saved-main", "main"]);
+          git(repo, ["checkout", "-q", "main"]);
+        }
       } finally {
         h.githubDown = false;
         git(repo, ["remote", "set-head", "origin", "main"]);

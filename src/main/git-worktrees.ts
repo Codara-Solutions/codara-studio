@@ -125,6 +125,19 @@ async function remoteRefExists(repoCwd: string, name: string): Promise<boolean> 
 // name is historical — it returns a start-point ref, which may be a remote one
 // like "origin/main"; git worktree add resolves it to a commit either way.)
 export async function resolveDefaultBranch(repoCwd: string): Promise<string> {
+  const known = await resolveMergeDefaultBranch(repoCwd);
+  if (known) return known;
+  const current = await readGitText(repoCwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  return current || "main";
+}
+
+/**
+ * The default branch a merge is proven against: origin/HEAD's branch, then
+ * origin/main, origin/master, main or master, the first that exists. Never
+ * the main checkout's current branch or HEAD, which may sit at the very
+ * commit being judged; null when none exists.
+ */
+export async function resolveMergeDefaultBranch(repoCwd: string): Promise<string | null> {
   const originHead = await readGitText(repoCwd, [
     "symbolic-ref",
     "--short",
@@ -138,8 +151,7 @@ export async function resolveDefaultBranch(repoCwd: string): Promise<string> {
   if (await remoteRefExists(repoCwd, "origin/master")) return "origin/master";
   if (await branchExists(repoCwd, "main")) return "main";
   if (await branchExists(repoCwd, "master")) return "master";
-  const current = await readGitText(repoCwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  return current || "main";
+  return null;
 }
 
 async function localBranchNames(repoCwd: string): Promise<Set<string>> {

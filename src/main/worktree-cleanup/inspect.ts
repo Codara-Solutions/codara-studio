@@ -39,7 +39,7 @@ import {
   inProgressOperation,
   isAncestor,
   populatedSubmodules,
-  resolveDefaultBranch,
+  resolveMergeDefaultBranch,
 } from "../git-worktrees";
 import { proveByMergedPullRequestStack } from "../merged-pull-request-stack";
 import { isKeptBranch } from "./kept-branches";
@@ -334,7 +334,7 @@ export async function discoverRepos(
   await Promise.all(
     repos.map(async (repo) => {
       try {
-        const name = await resolveDefaultBranch(repo.root);
+        const name = await resolveMergeDefaultBranch(repo.root);
         const commit = name ? await revParse(repo.root, `${name}^{commit}`) : null;
         repo.base = name && commit ? { name, commit } : null;
         repo.tracking = await branchTracking(repo.root);
