@@ -66,6 +66,8 @@ function localWorkspaceTarget(value: unknown): NavigationTarget | null {
 }
 
 let localToastSeq = 0;
+// The folder a local toast opens when clicked, by toast id.
+const localReveals = new Map<string, string>();
 
 export interface ToastHostProps {
   // Routes a clicked card to its target (run chat / terminal pane / loom).
@@ -153,6 +155,7 @@ export default function ToastHost({
           body?: unknown;
           tone?: unknown;
           target?: unknown;
+          reveal?: unknown;
         }>
       ).detail;
       const title = typeof detail?.title === "string" ? detail.title : "";
@@ -164,6 +167,7 @@ export default function ToastHost({
       localToastSeq += 1;
       const target = localWorkspaceTarget(detail?.target);
       const id = `${target ? LOCAL_NAVIGABLE_PREFIX : LOCAL_SOURCE_PREFIX}${localToastSeq}`;
+      if (typeof detail?.reveal === "string" && detail.reveal) localReveals.set(id, detail.reveal);
       setToasts((current) => {
         const next = [
           ...current,
@@ -278,9 +282,10 @@ export default function ToastHost({
           // in the array, closest to the eye) sits fully forward; each
           // older card above it steps slightly back via scale + opacity.
           depth={toasts.length - 1 - index}
-          onClose={() =>
-            setToasts((current) => current.filter((t) => t.id !== toast.id))
-          }
+          onClose={() => {
+            localReveals.delete(toast.id);
+            setToasts((current) => current.filter((t) => t.id !== toast.id));
+          }}
           navigateTo={navigateTo}
           resolveQuestion={resolveQuestion}
           onAcknowledge={() => acknowledge(toast.id)}
@@ -358,8 +363,9 @@ function ToastCard({
 
   // A local toast has no center entry, and only one emitted with a target
   // has anywhere to go; the rest render as plain, non-interactive cards.
+  const reveal = localReveals.get(toast.id) ?? null;
   const clickable =
-    Boolean(navigateTo) && (!isLocalToast(toast) || isNavigableLocalToast(toast));
+    reveal !== null || (Boolean(navigateTo) && (!isLocalToast(toast) || isNavigableLocalToast(toast)));
 
   return (
     <div
@@ -370,6 +376,11 @@ function ToastCard({
       role={tone === "danger" ? "alert" : "status"}
       data-lifted={hover && clickable ? "true" : undefined}
       onClick={() => {
+        if (reveal !== null) {
+          void window.spark.fs.revealInOS(reveal).catch(() => undefined);
+          onClose();
+          return;
+        }
         if (!clickable || !navigateTo) return;
         // Opening marks the center row read, unless nothing could be opened
         // (its workspace is gone). A local toast has no center row. The X

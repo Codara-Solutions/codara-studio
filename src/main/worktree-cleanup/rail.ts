@@ -511,13 +511,15 @@ function uncommittedText(work: WorktreeLocalWork): string {
 // The cleanup screen's rules, plus the rail's own: Clean up is for a merged
 // branch only, and never confirms uncommitted work away. Ignored files alone
 // are asked about (cleanUpRegistered), since a fresh checkout cannot bring
-// them back but nothing else is lost. An ignored folder the scan could not
+// them back but nothing else is lost; the automatic removal keeps them in
+// the archive instead (canArchive). An ignored folder the scan could not
 // see all of is a blocker of the check itself (UNCHECKED), on every path.
 function railRefusal(
   check: WorktreeRemovalCheck,
   request: WorktreeRailCleanupRequest,
   repo: RepoContext,
   parentPresent: boolean,
+  canArchive: boolean,
 ): string | null {
   if (check.blockers.length) {
     const blocker = check.blockers[0];
@@ -525,8 +527,9 @@ function railRefusal(
   }
   if (request.mode === "auto-merged") {
     if (check.alreadyRemoved) return "The folder is gone.";
-    // Ignored files included: nobody is here to be asked about them.
-    if (check.localWork) return "It holds uncommitted or kept files.";
+    // Nobody is here to be asked about ignored files: they go to the archive,
+    // or they hold it.
+    if (check.localWork && !(canArchive && onlyIgnoredWork(check.localWork))) return "It holds uncommitted or kept files.";
     if (!check.branchDeletable) return "Its branch is not one a cleanup deletes.";
     return null;
   }
@@ -577,12 +580,13 @@ async function cleanUpRegistered(
     }
   }
   const parentPresent = await parentHoldsFolders(path);
+  const canArchive = Boolean(deps.archiveRoot);
   const why =
-    railRefusal(check, request, repo, parentPresent) ??
+    railRefusal(check, request, repo, parentPresent, canArchive) ??
     (request.mode === "auto-merged" ? await autoMergedRefusal(repo, workspace, check.merge, check.branch, check.head) : null);
   if (why) return refused(why, workspace.name);
   const holdsIgnored = !check.alreadyRemoved && check.localWork !== null;
-  if (holdsIgnored && request.confirmIgnored !== check.fingerprint) {
+  if (holdsIgnored && request.mode === "manual" && request.confirmIgnored !== check.fingerprint) {
     return {
       status: "confirm",
       workspaceName: workspace.name,
@@ -608,6 +612,7 @@ async function cleanUpRegistered(
       boundTo: workspace.id,
       ...(allowInUse ? { allowInUse } : {}),
       ...(makerElsewhereOk ? { makerElsewhereOk } : {}),
+      ...(canArchive ? { archiveIgnored: true } : {}),
       ...(requireKnownUsage ? { requireKnownUsage, beforeRemove: () => lastMomentRefusal(deps, workspace, path) } : {}),
     },
   );
@@ -630,6 +635,8 @@ async function cleanUpRegistered(
     workspaceName: workspace.name,
     branchDeleted: outcome.branchDeleted,
     ...(outcome.branchKept ? { branchKept: KEPT_WORDS[outcome.branchKept] } : {}),
+    ...(outcome.reclaimedBytes ? { reclaimedBytes: outcome.reclaimedBytes } : {}),
+    ...(outcome.archived ? { archived: outcome.archived } : {}),
     ...(rowGone ? {} : { message: "The workspace row could not be removed." }),
   };
 }

@@ -18,10 +18,14 @@ import { onlyIgnoredWork } from "@shared/worktree-cleanup-agent";
 import {
   checkoutsInIgnored,
   cleanText,
+  finishedWork,
   isRegenerableIgnored,
+  MAKER_IDLE_MS,
   isSecretFile,
   packageRootTester,
   type AgentWorktreeAuditEntry,
+  processUsageUnknown,
+  type ProcessScan,
   type ProcessUse,
   type RendererTerminal,
 } from "../agent-worktrees";
@@ -85,7 +89,7 @@ export interface WorktreeCleanupDeps {
   // it did not answer. Absent counts as held.
   workspaceHeld?(workspaceId: string, paths?: readonly string[]): Promise<boolean | null>;
   // Null when the platform offers no process scan.
-  processesUnderCwds(dirs: readonly string[]): Promise<Map<string, ProcessUse[]> | null>;
+  processesUnderCwds(dirs: readonly string[]): Promise<ProcessScan | null>;
   runningServers(workspaceId: string): number;
   // Rejects when GitHub is unavailable; the screen then shows no pull requests.
   pullRequests(repoRoot: string): Promise<RepoPullRequests>;
@@ -105,6 +109,15 @@ export interface WorktreeCleanupDeps {
   // the agent's own title for it), to tell apart tabs with no name of their
   // own. Null when it has none or cannot be read.
   agentSessionName?(paneId: string): Promise<string | null>;
+  // How long a pane has had no input or output, in ms; null when it cannot
+  // say. Absent or null: never idle.
+  paneIdleMs?(paneId: string): number | null;
+  // Where the ignored files of a removed worktree are kept. Absent: they are
+  // not kept, so a removal that would delete them is asked about.
+  archiveRoot?(): string;
+  // Why a folder with a drive mounted inside must stay, or null. Absent: the
+  // real check (mounts.ts mountRefusal); tests stand in for it here.
+  mountRefusal?(path: string): Promise<string | null>;
 }
 
 export const ROW_BUDGET_MS = 12_000;
@@ -358,7 +371,7 @@ function shortBranch(target: string): string {
   return target.replace(/^[^/]+\//, "");
 }
 
-export { isKeptBranch };
+export { isKeptBranch, finishedWork };
 
 // ── Linked workspaces ──────────────────────────────────────────────────────
 
@@ -411,7 +424,12 @@ export interface UsageContext {
   /** False when the Cora runs could not be read, so `runs` says nothing. */
   runsKnown: boolean;
   terminals: RendererTerminal[] | null;
-  processes: Map<string, ProcessUse[]> | null;
+  processes: ProcessScan | null;
+}
+
+/** Terminals, runs or programs that could not all be read: a removal nobody confirmed must not go ahead. */
+export function usageUnknown(usage: UsageContext): boolean {
+  return usage.terminals === null || processUsageUnknown(usage.processes) || !usage.runsKnown;
 }
 
 export async function usageContext(deps: WorktreeCleanupDeps, dirs: readonly string[]): Promise<UsageContext> {
@@ -493,15 +511,14 @@ async function agentTabUse(
 
 /**
  * Whether a use holds the worktree once its work is done. The tab of the
- * agent that made it, open while it works from another folder (a coordinator
- * chat in another workspace, say), holds it only while that work may be
- * unfinished: once the branch is merged and no files are left uncommitted,
- * nothing of it is in the folder. A run, terminal or process inside still
- * holds it, the maker's own tab included. Nobody watching (strict) keeps
- * the open tab as a hold too, as anything else that cannot be ruled out.
+ * agent that made the worktree, open while its shell is in another folder (a
+ * coordinator chat in another workspace, say) or quiet for MAKER_IDLE_MS,
+ * holds it only while that work may be unfinished: once the branch is merged
+ * and no files are left uncommitted, nothing of it is in the folder. A run,
+ * terminal or other process inside still holds it.
  */
-export function heldByMaker(use: WorktreeInUse, finished: boolean, strict = false): boolean {
-  return !(use.kind === "agent" && use.elsewhere && finished && !strict);
+export function heldByMaker(use: WorktreeInUse, finished: boolean): boolean {
+  return !(use.kind === "agent" && (use.elsewhere || use.idle) && finished);
 }
 
 /**
@@ -527,36 +544,6 @@ export function workHoldsForMaker(work: WorktreeLocalWork | null): boolean {
   return work !== null && !onlyIgnoredWork(work);
 }
 
-/**
- * Whether the worktree's own work is in its base: merged by a pull request
- * or by content, or merged as an ancestor with a commit of its own. A
- * worktree with no commit of its own yet reads as merged too, but its agent
- * has not started, so its open tab still holds it. Its own commit is a head
- * past the commit its branch was created at (the branch's reflog); without
- * a reflog, a head committed in a later second than the worktree was made.
- */
-export async function finishedWork(
-  repoRoot: string,
-  merge: { state: WorktreeMergeState; proof?: WorktreeMergeProof },
-  head: string | null,
-  branch: string | null,
-  workspaces: readonly Workspace[],
-): Promise<boolean> {
-  if (merge.state !== "merged") return false;
-  if (merge.proof !== "ancestor") return true;
-  if (!head) return false;
-  if (branch) {
-    const log = await readGitText(repoRoot, ["reflog", "show", "--format=%H", `refs/heads/${branch}`, "--"]);
-    const start = log.split("\n").filter((line) => /^[0-9a-f]{40,64}$/i.test(line)).pop();
-    if (start) return start.toLowerCase() !== head.toLowerCase();
-  }
-  const made = workspaces.map((workspace) => Date.parse(workspace.copyBranch?.createdAt ?? "")).filter(Number.isFinite);
-  if (!made.length) return false;
-  const seconds = Number(await readGitText(repoRoot, ["log", "-1", "--format=%ct", head]));
-  // Commit times are whole seconds: only a later second counts, so a base
-  // commit made just before the worktree is never taken for its own.
-  return Number.isFinite(seconds) && seconds > 0 && seconds * 1000 > Math.min(...made);
-}
 
 function count(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
@@ -608,6 +595,7 @@ export async function usageOf(
     const inside = panes.has(owner.paneId) || shellInside;
     if (inside || deps.sessionCwd(owner.paneId) !== null || tab) {
       maker = await agentTabUse(ctx, tab, owner, inside);
+      if ((deps.paneIdleMs?.(owner.paneId) ?? -1) >= MAKER_IDLE_MS) maker.idle = true;
       if (shellInside) makerPid = pid;
       if (panes.has(owner.paneId)) makerPane = owner.paneId;
       break;
@@ -832,6 +820,9 @@ export interface CheckContext {
   // up takes only merged, committed work). The agent's tab with its folder
   // or shell inside still is.
   makerElsewhereOk?: boolean;
+  // Filled by checkRemoval: every kept ignored entry of a worktree (not only
+  // the listed first few), by pathKey of its real path, for the archive.
+  keptIgnored?: Map<string, string[]>;
 }
 
 function block(check: WorktreeRemovalCheck, code: WorktreeCleanupCode, message: string): void {
@@ -921,8 +912,8 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   // drive that is not mounted), so a locked one stays even when it looks gone.
   if (registration.locked) block(check, "LOCKED", "Locked with git worktree lock. Unlock it first.");
   if (stat === null) check.alreadyRemoved = true;
-  if (ctx.requireKnownUsage && (ctx.usage.terminals === null || ctx.usage.processes === null || !ctx.usage.runsKnown)) {
-    block(check, "UNCHECKED", "What is running in it could not be read, so it is not removed on its own.");
+  if (ctx.requireKnownUsage && usageUnknown(ctx.usage)) {
+    block(check, "UNCHECKED", "What is running in it could not be read, so it is not removed on its own. Codara tries again later.");
   }
   const uses = (await usageOf(ctx.usage, registration.path, real, workspaces)).filter((use) => countsAsUse(use, ctx));
   const inUse = (held: WorktreeInUse[]) => {
@@ -936,7 +927,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   // The maker's tab open in another folder is judged once the work is known:
   // it holds work not finished (finishedWork) or files not committed
   // (workHoldsForMaker).
-  const pending = uses.filter((use) => !heldByMaker(use, true, ctx.requireKnownUsage));
+  const pending = uses.filter((use) => !heldByMaker(use, true));
   inUse(uses.filter((use) => !pending.includes(use)));
 
   const target = await targetFor(repo, workspaces.find((workspace) => workspace.copyBranch) ?? null);
@@ -1046,6 +1037,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
       contents.update(`${entry}\0${stat?.size ?? -1}\0${stat?.mtimeMs ?? -1}\n`);
     }
     fingerprint.update(JSON.stringify([kept, scan.secrets, contents.digest("hex")]));
+    ctx.keptIgnored?.set(pathKey(real), kept);
     // Secrets first, so the few named are the ones that matter.
     const secret = (entry: string) => isSecretFile(basename(entry.replace(/\/+$/, "")));
     work.ignored = [...kept.filter(secret), ...kept.filter((entry) => !secret(entry))].slice(0, MAX_LISTED);

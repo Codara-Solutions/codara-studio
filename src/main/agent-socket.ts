@@ -8,6 +8,8 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import * as pty from "./pty-manager";
 import { codaraHome } from "./codara-home";
+import { paneIdleMs } from "./agent-hibernation";
+import { worktreeArchiveRoot } from "./worktree-cleanup/archive";
 import { writeFileAtomic } from "./fs-atomic";
 import { requestPreviewOp } from "./preview-bridge";
 import {
@@ -2869,6 +2871,9 @@ function worktreeDeps(): AgentWorktreeDeps {
       windowHoldsFolder((op, params) => requestTerminalOp<unknown>(op, params, { timeoutMs: 5_000 }), workspaceId, paths),
     processesUnderCwd: (dir) =>
       scanProcessesUnderCwd(dir, { appPid: process.pid, sessionPids: pty.sessionPids() }),
+    paneIdleMs: (paneId) => paneIdleMs(paneId),
+    sessionPid: (paneId) => pty.sessionPid(paneId),
+    archiveRoot: () => worktreeArchiveRoot(codaraHome()),
     github: {
       listPullRequestsForHead: (cwd, branch) =>
         github.listPullRequestsForHead
