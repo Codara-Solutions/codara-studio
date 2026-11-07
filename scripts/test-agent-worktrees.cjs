@@ -729,6 +729,78 @@ async function main() {
       fs.rmSync(path.join(scratch, "elsewhere"), { recursive: true, force: true });
     }
 
+    // Installed packages and build output come back with an install: one
+    // written while the removal runs (a cache, a postinstall, a watcher)
+    // does not put the folder back. Anything else written then still does.
+    {
+      const regen = await aw.createAgentWorktree(terminalAgent, { branch: "agent/regenerable-churn" }, deps);
+      assert.equal(regen.ok, true, JSON.stringify(regen));
+      const dep = path.join(regen.path, "node_modules", "left-pad", "index.js");
+      fs.mkdirSync(path.dirname(dep), { recursive: true });
+      fs.writeFileSync(dep, "module.exports = 1;\n");
+      fs.mkdirSync(path.join(regen.path, "dist"));
+      fs.writeFileSync(path.join(regen.path, "dist", "app.js"), "built\n");
+      // The second ask is the locked re-check's, after the first digest.
+      const writeDuringRemoval = (write) => {
+        let calls = 0;
+        h.held = () => {
+          calls += 1;
+          if (calls === 2) write();
+          return false;
+        };
+      };
+      for (const [label, write, undo] of [
+        ["an untracked file", () => fs.writeFileSync(path.join(regen.path, "notes.txt"), "mine\n"), () => fs.rmSync(path.join(regen.path, "notes.txt"))],
+        ["a tracked edit", () => fs.writeFileSync(path.join(regen.path, "README.md"), "# edited\n"), () => git(regen.path, ["checkout", "--", "README.md"])],
+        ["a secret in build output", () => fs.writeFileSync(path.join(regen.path, "dist", ".env.local"), "TOKEN=1\n"), () => fs.rmSync(path.join(regen.path, "dist", ".env.local"))],
+      ]) {
+        writeDuringRemoval(write);
+        const back = await aw.removeAgentWorktree(terminalAgent, { workspaceId: regen.workspaceId }, deps);
+        h.held = () => false;
+        assert.equal(back.code, "WORKTREE_CHANGED", `${label}: ${JSON.stringify(back)}`);
+        assert.ok(fs.existsSync(regen.path) && !fs.existsSync(asideOf(regen.path)), `${label}: it is back where it was`);
+        undo();
+      }
+      writeDuringRemoval(() => {
+        fs.writeFileSync(dep, "module.exports = 2;\n");
+        fs.mkdirSync(path.join(regen.path, "node_modules", ".cache"), { recursive: true });
+        fs.writeFileSync(path.join(regen.path, "node_modules", ".cache", "build.json"), "{}\n");
+        fs.writeFileSync(path.join(regen.path, "dist", "app.js"), "rebuilt\n");
+      });
+      const gone = await aw.removeAgentWorktree(terminalAgent, { workspaceId: regen.workspaceId }, deps);
+      h.held = () => false;
+      assert.equal(gone.removed, true, JSON.stringify(gone));
+      assert.ok(!fs.existsSync(regen.path) && !fs.existsSync(asideOf(regen.path)), "the worktree is gone");
+    }
+
+    // husky's generated hooks (.husky/_/, with a .gitignore of their own, so
+    // git lists each file) come back with its install: they never block.
+    {
+      const hooked = await aw.createAgentWorktree(terminalAgent, { branch: "agent/husky-hooks" }, deps);
+      // The hooks the repository commits sit beside husky's folder; the
+      // branch landed in a branch of its own, named as the target.
+      const hookedTip = commitFile(hooked.path, ".husky/pre-commit", "npm test\n", "hooks");
+      git(repo, ["branch", "hooks-landed", hookedTip]);
+      const landed = { workspaceId: hooked.workspaceId, target: "hooks-landed" };
+      const hooks = path.join(hooked.path, ".husky", "_");
+      fs.mkdirSync(hooks, { recursive: true });
+      fs.writeFileSync(path.join(hooks, ".gitignore"), "*\n");
+      fs.writeFileSync(path.join(hooks, "h"), "#!/usr/bin/env sh\n");
+      fs.writeFileSync(path.join(hooks, "pre-commit"), "#!/usr/bin/env sh\n. \"$(dirname \"$0\")/h\"\n");
+      const dry = await aw.removeAgentWorktree(terminalAgent, { ...landed, dryRun: true }, deps);
+      assert.equal(dry.wouldRemove, true, JSON.stringify(dry));
+      assert.deepEqual(dry.dirty.ignoredBlocking, []);
+      // A secret written among them is still the user's.
+      fs.writeFileSync(path.join(hooks, ".env"), "TOKEN=1\n");
+      const secret = await aw.removeAgentWorktree(terminalAgent, { ...landed, dryRun: true }, deps);
+      assert.ok(secret.blockers.includes("WORKTREE_IGNORED_FILES"), JSON.stringify(secret));
+      assert.deepEqual(secret.dirty.ignoredBlocking, [".husky/_/.env"]);
+      fs.rmSync(path.join(hooks, ".env"));
+      const gone = await aw.removeAgentWorktree(terminalAgent, landed, deps);
+      assert.equal(gone.removed, true, JSON.stringify(gone));
+      git(repo, ["branch", "-D", "hooks-landed"]);
+    }
+
     // A commit between the check and the locked re-check is caught.
     h.afterVerify = async () => {
       commitFile(created.path, "late.txt", "late\n", "late commit");
@@ -1514,6 +1586,10 @@ async function main() {
       "playwright-report/",
       "packages/web/test-results/",
       ".ruff_cache/",
+      ".husky/_/",
+      ".husky/_/pre-commit",
+      ".husky/_/.gitignore",
+      "packages/web/.husky/_/h",
     ]) {
       assert.equal(aw.isRegenerableIgnored(entry, [], packages), true, `${entry} regenerates`);
     }
@@ -1528,6 +1604,11 @@ async function main() {
       // A file inside a folder that is not ignored as a whole is that file, not the folder.
       "dist/.env",
       "test-results/.env.production",
+      // husky's own folder, only where husky puts it, and never a secret in it.
+      ".husky/_/.env",
+      ".husky/pre-commit",
+      "docs/.husky/_/",
+      "packages/b/.husky/_/h",
     ]) {
       assert.equal(aw.isRegenerableIgnored(entry, [], packages), false, `${entry} is kept`);
     }

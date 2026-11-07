@@ -34,6 +34,7 @@ import {
   restoreAsideWorktrees,
   worktreeFingerprint,
   resolveDefaultBranch,
+  type FingerprintRegenerable,
   type WorktreeRegistration,
 } from "./git-worktrees";
 import { deleteBranch, deleteBranchIfAt } from "./git-branches";
@@ -287,9 +288,13 @@ const TERMINAL_RUN_STATUSES = new Set(["complete", "failed", "cancelled"]);
 
 // Build output and caches a fresh checkout regenerates; anything else that is
 // git-ignored (.env.local, credentials, scratch notes) blocks removal until the
-// caller acknowledges it.
+// caller acknowledges it. A pattern with a "/" inside is a path, from the
+// worktree's root or a package root, and covers everything under it.
 export const REGENERABLE_IGNORED_PATTERNS: readonly string[] = [
   "node_modules/",
+  // husky's generated hooks: its install writes them again, with a
+  // .gitignore of their own, so git lists each file.
+  ".husky/_/",
   "dist/",
   "build/",
   "out/",
@@ -645,7 +650,10 @@ export function isRegenerableIgnored(
   for (const pattern of patterns) {
     const trimmed = pattern.trim().replace(/^\.\//, "");
     if (!trimmed) continue;
-    if (trimmed.endsWith("/")) {
+    const path = trimmed.replace(/\/+$/, "").split("/").filter(Boolean);
+    if (path.length > 1) {
+      if (underPath(segments, path, isPackageRoot)) return true;
+    } else if (trimmed.endsWith("/")) {
       const name = trimmed.replace(/\/+$/, "");
       if (isDir && atPackageRoot && globToRegExp(name).test(last)) return true;
     } else if (globToRegExp(trimmed).test(last)) {
@@ -653,6 +661,31 @@ export function isRegenerableIgnored(
     }
   }
   return false;
+}
+
+// The entry is the path's folder or inside it, the path taken from the
+// worktree's root or from a package root above the entry.
+function underPath(segments: readonly string[], path: readonly string[], isPackageRoot?: (dir: string) => boolean): boolean {
+  for (let start = 0; start + path.length <= segments.length; start += 1) {
+    if (start > 0 && isPackageRoot?.(segments.slice(0, start).join("/")) !== true) continue;
+    if (path.every((part, index) => globToRegExp(part).test(segments[start + index]))) return true;
+  }
+  return false;
+}
+
+/**
+ * What the removal's change check leaves out, judged as its ignored-file
+ * check judges them: regenerable entries, but for secret files written
+ * inside one, and installed packages, never walked.
+ */
+export function fingerprintRegenerable(root: string, extra: readonly string[]): FingerprintRegenerable {
+  const isPackageRoot = packageRootTester(root);
+  return {
+    entry: (path) => isRegenerableIgnored(path, extra, isPackageRoot),
+    kept: (path) =>
+      isSecretFile(basename(path)) && !inDependencyStore(path) && !isRegenerableIgnored(path, extra),
+    skipped: (path) => inDependencyStore(path),
+  };
 }
 
 const NESTED_SCAN_MAX_DIRS = 50_000;
@@ -1849,6 +1882,16 @@ async function paneIsOpen(ctx: VerifyContext, paneId: string): Promise<boolean> 
   return (terminals ?? []).some((terminal) => terminal.paneId === paneId);
 }
 
+// The ignored-file patterns the user marked regenerable for this worktree's repository.
+function regenerableExtra(ctx: VerifyContext, workspace: Workspace): string[] {
+  const byRepo = ctx.preferences.agentWorktreeRegenerableIgnoredByRepo;
+  return [
+    ...(byRepo?.[ctx.scope.parentWorkspace.cwd] ?? []),
+    ...(byRepo?.[ctx.scope.repoCwd] ?? []),
+    ...(byRepo?.[workspace.copyBranch!.repoCwd] ?? []),
+  ];
+}
+
 export async function verifyRemovable(
   ctx: VerifyContext,
   workspace: Workspace,
@@ -2000,11 +2043,7 @@ export async function verifyRemovable(
     verdict.dirty.inProgress = operation;
     block("WORKTREE_OPERATION_IN_PROGRESS");
   }
-  const extra = [
-    ...(ctx.preferences.agentWorktreeRegenerableIgnoredByRepo?.[scope.parentWorkspace.cwd] ?? []),
-    ...(ctx.preferences.agentWorktreeRegenerableIgnoredByRepo?.[scope.repoCwd] ?? []),
-    ...(ctx.preferences.agentWorktreeRegenerableIgnoredByRepo?.[copy.repoCwd] ?? []),
-  ];
+  const extra = regenerableExtra(ctx, workspace);
   let ignored: string[] | null = null;
   try {
     // What worktree setup linked in or copied unchanged from the main
@@ -2237,9 +2276,11 @@ async function proveMerged(
     // The recorded base is gone (a stacked pull request's branch, deleted
     // once merged): the default branch is where its work went, if anywhere.
     const fallbackName = await resolveDefaultBranch(repo);
-    if (fallbackName && shortBranch(fallbackName) !== branch && fallbackName !== branch) {
-      verdict.warnings.push(`the recorded base '${target.name}' is gone; judged against ${fallbackName}`);
-      target = await resolveTarget(ctx, fallbackName);
+    const fallback =
+      fallbackName && shortBranch(fallbackName) !== branch && fallbackName !== branch ? await resolveTarget(ctx, fallbackName) : null;
+    if (fallback?.commit) {
+      verdict.warnings.push(`the recorded base '${target.name}' is gone; judged against ${fallback.name}`);
+      target = fallback;
     }
   }
   // A target that could not be fetched (deleted on the remote, say) may be
@@ -2926,7 +2967,10 @@ async function changedWhileAside(
   before: string,
 ): Promise<string | null> {
   const { deps } = ctx;
-  if ((await worktreeFingerprint(aside)) !== before) return "it changed while it was being removed, so it was put back";
+  const regenerable = fingerprintRegenerable(aside, regenerableExtra(ctx, workspace));
+  if ((await worktreeFingerprint(aside, undefined, regenerable)) !== before) {
+    return "it changed while it was being removed, so it was put back";
+  }
   const realAside = await realpathOrResolve(aside);
   const fresh: VerifyContext = {
     ...ctx,
@@ -3005,7 +3049,8 @@ async function removeLocked(
     // commit, edit or new terminal since the unlocked check cannot slip by.
     // Taken before the checks, so whatever is written after them shows once
     // the folder is moved aside.
-    const before = await worktreeFingerprint(workspace.cwd).catch(() => null);
+    const regenerable = fingerprintRegenerable(workspace.cwd, regenerableExtra(ctx, stillListed));
+    const before = await worktreeFingerprint(workspace.cwd, undefined, regenerable).catch(() => null);
     if (before === null) {
       return refusal("WORKTREE_GIT_FAILED", "git could not read the worktree, so nothing was removed", {
         workspaceId: workspace.id,

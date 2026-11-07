@@ -130,7 +130,10 @@ export async function resolveDefaultBranch(repoCwd: string): Promise<string> {
     "--short",
     "refs/remotes/origin/HEAD",
   ]);
-  if (originHead.startsWith("origin/")) return originHead; // e.g. "origin/main"
+  // origin/HEAD keeps naming the branch it pointed at when that branch is
+  // deleted and pruned ("refs/remotes/origin/HEAD has become dangling"): a
+  // name that resolves to nothing is no default branch.
+  if (originHead.startsWith("origin/") && (await remoteRefExists(repoCwd, originHead))) return originHead; // e.g. "origin/main"
   if (await remoteRefExists(repoCwd, "origin/main")) return "origin/main";
   if (await remoteRefExists(repoCwd, "origin/master")) return "origin/master";
   if (await branchExists(repoCwd, "main")) return "main";
@@ -602,6 +605,20 @@ const fingerprintFs: { lstat: typeof lstat; readdir: (path: string) => Promise<s
   (process.getBuiltinModule?.("original-fs") as typeof import("node:fs") | undefined)?.promises ?? { lstat, readdir };
 
 /**
+ * The ignored entries a fresh checkout brings back (installed packages,
+ * build output, husky's hooks), as the removal's checks judge them. Paths
+ * are relative to the worktree, with "/" between folders.
+ */
+export interface FingerprintRegenerable {
+  /** An ignored entry as git lists it, a folder with a trailing "/". */
+  entry(path: string): boolean;
+  /** A file inside a regenerable folder that counts all the same: a secret written there. */
+  kept(path: string): boolean;
+  /** A folder inside a regenerable one that is not walked at all (installed packages). */
+  skipped(path: string): boolean;
+}
+
+/**
  * What a removal would delete, as one digest: HEAD, `git status` with
  * untracked and ignored entries, and the size, times and inode of every
  * file under those entries (ignored folders walked). Throws past 500,000
@@ -609,8 +626,16 @@ const fingerprintFs: { lstat: typeof lstat; readdir: (path: string) => Promise<s
  * Links count as nothing: setup's linked folders are released before the
  * delete, and removing a link loses no data. The same digest before the
  * last check and after the move means nothing was written in between.
+ * With `regenerable`, what a fresh checkout rebuilds counts as nothing
+ * either, but for the files it keeps: an install, a cache or a tool
+ * writing its own files there while the removal runs loses no data, and
+ * must not put the folder back.
  */
-export async function worktreeFingerprint(worktreePath: string, maxEntries = FINGERPRINT_MAX_ENTRIES): Promise<string> {
+export async function worktreeFingerprint(
+  worktreePath: string,
+  maxEntries = FINGERPRINT_MAX_ENTRIES,
+  regenerable?: FingerprintRegenerable,
+): Promise<string> {
   const hash = createHash("sha256");
   const head = await readGitText(worktreePath, ["rev-parse", "--verify", "HEAD"]);
   hash.update(`${head}\0`);
@@ -633,14 +658,22 @@ export async function worktreeFingerprint(worktreePath: string, maxEntries = FIN
     });
   // Files only: a folder holds no data of its own, and one left empty once
   // setup's links are released drops out of git's listing.
-  const walk = async (code: string, relative: string, info: Awaited<ReturnType<typeof statOf>>): Promise<void> => {
+  const slashed = (relative: string) => relative.replace(/\\/g, "/");
+  const walk = async (
+    code: string,
+    relative: string,
+    info: Awaited<ReturnType<typeof statOf>>,
+    regenerated = false,
+  ): Promise<void> => {
     budget -= 1;
     if (budget < 0) throw new Error("It holds too many files to check again before deleting it.");
+    if (regenerated && (!info || !info.isDirectory()) && !regenerable!.kept(slashed(relative))) return;
     if (!info) {
       hash.update(`${code}\0${relative}\0-\0`);
       return;
     }
     if (info.isSymbolicLink()) return;
+    if (regenerated && info.isDirectory() && regenerable!.skipped(`${slashed(relative)}/`)) return;
     if (!info.isDirectory()) {
       // The change time and inode too: a write that keeps the size and sets
       // the old modification time back, or a file replaced by another,
@@ -651,16 +684,18 @@ export async function worktreeFingerprint(worktreePath: string, maxEntries = FIN
     const absolute = join(worktreePath, relative);
     const names = (await fingerprintFs.readdir(absolute)).sort();
     const infos = await Promise.all(names.map((name) => statOf(join(absolute, name))));
-    for (const [index, name] of names.entries()) await walk(code, join(relative, name), infos[index]);
+    for (const [index, name] of names.entries()) await walk(code, join(relative, name), infos[index], regenerated);
   };
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
     if (record.length < 4) continue;
     const code = record.slice(0, 2);
-    const path = record.slice(3).replace(/\/+$/, "");
+    const listed = record.slice(3);
+    const path = listed.replace(/\/+$/, "");
     // A rename or copy carries its source in the next record.
     if (code[0] === "R" || code[0] === "C") index += 1;
-    await walk(code, path, await statOf(join(worktreePath, path)));
+    const regenerated = code === "!!" && regenerable !== undefined && regenerable.entry(slashed(listed));
+    await walk(code, path, await statOf(join(worktreePath, path)), regenerated);
   }
   // Tracked files git status does not look at (assume-unchanged,
   // skip-worktree): an edit to one shows nowhere else.
