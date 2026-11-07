@@ -481,6 +481,21 @@ const SESSION_TOOL_TO_RPC = {
   codara_review_findings: "review.findings",
 };
 
+// Every live session in any workspace, for an agent the user runs (or an
+// assistant outside Codara that the user pointed at it) to pick a target by.
+const SESSION_RELAY_TOOLS = [
+  {
+    name: "codara_session_list_all",
+    description:
+      "Every agent session in a terminal pane, in every workspace: id, title, workspace, runtime, state (working, needs_you, idle or done) and lastActivity. Read-only.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+];
+
+const SESSION_RELAY_TOOL_TO_RPC = {
+  codara_session_list_all: "session.list_all",
+};
+
 const SESSION_SEARCH_TOOL = {
   name: "codara_session_search",
   description:
@@ -2013,6 +2028,7 @@ if (IS_AUTOMATION_MODE) {
     ...TASK_TOOLS,
     ...WORKTREE_TOOLS,
     ...SESSION_TOOLS,
+    ...SESSION_RELAY_TOOLS,
     SESSION_SEARCH_TOOL,
     SHARE_TOOL,
     OPEN_FILE_TOOL,
@@ -2024,6 +2040,7 @@ if (IS_AUTOMATION_MODE) {
     ...TASK_TOOL_TO_RPC,
     ...WORKTREE_TOOL_TO_RPC,
     ...SESSION_TOOL_TO_RPC,
+    ...SESSION_RELAY_TOOL_TO_RPC,
     codara_session_search: "session.search",
     codara_share_offer: "share.offer",
     codara_open_file: "file.open",
@@ -2066,6 +2083,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "codara_session_search",
   "codara_session_status",
   "codara_session_wait",
+  "codara_session_list_all",
   "codara_task_list",
 ]);
 // Anything that runs a caller-chosen shell command or page script can destroy
@@ -2316,6 +2334,7 @@ const CALLER_LOCATED_RPCS = new Set([
   "session.status",
   "session.wait",
   "session.message",
+  "session.list_all",
   "review.findings",
 ]);
 // The browser code tool is scoped like the single browser tools it drives.
@@ -3099,7 +3118,7 @@ function toolManifest() {
     orchestration: names(EXECUTE_TOOLS),
     automation: names(AUTOMATION_TOOLS),
     workflow: names(WORKFLOW_TOOLS),
-    sessions: names([...SESSION_TOOLS, SESSION_SEARCH_TOOL]),
+    sessions: names([...SESSION_TOOLS, ...SESSION_RELAY_TOOLS, SESSION_SEARCH_TOOL]),
   };
 }
 
