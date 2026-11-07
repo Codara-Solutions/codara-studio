@@ -3,7 +3,7 @@
 // codara_worktree_create or codara_worktree_remove with `workspace`). Main asks the user once per caller and target workspace
 // pair, and one grant covers both; see src/main/cross-workspace-terminals.ts.
 
-export type CrossWorkspaceAnswer = "once" | "always" | "deny";
+export type CrossWorkspaceAnswer = "once" | "always" | "all" | "deny";
 
 export type CrossWorkspaceAction = "terminal" | "worktree" | "worktree-remove";
 

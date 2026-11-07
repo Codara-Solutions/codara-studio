@@ -51,6 +51,11 @@ function grantStore(): CrossWorkspaceGrantStore {
     store = {
       list: () => file.list(),
       has: (caller, target) => file.has(caller, target),
+      allowAll: () => file.allowAll!(),
+      async setAllowAll(value) {
+        await file.setAllowAll!(value);
+        sendToWindow("crossWorkspace:grantsChanged", null);
+      },
       async grant(entry) {
         await file.grant(entry);
         sendToWindow("crossWorkspace:grantsChanged", null);
@@ -109,7 +114,14 @@ export function crossWorkspaceApprover(): CrossWorkspaceApprover {
 }
 
 function isAnswer(value: unknown): value is CrossWorkspaceAnswer {
-  return value === "once" || value === "always" || value === "deny";
+  return value === "once" || value === "always" || value === "all" || value === "deny";
+}
+
+function answerAllPending(): void {
+  for (const [otherId, other] of [...pending]) {
+    other.answer("all");
+    closeCard({ id: otherId, reason: "answered" });
+  }
 }
 
 export function registerCrossWorkspaceIpc(handle: IpcHandle): void {
@@ -130,6 +142,16 @@ export function registerCrossWorkspaceIpc(handle: IpcHandle): void {
         closeCard({ id: otherId, reason: "answered" });
       }
     }
+    // Allow all workspaces covers every pair, so every queued card is answered.
+    if (value!.answer === "all") answerAllPending();
+    return true;
+  });
+  handle("crossWorkspace:allowAll", async (): Promise<boolean> => grantStore().allowAll!());
+  handle("crossWorkspace:setAllowAll", async (_event, raw: unknown): Promise<boolean> => {
+    if (typeof raw !== "boolean") return false;
+    await grantStore().setAllowAll!(raw);
+    // Turning it on covers every card still waiting.
+    if (raw) answerAllPending();
     return true;
   });
   handle("crossWorkspace:grants", async (): Promise<CrossWorkspaceGrant[]> => {
