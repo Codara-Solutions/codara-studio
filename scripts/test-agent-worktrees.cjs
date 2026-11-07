@@ -759,6 +759,8 @@ async function main() {
           () => execFileSync("git", ["init", "-q", path.join(regen.path, dir)]),
           () => fs.rmSync(path.join(regen.path, dir), { recursive: true, force: true }),
         ]),
+        // As a case-insensitive disk spells it.
+        ["a checkout's .GIT", () => fs.mkdirSync(path.join(regen.path, "node_modules", "cased", ".GIT"), { recursive: true }), () => fs.rmSync(path.join(regen.path, "node_modules", "cased"), { recursive: true, force: true })],
       ]) {
         writeDuringRemoval(write);
         const back = await aw.removeAgentWorktree(terminalAgent, { workspaceId: regen.workspaceId }, deps);

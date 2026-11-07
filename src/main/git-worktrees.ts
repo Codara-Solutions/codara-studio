@@ -666,9 +666,10 @@ export async function worktreeFingerprint(
   ): Promise<void> => {
     budget -= 1;
     if (budget < 0) throw new Error("It holds too many files to check again before deleting it.");
-    if (regenerated && basename(relative) === ".git") {
+    if (regenerated && basename(relative).toLowerCase() === ".git") {
       // A checkout made in it, or one gone: its own commits and changes
       // show nowhere else. Present or not is enough, its files churn.
+      // Any case: a case-insensitive disk (Windows, macOS) takes .GIT.
       hash.update(`${code}\0${relative}\0${info ? "checkout" : "-"}\0`);
       return;
     }
