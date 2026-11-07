@@ -1786,7 +1786,7 @@ function AgentWorktreeIgnoredField({ workspaceCwd }: { workspaceCwd: string }) {
   return (
     <SettingRow
       title="Agent worktrees: also regenerable"
-      desc="Ignored files an agent may delete with a merged worktree, besides build output and caches. Anything else ignored blocks removal. Saved for this repository."
+      desc="Ignored files an agent may delete with a merged worktree, besides build output and caches. A pattern with a / inside, such as tools/generated/, is a path and covers everything under it. Anything else ignored blocks removal. Saved for this repository."
       stacked
     >
       <input

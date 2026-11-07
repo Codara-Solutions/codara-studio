@@ -449,12 +449,23 @@ async function main() {
       assert.ok(fs.existsSync(merged) && !fs.existsSync(aside), "it is back where it was");
     });
 
-    await check("a merged worktree goes, with its branch and its rail row", async () => {
+    await check("a merged worktree goes, with its branch and its rail row, packages written meanwhile or not", async () => {
       const forgotten = [];
       const result = await removeMod.removeCleanupWorktrees(
         deps,
         { items: [item(merged)], deleteMergedBranches: true },
-        { sizeOf: () => ({ bytes: 4096, complete: true, measuredAt: 1 }), forgetSize: (id) => forgotten.push(id) },
+        {
+          sizeOf: () => ({ bytes: 4096, complete: true, measuredAt: 1 }),
+          forgetSize: (id) => forgotten.push(id),
+          // An install or a cache writing into node_modules/ while it goes:
+          // a fresh checkout brings that back, so it is no change.
+          beforeRemove: async () => {
+            const live = fs.existsSync(merged) ? merged : path.join(path.dirname(merged), `.${path.basename(merged)}.codara-removing`);
+            fs.mkdirSync(path.join(live, "node_modules", ".cache"), { recursive: true });
+            fs.writeFileSync(path.join(live, "node_modules", ".cache", "state.json"), `${Date.now()}\n`);
+            return null;
+          },
+        },
       );
       const [outcome] = result.outcomes;
       assert.equal(outcome.status, "removed", JSON.stringify(outcome));

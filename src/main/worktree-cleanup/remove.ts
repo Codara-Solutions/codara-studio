@@ -19,6 +19,7 @@ import {
   RECOVERY_REF_PREFIX,
   RepoLockTimeoutError,
   cleanText,
+  fingerprintRegenerable,
   pruneRecoveryRefs,
   saveRecoveryRef,
   withRepoLock,
@@ -313,7 +314,9 @@ async function changedWhileAside(
   options: RemoveOptions,
 ): Promise<string | null> {
   const path = check.path;
-  if ((await worktreeFingerprint(aside)) !== before) return "It changed while it was being removed, so it was put back.";
+  if ((await worktreeFingerprint(aside, undefined, fingerprintRegenerable(aside, ctx.regenerable))) !== before) {
+    return "It changed while it was being removed, so it was put back.";
+  }
   const realAside = await canonicalPath(aside);
   const usage = await usageContext(ctx.deps, [realAside]);
   if (ctx.requireKnownUsage && usageUnknown(usage)) {
@@ -341,7 +344,9 @@ async function removeOne(
   const { deps, repo } = ctx;
   // Taken before the checks, so whatever is written after them shows once
   // the folder is moved aside.
-  const before = await worktreeFingerprint(item.path).catch(() => null);
+  const before = await worktreeFingerprint(item.path, undefined, fingerprintRegenerable(item.path, ctx.regenerable)).catch(
+    () => null,
+  );
   const check = await checkRemoval(ctx, item.path);
   const real = await canonicalPath(check.path);
   const outcome: WorktreeCleanupOutcome = {

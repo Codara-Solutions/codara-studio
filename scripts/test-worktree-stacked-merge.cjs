@@ -462,6 +462,81 @@ async function main() {
       h.githubDown = false;
     });
 
+    await check("remove: a deleted base that origin/HEAD still names falls back to origin/main, and says so", async () => {
+      // The remote's default branch was trunk; it moved to main and trunk was
+      // deleted. The clone's origin/HEAD still names origin/trunk, dangling.
+      git(hub, ["fetch", "-q", "origin"]);
+      git(hub, ["push", "-q", "origin", "origin/main:refs/heads/trunk"]);
+      git(repo, ["fetch", "-q", "origin"]);
+      git(repo, ["remote", "set-head", "origin", "trunk"]);
+      try {
+        const made = await aw.createAgentWorktree(owner, { branch: "chore/on-trunk", base: "origin/trunk" }, deps);
+        assert.equal(made.ok, true, JSON.stringify(made));
+        const tip = commitFile(made.path, "trunk.txt", "trunk\n", "on trunk");
+        git(made.path, ["push", "-q", "-u", "origin", "chore/on-trunk"]);
+        // Squashed into main on GitHub, then both branches deleted.
+        git(hub, ["fetch", "-q", "origin"]);
+        git(hub, ["checkout", "-q", "main"]);
+        git(hub, ["reset", "-q", "--hard", "origin/main"]);
+        git(hub, ["merge", "-q", "--squash", "origin/chore/on-trunk"]);
+        git(hub, ["commit", "-q", "-m", "on trunk (#60)"]);
+        git(hub, ["push", "-q", "origin", "main"]);
+        git(hub, ["push", "-q", "origin", "--delete", "trunk", "chore/on-trunk"]);
+        git(repo, ["fetch", "-q", "--prune", "origin"]);
+        assert.equal(git(repo, ["symbolic-ref", "refs/remotes/origin/HEAD"]), "refs/remotes/origin/trunk", "origin/HEAD dangles");
+        assert.throws(() => git(repo, ["merge-base", "--is-ancestor", tip, "origin/main"]), "squashed: not in main's history");
+        h.githubDown = true; // the squash is proven by content alone
+        const dry = await aw.removeAgentWorktree(other, { workspaceId: made.workspaceId, dryRun: true }, deps);
+        assert.equal(dry.wouldRemove, true, JSON.stringify(dry));
+        assert.equal(dry.merge.target, "origin/main");
+        assert.equal(dry.merge.proof, "content-in-target");
+        assert.ok(
+          (dry.warnings ?? []).some((warning) => warning === "the recorded base 'origin/trunk' is gone; judged against origin/main"),
+          JSON.stringify(dry.warnings),
+        );
+        const gone = await aw.removeAgentWorktree(other, { workspaceId: made.workspaceId }, deps);
+        assert.equal(gone.removed, true, JSON.stringify(gone));
+        // Its absence never proves a merge: unmerged work on a deleted base stays.
+        const kept = await aw.createAgentWorktree(owner, { branch: "chore/not-landed", base: "origin/main" }, deps);
+        const keptTip = commitFile(kept.path, "kept.txt", "kept\n", "never merged");
+        const workspace = h.state.workspaces.find((entry) => entry.id === kept.workspaceId);
+        workspace.copyBranch.baseBranch = "origin/trunk";
+        const refused = await aw.removeAgentWorktree(other, { workspaceId: kept.workspaceId, dryRun: true }, deps);
+        assert.equal(refused.wouldRemove, false, JSON.stringify(refused));
+        assert.ok(refused.blockers.includes("WORKTREE_NOT_MERGED"), JSON.stringify(refused));
+        assert.ok(!refused.blockers.includes("WORKTREE_TARGET_NOT_FOUND"));
+        // No main or master either, and the main checkout detached at the
+        // worktree's own tip: HEAD is no default branch to prove it against.
+        const originMain = git(repo, ["rev-parse", "refs/remotes/origin/main"]);
+        git(repo, ["checkout", "-q", "--detach", keptTip]);
+        git(repo, ["branch", "-q", "-m", "main", "saved-main"]);
+        git(repo, ["update-ref", "-d", "refs/remotes/origin/main"]);
+        try {
+          const detached = await aw.removeAgentWorktree(other, { workspaceId: kept.workspaceId, dryRun: true }, deps);
+          assert.equal(detached.wouldRemove, false, JSON.stringify(detached));
+          assert.ok(detached.blockers.includes("WORKTREE_TARGET_NOT_FOUND"), JSON.stringify(detached));
+          const notRemoved = await aw.removeAgentWorktree(other, { workspaceId: kept.workspaceId }, deps);
+          assert.equal(notRemoved.code, "WORKTREE_TARGET_NOT_FOUND", JSON.stringify(notRemoved));
+          assert.ok(fs.existsSync(kept.path) && git(repo, ["rev-parse", "refs/heads/chore/not-landed"]) === keptTip);
+          // Its folder deleted by hand and no base recorded: only the branch
+          // is left, and HEAD at its tip proves nothing, so it stays.
+          h.state.workspaces.find((entry) => entry.id === kept.workspaceId).copyBranch.baseBranch = "HEAD";
+          fs.rmSync(kept.path, { recursive: true, force: true });
+          const leftover = await aw.removeAgentWorktree(other, { workspaceId: kept.workspaceId }, deps);
+          assert.equal(leftover.alreadyRemoved, true, JSON.stringify(leftover));
+          assert.equal(leftover.branchDeleted, false, JSON.stringify(leftover));
+          assert.equal(git(repo, ["rev-parse", "refs/heads/chore/not-landed"]), keptTip, "the unmerged branch stays");
+        } finally {
+          git(repo, ["update-ref", "refs/remotes/origin/main", originMain]);
+          git(repo, ["branch", "-q", "-m", "saved-main", "main"]);
+          git(repo, ["checkout", "-q", "main"]);
+        }
+      } finally {
+        h.githubDown = false;
+        git(repo, ["remote", "set-head", "origin", "main"]);
+      }
+    });
+
     await check("a base recorded by its local name is judged by the remote's copy, fetched, and not when it is gone", async () => {
       const b1 = await aw.createAgentWorktree(owner, { branch: "feat/b1" }, deps);
       commitFile(b1.path, "b1.txt", "b1\n", "b1");
