@@ -1089,6 +1089,19 @@ async function main() {
     }
   });
 
+  // Pi's native helpers must stay outside the asar, and a Pi upgrade that moves
+  // them must not leave the unpack rule pointing at nothing (pi 1.0 hoisted
+  // pi-tui out of pi-coding-agent's own node_modules).
+  {
+    const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
+    const piUnpack = manifest.build.asarUnpack.filter((pattern) => pattern.includes("@earendil-works"));
+    assert.ok(piUnpack.length > 0, "asarUnpack keeps a rule for Pi's native helpers");
+    for (const pattern of piUnpack) {
+      const matches = fs.globSync(pattern, { cwd: ROOT });
+      assert.ok(matches.length > 0, `asarUnpack pattern ${pattern} matches no installed file`);
+    }
+  }
+
   console.log("pi runtime policy: ok");
 }
 

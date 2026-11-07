@@ -276,7 +276,7 @@
     ],
     "asarUnpack": [
       "out/main/claude-follow-uninstall.js",
-      "node_modules/@earendil-works/pi-coding-agent/node_modules/**/*.node",
+      "node_modules/@earendil-works/pi-tui/native/**/*.node",
       "node_modules/pi-web-search/**",
       "node_modules/@vscode/ripgrep/**",
       "node_modules/@vscode/ripgrep-${os}-${arch}/**",
