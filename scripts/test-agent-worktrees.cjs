@@ -753,6 +753,12 @@ async function main() {
         ["an untracked file", () => fs.writeFileSync(path.join(regen.path, "notes.txt"), "mine\n"), () => fs.rmSync(path.join(regen.path, "notes.txt"))],
         ["a tracked edit", () => fs.writeFileSync(path.join(regen.path, "README.md"), "# edited\n"), () => git(regen.path, ["checkout", "--", "README.md"])],
         ["a secret in build output", () => fs.writeFileSync(path.join(regen.path, "dist", ".env.local"), "TOKEN=1\n"), () => fs.rmSync(path.join(regen.path, "dist", ".env.local"))],
+        // A checkout holds commits of its own, wherever it is made.
+        ...["dist/vendored", "node_modules/patched"].map((dir) => [
+          `a checkout made in ${dir}`,
+          () => execFileSync("git", ["init", "-q", path.join(regen.path, dir)]),
+          () => fs.rmSync(path.join(regen.path, dir), { recursive: true, force: true }),
+        ]),
       ]) {
         writeDuringRemoval(write);
         const back = await aw.removeAgentWorktree(terminalAgent, { workspaceId: regen.workspaceId }, deps);

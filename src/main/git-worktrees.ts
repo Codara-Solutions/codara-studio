@@ -614,8 +614,6 @@ export interface FingerprintRegenerable {
   entry(path: string): boolean;
   /** A file inside a regenerable folder that counts all the same: a secret written there. */
   kept(path: string): boolean;
-  /** A folder inside a regenerable one that is not walked at all (installed packages). */
-  skipped(path: string): boolean;
 }
 
 /**
@@ -627,9 +625,10 @@ export interface FingerprintRegenerable {
  * delete, and removing a link loses no data. The same digest before the
  * last check and after the move means nothing was written in between.
  * With `regenerable`, what a fresh checkout rebuilds counts as nothing
- * either, but for the files it keeps: an install, a cache or a tool
- * writing its own files there while the removal runs loses no data, and
- * must not put the folder back.
+ * either, but for the files it keeps and any checkout inside (a `.git`,
+ * which no removal may take): an install, a cache or a tool writing its
+ * own files there while the removal runs loses no data, and must not put
+ * the folder back.
  */
 export async function worktreeFingerprint(
   worktreePath: string,
@@ -667,13 +666,18 @@ export async function worktreeFingerprint(
   ): Promise<void> => {
     budget -= 1;
     if (budget < 0) throw new Error("It holds too many files to check again before deleting it.");
+    if (regenerated && basename(relative) === ".git") {
+      // A checkout made in it, or one gone: its own commits and changes
+      // show nowhere else. Present or not is enough, its files churn.
+      hash.update(`${code}\0${relative}\0${info ? "checkout" : "-"}\0`);
+      return;
+    }
     if (regenerated && (!info || !info.isDirectory()) && !regenerable!.kept(slashed(relative))) return;
     if (!info) {
       hash.update(`${code}\0${relative}\0-\0`);
       return;
     }
     if (info.isSymbolicLink()) return;
-    if (regenerated && info.isDirectory() && regenerable!.skipped(`${slashed(relative)}/`)) return;
     if (!info.isDirectory()) {
       // The change time and inode too: a write that keeps the size and sets
       // the old modification time back, or a file replaced by another,

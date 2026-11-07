@@ -676,7 +676,7 @@ function underPath(segments: readonly string[], path: readonly string[], isPacka
 /**
  * What the removal's change check leaves out, judged as its ignored-file
  * check judges them: regenerable entries, but for secret files written
- * inside one, and installed packages, never walked.
+ * inside one outside installed packages (where a key is the package's own).
  */
 export function fingerprintRegenerable(root: string, extra: readonly string[]): FingerprintRegenerable {
   const isPackageRoot = packageRootTester(root);
@@ -684,7 +684,6 @@ export function fingerprintRegenerable(root: string, extra: readonly string[]): 
     entry: (path) => isRegenerableIgnored(path, extra, isPackageRoot),
     kept: (path) =>
       isSecretFile(basename(path)) && !inDependencyStore(path) && !isRegenerableIgnored(path, extra),
-    skipped: (path) => inDependencyStore(path),
   };
 }
 
