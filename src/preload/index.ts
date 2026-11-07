@@ -45,6 +45,7 @@ import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-lef
 import type { ClaudeFollowStatus } from "@shared/claude-follow";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-delivery";
 import { agentBoardApi } from "./areas/agent-board";
+import { sessionRelayApi } from "./areas/session-relay";
 import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { keepAwakeApi } from "./areas/keep-awake";
@@ -1500,6 +1501,7 @@ const api = {
     },
   },
   agentBoard: agentBoardApi,
+  sessionRelay: sessionRelayApi,
   windowControls: {
     minimize: (): Promise<void> => ipcRenderer.invoke("window:minimize"),
     toggleMaximize: (): Promise<boolean> => ipcRenderer.invoke("window:toggleMaximize"),

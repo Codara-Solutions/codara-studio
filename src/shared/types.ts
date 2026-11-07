@@ -1944,7 +1944,10 @@ export type NotifyKind =
   | "git.ci-passed"
   // A worktree's repository setup command is new or changed, so it waits for
   // the user to run it (src/main/worktree-setup). One alert per setup.
-  | "worktree.setup-approval";
+  | "worktree.setup-approval"
+  // A caller asks to send a message to a session it did not start; it waits
+  // for the user's Send or Dismiss (src/main/session-relay).
+  | "session.relay";
 
 // Where clicking a notification (toast card, native notification, center
 // entry) navigates. Terminal targets reuse the TerminalAgentTarget shape.
@@ -1954,7 +1957,7 @@ export type NavigationTarget =
   | { type: "run"; runId: string; workspaceId?: string }
   | { type: "terminal"; workspaceId: string; tabId: string; paneId: string }
   | { type: "automation"; jobId: string; runId?: string; workspaceId?: string }
-  | { type: "workspace"; workspaceId: string; panel?: "git" };
+  | { type: "workspace"; workspaceId: string; panel?: "git" | "notifications" };
 
 // The one event shape every producer publishes and every surface consumes:
 // the in-app toast payload ("notification:in-app"), the native-notification
@@ -1981,6 +1984,9 @@ export interface NotifyEvent {
   // native notification carries it as its subtitle. Filled in by publish()
   // from the target's workspaceId when the producer does not set it.
   workspaceName?: string;
+  // Recorded in the center only: no toast, native notification or chime. For
+  // a burst from one source that the first event already announced.
+  centerOnly?: boolean;
 }
 
 // A NotifyEvent as persisted in the notification center's ring buffer.

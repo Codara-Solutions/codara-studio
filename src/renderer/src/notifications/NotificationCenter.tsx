@@ -33,6 +33,14 @@ import {
   type NotifyWorkspaceMeta,
 } from "./center-view";
 import { useNotificationCenter } from "./useNotificationCenter";
+import { relayIdOfSource } from "@shared/session-relay";
+import {
+  RELAY_OUTCOME_LABEL,
+  RelayApproval,
+  onOpenNotificationCenter,
+  useSessionRelays,
+  type RelayRowState,
+} from "./RelayApproval";
 
 // Notification center: a bell in the window chrome and the panel it opens
 // over the persisted history (main-side, see src/main/notify/center-store).
@@ -134,6 +142,8 @@ interface RowView {
   answer: AnswerState;
   // The head of a collapsed stack speaks for the whole stack.
   stackTitle: string | null;
+  // A message waiting for Send or Dismiss (session.relay), or how it ended.
+  relay: RelayRowState;
 }
 
 interface RowProps {
@@ -156,6 +166,8 @@ export default function NotificationCenter({
   const bellRef = useRef<HTMLButtonElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const center = useNotificationCenter(open);
+  const relayOf = useSessionRelays();
+  useEffect(() => onOpenNotificationCenter(() => setOpen(true)), []);
   const centerRef = useRef(center);
   centerRef.current = center;
   const [dnd, setDnd] = useState(false);
@@ -367,7 +379,13 @@ export default function NotificationCenter({
         close(false);
       },
       setRead: (entry, read) => centerRef.current.setRead([entry.id], read),
-      dismiss: (entry) => centerRef.current.dismiss([entry.id]),
+      dismiss: (entry) => {
+        // Removing a relay's row is the same answer as its Dismiss: no other
+        // surface could send it afterwards.
+        const relayId = entry.kind === "session.relay" ? relayIdOfSource(entry.sourceKey) : null;
+        if (relayId) void window.spark.sessionRelay.decide(relayId, "dismiss").catch(() => undefined);
+        centerRef.current.dismiss([entry.id]);
+      },
       toggleMenu: (entryId) => setMenuFor((current) => (current === entryId ? null : entryId)),
       mute: (entryId, key, label, durationMs) => {
         centerRef.current.mute(key, label, durationMs);
@@ -427,6 +445,7 @@ export default function NotificationCenter({
       question: runId && resolveQuestion ? resolveQuestion(runId) : null,
       answer,
       stackTitle: stack,
+      relay: relayOf(entry.kind === "session.relay" ? relayIdOfSource(entry.sourceKey) : null, Date.parse(entry.createdAt)),
     };
   };
 
@@ -806,7 +825,8 @@ const CenterRow = memo(function CenterRow({
   // Only a question that can still be answered gets a button; any other row
   // opens with a click on the row itself.
   let primary: { label: string; run: () => void } | null = null;
-  if (view.waiting) {
+  const relay = view.relay.pending;
+  if (view.waiting && entry.kind !== "session.relay") {
     if (entry.target.type === "terminal") {
       primary = { label: "Reply in terminal", run: () => actions.open(entry) };
     } else if (answerable && !showForm) {
@@ -871,6 +891,7 @@ const CenterRow = memo(function CenterRow({
     entry.settled ||
     Boolean(view.muted) ||
     Boolean(view.waiting) ||
+    Boolean(view.relay.outcome) ||
     Boolean(primary);
   const state = answered ? ", answered" : view.waiting ? ", waiting on you" : "";
 
@@ -890,7 +911,7 @@ const CenterRow = memo(function CenterRow({
       aria-label={`${title}${view.workspace.name ? `, ${view.workspace.name}` : ""}${state}${entry.read ? "" : ", unread"}${gone ? `, ${GONE_LABEL[gone].toLowerCase()}` : ""}`}
       style={{ ["--nc-tone" as string]: tone }}
       onClick={(e) => {
-        if (!openable || (e.target as Element).closest("button, input, .nc-answer, .nc-menu, .nc-earlier-list")) return;
+        if (!openable || (e.target as Element).closest("button, input, pre, .nc-answer, .nc-menu, .nc-earlier-list")) return;
         actions.open(entry);
       }}
       onKeyDown={(e) => {
@@ -965,7 +986,12 @@ const CenterRow = memo(function CenterRow({
                 {GONE_LABEL[gone]}
               </span>
             )}
-            {entry.settled && !gone && !answered && <span className="nc-tag">Resolved</span>}
+            {view.relay.outcome && (
+              <span className="nc-tag" data-kind={view.relay.outcome === "sent" ? "answered" : undefined}>
+                {RELAY_OUTCOME_LABEL[view.relay.outcome]}
+              </span>
+            )}
+            {entry.settled && !gone && !answered && !view.relay.outcome && <span className="nc-tag">Resolved</span>}
             {view.muted && view.waiting !== "seen" && (
               <span className="nc-tag" title={`Muted: ${view.muted.label}`}>
                 <BellOffIcon size={10} /> Muted
@@ -983,7 +1009,7 @@ const CenterRow = memo(function CenterRow({
             )}
           </div>
         )}
-        {body && <div className="nc-body">{body}</div>}
+        {relay ? <RelayApproval relay={relay} /> : body && <div className="nc-body">{body}</div>}
         {earlier.length > 0 && (
           <div className="nc-earlier">
             <button
@@ -1192,6 +1218,8 @@ function sameRow(a: RowProps, b: RowProps): boolean {
     a.view.waiting === b.view.waiting &&
     a.view.stackTitle === b.view.stackTitle &&
     a.view.answer === b.view.answer &&
+    a.view.relay.pending === b.view.relay.pending &&
+    a.view.relay.outcome === b.view.relay.outcome &&
     a.view.question?.questionMessageId === b.view.question?.questionMessageId &&
     a.view.question?.options.length === b.view.question?.options.length &&
     a.view.muted?.key === b.view.muted?.key &&
