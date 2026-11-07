@@ -188,6 +188,7 @@ import {
   type TerminalNotifyPaneEntry,
 } from "./terminal-agent-notify";
 import { registerAgentBoardIpc } from "./agent-board";
+import { registerSessionRelayIpc } from "./session-relay";
 import type {
   InlineAiCompletionRequest,
   InlineAiCompletionResponse,
@@ -3852,6 +3853,8 @@ export function registerIpc(): void {
   handle("terminalNotify:snapshot", async () => terminalAgentStateSnapshot());
   // The rail's Agents view: per-pane activity and its change ping.
   registerAgentBoardIpc(handle);
+  // Messages an outside caller asked to send, waiting for the user's Send.
+  registerSessionRelayIpc(handle);
 
   // Renderer reports what the user is looking at (focus + active workspace/
   // tab/run/pane) in one snapshot; the notify policy suppresses alerts for

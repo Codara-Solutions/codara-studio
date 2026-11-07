@@ -335,11 +335,12 @@ export function settleIds(list: NotificationCenterEntry[], ids: readonly string[
 }
 
 // At launch: every terminal pane of the previous session ended with it, so a
-// prompt one of them was showing can no longer be answered.
+// prompt one of them was showing can no longer be answered. Relayed messages
+// waited in memory only (src/main/session-relay), so theirs are gone too.
 export function settleTerminalQuestions(list: NotificationCenterEntry[]): boolean {
   let changed = false;
   for (const entry of list) {
-    if (entry.kind !== "terminal.agent.needs-input" || entry.settled) continue;
+    if ((entry.kind !== "terminal.agent.needs-input" && entry.kind !== "session.relay") || entry.settled) continue;
     entry.settled = true;
     entry.read = true;
     changed = true;

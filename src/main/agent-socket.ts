@@ -57,6 +57,8 @@ import {
 } from "./agent-sessions";
 import { buildLiveSessions } from "@shared/live-sessions";
 import { agentBoardActivity } from "./agent-board";
+import { parseRelayRequest } from "@shared/session-relay";
+import { handleSessionRelay } from "./session-relay";
 import { AGENT_SESSION_BRIEF_MAX_CHARS, AGENT_SESSION_MAX_LIVE, type AgentSessionRecord } from "@shared/agent-sessions";
 import {
   codexTrustOverride,
@@ -667,6 +669,7 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "worktree.remove",
   "session.start",
   "session.message",
+  "session.relay",
   "review.findings",
 ]);
 
@@ -697,6 +700,7 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "session.wait",
   "session.message",
   "session.list_all",
+  "session.relay",
 ]);
 
 // A terminal that makes a worktree changes worktrees like worktree.create.
@@ -798,6 +802,8 @@ async function dispatch(
         return await handleSessionMessage(params, id);
       case "session.list_all":
         return await handleSessionListAll(params, id);
+      case "session.relay":
+        return await handleSessionRelayRpc(params, id);
       case "terminal.write":
         return await handleTerminalWrite(params, id);
       case "terminal.close":
@@ -2383,6 +2389,44 @@ async function handleSessionListAll(params: Record<string, unknown>, id: JsonRpc
   const refusal = await agentSessionCallerRefusal(params, caller.workspaceId, caller.run, state);
   if (refusal) return errorResponse(id, ERR_FORBIDDEN, refusal.replace("start sessions", "list sessions"));
   return successResponse(id, { sessions: buildLiveSessions(agentBoardActivity(), state.workspaces) });
+}
+
+// A message for a session the caller did not start: it only waits for the
+// user's Send (session-relay/). An imported pull request may not even ask,
+// and a session.start id is resolved to its pane here.
+async function handleSessionRelayRpc(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const caller = await agentSessionCaller(params);
+  const state = await loadState();
+  const refusal = await agentSessionCallerRefusal(params, caller.workspaceId, caller.run, state);
+  if (refusal) return errorResponse(id, ERR_FORBIDDEN, refusal.replace("start sessions", "relay messages"));
+  const relayId = stringParam(params, "relayId");
+  if (relayId && params.text === undefined && params.target === undefined) {
+    const answer = await handleSessionRelay({ relayId, request: null });
+    return answer.error ? errorResponse(id, ERR_INVALID_PARAMS, answer.error) : successResponse(id, answer.result);
+  }
+  const request = parseRelayRequest(params);
+  if (typeof request !== "string") {
+    if (request.target.startsWith("as-")) {
+      const sessions = agentSessions();
+      await sessions.load();
+      const record = sessions.get(request.target);
+      if (record) request.target = record.paneId;
+    }
+    // The card shows where the call really came from, whatever sender it claims.
+    const workspace = (workspaceId: string | null | undefined) =>
+      state.workspaces.find((entry) => entry.id === workspaceId)?.name ?? "a workspace";
+    const pane = caller.paneId ? terminalPanePlacement(caller.paneId) : null;
+    if (caller.run) {
+      request.caller = { key: `run:${caller.run.id}`, label: `a Cora chat in ${workspace(caller.run.workspaceId)}` };
+    } else if (caller.paneId) {
+      const where = pane?.tabTitle ? `${workspace(caller.workspaceId)} \u00b7 ${pane.tabTitle}` : workspace(caller.workspaceId);
+      request.caller = { key: `pane:${caller.paneId}`, label: `an agent in ${where}` };
+    } else if (caller.process) {
+      request.caller = { key: `process:${caller.process}`, label: "outside Codara" };
+    }
+  }
+  const answer = await handleSessionRelay({ relayId: null, request });
+  return answer.error ? errorResponse(id, ERR_INVALID_PARAMS, answer.error) : successResponse(id, answer.result);
 }
 
 // Deliver text to a terminal pane's PTY. paneId is the pty session id, so this

@@ -11726,3 +11726,26 @@ button.st-list__row:hover,
   font-size: 10px;
   line-height: 1.35;
 }
+
+/* A relayed message waiting for Send or Dismiss: the exact text on an opaque
+   panel, scrolled rather than clamped, so nothing is approved unread. */
+.nc-relay-who,
+.nc-relay-reason,
+.nc-relay-note { color: var(--ink-dim); font-size: 11.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.nc-relay-who strong { color: var(--ink); font-weight: 600; }
+.nc-relay-note { color: var(--muted); }
+.nc-relay-text {
+  margin: 0;
+  max-height: 168px;
+  overflow: auto;
+  padding: 7px 9px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control, 7px);
+  background: var(--panel);
+  color: var(--ink);
+  font: 12px/1.45 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.nc-relay-text:focus-visible { outline: none; box-shadow: var(--focus-ring); }

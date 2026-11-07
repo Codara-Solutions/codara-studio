@@ -917,6 +917,48 @@ no parameters. Each entry has `id` (the pane id), `title` (the tab's title),
 that order, the latest first within each, at most 100. Only agents you run
 outside a Cora chat get it, and an agent in an imported pull request is refused.
 
+### Relaying a message, with your approval
+
+Only the agent that started a session can message it. Any other caller, such
+as an assistant you run outside Codara, uses `codara_session_relay` to ask
+you to send one for it. Nothing is sent until you press **Send**.
+
+| Parameter | What it is |
+|---|---|
+| `target` | The session's `id` from `codara_session_list_all` (a `codara_session_start` id works too). |
+| `text` | The message, up to 4,000 characters. |
+| `sender` | Who is asking, such as `Grok Bot`: letters, digits, spaces and `. _ ' -`, up to 40 characters. Names that pass for you or Codara (`you`, `me`, `user`, `etienne`, `codara`, `codara studio`, `studio`, `system`) are refused. |
+| `reason` | Optional, up to 300 characters, shown to you with the text. |
+| `relayId` | Alone, reads how an earlier relay stands: `pending`, `sent`, `dismissed`, `expired` or `undeliverable`. |
+
+The call returns a `relayId` and `status: "pending"`. You get a notification
+(in the notification center, and a native one) naming the sender, where the
+call really came from (an agent's workspace and tab, a Cora chat, or "outside
+Codara"), the target session and its workspace, the reason and the exact text,
+with **Send** and **Dismiss**. Send works only with a mouse click on it; Enter
+does not press it. Clicking the native notification or the toast opens the
+notification center on it; removing its row there dismisses it. Send types the text into the session as your next prompt, the way
+Codara submits any prompt there, prefixed with
+`[Relayed from <sender>, approved by you] `.
+
+Rules:
+
+- The call is refused, and nothing waits, when the target does not exist, has
+  ended, is not Claude Code or Codex, is working, is waiting for you, or has
+  text you are typing. If it became busy by the time you press Send, Send says
+  so and the message keeps waiting; if it ended, the message is dropped as
+  `undeliverable`.
+- The text is shown as plain text and never run or followed by Codara. Control
+  characters are removed, and a text, sender or reason with invisible
+  characters (zero-width, bidirectional, tag or blank characters) is refused,
+  so what you read is what is sent.
+- A relay waits 24 hours, then expires; one still waiting when Codara quits is
+  settled at the next launch. At most 20 wait at once, and 5 from one caller.
+  Only a caller's first waiting relay makes a native notification.
+- Every relay is logged in `~/.codarastudio/relay-log.jsonl`: time, sender,
+  caller, target, the first 200 characters and the outcome.
+- Agents in an imported pull request cannot relay, and no tool can press Send.
+
 ## Notifications
 
 Only in `studio` outside a Cora chat (a Cora run announces its own outcome).
