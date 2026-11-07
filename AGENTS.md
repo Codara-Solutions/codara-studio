@@ -21,8 +21,9 @@ of suites by area). `CONTRIBUTING.md` covers setup and pull requests.
 
 ## Verification before committing
 
-- `npm run typecheck` must pass (node, web, and e2e projects; CI runs all
-  three).
+- `npm run typecheck` must pass (node, web, e2e, and the bundled Pi
+  extension in `resources/pi-cora/` against the pinned Pi's types; CI runs
+  all four).
 - Run the unit suites relevant to what you touched with
   `npm test -- <regex>` (the registry globs `scripts/test-*.{cjs,mjs}`), for
   example `npm test -- step-lifecycle` or `npm test -- loom-steps` for

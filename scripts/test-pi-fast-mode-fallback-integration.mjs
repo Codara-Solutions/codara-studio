@@ -11,6 +11,7 @@
 // registered in-process stands in for Anthropic, so nothing leaves the machine.
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -19,7 +20,16 @@ import ts from "typescript";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 const sdkDir = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
-const { AssistantMessageEventStream } = await import(pathToFileURL(join(sdkDir, "../node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js")).href);
+// pi-ai is nested under pi-coding-agent when another copy is hoisted, and
+// hoisted otherwise; load the copy the SDK itself resolves.
+function piAiModuleUrl(...segments) {
+  for (let dir = sdkDir; ; dir = dirname(dir)) {
+    const candidate = join(dir, "node_modules", "@earendil-works", "pi-ai", ...segments);
+    if (existsSync(candidate)) return pathToFileURL(candidate).href;
+    if (dirname(dir) === dir) throw new Error(`pi-ai ${segments.join("/")} not found above ${sdkDir}`);
+  }
+}
+const { AssistantMessageEventStream } = await import(piAiModuleUrl("dist", "utils", "event-stream.js"));
 async function loadTs(file, imports = {}) {
   const exports = {};
   const source = await readFile(new URL(file, import.meta.url), "utf8");

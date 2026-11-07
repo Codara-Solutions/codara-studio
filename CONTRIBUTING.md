@@ -70,7 +70,7 @@ Read these first, in this order:
 Before you push:
 
 ```sh
-npm run typecheck           # node, web and e2e projects; CI runs all three
+npm run typecheck           # node, web, e2e and pi-cora projects; CI runs all four
 npm test -- <regex>         # the suites for the area you touched
 ```
 
@@ -129,7 +129,7 @@ allowlist its own finding anyway.
 - Open it against `main` and fill in the template: what changed and why,
   how you tested it, anything the reviewer should know. Add screenshots for
   UI changes.
-- CI (`.github/workflows/ci.yml`) runs the three typechecks, a build and
+- CI (`.github/workflows/ci.yml`) runs the four typechecks, a build and
   every unit suite on macOS. Keep it green.
 - Keep it small. `PR hygiene` (`scripts/check-pr-hygiene.cjs`) counts the
   added and deleted lines, leaving out lockfiles and `docs/`: above 800 it

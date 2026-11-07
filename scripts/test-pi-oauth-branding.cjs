@@ -18,18 +18,20 @@ const { pathToFileURL } = require("node:url");
 
 const ROOT = path.resolve(__dirname, "..");
 const PI_ROOT = path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-agent");
-const OAUTH_DIR = path.join(
-  PI_ROOT, "node_modules", "@earendil-works", "pi-ai", "dist", "auth", "oauth",
-);
-const PAGE = path.join(OAUTH_DIR, "oauth-page.js");
-// npm may also hoist a second copy of pi-ai to the top level. Codara's runtime
-// resolver imports the nested one, but a half-patched tree is a trap: the next
-// install could hoist differently and start serving the unbranded copy.
-const ALL_PAGES = [
-  PAGE,
-  path.join(ROOT, "node_modules", "@earendil-works", "pi-ai",
-    "dist", "auth", "oauth", "oauth-page.js"),
-].filter((file) => fs.existsSync(file));
+// Codara's runtime resolver (resolvePiAiModulePath) imports pi-ai from
+// pi-coding-agent's own node_modules when npm nested it there, and the
+// top-level copy otherwise. A half-patched tree is a trap either way: the next
+// install could lay pi-ai out differently and start serving the unbranded copy.
+const PI_AI_ROOTS = [
+  path.join(PI_ROOT, "node_modules", "@earendil-works", "pi-ai"),
+  path.join(ROOT, "node_modules", "@earendil-works", "pi-ai"),
+].filter((root) => fs.existsSync(path.join(root, "package.json")));
+const PI_AI_ROOT = PI_AI_ROOTS[0] ?? PI_AI_ROOTS[1];
+const OAUTH_DIR = PI_AI_ROOT ? path.join(PI_AI_ROOT, "dist", "auth", "oauth") : "";
+const PAGE = PI_AI_ROOT ? path.join(PI_AI_ROOT, "dist", "utils", "oauth-page.js") : "(pi-ai not installed)";
+const ALL_PAGES = PI_AI_ROOTS
+  .map((root) => path.join(root, "dist", "utils", "oauth-page.js"))
+  .filter((file) => fs.existsSync(file));
 
 // The path length of the Pi mark's outer glyph. Distinctive enough to identify
 // the vendor's artwork wherever it turns up.
@@ -117,17 +119,24 @@ async function main() {
     assert.ok(nasty.includes("&lt;script&gt;"));
   });
 
-  // Every provider flow imports the same module; if one ever stopped, it would
-  // start showing Pi's page again without any of the checks above noticing.
+  // Every browser sign-in renders this one module, through the shared callback
+  // server or (ChatGPT) directly; if one ever stopped, it would start showing
+  // Pi's page again without any of the checks above noticing.
   check("every provider flow renders through this page", () => {
-    const flows = fs
-      .readdirSync(OAUTH_DIR)
-      .filter((name) => name.endsWith(".js") && name !== "oauth-page.js");
-    const importers = flows.filter((name) =>
-      fs.readFileSync(path.join(OAUTH_DIR, name), "utf8").includes("./oauth-page.js"));
-    assert.ok(importers.length >= 4, `only ${importers.length} provider flow(s) import the page`);
+    const read = (name) => fs.readFileSync(path.join(OAUTH_DIR, name), "utf8");
+    const flows = fs.readdirSync(OAUTH_DIR).filter((name) => name.endsWith(".js"));
+    const pageImporters = flows.filter((name) => read(name).includes("/utils/oauth-page.js"));
+    for (const name of ["callback-server.js", "openai-chatgpt.js"]) {
+      assert.ok(pageImporters.includes(name), `${name} does not render through the shared page`);
+    }
+    const ownServers = flows.filter((name) => /\bcreateServer\(/.test(read(name)));
+    for (const name of ownServers) {
+      assert.ok(pageImporters.includes(name), `${name} serves its own callback without the shared page`);
+    }
+    const serverUsers = flows.filter((name) => read(name).includes("./callback-server.js"));
+    assert.ok(serverUsers.length >= 3, `only ${serverUsers.length} provider flow(s) use the callback server`);
     for (const provider of ["anthropic.js", "openai-codex.js"]) {
-      assert.ok(importers.includes(provider), `${provider} does not render through the shared page`);
+      assert.ok(serverUsers.includes(provider), `${provider} does not render through the shared page`);
     }
   });
 
