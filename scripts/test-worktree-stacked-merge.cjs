@@ -518,6 +518,14 @@ async function main() {
           const notRemoved = await aw.removeAgentWorktree(other, { workspaceId: kept.workspaceId }, deps);
           assert.equal(notRemoved.code, "WORKTREE_TARGET_NOT_FOUND", JSON.stringify(notRemoved));
           assert.ok(fs.existsSync(kept.path) && git(repo, ["rev-parse", "refs/heads/chore/not-landed"]) === keptTip);
+          // Its folder deleted by hand and no base recorded: only the branch
+          // is left, and HEAD at its tip proves nothing, so it stays.
+          h.state.workspaces.find((entry) => entry.id === kept.workspaceId).copyBranch.baseBranch = "HEAD";
+          fs.rmSync(kept.path, { recursive: true, force: true });
+          const leftover = await aw.removeAgentWorktree(other, { workspaceId: kept.workspaceId }, deps);
+          assert.equal(leftover.alreadyRemoved, true, JSON.stringify(leftover));
+          assert.equal(leftover.branchDeleted, false, JSON.stringify(leftover));
+          assert.equal(git(repo, ["rev-parse", "refs/heads/chore/not-landed"]), keptTip, "the unmerged branch stays");
         } finally {
           git(repo, ["update-ref", "refs/remotes/origin/main", originMain]);
           git(repo, ["branch", "-q", "-m", "saved-main", "main"]);

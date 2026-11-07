@@ -3173,14 +3173,16 @@ async function removeLocked(
       if (verdict.alreadyRemoved) {
         // Only the branch is left: delete it only when its current tip is
         // itself merged.
+        const recordedBase = workspace.copyBranch!.baseBranch;
+        // Never HEAD or the main checkout's branch: detached at this tip, it
+        // would prove the branch merged. No default branch keeps it.
+        const baseName =
+          recordedBase && recordedBase !== "HEAD" ? recordedBase : await resolveMergeDefaultBranch(repo);
         const target = input.target?.trim()
           ? await resolveExplicitTarget(ctx, input.target, branch)
-          : await resolveTarget(
-              ctx,
-              workspace.copyBranch!.baseBranch && workspace.copyBranch!.baseBranch !== "HEAD"
-                ? workspace.copyBranch!.baseBranch
-                : await resolveDefaultBranch(repo),
-            );
+          : baseName
+            ? await resolveTarget(ctx, baseName)
+            : { name: "origin/HEAD", commit: null };
         if (target.commit) {
           const merged =
             (await isAncestor(repo, currentTip, target.commit)) ||
