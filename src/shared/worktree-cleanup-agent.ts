@@ -40,7 +40,13 @@ export interface WorktreeAdviceFacts {
   dirty: { tracked: number; untracked: number; inProgress: string | null } | null;
   /** The full check's local work, ignored files included; null when there is none or it was not read. */
   localWork: WorktreeLocalWork | null;
-  merge: { state: WorktreeMergeState; proof?: WorktreeMergeProof; target?: string };
+  merge: { state: WorktreeMergeState; proof?: WorktreeMergeProof; target?: string; via?: number[] };
+  /**
+   * The open tab of the agent that made it, in another folder, which no
+   * longer holds it (its work is merged and committed), as words such as
+   * `the tab “Coordinator” in Cloud`: named in the reason.
+   */
+  makerOpen?: string;
   /** Commits the base lacks. */
   ahead: number;
   pullRequest: { number: number; state: AgentPullRequestState } | null;
@@ -134,13 +140,15 @@ export function adviseWorktree(facts: WorktreeAdviceFacts, now: number, staleDay
   const idle = days === null ? "no known activity" : days === 0 ? "active today" : `no activity for ${plural(days, "day")}`;
   if (facts.merge.state === "merged") {
     if (work && onlyIgnoredWork(work)) return review(`Merged, but it holds ${ignoredText(work)}.`);
+    const via = facts.merge.via?.length ? `, which landed through ${facts.merge.via.map((n) => `#${n}`).join(", then ")}` : "";
     const how =
       facts.merge.proof === "pull-request"
-        ? `merged through pull request${pr ? ` #${pr.number}` : ""}`
+        ? `merged through pull request${pr ? ` #${pr.number}` : ""}${via}`
         : facts.merge.proof === "content-in-target"
           ? `its changes are in ${facts.merge.target ?? "the base branch"} (squash merge)`
           : `merged into ${facts.merge.target ?? "the base branch"}`;
-    return { advice: "safe", reason: `${how.charAt(0).toUpperCase()}${how.slice(1)}, clean and idle.` };
+    const maker = facts.makerOpen ? ` The agent that made it still has ${facts.makerOpen} open, but none of its work is left here.` : "";
+    return { advice: "safe", reason: `${how.charAt(0).toUpperCase()}${how.slice(1)}, clean and idle.${maker}` };
   }
   if (facts.merge.state === "base") {
     const base = facts.merge.target ? `the base branch ${facts.merge.target}` : "the base branch";

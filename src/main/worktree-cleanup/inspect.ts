@@ -37,6 +37,8 @@ import {
   populatedSubmodules,
   resolveDefaultBranch,
 } from "../git-worktrees";
+import { proveByMergedPullRequestStack } from "../merged-pull-request-stack";
+import { isKeptBranch } from "./kept-branches";
 import { setupProvidedEntries } from "../worktree-setup/links";
 import { folderIdentity } from "../worktree-folders";
 
@@ -59,7 +61,9 @@ export interface RepoPullRequests {
     url: string;
     headRefName: string;
     headRefOid: string;
+    baseRefName?: string;
     isCrossRepository: boolean;
+    mergeCommitOid?: string | null;
   }>;
 }
 
@@ -105,9 +109,6 @@ export interface WorktreeCleanupDeps {
 
 export const ROW_BUDGET_MS = 12_000;
 const MAX_LISTED = 20;
-// Branch names that stay after a removal even when merged: deleting a long
-// lived branch someone checked out in a worktree is never what cleanup means.
-const PROTECTED_BRANCHES = new Set(["main", "master", "develop", "development", "trunk", "staging", "production"]);
 
 // ── Paths ──────────────────────────────────────────────────────────────────
 
@@ -202,8 +203,38 @@ export interface RepoContext {
   tracking: Map<string, BranchTracking>;
   targets: Map<string, Promise<{ name: string; commit: string } | null>>;
   pullRequests: RepoPullRequests | null;
+  /**
+   * A branch's commit as the remote has it now (not the last fetch), asked
+   * once per scan; null when it is gone or the remote did not answer. A
+   * fake in tests. Absent: asked with git ls-remote.
+   */
+  remoteHeads?: Map<string, Promise<string | null>>;
   /** Why its base branch or branch tracking could not be read, when they could not. */
   error?: string;
+}
+
+const LS_REMOTE_TIMEOUT_MS = 15_000;
+
+// The branch on origin now, the remote whose pull requests are judged. Its
+// tracking ref can be stale: deleted or force-pushed on GitHub since the
+// last fetch.
+function remoteHead(repo: RepoContext, branch: string): Promise<string | null> {
+  repo.remoteHeads ??= new Map();
+  let pending = repo.remoteHeads.get(branch);
+  if (!pending) {
+    pending = runGit(repo.root, ["ls-remote", "--heads", "--end-of-options", "origin", `refs/heads/${branch}`], {
+      timeout: LS_REMOTE_TIMEOUT_MS,
+    }).then(
+      ({ stdout }) => {
+        const line = stdout.split(/\r?\n/).find((entry) => entry.endsWith(`\trefs/heads/${branch}`));
+        const oid = line?.split("\t")[0]?.trim().toLowerCase() ?? "";
+        return /^[0-9a-f]{40,64}$/.test(oid) ? oid : null;
+      },
+      () => null,
+    );
+    repo.remoteHeads.set(branch, pending);
+  }
+  return pending;
 }
 
 interface WorktreeListing {
@@ -327,10 +358,7 @@ function shortBranch(target: string): string {
   return target.replace(/^[^/]+\//, "");
 }
 
-/** A long-lived branch, or the base itself, which cleanup never deletes even when merged. */
-export function isKeptBranch(branch: string, target: string | undefined | null): boolean {
-  return PROTECTED_BRANCHES.has(branch) || branch === shortBranch(target ?? "");
-}
+export { isKeptBranch };
 
 // ── Linked workspaces ──────────────────────────────────────────────────────
 
@@ -645,6 +673,16 @@ export interface MergeFacts {
   ahead?: number;
   behind?: number;
   pullRequest?: { number: number; url: string };
+  /** With a pull-request proof: the stacked pull requests that carried it into the base, nearest first. */
+  via?: number[];
+}
+
+async function aheadBehind(root: string, base: string, head: string): Promise<{ ahead: number; behind: number }> {
+  const counts = (await readGitText(root, ["rev-list", "--left-right", "--count", `${base}...${head}`])).split(/\s+/).map(Number);
+  return {
+    behind: Number.isFinite(counts[0]) ? counts[0] : 0,
+    ahead: Number.isFinite(counts[1]) ? counts[1] : 0,
+  };
 }
 
 export async function mergeFacts(
@@ -656,18 +694,73 @@ export async function mergeFacts(
   if (!target || !head) return { state: "unknown", ...(target ? { target: target.name } : {}) };
   const base = { target: target.name, targetCommit: target.commit };
   if (branch && (branch === shortBranch(target.name) || branch === target.name)) return { state: "base", ...base };
-  const counts = (await readGitText(repo.root, ["rev-list", "--left-right", "--count", `${target.commit}...${head}`]))
-    .split(/\s+/)
-    .map(Number);
-  const behind = Number.isFinite(counts[0]) ? counts[0] : 0;
-  const ahead = Number.isFinite(counts[1]) ? counts[1] : 0;
+  const { ahead, behind } = await aheadBehind(repo.root, target.commit, head);
   const facts = { ...base, ahead, behind };
   if (ahead === 0 && (await isAncestor(repo.root, head, target.commit))) return { state: "merged", proof: "ancestor", ...facts };
-  const merged = (repo.pullRequests?.merged ?? []).find(
-    (pr) => pr.headRefOid.toLowerCase() === head && !pr.isCrossRepository && (!branch || pr.headRefName === branch),
-  );
-  if (merged) {
-    return { state: "merged", proof: "pull-request", pullRequest: { number: merged.number, url: merged.url }, ...facts };
+  // A base that is not the default branch (a stacked pull request's branch,
+  // often deleted once merged) can lag behind where the work went. The
+  // default branch, as the remote has it, counts as well.
+  const fallback = repo.base;
+  const onDefault = Boolean(fallback && branch && (branch === shortBranch(fallback.name) || branch === fallback.name));
+  if (fallback && !onDefault && fallback.commit !== target.commit && (await isAncestor(repo.root, head, fallback.commit))) {
+    const counts = await aheadBehind(repo.root, fallback.commit, head);
+    return { state: "merged", proof: "ancestor", target: fallback.name, targetCommit: fallback.commit, ...counts };
+  }
+  // A merged pull request whose head holds this tip and that landed: into
+  // the default branch, into a base that still holds its merge, or into a
+  // branch whose own pull request then landed (a stack).
+  const all = repo.pullRequests?.merged ?? [];
+  // A detached HEAD is judged by the branches of the pull requests with it as head.
+  const branches = branch ? [branch] : [...new Set(all.filter((pr) => pr.headRefOid.toLowerCase() === head).map((pr) => pr.headRefName))];
+  if (repo.pullRequests && !onDefault) {
+    // The worktree's own base, when it is a remote branch, as trusted as the
+    // ancestor proof above trusts it; any other branch's tracking ref may be
+    // stale (deleted or force-pushed since the last fetch) and proves nothing.
+    // A base recorded by its local name (feat/base) is judged by the
+    // remote's copy too.
+    const targetIsRemote = await refPresent(repo.root, `refs/remotes/${target.name}`);
+    // Pull requests are origin's, so only origin's copy of the base can hold
+    // their merges. A base on another remote (upstream/feat/x, a fork) gives
+    // no such proof: its feat/x is not the branch the pull request merged into.
+    const ownBase = !targetIsRemote ? target.name : target.name.startsWith("origin/") ? target.name.slice("origin/".length) : null;
+    // Only as origin has it now: a stale tracking ref may still hold a merge
+    // the branch lost (deleted unmerged, force-pushed). Its commit must be
+    // here too, or the merge cannot be found in it.
+    const ownCommit = async (): Promise<string | null> => {
+      if (!ownBase) return null;
+      const now = await remoteHead(repo, ownBase);
+      return now && (await revParse(repo.root, `${now}^{commit}`)) ? now : null;
+    };
+    for (const name of branches) {
+      const stacked = await proveByMergedPullRequestStack({
+        repo: repo.root,
+        tip: head,
+        branch: name,
+        mergedFor: async (headName) => all.filter((pr) => pr.headRefName === headName),
+        landedBases: new Set(fallback ? [shortBranch(fallback.name)] : []),
+        defaultCommit: fallback?.commit ?? null,
+        remoteCommit: async (base) => (ownBase !== null && base === ownBase ? ownCommit() : null),
+      });
+      if (!stacked) continue;
+      // Judged against where it landed, never a local-only base (the rail's
+      // unattended removal asks for a remote one): the default branch, or
+      // the remote's copy of the worktree's own base.
+      const where =
+        stacked.landedIn.kind === "remote-base"
+          ? { name: `origin/${stacked.landedIn.branch}`, commit: stacked.landedIn.commit }
+          : fallback;
+      const landed =
+        !where || (where.name === target.name && where.commit === target.commit)
+          ? facts
+          : { target: where.name, targetCommit: where.commit, ...(await aheadBehind(repo.root, where.commit, head)) };
+      return {
+        state: "merged",
+        proof: "pull-request",
+        pullRequest: stacked.pullRequest,
+        ...(stacked.via.length ? { via: stacked.via } : {}),
+        ...landed,
+      };
+    }
   }
   if ((await contentInTarget(repo.root, head, target.commit)) === true) {
     return { state: "merged", proof: "content-in-target", ...facts };
@@ -852,6 +945,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     state: merge.state,
     ...(merge.proof ? { proof: merge.proof } : {}),
     ...(merge.target ? { target: merge.target } : {}),
+    ...(merge.via ? { via: merge.via } : {}),
   };
   if (merge.state === "unmerged" || merge.state === "unknown") {
     const commits = head && merge.targetCommit ? await commitSubjectsBetween(repo.root, merge.targetCommit, head, 10) : [];

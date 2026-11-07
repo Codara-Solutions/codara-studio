@@ -1253,6 +1253,9 @@ async function main() {
     git(twin.path, ["checkout", "-q", "--detach"]);
     await blocked(twin.workspaceId, "WORKTREE_DETACHED_HEAD", "a detached HEAD");
     git(twin.path, ["checkout", "-q", "-b", "agent/elsewhere"]);
+    // Unmerged work on the other branch (a merged one is removable: see
+    // test-worktree-stacked-merge.cjs).
+    commitFile(twin.path, "elsewhere.txt", "unmerged\n", "elsewhere");
     const switched = await blocked(twin.workspaceId, "WORKTREE_BRANCH_MISMATCH", "another branch");
     assert.equal(switched.details.checkedOutBranch, "agent/elsewhere");
     git(twin.path, ["checkout", "-q", "agent/twin"]);

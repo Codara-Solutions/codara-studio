@@ -1097,9 +1097,16 @@ the `blockers` and a `hint`:
   created** in Settings > Git; GitHub issue and pull-request workspaces
   are removed from the rail only;
 - its exact last commit is merged into the target (its base, or `target`):
-  the target contains it, a merged pull request from the same repository has
-  it as head, or merging it into the target changes nothing (a squash merge).
-  A `target` the agent names must be another local or remote-tracking
+  the target contains it, the default branch contains it (unless the agent
+  names `target`; this covers a stacked base GitHub deleted once merged), a
+  merged pull request from the same repository has it as head or a later
+  head and that pull request landed, or merging it into the target changes
+  nothing (a squash merge). A pull request landed when it was merged into
+  the default branch (or the named `target`), its merge commit is in the
+  default branch or still in the worktree's own base on the remote, or the merged pull
+  request of its base branch took that merge, followed up the stack. A
+  recorded base that no longer exists is replaced by the default branch. A
+  `target` the agent names must be another local or remote-tracking
   branch, never the worktree's own branch, its pushed copy or a commit id;
 - it has no uncommitted or untracked files (edits hidden by
   `assume-unchanged` or `skip-worktree` count), no merge or rebase in
@@ -1133,10 +1140,10 @@ The `code` is the first blocker; `blockers` lists them all, and a dry run or
 | `WORKTREE_USER_CREATED` | You created it and agents may not remove your worktrees. | Ask you. |
 | `WORKTREE_ORIGIN_MANAGED` | It is a GitHub issue or pull-request workspace. | Leave it; you remove it from the rail. |
 | `WORKTREE_OWNED_BY_ACTIVE_RUN` | Another Cora run created it and is still active (`details.ownerRunId`). | Leave it to that run; ask you if it must go now. |
-| `WORKTREE_OWNED_BY_LIVE_AGENT` | An agent in another terminal created it and that terminal is still open (`details.ownerPaneId`). | Leave it to that agent, or ask you. |
+| `WORKTREE_OWNED_BY_LIVE_AGENT` | An agent in another terminal created it and that terminal is still open (`details.ownerPaneId`). | Leave it to that agent, or ask you. When it is merged and nothing else holds it, the hint points to `codara_worktree_cleanup`, where you approve the removal. |
 | `WORKTREE_NOT_MANAGED` | The folder cannot be read, so it may still hold work, or it is no longer a git worktree in Codara's worktrees folder. | Ask you. |
 | `WORKTREE_LOCKED` | `git worktree lock` protects it. | Ask you. |
-| `WORKTREE_DETACHED_HEAD`, `WORKTREE_BRANCH_MISMATCH` | It is not on the branch Codara recorded. | Check out that branch again, or ask you. |
+| `WORKTREE_DETACHED_HEAD`, `WORKTREE_BRANCH_MISMATCH` | It is not on the branch Codara recorded, and the branch it has checked out is not proven merged (or is a long-lived, base or default branch). A switched-to branch that is proven merged does not block: the removal deletes it, deletes the recorded branch only when its own tip is merged, and lists both in `branches` (`checkedOutBranch` names the one checked out). | Check out that branch again, or ask you. |
 | `WORKTREE_DIRTY` | Uncommitted, untracked or hidden (`assume-unchanged`, `skip-worktree`) changes. | Commit or discard them yourself. |
 | `WORKTREE_OPERATION_IN_PROGRESS` | A merge, rebase, cherry-pick or similar is in progress. | Finish or abort it. |
 | `WORKTREE_IGNORED_FILES` | Ignored files that are not build output or caches. | Move them, or pass `discardIgnoredFiles: true`. |

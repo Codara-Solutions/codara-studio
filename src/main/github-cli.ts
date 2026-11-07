@@ -131,6 +131,7 @@ const MERGED_PULL_REQUEST_JSON_FIELDS = [
   "headRefOid",
   "baseRefName",
   "isCrossRepository",
+  "mergeCommit",
 ].join(",");
 export const GITHUB_MERGED_PULL_REQUEST_LIST_LIMIT = 100;
 
@@ -141,6 +142,8 @@ export interface GitHubMergedPullRequest {
   headRefOid: string;
   baseRefName: string;
   isCrossRepository: boolean;
+  /** The commit the merge made on the base branch; null when GitHub gave none. */
+  mergeCommitOid?: string | null;
 }
 
 export type GitHubCliErrorCode =
@@ -1293,7 +1296,7 @@ function parseMergedPullRequests(stdout: string): GitHubMergedPullRequest[] {
   const out: GitHubMergedPullRequest[] = [];
   for (const entry of value) {
     if (!isRecord(entry)) continue;
-    const { number, url, headRefName, headRefOid, baseRefName, isCrossRepository } = entry;
+    const { number, url, headRefName, headRefOid, baseRefName, isCrossRepository, mergeCommit } = entry;
     if (
       typeof number !== "number" ||
       !Number.isSafeInteger(number) ||
@@ -1318,9 +1321,15 @@ function parseMergedPullRequests(stdout: string): GitHubMergedPullRequest[] {
       headRefOid: headRefOid.toLowerCase(),
       baseRefName,
       isCrossRepository,
+      mergeCommitOid: mergeCommitOid(mergeCommit),
     });
   }
   return out;
+}
+
+function mergeCommitOid(value: unknown): string | null {
+  const oid = isRecord(value) ? value.oid : null;
+  return typeof oid === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(oid) ? oid.toLowerCase() : null;
 }
 
 function parsePullRequestSummaries(

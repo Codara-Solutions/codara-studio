@@ -265,7 +265,7 @@ async function main() {
       git(entry.dir, ["push", "-q", "-u", "origin", entry.branch]);
       h.pullRequests = {
         open: [],
-        merged: [{ number: 7, url: "https://example.invalid/7", headRefName: entry.branch, headRefOid: tip, isCrossRepository: false }],
+        merged: [{ number: 7, url: "https://example.invalid/7", headRefName: entry.branch, headRefOid: tip, baseRefName: "main", isCrossRepository: false }],
       };
       assert.equal((await stateOf(entry.id)).proof, "pull-request");
       await assertGone(entry);
@@ -393,7 +393,7 @@ async function main() {
       git(entry.dir, ["push", "-q", "origin", entry.branch]);
       h.pullRequests = {
         open: [],
-        merged: [{ number: 8, url: "https://example.invalid/8", headRefName: entry.branch, headRefOid: old, isCrossRepository: false }],
+        merged: [{ number: 8, url: "https://example.invalid/8", headRefName: entry.branch, headRefOid: old, baseRefName: "main", isCrossRepository: false }],
       };
       await assertStays(entry);
       h.pullRequests = { open: [], merged: [] };

@@ -48,6 +48,9 @@ import {
   rollbackCreatedWorktree,
 } from "./workspace-state-edits";
 import type { GitHubMergedPullRequest } from "./github-cli";
+import { PROTECTED_REMOTE_BRANCHES } from "@shared/worktree-cleanup-agent";
+import { isKeptBranch } from "./worktree-cleanup/kept-branches";
+import { proveByMergedPullRequestStack } from "./merged-pull-request-stack";
 
 // Agent-managed worktrees: the logic behind the worktree.create/list/remove
 // agent-socket methods and the codara_worktree_* MCP tools.
@@ -1623,6 +1626,10 @@ export interface RemovalVerdict {
   details: Record<string, unknown>;
   warnings: string[];
   alreadyRemoved: boolean;
+  // The worktree has another branch checked out than the recorded one: the
+  // tip judged is that branch's, and the recorded branch's own tip is merged
+  // or not.
+  switched?: { branch: string; recordedTip: string | null; recordedMerged: boolean };
   dirty: { tracked: number; untracked: number; ignoredBlocking: string[]; inProgress: string | null };
   running: { paneIds: string[]; runIds: string[]; processes: number };
 }
@@ -1756,6 +1763,23 @@ async function fetchTargetOnce(ctx: VerifyContext, target: string): Promise<stri
   return pending;
 }
 
+// True only when the remote answers and does not have the branch; an
+// unreachable remote says nothing.
+async function remoteBranchGone(ctx: VerifyContext, target: string): Promise<boolean> {
+  const remote = await splitRemoteRef(ctx.scope.repoCwd, target);
+  if (!remote) return false;
+  try {
+    const { stdout } = await runGit(
+      ctx.scope.repoCwd,
+      ["ls-remote", "--heads", "--end-of-options", remote.remote, `refs/heads/${remote.branch}`],
+      { timeout: FETCH_TIMEOUT_MS },
+    );
+    return !stdout.split(/\r?\n/).some((line) => line.endsWith(`\trefs/heads/${remote.branch}`));
+  } catch {
+    return false;
+  }
+}
+
 function shortBranch(target: string): string {
   return target.replace(/^[^/]+\//, "");
 }
@@ -1793,6 +1817,8 @@ export async function verifyRemovable(
   const block = (code: WorktreeCode) => {
     if (!verdict.blockers.includes(code)) verdict.blockers.push(code);
   };
+
+  let switched: string | null = null;
 
   // Identity and eligibility.
   const createdBy = copy.createdBy;
@@ -1855,8 +1881,27 @@ export async function verifyRemovable(
   if (registration.detached || !registration.branch) {
     block("WORKTREE_DETACHED_HEAD");
   } else if (registration.branch !== `refs/heads/${copy.branch}`) {
-    block("WORKTREE_BRANCH_MISMATCH");
-    verdict.details.checkedOutBranch = registration.branch.replace(/^refs\/heads\//, "");
+    // Its agent switched it to another branch: removable only once that
+    // branch is proven merged too (below).
+    const checkedOut = registration.branch.replace(/^refs\/heads\//, "");
+    verdict.details.checkedOutBranch = checkedOut;
+    // Never a long-lived branch, the base or the default branch: removal
+    // would delete it.
+    const base = copy.baseBranch ? shortBranch(copy.baseBranch) : null;
+    const defaultBranch = await resolveDefaultBranch(scope.repoCwd);
+    if (
+      checkedOut === base ||
+      checkedOut === copy.baseBranch ||
+      checkedOut === defaultBranch ||
+      checkedOut === shortBranch(defaultBranch) ||
+      isKeptBranch(checkedOut, copy.baseBranch) ||
+      PROTECTED_REMOTE_BRANCHES.has(checkedOut) ||
+      (await validateBranchName(scope.repoCwd, checkedOut)) !== null
+    ) {
+      block("WORKTREE_BRANCH_MISMATCH");
+    } else {
+      switched = checkedOut;
+    }
   }
 
   // Local work.
@@ -1956,12 +2001,27 @@ export async function verifyRemovable(
   }
 
   // Merge proof for the exact tip.
-  verdict.tip = await revParse(scope.repoCwd, `refs/heads/${copy.branch}`);
+  verdict.tip = await revParse(scope.repoCwd, `refs/heads/${switched ?? copy.branch}`);
   verdict.head = await revParse(path, "HEAD");
   if (!verdict.tip || verdict.tip !== verdict.head) {
     block("WORKTREE_BRANCH_MISMATCH");
   }
-  if (verdict.tip) await proveMerged(ctx, verdict, options);
+  if (verdict.tip) await proveMerged(ctx, verdict, options, switched ?? undefined);
+  if (switched) {
+    // The branch checked out instead must be merged itself; the recorded
+    // branch is kept unless its own tip is merged as well.
+    if (verdict.mergeStatus !== "merged") block("WORKTREE_BRANCH_MISMATCH");
+    const recordedTip = await revParse(scope.repoCwd, `refs/heads/${copy.branch}`);
+    let recordedMerged = false;
+    // Under the lock (pinned) the first answer stands: the recorded branch
+    // is deleted only by compare-and-delete at the tip proven then.
+    if (recordedTip && verdict.mergeStatus === "merged" && !options.pinned) {
+      const recorded: RemovalVerdict = { ...verdict, tip: recordedTip, proof: undefined, blockers: [], details: {}, warnings: [] };
+      await proveMerged(ctx, recorded, { ...options, pinned: undefined }, copy.branch);
+      recordedMerged = recorded.mergeStatus === "merged";
+    }
+    verdict.switched = { branch: switched, recordedTip, recordedMerged };
+  }
 
   // Nothing using it.
   const paneIds = await panesUsing(ctx, workspace, path, realPath);
@@ -1997,15 +2057,40 @@ export async function verifyRemovable(
   return verdict;
 }
 
+// The repository's default branch as the remote has it, fetched like any
+// target, when it is not the target already judged and not the worktree's
+// own branch. Null otherwise.
+async function defaultBranchTarget(
+  ctx: VerifyContext,
+  judged: string,
+  ownBranch: string,
+  options: VerifyOptions,
+): Promise<{ name: string; commit: string } | null> {
+  const name = await resolveDefaultBranch(ctx.scope.repoCwd);
+  if (!name || shortBranch(name) === ownBranch || name === ownBranch) return null;
+  let resolved = await resolveTarget(ctx, name);
+  // Fetched before it is compared: a stale default branch can sit at the
+  // judged commit while the remote's has moved on to include the work.
+  if (resolved.commit && options.fetch && !options.pinned) {
+    await fetchTargetOnce(ctx, resolved.name);
+    resolved = await resolveTarget(ctx, name);
+  }
+  return resolved.commit && resolved.commit !== judged ? { name: resolved.name, commit: resolved.commit } : null;
+}
+
 async function proveMerged(
   ctx: VerifyContext,
   verdict: RemovalVerdict,
   options: VerifyOptions,
+  // The branch whose tip is judged: the recorded one, or the one the
+  // worktree has checked out instead.
+  ownBranch?: string,
 ): Promise<void> {
   const { scope, deps } = ctx;
   const repo = scope.repoCwd;
   const tip = verdict.tip!;
   const copy = verdict.workspace.copyBranch!;
+  const branch = ownBranch ?? copy.branch;
   const explicitTarget = options.target?.trim() || null;
   const block = (code: WorktreeCode) => {
     if (!verdict.blockers.includes(code)) verdict.blockers.push(code);
@@ -2022,19 +2107,28 @@ async function proveMerged(
       else ghError = ctx.mergedPullRequests.error;
     } else {
       try {
-        candidates = await deps.github.listPullRequestsForHead(repo, copy.branch);
+        candidates = await deps.github.listPullRequestsForHead(repo, branch);
       } catch (err) {
         ghError = cleanText(err instanceof Error ? err.message : String(err), 300);
       }
     }
   }
-  candidates = candidates.filter((pr) => pr.headRefName === copy.branch && !pr.isCrossRepository);
+  // Merged pull requests by head branch, for following a stack: the list
+  // already holds them; a removal asks GitHub per branch.
+  const listed = ctx.mergedPullRequests && "list" in ctx.mergedPullRequests ? ctx.mergedPullRequests.list : null;
+  const own = candidates;
+  const mergedFor = async (head: string): Promise<GitHubMergedPullRequest[]> => {
+    if (listed) return listed.filter((pr) => pr.headRefName === head);
+    if (head === branch) return own;
+    return deps.github.listPullRequestsForHead(repo, head);
+  };
+  candidates = candidates.filter((pr) => pr.headRefName === branch && !pr.isCrossRepository);
 
   let targetName = explicitTarget ?? copy.baseBranch ?? null;
   if (!targetName && candidates.length) targetName = candidates[0].baseRefName;
   if (!targetName || targetName === "HEAD") targetName = await resolveDefaultBranch(repo);
   let target: { name: string; ref?: string | null; commit: string | null; problem?: string } = explicitTarget
-    ? await resolveExplicitTarget(ctx, explicitTarget, copy.branch)
+    ? await resolveExplicitTarget(ctx, explicitTarget, branch)
     : await resolveTarget(ctx, targetName);
   if (target.problem) {
     verdict.target = target.name;
@@ -2043,14 +2137,40 @@ async function proveMerged(
     block("WORKTREE_TARGET_NOT_FOUND");
     return;
   }
+  if (!explicitTarget && !target.commit) {
+    // The recorded base is gone (a stacked pull request's branch, deleted
+    // once merged): the default branch is where its work went, if anywhere.
+    const fallbackName = await resolveDefaultBranch(repo);
+    if (fallbackName && shortBranch(fallbackName) !== branch && fallbackName !== branch) {
+      verdict.warnings.push(`the recorded base '${target.name}' is gone; judged against ${fallbackName}`);
+      target = await resolveTarget(ctx, fallbackName);
+    }
+  }
+  // A target that could not be fetched (deleted on the remote, say) may be
+  // a stale copy: it proves no merge into it beyond what it already held.
+  let targetFetchFailed = false;
   if (options.pinned) {
     target = { name: target.name, commit: options.pinned.targetCommit };
   } else if (options.fetch && target.commit) {
     const failure = await fetchTargetOnce(ctx, target.name);
     if (failure) verdict.warnings.push(`fetch failed: ${failure}`);
+    targetFetchFailed = failure !== null;
     target = target.ref
       ? { ...target, commit: await revParse(repo, `${target.ref}^{commit}`) }
       : await resolveTarget(ctx, target.name);
+    // Deleted on the remote: its tracking ref is a stale copy that may hold
+    // merges the branch never landed anywhere. Judged as a gone base: the
+    // default branch, fetched.
+    if (failure && !explicitTarget && (await remoteBranchGone(ctx, target.name))) {
+      const fallbackName = await resolveDefaultBranch(repo);
+      if (fallbackName && shortBranch(fallbackName) !== branch && fallbackName !== shortBranch(target.name)) {
+        verdict.warnings.push(`the recorded base '${target.name}' is gone on the remote; judged against ${fallbackName}`);
+        const fetched = await fetchTargetOnce(ctx, fallbackName);
+        if (fetched) verdict.warnings.push(`fetch failed: ${fetched}`);
+        targetFetchFailed = fetched !== null;
+        target = await resolveTarget(ctx, fallbackName);
+      }
+    }
   }
   verdict.target = target.name;
   verdict.targetCommit = target.commit;
@@ -2065,14 +2185,63 @@ async function proveMerged(
   } else if (options.pinned?.pullRequestTip === tip) {
     verdict.proof = "pull-request";
   } else {
-    const targetBranch = shortBranch(target.name);
-    const matching = candidates.find(
-      (pr) => pr.headRefOid === tip && (!explicitTarget || pr.baseRefName === targetBranch),
-    );
-    if (matching) {
-      verdict.proof = "pull-request";
-      verdict.pullRequest = { number: matching.number, url: matching.url };
-    } else {
+    // The branch the target names: a local branch keeps its whole name
+    // (feat/release is not release); a remote-tracking one drops its remote.
+    const targetRef = target.ref ?? ((await refIsPresent(repo, `refs/remotes/${target.name}`)) ? `refs/remotes/${target.name}` : null);
+    const targetBranch = targetRef?.startsWith("refs/remotes/")
+      ? shortBranch(targetRef.slice("refs/remotes/".length))
+      : targetRef?.startsWith("refs/heads/")
+        ? targetRef.slice("refs/heads/".length)
+        : target.name;
+    const targetIsRemote = Boolean(targetRef?.startsWith("refs/remotes/"));
+    // The worktree's own base on the remote: the target when it is remote,
+    // or the remote's copy of a base recorded by its local name, fetched
+    // first before a removal.
+    // Pull requests are origin's: a base on another remote (upstream/feat/x,
+    // a fork) is not the branch they merged into and proves nothing.
+    const targetOnOrigin = Boolean(targetRef?.startsWith("refs/remotes/origin/"));
+    let ownBaseCommit: string | null = targetOnOrigin && !targetFetchFailed ? target.commit : null;
+    if (!explicitTarget && !targetIsRemote && (await refIsPresent(repo, `refs/remotes/origin/${targetBranch}`))) {
+      // A fetch that fails (the branch was deleted) leaves a stale copy: no proof.
+      const failure = options.fetch && !options.pinned ? await fetchTargetOnce(ctx, `origin/${targetBranch}`) : null;
+      ownBaseCommit = failure ? null : await revParse(repo, `refs/remotes/origin/${targetBranch}^{commit}`);
+    }
+    // A recorded base other than the default branch (a stacked pull
+    // request's branch, often deleted once merged) can lag behind where
+    // the work went: the default branch counts too, unless the caller
+    // named the target.
+    const fallback = explicitTarget ? null : await defaultBranchTarget(ctx, target.commit, branch, options);
+    const defaultCommit = explicitTarget ? target.commit : (fallback?.commit ?? target.commit);
+    const defaultName = explicitTarget ? targetBranch : shortBranch(fallback?.name ?? (await resolveDefaultBranch(repo)));
+    if (fallback && (await isAncestor(repo, tip, fallback.commit))) {
+      verdict.proof = "ancestor";
+      verdict.target = fallback.name;
+      verdict.targetCommit = fallback.commit;
+    } else if (wantPullRequests && !ghError) {
+      // A merged pull request whose head holds the tip and that landed:
+      // into the default branch (or the named target), into a base that
+      // still holds its merge on the remote, or up a stack of them.
+      const stacked = await proveByMergedPullRequestStack({
+        repo,
+        tip,
+        branch: branch,
+        mergedFor,
+        landedBases: new Set([defaultName]),
+        defaultCommit,
+        // The worktree's own base, fetched above when it is a remote branch,
+        // counts while it holds the merge; another branch's tracking ref may
+        // be stale and proves nothing.
+        ...(explicitTarget
+          ? {}
+          : { remoteCommit: async (base: string) => (base === targetBranch ? ownBaseCommit : null) }),
+      });
+      if (stacked) {
+        verdict.proof = "pull-request";
+        verdict.pullRequest = stacked.pullRequest;
+        if (stacked.via.length) verdict.details.via = stacked.via;
+      }
+    }
+    if (!verdict.proof) {
       const content = await contentInTarget(repo, tip, target.commit);
       if (content === true) verdict.proof = "content-in-target";
       else if (content === "unsupported") verdict.warnings.push("git 2.38 or newer is needed for the squash-merge proof");
@@ -2087,7 +2256,7 @@ async function proveMerged(
     return;
   }
   const ahead = await aheadCount(repo, target.commit, tip);
-  const pushedTip = await revParse(repo, `refs/remotes/origin/${copy.branch}`);
+  const pushedTip = await revParse(repo, `refs/remotes/origin/${branch}`);
   verdict.details.aheadOfTarget = ahead;
   verdict.details.commits = await commitSubjectsBetween(repo, target.commit, tip, 10);
   verdict.details.pushed = pushedTip === tip;
@@ -2433,10 +2602,19 @@ function mapRemoveError(message: string): WorktreeCode {
   return "WORKTREE_GIT_FAILED";
 }
 
+// Merged, and held back only by the open tab of the agent that made it: an
+// agent never removes it on its own, but the user may, through the cleanup
+// tool's approval.
+const OWNED_BUT_MERGED_HINT =
+  "it is merged and nothing else holds it: call codara_worktree_cleanup, then call it again with action:\"remove\" and this path; the user approves the removal in Codara";
+
 function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): WorktreeRefusal {
   const code = verdict.blockers[0];
   const item = verdictItem(ctx, verdict);
+  const ownedButMerged =
+    verdict.mergeStatus === "merged" && verdict.blockers.every((blocker) => blocker === "WORKTREE_OWNED_BY_LIVE_AGENT");
   return refusal(code, blockerMessage(verdict, code), {
+    ...(ownedButMerged ? { hint: OWNED_BUT_MERGED_HINT } : {}),
     blockers: verdict.blockers,
     workspaceId: verdict.workspace.id,
     path: verdict.path,
@@ -2787,8 +2965,12 @@ async function removeLocked(
     if (!dropped.ok) warnings.push(`the stale worktree registration was kept: ${cleanText(dropped.error, 200)}`);
   }
 
+  // The branch whose tip was verified: the one checked out, when the agent
+  // switched away from the recorded one.
+  const ownBranch = verdict.switched?.branch ?? branch;
+  let recordedOutcome: { branch: string; deleted: boolean; keptReason?: string; recoveryRef?: string } | null = null;
   if (input.deleteBranch) {
-    const currentTip = await revParse(repo, `refs/heads/${branch}`);
+    const currentTip = await revParse(repo, `refs/heads/${ownBranch}`);
     if (!currentTip) {
       branchKept = verdict.alreadyRemoved ? null : "BRANCH_MISSING";
     } else if (!verdict.alreadyRemoved && currentTip !== verdict.tip) {
@@ -2826,13 +3008,35 @@ async function removeLocked(
         }
       }
       if (provenTip) {
-        const deleted = await deleteBranchIfAt(repo, branch, provenTip);
+        const deleted = await deleteBranchIfAt(repo, ownBranch, provenTip);
         if (deleted.ok) branchDeleted = true;
         else branchKept = deleted.reason;
       }
     }
     if (branchKept && branchKept !== "BRANCH_MISSING") {
-      warnings.push(`branch '${branch}' was kept (${branchKept})`);
+      warnings.push(`branch '${ownBranch}' was kept (${branchKept})`);
+    }
+    if (verdict.switched) {
+      // The recorded branch goes only when its own tip was proven merged and
+      // it has not moved since (compare-and-delete).
+      const { recordedTip, recordedMerged } = verdict.switched;
+      if (!recordedTip) recordedOutcome = { branch, deleted: false, keptReason: "BRANCH_MISSING" };
+      else if (!recordedMerged) recordedOutcome = { branch, deleted: false, keptReason: "NOT_MERGED" };
+      else {
+        // Its tip saved first, as for the branch checked out; a name of its
+        // own, so the worktree's recovery ref stays the one to restore from.
+        const saved = await saveRecoveryRef(repo, `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}-recorded`, recordedTip);
+        if (!saved) recordedOutcome = { branch, deleted: false, keptReason: "RECOVERY_REF_FAILED" };
+        else {
+          const deleted = await deleteBranchIfAt(repo, branch, recordedTip);
+          recordedOutcome = deleted.ok
+            ? { branch, deleted: true, recoveryRef: saved }
+            : { branch, deleted: false, keptReason: deleted.reason };
+        }
+      }
+      if (recordedOutcome.keptReason && recordedOutcome.keptReason !== "BRANCH_MISSING") {
+        warnings.push(`branch '${branch}' was kept (${recordedOutcome.keptReason})`);
+      }
     }
   }
 
@@ -2859,7 +3063,7 @@ async function removeLocked(
   deps.invalidateGitCache(repo);
 
   const savedCommit = savedTip ?? verdict.tip;
-  const recoverWith = recoveryRef && savedCommit ? await recoverCommand(repo, workspace.cwd, branch, recoveryRef, savedCommit) : null;
+  const recoverWith = recoveryRef && savedCommit ? await recoverCommand(repo, workspace.cwd, ownBranch, recoveryRef, savedCommit) : null;
   return {
     ok: true,
     removed: !verdict.alreadyRemoved,
@@ -2869,6 +3073,16 @@ async function removeLocked(
     branch,
     branchDeleted,
     ...(branchKept ? { branchKeptReason: branchKept } : {}),
+    // Switched to another branch: branchDeleted is about that one, and both are listed.
+    ...(verdict.switched
+      ? {
+          checkedOutBranch: ownBranch,
+          branches: [
+            { branch: ownBranch, deleted: branchDeleted, ...(branchKept ? { keptReason: branchKept } : {}) },
+            recordedOutcome ?? { branch, deleted: false, keptReason: "NOT_ASKED" },
+          ],
+        }
+      : {}),
     ...(savedCommit ? { verifiedCommit: savedCommit } : {}),
     ...(verdict.proof ? { proof: verdict.proof } : {}),
     ...(verdict.target ? { target: verdict.target } : {}),
