@@ -21,10 +21,11 @@ export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
  * library (credential storage, sign-in flows, the model catalog); Cora's
  * sessions run the Pi the user installed.
  */
-export const CODARA_PI_VERSION = "0.85.1";
+export const CODARA_PI_VERSION = "1.5.0";
 /**
  * The oldest installed Pi Cora runs on. Its RPC mode, command-line flags and
- * the extension events Cora's extensions use are unchanged through 0.87.
+ * the extension events Cora's extensions use are unchanged through 1.5, apart
+ * from before_agent_start runs without a prompt, which the extension handles.
  */
 export const CODARA_PI_MIN_VERSION = "0.85.1";
 /**

@@ -6,8 +6,8 @@
 // OpenRouter, Radius. From Codara's point of view the user never asked for Pi;
 // they asked to connect an account to Cora.
 //
-// There is no seam to do this at runtime. `dist/auth/oauth/oauth-page.js`
-// exports two plain functions that every provider flow imports directly, and
+// There is no seam to do this at runtime. `dist/utils/oauth-page.js` exports
+// two plain functions that every provider flow's callback server imports, and
 // ESM bindings cannot be reassigned from outside the module — Codara imports
 // those provider flows into the main process, so there is not even a child
 // process whose loader could be hooked. The one place the substitution can
@@ -36,17 +36,18 @@ const ICON = path.join(ROOT, "build", "icon.png");
 // without parsing it.
 const MARKER = "codara-oauth-brand-v1";
 
-// Both the nested copy (what Codara's runtime resolver imports, under
-// pi-coding-agent's own node_modules) and the hoisted one npm may create.
+// Both the nested copy (under pi-coding-agent's own node_modules, when npm
+// cannot hoist it) and the hoisted one. Codara's runtime resolver imports the
+// nested copy when it exists and the hoisted one otherwise.
 const CANDIDATES = [
   path.join(
     ROOT, "node_modules", "@earendil-works", "pi-coding-agent",
     "node_modules", "@earendil-works", "pi-ai",
-    "dist", "auth", "oauth", "oauth-page.js",
+    "dist", "utils", "oauth-page.js",
   ),
   path.join(
     ROOT, "node_modules", "@earendil-works", "pi-ai",
-    "dist", "auth", "oauth", "oauth-page.js",
+    "dist", "utils", "oauth-page.js",
   ),
 ];
 
@@ -196,6 +197,19 @@ function looksLikePiPage(source) {
 function main() {
   const logo = logoDataUri();
   const present = CANDIDATES.filter((file) => fs.existsSync(file));
+  const piInstalled = fs.existsSync(
+    path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"),
+  );
+  if (present.length === 0 && piInstalled) {
+    // A Pi upgrade that moved the page would otherwise pass as "not installed".
+    console.error(
+      "[brand-pi-oauth] Pi is installed but its OAuth page module is not where " +
+        "scripts/brand-pi-oauth-page.cjs looks. Find the module that exports " +
+        "oauthSuccessHtml in pi-ai and update CANDIDATES.",
+    );
+    process.exitCode = 1;
+    return;
+  }
   if (present.length === 0) {
     // Pi is a normal dependency; if it is not installed there is nothing to
     // brand and nothing to complain about (postinstall can run mid-install).

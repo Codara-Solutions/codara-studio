@@ -16,7 +16,7 @@ dashboard and the harness benchmark.
 
 ## The standalone agent
 
-It needs Node 22.18 or newer. It runs from a clone of this repository, so keep the
+It needs Node 22.19 or newer. It runs from a clone of this repository, so keep the
 folder: `npm install -g .` links to it. Run `npm ci` first, because linking a folder
 does not install its dependencies.
 

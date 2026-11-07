@@ -1293,7 +1293,11 @@ test("a quick command is untouched, Pi's shell settings still apply and the mode
   assert.match(bash.description, /killed after 120 seconds unless timeout sets a longer limit, up to 1800/);
   assert.match(bash.description, /in the background with nohup/);
   assert.doesNotMatch(JSON.stringify(bash), /no default timeout/);
-  assert.match(bash.input_schema.properties.timeout.description, /Default 120, maximum 1800/);
+  // Pi 0.86+ sends built-in tools in strict mode, where an optional parameter
+  // becomes `anyOf: [its schema, null]` and its description moves inside.
+  const timeout = bash.input_schema.properties.timeout;
+  const timeoutDescription = timeout.description ?? timeout.anyOf?.find((branch) => branch.description)?.description;
+  assert.match(timeoutDescription, /Default 120, maximum 1800/);
 });
 
 test("an untrusted repo cannot choose the shell, and a trusted one still can", async () => {
@@ -2062,6 +2066,19 @@ test("luna is no longer a name, and its full id still works", async () => {
   assert.equal(stub.requests[0].model, "gpt-6-luna");
 });
 
+test("Node older than 22.19 is refused by version, not only by TypeScript support", async () => {
+  const preload = join(mkdtempSync(join(tmpdir(), "cora-node-")), "old-node.cjs");
+  writeFileSync(
+    preload,
+    'Object.defineProperty(process, "versions", { value: { ...process.versions, node: "22.18.0" } });\n' +
+      'Object.defineProperty(process, "version", { value: "v22.18.0" });\n',
+  );
+  const old = spawnSync(process.execPath, ["--require", preload, CLI, "exec", "copy it"], { encoding: "utf8" });
+  assert.equal(old.status, 2, old.stderr);
+  assert.match(old.stderr, /cora needs Node 22\.19\.0 or newer \(this is v22\.18\.0\)/);
+  assert.equal(stub.requests.length, 0);
+});
+
 test("usage mistakes exit 2 and old commands point to their new home", async () => {
   const world = makeWorld();
   for (const [args, pattern] of [
@@ -2628,6 +2645,8 @@ test("cora opens Pi's terminal interface in a real terminal, and /compact takes 
   const exited = new Promise((resolve) => child.on("exit", resolve));
   try {
     await until(() => output.includes("claude-sonnet-5-5"), "the footer");
+    // Pi 1.x defaults to fullscreen; cora keeps the terminal's scrollback.
+    assert.ok(!output.includes("\x1b[?1049h"), "cora switched to the alternate screen");
     await settle();
     await type("PLAIN_TEXT hello input.txt");
     await until(() => output.includes("STUB-FINAL"), "the reply");
