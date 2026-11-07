@@ -2066,6 +2066,19 @@ test("luna is no longer a name, and its full id still works", async () => {
   assert.equal(stub.requests[0].model, "gpt-6-luna");
 });
 
+test("Node older than 22.19 is refused by version, not only by TypeScript support", async () => {
+  const preload = join(mkdtempSync(join(tmpdir(), "cora-node-")), "old-node.cjs");
+  writeFileSync(
+    preload,
+    'Object.defineProperty(process, "versions", { value: { ...process.versions, node: "22.18.0" } });\n' +
+      'Object.defineProperty(process, "version", { value: "v22.18.0" });\n',
+  );
+  const old = spawnSync(process.execPath, ["--require", preload, CLI, "exec", "copy it"], { encoding: "utf8" });
+  assert.equal(old.status, 2, old.stderr);
+  assert.match(old.stderr, /cora needs Node 22\.19\.0 or newer \(this is v22\.18\.0\)/);
+  assert.equal(stub.requests.length, 0);
+});
+
 test("usage mistakes exit 2 and old commands point to their new home", async () => {
   const world = makeWorld();
   for (const [args, pattern] of [

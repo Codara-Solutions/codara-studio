@@ -12,6 +12,18 @@
 
 const { UsageError, parseArgs } = require("./harness/args.cjs");
 
+// Pi 1.5 needs 22.19 (cli/package.json engines). Type stripping alone came in
+// 22.18, so it does not tell the two apart.
+const MIN_NODE = [22, 19, 0];
+
+function nodeIsRecentEnough(version) {
+  const parts = String(version).split(".").map((part) => Number.parseInt(part, 10) || 0);
+  for (let i = 0; i < MIN_NODE.length; i += 1) {
+    if ((parts[i] ?? 0) !== MIN_NODE[i]) return (parts[i] ?? 0) > MIN_NODE[i];
+  }
+  return true;
+}
+
 const HELP = `cora: a coding agent in your terminal
 
   cora [prompt]                      interactive session in this folder
@@ -65,8 +77,8 @@ function main() {
     return;
   }
   if (cli.studioArgs) return require("./studio.cjs").run(cli.studioArgs);
-  if (!process.features.typescript) {
-    console.error(`cora needs Node 22.19 or newer (this is ${process.version}).`);
+  if (!nodeIsRecentEnough(process.versions.node) || !process.features.typescript) {
+    console.error(`cora needs Node ${MIN_NODE.join(".")} or newer (this is ${process.version}).`);
     process.exitCode = 2;
     return;
   }
