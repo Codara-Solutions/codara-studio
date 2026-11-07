@@ -54,6 +54,19 @@ export interface WorktreeInUse {
    * up does not count it at all.
    */
   elsewhere?: true;
+  /**
+   * With "agent": its tab has had no input or output for 30 minutes. Like
+   * `elsewhere`, it then holds only work that may be unfinished.
+   */
+  idle?: true;
+}
+
+/** Ignored files copied out of a worktree before it was removed, kept for 30 days. */
+export interface WorktreeArchived {
+  /** The archive folder of this worktree. */
+  path: string;
+  files: number;
+  bytes: number;
 }
 
 export interface WorktreeSize {
@@ -281,7 +294,9 @@ export type WorktreeCleanupCode =
   | "REPO_BUSY"
   | "GIT_FAILED"
   | "DIRTY_NOT_CONFIRMED"
-  | "UNMERGED_NOT_CONFIRMED";
+  | "UNMERGED_NOT_CONFIRMED"
+  | "ARCHIVE_FAILED"
+  | "MOUNT_INSIDE";
 
 export interface WorktreeLocalWork {
   tracked: number;
@@ -355,6 +370,7 @@ export interface WorktreeCleanupOutcome extends WorktreeCleanupTarget {
   changesRef?: string;
   reclaimedBytes?: number;
   workspaceRemoved?: string;
+  archived?: WorktreeArchived;
 }
 
 export interface WorktreeCleanupRemoveResult {
@@ -455,9 +471,48 @@ export interface WorktreeRailCleanupResult {
   holds?: string[];
   /** With "confirm": what the answer is tied to. */
   fingerprint?: string;
+  /** With "removed": the space it took, when it was measured. */
+  reclaimedBytes?: number;
+  /** With "removed": where its ignored files were kept. */
+  archived?: WorktreeArchived;
 }
 
 // ── Formatting ─────────────────────────────────────────────────────────────
+
+/** Days a removed worktree's archived ignored files are kept before they are pruned. */
+export const WORKTREE_ARCHIVE_RETENTION_DAYS = 30;
+
+/**
+ * The one quiet line after the rail removed worktrees on its own: how many,
+ * the space freed when it was measured, and where kept ignored files went.
+ * `reveal` is the archive folder a click opens, when anything was kept.
+ */
+export function autoCleanSummary(
+  removed: ReadonlyArray<{ result: WorktreeRailCleanupResult; mode: WorktreeRailCleanupRequest["mode"] }>,
+): { title: string; body: string; reveal?: string } {
+  const freed = removed.reduce((sum, entry) => sum + (entry.result.reclaimedBytes ?? 0), 0);
+  const archived = removed.map((entry) => entry.result.archived).filter((entry): entry is WorktreeArchived => Boolean(entry));
+  if (removed.length === 1 && !archived.length) {
+    const { result, mode } = removed[0];
+    const why = mode === "auto-merged" ? "Its work is merged and nothing was left in it." : "Its folder was gone and its work is merged.";
+    return {
+      title: `Removed ${result.workspaceName ?? "a merged workspace"}`,
+      body: result.branchKept ? `${why} Branch kept: ${result.branchKept}.` : why,
+    };
+  }
+  const parts = [
+    ...(freed > 0 ? [`${formatBytes(freed)} freed`] : []),
+    ...(archived.length ? [`data archived for ${WORKTREE_ARCHIVE_RETENTION_DAYS} days (click to open it)`] : []),
+  ];
+  const title = `Removed ${removed.length === 1 ? removed[0].result.workspaceName ?? "1 merged worktree" : `${removed.length} merged worktrees`}`;
+  // The day's folder holds every worktree archived that day.
+  const reveal = archived.length ? archived[0].path.replace(/[\\/]+[^\\/]+[\\/]*$/, "") : undefined;
+  return {
+    title,
+    body: parts.length ? `${parts.join(", ")}.` : "Their work is merged.",
+    ...(reveal ? { reveal } : {}),
+  };
+}
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "?";

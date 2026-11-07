@@ -1087,11 +1087,18 @@ registered with git, it is on a branch that is not long-lived, its work is
 provably in a remote base (a merged pull request for that exact commit or a
 later head of its branch, also when stacked on another merged pull request,
 its commits in the base or the default branch, or its content in the base
-with its last commit still on its remote branch), its branch has nothing its upstream lacks, no uncommitted,
-untracked or ignored
-files worth keeping, no lock, no open tab of that workspace, no terminal, Cora
-run, dev server or running program in it, the agent that made it is closed, and
-nothing has touched it for 30 minutes. What could not be read counts as in use.
+with its last commit still on its remote branch), its branch has nothing its upstream lacks, no uncommitted
+or untracked files, no lock, no open tab of that workspace, no terminal, Cora
+run, dev server or running program in it, the tab of the agent that made it is
+closed, works from another folder or has been quiet for 30 minutes, and nothing
+has touched it for 30 minutes. Ignored files a fresh checkout cannot bring back
+(`data/`, `.env.local`, not `node_modules/` or build output) are first copied to
+`~/.codarastudio/worktree-archive/<date>/<repo>--<branch>/` and counted; a copy
+that fails keeps the worktree. Archives older than 30 days go at startup. One
+toast sums up each pass ("Removed 4 merged worktrees, 1.6 GB freed, data archived
+for 30 days"); clicking it opens the archive. What could not be read counts as in use,
+and on Linux a program with a file open inside it counts as running in it. A
+worktree with a drive mounted inside it (rclone, sshfs, a bind mount) is kept.
 Anything else stays in the merged group, one click from **Clean up**, and goes
 on its own once what held it is gone. It never forces, and the last commit stays
 recoverable under `refs/codara/removed-worktrees/` for 30 days. Windows offers

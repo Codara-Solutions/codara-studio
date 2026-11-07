@@ -31,6 +31,7 @@ import {
   runtimeStateIsBusy,
 } from "@shared/types";
 import type { WorktreeRailCleanupRequest, WorktreeRailCleanupResult, WorktreeRailExternal } from "@shared/worktree-cleanup";
+import { autoCleanSummary } from "@shared/worktree-cleanup";
 import type {
   GitHubIssueSummary,
   GitHubWorkQueueItem,
@@ -905,12 +906,9 @@ export default function App() {
     refresh: refreshWorktreeStates,
   } = useWorktreeRailStates(
     workspaces,
-    useCallback((result: WorktreeRailCleanupResult, mode: WorktreeRailCleanupRequest["mode"]) => {
-      const why = mode === "auto-merged" ? "Its work is merged and nothing was left in it." : "Its folder was gone and its work is merged.";
-      emitLocalToast(
-        `Removed ${result.workspaceName ?? "a merged workspace"}`,
-        result.branchKept ? `${why} Branch kept: ${result.branchKept}.` : why,
-      );
+    useCallback((removed: Array<{ result: WorktreeRailCleanupResult; mode: WorktreeRailCleanupRequest["mode"] }>) => {
+      const summary = autoCleanSummary(removed);
+      emitLocalToast(summary.title, summary.body, "success", undefined, summary.reveal);
     }, []),
     useCallback(
       (workspaceId: string, folders: readonly string[]) => railWorkspaceHeldRef.current(workspaceId, folders),

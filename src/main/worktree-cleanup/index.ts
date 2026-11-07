@@ -20,6 +20,7 @@ import type {
   WorktreeCleanupApprovalRequest,
 } from "@shared/worktree-cleanup-agent";
 import { createWorktreeAuditLog, scanProcessesUnderCwds, type RendererTerminal, type WorktreeCaller } from "../agent-worktrees";
+import { paneIdleMs } from "../agent-hibernation";
 import { codaraHome } from "../codara-home";
 import { E2E_BACKGROUND } from "../e2e-background";
 import type { IpcHandle } from "../ipc";
@@ -33,6 +34,7 @@ import { requestTerminalOp } from "../terminal-bridge";
 import { windowHoldsFolder } from "../window-held";
 import { publishState } from "../workspace-state-publish";
 import type { AgentCleanupDeps, ApprovalAsker } from "./agent-tool";
+import { pruneWorktreeArchive, worktreeArchiveRoot } from "./archive";
 import type { RepoPullRequests, WorktreeCleanupDeps } from "./inspect";
 import type { AutoRemoveMergedOptions } from "./rail";
 import type { ScannedWorktree } from "./scan";
@@ -144,6 +146,8 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
     audit: (entry) => audit!(entry),
     now: () => new Date(),
     agentSessionName,
+    paneIdleMs: (paneId) => paneIdleMs(paneId),
+    archiveRoot: () => worktreeArchiveRoot(codaraHome()),
   };
 }
 
@@ -203,6 +207,11 @@ function stringList(value: unknown): string[] | null {
 
 /** Register this area's channels with the trusted-sender `handle`. */
 export function registerWorktreeCleanupIpc(handle: IpcHandle): void {
+  // Archives of removed worktrees' ignored files older than 30 days go once
+  // the app has settled.
+  setTimeout(() => {
+    void pruneWorktreeArchive(worktreeArchiveRoot(codaraHome()), new Date()).catch(() => undefined);
+  }, 60_000).unref();
   handle("worktreeCleanup:scan", async (): Promise<WorktreeCleanupScan> => {
     const { store: cache } = await sizes();
     const { scanWorktreeCleanup } = await import("./scan");

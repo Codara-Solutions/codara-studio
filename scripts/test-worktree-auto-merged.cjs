@@ -500,9 +500,13 @@ async function main() {
       delete h.processes[process_.dir];
       await assertGone(process_);
 
+      // The maker's tab with its shell inside, and not quiet, holds it. One
+      // in another folder does not hold merged work (test-worktree-auto-archive.cjs).
       const owned = mergedWorktree("busy-creator", { createdBy: { kind: "agent", client: "claude-code", paneId: "pane-open" } });
-      h.sessions["pane-open"] = repo;
+      h.sessions["pane-open"] = owned.dir;
+      h.terminals = [{ paneId: "pane-open", workspaceId: "ws-repo", cwd: owned.dir, title: "Coordinator" }];
       await assertStays(owned, /agent|tab/i);
+      h.terminals = [];
       delete h.sessions["pane-open"];
       await assertGone(owned);
     });

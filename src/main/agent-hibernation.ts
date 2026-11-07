@@ -191,6 +191,18 @@ export function agentPaneAsleep(paneId: string): boolean {
 }
 
 /**
+ * How long a pane has had no input or output, in ms; null when it is not a
+ * live or sleeping pane. A sleeping one counts from when it fell asleep,
+ * the least it can have been quiet.
+ */
+export function paneIdleMs(paneId: string, now = Date.now()): number | null {
+  const entry = sleepingEntry(paneId);
+  if (entry) return Math.max(0, now - entry.sleptAt);
+  const info = pty.hibernationSessionInfo(paneId);
+  return info ? Math.max(0, now - Math.max(info.lastInputAt, info.lastOutputAt)) : null;
+}
+
+/**
  * For a pane that mounts while its agent sleeps: whether it does, since
  * when, and what to show. A view that kept its own copy of the output gets
  * only what it never received (once); a fresh view, an empty xterm after a

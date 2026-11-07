@@ -40,7 +40,8 @@ const NO_EXTERNAL: readonly WorktreeRailExternal[] = [];
 
 export function useWorktreeRailStates(
   workspaces: Workspace[],
-  onAutoRemoved: (result: WorktreeRailCleanupResult, mode: WorktreeRailCleanupRequest["mode"]) => void,
+  // Once per read, with every row it removed: one line, not one per row.
+  onAutoRemoved: (removed: Array<{ result: WorktreeRailCleanupResult; mode: WorktreeRailCleanupRequest["mode"] }>) => void,
   isHeld: (workspaceId: string, folders: readonly string[]) => boolean,
 ): {
   states: Record<string, WorktreeRailState>;
@@ -102,6 +103,12 @@ export function useWorktreeRailStates(
         for (const state of list) next[state.workspaceId] = state;
         setStates((prev) => (sameStates(prev, next) ? prev : next));
         const now = Date.now();
+        const removed: Array<{ result: WorktreeRailCleanupResult; mode: WorktreeRailCleanupRequest["mode"] }> = [];
+        // Reported even when the removal's own state change already
+        // restarted this effect, or it was cancelled partway.
+        const report = () => {
+          if (removed.length) onAutoRemovedRef.current(removed.splice(0));
+        };
         for (const state of list) {
           const mode = state.autoCandidate ? "auto" : state.autoRemoveMerged ? "auto-merged" : null;
           const cwd = workspacesRef.current.find((ws) => ws.id === state.workspaceId)?.cwd;
@@ -113,11 +120,10 @@ export function useWorktreeRailStates(
             waitMs: tried ? Math.min(tried.waitMs * 2, AUTO_RETRY_MAX_MS) : AUTO_RETRY_MS,
           });
           const result = await api.railCleanUp({ workspaceId: state.workspaceId, mode }).catch(() => null);
-          // Reported even when the removal's own state change already
-          // restarted this effect.
-          if (result?.status === "removed") onAutoRemovedRef.current(result, mode);
-          if (cancelled) return;
+          if (result?.status === "removed") removed.push({ result, mode });
+          if (cancelled) return report();
         }
+        report();
       } finally {
         inFlight = false;
       }

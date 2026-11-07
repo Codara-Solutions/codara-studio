@@ -14,10 +14,12 @@ export function emitLocalToast(
   body = "",
   tone: InAppNotificationTone = "success",
   target?: NavigationTarget,
+  // A folder a click opens in the system's file manager.
+  reveal?: string,
 ): void {
   window.dispatchEvent(
     new CustomEvent("spark:local-toast", {
-      detail: { title, body, tone, ...(target ? { target } : {}) },
+      detail: { title, body, tone, ...(target ? { target } : {}), ...(reveal ? { reveal } : {}) },
     }),
   );
 }

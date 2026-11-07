@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, promises as fsp } from "node:fs";
 import { readlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import {
   COPY_BRANCH_CREATOR_LIMITS,
@@ -50,6 +50,8 @@ import {
 import type { GitHubMergedPullRequest } from "./github-cli";
 import { PROTECTED_REMOTE_BRANCHES } from "@shared/worktree-cleanup-agent";
 import { isKeptBranch } from "./worktree-cleanup/kept-branches";
+import { archiveIgnoredFiles } from "./worktree-cleanup/archive";
+import { mountRefusal } from "./worktree-cleanup/mounts";
 import { proveByMergedPullRequestStack } from "./merged-pull-request-stack";
 
 // Agent-managed worktrees: the logic behind the worktree.create/list/remove
@@ -117,6 +119,8 @@ export type WorktreeCode =
   | "WORKTREE_DIRTY"
   | "WORKTREE_OPERATION_IN_PROGRESS"
   | "WORKTREE_IGNORED_FILES"
+  | "WORKTREE_ARCHIVE_FAILED"
+  | "WORKTREE_MOUNT_INSIDE"
   | "WORKTREE_SUBMODULES"
   | "WORKTREE_NESTED_REPOSITORY"
   | "WORKTREE_NESTED_SCAN_INCOMPLETE"
@@ -125,6 +129,7 @@ export type WorktreeCode =
   | "WORKTREE_RUNNING_PANES"
   | "WORKTREE_ACTIVE_RUNS"
   | "WORKTREE_RUNNING_PROCESSES"
+  | "WORKTREE_USAGE_UNKNOWN"
   | "WORKTREE_CALLER_INSIDE"
   | "WORKTREE_OPEN_TABS"
   | "WORKTREE_CHANGED"
@@ -193,7 +198,7 @@ export interface AgentWorktreeDeps {
   // unsaved work). Null when it did not answer.
   workspaceHeld(workspaceId: string, paths: readonly string[]): Promise<boolean | null>;
   // Null when the platform offers no process scan.
-  processesUnderCwd(dir: string): Promise<ProcessUse[] | null>;
+  processesUnderCwd(dir: string): Promise<ProcessUseList | null>;
   github: {
     listPullRequestsForHead(cwd: string, branch: string): Promise<GitHubMergedPullRequest[]>;
     listMergedPullRequests(cwd: string, limit: number): Promise<GitHubMergedPullRequest[]>;
@@ -209,6 +214,18 @@ export interface AgentWorktreeDeps {
   // How many ignored directories the nested-checkout scan may visit. Tests
   // lower it to reach the limit without building a huge tree.
   nestedScanMaxDirs?: number;
+  // How long a pane has had no input or output (ms), and its shell's pid;
+  // null when unknown. The maker's tab quiet for MAKER_IDLE_MS holds only
+  // unfinished work.
+  paneIdleMs?(paneId: string): number | null;
+  sessionPid?(paneId: string): number | null;
+  // Where a removal keeps the ignored files a fresh checkout cannot bring
+  // back (worktree-cleanup/archive.ts). Absent: they block, or are deleted
+  // with discardIgnoredFiles.
+  archiveRoot?(): string;
+  // Why a folder with a drive mounted inside must stay, or null. Absent: the
+  // real check (worktree-cleanup/mounts.ts); tests stand in for it here.
+  mountRefusal?(path: string): Promise<string | null>;
   // Worktree setup kept in the repository (.worktreeinclude and
   // .codara/worktree.json, src/main/worktree-setup). Without it a created
   // worktree only reports the user's setup command for the agent to run.
@@ -328,6 +345,8 @@ const MESSAGES: Record<WorktreeCode, string> = {
   WORKTREE_DIRTY: "the worktree has uncommitted or untracked files",
   WORKTREE_OPERATION_IN_PROGRESS: "an operation is in progress in the worktree",
   WORKTREE_IGNORED_FILES: "the worktree has ignored files that cannot be regenerated",
+  WORKTREE_ARCHIVE_FAILED: "its ignored files could not be copied to the archive, so it was kept",
+  WORKTREE_MOUNT_INSIDE: "a drive is mounted inside the worktree, so it was kept",
   WORKTREE_SUBMODULES: "initialized submodules block removal",
   WORKTREE_NESTED_REPOSITORY: "another git checkout or worktree is nested inside this worktree",
   WORKTREE_NESTED_SCAN_INCOMPLETE:
@@ -337,6 +356,7 @@ const MESSAGES: Record<WorktreeCode, string> = {
   WORKTREE_RUNNING_PANES: "terminals use the worktree",
   WORKTREE_ACTIVE_RUNS: "active Cora runs use the worktree",
   WORKTREE_RUNNING_PROCESSES: "processes use the worktree",
+  WORKTREE_USAGE_UNKNOWN: "what runs in the worktree could not be read (the process scan failed or timed out)",
   WORKTREE_CALLER_INSIDE: "you are running inside this worktree",
   WORKTREE_OPEN_TABS: "the window shows the worktree or has tabs of it, or a tab shows a file inside it",
   WORKTREE_CHANGED: "the worktree changed during the check",
@@ -358,6 +378,8 @@ const HINTS: Partial<Record<WorktreeCode, string>> = {
   WORKTREE_ORIGIN_MANAGED: "remove it from the rail",
   WORKTREE_DIRTY: "commit or discard them yourself",
   WORKTREE_IGNORED_FILES: "move them, or pass discardIgnoredFiles:true",
+  WORKTREE_ARCHIVE_FAILED: "free some disk space or move them yourself, then retry",
+  WORKTREE_MOUNT_INSIDE: "ask the user to unmount it, then retry",
   WORKTREE_SUBMODULES: "ask the user",
   WORKTREE_NESTED_REPOSITORY: "move or remove the nested checkout first, or ask the user",
   WORKTREE_NESTED_SCAN_INCOMPLETE:
@@ -369,6 +391,7 @@ const HINTS: Partial<Record<WorktreeCode, string>> = {
   WORKTREE_ACTIVE_RUNS: "wait for the runs to finish or ask the user",
   WORKTREE_OWNED_BY_LIVE_AGENT: "leave it to that agent, or ask the user",
   WORKTREE_RUNNING_PROCESSES: "stop them, or wait or ask the user",
+  WORKTREE_USAGE_UNKNOWN: "try again in a minute; if it keeps failing, ask the user to remove it from the workspace rail",
   WORKTREE_CALLER_INSIDE: "call from the source workspace, or ask the user to delete it from the rail",
   WORKTREE_OPEN_TABS: "close the tabs you opened on its files; otherwise ask the user to close them",
   WORKTREE_CHANGED: "retry",
@@ -1611,6 +1634,40 @@ interface VerifyOptions {
   pinned?: { targetCommit: string; pullRequestTip?: string };
 }
 
+/** How long the tab of the agent that made a worktree must be quiet before it stops holding finished work. */
+export const MAKER_IDLE_MS = 30 * 60_000;
+
+/**
+ * Whether the worktree's own work is in its base: merged by a pull request
+ * or by content, or merged as an ancestor with a commit of its own. A
+ * worktree with no commit of its own yet reads as merged too, but its agent
+ * has not started, so its open tab still holds it. Its own commit is a head
+ * past the commit its branch was created at (the branch's reflog); without
+ * a reflog, a head committed in a later second than the worktree was made.
+ */
+export async function finishedWork(
+  repoRoot: string,
+  merge: { state: string; proof?: string },
+  head: string | null,
+  branch: string | null,
+  workspaces: readonly Workspace[],
+): Promise<boolean> {
+  if (merge.state !== "merged") return false;
+  if (merge.proof !== "ancestor") return true;
+  if (!head) return false;
+  if (branch) {
+    const log = await readGitText(repoRoot, ["reflog", "show", "--format=%H", `refs/heads/${branch}`, "--"]);
+    const start = log.split("\n").filter((line) => /^[0-9a-f]{40,64}$/i.test(line)).pop();
+    if (start) return start.toLowerCase() !== head.toLowerCase();
+  }
+  const made = workspaces.map((workspace) => Date.parse(workspace.copyBranch?.createdAt ?? "")).filter(Number.isFinite);
+  if (!made.length) return false;
+  const seconds = Number(await readGitText(repoRoot, ["log", "-1", "--format=%ct", head]));
+  // Commit times are whole seconds: only a later second counts, so a base
+  // commit made just before the worktree is never taken for its own.
+  return Number.isFinite(seconds) && seconds > 0 && seconds * 1000 > Math.min(...made);
+}
+
 export interface RemovalVerdict {
   workspace: Workspace;
   path: string;
@@ -1631,6 +1688,8 @@ export interface RemovalVerdict {
   // or not.
   switched?: { branch: string; recordedTip: string | null; recordedMerged: boolean };
   dirty: { tracked: number; untracked: number; ignoredBlocking: string[]; inProgress: string | null };
+  // Every kept ignored entry, copied to the archive before the removal.
+  archive: string[];
   running: { paneIds: string[]; runIds: string[]; processes: number };
 }
 
@@ -1812,6 +1871,7 @@ export async function verifyRemovable(
     warnings: [],
     alreadyRemoved: false,
     dirty: { tracked: 0, untracked: 0, ignoredBlocking: [], inProgress: null },
+    archive: [],
     running: { paneIds: [], runIds: [], processes: 0 },
   };
   const block = (code: WorktreeCode) => {
@@ -1834,11 +1894,17 @@ export async function verifyRemovable(
   // An agent in a pane works in its worktree through absolute paths and
   // `git -C`, so neither its pane nor its processes sit under the worktree
   // and the usage checks below cannot see it. Its pane being open is the
-  // only sign that it may still be working there.
+  // only sign that it may still be working there. Once its work is merged
+  // it holds no more when its shell is in another folder or it has been
+  // quiet for MAKER_IDLE_MS (judged at the end, with the merge and the usage).
+  let ownerPane: string | null = null;
   if (createdBy?.paneId && createdBy.paneId !== caller.paneId && (await paneIsOpen(ctx, createdBy.paneId))) {
     block("WORKTREE_OWNED_BY_LIVE_AGENT");
+    ownerPane = createdBy.paneId;
     verdict.details.ownerPaneId = createdBy.paneId;
   }
+  // Kept ignored files go to the archive instead of blocking or being deleted.
+  const canArchive = Boolean(deps.archiveRoot);
 
   // Only a path that does not exist reads as already removed; one that cannot
   // be read (permissions, a stalled mount) may still hold work.
@@ -1948,9 +2014,12 @@ export async function verifyRemovable(
     const provided = await setupProvidedEntries(realPath, all).catch(() => new Set<string>());
     ignored = all.filter((entry) => !provided.has(entry));
     const blocking = ignored.filter((entry) => !isRegenerableIgnored(entry, extra, packageRootTester(realPath)));
+    verdict.archive = blocking;
     if (blocking.length) {
       verdict.dirty.ignoredBlocking = blocking.slice(0, MAX_LISTED_PATHS);
-      if (options.discardIgnoredFiles) {
+      if (canArchive) {
+        verdict.warnings.push(`ignored files will be archived: ${blocking.slice(0, MAX_LISTED_PATHS).join(", ")}`);
+      } else if (options.discardIgnoredFiles) {
         verdict.warnings.push(`ignored files will be deleted: ${blocking.slice(0, MAX_LISTED_PATHS).join(", ")}`);
       } else {
         block("WORKTREE_IGNORED_FILES");
@@ -1991,7 +2060,9 @@ export async function verifyRemovable(
     );
     if (hidden.length) {
       verdict.dirty.ignoredBlocking = [...verdict.dirty.ignoredBlocking, ...hidden].slice(0, MAX_LISTED_PATHS);
-      if (options.discardIgnoredFiles) verdict.warnings.push(`ignored files will be deleted: ${hidden.join(", ")}`);
+      verdict.archive = [...verdict.archive, ...hidden];
+      if (canArchive) verdict.warnings.push(`ignored files will be archived: ${hidden.join(", ")}`);
+      else if (options.discardIgnoredFiles) verdict.warnings.push(`ignored files will be deleted: ${hidden.join(", ")}`);
       else block("WORKTREE_IGNORED_FILES");
     }
   }
@@ -2023,8 +2094,12 @@ export async function verifyRemovable(
     verdict.switched = { branch: switched, recordedTip, recordedMerged };
   }
 
-  // Nothing using it.
-  const paneIds = await panesUsing(ctx, workspace, path, realPath);
+  // Nothing using it. The maker's tab quiet for MAKER_IDLE_MS, with its
+  // shell inside, is judged as the maker below, not as a terminal or process.
+  const ownerIdle = ownerPane !== null && (deps.paneIdleMs?.(ownerPane) ?? -1) >= MAKER_IDLE_MS;
+  const ownerPid = ownerPane !== null ? (deps.sessionPid?.(ownerPane) ?? null) : null;
+  const allPanes = await panesUsing(ctx, workspace, path, realPath);
+  const paneIds = ownerIdle ? allPanes.filter((id) => id !== ownerPane) : allPanes;
   const runIds = await runsUsing(ctx, workspace, realPath);
   verdict.running.paneIds = paneIds;
   verdict.running.runIds = runIds;
@@ -2044,15 +2119,36 @@ export async function verifyRemovable(
     block("WORKTREE_OPEN_TABS");
     if (held === null) verdict.warnings.push("the window did not answer whether a tab shows the worktree");
   }
+  let ownerShellInside = false;
+  // Without a process scan the owner's shell may have moved in with cd.
+  let processesKnown = false;
   if (options.scanProcesses) {
     const processes = await deps.processesUnderCwd(realPath).catch(() => null);
+    processesKnown = !processUsageUnknown(processes);
+    // Windows has no scan at all: git's own delete fails on an open file
+    // there. Elsewhere a scan that failed, or saw only part of the open
+    // files, cannot rule a program out, and removing deletes.
+    if (!processesKnown && process.platform !== "win32") block("WORKTREE_USAGE_UNKNOWN");
     if (processes === null) {
       verdict.warnings.push("the process scan is unavailable on this system");
-    } else if (processes.length) {
-      verdict.running.processes = processes.length;
-      verdict.details.processes = processes.slice(0, 10);
-      if (!callerInside) block("WORKTREE_RUNNING_PROCESSES");
+    } else {
+      const others = processes.filter((entry) => !(ownerIdle && entry.pid === ownerPid));
+      if (others.length) {
+        verdict.running.processes = others.length;
+        verdict.details.processes = others.slice(0, 10);
+        if (!callerInside) block("WORKTREE_RUNNING_PROCESSES");
+      }
+      if (ownerPid !== null && processes.some((entry) => entry.pid === ownerPid)) ownerShellInside = true;
     }
+  }
+  if (ownerPane !== null) {
+    const ownerInside = allPanes.includes(ownerPane) || ownerShellInside || !processesKnown;
+    const finished =
+      (ownerIdle || !ownerInside) &&
+      (await finishedWork(scope.repoCwd, { state: verdict.mergeStatus, proof: verdict.proof }, verdict.tip, switched ?? copy.branch, [workspace]).catch(
+        () => false,
+      ));
+    if (finished) verdict.blockers = verdict.blockers.filter((code) => code !== "WORKTREE_OWNED_BY_LIVE_AGENT");
   }
   return verdict;
 }
@@ -2604,7 +2700,8 @@ function mapRemoveError(message: string): WorktreeCode {
 
 // Merged, and held back only by the open tab of the agent that made it: an
 // agent never removes it on its own, but the user may, through the cleanup
-// tool's approval.
+// tool's approval (which a process scan that could not run does not stop:
+// the user is the one deciding there).
 const OWNED_BUT_MERGED_HINT =
   "it is merged and nothing else holds it: call codara_worktree_cleanup, then call it again with action:\"remove\" and this path; the user approves the removal in Codara";
 
@@ -2612,7 +2709,9 @@ function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): Worktr
   const code = verdict.blockers[0];
   const item = verdictItem(ctx, verdict);
   const ownedButMerged =
-    verdict.mergeStatus === "merged" && verdict.blockers.every((blocker) => blocker === "WORKTREE_OWNED_BY_LIVE_AGENT");
+    verdict.mergeStatus === "merged" &&
+    verdict.blockers.includes("WORKTREE_OWNED_BY_LIVE_AGENT") &&
+    verdict.blockers.every((blocker) => blocker === "WORKTREE_OWNED_BY_LIVE_AGENT" || blocker === "WORKTREE_USAGE_UNKNOWN");
   return refusal(code, blockerMessage(verdict, code), {
     ...(ownedButMerged ? { hint: OWNED_BUT_MERGED_HINT } : {}),
     blockers: verdict.blockers,
@@ -2834,16 +2933,23 @@ async function changedWhileAside(
     runs: deps.listRuns().catch(() => []),
     rendererTerminals: deps.listRendererTerminals().catch(() => null),
   };
+  // The maker's quiet tab with its shell inside was judged by the check.
+  const owner = workspace.copyBranch?.createdBy?.paneId;
+  const ownerIdle = owner !== undefined && owner !== ctx.caller.paneId && (deps.paneIdleMs?.(owner) ?? -1) >= MAKER_IDLE_MS;
+  const ownerPid = ownerIdle ? (deps.sessionPid?.(owner!) ?? null) : null;
   const panes = [
     ...(await panesUsing(fresh, workspace, workspace.cwd, realBefore)),
     ...(await panesUsing(fresh, workspace, aside, realAside)),
-  ];
+  ].filter((id) => !(ownerIdle && id === owner));
   const runs = [...(await runsUsing(fresh, workspace, realBefore)), ...(await runsUsing(fresh, workspace, realAside))];
   if (panes.length || runs.length) return "a terminal or run started in it while it was being removed, so it was put back";
   const held = await deps.workspaceHeld(workspace.id, [...new Set([workspace.cwd, realBefore, aside])]).catch(() => null);
   if (held !== false) return "a tab of it was opened while it was being removed, or the window did not answer, so it was put back";
   const processes = await deps.processesUnderCwd(realAside).catch(() => null);
-  if (processes?.length) return "a process runs in it, so it was put back";
+  if (processes?.some((entry) => !(ownerPid !== null && entry.pid === ownerPid))) return "a process runs in it, so it was put back";
+  if (processUsageUnknown(processes) && process.platform !== "win32") {
+    return "what runs in it could not be read, so it was put back; try again in a minute";
+  }
   return null;
 }
 
@@ -2892,6 +2998,7 @@ async function removeLocked(
   let savedTip: string | null = null;
   let branchDeleted = false;
   let branchKept: string | null = null;
+  let archived = undefined as { path: string; files: number; bytes: number } | undefined;
 
   if (!verdict.alreadyRemoved) {
     // The decisive checks again, against the refs already fetched, so a
@@ -2930,12 +3037,46 @@ async function removeLocked(
       });
     }
 
+    // Before anything is copied or deleted: git would delete through a mount.
+    const mounted = await (deps.mountRefusal ?? mountRefusal)(workspace.cwd);
+    if (mounted) return refusal("WORKTREE_MOUNT_INSIDE", mounted, { workspaceId: workspace.id });
+
     recoveryRef = await saveRecoveryRef(repo, `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${workspace.id}`, verdict.tip!);
     if (!recoveryRef) {
       return refusal("WORKTREE_GIT_FAILED", "could not save the recovery ref, so nothing was removed", {
         workspaceId: workspace.id,
       });
     }
+    // Copied from the folder moved aside, after its last check: nothing new
+    // can be written there by its path, so the copy is what git deletes.
+    const archiveRoot = again.archive.length ? deps.archiveRoot?.() : undefined;
+    let archiveError = null as string | null;
+    const archiveFrom = async (aside: string): Promise<string | null> => {
+      if (!archiveRoot) return null;
+      try {
+        const done = await archiveIgnoredFiles({
+          worktree: aside,
+          entries: again.archive,
+          root: archiveRoot,
+          repoName: basename(repo),
+          branch: verdict.switched?.branch ?? branch,
+          now: deps.now(),
+        });
+        archived = { path: done.dir, files: done.files, bytes: done.bytes };
+        // A file written or a program started while the copy ran is in
+        // neither the copy nor the check: all of it is checked again.
+        const changed = await changedWhileAside(recheckCtx, stillListed, realBefore, aside, before);
+        if (changed) {
+          archived = undefined;
+          await fsp.rm(done.dir, { recursive: true, force: true }).catch(() => undefined);
+          return changed;
+        }
+        return null;
+      } catch (err) {
+        archiveError = `${MESSAGES.WORKTREE_ARCHIVE_FAILED}: ${cleanText(errorText(err), 200)}`;
+        return archiveError;
+      }
+    };
     // No onBusy hook: Codara never kills anything on an agent's behalf.
     const removed = await removeCopyWorktree({
       repoCwd: repo,
@@ -2944,8 +3085,14 @@ async function removeLocked(
       force: false,
       deleteBranch: false,
       removeOrphanDir: false,
-      aside: { recheck: (aside) => changedWhileAside(recheckCtx, stillListed, realBefore, aside, before) },
+      aside: {
+        recheck: async (aside) =>
+          (await changedWhileAside(recheckCtx, stillListed, realBefore, aside, before)) ?? archiveFrom(aside),
+      },
     });
+    if (!removed.ok && archiveError) {
+      return refusal("WORKTREE_ARCHIVE_FAILED", archiveError, { workspaceId: workspace.id, recoveryRef });
+    }
     if (!removed.ok && removed.changed) {
       return refusal("WORKTREE_CHANGED", removed.error, { workspaceId: workspace.id, recoveryRef });
     }
@@ -3089,53 +3236,174 @@ async function removeLocked(
     ...(verdict.pullRequest ? { pullRequest: verdict.pullRequest } : {}),
     ...(recoveryRef ? { recoveryRef } : {}),
     ...(recoverWith ? { recoverWith } : {}),
+    ...(archived ? { archived } : {}),
     ...(warnings.length ? { warnings } : {}),
   };
 }
 
 // ── Process scan ───────────────────────────────────────────────────────────
 
-// Processes whose working directory is the worktree or inside it. Codara's
-// own process tree is excluded (its helpers, git children, the MCP servers)
-// except below a terminal session, where the user's and agents' commands run.
-// Best effort: null when the platform offers no scan or it timed out.
+// Processes whose working directory is the worktree or inside it, and on
+// Linux those with a file open inside it (an editor, a tail -f, a server
+// holding a log or a database). Codara's own process tree is excluded (its
+// helpers, git children, the MCP servers) except below a terminal session,
+// where the user's and agents' commands run. Best effort: null when the
+// platform offers no scan or the listing timed out. When only the open-file
+// part ran out of time or budget, the working-directory hits are kept and
+// the result says `openFilesUnknown`: a caller that deletes must treat it as
+// unknown (processUsageUnknown).
 export async function scanProcessesUnderCwd(
   dir: string,
-  options: { appPid: number; sessionPids: readonly number[]; timeoutMs?: number },
-): Promise<ProcessUse[] | null> {
+  options: ProcessScanOptions,
+): Promise<ProcessUseList | null> {
   const found = await scanProcessesUnderCwds([dir], options);
-  return found ? found.get(dir) ?? [] : null;
+  if (!found) return null;
+  const list: ProcessUseList = [...(found.get(dir) ?? [])];
+  if (found.openFilesUnknown) list.openFilesUnknown = true;
+  return list;
+}
+
+export type ProcessUseList = ProcessUse[] & { openFilesUnknown?: boolean };
+export type ProcessScan = Map<string, ProcessUse[]> & { openFilesUnknown?: boolean };
+
+/** True when a scan could not say everything that uses the folder: none ran, or its open-file part did not finish. */
+export function processUsageUnknown(scan: { openFilesUnknown?: boolean } | null | undefined): boolean {
+  return !scan || scan.openFilesUnknown === true;
+}
+
+export interface ProcessScanOptions {
+  appPid: number;
+  sessionPids: readonly number[];
+  timeoutMs?: number;
+  /** Open files read per scan; tests lower it to reach the cap. */
+  openFileBudget?: number;
+  /** Tests stand in for the system here. */
+  readers?: Partial<ProcessScanReaders>;
+}
+
+export interface ProcessScanReaders {
+  platform: NodeJS.Platform;
+  list(): Promise<readonly { pid: number; parentPid: number; command: string }[] | null>;
+  cwds(pids: number[]): Promise<Map<number, string> | null>;
+  /** Linux: a /proc/<pid>/fd folder's entries, and one entry's target. */
+  readdir(path: string): Promise<string[]>;
+  readlink(path: string): Promise<string>;
+}
+
+// Open files read in one scan, across every process. Past it the scan
+// cannot say what is open, so it answers "unknown" (null) as a timeout does.
+export const OPEN_FILE_SCAN_MAX = 50_000;
+const OPEN_FILE_SCAN_CONCURRENCY = 32;
+
+const systemProcessScanReaders: ProcessScanReaders = {
+  platform: process.platform,
+  list: () => listProcessesWithCommands(0),
+  cwds: (pids) => processCwds(pids),
+  readdir: (path) => fsp.readdir(path),
+  readlink: (path) => readlink(path),
+};
+
+// The paths each process has open, from /proc/<pid>/fd. A process that is
+// gone or not ours (ENOENT, EACCES) has none we can see. Sockets, pipes and
+// anonymous inodes are not paths. Null when the budget ran out.
+export async function openPathsOf(
+  pids: readonly number[],
+  readers: Pick<ProcessScanReaders, "readdir" | "readlink">,
+  budget = OPEN_FILE_SCAN_MAX,
+  deadline = Number.POSITIVE_INFINITY,
+): Promise<Map<number, string[]> | null> {
+  const out = new Map<number, string[]>();
+  let left = budget;
+  for (let i = 0; i < pids.length; i += OPEN_FILE_SCAN_CONCURRENCY) {
+    if (Date.now() > deadline) return null;
+    const batch = pids.slice(i, i + OPEN_FILE_SCAN_CONCURRENCY);
+    const fds = await Promise.all(batch.map((pid) => readers.readdir(`/proc/${pid}/fd`).catch(() => [] as string[])));
+    const count = fds.reduce((sum, names) => sum + names.length, 0);
+    if (count > left) return null;
+    left -= count;
+    const paths = await Promise.all(
+      batch.map(async (pid, index) => {
+        const targets = await Promise.all(
+          fds[index].map((fd) => readers.readlink(`/proc/${pid}/fd/${fd}`).catch(() => null)),
+        );
+        return targets
+          .filter((target): target is string => typeof target === "string" && target.startsWith("/"))
+          .map((target) => target.replace(/ \(deleted\)$/, ""));
+      }),
+    );
+    batch.forEach((pid, index) => {
+      if (paths[index].length) out.set(pid, paths[index]);
+    });
+  }
+  return out;
 }
 
 // The same scan for many directories from one process listing, so the
 // worktree cleanup screen does not list every process once per worktree.
 export async function scanProcessesUnderCwds(
   dirs: readonly string[],
-  options: { appPid: number; sessionPids: readonly number[]; timeoutMs?: number },
-): Promise<Map<string, ProcessUse[]> | null> {
-  if (process.platform === "win32") return null;
-  const scan = (async (): Promise<Map<string, ProcessUse[]> | null> => {
-    const listed = await listProcessesWithCommands(0);
-    if (!listed) return null;
-    const cwds = await processCwds(listed.map((entry) => entry.pid));
-    if (!cwds) return null;
-    const sessions = new Set(options.sessionPids);
-    const appAncestors = new Set(processChainIn(listed, options.appPid) ?? [options.appPid]);
-    const out = new Map<string, ProcessUse[]>(dirs.map((dir) => [dir, []]));
-    for (const entry of listed) {
-      const cwd = cwds.get(entry.pid);
-      if (!cwd) continue;
-      const inside = dirs.filter((dir) => isAtOrUnder(cwd, dir));
-      if (!inside.length || appAncestors.has(entry.pid)) continue;
-      const chain = processChainIn(listed, entry.pid) ?? [entry.pid];
-      const sessionIndex = chain.findIndex((pid) => sessions.has(pid));
-      const appIndex = chain.indexOf(options.appPid);
-      if (appIndex >= 0 && (sessionIndex < 0 || sessionIndex > appIndex)) continue;
-      for (const dir of inside) out.get(dir)!.push({ pid: entry.pid, command: cleanText(entry.command, 200) });
+  options: ProcessScanOptions,
+): Promise<ProcessScan | null> {
+  const readers: ProcessScanReaders = { ...systemProcessScanReaders, ...options.readers };
+  if (readers.platform === "win32") return null;
+  const timeoutMs = options.timeoutMs ?? 3_000;
+  const deadline = Date.now() + timeoutMs;
+  // The listing and the working directories: without them nothing is known.
+  const base = await withTimeout(
+    (async () => {
+      const listed = await readers.list();
+      if (!listed) return null;
+      const cwds = await readers.cwds(listed.map((entry) => entry.pid));
+      return cwds ? { listed, cwds } : null;
+    })().catch(() => null),
+    timeoutMs,
+    null,
+  );
+  if (!base) return null;
+  const { listed, cwds } = base;
+  const sessions = new Set(options.sessionPids);
+  const appAncestors = new Set(processChainIn(listed, options.appPid) ?? [options.appPid]);
+  const parentOf = new Map(listed.map((entry) => [entry.pid, entry.parentPid]));
+  // Codara's own processes, the main one with them, are not counted
+  // unless they run below a terminal session: walking up, a session
+  // reached before the app counts it.
+  const counted = listed.filter((entry) => {
+    if (appAncestors.has(entry.pid)) return false;
+    const seen = new Set<number>();
+    for (let pid: number | undefined = entry.pid; pid !== undefined && pid > 0 && !seen.has(pid); pid = parentOf.get(pid)) {
+      if (sessions.has(pid)) return true;
+      if (pid === options.appPid) return false;
+      seen.add(pid);
     }
-    return out;
-  })();
-  return withTimeout(scan.catch(() => null), options.timeoutMs ?? 3_000, null);
+    return true;
+  });
+  // Linux only: macOS would need lsof over every process, too slow here.
+  // Past its budget or the time left, the open files are unknown but the
+  // working-directory hits still stand.
+  const open =
+    readers.platform === "linux"
+      ? await withTimeout(
+          openPathsOf(
+            counted.map((entry) => entry.pid),
+            readers,
+            options.openFileBudget ?? OPEN_FILE_SCAN_MAX,
+            deadline,
+          ).catch(() => null),
+          Math.max(0, deadline - Date.now()),
+          null,
+        )
+      : new Map<number, string[]>();
+  const out: ProcessScan = new Map<string, ProcessUse[]>(dirs.map((dir) => [dir, []]));
+  if (!open) out.openFilesUnknown = true;
+  for (const entry of counted) {
+    const cwd = cwds.get(entry.pid);
+    const paths = open?.get(entry.pid) ?? [];
+    const inside = dirs.filter(
+      (dir) => (cwd !== undefined && isAtOrUnder(cwd, dir)) || paths.some((path: string) => isAtOrUnder(path, dir)),
+    );
+    for (const dir of inside) out.get(dir)!.push({ pid: entry.pid, command: cleanText(entry.command, 200) });
+  }
+  return out;
 }
 
 async function processCwds(pids: number[]): Promise<Map<number, string> | null> {
