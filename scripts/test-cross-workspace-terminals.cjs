@@ -486,6 +486,74 @@ async function main() {
   registry.register({ paneId: "p-resumed", tabId: "t-resumed", runId: null, ownerPaneId: "p-gone", ownerSessionId: "s-1" });
   assert.equal(registry.isActiveOwnedBy("p-resumed", null, { paneId: "p-new", sessionId: "s-1" }), true, "the opener's session resumed elsewhere");
   console.log("ok 5 a terminal is steered only by the agent that opened it");
+
+  // ── 6. "Any workspace" switch ──────────────────────────────────────────
+  const allFile = path.join(OUT_DIR, "home", "codara", "all-" + cross.CROSS_WORKSPACE_GRANTS_FILE);
+  let allStore = cross.fileGrantStore(allFile);
+  assert.equal(await allStore.allowAll(), false, "off by default");
+  await allStore.grant({ callerWorkspaceId: "a", callerName: "CEO", targetWorkspaceId: "b", targetName: "Cora" });
+  let allAsks = 0;
+  const allAnswers = [];
+  const allApprover = cross.createCrossWorkspaceApprover({
+    store: allStore,
+    ask: async () => {
+      allAsks += 1;
+      return allAnswers.shift() ?? null;
+    },
+  });
+  const pair = (callerId, targetId, action) =>
+    allApprover.authorize({
+      caller: { id: callerId, name: callerId, cwd: "/" + callerId },
+      target: { id: targetId, name: targetId, cwd: "/" + targetId },
+      agent: null,
+      requester: "pane:p1",
+      ...(action ? { action } : {}),
+    });
+
+  // Off: exactly today's behaviour. A saved pair passes, an unknown pair asks.
+  assert.deepEqual(await pair("a", "b"), { ok: true, via: "grant" });
+  assert.equal(allAsks, 0);
+  assert.equal((await pair("x", "y")).ok, false, "an unknown pair asks and no answer refuses");
+  assert.equal(allAsks, 1);
+
+  // On: no prompt for any pair or action; the stored pairs stay.
+  await allStore.setAllowAll(true);
+  assert.equal(await allStore.allowAll(), true);
+  assert.deepEqual(await pair("x", "y"), { ok: true, via: "grant" });
+  assert.deepEqual(await pair("p", "q", "worktree"), { ok: true, via: "grant" });
+  assert.equal(allAsks, 1, "the switch asks nothing");
+  assert.equal((await allStore.list()).length, 1, "saved pairs are kept");
+  await allStore.grant({ callerWorkspaceId: "c", callerName: "C", targetWorkspaceId: "d", targetName: "D" });
+  assert.equal(await allStore.allowAll(), true, "granting a pair keeps the switch");
+  assert.equal(await allStore.revoke("c", "d"), true);
+  assert.equal(await allStore.allowAll(), true, "revoking a pair keeps the switch");
+
+  // It persists, and turning it off returns to the old behaviour.
+  allStore = cross.fileGrantStore(allFile);
+  assert.equal(await allStore.allowAll(), true, "survives a new store");
+  await allStore.setAllowAll(false);
+  assert.equal(await allStore.allowAll(), false);
+  assert.equal((await allStore.list()).length, 1);
+  assert.equal(JSON.parse(fs.readFileSync(allFile, "utf8")).allowAll, undefined);
+  const offApprover = cross.createCrossWorkspaceApprover({ store: allStore, ask: async () => null });
+  assert.equal(
+    (await offApprover.authorize({ caller: { id: "x", name: "x", cwd: "/x" }, target: { id: "y", name: "y", cwd: "/y" }, agent: null, requester: "r" })).ok,
+    false,
+    "off again: asks again",
+  );
+  assert.equal(await allStore.has("a", "b"), true, "the saved pair still works off");
+
+  // The prompt's "Allow all workspaces" answer turns the switch on.
+  const answerStore = cross.fileGrantStore(path.join(OUT_DIR, "home", "codara", "answer-" + cross.CROSS_WORKSPACE_GRANTS_FILE));
+  const answerApprover = cross.createCrossWorkspaceApprover({ store: answerStore, ask: async () => "all" });
+  const allFirst = await answerApprover.authorize({ caller: { id: "m", name: "m", cwd: "/m" }, target: { id: "n", name: "n", cwd: "/n" }, agent: null, requester: "r" });
+  assert.equal(allFirst.ok, true);
+  assert.equal(await answerStore.allowAll(), true);
+  assert.deepEqual((await answerStore.list()), [], "it saves no pair");
+  // A broken file reads as off.
+  fs.writeFileSync(allFile, "{nope");
+  assert.equal(await cross.fileGrantStore(allFile).allowAll(), false);
+  console.log("ok 6 the any-workspace switch skips every prompt, keeps pairs, persists and turns off cleanly");
 }
 
 main().catch((error) => {
