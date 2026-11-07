@@ -445,7 +445,7 @@ export default function NotificationCenter({
       question: runId && resolveQuestion ? resolveQuestion(runId) : null,
       answer,
       stackTitle: stack,
-      relay: relayOf(entry.kind === "session.relay" ? relayIdOfSource(entry.sourceKey) : null),
+      relay: relayOf(entry.kind === "session.relay" ? relayIdOfSource(entry.sourceKey) : null, Date.parse(entry.createdAt)),
     };
   };
 

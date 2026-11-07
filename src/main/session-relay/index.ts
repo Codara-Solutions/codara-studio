@@ -83,11 +83,13 @@ function busy(target: RelayTarget): string | null {
 // The submit path session.message uses: one bracketed paste and Enter, with
 // a draft the user left in Claude Code stashed first.
 function deliver(target: RelayTarget, prompt: string): void {
+  // inject() drops text for a pane that is gone without saying so.
+  if (!pty.hasSession(target.id)) throw new Error("its terminal has closed");
   pty.inject(target.id, prompt, { submit: true, stashDraft: target.runtime === "claude" });
   noteTerminalUserInput(target.id);
 }
 
-function announce(relay: PendingRelay): void {
+function announce(relay: PendingRelay, grouped: boolean): void {
   publish({
     kind: "session.relay",
     sourceKey: relaySourceKey(relay.id),
@@ -99,6 +101,8 @@ function announce(relay: PendingRelay): void {
     // Opening it opens the notification center, where Send and Dismiss are.
     target: { type: "workspace", workspaceId: relay.target.workspaceId, panel: "notifications" },
     workspaceName: relay.target.workspace,
+    // A caller's later relays only add rows: one banner and one chime per burst.
+    ...(grouped ? { centerOnly: true } : {}),
   });
 }
 
@@ -181,10 +185,13 @@ export async function handleSessionRelay(input: {
   };
 }
 
-// Send must follow a real click or key press in the window, and each one
-// answers at most one Send. A dev build lets an agent run script in the
-// renderer (app.evaluate), which can call the bridge or click the button, but
-// script never produces browser input events.
+// Send needs a real mouse click in the window in the last 1.5 s, and each
+// click answers at most one Send. This stops renderer script (app.evaluate,
+// which a dev build lets agents run) from sending on its own: script makes no
+// browser input events. It does not prove the click landed on this card's
+// Send button (the renderer, which could be that script, is what says so),
+// and in a dev build such script can already write to any terminal itself.
+// Keys never count, so Enter typed into a terminal cannot authorize a Send.
 const GESTURE_WINDOW_MS = 1_500;
 const lastGestureAt = new WeakMap<WebContents, number>();
 
@@ -192,14 +199,7 @@ function watchGestures(contents: WebContents): void {
   if (lastGestureAt.has(contents)) return;
   lastGestureAt.set(contents, 0);
   contents.on("input-event", (_event, input) => {
-    // Only what presses a button: a click, or Enter or Space on a focused one.
-    const key = input as { keyCode?: string; key?: string };
-    const pressKey =
-      (input.type === "keyDown" || input.type === "rawKeyDown") &&
-      [key.keyCode, key.key].some((name) => name === "Enter" || name === "Return" || name === "Space" || name === " ");
-    if (input.type === "mouseUp" || pressKey) {
-      lastGestureAt.set(contents, Date.now());
-    }
+    if (input.type === "mouseUp") lastGestureAt.set(contents, Date.now());
   });
 }
 
@@ -214,7 +214,7 @@ export function registerSessionRelayIpc(handle: IpcHandle): void {
     }
     watchGestures(event.sender);
     if (decision === "send" && Date.now() - (lastGestureAt.get(event.sender) ?? 0) > GESTURE_WINDOW_MS) {
-      return { ok: false, error: "Send needs your click or key press in Codara.", stillPending: true };
+      return { ok: false, error: "Click Send with the mouse to send it.", stillPending: true };
     }
     if (decision === "send") lastGestureAt.set(event.sender, 0);
     await refreshWorkspaces();

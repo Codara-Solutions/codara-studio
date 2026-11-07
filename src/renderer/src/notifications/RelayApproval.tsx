@@ -32,8 +32,12 @@ export function onOpenNotificationCenter(listener: () => void): () => void {
   return () => window.removeEventListener(OPEN_EVENT, listener);
 }
 
+// Relays live in main's memory, so a row from before this launch whose relay
+// main no longer knows can never be sent: it reads as expired.
+const LAUNCHED_AT = performance.timeOrigin;
+
 /** Pending relays and recent outcomes, by relay id; refreshed when main says so. */
-export function useSessionRelays(): (relayId: string | null) => RelayRowState {
+export function useSessionRelays(): (relayId: string | null, createdAt: number) => RelayRowState {
   const [list, setList] = useState<{ pending: Map<string, PendingRelay>; outcomes: Record<string, RelayOutcome> }>(
     () => ({ pending: new Map(), outcomes: {} }),
   );
@@ -54,10 +58,11 @@ export function useSessionRelays(): (relayId: string | null) => RelayRowState {
       off();
     };
   }, []);
-  return (relayId) => {
+  return (relayId, createdAt) => {
     if (!relayId) return EMPTY;
     const pending = list.pending.get(relayId) ?? null;
-    return { pending, outcome: pending ? null : (list.outcomes[relayId] ?? null) };
+    if (pending) return { pending, outcome: null };
+    return { pending, outcome: list.outcomes[relayId] ?? (createdAt < LAUNCHED_AT ? "expired" : null) };
   };
 }
 
@@ -81,6 +86,7 @@ export function RelayApproval({ relay }: { relay: PendingRelay }): React.ReactEl
       <div className="nc-relay-who">
         From <strong>{relay.sender}</strong> to <strong>“{relay.target.title}”</strong> in {relay.target.workspace}
       </div>
+      <div className="nc-relay-reason nc-relay-via">Asked from {relay.caller.label}</div>
       {relay.reason && <div className="nc-relay-reason">Reason: {relay.reason}</div>}
       <pre className="nc-relay-text" aria-label="Message text" tabIndex={0}>
         {relay.text}
@@ -95,7 +101,15 @@ export function RelayApproval({ relay }: { relay: PendingRelay }): React.ReactEl
           className="nc-option"
           data-recommended="true"
           disabled={busy !== null}
-          onClick={() => void decide("send")}
+          onClick={(event) => {
+            // A pointer click on this button only: Enter on a focused button
+            // fires click with detail 0, and script-made clicks are untrusted.
+            if (!event.nativeEvent.isTrusted || event.detail === 0) {
+              setError("Click Send with the mouse to send it.");
+              return;
+            }
+            void decide("send");
+          }}
         >
           {busy === "send" ? "Sending..." : "Send"}
         </button>

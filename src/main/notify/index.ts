@@ -111,11 +111,13 @@ export function publish(input: PublishInput): void {
   const watching = watchingTarget(input);
   const dnd = getPreferenceCached("notificationsDnd") === true;
   const muted = isEventMuted(event);
-  const decision = decide(
+  const decided = decide(
     { kind: event.kind, sourceKey: event.sourceKey },
     { watching, dnd, muted },
     state,
   );
+  const decision =
+    event.centerOnly && decided.deliver ? { ...decided, deliver: false, reason: "grouped" } : decided;
   // Persistent audit trail (<codaraHome>/logs/main.log): one line per
   // publish, delivered or not. Center rows fold repeats and get dismissed, so
   // without this line a background chime can leave no evidence of what

@@ -145,13 +145,14 @@ test("a relayed message reaches a session only after the user presses Send", asy
       const card = page.locator(`[data-relay-id="${relayId}"]`);
       await expect(card).toBeVisible({ timeout: 10_000 });
       await expect(card.locator(".nc-relay-who")).toHaveText("From Grok Bot to \u201cFix the docs\u201d in Notes");
-      await expect(card.locator(".nc-relay-reason")).toHaveText("Reason: The nightly check failed");
+      await expect(card.locator(".nc-relay-via")).toHaveText("Asked from outside Codara");
+      await expect(card.locator(".nc-relay-reason").last()).toHaveText("Reason: The nightly check failed");
       expect(await card.locator(".nc-relay-text").textContent()).toBe(hostile);
       await expect(card.locator(".nc-relay-text b, .nc-relay-text a")).toHaveCount(0);
       const dir = process.env.CODARA_PROOF_DIR;
       if (dir) await page.screenshot({ path: join(dir, "relay-approval.png") });
       // Script in the renderer (what app.evaluate runs) cannot press Send
-      // without a real click or key press just before it.
+      // without a real mouse click just before it.
       await page.waitForTimeout(2_000);
       // Nor right after an unrelated key press.
       await page.keyboard.press("a");
@@ -208,12 +209,18 @@ test("a relayed message reaches a session only after the user presses Send", asy
       await expect(panel).toBeVisible();
     });
 
-    await test.step("Enter on a focused Send sends it", async () => {
+    await test.step("Enter on a focused Send does not send it; only a click does", async () => {
       const relay = await request("session.relay", { target: started.paneId, sender: "Grok Bot", text: "Keyboard approval" });
-      const send = page.locator(`[data-relay-id="${relay.relayId}"]`).getByRole("button", { name: "Send" });
-      await send.focus();
+      const card = page.locator(`[data-relay-id="${relay.relayId}"]`);
+      await card.getByRole("button", { name: "Send" }).focus();
       await page.keyboard.press("Enter");
-      await expect.poll(finalMessage, { timeout: 20_000 }).toContain("Answer 3 to: [Relayed from Grok Bot, approved by you] Keyboard approval");
+      await expect(card.getByRole("alert")).toHaveText("Click Send with the mouse to send it.");
+      await page.keyboard.press("Space");
+      await page.waitForTimeout(1_500);
+      expect((await request("session.relay", { relayId: relay.relayId })).status).toBe("pending");
+      expect(await finalMessage()).toContain("Answer 2 to:");
+      await card.getByRole("button", { name: "Dismiss" }).click();
+      await expect.poll(async () => (await request("session.relay", { relayId: relay.relayId })).status).toBe("dismissed");
     });
 
     await test.step("a busy or unknown target is refused at once", async () => {
@@ -222,10 +229,15 @@ test("a relayed message reaches a session only after the user presses Send", asy
       expect(busy.error?.message).toMatch(/working/);
       const unknown = await call("session.relay", { target: "pane-nope", sender: "Grok Bot", text: "hi" });
       expect(unknown.error?.message).toMatch(/no live session/);
-      const log = (await readFile(join(home, "relay-log.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-      expect(log.map((entry) => entry.outcome)).toEqual(["pending", "sent", "pending", "dismissed", "pending", "sent", "refused", "refused"]);
+      // The log is appended in the background: wait for the last line.
+      const readLog = async () =>
+        (await readFile(join(home, "relay-log.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      await expect.poll(async () => (await readLog()).length).toBe(8);
+      const log = await readLog();
+      expect(log.map((entry) => entry.outcome)).toEqual(["pending", "sent", "pending", "dismissed", "pending", "dismissed", "refused", "refused"]);
       expect(log[0]).toMatchObject({ sender: "Grok Bot", target: { id: started.paneId, title: "Fix the docs", workspace: "Notes" } });
       expect(log[0].text).toBe(hostile.slice(0, 200));
+      expect(log[0].via).toBe("outside Codara");
     });
   } finally {
     await app.close().catch(() => undefined);

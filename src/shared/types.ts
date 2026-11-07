@@ -1984,6 +1984,9 @@ export interface NotifyEvent {
   // native notification carries it as its subtitle. Filled in by publish()
   // from the target's workspaceId when the producer does not set it.
   workspaceName?: string;
+  // Recorded in the center only: no toast, native notification or chime. For
+  // a burst from one source that the first event already announced.
+  centerOnly?: boolean;
 }
 
 // A NotifyEvent as persisted in the notification center's ring buffer.

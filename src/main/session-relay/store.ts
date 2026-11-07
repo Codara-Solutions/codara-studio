@@ -6,6 +6,7 @@
 import {
   RELAY_LOG_PREVIEW_CHARS,
   RELAY_MAX_PENDING,
+  RELAY_MAX_PENDING_PER_CALLER,
   RELAY_TTL_MS,
   relayPrompt,
   sameRelayTarget,
@@ -20,6 +21,8 @@ export interface RelayLogEntry {
   time: string;
   relayId: string | null;
   sender: string;
+  /** Where the call really came from (RelayCaller.label). */
+  via: string;
   target: { id: string; title: string | null; workspace: string | null };
   text: string;
   outcome: RelayOutcome | "pending" | "refused";
@@ -35,7 +38,8 @@ export interface RelayDeps {
   busy(target: RelayTarget): string | null;
   /** Types the prompt into the session and submits it. */
   deliver(target: RelayTarget, prompt: string): void;
-  announce(relay: PendingRelay): void;
+  /** `grouped`: the same caller already has one waiting, so this one stays quiet. */
+  announce(relay: PendingRelay, grouped: boolean): void;
   settle(relay: PendingRelay, outcome: RelayOutcome): void;
   changed(): void;
   log(entry: RelayLogEntry): void;
@@ -63,6 +67,10 @@ export class SessionRelays {
     if (this.pendingById.size >= RELAY_MAX_PENDING) {
       return refuse(`${RELAY_MAX_PENDING} relays already wait for the user; try again after they answer some`);
     }
+    const mine = [...this.pendingById.values()].filter((relay) => relay.caller.key === request.caller.key).length;
+    if (mine >= RELAY_MAX_PENDING_PER_CALLER) {
+      return refuse(`${RELAY_MAX_PENDING_PER_CALLER} of your relays already wait for the user; try again after they answer`);
+    }
     const target = this.deps.resolveTarget(request.target);
     if (typeof target === "string") return refuse(target);
     const busy = this.deps.busy(target);
@@ -71,6 +79,7 @@ export class SessionRelays {
     const relay: PendingRelay = {
       id: this.deps.newId(),
       sender: request.sender,
+      caller: request.caller,
       reason: request.reason,
       text: request.text,
       target,
@@ -79,7 +88,7 @@ export class SessionRelays {
     };
     this.pendingById.set(relay.id, relay);
     this.record(relay.id, relay, target, "pending");
-    this.deps.announce(relay);
+    this.deps.announce(relay, mine > 0);
     this.deps.changed();
     return { ok: true, relay };
   }
@@ -167,7 +176,7 @@ export class SessionRelays {
 
   private record(
     relayId: string | null,
-    request: { sender: string; text: string; target?: unknown },
+    request: { sender: string; text: string; caller: { label: string }; target?: unknown },
     target: RelayTarget | null,
     outcome: RelayLogEntry["outcome"],
     detail?: string,
@@ -177,6 +186,7 @@ export class SessionRelays {
       time: new Date(this.deps.now()).toISOString(),
       relayId,
       sender: request.sender,
+      via: request.caller.label,
       target: { id: targetId.slice(0, 120), title: target?.title ?? null, workspace: target?.workspace ?? null },
       text: request.text.slice(0, RELAY_LOG_PREVIEW_CHARS),
       outcome,
