@@ -34,24 +34,13 @@ jobs:
         if: matrix.variant == 'before'
         run: git checkout origin/main -- src
       - run: npm run build
-      - name: Loop
+      - name: Sweep
         env:
           LOAD: ${{ matrix.load }}
         run: |
           if [ "$LOAD" = busy ]; then
             for n in 1 2; do (while :; do :; done) & done
           fi
-          fails=0
-          for i in $(seq 1 20); do
-            start=$(date +%s)
-            if node scripts/test-app-exit-electron.cjs > run.log 2>&1; then
-              echo "run $i ok $(( $(date +%s) - start ))s"
-            else
-              fails=$((fails + 1))
-              echo "run $i FAIL $(( $(date +%s) - start ))s"
-              cat run.log
-            fi
-          done
-          echo "TOTAL ${{ matrix.variant }} ${{ matrix.load }}: $fails/20 failed"
+          node scripts/appexit-sweep.cjs | tee sweep.log
           jobs -p | xargs kill 2>/dev/null || true
-          [ "$fails" -eq 0 ]
+          grep -q "^STUCK 0/" sweep.log
