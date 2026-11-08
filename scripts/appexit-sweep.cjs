@@ -40,22 +40,25 @@ async function once(delay, samples) {
   await sleep(delay);
   const termAt = Date.now();
   child.kill("SIGTERM");
-  const result = await Promise.race([exited, sleep(15_000).then(() => null)]);
+  let result = await Promise.race([exited, sleep(12_000).then(() => null)]);
+  let stack = "";
+  if (!result && process.platform === "darwin" && samples.left > 0) {
+    samples.left -= 1;
+    try {
+      const out = execFileSync("sample", [String(child.pid), "2", "-mayDie"], { encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+      const start = out.indexOf("Call graph:");
+      const end = out.indexOf("Total number in stack");
+      const base = /^\s*(0x[0-9a-f]+) - .*com\.github\.Electron\.framework/m.exec(out)?.[1] ?? "?";
+      stack = `\nELECTRON_FRAMEWORK_BASE ${base}\n${out.slice(start, end)}`;
+    } catch (error) {
+      stack = `\nsample failed: ${error.message}`;
+    }
+  }
+  if (!result) result = await Promise.race([exited, sleep(48_000).then(() => null)]);
   const took = Date.now() - termAt;
   const received = /received SIGTERM/.test(log());
   const forced = /forcing/.test(stderr);
-  let stack = "";
   if (!result) {
-    if (process.platform === "darwin" && samples.left > 0) {
-      samples.left -= 1;
-      try {
-        const out = execFileSync("sample", [String(child.pid), "1", "-mayDie"], { encoding: "utf8", timeout: 30_000 });
-        const start = out.indexOf("Call graph:");
-        stack = `\n${out.slice(start, start + 5000)}`;
-      } catch (error) {
-        stack = `\nsample failed: ${error.message}`;
-      }
-    }
     child.kill("SIGKILL");
     await exited;
   }

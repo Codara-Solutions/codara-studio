@@ -16,9 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [before, after]
+        variant: [after]
         load: [busy]
-        shard: [1, 2]
+        shard: [1, 2, 3]
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
