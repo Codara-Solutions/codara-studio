@@ -347,10 +347,15 @@ async function main() {
 
   await check("wiring", () => {
     const session = read("src", "renderer", "src", "components", "Terminal", "useTerminalSession.ts");
-    const handler = session.slice(session.indexOf("const handleContextMenu"), session.indexOf('host.addEventListener("contextmenu"'));
+    const wiring = session.slice(session.indexOf("const handleContextMenu"), session.indexOf('host.addEventListener("contextmenu"'));
+    assert.match(wiring, /createTerminalRightClickHandler\(\{/);
+    assert.match(wiring, /isReadOnly: \(\) => readOnlyRef\.current \|\| inputBlockedRef\.current/, "a mirror pane says so");
+    assert.match(wiring, /paste: writePasteFromClipboard,/);
+    const rightClick = read("src", "renderer", "src", "components", "Terminal", "terminalRightClick.ts");
+    const handler = rightClick.slice(rightClick.indexOf("export function createTerminalRightClickHandler"));
     assert.ok(handler.indexOf("openTerminalContextMenu(") > 0, "the terminal hands a right-click off first");
-    assert.ok(handler.indexOf("openTerminalContextMenu(") < handler.indexOf("writePasteFromClipboard();"), "before its own quick edit");
-    assert.match(handler, /readOnly: readOnlyRef\.current \|\| inputBlockedRef\.current/, "a mirror pane says so");
+    assert.ok(handler.indexOf("openTerminalContextMenu(") < handler.indexOf("options.paste();"), "before its own quick edit");
+    assert.match(handler, /readOnly: options\.isReadOnly\(\)/);
 
     const commands = read("src", "renderer", "src", "shortcuts", "commands.ts");
     assert.match(commands, /id: "quickCommands\.open",\n\s+label: "Run a quick command",\n\s+group: "Terminal",[\s\S]*?defaultChords: \[mod\("p", \{ shift: true \}\)\]/);
