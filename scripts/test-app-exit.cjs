@@ -236,6 +236,11 @@ async function main() {
   check("a healthy holder answers focused and shows its window", /writeHandoffAnswer\(userData, nonce, "focused"\);\s*showMainWindow\(\);/.test(second));
   const cleanup = index.slice(index.indexOf('app.on("before-quit"'), index.indexOf("const plainQuit = "));
   check("the quit cleanup logs its end per pid, on disk, before the window closes (test-app-exit-electron waits on it)", /logMain\("lifecycle", `quit cleanup done \(pid \$\{process\.pid\}, /.test(cleanup) && cleanup.indexOf("await flushMainLog();") > cleanup.indexOf("quit cleanup done") && cleanup.indexOf("await flushMainLog();") < cleanup.indexOf("} finally {"));
+  const bootFailure = index.slice(index.indexOf("function onBootFailure("), index.indexOf("let bootDialogOpen = false;"));
+  check("a boot failure while quitting neither reloads nor opens a dialog", bootFailure.indexOf("if (isQuitting) return;") !== -1 && bootFailure.indexOf("if (isQuitting) return;") < bootFailure.indexOf("bootFailures += 1;"));
+  check("the boot dialog goes through the non-blocking message box", bootFailure.includes("void showMessageBoxWithoutBlocking({"));
+  check("which attaches it to the window (with no parent, macOS runs it modally and blocks signals, #170)", /function showMessageBoxWithoutBlocking\([\s\S]{0,700}dialog\.showMessageBox\(parent, options\)/.test(index));
+  check("and no other message box is built without a parent", !/dialog\s*\.showMessageBox\(\{/.test(index));
   check("the final close after cleanup is time-boxed", /const lastResort = setTimeout\(\(\) => \{[\s\S]{0,160}app\.exit\(0\);\s*\}, 3000\);/.test(index));
 
   fs.rmSync(outDir, { recursive: true, force: true });

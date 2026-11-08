@@ -10,7 +10,9 @@
 //   2. SIGTERM while Cora work is live: a chat with a manager turn in flight
 //      (the live-work prompt would ask), SIGTERM, and the app must exit
 //      within a few seconds after its ordinary quit cleanup.
-//   3. a new launch replaces an instance whose window cannot load, and
+//   3. a new launch replaces an instance whose window cannot load (and the
+//      fresh instance, whose window cannot load either, still quits on
+//      SIGTERM once its boot ladder gave up and showed its dialog), and
 //   4. still only focuses a healthy one.
 //
 // Each quit is checked twice. Studio's own quit must finish within seconds:
@@ -211,8 +213,8 @@ async function devLauncherDies() {
   check("the app quits once its dev launcher is gone", quit, `no quit after ${Date.now() - startedAt} ms; main.log ${mainLog(home).slice(-1200)}`);
   check("and says why in main.log", new RegExp(`dev launcher parent ${launcher.pid} is gone[^\\n]*: quitting without the live-work prompt`).test(mainLog(home)), mainLog(home).slice(-600));
   const gone = quit && (await until(() => !alive(appPid), CHROMIUM_SHUTDOWN_MS));
-  check("and its process exits", gone, () => `still alive after ${Date.now() - startedAt} ms${stackOf({ pid: appPid, exitCode: null, signalCode: null })}`);
-  if (!gone) process.kill(appPid, "SIGKILL");
+  check("and its process exits", gone, () => `still alive after ${Date.now() - startedAt} ms; main.log ${mainLog(home).slice(-1200)}${hangRecords(home)}${stackOf(appPid)}`);
+  if (!gone && alive(appPid)) process.kill(appPid, "SIGKILL");
 }
 
 function fabricateLiveChat(home, runId) {
@@ -297,14 +299,21 @@ async function newLaunchReplacesBrokenInstance() {
   } else {
     check("the new launch takes the lock and starts", secondStarted && appPid === second.child.pid && second.child.exitCode === null, detail);
   }
+  // Its window cannot load either, so its boot ladder gives up and shows the
+  // "couldn't finish loading" dialog. SIGTERM only after that: on macOS a
+  // dialog without a parent window ran modally and blocked the main thread,
+  // so the signal never reached Studio (#170).
+  const sinceStart = () => mainLog(home).split(`app start pid=${appPid} `)[1] ?? "";
+  const gaveUp = Boolean(appPid) && (await until(() => /relaunch unavailable \(dev mode or already relaunched\); surfacing dialog/.test(sinceStart()), 60_000));
+  check("and its boot ladder gives up", gaveUp, () => sinceStart().slice(-1200));
   if (appPid && alive(appPid)) process.kill(appPid, "SIGTERM");
   const termAt = Date.now();
   const appQuit = Boolean(appPid) && (await until(() => studioQuitDone(home, appPid), 10_000, 50));
   check("and quits on SIGTERM", appQuit, () => `no quit after ${Date.now() - termAt} ms (SIGTERM at ${new Date(termAt).toISOString()}); main.log since its start ${mainLog(home).split(`app start pid=${appPid} `)[1]?.slice(-2500)}${hangRecords(home)}${stackOf(appPid)}`);
   const appGone = appQuit && (await until(() => !appPid || !alive(appPid), CHROMIUM_SHUTDOWN_MS));
-  check("and its process exits", appGone, `still alive after ${Date.now() - termAt} ms`);
+  check("and its process exits", appGone, () => `still alive after ${Date.now() - termAt} ms${hangRecords(home)}${stackOf(appPid)}`);
   if (!firstGone) first.child.kill("SIGKILL");
-  if (appPid && !appGone) process.kill(appPid, "SIGKILL");
+  if (appPid && !appGone && alive(appPid)) process.kill(appPid, "SIGKILL");
   if (second.child.exitCode === null && second.child.signalCode === null) second.child.kill("SIGKILL");
 }
 

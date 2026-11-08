@@ -536,6 +536,8 @@ function onBootFailure(reason: string): void {
   // The renderer entry itself is untrusted; the ladder below cannot fix that and
   // reportRendererEntryRejected already named the cause and told the user.
   if (rendererEntryRejected) return;
+  // Already quitting: a reload or a dialog now only gets in the quit's way.
+  if (isQuitting) return;
   bootFailures += 1;
   logMain("boot", `renderer failed to boot (${reason}); failure #${bootFailures}`);
   if (bootFailures <= 2) {
@@ -553,27 +555,41 @@ function onBootFailure(reason: string): void {
   logMain("boot", "relaunch unavailable (dev mode or already relaunched); surfacing dialog");
   bootFailures = 0; // let the user retry after dismissing
   bootGaveUp = true;
-  // Not showErrorBox: a modal that blocks the main thread would also keep a
-  // termination signal, the dev launcher watch and a second launch from
-  // reaching this process. One dialog at a time; the ladder may come round
-  // again while it is open.
+  // One dialog at a time; the ladder may come round again while it is open.
   if (bootDialogOpen) return;
   bootDialogOpen = true;
-  void dialog
-    .showMessageBox({
-      type: "error",
-      title: "Codara Studio couldn't finish loading",
-      message: "Codara Studio couldn't finish loading",
-      detail: app.isPackaged
-        ? "The app failed to boot repeatedly. Please quit and start it again; if this persists, check <spark home>/logs/main.log."
-        : "The renderer loaded but the app never booted. In dev mode this usually means the Vite dev server died (e.g. during system sleep). Restart `npm run dev`.",
-    })
-    .catch(() => undefined)
-    .finally(() => {
-      bootDialogOpen = false;
-    });
+  void showMessageBoxWithoutBlocking({
+    type: "error",
+    title: "Codara Studio couldn't finish loading",
+    message: "Codara Studio couldn't finish loading",
+    detail: app.isPackaged
+      ? "The app failed to boot repeatedly. Please quit and start it again; if this persists, check <spark home>/logs/main.log."
+      : "The renderer loaded but the app never booted. In dev mode this usually means the Vite dev server died (e.g. during system sleep). Restart `npm run dev`.",
+  }).finally(() => {
+    bootDialogOpen = false;
+  });
 }
 let bootDialogOpen = false;
+
+// A message box with no parent window is [NSAlert runModal] on macOS, async
+// or not: the main thread blocks while it is open, so a termination signal,
+// the dev launcher watch and a second launch never reach this process (#170:
+// a relaunched instance whose boot ladder gave up ignored SIGTERM for 30 s
+// and more). Attached to the window it is a sheet, which does not block. Not
+// showErrorBox either, which blocks everywhere.
+function showMessageBoxWithoutBlocking(options: Electron.MessageBoxOptions): Promise<void> {
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  if (!parent && process.platform === "darwin") {
+    logMain("boot", `no window to attach "${options.title}" to: not showing it`);
+    return Promise.resolve();
+  }
+  if (parent) revealWindow(parent);
+  const shown = parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options);
+  return shown.then(
+    () => undefined,
+    () => undefined,
+  );
+}
 
 // The window can no longer show the app: the boot ladder gave up, the entry
 // fails its own allowlist, or a boot failure is still unrecovered.
@@ -630,21 +646,16 @@ function reportRendererEntryRejected(
   );
   // Off the load path so a modal never blocks the navigation we are starting.
   const notify = setTimeout(() => {
-    // Not showErrorBox, for the same reason as the boot dialog above.
-    void dialog
-      .showMessageBox({
-        type: "error",
-        title: "Codara Studio can't trust its own window",
-        message: "Codara Studio can't trust its own window",
-        detail:
-          `The app's renderer entry does not pass its navigation allowlist, so every privileged action is blocked and the window will not work.\n\n` +
-          `Cause: ${cause}.\n\n` +
-          (offender
-            ? `Fix: reinstall or move Codara Studio to a path with no "${offender}" character in it.\n\n`
-            : "") +
-          `Details are in ${join(codaraHome(), "logs", "main.log")}.`,
-      })
-      .catch(() => undefined);
+    void showMessageBoxWithoutBlocking({
+      type: "error",
+      title: "Codara Studio can't trust its own window",
+      message: "Codara Studio can't trust its own window",
+      detail:
+        `The app's renderer entry does not pass its navigation allowlist, so every privileged action is blocked and the window will not work.\n\n` +
+        `Cause: ${cause}.\n\n` +
+        (offender ? `Fix: reinstall or move Codara Studio to a path with no "${offender}" character in it.\n\n` : "") +
+        `Details are in ${join(codaraHome(), "logs", "main.log")}.`,
+    });
   }, 0);
   notify.unref?.();
 }
