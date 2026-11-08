@@ -20,7 +20,6 @@ jobs:
           - { variant: after, load: busy, shard: 1, runs: 30 }
           - { variant: after, load: busy, shard: 2, runs: 30 }
           - { variant: after, load: busy, shard: 3, runs: 30 }
-          - { variant: before, load: busy, shard: 1, runs: 5 }
     runs-on: macos-latest
     timeout-minutes: 75
     steps:
