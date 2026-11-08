@@ -234,6 +234,8 @@ async function main() {
   const second = index.slice(index.indexOf("function onSecondInstance("), index.indexOf("function onSecondInstance(") + 1200);
   check("a broken holder answers quitting before it quits", second.indexOf('writeHandoffAnswer(userData, nonce, "quitting");\n    quitWithoutPrompt(') !== -1);
   check("a healthy holder answers focused and shows its window", /writeHandoffAnswer\(userData, nonce, "focused"\);\s*showMainWindow\(\);/.test(second));
+  const cleanup = index.slice(index.indexOf('app.on("before-quit"'), index.indexOf("const plainQuit = "));
+  check("the quit cleanup logs its end per pid, on disk, before the window closes (test-app-exit-electron waits on it)", /logMain\("lifecycle", `quit cleanup done \(pid \$\{process\.pid\}, /.test(cleanup) && cleanup.indexOf("await flushMainLog();") > cleanup.indexOf("quit cleanup done") && cleanup.indexOf("await flushMainLog();") < cleanup.indexOf("} finally {"));
   check("the final close after cleanup is time-boxed", /const lastResort = setTimeout\(\(\) => \{[\s\S]{0,160}app\.exit\(0\);\s*\}, 3000\);/.test(index));
 
   fs.rmSync(outDir, { recursive: true, force: true });

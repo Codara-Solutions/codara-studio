@@ -12,7 +12,7 @@ import {
   powerMonitor,
   type WebContents,
 } from "electron";
-import { logMain } from "./file-log";
+import { flushMainLog, logMain } from "./file-log";
 import { errorBoundaryLogEntry } from "@shared/error-boundary";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -1902,6 +1902,7 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (cleanupRan) return; // cleanup already in flight from an earlier quit attempt
   cleanupRan = true;
+  const cleanupStartedAt = Date.now();
   // An update restart still waiting for agents ends with this quit. Its
   // timer would otherwise see the agents stop during cleanup and turn this
   // plain quit into an install that reopens the app. (A restart the gate
@@ -1996,6 +1997,12 @@ app.on("before-quit", (event) => {
       tray?.destroy();
       tray = null;
       await flushAllStores();
+      // Studio's part of the quit ends here, on disk before the window closes;
+      // what follows is the window close and Chromium's own shutdown, which a
+      // loaded macOS can hold for a minute (#170). The e2e exit test waits on
+      // this line, per pid.
+      logMain("lifecycle", `quit cleanup done (pid ${process.pid}, ${Date.now() - cleanupStartedAt} ms)`);
+      await flushMainLog();
     } catch (err) {
       console.error("[main] quit cleanup failed:", err);
     } finally {

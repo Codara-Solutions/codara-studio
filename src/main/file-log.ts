@@ -23,6 +23,11 @@ function logPath(): string {
   return join(codaraHome(), "logs", "main.log");
 }
 
+/** Resolves once every line logged so far is on disk (or failed to land). */
+export function flushMainLog(): Promise<void> {
+  return chain;
+}
+
 export function logMain(category: string, message: string): void {
   const line = `${new Date().toISOString()} [${category}] ${message}\n`;
   // Every logged event is notable by definition; the black box keeps the
