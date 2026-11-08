@@ -1,4 +1,5 @@
 // test-runner: heavy (boots Electron several times)
+// test-runner: timeout=600
 // The built app's exits that nobody confirms, end to end (npm run build
 // first). Each launch gets a throwaway Codara home, HOME and Chromium
 // userData:
@@ -11,6 +12,15 @@
 //      within a few seconds after its ordinary quit cleanup.
 //   3. a new launch replaces an instance whose window cannot load, and
 //   4. still only focuses a healthy one.
+//
+// Each quit is checked twice. Studio's own quit must finish within seconds:
+// its cleanup removes the agent-socket handshake file late in the quit, so
+// that file going away is the event waited on. The process must then exit,
+// within CHROMIUM_SHUTDOWN_MS: Chromium's shutdown first waits for the
+// thread-pool tasks already running, and a launch only seconds old still has
+// background-priority ones (the bounce-tracking database open, the preload
+// code cache write) that a loaded macOS runner can hold for tens of seconds
+// (issue #170: 10 to 60 s measured, with Studio's quit over in under 1 s).
 //
 //   npm run build && node scripts/test-app-exit-electron.cjs
 //
@@ -27,10 +37,13 @@ const { useVirtualDisplay } = require("./virtual-display.cjs");
 const ROOT = path.resolve(__dirname, "..");
 const MAIN = path.join(ROOT, "out", "main", "index.js");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const CHROMIUM_SHUTDOWN_MS = 120_000;
 
 let failures = 0;
+// A detail can be a function, so the costly ones (a stack sample) only run on failure.
 function check(name, cond, detail) {
-  console.log(`${cond ? "  PASS" : "  FAIL"} ${name}${cond || detail === undefined ? "" : ` (${detail})`}`);
+  const text = cond || detail === undefined ? "" : ` (${typeof detail === "function" ? detail() : detail})`;
+  console.log(`${cond ? "  PASS" : "  FAIL"} ${name}${text}`);
   if (!cond) failures += 1;
 }
 
@@ -88,6 +101,15 @@ function appEnv(home, extra = {}) {
     SPARK_NO_SHELL_INTEGRATION: "1",
     ...extra,
   };
+}
+
+function handshakeFile(home) {
+  return path.join(home, "agent-socket.json");
+}
+
+// Written at boot before the window, removed by the quit cleanup.
+function studioQuitDone(home) {
+  return !fs.existsSync(handshakeFile(home));
 }
 
 function mainLog(home) {
@@ -160,13 +182,15 @@ async function devLauncherDies() {
   });
   launched.add(appPid);
   check("the launcher started the app", Number.isInteger(appPid) && alive(appPid), appPid);
-  const watching = await until(() => mainLog(home).includes(`dev mode: watching the launcher (pid ${launcher.pid})`), 60_000);
+  const watching = await until(() => mainLog(home).includes(`dev mode: watching the launcher (pid ${launcher.pid})`) && fs.existsSync(handshakeFile(home)), 60_000);
   check("the app watches its dev launcher", watching, mainLog(home).slice(-600));
   launcher.kill("SIGKILL");
   const startedAt = Date.now();
-  const gone = await until(() => !alive(appPid), 15_000);
-  check("the app exits once its dev launcher is gone", gone, `still alive after ${Date.now() - startedAt} ms`);
+  const quit = await until(() => studioQuitDone(home), 15_000, 50);
+  check("the app quits once its dev launcher is gone", quit, `no quit after ${Date.now() - startedAt} ms; main.log ${mainLog(home).slice(-1200)}`);
   check("and says why in main.log", new RegExp(`dev launcher parent ${launcher.pid} is gone[^\\n]*: quitting without the live-work prompt`).test(mainLog(home)), mainLog(home).slice(-600));
+  const gone = quit && (await until(() => !alive(appPid), CHROMIUM_SHUTDOWN_MS));
+  check("and its process exits", gone, () => `still alive after ${Date.now() - startedAt} ms${stackOf({ pid: appPid, exitCode: null, signalCode: null })}`);
   if (!gone) process.kill(appPid, "SIGKILL");
 }
 
@@ -201,10 +225,9 @@ async function sigtermWithLiveWork() {
   // No SPARK_E2E_BACKGROUND: under it the live-work prompt never asks, and
   // this case is about a quit that must not ask.
   const app = launchApp(appEnv(home, { SPARK_ALLOW_MULTI: "1" }));
-  const handshakeFile = path.join(home, "agent-socket.json");
-  const ready = await until(() => fs.existsSync(handshakeFile) && mainLog(home).includes("renderer ready"), 60_000);
+  const ready = await until(() => fs.existsSync(handshakeFile(home)) && mainLog(home).includes("renderer ready"), 60_000);
   check("the app booted", ready, mainLog(home).slice(-600));
-  const handshake = JSON.parse(fs.readFileSync(handshakeFile, "utf8"));
+  const handshake = JSON.parse(fs.readFileSync(handshakeFile(home), "utf8"));
   // Boot recovery is over by now; the run is read on a cache miss, as a
   // chat whose manager turn is still running.
   await sleep(1500);
@@ -212,9 +235,10 @@ async function sigtermWithLiveWork() {
   await rpc(handshake, "orchestrator.get_worker_status", { runId: "run-app-exit-live", worker_task_id: "wt-none" });
   const startedAt = Date.now();
   app.child.kill("SIGTERM");
-  const exited = await Promise.race([app.exited, sleep(10_000).then(() => null)]);
-  const took = Date.now() - startedAt;
-  check("SIGTERM quits within a few seconds", exited !== null && took < 8_000, `took ${took} ms`);
+  const quit = await until(() => studioQuitDone(home), 8_000, 50);
+  check("SIGTERM quits within a few seconds", quit, () => `no quit after ${Date.now() - startedAt} ms; main.log ${mainLog(home).slice(-1200)}${stackOf(app.child)}`);
+  const exited = quit ? await Promise.race([app.exited, sleep(CHROMIUM_SHUTDOWN_MS).then(() => null)]) : null;
+  check("and the process exits", exited !== null, () => `still alive after ${Date.now() - startedAt} ms${stackOf(app.child)}`);
   check("with the live chat counted, so the prompt was skipped, not empty", /received SIGTERM: quitting without the live-work prompt \(live: 1 chat\(s\)/.test(mainLog(home)), mainLog(home).slice(-800));
   check("after the full quit cleanup (no hard-exit fallback)", !/forcing process\.exit|forcing exit after/.test(app.stderr()), app.stderr().slice(-400));
   if (!exited) app.child.kill("SIGKILL");
@@ -225,13 +249,15 @@ async function newLaunchReplacesBrokenInstance() {
   const home = freshHome("handoff");
   const env = appEnv(home, { SPARK_E2E_BACKGROUND: "1", ELECTRON_RENDERER_URL: `http://127.0.0.1:${await closedPort()}/` });
   const first = launchApp(env);
-  const broken = await until(() => /renderer failed to boot/.test(mainLog(home)), 60_000);
+  const broken = await until(() => /renderer failed to boot/.test(mainLog(home)) && fs.existsSync(handshakeFile(home)), 60_000);
   check("the first instance cannot load its window", broken, mainLog(home).slice(-600));
   const secondAt = Date.now();
   const second = launchApp(env);
-  const firstGone = await Promise.race([first.exited.then(() => true), sleep(15_000).then(() => false)]);
-  check("the broken instance quits for the new launch", firstGone, `still alive after ${Date.now() - secondAt} ms; main.log ${mainLog(home).slice(-1200)}\nbroken instance stderr=${first.stderr().slice(-1500)}${stackOf(first.child)}`);
+  const firstQuit = await until(() => studioQuitDone(home), 15_000, 50);
+  check("the broken instance quits for the new launch", firstQuit, () => `no quit after ${Date.now() - secondAt} ms; main.log ${mainLog(home).slice(-1200)}\nbroken instance stderr=${first.stderr().slice(-1500)}${stackOf(first.child)}`);
   check("and says why", /a new launch found this instance unable to load its window: quitting/.test(mainLog(home)), mainLog(home).slice(-600));
+  const firstGone = firstQuit && (await Promise.race([first.exited.then(() => true), sleep(CHROMIUM_SHUTDOWN_MS).then(() => false)]));
+  check("and its process exits", firstGone, () => `still alive after ${Date.now() - secondAt} ms${stackOf(first.child)}`);
   // macOS never finishes launching a process whose first lock request lost,
   // so there the new launch hands over to a fresh copy of itself.
   const startedPid = () => {
@@ -242,16 +268,20 @@ async function newLaunchReplacesBrokenInstance() {
   const secondStarted = await until(() => startedPid() !== null, 20_000);
   const appPid = startedPid();
   if (appPid) launched.add(appPid);
-  const detail = `${mainLog(home).slice(-600)}\nnew launch: exit=${second.child.exitCode} signal=${second.child.signalCode} stderr=${second.stderr().slice(-1500)}${stackOf(second.child)}`;
+  const detail = () => `${mainLog(home).slice(-600)}\nnew launch: exit=${second.child.exitCode} signal=${second.child.signalCode} stderr=${second.stderr().slice(-1500)}${stackOf(second.child)}`;
   if (relaunches) {
     check("the new launch takes the lock and starts again fresh", secondStarted && appPid !== second.child.pid && alive(appPid) && /relaunched=false/.test(mainLog(home).split(`app start pid=${appPid} `)[1] ?? ""), detail);
     check("and the launch that handed over is gone", await Promise.race([second.exited.then(() => true), sleep(10_000).then(() => false)]), detail);
   } else {
     check("the new launch takes the lock and starts", secondStarted && appPid === second.child.pid && second.child.exitCode === null, detail);
   }
+  const appBooted = await until(() => fs.existsSync(handshakeFile(home)), 60_000);
   if (appPid && alive(appPid)) process.kill(appPid, "SIGTERM");
-  const appGone = await until(() => !appPid || !alive(appPid), 10_000);
-  check("and quits on SIGTERM", appGone, mainLog(home).slice(-1200));
+  const termAt = Date.now();
+  const appQuit = appBooted && (await until(() => studioQuitDone(home), 10_000, 50));
+  check("and quits on SIGTERM", appQuit, `booted=${appBooted}; no quit after ${Date.now() - termAt} ms; main.log ${mainLog(home).slice(-1200)}`);
+  const appGone = appQuit && (await until(() => !appPid || !alive(appPid), CHROMIUM_SHUTDOWN_MS));
+  check("and its process exits", appGone, `still alive after ${Date.now() - termAt} ms`);
   if (!firstGone) first.child.kill("SIGKILL");
   if (appPid && !appGone) process.kill(appPid, "SIGKILL");
   if (second.child.exitCode === null && second.child.signalCode === null) second.child.kill("SIGKILL");
@@ -262,17 +292,19 @@ async function newLaunchFocusesHealthyInstance() {
   const home = freshHome("healthy");
   const env = appEnv(home, { SPARK_E2E_BACKGROUND: "1" });
   const first = launchApp(env);
-  check("the first instance boots", await until(() => mainLog(home).includes("renderer ready"), 60_000), mainLog(home).slice(-600));
+  check("the first instance boots", await until(() => mainLog(home).includes("renderer ready") && fs.existsSync(handshakeFile(home)), 60_000), mainLog(home).slice(-600));
   const startedAt = Date.now();
   const second = launchApp(env);
   const secondGone = await Promise.race([second.exited.then(() => true), sleep(10_000).then(() => false)]);
-  check("the new launch quits at once", secondGone && Date.now() - startedAt < 10_000, `${Date.now() - startedAt} ms; main.log ${mainLog(home).slice(-600)}\nnew launch stderr=${second.stderr().slice(-1500)}${stackOf(second.child)}`);
+  check("the new launch quits at once", secondGone && Date.now() - startedAt < 10_000, () => `${Date.now() - startedAt} ms; main.log ${mainLog(home).slice(-600)}\nnew launch stderr=${second.stderr().slice(-1500)}${stackOf(second.child)}`);
   check("the healthy instance keeps running", first.child.exitCode === null && first.child.signalCode === null);
   check("and started no second app", !mainLog(home).includes(`app start pid=${second.child.pid} `));
   const termAt = Date.now();
   first.child.kill("SIGTERM");
-  const firstGone = await Promise.race([first.exited.then(() => true), sleep(10_000).then(() => false)]);
-  check("the healthy instance quits on SIGTERM", firstGone, `still alive after ${Date.now() - termAt} ms; main.log ${mainLog(home).slice(-1200)}\nstderr=${first.stderr().slice(-1500)}${stackOf(first.child)}`);
+  const firstQuit = await until(() => studioQuitDone(home), 10_000, 50);
+  check("the healthy instance quits on SIGTERM", firstQuit, () => `no quit after ${Date.now() - termAt} ms; main.log ${mainLog(home).slice(-1200)}\nstderr=${first.stderr().slice(-1500)}${stackOf(first.child)}`);
+  const firstGone = firstQuit && (await Promise.race([first.exited.then(() => true), sleep(CHROMIUM_SHUTDOWN_MS).then(() => false)]));
+  check("and its process exits", firstGone, () => `still alive after ${Date.now() - termAt} ms${stackOf(first.child)}`);
   if (!secondGone) second.child.kill("SIGKILL");
   if (!firstGone) first.child.kill("SIGKILL");
 }
