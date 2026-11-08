@@ -1892,8 +1892,9 @@ function askToQuitWithLiveWork(live: LiveWork): void {
   if (process.platform === "darwin" && (!mainWindow || mainWindow.isDestroyed())) showMainWindow();
   void showMessageBoxWithoutBlocking({ ...options, signal: asking.signal })
     .then((answer) => {
-      if (!answer || asking.signal.aborted) return;
-      if (answer.response !== 0) {
+      if (asking.signal.aborted) return;
+      // Not answered (nothing shown, or the window went away under it) is a no.
+      if (!answer || answer.response !== 0) {
         if (restartingForUpdate) updaterModCached?.cancelInstallRequest();
         return;
       }
