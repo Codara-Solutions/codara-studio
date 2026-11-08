@@ -8,9 +8,13 @@
 // through. Dev only: packaged builds never run this.
 const { spawn } = require("node:child_process");
 const os = require("node:os");
+const path = require("node:path");
 const { createLineFilter } = require("./dev-log-filter.cjs");
 
-const bin = require.resolve("electron-vite/bin/electron-vite.js");
+// The package's exports map hides bin/, so find it through package.json.
+const pkgPath = require.resolve("electron-vite/package.json");
+const pkg = require(pkgPath);
+const bin = path.resolve(path.dirname(pkgPath), typeof pkg.bin === "string" ? pkg.bin : pkg.bin["electron-vite"]);
 const env = { ...process.env };
 if (process.stderr.isTTY && !env.NO_COLOR && !env.FORCE_COLOR) env.FORCE_COLOR = "1";
 
