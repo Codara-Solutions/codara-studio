@@ -60,19 +60,20 @@ async function once(delay, samples) {
     await exited;
   }
   fs.rmSync(home, { recursive: true, force: true });
-  return { delay, took, exited: Boolean(result), received, forced, stack };
+  const traces = [...stderr.matchAll(/TRACE (\S+) (\d+)/g)].map((m) => `${m[1]}@${Number(m[2]) - termAt}`).join(" ");
+  return { delay, took, exited: Boolean(result), received, forced, stack, traces };
 }
 
 (async () => {
   if (process.platform === "linux" && !useVirtualDisplay()) throw new Error("no private display");
   const delays = [];
-  for (let round = 0; round < 3; round += 1) for (let d = 2400; d <= 3600; d += 100) delays.push(d);
+  for (let round = 0; round < Number(process.env.SWEEP_ROUNDS || 3); round += 1) for (let d = 2400; d <= 3600; d += 100) delays.push(d);
   const samples = { left: 2 };
   let stuck = 0;
   for (const delay of delays) {
     const r = await once(delay, samples);
     if (!r.exited || r.took > 8000) stuck += 1;
-    console.log(`delay=${r.delay} took=${r.took} exited=${r.exited} receivedSIGTERM=${r.received} forced=${r.forced}${r.stack}`);
+    console.log(`delay=${r.delay} took=${r.took} exited=${r.exited} receivedSIGTERM=${r.received} forced=${r.forced}${r.traces && (r.took > 3000 || !r.exited || delay === 2400) ? ` traces: ${r.traces}` : ""}${r.stack}`);
   }
   console.log(`STUCK ${stuck}/${delays.length}`);
 })();
