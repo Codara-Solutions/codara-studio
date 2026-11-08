@@ -1173,11 +1173,9 @@ app.whenReady().then(async () => {
     "boot",
     `app start pid=${process.pid} packaged=${app.isPackaged} relaunched=${process.argv.includes(RELAUNCHED_FLAG)}`,
   );
-  // Chromium installs its own signal handlers after ready; see app-exit.ts.
-  // Once now and once more a little later, so ours are the last installed
-  // whichever turn Chromium's land on, even when the window never loads.
+  // Chromium installed its signal handlers before ready, so this makes ours
+  // the last installed. Only once: see app-exit.ts.
   installQuitSignals(onQuitSignal);
-  setTimeout(() => installQuitSignals(onQuitSignal), 3000).unref();
   // `npm run dev`: the electron-vite process that spawned us also serves the
   // renderer. Once it is gone the window can never load again, so go too
   // rather than hold the single-instance lock behind a dead window.

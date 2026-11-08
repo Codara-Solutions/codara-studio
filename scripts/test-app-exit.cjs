@@ -214,7 +214,10 @@ async function main() {
   // ── wiring in index.ts ──────────────────────────────────────────────────
   const index = fs.readFileSync(INDEX_TS, "utf8");
   const ready = index.slice(index.indexOf("app.whenReady().then(async () => {"));
-  check("the signal handlers are installed after ready, and again later (Chromium's would win before)", ready.indexOf("installQuitSignals(onQuitSignal);") !== -1 && index.indexOf("installQuitSignals(onQuitSignal)") > index.indexOf("app.whenReady().then(async () => {") && /setTimeout\(\(\) => installQuitSignals\(onQuitSignal\), 3000\)\.unref\(\);/.test(ready));
+  check("the signal handlers are installed after ready (Chromium's would win before)", ready.indexOf("installQuitSignals(onQuitSignal);") !== -1 && index.indexOf("installQuitSignals(onQuitSignal)") > index.indexOf("app.whenReady().then(async () => {"));
+  // A second install closes the handle a caught signal is waiting on, and the
+  // app then ignores that SIGTERM (issue #170).
+  check("and installed only once", (index.match(/installQuitSignals\(/g) ?? []).length === 1, (index.match(/installQuitSignals\(/g) ?? []).length);
   check("a signal quits without the prompt", /function onQuitSignal\(signal: NodeJS\.Signals\): void \{\s*quitWithoutPrompt\(`received \$\{signal\}`\);/.test(index));
   const forced = index.slice(index.indexOf("function quitWithoutPrompt("), index.indexOf("function confirmQuitWithLiveWork("));
   check("the forced quit confirms live work and closes an open prompt before it quits", forced.indexOf("quitWithLiveWorkConfirmed = true;") !== -1 && forced.indexOf("quitPrompt?.abort();") !== -1 && forced.indexOf("quitWithLiveWorkConfirmed = true;") < forced.indexOf("app.quit();"));

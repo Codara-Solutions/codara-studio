@@ -75,13 +75,19 @@ export function watchParentProcess(options: ParentWatchOptions): () => void {
 }
 
 // ── Termination signals ────────────────────────────────────────────────────
-// Chromium installs its own SIGTERM, SIGINT and SIGHUP handlers after
-// `ready`, which only call app.quit() and so reach the live-work prompt; the
-// last handler installed with the OS wins. Node installs its OS handler only
-// when a signal gets its first listener, and a dependency (signal-exit) adds
-// one at load, before Chromium. So every listener is taken off and put back:
-// that makes Node install its handler again, now after Chromium's. For the
-// few microseconds in between the signal has its default action.
+// Chromium installs its own SIGTERM, SIGINT and SIGHUP handlers before
+// `ready` (Electron's PostCreateMainMessageLoop, on Linux and macOS alike),
+// which only call app.quit() and so reach the live-work prompt; the last
+// handler installed with the OS wins. Node installs its OS handler only when a
+// signal gets its first listener, and a dependency (signal-exit) adds one at
+// load, before Chromium. So every listener is taken off and put back once
+// `ready` has fired: that makes Node install its handler again, now after
+// Chromium's. For the few microseconds in between the signal has its default
+// action.
+//
+// Do it once. Taking the listeners off closes Node's signal handle, and a
+// signal libuv already caught but has not yet handed to JS (the main thread
+// was busy) goes with it: the process ignores that SIGTERM and keeps running.
 
 export const QUIT_SIGNALS: readonly NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"];
 
@@ -99,7 +105,7 @@ export interface SignalTarget {
   on(signal: NodeJS.Signals, listener: SignalListener): unknown;
 }
 
-/** Idempotent for the same onSignal: call it again whenever Chromium may have installed its handlers since. */
+/** Call once, after `ready`. Idempotent for the same onSignal, but each call can drop a signal still in flight. */
 export function installQuitSignals(
   onSignal: SignalListener,
   options: { platform?: NodeJS.Platform; target?: SignalTarget } = {},

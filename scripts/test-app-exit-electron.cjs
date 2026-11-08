@@ -227,9 +227,10 @@ async function newLaunchReplacesBrokenInstance() {
   const first = launchApp(env);
   const broken = await until(() => /renderer failed to boot/.test(mainLog(home)), 60_000);
   check("the first instance cannot load its window", broken, mainLog(home).slice(-600));
+  const secondAt = Date.now();
   const second = launchApp(env);
   const firstGone = await Promise.race([first.exited.then(() => true), sleep(15_000).then(() => false)]);
-  check("the broken instance quits for the new launch", firstGone);
+  check("the broken instance quits for the new launch", firstGone, `still alive after ${Date.now() - secondAt} ms; main.log ${mainLog(home).slice(-1200)}\nbroken instance stderr=${first.stderr().slice(-1500)}${stackOf(first.child)}`);
   check("and says why", /a new launch found this instance unable to load its window: quitting/.test(mainLog(home)), mainLog(home).slice(-600));
   // macOS never finishes launching a process whose first lock request lost,
   // so there the new launch hands over to a fresh copy of itself.
@@ -250,7 +251,7 @@ async function newLaunchReplacesBrokenInstance() {
   }
   if (appPid && alive(appPid)) process.kill(appPid, "SIGTERM");
   const appGone = await until(() => !appPid || !alive(appPid), 10_000);
-  check("and quits on SIGTERM", appGone);
+  check("and quits on SIGTERM", appGone, mainLog(home).slice(-1200));
   if (!firstGone) first.child.kill("SIGKILL");
   if (appPid && !appGone) process.kill(appPid, "SIGKILL");
   if (second.child.exitCode === null && second.child.signalCode === null) second.child.kill("SIGKILL");
@@ -268,9 +269,10 @@ async function newLaunchFocusesHealthyInstance() {
   check("the new launch quits at once", secondGone && Date.now() - startedAt < 10_000, `${Date.now() - startedAt} ms; main.log ${mainLog(home).slice(-600)}\nnew launch stderr=${second.stderr().slice(-1500)}${stackOf(second.child)}`);
   check("the healthy instance keeps running", first.child.exitCode === null && first.child.signalCode === null);
   check("and started no second app", !mainLog(home).includes(`app start pid=${second.child.pid} `));
+  const termAt = Date.now();
   first.child.kill("SIGTERM");
   const firstGone = await Promise.race([first.exited.then(() => true), sleep(10_000).then(() => false)]);
-  check("the healthy instance quits on SIGTERM", firstGone);
+  check("the healthy instance quits on SIGTERM", firstGone, `still alive after ${Date.now() - termAt} ms; main.log ${mainLog(home).slice(-1200)}\nstderr=${first.stderr().slice(-1500)}${stackOf(first.child)}`);
   if (!secondGone) second.child.kill("SIGKILL");
   if (!firstGone) first.child.kill("SIGKILL");
 }
