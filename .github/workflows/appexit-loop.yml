@@ -16,9 +16,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [after]
-        load: [busy]
-        shard: [1, 2, 3]
+        include:
+          - { variant: after, load: busy, shard: 1, runs: 30 }
+          - { variant: after, load: busy, shard: 2, runs: 30 }
+          - { variant: after, load: busy, shard: 3, runs: 30 }
+          - { variant: before, load: busy, shard: 1, runs: 5 }
     runs-on: macos-latest
     timeout-minutes: 75
     steps:
@@ -38,12 +40,13 @@ jobs:
       - name: Loop
         env:
           LOAD: ${{ matrix.load }}
+          RUNS: ${{ matrix.runs }}
         run: |
           if [ "$LOAD" = busy ]; then
             for n in 1 2; do (while :; do :; done) & done
           fi
           fails=0
-          for i in $(seq 1 30); do
+          for i in $(seq 1 "$RUNS"); do
             start=$(date +%s)
             if node scripts/test-app-exit-electron.cjs > run.log 2>&1; then
               echo "run $i ok $(( $(date +%s) - start ))s"
@@ -53,6 +56,6 @@ jobs:
               cat run.log
             fi
           done
-          echo "TOTAL: $fails/30 failed"
+          echo "TOTAL: $fails/$RUNS failed"
           jobs -p | xargs kill 2>/dev/null || true
           [ "$fails" -eq 0 ]
