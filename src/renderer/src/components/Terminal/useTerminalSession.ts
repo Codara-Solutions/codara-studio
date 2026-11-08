@@ -86,7 +86,7 @@ import {
   terminalScreenModesSequence,
   type TerminalScreenModes,
 } from "./terminalScreenModes";
-import { createTerminalRightClickHandler } from "./terminalRightClick";
+import { createTerminalRightClickHandler, createTerminalRightPressGuard } from "./terminalRightClick";
 
 export type { SparkOpenInput };
 
@@ -1538,20 +1538,25 @@ export function useTerminalSession({
         return false;
       });
 
-      // Right-click quick edit and the quick command menu; see
-      // terminalRightClick.ts for when a mouse-reporting program owns it.
+      // Right-click quick edit and the quick command menu. The right button
+      // is Codara's, so a mouse-reporting program never gets the press too;
+      // see terminalRightClick.ts.
       const host = container.current;
       if (host) {
-        const handleContextMenu = createTerminalRightClickHandler({
+        const rightClickOptions = {
           paneId: sessionId,
           getTerminal: () => termRef.current,
           isReadOnly: () => readOnlyRef.current || inputBlockedRef.current,
           isMac: IS_MAC,
-          writeClipboard: (text) => void window.spark.clipboard.writeText(text),
+          writeClipboard: (text: string) => void window.spark.clipboard.writeText(text),
           paste: writePasteFromClipboard,
-        });
+        };
+        const handleRightPress = createTerminalRightPressGuard(rightClickOptions);
+        const handleContextMenu = createTerminalRightClickHandler(rightClickOptions);
+        host.addEventListener("mousedown", handleRightPress, true);
         host.addEventListener("contextmenu", handleContextMenu);
         cleanups.push(() => {
+          host.removeEventListener("mousedown", handleRightPress, true);
           host.removeEventListener("contextmenu", handleContextMenu);
         });
 

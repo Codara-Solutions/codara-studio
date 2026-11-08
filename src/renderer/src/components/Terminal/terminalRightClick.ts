@@ -6,15 +6,16 @@ import { openTerminalContextMenu } from "../../quick-commands/terminal-context-m
 // "quick-edit". The OS context menu is always suppressed so the click is
 // consumed entirely by the terminal.
 //
-// A program that turned mouse reporting on (DECSET 1000/1002/1003, as the
-// Codex TUI and Claude Code's fullscreen renderer do) already receives the
-// right-click from xterm as a mouse report, and both paste the clipboard
-// themselves when they get it. Pasting here as well delivered the clipboard
-// twice, so a right-click the program received is left to the program, as
-// in a native terminal. Shift+right-click (Option+right-click on a Mac with
-// macOptionClickForcesSelection) is never reported and still pastes here.
+// The right button belongs to Codara. A program that turned mouse reporting
+// on (DECSET 1000/1002/1003) would otherwise also get the press from xterm,
+// and the Codex TUI pastes the clipboard itself when it does (it only stands
+// down for TERM_PROGRAM=vscode), so one click pasted twice. Claude Code
+// stands down for xterm.js (terminalVersion.ts), which is why the press is
+// withheld rather than Codara's own paste: the paste must come from Codara
+// for both. Shift+right-click (Option+right-click on a Mac with
+// macOptionClickForcesSelection) is never reported by xterm anyway.
 
-type RightClickTerminal = Pick<Terminal, "modes" | "options" | "getSelection" | "clearSelection">;
+type RightClickTerminal = Pick<Terminal, "modes" | "options" | "getSelection" | "clearSelection" | "focus">;
 
 // Mirrors xterm 5.5's mousedown gate (Terminal.bindMouse and
 // SelectionService.shouldForceSelection): a press is reported whenever mouse
@@ -38,6 +39,25 @@ export interface TerminalRightClickOptions {
   isMac: boolean;
   writeClipboard: (text: string) => void;
   paste: () => void;
+}
+
+// A capture-phase `mousedown` listener on the element that holds xterm's: it
+// runs before xterm's own listener and keeps a right press xterm would report
+// from reaching the program. xterm registers its release and drag reporting
+// only from a reported press, so the rest of the click is withheld with it.
+// Everything xterm's listener would otherwise do for a right press is to
+// cancel the default and take focus.
+export function createTerminalRightPressGuard(
+  options: Pick<TerminalRightClickOptions, "getTerminal" | "isMac">,
+): (event: MouseEvent) => void {
+  return (event) => {
+    if (event.button !== 2) return;
+    const term = options.getTerminal();
+    if (!term || !rightClickReachesProgram(term, event, options.isMac)) return;
+    event.stopPropagation();
+    event.preventDefault();
+    term.focus();
+  };
 }
 
 export function createTerminalRightClickHandler(
@@ -73,7 +93,6 @@ export function createTerminalRightClickHandler(
       copySelection();
       return;
     }
-    if (rightClickReachesProgram(term, event, options.isMac)) return;
     options.paste();
   };
 }
