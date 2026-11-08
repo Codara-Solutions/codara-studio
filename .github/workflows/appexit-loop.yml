@@ -20,7 +20,7 @@ jobs:
         load: [busy]
         shard: [1, 2, 3]
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,7 +43,7 @@ jobs:
             for n in 1 2; do (while :; do :; done) & done
           fi
           fails=0
-          for i in $(seq 1 15); do
+          for i in $(seq 1 30); do
             start=$(date +%s)
             if node scripts/test-app-exit-electron.cjs > run.log 2>&1; then
               echo "run $i ok $(( $(date +%s) - start ))s"
@@ -53,6 +53,6 @@ jobs:
               cat run.log
             fi
           done
-          echo "TOTAL: $fails/15 failed"
+          echo "TOTAL: $fails/30 failed"
           jobs -p | xargs kill 2>/dev/null || true
           [ "$fails" -eq 0 ]
