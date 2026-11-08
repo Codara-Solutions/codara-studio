@@ -36,7 +36,7 @@
     "test:changed": "node scripts/run-changed-tests.cjs",
     "icon:dev": "node scripts/stamp-dev-electron-icon.cjs",
     "predev": "node scripts/stamp-dev-electron-icon.cjs",
-    "dev": "electron-vite dev",
+    "dev": "node scripts/dev.cjs",
     "cora": "node cli/cora.cjs",
     "test:cora-cli": "node scripts/test-cora-cli.cjs",
     "test:overlay-performance": "node scripts/test-overlay-performance.cjs",
