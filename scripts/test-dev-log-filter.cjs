@@ -34,4 +34,17 @@ assert.equal(run([noise]), "");
 // Blank lines and colour codes survive.
 assert.equal(run(["\n\x1b[31mred\x1b[0m\n"]), "\n\x1b[31mred\x1b[0m\n");
 
+// Ordinary output that merely mentions the phrase is kept.
+assert.equal(isNoiseLine("Test fixture: display.cc:273] Frame latency is negative"), false);
+
+// A prompt without a newline appears at once, not at exit.
+{
+  const out = [];
+  const filter = createLineFilter((t) => out.push(t));
+  filter.push("Enter a value: ");
+  assert.equal(out.join(""), "Enter a value: ");
+  filter.push("42\n[1:2:ERROR:display.cc:1] Frame latency is negative: 1\n");
+  assert.equal(out.join(""), "Enter a value: 42\n");
+}
+
 console.log("PASS dev log filter hides only Chromium frame-latency noise");

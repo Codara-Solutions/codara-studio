@@ -41,5 +41,5 @@ child.on("error", (error) => {
 });
 child.on("close", (code, signal) => {
   filter.flush();
-  process.exit(code ?? 128 + (os.constants.signals[signal] || 0));
+  process.exitCode = code ?? 128 + (os.constants.signals[signal] || 0);
 });
