@@ -239,8 +239,12 @@ async function main() {
   const bootFailure = index.slice(index.indexOf("function onBootFailure("), index.indexOf("let bootDialogOpen = false;"));
   check("a boot failure while quitting neither reloads nor opens a dialog", bootFailure.indexOf("if (isQuitting) return;") !== -1 && bootFailure.indexOf("if (isQuitting) return;") < bootFailure.indexOf("bootFailures += 1;"));
   check("the boot dialog goes through the non-blocking message box", bootFailure.includes("void showMessageBoxWithoutBlocking({"));
-  check("which attaches it to the window (with no parent, macOS runs it modally and blocks signals, #170)", /function showMessageBoxWithoutBlocking\([\s\S]{0,700}dialog\.showMessageBox\(parent, options\)/.test(index));
-  check("and no other message box is built without a parent", !/dialog\s*\.showMessageBox\(\{/.test(index));
+  const helper = index.slice(index.indexOf("function showMessageBoxWithoutBlocking("), index.indexOf("function showMessageBoxWithoutBlocking(") + 1500);
+  check("which attaches it to the window (with no parent, macOS runs it modally and blocks signals, #170)", helper.includes("dialog.showMessageBox(parent, options)"));
+  check("and on macOS shows nothing rather than a parentless one", helper.indexOf('if (process.platform === "darwin")') !== -1 && helper.indexOf("return Promise.resolve(null);") > helper.indexOf('if (process.platform === "darwin")') && helper.indexOf("return Promise.resolve(null);") < helper.indexOf("dialog.showMessageBox(options)"));
+  const boxes = index.match(/\.showMessageBox\(/g) ?? [];
+  const inHelper = helper.match(/\.showMessageBox\(/g) ?? [];
+  check("every message box goes through it, the live-work prompt too", boxes.length === inHelper.length && /void showMessageBoxWithoutBlocking\(\{ \.\.\.options, signal: asking\.signal \}\)/.test(index), `${boxes.length} in index.ts, ${inHelper.length} in the helper`);
   check("the final close after cleanup is time-boxed", /const lastResort = setTimeout\(\(\) => \{[\s\S]{0,160}app\.exit\(0\);\s*\}, 3000\);/.test(index));
 
   fs.rmSync(outDir, { recursive: true, force: true });

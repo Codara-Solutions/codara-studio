@@ -576,19 +576,32 @@ let bootDialogOpen = false;
 // the dev launcher watch and a second launch never reach this process (#170:
 // a relaunched instance whose boot ladder gave up ignored SIGTERM for 30 s
 // and more). Attached to the window it is a sheet, which does not block. Not
-// showErrorBox either, which blocks everywhere.
-function showMessageBoxWithoutBlocking(options: Electron.MessageBoxOptions): Promise<void> {
+// showErrorBox either, which blocks everywhere. Resolves null when nothing
+// was shown or the window went away under it, never rejects.
+function showMessageBoxWithoutBlocking(
+  options: Electron.MessageBoxOptions,
+): Promise<Electron.MessageBoxReturnValue | null> {
   const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
-  if (!parent && process.platform === "darwin") {
-    logMain("boot", `no window to attach "${options.title}" to: not showing it`);
-    return Promise.resolve();
+  if (!parent) {
+    if (process.platform === "darwin") {
+      logMain("lifecycle", `no window to attach "${options.title ?? options.message}" to: not showing it`);
+      return Promise.resolve(null);
+    }
+    return dialog.showMessageBox(options).catch(() => null);
   }
-  if (parent) revealWindow(parent);
-  const shown = parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options);
-  return shown.then(
-    () => undefined,
-    () => undefined,
-  );
+  revealWindow(parent);
+  // A sheet whose window is destroyed may never settle; callers keep a
+  // one-at-a-time flag that must not stick.
+  let onClosed = (): void => undefined;
+  const closed = new Promise<null>((resolve) => {
+    onClosed = () => resolve(null);
+    parent.once("closed", onClosed);
+  });
+  return Promise.race([dialog.showMessageBox(parent, options), closed])
+    .catch(() => null)
+    .finally(() => {
+      if (!parent.isDestroyed()) parent.removeListener("closed", onClosed);
+    });
 }
 
 // The window can no longer show the app: the boot ladder gave up, the entry
@@ -1874,13 +1887,13 @@ function askToQuitWithLiveWork(live: LiveWork): void {
   };
   const asking = new AbortController();
   quitPrompt = asking;
-  const parent = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : null;
-  const withSignal = { ...options, signal: asking.signal };
-  const shown = parent ? dialog.showMessageBox(parent, withSignal) : dialog.showMessageBox(withSignal);
-  void shown
-    .then(({ response: choice }) => {
-      if (asking.signal.aborted) return;
-      if (choice !== 0) {
+  // On macOS the prompt needs a window to attach to (a parentless one blocks
+  // the main thread, see showMessageBoxWithoutBlocking): open it if closed.
+  if (process.platform === "darwin" && (!mainWindow || mainWindow.isDestroyed())) showMainWindow();
+  void showMessageBoxWithoutBlocking({ ...options, signal: asking.signal })
+    .then((answer) => {
+      if (!answer || asking.signal.aborted) return;
+      if (answer.response !== 0) {
         if (restartingForUpdate) updaterModCached?.cancelInstallRequest();
         return;
       }
@@ -1888,7 +1901,6 @@ function askToQuitWithLiveWork(live: LiveWork): void {
       isQuitting = true;
       app.quit();
     })
-    .catch(() => undefined)
     .finally(() => {
       if (quitPrompt === asking) quitPrompt = null;
     });
