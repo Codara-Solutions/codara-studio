@@ -37,6 +37,9 @@ const { useVirtualDisplay } = require("./virtual-display.cjs");
 const ROOT = path.resolve(__dirname, "..");
 const MAIN = path.join(ROOT, "out", "main", "index.js");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// For the losing side of a race: unref'd, so a bound that is not reached
+// does not keep the run alive until it fires.
+const deadline = (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref());
 const CHROMIUM_SHUTDOWN_MS = 120_000;
 
 let failures = 0;
@@ -111,18 +114,41 @@ function mainLog(home) {
   }
 }
 
+// The hang watchdog's records: a main thread frozen past its threshold.
+function hangRecords(home) {
+  const found = [];
+  const walk = (dir, depth) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory() && depth < 3) walk(file, depth + 1);
+      else if (entry.name === "hangs.jsonl" || entry.name === "hang-pending.json") found.push(`\n${entry.name}: ${fs.readFileSync(file, "utf8").slice(-3000)}`);
+    }
+  };
+  walk(home, 0);
+  return found.join("");
+}
+
 function studioQuitDone(home, pid) {
   return mainLog(home).includes(`quit cleanup done (pid ${pid},`);
 }
 
 // Where a process that should have quit or started is stuck: its main
 // thread's stack, from macOS's own sampler.
-function stackOf(child) {
-  if (process.platform !== "darwin" || child.exitCode !== null || child.signalCode !== null) return "";
+// The main thread's stack on macOS, of a child or of a bare pid (a relaunch).
+function stackOf(target) {
+  const pid = typeof target === "number" ? target : target.pid;
+  const gone = typeof target === "number" ? !alive(pid) : target.exitCode !== null || target.signalCode !== null;
+  if (process.platform !== "darwin" || gone) return "";
   try {
-    const out = require("node:child_process").execFileSync("sample", [String(child.pid), "1", "-mayDie"], { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
+    const out = require("node:child_process").execFileSync("sample", [String(pid), "1", "-mayDie"], { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
     const start = out.indexOf("Call graph:");
-    return `\nstack of ${child.pid}:\n${out.slice(start, start + 6000)}`;
+    return `\nstack of ${pid}:\n${out.slice(start, start + 6000)}`;
   } catch (error) {
     return `\nsample failed: ${error.message}`;
   }
@@ -233,7 +259,7 @@ async function sigtermWithLiveWork() {
   app.child.kill("SIGTERM");
   const quit = await until(() => studioQuitDone(home, app.child.pid), 8_000, 50);
   check("SIGTERM quits within a few seconds", quit, () => `no quit after ${Date.now() - startedAt} ms; main.log ${mainLog(home).slice(-1200)}${stackOf(app.child)}`);
-  const exited = quit ? await Promise.race([app.exited, sleep(CHROMIUM_SHUTDOWN_MS).then(() => null)]) : null;
+  const exited = quit ? await Promise.race([app.exited, deadline(CHROMIUM_SHUTDOWN_MS).then(() => null)]) : null;
   check("and the process exits", exited !== null, () => `still alive after ${Date.now() - startedAt} ms${stackOf(app.child)}`);
   check("with the live chat counted, so the prompt was skipped, not empty", /received SIGTERM: quitting without the live-work prompt \(live: 1 chat\(s\)/.test(mainLog(home)), mainLog(home).slice(-800));
   check("after the full quit cleanup (no hard-exit fallback)", !/forcing process\.exit|forcing exit after/.test(app.stderr()), app.stderr().slice(-400));
@@ -252,7 +278,7 @@ async function newLaunchReplacesBrokenInstance() {
   const firstQuit = await until(() => studioQuitDone(home, first.child.pid), 15_000, 50);
   check("the broken instance quits for the new launch", firstQuit, () => `no quit after ${Date.now() - secondAt} ms; main.log ${mainLog(home).slice(-1200)}\nbroken instance stderr=${first.stderr().slice(-1500)}${stackOf(first.child)}`);
   check("and says why", /a new launch found this instance unable to load its window: quitting/.test(mainLog(home)), mainLog(home).slice(-600));
-  const firstGone = firstQuit && (await Promise.race([first.exited.then(() => true), sleep(CHROMIUM_SHUTDOWN_MS).then(() => false)]));
+  const firstGone = firstQuit && (await Promise.race([first.exited.then(() => true), deadline(CHROMIUM_SHUTDOWN_MS).then(() => false)]));
   check("and its process exits", firstGone, () => `still alive after ${Date.now() - secondAt} ms${stackOf(first.child)}`);
   // macOS never finishes launching a process whose first lock request lost,
   // so there the new launch hands over to a fresh copy of itself.
@@ -267,14 +293,14 @@ async function newLaunchReplacesBrokenInstance() {
   const detail = () => `${mainLog(home).slice(-600)}\nnew launch: exit=${second.child.exitCode} signal=${second.child.signalCode} stderr=${second.stderr().slice(-1500)}${stackOf(second.child)}`;
   if (relaunches) {
     check("the new launch takes the lock and starts again fresh", secondStarted && appPid !== second.child.pid && alive(appPid) && /relaunched=false/.test(mainLog(home).split(`app start pid=${appPid} `)[1] ?? ""), detail);
-    check("and the launch that handed over is gone", await Promise.race([second.exited.then(() => true), sleep(10_000).then(() => false)]), detail);
+    check("and the launch that handed over is gone", await Promise.race([second.exited.then(() => true), deadline(10_000).then(() => false)]), detail);
   } else {
     check("the new launch takes the lock and starts", secondStarted && appPid === second.child.pid && second.child.exitCode === null, detail);
   }
   if (appPid && alive(appPid)) process.kill(appPid, "SIGTERM");
   const termAt = Date.now();
   const appQuit = Boolean(appPid) && (await until(() => studioQuitDone(home, appPid), 10_000, 50));
-  check("and quits on SIGTERM", appQuit, `no quit after ${Date.now() - termAt} ms; main.log ${mainLog(home).slice(-1200)}`);
+  check("and quits on SIGTERM", appQuit, () => `no quit after ${Date.now() - termAt} ms (SIGTERM at ${new Date(termAt).toISOString()}); main.log since its start ${mainLog(home).split(`app start pid=${appPid} `)[1]?.slice(-2500)}${hangRecords(home)}${stackOf(appPid)}`);
   const appGone = appQuit && (await until(() => !appPid || !alive(appPid), CHROMIUM_SHUTDOWN_MS));
   check("and its process exits", appGone, `still alive after ${Date.now() - termAt} ms`);
   if (!firstGone) first.child.kill("SIGKILL");
@@ -290,7 +316,7 @@ async function newLaunchFocusesHealthyInstance() {
   check("the first instance boots", await until(() => mainLog(home).includes("renderer ready"), 60_000), mainLog(home).slice(-600));
   const startedAt = Date.now();
   const second = launchApp(env);
-  const secondGone = await Promise.race([second.exited.then(() => true), sleep(10_000).then(() => false)]);
+  const secondGone = await Promise.race([second.exited.then(() => true), deadline(10_000).then(() => false)]);
   check("the new launch quits at once", secondGone && Date.now() - startedAt < 10_000, () => `${Date.now() - startedAt} ms; main.log ${mainLog(home).slice(-600)}\nnew launch stderr=${second.stderr().slice(-1500)}${stackOf(second.child)}`);
   check("the healthy instance keeps running", first.child.exitCode === null && first.child.signalCode === null);
   check("and started no second app", !mainLog(home).includes(`app start pid=${second.child.pid} `));
@@ -298,7 +324,7 @@ async function newLaunchFocusesHealthyInstance() {
   first.child.kill("SIGTERM");
   const firstQuit = await until(() => studioQuitDone(home, first.child.pid), 10_000, 50);
   check("the healthy instance quits on SIGTERM", firstQuit, () => `no quit after ${Date.now() - termAt} ms; main.log ${mainLog(home).slice(-1200)}\nstderr=${first.stderr().slice(-1500)}${stackOf(first.child)}`);
-  const firstGone = firstQuit && (await Promise.race([first.exited.then(() => true), sleep(CHROMIUM_SHUTDOWN_MS).then(() => false)]));
+  const firstGone = firstQuit && (await Promise.race([first.exited.then(() => true), deadline(CHROMIUM_SHUTDOWN_MS).then(() => false)]));
   check("and its process exits", firstGone, () => `still alive after ${Date.now() - termAt} ms${stackOf(first.child)}`);
   if (!secondGone) second.child.kill("SIGKILL");
   if (!firstGone) first.child.kill("SIGKILL");
