@@ -347,8 +347,8 @@ async function main() {
 
   await check("wiring", () => {
     const session = read("src", "renderer", "src", "components", "Terminal", "useTerminalSession.ts");
-    const wiring = session.slice(session.indexOf("const rightClickOptions"), session.indexOf('host.addEventListener("contextmenu"'));
-    assert.match(wiring, /createTerminalRightClickHandler\(rightClickOptions\)/);
+    const wiring = session.slice(session.indexOf("const handleContextMenu"), session.indexOf('host.addEventListener("contextmenu"'));
+    assert.match(wiring, /createTerminalRightClickHandler\(\{/);
     assert.match(wiring, /isReadOnly: \(\) => readOnlyRef\.current \|\| inputBlockedRef\.current/, "a mirror pane says so");
     assert.match(wiring, /paste: writePasteFromClipboard,/);
     const rightClick = read("src", "renderer", "src", "components", "Terminal", "terminalRightClick.ts");

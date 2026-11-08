@@ -36,7 +36,6 @@ import { pasteBody } from "@shared/terminal-text";
 import { applyUnicode11Widths } from "@shared/terminal-unicode";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
-import { IS_MAC } from "../../shortcuts/platform";
 import { createFileLinkProvider } from "./file-link-provider";
 import { createReplayTracker } from "./replayTracker";
 import { replayFloorRow, replayPersistedScrollback } from "./persistedScrollback";
@@ -86,7 +85,7 @@ import {
   terminalScreenModesSequence,
   type TerminalScreenModes,
 } from "./terminalScreenModes";
-import { createTerminalRightClickHandler, createTerminalRightPressGuard } from "./terminalRightClick";
+import { createTerminalRightClickHandler, isRightButtonReport } from "./terminalRightClick";
 
 export type { SparkOpenInput };
 
@@ -1539,24 +1538,19 @@ export function useTerminalSession({
       });
 
       // Right-click quick edit and the quick command menu. The right button
-      // is Codara's, so a mouse-reporting program never gets the press too;
-      // see terminalRightClick.ts.
+      // is Codara's: the input forwarder below drops its mouse reports; see
+      // terminalRightClick.ts.
       const host = container.current;
       if (host) {
-        const rightClickOptions = {
+        const handleContextMenu = createTerminalRightClickHandler({
           paneId: sessionId,
           getTerminal: () => termRef.current,
           isReadOnly: () => readOnlyRef.current || inputBlockedRef.current,
-          isMac: IS_MAC,
-          writeClipboard: (text: string) => void window.spark.clipboard.writeText(text),
+          writeClipboard: (text) => void window.spark.clipboard.writeText(text),
           paste: writePasteFromClipboard,
-        };
-        const handleRightPress = createTerminalRightPressGuard(rightClickOptions);
-        const handleContextMenu = createTerminalRightClickHandler(rightClickOptions);
-        host.addEventListener("mousedown", handleRightPress, true);
+        });
         host.addEventListener("contextmenu", handleContextMenu);
         cleanups.push(() => {
-          host.removeEventListener("mousedown", handleRightPress, true);
           host.removeEventListener("contextmenu", handleContextMenu);
         });
 
@@ -3385,6 +3379,8 @@ export function useTerminalSession({
           onActivityRef.current?.();
           return;
         }
+        // The right button is Codara's quick edit (terminalRightClick.ts).
+        if (isRightButtonReport(data)) return;
         void window.spark.pty.write(sessionId, data, { typed: true });
         onActivityRef.current?.();
         onUserInputRef.current?.();
