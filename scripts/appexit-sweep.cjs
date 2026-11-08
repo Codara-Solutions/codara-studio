@@ -22,7 +22,7 @@ async function once(delay, samples) {
     SPARK_USER_DATA_DIR: home,
     SPARK_SKIP_LEGACY_MIGRATION: "1",
     SPARK_NO_SHELL_INTEGRATION: "1",
-    SPARK_E2E_BACKGROUND: "1",
+    ...(process.env.SWEEP_E2E === "0" ? { SPARK_ALLOW_MULTI: "1" } : { SPARK_E2E_BACKGROUND: "1" }),
   };
   const child = spawn(electron, [MAIN], { env, stdio: ["ignore", "ignore", "pipe"] });
   let stderr = "";

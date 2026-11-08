@@ -18,7 +18,8 @@ jobs:
       matrix:
         variant: [after]
         load: [busy]
-        shard: [1, 2, 3]
+        shard: [1, 2]
+        e2e: ['1', '0']
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -39,6 +40,7 @@ jobs:
       - name: Sweep
         env:
           LOAD: ${{ matrix.load }}
+          SWEEP_E2E: ${{ matrix.e2e }}
         run: |
           if [ "$LOAD" = busy ]; then
             for n in 1 2; do (while :; do :; done) & done
