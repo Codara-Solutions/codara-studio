@@ -573,7 +573,9 @@ percent sign).
 **Right-click in a terminal** chooses what a plain right-click does: **Copy
 or paste** (the default: copy the selection, or paste when nothing is
 selected) or **Open menu**. Shift+right-click always does the other one. A
-read-only mirror pane keeps copy and paste.
+read-only mirror pane keeps copy and paste. A program that reads the mouse
+itself, such as Codex or Claude Code's fullscreen view, receives a plain
+right-click and pastes on its own, so Codara does not paste a second time.
 
 Quick commands are stored with your other preferences in
 `spark-preferences.json` and stay on this computer; the phone app does not

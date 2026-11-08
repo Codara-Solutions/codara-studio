@@ -36,9 +36,9 @@ import { pasteBody } from "@shared/terminal-text";
 import { applyUnicode11Widths } from "@shared/terminal-unicode";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
+import { IS_MAC } from "../../shortcuts/platform";
 import { createFileLinkProvider } from "./file-link-provider";
 import { createReplayTracker } from "./replayTracker";
-import { openTerminalContextMenu } from "../../quick-commands/terminal-context-menu";
 import { replayFloorRow, replayPersistedScrollback } from "./persistedScrollback";
 import {
   registerCwdHandler,
@@ -86,6 +86,7 @@ import {
   terminalScreenModesSequence,
   type TerminalScreenModes,
 } from "./terminalScreenModes";
+import { createTerminalRightClickHandler } from "./terminalRightClick";
 
 export type { SparkOpenInput };
 
@@ -1537,45 +1538,18 @@ export function useTerminalSession({
         return false;
       });
 
-      // Native-terminal right-click: copy current selection if one exists,
-      // otherwise paste from clipboard. Matches ConHost / Windows Terminal
-      // "quick-edit" behavior the user expects. preventDefault suppresses
-      // the OS context menu so the click is consumed entirely by the
-      // terminal.
+      // Right-click quick edit and the quick command menu; see
+      // terminalRightClick.ts for when a mouse-reporting program owns it.
       const host = container.current;
       if (host) {
-        const handleContextMenu = (event: MouseEvent) => {
-          event.preventDefault();
-          const term2 = termRef.current;
-          if (!term2) return;
-          const selection = term2.getSelection();
-          const copySelection = () => {
-            if (!selection) return;
-            void window.spark.clipboard.writeText(selection);
-            term2.clearSelection();
-          };
-          // Shift+right-click (or a plain one, by preference) opens the quick
-          // command menu instead; see quick-commands/terminal-context-menu.ts.
-          if (
-            openTerminalContextMenu({
-              paneId: sessionId,
-              x: event.clientX,
-              y: event.clientY,
-              shiftKey: event.shiftKey,
-              selection,
-              readOnly: readOnlyRef.current || inputBlockedRef.current,
-              copy: copySelection,
-              paste: writePasteFromClipboard,
-            })
-          ) {
-            return;
-          }
-          if (selection) {
-            copySelection();
-            return;
-          }
-          writePasteFromClipboard();
-        };
+        const handleContextMenu = createTerminalRightClickHandler({
+          paneId: sessionId,
+          getTerminal: () => termRef.current,
+          isReadOnly: () => readOnlyRef.current || inputBlockedRef.current,
+          isMac: IS_MAC,
+          writeClipboard: (text) => void window.spark.clipboard.writeText(text),
+          paste: writePasteFromClipboard,
+        });
         host.addEventListener("contextmenu", handleContextMenu);
         cleanups.push(() => {
           host.removeEventListener("contextmenu", handleContextMenu);
