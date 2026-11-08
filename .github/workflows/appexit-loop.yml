@@ -18,8 +18,7 @@ jobs:
       matrix:
         variant: [after]
         load: [busy]
-        shard: [1, 2]
-        e2e: ['1', '0']
+        shard: [1, 2, 3]
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -36,15 +35,24 @@ jobs:
         if: matrix.variant == 'before'
         run: git checkout origin/main -- src
       - run: npm run build
-      - run: node scripts/appexit-trace-patch.cjs
-      - name: Sweep
+      - name: Loop
         env:
           LOAD: ${{ matrix.load }}
-          SWEEP_E2E: ${{ matrix.e2e }}
         run: |
           if [ "$LOAD" = busy ]; then
             for n in 1 2; do (while :; do :; done) & done
           fi
-          node scripts/appexit-sweep.cjs | tee sweep.log
+          fails=0
+          for i in $(seq 1 15); do
+            start=$(date +%s)
+            if node scripts/test-app-exit-electron.cjs > run.log 2>&1; then
+              echo "run $i ok $(( $(date +%s) - start ))s"
+            else
+              fails=$((fails + 1))
+              echo "run $i FAIL $(( $(date +%s) - start ))s"
+              cat run.log
+            fi
+          done
+          echo "TOTAL: $fails/15 failed"
           jobs -p | xargs kill 2>/dev/null || true
-          grep -q "^STUCK 0/" sweep.log
+          [ "$fails" -eq 0 ]
