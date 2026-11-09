@@ -1166,7 +1166,10 @@ the `blockers` and a `hint`:
   progress, and no ignored files beyond build output and caches
   (`node_modules/`, `dist/`, `.venv/` and similar, plus the patterns you add
   for the repository in Settings, and the files worktree setup copied or
-  linked while they are unchanged). The rest (`data/`, `.env.local`) is
+  linked while they are unchanged). Tool caches never block, at any depth and
+  whether git ignores them or lists them as untracked: `__pycache__`,
+  `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.turbo`, `.next/cache`,
+  `node_modules/.vite` and a root `coverage/` (`REGENERABLE_CACHE_DIRS`). The rest (`data/`, `.env.local`) is
   copied to `~/.codarastudio/worktree-archive/<date>/<repo>--<branch>/`, counted,
   and kept 30 days; with or without `discardIgnoredFiles`, a copy that fails
   keeps the worktree (`WORKTREE_ARCHIVE_FAILED`) and the result names `archived`;
@@ -1243,6 +1246,14 @@ write into it until it is deleted. A folder left aside when Codara stopped
 goes back before the next removal in that repository; one that cannot go
 back blocks removals there until it can. A worktree of more than 500,000
 files and folders is not removed: it is too large to check again.
+Removing a worktree that is already gone (folder deleted, registration
+pruned) answers `ok` with `alreadyRemoved: true`. Every refusal carries `code`
+and `hint`, and `retryWith` (the exact parameter to pass) where a retry with
+one would work: `discardIgnoredFiles`, a `target` that already holds the
+commits, `checkout` for an existing branch, `workspace` for a folder that
+holds repositories (`nestedRepositories` lists them), a valid `base`.
+`codara_worktree_create` returns `fetch`: `ok`, `skipped`, or
+`failed: <reason>` (then `baseCommit` is the last fetched remote head).
 Every create and removal, refused or not, is logged to
 `~/.codarastudio/logs/worktree-audit.jsonl`. **Let agents create and remove
 worktrees** in Settings turns creating and removing off; listing still works.

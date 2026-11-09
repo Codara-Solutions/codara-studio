@@ -65,6 +65,11 @@ export interface RemoveCopyWorktreeInput {
   // path once it is moved, `recheck` then checks it again there, and a
   // reason puts it back. A process that already had it open still can.
   aside?: { recheck(asidePath: string): Promise<string | null> };
+  // Untracked files (paths from the worktree's root) that are regenerable
+  // caches: they do not make the folder "dirty", and are deleted just before
+  // git removes it, which refuses any untracked file without --force. Every
+  // other untracked file keeps blocking.
+  discardUntracked?: (relativePath: string) => boolean;
 }
 
 const MANAGED_REPO_HASH_HEX_LENGTH = 12;
@@ -624,6 +629,8 @@ const fingerprintFs: { lstat: typeof lstat; readdir: (path: string) => Promise<s
 export interface FingerprintRegenerable {
   /** An ignored entry as git lists it, a folder with a trailing "/". */
   entry(path: string): boolean;
+  /** An untracked entry that is a cache and not work (see REGENERABLE_CACHE_DIRS). */
+  untracked?(path: string): boolean;
   /** A file inside a regenerable folder that counts all the same: a secret written there. */
   kept(path: string): boolean;
 }
@@ -711,7 +718,9 @@ export async function worktreeFingerprint(
     const path = listed.replace(/\/+$/, "");
     // A rename or copy carries its source in the next record.
     if (code[0] === "R" || code[0] === "C") index += 1;
-    const regenerated = code === "!!" && regenerable !== undefined && regenerable.entry(slashed(listed));
+    const regenerated =
+      regenerable !== undefined &&
+      (code === "!!" ? regenerable.entry(slashed(listed)) : code === "??" && regenerable.untracked?.(slashed(listed)) === true);
     await walk(code, path, await statOf(join(worktreePath, path)), regenerated);
   }
   // Tracked files git status does not look at (assume-unchanged,
@@ -794,19 +803,38 @@ async function tryRemoveWorktreeOnce(
     // drop its registration as if it were gone.
     let status: string;
     try {
-      status = (await runGit(input.worktreePath, ["status", "--porcelain", "--untracked-files=all"])).stdout;
+      status = (await runGit(input.worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout;
     } catch (err) {
       if (await isRegisteredWorktree(input.repoCwd, input.worktreePath)) {
         return { ok: false, error: `git could not read the worktree: ${errorText(err)}`, retryable: false };
       }
       status = "";
     }
-    if (status.trim()) {
+    const caches: string[] = [];
+    let blocking = false;
+    const fields = status.split("\0");
+    for (let i = 0; i < fields.length; i += 1) {
+      const field = fields[i];
+      if (field.length < 4) continue;
+      const code = field.slice(0, 2);
+      if (code === "!!") continue;
+      if (code === "??" && input.discardUntracked?.(field.slice(3))) caches.push(field.slice(3));
+      else blocking = true;
+      if (code[0] === "R" || code[0] === "C") i += 1;
+    }
+    if (blocking) {
       return {
         ok: false,
         error: "Worktree has uncommitted changes. Use force removal to discard them.",
         retryable: false,
       };
+    }
+    for (const file of caches) {
+      try {
+        await rm(join(input.worktreePath, file), { force: true });
+      } catch (err) {
+        return { ok: false, error: `could not delete the cache file ${file}: ${errorText(err)}`, retryable: false };
+      }
     }
   }
   try {
