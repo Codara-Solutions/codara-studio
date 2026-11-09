@@ -174,12 +174,13 @@ async function main() {
     fs.rmSync(path.join(late.path, "late.py"));
     assert.equal((await aw.removeAgentWorktree(agent, { workspaceId: late.workspaceId }, deps)).removed, true);
 
-    // Invariant: this change adds no deletion code. git-worktrees.ts is untouched.
-    assert.equal(
-      execFileSync("git", ["-C", path.join(__dirname, ".."), "diff", "--name-only", "origin/main", "--", "src/main/git-worktrees.ts"], { encoding: "utf8" }).trim(),
-      "",
-      "src/main/git-worktrees.ts (the deleting code) is unchanged",
-    );
+    // Invariant: the cache rule only decides; it deletes nothing itself. The module that decides
+    // must not call a delete. (That the deleting module is unchanged was checked in review of the
+    // change that added this rule; a test cannot compare against a branch CI may not have.)
+    const deciding = fs.readFileSync(path.join(__dirname, "..", "src", "main", "agent-worktrees.ts"), "utf8");
+    assert.ok(deciding.includes("REGENERABLE_CACHE_DIRS"), "the cache allowlist exists");
+    assert.ok(!/\b(rmSync|unlinkSync|rmdirSync)\b|\bfs(?:\.promises)?\.(rm|unlink|rmdir)\(/.test(deciding),
+      "the deciding module calls no delete");
 
     // Real work still blocks, next to the same caches.
     const workTree = await mergedWorktree("agent/real-work");
