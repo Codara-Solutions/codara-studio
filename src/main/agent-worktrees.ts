@@ -321,7 +321,7 @@ export const REGENERABLE_IGNORED_PATTERNS: readonly string[] = [
   ".eslintcache",
 ];
 
-const MESSAGES: Record<WorktreeCode, string> = {
+export const WORKTREE_MESSAGES: Record<WorktreeCode, string> = {
   WORKTREE_DISABLED: "agent worktrees are turned off in Settings > Git",
   WORKTREE_FORBIDDEN:
     "worktree changes are unavailable to workers, automation and talk chats, and finished runs",
@@ -370,8 +370,23 @@ const MESSAGES: Record<WorktreeCode, string> = {
   WORKTREE_REPO_BUSY: "another worktree operation on this repository is running",
 };
 
-const HINTS: Partial<Record<WorktreeCode, string>> = {
+export const WORKTREE_HINTS: Partial<Record<WorktreeCode, string>> = {
   WORKTREE_DISABLED: "ask the user",
+  WORKTREE_FORBIDDEN: "call it from a terminal or Cora chat of your own workspace; workers and automations cannot change worktrees",
+  WORKTREE_REMOTE_UNSUPPORTED: "use a local workspace; pass workspace: a local repository's id or folder",
+  WORKTREE_BRANCH_NOT_FOUND: "check the name with git branch -a, or drop checkout:true to make a new branch",
+  WORKTREE_BASE_NOT_FOUND: "pass base: a branch, tag or commit that exists, or leave it out to fork from the default branch",
+  WORKTREE_BRANCH_BUSY: "that branch is checked out at path: work there, or choose another branch name",
+  WORKTREE_GIT_FAILED: "read error for git's reason, fix that, then retry",
+  WORKTREE_STATE_FAILED: "retry; the worktree was rolled back, nothing is left over",
+  WORKTREE_NOT_FOUND: "call codara_worktree_list for the ids and paths; pass workspace if it is in another repository",
+  WORKTREE_NOT_YOURS: "call codara_worktree_list for the ids and paths; pass workspace if it is in another repository",
+  WORKTREE_NOT_MANAGED: "call codara_worktree_list for the ids and paths; only worktrees made by codara_worktree_create can be removed",
+  WORKTREE_OWNED_BY_ACTIVE_RUN: "wait for that run to finish, or ask the user",
+  WORKTREE_DETACHED_HEAD: "put the worktree back on its branch with git -C <path> switch <branch>, then retry",
+  WORKTREE_BRANCH_MISMATCH: "put the worktree back on its branch with git -C <path> switch <branch>, then retry",
+  WORKTREE_LOCKED: "ask the user to unlock it (git worktree unlock <path>)",
+  WORKTREE_OPERATION_IN_PROGRESS: "finish or abort the merge, rebase or cherry-pick in the worktree, then retry",
   WORKTREE_NO_WORKSPACE:
     "worktree tools work for agents started in a Codara Studio terminal or Cora chat",
   WORKTREE_NOT_A_REPO:
@@ -410,11 +425,11 @@ function refusal(
   error?: string,
   details: Record<string, unknown> = {},
 ): WorktreeRefusal {
-  const hint = HINTS[code];
+  const hint = WORKTREE_HINTS[code];
   return {
     ok: false,
     code,
-    error: cleanText(error ?? MESSAGES[code], 1_000),
+    error: cleanText(error ?? WORKTREE_MESSAGES[code], 1_000),
     ...(hint ? { hint } : {}),
     ...details,
   };
@@ -435,7 +450,7 @@ export function cleanText(value: unknown, max: number): string {
 
 export class RepoLockTimeoutError extends Error {
   constructor() {
-    super(MESSAGES.WORKTREE_REPO_BUSY);
+    super(WORKTREE_MESSAGES.WORKTREE_REPO_BUSY);
     this.name = "RepoLockTimeoutError";
   }
 }
@@ -587,6 +602,38 @@ const SECRET_FILES = [
   /^id_(?:rsa|dsa|ecdsa|ed25519)$/i,
 ];
 
+// Tool caches that hold nothing a test run or build cannot write again. They
+// never block a removal, at any depth, whether git ignores them or lists them
+// as untracked (a repository that does not ignore __pycache__). Each entry is
+// a folder name or a path of folders. Anything else keeps its protection.
+export const REGENERABLE_CACHE_DIRS: readonly string[] = [
+  "__pycache__",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".mypy_cache",
+  ".turbo",
+  ".next/cache",
+  "node_modules/.vite",
+];
+// Output folders that are caches only at the worktree's root: a nested
+// docs/coverage/ may be hand-made.
+const REGENERABLE_ROOT_CACHE_DIRS: readonly string[] = ["coverage"];
+
+/** The path (as folder names from the worktree's root) lies inside an allowlisted cache folder. */
+export function isRegenerableCachePath(folders: readonly string[], isDir = true): boolean {
+  // A file that merely carries a cache folder's name is not one.
+  const room = isDir ? 0 : 1;
+  if (folders.length === 0) return false;
+  if (REGENERABLE_ROOT_CACHE_DIRS.includes(folders[0]) && folders.length > room) return true;
+  for (const dir of REGENERABLE_CACHE_DIRS) {
+    const parts = dir.split("/");
+    for (let start = 0; start + parts.length + room <= folders.length; start += 1) {
+      if (parts.every((part, index) => folders[start + index] === part)) return true;
+    }
+  }
+  return false;
+}
+
 export function isSecretFile(name: string): boolean {
   return SECRET_FILES.some((pattern) => pattern.test(name));
 }
@@ -645,6 +692,7 @@ export function isRegenerableIgnored(
   const segments = normalized.replace(/\/+$/, "").split("/").filter(Boolean);
   if (segments.length === 0) return true;
   const last = segments[segments.length - 1];
+  if (!isSecretFile(last) && isRegenerableCachePath(segments, isDir)) return true;
   const parent = segments.slice(0, -1).join("/");
   const atPackageRoot = parent === "" || isPackageRoot?.(parent) === true;
   const patterns = !isDir && isSecretFile(last) ? extra : [...REGENERABLE_IGNORED_PATTERNS, ...extra];
@@ -908,6 +956,44 @@ function createdByCaller(creator: NonNullable<Workspace["copyBranch"]>["createdB
  * finds it again that way. A worktree someone else made leaves the scope as
  * it was.
  */
+// A hint is a command an agent may paste: paths and branch names (git allows
+// ';', spaces and quotes in both) go in single quotes.
+function shellQuote(value: string): string {
+  return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+const NESTED_ROOTS_MAX = 10;
+const NESTED_ROOTS_DEPTH = 2;
+
+// Git repositories at most two folders below `folder` (a workspace that holds
+// repositories instead of being one), at most ten, in name order. Hidden
+// folders and dependency stores are skipped, and a repository's own insides
+// are not searched.
+export async function nestedGitRoots(folder: string): Promise<string[]> {
+  const found: string[] = [];
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const entry of entries) {
+      if (found.length >= NESTED_ROOTS_MAX) return;
+      if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name === "node_modules") continue;
+      const child = join(dir, entry.name);
+      if (await fsp.lstat(join(child, ".git")).then(() => true, () => false)) {
+        found.push(child);
+      } else if (depth < NESTED_ROOTS_DEPTH) {
+        await walk(child, depth + 1);
+      }
+    }
+  };
+  await walk(folder, 1);
+  return found;
+}
+
 export async function resolveWorktreeScope(
   caller: WorktreeCaller,
   deps: AgentWorktreeDeps,
@@ -998,7 +1084,13 @@ export async function resolveWorktreeScope(
     if (!top) throw new Error("no toplevel");
     repoCwd = await fsp.realpath(top);
   } catch {
-    return refusal("WORKTREE_NOT_A_REPO");
+    const nested = await nestedGitRoots(source);
+    if (!nested.length) return refusal("WORKTREE_NOT_A_REPO");
+    return refusal("WORKTREE_NOT_A_REPO", `${WORKTREE_MESSAGES.WORKTREE_NOT_A_REPO}, but ${nested.length} folders inside it are`, {
+      nestedRepositories: nested,
+      hint: `pass workspace=${nested[0]} (or one of nestedRepositories)`,
+      retryWith: { workspace: nested[0] },
+    });
   }
   let parentWorkspace = callerWorkspace;
   for (const workspace of state.workspaces) {
@@ -1123,6 +1215,7 @@ function createdResult(
     created: boolean;
     base?: string | null;
     baseCommit?: string | null;
+    fetch?: string;
     setupCommand: string | null;
     warnings: string[];
     setup?: Record<string, unknown> | null;
@@ -1156,6 +1249,7 @@ function createdResult(
     mode: copy.mode ?? "fork",
     ...(extra.base ?? copy.baseBranch ? { base: extra.base ?? copy.baseBranch } : {}),
     ...(extra.baseCommit ? { baseCommit: extra.baseCommit } : {}),
+    ...(extra.fetch ? { fetch: extra.fetch } : {}),
     repoCwd: scope.repoCwd,
     sourceWorkspaceId: scope.parentWorkspace.id,
     ...(typeof copy.fileCount === "number" ? { fileCount: copy.fileCount } : {}),
@@ -1433,6 +1527,10 @@ async function createAgentWorktreeInner(
   const warnings: string[] = [];
   let baseName: string | null = null;
   let baseCommit: string | null = null;
+  // Whether the base was refreshed from its remote first: "ok", "skipped"
+  // (a local base, a base of HEAD, or fetch:false) or "failed: <reason>", in
+  // which case the base is the last fetched state of the remote branch.
+  let fetchStatus = "skipped";
   if (!checkout) {
     const requested = typeof input.base === "string" ? input.base.trim() : "";
     if (requested.length > MAX_BASE) {
@@ -1446,8 +1544,10 @@ async function createAgentWorktreeInner(
       baseCommit = await revParse(repoCwd, `${baseName}^{commit}`);
     }
     if (!baseCommit) {
+      const fallback = requested ? await resolveMergeDefaultBranch(repoCwd) : null;
       return refusal("WORKTREE_BASE_NOT_FOUND", `base '${cleanText(baseName, MAX_BASE)}' does not resolve to a commit`, {
         repoCwd,
+        ...(fallback ? { retryWith: { base: fallback } } : {}),
       });
     }
   }
@@ -1486,7 +1586,11 @@ async function createAgentWorktreeInner(
       }
       const localExists = await refExists(repoCwd, `refs/heads/${branch}`);
       if (localExists && !checkout) {
-        return refusal("WORKTREE_BRANCH_EXISTS", `branch '${branch}' already exists`, { branch, repoCwd });
+        return refusal("WORKTREE_BRANCH_EXISTS", `branch '${branch}' already exists`, {
+          branch,
+          repoCwd,
+          retryWith: { checkout: true },
+        });
       }
       const agentCount = managed.filter((workspace) => workspace.copyBranch?.createdBy?.kind === "agent");
       if (agentCount.length >= AGENT_WORKTREE_LIMIT) {
@@ -1522,7 +1626,8 @@ async function createAgentWorktreeInner(
         const remoteBase = baseName && baseName !== "HEAD" ? await splitRemoteRef(repoCwd, baseName) : null;
         if (remoteBase && input.fetch !== false) {
           const failure = await fetchRemoteBranch(repoCwd, remoteBase.remote, remoteBase.branch);
-          if (failure) warnings.push(`fetch failed: ${failure}`);
+          fetchStatus = failure ? `failed: ${failure}` : "ok";
+          if (failure) warnings.push(`fetch failed: ${failure}; forked from the last fetched ${baseName}`);
           baseCommit = (await revParse(repoCwd, `${baseName}^{commit}`)) ?? baseCommit;
         }
         created = await createCopyWorktree({
@@ -1580,7 +1685,7 @@ async function createAgentWorktreeInner(
         return refusal(
           "WORKTREE_STATE_FAILED",
           rolledBack
-            ? `${MESSAGES.WORKTREE_STATE_FAILED}: ${cleanText(errorText(err), 300)}`
+            ? `${WORKTREE_MESSAGES.WORKTREE_STATE_FAILED}: ${cleanText(errorText(err), 300)}`
             : `could not add the worktree to Codara and could not fully remove ${created.path}`,
           { rolledBack, branch, repoCwd },
         );
@@ -1593,6 +1698,7 @@ async function createAgentWorktreeInner(
         created: true,
         base: baseName,
         baseCommit,
+        fetch: fetchStatus,
         // With worktree setup the user's command runs there, with the
         // repository's own; the agent must not run it a second time.
         setupCommand: deps.worktreeSetup ? null : await setupCommandFor(current, deps),
@@ -1633,6 +1739,7 @@ async function createAgentWorktreeInner(
       created: true,
       base: baseName,
       baseCommit,
+      fetch: fetchStatus,
       setupCommand: null,
       warnings,
       setup,
@@ -2017,6 +2124,10 @@ export async function verifyRemovable(
   try {
     const { stdout } = await runGit(path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
     const status = parseStatusZ(stdout);
+    // Cache folders git does not ignore stay blocking (this change adds no
+    // way to delete files); the refusal names them.
+    const cacheFiles = status.untracked.filter((file) => isRegenerableCachePath(file.split("/").filter(Boolean), false));
+    if (cacheFiles.length && cacheFiles.length === status.untracked.length && !status.tracked.length) verdict.details.untrackedCaches = [...new Set(cacheFiles.map(cacheFolderOf))].slice(0, MAX_LISTED_PATHS);
     verdict.dirty.tracked = status.tracked.length;
     verdict.dirty.untracked = status.untracked.length;
     if (status.tracked.length || status.untracked.length) {
@@ -2052,7 +2163,15 @@ export async function verifyRemovable(
     const all = await ignoredEntries(path);
     const provided = await setupProvidedEntries(realPath, all).catch(() => new Set<string>());
     ignored = all.filter((entry) => !provided.has(entry));
-    const blocking = ignored.filter((entry) => !isRegenerableIgnored(entry, extra, packageRootTester(realPath)));
+    const isPackageRoot = packageRootTester(realPath);
+    const blocking: string[] = [];
+    for (const entry of ignored) {
+      if (isRegenerableIgnored(entry, extra, isPackageRoot)) continue;
+      // git lists an ignored folder as one entry, so pkg/ holding only
+      // pkg/__pycache__/ is one: it passes when every file in it is a cache.
+      if (entry.endsWith("/") && (await holdsOnlyCaches(realPath, entry))) continue;
+      blocking.push(entry);
+    }
     verdict.archive = blocking;
     if (blocking.length) {
       verdict.dirty.ignoredBlocking = blocking.slice(0, MAX_LISTED_PATHS);
@@ -2398,6 +2517,15 @@ async function proveMerged(
   verdict.details.aheadOfTarget = ahead;
   verdict.details.commits = await commitSubjectsBetween(repo, target.commit, tip, 10);
   verdict.details.pushed = pushedTip === tip;
+  // Another branch on origin that already holds the tip (a release branch the
+  // work was merged into): naming it as the target proves the merge.
+  const holders = (
+    await readGitText(repo, ["for-each-ref", "--contains", tip, "--format=%(refname:short)", "refs/remotes/origin"]).catch(() => "")
+  )
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((name) => name && name !== "origin" && name !== "origin/HEAD" && name !== `origin/${branch}` && name !== target.name);
+  if (holders.length) verdict.details.containedIn = holders.slice(0, 3);
   if (ghError) {
     verdict.mergeStatus = "unknown";
     verdict.details.github = ghError;
@@ -2405,6 +2533,37 @@ async function proveMerged(
     verdict.mergeStatus = "unmerged";
   }
   block("WORKTREE_NOT_MERGED");
+}
+
+const ONLY_CACHES_MAX_ENTRIES = 5_000;
+
+// Read-only: every file under the ignored folder `entry` lies in an
+// allowlisted cache folder. Anything else, a link, or a folder too large to
+// look through, is not "only caches".
+async function holdsOnlyCaches(root: string, entry: string): Promise<boolean> {
+  let budget = ONLY_CACHES_MAX_ENTRIES;
+  const walk = async (relative: string[]): Promise<boolean> => {
+    const children = await fsp.readdir(join(root, ...relative), { withFileTypes: true }).catch(() => null);
+    if (!children) return false;
+    for (const child of children) {
+      budget -= 1;
+      if (budget < 0) return false;
+      const next = [...relative, child.name];
+      if (isRegenerableCachePath(next, child.isDirectory())) continue;
+      if (!child.isDirectory() || !(await walk(next))) return false;
+    }
+    return true;
+  };
+  return walk(entry.split("/").filter(Boolean));
+}
+
+// The allowlisted cache folder a path lies in, as a path from the root.
+function cacheFolderOf(file: string): string {
+  const parts = file.split("/").filter(Boolean);
+  for (let end = 1; end < parts.length; end += 1) {
+    if (isRegenerableCachePath(parts.slice(0, end), true)) return `${parts.slice(0, end).join("/")}/`;
+  }
+  return file;
 }
 
 function blockerMessage(verdict: RemovalVerdict, code: WorktreeCode): string {
@@ -2416,8 +2575,13 @@ function blockerMessage(verdict: RemovalVerdict, code: WorktreeCode): string {
       return `a ${verdict.dirty.inProgress ?? "git operation"} is in progress`;
     case "WORKTREE_IGNORED_FILES":
       return `ignored files that cannot be regenerated: ${verdict.dirty.ignoredBlocking.join(", ")}`;
-    case "WORKTREE_NOT_MERGED":
-      return `'${verdict.branch}' has ${d.aheadOfTarget ?? "some"} commits not in ${verdict.target} and no merged PR has head ${verdict.tip}`;
+    case "WORKTREE_NOT_MERGED": {
+      const commits = Array.isArray(d.commits) ? (d.commits as string[]) : [];
+      const shown = commits.slice(0, 3).map((subject) => `"${cleanText(subject, 80)}"`);
+      const more = typeof d.aheadOfTarget === "number" && d.aheadOfTarget > shown.length ? `, and ${d.aheadOfTarget - shown.length} more` : "";
+      const name = typeof d.checkedOutBranch === "string" ? d.checkedOutBranch : verdict.branch;
+      return `'${name}' has ${d.aheadOfTarget ?? "some"} commits not in ${verdict.target} and no merged PR has head ${verdict.tip}${shown.length ? `: ${shown.join(", ")}${more}` : ""}`;
+    }
     case "WORKTREE_TARGET_NOT_FOUND":
       return d.targetProblem
         ? `'${verdict.target}' cannot be the merge target: ${String(d.targetProblem)}`
@@ -2437,10 +2601,15 @@ function blockerMessage(verdict: RemovalVerdict, code: WorktreeCode): string {
     case "WORKTREE_OWNED_BY_LIVE_AGENT":
       return `the worktree belongs to the agent in terminal ${String(d.ownerPaneId)}, which is still open`;
     case "WORKTREE_DETACHED_HEAD":
-    case "WORKTREE_BRANCH_MISMATCH":
-      return `the worktree is not on its recorded branch '${verdict.branch}'`;
+    case "WORKTREE_BRANCH_MISMATCH": {
+      if (code === "WORKTREE_DETACHED_HEAD") return `the worktree has a detached HEAD, not its recorded branch '${verdict.branch}'`;
+      if (typeof d.checkedOutBranch === "string") {
+        return `the worktree has '${d.checkedOutBranch}' checked out instead of its recorded branch '${verdict.branch}'${verdict.mergeStatus === "merged" ? "" : ", and that branch is not merged"}`;
+      }
+      return `the worktree's HEAD (${String(verdict.head).slice(0, 8)}) is not the tip of '${verdict.branch}' (${String(verdict.tip).slice(0, 8)})`;
+    }
     default:
-      return MESSAGES[code];
+      return WORKTREE_MESSAGES[code];
   }
 }
 
@@ -2747,15 +2916,38 @@ function mapRemoveError(message: string): WorktreeCode {
 const OWNED_BUT_MERGED_HINT =
   "it is merged and nothing else holds it: call codara_worktree_cleanup, then call it again with action:\"remove\" and this path; the user approves the removal in Codara";
 
-function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): WorktreeRefusal {
+async function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): Promise<WorktreeRefusal> {
   const code = verdict.blockers[0];
   const item = verdictItem(ctx, verdict);
   const ownedButMerged =
     verdict.mergeStatus === "merged" &&
     verdict.blockers.includes("WORKTREE_OWNED_BY_LIVE_AGENT") &&
     verdict.blockers.every((blocker) => blocker === "WORKTREE_OWNED_BY_LIVE_AGENT" || blocker === "WORKTREE_USAGE_UNKNOWN");
+  const contained = Array.isArray(verdict.details.containedIn) ? (verdict.details.containedIn as string[]) : [];
+  const defaultTarget = code === "WORKTREE_TARGET_NOT_FOUND" ? await resolveMergeDefaultBranch(ctx.scope.repoCwd) : null;
+  const dynamic: { hint?: string; retryWith?: Record<string, unknown> } = {};
+  if (ownedButMerged) dynamic.hint = OWNED_BUT_MERGED_HINT;
+  else if (
+    code === "WORKTREE_DIRTY" &&
+    Array.isArray(verdict.details.untrackedCaches) &&
+    verdict.blockers.length === 1
+  ) {
+    dynamic.hint = `these are cache folders git does not ignore: delete them or add them to .gitignore, then retry (${(verdict.details.untrackedCaches as string[]).join(", ")})`;
+  } else if (code === "WORKTREE_IGNORED_FILES") dynamic.retryWith = { discardIgnoredFiles: true };
+  else if (code === "WORKTREE_NOT_MERGED") {
+    if (contained.length) {
+      dynamic.retryWith = { target: contained[0] };
+      dynamic.hint = `its commits are already in ${contained[0]}: pass target:"${contained[0]}" if that is where the work was merged; otherwise push it and merge its PR into ${verdict.target}`;
+    } else {
+      dynamic.hint = `merge its PR into ${verdict.target} (or pass target:<branch> if it was merged into another branch), or ask the user to delete it from the workspace rail`;
+    }
+  } else if (code === "WORKTREE_TARGET_NOT_FOUND" && defaultTarget && defaultTarget !== verdict.target) {
+    dynamic.retryWith = { target: defaultTarget };
+  } else if (code === "WORKTREE_DETACHED_HEAD" || code === "WORKTREE_BRANCH_MISMATCH") {
+    dynamic.hint = `run git -C ${shellQuote(verdict.path)} switch ${shellQuote(verdict.branch)} to put it back on its branch, then retry`;
+  }
   return refusal(code, blockerMessage(verdict, code), {
-    ...(ownedButMerged ? { hint: OWNED_BUT_MERGED_HINT } : {}),
+    ...dynamic,
     blockers: verdict.blockers,
     workspaceId: verdict.workspace.id,
     path: verdict.path,
@@ -2857,6 +3049,21 @@ export async function removeAgentWorktree(
         verifiedCommit: recovery.oid,
       };
     }
+    // A path in the managed folder that is gone from disk, from git's list and
+    // from the rail has nothing left to remove: asking again is not an error.
+    if (input.path && isAbsolute(input.path)) {
+      const wanted = resolve(input.path);
+      const absent = await fsp.lstat(wanted).then(
+        () => false,
+        (err: NodeJS.ErrnoException) => err?.code === "ENOENT" || err?.code === "ENOTDIR",
+      );
+      if (absent && (await sameFolder(dirname(wanted), scope.root))) {
+        const listed = await listWorktreeRegistrations(scope.repoCwd).catch(() => null);
+        if (listed && !listed.some((entry) => resolve(entry.path) === wanted)) {
+          return { ok: true, removed: false, alreadyRemoved: true, path: wanted };
+        }
+      }
+    }
     const notFound = refusal("WORKTREE_NOT_FOUND");
     await auditRefusal(deps, caller, notFound, input, scope.repoCwd);
     return notFound;
@@ -2890,7 +3097,7 @@ export async function removeAgentWorktree(
   }
   if (verdict.blockers.length) {
     await deps.audit({ ...auditBase, outcome: "refused", code: verdict.blockers[0] }).catch(() => undefined);
-    return refusalFromVerdict(ctx, verdict);
+    return await refusalFromVerdict(ctx, verdict);
   }
   await deps.afterVerify?.();
 
@@ -3119,7 +3326,7 @@ async function removeLocked(
         }
         return null;
       } catch (err) {
-        archiveError = `${MESSAGES.WORKTREE_ARCHIVE_FAILED}: ${cleanText(errorText(err), 200)}`;
+        archiveError = `${WORKTREE_MESSAGES.WORKTREE_ARCHIVE_FAILED}: ${cleanText(errorText(err), 200)}`;
         return archiveError;
       }
     };
