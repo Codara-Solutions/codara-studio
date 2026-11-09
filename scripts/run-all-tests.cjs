@@ -56,7 +56,7 @@ function defaultJobs() {
 // Tests put unix sockets under their TMPDIR, and a socket path is limited to
 // 103 bytes on macOS (107 on Linux). macOS's own temp folder is already 49
 // characters, so with ours on top (ct-XXXXXX/<n>/) a socket no longer fits and
-// the bind silently lands somewhere else. Keep the base short.
+// the bind fails or silently lands somewhere else. Keep the base short.
 const MAX_RUN_BASE_CHARS = 24;
 function isWritableDir(dir) {
   try {

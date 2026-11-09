@@ -7,6 +7,7 @@
 //   node scripts/test-run-all-tests-tmp.cjs
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const fs = require("node:fs");
 const { runDirBase } = require("./run-all-tests.cjs");
 
 let failed = 0;
@@ -23,8 +24,9 @@ function check(name, fn) {
 
 const MACOS_TMP = "/var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T";
 const MACOS_SOCKET_LIMIT = 103;
-// The longest socket path a suite makes under its TMPDIR today.
-const LONGEST_TAIL = path.join("ct-XXXXXX", "999", "desktop-command-XXXXXX", "desktop-command.sock");
+// The longest socket path a suite makes under its TMPDIR today: the tmux
+// socket of test-remote-agents.cjs. (The desktop-command one is 13 shorter.)
+const LONGEST_TAIL = path.join("ct-XXXXXX", "999", "codara-remote-agents-XXXXXX", "tmux-sockets", "tmux-501", "codara");
 
 check("a long temp folder (macOS) is replaced by /tmp", () => {
   assert.equal(runDirBase({ tmpdir: MACOS_TMP, platform: "darwin", usable: () => true }), "/tmp");
@@ -47,6 +49,12 @@ check("the longest socket path fits macOS's limit under every base the runner ca
   }
   // And it did not fit before: this is the failure being guarded.
   assert.ok(Buffer.byteLength(path.join(MACOS_TMP, LONGEST_TAIL)) > MACOS_SOCKET_LIMIT);
+});
+
+check("the runner makes its run folder under runDirBase(), not under the raw temp folder", () => {
+  const source = fs.readFileSync(path.join(__dirname, "run-all-tests.cjs"), "utf8");
+  assert.match(source, /mkdtempSync\(path\.join\(runDirBase\(\), "ct-"\)\)/);
+  assert.doesNotMatch(source, /mkdtempSync\(path\.join\(os\.tmpdir\(\)/);
 });
 
 check("on this machine the chosen base leaves room for a socket", () => {
