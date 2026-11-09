@@ -957,6 +957,12 @@ function createdByCaller(creator: NonNullable<Workspace["copyBranch"]>["createdB
  * finds it again that way. A worktree someone else made leaves the scope as
  * it was.
  */
+// A hint is a command an agent may paste: paths and branch names (git allows
+// ';', spaces and quotes in both) go in single quotes.
+function shellQuote(value: string): string {
+  return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 const NESTED_ROOTS_MAX = 10;
 const NESTED_ROOTS_DEPTH = 2;
 
@@ -2896,7 +2902,7 @@ async function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): 
   } else if (code === "WORKTREE_TARGET_NOT_FOUND" && defaultTarget && defaultTarget !== verdict.target) {
     dynamic.retryWith = { target: defaultTarget };
   } else if (code === "WORKTREE_DETACHED_HEAD" || code === "WORKTREE_BRANCH_MISMATCH") {
-    dynamic.hint = `run git -C ${verdict.path} switch ${verdict.branch} to put it back on its branch, then retry`;
+    dynamic.hint = `run git -C ${shellQuote(verdict.path)} switch ${shellQuote(verdict.branch)} to put it back on its branch, then retry`;
   }
   return refusal(code, blockerMessage(verdict, code), {
     ...dynamic,

@@ -44,6 +44,18 @@ async function main() {
     logLevel: "silent",
   });
   const aw = require(outFile);
+  const gwOut = path.join(cacheDir, `spark-agent-worktree-contracts-git-${process.pid}.cjs`);
+  await esbuild.build({
+    entryPoints: [path.join(__dirname, "..", "src", "main", "git-worktrees.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile: gwOut,
+    alias: { "@shared": path.join(__dirname, "..", "src", "shared") },
+    external: ["electron", "ssh2", "cpu-features"],
+    logLevel: "silent",
+  });
+  const gw = require(gwOut);
 
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-wt-contract-")));
   const home = path.join(scratch, "home");
@@ -147,6 +159,25 @@ async function main() {
     assert.equal(cacheRemoved.removed, true, JSON.stringify(cacheRemoved));
     assert.equal(fs.existsSync(cacheTree.path), false);
 
+    // A cache folder swapped for a link out of the worktree after git listed
+    // it: nothing outside is deleted.
+    const raced = await mergedWorktree("agent/raced");
+    write(raced.path, "pkg/__pycache__/payload.txt");
+    const outside = path.join(scratch, "outside");
+    write(outside, "payload.txt", "keep me\n");
+    const swapped = await gw.removeCopyWorktree({
+      repoCwd: repo,
+      worktreePath: raced.path,
+      branch: "agent/raced",
+      discardUntracked: (file) => {
+        fs.rmSync(path.join(raced.path, "pkg", "__pycache__"), { recursive: true, force: true });
+        fs.symlinkSync(outside, path.join(raced.path, "pkg", "__pycache__"));
+        return file.includes("__pycache__");
+      },
+    });
+    assert.equal(swapped.ok, false, JSON.stringify(swapped));
+    assert.equal(fs.readFileSync(path.join(outside, "payload.txt"), "utf8"), "keep me\n", "the file outside survives");
+
     // Real work still blocks, next to the same caches.
     const workTree = await mergedWorktree("agent/real-work");
     write(workTree.path, "pkg/__pycache__/mod.pyc");
@@ -226,6 +257,12 @@ async function main() {
     assert.equal(renamedRefused.ok, false);
     assert.match(renamedRefused.error, /unmerged after rename/);
     assert.ok(fs.existsSync(renamedOpen.path));
+
+    // Hints are commands: metacharacters and spaces are quoted.
+    const odd = await make("agent/odd;echo>marker");
+    git(odd.path, ["checkout", "-q", "--detach"]);
+    const oddRefused = await aw.removeAgentWorktree(agent, { workspaceId: odd.workspaceId }, deps);
+    assert.match(oddRefused.hint, /switch 'agent\/odd;echo>marker'/, oddRefused.hint);
 
     // Checked out the default branch inside the worktree: the refusal names it.
     const onMain = await make("agent/on-main");
@@ -337,6 +374,7 @@ async function main() {
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
     fs.rmSync(outFile, { force: true });
+    fs.rmSync(gwOut, { force: true });
   }
 }
 

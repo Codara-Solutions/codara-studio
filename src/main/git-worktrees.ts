@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult } from "@shared/types";
 import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
@@ -829,9 +829,17 @@ async function tryRemoveWorktreeOnce(
         retryable: false,
       };
     }
+    // The folder is moved aside by now, but a process that already had it
+    // open could swap a cache folder for a link out of it: each file is
+    // deleted only when its folder still resolves inside the worktree.
+    const root = await realpath(input.worktreePath).catch(() => null);
     for (const file of caches) {
       try {
-        await rm(join(input.worktreePath, file), { force: true });
+        const parent = await realpath(dirname(join(input.worktreePath, file))).catch(() => null);
+        if (root === null || parent === null || (parent !== root && !parent.startsWith(`${root}${sep}`))) {
+          return { ok: false, error: `the cache file ${file} is no longer inside the worktree, so nothing more was deleted`, retryable: false };
+        }
+        await rm(join(parent, basename(file)), { force: true });
       } catch (err) {
         return { ok: false, error: `could not delete the cache file ${file}: ${errorText(err)}`, retryable: false };
       }
