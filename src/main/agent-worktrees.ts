@@ -731,7 +731,6 @@ export function fingerprintRegenerable(root: string, extra: readonly string[]): 
   const isPackageRoot = packageRootTester(root);
   return {
     entry: (path) => isRegenerableIgnored(path, extra, isPackageRoot),
-    untracked: (path) => isRegenerableCachePath(path.split("/").filter(Boolean), path.endsWith("/")),
     kept: (path) =>
       isSecretFile(basename(path)) && !inDependencyStore(path) && !isRegenerableIgnored(path, extra),
   };
@@ -2124,13 +2123,11 @@ export async function verifyRemovable(
   // Local work.
   try {
     const { stdout } = await runGit(path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-    const parsed = parseStatusZ(stdout);
-    // Caches a test run leaves untracked (a repository that does not ignore
-    // __pycache__) are not work; every other untracked file still counts.
-    const status = {
-      tracked: parsed.tracked,
-      untracked: parsed.untracked.filter((file) => !isRegenerableCachePath(file.split("/").filter(Boolean), false)),
-    };
+    const status = parseStatusZ(stdout);
+    // Cache folders git does not ignore stay blocking (this change adds no
+    // way to delete files); the refusal names them.
+    const cacheFiles = status.untracked.filter((file) => isRegenerableCachePath(file.split("/").filter(Boolean), false));
+    if (cacheFiles.length && cacheFiles.length === status.untracked.length && !status.tracked.length) verdict.details.untrackedCaches = [...new Set(cacheFiles.map(cacheFolderOf))].slice(0, MAX_LISTED_PATHS);
     verdict.dirty.tracked = status.tracked.length;
     verdict.dirty.untracked = status.untracked.length;
     if (status.tracked.length || status.untracked.length) {
@@ -2166,7 +2163,15 @@ export async function verifyRemovable(
     const all = await ignoredEntries(path);
     const provided = await setupProvidedEntries(realPath, all).catch(() => new Set<string>());
     ignored = all.filter((entry) => !provided.has(entry));
-    const blocking = ignored.filter((entry) => !isRegenerableIgnored(entry, extra, packageRootTester(realPath)));
+    const isPackageRoot = packageRootTester(realPath);
+    const blocking: string[] = [];
+    for (const entry of ignored) {
+      if (isRegenerableIgnored(entry, extra, isPackageRoot)) continue;
+      // git lists an ignored folder as one entry, so pkg/ holding only
+      // pkg/__pycache__/ is one: it passes when every file in it is a cache.
+      if (entry.endsWith("/") && (await holdsOnlyCaches(realPath, entry))) continue;
+      blocking.push(entry);
+    }
     verdict.archive = blocking;
     if (blocking.length) {
       verdict.dirty.ignoredBlocking = blocking.slice(0, MAX_LISTED_PATHS);
@@ -2530,6 +2535,37 @@ async function proveMerged(
   block("WORKTREE_NOT_MERGED");
 }
 
+const ONLY_CACHES_MAX_ENTRIES = 5_000;
+
+// Read-only: every file under the ignored folder `entry` lies in an
+// allowlisted cache folder. Anything else, a link, or a folder too large to
+// look through, is not "only caches".
+async function holdsOnlyCaches(root: string, entry: string): Promise<boolean> {
+  let budget = ONLY_CACHES_MAX_ENTRIES;
+  const walk = async (relative: string[]): Promise<boolean> => {
+    const children = await fsp.readdir(join(root, ...relative), { withFileTypes: true }).catch(() => null);
+    if (!children) return false;
+    for (const child of children) {
+      budget -= 1;
+      if (budget < 0) return false;
+      const next = [...relative, child.name];
+      if (isRegenerableCachePath(next, child.isDirectory())) continue;
+      if (!child.isDirectory() || !(await walk(next))) return false;
+    }
+    return true;
+  };
+  return walk(entry.split("/").filter(Boolean));
+}
+
+// The allowlisted cache folder a path lies in, as a path from the root.
+function cacheFolderOf(file: string): string {
+  const parts = file.split("/").filter(Boolean);
+  for (let end = 1; end < parts.length; end += 1) {
+    if (isRegenerableCachePath(parts.slice(0, end), true)) return `${parts.slice(0, end).join("/")}/`;
+  }
+  return file;
+}
+
 function blockerMessage(verdict: RemovalVerdict, code: WorktreeCode): string {
   const d = verdict.details;
   switch (code) {
@@ -2891,7 +2927,13 @@ async function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): 
   const defaultTarget = code === "WORKTREE_TARGET_NOT_FOUND" ? await resolveMergeDefaultBranch(ctx.scope.repoCwd) : null;
   const dynamic: { hint?: string; retryWith?: Record<string, unknown> } = {};
   if (ownedButMerged) dynamic.hint = OWNED_BUT_MERGED_HINT;
-  else if (code === "WORKTREE_IGNORED_FILES") dynamic.retryWith = { discardIgnoredFiles: true };
+  else if (
+    code === "WORKTREE_DIRTY" &&
+    Array.isArray(verdict.details.untrackedCaches) &&
+    verdict.blockers.length === 1
+  ) {
+    dynamic.hint = `these are cache folders git does not ignore: delete them or add them to .gitignore, then retry (${(verdict.details.untrackedCaches as string[]).join(", ")})`;
+  } else if (code === "WORKTREE_IGNORED_FILES") dynamic.retryWith = { discardIgnoredFiles: true };
   else if (code === "WORKTREE_NOT_MERGED") {
     if (contained.length) {
       dynamic.retryWith = { target: contained[0] };
@@ -3296,7 +3338,6 @@ async function removeLocked(
       force: false,
       deleteBranch: false,
       removeOrphanDir: false,
-      discardUntracked: (file) => isRegenerableCachePath(file.split("/").filter(Boolean), false),
       aside: {
         recheck: async (aside) =>
           (await changedWhileAside(recheckCtx, stillListed, realBefore, aside, before)) ?? archiveFrom(aside),

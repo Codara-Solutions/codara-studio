@@ -44,18 +44,6 @@ async function main() {
     logLevel: "silent",
   });
   const aw = require(outFile);
-  const gwOut = path.join(cacheDir, `spark-agent-worktree-contracts-git-${process.pid}.cjs`);
-  await esbuild.build({
-    entryPoints: [path.join(__dirname, "..", "src", "main", "git-worktrees.ts")],
-    bundle: true,
-    platform: "node",
-    format: "cjs",
-    outfile: gwOut,
-    alias: { "@shared": path.join(__dirname, "..", "src", "shared") },
-    external: ["electron", "ssh2", "cpu-features"],
-    logLevel: "silent",
-  });
-  const gw = require(gwOut);
 
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-wt-contract-")));
   const home = path.join(scratch, "home");
@@ -71,7 +59,7 @@ async function main() {
     const repo = path.join(scratch, "repo");
     execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
     execFileSync("git", ["init", "-q", "-b", "main", repo]);
-    commitFile(repo, ".gitignore", "node_modules/\n.env.local\n", "ignore");
+    commitFile(repo, ".gitignore", "node_modules/\n.env.local\n__pycache__/\n.pytest_cache/\n.ruff_cache/\n.mypy_cache/\ncoverage/\n.next/\n", "ignore");
     commitFile(repo, "README.md", "# test\n", "init");
     git(repo, ["remote", "add", "origin", origin]);
     git(repo, ["push", "-q", "-u", "origin", "main"]);
@@ -87,6 +75,7 @@ async function main() {
       prefs: { agentWorktreesEnabled: true, agentsMayRemoveUserWorktrees: false, agentWorktreeRegenerableIgnoredByRepo: {} },
       paneWorkspace: { "pane-1": "ws-repo" },
       pulls: [],
+      afterVerify: null,
       now: new Date("2026-10-12T10:00:00Z"),
     };
     const deps = {
@@ -112,7 +101,9 @@ async function main() {
       worktreesRoot: (repoCwd) => path.join(home, "worktrees", path.basename(repoCwd)),
       now: () => h.now,
       randomId: () => (++ids).toString(16).padStart(8, "a"),
-      afterVerify: async () => {},
+      afterVerify: async () => {
+        if (h.afterVerify) await h.afterVerify();
+      },
       pretrustClaude: async () => {},
     };
     const agent = { role: "studio", client: "claude-code", paneId: "pane-1" };
@@ -141,42 +132,54 @@ async function main() {
     if (want(1)) {
     const cacheTree = await mergedWorktree("agent/caches");
     for (const file of [
-      "pkg/__pycache__/mod.cpython-312.pyc", // untracked: the repo does not ignore it
+      "pkg/__pycache__/mod.cpython-312.pyc", // ignored by the repository
       "pkg/sub/__pycache__/other.pyc",
       ".pytest_cache/v/cache/nodeids",
       "tests/.pytest_cache/README.md",
       ".ruff_cache/0.1/x",
       "lib/.mypy_cache/3.12/y.json",
-      ".turbo/run.log",
       "coverage/lcov.info",
       "web/.next/cache/webpack/z",
       "node_modules/.vite/deps/a.js",
     ]) write(cacheTree.path, file);
     write(cacheTree.path, ".pytest_cache/.gitignore", "*\n");
+    // Ignored caches pass without discardIgnoredFiles: they go through the path that parameter already uses.
     const dry = await aw.removeAgentWorktree(agent, { workspaceId: cacheTree.workspaceId, dryRun: true }, deps);
     assert.equal(dry.wouldRemove, true, `caches do not block: ${JSON.stringify(dry)}`);
     const cacheRemoved = await aw.removeAgentWorktree(agent, { workspaceId: cacheTree.workspaceId }, deps);
     assert.equal(cacheRemoved.removed, true, JSON.stringify(cacheRemoved));
     assert.equal(fs.existsSync(cacheTree.path), false);
 
-    // A cache folder swapped for a link out of the worktree after git listed
-    // it: nothing outside is deleted.
-    const raced = await mergedWorktree("agent/raced");
-    write(raced.path, "pkg/__pycache__/payload.txt");
-    const outside = path.join(scratch, "outside");
-    write(outside, "payload.txt", "keep me\n");
-    const swapped = await gw.removeCopyWorktree({
-      repoCwd: repo,
-      worktreePath: raced.path,
-      branch: "agent/raced",
-      discardUntracked: (file) => {
-        fs.rmSync(path.join(raced.path, "pkg", "__pycache__"), { recursive: true, force: true });
-        fs.symlinkSync(outside, path.join(raced.path, "pkg", "__pycache__"));
-        return file.includes("__pycache__");
-      },
-    });
-    assert.equal(swapped.ok, false, JSON.stringify(swapped));
-    assert.equal(fs.readFileSync(path.join(outside, "payload.txt"), "utf8"), "keep me\n", "the file outside survives");
+    // A cache folder git does not ignore blocks, and the hint names it; no parameter forces it.
+    const loose = await mergedWorktree("agent/loose-cache");
+    write(loose.path, ".turbo/run.log");
+    const looseRefused = await aw.removeAgentWorktree(agent, { workspaceId: loose.workspaceId }, deps);
+    guarded(looseRefused, "WORKTREE_DIRTY");
+    assert.match(looseRefused.hint, /cache folders git does not ignore: delete them or add them to \.gitignore, then retry \(\.turbo\/\)/);
+    assert.equal(looseRefused.retryWith, undefined);
+    const looseForced = await aw.removeAgentWorktree(agent, { workspaceId: loose.workspaceId, discardIgnoredFiles: true }, deps);
+    assert.equal(looseForced.code, "WORKTREE_DIRTY", "discardIgnoredFiles does not cover untracked files");
+    assert.ok(fs.existsSync(path.join(loose.path, ".turbo/run.log")), "nothing was deleted");
+    fs.rmSync(path.join(loose.path, ".turbo"), { recursive: true });
+    assert.equal((await aw.removeAgentWorktree(agent, { workspaceId: loose.workspaceId }, deps)).removed, true);
+
+    // A source file written after the status check is never deleted: the existing locked re-check refuses and keeps it.
+    const late = await mergedWorktree("agent/late-file");
+    write(late.path, "pkg/__pycache__/m.pyc");
+    h.afterVerify = async () => write(late.path, "late.py", "print(1)\n");
+    const lateRefused = await aw.removeAgentWorktree(agent, { workspaceId: late.workspaceId }, deps);
+    h.afterVerify = null;
+    assert.equal(lateRefused.ok, false, JSON.stringify(lateRefused));
+    assert.ok(fs.existsSync(path.join(late.path, "late.py")), "the late file survives");
+    fs.rmSync(path.join(late.path, "late.py"));
+    assert.equal((await aw.removeAgentWorktree(agent, { workspaceId: late.workspaceId }, deps)).removed, true);
+
+    // Invariant: this change adds no deletion code. git-worktrees.ts is untouched.
+    assert.equal(
+      execFileSync("git", ["-C", path.join(__dirname, ".."), "diff", "--name-only", "origin/main", "--", "src/main/git-worktrees.ts"], { encoding: "utf8" }).trim(),
+      "",
+      "src/main/git-worktrees.ts (the deleting code) is unchanged",
+    );
 
     // Real work still blocks, next to the same caches.
     const workTree = await mergedWorktree("agent/real-work");
@@ -186,7 +189,7 @@ async function main() {
     fs.rmSync(path.join(workTree.path, "pkg/new_module.py"));
     // A look-alike is not a cache: a file named like one, a nested coverage folder, notes in a cache-named path elsewhere.
     write(workTree.path, "docs/coverage/report.md");
-    guarded(await aw.removeAgentWorktree(agent, { workspaceId: workTree.workspaceId }, deps), "WORKTREE_DIRTY");
+    guarded(await aw.removeAgentWorktree(agent, { workspaceId: workTree.workspaceId }, deps), "WORKTREE_IGNORED_FILES");
     fs.rmSync(path.join(workTree.path, "docs"), { recursive: true });
     write(workTree.path, "src/__pycache__");
     guarded(await aw.removeAgentWorktree(agent, { workspaceId: workTree.workspaceId }, deps), "WORKTREE_DIRTY");
@@ -374,7 +377,6 @@ async function main() {
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
     fs.rmSync(outFile, { force: true });
-    fs.rmSync(gwOut, { force: true });
   }
 }
 

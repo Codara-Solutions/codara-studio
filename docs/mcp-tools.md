@@ -1166,8 +1166,9 @@ the `blockers` and a `hint`:
   progress, and no ignored files beyond build output and caches
   (`node_modules/`, `dist/`, `.venv/` and similar, plus the patterns you add
   for the repository in Settings, and the files worktree setup copied or
-  linked while they are unchanged). Tool caches never block, at any depth and
-  whether git ignores them or lists them as untracked: `__pycache__`,
+  linked while they are unchanged). Tool caches that git ignores never block, at any depth
+  (they are discarded the way `discardIgnoredFiles` does; one git does not
+  ignore still blocks, and the refusal names it): `__pycache__`,
   `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.turbo`, `.next/cache`,
   `node_modules/.vite` and a root `coverage/` (`REGENERABLE_CACHE_DIRS`). The rest (`data/`, `.env.local`) is
   copied to `~/.codarastudio/worktree-archive/<date>/<repo>--<branch>/`, counted,
