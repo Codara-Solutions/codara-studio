@@ -53,6 +53,24 @@ function defaultJobs() {
   return Math.max(1, Math.min(4, cores - 2));
 }
 
+// Tests put unix sockets under their TMPDIR, and a socket path is limited to
+// 103 bytes on macOS (107 on Linux). macOS's own temp folder is already 49
+// characters, so with ours on top (ct-XXXXXX/<n>/) a socket no longer fits and
+// the bind silently lands somewhere else. Keep the base short.
+const MAX_RUN_BASE_CHARS = 24;
+function isWritableDir(dir) {
+  try {
+    fs.accessSync(dir, fs.constants.W_OK | fs.constants.X_OK);
+    return fs.statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
+}
+function runDirBase({ tmpdir = os.tmpdir(), platform = process.platform, usable = isWritableDir } = {}) {
+  if (platform === "win32" || tmpdir.length <= MAX_RUN_BASE_CHARS) return tmpdir;
+  return usable("/tmp") ? "/tmp" : tmpdir;
+}
+
 function jobsFromEnv(env = process.env) {
   const raw = env.CODARA_TEST_JOBS?.trim();
   if (!raw) return defaultJobs();
@@ -193,7 +211,7 @@ async function runTests(tests, { jobs = jobsFromEnv(), minFreeMb = Number(proces
   const alone = serialMode ? [] : tests.filter((f) => tags.get(f) === "serial").sort();
 
   let runDir = null;
-  if (!serialMode) runDir = fs.mkdtempSync(path.join(os.tmpdir(), "ct-"));
+  if (!serialMode) runDir = fs.mkdtempSync(path.join(runDirBase(), "ct-"));
   const running = new Map();
   const failed = [];
   const durations = {};
@@ -274,7 +292,7 @@ async function runTests(tests, { jobs = jobsFromEnv(), minFreeMb = Number(proces
   return failed;
 }
 
-module.exports = { listTests, runTests, jobsFromEnv };
+module.exports = { listTests, runTests, jobsFromEnv, runDirBase };
 
 if (require.main === module) {
   const filter = process.argv[2] ? new RegExp(process.argv[2]) : null;
