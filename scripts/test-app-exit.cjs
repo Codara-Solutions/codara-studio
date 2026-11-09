@@ -214,7 +214,10 @@ async function main() {
   // ── wiring in index.ts ──────────────────────────────────────────────────
   const index = fs.readFileSync(INDEX_TS, "utf8");
   const ready = index.slice(index.indexOf("app.whenReady().then(async () => {"));
-  check("the signal handlers are installed after ready, and again later (Chromium's would win before)", ready.indexOf("installQuitSignals(onQuitSignal);") !== -1 && index.indexOf("installQuitSignals(onQuitSignal)") > index.indexOf("app.whenReady().then(async () => {") && /setTimeout\(\(\) => installQuitSignals\(onQuitSignal\), 3000\)\.unref\(\);/.test(ready));
+  check("the signal handlers are installed after ready (Chromium's would win before)", ready.indexOf("installQuitSignals(onQuitSignal);") !== -1 && index.indexOf("installQuitSignals(onQuitSignal)") > index.indexOf("app.whenReady().then(async () => {"));
+  // A second install closes the handle a caught signal is waiting on, and the
+  // app then ignores that SIGTERM (issue #170).
+  check("and installed only once", (index.match(/installQuitSignals\(/g) ?? []).length === 1, (index.match(/installQuitSignals\(/g) ?? []).length);
   check("a signal quits without the prompt", /function onQuitSignal\(signal: NodeJS\.Signals\): void \{\s*quitWithoutPrompt\(`received \$\{signal\}`\);/.test(index));
   const forced = index.slice(index.indexOf("function quitWithoutPrompt("), index.indexOf("function confirmQuitWithLiveWork("));
   check("the forced quit confirms live work and closes an open prompt before it quits", forced.indexOf("quitWithLiveWorkConfirmed = true;") !== -1 && forced.indexOf("quitPrompt?.abort();") !== -1 && forced.indexOf("quitWithLiveWorkConfirmed = true;") < forced.indexOf("app.quit();"));
@@ -231,6 +234,17 @@ async function main() {
   const second = index.slice(index.indexOf("function onSecondInstance("), index.indexOf("function onSecondInstance(") + 1200);
   check("a broken holder answers quitting before it quits", second.indexOf('writeHandoffAnswer(userData, nonce, "quitting");\n    quitWithoutPrompt(') !== -1);
   check("a healthy holder answers focused and shows its window", /writeHandoffAnswer\(userData, nonce, "focused"\);\s*showMainWindow\(\);/.test(second));
+  const cleanup = index.slice(index.indexOf('app.on("before-quit"'), index.indexOf("const plainQuit = "));
+  check("the quit cleanup logs its end per pid, on disk, before the window closes (test-app-exit-electron waits on it)", /logMain\("lifecycle", `quit cleanup done \(pid \$\{process\.pid\}, /.test(cleanup) && cleanup.indexOf("await flushMainLog();") > cleanup.indexOf("quit cleanup done") && cleanup.indexOf("await flushMainLog();") < cleanup.indexOf("} finally {"));
+  const bootFailure = index.slice(index.indexOf("function onBootFailure("), index.indexOf("let bootDialogOpen = false;"));
+  check("a boot failure while quitting neither reloads nor opens a dialog", bootFailure.indexOf("if (isQuitting) return;") !== -1 && bootFailure.indexOf("if (isQuitting) return;") < bootFailure.indexOf("bootFailures += 1;"));
+  check("the boot dialog goes through the non-blocking message box", bootFailure.includes("void showMessageBoxWithoutBlocking({"));
+  const helper = index.slice(index.indexOf("function showMessageBoxWithoutBlocking("), index.indexOf("function showMessageBoxWithoutBlocking(") + 1500);
+  check("which attaches it to the window (with no parent, macOS runs it modally and blocks signals, #170)", helper.includes("dialog.showMessageBox(parent, options)"));
+  check("and on macOS shows nothing rather than a parentless one", helper.indexOf('if (process.platform === "darwin")') !== -1 && helper.indexOf("return Promise.resolve(null);") > helper.indexOf('if (process.platform === "darwin")') && helper.indexOf("return Promise.resolve(null);") < helper.indexOf("dialog.showMessageBox(options)"));
+  const boxes = index.match(/\.showMessageBox\(/g) ?? [];
+  const inHelper = helper.match(/\.showMessageBox\(/g) ?? [];
+  check("every message box goes through it, the live-work prompt too", boxes.length === inHelper.length && /void showMessageBoxWithoutBlocking\(\{ \.\.\.options, signal: asking\.signal \}\)/.test(index), `${boxes.length} in index.ts, ${inHelper.length} in the helper`);
   check("the final close after cleanup is time-boxed", /const lastResort = setTimeout\(\(\) => \{[\s\S]{0,160}app\.exit\(0\);\s*\}, 3000\);/.test(index));
 
   fs.rmSync(outDir, { recursive: true, force: true });

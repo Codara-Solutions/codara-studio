@@ -12,7 +12,7 @@ import {
   powerMonitor,
   type WebContents,
 } from "electron";
-import { logMain } from "./file-log";
+import { flushMainLog, logMain } from "./file-log";
 import { errorBoundaryLogEntry } from "@shared/error-boundary";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -536,6 +536,8 @@ function onBootFailure(reason: string): void {
   // The renderer entry itself is untrusted; the ladder below cannot fix that and
   // reportRendererEntryRejected already named the cause and told the user.
   if (rendererEntryRejected) return;
+  // Already quitting: a reload or a dialog now only gets in the quit's way.
+  if (isQuitting) return;
   bootFailures += 1;
   logMain("boot", `renderer failed to boot (${reason}); failure #${bootFailures}`);
   if (bootFailures <= 2) {
@@ -553,27 +555,54 @@ function onBootFailure(reason: string): void {
   logMain("boot", "relaunch unavailable (dev mode or already relaunched); surfacing dialog");
   bootFailures = 0; // let the user retry after dismissing
   bootGaveUp = true;
-  // Not showErrorBox: a modal that blocks the main thread would also keep a
-  // termination signal, the dev launcher watch and a second launch from
-  // reaching this process. One dialog at a time; the ladder may come round
-  // again while it is open.
+  // One dialog at a time; the ladder may come round again while it is open.
   if (bootDialogOpen) return;
   bootDialogOpen = true;
-  void dialog
-    .showMessageBox({
-      type: "error",
-      title: "Codara Studio couldn't finish loading",
-      message: "Codara Studio couldn't finish loading",
-      detail: app.isPackaged
-        ? "The app failed to boot repeatedly. Please quit and start it again; if this persists, check <spark home>/logs/main.log."
-        : "The renderer loaded but the app never booted. In dev mode this usually means the Vite dev server died (e.g. during system sleep). Restart `npm run dev`.",
-    })
-    .catch(() => undefined)
-    .finally(() => {
-      bootDialogOpen = false;
-    });
+  void showMessageBoxWithoutBlocking({
+    type: "error",
+    title: "Codara Studio couldn't finish loading",
+    message: "Codara Studio couldn't finish loading",
+    detail: app.isPackaged
+      ? "The app failed to boot repeatedly. Please quit and start it again; if this persists, check <spark home>/logs/main.log."
+      : "The renderer loaded but the app never booted. In dev mode this usually means the Vite dev server died (e.g. during system sleep). Restart `npm run dev`.",
+  }).finally(() => {
+    bootDialogOpen = false;
+  });
 }
 let bootDialogOpen = false;
+
+// A message box with no parent window is [NSAlert runModal] on macOS, async
+// or not: the main thread blocks while it is open, so a termination signal,
+// the dev launcher watch and a second launch never reach this process (#170:
+// a relaunched instance whose boot ladder gave up ignored SIGTERM for 30 s
+// and more). Attached to the window it is a sheet, which does not block. Not
+// showErrorBox either, which blocks everywhere. Resolves null when nothing
+// was shown or the window went away under it, never rejects.
+function showMessageBoxWithoutBlocking(
+  options: Electron.MessageBoxOptions,
+): Promise<Electron.MessageBoxReturnValue | null> {
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  if (!parent) {
+    if (process.platform === "darwin") {
+      logMain("lifecycle", `no window to attach "${options.title ?? options.message}" to: not showing it`);
+      return Promise.resolve(null);
+    }
+    return dialog.showMessageBox(options).catch(() => null);
+  }
+  revealWindow(parent);
+  // A sheet whose window is destroyed may never settle; callers keep a
+  // one-at-a-time flag that must not stick.
+  let onClosed = (): void => undefined;
+  const closed = new Promise<null>((resolve) => {
+    onClosed = () => resolve(null);
+    parent.once("closed", onClosed);
+  });
+  return Promise.race([dialog.showMessageBox(parent, options), closed])
+    .catch(() => null)
+    .finally(() => {
+      if (!parent.isDestroyed()) parent.removeListener("closed", onClosed);
+    });
+}
 
 // The window can no longer show the app: the boot ladder gave up, the entry
 // fails its own allowlist, or a boot failure is still unrecovered.
@@ -630,21 +659,16 @@ function reportRendererEntryRejected(
   );
   // Off the load path so a modal never blocks the navigation we are starting.
   const notify = setTimeout(() => {
-    // Not showErrorBox, for the same reason as the boot dialog above.
-    void dialog
-      .showMessageBox({
-        type: "error",
-        title: "Codara Studio can't trust its own window",
-        message: "Codara Studio can't trust its own window",
-        detail:
-          `The app's renderer entry does not pass its navigation allowlist, so every privileged action is blocked and the window will not work.\n\n` +
-          `Cause: ${cause}.\n\n` +
-          (offender
-            ? `Fix: reinstall or move Codara Studio to a path with no "${offender}" character in it.\n\n`
-            : "") +
-          `Details are in ${join(codaraHome(), "logs", "main.log")}.`,
-      })
-      .catch(() => undefined);
+    void showMessageBoxWithoutBlocking({
+      type: "error",
+      title: "Codara Studio can't trust its own window",
+      message: "Codara Studio can't trust its own window",
+      detail:
+        `The app's renderer entry does not pass its navigation allowlist, so every privileged action is blocked and the window will not work.\n\n` +
+        `Cause: ${cause}.\n\n` +
+        (offender ? `Fix: reinstall or move Codara Studio to a path with no "${offender}" character in it.\n\n` : "") +
+        `Details are in ${join(codaraHome(), "logs", "main.log")}.`,
+    });
   }, 0);
   notify.unref?.();
 }
@@ -1173,11 +1197,9 @@ app.whenReady().then(async () => {
     "boot",
     `app start pid=${process.pid} packaged=${app.isPackaged} relaunched=${process.argv.includes(RELAUNCHED_FLAG)}`,
   );
-  // Chromium installs its own signal handlers after ready; see app-exit.ts.
-  // Once now and once more a little later, so ours are the last installed
-  // whichever turn Chromium's land on, even when the window never loads.
+  // Chromium installed its signal handlers before ready, so this makes ours
+  // the last installed. Only once: see app-exit.ts.
   installQuitSignals(onQuitSignal);
-  setTimeout(() => installQuitSignals(onQuitSignal), 3000).unref();
   // `npm run dev`: the electron-vite process that spawned us also serves the
   // renderer. Once it is gone the window can never load again, so go too
   // rather than hold the single-instance lock behind a dead window.
@@ -1865,13 +1887,14 @@ function askToQuitWithLiveWork(live: LiveWork): void {
   };
   const asking = new AbortController();
   quitPrompt = asking;
-  const parent = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : null;
-  const withSignal = { ...options, signal: asking.signal };
-  const shown = parent ? dialog.showMessageBox(parent, withSignal) : dialog.showMessageBox(withSignal);
-  void shown
-    .then(({ response: choice }) => {
+  // On macOS the prompt needs a window to attach to (a parentless one blocks
+  // the main thread, see showMessageBoxWithoutBlocking): open it if closed.
+  if (process.platform === "darwin" && (!mainWindow || mainWindow.isDestroyed())) showMainWindow();
+  void showMessageBoxWithoutBlocking({ ...options, signal: asking.signal })
+    .then((answer) => {
       if (asking.signal.aborted) return;
-      if (choice !== 0) {
+      // Not answered (nothing shown, or the window went away under it) is a no.
+      if (!answer || answer.response !== 0) {
         if (restartingForUpdate) updaterModCached?.cancelInstallRequest();
         return;
       }
@@ -1879,7 +1902,6 @@ function askToQuitWithLiveWork(live: LiveWork): void {
       isQuitting = true;
       app.quit();
     })
-    .catch(() => undefined)
     .finally(() => {
       if (quitPrompt === asking) quitPrompt = null;
     });
@@ -1904,6 +1926,7 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (cleanupRan) return; // cleanup already in flight from an earlier quit attempt
   cleanupRan = true;
+  const cleanupStartedAt = Date.now();
   // An update restart still waiting for agents ends with this quit. Its
   // timer would otherwise see the agents stop during cleanup and turn this
   // plain quit into an install that reopens the app. (A restart the gate
@@ -1998,6 +2021,12 @@ app.on("before-quit", (event) => {
       tray?.destroy();
       tray = null;
       await flushAllStores();
+      // Studio's part of the quit ends here, on disk before the window closes;
+      // what follows is the window close and Chromium's own shutdown, which a
+      // loaded macOS can hold for a minute (#170). The e2e exit test waits on
+      // this line, per pid.
+      logMain("lifecycle", `quit cleanup done (pid ${process.pid}, ${Date.now() - cleanupStartedAt} ms)`);
+      await flushMainLog();
     } catch (err) {
       console.error("[main] quit cleanup failed:", err);
     } finally {
