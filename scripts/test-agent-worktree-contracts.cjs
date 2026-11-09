@@ -175,6 +175,7 @@ async function main() {
         return file.includes("__pycache__");
       },
     });
+    assert.equal(swapped.ok, false, JSON.stringify(swapped));
     assert.equal(fs.readFileSync(path.join(outside, "payload.txt"), "utf8"), "keep me\n", "the file outside survives");
 
     // Real work still blocks, next to the same caches.

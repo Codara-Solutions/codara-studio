@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult } from "@shared/types";
 import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
@@ -66,10 +66,9 @@ export interface RemoveCopyWorktreeInput {
   // reason puts it back. A process that already had it open still can.
   aside?: { recheck(asidePath: string): Promise<string | null> };
   // Untracked files (paths from the worktree's root) that are regenerable
-  // caches: they do not make the folder "dirty", and git removes them with
-  // the folder (it refuses any untracked file without --force, so the removal
-  // is forced only when these are the only untracked files). Every other
-  // untracked file keeps blocking.
+  // caches: they do not make the folder "dirty", and are deleted just before
+  // git removes it, which refuses any untracked file without --force. Every
+  // other untracked file keeps blocking.
   discardUntracked?: (relativePath: string) => boolean;
 }
 
@@ -798,7 +797,6 @@ function sleep(ms: number): Promise<void> {
 async function tryRemoveWorktreeOnce(
   input: RemoveCopyWorktreeInput,
 ): Promise<{ ok: true } | { ok: false; error: string; retryable: boolean }> {
-  let forceForCaches = false;
   if (!input.force) {
     // A status git could not read is not a clean one: an unreadable folder
     // (wrong permissions, a stale mount) may hold anything, and git would
@@ -831,17 +829,26 @@ async function tryRemoveWorktreeOnce(
         retryable: false,
       };
     }
-    // Only allowlisted caches are untracked here (anything else returned
-    // above), and git refuses untracked files without --force. Its own
-    // recursive delete unlinks a link instead of following it, which a
-    // delete by path from here could not promise if a cache folder were
-    // swapped for a link out of the worktree.
-    forceForCaches = caches.length > 0;
+    // The folder is moved aside by now, but a process that already had it
+    // open could swap a cache folder for a link out of it: each file is
+    // deleted only when its folder still resolves inside the worktree.
+    const root = await realpath(input.worktreePath).catch(() => null);
+    for (const file of caches) {
+      try {
+        const parent = await realpath(dirname(join(input.worktreePath, file))).catch(() => null);
+        if (root === null || parent === null || (parent !== root && !parent.startsWith(`${root}${sep}`))) {
+          return { ok: false, error: `the cache file ${file} is no longer inside the worktree, so nothing more was deleted`, retryable: false };
+        }
+        await rm(join(parent, basename(file)), { force: true });
+      } catch (err) {
+        return { ok: false, error: `could not delete the cache file ${file}: ${errorText(err)}`, retryable: false };
+      }
+    }
   }
   try {
     await runGit(
       input.repoCwd,
-      ["worktree", "remove", ...(input.force || forceForCaches ? ["--force"] : []), input.worktreePath],
+      ["worktree", "remove", ...(input.force ? ["--force"] : []), input.worktreePath],
       input.timeoutMs ? { timeout: input.timeoutMs } : {},
     );
     return { ok: true };
