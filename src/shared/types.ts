@@ -1439,6 +1439,12 @@ export interface AppPreferences {
   // untouched agent terminal in a background workspace may sit before Codara
   // stops it to save memory; opening the pane resumes it. 0 = off.
   agentHibernationMinutes?: number;
+  // Opt-in (default off): an answer the user gave an outside assistant on
+  // their phone may be typed into a session waiting at its prompt without
+  // Send (session.relay mode "answer", src/main/session-relay). Only from the
+  // assistant named in relayAnswerAssistant.
+  relayPhoneAnswers?: boolean;
+  relayAnswerAssistant?: string;
   // Opt-in (default off): the phone Remote Access listener
   // (docs/remote-access.md). While on, paired devices can reach this
   // computer over LAN or the blind relay; pairing and revocation live in Settings,
@@ -1645,6 +1651,9 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   restoreTerminalOutput: true,
   // DEFAULT_AGENT_HIBERNATION_MINUTES in shared/agent-hibernation.ts.
   agentHibernationMinutes: 30,
+  relayPhoneAnswers: false,
+  // DEFAULT_RELAY_ANSWER_ASSISTANT in shared/session-relay.ts.
+  relayAnswerAssistant: "Grok Bot",
   remoteAccessEnabled: false,
   machinesEnabled: true,
   gitAutoFetchEnabled: true,
@@ -1947,7 +1956,9 @@ export type NotifyKind =
   | "worktree.setup-approval"
   // A caller asks to send a message to a session it did not start; it waits
   // for the user's Send or Dismiss (src/main/session-relay).
-  | "session.relay";
+  | "session.relay"
+  // The user's answer from their phone was typed into a session without Send.
+  | "session.relay.answered";
 
 // Where clicking a notification (toast card, native notification, center
 // entry) navigates. Terminal targets reuse the TerminalAgentTarget shape.

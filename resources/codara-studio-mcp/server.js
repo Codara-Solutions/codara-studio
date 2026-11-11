@@ -493,7 +493,7 @@ const SESSION_RELAY_TOOLS = [
   {
     name: "codara_session_relay",
     description:
-      "Ask the user to send text to a session you did not start. Nothing is sent: the user sees it and picks Send or Dismiss. Refused for a dead or busy target. With only relayId, returns pending, sent, dismissed, expired or undeliverable.",
+      "Ask the user to send text to a session you did not start. Nothing is sent: the user sees it and picks Send or Dismiss. Refused for a dead or busy target. mode answer: the user's reply from their phone, typed in without Send only if they allowed it and you run outside Codara; else it waits and notAnswered says why. With only relayId: pending, sent, dismissed, expired, undeliverable or answered.",
     inputSchema: {
       type: "object",
       properties: {
@@ -501,6 +501,7 @@ const SESSION_RELAY_TOOLS = [
         text: { type: "string", description: "Max 4000 characters." },
         sender: { type: "string", description: "Who asks, e.g. Grok Bot." },
         reason: { type: "string" },
+        mode: { type: "string", enum: ["ask", "answer"], description: "answer: max 500 characters" },
         relayId: { type: "string" },
       },
       additionalProperties: false,

@@ -137,8 +137,8 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // make; studio by 400 for codara_session_list_all, about 350, so an agent
 // can name a session in another workspace; studio by 700 for
 // codara_session_relay, about 660, so a caller can ask the user to send a
-// session a message).
-const LIST_BUDGET = { studio: 39_150, run: 39_000, worker: 35_000, execute: 104_200, automation: 69_000 };
+// session a message, and by 250 for its answer mode, about 230).
+const LIST_BUDGET = { studio: 39_400, run: 39_000, worker: 35_000, execute: 104_200, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",

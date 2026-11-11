@@ -25,6 +25,7 @@ import {
 import { normalizeKeepAwakeMode } from "@shared/keep-awake";
 import { normalizeQuickCommands, normalizeTerminalRightClick } from "@shared/quick-commands";
 import { normalizeAgentHibernationMinutes } from "@shared/agent-hibernation";
+import { RELAY_SENDER_MAX_CHARS } from "@shared/session-relay";
 import { normalizeSessionSearchPreferences } from "@shared/session-search";
 import { normalizeForecastIdeas } from "@shared/usage-forecast";
 import { normalizeRepository } from "@shared/pull-request-watch";
@@ -354,6 +355,12 @@ function normalize(
     // Agent hibernation: one of the Settings presets (0 = off); anything else
     // falls back to the default.
     agentHibernationMinutes: normalizeAgentHibernationMinutes(src.agentHibernationMinutes),
+    // Opt-in: only a stored true types phone answers in without Send.
+    relayPhoneAnswers: src.relayPhoneAnswers === true,
+    relayAnswerAssistant:
+      typeof src.relayAnswerAssistant === "string"
+        ? src.relayAnswerAssistant.slice(0, RELAY_SENDER_MAX_CHARS)
+        : DEFAULT_PREFERENCES.relayAnswerAssistant,
     // Opt-in: the phone Remote Access listener. Off for absent/invalid
     // values, so an existing preference file never turns a network listener
     // on by surprise.

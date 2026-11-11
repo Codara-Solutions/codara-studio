@@ -3,7 +3,10 @@
 // ask to send it a message. The user sees who asks, the target and the exact
 // text in the notification center (plus a native notification), and only
 // their Send types it into the session. Agents never get a way to answer:
-// relay:decide is an IPC channel of the trusted main window only.
+// relay:decide is an IPC channel of the trusted main window only. With the
+// "Answers from your phone" setting on, an answer from the assistant named
+// there, calling from outside Codara's process tree, is typed into a session
+// idle at its prompt without Send (store.ts, answerRefusal).
 
 import { randomUUID } from "node:crypto";
 import type { WebContents } from "electron";
@@ -11,7 +14,10 @@ import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import { buildLiveSessions } from "@shared/live-sessions";
 import {
+  DEFAULT_RELAY_ANSWER_ASSISTANT,
+  RELAY_ANSWER_MAX_CHARS,
   RELAY_RUNTIMES,
+  relayAnswerTargetRefusal,
   relayPreview,
   relaySourceKey,
   type PendingRelay,
@@ -26,11 +32,14 @@ import { codaraHome } from "../codara-home";
 import { getTrustedMainWindow } from "../main-window-trust";
 import { publish, rearm } from "../notify";
 import * as pty from "../pty-manager";
+import { getPreferenceCached, loadPreferences } from "../preferences-store";
 import { loadState } from "../storage";
 import {
   noteTerminalUserInput,
+  terminalAgentAnswerEvidence,
   terminalAgentHibernationEvidence,
   terminalAgentSessionLive,
+  terminalPanePlacement,
 } from "../terminal-agent-notify";
 import { SessionRelays, type RelayLogEntry } from "./store";
 
@@ -106,6 +115,31 @@ function announce(relay: PendingRelay, grouped: boolean): void {
   });
 }
 
+// The session must still be the one resolveTarget saw: a new agent in the
+// pane has its own turns.
+function answerTurn(target: RelayTarget): { turnKey: string } | string {
+  const evidence = terminalAgentAnswerEvidence(target.id);
+  const refusal = relayAnswerTargetRefusal(evidence);
+  if (refusal || !evidence?.lastTurnEnd) return refusal ?? "it has not finished a turn it could be waiting on";
+  return { turnKey: `${target.id}:${target.sessionSince}:${evidence.lastTurnEnd.at}` };
+}
+
+function announceAnswer(relay: PendingRelay): void {
+  const placement = terminalPanePlacement(relay.target.id);
+  publish({
+    kind: "session.relay.answered",
+    sourceKey: relaySourceKey(relay.id),
+    title: `${relay.sender} answered for you in \u201c${relay.target.title}\u201d`,
+    body: relayPreview(relay.text, RELAY_ANSWER_MAX_CHARS + 1),
+    tone: "success",
+    soundKind: "done",
+    target: placement
+      ? { type: "terminal", workspaceId: relay.target.workspaceId, tabId: placement.tabId, paneId: relay.target.id }
+      : { type: "workspace", workspaceId: relay.target.workspaceId },
+    workspaceName: relay.target.workspace,
+  });
+}
+
 function changed(): void {
   const win = getTrustedMainWindow();
   if (win && !win.webContents.isDestroyed()) win.webContents.send("relay:changed");
@@ -149,6 +183,12 @@ const relays = new SessionRelays({
   busy,
   deliver,
   announce,
+  answerPolicy: () => ({
+    enabled: getPreferenceCached("relayPhoneAnswers") === true,
+    assistant: getPreferenceCached("relayAnswerAssistant") ?? DEFAULT_RELAY_ANSWER_ASSISTANT,
+  }),
+  answerTurn,
+  announceAnswer,
   settle: (relay: PendingRelay) => rearm(relaySourceKey(relay.id)),
   changed,
   log: appendLog,
@@ -171,9 +211,21 @@ export async function handleSessionRelay(input: {
   }
   if (typeof input.request === "string" || !input.request) return { error: input.request ?? "text is required" };
   await refreshWorkspaces();
+  // Warms the cache answerPolicy reads; the window's toggle updates it.
+  await loadPreferences();
   const created = relays.create(input.request);
   if (!created.ok) return { error: created.error };
   const { relay } = created;
+  if (created.answered) {
+    return {
+      result: {
+        relayId: relay.id,
+        status: "answered",
+        target: relay.target,
+        note: "Typed into the session as the user's answer, without Send. The user is told in the notification center.",
+      },
+    };
+  }
   return {
     result: {
       relayId: relay.id,
@@ -181,6 +233,7 @@ export async function handleSessionRelay(input: {
       target: relay.target,
       expiresAt: new Date(relay.expiresAt).toISOString(),
       note: "Nothing was sent. The user sees the exact text and decides with Send or Dismiss; read the outcome with relayId.",
+      ...(created.notAnswered ? { notAnswered: `Not typed in as an answer because ${created.notAnswered}.` } : {}),
     },
   };
 }

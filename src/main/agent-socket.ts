@@ -59,6 +59,7 @@ import { buildLiveSessions } from "@shared/live-sessions";
 import { agentBoardActivity } from "./agent-board";
 import { parseRelayRequest } from "@shared/session-relay";
 import { handleSessionRelay } from "./session-relay";
+import { answerCallerCheck } from "./session-relay/caller-peer";
 import { AGENT_SESSION_BRIEF_MAX_CHARS, AGENT_SESSION_MAX_LIVE, type AgentSessionRecord } from "@shared/agent-sessions";
 import {
   codexTrustOverride,
@@ -803,7 +804,7 @@ async function dispatch(
       case "session.list_all":
         return await handleSessionListAll(params, id);
       case "session.relay":
-        return await handleSessionRelayRpc(params, id);
+        return await handleSessionRelayRpc(params, id, auth.kind, res);
       case "terminal.write":
         return await handleTerminalWrite(params, id);
       case "terminal.close":
@@ -2393,8 +2394,15 @@ async function handleSessionListAll(params: Record<string, unknown>, id: JsonRpc
 
 // A message for a session the caller did not start: it only waits for the
 // user's Send (session-relay/). An imported pull request may not even ask,
-// and a session.start id is resolved to its pane here.
-async function handleSessionRelayRpc(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+// and a session.start id is resolved to its pane here. An answer is checked
+// against the kernel's view of the connection, never the callerPid or pane
+// the request names: those are only what the caller says.
+async function handleSessionRelayRpc(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  authKind: AgentSocketAuth["kind"],
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
   const caller = await agentSessionCaller(params);
   const state = await loadState();
   const refusal = await agentSessionCallerRefusal(params, caller.workspaceId, caller.run, state);
@@ -2423,6 +2431,17 @@ async function handleSessionRelayRpc(params: Record<string, unknown>, id: JsonRp
       request.caller = { key: `pane:${caller.paneId}`, label: `an agent in ${where}` };
     } else if (caller.process) {
       request.caller = { key: `process:${caller.process}`, label: "outside Codara" };
+    }
+    if (request.mode === "answer") {
+      request.answerCaller =
+        authKind !== "root"
+          ? { verified: false, why: "it came from a Cora run or an agent's own credential" }
+          : await answerCallerCheck({
+              platform: process.platform,
+              clientPort: res.socket?.remotePort,
+              serverPort: res.socket?.localPort,
+              appPid: process.pid,
+            });
     }
   }
   const answer = await handleSessionRelay({ relayId: null, request });

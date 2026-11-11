@@ -39,6 +39,7 @@ export const NOTIFY_KIND_META: Record<NotifyKind, NotifyKindMeta> = {
   "git.ci-passed": { label: "Checks passed", tone: "success", glyph: "check" },
   "worktree.setup-approval": { label: "Setup needs you", tone: "warning", glyph: "alert" },
   "session.relay": { label: "Message to approve", tone: "warning", glyph: "alert" },
+  "session.relay.answered": { label: "Answered from your phone", tone: "success", glyph: "check" },
 };
 
 // Tolerates unknown kinds from a persisted history written by a newer build.
