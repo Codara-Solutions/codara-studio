@@ -962,9 +962,12 @@ Rules:
 - Agents in an imported pull request cannot relay, and no tool can press Send.
 - A text that repeats the wording of the answer prefix below is refused, so
   no relay can pass for one of your answers. The wording is compared on the
-  letters alone after Unicode folding (NFKC), with look-alike letters of
-  other alphabets (Cyrillic, Greek, Armenian, Cherokee) read as the Latin
-  letter they pass for; any other text, in any alphabet, passes. The same check
+  letters alone after Unicode decomposition (NFKD), with accents and
+  invisible characters removed and look-alike letters (Cyrillic, Greek,
+  Armenian, Cherokee, Latin small capitals) read as the Latin letter they pass
+  for; any other text, in any alphabet, passes. This stops look-alike copies
+  of the wording, but the prefix is a label for the receiving agent, not
+  proof that the user wrote the text. The same check
   applies to `codara_session_message`, so an agent cannot type the prefix
   into a session it started either.
 

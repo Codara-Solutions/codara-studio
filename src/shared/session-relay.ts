@@ -93,8 +93,11 @@ const UNSAFE_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f‎‏‪-‮⁦-�
 // so they could carry instructions the user never saw: every format character
 // (zero-width spaces and joiners, word joiners, the BOM, bidi marks and
 // isolates, Unicode tags U+E0000-E007F), blank letters, the supplementary
-// variation selectors and runs of ordinary ones (one after an emoji is normal).
-const INVISIBLE_CHARS = /[\p{Cf}\u115f\u1160\u3164\uffa0\u{e0100}-\u{e01ef}]|[\ufe00-\ufe0f]{2,}/u;
+// variation selectors and runs of ordinary ones (one after an emoji is normal),
+// and every other default-ignorable character (a combining grapheme joiner,
+// Mongolian variation selectors, fillers).
+const INVISIBLE_CHARS =
+  /[\p{Cf}\u115f\u1160\u3164\uffa0\u{e0100}-\u{e01ef}]|(?![\ufe00-\ufe0f])\p{Default_Ignorable_Code_Point}|[\ufe00-\ufe0f]{2,}/u;
 
 export function hasInvisibleRelayChars(raw: string): boolean {
   return INVISIBLE_CHARS.test(raw);
@@ -126,9 +129,9 @@ export function cleanRelaySender(raw: string): string {
 // The wording of the answer prefix, compared on letters only.
 const ANSWER_WORDING = [" answer from the user sent from ", " not typed in studio "];
 
-// Letters of other alphabets that look like Latin ones, mapped to the Latin
-// letter they pass for. A deliberate subset of the Unicode confusables list
-// (Cyrillic, Greek, Armenian and Cherokee), enough to keep the prefix wording
+// Letters that look like plain Latin ones, mapped to the Latin letter they
+// pass for. A deliberate subset of the Unicode confusables list (Cyrillic,
+// Greek, Armenian, Cherokee and Latin small capitals and variants), enough to keep the prefix wording
 // from being spelt in look-alikes; it only decides what to compare, never
 // what is refused.
 const LOOK_ALIKES: Record<string, string> = Object.fromEntries(
@@ -142,6 +145,8 @@ const LOOK_ALIKES: Record<string, string> = Object.fromEntries(
     "ՍU ՕO ՏS ԼL ՀH ԳQ օo սu ոn հh ցg քp զq աw յj լl ռn",
     // Cherokee (small letters are raised to these first)
     "ᎪA ᏴB ᏟC ᎠD ᎬE ᏀG ᎻH ᎥI ᎫJ ᏦK ᏞL ᎷM ᏒR ᏚS ᎢT ᏙV ᏔW ᏃZ ᏢP ᎳW ᏂH",
+    // Latin letters that pass for others: small capitals, alpha, dotless i and j
+    "ᴀa ʙb ᴄc ᴅd ᴇe ɢg ʜh ɪi ᴊj ᴋk ʟl ᴍm ɴn ᴏo ᴘp ʀr ꜱs ᴛt ᴜu ᴠv ᴡw ʏy ᴢz ɑa ɡg ɩi ıi ȷj",
   ]
     .join(" ")
     .split(/\s+/)
@@ -156,17 +161,25 @@ function latinShape(char: string): string {
 }
 
 /**
- * Why a text could pass for the answer prefix, or null. Compatibility forms
- * are folded (NFKC), look-alike letters of other alphabets are read as the
- * Latin letter they pass for, and the wording is matched on the letters
- * alone, so separators such as "_" or digits do not hide it. Other text in
- * any alphabet passes untouched: only the wording itself is refused.
+ * The skeleton every comparison with the answer prefix's wording uses:
+ * compatibility forms decomposed (NFKD), every combining mark (accents) and
+ * every format or default-ignorable character removed, look-alike letters
+ * read as the Latin letter they pass for, lowercased, and letters only, one
+ * space between words and around the whole.
+ */
+export function relayPrefixSkeleton(raw: string): string {
+  const bare = raw.normalize("NFKD").replace(/[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "");
+  const words = Array.from(bare, latinShape).join("").toLowerCase().split(/\P{L}+/u).filter(Boolean);
+  return ` ${words.join(" ")} `;
+}
+
+/**
+ * Why a text could pass for the answer prefix, or null: its skeleton
+ * contains the wording. Other text in any alphabet passes untouched.
  */
 export function relayAnswerForgery(raw: string): string | null {
-  const mapped = Array.from(raw.normalize("NFKC"), latinShape).join("");
-  const words = mapped.toLowerCase().split(/\P{L}+/u).filter(Boolean);
-  const letters = ` ${words.join(" ")} `;
-  return ANSWER_WORDING.some((phrase) => letters.includes(phrase))
+  const skeleton = relayPrefixSkeleton(raw);
+  return ANSWER_WORDING.some((phrase) => skeleton.includes(phrase))
     ? "text cannot contain the wording of the answer prefix"
     : null;
 }
