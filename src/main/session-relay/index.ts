@@ -10,7 +10,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { WebContents } from "electron";
-import { closeSync, fsyncSync, openSync, promises as fsp, renameSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, promises as fsp, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { buildLiveSessions } from "@shared/live-sessions";
 import {
@@ -234,7 +234,8 @@ function saveAnswerTimes(times: readonly number[]): void {
   // cannot bring back an older, lower count.
   const fd = openSync(temp, "w", 0o600);
   try {
-    writeSync(fd, JSON.stringify(times.filter((at) => now - at < RELAY_ANSWER_WINDOW_MS)));
+    // writeFileSync on a descriptor writes every byte or throws; writeSync may stop short.
+    writeFileSync(fd, JSON.stringify(times.filter((at) => now - at < RELAY_ANSWER_WINDOW_MS)));
     fsyncSync(fd);
   } finally {
     closeSync(fd);
