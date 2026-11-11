@@ -989,8 +989,10 @@ when all of these hold:
 - The text is at most 500 characters and passes the same cleaning as any
   relay.
 - The session got no other answer since its turn ended, and fewer than 10
-  answers went in during the last hour (counted from the log, so a restart
-  does not reset it).
+  answers went in during the last hour. That count is saved in
+  `~/.codarastudio/relay-answers.json` before each answer is typed, so a
+  restart does not reset it; if it cannot be saved or read, answers wait for
+  Send.
 
 The session receives
 `[Answer from the user, sent from their phone through <sender>; not typed in Studio] <text>`.

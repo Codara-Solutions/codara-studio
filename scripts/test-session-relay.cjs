@@ -96,6 +96,9 @@ function harness(lib) {
     // The finished turn each pane waits on, or why it cannot take an answer.
     turns: new Map([["pane-1", "turn-1"]]),
     answers: [],
+    saved: null,
+    saveFails: false,
+    savedBeforePaste: [],
   };
   h.relays = new lib.SessionRelays({
     now: () => h.now,
@@ -116,6 +119,11 @@ function harness(lib) {
       return turn.startsWith("turn-") ? { turnKey: `${target.id}:${turn}` } : turn;
     },
     announceAnswer: (relay) => h.answers.push(relay),
+    saveAnswerTimes: (times) => {
+      if (h.saveFails) throw new Error("disk full");
+      h.saved = [...times];
+      h.savedBeforePaste.push(h.delivered.length);
+    },
     settle: (relay, outcome) => h.settled.push(`${relay.id}:${outcome}`),
     changed: () => (h.changes += 1),
     log: (entry) => h.logs.push(entry),
@@ -131,6 +139,7 @@ function harness(lib) {
       answerCaller: { verified: false, why: "not checked" },
       ...fields,
     });
+  h.relays.restoreAnswerTimes([]);
   h.answer = (fields = {}) =>
     h.ask({ text: "yes, use the second option", mode: "answer", answerCaller: { verified: true }, caller: { key: "process:900@1", label: "outside Codara" }, ...fields });
   return h;
@@ -462,6 +471,24 @@ function harness(lib) {
     assert.equal(gone.ok, false);
     assert.match(gone.error, /no live session/);
 
+    // The count is saved before each paste, and a failed save or an
+    // unreadable record stops answers rather than the cap.
+    const saving = harness(lib);
+    assert.equal(saving.answer().answered, true);
+    assert.deepEqual(saving.saved, [saving.now]);
+    assert.deepEqual(saving.savedBeforePaste, [0], "saved before anything is typed");
+    const full = harness(lib);
+    full.saveFails = true;
+    const unsaved = full.answer();
+    assert.equal(unsaved.answered, false);
+    assert.match(unsaved.notAnswered, /could not save its record of recent answers/);
+    assert.deepEqual(full.delivered, []);
+    full.saveFails = false;
+    assert.equal(full.answer().answered, true, "the failed save spent nothing");
+    const unread = harness(lib);
+    unread.relays.restoreAnswerTimes("Codara could not read its record of recent answers");
+    assert.match(unread.answer().notAnswered, /could not read its record/);
+
     // The hourly cap counts answers an earlier run of Codara typed in.
     const restarted = harness(lib);
     const times = Array.from({ length: lib.RELAY_ANSWERS_PER_HOUR }, (_, i) => restarted.now - lib.RELAY_ANSWER_WINDOW_MS + 30_000 * (i + 1));
@@ -602,6 +629,13 @@ function harness(lib) {
     };
     assert.match((await check([51], { fs: hiding([31]) })).why, /cannot inspect may share/);
     assert.deepEqual(await check([51], { fs: hiding([50]) }), { verified: true });
+    // One whose parents cannot be read is a candidate unless it is provably gone.
+    const statless = (code) => {
+      const base = hiding([31]);
+      return { ...base, read: async (p) => (p.startsWith("/proc/31/") || p.startsWith("/proc/30/") ? Promise.reject(Object.assign(new Error("no"), { code })) : base.read(p)) };
+    };
+    assert.match((await check([51], { fs: statless("EACCES") })).why, /cannot inspect may share/);
+    assert.deepEqual(await check([51], { fs: statless("ENOENT") }), { verified: true }, "a process that exited holds nothing");
     // A chain cut short could hide Codara above where it stops.
     const deep = {};
     for (let pid = 1000; pid < 1200; pid += 1) deep[pid] = pid + 1;

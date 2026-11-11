@@ -160,7 +160,8 @@ export async function answerCallerCheck(input: {
     for (const pid of hidden) {
       const chain = await ancestry(pid, fs);
       if (chain === null || chain.includes(input.appPid)) {
-        const exited = chain === null && !(await fs.read(`/proc/${pid}/stat`).then(() => true, () => false));
+        // Only a process that is provably gone is no longer a candidate.
+        const exited = chain === null && (await fs.read(`/proc/${pid}/stat`).then(() => false, (err) => gone(err)));
         if (!exited) return unverified("a process Codara cannot inspect may share the calling connection");
       }
     }

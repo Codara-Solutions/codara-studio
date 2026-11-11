@@ -53,6 +53,11 @@ export interface RelayDeps {
   answerTurn(target: RelayTarget): { turnKey: string } | string;
   /** Tells the user an answer was typed in for them. */
   announceAnswer(relay: PendingRelay): void;
+  /**
+   * Saves when the answers of the last hour went in, before the next one is
+   * typed, so a restart cannot reset the hourly cap. Throws when it cannot.
+   */
+  saveAnswerTimes(times: readonly number[]): void;
   settle(relay: PendingRelay, outcome: RelayOutcome): void;
   changed(): void;
   log(entry: RelayLogEntry): void;
@@ -74,6 +79,9 @@ export class SessionRelays {
   // Turns that already got an answer, and when the last answers went in.
   private readonly answeredTurns = new Set<string>();
   private answerTimes: number[] = [];
+  // Null until the record of an earlier run's answers is read; a string
+  // when it could not be, which stops answers for this run.
+  private answerHistory: "restored" | string | null = null;
 
   constructor(private readonly deps: RelayDeps) {}
 
@@ -84,8 +92,9 @@ export class SessionRelays {
     if (request.mode === "answer") {
       resolved = this.deps.resolveTarget(request.target);
       const answer = typeof resolved === "string" ? resolved : this.answerRefusal(request, resolved);
-      if (typeof answer !== "string") return this.answer(request, resolved as RelayTarget, answer.turnKey);
-      notAnswered = answer;
+      const saved = typeof answer === "string" ? answer : this.reserveAnswer();
+      if (typeof answer !== "string" && saved === null) return this.answer(request, resolved as RelayTarget, answer.turnKey);
+      notAnswered = saved;
     }
     const refuse = (error: string, target: RelayTarget | null = null): RelayCreateResult => {
       const why = notAnswered && notAnswered !== error ? `${error}; not typed in as an answer either: ${notAnswered}` : error;
@@ -136,6 +145,7 @@ export class SessionRelays {
     if (!request.answerCaller.verified) return request.answerCaller.why;
     if (!sameRelayAssistant(request.sender, policy.assistant)) return "the sender is not the assistant named in Settings";
     if (request.text.length > RELAY_ANSWER_MAX_CHARS) return `an answer is limited to ${RELAY_ANSWER_MAX_CHARS} characters`;
+    if (this.answerHistory !== "restored") return this.answerHistory ?? "Codara has not read its record of recent answers";
     const turn = this.deps.answerTurn(target);
     if (typeof turn === "string") return turn;
     if (this.answeredTurns.has(turn.turnKey)) return "that session already got an answer since its turn ended";
@@ -163,7 +173,6 @@ export class SessionRelays {
     // Spent before the paste, so an answer that fails halfway is not retried.
     this.answeredTurns.add(turnKey);
     if (this.answeredTurns.size > FINISHED_KEPT) this.answeredTurns.delete(this.answeredTurns.values().next().value as string);
-    this.answerTimes.push(now);
     try {
       this.deps.deliver(target, relayAnswerPrompt(relay));
     } catch (err) {
@@ -221,11 +230,32 @@ export class SessionRelays {
     return { ok: true, outcome: "sent" };
   }
 
-  /** Answers typed in by an earlier run of Codara (from the log), for the hourly cap. */
-  restoreAnswerTimes(times: readonly number[]): void {
+  /**
+   * The answers an earlier run of Codara typed in, for the hourly cap, or why
+   * they could not be read: then no answer goes in without Send this run.
+   */
+  restoreAnswerTimes(times: readonly number[] | string): void {
+    if (typeof times === "string") {
+      this.answerHistory = times;
+      return;
+    }
     const now = this.deps.now();
-    const recent = times.filter((at) => now - at < RELAY_ANSWER_WINDOW_MS && at <= now);
+    const recent = times.filter((at) => Number.isFinite(at) && now - at < RELAY_ANSWER_WINDOW_MS && at <= now);
     this.answerTimes = [...recent, ...this.answerTimes].sort((a, b) => a - b);
+    this.answerHistory = "restored";
+  }
+
+  // Counts this answer against the hour and saves the count first; null when
+  // saved, or why it could not be (then the answer waits for Send).
+  private reserveAnswer(): string | null {
+    const next = [...this.answerTimes, this.deps.now()];
+    try {
+      this.deps.saveAnswerTimes(next);
+    } catch {
+      return "Codara could not save its record of recent answers";
+    }
+    this.answerTimes = next;
+    return null;
   }
 
   /** "pending", how it ended, or null for an id this run of Codara never saw. */

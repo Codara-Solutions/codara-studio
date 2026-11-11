@@ -10,12 +10,13 @@
 
 import { randomUUID } from "node:crypto";
 import type { WebContents } from "electron";
-import { promises as fsp } from "node:fs";
+import { promises as fsp, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildLiveSessions } from "@shared/live-sessions";
 import {
   DEFAULT_RELAY_ANSWER_ASSISTANT,
   RELAY_ANSWER_MAX_CHARS,
+  RELAY_ANSWER_WINDOW_MS,
   RELAY_RUNTIMES,
   relayAnswerTargetRefusal,
   relayPreview,
@@ -189,35 +190,48 @@ const relays = new SessionRelays({
   }),
   answerTurn,
   announceAnswer,
+  saveAnswerTimes,
   settle: (relay: PendingRelay) => rearm(relaySourceKey(relay.id)),
   changed,
   log: appendLog,
 });
 
-// The hourly cap on answers outlives a restart: the log says when the last
-// ones went in. Read once, before the first answer of this run.
+// The hourly cap on answers outlives a restart: when the answers of the
+// last hour went in is kept in its own file (the log may rotate or drop
+// lines), written before each answer is typed and read once per run.
+export const RELAY_ANSWERS_FILE = "relay-answers.json";
 let answersRestored: Promise<void> | null = null;
+
+function answersFile(): string {
+  return join(codaraHome(), RELAY_ANSWERS_FILE);
+}
 
 function restoreAnswers(): Promise<void> {
   answersRestored ??= (async () => {
-    const file = join(codaraHome(), RELAY_LOG_FILE);
-    const times: number[] = [];
-    for (const path of [`${file}.1`, file]) {
-      const text = await fsp.readFile(path, "utf8").catch(() => "");
-      for (const line of text.split("\n")) {
-        if (!line.includes('"answered"')) continue;
-        try {
-          const entry = JSON.parse(line) as Partial<RelayLogEntry>;
-          const at = entry.outcome === "answered" && typeof entry.time === "string" ? Date.parse(entry.time) : NaN;
-          if (Number.isFinite(at)) times.push(at);
-        } catch {
-          // A torn last line.
-        }
-      }
+    let text: string;
+    try {
+      text = await fsp.readFile(answersFile(), "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return relays.restoreAnswerTimes([]);
+      return relays.restoreAnswerTimes("Codara could not read its record of recent answers");
     }
-    relays.restoreAnswerTimes(times);
+    try {
+      const times = JSON.parse(text) as unknown;
+      if (!Array.isArray(times) || !times.every((at) => typeof at === "number")) throw new Error("not a list of times");
+      relays.restoreAnswerTimes(times);
+    } catch {
+      relays.restoreAnswerTimes("Codara could not read its record of recent answers");
+    }
   })();
   return answersRestored;
+}
+
+function saveAnswerTimes(times: readonly number[]): void {
+  const now = Date.now();
+  const file = answersFile();
+  const temp = `${file}.${process.pid}.tmp`;
+  writeFileSync(temp, JSON.stringify(times.filter((at) => now - at < RELAY_ANSWER_WINDOW_MS)), { mode: 0o600 });
+  renameSync(temp, file);
 }
 
 export interface RelayRpcResult {
