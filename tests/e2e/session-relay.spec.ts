@@ -13,7 +13,13 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 // busy or unknown target is refused at once. The hostile text is shown as
 // text and arrives as one prompt with the approval prefix.
 //
-// CODARA_PROOF_DIR=<dir> saves the approval card's screenshot there.
+// The second test is the answer mode: a reply the user gave an outside
+// assistant on their phone goes in without Send only with the setting on,
+// from the named assistant, from outside Codara's process tree (an agent's
+// command in a pane is refused whatever it claims), at an idle prompt and
+// never into a dialog; anything else waits for Send and says why.
+//
+// CODARA_PROOF_DIR=<dir> saves the approval card's and the setting's screenshots there.
 
 // Reports a turn for each prompt; "slow" keeps it working for a while.
 const FAKE_CLAUDE = String.raw`#!/usr/bin/env node
@@ -30,7 +36,9 @@ function turn(text) {
   count += 1;
   const n = count;
   status("state=working");
-  setTimeout(() => status("state=done:msg=" + b64("Answer " + n + " to: " + text.slice(0, 120))), /slow/.test(text) ? 6000 : 600);
+  // A permission dialog: blocked until the user answers in the tab.
+  if (/permission/.test(text)) return setTimeout(() => status("state=blocked:kind=permission"), 400);
+  setTimeout(() => status("state=done:msg=" + b64("Answer " + n + " to: " + text.slice(0, 160))), /slow/.test(text) ? 6000 : 600);
 }
 setTimeout(() => turn(brief), 400);
 let line = "";
@@ -238,6 +246,131 @@ test("a relayed message reaches a session only after the user presses Send", asy
       expect(log[0]).toMatchObject({ sender: "Grok Bot", target: { id: started.paneId, title: "Fix the docs", workspace: "Notes" } });
       expect(log[0].text).toBe(hostile.slice(0, 200));
       expect(log[0].via).toBe("outside Codara");
+    });
+  } finally {
+    await app.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("a phone answer goes in without Send only from outside Codara, at an idle prompt, with the setting on", async () => {
+  test.skip(process.platform !== "linux", "the caller is checked through /proc, so answers are Linux only");
+  test.setTimeout(180_000);
+  const { root, home, notes, env } = await setup();
+  const call = (method: string, params: Record<string, unknown> = {}) =>
+    rpcRaw({ home }, method, params, { timeoutMs: 60_000 }) as Promise<{ result?: any; error?: { message: string } }>;
+  const request = async (method: string, params: Record<string, unknown> = {}) => {
+    const response = await call(method, params);
+    if (response.error) throw new Error(response.error.message);
+    return response.result;
+  };
+
+  const { app, page } = await launch(env);
+  try {
+    const pidFile = join(root, "starter.pid");
+    await request("terminal.create", { cwd: notes, title: "starter", command: `sh -c 'echo $$ > "${pidFile}"; exec sleep 600'` });
+    await expect.poll(async () => (await readFile(pidFile, "utf8").catch(() => "")).trim(), { timeout: 20_000 }).not.toBe("");
+    const starter = { callerRole: "studio", callerClient: "claude-code", callerPid: Number((await readFile(pidFile, "utf8")).trim()) };
+    const started = await request("session.start", { ...starter, brief: "Which option?", runtime: "claude", title: "Fix the docs" });
+    const finalMessage = async () => (await request("session.status", { ...starter, id: started.id })).finalMessage as string | null;
+    const listed = async () =>
+      ((await request("session.list_all")).sessions as Array<{ id: string; state: string }>).find((s) => s.id === started.paneId)?.state;
+    await expect.poll(finalMessage, { timeout: 30_000 }).toContain("Answer 1 to: Which option?");
+    const answer = (text: string, extra: Record<string, unknown> = {}) =>
+      call("session.relay", { target: started.paneId, sender: "Grok Bot", text, mode: "answer", ...extra });
+
+    await test.step("off by default: the answer waits for Send and says why", async () => {
+      const off = (await answer("use option two")).result;
+      expect(off).toMatchObject({ status: "pending", notAnswered: expect.stringMatching(/off in Settings/) });
+      await page.waitForTimeout(1_500);
+      expect(await finalMessage()).toContain("Answer 1 to:");
+    });
+
+    await test.step("the setting is one toggle and the assistant's name", async () => {
+      await page.getByTitle("Settings").click({ force: true });
+      const dialog = page.getByRole("dialog", { name: "Settings" });
+      await dialog.locator("nav").getByRole("button", { name: "Notifications" }).click({ force: true });
+      const toggle = dialog.getByRole("switch", { name: "Answers from your phone" });
+      await expect(toggle).toHaveAttribute("aria-checked", "false");
+      await expect(dialog.getByLabel("Assistant name")).toHaveValue("Grok Bot");
+      await toggle.click({ force: true });
+      await expect(toggle).toHaveAttribute("aria-checked", "true");
+      const dir = process.env.CODARA_PROOF_DIR;
+      if (dir) await dialog.screenshot({ path: join(dir, "relay-answer-setting.png") });
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      await expect.poll(async () => (await request("app.prefs.get", { key: "relayPhoneAnswers" })).value).toBe(true);
+    });
+
+    await test.step("an agent inside Codara cannot answer, even from its shell claiming to be outside", async () => {
+      const out = join(root, "inside.json");
+      const script = join(root, "inside.cjs");
+      await writeFile(
+        script,
+        `const { rpcRaw } = require(${JSON.stringify(require.resolve("../../cli/lib/rpc.cjs"))});
+rpcRaw({ home: ${JSON.stringify(home)} }, "session.relay", { target: ${JSON.stringify(started.paneId)}, sender: "Grok Bot", text: "from inside", mode: "answer" })
+  .then((r) => require("fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify(r)));
+`,
+      );
+      await request("terminal.create", { cwd: notes, title: "inside", command: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}` });
+      await expect.poll(async () => (await readFile(out, "utf8").catch(() => "")).length, { timeout: 20_000 }).toBeGreaterThan(0);
+      const inside = JSON.parse(await readFile(out, "utf8"));
+      expect(inside.result).toMatchObject({ status: "pending", notAnswered: expect.stringMatching(/inside Codara/) });
+      expect(await finalMessage()).toContain("Answer 1 to:");
+    });
+
+    await test.step("another sender waits for Send", async () => {
+      const other = (await answer("use option two", { sender: "Other Bot" })).result;
+      expect(other).toMatchObject({ status: "pending", notAnswered: expect.stringMatching(/not the assistant named in Settings/) });
+    });
+
+    let answeredId = "";
+    await test.step("from the named assistant, outside Codara, at an idle prompt: typed in at once", async () => {
+      const done = (await answer("use option two")).result;
+      expect(done.status).toBe("answered");
+      answeredId = done.relayId;
+      await expect
+        .poll(finalMessage, { timeout: 20_000 })
+        .toContain("Answer 2 to: [Answer from the user, sent from their phone through Grok Bot; not typed in Studio] use option two");
+      expect((await request("session.relay", { relayId: answeredId })).status).toBe("answered");
+    });
+
+    await test.step("the notification center shows who, where and the exact text, and opens the session", async () => {
+      await page.locator('button[title="Notifications"]').click();
+      const row = page.locator(".nc-row", { hasText: "Grok Bot answered for you in “Fix the docs”" });
+      await expect(row).toBeVisible({ timeout: 10_000 });
+      await expect(row).toContainText("use option two");
+      await expect(row).toContainText("Notes");
+      await row.click();
+      await expect(page.getByRole("dialog", { name: "Notifications" })).toHaveCount(0);
+    });
+
+    await test.step("turning the setting off stops direct answers at once", async () => {
+      await expect.poll(listed, { timeout: 20_000 }).toMatch(/done|idle/);
+      await request("app.prefs.set", { key: "relayPhoneAnswers", value: false });
+      const off = (await answer("use option three")).result;
+      expect(off).toMatchObject({ status: "pending", notAnswered: expect.stringMatching(/off in Settings/) });
+      await request("app.prefs.set", { key: "relayPhoneAnswers", value: true });
+    });
+
+    await test.step("never into a permission dialog", async () => {
+      await request("session.message", { ...starter, id: started.id, text: "needs a permission" });
+      await expect.poll(listed, { timeout: 20_000 }).toBe("needs_you");
+      const blocked = await answer("yes");
+      expect(blocked.error?.message).toMatch(/waiting for the user.*not typed in as an answer either: it is not idle/);
+      await page.waitForTimeout(1_500);
+      expect(await listed()).toBe("needs_you");
+    });
+
+    await test.step("the log records the answer whole, with its own outcome", async () => {
+      const readLog = async () =>
+        (await readFile(join(home, "relay-log.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      await expect.poll(async () => (await readLog()).some((entry) => entry.outcome === "refused")).toBe(true);
+      const log = await readLog();
+      expect(log.map((entry) => entry.outcome)).toEqual(["pending", "pending", "pending", "answered", "pending", "refused"]);
+      expect(log[3]).toMatchObject({ relayId: answeredId, sender: "Grok Bot", text: "use option two", via: "outside Codara" });
+      expect(log[1].via).toBe("a process inside Codara");
+      expect(log[1].detail).toMatch(/inside Codara/);
     });
   } finally {
     await app.close().catch(() => undefined);

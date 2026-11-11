@@ -1377,7 +1377,7 @@ function NotificationSettings() {
       <SettingsSection title="From your phone">
         <ToggleRow
           title="Answers from your phone"
-          desc="Your assistant outside Codara may type your reply into a Claude Code or Codex session that waits at its prompt, without your Send. Never into a permission or question dialog, and each answer shows in the notification center."
+          desc="Your assistant outside Codara may type your reply into a Claude Code or Codex session waiting at its prompt, without your Send, never into a dialog, and each answer shows in the notification center."
           {...bindToggle("relayPhoneAnswers", preferences, setPreference)}
         />
         <SettingRow

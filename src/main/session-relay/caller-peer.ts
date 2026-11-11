@@ -122,7 +122,9 @@ export async function answerCallerCheck(input: {
     for (const holder of holders) {
       const chain = await ancestry(holder, fs);
       if (!chain) return unverified("Codara could not read the calling process's parents");
-      if (chain.includes(input.appPid)) return unverified("it came from a process running inside Codara");
+      if (chain.includes(input.appPid)) {
+        return { verified: false, why: "it came from a process running inside Codara", inside: true };
+      }
     }
     return { verified: true };
   } catch {

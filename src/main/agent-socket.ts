@@ -2442,6 +2442,10 @@ async function handleSessionRelayRpc(
               serverPort: res.socket?.localPort,
               appPid: process.pid,
             });
+      // The card then names where the call came from, not what it said.
+      if (!request.answerCaller.verified && request.answerCaller.inside && !caller.run && !caller.paneId) {
+        request.caller = { key: request.caller.key, label: "a process inside Codara" };
+      }
     }
   }
   const answer = await handleSessionRelay({ relayId: null, request });

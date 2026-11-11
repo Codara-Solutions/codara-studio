@@ -72,7 +72,7 @@ export interface PendingRelay {
  * tree (session-relay/caller-peer.ts). Only the agent socket sets it, after
  * that check; anything parsed from the request starts unverified.
  */
-export type RelayAnswerCaller = { verified: true } | { verified: false; why: string };
+export type RelayAnswerCaller = { verified: true } | { verified: false; why: string; inside?: boolean };
 
 export interface RelayRequest {
   target: string;

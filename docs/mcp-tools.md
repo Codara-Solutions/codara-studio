@@ -929,7 +929,8 @@ you to send one for it. Nothing is sent until you press **Send**.
 | `text` | The message, up to 4,000 characters. |
 | `sender` | Who is asking, such as `Grok Bot`: letters, digits, spaces and `. _ ' -`, up to 40 characters. Names that pass for you or Codara (`you`, `me`, `user`, `etienne`, `codara`, `codara studio`, `studio`, `system`) are refused. |
 | `reason` | Optional, up to 300 characters, shown to you with the text. |
-| `relayId` | Alone, reads how an earlier relay stands: `pending`, `sent`, `dismissed`, `expired` or `undeliverable`. |
+| `mode` | `ask` (the default) waits for Send. `answer` is your reply from your phone; see [Answers from your phone](#answers-from-your-phone). |
+| `relayId` | Alone, reads how an earlier relay stands: `pending`, `sent`, `dismissed`, `expired`, `undeliverable` or `answered`. |
 
 The call returns a `relayId` and `status: "pending"`. You get a notification
 (in the notification center, and a native one) naming the sender, where the
@@ -956,8 +957,62 @@ Rules:
   settled at the next launch. At most 20 wait at once, and 5 from one caller.
   Only a caller's first waiting relay makes a native notification.
 - Every relay is logged in `~/.codarastudio/relay-log.jsonl`: time, sender,
-  caller, target, the first 200 characters and the outcome.
+  caller, target, the first 200 characters (an answer's whole text) and the
+  outcome.
 - Agents in an imported pull request cannot relay, and no tool can press Send.
+- A text that repeats the wording of the answer prefix below is refused, so
+  no relay can pass for one of your answers.
+
+#### Answers from your phone
+
+When a session asked you an ordinary question and you are away, the
+assistant you talk to on your phone can pass your reply on with
+`mode: "answer"`. It is typed into the session at once, without Send, only
+when all of these hold:
+
+- **Settings, Notifications, Answers from your phone** is on (off by
+  default). Turning it off stops direct answers from the next call.
+- `sender` is the name saved under **Assistant name** in that section
+  (default `Grok Bot`; case and spacing do not matter).
+- The caller runs outside Codara. Codara looks up, from the kernel
+  (`/proc`), every process holding the other end of the call's connection,
+  and none of them may descend from Codara's main process: no agent pane,
+  MCP server, Cora chat or run, whatever the request says about itself. The
+  call must use the socket's root token. Linux only for now; elsewhere the
+  answer waits for Send.
+- The target is a Claude Code or Codex session idle at its prompt: its turn
+  ended (and did not fail), no tool call, background work or dialog is open,
+  and nothing was typed in its tab since. The CLI itself must report that
+  (Claude Code hooks or status reports, Codex status reports); with only the
+  screen to go on, Codara cannot tell a prompt from a permission or question
+  dialog, so it does not answer.
+- The text is at most 500 characters and passes the same cleaning as any
+  relay.
+- The session got no other answer since its turn ended, and fewer than 10
+  answers went in during the last hour.
+
+The session receives
+`[Answer from the user, sent from their phone through <sender>; not typed in Studio] <text>`.
+The receiving agent applies its own rules to it; Codara does not judge
+whether the question was an ordinary one.
+
+The call returns `status: "answered"`, and the notification center shows
+who answered, in which session and workspace, and the exact text; clicking
+it opens the session's tab. The log records it as `answered`, with the
+whole text.
+
+When any rule fails, nothing is lost: the call becomes an ordinary relay
+that waits for your Send, and the result's `notAnswered` says in one
+sentence why it was not typed in. A target that cannot take any relay (it is
+working, waiting on a dialog, or gone) is refused as before.
+
+What this does not stop: it keeps agents inside Codara from answering for
+you through their tools or a plain command in their terminal. A process
+that deliberately leaves Codara's process tree first (with `setsid`,
+`systemd-run`, `at` or `cron`), or that gets your outside assistant to send
+the answer, is not caught, and in a development build the `app.*` tools
+already let any holder of the root token drive the window. Every process you
+run can do what you can; this is a guard, not a sandbox.
 
 ## Notifications
 
