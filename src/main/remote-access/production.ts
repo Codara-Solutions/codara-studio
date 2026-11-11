@@ -127,6 +127,7 @@ import {
 } from "./phone-notify";
 import { getPreferenceCached, getPreferenceSync } from "../preferences-store";
 import * as pty from "../pty-manager";
+import { noteTerminalUserInput } from "../terminal-agent-notify";
 import { codaraHome } from "../codara-home";
 import {
   loadSettings,
@@ -4008,7 +4009,10 @@ async function createRemoteTerminal(
     desktopTabId: result.tabId,
     desktopPaneId: result.paneId,
     title: truncateUtf8(title, 240),
-    write: (data) => pty.write(result.paneId, data),
+    write: (data) => {
+      pty.write(result.paneId, data);
+      noteTerminalUserInput(result.paneId, data);
+    },
     resize: async (cols, rows) => {
       // Resize xterm first so it parses the TUI's next repaint using the same
       // grid the PTY is about to advertise. If the renderer is reloading, keep

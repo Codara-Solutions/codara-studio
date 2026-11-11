@@ -57,7 +57,7 @@ import {
 } from "./agent-sessions";
 import { buildLiveSessions } from "@shared/live-sessions";
 import { agentBoardActivity } from "./agent-board";
-import { parseRelayRequest } from "@shared/session-relay";
+import { parseRelayRequest, relayAnswerForgery } from "@shared/session-relay";
 import { handleSessionRelay } from "./session-relay";
 import { answerCallerCheck } from "./session-relay/caller-peer";
 import { AGENT_SESSION_BRIEF_MAX_CHARS, AGENT_SESSION_MAX_LIVE, type AgentSessionRecord } from "@shared/agent-sessions";
@@ -2346,6 +2346,10 @@ async function handleSessionMessage(params: Record<string, unknown>, id: JsonRpc
   if (text.length > AGENT_SESSION_BRIEF_MAX_CHARS) {
     return errorResponse(id, ERR_INVALID_PARAMS, `text is limited to ${AGENT_SESSION_BRIEF_MAX_CHARS} characters`);
   }
+  // An agent's own session must not read a message from it as the user's
+  // answer from their phone.
+  const forged = relayAnswerForgery(text);
+  if (forged) return errorResponse(id, ERR_INVALID_PARAMS, forged);
   const sessions = agentSessions();
   await sessions.load();
   const caller = await agentSessionCaller(params);

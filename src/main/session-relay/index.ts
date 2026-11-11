@@ -42,7 +42,7 @@ import {
   terminalAgentSessionLive,
   terminalPanePlacement,
 } from "../terminal-agent-notify";
-import { SessionRelays, type RelayLogEntry } from "./store";
+import { answeredTimesInLog, SessionRelays, type RelayLogEntry } from "./store";
 
 export const RELAY_LOG_FILE = "relay-log.jsonl";
 const LOG_ROTATE_BYTES = 1024 * 1024;
@@ -206,13 +206,24 @@ function answersFile(): string {
   return join(codaraHome(), RELAY_ANSWERS_FILE);
 }
 
+// Without the file (a first run, or someone deleted it), the answers of the
+// last hour are read back from the log, which records each one.
+async function answeredInLog(): Promise<number[]> {
+  const file = join(codaraHome(), RELAY_LOG_FILE);
+  const times: number[] = [];
+  for (const path of [`${file}.1`, file]) {
+    times.push(...answeredTimesInLog(await fsp.readFile(path, "utf8").catch(() => "")));
+  }
+  return times;
+}
+
 function restoreAnswers(): Promise<void> {
   answersRestored ??= (async () => {
     let text: string;
     try {
       text = await fsp.readFile(answersFile(), "utf8");
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return relays.restoreAnswerTimes([]);
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return relays.restoreAnswerTimes(await answeredInLog());
       return relays.restoreAnswerTimes("Codara could not read its record of recent answers");
     }
     try {

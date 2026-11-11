@@ -21,8 +21,20 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 //
 // CODARA_PROOF_DIR=<dir> saves the approval card's and the setting's screenshots there.
 
-// Reports a turn for each prompt; "slow" keeps it working for a while.
+// Reports a turn for each prompt; "slow" keeps it working for a while. With
+// a hooks folder it also drops Claude Code's hook files there, the way
+// codara-hook.py does.
 const FAKE_CLAUDE = String.raw`#!/usr/bin/env node
+const HOOKS = __HOOKS__;
+const hook = (hookName, payload) => {
+  if (!HOOKS) return;
+  const fs = require("fs");
+  const file = require("path").join(HOOKS, require("crypto").randomUUID() + ".json");
+  const body = JSON.stringify({ hookName, timestamp: new Date().toISOString(), paneId: process.env.SPARK_PANE_ID || "", payload: { session_id: "fake-session", ...payload } });
+  fs.mkdirSync(HOOKS, { recursive: true });
+  fs.writeFileSync(file + ".tmp", body);
+  fs.renameSync(file + ".tmp", file);
+};
 const out = (text) => process.stdout.write(text);
 const status = (fields) => out("\x1b]7501;app=claude:" + fields + "\x07");
 const b64 = (text) => Buffer.from(text, "utf8").toString("base64");
@@ -35,10 +47,21 @@ let count = 0;
 function turn(text) {
   count += 1;
   const n = count;
+  hook("UserPromptSubmit", { prompt: text });
   status("state=working");
   // A permission dialog: blocked until the user answers in the tab.
-  if (/permission/.test(text)) return setTimeout(() => status("state=blocked:kind=permission"), 400);
-  setTimeout(() => status("state=done:msg=" + b64("Answer " + n + " to: " + text.slice(0, 160))), /slow/.test(text) ? 6000 : 600);
+  if (/permission/.test(text)) {
+    hook("PreToolUse", { tool_name: "Bash", tool_input: { command: "rm -rf build" } });
+    return setTimeout(() => {
+      status("state=blocked:kind=permission");
+      hook("Notification", { notification_type: "permission_prompt", message: "Claude needs your permission" });
+    }, 400);
+  }
+  setTimeout(() => {
+    const message = "Answer " + n + " to: " + text.slice(0, 160);
+    status("state=done:msg=" + b64(message));
+    hook("Stop", { last_assistant_message: message });
+  }, /slow/.test(text) ? 6000 : 600);
 }
 setTimeout(() => turn(brief), 400);
 let line = "";
@@ -55,14 +78,14 @@ process.stdin.on("data", (data) => {
 setTimeout(() => process.exit(0), 170000);
 `;
 
-async function setup() {
+async function setup(options: { hooks?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "codara-session-relay-")));
   const home = join(root, "home");
   const userHome = join(root, "user-home");
   const notes = join(root, "notes");
   const bin = join(root, "bin");
   await Promise.all([home, userHome, notes, bin].map((dir) => mkdir(dir)));
-  await writeFile(join(bin, "claude"), FAKE_CLAUDE);
+  await writeFile(join(bin, "claude"), FAKE_CLAUDE.replace("__HOOKS__", JSON.stringify(options.hooks ? join(home, "hooks") : null)));
   await chmod(join(bin, "claude"), 0o755);
   const shell = join(bin, "bash");
   await writeFile(shell, '#!/bin/sh\nexec /bin/bash --noprofile --norc "$@"\n');
@@ -256,7 +279,7 @@ test("a relayed message reaches a session only after the user presses Send", asy
 test("a phone answer goes in without Send only from outside Codara, at an idle prompt, with the setting on", async () => {
   test.skip(process.platform !== "linux", "the caller is checked through /proc, so answers are Linux only");
   test.setTimeout(180_000);
-  const { root, home, notes, env } = await setup();
+  const { root, home, notes, env } = await setup({ hooks: true });
   const call = (method: string, params: Record<string, unknown> = {}) =>
     rpcRaw({ home }, method, params, { timeoutMs: 60_000 }) as Promise<{ result?: any; error?: { message: string } }>;
   const request = async (method: string, params: Record<string, unknown> = {}) => {
@@ -276,8 +299,10 @@ test("a phone answer goes in without Send only from outside Codara, at an idle p
     const listed = async () =>
       ((await request("session.list_all")).sessions as Array<{ id: string; state: string }>).find((s) => s.id === started.paneId)?.state;
     await expect.poll(finalMessage, { timeout: 30_000 }).toContain("Answer 1 to: Which option?");
+    // The test is the outside assistant here; its own pid keeps its relays
+    // apart from the ones the pane scripts below send.
     const answer = (text: string, extra: Record<string, unknown> = {}) =>
-      call("session.relay", { target: started.paneId, sender: "Grok Bot", text, mode: "answer", ...extra });
+      call("session.relay", { target: started.paneId, sender: "Grok Bot", text, mode: "answer", callerPid: process.pid, ...extra });
 
     await test.step("off by default: the answer waits for Send and says why", async () => {
       const off = (await answer("use option two")).result;
@@ -303,19 +328,36 @@ test("a phone answer goes in without Send only from outside Codara, at an idle p
     });
 
     await test.step("an agent inside Codara cannot answer, even from its shell claiming to be outside", async () => {
-      const out = join(root, "inside.json");
-      const script = join(root, "inside.cjs");
-      await writeFile(
-        script,
-        `const { rpcRaw } = require(${JSON.stringify(require.resolve("../../cli/lib/rpc.cjs"))});
-rpcRaw({ home: ${JSON.stringify(home)} }, "session.relay", { target: ${JSON.stringify(started.paneId)}, sender: "Grok Bot", text: "from inside", mode: "answer" })
-  .then((r) => require("fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify(r)));
+      // The script claims nothing about itself (no callerPid), as a plain
+      // command with the root token would.
+      const inside = async (name: string, command: (node: string, script: string) => string) => {
+        const out = join(root, `${name}.json`);
+        const script = join(root, `${name}.cjs`);
+        await writeFile(
+          script,
+          `const parentOf = (pid) => Number(require("fs").readFileSync("/proc/" + pid + "/stat", "utf8").split(") ")[1].split(" ")[1]);
+setTimeout(() => {
+  const { rpcRaw } = require(${JSON.stringify(require.resolve("../../cli/lib/rpc.cjs"))});
+  rpcRaw({ home: ${JSON.stringify(home)} }, "session.relay", { target: ${JSON.stringify(started.paneId)}, sender: "Grok Bot", text: "from inside", mode: "answer" })
+    .then((r) => require("fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify({ ...r, parent: parentOf(process.pid), grandparent: parentOf(parentOf(process.pid)) })));
+}, 1000);
 `,
-      );
-      await request("terminal.create", { cwd: notes, title: "inside", command: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}` });
-      await expect.poll(async () => (await readFile(out, "utf8").catch(() => "")).length, { timeout: 20_000 }).toBeGreaterThan(0);
-      const inside = JSON.parse(await readFile(out, "utf8"));
-      expect(inside.result).toMatchObject({ status: "pending", notAnswered: expect.stringMatching(/inside Codara/) });
+        );
+        await request("terminal.create", { cwd: notes, title: name, command: command(JSON.stringify(process.execPath), JSON.stringify(script)) });
+        await expect.poll(async () => (await readFile(out, "utf8").catch(() => "")).length, { timeout: 20_000 }).toBeGreaterThan(0);
+        return JSON.parse(await readFile(out, "utf8"));
+      };
+      const direct = await inside("inside", (node, script) => `${node} ${script}`);
+      expect(direct.result).toMatchObject({ status: "pending", notAnswered: expect.stringMatching(/inside Codara/) });
+      // Sent to the background from a shell that then exits: the process is
+      // reparented away from Codara, and its pane's environment still names it.
+      const detached = await inside("detached", (node, script) => `sh -c '${node} ${script} >/dev/null 2>&1 & exit 0'`);
+      // Its shell is gone: neither its parent nor that one's is Codara's main process.
+      const appPid = await app.evaluate(() => process.pid);
+      const direct2 = [direct.parent, direct.grandparent];
+      expect(direct2).toContain(appPid);
+      expect([detached.parent, detached.grandparent]).not.toContain(appPid);
+      expect(detached.result).toMatchObject({ status: "pending", notAnswered: expect.stringMatching(/inside Codara/) });
       expect(await finalMessage()).toContain("Answer 1 to:");
     });
 
@@ -365,12 +407,14 @@ rpcRaw({ home: ${JSON.stringify(home)} }, "session.relay", { target: ${JSON.stri
     await test.step("the log records the answer whole, with its own outcome", async () => {
       const readLog = async () =>
         (await readFile(join(home, "relay-log.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-      await expect.poll(async () => (await readLog()).length).toBe(6);
+      await expect.poll(async () => (await readLog()).length).toBe(7);
       const log = await readLog();
-      expect(log.map((entry) => entry.outcome)).toEqual(["pending", "pending", "pending", "answered", "pending", "pending"]);
-      expect(log[3]).toMatchObject({ relayId: answeredId, sender: "Grok Bot", text: "use option two", via: "outside Codara" });
-      expect(log[1].via).toBe("a process inside Codara");
-      expect(log[1].detail).toMatch(/inside Codara/);
+      expect(log.map((entry) => entry.outcome)).toEqual(["pending", "pending", "pending", "pending", "answered", "pending", "pending"]);
+      expect(log[4]).toMatchObject({ relayId: answeredId, sender: "Grok Bot", text: "use option two", via: "outside Codara" });
+      for (const entry of [log[1], log[2]]) {
+        expect(entry.via).toBe("a process inside Codara");
+        expect(entry.detail).toMatch(/inside Codara/);
+      }
     });
   } finally {
     await app.close().catch(() => undefined);

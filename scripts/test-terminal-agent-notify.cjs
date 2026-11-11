@@ -404,6 +404,7 @@ async function main() {
   mod.noteTerminalHookEvent("h1", "Stop", { ...session, last_assistant_message: "Deployed to eu-west." });
   await sleep(1100);
   check("hooks: the turn still finishes after its prompts", alertCount() === beforePrompt + 3 && T.alerts.at(-1).kind === "complete");
+  check("hooks: the Stop hook is what ended the turn, for a relayed answer", mod.terminalAgentAnswerEvidence("h1")?.lastTurnEnd?.origin === "hook");
 
   // ── Hooks: background work keeps the agent busy until it drains ──
   // The owner's report: Claude's turn ended with background subagents and
@@ -580,6 +581,10 @@ async function main() {
   feed("s1", `\x1b]7501;state=done:app=claude-code:msg=${b64("Added the parser test.")}\x1b\\`);
   await sleep(900);
   check("7501: done finishes the turn with its summary", alertCount() === before7501 + 2 && /Added the parser test\./.test(T.alerts.at(-1).body));
+  check(
+    "7501: a turn ended by a status report alone is marked so (relayed answers do not trust it)",
+    mod.terminalAgentAnswerEvidence("s1")?.lastTurnEnd?.origin === "program",
+  );
   // A turn the user stops reads idle, never done.
   mod.noteTerminalUserInput("s1", "now the docs\r");
   feed("s1", "\x1b]7501;state=working:app=claude-code\x1b\\");

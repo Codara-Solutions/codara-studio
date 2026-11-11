@@ -245,8 +245,9 @@ interface PaneWatcher {
   // The latest turn's start, kept after it ends, and its final message whole.
   // codara_session_status answers from these; the board keeps one line.
   lastTurnStartedAt: number;
-  // The latest turn end announced for the current agent session.
-  lastTurnEnd: { at: number; failed: boolean } | null;
+  // The latest turn end announced for the current agent session, and which
+  // signal ended it (null for a failure or the screen).
+  lastTurnEnd: { at: number; failed: boolean; origin: DoneOrigin | null } | null;
   finalMessage: string | null;
   // The UserPromptSubmit that started the current Claude activity was a
   // background task reporting back, not the user.
@@ -932,7 +933,7 @@ function requestDone(
     // A prompt given on the command line submits nothing Codara sees, so an
     // agent that reports the end of that first turn has no turn open here.
     // Nothing to alert, but a session waiting on it must hear.
-    if (w.turn === null && req.origin !== "heuristic") emitTurnEnded(w, false, req.body ?? null);
+    if (w.turn === null && req.origin !== "heuristic") emitTurnEnded(w, false, req.body ?? null, req.origin);
     tanLog(`pane=${w.paneId} done (${req.origin}) ignored: no unannounced turn`);
     return;
   }
@@ -987,6 +988,7 @@ function fireDone(w: PaneWatcher, pending: PendingDone): void {
     // server, or work that went quiet.
     backgroundRunning: pending.followUp ? 0 : w.background.size,
     followUp: pending.followUp,
+    origin: pending.origin,
   });
 }
 
@@ -2368,9 +2370,9 @@ export function onTerminalAgentTurnEnded(listener: (event: TerminalAgentTurnEnd)
   return () => turnEndListeners.delete(listener);
 }
 
-function emitTurnEnded(w: PaneWatcher, failed: boolean, body: string | null): void {
+function emitTurnEnded(w: PaneWatcher, failed: boolean, body: string | null, origin: DoneOrigin | null): void {
   const event = { paneId: w.paneId, failed, message: failed ? body : (w.finalMessage ?? body), at: Date.now() };
-  w.lastTurnEnd = { at: event.at, failed };
+  w.lastTurnEnd = { at: event.at, failed, origin: failed ? null : origin };
   for (const listener of turnEndListeners) {
     try {
       listener(event);
@@ -2391,6 +2393,7 @@ function deliver(
     backgroundRunning?: number;
     followUp?: boolean;
     plain?: boolean;
+    origin?: DoneOrigin;
   } = {},
 ): void {
   if (w.excluded) return;
@@ -2399,7 +2402,7 @@ function deliver(
     return;
   }
   tanLog(`pane=${w.paneId} ALERT kind=${kind} runtime=${w.runtime} ws=${w.workspaceId} tab=${w.tabId}`);
-  if (kind !== "blocked") emitTurnEnded(w, kind === "failed", detail.body ?? null);
+  if (kind !== "blocked") emitTurnEnded(w, kind === "failed", detail.body ?? null, detail.origin ?? null);
   const label = detail.plain ? "Terminal" : runtimeLabel(w.runtime);
   const where = w.tabTitle ? ` · ${w.tabTitle}` : "";
   const status =

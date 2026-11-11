@@ -961,7 +961,11 @@ Rules:
   outcome.
 - Agents in an imported pull request cannot relay, and no tool can press Send.
 - A text that repeats the wording of the answer prefix below is refused, so
-  no relay can pass for one of your answers.
+  no relay can pass for one of your answers. The wording is compared on the
+  letters alone after Unicode folding (NFKC), and a word that mixes Latin
+  letters with look-alikes from another alphabet is refused. The same check
+  applies to `codara_session_message`, so an agent cannot type the prefix
+  into a session it started either.
 
 #### Answers from your phone
 
@@ -976,23 +980,30 @@ when all of these hold:
   (default `Grok Bot`; case and spacing do not matter).
 - The caller runs outside Codara. Codara looks up, from the kernel
   (`/proc`), every process holding the other end of the call's connection,
-  and none of them may descend from Codara's main process: no agent pane,
-  MCP server, Cora chat or run, whatever the request says about itself. The
-  call must use the socket's root token. Linux only for now; elsewhere the
-  answer waits for Send.
+  whatever the request says about itself. None of them may descend from
+  Codara's main process, carry a pane's or a run's variables in its
+  environment (`SPARK_PANE_ID`, `SPARK_RUN_ID`, which a command sent to the
+  background with `&`, `nohup`, `setsid` or a double fork keeps), or run in a
+  cgroup of Codara's own processes (which `env -i` does not leave). Anything
+  Codara cannot read there counts as inside. The call must use the socket's
+  root token. Linux only for now; elsewhere the answer waits for Send.
 - The target is a Claude Code or Codex session idle at its prompt: its turn
   ended (and did not fail), no tool call, background work or dialog is open,
-  and no key was pressed in its tab since that turn began. The CLI itself must report that
-  (Claude Code hooks or status reports, Codex status reports); with only the
-  screen to go on, Codara cannot tell a prompt from a permission or question
-  dialog, so it does not answer.
+  and no key was pressed in its tab since that turn began (in the window or
+  through Remote Access). The turn's end must come from Claude Code's Stop
+  hook or Codex's notify program, and the CLI must report its state itself
+  (hooks or status reports). A status report written in the terminal's output
+  is not enough on its own, since any program can write there: Claude Code
+  without Codara's hooks, or a pane read only from the screen, gets its
+  answers through Send.
 - The text is at most 500 characters and passes the same cleaning as any
   relay.
 - The session got no other answer since its turn ended, and fewer than 10
   answers went in during the last hour. That count is saved in
   `~/.codarastudio/relay-answers.json` before each answer is typed, so a
-  restart does not reset it; if it cannot be saved or read, answers wait for
-  Send.
+  restart does not reset it. Without that file, the count is rebuilt from the
+  `answered` lines of the log; a time ahead of the clock still counts. If the
+  record cannot be saved or read, answers wait for Send.
 
 The session receives
 `[Answer from the user, sent from their phone through <sender>; not typed in Studio] <text>`.
@@ -1006,18 +1017,21 @@ whole text.
 
 When any rule fails, nothing is lost: the call becomes an ordinary relay
 that waits for your Send, and the result's `notAnswered` says in one
-sentence why it was not typed in. Unlike an ordinary relay, this holds even
+sentence why it was not typed in. That includes an answer whose typing
+failed: it waits for Send, and that turn takes no second answer. Unlike an ordinary relay, this holds even
 while the session works or shows a dialog; Send checks the session again and
 keeps waiting until it can take the text. Only a target that is gone is
 refused.
 
 What this does not stop: it keeps agents inside Codara from answering for
-you through their tools or a plain command in their terminal. A process
-that deliberately leaves Codara's process tree first (with `setsid`,
-`systemd-run`, `at` or `cron`), or that gets your outside assistant to send
-the answer, is not caught, and in a development build the `app.*` tools
-already let any holder of the root token drive the window. Every process you
-run can do what you can; this is a guard, not a sandbox.
+you through their tools or a terminal command, also one sent to the
+background or stripped of its environment. A process that has a new program
+started outside Codara on its behalf (`systemd-run`, `cron`, `at`), or that
+gets your outside assistant itself to send the answer, is not caught. Any
+process of yours can also edit Codara's preferences or the answer record on
+disk, and in a development build the `app.*` tools already let any holder of
+the root token drive the window. Every process you run can do what you can;
+this is a guard, not a sandbox.
 
 ## Notifications
 

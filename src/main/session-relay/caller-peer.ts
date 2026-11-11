@@ -3,17 +3,24 @@
 // (session.relay mode "answer") must come from outside Codara, but the root
 // token sits in a file every process of the user can read, and the callerPid
 // the MCP server sends is only what the caller says. So the processes that
-// hold the other end of the TCP connection are looked up in /proc, and none
-// of them may descend from Codara's main process, which every terminal pane,
-// agent CLI, MCP server and Cora run does.
+// hold the other end of the TCP connection are looked up in /proc, and each
+// counts as inside Codara when any of these holds:
+//   - it descends from Codara's main process (every pane, agent CLI, MCP
+//     server and Cora run does);
+//   - its environment names a pane or a run (SPARK_PANE_ID and friends): a
+//     command sent to the background with `&`, nohup, setsid or a double fork
+//     loses its parent but keeps the environment it started with;
+//   - it runs in a cgroup of Codara's own processes, which `env -i` does not
+//     leave;
+//   - any of that cannot be read.
 //
 // What this does not stop: a process started inside Codara that deliberately
-// leaves its process tree before it connects (setsid with a double fork,
-// systemd-run, at, cron), or one that gets the outside assistant itself to
-// send the answer. Any process of the user can do what the user can, so this
-// keeps agents from answering through their tools or a plain command; it is
-// not a sandbox. Linux only: elsewhere the caller cannot be checked, and an
-// answer waits for Send like any relay.
+// starts a new program outside both its environment and its cgroup (systemd-run,
+// at, cron), one that gets the outside assistant itself to send the answer,
+// editing Codara's files on disk, and a dev build's app.* tools. Any process of the user can do what the user can, so this keeps agents from
+// answering through their tools or a terminal command; it is not a sandbox.
+// Linux only: elsewhere the caller cannot be checked, and an answer waits for
+// Send like any relay.
 
 import { promises as fsp } from "node:fs";
 import type { RelayAnswerCaller } from "@shared/session-relay";
@@ -126,8 +133,64 @@ export async function ancestry(pid: number, fs: ProcFs = realProcFs): Promise<nu
   return chain;
 }
 
+// Variables Codara gives every pane's shell or run process, and that their
+// children inherit.
+const CODARA_ORIGIN_ENV = /(?:^|\0)SPARK_(?:PANE_ID|RUN_ID|AGENT_SOCKET|AGENT_TOKEN)=/;
+
+/** Whether a /proc/<pid>/environ block names a Codara pane or run. */
+export function hasCodaraOrigin(environ: string): boolean {
+  return CODARA_ORIGIN_ENV.test(environ);
+}
+
+const readCgroup = (pid: number, fs: ProcFs) => fs.read(`/proc/${pid}/cgroup`).then((text) => text.trim());
+
 /**
- * Whether the caller on this connection runs outside Codara's process tree.
+ * The cgroups Codara's own processes run in: its main process's and those of
+ * everything below it (an agent may be moved to a scope of its own), minus
+ * those of the processes that started Codara (a terminal, a test runner),
+ * which it shares with programs that are not Codara's.
+ */
+export async function codaraCgroups(appPid: number, fs: ProcFs = realProcFs): Promise<Set<string>> {
+  const pids = (await fs.list("/proc")).filter((name) => /^\d+$/.test(name)).map(Number);
+  const children = new Map<number, number[]>();
+  await Promise.all(
+    pids.map(async (pid) => {
+      const stat = await fs.read(`/proc/${pid}/stat`).catch(() => null);
+      const parent = stat === null ? null : parentPidOf(stat);
+      if (parent !== null) children.set(parent, [...(children.get(parent) ?? []), pid]);
+    }),
+  );
+  const members = [appPid];
+  for (let i = 0; i < members.length && members.length < 100_000; i += 1) {
+    for (const child of children.get(members[i]) ?? []) if (!members.includes(child)) members.push(child);
+  }
+  const inside = new Set(
+    (await Promise.all(members.map((pid) => readCgroup(pid, fs).catch(() => null)))).filter((cg): cg is string => !!cg),
+  );
+  for (const pid of ((await ancestry(appPid, fs)) ?? []).slice(1)) {
+    const cg = await readCgroup(pid, fs).catch(() => null);
+    if (cg) inside.delete(cg);
+  }
+  return inside;
+}
+
+/** Why this calling process counts as inside Codara, or null. */
+async function insideReason(pid: number, appPid: number, cgroups: Set<string>, fs: ProcFs): Promise<string | null> {
+  const chain = await ancestry(pid, fs);
+  if (!chain) return "Codara could not read the calling process's parents";
+  if (chain.includes(appPid)) return INSIDE;
+  const environ = await fs.read(`/proc/${pid}/environ`).catch(() => null);
+  if (environ === null) return "Codara could not read the calling process's environment";
+  if (hasCodaraOrigin(environ)) return INSIDE;
+  const cgroup = await readCgroup(pid, fs).catch(() => null);
+  if (cgroup === null) return "Codara could not read the calling process's cgroup";
+  return cgroups.has(cgroup) ? INSIDE : null;
+}
+
+const INSIDE = "it came from a process running inside Codara";
+
+/**
+ * Whether the caller on this connection runs outside Codara.
  * Fails closed: anything it cannot read counts as inside.
  */
 export async function answerCallerCheck(input: {
@@ -148,22 +211,24 @@ export async function answerCallerCheck(input: {
     const inodes = tables.flatMap((table) => clientSocketInodes(table, input.clientPort!, input.serverPort!));
     const { holders, hidden } = inodes.length > 0 ? await socketHolders(inodes, fs) : { holders: [], hidden: [] };
     if (holders.length === 0) return unverified("Codara could not find the calling process");
+    const cgroups = await codaraCgroups(input.appPid, fs);
     for (const holder of holders) {
-      const chain = await ancestry(holder, fs);
-      if (!chain) return unverified("Codara could not read the calling process's parents");
-      if (chain.includes(input.appPid)) {
-        return { verified: false, why: "it came from a process running inside Codara", inside: true };
-      }
+      const why = await insideReason(holder, input.appPid, cgroups, fs);
+      if (why === INSIDE) return { verified: false, why, inside: true };
+      if (why) return unverified(why);
     }
-    // A process under Codara whose open files cannot be read may share the
-    // connection. Others (system services, an ssh-agent) are not Codara's.
+    // A process of Codara's whose open files cannot be read may share the
+    // connection. Others (system services, an ssh-agent) are not Codara's;
+    // their environment is not readable either, so only the tree and the
+    // cgroup tell.
     for (const pid of hidden) {
       const chain = await ancestry(pid, fs);
-      if (chain === null || chain.includes(input.appPid)) {
-        // Only a process that is provably gone is no longer a candidate.
-        const exited = chain === null && (await fs.read(`/proc/${pid}/stat`).then(() => false, (err) => gone(err)));
-        if (!exited) return unverified("a process Codara cannot inspect may share the calling connection");
-      }
+      const cgroup = await readCgroup(pid, fs).catch(() => null);
+      const ours = chain === null || chain.includes(input.appPid) || cgroup === null || cgroups.has(cgroup);
+      if (!ours) continue;
+      // Only a process that is provably gone is no longer a candidate.
+      const exited = await fs.read(`/proc/${pid}/stat`).then(() => false, (err) => gone(err));
+      if (!exited) return unverified("a process Codara cannot inspect may share the calling connection");
     }
     return { verified: true };
   } catch {

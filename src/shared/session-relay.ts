@@ -123,8 +123,25 @@ export function cleanRelaySender(raw: string): string {
     .trim();
 }
 
-// What a text would need to pass for the answer prefix on its own line.
-const FORGED_ANSWER = /answer\W+from\W+the\W+user\W+sent\W+from|not\W+typed\W+in\W+studio/i;
+// The wording of the answer prefix, compared on letters only.
+const ANSWER_WORDING = [" answer from the user sent from ", " not typed in studio "];
+
+/**
+ * Why a text could pass for the answer prefix, or null. Compatibility forms
+ * are folded (NFKC), a word that mixes Latin letters with others (a Cyrillic
+ * "а" in "answer") is refused outright, and the wording is matched on the
+ * letters alone, so separators such as "_" or digits do not hide it.
+ */
+export function relayAnswerForgery(raw: string): string | null {
+  const words = raw.normalize("NFKC").toLowerCase().split(/\P{L}+/u).filter(Boolean);
+  if (words.some((word) => /\p{Script=Latin}/u.test(word) && /[^\p{Script=Latin}]/u.test(word))) {
+    return "text cannot mix Latin letters with look-alike letters of other alphabets in one word";
+  }
+  const letters = ` ${words.join(" ")} `;
+  return ANSWER_WORDING.some((phrase) => letters.includes(phrase))
+    ? "text cannot contain the wording of the answer prefix"
+    : null;
+}
 
 export function parseRelayRequest(params: Record<string, unknown>): RelayRequest | string {
   const mode = params.mode === undefined || params.mode === null ? "ask" : params.mode;
@@ -138,7 +155,8 @@ export function parseRelayRequest(params: Record<string, unknown>): RelayRequest
   if (hasInvisibleRelayChars(params.text)) return hidden("text");
   const text = cleanRelayText(params.text);
   if (!text) return "text is required";
-  if (FORGED_ANSWER.test(text)) return "text cannot contain the wording of the answer prefix";
+  const forged = relayAnswerForgery(text);
+  if (forged) return forged;
   if (typeof params.sender !== "string") return "sender is required: a short name for who is asking, such as Grok Bot";
   if (hasInvisibleRelayChars(params.sender)) return hidden("sender");
   const sender = cleanRelaySender(params.sender);
@@ -207,8 +225,12 @@ export interface RelayAnswerEvidence {
   teammatesActive: number;
   codexAwaitingIdle: boolean;
   lastTurnStartedAt: number;
-  /** The last turn's end, as the notifier announced it. */
-  lastTurnEnd: { at: number; failed: boolean } | null;
+  /**
+   * The last turn's end, as the notifier announced it, and the signal that
+   * ended it: "hook" (Claude Code's Stop hook), "codex" (Codex's notify
+   * program or session file), "program" (an OSC 7501 status report), ...
+   */
+  lastTurnEnd: { at: number; failed: boolean; origin: string | null } | null;
   lastUserInputAt: number;
   /** The last of those keys that was Enter: a key after it may be unsent text. */
   lastSubmitAt: number;
@@ -238,6 +260,13 @@ export function relayAnswerTargetRefusal(evidence: RelayAnswerEvidence | null): 
   const end = evidence.lastTurnEnd;
   if (!end || end.at < evidence.lastTurnStartedAt) return "it has not finished a turn it could be waiting on";
   if (end.failed) return "its last turn failed";
+  // An OSC 7501 report is read from the pane's output, which any process of
+  // the user can write to (its /dev/pts): a forged "done" over a permission
+  // prompt must not let an answer press Enter on it. A hook or Codex's
+  // notify program is a separate channel.
+  if (end.origin !== "hook" && end.origin !== "codex") {
+    return "its turn's end was reported only in its terminal output, which Codara cannot trust for this";
+  }
   // Any key since the turn began: an answered prompt, a queued message, a
   // menu opened while the end was being confirmed, or unsent text. The user
   // pressing keys in the tab is not away anyway.

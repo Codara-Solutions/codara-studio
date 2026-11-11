@@ -73,6 +73,22 @@ export type RelayDecideResult =
 
 const FINISHED_KEPT = 200;
 
+/** When the answers recorded in relay-log.jsonl text went in. */
+export function answeredTimesInLog(text: string): number[] {
+  const times: number[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.includes('"answered"')) continue;
+    try {
+      const entry = JSON.parse(line) as Partial<RelayLogEntry>;
+      const at = entry.outcome === "answered" && typeof entry.time === "string" ? Date.parse(entry.time) : NaN;
+      if (Number.isFinite(at)) times.push(at);
+    } catch {
+      // A torn last line.
+    }
+  }
+  return times;
+}
+
 export class SessionRelays {
   private readonly pendingById = new Map<string, PendingRelay>();
   private readonly finished = new Map<string, RelayOutcome>();
@@ -93,8 +109,13 @@ export class SessionRelays {
       resolved = this.deps.resolveTarget(request.target);
       const answer = typeof resolved === "string" ? resolved : this.answerRefusal(request, resolved);
       const saved = typeof answer === "string" ? answer : this.reserveAnswer();
-      if (typeof answer !== "string" && saved === null) return this.answer(request, resolved as RelayTarget, answer.turnKey);
-      notAnswered = saved;
+      if (typeof answer !== "string" && saved === null) {
+        const typed = this.answer(request, resolved as RelayTarget, answer.turnKey);
+        if (typeof typed !== "string") return typed;
+        notAnswered = typed;
+      } else {
+        notAnswered = saved;
+      }
     }
     const refuse = (error: string, target: RelayTarget | null = null): RelayCreateResult => {
       const why = notAnswered && notAnswered !== error ? `${error}; not typed in as an answer either: ${notAnswered}` : error;
@@ -157,8 +178,9 @@ export class SessionRelays {
     return turn;
   }
 
-  // Typed in now, with nothing between the checks above and the paste.
-  private answer(request: RelayRequest, target: RelayTarget, turnKey: string): RelayCreateResult {
+  // Typed in now, with nothing between the checks above and the paste. A
+  // paste that fails returns why, and the answer then waits for Send.
+  private answer(request: RelayRequest, target: RelayTarget, turnKey: string): RelayCreateResult | string {
     const now = this.deps.now();
     const relay: PendingRelay = {
       id: this.deps.newId(),
@@ -179,7 +201,7 @@ export class SessionRelays {
       const detail = err instanceof Error ? err.message : String(err);
       this.remember(relay.id, "undeliverable");
       this.record(relay.id, relay, target, "undeliverable", detail);
-      return { ok: false, error: `Not answered: ${detail}` };
+      return `typing it in failed: ${detail}`;
     }
     this.remember(relay.id, "answered");
     this.record(relay.id, relay, target, "answered");
@@ -240,7 +262,8 @@ export class SessionRelays {
       return;
     }
     const now = this.deps.now();
-    const recent = times.filter((at) => Number.isFinite(at) && now - at < RELAY_ANSWER_WINDOW_MS && at <= now);
+    // A time ahead of the clock (it was set back) still counts.
+    const recent = times.filter((at) => Number.isFinite(at) && now - at < RELAY_ANSWER_WINDOW_MS);
     this.answerTimes = [...recent, ...this.answerTimes].sort((a, b) => a - b);
     this.answerHistory = "restored";
   }
