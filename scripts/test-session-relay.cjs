@@ -446,16 +446,29 @@ function harness(lib) {
     r.turns.set("pane-1", "turn-100");
     assert.equal(r.answer({ text: "an hour later" }).answered, true);
 
-    // A target that cannot take a relay at all is still refused, with both reasons.
+    // A session that works or shows a dialog keeps the answer for Send, and
+    // Send checks it again.
     const busy = harness(lib);
     busy.turns.set("pane-1", "it is not idle at its prompt");
     busy.busy.set("pane-1", "it is waiting for the user, who answers in its tab");
-    const refused = busy.answer();
-    assert.equal(refused.ok, false);
-    assert.match(refused.error, /waiting for the user.*not typed in as an answer either: it is not idle/);
+    const kept = busy.answer();
+    assert.equal(kept.ok, true);
+    assert.match(kept.notAnswered, /not idle/);
+    const early = busy.relays.decide(kept.relay.id, "send");
+    assert.equal(early.stillPending, true, "Send waits while the dialog is up");
+    assert.deepEqual(busy.delivered, []);
+    assert.equal(busy.ask().ok, false, "an ordinary relay to a busy session is still refused");
     const gone = harness(lib).answer({ target: "pane-gone" });
     assert.equal(gone.ok, false);
     assert.match(gone.error, /no live session/);
+
+    // The hourly cap counts answers an earlier run of Codara typed in.
+    const restarted = harness(lib);
+    const times = Array.from({ length: lib.RELAY_ANSWERS_PER_HOUR }, (_, i) => restarted.now - lib.RELAY_ANSWER_WINDOW_MS + 30_000 * (i + 1));
+    restarted.relays.restoreAnswerTimes([...times, restarted.now - lib.RELAY_ANSWER_WINDOW_MS - 1]);
+    assert.match(restarted.answer().notAnswered, /10 answers were already typed in/);
+    restarted.now += 60_000;
+    assert.equal(restarted.answer().answered, true, "once the oldest is an hour old");
 
     // A paste that fails is not retried as an answer.
     const broken = harness(lib);
@@ -514,6 +527,9 @@ function harness(lib) {
       [{ lastTurnEnd: { at: 5_000, failed: true } }, /last turn failed/],
       // A menu the user opened, or text they typed and did not send.
       [{ lastUserInputAt: 6_000, lastSubmitAt: 6_000 }, /typed in its tab/],
+      // A menu opened (or a permission answered) during the turn or while its end was confirmed.
+      [{ lastUserInputAt: 4_999, lastSubmitAt: 4_999 }, /typed in its tab/],
+      [{ lastUserInputAt: 1_001, lastSubmitAt: 1_001 }, /typed in its tab/],
       [{ lastUserInputAt: 3_000, lastSubmitAt: 900 }, /typed in its tab/],
     ];
     for (const [change, why] of cases) {
@@ -578,6 +594,20 @@ function harness(lib) {
     assert.match((await check([])).why, /could not find the calling process/);
     assert.match((await check([51], { clientPort: 0xd432 })).why, /could not find/);
     assert.match((await check([51], { platform: "darwin" })).why, /only on Linux/);
+    // A process under Codara whose files cannot be read may share the socket;
+    // an unreadable one elsewhere (another user's, an ssh-agent) does not matter.
+    const hiding = (blocked) => {
+      const base = fakeFs([51]);
+      return { ...base, list: async (p) => (blocked.some((pid) => p === `/proc/${pid}/fd`) ? Promise.reject(Object.assign(new Error("no"), { code: "EACCES" })) : base.list(p)) };
+    };
+    assert.match((await check([51], { fs: hiding([31]) })).why, /cannot inspect may share/);
+    assert.deepEqual(await check([51], { fs: hiding([50]) }), { verified: true });
+    // A chain cut short could hide Codara above where it stops.
+    const deep = {};
+    for (let pid = 1000; pid < 1200; pid += 1) deep[pid] = pid + 1;
+    deep[1200] = 10;
+    Object.assign(procs, deep, { 51: 1000 });
+    assert.match((await check([51])).why, /could not read the calling process's parents/, "too deep to read whole");
     procs[51] = 77;
     assert.match((await check([51])).why, /could not read the calling process's parents/);
 

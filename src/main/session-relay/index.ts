@@ -194,6 +194,32 @@ const relays = new SessionRelays({
   log: appendLog,
 });
 
+// The hourly cap on answers outlives a restart: the log says when the last
+// ones went in. Read once, before the first answer of this run.
+let answersRestored: Promise<void> | null = null;
+
+function restoreAnswers(): Promise<void> {
+  answersRestored ??= (async () => {
+    const file = join(codaraHome(), RELAY_LOG_FILE);
+    const times: number[] = [];
+    for (const path of [`${file}.1`, file]) {
+      const text = await fsp.readFile(path, "utf8").catch(() => "");
+      for (const line of text.split("\n")) {
+        if (!line.includes('"answered"')) continue;
+        try {
+          const entry = JSON.parse(line) as Partial<RelayLogEntry>;
+          const at = entry.outcome === "answered" && typeof entry.time === "string" ? Date.parse(entry.time) : NaN;
+          if (Number.isFinite(at)) times.push(at);
+        } catch {
+          // A torn last line.
+        }
+      }
+    }
+    relays.restoreAnswerTimes(times);
+  })();
+  return answersRestored;
+}
+
 export interface RelayRpcResult {
   result?: unknown;
   error?: string;
@@ -213,6 +239,7 @@ export async function handleSessionRelay(input: {
   await refreshWorkspaces();
   // Warms the cache answerPolicy reads; the window's toggle updates it.
   await loadPreferences();
+  if (input.request.mode === "answer") await restoreAnswers();
   const created = relays.create(input.request);
   if (!created.ok) return { error: created.error };
   const { relay } = created;

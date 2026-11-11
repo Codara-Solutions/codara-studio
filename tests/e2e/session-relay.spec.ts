@@ -356,8 +356,8 @@ rpcRaw({ home: ${JSON.stringify(home)} }, "session.relay", { target: ${JSON.stri
     await test.step("never into a permission dialog", async () => {
       await request("session.message", { ...starter, id: started.id, text: "needs a permission" });
       await expect.poll(listed, { timeout: 20_000 }).toBe("needs_you");
-      const blocked = await answer("yes");
-      expect(blocked.error?.message).toMatch(/waiting for the user.*not typed in as an answer either: it is not idle/);
+      const blocked = (await answer("yes")).result;
+      expect(blocked).toMatchObject({ status: "pending", notAnswered: expect.stringMatching(/not idle at its prompt/) });
       await page.waitForTimeout(1_500);
       expect(await listed()).toBe("needs_you");
     });
@@ -365,9 +365,9 @@ rpcRaw({ home: ${JSON.stringify(home)} }, "session.relay", { target: ${JSON.stri
     await test.step("the log records the answer whole, with its own outcome", async () => {
       const readLog = async () =>
         (await readFile(join(home, "relay-log.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-      await expect.poll(async () => (await readLog()).some((entry) => entry.outcome === "refused")).toBe(true);
+      await expect.poll(async () => (await readLog()).length).toBe(6);
       const log = await readLog();
-      expect(log.map((entry) => entry.outcome)).toEqual(["pending", "pending", "pending", "answered", "pending", "refused"]);
+      expect(log.map((entry) => entry.outcome)).toEqual(["pending", "pending", "pending", "answered", "pending", "pending"]);
       expect(log[3]).toMatchObject({ relayId: answeredId, sender: "Grok Bot", text: "use option two", via: "outside Codara" });
       expect(log[1].via).toBe("a process inside Codara");
       expect(log[1].detail).toMatch(/inside Codara/);

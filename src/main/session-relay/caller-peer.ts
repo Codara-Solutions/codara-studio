@@ -62,16 +62,40 @@ export function parentPidOf(stat: string): number | null {
   return Number.isSafeInteger(ppid) && ppid >= 0 ? ppid : null;
 }
 
-/** Every process that holds one of these sockets open. */
-export async function socketHolders(inodes: readonly string[], fs: ProcFs = realProcFs): Promise<number[]> {
+const gone = (err: unknown) => (err as NodeJS.ErrnoException | null)?.code === "ENOENT";
+
+/**
+ * Every process that holds one of these sockets open, and every process
+ * whose open files could not be read (another user's, or one that made
+ * itself undumpable) and so might hold one too. A process or descriptor
+ * that ended meanwhile is neither.
+ */
+export async function socketHolders(
+  inodes: readonly string[],
+  fs: ProcFs = realProcFs,
+): Promise<{ holders: number[]; hidden: number[] }> {
   const wanted = new Set(inodes.map((inode) => `socket:[${inode}]`));
   const pids = (await fs.list("/proc")).filter((name) => /^\d+$/.test(name));
   const holders: number[] = [];
+  const hidden: number[] = [];
   await Promise.all(
     pids.map(async (pid) => {
-      const fds = await fs.list(`/proc/${pid}/fd`).catch(() => [] as string[]);
+      let fds: string[];
+      try {
+        fds = await fs.list(`/proc/${pid}/fd`);
+      } catch (err) {
+        if (!gone(err)) hidden.push(Number(pid));
+        return;
+      }
       for (const fd of fds) {
-        const target = await fs.link(`/proc/${pid}/fd/${fd}`).catch(() => "");
+        let target = "";
+        try {
+          target = await fs.link(`/proc/${pid}/fd/${fd}`);
+        } catch (err) {
+          if (gone(err)) continue;
+          hidden.push(Number(pid));
+          return;
+        }
         if (wanted.has(target)) {
           holders.push(Number(pid));
           return;
@@ -79,16 +103,21 @@ export async function socketHolders(inodes: readonly string[], fs: ProcFs = real
       }
     }),
   );
-  return holders;
+  return { holders, hidden };
 }
 
-/** `pid` and its ancestors, nearest first; null when one of them cannot be read. */
+/**
+ * `pid` and all its ancestors, nearest first, up to a process with no parent
+ * (pid 1, or the root of a pid namespace). Null when one cannot be read or
+ * the chain is not a real one (too deep, or a loop): a partial chain could
+ * hide Codara above where it stops.
+ */
 export async function ancestry(pid: number, fs: ProcFs = realProcFs): Promise<number[] | null> {
   const chain: number[] = [];
   let current = pid;
-  while (current > 0 && chain.length < MAX_DEPTH && !chain.includes(current)) {
+  while (current > 0) {
+    if (chain.length >= MAX_DEPTH || chain.includes(current)) return null;
     chain.push(current);
-    if (current === 1) return chain;
     const stat = await fs.read(`/proc/${current}/stat`).catch(() => null);
     const parent = stat === null ? null : parentPidOf(stat);
     if (parent === null) return null;
@@ -117,13 +146,22 @@ export async function answerCallerCheck(input: {
       ["/proc/net/tcp", "/proc/net/tcp6"].map((path) => fs.read(path).catch(() => "")),
     );
     const inodes = tables.flatMap((table) => clientSocketInodes(table, input.clientPort!, input.serverPort!));
-    const holders = inodes.length > 0 ? await socketHolders(inodes, fs) : [];
+    const { holders, hidden } = inodes.length > 0 ? await socketHolders(inodes, fs) : { holders: [], hidden: [] };
     if (holders.length === 0) return unverified("Codara could not find the calling process");
     for (const holder of holders) {
       const chain = await ancestry(holder, fs);
       if (!chain) return unverified("Codara could not read the calling process's parents");
       if (chain.includes(input.appPid)) {
         return { verified: false, why: "it came from a process running inside Codara", inside: true };
+      }
+    }
+    // A process under Codara whose open files cannot be read may share the
+    // connection. Others (system services, an ssh-agent) are not Codara's.
+    for (const pid of hidden) {
+      const chain = await ancestry(pid, fs);
+      if (chain === null || chain.includes(input.appPid)) {
+        const exited = chain === null && !(await fs.read(`/proc/${pid}/stat`).then(() => true, () => false));
+        if (!exited) return unverified("a process Codara cannot inspect may share the calling connection");
       }
     }
     return { verified: true };

@@ -238,8 +238,15 @@ export function relayAnswerTargetRefusal(evidence: RelayAnswerEvidence | null): 
   const end = evidence.lastTurnEnd;
   if (!end || end.at < evidence.lastTurnStartedAt) return "it has not finished a turn it could be waiting on";
   if (end.failed) return "its last turn failed";
-  if (evidence.lastUserInputAt >= end.at || evidence.lastUserInputAt > evidence.lastSubmitAt) {
-    return "something may be typed in its tab";
+  // Any key since the turn began: an answered prompt, a queued message, a
+  // menu opened while the end was being confirmed, or unsent text. The user
+  // pressing keys in the tab is not away anyway.
+  if (
+    evidence.lastUserInputAt > evidence.lastTurnStartedAt ||
+    evidence.lastUserInputAt >= end.at ||
+    evidence.lastUserInputAt > evidence.lastSubmitAt
+  ) {
+    return "something was typed in its tab since its last turn began";
   }
   return null;
 }

@@ -101,7 +101,9 @@ export class SessionRelays {
     }
     const target = resolved ?? this.deps.resolveTarget(request.target);
     if (typeof target === "string") return refuse(target);
-    const busy = this.deps.busy(target);
+    // An answer is the user's own reply, so it waits for Send even while the
+    // session works or shows a dialog; Send checks the session again.
+    const busy = notAnswered ? null : this.deps.busy(target);
     if (busy) return refuse(`that session cannot take a message now: ${busy}`, target);
     const now = this.deps.now();
     const relay: PendingRelay = {
@@ -217,6 +219,13 @@ export class SessionRelays {
     }
     this.finish(relay, "sent");
     return { ok: true, outcome: "sent" };
+  }
+
+  /** Answers typed in by an earlier run of Codara (from the log), for the hourly cap. */
+  restoreAnswerTimes(times: readonly number[]): void {
+    const now = this.deps.now();
+    const recent = times.filter((at) => now - at < RELAY_ANSWER_WINDOW_MS && at <= now);
+    this.answerTimes = [...recent, ...this.answerTimes].sort((a, b) => a - b);
   }
 
   /** "pending", how it ended, or null for an id this run of Codara never saw. */

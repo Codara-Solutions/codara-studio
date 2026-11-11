@@ -982,14 +982,15 @@ when all of these hold:
   answer waits for Send.
 - The target is a Claude Code or Codex session idle at its prompt: its turn
   ended (and did not fail), no tool call, background work or dialog is open,
-  and nothing was typed in its tab since. The CLI itself must report that
+  and no key was pressed in its tab since that turn began. The CLI itself must report that
   (Claude Code hooks or status reports, Codex status reports); with only the
   screen to go on, Codara cannot tell a prompt from a permission or question
   dialog, so it does not answer.
 - The text is at most 500 characters and passes the same cleaning as any
   relay.
 - The session got no other answer since its turn ended, and fewer than 10
-  answers went in during the last hour.
+  answers went in during the last hour (counted from the log, so a restart
+  does not reset it).
 
 The session receives
 `[Answer from the user, sent from their phone through <sender>; not typed in Studio] <text>`.
@@ -1003,8 +1004,10 @@ whole text.
 
 When any rule fails, nothing is lost: the call becomes an ordinary relay
 that waits for your Send, and the result's `notAnswered` says in one
-sentence why it was not typed in. A target that cannot take any relay (it is
-working, waiting on a dialog, or gone) is refused as before.
+sentence why it was not typed in. Unlike an ordinary relay, this holds even
+while the session works or shows a dialog; Send checks the session again and
+keeps waiting until it can take the text. Only a target that is gone is
+refused.
 
 What this does not stop: it keeps agents inside Codara from answering for
 you through their tools or a plain command in their terminal. A process
