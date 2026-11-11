@@ -53,6 +53,11 @@ async function loadStore() {
       "    globalThis.__studioShareBridge.requestTerminalOp(...args),\n" +
       "};\n",
   );
+  const notifyStub = path.join(temporaryRoot, "terminal-agent-notify-stub.js");
+  fs.writeFileSync(
+    notifyStub,
+    "exports.noteTerminalUserInput = (...args) => (globalThis.__studioShareInputs ??= []).push(args);\n",
+  );
   const outfile = path.join(temporaryRoot, "studio-terminal-share.cjs");
   await esbuild.build({
     entryPoints: [ENTRY],
@@ -71,6 +76,9 @@ async function loadStore() {
           }));
           build.onResolve({ filter: /^\.\.\/terminal-bridge$/ }, () => ({
             path: bridgeStub,
+          }));
+          build.onResolve({ filter: /^\.\.\/terminal-agent-notify$/ }, () => ({
+            path: notifyStub,
           }));
         },
       },
@@ -244,8 +252,12 @@ async function main() {
         },
       ]);
 
+      globalThis.__studioShareInputs = [];
       store.write("phone-a", "studio-pane-1", "phone-a-sub", attached.attachmentId, 1, "ls\r");
       assert.deepEqual(pty.session("pane-1").writes, ["ls\r"]);
+      // The phone's keys count as the user's input, so a relayed answer
+      // never lands on a line typed there.
+      assert.deepEqual(globalThis.__studioShareInputs, [["pane-1", "ls\r"]]);
       store.shutdown();
     },
   );

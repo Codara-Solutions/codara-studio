@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import * as pty from "../pty-manager";
+import { noteTerminalUserInput } from "../terminal-agent-notify";
 import { requestTerminalOp } from "../terminal-bridge";
 import type {
   RemoteTerminalLeaseAttachResult,
@@ -215,6 +216,9 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
       throw new Error("That terminal input is out of order. Reattach and retry.");
     }
     pty.write(record.paneId, data);
+    // Keys from the phone are the user's too: a half-typed line or an open
+    // menu must keep a relayed answer out (session-relay).
+    noteTerminalUserInput(record.paneId, data);
     record.acceptedInputs.set(inputSequence, data);
     while (record.acceptedInputs.size > 128) {
       const oldest = record.acceptedInputs.keys().next().value;

@@ -16,6 +16,7 @@ export const RELAY_OUTCOME_LABEL: Record<RelayOutcome, string> = {
   dismissed: "Dismissed",
   expired: "Expired",
   undeliverable: "Not sent",
+  answered: "Answered",
 };
 
 const EMPTY: RelayRowState = { pending: null, outcome: null };

@@ -58,6 +58,7 @@ import { isRecording } from "../shortcuts/recording";
 import { useOpenAiFastMode } from "../lib/useOpenAiFastMode";
 import { FAST_MODE_COST_NOTE } from "@shared/fast-mode";
 import { AGENT_HIBERNATION_PRESETS, normalizeAgentHibernationMinutes } from "@shared/agent-hibernation";
+import { DEFAULT_RELAY_ANSWER_ASSISTANT, RELAY_SENDER_MAX_CHARS } from "@shared/session-relay";
 import {
   UsageEntryBody,
   useSubscriptionUsage,
@@ -1371,6 +1372,28 @@ function NotificationSettings() {
           desc="The macOS dock badge or Windows taskbar flash. Clears when you focus Codara Studio."
           {...bindToggle("notifyOsCues", preferences, setPreference)}
         />
+      </SettingsSection>
+
+      <SettingsSection title="From your phone">
+        <ToggleRow
+          title="Answers from your phone"
+          desc="Your assistant outside Codara may type your reply into a Claude Code or Codex session waiting at its prompt, without your Send, never into a dialog, and each answer shows in the notification center."
+          {...bindToggle("relayPhoneAnswers", preferences, setPreference)}
+        />
+        <SettingRow
+          title="Assistant name"
+          desc="Only answers this assistant sends are typed in. Anything else waits for your Send."
+          htmlFor="settings-relay-answer-assistant"
+          stacked
+        >
+          <input
+            id="settings-relay-answer-assistant"
+            className="spark-input"
+            value={preferences.relayAnswerAssistant ?? DEFAULT_RELAY_ANSWER_ASSISTANT}
+            maxLength={RELAY_SENDER_MAX_CHARS}
+            onChange={(event) => void setPreference("relayAnswerAssistant", event.currentTarget.value)}
+          />
+        </SettingRow>
       </SettingsSection>
     </>
   );

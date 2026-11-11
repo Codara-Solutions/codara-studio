@@ -929,7 +929,8 @@ you to send one for it. Nothing is sent until you press **Send**.
 | `text` | The message, up to 4,000 characters. |
 | `sender` | Who is asking, such as `Grok Bot`: letters, digits, spaces and `. _ ' -`, up to 40 characters. Names that pass for you or Codara (`you`, `me`, `user`, `etienne`, `codara`, `codara studio`, `studio`, `system`) are refused. |
 | `reason` | Optional, up to 300 characters, shown to you with the text. |
-| `relayId` | Alone, reads how an earlier relay stands: `pending`, `sent`, `dismissed`, `expired` or `undeliverable`. |
+| `mode` | `ask` (the default) waits for Send. `answer` is your reply from your phone; see [Answers from your phone](#answers-from-your-phone). |
+| `relayId` | Alone, reads how an earlier relay stands: `pending`, `sent`, `dismissed`, `expired`, `undeliverable` or `answered`. |
 
 The call returns a `relayId` and `status: "pending"`. You get a notification
 (in the notification center, and a native one) naming the sender, where the
@@ -956,8 +957,87 @@ Rules:
   settled at the next launch. At most 20 wait at once, and 5 from one caller.
   Only a caller's first waiting relay makes a native notification.
 - Every relay is logged in `~/.codarastudio/relay-log.jsonl`: time, sender,
-  caller, target, the first 200 characters and the outcome.
+  caller, target, the first 200 characters (an answer's whole text) and the
+  outcome.
 - Agents in an imported pull request cannot relay, and no tool can press Send.
+- A text that repeats the wording of the answer prefix below is refused, so
+  no relay can pass for one of your answers. The wording is compared on the
+  letters alone after Unicode decomposition (NFKD), with accents and
+  invisible characters removed and look-alike letters (Cyrillic, Greek,
+  Armenian, Cherokee, Latin small capitals) read as the Latin letter they pass
+  for; any other text, in any alphabet, passes. This stops look-alike copies
+  of the wording, but the prefix is a label for the receiving agent, not
+  proof that the user wrote the text. The same check
+  applies to `codara_session_message`, so an agent cannot type the prefix
+  into a session it started either.
+
+#### Answers from your phone
+
+When a session asked you an ordinary question and you are away, the
+assistant you talk to on your phone can pass your reply on with
+`mode: "answer"`. It is typed into the session at once, without Send, only
+when all of these hold:
+
+- **Settings, Notifications, Answers from your phone** is on (off by
+  default). Turning it off stops direct answers from the next call.
+- `sender` is the name saved under **Assistant name** in that section
+  (default `Grok Bot`; case and spacing do not matter).
+- The caller runs outside Codara. Codara looks up, from the kernel
+  (`/proc`), every process holding the other end of the call's connection,
+  whatever the request says about itself. None of them may descend from
+  Codara's main process, carry a pane's or a run's variables in its
+  environment (`SPARK_PANE_ID`, `SPARK_RUN_ID`, which a command sent to the
+  background with `&`, `nohup`, `setsid` or a double fork keeps), or run in a
+  cgroup of Codara's own processes (which `env -i` does not leave). Anything
+  Codara cannot read there counts as inside, and when Codara shares its own
+  cgroup with the program that started it, every answer waits for Send. The call must use the socket's
+  root token. Linux only for now; elsewhere the answer waits for Send.
+- The target is a Claude Code or Codex session idle at its prompt: its turn
+  ended (and did not fail), no tool call, background work or dialog is open,
+  and no key was pressed in its tab since that turn began (in the window or
+  through Remote Access). The turn's end must come from Claude Code's Stop
+  hook or Codex's notify program, and the CLI must report its state itself
+  (hooks or status reports). A status report written in the terminal's output
+  is not enough on its own, since any program can write there: Claude Code
+  without Codara's hooks, or a pane read only from the screen, gets its
+  answers through Send.
+- The text is at most 500 characters and passes the same cleaning as any
+  relay.
+- The session got no other answer since its turn ended, and fewer than 10
+  answers went in during the last hour. That count is saved in
+  `~/.codarastudio/relay-answers.json` before each answer is typed, so a
+  restart does not reset it. Without that file, the count is rebuilt from the
+  `answered` lines of the log; a time ahead of the clock still counts. If the
+  record cannot be saved or read, answers wait for Send.
+
+The session receives
+`[Answer from the user, sent from their phone through <sender>; not typed in Studio] <text>`.
+The receiving agent applies its own rules to it; Codara does not judge
+whether the question was an ordinary one.
+
+The call returns `status: "answered"`, and the notification center shows
+who answered, in which session and workspace, and the exact text; clicking
+it opens the session's tab. The log records it as `answered`, with the
+whole text.
+
+When any rule fails, nothing is lost: the call becomes an ordinary relay
+that waits for your Send, and the result's `notAnswered` says in one
+sentence why it was not typed in. That includes an answer whose typing
+failed: it waits for Send, and that turn takes no second answer. Unlike an ordinary relay, this holds even
+while the session works or shows a dialog; Send checks the session again and
+keeps waiting until it can take the text. Only a target that is gone is
+refused.
+
+What this does not stop: it keeps agents inside Codara from answering for
+you through their tools or a terminal command, also one sent to the
+background or stripped of its environment. A process that has a new program
+started outside Codara on its behalf (`systemd-run`, `cron`, `at`), or that
+gets your outside assistant itself to send the answer, is not caught. Any
+process of yours can also forge the hook or notify files so a session at a
+dialog looks idle, edit Codara's preferences or the answer record on disk,
+and in a development build the `app.*` tools already let any holder of the
+root token drive the window. This is defence in depth on a one-user machine,
+not a boundary against a process running as you.
 
 ## Notifications
 

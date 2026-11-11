@@ -57,8 +57,9 @@ import {
 } from "./agent-sessions";
 import { buildLiveSessions } from "@shared/live-sessions";
 import { agentBoardActivity } from "./agent-board";
-import { parseRelayRequest } from "@shared/session-relay";
+import { parseRelayRequest, relayAnswerForgery } from "@shared/session-relay";
 import { handleSessionRelay } from "./session-relay";
+import { answerCallerCheck } from "./session-relay/caller-peer";
 import { AGENT_SESSION_BRIEF_MAX_CHARS, AGENT_SESSION_MAX_LIVE, type AgentSessionRecord } from "@shared/agent-sessions";
 import {
   codexTrustOverride,
@@ -803,7 +804,7 @@ async function dispatch(
       case "session.list_all":
         return await handleSessionListAll(params, id);
       case "session.relay":
-        return await handleSessionRelayRpc(params, id);
+        return await handleSessionRelayRpc(params, id, auth.kind, res);
       case "terminal.write":
         return await handleTerminalWrite(params, id);
       case "terminal.close":
@@ -2345,6 +2346,10 @@ async function handleSessionMessage(params: Record<string, unknown>, id: JsonRpc
   if (text.length > AGENT_SESSION_BRIEF_MAX_CHARS) {
     return errorResponse(id, ERR_INVALID_PARAMS, `text is limited to ${AGENT_SESSION_BRIEF_MAX_CHARS} characters`);
   }
+  // An agent's own session must not read a message from it as the user's
+  // answer from their phone.
+  const forged = relayAnswerForgery(text);
+  if (forged) return errorResponse(id, ERR_INVALID_PARAMS, forged);
   const sessions = agentSessions();
   await sessions.load();
   const caller = await agentSessionCaller(params);
@@ -2393,8 +2398,15 @@ async function handleSessionListAll(params: Record<string, unknown>, id: JsonRpc
 
 // A message for a session the caller did not start: it only waits for the
 // user's Send (session-relay/). An imported pull request may not even ask,
-// and a session.start id is resolved to its pane here.
-async function handleSessionRelayRpc(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+// and a session.start id is resolved to its pane here. An answer is checked
+// against the kernel's view of the connection, never the callerPid or pane
+// the request names: those are only what the caller says.
+async function handleSessionRelayRpc(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  authKind: AgentSocketAuth["kind"],
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
   const caller = await agentSessionCaller(params);
   const state = await loadState();
   const refusal = await agentSessionCallerRefusal(params, caller.workspaceId, caller.run, state);
@@ -2423,6 +2435,21 @@ async function handleSessionRelayRpc(params: Record<string, unknown>, id: JsonRp
       request.caller = { key: `pane:${caller.paneId}`, label: `an agent in ${where}` };
     } else if (caller.process) {
       request.caller = { key: `process:${caller.process}`, label: "outside Codara" };
+    }
+    if (request.mode === "answer") {
+      request.answerCaller =
+        authKind !== "root"
+          ? { verified: false, why: "it came from a Cora run or an agent's own credential" }
+          : await answerCallerCheck({
+              platform: process.platform,
+              clientPort: res.socket?.remotePort,
+              serverPort: res.socket?.localPort,
+              appPid: process.pid,
+            });
+      // The card then names where the call came from, not what it said.
+      if (!request.answerCaller.verified && request.answerCaller.inside && !caller.run && !caller.paneId) {
+        request.caller = { key: request.caller.key, label: "a process inside Codara" };
+      }
     }
   }
   const answer = await handleSessionRelay({ relayId: null, request });

@@ -3,15 +3,22 @@
 // ask to send it a message. The user sees who asks, the target and the exact
 // text in the notification center (plus a native notification), and only
 // their Send types it into the session. Agents never get a way to answer:
-// relay:decide is an IPC channel of the trusted main window only.
+// relay:decide is an IPC channel of the trusted main window only. With the
+// "Answers from your phone" setting on, an answer from the assistant named
+// there, calling from outside Codara's process tree, is typed into a session
+// idle at its prompt without Send (store.ts, answerRefusal).
 
 import { randomUUID } from "node:crypto";
 import type { WebContents } from "electron";
-import { promises as fsp } from "node:fs";
-import { join } from "node:path";
+import { closeSync, fsyncSync, openSync, promises as fsp, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { buildLiveSessions } from "@shared/live-sessions";
 import {
+  DEFAULT_RELAY_ANSWER_ASSISTANT,
+  RELAY_ANSWER_MAX_CHARS,
+  RELAY_ANSWER_WINDOW_MS,
   RELAY_RUNTIMES,
+  relayAnswerTargetRefusal,
   relayPreview,
   relaySourceKey,
   type PendingRelay,
@@ -26,13 +33,16 @@ import { codaraHome } from "../codara-home";
 import { getTrustedMainWindow } from "../main-window-trust";
 import { publish, rearm } from "../notify";
 import * as pty from "../pty-manager";
+import { getPreferenceCached, loadPreferences } from "../preferences-store";
 import { loadState } from "../storage";
 import {
   noteTerminalUserInput,
+  terminalAgentAnswerEvidence,
   terminalAgentHibernationEvidence,
   terminalAgentSessionLive,
+  terminalPanePlacement,
 } from "../terminal-agent-notify";
-import { SessionRelays, type RelayLogEntry } from "./store";
+import { answeredTimesInLog, SessionRelays, type RelayLogEntry } from "./store";
 
 export const RELAY_LOG_FILE = "relay-log.jsonl";
 const LOG_ROTATE_BYTES = 1024 * 1024;
@@ -106,6 +116,31 @@ function announce(relay: PendingRelay, grouped: boolean): void {
   });
 }
 
+// The session must still be the one resolveTarget saw: a new agent in the
+// pane has its own turns.
+function answerTurn(target: RelayTarget): { turnKey: string } | string {
+  const evidence = terminalAgentAnswerEvidence(target.id);
+  const refusal = relayAnswerTargetRefusal(evidence);
+  if (refusal || !evidence?.lastTurnEnd) return refusal ?? "it has not finished a turn it could be waiting on";
+  return { turnKey: `${target.id}:${target.sessionSince}:${evidence.lastTurnEnd.at}` };
+}
+
+function announceAnswer(relay: PendingRelay): void {
+  const placement = terminalPanePlacement(relay.target.id);
+  publish({
+    kind: "session.relay.answered",
+    sourceKey: relaySourceKey(relay.id),
+    title: `${relay.sender} answered for you in \u201c${relay.target.title}\u201d`,
+    body: relayPreview(relay.text, RELAY_ANSWER_MAX_CHARS + 1),
+    tone: "success",
+    soundKind: "done",
+    target: placement
+      ? { type: "terminal", workspaceId: relay.target.workspaceId, tabId: placement.tabId, paneId: relay.target.id }
+      : { type: "workspace", workspaceId: relay.target.workspaceId },
+    workspaceName: relay.target.workspace,
+  });
+}
+
 function changed(): void {
   const win = getTrustedMainWindow();
   if (win && !win.webContents.isDestroyed()) win.webContents.send("relay:changed");
@@ -149,10 +184,81 @@ const relays = new SessionRelays({
   busy,
   deliver,
   announce,
+  answerPolicy: () => ({
+    enabled: getPreferenceCached("relayPhoneAnswers") === true,
+    assistant: getPreferenceCached("relayAnswerAssistant") ?? DEFAULT_RELAY_ANSWER_ASSISTANT,
+  }),
+  answerTurn,
+  announceAnswer,
+  saveAnswerTimes,
   settle: (relay: PendingRelay) => rearm(relaySourceKey(relay.id)),
   changed,
   log: appendLog,
 });
+
+// The hourly cap on answers outlives a restart: when the answers of the
+// last hour went in is kept in its own file (the log may rotate or drop
+// lines), written before each answer is typed and read once per run.
+export const RELAY_ANSWERS_FILE = "relay-answers.json";
+let answersRestored: Promise<void> | null = null;
+
+function answersFile(): string {
+  return join(codaraHome(), RELAY_ANSWERS_FILE);
+}
+
+// Without the file (a first run, or someone deleted it), the answers of the
+// last hour are read back from the log, which records each one.
+async function answeredInLog(): Promise<number[]> {
+  const file = join(codaraHome(), RELAY_LOG_FILE);
+  const times: number[] = [];
+  for (const path of [`${file}.1`, file]) {
+    times.push(...answeredTimesInLog(await fsp.readFile(path, "utf8").catch(() => "")));
+  }
+  return times;
+}
+
+function restoreAnswers(): Promise<void> {
+  answersRestored ??= (async () => {
+    let text: string;
+    try {
+      text = await fsp.readFile(answersFile(), "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return relays.restoreAnswerTimes(await answeredInLog());
+      return relays.restoreAnswerTimes("Codara could not read its record of recent answers");
+    }
+    try {
+      const times = JSON.parse(text) as unknown;
+      if (!Array.isArray(times) || !times.every((at) => typeof at === "number")) throw new Error("not a list of times");
+      relays.restoreAnswerTimes(times);
+    } catch {
+      relays.restoreAnswerTimes("Codara could not read its record of recent answers");
+    }
+  })();
+  return answersRestored;
+}
+
+function saveAnswerTimes(times: readonly number[]): void {
+  const now = Date.now();
+  const file = answersFile();
+  const temp = `${file}.${process.pid}.tmp`;
+  // Flushed before the rename and the folder after it, so a power loss
+  // cannot bring back an older, lower count.
+  const fd = openSync(temp, "w", 0o600);
+  try {
+    // writeFileSync on a descriptor writes every byte or throws; writeSync may stop short.
+    writeFileSync(fd, JSON.stringify(times.filter((at) => now - at < RELAY_ANSWER_WINDOW_MS)));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temp, file);
+  const dir = openSync(dirname(file), "r");
+  try {
+    fsyncSync(dir);
+  } finally {
+    closeSync(dir);
+  }
+}
 
 export interface RelayRpcResult {
   result?: unknown;
@@ -171,9 +277,22 @@ export async function handleSessionRelay(input: {
   }
   if (typeof input.request === "string" || !input.request) return { error: input.request ?? "text is required" };
   await refreshWorkspaces();
+  // Warms the cache answerPolicy reads; the window's toggle updates it.
+  await loadPreferences();
+  if (input.request.mode === "answer") await restoreAnswers();
   const created = relays.create(input.request);
   if (!created.ok) return { error: created.error };
   const { relay } = created;
+  if (created.answered) {
+    return {
+      result: {
+        relayId: relay.id,
+        status: "answered",
+        target: relay.target,
+        note: "Typed into the session as the user's answer, without Send. The user is told in the notification center.",
+      },
+    };
+  }
   return {
     result: {
       relayId: relay.id,
@@ -181,6 +300,7 @@ export async function handleSessionRelay(input: {
       target: relay.target,
       expiresAt: new Date(relay.expiresAt).toISOString(),
       note: "Nothing was sent. The user sees the exact text and decides with Send or Dismiss; read the outcome with relayId.",
+      ...(created.notAnswered ? { notAnswered: `Not typed in as an answer because ${created.notAnswered}.` } : {}),
     },
   };
 }

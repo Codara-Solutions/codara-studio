@@ -27,6 +27,7 @@ import { nextWorkingSince, type TerminalAgentActivity } from "@shared/agent-boar
 import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 import type { AgentHibernationEvidence } from "@shared/agent-hibernation";
 import type { AgentSessionLive } from "@shared/agent-sessions";
+import type { RelayAnswerEvidence } from "@shared/session-relay";
 
 // Terminal-agent notifier: tells the user when a Claude Code, Codex, Grok
 // or Pi CLI they ran in a NORMAL terminal pane finished a turn, or stopped to
@@ -244,6 +245,9 @@ interface PaneWatcher {
   // The latest turn's start, kept after it ends, and its final message whole.
   // codara_session_status answers from these; the board keeps one line.
   lastTurnStartedAt: number;
+  // The latest turn end announced for the current agent session, and which
+  // signal ended it (null for a failure or the screen).
+  lastTurnEnd: { at: number; failed: boolean; origin: DoneOrigin | null } | null;
   finalMessage: string | null;
   // The UserPromptSubmit that started the current Claude activity was a
   // background task reporting back, not the user.
@@ -404,6 +408,7 @@ export function syncTerminalNotifyPanes(input: {
       lastToolDetail: null,
       activity: emptyActivity(),
       lastTurnStartedAt: 0,
+      lastTurnEnd: null,
       finalMessage: null,
       hookFollowUp: false,
       background: new BackgroundWork(),
@@ -597,6 +602,7 @@ function resetAgentSession(w: PaneWatcher): void {
   clearBackground(w);
   w.backgroundSessionId = null;
   w.lastProgramState = null;
+  w.lastTurnEnd = null;
   w.codexAnnouncedTurnIds = [];
   w.codexRollout = null;
   w.codexRolloutSince = 0;
@@ -927,7 +933,7 @@ function requestDone(
     // A prompt given on the command line submits nothing Codara sees, so an
     // agent that reports the end of that first turn has no turn open here.
     // Nothing to alert, but a session waiting on it must hear.
-    if (w.turn === null && req.origin !== "heuristic") emitTurnEnded(w, false, req.body ?? null);
+    if (w.turn === null && req.origin !== "heuristic") emitTurnEnded(w, false, req.body ?? null, req.origin);
     tanLog(`pane=${w.paneId} done (${req.origin}) ignored: no unannounced turn`);
     return;
   }
@@ -982,6 +988,7 @@ function fireDone(w: PaneWatcher, pending: PendingDone): void {
     // server, or work that went quiet.
     backgroundRunning: pending.followUp ? 0 : w.background.size,
     followUp: pending.followUp,
+    origin: pending.origin,
   });
 }
 
@@ -2363,8 +2370,9 @@ export function onTerminalAgentTurnEnded(listener: (event: TerminalAgentTurnEnd)
   return () => turnEndListeners.delete(listener);
 }
 
-function emitTurnEnded(w: PaneWatcher, failed: boolean, body: string | null): void {
+function emitTurnEnded(w: PaneWatcher, failed: boolean, body: string | null, origin: DoneOrigin | null): void {
   const event = { paneId: w.paneId, failed, message: failed ? body : (w.finalMessage ?? body), at: Date.now() };
+  w.lastTurnEnd = { at: event.at, failed, origin: failed ? null : origin };
   for (const listener of turnEndListeners) {
     try {
       listener(event);
@@ -2385,6 +2393,7 @@ function deliver(
     backgroundRunning?: number;
     followUp?: boolean;
     plain?: boolean;
+    origin?: DoneOrigin;
   } = {},
 ): void {
   if (w.excluded) return;
@@ -2393,7 +2402,7 @@ function deliver(
     return;
   }
   tanLog(`pane=${w.paneId} ALERT kind=${kind} runtime=${w.runtime} ws=${w.workspaceId} tab=${w.tabId}`);
-  if (kind !== "blocked") emitTurnEnded(w, kind === "failed", detail.body ?? null);
+  if (kind !== "blocked") emitTurnEnded(w, kind === "failed", detail.body ?? null, detail.origin ?? null);
   const label = detail.plain ? "Terminal" : runtimeLabel(w.runtime);
   const where = w.tabTitle ? ` · ${w.tabTitle}` : "";
   const status =
@@ -2522,6 +2531,33 @@ export function terminalAgentSessionLive(paneId: string): AgentSessionLive | nul
     question: state === "blocked" ? w.activity.question : null,
     lastTurnStartedAt: w.lastTurnStartedAt,
     turnActive: turnActive(w),
+  };
+}
+
+// Whether a relayed answer may be typed into the pane is decided from this
+// (relayAnswerTargetRefusal in shared/session-relay.ts). Null for an unknown,
+// closing or Cora-run pane.
+export function terminalAgentAnswerEvidence(paneId: string): RelayAnswerEvidence | null {
+  const w = watchers.get(paneId);
+  if (!w || w.excluded || w.disposing) return null;
+  return {
+    runtime: w.runtime,
+    running: w.attached && !w.agentProcGone && pty.hasSession(paneId),
+    hooks: w.signals.hooks,
+    programStatus: w.signals.programStatus,
+    programState: w.lastProgramState,
+    state: w.state,
+    chipState: w.lastEmittedState,
+    turnActive: turnActive(w),
+    pendingDone: w.pendingDone !== null || w.heldDone !== null,
+    pendingToolCalls: w.pendingToolCalls,
+    backgroundRunning: w.background.size,
+    teammatesActive: w.teammatesActive,
+    codexAwaitingIdle: w.codexAwaitingIdle,
+    lastTurnStartedAt: w.lastTurnStartedAt,
+    lastTurnEnd: w.lastTurnEnd,
+    lastUserInputAt: w.lastUserInputAt,
+    lastSubmitAt: w.lastSubmitAt,
   };
 }
 

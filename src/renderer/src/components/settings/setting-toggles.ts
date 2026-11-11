@@ -49,6 +49,7 @@ export const PREFERENCE_TOGGLES = {
   notifyNative: channel("native"),
   notifySound: channel("sound"),
   notifyOsCues: channel("osCues"),
+  relayPhoneAnswers: defaultOff("relayPhoneAnswers"),
   gitAutoFetchEnabled: defaultOn("gitAutoFetchEnabled"),
   notifyTeammatePushes: defaultOn("notifyTeammatePushes"),
   notifyPullRequests: defaultOn("notifyPullRequests"),
