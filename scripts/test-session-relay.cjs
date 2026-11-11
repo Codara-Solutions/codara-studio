@@ -672,6 +672,9 @@ function harness(lib) {
     assert.match(body, /clientPort: res\.socket\?\.remotePort,\s*serverPort: res\.socket\?\.localPort,\s*appPid: process\.pid/);
     assert.equal((body.match(/answerCaller =/g) ?? []).length, 1, "answerCaller is set in one place");
     assert.doesNotMatch(body, /answerCaller[^;]*params/, "never from the request");
+    const relayMain = fs.readFileSync(path.join(ROOT, "src", "main", "session-relay", "index.ts"), "utf8");
+    const save = relayMain.slice(relayMain.indexOf("function saveAnswerTimes"));
+    assert.match(save.slice(0, save.indexOf("\n}\n")), /fsyncSync\(fd\)[\s\S]*renameSync[\s\S]*fsyncSync\(dir\)/, "the answer count is on disk before the paste");
   }
 
   console.log("session-relay: ok");
