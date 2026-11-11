@@ -3,6 +3,7 @@ import { _electron as electron, type ElectronApplication } from "playwright";
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 
@@ -120,8 +121,8 @@ async function setup(options: { hooks?: boolean } = {}) {
   return { root, home, notes, env };
 }
 
-async function launch(env: Record<string, string>): Promise<{ app: ElectronApplication; page: Page }> {
-  const app = await electron.launch({ args: ["."], env });
+async function launch(env: Record<string, string>, executablePath?: string): Promise<{ app: ElectronApplication; page: Page }> {
+  const app = await electron.launch({ args: ["."], env, ...(executablePath ? { executablePath } : {}) });
   const page = await app.firstWindow();
   await page.waitForLoadState("domcontentloaded");
   await expect(page.locator('[data-workspace-id="ws-notes"]')).toBeVisible({ timeout: 30_000 });
@@ -276,10 +277,31 @@ test("a relayed message reaches a session only after the user presses Send", asy
   }
 });
 
+/**
+ * A launcher that starts the app in a cgroup of its own, as a desktop
+ * launcher does. Without one the app shares this test's cgroup, and answers
+ * rightly wait for Send. Null when systemd-run --user is not available.
+ */
+async function ownScopeLauncher(root: string): Promise<string | null> {
+  try {
+    execFileSync("systemd-run", ["--user", "--scope", "--quiet", "--", "true"], { stdio: "ignore", timeout: 10_000 });
+  } catch {
+    return null;
+  }
+  const dir = join(process.cwd(), "node_modules", "electron");
+  const binary = join(dir, "dist", (await readFile(join(dir, "path.txt"), "utf8")).trim());
+  const launcher = join(root, "bin", "electron-own-scope");
+  await writeFile(launcher, `#!/bin/sh\nexec systemd-run --user --scope --quiet -- ${JSON.stringify(binary)} "$@"\n`);
+  await chmod(launcher, 0o755);
+  return launcher;
+}
+
 test("a phone answer goes in without Send only from outside Codara, at an idle prompt, with the setting on", async () => {
   test.skip(process.platform !== "linux", "the caller is checked through /proc, so answers are Linux only");
   test.setTimeout(180_000);
   const { root, home, notes, env } = await setup({ hooks: true });
+  const launcher = await ownScopeLauncher(root);
+  test.skip(!launcher, "needs systemd-run --user to give the app a cgroup of its own");
   const call = (method: string, params: Record<string, unknown> = {}) =>
     rpcRaw({ home }, method, params, { timeoutMs: 60_000 }) as Promise<{ result?: any; error?: { message: string } }>;
   const request = async (method: string, params: Record<string, unknown> = {}) => {
@@ -288,7 +310,7 @@ test("a phone answer goes in without Send only from outside Codara, at an idle p
     return response.result;
   };
 
-  const { app, page } = await launch(env);
+  const { app, page } = await launch(env, launcher ?? undefined);
   try {
     const pidFile = join(root, "starter.pid");
     await request("terminal.create", { cwd: notes, title: "starter", command: `sh -c 'echo $$ > "${pidFile}"; exec sleep 600'` });

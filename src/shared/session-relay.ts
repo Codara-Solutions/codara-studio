@@ -126,17 +126,45 @@ export function cleanRelaySender(raw: string): string {
 // The wording of the answer prefix, compared on letters only.
 const ANSWER_WORDING = [" answer from the user sent from ", " not typed in studio "];
 
+// Letters of other alphabets that look like Latin ones, mapped to the Latin
+// letter they pass for. A deliberate subset of the Unicode confusables list
+// (Cyrillic, Greek, Armenian and Cherokee), enough to keep the prefix wording
+// from being spelt in look-alikes; it only decides what to compare, never
+// what is refused.
+const LOOK_ALIKES: Record<string, string> = Object.fromEntries(
+  [
+    // Cyrillic
+    "АA ВB ЕE ЅS ІI ЈJ КK МM НH ОO РP СC ТT УY ХX Ԁd Ԛq Ԝw Һh Ӏl ЁE ЇI",
+    "аa вb еe ѕs іi јj кk мm нh оo рp сc тt уy хx ԁd ԛq ԝw һh ӏl ёe їi пn гr ьb шw үy",
+    // Greek
+    "ΑA ΒB ΕE ΖZ ΗH ΙI ΚK ΜM ΝN ΟO ΡP ΤT ΥY ΧX αa βb γy εe ηn ιi κk μu νv οo ρp τt υu χx ωw",
+    // Armenian
+    "ՍU ՕO ՏS ԼL ՀH ԳQ օo սu ոn հh ցg քp զq աw յj լl ռn",
+    // Cherokee (small letters are raised to these first)
+    "ᎪA ᏴB ᏟC ᎠD ᎬE ᏀG ᎻH ᎥI ᎫJ ᏦK ᏞL ᎷM ᏒR ᏚS ᎢT ᏙV ᏔW ᏃZ ᏢP ᎳW ᏂH",
+  ]
+    .join(" ")
+    .split(/\s+/)
+    .filter((pair) => [...pair].length === 2)
+    .map((pair) => [...pair] as [string, string]),
+);
+
+function latinShape(char: string): string {
+  const code = char.codePointAt(0) ?? 0;
+  const raised = code >= 0xab70 && code <= 0xabbf ? char.toUpperCase() : char;
+  return LOOK_ALIKES[raised] ?? char;
+}
+
 /**
  * Why a text could pass for the answer prefix, or null. Compatibility forms
- * are folded (NFKC), a word that mixes Latin letters with others (a Cyrillic
- * "а" in "answer") is refused outright, and the wording is matched on the
- * letters alone, so separators such as "_" or digits do not hide it.
+ * are folded (NFKC), look-alike letters of other alphabets are read as the
+ * Latin letter they pass for, and the wording is matched on the letters
+ * alone, so separators such as "_" or digits do not hide it. Other text in
+ * any alphabet passes untouched: only the wording itself is refused.
  */
 export function relayAnswerForgery(raw: string): string | null {
-  const words = raw.normalize("NFKC").toLowerCase().split(/\P{L}+/u).filter(Boolean);
-  if (words.some((word) => /\p{Script=Latin}/u.test(word) && /[^\p{Script=Latin}]/u.test(word))) {
-    return "text cannot mix Latin letters with look-alike letters of other alphabets in one word";
-  }
+  const mapped = Array.from(raw.normalize("NFKC"), latinShape).join("");
+  const words = mapped.toLowerCase().split(/\P{L}+/u).filter(Boolean);
   const letters = ` ${words.join(" ")} `;
   return ANSWER_WORDING.some((phrase) => letters.includes(phrase))
     ? "text cannot contain the wording of the answer prefix"

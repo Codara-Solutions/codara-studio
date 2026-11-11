@@ -962,8 +962,9 @@ Rules:
 - Agents in an imported pull request cannot relay, and no tool can press Send.
 - A text that repeats the wording of the answer prefix below is refused, so
   no relay can pass for one of your answers. The wording is compared on the
-  letters alone after Unicode folding (NFKC), and a word that mixes Latin
-  letters with look-alikes from another alphabet is refused. The same check
+  letters alone after Unicode folding (NFKC), with look-alike letters of
+  other alphabets (Cyrillic, Greek, Armenian, Cherokee) read as the Latin
+  letter they pass for; any other text, in any alphabet, passes. The same check
   applies to `codara_session_message`, so an agent cannot type the prefix
   into a session it started either.
 
@@ -985,7 +986,8 @@ when all of these hold:
   environment (`SPARK_PANE_ID`, `SPARK_RUN_ID`, which a command sent to the
   background with `&`, `nohup`, `setsid` or a double fork keeps), or run in a
   cgroup of Codara's own processes (which `env -i` does not leave). Anything
-  Codara cannot read there counts as inside. The call must use the socket's
+  Codara cannot read there counts as inside, and when Codara shares its own
+  cgroup with the program that started it, every answer waits for Send. The call must use the socket's
   root token. Linux only for now; elsewhere the answer waits for Send.
 - The target is a Claude Code or Codex session idle at its prompt: its turn
   ended (and did not fail), no tool call, background work or dialog is open,
@@ -1028,10 +1030,11 @@ you through their tools or a terminal command, also one sent to the
 background or stripped of its environment. A process that has a new program
 started outside Codara on its behalf (`systemd-run`, `cron`, `at`), or that
 gets your outside assistant itself to send the answer, is not caught. Any
-process of yours can also edit Codara's preferences or the answer record on
-disk, and in a development build the `app.*` tools already let any holder of
-the root token drive the window. Every process you run can do what you can;
-this is a guard, not a sandbox.
+process of yours can also forge the hook or notify files so a session at a
+dialog looks idle, edit Codara's preferences or the answer record on disk,
+and in a development build the `app.*` tools already let any holder of the
+root token drive the window. This is defence in depth on a one-user machine,
+not a boundary against a process running as you.
 
 ## Notifications
 

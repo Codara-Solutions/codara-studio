@@ -13,12 +13,17 @@
 //   - it runs in a cgroup of Codara's own processes, which `env -i` does not
 //     leave;
 //   - any of that cannot be read.
+// When Codara's main process shares its cgroup with what started it, the
+// cgroup tells nothing, and every caller counts as unverified.
 //
 // What this does not stop: a process started inside Codara that deliberately
 // starts a new program outside both its environment and its cgroup (systemd-run,
 // at, cron), one that gets the outside assistant itself to send the answer,
-// editing Codara's files on disk, and a dev build's app.* tools. Any process of the user can do what the user can, so this keeps agents from
-// answering through their tools or a terminal command; it is not a sandbox.
+// forging the hook or notify files so a session at a dialog looks idle,
+// editing Codara's files on disk, and a dev build's app.* tools. It is defence
+// in depth on a one-user machine, not a boundary against a process running as
+// that user: it keeps agents from answering through their tools or a terminal
+// command; it is not a sandbox.
 // Linux only: elsewhere the caller cannot be checked, and an answer waits for
 // Send like any relay.
 
@@ -148,9 +153,12 @@ const readCgroup = (pid: number, fs: ProcFs) => fs.read(`/proc/${pid}/cgroup`).t
  * The cgroups Codara's own processes run in: its main process's and those of
  * everything below it (an agent may be moved to a scope of its own), minus
  * those of the processes that started Codara (a terminal, a test runner),
- * which it shares with programs that are not Codara's.
+ * which it shares with programs that are not Codara's. Null when Codara's
+ * main process has no cgroup of its own (it could not be read, or it is its
+ * launcher's): then a pane's processes cannot be told apart from the
+ * launcher's other programs by cgroup at all.
  */
-export async function codaraCgroups(appPid: number, fs: ProcFs = realProcFs): Promise<Set<string>> {
+export async function codaraCgroups(appPid: number, fs: ProcFs = realProcFs): Promise<Set<string> | null> {
   const pids = (await fs.list("/proc")).filter((name) => /^\d+$/.test(name)).map(Number);
   const children = new Map<number, number[]>();
   await Promise.all(
@@ -164,24 +172,32 @@ export async function codaraCgroups(appPid: number, fs: ProcFs = realProcFs): Pr
   for (let i = 0; i < members.length && members.length < 100_000; i += 1) {
     for (const child of children.get(members[i]) ?? []) if (!members.includes(child)) members.push(child);
   }
+  const own = await readCgroup(appPid, fs).catch(() => null);
+  if (!own) return null;
   const inside = new Set(
     (await Promise.all(members.map((pid) => readCgroup(pid, fs).catch(() => null)))).filter((cg): cg is string => !!cg),
   );
   for (const pid of ((await ancestry(appPid, fs)) ?? []).slice(1)) {
     const cg = await readCgroup(pid, fs).catch(() => null);
+    if (cg === own) return null;
     if (cg) inside.delete(cg);
   }
   return inside;
 }
 
-/** Why this calling process counts as inside Codara, or null. */
-async function insideReason(pid: number, appPid: number, cgroups: Set<string>, fs: ProcFs): Promise<string | null> {
+const SHARED_CGROUP =
+  "Codara runs in the same cgroup as the program that started it, so it cannot tell its own processes from others";
+let sharedCgroupLogged = false;
+
+/** Why this calling process counts as inside Codara, or cannot be placed, or null. */
+async function insideReason(pid: number, appPid: number, cgroups: Set<string> | null, fs: ProcFs): Promise<string | null> {
   const chain = await ancestry(pid, fs);
   if (!chain) return "Codara could not read the calling process's parents";
   if (chain.includes(appPid)) return INSIDE;
   const environ = await fs.read(`/proc/${pid}/environ`).catch(() => null);
   if (environ === null) return "Codara could not read the calling process's environment";
   if (hasCodaraOrigin(environ)) return INSIDE;
+  if (cgroups === null) return SHARED_CGROUP;
   const cgroup = await readCgroup(pid, fs).catch(() => null);
   if (cgroup === null) return "Codara could not read the calling process's cgroup";
   return cgroups.has(cgroup) ? INSIDE : null;
@@ -212,6 +228,10 @@ export async function answerCallerCheck(input: {
     const { holders, hidden } = inodes.length > 0 ? await socketHolders(inodes, fs) : { holders: [], hidden: [] };
     if (holders.length === 0) return unverified("Codara could not find the calling process");
     const cgroups = await codaraCgroups(input.appPid, fs);
+    if (cgroups === null && !sharedCgroupLogged) {
+      sharedCgroupLogged = true;
+      console.warn(`[relay] answers from your phone wait for Send: ${SHARED_CGROUP}`);
+    }
     for (const holder of holders) {
       const why = await insideReason(holder, input.appPid, cgroups, fs);
       if (why === INSIDE) return { verified: false, why, inside: true };
@@ -224,7 +244,7 @@ export async function answerCallerCheck(input: {
     for (const pid of hidden) {
       const chain = await ancestry(pid, fs);
       const cgroup = await readCgroup(pid, fs).catch(() => null);
-      const ours = chain === null || chain.includes(input.appPid) || cgroup === null || cgroups.has(cgroup);
+      const ours = chain === null || chain.includes(input.appPid) || cgroup === null || cgroups === null || cgroups.has(cgroup);
       if (!ours) continue;
       // Only a process that is provably gone is no longer a candidate.
       const exited = await fs.read(`/proc/${pid}/stat`).then(() => false, (err) => gone(err));
