@@ -46,7 +46,7 @@ import { BackIcon, CloseIcon, DragHandleIcon, LockIcon, PlusIcon, SplitDownIcon,
 import { workerModelLabel } from "../components/runs/run-format";
 import { RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
 import { agentBrandColor, agentBrandRuntime, agentBrandTone } from "../lib/agent-brand";
-import { visibleWorkerChip } from "./terminalAgentState";
+import { visibleWorkerChip, workerFault } from "./terminalAgentState";
 import { useWhereChoices, whereCwd } from "../components/machines/whereChoices";
 import {
   TERMINAL_PANE_DRAG_MIME,
@@ -3058,19 +3058,22 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
       frame: "success",
     };
   }
-  if (runtime === "error" && worker.state !== "done") {
+  const fault = workerFault(worker);
+  if (fault) {
     // Unsanctioned pty death / spawn failure: the agent CRASHED. Red danger
     // frame with a steady dot; the chip stays visible until the pane is closed.
     // Labelled "crashed", not "exited": only Cora is allowed to end a worker,
     // so "exited" read as a routine, sanctioned shutdown and hid the fact that
-    // this pane died on its own. The word has to name the fault.
+    // this pane died on its own. The word has to name the fault, so a live
+    // agent whose turn failed (a usage limit) reads "stopped" instead.
     //
-    // Gated on the lifecycle: once the attempt reported done its outcome is
-    // settled, and a late error write (a stale notifier snapshot, a wake-from-
-    // sleep sweep of the already-disposed shell) must not rename a finished
-    // worker. Crashed is reserved for a worker that died before it finished.
+    // Gated on the lifecycle (workerFault): once the attempt reported done its
+    // outcome is settled, and a late error write (a stale notifier snapshot, a
+    // wake-from-sleep sweep of the already-disposed shell) must not rename a
+    // finished worker. Crashed is reserved for a worker that died before it
+    // finished.
     return {
-      status: "crashed",
+      status: fault,
       dot: "var(--danger)",
       dotGlow: "0 0 9px color-mix(in oklch, var(--danger) 45%, transparent)",
       pulse: false,

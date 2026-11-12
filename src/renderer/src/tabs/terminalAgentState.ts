@@ -46,6 +46,79 @@ export function mergeTerminalRuntimeState(
   return incoming;
 }
 
+/**
+ * A state from main's notifier applied to a pane's existing worker; null
+ * removes a manual chip.
+ *
+ * "error" means two things here. onTerminalPaneExit writes it with
+ * agentRunning:false when the pty died on its own: that crash is final and a
+ * delayed notifier snapshot must not paint over it. The notifier writes it
+ * for a turn that failed (a usage limit, an API error) while the agent keeps
+ * running, and the agent's next state replaces it like any other, or a pane
+ * working again reads failed for the rest of its session.
+ */
+export function applyTerminalAgentState(
+  existing: TerminalLeafWorker,
+  incoming: RuntimeState,
+): TerminalLeafWorker | null {
+  if (existing.runtimeState === "error" && existing.agentRunning === false) return existing;
+  if (incoming === "done") {
+    if (existing.source === "spark") {
+      return existing.agentRunning === false ? existing : { ...existing, agentRunning: false };
+    }
+    return null;
+  }
+  const runtimeState = mergeTerminalRuntimeState(existing.runtimeState, incoming);
+  return existing.runtimeState === runtimeState ? existing : { ...existing, runtimeState };
+}
+
+/**
+ * The worker a pane holds once its foreground agent is seen running, or
+ * undefined to leave the pane as it is. A manual chip is minted afresh; a
+ * Cora worker keeps its run metadata.
+ *
+ * An agent running again in a pane whose pty died (the in-place resume after
+ * an unexpected exit) is alive: the crash its dead process left must not stay
+ * on the pane.
+ */
+export function workerForRunningAgent(
+  existing: TerminalLeafWorker | null | undefined,
+  runtime: TerminalAgentRuntime | null,
+  paneId: string,
+): TerminalLeafWorker | undefined {
+  if (existing && existing.source === "spark") {
+    const revived = existing.agentRunning === false && existing.runtimeState === "error";
+    const { runtimeState: _deadState, ...alive } = existing;
+    return { ...(revived ? alive : existing), runtime: runtime ?? existing.runtime, agentRunning: true };
+  }
+  if (existing && existing.source !== "manual") return undefined;
+  // Unrecognised TUI (runtime=null) with no existing chip: don't sprout a
+  // "WORKER" badge on vim / less / fzf panes.
+  if (runtime === null && !existing) return undefined;
+  return {
+    runtime: runtime ?? existing?.runtime,
+    runId: "manual",
+    workerTaskId: existing?.workerTaskId ?? `manual-${paneId}`,
+    attemptId: existing?.attemptId ?? paneId,
+    source: "manual",
+    state: "running",
+    agentRunning: true,
+  };
+}
+
+/**
+ * What went wrong with a worker, for its chip. "crashed" is kept for an agent
+ * whose process died without Codara ending it (a Cora worker's error is a
+ * dead pty or a broken attempt); a live agent whose turn failed only
+ * "stopped". Null when nothing did, or when a finished worker's outcome is
+ * already settled.
+ */
+export function workerFault(worker: TerminalLeafWorker): "crashed" | "stopped" | null {
+  if (worker.runtimeState !== "error" || worker.state === "done") return null;
+  if (worker.source === "spark" || worker.agentRunning === false) return "crashed";
+  return "stopped";
+}
+
 function isLiveRuntimeState(state: RuntimeState | undefined): boolean {
   return (
     state === "launching" ||

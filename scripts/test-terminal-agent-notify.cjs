@@ -660,6 +660,42 @@ async function main() {
     alertCount() === beforeBoth + 1 && /Built and tested\./.test(T.alerts.at(-1).body),
   );
   check("7501 + hooks: ready again", mod.terminalAgentStateSnapshot().find((c) => c.paneId === "s3")?.state === "idle");
+
+  // A failed turn, then the same live agent goes back to work. Claude's
+  // program status can stay "working" through a usage limit (its background
+  // agents keep it busy), so no new status transition ever comes; the chip
+  // read "error" (shown as crashed, the rail as needs you) for the rest of
+  // the session while the agent worked.
+  mod.syncTerminalNotifyPanes({
+    workspaceId: "ws-failed",
+    panes: [{ paneId: "f1", tabId: "tf1", tabTitle: "Failed turn", excluded: false }],
+  });
+  const lim = { session_id: "55555555-dddd" };
+  feed("f1", "\x1b]7501;state=idle:app=claude-code\x1b\\Claude Code v2.1.301\r\n");
+  mod.noteTerminalHookEvent("f1", "SessionStart", { ...lim, source: "startup" });
+  mod.noteTerminalUserInput("f1", "run the reviewers\r");
+  mod.noteTerminalHookEvent("f1", "UserPromptSubmit", { ...lim, prompt: "run the reviewers" });
+  feed("f1", "\x1b]7501;state=working:app=claude-code\x1b\\");
+  feed("f1", `\x1b]7501;state=working:app=claude-code:id=rev1:title=${b64("Review")}\x1b\\`);
+  check("failed turn: working before the limit", chipOf("f1") === "working");
+  feed("f1", "\r\nYou've hit your usage limit · resets at 5pm\r\n");
+  check("failed turn: a usage limit reads error", chipOf("f1") === "error");
+  feed("f1", "\x1b]7501;state=working:app=claude-code\x1b\\");
+  mod.noteTerminalUserInput("f1", "carry on\r");
+  mod.noteTerminalHookEvent("f1", "UserPromptSubmit", { ...lim, prompt: "carry on" });
+  check("failed turn: a prompt the agent takes up clears the error", chipOf("f1") === "working");
+  feed("f1", "\x1b]7501;state=working:app=claude-code\x1b\\");
+  check("failed turn: and repeated working reports keep it working", chipOf("f1") === "working");
+  feed("f1", "\r\nRate limit exceeded · try again later\r\n");
+  check("failed turn: a second failure reads error again", chipOf("f1") === "error");
+  mod.noteTerminalHookEvent("f1", "PreToolUse", { ...lim, agent_id: "rev1", tool_name: "Read", tool_input: { file_path: "/repo/a.ts" } });
+  check("failed turn: a background agent's tool call is not the lead recovering", chipOf("f1") === "error");
+  mod.noteTerminalHookEvent("f1", "PreToolUse", { ...lim, tool_name: "Bash", tool_input: { command: "npm test" } });
+  check("failed turn: the lead's own tool call clears the error", chipOf("f1") === "working");
+  // A background task ending while the lead lives is not the agent failing.
+  feed("f1", "\x1b]7501;state=clear:id=rev1\x1b\\");
+  mod.noteTerminalHookEvent("f1", "SubagentStop", { ...lim, agent_id: "rev1", last_assistant_message: "review done" });
+  check("failed turn: a background task's exit leaves the live lead working", chipOf("f1") === "working");
   T.writes.length = 0;
   T.tails.set("s2", [Buffer.from("\x1b]7501;?\x1b\\", "utf8")]);
   mod.syncTerminalNotifyPanes({
