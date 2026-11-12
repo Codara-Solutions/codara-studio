@@ -228,12 +228,11 @@ const resumedManual = state.workerForRunningAgent(deadManual, "claude", "pane-li
 assert.equal(resumedManual?.agentRunning, true);
 assert.equal(state.workerFault(resumedManual), null, "a resumed manual agent is not crashed");
 assert.equal(state.applyTerminalAgentState(resumedManual, "working")?.runtimeState, "working");
-const resumedSpark = state.workerForRunningAgent(deadSpark, "claude", "pane-live");
-assert.equal(resumedSpark?.runId, "run-1", "a resumed Cora worker keeps its run");
-assert.equal(state.workerFault(resumedSpark), null, "a resumed Cora worker is not crashed");
-const brokenSpark = { ...deadSpark, agentRunning: true };
-assert.equal(state.workerForRunningAgent(brokenSpark, "claude", "pane-live")?.runtimeState, "error",
-  "the run store's own verdict on a live Cora worker is not the pane's to clear");
+// A dead Cora pane's frozen screen can read as a running TUI: only its run
+// may say it lives again.
+const seenSpark = state.workerForRunningAgent(deadSpark, "claude", "pane-live");
+assert.equal(seenSpark?.runId, "run-1", "a Cora worker keeps its run");
+assert.equal(seenSpark?.runtimeState, "error", "a running-screen sighting does not clear a Cora worker's crash");
 assert.equal(state.workerForRunningAgent(null, null, "pane-vim"), undefined, "vim sprouts no chip");
 
 console.log(

@@ -6869,6 +6869,8 @@ export default function App() {
       const existing = leaf?.worker;
       if (!existing) return;
       if (existing.runtimeState === state) return;
+      // A dead pane's frozen screen must not repaint its crash either.
+      if (existing.runtimeState === "error" && existing.agentRunning === false) return;
       t.setLeafWorker(tabId, paneId, { ...existing, runtimeState: state });
     },
     [setTerminalPaneWorking],

@@ -692,6 +692,10 @@ async function main() {
   check("failed turn: a background agent's tool call is not the lead recovering", chipOf("f1") === "error");
   mod.noteTerminalHookEvent("f1", "PreToolUse", { ...lim, tool_name: "Bash", tool_input: { command: "npm test" } });
   check("failed turn: the lead's own tool call clears the error", chipOf("f1") === "working");
+  feed("f1", "\r\nUsage limit reached · resets 6pm\r\n");
+  check("failed turn: a third failure reads error", chipOf("f1") === "error");
+  mod.noteTerminalHookEvent("f1", "UserPromptSubmit", { ...lim, prompt: "<task-notification>\n<task-id>rev1</task-id>" });
+  check("failed turn: a background task reporting back puts the lead to work", chipOf("f1") === "working");
   // A background task ending while the lead lives is not the agent failing.
   feed("f1", "\x1b]7501;state=clear:id=rev1\x1b\\");
   mod.noteTerminalHookEvent("f1", "SubagentStop", { ...lim, agent_id: "rev1", last_assistant_message: "review done" });

@@ -74,12 +74,10 @@ export function applyTerminalAgentState(
 
 /**
  * The worker a pane holds once its foreground agent is seen running, or
- * undefined to leave the pane as it is. A manual chip is minted afresh; a
- * Cora worker keeps its run metadata.
- *
- * An agent running again in a pane whose pty died (the in-place resume after
- * an unexpected exit) is alive: the crash its dead process left must not stay
- * on the pane.
+ * undefined to leave the pane as it is. A manual chip is minted afresh, so a
+ * session resumed in the pane its process died in starts clean. A Cora worker
+ * keeps its run metadata, crash included: a dead pane's frozen screen can
+ * still read as a running TUI, so only its run decides it lives again.
  */
 export function workerForRunningAgent(
   existing: TerminalLeafWorker | null | undefined,
@@ -87,9 +85,7 @@ export function workerForRunningAgent(
   paneId: string,
 ): TerminalLeafWorker | undefined {
   if (existing && existing.source === "spark") {
-    const revived = existing.agentRunning === false && existing.runtimeState === "error";
-    const { runtimeState: _deadState, ...alive } = existing;
-    return { ...(revived ? alive : existing), runtime: runtime ?? existing.runtime, agentRunning: true };
+    return { ...existing, runtime: runtime ?? existing.runtime, agentRunning: true };
   }
   if (existing && existing.source !== "manual") return undefined;
   // Unrecognised TUI (runtime=null) with no existing chip: don't sprout a
