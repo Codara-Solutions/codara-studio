@@ -64,12 +64,15 @@ function vp9Codecs(width: number, height: number): string[] {
 
 /**
  * Bits per second for H.264, which WebCodecs cannot encode at a constant
- * quality: 0.15 bit per pixel per frame is plenty for screen content on the
- * platform encoders (macOS, Windows) that follow it. OpenH264 picks its own
- * quality and stays far below it.
+ * quality (OpenH264 in this Electron refuses the quantizer mode). It is a
+ * ceiling more than a target: OpenH264 encodes screen content at its own
+ * best quality and usually stays far below it, and only a fast scroll comes
+ * near it. At 0.2 bit per pixel per frame a scroll of a 1094x914 tab still
+ * lost about 1.5 dB on its worst frame; 0.3 leaves room for faster ones.
+ * Platform encoders (macOS, Windows) follow it more closely.
  */
 export function videoBitrate(width: number, height: number, fps: number): number {
-  return Math.round(Math.min(24_000_000, Math.max(2_000_000, width * height * Math.min(30, fps) * 0.15)));
+  return Math.round(Math.min(24_000_000, Math.max(2_000_000, width * height * Math.min(30, fps) * 0.3)));
 }
 
 function encoderPreload(): string {
