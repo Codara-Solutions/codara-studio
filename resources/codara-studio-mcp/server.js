@@ -546,12 +546,13 @@ const SHARE_TOOL = {
   },
 };
 
-// Opens a text file in an editor tab of the caller's workspace for the user
-// (src/main/preview-tools/open-file.ts). The file's text is never returned.
+// Opens a file in an editor tab of the caller's workspace for the user, as
+// text or in the viewer its name picks (src/main/preview-tools/open-file.ts).
+// The file's content is never returned.
 const OPEN_FILE_TOOL = {
   name: "codara_open_file",
   description:
-    "Open a text file in an editor tab of your workspace for the user (\"open X\"). path: absolute, ~/ or cwd-relative.",
+    "Open a text, image or PDF file in an editor tab of your workspace for the user (\"open X\"). path: absolute, ~/ or cwd-relative.",
   inputSchema: {
     type: "object",
     required: ["path"],

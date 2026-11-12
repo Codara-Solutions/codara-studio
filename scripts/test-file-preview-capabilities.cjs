@@ -23,6 +23,7 @@ const built = esbuild.buildSync({
   format: "cjs",
   write: false,
   logLevel: "silent",
+  alias: { "@shared": path.join(ROOT, "src", "shared") },
 });
 const moduleShim = { exports: {} };
 new Function("module", "exports", built.outputFiles[0].text)(moduleShim, moduleShim.exports);
