@@ -1039,6 +1039,20 @@ function promptResolved(w: PaneWatcher, now: number): void {
   enterWorking(w, now);
 }
 
+// A failed turn (a usage limit, an API error) leaves the chip on "error"
+// until something shows the agent works again. With program status the chip
+// follows Claude's reports, but Claude can report "working" straight through
+// the failure, so no new transition arrives and a pane that went back to work
+// read failed for the rest of its session. A prompt the agent takes up, or a
+// tool call of its own, is that sign. Hooks of a `claude -p` that a shell in
+// the pane runs count too: they come from the same account, so a run that
+// gets that far shows the limit is gone.
+function recoverFromFailure(w: PaneWatcher, now: number, why: string): void {
+  if (w.state !== "failed") return;
+  tanLog(`pane=${w.paneId} working again after a failed turn (${why})`);
+  enterWorking(w, now);
+}
+
 // Enter (or stay in) the heuristic working state.
 //
 // Deliberately does NOT start a turn or rearm the policy: a stream re-match of
@@ -1214,6 +1228,7 @@ export function noteTerminalHookEvent(
       w.pendingToolCalls = 0;
       // No call is pending, so no tool is running (a follow-up too).
       noteActivity(w, { tool: null });
+      recoverFromFailure(w, now, "prompt submitted");
       if (/^\s*<task-notification>/.test(prompt)) {
         // A background task reporting back. Claude works on it, but nobody
         // submitted anything.
@@ -1238,7 +1253,10 @@ export function noteTerminalHookEvent(
       w.pendingToolCalls += 1;
       w.lastToolDetail = describeToolCall(tool, input);
       noteActivity(w, { tool: w.lastToolDetail });
-      if (!agentId) cancelPendingDone(w, `lead tool call ${tool}`);
+      if (!agentId) {
+        cancelPendingDone(w, `lead tool call ${tool}`);
+        recoverFromFailure(w, now, `lead tool call ${tool}`);
+      }
       if (tool === "AskUserQuestion") {
         if (!w.signals.programStatus) needsYou(w, now, questionText(input) ?? "Has a question for you.", "AskUserQuestion");
         return;

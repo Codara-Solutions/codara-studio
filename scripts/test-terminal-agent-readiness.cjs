@@ -190,6 +190,51 @@ assert.equal(
   null,
 );
 
+// ── "crashed" only for an agent whose process died ──
+// A turn that failed (a usage limit) while Claude kept running painted
+// "error" from main's notifier; the pane then held it against every later
+// state and the chip read CLAUDE CRASHED while the agent worked.
+const failedTurn = { ...liveWorker, runtimeState: "error" };
+assert.equal(
+  state.applyTerminalAgentState(failedTurn, "working")?.runtimeState,
+  "working",
+  "a failed turn clears the moment the live agent works again",
+);
+assert.equal(
+  state.applyTerminalAgentState(failedTurn, "background")?.runtimeState,
+  "background",
+  "a failed turn clears when the live agent goes back to background work",
+);
+assert.equal(state.workerFault(failedTurn), "stopped", "a live agent whose turn failed is stopped, not crashed");
+assert.equal(state.workerFault({ ...liveWorker, runtimeState: "working" }), null);
+assert.equal(state.workerFault({ ...liveWorker, runtimeState: "background" }), null,
+  "work running in the background is not a fault");
+
+// The pty died on its own (onTerminalPaneExit): final, and still crashed.
+const deadManual = { ...liveWorker, agentRunning: false, runtimeState: "error" };
+assert.equal(state.applyTerminalAgentState(deadManual, "working"), deadManual,
+  "a delayed notifier snapshot never paints over a dead pty");
+assert.equal(state.workerFault(deadManual), "crashed", "a dead agent is still crashed");
+const deadSpark = {
+  ...liveWorker, source: "spark", runId: "run-1", state: "running", agentRunning: false, runtimeState: "error",
+};
+assert.equal(state.workerFault(deadSpark), "crashed", "a Cora worker whose pty died is crashed");
+assert.equal(state.workerFault({ ...deadSpark, agentRunning: undefined }), "crashed",
+  "a Cora attempt the run store reports broken is crashed");
+assert.equal(state.workerFault({ ...deadSpark, state: "done" }), null, "a finished worker's outcome is settled");
+
+// Resumed in the same pane after the pty died: the new process is alive.
+const resumedManual = state.workerForRunningAgent(deadManual, "claude", "pane-live");
+assert.equal(resumedManual?.agentRunning, true);
+assert.equal(state.workerFault(resumedManual), null, "a resumed manual agent is not crashed");
+assert.equal(state.applyTerminalAgentState(resumedManual, "working")?.runtimeState, "working");
+// A dead Cora pane's frozen screen can read as a running TUI: only its run
+// may say it lives again.
+const seenSpark = state.workerForRunningAgent(deadSpark, "claude", "pane-live");
+assert.equal(seenSpark?.runId, "run-1", "a Cora worker keeps its run");
+assert.equal(seenSpark?.runtimeState, "error", "a running-screen sighting does not clear a Cora worker's crash");
+assert.equal(state.workerForRunningAgent(null, null, "pane-vim"), undefined, "vim sprouts no chip");
+
 console.log(
   "PASS terminal agent launch identity, detector-confirmed injectability, and monotonic readiness state",
 );

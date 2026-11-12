@@ -175,9 +175,10 @@ import type {
 } from "./tabs/types";
 import { isRunOwnedTab } from "./tabs/types";
 import {
+  applyTerminalAgentState,
   createManualAgentLaunchWorker,
-  mergeTerminalRuntimeState,
   terminalAgentCensus,
+  workerForRunningAgent,
 } from "./tabs/terminalAgentState";
 import {
   resolveEffectiveActiveId,
@@ -2808,24 +2809,7 @@ export default function App() {
             runtimeState: payload.state,
           };
         }
-        // A pane already flipped to "error" is showing a PTY crash. Preserve
-        // that authoritative exit state against delayed notifier snapshots.
-        if (existing.runtimeState === "error") return existing;
-        if (payload.state === "done") {
-          if (existing.source === "spark") {
-            return existing.agentRunning === false
-              ? existing
-              : { ...existing, agentRunning: false };
-          }
-          return null;
-        }
-        const runtimeState = mergeTerminalRuntimeState(
-          existing.runtimeState,
-          payload.state,
-        );
-        return existing.runtimeState === runtimeState
-          ? existing
-          : { ...existing, runtimeState };
+        return applyTerminalAgentState(existing, payload.state);
       },
     );
   }, [setTerminalPaneWorking, setTerminalPaneAgent]);
@@ -6832,29 +6816,10 @@ export default function App() {
       }
       const existing = leaf.worker;
       if (state.running) {
-        if (existing && existing.source === "spark") {
-          t.setLeafWorker(tabId, paneId, {
-            ...existing,
-            runtime: state.runtime ?? existing.runtime,
-            agentRunning: true,
-          });
-          return;
-        }
-        if (existing && existing.source !== "manual") return;
-        // Unrecognised TUI (runtime=null) with no existing chip — the
-        // alt-screen tracker above is enough to block the keybind; don't
-        // sprout a "WORKER" badge on vim / less / fzf panes.
-        if (state.runtime === null && !existing) return;
-        const runtime = state.runtime ?? existing?.runtime;
-        t.setLeafWorker(tabId, paneId, {
-          runtime,
-          runId: "manual",
-          workerTaskId: existing?.workerTaskId ?? `manual-${paneId}`,
-          attemptId: existing?.attemptId ?? paneId,
-          source: "manual",
-          state: "running",
-          agentRunning: true,
-        });
+        // An unrecognised TUI with no chip leaves the pane alone: the
+        // alt-screen tracker above is enough to block the keybind.
+        const next = workerForRunningAgent(existing, state.runtime, paneId);
+        if (next) t.setLeafWorker(tabId, paneId, next);
         return;
       }
       // running=false: the agent's TUI closed — the user Ctrl+C'd out (or
@@ -6904,6 +6869,8 @@ export default function App() {
       const existing = leaf?.worker;
       if (!existing) return;
       if (existing.runtimeState === state) return;
+      // A dead pane's frozen screen must not repaint its crash either.
+      if (existing.runtimeState === "error" && existing.agentRunning === false) return;
       t.setLeafWorker(tabId, paneId, { ...existing, runtimeState: state });
     },
     [setTerminalPaneWorking],
