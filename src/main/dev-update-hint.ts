@@ -38,6 +38,8 @@ export class DevUpdateWatch {
   private hint: DevUpdateHint | null = null;
   private lastFetchAt = Number.NEGATIVE_INFINITY;
   private reading: Promise<DevUpdateHint | null> | null = null;
+  private fetchWanted = false;
+  private lastFailure: string | null = null;
   private timers: Array<ReturnType<typeof setTimeout>> = [];
   private commonDirs = new Map<string, Promise<string | null>>();
 
@@ -59,7 +61,7 @@ export class DevUpdateWatch {
   }
 
   stop(): void {
-    for (const timer of this.timers) clearTimeout(timer);
+    for (const timer of this.timers) clearInterval(timer);
     this.timers = [];
   }
 
@@ -69,13 +71,27 @@ export class DevUpdateWatch {
     return this.check(false);
   }
 
-  /** One read; concurrent callers share it. `fetch` fetches first when one is due. */
+  /**
+   * One read; concurrent callers share it. `fetch` fetches first when one is
+   * due; asked while a read without one runs, it reads once more after it.
+   */
   check(fetch: boolean): Promise<DevUpdateHint | null> {
     if (this.deps.packaged || !this.started) return Promise.resolve(null);
-    this.reading ??= this.read(fetch).finally(() => {
+    if (fetch) this.fetchWanted = true;
+    this.reading ??= this.drain().finally(() => {
       this.reading = null;
     });
     return this.reading;
+  }
+
+  private async drain(): Promise<DevUpdateHint | null> {
+    let hint: DevUpdateHint | null;
+    do {
+      const fetch = this.fetchWanted;
+      this.fetchWanted = false;
+      hint = await this.read(fetch);
+    } while (this.fetchWanted);
+    return hint;
   }
 
   private async read(fetch: boolean): Promise<DevUpdateHint | null> {
@@ -125,14 +141,19 @@ export class DevUpdateWatch {
     if (upstream.remote === "." || this.deps.now() - this.lastFetchAt < DEV_UPDATE_FETCH_MS) return;
     this.lastFetchAt = this.deps.now();
     if (await this.fetchedElsewhere(upstream.remote)) return;
+    // Not `internal`: counted as a network operation, so the auto-fetch and
+    // a Fetch press wait for it instead of racing it for the ref locks.
     try {
       await this.deps.runGit(this.deps.appDir, autoFetchGitArgs(upstream.remote), {
         timeout: GIT_AUTO_FETCH_TIMEOUT_MS,
         env: autoFetchEnv(process.env),
-        internal: true,
       });
+      this.lastFailure = null;
     } catch (err) {
-      this.deps.log(`fetch of ${upstream.remote} failed: ${String((err as Error)?.message ?? err).split("\n")[0].slice(0, 200)}`);
+      // One line per new reason: offline for a day is not 48 lines.
+      const why = failureText(err);
+      if (why !== this.lastFailure) this.deps.log(`fetch of ${upstream.remote} failed: ${why}`);
+      this.lastFailure = why;
     }
   }
 
@@ -169,6 +190,15 @@ export class DevUpdateWatch {
       return "";
     }
   }
+}
+
+// git's own reason (its first fatal or error line), not execFile's
+// "Command failed: <args>".
+function failureText(err: unknown): string {
+  const stderr = (err as { stderr?: unknown })?.stderr;
+  const text = typeof stderr === "string" && stderr.trim() ? stderr.trim() : String((err as Error)?.message ?? err);
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  return (lines.find((line) => /^(fatal|error):/i.test(line)) ?? lines[0] ?? "unknown").slice(0, 200);
 }
 
 let watch: DevUpdateWatch | null = null;

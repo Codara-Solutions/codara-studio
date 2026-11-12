@@ -96,6 +96,7 @@ async function main() {
       assert.match(hint.detail, /• fix one\n• fix two\nand 5 more$/);
       assert.equal(shared.devUpdateHint(facts({ behind: 1, upstreamBranch: "trunk" })).text, "Studio is 1 change behind trunk · restart to update");
       assert.match(shared.devUpdateHint(facts({ behind: 2, appDir: "/a b/it's" })).detail, /git -C '\/a b\/it'\\''s' pull --ff-only/);
+      assert.equal(shared.shellPath("C:\\Code\\Codara Studio"), '"C:\\Code\\Codara Studio"', "cmd.exe takes double quotes");
     });
 
     await check("pulled but not restarted says restart; up to date, no upstream or no HEAD says nothing", async () => {
@@ -214,6 +215,41 @@ async function main() {
       none.start();
       assert.equal(await none.check(true), null);
       none.stop();
+    });
+
+    await check("an upstream in the same repository is read without any fetch", async () => {
+      git(app, "branch", "-f", "base", "origin/main");
+      git(app, "checkout", "-q", "-b", "topic", "base~1");
+      git(app, "branch", "-q", "--set-upstream-to=base");
+      const before = fetches();
+      clock += mod.DEV_UPDATE_FETCH_MS;
+      const hint = await watch.check(true);
+      assert.equal(hint.text, "Studio is 1 change behind base · restart to update");
+      assert.equal(fetches(), before);
+    });
+
+    await check("a fetch asked for while a read runs is not dropped; a failing one is logged once per reason", async () => {
+      git(app, "checkout", "-q", "main");
+      const logged = [];
+      const offline = new mod.DevUpdateWatch({
+        ...watchDepsStub(),
+        appDir: app,
+        runGit: realRunGit(calls),
+        log: (line) => logged.push(line),
+        now: () => clock,
+      });
+      git(app, "remote", "set-url", "origin", path.join(scratch, "gone.git"));
+      offline.start();
+      const before = fetches();
+      clock += mod.DEV_UPDATE_FETCH_MS;
+      await Promise.all([offline.status(), offline.check(true)]);
+      assert.equal(fetches(), before + 1, "the fetch ran after the read already in flight");
+      clock += mod.DEV_UPDATE_FETCH_MS;
+      await offline.check(true);
+      assert.equal(fetches(), before + 2);
+      assert.equal(logged.length, 1, logged.join("\n"));
+      assert.match(logged[0], /^fetch of origin failed: .*(gone\.git|does not appear|not a git repository)/i);
+      offline.stop();
     });
     watch.stop();
   } finally {

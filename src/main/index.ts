@@ -1611,9 +1611,10 @@ app.whenReady().then(async () => {
 
   // A dev build has no auto-updater: the status bar says when the folder it
   // runs from is behind its upstream (dev-update-hint.ts). The e2e suite runs
-  // a dev build too, and starts it only for the spec that points it at a
-  // generated repository.
-  const devUpdateDir = E2E_BACKGROUND ? process.env.CODARA_E2E_DEV_UPDATE_DIR : app.getAppPath();
+  // a dev build too, visible windows included (SPARK_E2E_BACKGROUND=0), and
+  // starts it only for the spec that points it at a generated repository.
+  const underTest = E2E_BACKGROUND || process.env.SPARK_E2E_BACKGROUND !== undefined;
+  const devUpdateDir = underTest ? process.env.CODARA_E2E_DEV_UPDATE_DIR : app.getAppPath();
   if (!app.isPackaged && devUpdateDir) {
     void Promise.all([import("./dev-update-hint"), import("./git-exec")])
       .then(([m, git]) =>

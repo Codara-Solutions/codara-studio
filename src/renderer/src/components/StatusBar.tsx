@@ -155,11 +155,11 @@ function StatusBar({ workspace, gitStatus, defaultShell, platform, workerCount }
         </div>
       ))}
       <div style={{ flex: 1 }} />
+      <DevUpdateItem />
       {/* Update control: invisible until a new version exists, then the
           download glyph with progress ring / ready badge, one click to
           restart into the update. Lives here at the bottom-right so the
           chrome stays quiet. */}
-      <DevUpdateItem />
       <PortsChip workspace={workspace} />
       <StatusChip workspace={workspace} />
       <UpdateChip />

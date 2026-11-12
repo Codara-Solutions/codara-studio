@@ -31,9 +31,10 @@ export interface DevUpdateHint {
 
 export const DEV_UPDATE_MISSING_SHOWN = 5;
 
-/** The folder as a shell argument, quoted only when it needs it. */
-export function shellPath(path: string): string {
-  return /^[\w@%+=:,./-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`;
+/** The folder as a shell argument, quoted only when it needs it (cmd.exe takes double quotes). */
+export function shellPath(path: string, windows = /^[A-Za-z]:\\/.test(path)): string {
+  if (/^[\w@%+=:,./-]+$/.test(path)) return path;
+  return windows ? `"${path}"` : `'${path.replace(/'/g, `'\\''`)}'`;
 }
 
 /** The status bar's dev update line, or null when there is nothing to say. */
