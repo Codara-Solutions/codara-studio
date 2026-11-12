@@ -7,6 +7,8 @@
 
 import { ipcRenderer } from "electron";
 
+import { videoEncoderAttempts } from "@shared/video-encoder-attempts";
+
 interface OpenRequest {
   type: "open";
   /** Codec strings to try, best first. */
@@ -18,6 +20,8 @@ interface OpenRequest {
   bitrate: number;
   /** VP9's constant-quality level, 0 (best) to 63. */
   quantizer: number;
+  /** The platform the encoder runs on: the H.264 hint is for Linux only. */
+  platform: string;
 }
 
 interface FrameRequest {
@@ -50,23 +54,8 @@ ipcRenderer.once("record-encoder:port", (event) => {
   };
 
   async function open(request: OpenRequest): Promise<void> {
-    // VP9 at a constant quality where it can be; otherwise a bitrate,
-    // variable where the encoder allows it (some hardware ones only keep it
-    // constant).
-    const attempts = request.codecs.flatMap((candidate) =>
-      ((candidate.startsWith("vp09") ? ["quantizer", "variable", "constant"] : ["variable", "constant"]) as VideoEncoderBitrateMode[])
-        .map((mode) => ({ candidate, mode })));
-    for (const { candidate, mode } of attempts) {
-      const config: VideoEncoderConfig = {
-        codec: candidate,
-        width: request.width,
-        height: request.height,
-        framerate: request.fps,
-        latencyMode: "quality",
-        bitrateMode: mode,
-        ...(mode === "quantizer" ? {} : { bitrate: request.bitrate }),
-        ...(candidate.startsWith("avc1") ? { avc: { format: "avc" as AvcBitstreamFormat } } : {}),
-      };
+    for (const attempt of videoEncoderAttempts(request)) {
+      const config: VideoEncoderConfig = attempt;
       const support = await VideoEncoder.isConfigSupported(config).catch(() => null);
       if (!support?.supported) continue;
       encoder = new VideoEncoder({
@@ -91,8 +80,8 @@ ipcRenderer.once("record-encoder:port", (event) => {
       });
       encoder.configure(config);
       opened = request;
-      codec = candidate;
-      constantQuality = mode === "quantizer";
+      codec = attempt.codec;
+      constantQuality = attempt.bitrateMode === "quantizer";
       port.postMessage({ type: "opened", codec });
       return;
     }
