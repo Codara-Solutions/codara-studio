@@ -3,7 +3,7 @@ import { buildRailFamily, buildRailTree, railMergeState } from "@shared/rail-tre
 import { isRemotePath } from "@shared/remote";
 import { buildSourceLanes, type LaneChanges, type LaneInput, type SourceLanes } from "@shared/source-lanes";
 import type { Workspace } from "@shared/types";
-import type { WorktreeRailExternal, WorktreeRailState } from "@shared/worktree-cleanup";
+import { railRowMerged, type WorktreeRailExternal, type WorktreeRailState } from "@shared/worktree-cleanup";
 import { usePullRequestWatches } from "../../../git/pullRequestWatchStore";
 import { useAgentLinesOf } from "../../workspace-status/agentLinesStore";
 
@@ -24,10 +24,6 @@ export interface SourceLanesContext {
 
 function trim(path: string): string {
   return path.replace(/[\\/]+$/, "");
-}
-
-function isMerged(state: WorktreeRailState | undefined): boolean {
-  return state?.merge === "merged" || (state?.missing === true && state.merge === "gone");
 }
 
 export function useSourceLanes(
@@ -106,7 +102,7 @@ export function useSourceLanes(
           lines: lineLists[index + 1] ?? [],
           creatorPaneId: creator?.kind === "agent" ? creator.paneId : undefined,
           createdAt: item.copyBranch?.createdAt,
-          merged: railMergeState(state ? isMerged(state) : undefined, {
+          merged: railMergeState(state ? railRowMerged(state) : undefined, {
             remote: Boolean(item.remote),
             loaded: worktreeStatesLoaded ?? false,
           }),
@@ -132,7 +128,7 @@ export function useSourceLanes(
         agents: item.id === project.id ? family.own : (agentsOf.get(item.id) ?? []),
         creator: item.copyBranch?.createdBy?.kind === "agent" ? (item.copyBranch.createdBy.client ?? null) : null,
         pullRequest: pullRequestOf(item.id),
-        merged: item.id !== project.id && isMerged(state),
+        merged: item.id !== project.id && railRowMerged(state),
         missing: state?.missing === true,
         changes: changes[item.cwd] ?? null,
       };

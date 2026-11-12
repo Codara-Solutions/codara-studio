@@ -51,7 +51,7 @@ import {
 import { openWorktreeCleanup } from "./worktree-cleanup/open-worktree-cleanup";
 import { PullRequestMark } from "../git/PullRequestMark";
 import { setRepositoryWatched, usePullRequestWatch } from "../git/pullRequestWatchStore";
-import type { WorktreeRailCleanupResult, WorktreeRailExternal, WorktreeRailState } from "@shared/worktree-cleanup";
+import { railRowMerged, type WorktreeRailCleanupResult, type WorktreeRailExternal, type WorktreeRailState } from "@shared/worktree-cleanup";
 import { buildRailFamily, buildRailTree, railFamilyAgentCount, railMergeState, type RailTree } from "@shared/rail-tree";
 import type { AgentLine } from "@shared/agent-status";
 
@@ -2095,9 +2095,7 @@ interface RowProps {
 
 // Merged: the branch's work is in its base. A gone branch with a gone folder
 // has nothing left but the row, which reads the same way.
-function rowMerged(worktree: WorktreeRailState | null | undefined, missing: boolean): boolean {
-  return worktree?.merge === "merged" || (missing && worktree?.merge === "gone");
-}
+const rowMerged = railRowMerged;
 
 const NO_EXTERNAL: readonly WorktreeRailExternal[] = [];
 
@@ -2709,6 +2707,7 @@ function WorkspaceRow({
                 pullRequest={prWatch?.watching ? prWatch.pullRequest.number : null}
                 baseBranch={ws.copyBranch?.baseBranch}
                 active={active}
+                appRunsHere={worktree?.appRunsHere === true}
               />
             )}
             <WorkspaceStatusLine workspaceId={ws.id} active={active} />
