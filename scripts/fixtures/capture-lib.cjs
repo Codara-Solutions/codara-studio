@@ -27,6 +27,7 @@ async function loadCaptureLib() {
         export * from "./record/ffmpeg";
         export * from "./record/video-mux";
         export * from "../../shared/video-encoder-attempts";
+        export { videoBitrate } from "./record/video-encoder";
         export * from "./record/recorder";
         export * from "./capture/paint";
         export * from "./locator";

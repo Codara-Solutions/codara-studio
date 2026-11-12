@@ -22,8 +22,8 @@ import { join } from "node:path";
 // - as camera video (before): worst frame 23.8 dB, worst block 29.9, and
 //   from the fast scroll to the end every frame stayed near 24 dB, since a
 //   page that stops sends no more frames to sharpen;
-// - as screen content (now): worst frame 36.5 dB, worst block 8.7, the
-//   same as the first keyframe; half the bytes (6.0 MB a minute, was 12.5).
+// - as screen content (now): worst frame 35.0 to 36.5 dB, worst block 8.6
+//   to 11.2, close to the first keyframe; 5 to 8.5 MB a minute (was 12.5).
 // RECORD_SCROLL_OUT=<dir> keeps the video, the worst frame, every reference
 // screenshot and the per-frame numbers.
 //
@@ -230,11 +230,13 @@ function startFixture() {
 
 /**
  * The worst frame's floor, in dB over the whole frame (RGB, against the
- * lossless screenshot): 23.8 before, 36.5 now. Below about 30 the 9 px text
- * smears into its neighbours.
+ * lossless screenshot): 23.8 before, 35.0 to 36.5 now over four runs. In
+ * the lowest, a few frames dipped about 1.5 dB right after keyframes the
+ * encoder inserted on its own during the fast scroll.
+ * Below about 30 the 9 px text smears into its neighbours.
  */
-const MIN_WORST_PSNR = 34;
-/** The worst 8x8 block mean error, where squares show in a gradient: 29.9 before, 8.7 now. */
+const MIN_WORST_PSNR = 32;
+/** The worst 8x8 block mean error, where squares show in a gradient: 29.9 before, 8.6 to 11.2 now. */
 const MAX_WORST_BLOCK = 14;
 
 const OUT = process.env.RECORD_SCROLL_OUT;

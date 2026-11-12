@@ -64,16 +64,17 @@ function vp9Codecs(width: number, height: number): string[] {
 
 /**
  * Bits per second for H.264, which WebCodecs cannot encode at a constant
- * quality (OpenH264 in this Electron refuses the quantizer mode). It is a
- * ceiling more than a target: OpenH264 encodes screen content at its own
- * best quality and usually stays far below it, and only a fast scroll comes
- * near it. At 0.2 bit per pixel per frame a scroll of a 1094x914 tab still
- * lost about 1.5 dB on its worst frame; 0.3 leaves room for faster ones.
- * Platform encoders (macOS, Windows) follow it more closely. VP9 and VP8
- * only use theirs where the quantizer mode is refused, and keep 0.15.
+ * quality (OpenH264 in this Electron refuses the quantizer mode). On Linux
+ * it is a ceiling more than a target: OpenH264 encodes screen content at its
+ * own best quality and usually stays far below it, and only a fast scroll
+ * comes near it. At 0.2 bit per pixel per frame a scroll of a 1094x914 tab
+ * still lost about 1.5 dB on its worst frame; 0.3 leaves room for faster
+ * ones. The platform encoders of macOS and Windows follow the bitrate
+ * closely and were not measured, so they keep 0.15, as do VP9 and VP8
+ * where their quantizer mode is refused.
  */
-export function videoBitrate(width: number, height: number, fps: number, codec: "avc" | "vp" = "avc"): number {
-  const bitsPerPixel = codec === "avc" ? 0.3 : 0.15;
+export function videoBitrate(width: number, height: number, fps: number, codec: "avc" | "vp" = "avc", platform: string = process.platform): number {
+  const bitsPerPixel = codec === "avc" && platform === "linux" ? 0.3 : 0.15;
   return Math.round(Math.min(24_000_000, Math.max(2_000_000, width * height * Math.min(30, fps) * bitsPerPixel)));
 }
 
@@ -174,7 +175,16 @@ export async function encodeVideo(job: VideoEncodeJob): Promise<VideoEncodeResul
     contents.postMessage("record-encoder:port", null, [port2]);
 
     const open = (codecs: string[]) =>
-      request({ type: "open", codecs, width, height, fps: job.fps, bitrate: videoBitrate(width, height, job.fps, codecs[0].startsWith("avc1") ? "avc" : "vp"), quantizer: VP9_QUANTIZER });
+      request({
+        type: "open",
+        codecs,
+        width,
+        height,
+        fps: job.fps,
+        bitrate: videoBitrate(width, height, job.fps, codecs[0].startsWith("avc1") ? "avc" : "vp"),
+        quantizer: VP9_QUANTIZER,
+        platform: process.platform,
+      });
     let note: string | undefined;
     let reply = await open(job.format === "mp4" ? avcCodecs(width, height) : vp9Codecs(width, height));
     if (reply.type === "unsupported" && job.format === "mp4") {

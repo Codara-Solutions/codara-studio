@@ -20,6 +20,8 @@ interface OpenRequest {
   bitrate: number;
   /** VP9's constant-quality level, 0 (best) to 63. */
   quantizer: number;
+  /** The platform the encoder runs on: the H.264 hint is for Linux only. */
+  platform: string;
 }
 
 interface FrameRequest {
