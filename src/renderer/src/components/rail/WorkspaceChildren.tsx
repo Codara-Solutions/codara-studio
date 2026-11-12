@@ -162,20 +162,25 @@ export function WorktreeAgentLine({
   pullRequest,
   baseBranch,
   active,
+  appRunsHere = false,
 }: {
   agents: readonly AgentLine[];
   merged: boolean;
   pullRequest: number | null;
   baseBranch?: string;
   active: boolean;
+  /** This Codara runs from it: said in place of "No agent", since no Clean up can take it. */
+  appRunsHere?: boolean;
 }) {
   const now = useMinuteClock(agents.length > 0);
   const first = agents[0];
   const muted = active ? "var(--ink-dim)" : "var(--muted)";
   if (!first) {
-    const text = merged
-      ? pullRequest !== null ? `Merged #${pullRequest}` : "Merged"
-      : baseBranch ? `No agent · from ${baseBranch}` : "No agent";
+    const text = appRunsHere
+      ? "Codara runs from here"
+      : merged
+        ? pullRequest !== null ? `Merged #${pullRequest}` : "Merged"
+        : baseBranch ? `No agent · from ${baseBranch}` : "No agent";
     return (
       <span data-testid="worktree-agent-line" data-state="none" className="rail-child-line2" style={{ color: muted }}>
         <span className="rail-child-note" data-testid={merged ? "workspace-merged" : undefined}>{text}</span>

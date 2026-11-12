@@ -401,7 +401,13 @@ async function statesOf(
     const branch = shortName(registration?.branch) ?? workspace.copyBranch.branch;
     const registered = registration?.head && !/^0+$/.test(registration.head) ? registration.head : null;
     const tip = await branchTip(repo.root, branch).catch(() => undefined);
-    const base = { workspaceId: workspace.id, missing, branch, branchGone: tip === null };
+    const base = {
+      workspaceId: workspace.id,
+      missing,
+      branch,
+      branchGone: tip === null,
+      ...(!missing && (await appRunsFrom(deps, workspace.cwd)) ? { appRunsHere: true } : {}),
+    };
     if (tip === undefined && !registered) return { ...base, merge: "unknown", autoCandidate: false };
     const head = registered ?? tip ?? null;
     if (!head) return { ...base, merge: "gone", autoCandidate: missing };
@@ -411,6 +417,7 @@ async function statesOf(
     // Only rows that passed the cheap facts pay for reading their activity.
     const offerAuto =
       autoMerged?.enabled === true &&
+      !base.appRunsHere &&
       tip !== undefined &&
       upLongEnough(autoMerged) &&
       !missing &&
@@ -434,6 +441,13 @@ async function statesOf(
       ...(stale ? { stale: true } : {}),
     };
   });
+}
+
+// The check refuses it for as long as this Codara runs ("Codara runs from
+// here"), which no press can change. Judged as the check judges it (usageOf).
+async function appRunsFrom(deps: WorktreeCleanupDeps, path: string): Promise<boolean> {
+  const real = await canonicalPath(path);
+  return deps.appPaths().some((appPath) => Boolean(appPath) && isAtOrUnder(appPath, real));
 }
 
 // Nothing committed in it yet (its head is in the base and is where its
@@ -460,8 +474,16 @@ async function isStale(workspace: Workspace, head: string, root: string, now: nu
   return active !== null && now - active >= STALE_AFTER_MS;
 }
 
-function refused(message: string, workspaceName?: string): WorktreeRailCleanupResult {
-  return { status: "refused", message, branchDeleted: false, ...(workspaceName ? { workspaceName } : {}) };
+function refused(message: string, workspaceName?: string, code = "REFUSED"): WorktreeRailCleanupResult {
+  return { status: "refused", code, message, branchDeleted: false, ...(workspaceName ? { workspaceName } : {}) };
+}
+
+// The audit log's code for a press the rail turned down before the removal
+// ran (which logs its own).
+function refusalCode(check: WorktreeRemovalCheck): string {
+  if (check.blockers.length) return check.blockers[0].code;
+  if (check.localWork && !onlyIgnoredWork(check.localWork)) return "DIRTY";
+  return check.merge.state === "merged" ? "REFUSED" : "UNMERGED";
 }
 
 async function dropRow(
@@ -567,7 +589,7 @@ async function cleanUpRegistered(
     requireKnownUsage,
     makerElsewhereOk,
   });
-  if (!check) return refused("The worktree could not be checked.", workspace.name);
+  if (!check) return refused("The worktree could not be checked.", workspace.name, "CHECK_FAILED");
   // Neither automatic mode goes ahead on a branch git could not read: the
   // one the check judged (the worktree may have switched) and the row's.
   if (request.mode !== "manual") {
@@ -584,11 +606,12 @@ async function cleanUpRegistered(
   const why =
     railRefusal(check, request, repo, parentPresent, canArchive) ??
     (request.mode === "auto-merged" ? await autoMergedRefusal(repo, workspace, check.merge, check.branch, check.head) : null);
-  if (why) return refused(why, workspace.name);
+  if (why) return refused(why, workspace.name, refusalCode(check));
   const holdsIgnored = !check.alreadyRemoved && check.localWork !== null;
   if (holdsIgnored && request.mode === "manual" && request.confirmIgnored !== check.fingerprint) {
     return {
       status: "confirm",
+      code: "CONFIRM_IGNORED",
       workspaceName: workspace.name,
       branchDeleted: false,
       holds: check.localWork!.ignored,
@@ -748,6 +771,54 @@ export async function cleanUpRailWorkspace(
   request: WorktreeRailCleanupRequest,
   options: RailOptions = {},
 ): Promise<WorktreeRailCleanupResult> {
+  if (request?.mode === "auto" || request?.mode === "auto-merged") return cleanUpRailWorkspaceOnce(deps, request, options);
+  // A press always leaves a line in the audit log, also when it ended before
+  // the removal (which logs its own): turned down by the check, or asking
+  // about ignored files. The automatic modes run on every read of the rail
+  // and log only what reached the removal.
+  let audited = false;
+  const tracked: WorktreeCleanupDeps = {
+    ...deps,
+    audit: (entry) => {
+      audited = true;
+      return deps.audit(entry);
+    },
+  };
+  const workspaceId = String(request?.workspaceId ?? "");
+  const row = (await deps.loadState().catch(() => null))?.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const result = await cleanUpRailWorkspaceOnce(tracked, request, options).catch(
+    (err: unknown): WorktreeRailCleanupResult => ({
+      status: "failed",
+      code: "FAILED",
+      message: cleanText(errorText(err), 300),
+      branchDeleted: false,
+      ...(row ? { workspaceName: row.name } : {}),
+    }),
+  );
+  if (!audited) {
+    await deps
+      .audit({
+        action: "remove",
+        outcome: result.status === "removed" ? "removed" : "refused",
+        code: result.status === "removed" ? null : (result.code ?? (result.status === "failed" ? "FAILED" : "REFUSED")),
+        caller: callerFor("manual"),
+        repo: row?.copyBranch?.repoCwd ?? null,
+        workspaceId,
+        path: row?.cwd ?? null,
+        branch: row?.copyBranch?.branch ?? null,
+        blockers: [],
+        message: result.message ?? null,
+      })
+      .catch(() => undefined);
+  }
+  return result;
+}
+
+async function cleanUpRailWorkspaceOnce(
+  deps: WorktreeCleanupDeps,
+  request: WorktreeRailCleanupRequest,
+  options: RailOptions,
+): Promise<WorktreeRailCleanupResult> {
   const mode = request?.mode === "auto" || request?.mode === "auto-merged" ? request.mode : "manual";
   const normalized: WorktreeRailCleanupRequest = {
     workspaceId: String(request?.workspaceId ?? ""),
@@ -774,7 +845,7 @@ export async function cleanUpRailWorkspace(
         ? { status: "removed", workspaceName: workspace.name, branchDeleted: false }
         : { status: "failed", message: "The workspace row could not be removed.", workspaceName: workspace.name, branchDeleted: false };
     }
-    return refused("Its repository could not be read.", workspace.name);
+    return refused("Its repository could not be read.", workspace.name, "REPO_UNREADABLE");
   }
   if (mode === "auto" && !missing) return refused("The folder is still there.", workspace.name);
   const { autoRemoveMerged: autoMerged, ...removeOptions } = options;
@@ -800,7 +871,9 @@ export async function cleanUpRailWorkspace(
       if (!missing) return null;
       return { unregistered: await cleanUpUnregistered(deps, repo, workspace, normalized) } as const;
     });
-    if (registration === null) return refused("git does not list this folder as a worktree. Use Delete instead.", workspace.name);
+    if (registration === null) {
+      return refused("git does not list this folder as a worktree. Use Delete instead.", workspace.name, "NOT_REGISTERED");
+    }
     if ("putBack" in registration) {
       const stuck = registration.putBack ?? [];
       return refused(
@@ -819,7 +892,7 @@ export async function cleanUpRailWorkspace(
     return await cleanUpRegistered(deps, repo, workspace, registration.path, normalized, removeOptions);
   } catch (err) {
     if (err instanceof RepoLockTimeoutError) {
-      return refused("Another worktree change on this repository is running. Try again shortly.", workspace.name);
+      return refused("Another worktree change on this repository is running. Try again shortly.", workspace.name, "LOCK_TIMEOUT");
     }
     return { status: "failed", message: cleanText(errorText(err), 300), workspaceName: workspace.name, branchDeleted: false };
   }

@@ -413,6 +413,22 @@ export interface WorktreeRailState {
    * row offers Clean up. Never removed on its own.
    */
   stale?: boolean;
+  /**
+   * This Codara runs from inside it (its working directory or app folder), so
+   * no Clean up can take it while it runs: the rail keeps it out of the
+   * merged group, whose count is what its Clean up acts on.
+   */
+  appRunsHere?: boolean;
+}
+
+/**
+ * Whether a rail row reads as merged: in its project's "N merged · Clean up"
+ * group, with Clean up on the row. `missing` is the folder's state as the
+ * rail last saw it.
+ */
+export function railRowMerged(state: WorktreeRailState | null | undefined, missing = state?.missing === true): boolean {
+  if (!state || state.appRunsHere) return false;
+  return state.merge === "merged" || (missing && state.merge === "gone");
 }
 
 /**
@@ -461,6 +477,8 @@ export interface WorktreeRailCleanupRequest {
 export interface WorktreeRailCleanupResult {
   /** "confirm": only ignored files hold it back; ask, then send the fingerprint back. */
   status: "removed" | "refused" | "failed" | "confirm";
+  /** What held it back, for the audit log: a check's blocker code, or the rail's own. */
+  code?: string;
   /** Why it was refused or failed, or what was left behind. */
   message?: string;
   workspaceName?: string;

@@ -10,6 +10,7 @@ import {
 import type { SparkEvent } from "@shared/types";
 import { withBackgroundAgents, type BackgroundWorktree } from "@shared/background-agents";
 import { buildRailTree } from "@shared/rail-tree";
+import { railRowMerged } from "@shared/worktree-cleanup";
 import { useAgentNotes } from "../workspace-status/agentNotesStore";
 import { collectLeaves } from "../../tabs/paneTree";
 import { isDockLeaf } from "../../tabs/dock";
@@ -402,7 +403,7 @@ export function backgroundWorktreesOf(
             },
           }
         : {}),
-      merged: state?.merge === "merged" || (state?.missing === true && state.merge === "gone"),
+      merged: railRowMerged(state),
       ...(state?.headAt ? { headAt: state.headAt } : {}),
     };
   });

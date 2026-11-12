@@ -438,6 +438,35 @@ async function main() {
       assert.equal(has("ws-unmerged"), true);
     });
 
+    await check("every press Clean up turns down before the removal is in the audit log, with what it said", async () => {
+      const rows = fs
+        .readFileSync(auditFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line))
+        .filter((row) => row.caller.client === "workspace-rail");
+      const dirty = rows.find((row) => row.workspaceId === "ws-merged-dirty");
+      assert.deepEqual([dirty?.outcome, dirty?.code, dirty?.branch], ["refused", "DIRTY", "feature/merged-dirty"]);
+      assert.match(dirty.message, /uncommitted work/);
+      const notMerged = rows.find((row) => row.workspaceId === "ws-unmerged");
+      assert.deepEqual([notMerged?.outcome, notMerged?.code], ["refused", "UNMERGED"]);
+      assert.equal(
+        rows.filter((row) => row.workspaceId === "ws-merged" || row.workspaceId === "ws-bystander").length,
+        0,
+        "the automatic mode logs only what reached the removal",
+      );
+    });
+
+    await check("the worktree Codara runs from is never offered as merged", async () => {
+      const running = Object.fromEntries(
+        (await rail.railWorktreeStates({ ...deps, appPaths: () => [path.join(merged, "out")] })).map((entry) => [entry.workspaceId, entry]),
+      );
+      assert.equal(running["ws-merged"].merge, "merged");
+      assert.equal(running["ws-merged"].appRunsHere, true);
+      assert.equal(running["ws-merged-busy"].appRunsHere, undefined);
+      assert.equal(states["ws-merged"].appRunsHere, undefined, "nor anything when it runs from elsewhere");
+    });
+
     await check("auto refuses a missing folder while a terminal of the workspace is open", async () => {
       const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-missing-busy", mode: "auto" });
       assert.equal(result.status, "refused");

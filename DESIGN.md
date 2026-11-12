@@ -558,6 +558,11 @@ Worktrees, Remove merged worktrees on their own** turns it off (on by default).
   counted before anything is deleted. The maker's tab holds merged work only
   while its shell is inside and it was active in the last 30 minutes. Clean up
   is left for what needs a human: unmerged and stale, dirty or detached.
+- The fold's count is what its Clean up acts on (2026-11-12, "cleanup is
+  still not working": "3 merged" held the worktree Studio itself ran from,
+  which no press can take). That worktree stays among the active rows and says
+  "Codara runs from here". Every press leaves a line in the worktree audit log,
+  also when it only asked or was turned down.
 - One toast per pass, not one per worktree: "Removed 4 merged worktrees" with
   "1.6 GB freed, data archived for 30 days (click to open it)". The existing
   local toast, success tone; a click opens the archive folder. No dialog.

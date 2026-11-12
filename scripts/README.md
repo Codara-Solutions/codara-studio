@@ -514,6 +514,8 @@ a branch already gone counts as deleted and an unmerged one is kept with a
 note, the rail's merge state, Clean up and Remove from rail, and the automatic
 cleanup of a missing folder refusing dirty, unpushed, busy, locked and
 possibly unmounted worktrees),
+`test-worktree-mounts-electron` (the mount check under the Electron binary:
+an installed electron package's `.asar` is not a drive mounted inside),
 `test-worktree-auto-archive` (merged worktrees leaving on their own with their
 ignored data copied to the archive and counted first: a copy that fails keeps
 the worktree, the maker's tab quiet 5 or 31 minutes, unmerged work and an

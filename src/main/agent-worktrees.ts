@@ -179,6 +179,8 @@ export interface AgentWorktreeAuditEntry {
   proof?: string | null;
   blockers?: string[];
   recoveryRef?: string | null;
+  /** What the user was told, when a press ended before the removal. */
+  message?: string | null;
 }
 
 export interface AgentWorktreeDeps {
@@ -3733,6 +3735,7 @@ export function createWorktreeAuditLog(
       proof: entry.proof ?? null,
       blockers: entry.blockers ?? [],
       recoveryRef: entry.recoveryRef ?? null,
+      ...(entry.message ? { message: cleanText(entry.message, 300) } : {}),
     });
     const write = chain.then(async () => {
       await fsp.mkdir(dirname(file), { recursive: true });
