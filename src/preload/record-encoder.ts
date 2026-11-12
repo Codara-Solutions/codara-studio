@@ -7,6 +7,8 @@
 
 import { ipcRenderer } from "electron";
 
+import { videoEncoderAttempts } from "@shared/video-encoder-attempts";
+
 interface OpenRequest {
   type: "open";
   /** Codec strings to try, best first. */
@@ -50,28 +52,8 @@ ipcRenderer.once("record-encoder:port", (event) => {
   };
 
   async function open(request: OpenRequest): Promise<void> {
-    // VP9 at a constant quality where it can be; otherwise a bitrate,
-    // variable where the encoder allows it (some hardware ones only keep it
-    // constant).
-    // H.264 is told the frames are text: OpenH264 (Linux) then encodes them
-    // as screen content, which follows a scroll as motion and keeps small
-    // text sharp. As camera video it spends its bits on stills and turns
-    // each scroll into blocks. An encoder that refuses the hint gets none.
-    const attempts = request.codecs.flatMap((candidate) =>
-      ((candidate.startsWith("vp09") ? ["quantizer", "variable", "constant"] : ["variable", "constant"]) as VideoEncoderBitrateMode[])
-        .flatMap((mode) => (candidate.startsWith("avc1") ? ["text", undefined] : [undefined]).map((contentHint) => ({ candidate, mode, contentHint }))));
-    for (const { candidate, mode, contentHint } of attempts) {
-      const config: VideoEncoderConfig = {
-        codec: candidate,
-        width: request.width,
-        height: request.height,
-        framerate: request.fps,
-        latencyMode: "quality",
-        bitrateMode: mode,
-        ...(mode === "quantizer" ? {} : { bitrate: request.bitrate }),
-        ...(contentHint ? { contentHint } : {}),
-        ...(candidate.startsWith("avc1") ? { avc: { format: "avc" as AvcBitstreamFormat } } : {}),
-      };
+    for (const attempt of videoEncoderAttempts(request)) {
+      const config: VideoEncoderConfig = attempt;
       const support = await VideoEncoder.isConfigSupported(config).catch(() => null);
       if (!support?.supported) continue;
       encoder = new VideoEncoder({
@@ -96,8 +78,8 @@ ipcRenderer.once("record-encoder:port", (event) => {
       });
       encoder.configure(config);
       opened = request;
-      codec = candidate;
-      constantQuality = mode === "quantizer";
+      codec = attempt.codec;
+      constantQuality = attempt.bitrateMode === "quantizer";
       port.postMessage({ type: "opened", codec });
       return;
     }

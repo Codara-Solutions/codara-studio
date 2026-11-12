@@ -4,8 +4,10 @@
 // temporal stability (a still area never changes from frame to frame,
 // dithered or not), exact colors for UI frames, the worker's own PNG decoding
 // and fitting, GIF delay rounding, and the MP4 and WebM containers parsed
-// back box by box and element by element. Real encoders and players are
-// covered by tests/e2e/preview-record-quality.spec.ts.
+// back box by box and element by element, and the order the video
+// encoder tries its configurations in. Real encoders and players are
+// covered by tests/e2e/preview-record-quality.spec.ts and
+// tests/e2e/preview-record-scroll.spec.ts.
 //
 //   node scripts/test-record-encoders.cjs
 
@@ -394,6 +396,26 @@ async function webm(lib, dir) {
   assert.deepEqual(["avc1.640028", "vp09.00.41.08", "vp8"].map(lib.containerFor), ["mp4", "webm", "webm"]);
 }
 
+/** The encoder page's configurations: H.264 asks for screen content first and again without it; VP9 and VP8 never do. */
+function encoderAttempts(lib) {
+  const attempts = lib.videoEncoderAttempts({ codecs: ["avc1.640028", "avc1.4d0028"], width: 1094, height: 914, fps: 30, bitrate: 9_000_000 });
+  assert.deepEqual(
+    attempts.map((attempt) => [attempt.codec, attempt.bitrateMode, attempt.contentHint ?? "-"]),
+    [
+      ["avc1.640028", "variable", "text"], ["avc1.640028", "variable", "-"], ["avc1.640028", "constant", "text"], ["avc1.640028", "constant", "-"],
+      ["avc1.4d0028", "variable", "text"], ["avc1.4d0028", "variable", "-"], ["avc1.4d0028", "constant", "text"], ["avc1.4d0028", "constant", "-"],
+    ],
+    "H.264 tries screen content first, then the same mode without the hint",
+  );
+  for (const attempt of attempts) assert.deepEqual([attempt.bitrate, attempt.latencyMode, attempt.avc], [9_000_000, "quality", { format: "avc" }]);
+  const webm = lib.videoEncoderAttempts({ codecs: ["vp09.00.41.08", "vp8"], width: 640, height: 480, fps: 30, bitrate: 2_000_000 });
+  assert.deepEqual(webm.map((attempt) => [attempt.codec, attempt.bitrateMode]), [
+    ["vp09.00.41.08", "quantizer"], ["vp09.00.41.08", "variable"], ["vp09.00.41.08", "constant"], ["vp8", "variable"], ["vp8", "constant"],
+  ]);
+  assert.ok(webm.every((attempt) => attempt.contentHint === undefined && attempt.avc === undefined), "WebM codecs get no H.264 options");
+  assert.equal(webm[0].bitrate, undefined, "constant quality has no bitrate");
+}
+
 (async () => {
   const { lib, cleanup } = await loadCaptureLib();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-record-encoders-"));
@@ -405,7 +427,8 @@ async function webm(lib, dir) {
     timing(lib);
     await mp4(lib, dir);
     await webm(lib, dir);
-    console.log("record encoders: GIF banding, exact UI colors, no shimmer, worker PNG decoding and fitting, delays, MP4 and WebM containers");
+    encoderAttempts(lib);
+    console.log("record encoders: GIF banding, exact UI colors, no shimmer, worker PNG decoding and fitting, delays, MP4 and WebM containers, encoder configurations");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
     cleanup();
