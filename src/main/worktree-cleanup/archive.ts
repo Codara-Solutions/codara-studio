@@ -1,5 +1,5 @@
 import { createHash, type Hash } from "node:crypto";
-import { constants, promises as fsp } from "node:fs";
+import { constants, promises as nodeFsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { WORKTREE_ARCHIVE_RETENTION_DAYS } from "@shared/worktree-cleanup";
 
@@ -9,6 +9,12 @@ import { WORKTREE_ARCHIVE_RETENTION_DAYS } from "@shared/worktree-cleanup";
 // counted again on the far side, files and bytes, before anything is
 // deleted: a copy that does not match is removed and the worktree stays.
 // Day folders older than ARCHIVE_RETENTION_DAYS go at startup.
+
+// Electron's fs reads an .asar file as a folder whose entries it makes up,
+// device included, so a kept .asar would count as another drive or as changed
+// while it was copied. The disk is read as it is, through the unpatched fs.
+const fsp: typeof nodeFsp =
+  (process.getBuiltinModule?.("original-fs") as typeof import("node:fs") | undefined)?.promises ?? nodeFsp;
 
 // The toast that reports an archive says how long it is kept, from the same number.
 export const ARCHIVE_RETENTION_DAYS = WORKTREE_ARCHIVE_RETENTION_DAYS;

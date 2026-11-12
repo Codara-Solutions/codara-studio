@@ -3388,6 +3388,8 @@ export function registerIpc(): void {
   });
   // Keep awake, the control beside the system meters.
   registerKeepAwakeIpc(handle);
+  // The status bar's dev-build update line (dev-update-hint.ts); null when not running.
+  handle("devUpdate:status", async () => (app.isPackaged ? null : (await import("./dev-update-hint")).devUpdateStatus()));
 
   // Pause / resume the live byte stream while the renderer-side TerminalPane
   // is unmounted (workspace switch). Paused sessions buffer pty output into a

@@ -34,10 +34,18 @@ export function mountPointsFromMountinfo(text: string): string[] {
   return out;
 }
 
+// Electron's fs reads an .asar file as a folder whose entries it makes up,
+// device included: an installed electron package (default_app.asar) looked
+// like a drive mounted inside every worktree that had one, and kept it. The
+// walk reads the disk through Electron's unpatched fs, where an archive is
+// one file; plain Node has no such layer.
+const diskFs: typeof fsp =
+  (process.getBuiltinModule?.("original-fs") as typeof import("node:fs") | undefined)?.promises ?? fsp;
+
 export const systemMountReader: MountReader = {
-  lstat: (path) => fsp.lstat(path),
-  readdir: (path) => fsp.readdir(path),
-  realpath: (path) => fsp.realpath(path),
+  lstat: (path) => diskFs.lstat(path),
+  readdir: (path) => diskFs.readdir(path),
+  realpath: (path) => diskFs.realpath(path),
   mountPoints: async () => {
     if (process.platform !== "linux") return null;
     return mountPointsFromMountinfo(await fsp.readFile("/proc/self/mountinfo", "utf8"));

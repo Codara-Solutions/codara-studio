@@ -2587,6 +2587,9 @@ export interface FsFileContent {
 // IPC throws on binary or oversize files; the editor wants to render a
 // dedicated banner instead, so we surface those states explicitly.
 export const FS_READ_TEXT_LIMIT_BYTES = 5 * 1024 * 1024;
+// The most fs:readFileBytes hands the previewers (images, PDFs, media,
+// Office files), so a mis-click on a giant file cannot balloon main's memory.
+export const FS_READ_BYTES_LIMIT_BYTES = 300 * 1024 * 1024;
 
 export type FsReadResult =
   | { kind: "text"; path: string; content: string; size: number; mtimeMs: number }

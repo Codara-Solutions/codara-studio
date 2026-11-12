@@ -18,8 +18,9 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 //   invalid-path     not one absolute path: relative, "~", "." or "..", control
 //                    characters, not UTF-8, or too long
 //   not-found        no such file or folder
-//   not-text         a binary file, which the editor cannot show
-//   too-large        a file over the editor's limit
+//   not-text         a file no view of Studio shows: binary with no viewer,
+//                    or content that does not match its name (text in a .png)
+//   too-large        a file over the editor's or the viewer's limit
 //   not-allowed      Studio's private data, or a folder unfit to be a workspace
 //   no-workspace     a file, with no workspace open to hold its tab
 //   timeout          the drive holding it did not answer

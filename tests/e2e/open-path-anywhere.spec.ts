@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { deflateSync } from "node:zlib";
 
 // Opening any path from two places, in a real app with a fixture home folder:
 // - Quick Open: a query that looks like a path lists that folder like a
@@ -44,7 +45,49 @@ interface Fixture {
   cwd: string;
 }
 
-async function put(file: string, text: string): Promise<void> {
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+
+function crc32(bytes: Buffer): number {
+  let c = 0xffffffff;
+  for (const byte of bytes) c = CRC_TABLE[(c ^ byte) & 0xff]! ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length);
+  const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body));
+  return Buffer.concat([length, body, crc]);
+}
+
+/** A generated RGB gradient, so no real picture ends up in the fixture. */
+function gradientPng(width: number, height: number): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header.set([8, 2, 0, 0, 0], 8);
+  const rows: number[] = [];
+  for (let y = 0; y < height; y += 1) {
+    rows.push(0);
+    for (let x = 0; x < width; x += 1) {
+      rows.push(Math.round((x / width) * 255), Math.round((y / height) * 255), 200);
+    }
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(Buffer.from(rows))),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+async function put(file: string, text: string | Buffer): Promise<void> {
   await mkdir(dirname(file), { recursive: true });
   await writeFile(file, text);
 }
@@ -64,6 +107,8 @@ async function prepare(): Promise<Fixture> {
   await put(join(userHome, "Documents", "Plans 2027", "roadmap-elsewhere.md"), "# Roadmap\n");
   await put(join(userHome, "Documents", "Codara SL", "Año nuevo", "plan final.md"), "# Plan with spaces\n");
   await put(join(userHome, "Documents", "Codara SL", "image.bin"), "\0\0binary");
+  await put(join(userHome, "Pictures", "pixel-proof.png"), gradientPng(320, 180));
+  await put(join(userHome, "Pictures", "named-wrong.png"), "these are notes, not a picture\n");
   await mkdir(join(userHome, "Documents", "Codara SL", "Cliente Ñ"), { recursive: true });
   await symlink(join(userHome, ".mytool", "settings.json"), join(userHome, ".mytool", "linked.json"));
   await mkdir(dataHome, { recursive: true });
@@ -245,6 +290,55 @@ test("Quick Open resolves a typed path: hidden folders, files, drilling in, no m
     await page.evaluate(() => window.spark.preferences.set("quickOpenAnywhere", false));
     const refused = await page.evaluate(() => window.spark.fs.searchPath("~/.mytool/", null));
     expect(refused).toEqual({ hits: [], truncated: false, disabled: true });
+  } finally {
+    await app.close().catch(() => undefined);
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("Quick Open opens an image in the viewer, from a pasted path and from a search result", async () => {
+  test.setTimeout(120_000);
+  const fixture = await prepare();
+  const { app, page } = await launch(fixture);
+  const picture = join(fixture.userHome, "Pictures", "pixel-proof.png");
+  const viewer = page.locator(`img[alt="${picture}"]:visible`);
+  try {
+    // A pasted absolute path: the image viewer, with its pixel size, and no
+    // "binary" refusal in the palette.
+    const { dialog, input } = await openQuickOpen(page);
+    await input.fill(picture);
+    await expect(dialog.getByRole("button", { name: /^pixel-proof\.png/ })).toBeVisible({ timeout: 10_000 });
+    await proof(page, "10-quick-open-png-path");
+    await input.press("Enter");
+    await expect(dialog).toHaveCount(0);
+    await expect(viewer).toBeVisible({ timeout: 10_000 });
+    await expect.poll(() => viewer.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(320);
+    await expect(page.getByText("320 × 180")).toBeVisible();
+    await expect(page.getByRole("tab", { name: /pixel-proof\.png/ }).first()).toBeVisible();
+    await proof(page, "11-png-opened");
+
+    // The same file picked from the search of the whole computer, after a
+    // text file took the front so the viewer showing again proves the pick.
+    const text = await openQuickOpen(page);
+    await text.input.fill(join(fixture.userHome, "Documents", "Plans 2027", "roadmap-elsewhere.md"));
+    await text.input.press("Enter");
+    await expect(page.locator(".cm-content:visible")).toContainText("Roadmap", { timeout: 10_000 });
+    await expect(viewer).toHaveCount(0);
+    const second = await openQuickOpen(page);
+    await second.input.fill("pixel-proof");
+    const hit = second.dialog.getByRole("button", { name: /pixel-proof\.png/ });
+    await expect(hit).toBeVisible({ timeout: 15_000 });
+    await hit.click();
+    await expect(second.dialog).toHaveCount(0);
+    await expect(viewer).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("320 × 180")).toBeVisible();
+
+    // Text named like an image says what it is instead of a broken picture.
+    const third = await openQuickOpen(page);
+    await third.input.fill(join(fixture.userHome, "Pictures", "named-wrong.png"));
+    await expect(third.dialog.getByRole("button", { name: /^named-wrong\.png/ })).toBeVisible({ timeout: 10_000 });
+    await third.input.press("Enter");
+    await expect(third.dialog.getByText("the file holds text, not an image; the viewer cannot show it")).toBeVisible({ timeout: 10_000 });
   } finally {
     await app.close().catch(() => undefined);
     await rm(fixture.root, { recursive: true, force: true });

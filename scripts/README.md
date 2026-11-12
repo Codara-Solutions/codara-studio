@@ -99,7 +99,7 @@ Most suites need only `npm install`. These are the exceptions:
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
 | `dbus-daemon`, `libnotify4`, `python3-gi`, Xvfb (Linux) | `test-notify-linux-click.cjs` | Runs a private bus with a fake notification server. Prints SKIP without them, and fails on CI. |
 | Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-browser-devtools.cjs`, `test-browser-cdp-access.cjs`, `test-browser-insight.cjs`, `test-browser-capture-chromium.cjs`, `test-preview-waits.cjs`, `test-preview-dialogs.cjs`, `test-preview-find-outline.cjs`, `test-preview-console-filter.cjs`, `test-studio-csp.cjs`, `test-browser-code.cjs` | Install it with `npx playwright install chromium`. Without it they print SKIP for the real-page checks. |
-| Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-worktree-cleanup.cjs`, `test-worktree-cleanup-agent.cjs`, `test-worktree-setup.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-review-diff.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
+| Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-worktree-cleanup.cjs`, `test-worktree-cleanup-agent.cjs`, `test-worktree-setup.cjs`, `test-git-auto-fetch-git.cjs`, `test-dev-update-hint.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-review-diff.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
 
@@ -514,6 +514,8 @@ a branch already gone counts as deleted and an unmerged one is kept with a
 note, the rail's merge state, Clean up and Remove from rail, and the automatic
 cleanup of a missing folder refusing dirty, unpushed, busy, locked and
 possibly unmounted worktrees),
+`test-worktree-mounts-electron` (the mount check under the Electron binary:
+an installed electron package's `.asar` is not a drive mounted inside),
 `test-worktree-auto-archive` (merged worktrees leaving on their own with their
 ignored data copied to the archive and counted first: a copy that fails keeps
 the worktree, the maker's tab quiet 5 or 31 minutes, unmerged work and an

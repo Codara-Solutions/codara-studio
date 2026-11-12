@@ -627,6 +627,13 @@ npm run test:e2e   # build, then the Playwright specs
 The test runner, what each suite needs, and an index of suites by area are in
 [scripts/README.md](../scripts/README.md).
 
+A dev build has no auto-updater. When the checkout it runs from is behind its
+upstream, the status bar says "Studio is N changes behind main · restart to
+update", and its tooltip has the `git -C <folder> pull --ff-only` to run;
+after a pull it says "Restart to load the update". It never pulls or restarts
+by itself: new main, preload or shared code under a running window breaks it
+(`src/main/dev-update-hint.ts`).
+
 Debugging:
 
 - **Main-process logs** print in the terminal running `npm run dev`. Code
