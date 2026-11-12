@@ -2,7 +2,7 @@ import { app, shell } from "electron";
 import { promises as fs } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative } from "node:path";
 import type { FileListResult, FsEntry, FsFileContent, FsReadResult, FsWriteResult } from "@shared/types";
-import { FS_READ_TEXT_LIMIT_BYTES } from "@shared/types";
+import { FS_READ_BYTES_LIMIT_BYTES, FS_READ_TEXT_LIMIT_BYTES } from "@shared/types";
 import { writeFileAtomic } from "./fs-atomic";
 import { isRemotePath } from "@shared/remote";
 import * as remoteFs from "./remote/remote-fs";
@@ -165,9 +165,8 @@ export async function statFile(path: string): Promise<{ size: number; mtimeMs: n
 
 // Raw bytes for renderer-side binary consumers (pdf.js document loading and
 // the blob-URL fallback the previewers use in dev, where an http-served
-// renderer cannot load file:// subresources). Hard cap keeps a mis-click on
-// a giant artifact from ballooning main-process memory.
-const MAX_BINARY_READ_BYTES = 300 * 1024 * 1024;
+// renderer cannot load file:// subresources).
+const MAX_BINARY_READ_BYTES = FS_READ_BYTES_LIMIT_BYTES;
 
 export async function readFileBytes(path: string): Promise<Uint8Array> {
   if (isRemotePath(path)) return remoteFs.remoteReadFileBytes(path);

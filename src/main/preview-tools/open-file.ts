@@ -1,7 +1,8 @@
-// codara_open_file (socket file.open): an agent opens a text file in an
-// editor tab of its own workspace, for the user to read or edit. The checks
-// are in ../open-file.ts; the tabs live in the renderer, reached through the
-// terminal bridge's "openFile" op. The file's text never passes through here.
+// codara_open_file (socket file.open): an agent opens a file in an editor
+// tab of its own workspace, for the user to read or edit, as text or in the
+// viewer its name picks. The checks are in ../open-file.ts; the tabs live in
+// the renderer, reached through the terminal bridge's "openFile" op. The
+// file's content never passes through here.
 
 import { grantReadFile } from "../fs-sandbox";
 import { checkOpenFile } from "../open-file";

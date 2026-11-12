@@ -175,7 +175,8 @@ async function resolveTarget(target: string, deps: PathDeps): Promise<OpenTarget
 
 /**
  * The checks for opening a path. The caller says the path is absolute. A file
- * must be text the editor can show; a folder must be fit to be a workspace.
+ * must be one an editor tab can show (checkOpenFile); a folder must be fit to
+ * be a workspace.
  */
 export async function resolveOpenTarget(target: string, deps: PathDeps, timeoutMs = OPEN_TIMEOUT_MS): Promise<OpenTarget> {
   try {

@@ -11,6 +11,8 @@
 //   3. .env and key files are recognized, so no editor feature sends them on.
 //   4. codara_open_file's check (open-file.ts): missing, folder, binary, too
 //      large, relative and bad lines are refused; ~/ and a line are kept.
+//      Every kind an editor tab previews opens too, judged by the same table
+//      the tabs use and by what the file holds, not its name alone.
 //   5. The read sandbox grants the one file an agent opened, not its folder.
 //   6. The file.open handler opens in the caller's workspace and refuses
 //      without touching the tabs or the sandbox.
@@ -331,7 +333,7 @@ async function main() {
   fs.writeFileSync(path.join(dir, ".env"), "API_KEY=do-not-print\n");
   fs.writeFileSync(path.join(dir, "notes.txt"), "hello\n");
   fs.writeFileSync(path.join(dir, "empty.md"), "");
-  fs.writeFileSync(path.join(dir, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d]));
+  fs.writeFileSync(path.join(dir, "blob.bin"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d]));
   fs.writeFileSync(path.join(dir, "big.log"), Buffer.alloc(5 * 1024 * 1024 + 1, 0x61));
   const reasonOf = async (p, line) => (await checkOpenFile(p, line)).reason;
   await check("codara_open_file's check: text files open, everything else is refused with a reason", async () => {
@@ -344,7 +346,7 @@ async function main() {
     const reason = async (p, line) => (await checkOpenFile(p, line)).reason;
     assert.equal(await reason(path.join(dir, "missing.md")), "missing");
     assert.equal(await reason(path.join(dir, "folder")), "directory");
-    assert.equal(await reason(path.join(dir, "logo.png")), "binary");
+    assert.equal(await reason(path.join(dir, "blob.bin")), "binary");
     assert.equal(await reason(path.join(dir, "big.log")), "too_large");
     assert.equal(await reason("notes.txt"), "invalid", "a relative path reaches Codara already resolved by the MCP server");
     assert.equal(await reason("file:///etc/hosts"), "invalid");
@@ -352,7 +354,7 @@ async function main() {
     assert.equal(await reason(42), "invalid");
     assert.equal(await reason(path.join(dir, "notes.txt"), 0), "invalid");
     assert.equal(await reason(path.join(dir, "notes.txt"), 1.5), "invalid");
-    const refused = await checkOpenFile(path.join(dir, "logo.png"));
+    const refused = await checkOpenFile(path.join(dir, "blob.bin"));
     assert.ok(!JSON.stringify(refused).includes("PNG"), "a refusal carries no file content");
     if (process.platform !== "win32") {
       fs.symlinkSync(path.join(dir, "notes.txt"), path.join(dir, ".env.local"));
@@ -362,6 +364,120 @@ async function main() {
         "a link keeps the name asked for, so a .env stays a .env to the editor",
       );
     }
+  });
+
+  // One sample per view, by what its files start with. A new kind in
+  // @shared/preview-kind fails here until it has one, so the open check is
+  // decided for it at the same time as the tab's view.
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  const SAMPLES = {
+    image: PNG,
+    svg: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>\n'),
+    pdf: Buffer.from("%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n", "latin1"),
+    video: Buffer.from([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0x34, 0x32, 0, 0, 0, 0]),
+    audio: Buffer.from([0x49, 0x44, 0x33, 0x03, 0, 0, 0, 0, 0, 0x0a]),
+    docx: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0, 0, 0, 0x08, 0]),
+    pptx: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0, 0, 0, 0x08, 0]),
+    spreadsheet: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0, 0, 0, 0x08, 0]),
+    whiteboard: Buffer.from('{"version":1,"items":[]}\n'),
+    html: Buffer.from("<!doctype html><p>hello</p>\n"),
+  };
+  const shared = await bundle("src/shared/preview-kind.ts", "preview-kind");
+  const tabs = await bundle("src/renderer/src/components/file-preview/previewKind.ts", "preview-kind-tabs");
+  const { viewRefusal } = await bundle("src/main/open-file.ts", "open-file-refusal");
+  const views = path.join(TMP, "views");
+  fs.mkdirSync(views);
+  await check("every kind an editor tab previews opens from Quick Open and codara_open_file", async () => {
+    for (const [kind, exts] of Object.entries(shared.PREVIEW_EXTENSIONS)) {
+      assert.ok(SAMPLES[kind], `add a sample for the "${kind}" view to this test`);
+      for (const ext of exts) {
+        const file = path.join(views, `sample.${ext}`);
+        fs.writeFileSync(file, SAMPLES[kind]);
+        assert.equal(tabs.previewKindForPath(file), kind, `the tab shows .${ext} as ${kind}`);
+        assert.deepEqual(await checkOpenFile(file), { ok: true, path: file, real: file }, `.${ext} opens`);
+        const upper = path.join(views, `UPPER.${ext.toUpperCase()}`);
+        fs.writeFileSync(upper, SAMPLES[kind]);
+        assert.equal((await checkOpenFile(upper)).ok, true, `.${ext.toUpperCase()} opens`);
+      }
+    }
+    for (const name of ["notes.txt", "Makefile", ".env", "a.doc", "a.xls", "a.ppt", "a.tar.gz"]) {
+      assert.equal(tabs.previewKindForPath(name), null, `${name} is not previewed`);
+    }
+  });
+
+  await check("one table: the tabs read the open check's, and nothing else defines one", () => {
+    const tabsSource = fs.readFileSync(path.join(ROOT, "src/renderer/src/components/file-preview/previewKind.ts"), "utf8");
+    const code = tabsSource.replace(/^\s*\/\/.*$/gm, "").trim();
+    assert.match(code, /^export \{[^}]*previewKindForPath[^}]*\} from "@shared\/preview-kind";$/, "the renderer module only re-exports");
+    const definers = [];
+    const walk = (folder) => {
+      for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
+        const full = path.join(folder, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.tsx?$/.test(entry.name) && /function previewKindForPath\b|const IMAGE_EXTS\b/.test(fs.readFileSync(full, "utf8"))) {
+          definers.push(path.relative(ROOT, full));
+        }
+      }
+    };
+    walk(path.join(ROOT, "src"));
+    assert.deepEqual(definers, [path.join("src", "shared", "preview-kind.ts")]);
+    const openSource = fs.readFileSync(path.join(ROOT, "src/main/open-file.ts"), "utf8");
+    assert.match(openSource, /from "@shared\/preview-kind"/, "the open check reads the shared table");
+  });
+
+  await check("the view is judged by what the file holds, not its name alone", async () => {
+    const put = (name, bytes) => {
+      const file = path.join(views, name);
+      fs.writeFileSync(file, bytes);
+      return file;
+    };
+    const refusal = async (name, bytes) => {
+      const result = await checkOpenFile(put(name, bytes));
+      assert.equal(result.ok, false, `${name} is refused`);
+      assert.equal(result.reason, "binary");
+      return result.message;
+    };
+    assert.match(await refusal("fake.png", "just some notes\n"), /holds text, not an image/);
+    assert.match(await refusal("blank.png", ""), /empty, not an image/);
+    assert.match(await refusal("shot.txt", PNG), /a PNG image but is not named like one/);
+    assert.match(await refusal("shot", PNG), /a PNG image but is not named like one/);
+    assert.match(await refusal("shot.pdf", PNG), /a PNG image, not a PDF/);
+    assert.match(await refusal("report.png", SAMPLES.pdf), /a PDF, not an image/);
+    assert.match(await refusal("archive.bin", Buffer.from([1, 2, 0, 3])), /no viewer for it/);
+    assert.match(await refusal("binary.svg", Buffer.from([0x3c, 0x73, 0, 0x76])), /no viewer for it/, "SVG is text, read as text");
+    // A JPEG named .png still decodes, and unknown bytes reach the viewer,
+    // which says itself that it cannot draw them, as from the Explorer.
+    assert.equal((await checkOpenFile(put("photo.png", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10])))).ok, true);
+    assert.equal((await checkOpenFile(put("odd.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d])))).ok, true);
+    assert.equal((await checkOpenFile(put("utf8.txt", "naïve café ☕\n"))).ok, true, "UTF-8 text stays text");
+    assert.equal(viewRefusal("image", Buffer.from("caf\xc3", "latin1")), "the file holds text, not an image; the viewer cannot show it", "a sample cut inside a character is still text");
+    assert.equal(viewRefusal(null, Buffer.alloc(0)), null, "an empty text file opens");
+    const sniff = (bytes) => shared.sniffPreviewContent(Buffer.from(bytes))?.kinds ?? null;
+    assert.deepEqual(sniff([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0]), ["image"]);
+    assert.deepEqual(sniff([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]), ["image"]);
+    assert.deepEqual(sniff([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45]), ["audio"]);
+    assert.deepEqual(sniff([0, 0, 0, 0x1c, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66]), ["image"]);
+    assert.deepEqual(sniff([0, 0, 1, 0, 1, 0]), ["image"]);
+    assert.deepEqual(sniff([0x1a, 0x45, 0xdf, 0xa3]), ["video", "audio"]);
+    assert.deepEqual(sniff([0xff, 0xf1, 0x50, 0x80]), ["audio"]);
+    assert.equal(sniff([0x7b, 0x7d]), null, "text has no signature");
+  });
+
+  await check("viewers keep the previewers' size cap, text keeps the editor's", async () => {
+    const sparse = (name, size, head) => {
+      const file = path.join(views, name);
+      fs.writeFileSync(file, head);
+      fs.truncateSync(file, size);
+      return file;
+    };
+    const { FS_READ_BYTES_LIMIT_BYTES, FS_READ_TEXT_LIMIT_BYTES } = await bundle("src/shared/types.ts", "shared-types");
+    assert.equal((await checkOpenFile(sparse("photo-6mb.png", 6 * 1024 * 1024, PNG))).ok, true, "an image over the text cap opens");
+    const huge = await checkOpenFile(sparse("huge.png", FS_READ_BYTES_LIMIT_BYTES + 1, PNG));
+    assert.equal(huge.reason, "too_large");
+    assert.match(huge.message, /300 MB, the most the viewer opens/);
+    const bigSvg = await checkOpenFile(sparse("big.svg", FS_READ_TEXT_LIMIT_BYTES + 1, "<svg>"));
+    assert.equal(bigSvg.reason, "too_large", "SVG is text: the editor's cap");
+    assert.match(bigSvg.message, /the most the editor opens/);
   });
 
   const sandbox = await bundle("src/main/fs-sandbox.ts", "fs-sandbox", {
@@ -408,7 +524,7 @@ async function main() {
     harness.ops.length = 0;
     harness.grants.length = 0;
     assert.deepEqual(await run({ path: path.join(dir, "folder") }), { opened: false, reason: "directory", note: "that path is a folder, not a file" });
-    assert.equal((await run({ path: path.join(dir, "logo.png") })).reason, "binary");
+    assert.equal((await run({ path: path.join(dir, "blob.bin") })).reason, "binary");
     assert.equal((await run({ path: path.join(dir, "missing.txt") })).reason, "missing");
     harness.located = { refusal: { updated: false, reason: "not_in_codara_workspace", note: "only in Codara" } };
     assert.deepEqual(await run({ path: path.join(dir, "notes.txt") }), { opened: false, reason: "not_in_codara_workspace", note: "only in Codara" });
