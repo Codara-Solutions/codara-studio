@@ -414,7 +414,7 @@ async function main() {
       for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
         const full = path.join(folder, entry.name);
         if (entry.isDirectory()) walk(full);
-        else if (/\.tsx?$/.test(entry.name) && /function previewKindForPath\b|const IMAGE_EXTS\b/.test(fs.readFileSync(full, "utf8"))) {
+        else if (/\.tsx?$/.test(entry.name) && /function previewKindForPath\b|\b(?:IMAGE|VIDEO|AUDIO|DOCX|PPTX|SPREADSHEET)_EXTS\s*=/.test(fs.readFileSync(full, "utf8"))) {
           definers.push(path.relative(ROOT, full));
         }
       }
@@ -450,6 +450,12 @@ async function main() {
     assert.equal((await checkOpenFile(put("photo.png", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10])))).ok, true);
     assert.equal((await checkOpenFile(put("odd.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d])))).ok, true);
     assert.equal((await checkOpenFile(put("utf8.txt", "naïve café ☕\n"))).ok, true, "UTF-8 text stays text");
+    assert.match(await refusal("utf16.txt", Buffer.from("\ufeffnotes", "utf16le")), /no viewer for it/, "a UTF-16 byte order mark is not an MP3 frame");
+    assert.equal((await checkOpenFile(put(".env.png", "KEY=1\n"))).ok, true, "a secret's name opens as text, as in the tab");
+    const heif = Buffer.from([0, 0, 0, 0x1c, ...Buffer.from("ftypmif1"), 0, 0, 0, 0, ...Buffer.from("mif1avifmiaf")]);
+    assert.equal((await checkOpenFile(put("heif-brand.avif", heif))).ok, true, "an AVIF with a generic HEIF major brand");
+    const movie = Buffer.from([0, 0, 1, 0, ...Buffer.from("ftypisom"), 0, 0, 2, 0]);
+    assert.equal((await checkOpenFile(put("long-box.mp4", movie))).ok, true, "a 256-byte first box is not an icon");
     assert.equal(viewRefusal("image", Buffer.from("caf\xc3", "latin1")), "the file holds text, not an image; the viewer cannot show it", "a sample cut inside a character is still text");
     assert.equal(viewRefusal(null, Buffer.alloc(0)), null, "an empty text file opens");
     const sniff = (bytes) => shared.sniffPreviewContent(Buffer.from(bytes))?.kinds ?? null;
@@ -463,7 +469,7 @@ async function main() {
     assert.equal(sniff([0x7b, 0x7d]), null, "text has no signature");
   });
 
-  await check("viewers keep the previewers' size cap, text keeps the editor's", async () => {
+  await check("viewers that read whole files keep their cap, streamed media has none, text keeps the editor's", async () => {
     const sparse = (name, size, head) => {
       const file = path.join(views, name);
       fs.writeFileSync(file, head);
@@ -472,7 +478,9 @@ async function main() {
     };
     const { FS_READ_BYTES_LIMIT_BYTES, FS_READ_TEXT_LIMIT_BYTES } = await bundle("src/shared/types.ts", "shared-types");
     assert.equal((await checkOpenFile(sparse("photo-6mb.png", 6 * 1024 * 1024, PNG))).ok, true, "an image over the text cap opens");
-    const huge = await checkOpenFile(sparse("huge.png", FS_READ_BYTES_LIMIT_BYTES + 1, PNG));
+    assert.equal((await checkOpenFile(sparse("huge.png", FS_READ_BYTES_LIMIT_BYTES + 1, PNG))).ok, true, "images stream, as from the Explorer");
+    assert.equal((await checkOpenFile(sparse("recording.mp4", FS_READ_BYTES_LIMIT_BYTES + 1, SAMPLES.video))).ok, true, "so does a long recording");
+    const huge = await checkOpenFile(sparse("huge.pdf", FS_READ_BYTES_LIMIT_BYTES + 1, SAMPLES.pdf));
     assert.equal(huge.reason, "too_large");
     assert.match(huge.message, /300 MB, the most the viewer opens/);
     const bigSvg = await checkOpenFile(sparse("big.svg", FS_READ_TEXT_LIMIT_BYTES + 1, "<svg>"));

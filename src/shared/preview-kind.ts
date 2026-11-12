@@ -58,6 +58,14 @@ export function previewKindForPath(path: string): PreviewKind | null {
 }
 
 /**
+ * Kinds whose viewer reads the whole file through fs:readFileBytes, and so
+ * stops at its cap. Images and media stream from file:// with no cap.
+ */
+export function previewLoadsBytes(kind: PreviewKind): boolean {
+  return kind === "pdf" || kind === "docx" || kind === "pptx" || kind === "spreadsheet";
+}
+
+/**
  * Kinds whose file is text the editor reads too (SVG and HTML toggle to the
  * editor; a board is saved as JSON), so the editor's text limits apply.
  */
@@ -93,8 +101,8 @@ export function sniffPreviewContent(head: Uint8Array): SniffedContent | null {
   if (startsWith(head, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return { label: "a PNG image", kinds: ["image"] };
   if (startsWith(head, [0xff, 0xd8, 0xff])) return { label: "a JPEG image", kinds: ["image"] };
   if (ascii(head, 0, 6) === "GIF87a" || ascii(head, 0, 6) === "GIF89a") return { label: "a GIF image", kinds: ["image"] };
-  if (ascii(head, 0, 2) === "BM" && head.length >= 14) return { label: "a BMP image", kinds: ["image"] };
-  if (startsWith(head, [0x00, 0x00, 0x01, 0x00])) return { label: "an icon", kinds: ["image"] };
+  // BMP's two reserved words are zero.
+  if (ascii(head, 0, 2) === "BM" && startsWith(head, [0, 0, 0, 0], 6)) return { label: "a BMP image", kinds: ["image"] };
   if (ascii(head, 0, 4) === "RIFF") {
     const form = ascii(head, 8, 12);
     if (form === "WEBP") return { label: "a WebP image", kinds: ["image"] };
@@ -103,20 +111,32 @@ export function sniffPreviewContent(head: Uint8Array): SniffedContent | null {
   }
   const box = ascii(head, 4, 8);
   if (box === "ftyp") {
-    const brand = ascii(head, 8, 12);
-    if (brand === "avif" || brand === "avis") return { label: "an AVIF image", kinds: ["image"] };
+    // AVIF may carry a generic HEIF major brand and name itself among the
+    // compatible brands that follow.
+    const boxEnd = Math.min(head.length, ((head[0]! << 24) | (head[1]! << 16) | (head[2]! << 8) | head[3]!) >>> 0);
+    const brands = [ascii(head, 8, 12)];
+    for (let at = 16; at + 4 <= boxEnd; at += 4) brands.push(ascii(head, at, at + 4));
+    if (brands.some((brand) => brand === "avif" || brand === "avis") || brands[0] === "mif1" || brands[0] === "msf1") {
+      return { label: "an AVIF image", kinds: ["image"] };
+    }
     return { label: "an MP4 or QuickTime file", kinds: MEDIA };
   }
   if (box === "moov" || box === "mdat" || box === "wide" || box === "free") return { label: "a QuickTime movie", kinds: ["video"] };
-  // A PDF may carry a few bytes before its header.
-  if (ascii(head, 0, 1024).includes("%PDF-")) return { label: "a PDF", kinds: ["pdf"] };
+  // An icon directory: reserved zero, type 1, and at least one image.
+  if (startsWith(head, [0x00, 0x00, 0x01, 0x00]) && head.length >= 6 && (head[4]! | head[5]!) !== 0) return { label: "an icon", kinds: ["image"] };
   if (startsWith(head, [0x50, 0x4b, 0x03, 0x04])) return { label: "a zip archive", kinds: OOXML };
   if (startsWith(head, [0x1a, 0x45, 0xdf, 0xa3])) return { label: "a WebM or Matroska file", kinds: MEDIA };
   if (ascii(head, 0, 4) === "OggS") return { label: "an Ogg file", kinds: MEDIA };
   if (ascii(head, 0, 4) === "fLaC") return { label: "a FLAC recording", kinds: ["audio"] };
   if (ascii(head, 0, 3) === "ID3") return { label: "an MP3 recording", kinds: ["audio"] };
-  // MPEG audio frame or AAC ADTS sync word.
-  if (head.length >= 2 && head[0] === 0xff && (head[1]! & 0xe0) === 0xe0) return { label: "an MP3 or AAC recording", kinds: ["audio"] };
+  // An MPEG layer III frame or an AAC ADTS header. Neither matches FF FE,
+  // the byte order mark of UTF-16 text.
+  if (head.length >= 2 && head[0] === 0xff && (((head[1]! & 0xe6) === 0xe2) || (head[1]! & 0xf6) === 0xf0)) {
+    return { label: "an MP3 or AAC recording", kinds: ["audio"] };
+  }
+  // Last: a PDF may carry a few bytes before its header, so this looks
+  // further in than the signatures above.
+  if (ascii(head, 0, 1024).includes("%PDF-")) return { label: "a PDF", kinds: ["pdf"] };
   return null;
 }
 

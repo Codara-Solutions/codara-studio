@@ -8,7 +8,8 @@
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { looksLikeText, previewKindForPath, previewReadsText, sniffPreviewContent, type PreviewKind } from "@shared/preview-kind";
+import { looksLikeText, previewKindForPath, previewLoadsBytes, previewReadsText, sniffPreviewContent, type PreviewKind } from "@shared/preview-kind";
+import { isSecretFilePath } from "@shared/secret-files";
 import { FS_READ_BYTES_LIMIT_BYTES, FS_READ_TEXT_LIMIT_BYTES } from "@shared/types";
 
 // The editor's own binary sniff (fs-tree readFileEx) looks for a NUL byte in
@@ -97,10 +98,12 @@ export async function checkOpenFile(rawPath: unknown, rawLine: unknown, deps: Op
   } catch {
     return { ok: false, reason: "missing", message: "file not found" };
   }
-  // The tab picks its view by the name asked for, so this does too.
-  const kind = previewKindForPath(target);
+  // The tab picks its view by the name asked for, so this does too, and as
+  // the tab does, a secret's name always opens as text.
+  const kind = isSecretFilePath(target) ? null : previewKindForPath(target);
   const viewer = kind !== null && !previewReadsText(kind);
-  const limit = viewer ? FS_READ_BYTES_LIMIT_BYTES : FS_READ_TEXT_LIMIT_BYTES;
+  // Images and media stream from disk and have no cap, as in the Explorer.
+  const limit = !viewer ? FS_READ_TEXT_LIMIT_BYTES : kind !== null && previewLoadsBytes(kind) ? FS_READ_BYTES_LIMIT_BYTES : Infinity;
   if (size > limit) {
     return {
       ok: false,
