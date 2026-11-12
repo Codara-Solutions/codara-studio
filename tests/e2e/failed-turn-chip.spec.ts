@@ -13,7 +13,8 @@ import { join } from "node:path";
 const FAKE_CLAUDE = String.raw`
   const out = (text) => process.stdout.write(text);
   const status = (fields) => out("\x1b]7501;app=claude:" + fields + "\x07");
-  out("Claude Code v2.1.300\r\n> ");
+  // A clean screen: the typed launch line holds this machine's paths.
+  out("\x1b[2J\x1b[HClaude Code v2.1.300\r\n> ");
   status("state=idle");
   process.stdin.setRawMode(true);
   process.stdin.resume();
