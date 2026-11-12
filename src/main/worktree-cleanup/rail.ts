@@ -417,6 +417,7 @@ async function statesOf(
     // Only rows that passed the cheap facts pay for reading their activity.
     const offerAuto =
       autoMerged?.enabled === true &&
+      !base.appRunsHere &&
       tip !== undefined &&
       upLongEnough(autoMerged) &&
       !missing &&
@@ -791,6 +792,7 @@ export async function cleanUpRailWorkspace(
       code: "FAILED",
       message: cleanText(errorText(err), 300),
       branchDeleted: false,
+      ...(row ? { workspaceName: row.name } : {}),
     }),
   );
   if (!audited) {

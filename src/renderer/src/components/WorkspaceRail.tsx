@@ -2298,7 +2298,7 @@ function WorkspaceRow({
   const canRemoveFromRail = missing && Boolean(onCleanUp);
   // Nothing was ever committed here and it sat untouched for days: offered,
   // never removed on its own.
-  const stale = !missing && !merged && worktree?.stale === true && agentTotal === 0;
+  const stale = !missing && !merged && worktree?.stale === true && !worktree.appRunsHere && agentTotal === 0;
   const canCleanUp = !missing && (merged || stale) && Boolean(onCleanUp);
   const runCleanUp = () => {
     if (!onCleanUp || cleaning) return;
