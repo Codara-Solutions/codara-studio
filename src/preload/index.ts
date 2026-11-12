@@ -49,6 +49,7 @@ import { sessionRelayApi } from "./areas/session-relay";
 import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { keepAwakeApi } from "./areas/keep-awake";
+import { devUpdateApi } from "./areas/dev-update";
 import { gitFixApi } from "./areas/git-fix";
 import { diagnosticsApi } from "./areas/diagnostics";
 import { pointApi } from "./areas/point";
@@ -1913,6 +1914,7 @@ const api = {
   share: shareApi,
   chromeLink: chromeLinkApi,
   keepAwake: keepAwakeApi,
+  devUpdate: devUpdateApi,
   capture: captureApi,
   point: pointApi,
   workspaceStatus: workspaceStatusApi,

@@ -1609,6 +1609,34 @@ app.whenReady().then(async () => {
       logMain("git-auto-fetch", `failed to start: ${String(err)}`);
     });
 
+  // A dev build has no auto-updater: the status bar says when the folder it
+  // runs from is behind its upstream (dev-update-hint.ts). The e2e suite runs
+  // a dev build too, and starts it only for the spec that points it at a
+  // generated repository.
+  const devUpdateDir = E2E_BACKGROUND ? process.env.CODARA_E2E_DEV_UPDATE_DIR : app.getAppPath();
+  if (!app.isPackaged && devUpdateDir) {
+    void Promise.all([import("./dev-update-hint"), import("./git-exec")])
+      .then(([m, git]) =>
+        m.startDevUpdateHint({
+          packaged: app.isPackaged,
+          appDir: devUpdateDir,
+          runGit: git.runGit,
+          autoFetched: async () =>
+            (await import("./git-auto-fetch"))
+              .getGitAutoFetchSnapshot()
+              .flatMap((repo) => repo.cwds.map((cwd) => ({ cwd, remote: repo.remote }))),
+          broadcast: (hint) => {
+            for (const window of BrowserWindow.getAllWindows()) {
+              if (!window.isDestroyed() && !window.webContents.isDestroyed()) window.webContents.send("devUpdate:changed", hint);
+            }
+          },
+          log: (line) => logMain("dev-update", line),
+          now: () => Date.now(),
+        }),
+      )
+      .catch((err) => logMain("dev-update", `failed to start: ${String(err)}`));
+  }
+
   // Agent session search: the local index of agent transcripts. Its first
   // pass waits out the launch and runs on its own low-priority thread.
   void import("./session-search/service")

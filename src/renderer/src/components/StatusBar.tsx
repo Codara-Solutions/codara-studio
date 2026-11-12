@@ -1,6 +1,7 @@
 import React from "react";
 import type { GitStatus, ShellInfo, Workspace } from "@shared/types";
 import UpdateChip from "./UpdateChip";
+import DevUpdateItem from "./DevUpdateItem";
 import StatusChip from "./status/StatusChip";
 import PortsChip from "./remote/PortsChip";
 
@@ -158,6 +159,7 @@ function StatusBar({ workspace, gitStatus, defaultShell, platform, workerCount }
           download glyph with progress ring / ready badge, one click to
           restart into the update. Lives here at the bottom-right so the
           chrome stays quiet. */}
+      <DevUpdateItem />
       <PortsChip workspace={workspace} />
       <StatusChip workspace={workspace} />
       <UpdateChip />
