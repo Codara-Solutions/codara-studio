@@ -25,6 +25,7 @@ const { promisify } = require("node:util");
   childProcess.spawnSync("git", ["-C", ".", "rev-parse", "--is-inside-work-tree"]);
   await new Promise((resolve) => childProcess.spawn("ps", ["-o", "pid="], { stdio: "ignore" }).on("close", resolve));
   childProcess.execSync("true");
+  await new Promise((resolve) => childProcess.exec("true", resolve));
   console.log(JSON.stringify({ wrapped: childProcess.spawn.name, label: census.spawnLabel("gh", ["pr", "view", "--json", "x"]) }));
 })().catch((error) => { console.error(error); process.exit(1); });
 `;
@@ -59,19 +60,20 @@ async function main() {
   const on = run(dir, { CODARA_SPAWN_CENSUS: file });
   check("with the variable spawn is wrapped", on.wrapped === "wrapped");
   const census = JSON.parse(fs.readFileSync(file, "utf8"));
-  check("every start is counted", census.total === 4);
+  check("every start is counted once, exec included", census.total === 5);
   check(
     "programs are labelled",
     census.byProgram.git === 1 &&
       census.byProgram["git rev-parse"] === 1 &&
       census.byProgram["ps -o"] === 1 &&
-      census.byProgram.true === 1,
+      census.byProgram.true === 2 &&
+      census.byProgram.sh === undefined,
   );
   check(
     "callers carry source positions",
     Object.keys(census.byCaller).every((key) => / @ .+:\d+:\d+/.test(key)),
   );
-  check("starts are bucketed by second", Object.values(census.perSecond).reduce((a, b) => a + b, 0) === 4);
+  check("starts are bucketed by second", Object.values(census.perSecond).reduce((a, b) => a + b, 0) === 5);
   fs.rmSync(dir, { recursive: true, force: true });
   console.log(`\nAll ${pass} spawn-census checks passed.`);
 }

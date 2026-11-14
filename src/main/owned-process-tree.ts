@@ -113,18 +113,23 @@ function listProcesses(): readonly ListedProcess[] | null {
 // USER_HZ: /proc/<pid>/stat counts start times in it, and Linux fixes it at
 // 100 on every architecture Node runs on.
 const CLOCK_TICKS_PER_SECOND = 100;
-let bootSeconds: number | null | undefined;
+// The kernel moves btime when the wall clock is stepped (NTP, suspend), and
+// `ps` reads it on every run, so it is re-read now and then.
+const BOOT_TIME_MAX_AGE_MS = 60_000;
+let bootSeconds: { value: number | null; at: number } | null = null;
 let childrenFiles: boolean | undefined;
 
 async function linuxBootSeconds(): Promise<number | null> {
-  if (bootSeconds !== undefined) return bootSeconds;
+  if (bootSeconds && Date.now() - bootSeconds.at < BOOT_TIME_MAX_AGE_MS) return bootSeconds.value;
+  let value: number | null = null;
   try {
     const match = /^btime\s+(\d+)$/m.exec(await fsp.readFile("/proc/stat", "utf8"));
-    bootSeconds = match ? Number(match[1]) : null;
+    value = match ? Number(match[1]) : null;
   } catch {
-    bootSeconds = null;
+    value = null;
   }
-  return bootSeconds;
+  bootSeconds = { value, at: Date.now() };
+  return value;
 }
 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
