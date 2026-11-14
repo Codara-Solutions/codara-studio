@@ -221,8 +221,9 @@ async function main() {
   // stand-in agent does the same here (forked like the real one).
   {
     // The shell and holder pids are above any pid Linux (2^22) or macOS
-    // (99,999) hands out: a fork that got one of them would rightly drop it as
-    // its own pid, so small made-up pids made this check fail by chance.
+    // (99,999) hands out: if a forked stand-in got one of them as its pid,
+    // listConsolePids would rightly drop it, so small made-up pids made this
+    // check fail by chance.
     const shellPid = 5_000_001;
     const holderPid = 5_000_003;
     const answering = path.join(dir, "console-agent-answers.js");
@@ -234,12 +235,13 @@ async function main() {
     );
     const silent = path.join(dir, "console-agent-silent.js");
     fs.writeFileSync(silent, "process.exit(0);\n");
-    let answered = true;
-    for (let i = 0; i < 5; i++) {
-      const pids = await listConsolePids(shellPid, answering);
-      if (JSON.stringify(pids) !== JSON.stringify([shellPid, holderPid])) answered = false;
-    }
-    check("an agent that answers and exits at once is heard, minus its own pid", answered);
+    const answers = [];
+    for (let i = 0; i < 5; i++) answers.push(await listConsolePids(shellPid, answering));
+    check(
+      "an agent that answers and exits at once is heard, minus its own pid",
+      answers.every((pids) => JSON.stringify(pids) === JSON.stringify([shellPid, holderPid])),
+      answers,
+    );
     check("an agent that exits without answering is unknown", (await listConsolePids(shellPid, silent)) === null);
   }
 
