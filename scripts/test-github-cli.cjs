@@ -387,6 +387,30 @@ async function main() {
     }
 
     {
+      // Merged pull requests by commit: a full id only, passed as a search.
+      const sha = "AB".repeat(20);
+      const merged = {
+        number: 9,
+        url: "https://github.com/codara/studio/pull/9",
+        headRefName: "feat/y",
+        headRefOid: sha,
+        baseRefName: "main",
+        isCrossRepository: false,
+        mergeCommit: { oid: "c".repeat(40) },
+      };
+      const { adapter, calls } = fakeAdapter(github, [{ stdout: JSON.stringify([merged]), stderr: "" }]);
+      const { mergeCommit: _merge, ...summary } = merged;
+      assert.deepEqual(await adapter.listPullRequestsForCommit("/repo", sha), [
+        { ...summary, headRefOid: sha.toLowerCase(), mergeCommitOid: "c".repeat(40) },
+      ]);
+      assert.deepEqual(calls[0].args.slice(0, 6), ["pr", "list", "--state", "merged", "--search", sha.toLowerCase()]);
+      for (const bad of ["abc1234", `${"a".repeat(40)} is:open`, "-x"]) {
+        await rejectsCode(adapter.listPullRequestsForCommit("/repo", bad), "command-failed");
+      }
+      assert.equal(calls.length, 1, "a bad commit id never reaches gh");
+    }
+
+    {
       const { adapter, calls } = fakeAdapter(github, [
         {
           stdout: JSON.stringify([

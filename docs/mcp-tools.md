@@ -1238,6 +1238,11 @@ the `blockers` and a `hint`:
   the default branch (or the named `target`), its merge commit is in the
   default branch or still in the worktree's own base on the remote, or the merged pull
   request of its base branch took that merge, followed up the stack. A
+  branch pushed under another name (its upstream, or found on GitHub by its
+  commit) counts only through a merged pull request from the same
+  repository whose head is exactly the last commit, whose merge commit is in
+  the target or the default branch as fetched now and holds that commit's
+  content; merged into another branch, the refusal names it in `retryWith`. A
   recorded base that no longer exists is replaced by the default branch. A
   `target` the agent names must be another local or remote-tracking
   branch, never the worktree's own branch, its pushed copy or a commit id;
@@ -1293,7 +1298,7 @@ The `code` is the first blocker; `blockers` lists them all, and a dry run or
 | `WORKTREE_SUBMODULES` | A submodule or committed nested repository is checked out. | Ask you. |
 | `WORKTREE_NESTED_REPOSITORY` | Another checkout or worktree sits inside it (`details.nestedRepositories`). | Move or remove it first, or ask you. |
 | `WORKTREE_NESTED_SCAN_INCOMPLETE` | The search for nested checkouts could not finish (`details.unscannedFolder`). | Delete that folder if it only holds build output or dependencies, then retry; otherwise ask you. |
-| `WORKTREE_NOT_MERGED` | The last commit is not merged into the target. | Push and merge it, or ask you to delete it from the rail. |
+| `WORKTREE_NOT_MERGED` | The last commit is not merged into the target. `details.pushed` says whether origin has it under the branch's name or its upstream's; `details.upstream` names an upstream of another name, with `gone` when the remote deleted it. | Push and merge it, or ask you to delete it from the rail. |
 | `WORKTREE_TARGET_NOT_FOUND` | The merge target does not exist or cannot be a target. | Pass `target`, the branch it was merged into. |
 | `WORKTREE_RUNNING_PANES` | Terminals are open in it. | Close your own with `codara_terminal_close`; otherwise wait or ask you. |
 | `WORKTREE_ACTIVE_RUNS` | Active Cora runs work in it. | Wait for them to finish, or ask you. |

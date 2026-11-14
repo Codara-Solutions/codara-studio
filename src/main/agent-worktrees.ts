@@ -54,7 +54,7 @@ import { PROTECTED_REMOTE_BRANCHES } from "@shared/worktree-cleanup-agent";
 import { isKeptBranch } from "./worktree-cleanup/kept-branches";
 import { archiveIgnoredFiles } from "./worktree-cleanup/archive";
 import { mountRefusal } from "./worktree-cleanup/mounts";
-import { proveByMergedPullRequestStack } from "./merged-pull-request-stack";
+import { proveByMergedHead, proveByMergedPullRequestStack } from "./merged-pull-request-stack";
 
 // Agent-managed worktrees: the logic behind the worktree.create/list/remove
 // agent-socket methods and the codara_worktree_* MCP tools.
@@ -206,6 +206,8 @@ export interface AgentWorktreeDeps {
   github: {
     listPullRequestsForHead(cwd: string, branch: string): Promise<GitHubMergedPullRequest[]>;
     listMergedPullRequests(cwd: string, limit: number): Promise<GitHubMergedPullRequest[]>;
+    // Merged pull requests that hold this commit. Absent: none are looked up.
+    listPullRequestsForCommit?(cwd: string, sha: string): Promise<GitHubMergedPullRequest[]>;
   };
   sendAgentEvent(event: AgentWorktreeEvent): void;
   audit(entry: AgentWorktreeAuditEntry): Promise<void>;
@@ -1981,6 +1983,17 @@ async function remoteBranchGone(ctx: VerifyContext, target: string): Promise<boo
   }
 }
 
+// The branch name the worktree's branch tracks on origin, when it is not its
+// own name (pushed as feat/y). Read from config, so it outlives the remote
+// branch: GitHub deleting it once merged leaves it "gone", still named.
+async function originUpstream(repo: string, branch: string): Promise<string | null> {
+  const remote = await readGitText(repo, ["config", "--get", `branch.${branch}.remote`]).catch(() => "");
+  const merge = await readGitText(repo, ["config", "--get", `branch.${branch}.merge`]).catch(() => "");
+  if (remote !== "origin" || !merge.startsWith("refs/heads/")) return null;
+  const name = merge.slice("refs/heads/".length);
+  return name && name !== branch ? name : null;
+}
+
 function shortBranch(target: string): string {
   return target.replace(/^[^/]+\//, "");
 }
@@ -2334,6 +2347,32 @@ async function defaultBranchTarget(
   return resolved.commit && resolved.commit !== judged ? { name: resolved.name, commit: resolved.commit } : null;
 }
 
+// Merged pull requests that may have this exact tip as head under another
+// branch name: the list's batch when there is one, else GitHub asked for the
+// upstream's name and, when that finds no such head, for the commit. A
+// lookup that fails gives none.
+async function mergedUnderOtherName(
+  ctx: VerifyContext,
+  branch: string,
+  tip: string,
+  listed: readonly GitHubMergedPullRequest[] | null,
+): Promise<GitHubMergedPullRequest[]> {
+  const repo = ctx.scope.repoCwd;
+  const exact = (pr: GitHubMergedPullRequest) => pr.headRefOid.toLowerCase() === tip.toLowerCase();
+  if (listed) return listed.filter(exact);
+  const github = ctx.deps.github;
+  const found: GitHubMergedPullRequest[] = [];
+  const upstream = await originUpstream(repo, branch);
+  if (upstream) {
+    const named = await github.listPullRequestsForHead(repo, upstream).catch(() => [] as GitHubMergedPullRequest[]);
+    found.push(...named.filter((pr) => pr.headRefName === upstream));
+  }
+  if (!found.some(exact) && github.listPullRequestsForCommit) {
+    found.push(...(await github.listPullRequestsForCommit(repo, tip).catch(() => [] as GitHubMergedPullRequest[])));
+  }
+  return found;
+}
+
 async function proveMerged(
   ctx: VerifyContext,
   verdict: RemovalVerdict,
@@ -2498,6 +2537,24 @@ async function proveMerged(
         verdict.proof = "pull-request";
         verdict.pullRequest = stacked.pullRequest;
         if (stacked.via.length) verdict.details.via = stacked.via;
+      } else {
+        // Opened from another branch name: landed only in a target fetched
+        // now, or the default branch; a stale target copy proves nothing.
+        const landing = [fallback?.commit, targetFetchFailed ? null : target.commit].filter((commit): commit is string => Boolean(commit));
+        const byHead = await proveByMergedHead({
+          repo,
+          tip,
+          candidates: await mergedUnderOtherName(ctx, branch, tip, listed),
+          landing,
+          contentIn: (from, into) => contentInTarget(repo, from, into),
+          treeOf: (commit) => revParse(repo, `${commit}^{tree}`),
+        });
+        if (byHead?.kind === "landed") {
+          verdict.proof = "pull-request";
+          verdict.pullRequest = byHead.pullRequest;
+        } else if (byHead) {
+          verdict.details.mergedInto = { branch: byHead.base, pullRequest: byHead.pullRequest };
+        }
       }
     }
     if (!verdict.proof) {
@@ -2515,10 +2572,15 @@ async function proveMerged(
     return;
   }
   const ahead = await aheadCount(repo, target.commit, tip);
+  // Pushed under its own name or the one it tracks; a tracked branch the
+  // remote deleted is named with gone, since what it held cannot be read.
+  const upstream = await originUpstream(repo, branch);
+  const upstreamTip = upstream ? await revParse(repo, `refs/remotes/origin/${upstream}`) : null;
   const pushedTip = await revParse(repo, `refs/remotes/origin/${branch}`);
   verdict.details.aheadOfTarget = ahead;
   verdict.details.commits = await commitSubjectsBetween(repo, target.commit, tip, 10);
-  verdict.details.pushed = pushedTip === tip;
+  verdict.details.pushed = pushedTip === tip || upstreamTip === tip;
+  if (upstream) verdict.details.upstream = { branch: `origin/${upstream}`, gone: upstreamTip === null };
   // Another branch on origin that already holds the tip (a release branch the
   // work was merged into): naming it as the target proves the merge.
   const holders = (
@@ -2926,6 +2988,9 @@ async function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): 
     verdict.blockers.includes("WORKTREE_OWNED_BY_LIVE_AGENT") &&
     verdict.blockers.every((blocker) => blocker === "WORKTREE_OWNED_BY_LIVE_AGENT" || blocker === "WORKTREE_USAGE_UNKNOWN");
   const contained = Array.isArray(verdict.details.containedIn) ? (verdict.details.containedIn as string[]) : [];
+  // Naming the branch it merged into helps only when that is not the target already judged.
+  const mergedInto = verdict.details.mergedInto as { branch: string; pullRequest: { number: number } } | undefined;
+  const otherBranch = mergedInto && mergedInto.branch !== shortBranch(verdict.target ?? "") ? mergedInto : undefined;
   const defaultTarget = code === "WORKTREE_TARGET_NOT_FOUND" ? await resolveMergeDefaultBranch(ctx.scope.repoCwd) : null;
   const dynamic: { hint?: string; retryWith?: Record<string, unknown> } = {};
   if (ownedButMerged) dynamic.hint = OWNED_BUT_MERGED_HINT;
@@ -2937,7 +3002,10 @@ async function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): 
     dynamic.hint = `these are cache folders git does not ignore: delete them or add them to .gitignore, then retry (${(verdict.details.untrackedCaches as string[]).join(", ")})`;
   } else if (code === "WORKTREE_IGNORED_FILES") dynamic.retryWith = { discardIgnoredFiles: true };
   else if (code === "WORKTREE_NOT_MERGED") {
-    if (contained.length) {
+    if (otherBranch) {
+      dynamic.retryWith = { target: otherBranch.branch };
+      dynamic.hint = `pull request #${otherBranch.pullRequest.number} merged this exact commit into ${otherBranch.branch}: pass target:"${otherBranch.branch}" if that is where the work belongs`;
+    } else if (contained.length) {
       dynamic.retryWith = { target: contained[0] };
       dynamic.hint = `its commits are already in ${contained[0]}: pass target:"${contained[0]}" if that is where the work was merged; otherwise push it and merge its PR into ${verdict.target}`;
     } else {
