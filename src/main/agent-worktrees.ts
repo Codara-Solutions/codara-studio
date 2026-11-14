@@ -582,6 +582,51 @@ async function fetchRemoteBranch(
   }
 }
 
+async function hasCommit(cwd: string, oid: string): Promise<boolean> {
+  try {
+    await runGit(cwd, ["cat-file", "-e", `${oid}^{commit}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The commit a remote branch is at now, read from the remote itself and
+ * never from a tracking ref: "origin/main", "main" (origin's), or a HEAD
+ * alias ("origin/HEAD", "HEAD"), which is resolved through the remote's own
+ * symbolic ref. The commit is fetched when git does not have it. Null on any
+ * failure: no remote, unreachable, no such branch, or a commit still missing.
+ */
+export async function remoteCommitNow(repo: string, name: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<string | null> {
+  const split = await splitRemoteRef(repo, name);
+  const remote = split?.remote ?? "origin";
+  let branch = split ? split.branch : name;
+  try {
+    if (!split && !(await remoteNames(repo)).has(remote)) return null;
+    if (branch === "HEAD") {
+      const { stdout } = await runGit(repo, ["ls-remote", "--symref", "--end-of-options", remote, "HEAD"], { timeout: timeoutMs });
+      const match = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(stdout);
+      if (!match) return null;
+      branch = match[1];
+    }
+    await runGit(repo, ["check-ref-format", `refs/heads/${branch}`]);
+    const { stdout } = await runGit(repo, ["ls-remote", "--end-of-options", remote, `refs/heads/${branch}`], { timeout: timeoutMs });
+    const line = stdout.split(/\r?\n/).find((entry) => entry.endsWith(`\trefs/heads/${branch}`));
+    const oid = line?.split("\t")[0]?.trim().toLowerCase() ?? "";
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(oid)) return null;
+    if (!(await hasCommit(repo, oid))) {
+      await runGit(repo, ["fetch", "--no-tags", "--end-of-options", remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`], {
+        timeout: timeoutMs,
+      });
+      if (!(await hasCommit(repo, oid))) return null;
+    }
+    return oid;
+  } catch {
+    return null;
+  }
+}
+
 function slugify(text: string): string {
   return text
     .toLowerCase()
@@ -1770,7 +1815,8 @@ interface VerifyContext {
   registrations: WorktreeRegistration[];
   runs: Promise<RunState[]>;
   rendererTerminals: Promise<RendererTerminal[] | null>;
-  fetchedTargets: Map<string, Promise<string | null>>;
+  // What each remote target is at now, read from the remote (targetNow).
+  remoteCommits: Map<string, Promise<string | null>>;
   // Prefetched merged pull requests for a whole list, or the error gh gave.
   mergedPullRequests?: { list: GitHubMergedPullRequest[] } | { error: string };
 }
@@ -1979,18 +2025,6 @@ async function resolveExplicitTarget(
   return { name: resolved.name, ref: resolved.ref, commit: await revParse(repo, `${resolved.ref}^{commit}`) };
 }
 
-async function fetchTargetOnce(ctx: VerifyContext, target: string): Promise<string | null> {
-  const known = ctx.fetchedTargets.get(target);
-  if (known) return known;
-  const pending = (async () => {
-    const remote = await splitRemoteRef(ctx.scope.repoCwd, target);
-    if (!remote) return null;
-    return fetchRemoteBranch(ctx.scope.repoCwd, remote.remote, remote.branch);
-  })();
-  ctx.fetchedTargets.set(target, pending);
-  return pending;
-}
-
 // True only when the remote answers and does not have the branch; an
 // unreachable remote says nothing.
 async function remoteBranchGone(ctx: VerifyContext, target: string): Promise<boolean> {
@@ -2019,14 +2053,14 @@ async function originUpstream(repo: string, branch: string): Promise<string | nu
   return name && name !== branch ? name : null;
 }
 
-// What origin has for `branch` now, fetched by this check. Null when the
-// fetch fails or there is no origin to fetch from: a copy not refreshed now
-// proves nothing.
-async function freshOriginCommit(ctx: VerifyContext, branch: string): Promise<string | null> {
-  const repo = ctx.scope.repoCwd;
-  if (!(await splitRemoteRef(repo, `origin/${branch}`))) return null;
-  if ((await fetchTargetOnce(ctx, `origin/${branch}`)) !== null) return null;
-  return revParse(repo, `refs/remotes/origin/${branch}^{commit}`);
+// remoteCommitNow, asked once per name in a check.
+function targetNow(ctx: VerifyContext, name: string): Promise<string | null> {
+  let pending = ctx.remoteCommits.get(name);
+  if (!pending) {
+    pending = remoteCommitNow(ctx.scope.repoCwd, name);
+    ctx.remoteCommits.set(name, pending);
+  }
+  return pending;
 }
 
 function shortBranch(target: string): string {
@@ -2373,11 +2407,12 @@ async function defaultBranchTarget(
   const name = await resolveMergeDefaultBranch(ctx.scope.repoCwd);
   if (!name || shortBranch(name) === ownBranch || name === ownBranch) return null;
   let resolved = await resolveTarget(ctx, name);
-  // Fetched before it is compared: a stale default branch can sit at the
-  // judged commit while the remote's has moved on to include the work.
+  // Read from the remote before it is compared: a stale default branch can
+  // sit at the judged commit while the remote's has moved on to include the
+  // work. Unreadable (offline), its last known commit stands.
   if (resolved.commit && options.fetch && !options.pinned) {
-    await fetchTargetOnce(ctx, resolved.name);
-    resolved = await resolveTarget(ctx, name);
+    const now = await targetNow(ctx, resolved.name);
+    if (now) resolved = { ...resolved, commit: now };
   }
   return resolved.commit && resolved.commit !== judged ? { name: resolved.name, commit: resolved.commit } : null;
 }
@@ -2479,29 +2514,43 @@ async function proveMerged(
       target = fallback;
     }
   }
-  // A target that could not be fetched (deleted on the remote, say) may be
-  // a stale copy: it proves no merge into it beyond what it already held.
+  // A remote target is judged at the commit the remote has now, read once
+  // here and used by every proof below and by the locked re-check (pinned).
+  // One that could not be read (offline, deleted on the remote) keeps its
+  // last known commit, a possibly stale copy: it proves no merge into it
+  // beyond what it already held, and never lands the pull request proof of
+  // another branch name (targetFresh). A local target is never fetched.
   let targetFetchFailed = false;
+  let targetFresh = false;
   if (options.pinned) {
     target = { name: target.name, commit: options.pinned.targetCommit };
   } else if (options.fetch && target.commit) {
-    const failure = await fetchTargetOnce(ctx, target.name);
-    if (failure) verdict.warnings.push(`fetch failed: ${failure}`);
-    targetFetchFailed = failure !== null;
-    target = target.ref
-      ? { ...target, commit: await revParse(repo, `${target.ref}^{commit}`) }
-      : await resolveTarget(ctx, target.name);
+    const isRemote = !target.ref?.startsWith("refs/heads/") && (await splitRemoteRef(repo, target.name)) !== null;
+    if (isRemote) {
+      const now = await targetNow(ctx, target.name);
+      if (now) {
+        target = { ...target, commit: now };
+        targetFresh = true;
+      } else {
+        targetFetchFailed = true;
+        verdict.warnings.push(`fetch failed: ${target.name} could not be read from the remote`);
+      }
+    }
     // Deleted on the remote: its tracking ref is a stale copy that may hold
     // merges the branch never landed anywhere. Judged as a gone base: the
-    // default branch, fetched.
-    if (failure && !explicitTarget && (await remoteBranchGone(ctx, target.name))) {
+    // default branch, as the remote has it.
+    if (targetFetchFailed && !explicitTarget && (await remoteBranchGone(ctx, target.name))) {
       const fallbackName = await resolveMergeDefaultBranch(repo);
       if (fallbackName && shortBranch(fallbackName) !== branch && fallbackName !== shortBranch(target.name)) {
         verdict.warnings.push(`the recorded base '${target.name}' is gone on the remote; judged against ${fallbackName}`);
-        const fetched = await fetchTargetOnce(ctx, fallbackName);
-        if (fetched) verdict.warnings.push(`fetch failed: ${fetched}`);
-        targetFetchFailed = fetched !== null;
+        const now = await targetNow(ctx, fallbackName);
+        if (!now) verdict.warnings.push(`fetch failed: ${fallbackName} could not be read from the remote`);
+        targetFetchFailed = now === null;
         target = await resolveTarget(ctx, fallbackName);
+        if (now) {
+          target = { ...target, commit: now };
+          targetFresh = true;
+        }
       }
     }
   }
@@ -2535,9 +2584,12 @@ async function proveMerged(
     const targetOnOrigin = Boolean(targetRef?.startsWith("refs/remotes/origin/"));
     let ownBaseCommit: string | null = targetOnOrigin && !targetFetchFailed ? target.commit : null;
     if (!explicitTarget && !targetIsRemote && (await refIsPresent(repo, `refs/remotes/origin/${targetBranch}`))) {
-      // A fetch that fails (the branch was deleted) leaves a stale copy: no proof.
-      const failure = options.fetch && !options.pinned ? await fetchTargetOnce(ctx, `origin/${targetBranch}`) : null;
-      ownBaseCommit = failure ? null : await revParse(repo, `refs/remotes/origin/${targetBranch}^{commit}`);
+      // Read from the remote: a branch it no longer has, or one that cannot
+      // be read, leaves a stale copy: no proof.
+      ownBaseCommit =
+        options.fetch && !options.pinned
+          ? await targetNow(ctx, `origin/${targetBranch}`)
+          : await revParse(repo, `refs/remotes/origin/${targetBranch}^{commit}`);
     }
     // A recorded base other than the default branch (a stacked pull
     // request's branch, often deleted once merged) can lag behind where
@@ -2576,14 +2628,12 @@ async function proveMerged(
         // Opened from another branch name: landed only in the target or
         // the default branch as origin has it now. A local branch, or a copy
         // this check did not refresh, proves nothing.
-        const landingBranches = new Set<string>();
-        if (options.fetch && targetOnOrigin) landingBranches.add(targetBranch);
-        const defaultRemote = explicitTarget ? null : await splitRemoteRef(repo, (await resolveMergeDefaultBranch(repo)) ?? "");
-        if (options.fetch && defaultRemote?.remote === "origin") landingBranches.add(defaultRemote.branch);
         const landing: string[] = [];
-        for (const name of landingBranches) {
-          const commit = await freshOriginCommit(ctx, name);
-          if (commit) landing.push(commit);
+        if (targetFresh && targetOnOrigin) landing.push(target.commit);
+        const defaultName = explicitTarget || !options.fetch ? null : await resolveMergeDefaultBranch(repo);
+        if (defaultName && (await splitRemoteRef(repo, defaultName))?.remote === "origin") {
+          const now = await targetNow(ctx, defaultName);
+          if (now) landing.push(now);
         }
         const byHead = await proveByMergedHead({
           repo,
@@ -2780,7 +2830,7 @@ function newContext(
     registrations,
     runs: deps.listRuns().catch(() => []),
     rendererTerminals: deps.listRendererTerminals().catch(() => null),
-    fetchedTargets: new Map(),
+    remoteCommits: new Map(),
   };
 }
 

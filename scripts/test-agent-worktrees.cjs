@@ -1114,6 +1114,55 @@ async function main() {
     git(repo, ["push", "-q", "origin", "--delete", "release-stale"]);
     git(repo, ["fetch", "-q", "--prune", "origin"]);
 
+    // origin/HEAD is an alias: judged as the branch the remote's HEAD names,
+    // at the commit the remote has, never the local origin/HEAD.
+    const viaHead = await mergedUnderOtherName("via-head");
+    const mainNow = git(repo, ["rev-parse", "main"]);
+    const behindSquash = git(repo, ["rev-parse", `${viaHead.squash}~1`]);
+    git(repo, ["push", "-q", "-f", "origin", `${behindSquash}:refs/heads/main`]);
+    git(repo, ["update-ref", "refs/remotes/origin/main", mainNow]);
+    h.pulls = [viaHead.pr];
+    try {
+      const headRefused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: viaHead.made.workspaceId, target: "origin/HEAD" }, deps);
+      assert.equal(headRefused.code, "WORKTREE_NOT_MERGED", JSON.stringify(headRefused));
+      assert.equal(git(repo, ["rev-parse", "refs/heads/fix/via-head"]), viaHead.head, "the branch is kept");
+    } finally {
+      git(repo, ["push", "-q", "-f", "origin", "main"]);
+    }
+    const headRemoved = await aw.removeAgentWorktree(terminalAgent, { workspaceId: viaHead.made.workspaceId, target: "origin/HEAD" }, deps);
+    assert.equal(headRemoved.ok, true, JSON.stringify(headRemoved));
+
+    // remoteCommitNow answers what the remote has, or nothing.
+    const remoteMain = git(repo, ["ls-remote", "origin", "refs/heads/main"]).split("\t")[0];
+    const older = git(repo, ["rev-parse", "main~2"]);
+    const middle = git(repo, ["rev-parse", "main~1"]);
+    git(repo, ["push", "-q", "origin", `${middle}:refs/heads/table-moved`, `${middle}:refs/heads/table-excluded`]);
+    git(repo, ["push", "-q", "-f", "origin", `${older}:refs/heads/table-moved`]);
+    git(repo, ["update-ref", "refs/remotes/origin/table-moved", middle]);
+    git(repo, ["update-ref", "refs/remotes/origin/table-excluded", remoteMain]);
+    git(repo, ["remote", "add", "unreachable", path.join(scratch, "no-such-remote.git")]);
+    git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"]);
+    try {
+      for (const [name, expected] of [
+        ["main", remoteMain],
+        ["origin/main", remoteMain],
+        ["origin/HEAD", remoteMain],
+        ["HEAD", remoteMain],
+        ["origin/table-excluded", middle],
+        ["origin/table-moved", older],
+        ["origin/no-such-branch", null],
+        ["unreachable/main", null],
+        ["origin/a..b", null],
+      ]) {
+        assert.equal(await aw.remoteCommitNow(repo, name, 10_000), expected, name);
+      }
+    } finally {
+      git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+      git(repo, ["remote", "remove", "unreachable"]);
+      git(repo, ["push", "-q", "origin", "--delete", "table-moved", "table-excluded"]);
+      git(repo, ["fetch", "-q", "--prune", "origin"]);
+    }
+
     // One file under the ignored folder keeps blocking.
     const keptFile = await mergedUnderOtherName("kept-file");
     h.pulls = [keptFile.pr];
