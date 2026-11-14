@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Workspace } from "@shared/types";
-import { gitReadsActive, HIDDEN_EVERY, TICK_MS, useGitRefresh, type GitRefreshMemory } from "./gitRefreshClock";
+import { gitReadsActive, gitReadsSettled, HIDDEN_EVERY, TICK_MS, useGitRefresh, type GitRefreshMemory } from "./gitRefreshClock";
 import {
   railRowMerged,
   type WorktreeRailCleanupRequest,
@@ -260,7 +260,7 @@ export function useWorktreeRailStates(
       const now = Date.now();
       // Focus reads only the rows waiting on time or tabs; the full read
       // waits for a tick.
-      if (reason === "tick" && now - lastFullAt.current >= FULL_MS) {
+      if (reason === "tick" && now - lastFullAt.current >= FULL_MS && gitReadsSettled()) {
         void readRef.current?.();
         return;
       }

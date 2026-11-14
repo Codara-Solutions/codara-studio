@@ -6,7 +6,7 @@ import type { Workspace } from "@shared/types";
 import { railRowMerged, type WorktreeRailExternal, type WorktreeRailState } from "@shared/worktree-cleanup";
 import { usePullRequestWatches } from "../../../git/pullRequestWatchStore";
 import { useAgentLinesOf } from "../../workspace-status/agentLinesStore";
-import { useGitRefresh } from "../../../git/gitRefreshClock";
+import { gitReadsSettled, useGitRefresh } from "../../../git/gitRefreshClock";
 
 // The lanes of the active workspace's project: the project's own checkout and
 // every worktree of it, wherever the user is standing. Agents land on the
@@ -139,7 +139,7 @@ export function useSourceLanes(
     const now = Date.now();
     // Focus re-reads the user's own lane and the lanes whose git state moved;
     // the rest wait for their own clock.
-    if (reason === "tick" && now - lastReadAt.current >= SAFETY_MS) {
+    if (reason === "tick" && now - lastReadAt.current >= SAFETY_MS && gitReadsSettled()) {
       lastWorkingReadAt.current = now;
       readRef.current?.();
       return;

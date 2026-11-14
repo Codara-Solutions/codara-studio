@@ -50,6 +50,8 @@ export interface GitRefreshClock {
   /** Focus or visibility went away: stop until focus() is called. */
   pause(): void;
   isActive(): boolean;
+  /** Focused for a whole off-screen round: time for reads that are only due by the clock. */
+  isSettled(): boolean;
   /** One tick, for tests. */
   tick(): Promise<void>;
   /** Remember these checkouts' state now, before reading them: later moves count, not this one. */
@@ -65,6 +67,7 @@ export function createGitRefreshClock(env: GitRefreshEnv, active = false): GitRe
   let ticks = 0;
   let running: Promise<void> | null = null;
   let focusAfter: Promise<void> | null = null;
+  let focusedAt = 0;
 
   const check = (reason: GitRefreshReason): Promise<void> => {
     if (running) {
@@ -132,6 +135,7 @@ export function createGitRefreshClock(env: GitRefreshEnv, active = false): GitRe
       };
     },
     focus() {
+      if (!active) focusedAt = Date.now();
       active = true;
       start();
       return check("focus");
@@ -141,6 +145,7 @@ export function createGitRefreshClock(env: GitRefreshEnv, active = false): GitRe
       stop();
     },
     isActive: () => active,
+    isSettled: () => active && Date.now() - focusedAt >= TICK_MS * HIDDEN_EVERY,
     tick: () => check("tick"),
     async baseline(memory, cwds) {
       if (cwds.length === 0) return;
@@ -198,6 +203,15 @@ function sharedClock(): GitRefreshClock {
 /** Whether git reads may run now: the window is focused and visible. */
 export function gitReadsActive(): boolean {
   return sharedClock().isActive();
+}
+
+/**
+ * Whether reads due only by time (a safety re-read, a full read) may run:
+ * the window has been focused for a whole off-screen round. Coming back
+ * after a long while then does not run every overdue read at once.
+ */
+export function gitReadsSettled(): boolean {
+  return sharedClock().isSettled();
 }
 
 /**

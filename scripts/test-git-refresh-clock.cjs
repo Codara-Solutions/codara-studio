@@ -181,6 +181,24 @@ async function main() {
       stop();
     });
 
+    await check("reads due by time wait a whole off-screen round after focus returns", async () => {
+      const fresh = clockModule.createGitRefreshClock(env);
+      assert.equal(fresh.isSettled(), false, "unfocused");
+      await fresh.focus();
+      assert.equal(fresh.isSettled(), false, "just focused");
+      const realNow = Date.now;
+      try {
+        Date.now = () => realNow() + clockModule.TICK_MS * clockModule.HIDDEN_EVERY;
+        assert.equal(fresh.isSettled(), true, "a round later");
+        await fresh.focus();
+        assert.equal(fresh.isSettled(), true, "a focus while focused changes nothing");
+      } finally {
+        Date.now = realNow;
+      }
+      fresh.pause();
+      assert.equal(fresh.isSettled(), false, "paused");
+    });
+
     await check("losing focus stops the clock", async () => {
       clock.pause();
       assert.equal(intervals.size, 0);

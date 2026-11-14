@@ -7,6 +7,8 @@
 //   - at start the rail reads the visible workspace's project first, and its
 //     rows have their state within 5 s; the other projects follow one at a
 //     time, and the rail says it is loaded once all were read;
+//   - reads due only by time wait until the window has been focused for a
+//     whole off-screen round after it comes back;
 //   - on focus, Source Control's lanes re-read the user's own lane and the lanes whose
 //     git state moved, not every lane of the project;
 //   - the rail re-reads at once only the projects with a row waiting on time
@@ -270,8 +272,22 @@ async function main() {
       });
       await refocus(page);
       assert.deepEqual(await page.evaluate(() => window.__reads), [["/p", "/w2"]], "and a lane that moved");
+      // Away longer than the safety re-read: it waits until the window has
+      // been focused for a whole off-screen round, not the first tick.
+      await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+      await page.clock.runFor(6 * 60_000);
+      await page.evaluate(() => {
+        window.__reads = [];
+        window.dispatchEvent(new Event("focus"));
+      });
+      await page.clock.runFor(10_000);
+      await page.waitForTimeout(100);
+      assert.deepEqual(await page.evaluate(() => window.__reads), [["/p"]], "the 10 s after a long absence read the own lane only");
+      await page.clock.runFor(25_000);
+      await page.waitForTimeout(100);
+      assert.deepEqual((await page.evaluate(() => window.__reads)).at(-1), ["/p", "/w1", "/w2"], "the overdue safety read comes later");
       await page.close();
-      console.log("PASS on focus the lanes re-read the user's own lane and the lanes that moved");
+      console.log("PASS on focus the lanes re-read the user's own lane and the lanes that moved, and overdue reads wait");
     }
 
     {
