@@ -142,6 +142,8 @@ const FILE_MAGIC = "CODARA-SCROLLBACK 1";
 const FOLD_BEFORE_SAVE_BYTES = 4 * 1024;
 // About one folded screen: what a rewrite adds to the history it holds.
 const APPEND_SLACK_BYTES = 16 * 1024;
+// Longest a timed save waits for the fold it started.
+const FOLD_WAIT_MAX_MS = 5_000;
 const FILE_EXT = ".bin";
 const MAX_HEADER_BYTES = 4096;
 
@@ -268,7 +270,14 @@ export class TerminalScrollbackStore {
     this.wipedWhileDisabled = false;
     for (const paneId of ids) {
       const state = this.ensureState(paneId);
-      if (state.untap) continue;
+      if (state.untap) {
+        // A duplicate exit report can drop the exit handler without calling
+        // it; each layout sync registers it afresh.
+        state.offExit?.();
+        state.offExit = null;
+        this.watchExit(state);
+        continue;
+      }
       // Tap first, then read what the session already printed: nothing can
       // run between the two, so every byte is seen exactly once.
       state.untap = this.deps.tap(paneId, (chunk) => this.onChunk(state, chunk));
@@ -732,7 +741,16 @@ export class TerminalScrollbackStore {
     if (state.folding || (!this.canAppend(state, name) && state.rawBytes >= FOLD_BEFORE_SAVE_BYTES)) {
       state.saveAfterFold = true;
       if (!state.folding) this.queueFold(state);
-      if (state.folding) return;
+      if (state.folding) {
+        // Folds of many busy panes queue behind each other: past this wait
+        // the save writes as is, so the max wait still holds.
+        state.timer = this.timers.setTimeout(() => {
+          state.timer = null;
+          this.saveIfWaiting(state);
+        }, FOLD_WAIT_MAX_MS);
+        state.timer.unref?.();
+        return;
+      }
       state.saveAfterFold = false;
     }
     void this.save(state);
@@ -846,10 +864,19 @@ export class TerminalScrollbackStore {
     this.index.set(name, { size: data.length, mtimeMs: this.now() });
   }
 
+  // Opened without create: a file the total budget evicted meanwhile must
+  // fail here rather than come back as a tail with no header.
   private async appendFile(name: string, data: Buffer): Promise<void> {
-    await fs.appendFile(join(this.deps.dir, name), data, { mode: 0o600 });
+    const handle = await fs.open(join(this.deps.dir, name), "r+");
+    try {
+      const { size } = await handle.stat();
+      await handle.write(data, 0, data.length, size);
+    } finally {
+      await handle.close();
+    }
     const entry = this.index.get(name);
-    this.index.set(name, { size: (entry?.size ?? 0) + data.length, mtimeMs: this.now() });
+    if (!entry) throw new Error("evicted while appending");
+    this.index.set(name, { size: entry.size + data.length, mtimeMs: this.now() });
   }
 
   private async removeFile(name: string): Promise<void> {

@@ -47,11 +47,12 @@ async function bundle(entry, name, dir) {
   return require(outfile);
 }
 
-// Bytes the store hands the file system under `dir`, whole writes and appends.
+// Bytes the store hands the file system under `dir`: whole writes, and
+// appends (writes through a handle opened "r+").
 function countWrites(dir) {
   const fsp = fs.promises;
   const writeFile = fsp.writeFile;
-  const appendFile = fsp.appendFile;
+  const open = fsp.open;
   const counter = { bytes: 0, writes: 0, appends: 0 };
   fsp.writeFile = function (file, data, options) {
     if (String(file).startsWith(dir)) {
@@ -60,16 +61,21 @@ function countWrites(dir) {
     }
     return writeFile.call(this, file, data, options);
   };
-  fsp.appendFile = function (file, data, options) {
-    if (String(file).startsWith(dir)) {
-      counter.bytes += data.length;
-      counter.appends += 1;
+  fsp.open = async function (file, flags, mode) {
+    const handle = await open.call(this, file, flags, mode);
+    if (String(file).startsWith(dir) && flags === "r+") {
+      const write = handle.write;
+      handle.write = function (data, ...rest) {
+        counter.bytes += data.length;
+        counter.appends += 1;
+        return write.call(this, data, ...rest);
+      };
     }
-    return appendFile.call(this, file, data, options);
+    return handle;
   };
   counter.restore = () => {
     fsp.writeFile = writeFile;
-    fsp.appendFile = appendFile;
+    fsp.open = open;
   };
   return counter;
 }
@@ -139,6 +145,8 @@ async function makeHarness(storeMod, dir, limits = {}) {
       handler?.();
     },
     hasExitWatch: (paneId) => exits.has(paneId),
+    // pty-manager drops the handlers without calling them on a duplicate exit.
+    dropExitWatch: (paneId) => exits.delete(paneId),
     // Moves the clock, firing every save timer due on the way.
     async advance(ms) {
       const end = now + ms;
@@ -278,6 +286,9 @@ async function main() {
       (await h.store.read("hidden")).raw.toString("utf8").includes("printed just before quit") &&
         (await h.store.read("shown")).raw.toString("utf8").includes("also just before quit"),
     );
+    h.dropExitWatch("shown");
+    h.store.track(["shown", "hidden"]);
+    check("a dropped exit handler is registered again at the next layout sync", h.hasExitWatch("shown"));
     await h.store.forget("shown");
     check("a closed pane stops being watched", !h.hasExitWatch("shown"));
     h.store.dispose();
@@ -326,8 +337,8 @@ async function main() {
     counter.restore();
     check("saves after the first append to the file", counter.appends > 0 && counter.writes >= 1, JSON.stringify(counter));
     check(
-      "a file that passes the raw cap is rewritten whole, so it stays bounded",
-      counter.writes > 1 && fs.statSync(appended.file("p")).size < 32 * 1024 + 256 * 1024 + 4096,
+      "the file stays bounded",
+      fs.statSync(appended.file("p")).size < 32 * 1024 + 256 * 1024 + 4096,
       JSON.stringify(counter),
     );
     const a = await appended.store.read("p");
@@ -337,7 +348,7 @@ async function main() {
     const shownA = await show(a);
     const shownW = await show(w);
     check("the appended file restores the same text as a whole rewrite", shownA === shownW && shownA.includes("step 11.15"), `${shownA.length} vs ${shownW.length}`);
-    check("its time is the last append's", Date.parse(a.savedAt) >= fs.statSync(appended.file("p")).mtimeMs - 1);
+    check("a read gives the time of the last append, not of the header", Date.parse(a.savedAt) >= fs.statSync(appended.file("p")).mtimeMs - 1);
 
     // A resize or a failed write starts over with a whole file.
     appended.store.track(["q"]);
@@ -350,13 +361,14 @@ async function main() {
     after.restore();
     check("a resized pane's file is rewritten whole", after.writes === 1 && after.appends === 0, JSON.stringify(after));
     const fsp = fs.promises;
-    const realAppend = fsp.appendFile;
-    fsp.appendFile = async () => {
-      throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    const realOpen = fsp.open;
+    fsp.open = async (file, flags, mode) => {
+      if (flags === "r+") throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      return realOpen.call(fsp, file, flags, mode);
     };
     appended.feed("q", "lost append\r\n");
     await appended.store.flush("q");
-    fsp.appendFile = realAppend;
+    fsp.open = realOpen;
     after = countWrites(appended.dir);
     appended.feed("q", "next\r\n");
     await appended.store.flush("q");
@@ -367,8 +379,89 @@ async function main() {
       after.writes === 1 && text.includes("before") && text.includes("lost append\r\nnext"),
       JSON.stringify({ after, text }),
     );
+
+    // Log lines (cheaper to append than to rewrite) until the raw part would
+    // pass the cap: that save rewrites the file whole, folded.
+    appended.store.track(["log"]);
+    appended.feed("log", "start\r\n");
+    await appended.store.flush("log");
+    let crossed = null;
+    for (let i = 0, raw = 0; raw < 40 * 1024; i += 1) {
+      const counter = countWrites(appended.dir);
+      const chunk = Array.from({ length: 20 }, (_, j) => `log ${i}.${j} ${"=".repeat(60)}\r\n`).join("");
+      raw += chunk.length;
+      appended.feed("log", chunk);
+      await appended.store.flush("log");
+      counter.restore();
+      if (crossed === null && counter.writes === 1) crossed = { at: raw, counter };
+      else if (crossed === null && counter.appends !== 1) crossed = { at: raw, counter, wrong: true };
+    }
+    check(
+      "log output is appended until the raw part would pass the cap, then rewritten whole",
+      crossed && !crossed.wrong && crossed.at > 24 * 1024 && crossed.at <= 34 * 1024,
+      JSON.stringify(crossed),
+    );
+
+    // The total budget evicts a file while its append is on the way: the
+    // append fails instead of leaving a tail with no header, and the next
+    // save writes the file whole.
+    appended.store.track(["evicted"]);
+    appended.feed("evicted", "kept line\r\n");
+    await appended.store.flush("evicted");
+    const openFor = fsp.open;
+    fsp.open = async (file, flags, mode) => {
+      if (flags === "r+" && String(file).endsWith(storeMod.scrollbackFileName("evicted"))) {
+        await appended.store.removeFile(storeMod.scrollbackFileName("evicted"));
+      }
+      return openFor.call(fsp, file, flags, mode);
+    };
+    appended.feed("evicted", "printed during the eviction\r\n");
+    await appended.store.flush("evicted");
+    fsp.open = openFor;
+    check("an append never recreates an evicted file without its header", !appended.exists("evicted"));
+    appended.feed("evicted", "after\r\n");
+    await appended.store.flush("evicted");
+    const back = (await appended.store.read("evicted"))?.raw.toString("utf8") ?? "";
+    check(
+      "the next save writes it whole again",
+      back.includes("kept line\r\nprinted during the eviction\r\nafter"),
+      JSON.stringify(back),
+    );
     appended.store.dispose();
     whole.store.dispose();
+  }
+
+  // ── a restored pane: rewritten with the marker, then appended ─────────
+  {
+    run += 1;
+    const dir = path.join(tmp, `run-${run}`, "terminal-scrollback");
+    const first = await makeHarness(storeMod, dir);
+    first.store.track(["r"]);
+    first.feed("r", "$ echo before restart\r\nbefore restart\r\n$ ");
+    await first.store.flush();
+    first.store.dispose();
+    const second = await makeHarness(storeMod, dir);
+    const replay = await second.store.restoreReplay("r");
+    check("the earlier output is replayed", !!replay && replay.text.includes("before restart"));
+    second.store.track(["r"]);
+    second.sessions.add("r");
+    const counter = countWrites(dir);
+    second.feed("r", "$ echo one\r\none\r\n");
+    await second.store.flush();
+    second.feed("r", "$ echo two\r\ntwo\r\n");
+    await second.store.flush();
+    counter.restore();
+    check("the first save after a restore is whole, the next one appended", counter.writes === 1 && counter.appends === 1, JSON.stringify(counter));
+    second.store.dispose();
+    const third = await makeHarness(storeMod, dir);
+    const text = (await third.store.restoreReplay("r"))?.text ?? "";
+    const order = ["before restart", "Restored from before", "one\r\n", "two\r\n"].map((part) => text.indexOf(part));
+    check(
+      "the next restart shows both sessions around the marker, in order",
+      order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])),
+      JSON.stringify(order),
+    );
+    third.store.dispose();
   }
 
   // ── 2 minutes of output ───────────────────────────────────────────────
