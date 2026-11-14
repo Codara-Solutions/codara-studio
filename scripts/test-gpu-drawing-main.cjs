@@ -127,12 +127,25 @@ async function scenarios() {
     check("another process dying writes nothing", !t.file()?.fallback);
     t.app.emit("child-process-gone", {}, { type: "GPU", reason: "crashed", exitCode: 139 });
     check("a GPU crash writes the marker", t.file()?.fallback?.reason === "gpu-crash" && t.file().fallback.detail === "crashed (exit code 139)");
-    t.app.emit("child-process-gone", {}, { type: "GPU", reason: "killed", exitCode: 9 });
+    t.app.emit("child-process-gone", {}, { type: "GPU", reason: "oom", exitCode: 1 });
     check("a second crash keeps the first marker", t.file()?.fallback?.detail === "crashed (exit code 139)");
     const status = await t.handlers.get("gpuDrawing:status")();
     check("the window that reloads after the crash gets no notice yet", status.notice === null);
     t.app.emit("will-quit");
     check("a clean exit removes the record and keeps the marker", !t.file()?.running && t.file()?.fallback?.reason === "gpu-crash");
+  }
+
+  console.log("a lost graphics context Chromium recovers from");
+  {
+    const t = fresh({ preference: true });
+    t.mod.decideGpuDrawingAtStartup(true);
+    t.mod.startGpuDrawingSafetyNet();
+    t.app.emit("child-process-gone", {}, { type: "GPU", reason: "abnormal-exit", exitCode: 8 });
+    check("one GPU exit of that kind leaves no marker", !t.file()?.fallback);
+    t.app.emit("child-process-gone", {}, { type: "GPU", reason: "killed", exitCode: 9 });
+    check("a second one in the same run does", t.file()?.fallback?.reason === "gpu-crash" && t.file().fallback.detail === "killed (exit code 9)");
+    await t.preferences.setPreference("waylandHardwareAcceleration", false);
+    check("turned off by hand after that crash: no marker left to say Codara did it", !t.file()?.fallback && t.file()?.running?.pid === process.pid);
   }
 
   console.log("a quit, a shutdown, the switch turned off during the run");
@@ -169,6 +182,17 @@ async function scenarios() {
     fs.writeFileSync(path.join(process.env.CODARA_HOME_DIR, "gpu-drawing.json"), JSON.stringify(theirs));
     t.app.emit("will-quit");
     check("a clean exit leaves another instance's record alone", t.file()?.running?.pid === 1);
+  }
+
+  console.log("a lock hand-off between the read and the write");
+  {
+    const old = { running: { pid: process.pid === 1 ? 2 : 1, startedAt: "2026-11-14T10:00:00.000Z" } };
+    const t = fresh({ preference: false, state: old });
+    t.mod.decideGpuDrawingAtStartup(true);
+    // The old instance (pid 1 is always alive) quits cleanly before this one owns the lock.
+    fs.rmSync(path.join(process.env.CODARA_HOME_DIR, "gpu-drawing.json"));
+    t.mod.startGpuDrawingSafetyNet();
+    check("its removed record is not written back", t.file() === null);
   }
 
   console.log("the start after a fallback");

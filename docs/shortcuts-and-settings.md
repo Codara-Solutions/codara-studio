@@ -466,8 +466,13 @@ applies depends on the system:
 If the graphics driver crashes while the switch is on, or Codara did not
 close properly the last time it ran with it on (it crashed, was killed or
 the computer froze while Codara was in use), the next start draws on the
-CPU, turns the switch off, and says why once in a notice. Codara ending
-while it quits, or with a logout or shutdown, does not count. The row keeps the reason under the switch.
+CPU, turns the switch off, and says why once in a notice. A GPU process
+that crashes, runs out of memory or cannot start counts at once; one that
+Chromium ends and restarts on its own (after a lost graphics context, as
+can happen on waking from sleep) counts only the second time in a run.
+Codara ending once it has started to quit, or with a system shutdown, does
+not count. A logout that ends Codara without asking it to quit can still
+look like a crash. The row keeps the reason under the switch.
 Turn it on again to try once more. The record lives in
 `~/.codarastudio/gpu-drawing.json`.
 

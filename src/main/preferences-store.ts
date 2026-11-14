@@ -455,10 +455,22 @@ async function writeToDisk(prefs: AppPreferences): Promise<void> {
   await writeFileAtomic(prefsPath(), JSON.stringify(prefs, null, 2));
 }
 
+let loading: Promise<AppPreferences> | null = null;
+
 export async function loadPreferences(): Promise<AppPreferences> {
   if (cache) return cache;
-  cache = await readFromDisk();
-  return cache;
+  // One read for every early caller, and a value set while it was in flight
+  // wins over what it read: a second read landing late would otherwise put
+  // the old value back in the cache, and the next save would write it.
+  loading ??= readFromDisk()
+    .then((read) => {
+      cache ??= read;
+      return cache;
+    })
+    .finally(() => {
+      loading = null;
+    });
+  return loading;
 }
 
 type PreferenceListener = (key: PrefKey, prefs: AppPreferences) => void;

@@ -7,6 +7,7 @@ import {
   GPU_DRAWING_STATE_FILE,
   gpuDrawingStatus,
   isGpuCrash,
+  isRecoverableGpuExit,
   parseGpuDrawingState,
   planGpuDrawing,
   serializeGpuDrawingState,
@@ -14,7 +15,8 @@ import {
   stateAfterNoticeShown,
   stateAfterQuitCancelled,
   stateAfterQuitStarted,
-  stateAfterTurnedOnByHand,
+  stateWhenLockOwned,
+  stateWithoutFallback,
   type GpuDrawingPlan,
   type GpuDrawingRunning,
   type GpuDrawingState,
@@ -38,6 +40,7 @@ const PREFERENCE = "waylandHardwareAcceleration";
 const QUIT_CANCELLED_AFTER_MS = 30_000;
 
 let plan: GpuDrawingPlan | null = null;
+let bootId: string | null = null;
 
 function statePath(): string {
   return join(codaraHome(), GPU_DRAWING_STATE_FILE);
@@ -107,13 +110,14 @@ function isSameProcess(record: GpuDrawingRunning): boolean {
  * the userData override is settled: it resolves the Codara home.
  */
 export function decideGpuDrawingAtStartup(nativeWayland: boolean): GpuDrawingPlan {
+  bootId = nativeWayland ? readBootId() : null;
   plan = planGpuDrawing({
     nativeWayland,
     env: process.env[GPU_DRAWING_ENV],
     preference: nativeWayland && readPreferenceFromDiskSync(PREFERENCE) === true,
     state: nativeWayland ? readState() : {},
     pid: process.pid,
-    bootId: nativeWayland ? readBootId() : null,
+    bootId,
     startTicks: nativeWayland ? readStartTicks(process.pid) : null,
     isRunning: isSameProcess,
     now: new Date().toISOString(),
@@ -135,7 +139,7 @@ export function startGpuDrawingSafetyNet(): void {
     `drawing with the graphics card: ${current.hardware ? "on" : "off"} (source=${current.source})` +
       (fallback ? ` fallback=${fallback.reason} since ${fallback.at}` : ""),
   );
-  writeState(current.nextState);
+  updateState((fresh) => stateWhenLockOwned(fresh, current, { pid: process.pid, bootId, isRunning: isSameProcess }));
   if (current.turnOffPreference) {
     void setPreference(PREFERENCE, false).catch((err) => {
       console.warn("[gpu-drawing] could not turn the preference off:", err);
@@ -146,11 +150,15 @@ export function startGpuDrawingSafetyNet(): void {
   onPreferenceChange((key, prefs) => {
     if (key !== PREFERENCE) return;
     preferenceOn = prefs[PREFERENCE] === true;
-    if (!preferenceOn) return;
-    const before = readState();
-    if (!before.fallback) return;
-    updateState(stateAfterTurnedOnByHand);
-    logMain("gpu", "drawing with the graphics card turned on again by hand; applies at the next start");
+    const before = readState().fallback;
+    if (!before) return;
+    if (preferenceOn) {
+      updateState(stateWithoutFallback);
+      logMain("gpu", "drawing with the graphics card turned on again by hand; applies at the next start");
+    } else if (current.guarded && !before.noticeShown) {
+      // Turned off by hand in the run that crashed: no "Codara turned it off".
+      updateState(stateWithoutFallback);
+    }
   });
   if (!current.guarded) return;
 
@@ -168,14 +176,17 @@ export function startGpuDrawingSafetyNet(): void {
   app.on("before-quit", () => quitStarted("before-quit"));
   powerMonitor.on("shutdown", () => quitStarted("system shutdown"));
 
+  let recoverableExits = 0;
   app.on("child-process-gone", (_event, details) => {
+    const crash = isGpuCrash(details, quitting, recoverableExits);
+    if (isRecoverableGpuExit(details) && !quitting) recoverableExits += 1;
     // Someone who turned it off during the run needs no "Codara turned it off".
-    if (!preferenceOn || !isGpuCrash(details, quitting)) return;
-    const crash = fallbackForGpuCrash(details, new Date().toISOString());
+    if (!preferenceOn || !crash) return;
+    const marker = fallbackForGpuCrash(details, new Date().toISOString());
     // The first crash is enough: the next start draws on the CPU.
-    const next = updateState((state) => (state.fallback ? state : { ...state, fallback: crash }));
-    if (next.fallback === crash) {
-      logMain("gpu", `GPU process died (${crash.detail}); the next start draws without the graphics card`);
+    const next = updateState((state) => (state.fallback ? state : { ...state, fallback: marker }));
+    if (next.fallback === marker) {
+      logMain("gpu", `GPU process died (${marker.detail}); the next start draws without the graphics card`);
     }
   });
   const cleanExit = (): void => {

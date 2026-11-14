@@ -250,9 +250,28 @@ export interface GpuProcessGone {
   exitCode?: number;
 }
 
-/** A GPU process death that counts as a crash. Exits during a quit and clean exits do not. */
-export function isGpuCrash(details: GpuProcessGone, quitting: boolean): boolean {
-  return details.type === "GPU" && details.reason !== "clean-exit" && !quitting;
+// A GPU process that crashed, ran out of memory or could not start is a
+// crash at once. Chromium also ends the GPU process on purpose after a lost
+// graphics context (common after a resume from sleep) and recovers by
+// itself; that, a kill or another abnormal exit counts only once it happens
+// a second time in the same run.
+const GPU_CRASH_AT_ONCE = new Set(["crashed", "oom", "launch-failed", "integrity-failure"]);
+const GPU_CRASH_IF_REPEATED = new Set(["abnormal-exit", "killed"]);
+
+/**
+ * A GPU process death that counts as a crash. `earlierExits`: the GPU exits
+ * of the second kind already seen this run. Exits during a quit, clean exits
+ * and memory evictions never count.
+ */
+export function isGpuCrash(details: GpuProcessGone, quitting: boolean, earlierExits = 0): boolean {
+  if (details.type !== "GPU" || quitting) return false;
+  if (GPU_CRASH_AT_ONCE.has(details.reason)) return true;
+  return GPU_CRASH_IF_REPEATED.has(details.reason) && earlierExits >= 1;
+}
+
+/** An exit that counts only when repeated (see isGpuCrash). */
+export function isRecoverableGpuExit(details: GpuProcessGone): boolean {
+  return details.type === "GPU" && GPU_CRASH_IF_REPEATED.has(details.reason);
 }
 
 export function fallbackForGpuCrash(details: GpuProcessGone, now: string): GpuDrawingFallback {
@@ -283,9 +302,32 @@ export function stateAfterCleanExit(state: GpuDrawingState, pid: number): GpuDra
   return withState(undefined, state.fallback);
 }
 
-/** Turning the preference on by hand clears the fallback; the next start uses the graphics card again. */
-export function stateAfterTurnedOnByHand(state: GpuDrawingState): GpuDrawingState {
+/**
+ * Turning the preference on by hand clears the fallback (the next start uses
+ * the graphics card again), and so does turning it off by hand in the run that
+ * crashed: Codara did not turn it off then, and must not say it did.
+ */
+export function stateWithoutFallback(state: GpuDrawingState): GpuDrawingState {
   return withState(state.running, undefined);
+}
+
+/**
+ * The file once this instance owns the single-instance lock, from a fresh
+ * read: the plan was made before app ready, and an instance that handed the
+ * lock over may have removed its record or written a marker since.
+ */
+export function stateWhenLockOwned(
+  fresh: GpuDrawingState,
+  plan: GpuDrawingPlan,
+  input: Pick<GpuDrawingStartupInput, "pid" | "bootId" | "isRunning">,
+): GpuDrawingState {
+  if (plan.availability !== "opt-in") return fresh;
+  const running = plan.guarded
+    ? plan.nextState.running
+    : recordIsStale(fresh.running, input)
+      ? undefined
+      : fresh.running;
+  return withState(running, fresh.fallback ?? plan.nextState.fallback);
 }
 
 export function stateAfterNoticeShown(state: GpuDrawingState): GpuDrawingState {

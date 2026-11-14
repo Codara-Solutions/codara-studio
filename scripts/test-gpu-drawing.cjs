@@ -62,7 +62,9 @@ function run(mod) {
     isGpuCrash,
     fallbackForGpuCrash,
     stateAfterCleanExit,
-    stateAfterTurnedOnByHand,
+    stateWithoutFallback,
+    stateWhenLockOwned,
+    isRecoverableGpuExit,
     stateAfterNoticeShown,
     stateAfterQuitStarted,
     stateAfterQuitCancelled,
@@ -181,7 +183,14 @@ function run(mod) {
   console.log("safety net: the GPU process died");
   {
     check("a GPU crash counts", isGpuCrash({ type: "GPU", reason: "crashed", exitCode: 139 }, false));
-    check("a killed GPU process counts", isGpuCrash({ type: "GPU", reason: "killed", exitCode: 9 }, false));
+    check("an out-of-memory GPU process counts", isGpuCrash({ type: "GPU", reason: "oom", exitCode: 1 }, false));
+    check("a GPU process that cannot start counts", isGpuCrash({ type: "GPU", reason: "launch-failed", exitCode: 1 }, false));
+    for (const reason of ["killed", "abnormal-exit"]) {
+      const exit = { type: "GPU", reason, exitCode: 8 };
+      check(`a first ${reason} (a lost context Chromium recovers from) does not count`, !isGpuCrash(exit, false, 0) && isRecoverableGpuExit(exit));
+      check(`a second ${reason} in the same run does`, isGpuCrash(exit, false, 1));
+    }
+    check("a memory eviction never counts", !isGpuCrash({ type: "GPU", reason: "memory-eviction", exitCode: 0 }, false, 5));
     check("a clean GPU exit does not", !isGpuCrash({ type: "GPU", reason: "clean-exit", exitCode: 0 }, false));
     check("a GPU exit while quitting does not", !isGpuCrash({ type: "GPU", reason: "crashed", exitCode: 139 }, true));
     check("another process type does not", !isGpuCrash({ type: "Utility", reason: "crashed", exitCode: 1 }, false));
@@ -204,7 +213,7 @@ function run(mod) {
     check("after it was shown: no notice again, the row still says why", thirdStatus.notice === null && thirdStatus.turnedOff?.reason === "gpu-crash" && !third.hardware);
     check("stateAfterNoticeShown is idempotent", stateAfterNoticeShown(shown) === shown);
 
-    const byHand = stateAfterTurnedOnByHand(third.nextState);
+    const byHand = stateWithoutFallback(third.nextState);
     check("turning it on by hand clears the marker", !byHand.fallback && serializeGpuDrawingState(byHand) === null);
     const fourth = planGpuDrawing(input({ preference: true, state: byHand, pid: 7000 }));
     check("and the next start uses the graphics card again", fourth.hardware && fourth.source === "setting" && fourth.guarded);
@@ -212,6 +221,24 @@ function run(mod) {
   {
     const state = { running: { pid: 99, bootId: BOOT, startedAt: NOW } };
     check("a clean exit leaves another process's record alone", stateAfterCleanExit(state, 4242) === state);
+  }
+
+  console.log("the file once the lock is owned (re-read: a hand-off may have changed it)");
+  {
+    const old = { running: { pid: 77, bootId: BOOT, startedAt: NOW } };
+    const off = planGpuDrawing(input({ preference: false, state: old, isRunning: () => true }));
+    check("planned while the old instance ran: its record kept in the plan", off.nextState.running?.pid === 77);
+    const gone = stateWhenLockOwned({}, off, { pid: 4242, bootId: BOOT, isRunning: () => false });
+    check("the old instance removed its record meanwhile: it is not written back", serializeGpuDrawingState(gone) === null);
+    const dead = stateWhenLockOwned(old, off, { pid: 4242, bootId: BOOT, isRunning: () => false });
+    check("a record whose process is gone by then is dropped", !dead.running);
+    const crash = { reason: "gpu-crash", at: NOW, noticeShown: false };
+    const on = planGpuDrawing(input({ preference: true, state: old, isRunning: () => true }));
+    const merged = stateWhenLockOwned({ fallback: crash }, on, { pid: 4242, bootId: BOOT, isRunning: () => false });
+    check("a marker the old instance wrote after the read is kept, with this run's record", merged.fallback === crash && merged.running?.pid === 4242);
+    const always = planGpuDrawing(input({ nativeWayland: false }));
+    const stray = { fallback: crash };
+    check("where Codara never turns it off, the file is left as it is", stateWhenLockOwned(stray, always, { pid: 4242, bootId: BOOT, isRunning: () => false }) === stray);
   }
 
   console.log("the state file");

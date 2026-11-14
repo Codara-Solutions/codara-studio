@@ -16,7 +16,8 @@ const GPU_DRAWING_DESC =
 
 type SetPreference = <K extends PrefKey>(key: K, value: AppPreferences[K]) => Promise<void>;
 
-export function useGpuDrawingStatus(): GpuDrawingStatus | null {
+/** Re-read whenever `preference` changes: turning it on clears Codara's turned-off reason. */
+export function useGpuDrawingStatus(preference?: boolean): GpuDrawingStatus | null {
   const [status, setStatus] = useState<GpuDrawingStatus | null>(null);
   useEffect(() => {
     let live = true;
@@ -29,7 +30,7 @@ export function useGpuDrawingStatus(): GpuDrawingStatus | null {
     return () => {
       live = false;
     };
-  }, []);
+  }, [preference]);
   return status;
 }
 
@@ -40,7 +41,7 @@ export function GpuDrawingRow({
   preferences: AppPreferences;
   setPreference: SetPreference;
 }) {
-  const status = useGpuDrawingStatus();
+  const status = useGpuDrawingStatus(preferences.waylandHardwareAcceleration === true);
   if (!status) return null;
   if (status.availability === "always-on") {
     return (
