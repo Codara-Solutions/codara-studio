@@ -84,7 +84,7 @@ function install(target: string): void {
   for (const name of ["spawn", "spawnSync", "execFile", "execFileSync", "fork"]) {
     const original = mutable[name];
     const wrapped = function (this: unknown, file: unknown, args?: unknown, ...rest: unknown[]) {
-      record(name === "fork" ? process.execPath : file, args);
+      recordOnce(name === "fork" ? process.execPath : file, args);
       return original.call(this, file, args, ...rest);
     };
     const custom = (original as unknown as Record<symbol, unknown>)[promisify.custom];
@@ -98,12 +98,23 @@ function install(target: string): void {
     }
     mutable[name] = wrapped as never;
   }
+  // Node's exec calls the exported execFile (the shell), which would count
+  // the same child twice.
+  let insideExec = false;
+  const recordOnce = (file: unknown, args: unknown): void => {
+    if (!insideExec) record(file, args);
+  };
   for (const name of ["exec", "execSync"]) {
     const original = mutable[name];
     const wrapped = function (this: unknown, command: unknown, ...rest: unknown[]) {
       const words = String(command ?? "").trim().split(/\s+/);
       record(words[0], words.slice(1));
-      return original.call(this, command, ...rest);
+      insideExec = true;
+      try {
+        return original.call(this, command, ...rest);
+      } finally {
+        insideExec = false;
+      }
     };
     const custom = (original as unknown as Record<symbol, unknown>)[promisify.custom];
     if (typeof custom === "function") {

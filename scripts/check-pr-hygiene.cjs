@@ -14,7 +14,7 @@
 //    ones) and usually mean the branch was cut from the wrong place.
 //
 // Usage (CI passes these through the environment):
-//   node scripts/check-pr-hygiene.cjs --base origin/Cora --head HEAD \
+//   node scripts/check-pr-hygiene.cjs --base origin/main --head HEAD \
 //     [--head-ref my-branch] [--labels '["large-pr"]']
 // Exit code 1 when a check fails. Annotations use the GitHub Actions
 // "::warning::" / "::error::" syntax and a summary goes to
@@ -252,7 +252,7 @@ function annotation(kind, message) {
 function main() {
   const options = parseArgs(process.argv.slice(2));
   if (!options.base) {
-    console.error("check-pr-hygiene: --base (or PR_BASE) is required, for example origin/Cora");
+    console.error("check-pr-hygiene: --base (or PR_BASE) is required, for example origin/main");
     process.exit(2);
   }
   const result = analyze(options);
