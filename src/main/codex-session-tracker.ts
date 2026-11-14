@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { runtimeFromProcessCommand, type PublicAgentRuntime } from "@shared/agent-patterns";
-import { listProcessesWithCommands } from "./owned-process-tree";
+import { processesUnder } from "./owned-process-tree";
 import { resolveCodexTranscriptPath, resolveCodexHomePaths, pathIsInsideCodexHome } from "./orchestration/codex-home";
 import { extractSessionUuid, isInteractiveCodexSource, readRolloutHeader } from "./orchestration/codex-sessions";
 import { latestSessionStart, recordSessionStart, type SessionStartRecord } from "./agent-session-registry";
@@ -65,9 +65,22 @@ export function parseCodexOpenFiles(output: string): Map<number, string[]> {
   return result;
 }
 
+// Linux names every open file under /proc/<pid>/fd, so no lsof is needed.
+async function procOpenRollouts(pids: number[]): Promise<Map<number, string[]>> {
+  const result = new Map<number, string[]>();
+  await Promise.all(pids.map(async (pid) => {
+    const descriptors = await fs.readdir(`/proc/${pid}/fd`).catch(() => [] as string[]);
+    const targets = await Promise.all(descriptors.map((fd) => fs.readlink(`/proc/${pid}/fd/${fd}`).catch(() => "")));
+    const paths = [...new Set(targets.filter((target) => target.startsWith("/") && extractSessionUuid(target)))];
+    if (paths.length > 0) result.set(pid, paths);
+  }));
+  return result;
+}
+
 async function openRollouts(pids: number[]): Promise<Map<number, string[]> | null> {
   if (pids.length === 0) return new Map();
   if (process.platform === "win32") return null;
+  if (process.platform === "linux") return procOpenRollouts(pids);
   return new Promise((resolve) => {
     execFile(process.platform === "darwin" ? "/usr/sbin/lsof" : "lsof",
       ["-nP", "-a", "-p", pids.join(","), "-Fpn"],
@@ -122,36 +135,58 @@ export async function sessionFromOpenRollouts(paths: readonly string[], explicit
   return { sessionId: found.sessionId, transcriptPath: found.transcriptPath, cwd: found.cwd };
 }
 
+// A Codex whose session was found keeps it until /resume, which opens
+// another rollout: its open files are read again only this often, instead of
+// every refresh (an lsof each time on macOS).
+const FOUND_RECHECK_MS = 60_000;
+
 export function createCodexSessionTracker(deps: {
   panes: () => CodexTrackedPane[];
   codexHome?: () => string;
-  processes?: () => Promise<readonly ProcessEntry[] | null>;
+  processes?: (rootPids: number[]) => Promise<readonly ProcessEntry[] | null>;
   files?: (pids: number[]) => Promise<Map<number, string[]> | null>;
   latest?: (paneId: string) => SessionStartRecord | null;
   record?: (record: SessionStartRecord) => void;
+  now?: () => number;
 }) {
   const observed = new Map<string, CodexTrackedPane>();
+  // Codex pid -> when its session was last found from its open files.
+  const foundAt = new Map<number, number>();
+  const clock = deps.now ?? Date.now;
   let pending: Promise<void> | null = null;
   let timer: NodeJS.Timeout | null = null;
   let revision = 0;
   const latest = deps.latest ?? latestSessionStart;
   const record = deps.record ?? recordSessionStart;
-  const refresh = (): Promise<void> => {
-    if (pending) return pending;
+  // `force` reads every Codex's open files now, past the found back-off: the
+  // shutdown snapshot must hold the session a /resume just switched to.
+  const refresh = (force = false): Promise<void> => {
+    if (pending) {
+      if (!force) return pending;
+      // After the running read, unless shutdown gave up on it meanwhile.
+      const calledRevision = revision;
+      return pending.then(() => (revision === calledRevision ? refresh(true) : undefined));
+    }
     const startedRevision = revision;
     pending = (async () => {
       const panes = deps.panes();
       if (panes.length === 0 && observed.size === 0) return;
-      const processes = await (deps.processes?.() ?? listProcessesWithCommands(2000));
+      const roots = panes.map((pane) => pane.pid);
+      const processes = await (deps.processes ?? ((pids: number[]) => processesUnder(pids, 2000)))(roots);
       if (!processes) return;
       const live = panes.map((pane) => ({ pane, pid: codexProcessForPane(pane.pid, processes) }));
-      const files = await (deps.files ?? openRollouts)([...new Set(live.flatMap(({ pid }) => pid ? [pid] : []))]);
+      const livePids = new Set(live.flatMap(({ pid }) => pid ? [pid] : []));
+      for (const pid of foundAt.keys()) if (!livePids.has(pid)) foundAt.delete(pid);
+      const startedAt = clock();
+      const probe = [...livePids].filter((pid) => force || startedAt - (foundAt.get(pid) ?? -Infinity) >= FOUND_RECHECK_MS);
+      const files = await (deps.files ?? openRollouts)(probe);
       if (revision !== startedRevision) return;
       for (const { pane, pid } of live) {
-        if (!pid || !files) continue;
+        if (!pid || !files || !probe.includes(pid)) continue;
         const session = await sessionFromOpenRollouts(files.get(pid) ?? [], deps.codexHome?.());
         if (revision !== startedRevision) return;
         if (!session || !deps.panes().some((now) => now.paneId === pane.paneId && now.generationId === pane.generationId)) continue;
+        foundAt.set(pid, startedAt);
         observed.set(pane.paneId, pane);
         const previous = latest(pane.paneId);
         if (previous?.runtime === "codex" && previous.sessionId === session.sessionId &&
@@ -173,14 +208,14 @@ export function createCodexSessionTracker(deps: {
     return pending;
   };
   return {
-    refresh,
+    refresh: () => refresh(),
     start() { if (!timer) { timer = setInterval(() => { void refresh(); }, 3000); timer.unref(); } },
     stop() { if (timer) clearInterval(timer); timer = null; revision += 1; },
     async flush() {
       if (timer) clearInterval(timer);
       timer = null;
       let deadline: NodeJS.Timeout | undefined;
-      await Promise.race([refresh(), new Promise<void>((resolve) => { deadline = setTimeout(resolve, 1000); })]);
+      await Promise.race([refresh(true), new Promise<void>((resolve) => { deadline = setTimeout(resolve, 1000); })]);
       if (deadline) clearTimeout(deadline);
       // A slow process listing must not outlive the shutdown snapshot and
       // mark sessions inactive after shutdown kills their PTYs.

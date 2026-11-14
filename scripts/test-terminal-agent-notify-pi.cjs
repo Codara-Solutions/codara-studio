@@ -264,6 +264,9 @@ async function main() {
   check("process tree recovers a Pi pane", lastChip("pi4")?.runtime === "pi");
   T.processes.set(4040, []);
   await sleep(4200);
+  check("a seen agent's process tree is not read again every 2 s", lastChip("pi4")?.state !== "done");
+  mod.setKnownAgentProcessRecheckMs(2_000);
+  await sleep(2600);
   check("the Pi process leaving ends the session", lastChip("pi4")?.state === "done");
 
   // ── Pi 1.x fullscreen: leaving the alternate screen is not an exit ──

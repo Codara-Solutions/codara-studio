@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync, promises as fsp } from "node:fs";
 
 export interface OwnedProcessIdentity {
   pid: number;
@@ -102,10 +103,210 @@ function listProcesses(): readonly ListedProcess[] | null {
   return parsePsOutput(result.stdout, PS_LINE_RE_BARE);
 }
 
+// ── Linux: /proc instead of `ps` ────────────────────────────────────────────
+// The pollers (the terminal notifier every 2 s, the session trackers every
+// 3 s) forked `ps -axww` about 30 times a minute, and each `ps` reads every
+// process's stat, status and command line. On Linux the same facts are in
+// /proc, read here without a child, and a pane's own subtree is found through
+// each thread's `children` file without listing the machine.
+
+// USER_HZ: /proc/<pid>/stat counts start times in it, and Linux fixes it at
+// 100 on every architecture Node runs on.
+const CLOCK_TICKS_PER_SECOND = 100;
+// The kernel moves btime when the wall clock is stepped (NTP, suspend), and
+// `ps` reads it on every run, so it is re-read now and then.
+const BOOT_TIME_MAX_AGE_MS = 60_000;
+let bootSeconds: { value: number | null; at: number } | null = null;
+let childrenFiles: boolean | undefined;
+
+// The /proc reads, replaceable by tests to inject read errors.
+interface ProcReader {
+  readText(path: string): Promise<string>;
+  readBytes(path: string): Promise<Buffer>;
+  readdir(path: string): Promise<string[]>;
+}
+const systemProcReader: ProcReader = {
+  readText: (path) => fsp.readFile(path, "utf8"),
+  readBytes: (path) => fsp.readFile(path),
+  readdir: (path) => fsp.readdir(path),
+};
+let procReader: ProcReader = systemProcReader;
+
+/** Tests only: replace some /proc reads (null restores the real ones). */
+export function setProcReaderForTests(reader: Partial<ProcReader> | null): void {
+  procReader = reader ? { ...systemProcReader, ...reader } : systemProcReader;
+  bootSeconds = null;
+}
+
+// A read that failed because the process (or one of its threads) exited
+// while it was read. Any other failure (EACCES, EMFILE, EIO, a hidepid
+// mount, a hardened /proc) says nothing about the process: the /proc answer
+// is then incomplete and is never returned. The listing falls back to `ps`,
+// exactly what ran before /proc was read, and is null when `ps` fails too.
+// Callers stop panes on what a listing leaves out.
+function exitedWhileRead(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ESRCH";
+}
+
+const UNKNOWN = Symbol("unknown");
+type Unknown = typeof UNKNOWN;
+
+async function linuxBootSeconds(): Promise<number | null> {
+  if (bootSeconds && Date.now() - bootSeconds.at < BOOT_TIME_MAX_AGE_MS) return bootSeconds.value;
+  let value: number | null = null;
+  try {
+    const match = /^btime\s+(\d+)$/m.exec(await procReader.readText("/proc/stat"));
+    value = match ? Number(match[1]) : null;
+  } catch {
+    value = null;
+  }
+  bootSeconds = { value, at: Date.now() };
+  return value;
+}
+
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** The stamp `ps -o lstart` prints under LC_TIME=C, in local time. */
+export function lstartStamp(epochSeconds: number): string {
+  const at = new Date(epochSeconds * 1000);
+  const two = (value: number) => String(value).padStart(2, "0");
+  return `${DAYS[at.getDay()]} ${MONTHS[at.getMonth()]} ${String(at.getDate()).padStart(2, " ")} ${two(at.getHours())}:${two(at.getMinutes())}:${two(at.getSeconds())} ${at.getFullYear()}`;
+}
+
+/** Parent pid, start time in clock ticks and name from /proc/<pid>/stat. */
+export function parseProcStat(text: string): { parentPid: number; startTicks: number; name: string } | null {
+  // The name sits in parentheses and may itself hold spaces and parentheses.
+  const open = text.indexOf("(");
+  const close = text.lastIndexOf(")");
+  if (open < 0 || close < open) return null;
+  const fields = text.slice(close + 2).split(" ");
+  const parentPid = Number(fields[1]);
+  const startTicks = Number(fields[19]);
+  if (!Number.isSafeInteger(parentPid) || parentPid < 0 || !Number.isFinite(startTicks)) return null;
+  return { parentPid, startTicks, name: text.slice(open + 1, close) };
+}
+
+/** One process from /proc: null when it exited while being read, UNKNOWN when it could not be read. */
+async function readLinuxProcess(pid: number, boot: number | null): Promise<ListedProcess | null | Unknown> {
+  let stat: string;
+  let argv: Buffer;
+  try {
+    [stat, argv] = await Promise.all([
+      procReader.readText(`/proc/${pid}/stat`),
+      procReader.readBytes(`/proc/${pid}/cmdline`),
+    ]);
+  } catch (error) {
+    return exitedWhileRead(error) ? null : UNKNOWN;
+  }
+  const parsed = parseProcStat(stat);
+  if (!parsed) return UNKNOWN;
+  const startedAt =
+    boot === null ? "" : lstartStamp(boot + Math.floor(parsed.startTicks / CLOCK_TICKS_PER_SECOND));
+  const words = argv.toString("utf8").split("\0");
+  while (words.length > 0 && words[words.length - 1] === "") words.pop();
+  // `ps` shows a process without a command line (a kernel thread, a
+  // zombie) by its bracketed name.
+  const command = words.length > 0 ? words.join(" ") : `[${parsed.name}]`;
+  return { pid, parentPid: parsed.parentPid, startedAt, command };
+}
+
+
+async function linuxProcessTable(): Promise<readonly ListedProcess[] | null> {
+  let names: string[];
+  try {
+    names = await procReader.readdir("/proc");
+  } catch {
+    return null;
+  }
+  const boot = await linuxBootSeconds();
+  const rows = await Promise.all(
+    names.filter((name) => /^\d+$/.test(name)).map(Number).filter(safePid).map((pid) => readLinuxProcess(pid, boot)),
+  );
+  if (rows.includes(UNKNOWN)) return null;
+  const listed = rows.filter((row): row is ListedProcess => row !== null && row !== UNKNOWN);
+  return listed.length === 0 ? null : listed;
+}
+
 /**
- * The listing with command lines, read off the main thread. `maxAgeMs`
- * reuses a listing taken within that window; concurrent callers share one
- * in-flight read. Null when the platform has no `ps` or it failed.
+ * Direct children of `pid`, across all its threads. Null when it is gone,
+ * UNKNOWN when a list could not be read (never an empty list in its place).
+ */
+async function linuxChildPids(pid: number): Promise<number[] | null | Unknown> {
+  let tasks: string[];
+  try {
+    tasks = await procReader.readdir(`/proc/${pid}/task`);
+  } catch (error) {
+    return exitedWhileRead(error) ? null : UNKNOWN;
+  }
+  const lists = await Promise.all(
+    tasks.map((task) =>
+      procReader.readText(`/proc/${pid}/task/${task}/children`).catch((error: unknown) =>
+        // A thread that ended has no children left to list.
+        exitedWhileRead(error) ? "" : UNKNOWN,
+      ),
+    ),
+  );
+  if (lists.includes(UNKNOWN)) return UNKNOWN;
+  const children = new Set<number>();
+  for (const list of lists as string[]) {
+    for (const word of list.split(" ")) {
+      const child = Number(word);
+      if (word && safePid(child)) children.add(child);
+    }
+  }
+  return [...children];
+}
+
+/** True when this kernel lists children per thread (CONFIG_PROC_CHILDREN). */
+function linuxChildrenFiles(): boolean {
+  if (childrenFiles === undefined) {
+    childrenFiles = process.platform === "linux" && existsSync(`/proc/self/task/${process.pid}/children`);
+  }
+  return childrenFiles;
+}
+
+/** `rootPids` and everything below them, from /proc. Null when a read failed (incomplete). */
+async function linuxSubtrees(rootPids: readonly number[]): Promise<ListedProcess[] | null> {
+  const boot = await linuxBootSeconds();
+  const seen = new Set<number>();
+  let level = rootPids.filter((pid) => safePid(pid));
+  const listed: ListedProcess[] = [];
+  while (level.length > 0) {
+    const fresh = level.filter((pid) => !seen.has(pid));
+    for (const pid of fresh) seen.add(pid);
+    const [rows, children] = await Promise.all([
+      Promise.all(fresh.map((pid) => readLinuxProcess(pid, boot))),
+      Promise.all(fresh.map((pid) => linuxChildPids(pid))),
+    ]);
+    if (rows.includes(UNKNOWN) || children.includes(UNKNOWN)) return null;
+    for (const row of rows) if (row && row !== UNKNOWN) listed.push(row);
+    level = children.flatMap((list) => (list && list !== UNKNOWN ? list : []));
+  }
+  return listed;
+}
+
+/**
+ * The processes at and below `rootPids` with their command lines. On Linux
+ * only those subtrees are read; elsewhere it is the whole listing (which
+ * holds them). Null when the platform cannot tell.
+ */
+export function processesUnder(
+  rootPids: readonly number[],
+  maxAgeMs = 0,
+): Promise<readonly ListedProcess[] | null> {
+  if (!linuxChildrenFiles()) return listProcessesWithCommands(maxAgeMs);
+  // An incomplete subtree is never an answer: the whole listing instead
+  // (from /proc when that reads in full, else `ps`).
+  return linuxSubtrees(rootPids).then((subtree) => subtree ?? listProcessesWithCommands(maxAgeMs));
+}
+
+/**
+ * The listing with command lines, read off the main thread (from /proc on
+ * Linux, from `ps` elsewhere). `maxAgeMs` reuses a listing taken within that
+ * window; concurrent callers share one in-flight read. Null when the
+ * platform cannot list processes or the read failed.
  */
 export function listProcessesWithCommands(
   maxAgeMs = 0,
@@ -119,7 +320,24 @@ export function listProcessesWithCommands(
     return Promise.resolve(cachedWithCommands.list);
   }
   if (inflightWithCommands) return inflightWithCommands;
-  inflightWithCommands = new Promise<readonly ListedProcess[] | null>(
+  const read =
+    process.platform === "linux"
+      ? linuxProcessTable().then((list) => list ?? psListingWithCommands())
+      : psListingWithCommands();
+  inflightWithCommands = read
+    .then((list) => {
+      if (list) cachedWithCommands = { at: Date.now(), list };
+      return list;
+    })
+    .finally(() => {
+      inflightWithCommands = null;
+    });
+  return inflightWithCommands;
+}
+
+/** `ps -axww` with command lines; null when it fails, times out or overflows. */
+function psListingWithCommands(): Promise<readonly ListedProcess[] | null> {
+  return new Promise<readonly ListedProcess[] | null>(
     (resolve) => {
       let stdout = "";
       let overflowed = false;
@@ -128,7 +346,6 @@ export function listProcessesWithCommands(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        if (value) cachedWithCommands = { at: Date.now(), list: value };
         resolve(value);
       };
       let child: ReturnType<typeof spawn>;
@@ -174,10 +391,7 @@ export function listProcessesWithCommands(
         finish(parsed.length === 0 ? null : parsed);
       });
     },
-  ).finally(() => {
-    inflightWithCommands = null;
-  });
-  return inflightWithCommands;
+  );
 }
 
 function buildTree(
@@ -295,7 +509,8 @@ export function aliveProcesses(
 /**
  * Every process below `rootPid` right now with its command line, excluding
  * the root. Async because the command-line listing is slow on some machines;
- * `maxAgeMs` lets a polling caller reuse a listing taken within that window.
+ * `maxAgeMs` lets a polling caller reuse a listing taken within that window
+ * where the whole listing is read (not on Linux, which reads the subtree).
  * Null when the process list is unavailable.
  */
 export async function descendantProcessesWithCommands(
@@ -303,7 +518,7 @@ export async function descendantProcessesWithCommands(
   maxAgeMs = 0,
 ): Promise<OwnedProcessIdentity[] | null> {
   if (!safePid(rootPid)) return null;
-  const listed = await listProcessesWithCommands(maxAgeMs);
+  const listed = await processesUnder([rootPid], maxAgeMs);
   if (!listed) return null;
   const tree = buildTree(listed, rootPid);
   if (!tree) return null;

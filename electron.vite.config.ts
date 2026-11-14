@@ -91,6 +91,8 @@ export default defineConfig(({ command }) => ({
     },
     build: {
       minify: "esbuild",
+      // For scripts/measure-spawns.cjs: the spawn census names source lines.
+      sourcemap: process.env.CODARA_MAIN_SOURCEMAP === "1",
       rollupOptions: {
         input: { index: resolve(__dirname, "src/main/index.ts") },
       },

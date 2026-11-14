@@ -1,4 +1,5 @@
 import "./appimage-launch-boot";
+import "./spawn-census";
 import {
   app,
   BrowserWindow,
