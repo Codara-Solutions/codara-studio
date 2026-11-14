@@ -108,6 +108,8 @@ export class VtScanner {
           this.utf8 -= 1;
           i += 1;
         }
+        // A character split over more than two chunks is still open.
+        if (i === end) return end;
         this.utf8 = 0;
         const found = buf.indexOf(0x1b, i);
         const stop = found === -1 || found >= end ? end : found;

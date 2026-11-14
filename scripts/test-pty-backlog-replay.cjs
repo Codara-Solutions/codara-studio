@@ -84,6 +84,9 @@ async function main() {
     controller = createController();
     globalThis.__codaraPtySpawnHarness = controller;
     pty = require(outfile);
+    const backlogFile = path.join(tmp, "backlog.cjs");
+    await esbuild.build({ entryPoints: [path.join(path.dirname(MODULE_TS), "pty-backlog.ts")], outfile: backlogFile, bundle: true, platform: "node", format: "cjs", logLevel: "silent" });
+    const { VtScanner } = require(backlogFile);
 
     let failed = 0;
     const section = async (name, fn) => {
@@ -193,6 +196,26 @@ async function main() {
       assert.equal(view.modes.bracketedPasteMode, true, "a mode set in the dropped output survives");
       assert.ok(held > 2 * MB && held <= 16 * MB, `cursor-relative output keeps the old cap, kept ${held}`);
       view.dispose();
+    });
+
+    await section("the scanner knows when a sequence or a character is still open across chunks", async () => {
+      const scanner = new VtScanner();
+      const steps = [
+        ["\xf0", false],
+        ["\x9f", false],
+        ["\x98", false],
+        ["\x80 ok", true],
+        ["\x1b]0;ti", false],
+        ["tle\x07", true],
+        ["\x1b[", false],
+        ["?1049h", true],
+      ];
+      for (const [input, ground] of steps) {
+        const buf = Buffer.from(input, "latin1");
+        for (let at = 0; at < buf.length; ) at = scanner.scan(buf, at, buf.length, { ris: false, modes: new Map(), sgr: [] });
+        assert.equal(scanner.atGround(), ground, `after ${JSON.stringify(input)}`);
+      }
+      assert.equal(scanner.alt, true, "a split switch to the alternate screen is seen");
     });
 
     const history = Buffer.alloc(SLICE * 5 + 77);
