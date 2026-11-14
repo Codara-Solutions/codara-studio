@@ -86,7 +86,11 @@ async function measure(pty, controller, name, total) {
   await sleep(30);
   pty.pause(id, 3_000);
   const before = await used();
-  for (const chunk of WORKLOADS[name](total)) handle.emit(chunk);
+  const output = [...WORKLOADS[name](total)];
+  const ingestStart = performance.now();
+  for (const chunk of output) handle.emit(chunk);
+  const ingest = performance.now() - ingestStart;
+  output.length = 0;
   const after = await used();
   const held = { heap: after.heap - before.heap, buffers: after.buffers - before.buffers };
   const snapshot = pty.resourceSnapshot().sessions.find((s) => s.id === id);
@@ -113,6 +117,7 @@ async function measure(pty, controller, name, total) {
   pty.killImmediate(id);
   return {
     held,
+    ingest,
     backlog: snapshot.detachedBacklogBytes,
     tail: snapshot.tailBytes,
     messages: replay.length,
@@ -138,6 +143,7 @@ async function main() {
       const r = await measure(pty, controller, name, total);
       console.log(`${name}:`);
       console.log(`  held after the output: ${fmt(r.held.heap + r.held.buffers)}: ${fmt(r.held.buffers)} of buffers and ${fmt(r.held.heap)} of heap (backlog ${fmt(r.backlog)}, tail ${fmt(r.tail)})`);
+      console.log(`  main's time to take in the output: ${Math.round(r.ingest)} ms`);
       console.log(`  switch back: ${r.messages} messages, largest ${fmt(r.largest)}, longest task ${Math.round(r.longest)} ms`);
     }
     pty.disposeAll();
