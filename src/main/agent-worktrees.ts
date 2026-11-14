@@ -559,13 +559,21 @@ async function splitRemoteRef(
   return { remote, branch };
 }
 
+// Into its tracking ref with an explicit destination: a configured fetch
+// refspec that leaves the branch out lets a plain fetch succeed without
+// refreshing it, and every proof reads that ref afterwards.
 async function fetchRemoteBranch(
   cwd: string,
   remote: string,
   branch: string,
 ): Promise<string | null> {
   try {
-    await runGit(cwd, ["fetch", "--no-tags", "--end-of-options", remote, branch], {
+    let refspec = branch;
+    if (branch !== "HEAD") {
+      await runGit(cwd, ["check-ref-format", `refs/heads/${branch}`]);
+      refspec = `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`;
+    }
+    await runGit(cwd, ["fetch", "--no-tags", "--end-of-options", remote, refspec], {
       timeout: FETCH_TIMEOUT_MS,
     });
     return null;
@@ -1763,8 +1771,6 @@ interface VerifyContext {
   runs: Promise<RunState[]>;
   rendererTerminals: Promise<RendererTerminal[] | null>;
   fetchedTargets: Map<string, Promise<string | null>>;
-  // Origin branches fetched with an explicit destination, by name.
-  freshOriginCommits?: Map<string, Promise<string | null>>;
   // Prefetched merged pull requests for a whole list, or the error gh gave.
   mergedPullRequests?: { list: GitHubMergedPullRequest[] } | { error: string };
 }
@@ -2013,30 +2019,14 @@ async function originUpstream(repo: string, branch: string): Promise<string | nu
   return name && name !== branch ? name : null;
 }
 
-// What origin has for `branch` now: fetched into its tracking ref with an
-// explicit destination, since a configured fetch refspec that leaves the
-// branch out lets a plain fetch succeed without refreshing it. Null when the
-// fetch fails or the name is no branch name.
+// What origin has for `branch` now, fetched by this check. Null when the
+// fetch fails or there is no origin to fetch from: a copy not refreshed now
+// proves nothing.
 async function freshOriginCommit(ctx: VerifyContext, branch: string): Promise<string | null> {
-  ctx.freshOriginCommits ??= new Map();
-  let pending = ctx.freshOriginCommits.get(branch);
-  if (!pending) {
-    pending = (async () => {
-      const repo = ctx.scope.repoCwd;
-      const ref = `refs/remotes/origin/${branch}`;
-      try {
-        await runGit(repo, ["check-ref-format", `refs/heads/${branch}`]);
-        await runGit(repo, ["fetch", "--no-tags", "--end-of-options", "origin", `+refs/heads/${branch}:${ref}`], {
-          timeout: FETCH_TIMEOUT_MS,
-        });
-      } catch {
-        return null;
-      }
-      return revParse(repo, `${ref}^{commit}`);
-    })();
-    ctx.freshOriginCommits.set(branch, pending);
-  }
-  return pending;
+  const repo = ctx.scope.repoCwd;
+  if (!(await splitRemoteRef(repo, `origin/${branch}`))) return null;
+  if ((await fetchTargetOnce(ctx, `origin/${branch}`)) !== null) return null;
+  return revParse(repo, `refs/remotes/origin/${branch}^{commit}`);
 }
 
 function shortBranch(target: string): string {

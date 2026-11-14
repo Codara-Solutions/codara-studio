@@ -1087,6 +1087,33 @@ async function main() {
     git(repo, ["fetch", "-q", "--prune", "origin"]);
     git(repo, ["branch", "-q", "-D", "release-dropped-local"]);
 
+    // The same with the stale tracking ref right at the squash (no later
+    // rewrite): the content proof must judge what origin has now too.
+    const staleSquash = await mergedUnderOtherName("stale-squash");
+    const stalePreMerge = git(repo, ["rev-parse", `${staleSquash.squash}~1`]);
+    git(repo, ["checkout", "-q", "-b", "release-stale-build", stalePreMerge]);
+    git(repo, ["merge", "-q", "--squash", "fix/stale-squash"]);
+    git(repo, ["commit", "-q", "-m", "squash into release"]);
+    const staleMerge = git(repo, ["rev-parse", "HEAD"]);
+    git(repo, ["checkout", "-q", "main"]);
+    git(repo, ["branch", "-q", "-D", "release-stale-build"]);
+    git(repo, ["push", "-q", "origin", `${stalePreMerge}:refs/heads/release-stale`]);
+    git(repo, ["update-ref", "refs/remotes/origin/release-stale", staleMerge]);
+    h.pulls = [{ ...staleSquash.pr, baseRefName: "release-stale", mergeCommitOid: staleMerge }];
+    git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"]);
+    try {
+      const staleSquashRefused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: staleSquash.made.workspaceId, target: "origin/release-stale" }, deps);
+      assert.equal(staleSquashRefused.code, "WORKTREE_NOT_MERGED", JSON.stringify(staleSquashRefused));
+    } finally {
+      git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    }
+    assert.equal(git(repo, ["rev-parse", "refs/heads/fix/stale-squash"]), staleSquash.head, "the branch is kept");
+    git(repo, ["push", "-q", "-f", "origin", `${staleMerge}:refs/heads/release-stale`]);
+    const staleSquashRemoved = await aw.removeAgentWorktree(terminalAgent, { workspaceId: staleSquash.made.workspaceId, target: "origin/release-stale" }, deps);
+    assert.equal(staleSquashRemoved.ok, true, JSON.stringify(staleSquashRemoved));
+    git(repo, ["push", "-q", "origin", "--delete", "release-stale"]);
+    git(repo, ["fetch", "-q", "--prune", "origin"]);
+
     // One file under the ignored folder keeps blocking.
     const keptFile = await mergedUnderOtherName("kept-file");
     h.pulls = [keptFile.pr];
