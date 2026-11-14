@@ -10,7 +10,7 @@ on:
     # edited: a pull request pointed at another base has another range.
     types: [opened, synchronize, reopened, edited]
   push:
-    branches: [main, Cora]
+    branches: [main]
 
 concurrency:
   group: gitleaks-${{ github.event.pull_request.number || github.ref }}
