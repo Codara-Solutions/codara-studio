@@ -1,5 +1,5 @@
 {
-  "$comment": "Limits in bytes for scripts/check-bundle-budgets.cjs. Started at the 2026-11-02 build plus 3%; renderer.entry gzip and main.index raised on 2026-11-14 to that day's main build plus 1%. Raise one only in the pull request that needs it and say why; lower one after a size win.",
+  "$comment": "Limits in bytes for scripts/check-bundle-budgets.cjs. Started at the 2026-11-02 build plus 3%; renderer.entry gzip and main.index raised on 2026-11-14 to that day's main build plus 1%; main.total gzip raised the same day to 1,835.4 kB plus 1% (the spawn census and the /proc process reader, pull request 192). Raise one only in the pull request that needs it and say why; lower one after a size win.",
   "headroom": 0.03,
   "metrics": {
     "renderer.entry": {
@@ -20,7 +20,7 @@
     },
     "main.total": {
       "raw": 5635000,
-      "gzip": 1835000
+      "gzip": 1854000
     },
     "preload.total": {
       "raw": 51000,
