@@ -456,7 +456,8 @@ applies depends on the system:
 - **Windows, macOS and Linux on X11** (including a Wayland desktop that runs
   Codara through XWayland, `--ozone-platform=x11`): Codara never turns the
   graphics card off, so it is already on. The row says so and has no switch.
-  Chromium may still draw on the CPU for a graphics driver it does not trust.
+  Chromium may still draw on the CPU for a graphics driver it does not trust;
+  the row then shows Off and says why.
 - **Linux with native Wayland**: off by default, because a crash in the
   graphics driver once closed Codara and every terminal with it. Turn the
   switch on and restart Codara to use the graphics card. The Vulkan
@@ -464,8 +465,9 @@ applies depends on the system:
 
 If the graphics driver crashes while the switch is on, or Codara did not
 close properly the last time it ran with it on (it crashed, was killed or
-the computer froze), the next start draws on the CPU, turns the switch off,
-and says why once in a notice. The row keeps the reason under the switch.
+the computer froze while Codara was in use), the next start draws on the
+CPU, turns the switch off, and says why once in a notice. Codara ending
+while it quits, or with a logout or shutdown, does not count. The row keeps the reason under the switch.
 Turn it on again to try once more. The record lives in
 `~/.codarastudio/gpu-drawing.json`.
 

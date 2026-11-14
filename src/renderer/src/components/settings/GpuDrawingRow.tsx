@@ -46,8 +46,12 @@ export function GpuDrawingRow({
     return (
       <ValueRow
         title="Draw with the graphics card (hardware acceleration)"
-        desc="Codara already uses the graphics card on this computer. It is off by default only on Linux with native Wayland."
-        value="On"
+        desc={
+          status.activeNow
+            ? "Codara already uses the graphics card on this computer. It is off by default only on Linux with native Wayland."
+            : "Codara does not turn it off on this computer, but Chromium is not using the graphics card here, usually because it does not trust the graphics driver."
+        }
+        value={status.activeNow ? "On" : "Off"}
       />
     );
   }

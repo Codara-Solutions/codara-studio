@@ -47,7 +47,15 @@ export interface GpuDrawingRunning {
   pid: number;
   /** Linux boot id: a record from an earlier boot never belongs to a live process. */
   bootId?: string;
+  /** The process's start time in clock ticks since boot (/proc/<pid>/stat), so a reused pid is not mistaken for it. */
+  startTicks?: number;
   startedAt: string;
+  /**
+   * Set when a quit began (a quit, a termination signal, a system shutdown).
+   * A logout or shutdown can take the compositor away mid-quit and end the
+   * process before it removes the record; that is not a crash.
+   */
+  quitAt?: string;
 }
 
 export interface GpuDrawingState {
@@ -77,6 +85,10 @@ export function parseGpuDrawingState(raw: string | null | undefined): GpuDrawing
       pid: running.pid as number,
       startedAt: running.startedAt,
       ...(typeof running.bootId === "string" && running.bootId ? { bootId: running.bootId } : {}),
+      ...(Number.isInteger(running.startTicks) && (running.startTicks as number) >= 0
+        ? { startTicks: running.startTicks as number }
+        : {}),
+      ...(typeof running.quitAt === "string" ? { quitAt: running.quitAt } : {}),
     };
   }
   const fallback = parsed.fallback;
@@ -110,7 +122,10 @@ export interface GpuDrawingStartupInput {
   state: GpuDrawingState;
   pid: number;
   bootId: string | null;
-  isAlive: (pid: number) => boolean;
+  /** This process's start time in clock ticks since boot, when known. */
+  startTicks: number | null;
+  /** Whether the process a record names is still that process (alive, and the same start time when recorded). */
+  isRunning: (record: GpuDrawingRunning) => boolean;
   now: string;
 }
 
@@ -131,19 +146,26 @@ export interface GpuDrawingPlan {
   nextState: GpuDrawingState;
 }
 
-/**
- * The previous run with the preference on never removed its record: it
- * crashed or was killed. A record whose process is still alive in this boot
- * belongs to another instance (one that keeps the single-instance lock).
- */
-export function previousRunEndedUncleanly(
+/** The record's process is gone (or from an earlier boot). A live one belongs to another instance. */
+export function recordIsStale(
   running: GpuDrawingRunning | undefined,
-  input: Pick<GpuDrawingStartupInput, "pid" | "bootId" | "isAlive">,
+  input: Pick<GpuDrawingStartupInput, "pid" | "bootId" | "isRunning">,
 ): boolean {
   if (!running) return false;
   if (running.bootId && input.bootId && running.bootId !== input.bootId) return true;
   if (running.pid === input.pid) return true;
-  return !input.isAlive(running.pid);
+  return !input.isRunning(running);
+}
+
+/**
+ * The previous run with the preference on never removed its record and was
+ * not quitting: it crashed or was killed while in use.
+ */
+export function previousRunEndedUncleanly(
+  running: GpuDrawingRunning | undefined,
+  input: Pick<GpuDrawingStartupInput, "pid" | "bootId" | "isRunning">,
+): boolean {
+  return recordIsStale(running, input) && !running?.quitAt;
 }
 
 export function planGpuDrawing(input: GpuDrawingStartupInput): GpuDrawingPlan {
@@ -158,7 +180,8 @@ export function planGpuDrawing(input: GpuDrawingStartupInput): GpuDrawingPlan {
       nextState: input.state,
     };
   }
-  const stale = previousRunEndedUncleanly(input.state.running, input);
+  const stale = recordIsStale(input.state.running, input);
+  const unclean = previousRunEndedUncleanly(input.state.running, input);
   // A live record is another instance's; only the lock owner writes the file,
   // and it keeps that record until its own run replaces it.
   const keptRunning = stale ? undefined : input.state.running;
@@ -177,7 +200,7 @@ export function planGpuDrawing(input: GpuDrawingStartupInput): GpuDrawingPlan {
   let fallback = input.state.fallback;
   // Only while the preference is still on: someone who turned it off by hand
   // before the crash needs no notice.
-  if (!fallback && stale && input.preference) {
+  if (!fallback && unclean && input.preference) {
     fallback = { reason: "unclean-exit", at: input.now, noticeShown: false };
   }
   if (input.preference && fallback) {
@@ -204,6 +227,7 @@ export function planGpuDrawing(input: GpuDrawingStartupInput): GpuDrawingPlan {
           pid: input.pid,
           startedAt: input.now,
           ...(input.bootId ? { bootId: input.bootId } : {}),
+          ...(input.startTicks !== null ? { startTicks: input.startTicks } : {}),
         },
         fallback,
       ),
@@ -240,6 +264,19 @@ export function fallbackForGpuCrash(details: GpuProcessGone, now: string): GpuDr
   };
 }
 
+/** A quit began: an exit that follows is not a crash, even if the process never gets to remove its record. */
+export function stateAfterQuitStarted(state: GpuDrawingState, pid: number, now: string): GpuDrawingState {
+  if (state.running?.pid !== pid || state.running.quitAt) return state;
+  return withState({ ...state.running, quitAt: now }, state.fallback);
+}
+
+/** The quit was called off (the process is still running long after): watch for crashes again. */
+export function stateAfterQuitCancelled(state: GpuDrawingState, pid: number): GpuDrawingState {
+  if (state.running?.pid !== pid || !state.running.quitAt) return state;
+  const { quitAt: _quitAt, ...running } = state.running;
+  return withState(running, state.fallback);
+}
+
 /** A clean exit removes this run's record and nothing else. */
 export function stateAfterCleanExit(state: GpuDrawingState, pid: number): GpuDrawingState {
   if (state.running?.pid !== pid) return state;
@@ -259,7 +296,10 @@ export function stateAfterNoticeShown(state: GpuDrawingState): GpuDrawingState {
 /** What Settings shows and the startup notice reads. */
 export interface GpuDrawingStatus {
   availability: "opt-in" | "always-on";
-  /** Hardware acceleration in this run. */
+  /**
+   * Hardware acceleration in this run. Where Codara never turns it off, what
+   * Chromium reports: it can still refuse a graphics driver it does not trust.
+   */
   activeNow: boolean;
   envOverride: GpuDrawingEnvOverride;
   /** Codara turned the preference off; stays until it is turned on again. */
@@ -268,14 +308,25 @@ export interface GpuDrawingStatus {
   notice: { title: string; body: string } | null;
 }
 
-export function gpuDrawingStatus(plan: GpuDrawingPlan, state: GpuDrawingState): GpuDrawingStatus {
+/**
+ * `chromiumCompositing`: Chromium's gpu_compositing status, which only
+ * matters where Codara never turns acceleration off. The notice waits while
+ * the variable decides: its words ("draws without it now") would be wrong
+ * then, and the start that applies the fallback still has to say it.
+ */
+export function gpuDrawingStatus(
+  plan: GpuDrawingPlan,
+  state: GpuDrawingState,
+  chromiumCompositing: boolean | null = null,
+): GpuDrawingStatus {
   const fallback = plan.availability === "opt-in" ? state.fallback : undefined;
   return {
     availability: plan.availability,
-    activeNow: plan.hardware,
+    activeNow: plan.availability === "always-on" ? chromiumCompositing ?? true : plan.hardware,
     envOverride: plan.envOverride,
     turnedOff: fallback ? { reason: fallback.reason, at: fallback.at } : null,
-    notice: fallback && !fallback.noticeShown ? gpuDrawingNotice(fallback.reason) : null,
+    notice:
+      fallback && !fallback.noticeShown && !plan.envOverride ? gpuDrawingNotice(fallback.reason) : null,
   };
 }
 

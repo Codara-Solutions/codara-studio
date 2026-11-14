@@ -45,7 +45,8 @@ function input(overrides = {}) {
     state: {},
     pid: 4242,
     bootId: BOOT,
-    isAlive: () => false,
+    startTicks: 555,
+    isRunning: () => false,
     now: NOW,
     ...overrides,
   };
@@ -63,6 +64,8 @@ function run(mod) {
     stateAfterCleanExit,
     stateAfterTurnedOnByHand,
     stateAfterNoticeShown,
+    stateAfterQuitStarted,
+    stateAfterQuitCancelled,
     gpuDrawingStatus,
   } = mod;
 
@@ -92,6 +95,7 @@ function run(mod) {
     const state = { fallback: { reason: "gpu-crash", at: NOW, noticeShown: false } };
     const plan = planGpuDrawing(input({ nativeWayland: false, state }));
     check("not native Wayland: a stray marker changes nothing and shows nothing", plan.hardware && gpuDrawingStatus(plan, state).notice === null && gpuDrawingStatus(plan, state).turnedOff === null);
+    check("not native Wayland: the row reports what Chromium does", gpuDrawingStatus(plan, {}, false).activeNow === false && gpuDrawingStatus(plan, {}, true).activeNow === true && gpuDrawingStatus(plan, {}).activeNow === true);
   }
 
   console.log("native Wayland");
@@ -105,7 +109,10 @@ function run(mod) {
     check("preference on: graphics card, guarded", plan.hardware && plan.source === "setting" && plan.guarded && !plan.turnOffPreference);
     check(
       "preference on: records this run with its boot id",
-      plan.nextState.running?.pid === 4242 && plan.nextState.running?.bootId === BOOT && plan.nextState.running?.startedAt === NOW,
+      plan.nextState.running?.pid === 4242 &&
+        plan.nextState.running?.bootId === BOOT &&
+        plan.nextState.running?.startTicks === 555 &&
+        plan.nextState.running?.startedAt === NOW,
       JSON.stringify(plan.nextState),
     );
   }
@@ -123,12 +130,16 @@ function run(mod) {
     const forced = planGpuDrawing(input({ preference: true, env: "1", state: crashed }));
     check("env 1 wins over a fallback too, and does not turn the preference off", forced.hardware && !forced.turnOffPreference);
     check("env: a dead run's record is dropped, the fallback kept", !forced.nextState.running && forced.nextState.fallback?.reason === "gpu-crash");
+    const forcedStatus = gpuDrawingStatus(forced, forced.nextState);
+    check("env: the notice waits (its words would be wrong) and is not used up", forcedStatus.notice === null);
+    const after = planGpuDrawing(input({ preference: true, state: forced.nextState, pid: 5001 }));
+    check("env gone: the start that applies the fallback still tells", !after.hardware && after.turnOffPreference && gpuDrawingStatus(after, after.nextState).notice !== null);
   }
 
   console.log("safety net: the previous run did not exit cleanly");
   {
     const state = { running: { pid: 77, bootId: BOOT, startedAt: "2026-11-14T10:00:00.000Z" } };
-    const plan = planGpuDrawing(input({ preference: true, state, isAlive: () => false }));
+    const plan = planGpuDrawing(input({ preference: true, state, isRunning: () => false }));
     check("a dead process left its record: CPU drawing", plan.hardware === false && plan.source === "fallback" && plan.turnOffPreference);
     check(
       "the marker says unclean-exit, not yet shown, and the dead record is gone",
@@ -141,13 +152,25 @@ function run(mod) {
   }
   {
     const state = { running: { pid: 77, bootId: BOOT, startedAt: NOW } };
-    const plan = planGpuDrawing(input({ preference: true, state, isAlive: (pid) => pid === 77 }));
+    const plan = planGpuDrawing(input({ preference: true, state, isRunning: (record) => record.pid === 77 }));
     check("a live record belongs to another instance: no fallback", plan.hardware && plan.source === "setting" && !plan.nextState.fallback);
-    check("previousRunEndedUncleanly: alive in the same boot is not unclean", !previousRunEndedUncleanly(state.running, { pid: 4242, bootId: BOOT, isAlive: () => true }));
-    check("previousRunEndedUncleanly: a record from another boot is unclean even if the pid is taken", previousRunEndedUncleanly({ ...state.running, bootId: "boot-old" }, { pid: 4242, bootId: BOOT, isAlive: () => true }));
-    check("previousRunEndedUncleanly: no boot id falls back to the pid", previousRunEndedUncleanly({ pid: 77, startedAt: NOW }, { pid: 4242, bootId: null, isAlive: () => false }));
-    const keep = planGpuDrawing(input({ preference: false, state, isAlive: () => true }));
+    check("previousRunEndedUncleanly: alive in the same boot is not unclean", !previousRunEndedUncleanly(state.running, { pid: 4242, bootId: BOOT, isRunning: () => true }));
+    check("previousRunEndedUncleanly: a record from another boot is unclean even if the pid is taken", previousRunEndedUncleanly({ ...state.running, bootId: "boot-old" }, { pid: 4242, bootId: BOOT, isRunning: () => true }));
+    check("previousRunEndedUncleanly: no boot id falls back to the process check", previousRunEndedUncleanly({ pid: 77, startedAt: NOW }, { pid: 4242, bootId: null, isRunning: () => false }));
+    const keep = planGpuDrawing(input({ preference: false, state, isRunning: () => true }));
     check("preference off: another instance's live record is kept", keep.nextState.running?.pid === 77);
+  }
+  {
+    const quitting = { running: { pid: 77, bootId: BOOT, startedAt: NOW, quitAt: NOW } };
+    const plan = planGpuDrawing(input({ preference: true, state: quitting }));
+    check("a run that died while quitting (logout, shutdown) is not a crash", plan.hardware && plan.source === "setting" && !plan.nextState.fallback);
+    const otherBoot = { running: { pid: 77, bootId: "boot-old", startedAt: NOW, quitAt: NOW } };
+    check("nor is one from an earlier boot that was quitting", planGpuDrawing(input({ preference: true, state: otherBoot })).hardware);
+    const started = stateAfterQuitStarted({ running: { pid: 4242, bootId: BOOT, startedAt: NOW } }, 4242, "2026-11-14T12:05:00.000Z");
+    check("stateAfterQuitStarted marks this run", started.running?.quitAt === "2026-11-14T12:05:00.000Z");
+    check("stateAfterQuitStarted leaves another run alone", stateAfterQuitStarted(quitting, 4242, NOW) === quitting);
+    const cancelled = stateAfterQuitCancelled(started, 4242);
+    check("a quit called off watches for crashes again", cancelled.running && cancelled.running.quitAt === undefined && previousRunEndedUncleanly(cancelled.running, { pid: 1, bootId: BOOT, isRunning: () => false }));
   }
   {
     const state = { running: { pid: 77, bootId: BOOT, startedAt: NOW } };
@@ -195,7 +218,7 @@ function run(mod) {
   check("wrong shapes are dropped", JSON.stringify(parseGpuDrawingState(JSON.stringify({ running: { pid: "x" }, fallback: { reason: "bad", at: NOW } }))) === "{}");
   check("an array is empty", JSON.stringify(parseGpuDrawingState("[]")) === "{}");
   const full = {
-    running: { pid: 12, bootId: BOOT, startedAt: NOW },
+    running: { pid: 12, startedAt: NOW, bootId: BOOT, startTicks: 9, quitAt: NOW },
     fallback: { reason: "unclean-exit", at: NOW, noticeShown: true },
   };
   let same = true;
