@@ -268,9 +268,13 @@ export function registerWorktreeCleanupIpc(handle: IpcHandle): void {
   // The workspace rail: which copy-branch workspaces are merged or lost their
   // folder, the worktrees made outside Codara, and the one-click cleanup of a
   // row (rail.ts).
-  handle("worktreeCleanup:railStates", async () => {
+  handle("worktreeCleanup:railStates", async (_event, projects?: unknown) => {
     const { railWorktreeOverview } = await import("./rail");
-    return railWorktreeOverview(deps(await gitCacheInvalidator()), { autoRemoveMerged: await autoRemoveMergedOptions() });
+    const only = Array.isArray(projects) ? projects.filter((cwd): cwd is string => typeof cwd === "string").slice(0, 1_000) : undefined;
+    return railWorktreeOverview(deps(await gitCacheInvalidator()), {
+      autoRemoveMerged: await autoRemoveMergedOptions(),
+      ...(only ? { projects: only } : {}),
+    });
   });
 
   handle("worktreeCleanup:railCleanUp", async (_event, request: WorktreeRailCleanupRequest) => {

@@ -903,6 +903,8 @@ const api = {
     status: (cwd: string): Promise<GitStatus> => ipcRenderer.invoke("git:status", cwd),
     currentBranch: (cwd: string): Promise<string | null> =>
       ipcRenderer.invoke("git:currentBranch", cwd),
+    signatures: (cwds: string[]): Promise<Record<string, string | null>> =>
+      ipcRenderer.invoke("git:signatures", cwds),
     log: (cwd: string): Promise<GitLog> => ipcRenderer.invoke("git:log", cwd),
     diff: (
       cwd: string,
@@ -1554,6 +1556,8 @@ const api = {
      * them. A real workspace always starts empty.
      */
     e2eSeedTerminal: process.argv.includes("--codara-e2e-seed-terminal"),
+    /** True only in the e2e suite, whose window is shown without focus. */
+    e2eBackground: process.argv.includes("--codara-e2e-background"),
     platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke("app:platform"),
     home: (): Promise<string> => ipcRenderer.invoke("app:home"),
     /** Where the one-time cleanup of older builds' global config put its backup; null if it never cleaned anything. */

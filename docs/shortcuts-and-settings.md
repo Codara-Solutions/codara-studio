@@ -1151,7 +1151,7 @@ only when it is merged, and keeps one with unmerged commits.
 
 When a worktree's folder is already gone and its branch is merged or gone
 too, Codara cleans it up by itself (git's record, the merged branch and the row) and says so, at the rail's next
-check (every 3 minutes and when the window comes back to the front), even with the
+check (every 5 minutes, and when the window comes back to the front), even with the
 tab of the agent that made it still open. It never does that while a
 terminal, run or dev server of that workspace is open, when git could not read the branch, while the branch has
 commits its upstream lacks, for a locked worktree, or when the folder above

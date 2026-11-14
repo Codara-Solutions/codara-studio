@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   GITHUB_PUBLISH_MAX_BODY_LENGTH,
   GITHUB_PUBLISH_MAX_TITLE_LENGTH,
@@ -16,6 +16,7 @@ import type {
   GitHubWorkspaceStatus,
 } from "@shared/github";
 import { resolveBinary } from "./binary-resolver";
+import { gitDirsOf } from "./git-state";
 
 export type {
   GitHubCheckSummary,
@@ -431,38 +432,20 @@ const repositoryCaches = new WeakMap<object, Map<string, RepositoryCacheEntry>>(
 export async function repositoryCacheKey(
   cwd: string,
 ): Promise<{ key: string; configStamp: string } | null> {
-  if (!cwd.trim() || /^[a-z][a-z0-9+.-]*:\/\//i.test(cwd)) return null;
-  let dir = resolve(cwd);
-  for (;;) {
-    const dotGit = join(dir, ".git");
-    const found = await fs.stat(dotGit).catch(() => null);
-    if (found) {
-      let gitDir = dotGit;
-      let ownDir = dotGit;
-      if (found.isFile()) {
-        const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await fs.readFile(dotGit, "utf8").catch(() => ""));
-        if (!pointer) return null;
-        gitDir = ownDir = resolve(dir, pointer[1]);
-        const common = (await fs.readFile(join(gitDir, "commondir"), "utf8").catch(() => "")).trim();
-        if (common) gitDir = resolve(gitDir, common);
-      }
-      const configPath = join(gitDir, "config");
-      const [config, text, ownWorktreeConfig, sharedWorktreeConfig] = await Promise.all([
-        fs.stat(configPath).catch(() => null),
-        fs.readFile(configPath, "utf8").catch(() => null),
-        fs.lstat(join(ownDir, "config.worktree")).catch(() => null),
-        fs.lstat(join(gitDir, "config.worktree")).catch(() => null),
-      ]);
-      if (!config || text === null || !plainConfig(text) || ownWorktreeConfig || sharedWorktreeConfig) return null;
-      // A worktree's .git file names the real path (/private/var on macOS),
-      // its checkout may be reached through a link (/var).
-      const key = await fs.realpath(gitDir).catch(() => gitDir);
-      return { key, configStamp: String(config.mtimeMs) };
-    }
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
+  const dirs = await gitDirsOf(cwd);
+  if (!dirs) return null;
+  const configPath = join(dirs.commonDir, "config");
+  const [config, text, ownWorktreeConfig, sharedWorktreeConfig] = await Promise.all([
+    fs.stat(configPath).catch(() => null),
+    fs.readFile(configPath, "utf8").catch(() => null),
+    fs.lstat(join(dirs.gitDir, "config.worktree")).catch(() => null),
+    fs.lstat(join(dirs.commonDir, "config.worktree")).catch(() => null),
+  ]);
+  if (!config || text === null || !plainConfig(text) || ownWorktreeConfig || sharedWorktreeConfig) return null;
+  // A worktree's .git file names the real path (/private/var on macOS), its
+  // checkout may be reached through a link (/var).
+  const key = await fs.realpath(dirs.commonDir).catch(() => dirs.commonDir);
+  return { key, configStamp: String(config.mtimeMs) };
 }
 
 /** No include of another file and no per-worktree config, in any spelling or position. */

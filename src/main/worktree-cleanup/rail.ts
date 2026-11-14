@@ -308,6 +308,11 @@ async function commitTime(root: string, commit: string): Promise<number | null> 
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null;
 }
 
+/** The project a rail row belongs to: its copy branch's source folder, or its own. */
+export function railProjectOf(workspace: Workspace): string {
+  return workspace.copyBranch?.repoCwd ?? workspace.cwd;
+}
+
 /** The rail's state of every local copy-branch workspace. Reads only. */
 export async function railWorktreeStates(deps: WorktreeCleanupDeps): Promise<WorktreeRailState[]> {
   return (await railWorktreeOverview(deps, { external: false })).states;
@@ -320,14 +325,21 @@ export async function railWorktreeStates(deps: WorktreeCleanupDeps): Promise<Wor
  */
 export async function railWorktreeOverview(
   deps: WorktreeCleanupDeps,
-  options: { external?: boolean; autoRemoveMerged?: AutoRemoveMergedOptions } = {},
+  options: { external?: boolean; autoRemoveMerged?: AutoRemoveMergedOptions; projects?: readonly string[] } = {},
 ): Promise<WorktreeRailOverview> {
   const state = await deps.loadState();
-  const { repos } = await discoverRepos(state, {
+  // Only the rows of these projects (a row's project is its copy branch's
+  // source folder, or its own folder): the rail re-reads the projects whose
+  // git state moved, not every repository at once.
+  const projects = options.projects ? new Set(options.projects) : null;
+  const read = projects
+    ? { ...state, workspaces: state.workspaces.filter((workspace) => projects.has(railProjectOf(workspace))) }
+    : state;
+  const { repos } = await discoverRepos(read, {
     withPullRequests: (root) => deps.pullRequests(root).catch(() => null),
   });
   const [states, external] = await Promise.all([
-    statesOf(deps, state, repos, options.autoRemoveMerged),
+    statesOf(deps, read, repos, options.autoRemoveMerged),
     options.external === false ? Promise.resolve([]) : externalWorktrees(state, repos),
   ]);
   return { states, external };

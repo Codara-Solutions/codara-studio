@@ -1,5 +1,5 @@
 // What each checkout of a repository changed since it left its base, for the
-// Source Control panel's agent lanes. The lanes poll every worktree, so reads
+// Source Control panel's agent lanes. The lanes read every worktree, so reads
 // are cached, run a few at a time and never lock the index: an agent's own git
 // commands in that folder must not lose a race to a panel.
 //
@@ -135,6 +135,28 @@ export async function computeLaneChanges(cwd: string, deps: LaneBaseDeps = {}): 
 }
 
 const cache = new Map<string, { at: number; value: Promise<LaneChanges> }>();
+// The default branch costs four git reads and changes only when the remote's
+// HEAD moves, so lanes re-read it at most this often.
+const DEFAULT_BASE_MS = 5 * 60_000;
+const defaultBases = new Map<string, { at: number; value: Promise<string> }>();
+
+function rememberedDefaultBase(deps: LaneBaseDeps, now: () => number): LaneBaseDeps {
+  const read = deps.defaultBase;
+  if (!read) return deps;
+  return {
+    ...deps,
+    defaultBase(cwd) {
+      const hit = defaultBases.get(cwd);
+      if (hit && now() - hit.at < DEFAULT_BASE_MS) return hit.value;
+      const entry = { at: now(), value: read(cwd) };
+      defaultBases.set(cwd, entry);
+      entry.value.catch(() => {
+        if (defaultBases.get(cwd) === entry) defaultBases.delete(cwd);
+      });
+      return entry.value;
+    },
+  };
+}
 
 /** Reads several checkouts, a few at a time; a failed one carries its own error. */
 export async function readLaneChanges(
@@ -143,6 +165,7 @@ export async function readLaneChanges(
   now: () => number = Date.now,
 ): Promise<Record<string, LaneChanges>> {
   const wanted = [...new Set(cwds)].slice(0, MAX_LANE_READS);
+  const baseDeps = rememberedDefaultBase(deps, now);
   const out: Record<string, LaneChanges> = {};
   let next = 0;
   const worker = async () => {
@@ -153,7 +176,7 @@ export async function readLaneChanges(
         out[cwd] = await hit.value;
         continue;
       }
-      const value = computeLaneChanges(cwd, deps);
+      const value = computeLaneChanges(cwd, baseDeps);
       cache.set(cwd, { at: now(), value });
       out[cwd] = await value;
     }
@@ -161,6 +184,9 @@ export async function readLaneChanges(
   await Promise.all(Array.from({ length: Math.min(MAX_PARALLEL, wanted.length) }, worker));
   for (const [cwd, entry] of cache) {
     if (now() - entry.at >= CACHE_MS) cache.delete(cwd);
+  }
+  for (const [cwd, entry] of defaultBases) {
+    if (now() - entry.at >= DEFAULT_BASE_MS) defaultBases.delete(cwd);
   }
   return out;
 }

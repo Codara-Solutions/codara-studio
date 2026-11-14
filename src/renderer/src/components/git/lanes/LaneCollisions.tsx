@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { collisionText, type LaneCollisions } from "@shared/lane-collisions";
 import { isRemotePath } from "@shared/remote";
 import type { SourceLane, SourceLanes } from "@shared/source-lanes";
+import { useGitRefresh } from "../../../git/gitRefreshClock";
 
-const POLL_MS = 30_000;
+// Read when the running lanes or their work change, when focus returns, when
+// a lane's git state moves (the shared clock), and otherwise at most this often.
+const SAFETY_MS = 5 * 60_000;
 
 function running(lane: SourceLane): boolean {
   return !lane.merged && !lane.missing && (lane.changes?.fileCount ?? 0) > 0 && !isRemotePath(lane.path);
@@ -16,6 +19,8 @@ export function useLaneCollisions(lanes: SourceLanes): Record<string, string> {
   // A commit usually changes these, so a new clash shows without waiting for the poll.
   const work = inPlay.map((lane) => `${lane.changes?.additions}/${lane.changes?.deletions}`).join(",");
   const [collisions, setCollisions] = useState<LaneCollisions>({});
+  const lastReadAt = useRef(0);
+  const readRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     const wanted = paths ? paths.split("\n") : [];
@@ -26,6 +31,7 @@ export function useLaneCollisions(lanes: SourceLanes): Record<string, string> {
     let cancelled = false;
     const read = () => {
       if (document.hidden) return;
+      lastReadAt.current = Date.now();
       void window.spark.git.laneCollisions(wanted).then(
         (next) => {
           if (!cancelled) setCollisions(next);
@@ -33,15 +39,17 @@ export function useLaneCollisions(lanes: SourceLanes): Record<string, string> {
         () => undefined,
       );
     };
+    readRef.current = read;
     read();
-    const timer = window.setInterval(read, POLL_MS);
-    window.addEventListener("focus", read);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
-      window.removeEventListener("focus", read);
+      if (readRef.current === read) readRef.current = null;
     };
   }, [paths, work]);
+
+  useGitRefresh(paths ? paths.split("\n") : [], true, (changed, reason) => {
+    if (reason === "focus" || changed.length > 0 || Date.now() - lastReadAt.current >= SAFETY_MS) readRef.current?.();
+  });
 
   return useMemo(() => {
     const nameOf = (path: string) => inPlay.find((lane) => lane.path === path)?.branch ?? "another lane";

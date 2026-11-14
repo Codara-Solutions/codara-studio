@@ -33,7 +33,8 @@ export const worktreeCleanupApi = {
   remove: (request: WorktreeCleanupRemoveRequest): Promise<WorktreeCleanupRemoveResult> =>
     ipcRenderer.invoke("worktreeCleanup:remove", request),
   /** Merge and folder state of each copy-branch workspace, and the worktrees made outside Codara, for the rail. */
-  railStates: (): Promise<WorktreeRailOverview> => ipcRenderer.invoke("worktreeCleanup:railStates"),
+  /** Every row, or only the rows of these projects (see railProjectOf). */
+  railStates: (projects?: string[]): Promise<WorktreeRailOverview> => ipcRenderer.invoke("worktreeCleanup:railStates", projects),
   /** Clean up one copy-branch workspace from its rail row. */
   railCleanUp: (request: WorktreeRailCleanupRequest): Promise<WorktreeRailCleanupResult> =>
     ipcRenderer.invoke("worktreeCleanup:railCleanUp", request),
