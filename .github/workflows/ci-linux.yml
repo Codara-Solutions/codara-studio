@@ -1,14 +1,17 @@
 name: CI (Linux)
 
-# Pull requests into Cora, where most work lands, and pushes to it. main keeps
-# its macOS job in ci.yml; this one runs headless on Linux (Xvfb), the
-# platform most contributors here develop on.
+# Pull requests into main and pushes to it, headless on Linux (Xvfb), the
+# platform most contributors here develop on. ci.yml already runs the
+# typechecks on macOS, and they do not depend on the platform, so this job
+# skips them. It keeps what only Linux shows: the unit suites' Linux paths
+# (/proc, inotify, D-Bus notifications, zsh, Xvfb) and the e2e smoke set,
+# which runs nowhere else in CI.
 
 on:
   pull_request:
-    branches: [Cora]
+    branches: [main]
   push:
-    branches: [Cora]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -41,10 +44,6 @@ jobs:
           # and Electron's sandbox cannot start without them.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: npm ci
-      - run: npm run typecheck:node
-      - run: npm run typecheck:web
-      - run: npm run typecheck:e2e
-      - run: npm run typecheck:pi-cora
       # Some suites drive the BUILT app surface (agent-socket handshake) or a
       # real Chromium (chat-surface-routing).
       - run: npm run build

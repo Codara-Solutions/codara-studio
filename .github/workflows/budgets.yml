@@ -1,14 +1,14 @@
 name: Budgets
 
 # Bundle size budgets (fail) and startup time and memory (report only) for
-# pull requests into Cora and pushes to it. Limits and warn levels live in
+# pull requests into main and pushes to it. Limits and warn levels live in
 # scripts/bundle-budgets.json; scripts/README.md explains how to change them.
 
 on:
   pull_request:
-    branches: [Cora]
+    branches: [main]
   push:
-    branches: [Cora]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:

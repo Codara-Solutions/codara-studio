@@ -220,6 +220,21 @@ test("direct main pushes run release checks before the next nightly", () => {
   assert.ok(workflow.jobs.test.steps.some((step) => step.run === "npm run test:all"));
 });
 
+// budgets.yml and ci-linux.yml kept filtering on the retired Cora branch for a
+// week after work moved to main, so nothing checked main with them.
+test("every branch-filtered push and pull request trigger covers main", () => {
+  const dir = path.join(__dirname, "../.github/workflows");
+  const files = fs.readdirSync(dir).filter((name) => /\.ya?ml$/.test(name));
+  for (const required of ["budgets.yml", "ci-linux.yml", "ci.yml"]) assert.ok(files.includes(required), required);
+  for (const name of files) {
+    const triggers = yaml.load(fs.readFileSync(path.join(dir, name), "utf8")).on;
+    for (const event of ["push", "pull_request"]) {
+      const branches = triggers?.[event]?.branches;
+      if (branches) assert.ok(branches.includes("main"), `${name}: on.${event}.branches ${JSON.stringify(branches)} leaves out main`);
+    }
+  }
+});
+
 test("release summary distinguishes publication from skipped and failed runs", () => {
   const workflow = yaml.load(fs.readFileSync(path.join(__dirname, "../.github/workflows/release.yml"), "utf8"));
   assert.equal(workflow.jobs.summary.if, "always()");

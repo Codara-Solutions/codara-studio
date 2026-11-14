@@ -23,9 +23,11 @@ npm install     # also installs the git hooks and patches the bundled Pi sign-in
 npm run dev     # starts the app with hot reload
 ```
 
-CI tests macOS on pull requests into `main` (`ci.yml`) and Linux, headless
-under Xvfb, on pull requests into `Cora` and pushes to it (`ci-linux.yml`:
-typechecks, build, every unit suite and an e2e smoke set). The app also
+CI tests every pull request into `main` and every push to it on macOS
+(`ci.yml`: typechecks, build, every unit suite) and on Linux, headless under
+Xvfb (`ci-linux.yml`: build, every unit suite and an e2e smoke set).
+`budgets.yml` checks bundle sizes and reports startup time and memory on the
+same events. The app also
 packages for Windows (`npm run package:win`), but CI does not test it.
 
 **Your real data.** A dev build uses the same `~/.codarastudio` as an
@@ -82,7 +84,7 @@ runs the Playwright specs.
 
 If your change adds code the window loads at startup, also run
 `npm run build && node scripts/check-bundle-budgets.cjs`: CI fails a pull
-request into `Cora` that grows a bundle past its budget
+request into `main` that grows a bundle past its budget
 ([scripts/README.md](./scripts/README.md) says how to change one).
 
 Suites that need real subscriptions or the network are the `smoke:*`
