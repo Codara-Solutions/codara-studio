@@ -1143,19 +1143,21 @@ async function main() {
     git(repo, ["remote", "add", "unreachable", path.join(scratch, "no-such-remote.git")]);
     git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"]);
     try {
-      for (const [name, expected] of [
-        ["main", remoteMain],
-        ["origin/main", remoteMain],
-        ["origin/HEAD", remoteMain],
-        ["HEAD", remoteMain],
-        ["origin/table-excluded", middle],
-        ["origin/table-moved", older],
-        ["origin/no-such-branch", null],
-        ["unreachable/main", null],
-        ["origin/a..b", null],
+      for (const [name, branch, commit] of [
+        ["main", "main", remoteMain],
+        ["origin/main", "main", remoteMain],
+        ["origin/HEAD", "main", remoteMain],
+        ["HEAD", "main", remoteMain],
+        ["origin/table-excluded", "table-excluded", middle],
+        ["origin/table-moved", "table-moved", older],
+        ["origin/no-such-branch"],
+        ["unreachable/main"],
+        ["origin/a..b"],
       ]) {
-        assert.equal(await aw.remoteCommitNow(repo, name, 10_000), expected, name);
+        const now = await aw.remoteCommitNow(repo, name, 10_000);
+        assert.deepEqual(now, commit ? { remote: "origin", branch, commit } : null, name);
       }
+      assert.equal(git(repo, ["rev-parse", "refs/remotes/origin/table-excluded"]), remoteMain, "a tracking ref the refspec leaves out is not moved");
     } finally {
       git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
       git(repo, ["remote", "remove", "unreachable"]);

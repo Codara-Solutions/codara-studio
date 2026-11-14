@@ -559,21 +559,13 @@ async function splitRemoteRef(
   return { remote, branch };
 }
 
-// Into its tracking ref with an explicit destination: a configured fetch
-// refspec that leaves the branch out lets a plain fetch succeed without
-// refreshing it, and every proof reads that ref afterwards.
 async function fetchRemoteBranch(
   cwd: string,
   remote: string,
   branch: string,
 ): Promise<string | null> {
   try {
-    let refspec = branch;
-    if (branch !== "HEAD") {
-      await runGit(cwd, ["check-ref-format", `refs/heads/${branch}`]);
-      refspec = `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`;
-    }
-    await runGit(cwd, ["fetch", "--no-tags", "--end-of-options", remote, refspec], {
+    await runGit(cwd, ["fetch", "--no-tags", "--end-of-options", remote, branch], {
       timeout: FETCH_TIMEOUT_MS,
     });
     return null;
@@ -591,14 +583,23 @@ async function hasCommit(cwd: string, oid: string): Promise<boolean> {
   }
 }
 
+export interface RemoteCommit {
+  remote: string;
+  /** The branch on the remote, a HEAD alias resolved. */
+  branch: string;
+  commit: string;
+}
+
 /**
- * The commit a remote branch is at now, read from the remote itself and
- * never from a tracking ref: "origin/main", "main" (origin's), or a HEAD
- * alias ("origin/HEAD", "HEAD"), which is resolved through the remote's own
- * symbolic ref. The commit is fetched when git does not have it. Null on any
- * failure: no remote, unreachable, no such branch, or a commit still missing.
+ * Where a remote branch is now, read from the remote itself and never from a
+ * tracking ref: "origin/main", "main" (origin's), or a HEAD alias
+ * ("origin/HEAD", "HEAD") resolved through the remote's own symbolic ref.
+ * The commit is fetched when git does not have it, the way a plain fetch of
+ * that branch would, so tracking refs move no further than they do then.
+ * Null on any failure: no remote, unreachable, no such branch, a commit
+ * still missing.
  */
-export async function remoteCommitNow(repo: string, name: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<string | null> {
+export async function remoteCommitNow(repo: string, name: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<RemoteCommit | null> {
   const split = await splitRemoteRef(repo, name);
   const remote = split?.remote ?? "origin";
   let branch = split ? split.branch : name;
@@ -613,15 +614,13 @@ export async function remoteCommitNow(repo: string, name: string, timeoutMs = FE
     await runGit(repo, ["check-ref-format", `refs/heads/${branch}`]);
     const { stdout } = await runGit(repo, ["ls-remote", "--end-of-options", remote, `refs/heads/${branch}`], { timeout: timeoutMs });
     const line = stdout.split(/\r?\n/).find((entry) => entry.endsWith(`\trefs/heads/${branch}`));
-    const oid = line?.split("\t")[0]?.trim().toLowerCase() ?? "";
-    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(oid)) return null;
-    if (!(await hasCommit(repo, oid))) {
-      await runGit(repo, ["fetch", "--no-tags", "--end-of-options", remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`], {
-        timeout: timeoutMs,
-      });
-      if (!(await hasCommit(repo, oid))) return null;
+    const commit = line?.split("\t")[0]?.trim().toLowerCase() ?? "";
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(commit)) return null;
+    if (!(await hasCommit(repo, commit))) {
+      await runGit(repo, ["fetch", "--no-tags", "--end-of-options", remote, `refs/heads/${branch}`], { timeout: timeoutMs });
+      if (!(await hasCommit(repo, commit))) return null;
     }
-    return oid;
+    return { remote, branch, commit };
   } catch {
     return null;
   }
@@ -1815,8 +1814,9 @@ interface VerifyContext {
   registrations: WorktreeRegistration[];
   runs: Promise<RunState[]>;
   rendererTerminals: Promise<RendererTerminal[] | null>;
-  // What each remote target is at now, read from the remote (targetNow).
-  remoteCommits: Map<string, Promise<string | null>>;
+  fetchedTargets: Map<string, Promise<string | null>>;
+  // Where each remote target is now, read from the remote (targetNow).
+  remoteCommits: Map<string, Promise<RemoteCommit | null>>;
   // Prefetched merged pull requests for a whole list, or the error gh gave.
   mergedPullRequests?: { list: GitHubMergedPullRequest[] } | { error: string };
 }
@@ -1978,10 +1978,10 @@ async function refIsPresent(cwd: string, ref: string): Promise<boolean> {
 }
 
 // A caller-named merge target must be a branch, local or remote-tracking,
-// other than the worktree's own or its copy pushed under another name (its
-// upstream, unless that is the recorded base or the default branch). A commit
-// id, a revision expression or the branch itself would make the ancestor
-// proof hold for any tip, and removal would then delete unmerged work.
+// other than the worktree's own or its copy pushed under another name. A
+// commit id, a revision expression or the branch itself would make the
+// ancestor proof hold for any tip, and removal would then delete unmerged
+// work.
 async function resolveExplicitTarget(
   ctx: VerifyContext,
   raw: string,
@@ -2004,25 +2004,21 @@ async function resolveExplicitTarget(
   if (!resolved) {
     return { name, ref: null, commit: null, problem: "it is not a local or remote-tracking branch" };
   }
-  if (resolved.branch === ownBranch) {
-    return { name: resolved.name, ref: null, commit: null, problem: "it is the worktree's own branch" };
-  }
-  const upstream = await originUpstream(repo, ownBranch);
-  if (upstream && resolved.branch === upstream) {
-    // Kept only when the recorded base or the default branch is that very
-    // branch on origin. A remote prefix is dropped only when it names a
-    // configured remote: a local feature/base is not origin's base.
-    let kept = false;
-    for (const name of [recordedBase, await resolveMergeDefaultBranch(repo)]) {
-      if (!name || name === "HEAD") continue;
-      const remote = await splitRemoteRef(repo, name);
-      if (remote ? remote.remote === "origin" && remote.branch === upstream : name === upstream) kept = true;
-    }
-    if (!kept) {
-      return { name: resolved.name, ref: null, commit: null, problem: "it is the worktree's own branch, pushed under another name" };
-    }
-  }
+  const problem = await ownBranchProblem(repo, resolved.branch, ownBranch, recordedBase);
+  if (problem) return { name: resolved.name, ref: null, commit: null, problem };
   return { name: resolved.name, ref: resolved.ref, commit: await revParse(repo, `${resolved.ref}^{commit}`) };
+}
+
+async function fetchTargetOnce(ctx: VerifyContext, target: string): Promise<string | null> {
+  const known = ctx.fetchedTargets.get(target);
+  if (known) return known;
+  const pending = (async () => {
+    const remote = await splitRemoteRef(ctx.scope.repoCwd, target);
+    if (!remote) return null;
+    return fetchRemoteBranch(ctx.scope.repoCwd, remote.remote, remote.branch);
+  })();
+  ctx.fetchedTargets.set(target, pending);
+  return pending;
 }
 
 // True only when the remote answers and does not have the branch; an
@@ -2053,8 +2049,30 @@ async function originUpstream(repo: string, branch: string): Promise<string | nu
   return name && name !== branch ? name : null;
 }
 
+// Why a branch, named by its name on the remote or locally, cannot be the
+// merge target: it is the worktree's own, or its copy pushed under another
+// name (its upstream), unless the recorded base or the default branch is
+// that very branch on origin. A remote prefix is dropped only when it names
+// a configured remote: a local feature/base is not origin's base.
+async function ownBranchProblem(
+  repo: string,
+  candidate: string,
+  ownBranch: string,
+  recordedBase: string | null | undefined,
+): Promise<string | null> {
+  if (candidate === ownBranch) return "it is the worktree's own branch";
+  const upstream = await originUpstream(repo, ownBranch);
+  if (!upstream || candidate !== upstream) return null;
+  for (const name of [recordedBase, await resolveMergeDefaultBranch(repo)]) {
+    if (!name || name === "HEAD") continue;
+    const remote = await splitRemoteRef(repo, name);
+    if (remote ? remote.remote === "origin" && remote.branch === upstream : name === upstream) return null;
+  }
+  return "it is the worktree's own branch, pushed under another name";
+}
+
 // remoteCommitNow, asked once per name in a check.
-function targetNow(ctx: VerifyContext, name: string): Promise<string | null> {
+function targetNow(ctx: VerifyContext, name: string): Promise<RemoteCommit | null> {
   let pending = ctx.remoteCommits.get(name);
   if (!pending) {
     pending = remoteCommitNow(ctx.scope.repoCwd, name);
@@ -2407,12 +2425,11 @@ async function defaultBranchTarget(
   const name = await resolveMergeDefaultBranch(ctx.scope.repoCwd);
   if (!name || shortBranch(name) === ownBranch || name === ownBranch) return null;
   let resolved = await resolveTarget(ctx, name);
-  // Read from the remote before it is compared: a stale default branch can
-  // sit at the judged commit while the remote's has moved on to include the
-  // work. Unreadable (offline), its last known commit stands.
+  // Fetched before it is compared: a stale default branch can sit at the
+  // judged commit while the remote's has moved on to include the work.
   if (resolved.commit && options.fetch && !options.pinned) {
-    const now = await targetNow(ctx, resolved.name);
-    if (now) resolved = { ...resolved, commit: now };
+    await fetchTargetOnce(ctx, resolved.name);
+    resolved = await resolveTarget(ctx, name);
   }
   return resolved.commit && resolved.commit !== judged ? { name: resolved.name, commit: resolved.commit } : null;
 }
@@ -2514,43 +2531,29 @@ async function proveMerged(
       target = fallback;
     }
   }
-  // A remote target is judged at the commit the remote has now, read once
-  // here and used by every proof below and by the locked re-check (pinned).
-  // One that could not be read (offline, deleted on the remote) keeps its
-  // last known commit, a possibly stale copy: it proves no merge into it
-  // beyond what it already held, and never lands the pull request proof of
-  // another branch name (targetFresh). A local target is never fetched.
+  // A target that could not be fetched (deleted on the remote, say) may be
+  // a stale copy: it proves no merge into it beyond what it already held.
   let targetFetchFailed = false;
-  let targetFresh = false;
   if (options.pinned) {
     target = { name: target.name, commit: options.pinned.targetCommit };
   } else if (options.fetch && target.commit) {
-    const isRemote = !target.ref?.startsWith("refs/heads/") && (await splitRemoteRef(repo, target.name)) !== null;
-    if (isRemote) {
-      const now = await targetNow(ctx, target.name);
-      if (now) {
-        target = { ...target, commit: now };
-        targetFresh = true;
-      } else {
-        targetFetchFailed = true;
-        verdict.warnings.push(`fetch failed: ${target.name} could not be read from the remote`);
-      }
-    }
+    const failure = await fetchTargetOnce(ctx, target.name);
+    if (failure) verdict.warnings.push(`fetch failed: ${failure}`);
+    targetFetchFailed = failure !== null;
+    target = target.ref
+      ? { ...target, commit: await revParse(repo, `${target.ref}^{commit}`) }
+      : await resolveTarget(ctx, target.name);
     // Deleted on the remote: its tracking ref is a stale copy that may hold
     // merges the branch never landed anywhere. Judged as a gone base: the
-    // default branch, as the remote has it.
-    if (targetFetchFailed && !explicitTarget && (await remoteBranchGone(ctx, target.name))) {
+    // default branch, fetched.
+    if (failure && !explicitTarget && (await remoteBranchGone(ctx, target.name))) {
       const fallbackName = await resolveMergeDefaultBranch(repo);
       if (fallbackName && shortBranch(fallbackName) !== branch && fallbackName !== shortBranch(target.name)) {
         verdict.warnings.push(`the recorded base '${target.name}' is gone on the remote; judged against ${fallbackName}`);
-        const now = await targetNow(ctx, fallbackName);
-        if (!now) verdict.warnings.push(`fetch failed: ${fallbackName} could not be read from the remote`);
-        targetFetchFailed = now === null;
+        const fetched = await fetchTargetOnce(ctx, fallbackName);
+        if (fetched) verdict.warnings.push(`fetch failed: ${fetched}`);
+        targetFetchFailed = fetched !== null;
         target = await resolveTarget(ctx, fallbackName);
-        if (now) {
-          target = { ...target, commit: now };
-          targetFresh = true;
-        }
       }
     }
   }
@@ -2561,8 +2564,28 @@ async function proveMerged(
     block("WORKTREE_TARGET_NOT_FOUND");
     return;
   }
+  // The target as the remote has it now, read from the remote (a HEAD alias
+  // resolved to its branch). It only adds conditions: a proof against the
+  // target must hold against it too, and the proof through another branch
+  // name's pull request lands nowhere else. Unreadable, every other proof
+  // judges the target as above, and that one is not tried.
+  const remoteTarget =
+    options.fetch && !options.pinned && !target.ref?.startsWith("refs/heads/") && (await splitRemoteRef(repo, target.name))
+      ? await targetNow(ctx, target.name)
+      : null;
+  if (remoteTarget) {
+    const problem = await ownBranchProblem(repo, remoteTarget.branch, branch, copy.baseBranch);
+    if (problem) {
+      verdict.details.targetProblem = `${target.name} names ${remoteTarget.remote}/${remoteTarget.branch}: ${problem}`;
+      verdict.mergeStatus = "unknown";
+      block("WORKTREE_TARGET_NOT_FOUND");
+      return;
+    }
+  }
+  const holdsTip = async (judge: (commit: string) => Promise<boolean>): Promise<boolean> =>
+    (await judge(target.commit!)) && (!remoteTarget || remoteTarget.commit === target.commit || (await judge(remoteTarget.commit)));
 
-  if (await isAncestor(repo, tip, target.commit)) {
+  if (await holdsTip((commit) => isAncestor(repo, tip, commit))) {
     verdict.proof = "ancestor";
   } else if (options.pinned?.pullRequestTip === tip) {
     verdict.proof = "pull-request";
@@ -2584,12 +2607,9 @@ async function proveMerged(
     const targetOnOrigin = Boolean(targetRef?.startsWith("refs/remotes/origin/"));
     let ownBaseCommit: string | null = targetOnOrigin && !targetFetchFailed ? target.commit : null;
     if (!explicitTarget && !targetIsRemote && (await refIsPresent(repo, `refs/remotes/origin/${targetBranch}`))) {
-      // Read from the remote: a branch it no longer has, or one that cannot
-      // be read, leaves a stale copy: no proof.
-      ownBaseCommit =
-        options.fetch && !options.pinned
-          ? await targetNow(ctx, `origin/${targetBranch}`)
-          : await revParse(repo, `refs/remotes/origin/${targetBranch}^{commit}`);
+      // A fetch that fails (the branch was deleted) leaves a stale copy: no proof.
+      const failure = options.fetch && !options.pinned ? await fetchTargetOnce(ctx, `origin/${targetBranch}`) : null;
+      ownBaseCommit = failure ? null : await revParse(repo, `refs/remotes/origin/${targetBranch}^{commit}`);
     }
     // A recorded base other than the default branch (a stacked pull
     // request's branch, often deleted once merged) can lag behind where
@@ -2598,7 +2618,14 @@ async function proveMerged(
     const fallback = explicitTarget ? null : await defaultBranchTarget(ctx, target.commit, branch, options);
     const defaultCommit = explicitTarget ? target.commit : (fallback?.commit ?? target.commit);
     const defaultName = explicitTarget ? targetBranch : shortBranch(fallback?.name ?? (await resolveMergeDefaultBranch(repo)) ?? targetBranch);
-    if (fallback && (await isAncestor(repo, tip, fallback.commit))) {
+    // The default branch as the remote has it now: only adds conditions, like remoteTarget.
+    const defaultRef = explicitTarget || !options.fetch || options.pinned ? null : await resolveMergeDefaultBranch(repo);
+    const remoteDefault = defaultRef && (await splitRemoteRef(repo, defaultRef)) ? await targetNow(ctx, defaultRef) : null;
+    if (
+      fallback &&
+      (await isAncestor(repo, tip, fallback.commit)) &&
+      (!remoteDefault || remoteDefault.commit === fallback.commit || (await isAncestor(repo, tip, remoteDefault.commit)))
+    ) {
       verdict.proof = "ancestor";
       verdict.target = fallback.name;
       verdict.targetCommit = fallback.commit;
@@ -2625,36 +2652,41 @@ async function proveMerged(
         verdict.pullRequest = stacked.pullRequest;
         if (stacked.via.length) verdict.details.via = stacked.via;
       } else {
-        // Opened from another branch name: landed only in the target or
-        // the default branch as origin has it now. A local branch, or a copy
-        // this check did not refresh, proves nothing.
-        const landing: string[] = [];
-        if (targetFresh && targetOnOrigin) landing.push(target.commit);
-        const defaultName = explicitTarget || !options.fetch ? null : await resolveMergeDefaultBranch(repo);
-        if (defaultName && (await splitRemoteRef(repo, defaultName))?.remote === "origin") {
-          const now = await targetNow(ctx, defaultName);
-          if (now) landing.push(now);
-        }
-        const byHead = await proveByMergedHead({
-          repo,
-          tip,
-          candidates: await mergedUnderOtherName(ctx, branch, tip, listed),
-          landing,
-          contentIn: (from, into) => contentInTarget(repo, from, into),
-          treeOf: (commit) => revParse(repo, `${commit}^{tree}`),
-        });
+        // Opened from another branch name: lands only in a commit the remote
+        // gave in this check, the target's (when it is origin's) or the
+        // default branch's. Without one, this proof is not tried.
+        const landing = [
+          remoteTarget?.remote === "origin" ? remoteTarget.commit : null,
+          remoteDefault?.remote === "origin" ? remoteDefault.commit : null,
+        ].filter((commit): commit is string => Boolean(commit));
+        const byHead = landing.length
+          ? await proveByMergedHead({
+              repo,
+              tip,
+              candidates: await mergedUnderOtherName(ctx, branch, tip, listed),
+              landing,
+              contentIn: (from, into) => contentInTarget(repo, from, into),
+              treeOf: (commit) => revParse(repo, `${commit}^{tree}`),
+            })
+          : null;
         if (byHead?.kind === "landed") {
           verdict.proof = "pull-request";
           verdict.pullRequest = byHead.pullRequest;
+          verdict.details.headProof = { pullRequest: byHead.pullRequest.number, remoteEvidence: landing };
         } else if (byHead) {
           verdict.details.mergedInto = { branch: byHead.base, pullRequest: byHead.pullRequest };
         }
       }
     }
     if (!verdict.proof) {
-      const content = await contentInTarget(repo, tip, target.commit);
-      if (content === true) verdict.proof = "content-in-target";
-      else if (content === "unsupported") verdict.warnings.push("git 2.38 or newer is needed for the squash-merge proof");
+      let unsupported = false;
+      const content = await holdsTip(async (commit) => {
+        const result = await contentInTarget(repo, tip, commit);
+        if (result === "unsupported") unsupported = true;
+        return result === true;
+      });
+      if (content) verdict.proof = "content-in-target";
+      else if (unsupported) verdict.warnings.push("git 2.38 or newer is needed for the squash-merge proof");
     }
   }
   if (verdict.proof) {
@@ -2830,6 +2862,7 @@ function newContext(
     registrations,
     runs: deps.listRuns().catch(() => []),
     rendererTerminals: deps.listRendererTerminals().catch(() => null),
+    fetchedTargets: new Map(),
     remoteCommits: new Map(),
   };
 }

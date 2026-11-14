@@ -1241,13 +1241,17 @@ the `blockers` and a `hint`:
   branch pushed under another name (its upstream, or found on GitHub by its
   commit) counts only through a merged pull request from the same
   repository whose head is exactly the last commit, whose merge commit is in
-  the target or the default branch as fetched now and holds that commit's
-  content; merged into another branch, the refusal's hint names it. A
-  recorded base that no longer exists is replaced by the default branch. A
-  `target` the agent names must be another local or remote-tracking
-  branch, never the worktree's own branch, its pushed copy (under its own
-  name or its upstream's, unless that is its base or the default branch) or
-  a commit id;
+  the target or the default branch as the remote gives it during the check
+  (read with `ls-remote`, never from a tracking ref; offline, this proof is
+  not tried) and holds that commit's content; merged into another branch,
+  the refusal's hint names it. When the remote can be read, the target must
+  hold the commit there too, not only in its local copy. A recorded base
+  that no longer exists is replaced by the default branch. A `target` the
+  agent names must be another local or remote-tracking branch, never the
+  worktree's own branch, its pushed copy (under its own name or its
+  upstream's, unless that is its base or the default branch) or a commit
+  id, also when it is `origin/HEAD` or `HEAD` and the remote's HEAD names
+  one of those;
 - it has no uncommitted or untracked files (edits hidden by
   `assume-unchanged` or `skip-worktree` count), no merge or rebase in
   progress, and no ignored files beyond build output and caches
