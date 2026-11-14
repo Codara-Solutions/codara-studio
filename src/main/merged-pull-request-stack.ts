@@ -112,3 +112,59 @@ export async function proveByMergedPullRequestStack(input: StackProofInput): Pro
   }
   return null;
 }
+
+// Merge proof through a merged pull request opened from another branch name
+// than the worktree's own: the branch's upstream (the agent pushed fix/x as
+// feat/y) or none at all (git push origin HEAD:feat/y), found by its head
+// commit. Nothing ties another name's later commits to this worktree, so only
+// a head that is exactly the tip counts, and GitHub's word is checked in git:
+// the merge commit must be in a landing commit and must hold the tip's
+// content (its tree is the tip's, or merging the tip into it changes nothing).
+
+export interface HeadProofInput {
+  repo: string;
+  tip: string;
+  /** Merged pull requests found by another head name or by head commit. */
+  candidates: readonly StackPullRequest[];
+  /** Commits a merge into which counts: the target and the default branch, each as fetched now. */
+  landing: readonly string[];
+  /** True when merging `tip` into `commit` changes nothing; false or "unsupported" otherwise. */
+  contentIn(tip: string, commit: string): Promise<boolean | "unsupported">;
+  /** The tree of a commit, or null. */
+  treeOf(commit: string): Promise<string | null>;
+}
+
+export type HeadProof =
+  | { kind: "landed"; pullRequest: { number: number; url: string } }
+  /** Merged with this exact head, but its merge commit is in none of the landing commits. */
+  | { kind: "elsewhere"; pullRequest: { number: number; url: string }; base: string };
+
+export async function proveByMergedHead(input: HeadProofInput): Promise<HeadProof | null> {
+  const tip = input.tip.toLowerCase();
+  const landing = input.landing.filter((commit) => OID.test(commit));
+  let elsewhere: HeadProof | null = null;
+  const seen = new Set<number>();
+  let tipTree: string | null | undefined;
+  for (const pr of input.candidates) {
+    if (seen.has(pr.number)) continue;
+    seen.add(pr.number);
+    if (pr.isCrossRepository || !OID.test(pr.headRefOid) || pr.headRefOid.toLowerCase() !== tip) continue;
+    const merged = pr.mergeCommitOid && OID.test(pr.mergeCommitOid) ? pr.mergeCommitOid.toLowerCase() : null;
+    if (!merged) continue;
+    tipTree ??= await input.treeOf(tip);
+    const holdsTip =
+      (tipTree !== null && tipTree === (await input.treeOf(merged))) || (await input.contentIn(tip, merged)) === true;
+    if (!holdsTip) continue;
+    let inLanding = false;
+    for (const commit of landing) {
+      if (merged === commit.toLowerCase() || (await isAncestor(input.repo, merged, commit))) {
+        inLanding = true;
+        break;
+      }
+    }
+    const pullRequest = { number: pr.number, url: pr.url };
+    if (inLanding) return { kind: "landed", pullRequest };
+    if (!elsewhere && pr.baseRefName) elsewhere = { kind: "elsewhere", pullRequest, base: pr.baseRefName };
+  }
+  return elsewhere;
+}
