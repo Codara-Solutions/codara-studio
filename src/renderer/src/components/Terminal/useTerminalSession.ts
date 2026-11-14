@@ -3753,7 +3753,11 @@ export function useTerminalSession({
       // resume issued here would drain a backlog the CANONICAL pane paused for,
       // stealing its bytes onto the shared channel at the wrong moment.
       if (!rawTailReattachRef.current && !readOnlyRef.current && !sleepingAtMount) {
-        void window.spark.pty.resume(sessionId, attachedExistingSession && !externalSizeOwnerRef.current);
+        void window.spark.pty.resume(
+          sessionId,
+          attachedExistingSession && !externalSizeOwnerRef.current,
+          scrollbackLineLimitRef.current,
+        );
       }
 
       // Two-stage debounce, ported from the terax design.
@@ -4065,7 +4069,7 @@ export function useTerminalSession({
         // the screen on remount.
         void window.spark.pty.detach?.(sessionId);
       } else if (!readOnlyRef.current) {
-        void window.spark.pty.pause?.(sessionId);
+        void window.spark.pty.pause?.(sessionId, scrollbackLineLimitRef.current);
       }
       for (const fn of cleanups) {
         try {
@@ -4353,7 +4357,7 @@ export function useTerminalSession({
       resume: async (redraw) => {
         refitAndResizeRef.current?.();
         if (!readOnlyRef.current) {
-          await window.spark.pty.resume(sessionId, redraw && !externalSizeOwnerRef.current);
+          await window.spark.pty.resume(sessionId, redraw && !externalSizeOwnerRef.current, scrollbackLineLimitRef.current);
         }
       },
       afterWrite: (done) => {
@@ -4377,7 +4381,7 @@ export function useTerminalSession({
         // Stop IPC/xterm churn while the whole window is minimized, hidden to
         // tray, or frozen by the OS. Main keeps a bounded ordered backlog and
         // recoverAfterHostWake resumes it only after xterm has repaired/refit.
-        if (!readOnlyRef.current) void window.spark.pty.pause(sessionId);
+        if (!readOnlyRef.current) void window.spark.pty.pause(sessionId, scrollbackLineLimitRef.current);
       }
     };
     window.addEventListener("blur", onBlur);

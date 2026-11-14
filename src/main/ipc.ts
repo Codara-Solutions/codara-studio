@@ -3413,11 +3413,15 @@ export function registerIpc(): void {
   // detached backlog instead of sending it to webContents — the listener is
   // gone, so the send would be dropped. Resume drains the backlog through the
   // same data channel before live output continues.
-  handle("pty:pause", async (_e, args: { id: string }) => {
-    pty.pause(args.id);
+  handle("pty:pause", async (_e, args: { id: string; scrollbackLines?: unknown }) => {
+    pty.pause(args.id, typeof args.scrollbackLines === "number" ? args.scrollbackLines : undefined);
   });
-  handle("pty:resume", async (_e, args: { id: string; redraw?: boolean }) => {
-    pty.resume(args.id, args.redraw === true);
+  handle("pty:resume", async (_e, args: { id: string; redraw?: boolean; scrollbackLines?: unknown }) => {
+    pty.resume(
+      args.id,
+      args.redraw === true,
+      typeof args.scrollbackLines === "number" ? args.scrollbackLines : undefined,
+    );
   });
   // Renderer backpressure ack: xterm reports parsed bytes so pty-manager can
   // pause the child at the OS level when the screen falls too far behind.

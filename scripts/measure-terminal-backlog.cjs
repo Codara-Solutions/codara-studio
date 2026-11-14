@@ -67,10 +67,14 @@ const WORKLOADS = {
   },
 };
 
-function used() {
-  globalThis.gc();
+// Buffers' memory is released a turn after the collection that frees them.
+async function used() {
+  for (let i = 0; i < 3; i += 1) {
+    globalThis.gc();
+    await sleep(20);
+  }
   const usage = process.memoryUsage();
-  return usage.heapUsed + usage.arrayBuffers;
+  return { heap: usage.heapUsed, buffers: usage.arrayBuffers };
 }
 
 async function measure(pty, controller, name, total) {
@@ -80,10 +84,11 @@ async function measure(pty, controller, name, total) {
   await pty.spawn({ ...localOptions(id), cols: COLS, rows: ROWS, webContents: wc });
   const handle = controller.localSpawnCalls.at(-1).handle;
   await sleep(30);
-  pty.pause(id, { scrollbackLines: 3_000, rows: ROWS });
-  const before = used();
+  pty.pause(id, 3_000);
+  const before = await used();
   for (const chunk of WORKLOADS[name](total)) handle.emit(chunk);
-  const held = used() - before;
+  const after = await used();
+  const held = { heap: after.heap - before.heap, buffers: after.buffers - before.buffers };
   const snapshot = pty.resourceSnapshot().sessions.find((s) => s.id === id);
 
   sent.length = 0;
@@ -132,7 +137,7 @@ async function main() {
     for (const name of Object.keys(WORKLOADS)) {
       const r = await measure(pty, controller, name, total);
       console.log(`${name}:`);
-      console.log(`  held after the output: ${fmt(r.held)} (backlog ${fmt(r.backlog)}, tail ${fmt(r.tail)})`);
+      console.log(`  held after the output: ${fmt(r.held.heap + r.held.buffers)}: ${fmt(r.held.buffers)} of buffers and ${fmt(r.held.heap)} of heap (backlog ${fmt(r.backlog)}, tail ${fmt(r.tail)})`);
       console.log(`  switch back: ${r.messages} messages, largest ${fmt(r.largest)}, longest task ${Math.round(r.longest)} ms`);
     }
     pty.disposeAll();

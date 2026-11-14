@@ -213,7 +213,7 @@ async function main() {
   check(
     "hidden documents pause PTY delivery before Chromium throttles the renderer",
     source.includes('document.visibilityState === "visible"') &&
-      source.includes("window.spark.pty.pause(sessionId)"),
+      source.includes("window.spark.pty.pause(sessionId, scrollbackLineLimitRef.current)"),
   );
   check(
     "snapshot cache also has a process-wide byte budget",
