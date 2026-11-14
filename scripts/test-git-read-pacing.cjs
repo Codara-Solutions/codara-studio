@@ -166,6 +166,28 @@ async function main() {
       console.log("PASS the other projects follow one at a time, and the rail is loaded once all were read");
     }
     {
+      // The round waits while the window is unfocused, and a refocus does
+      // not read the next project at once.
+      const page = await browser.newPage();
+      await page.addInitScript(railSpark);
+      await page.clock.install();
+      await page.goto("file://" + path.join(directory, "start.html"));
+      await page.waitForFunction(() => window.__calls.length === 1);
+      await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+      await page.clock.runFor(91_000);
+      await page.waitForTimeout(100);
+      assert.equal(await page.evaluate(() => window.__calls.length), 1, "nothing read while unfocused");
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.clock.runFor(10_000);
+      await page.waitForTimeout(100);
+      assert.equal(await page.evaluate(() => window.__calls.length), 1, "nor in the 10 s after focus returns");
+      await page.clock.runFor(60_000);
+      await page.waitForTimeout(100);
+      assert.deepEqual(await page.evaluate(() => window.__calls), [["/q"], ["/p"]], "then it carries on");
+      await page.close();
+      console.log("PASS the round waits while the window is unfocused, and not for a refocus");
+    }
+    {
       // A change of workspaces restarts the round: it carries on with the
       // projects read least recently, so none is starved by restarts.
       const page = await browser.newPage();

@@ -138,14 +138,17 @@ export function useWorktreeRailStates(
         const local = workspacesRef.current.filter((ws) => !ws.remote);
         const visible = local.find((ws) => ws.id === visibleRef.current);
         const projects = [...new Set(local.map(railProjectOf))];
-        const age = (project: string) => readAt.current.get(project) ?? -Infinity;
+        const age = (project: string) => readAt.current.get(project) ?? 0;
         const rest = projects.filter((project) => !visible || project !== railProjectOf(visible));
         const order = [...(visible ? [railProjectOf(visible)] : []), ...rest.sort((a, b) => age(a) - age(b))];
         for (const project of order) queued.current.add(project);
         for (let index = 0; index < order.length; index++) {
-          if (index > 0) {
+          // Only after a whole pace with the window focused: paused while
+          // it is not, and a refocus is not a moment to read a project.
+          while (index > 0) {
+            const focused = gitReadsActive();
             await wait(PACE_MS);
-            while (!cancelled && !gitReadsActive()) await wait(TICK_MS);
+            if (cancelled || (focused && gitReadsActive())) break;
           }
           if (cancelled) return;
           const project = order[index];
