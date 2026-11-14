@@ -139,8 +139,15 @@ async function main() {
       },
       processesUnderCwd: async () => h.processes,
       github: {
-        listPullRequestsForHead: async () => h.pulls,
+        listPullRequestsForHead: async () => {
+          if (h.pullsError) throw h.pullsError;
+          return h.pulls;
+        },
         listMergedPullRequests: async () => h.pulls,
+        listPullRequestsForCommit: async () => {
+          if (h.pullsError) throw h.pullsError;
+          return h.commitPulls ?? [];
+        },
       },
       sendAgentEvent: (event) => h.events.push(event),
       audit: aw.createWorktreeAuditLog(auditFile),
@@ -885,6 +892,297 @@ async function main() {
     assert.equal(prRemoved.proof, "pull-request");
     assert.deepEqual(prRemoved.pullRequest, { number: 7, url: "https://github.com/o/r/pull/7" });
     assert.deepEqual(h.events.at(-1).pullRequest, prRemoved.pullRequest);
+    h.pulls = [];
+
+    // ── Remove: merged under another branch name ───────────────────────────
+    // The agent's branch was pushed under another name (its upstream), that
+    // pull request was squash-merged and GitHub deleted its branch, and main
+    // then rewrote the same file: neither ancestry nor a merge into main's
+    // tip proves it. Its only ignored content is empty folders.
+    let otherNamePr = 40;
+    const mergedUnderOtherName = async (name, { upstream = true } = {}) => {
+      const remoteBranch = `feat/${name}`;
+      git(repo, ["push", "-q", "origin", `main:refs/heads/${remoteBranch}`]);
+      git(repo, ["fetch", "-q", "origin"]);
+      const made = await aw.createAgentWorktree(terminalAgent, { branch: `fix/${name}`, base: `origin/${remoteBranch}` }, deps);
+      assert.equal(made.ok, true, JSON.stringify(made));
+      // Codara makes it without an upstream; its agent set one.
+      if (upstream) git(made.path, ["branch", "-q", "--set-upstream-to", `origin/${remoteBranch}`]);
+      fs.appendFileSync(path.join(made.path, ".gitignore"), "data/\n");
+      git(made.path, ["commit", "-q", "-am", "ignore data"]);
+      commitFile(made.path, `${name}.txt`, "first\n", "work");
+      const head = commitFile(made.path, `${name}.txt`, "first\nsecond\n", "more work");
+      git(made.path, ["push", "-q", "origin", `HEAD:${remoteBranch}`]);
+      git(repo, ["merge", "-q", "--squash", `fix/${name}`]);
+      git(repo, ["commit", "-q", "-m", `squash ${remoteBranch}`]);
+      const squash = git(repo, ["rev-parse", "HEAD"]);
+      commitFile(repo, `${name}.txt`, "rewritten on main\n", "main moves on");
+      git(repo, ["push", "-q", "origin", "main"]);
+      git(repo, ["push", "-q", "origin", "--delete", remoteBranch]);
+      git(repo, ["fetch", "-q", "--prune", "origin"]);
+      fs.mkdirSync(path.join(made.path, "data", "a"), { recursive: true });
+      fs.mkdirSync(path.join(made.path, "data", "b", "c"), { recursive: true });
+      otherNamePr += 1;
+      const pr = {
+        number: otherNamePr,
+        url: `https://github.com/o/r/pull/${otherNamePr}`,
+        headRefName: remoteBranch,
+        headRefOid: head,
+        baseRefName: "main",
+        isCrossRepository: false,
+        mergeCommitOid: squash,
+      };
+      return { made, head, squash, pr, remoteBranch };
+    };
+    const checkOnly = (made, extra = {}) => aw.removeAgentWorktree(terminalAgent, { workspaceId: made.workspaceId, dryRun: true, ...extra }, deps);
+
+    // The whole shape is removable, without naming a target.
+    const shape = await mergedUnderOtherName("other-name");
+    assert.match(git(repo, ["branch", "-vv", "--list", "fix/other-name"]), /\[origin\/feat\/other-name: gone\]/);
+    h.pulls = [shape.pr];
+    const shapeDry = await checkOnly(shape.made);
+    assert.equal(shapeDry.wouldRemove, true, JSON.stringify(shapeDry));
+    const shapeListed = (await aw.listAgentWorktrees(terminalAgent, { checkMerge: true }, deps)).worktrees.find((entry) => entry.workspaceId === shape.made.workspaceId);
+    assert.equal(shapeListed.removable, true, JSON.stringify(shapeListed));
+    const shapeRemoved = await aw.removeAgentWorktree(terminalAgent, { workspaceId: shape.made.workspaceId }, deps);
+    assert.equal(shapeRemoved.ok, true, JSON.stringify(shapeRemoved));
+    assert.equal(shapeRemoved.proof, "pull-request");
+    assert.deepEqual(shapeRemoved.pullRequest, { number: shape.pr.number, url: shape.pr.url });
+    assert.equal(shapeRemoved.branchDeleted, true);
+    assert.ok(!fs.existsSync(shape.made.path));
+
+    // Pushed with no upstream left at all: found by its head commit.
+    const noUpstream = await mergedUnderOtherName("no-upstream", { upstream: false });
+    h.pulls = [];
+    h.commitPulls = [noUpstream.pr];
+    const noUpstreamRemoved = await aw.removeAgentWorktree(terminalAgent, { workspaceId: noUpstream.made.workspaceId }, deps);
+    assert.equal(noUpstreamRemoved.ok, true, JSON.stringify(noUpstreamRemoved));
+    assert.equal(noUpstreamRemoved.proof, "pull-request");
+    h.commitPulls = null;
+
+    // Each refusal that must stay, then the same worktree once it is fixed.
+    const extraCommit = await mergedUnderOtherName("extra-commit");
+    h.pulls = [extraCommit.pr];
+    commitFile(extraCommit.made.path, "after-merge.txt", "after the merge\n", "after the merge");
+    const extraRefused = await checkOnly(extraCommit.made);
+    assert.deepEqual(extraRefused.blockers, ["WORKTREE_NOT_MERGED"], "a commit after the merged head is unmerged work");
+    git(extraCommit.made.path, ["reset", "-q", "--hard", extraCommit.head]);
+    assert.equal((await checkOnly(extraCommit.made)).wouldRemove, true);
+
+    const closed = await mergedUnderOtherName("closed");
+    h.pulls = [{ ...closed.pr, mergeCommitOid: null }];
+    assert.deepEqual((await checkOnly(closed.made)).blockers, ["WORKTREE_NOT_MERGED"], "a pull request closed without a merge commit");
+    h.pulls = [{ ...closed.pr, isCrossRepository: true }];
+    assert.deepEqual((await checkOnly(closed.made)).blockers, ["WORKTREE_NOT_MERGED"], "a fork's pull request with the same branch name");
+    h.commitPulls = [{ ...closed.pr, isCrossRepository: true }];
+    assert.deepEqual((await checkOnly(closed.made)).blockers, ["WORKTREE_NOT_MERGED"], "nor found by its head commit");
+    h.commitPulls = null;
+    h.pulls = [{ ...closed.pr, headRefOid: git(closed.made.path, ["rev-parse", "HEAD~1"]) }];
+    assert.deepEqual((await checkOnly(closed.made)).blockers, ["WORKTREE_NOT_MERGED"], "a pull request of an earlier head");
+    h.pullsError = new Error("gh: API rate limit exceeded");
+    h.pulls = [closed.pr];
+    const ghRefused = await checkOnly(closed.made);
+    assert.deepEqual(ghRefused.blockers, ["WORKTREE_NOT_MERGED"], "GitHub not answering proves nothing");
+    assert.equal(ghRefused.merge.status, "unknown");
+    assert.equal(ghRefused.details.pushed, false);
+    assert.deepEqual(ghRefused.details.upstream, { branch: "origin/feat/closed", gone: true }, "pushed under another name that is gone");
+    h.pullsError = null;
+    assert.equal((await checkOnly(closed.made)).wouldRemove, true);
+
+    // Merged into a branch that is not the target: the hint names it without
+    // a retryWith (that branch may be unmerged itself), and naming it proves
+    // the merge.
+    const elsewhereMerge = await mergedUnderOtherName("merged-elsewhere");
+    git(repo, ["push", "-q", "origin", `${elsewhereMerge.squash}~1:refs/heads/release-elsewhere`]);
+    git(repo, ["checkout", "-q", "-b", "release-elsewhere", "origin/release-elsewhere"]);
+    git(repo, ["merge", "-q", "--squash", "fix/merged-elsewhere"]);
+    git(repo, ["commit", "-q", "-m", "squash into release"]);
+    git(repo, ["push", "-q", "origin", "release-elsewhere"]);
+    const releaseMerge = git(repo, ["rev-parse", "HEAD"]);
+    git(repo, ["checkout", "-q", "main"]);
+    git(repo, ["branch", "-q", "-D", "release-elsewhere"]);
+    git(repo, ["fetch", "-q", "origin"]);
+    h.pulls = [{ ...elsewhereMerge.pr, baseRefName: "release-elsewhere", mergeCommitOid: releaseMerge }];
+    const elsewhereRefused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: elsewhereMerge.made.workspaceId }, deps);
+    assert.equal(elsewhereRefused.code, "WORKTREE_NOT_MERGED", JSON.stringify(elsewhereRefused));
+    assert.equal(elsewhereRefused.retryWith, undefined);
+    assert.match(elsewhereRefused.hint, /#\d+ merged this exact commit into release-elsewhere/);
+    assert.equal((await checkOnly(elsewhereMerge.made, { target: "release-elsewhere" })).wouldRemove, true);
+    h.pulls = [{ ...elsewhereMerge.pr, mergeCommitOid: releaseMerge }];
+    assert.deepEqual((await checkOnly(elsewhereMerge.made)).blockers, ["WORKTREE_NOT_MERGED"], "a merge commit main does not hold");
+
+    // Its copy pushed under another name, with nothing merged, is never a
+    // target: neither suggested nor accepted.
+    const pushedCopy = await aw.createAgentWorktree(terminalAgent, { branch: "fix/pushed-copy" }, deps);
+    const pushedCopyTip = commitFile(pushedCopy.path, "pushed-copy.txt", "unmerged\n", "unmerged work");
+    git(pushedCopy.path, ["push", "-q", "-u", "origin", "HEAD:feat/pushed-copy"]);
+    h.pulls = [];
+    const copyRefused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: pushedCopy.workspaceId }, deps);
+    assert.equal(copyRefused.code, "WORKTREE_NOT_MERGED", JSON.stringify(copyRefused));
+    assert.equal(copyRefused.retryWith, undefined, "the pushed copy is not offered as a target");
+    assert.equal(copyRefused.details.pushed, true, "pushed under its upstream's name");
+    assert.deepEqual(copyRefused.details.upstream, { branch: "origin/feat/pushed-copy", gone: false });
+    for (const target of ["feat/pushed-copy", "origin/feat/pushed-copy"]) {
+      const named = await aw.removeAgentWorktree(terminalAgent, { workspaceId: pushedCopy.workspaceId, target }, deps);
+      assert.equal(named.code, "WORKTREE_TARGET_NOT_FOUND", JSON.stringify(named));
+      assert.match(named.details.targetProblem, /pushed under another name/);
+    }
+    assert.equal(git(repo, ["rev-parse", "refs/heads/fix/pushed-copy"]), pushedCopyTip, "the unmerged branch is kept");
+    git(repo, ["push", "-q", "origin", "--delete", "feat/pushed-copy"]);
+    git(repo, ["fetch", "-q", "--prune", "origin"]);
+    git(pushedCopy.path, ["reset", "-q", "--hard", "HEAD~1"]);
+    git(pushedCopy.path, ["branch", "-q", "--unset-upstream"]);
+    assert.equal((await aw.removeAgentWorktree(terminalAgent, { workspaceId: pushedCopy.workspaceId }, deps)).ok, true);
+
+    // A local base whose last segment is the upstream's name is not that
+    // branch on origin: the pushed copy stays refused.
+    git(repo, ["branch", "-q", "feature/suffix-base", "main"]);
+    const suffix = await aw.createAgentWorktree(terminalAgent, { branch: "fix/suffix", base: "feature/suffix-base" }, deps);
+    assert.equal(suffix.ok, true, JSON.stringify(suffix));
+    const suffixTip = commitFile(suffix.path, "suffix.txt", "unmerged\n", "unmerged work");
+    git(suffix.path, ["push", "-q", "-u", "origin", "HEAD:suffix-base"]);
+    const suffixNamed = await aw.removeAgentWorktree(terminalAgent, { workspaceId: suffix.workspaceId, target: "suffix-base" }, deps);
+    assert.equal(suffixNamed.code, "WORKTREE_TARGET_NOT_FOUND", JSON.stringify(suffixNamed));
+    assert.equal(git(repo, ["rev-parse", "refs/heads/fix/suffix"]), suffixTip, "the unmerged branch is kept");
+    git(repo, ["push", "-q", "origin", "--delete", "suffix-base"]);
+    git(repo, ["fetch", "-q", "--prune", "origin"]);
+    git(suffix.path, ["reset", "-q", "--hard", "HEAD~1"]);
+    git(suffix.path, ["branch", "-q", "--unset-upstream"]);
+    assert.equal((await aw.removeAgentWorktree(terminalAgent, { workspaceId: suffix.workspaceId }, deps)).ok, true);
+    git(repo, ["branch", "-q", "-D", "feature/suffix-base"]);
+
+    // The merge commit counts only in what origin has now: a local branch
+    // holding it, or a tracking ref the fetch refspec leaves stale, after
+    // origin dropped that merge, proves nothing.
+    const dropped = await mergedUnderOtherName("dropped-merge");
+    const preMerge = git(repo, ["rev-parse", `${dropped.squash}~1`]);
+    git(repo, ["checkout", "-q", "-b", "release-dropped-local", preMerge]);
+    git(repo, ["merge", "-q", "--squash", "fix/dropped-merge"]);
+    git(repo, ["commit", "-q", "-m", "squash into release"]);
+    const droppedMerge = git(repo, ["rev-parse", "HEAD"]);
+    const staleTip = commitFile(repo, "dropped-merge.txt", "rewritten on release\n", "release moves on");
+    git(repo, ["checkout", "-q", "main"]);
+    git(repo, ["push", "-q", "origin", `${preMerge}:refs/heads/release-dropped`]);
+    git(repo, ["update-ref", "refs/remotes/origin/release-dropped", staleTip]);
+    h.pulls = [{ ...dropped.pr, baseRefName: "release-dropped", mergeCommitOid: droppedMerge }];
+    assert.deepEqual(
+      (await checkOnly(dropped.made, { target: "release-dropped-local" })).blockers,
+      ["WORKTREE_NOT_MERGED"],
+      "a local branch holding a merge origin dropped",
+    );
+    git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"]);
+    try {
+      const staleRefused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: dropped.made.workspaceId, target: "origin/release-dropped" }, deps);
+      assert.equal(staleRefused.code, "WORKTREE_NOT_MERGED", JSON.stringify(staleRefused));
+    } finally {
+      git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    }
+    assert.equal(git(repo, ["rev-parse", "refs/heads/fix/dropped-merge"]), dropped.head, "the branch is kept");
+    // Once origin holds the merge again, the same target proves it.
+    git(repo, ["push", "-q", "-f", "origin", `${staleTip}:refs/heads/release-dropped`]);
+    const droppedRemoved = await aw.removeAgentWorktree(terminalAgent, { workspaceId: dropped.made.workspaceId, target: "origin/release-dropped" }, deps);
+    assert.equal(droppedRemoved.ok, true, JSON.stringify(droppedRemoved));
+    assert.equal(droppedRemoved.proof, "pull-request");
+    git(repo, ["push", "-q", "origin", "--delete", "release-dropped"]);
+    git(repo, ["fetch", "-q", "--prune", "origin"]);
+    git(repo, ["branch", "-q", "-D", "release-dropped-local"]);
+
+    // The same with the stale tracking ref right at the squash (no later
+    // rewrite): the content proof must judge what origin has now too.
+    const staleSquash = await mergedUnderOtherName("stale-squash");
+    const stalePreMerge = git(repo, ["rev-parse", `${staleSquash.squash}~1`]);
+    git(repo, ["checkout", "-q", "-b", "release-stale-build", stalePreMerge]);
+    git(repo, ["merge", "-q", "--squash", "fix/stale-squash"]);
+    git(repo, ["commit", "-q", "-m", "squash into release"]);
+    const staleMerge = git(repo, ["rev-parse", "HEAD"]);
+    git(repo, ["checkout", "-q", "main"]);
+    git(repo, ["branch", "-q", "-D", "release-stale-build"]);
+    git(repo, ["push", "-q", "origin", `${stalePreMerge}:refs/heads/release-stale`]);
+    git(repo, ["update-ref", "refs/remotes/origin/release-stale", staleMerge]);
+    h.pulls = [{ ...staleSquash.pr, baseRefName: "release-stale", mergeCommitOid: staleMerge }];
+    git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"]);
+    try {
+      const staleSquashRefused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: staleSquash.made.workspaceId, target: "origin/release-stale" }, deps);
+      assert.equal(staleSquashRefused.code, "WORKTREE_NOT_MERGED", JSON.stringify(staleSquashRefused));
+    } finally {
+      git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    }
+    assert.equal(git(repo, ["rev-parse", "refs/heads/fix/stale-squash"]), staleSquash.head, "the branch is kept");
+    git(repo, ["push", "-q", "-f", "origin", `${staleMerge}:refs/heads/release-stale`]);
+    const staleSquashRemoved = await aw.removeAgentWorktree(terminalAgent, { workspaceId: staleSquash.made.workspaceId, target: "origin/release-stale" }, deps);
+    assert.equal(staleSquashRemoved.ok, true, JSON.stringify(staleSquashRemoved));
+    git(repo, ["push", "-q", "origin", "--delete", "release-stale"]);
+    git(repo, ["fetch", "-q", "--prune", "origin"]);
+
+    // origin/HEAD is an alias: judged as the branch the remote's HEAD names,
+    // at the commit the remote has, never the local origin/HEAD.
+    const viaHead = await mergedUnderOtherName("via-head");
+    const mainNow = git(repo, ["rev-parse", "main"]);
+    const behindSquash = git(repo, ["rev-parse", `${viaHead.squash}~1`]);
+    git(repo, ["push", "-q", "-f", "origin", `${behindSquash}:refs/heads/main`]);
+    git(repo, ["update-ref", "refs/remotes/origin/main", mainNow]);
+    h.pulls = [viaHead.pr];
+    try {
+      const headRefused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: viaHead.made.workspaceId, target: "origin/HEAD" }, deps);
+      assert.equal(headRefused.code, "WORKTREE_NOT_MERGED", JSON.stringify(headRefused));
+      assert.equal(git(repo, ["rev-parse", "refs/heads/fix/via-head"]), viaHead.head, "the branch is kept");
+    } finally {
+      git(repo, ["push", "-q", "-f", "origin", "main"]);
+    }
+    const headRemoved = await aw.removeAgentWorktree(terminalAgent, { workspaceId: viaHead.made.workspaceId, target: "origin/HEAD" }, deps);
+    assert.equal(headRemoved.ok, true, JSON.stringify(headRemoved));
+
+    // remoteCommitNow answers what the remote has, or nothing.
+    const remoteMain = git(repo, ["ls-remote", "origin", "refs/heads/main"]).split("\t")[0];
+    const older = git(repo, ["rev-parse", "main~2"]);
+    const middle = git(repo, ["rev-parse", "main~1"]);
+    git(repo, ["push", "-q", "origin", `${middle}:refs/heads/table-moved`, `${middle}:refs/heads/table-excluded`]);
+    git(repo, ["push", "-q", "-f", "origin", `${older}:refs/heads/table-moved`]);
+    git(repo, ["update-ref", "refs/remotes/origin/table-moved", middle]);
+    git(repo, ["update-ref", "refs/remotes/origin/table-excluded", remoteMain]);
+    git(repo, ["remote", "add", "unreachable", path.join(scratch, "no-such-remote.git")]);
+    git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"]);
+    try {
+      for (const [name, branch, commit] of [
+        ["main", "main", remoteMain],
+        ["origin/main", "main", remoteMain],
+        ["origin/HEAD", "main", remoteMain],
+        ["HEAD", "main", remoteMain],
+        ["origin/table-excluded", "table-excluded", middle],
+        ["origin/table-moved", "table-moved", older],
+        ["origin/no-such-branch"],
+        ["unreachable/main"],
+        ["origin/a..b"],
+      ]) {
+        const now = await aw.remoteCommitNow(repo, name, 10_000);
+        assert.deepEqual(now, commit ? { remote: "origin", branch, commit } : null, name);
+      }
+      assert.equal(git(repo, ["rev-parse", "refs/remotes/origin/table-excluded"]), remoteMain, "a tracking ref the refspec leaves out is not moved");
+    } finally {
+      git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+      git(repo, ["remote", "remove", "unreachable"]);
+      git(repo, ["push", "-q", "origin", "--delete", "table-moved", "table-excluded"]);
+      git(repo, ["fetch", "-q", "--prune", "origin"]);
+    }
+
+    // One file under the ignored folder keeps blocking.
+    const keptFile = await mergedUnderOtherName("kept-file");
+    h.pulls = [keptFile.pr];
+    fs.writeFileSync(path.join(keptFile.made.path, "data", "b", "c", "keep.json"), "{}\n");
+    const keptRefused = await checkOnly(keptFile.made);
+    assert.deepEqual(keptRefused.blockers, ["WORKTREE_IGNORED_FILES"], JSON.stringify(keptRefused));
+    assert.deepEqual(keptRefused.dirty.ignoredBlocking, ["data/"]);
+    fs.rmSync(path.join(keptFile.made.path, "data", "b", "c", "keep.json"));
+    assert.equal((await checkOnly(keptFile.made)).wouldRemove, true);
+
+    for (const left of [extraCommit, closed, elsewhereMerge, keptFile]) {
+      const elsewhere = left === elsewhereMerge;
+      h.pulls = elsewhere ? [{ ...left.pr, baseRefName: "release-elsewhere", mergeCommitOid: releaseMerge }] : [left.pr];
+      const gone = await aw.removeAgentWorktree(terminalAgent, { workspaceId: left.made.workspaceId, ...(elsewhere ? { target: "release-elsewhere" } : {}) }, deps);
+      assert.equal(gone.ok, true, JSON.stringify(gone));
+    }
+    git(repo, ["push", "-q", "origin", "--delete", "release-elsewhere"]);
+    git(repo, ["fetch", "-q", "--prune", "origin"]);
     h.pulls = [];
 
     // A worktree the user made is theirs unless they opt in.
