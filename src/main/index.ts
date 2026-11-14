@@ -116,6 +116,7 @@ import {
 } from "./orchestration/unified-account-migration";
 import { startClaudeFollow } from "./claude-follow/claude-follow-service";
 import { credentialMirror } from "./orchestration/credential-mirror";
+import { decideGpuDrawingAtStartup, gpuDrawingQuitGoingAhead, startGpuDrawingSafetyNet } from "./gpu-drawing";
 
 // run-store is heavy (loads the manager protocol and agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
@@ -157,8 +158,11 @@ app.setName("Codara Studio");
 // startup, so forcing X11 merely trades one unstable graphics backend for
 // another. Software compositing avoids both driver paths, while xterm already
 // has a tested DOM-renderer fallback when WebGL is unavailable. Explicit x11
-// and non-Wayland sessions remain untouched. Developers can opt back into the
-// native hardware path with CODARA_WAYLAND_HARDWARE_ACCELERATION=1.
+// and non-Wayland sessions remain untouched. People can opt back into the
+// native hardware path in Settings (waylandHardwareAcceleration, with a
+// safety net that turns it off after a GPU crash), and
+// CODARA_WAYLAND_HARDWARE_ACCELERATION wins over that either way
+// (src/shared/gpu-drawing.ts).
 isolateE2eFromDesktop();
 const requestedOzonePlatform = app.commandLine.getSwitchValue("ozone-platform").toLowerCase();
 const isWaylandSession = process.platform === "linux" && process.env.XDG_SESSION_TYPE === "wayland";
@@ -166,8 +170,6 @@ const usesNativeWayland =
   isWaylandSession &&
   requestedOzonePlatform !== "x11" &&
   requestedOzonePlatform !== "headless";
-const usesWaylandSoftwareFallback =
-  usesNativeWayland && process.env.CODARA_WAYLAND_HARDWARE_ACCELERATION !== "1";
 const disabledChromiumFeatures = new Set(
   app.commandLine
     .getSwitchValue("disable-features")
@@ -201,13 +203,6 @@ if (usesNativeWayland) {
 app.commandLine.removeSwitch("disable-features");
 app.commandLine.appendSwitch("disable-features", [...disabledChromiumFeatures].join(","));
 
-if (usesWaylandSoftwareFallback) {
-  // This is a pre-ready API. Calling it here ensures Chromium never creates
-  // a hardware context in the GPU process whose Wayland/Vulkan surface
-  // teardown killed the app.
-  app.disableHardwareAcceleration();
-}
-
 // Surface any uncaught error in main so renderer-side "everything goes black"
 // crashes show up in the dev console instead of dying silently.
 process.on("uncaughtException", (err) => {
@@ -226,6 +221,14 @@ if (safeUserDataDir) {
   // neither Chromium credentials nor Codara state can be written into Git.
   delete process.env.SPARK_USER_DATA_DIR;
   console.error("[privacy] Ignored SPARK_USER_DATA_DIR inside a Git repository.");
+}
+// After the userData override above: the decision reads the Codara home.
+const gpuDrawing = decideGpuDrawingAtStartup(usesNativeWayland);
+if (!gpuDrawing.hardware) {
+  // This is a pre-ready API. Calling it here ensures Chromium never creates
+  // a hardware context in the GPU process whose Wayland/Vulkan surface
+  // teardown killed the app.
+  app.disableHardwareAcceleration();
 }
 if (process.platform === "win32") {
   // Windows only displays native toasts for an AppUserModelID it can resolve
@@ -1199,6 +1202,7 @@ app.whenReady().then(async () => {
   }
 
   ensureCodaraHomeSync();
+  startGpuDrawingSafetyNet();
   // The crash and freeze black box: before anything slow runs, so a freeze
   // during startup is caught, and before the window, so Crashpad watches it
   // on a first run too.
@@ -1228,7 +1232,7 @@ app.whenReady().then(async () => {
       onGone: (reason) => quitWithoutPrompt(`dev launcher ${reason}`),
     });
   }
-  if (usesWaylandSoftwareFallback) {
+  if (!gpuDrawing.hardware) {
     logMain("boot", "graphics backend=wayland-software (automatic crash-safety fallback)");
   } else if (usesNativeWayland) {
     logMain("boot", "graphics backend=wayland-hardware (Vulkan disabled, ANGLE=OpenGL)");
@@ -1955,6 +1959,8 @@ app.on("before-quit", (event) => {
     isQuitting = false;
     return;
   }
+  // Past the prompt this quit ends the process: a GPU exit is no crash now.
+  gpuDrawingQuitGoingAhead("before-quit");
   // Flag the quit BEFORE anything else. Otherwise the async cleanup below
   // preventDefault()s this quit, then later re-calls app.quit() — and on that
   // second pass the window `close` handler would still see isQuitting === false

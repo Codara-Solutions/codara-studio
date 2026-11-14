@@ -1,4 +1,4 @@
-import { readFileSync, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import {
   APP_THEME_IDS,
@@ -31,11 +31,14 @@ import { normalizeForecastIdeas } from "@shared/usage-forecast";
 import { normalizeRepository } from "@shared/pull-request-watch";
 import { writeFileAtomic } from "./fs-atomic";
 import { codaraHome } from "./codara-home";
+import { readRegularFileSync } from "./read-regular-file-sync";
 
 // Per-user UI preferences (theme + future toggles like vim mode, inline-AI
 // model id, etc.). Lives next to spark-state.json / spark-settings.json so
 // the existing migration in spark-home.ts covers it implicitly.
 const PREFS_FILE = "spark-preferences.json";
+// The startup reads skip a pipe, a device or a runaway file (defaults instead).
+const PREFS_SYNC_MAX_BYTES = 16 * 1024 * 1024;
 
 let cache: AppPreferences | null = null;
 // Separate cache for getPreferenceSync(): the sync reader is invoked before
@@ -284,6 +287,8 @@ function normalize(
       typeof src.keepRunningInBackground === "boolean"
         ? src.keepRunningInBackground
         : DEFAULT_PREFERENCES.keepRunningInBackground,
+    // Opt-in: only a stored true draws with the graphics card on native Wayland.
+    waylandHardwareAcceleration: src.waylandHardwareAcceleration === true,
     claudeFollowsActiveAccount:
       typeof src.claudeFollowsActiveAccount === "boolean"
         ? src.claudeFollowsActiveAccount
@@ -453,10 +458,22 @@ async function writeToDisk(prefs: AppPreferences): Promise<void> {
   await writeFileAtomic(prefsPath(), JSON.stringify(prefs, null, 2));
 }
 
+let loading: Promise<AppPreferences> | null = null;
+
 export async function loadPreferences(): Promise<AppPreferences> {
   if (cache) return cache;
-  cache = await readFromDisk();
-  return cache;
+  // One read for every early caller, and a value set while it was in flight
+  // wins over what it read: a second read landing late would otherwise put
+  // the old value back in the cache, and the next save would write it.
+  loading ??= readFromDisk()
+    .then((read) => {
+      cache ??= read;
+      return cache;
+    })
+    .finally(() => {
+      loading = null;
+    });
+  return loading;
 }
 
 type PreferenceListener = (key: PrefKey, prefs: AppPreferences) => void;
@@ -508,7 +525,7 @@ export async function flushPreferences(): Promise<void> {
 
 function readFromDiskSync(): AppPreferences {
   try {
-    const raw = readFileSync(prefsPath(), "utf8");
+    const raw = readRegularFileSync(prefsPath(), PREFS_SYNC_MAX_BYTES);
     return normalize(JSON.parse(raw) as Partial<AppPreferences>, {
       migrateLegacyInlineDefault: true,
     });
@@ -530,6 +547,14 @@ export function getPreferenceSync<K extends PrefKey>(key: K): AppPreferences[K] 
     syncCache = readFromDiskSync();
   }
   const value = syncCache[key];
+  return value === undefined ? DEFAULT_PREFERENCES[key] : value;
+}
+
+// Synchronously read a single preference straight from disk, leaving the
+// getPreferenceSync cache alone: for the startup switches, which run before
+// the Codara home's legacy migration and so must not pin what later reads see.
+export function readPreferenceFromDiskSync<K extends PrefKey>(key: K): AppPreferences[K] {
+  const value = readFromDiskSync()[key];
   return value === undefined ? DEFAULT_PREFERENCES[key] : value;
 }
 

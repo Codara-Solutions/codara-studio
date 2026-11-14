@@ -1369,6 +1369,11 @@ export interface AppPreferences {
   // and keeps the process alive so main-process timers (automations / loops)
   // keep firing instead of quitting. Quit explicitly from the tray menu.
   keepRunningInBackground?: boolean;
+  // Opt-in (default off): draw with the graphics card on native Wayland,
+  // where Codara otherwise draws on the CPU. Read before app ready, so it
+  // applies at the next start; CODARA_WAYLAND_HARDWARE_ACCELERATION wins over
+  // it. Codara turns it off itself after a GPU crash (shared/gpu-drawing.ts).
+  waylandHardwareAcceleration?: boolean;
   // When true (default), a plain `claude` typed in a terminal outside Codara
   // uses the Claude account active in Codara (src/main/claude-follow). Only
   // an installed app sets it up; turning it off takes it out again.
@@ -1648,6 +1653,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   glassRefraction: 100,
   glassChroma: 100,
   keepRunningInBackground: true,
+  waylandHardwareAcceleration: false,
   claudeFollowsActiveAccount: true,
   keepAwakeMode: "agents",
   keepAwakeLidClosed: false,

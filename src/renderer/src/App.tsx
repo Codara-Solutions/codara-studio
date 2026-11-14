@@ -142,6 +142,7 @@ import {
 import { openNotificationCenter } from "./notifications/RelayApproval";
 import { targetWorkspaceId as notifyTargetWorkspaceId } from "@shared/notify-center";
 import { emitLocalToast } from "./notifications/local-toast";
+import { useGpuDrawingNotice } from "./notifications/gpu-drawing-notice";
 import { startNewWorktreeSetup } from "./components/worktree-setup/start";
 import {
   AGENT_WORKTREE_TOAST_GAP_MS,
@@ -592,6 +593,7 @@ export default function App() {
   const { resolvedTheme } = useTheme();
   const [bootError, setBootError] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
+  useGpuDrawingNotice(booted);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [createCopyDialogWs, setCreateCopyDialogWs] = useState<Workspace | null>(null);
   const [createCopyBusy, setCreateCopyBusy] = useState(false);

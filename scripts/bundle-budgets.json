@@ -1,5 +1,5 @@
 {
-  "$comment": "Limits in bytes for scripts/check-bundle-budgets.cjs. Started at the 2026-11-02 build plus 3%; renderer.entry gzip and main.index raised on 2026-11-14 to that day's main build plus 1%; main.total gzip raised the same day to 1,835.4 kB plus 1% (the spawn census and the /proc process reader, pull request 192); renderer.startup gzip raised the same day to 783.2 kB plus 1% (the git refresh clock, pull request 193). Raise one only in the pull request that needs it and say why; lower one after a size win.",
+  "$comment": "Limits in bytes for scripts/check-bundle-budgets.cjs. Started at the 2026-11-02 build plus 3%; renderer.entry gzip and main.index raised on 2026-11-14 to that day's main build plus 1%; main.total gzip raised the same day to 1,835.4 kB plus 1% (the spawn census and the /proc process reader, pull request 192); renderer.startup gzip raised the same day to 783.2 kB plus 1% (the git refresh clock, pull request 193); main.index raw and gzip and main.total raw and gzip raised the same day to the budgets job's measure plus 1% (main.index 2,073.6 / 680.9 kB, main.total 5,634.9 / 1,838.4 kB) for the graphics-card switch and its safety net (pull request 196). Raise one only in the pull request that needs it and say why; lower one after a size win.",
   "headroom": 0.03,
   "metrics": {
     "renderer.entry": {
@@ -15,12 +15,12 @@
       "gzip": 5126000
     },
     "main.index": {
-      "raw": 2072000,
-      "gzip": 681000
+      "raw": 2095000,
+      "gzip": 688000
     },
     "main.total": {
-      "raw": 5635000,
-      "gzip": 1854000
+      "raw": 5692000,
+      "gzip": 1857000
     },
     "preload.total": {
       "raw": 51000,
