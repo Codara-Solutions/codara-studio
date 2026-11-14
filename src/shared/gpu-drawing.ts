@@ -310,9 +310,10 @@ export interface GpuDrawingStatus {
 
 /**
  * `chromiumCompositing`: Chromium's gpu_compositing status, which only
- * matters where Codara never turns acceleration off. The notice waits while
- * the variable decides: its words ("draws without it now") would be wrong
- * then, and the start that applies the fallback still has to say it.
+ * matters where Codara never turns acceleration off. The notice says Codara
+ * "draws without it now", so it waits for a run that does: not the run the
+ * GPU crashed in (its window reloads after the crash and would show it at
+ * once), nor one the variable decides. That start still has to say it.
  */
 export function gpuDrawingStatus(
   plan: GpuDrawingPlan,
@@ -326,7 +327,9 @@ export function gpuDrawingStatus(
     envOverride: plan.envOverride,
     turnedOff: fallback ? { reason: fallback.reason, at: fallback.at } : null,
     notice:
-      fallback && !fallback.noticeShown && !plan.envOverride ? gpuDrawingNotice(fallback.reason) : null,
+      fallback && !fallback.noticeShown && !plan.hardware && !plan.envOverride
+        ? gpuDrawingNotice(fallback.reason)
+        : null,
   };
 }
 

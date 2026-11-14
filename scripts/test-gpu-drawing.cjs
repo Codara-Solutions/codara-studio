@@ -189,6 +189,8 @@ function run(mod) {
     check("the marker keeps the reason and exit code", fallback.reason === "gpu-crash" && fallback.detail === "crashed (exit code 139)" && !fallback.noticeShown);
 
     const during = { running: { pid: 4242, bootId: BOOT, startedAt: NOW }, fallback };
+    const crashRun = planGpuDrawing(input({ preference: true }));
+    check("the run the GPU crashed in shows no notice (it still draws with the graphics card)", gpuDrawingStatus(crashRun, during).notice === null);
     const afterExit = stateAfterCleanExit(during, 4242);
     check("a clean exit after the crash removes the run record and keeps the marker", !afterExit.running && afterExit.fallback === fallback);
     const next = planGpuDrawing(input({ preference: true, state: parseGpuDrawingState(serializeGpuDrawingState(afterExit)), pid: 5000 }));

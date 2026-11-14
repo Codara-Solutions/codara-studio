@@ -120,6 +120,8 @@ async function scenarios() {
     check("a GPU crash writes the marker", t.file()?.fallback?.reason === "gpu-crash" && t.file().fallback.detail === "crashed (exit code 139)");
     t.app.emit("child-process-gone", {}, { type: "GPU", reason: "killed", exitCode: 9 });
     check("a second crash keeps the first marker", t.file()?.fallback?.detail === "crashed (exit code 139)");
+    const status = await t.handlers.get("gpuDrawing:status")();
+    check("the window that reloads after the crash gets no notice yet", status.notice === null);
     t.app.emit("will-quit");
     check("a clean exit removes the record and keeps the marker", !t.file()?.running && t.file()?.fallback?.reason === "gpu-crash");
   }
