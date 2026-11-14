@@ -100,6 +100,48 @@ async function main() {
   } else {
     console.log("SKIP localized listing: this machine has no French locale for ps");
   }
+
+  // Linux reads /proc instead of forking ps; what it reports must match ps.
+  if (process.platform === "linux") {
+    check(
+      "a /proc stat line parses past a name with spaces and parentheses",
+      JSON.stringify(mod.parseProcStat("42 (a (b) c) S 7 42 42 0 -1 4194304 1 0 0 0 0 0 0 0 20 0 1 0 12345 0 0")) ===
+        JSON.stringify({ parentPid: 7, startTicks: 12345, name: "a (b) c" }),
+    );
+    check("a mangled stat line is refused", mod.parseProcStat("42 no parens") === null);
+    const tree = spawn("sh", ["-c", "sleep 6 & sleep 6; wait"], { stdio: "ignore" });
+    try {
+      await sleep(400);
+      const ps = spawnSync("ps", ["-axww", "-o", "pid=,ppid=,lstart=,args="], { encoding: "utf8", env: mod.psTimeEnvironment() });
+      const psRows = new Map();
+      for (const line of ps.stdout.split("\n")) {
+        const match = /^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+[\d:]{8}\s+\d{4})\s*(.*?)\s*$/.exec(line);
+        if (match) psRows.set(Number(match[1]), { parentPid: Number(match[2]), startedAt: match[3], command: match[4] });
+      }
+      const listed = await mod.listProcessesWithCommands(0);
+      const mine = listed.filter((row) => row.pid === tree.pid || row.parentPid === tree.pid);
+      check("the /proc listing holds the shell and both sleeps", mine.length === 3);
+      check(
+        "the /proc listing agrees with ps on parent, command and start second",
+        mine.every((row) => {
+          const twin = psRows.get(row.pid);
+          return twin && twin.parentPid === row.parentPid && twin.command === row.command &&
+            Math.abs(mod.processStartMs(twin.startedAt) - mod.processStartMs(row.startedAt)) <= 1_000;
+        }),
+      );
+      const under = await mod.processesUnder([tree.pid]);
+      check(
+        "processesUnder reads the root and its subtree only",
+        under.length === 3 && under.some((row) => row.pid === tree.pid) && under.filter((row) => /^sleep 6$/.test(row.command)).length === 2,
+      );
+      const below = await mod.descendantProcessesWithCommands(tree.pid);
+      check("descendants from /proc carry depth and leave out the root", below.length === 2 && below.every((row) => row.depth === 1));
+      check("a gone root lists nothing", (await mod.descendantProcessesWithCommands(2 ** 22 + 7)) === null);
+      check("the lstart stamp is the C ctime form", /^[A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \d{4}$/.test(mod.lstartStamp(1_788_000_000)));
+    } finally {
+      tree.kill("SIGKILL");
+    }
+  }
   console.log(`\nAll ${pass} owned-process-tree checks passed.`);
 }
 

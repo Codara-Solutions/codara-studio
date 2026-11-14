@@ -75,9 +75,11 @@ const esbuild = require("esbuild");
   let panes = [{ paneId: "a", pid: 100, generationId: "a1" }, { paneId: "b", pid: 200, generationId: "b1" }];
   let files = new Map();
   const records = new Map();
+  let clock = 1_000_000;
+  let probed = [];
   const tracker = createCodexSessionTracker({ panes: () => panes, processes: async () => processes,
-    files: async () => files, latest: (id) => records.get(id) ?? null,
-    record: (rec) => records.set(rec.paneId, rec) });
+    files: async (pids) => { probed = pids; return files; }, latest: (id) => records.get(id) ?? null,
+    record: (rec) => records.set(rec.paneId, rec), now: () => clock });
   await tracker.refresh();
   assert.equal(records.size, 0, "a delayed transcript does not adopt a neighboring pane's file");
   files = new Map([[101, [paths[0]]], [102, [paths[2]]], [200, [paths[1]]]]);
@@ -88,7 +90,9 @@ const esbuild = require("esbuild");
   const original = records.get("a");
   await tracker.refresh();
   assert.equal(records.get("a"), original, "idle polls do not churn the binding");
+  assert.deepEqual(probed, [], "a Codex whose session was found is not probed again (no lsof) on the next poll");
   files.set(101, [paths[1]]);
+  clock += 60_000;
   await tracker.refresh();
   assert.equal(records.get("a").sessionId, ids[1], "an in-process session switch replaces the exact ID");
   processes = null;

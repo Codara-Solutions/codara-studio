@@ -141,6 +141,15 @@ const OSC_NOTIFY_MUTE_MS = 10_000;
 // Self-heal window for the stream-counted teammate counter (heuristic panes).
 const TEAMMATE_SILENCE_MS = 15_000;
 const AGENT_PROC_RECHECK_MS = 2_000;
+// Once the pane's agent process has been seen, the process tree only backs
+// up the stream's own exit cues (the prompt marker, leaving the alt screen),
+// so it is read far less often.
+let agentProcKnownRecheckMs = 30_000;
+
+/** Test seam: how often a pane whose agent process was seen reads it again. */
+export function setKnownAgentProcessRecheckMs(ms: number): void {
+  agentProcKnownRecheckMs = ms;
+}
 const PROCESS_LIST_MAX_AGE_MS = 900;
 // Late registration is most visible during cold restore. Replaying a bounded
 // recent tail closes that gap without scanning the full 4 MB PTY history.
@@ -2172,7 +2181,8 @@ function checkAgentProcess(w: PaneWatcher, now: number): boolean {
     return true;
   }
   if (w.agentProcCheckInflight) return false;
-  if (now - w.lastAgentProcCheckAt < AGENT_PROC_RECHECK_MS) return false;
+  const recheckMs = w.runtime && w.agentProcSeen ? agentProcKnownRecheckMs : AGENT_PROC_RECHECK_MS;
+  if (now - w.lastAgentProcCheckAt < recheckMs) return false;
   w.lastAgentProcCheckAt = now;
   const rootPid = pty.sessionPid(w.paneId);
   if (rootPid === null) return false;

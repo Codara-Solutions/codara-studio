@@ -1218,6 +1218,46 @@ async function main() {
       );
     }
 
+    {
+      // `gh repo view` is asked once per repository: a checkout and its
+      // worktrees share the answer until the remotes change or it ages out.
+      const { execFileSync } = require("node:child_process");
+      const repo = path.join(temp, "cached-repo");
+      const tree = path.join(temp, "cached-tree");
+      mkdirSync(repo);
+      const git = (cwd, args) => execFileSync("git", args, { cwd, stdio: "ignore", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+      git(repo, ["init", "-q", "-b", "main"]);
+      git(repo, ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
+      git(repo, ["worktree", "add", "-q", "-b", "lane", tree]);
+      const payload = JSON.stringify({ nameWithOwner: "octo/cached", url: "https://github.com/octo/cached", defaultBranchRef: { name: "main" } });
+      const failure = Object.assign(new Error("offline"), { stderr: "could not resolve host" });
+      const { adapter, calls } = fakeAdapter(github, [failure, { stdout: payload, stderr: "" }, { stdout: payload, stderr: "" }, { stdout: payload, stderr: "" }]);
+      await assert.rejects(adapter.resolveRepository(repo));
+      assert.equal((await adapter.resolveRepository(repo)).nameWithOwner, "octo/cached", "a failure is not cached");
+      const fromTree = await adapter.resolveRepository(path.join(tree));
+      assert.equal(fromTree.nameWithOwner, "octo/cached");
+      assert.equal(calls.length, 2, "a worktree of the same repository reuses the answer");
+      fromTree.nameWithOwner = "mutated";
+      assert.equal((await adapter.resolveRepository(repo)).nameWithOwner, "octo/cached", "callers get copies");
+      git(repo, ["remote", "add", "origin", "https://github.com/octo/cached.git"]);
+      const { utimesSync } = require("node:fs");
+      utimesSync(path.join(repo, ".git", "config"), new Date(), new Date(Date.now() + 5_000));
+      await adapter.resolveRepository(tree);
+      assert.equal(calls.length, 3, "a remote change asks again");
+      let now = Date.now();
+      github.setGitHubCliCacheClock(() => now);
+      try {
+        await adapter.resolveRepository(repo);
+        assert.equal(calls.length, 3);
+        now += github.GITHUB_REPOSITORY_TTL_MS + 1;
+        await adapter.resolveRepository(repo);
+        assert.equal(calls.length, 4, "an entry ages out");
+      } finally {
+        github.setGitHubCliCacheClock(null);
+      }
+      assert.equal(await github.repositoryCacheKey("/repo"), null, "no repository, no cache");
+    }
+
     console.log("All GitHub CLI adapter checks passed.");
   } finally {
     rmSync(temp, { recursive: true, force: true });

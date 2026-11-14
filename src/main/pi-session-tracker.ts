@@ -6,7 +6,8 @@
 // appears only after the first reply and is opened and closed on every
 // write, so neither a startup banner nor lsof can tie it to a process. The
 // tracker attributes files to processes from what it can observe instead:
-// every Pi process the user runs while a pane has one (ps), when it started
+// every Pi process the user runs while a pane has one (ps, or /proc on
+// Linux), when it started
 // and when it was last seen, its working directory (lsof, /proc), and the
 // creation stamp Pi writes into each file name. It reads file names and
 // modification times only; transcripts stay unread.
@@ -32,7 +33,7 @@ import { join, resolve } from "node:path";
 import { runtimeFromProcessCommand } from "@shared/agent-patterns";
 import { agentProcessForPane } from "./codex-session-tracker";
 import { latestSessionStart, recordSessionStart, type SessionStartRecord } from "./agent-session-registry";
-import { listProcessesWithCommands, processStartMs } from "./owned-process-tree";
+import { listProcessesWithCommands, processesUnder, processStartMs } from "./owned-process-tree";
 
 interface ProcessEntry { pid: number; parentPid: number; startedAt: string; command: string }
 
@@ -184,14 +185,18 @@ export function createPiSessionTracker(deps: {
     pending = (async () => {
       const panes = deps.panes();
       if (panes.length === 0 && observed.size === 0 && known.size === 0) return;
-      const processes = await (deps.processes?.() ?? listProcessesWithCommands(2000));
-      if (!processes) return;
+      // The panes' own processes first; every Pi on the machine matters only
+      // while a pane runs one.
+      const under = await (deps.processes?.() ?? processesUnder(panes.map((pane) => pane.pid), 2000));
+      if (!under) return;
       const now = clock();
       const live = panes.map((pane) => {
-        const agent = agentProcessForPane(pane.pid, processes);
+        const agent = agentProcessForPane(pane.pid, under);
         return { pane, pid: agent?.runtime === "pi" ? agent.pid : null };
       });
       const panePids = new Set(live.flatMap(({ pid }) => (pid ? [pid] : [])));
+      const processes = panePids.size === 0 || deps.processes ? under : await listProcessesWithCommands(2000);
+      if (!processes) return;
       const identity = (proc: ProcessEntry): string => `${proc.pid}:${proc.startedAt}`;
       // Every Pi the user runs can create files in a pane's directory, the
       // ones in other terminals too; only Cora's, started by the app, cannot.
