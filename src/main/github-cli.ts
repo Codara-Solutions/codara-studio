@@ -233,6 +233,9 @@ export interface GitHubCliAdapter {
   // Merged pull requests whose head is `branch`, for the agent worktree
   // merge proof.
   listPullRequestsForHead?(cwd: string, branch: string): Promise<GitHubMergedPullRequest[]>;
+  // Merged pull requests that hold commit `sha` (GitHub's search), for the
+  // proof of a branch pushed under another name. Callers match the head.
+  listPullRequestsForCommit?(cwd: string, sha: string): Promise<GitHubMergedPullRequest[]>;
   // The most recent merged pull requests, one call for a whole worktree list.
   listMergedPullRequests?(cwd: string, limit?: number): Promise<GitHubMergedPullRequest[]>;
   // The most recent pull requests closed without merging.
@@ -801,6 +804,28 @@ export function createGitHubCliAdapter(
         "merged",
         "--head",
         head,
+        "--limit",
+        "20",
+        "--json",
+        MERGED_PULL_REQUEST_JSON_FIELDS,
+      ]);
+      return parseMergedPullRequests(stdout);
+    },
+
+    async listPullRequestsForCommit(
+      cwd: string,
+      sha: string,
+    ): Promise<GitHubMergedPullRequest[]> {
+      if (typeof sha !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(sha)) {
+        throw new GitHubCliError("command-failed", "commit must be a full commit id.");
+      }
+      const stdout = await runRead(cwd, [
+        "pr",
+        "list",
+        "--state",
+        "merged",
+        "--search",
+        sha.toLowerCase(),
         "--limit",
         "20",
         "--json",
