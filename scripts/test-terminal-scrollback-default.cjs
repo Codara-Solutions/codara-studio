@@ -8,8 +8,9 @@
 //
 //   - no file, or a file without the field: this machine's default;
 //   - a stored number, 10,000 included: kept exactly, since files written
-//     before this change cannot tell the old default from a choice;
-//   - saving the machine's default leaves the field out of the file, so a
+//     before this change cannot tell the old default from a choice, and once
+//     a file holds a number every later save writes it back;
+//   - a file that never held one leaves the machine's default out, so a
 //     later default reaches whoever never picked one;
 //   - saving any other number writes it, and it survives a restart.
 //
@@ -171,16 +172,50 @@ async function main() {
       );
       await storage.saveSettings({ ...settings, terminalScrollbackLineLimit: 3_000 });
       check(
-        "saving this machine's default leaves the field out of the file",
-        !("terminalScrollbackLineLimit" in fileJson(home)) && fileJson(home).openRouterModel === "vendor/model",
+        "a file that held a number keeps one, even when it equals the default",
+        fileJson(home).terminalScrollbackLineLimit === 3_000 && fileJson(home).openRouterModel === "vendor/model",
       );
       check(
-        "the saved default still reads back as 3,000",
+        "the same file on an 8 GB machine still reads 3,000",
+        (await session(home, 8 * GIB).loadSettings()).terminalScrollbackLineLimit === 3_000,
+      );
+    }
+
+    {
+      const home = newHome({ terminalScrollbackLineLimit: 3_000, openRouterModel: "vendor/model" });
+      const storage = session(home, 16 * GIB);
+      const settings = await storage.loadSettings();
+      await storage.saveSettings({ ...settings, openRouterModel: "vendor/other" });
+      check(
+        "a stored choice equal to the new default is not dropped by saving another setting",
+        fileJson(home).terminalScrollbackLineLimit === 3_000,
+      );
+    }
+
+    {
+      const home = newHome(null);
+      const storage = session(home, 16 * GIB);
+      const settings = await storage.loadSettings();
+      await storage.saveSettings({ ...settings, terminalScrollbackLineLimit: 3_000 });
+      check(
+        "a file that never held a number leaves this machine's default out",
+        !("terminalScrollbackLineLimit" in fileJson(home)),
+      );
+      check(
+        "and the default still reads back as 3,000",
         (await storage.loadSettings()).terminalScrollbackLineLimit === 3_000,
       );
       check(
         "the same file on an 8 GB machine reads 2,000",
         (await session(home, 8 * GIB).loadSettings()).terminalScrollbackLineLimit === 2_000,
+      );
+      const restarted = session(home, 16 * GIB);
+      const loaded = await restarted.loadSettings();
+      await restarted.saveSettings({ ...loaded, terminalScrollbackLineLimit: 5_000 });
+      await restarted.saveSettings({ ...loaded, terminalScrollbackLineLimit: 3_000 });
+      check(
+        "once a number was written, going back to the default keeps it written",
+        fileJson(home).terminalScrollbackLineLimit === 3_000,
       );
     }
 

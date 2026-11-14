@@ -90,6 +90,9 @@ let settingsWriting: Promise<void> = Promise.resolve();
 // was replaced). It is written back unchanged until the user enters another
 // key, so a save made meanwhile never drops it.
 let undecryptableOpenRouterKey: string | null = null;
+// Whether the settings file holds a scrollback line limit. Once it does, the
+// number is someone's choice and is always written back.
+let terminalScrollbackLineLimitStored = false;
 const loggedKeyStorageNotes = new Set<string>();
 const stateSavedListeners = new Set<(state: AppState) => void>();
 
@@ -153,6 +156,8 @@ async function readSettingsFromDisk(): Promise<{
     };
   }
   const settings = normalizeSettings(parsed);
+  terminalScrollbackLineLimitStored =
+    parsed.terminalScrollbackLineLimit !== undefined && parsed.terminalScrollbackLineLimit !== null;
   const encrypted = typeof parsed[ENCRYPTED_OPENROUTER_KEY] === "string"
     ? parsed[ENCRYPTED_OPENROUTER_KEY].trim()
     : "";
@@ -225,9 +230,9 @@ function notePlaintextKey(): void {
 }
 
 // Settings files before this build stored the scrollback default like any
-// choice, so a stored number is read as one. A value equal to this machine's
-// default is left out of the file instead, so a later default reaches
-// everyone who never picked their own.
+// choice, so a stored number is read as one and kept. Until a file holds one,
+// a value equal to this machine's default is left out, so a later default
+// reaches everyone who never picked their own.
 function machineTerminalScrollbackLineLimit(): number {
   return terminalScrollbackLineLimitDefault(totalmem());
 }
@@ -235,6 +240,7 @@ function machineTerminalScrollbackLineLimit(): number {
 function settingsForDisk(settings: AppSettings): SettingsOnDisk {
   const { terminalScrollbackLineLimit, ...withoutScrollback } = settings;
   const chosen: SettingsOnDisk =
+    !terminalScrollbackLineLimitStored &&
     terminalScrollbackLineLimit === machineTerminalScrollbackLineLimit()
       ? withoutScrollback
       : settings;
@@ -446,6 +452,7 @@ async function writeSettingsToDisk(settings: AppSettings): Promise<boolean> {
   const normalized = normalizeSettings(settings);
   const onDisk = settingsForDisk(normalized);
   await writeFileAtomic(settingsPath(), JSON.stringify(onDisk, null, 2), { mode: 0o600 });
+  if (onDisk.terminalScrollbackLineLimit !== undefined) terminalScrollbackLineLimitStored = true;
   // A key the user entered replaces one this session could not decrypt.
   if (normalized.openRouterApiKey) undecryptableOpenRouterKey = null;
   return typeof onDisk[ENCRYPTED_OPENROUTER_KEY] === "string";
