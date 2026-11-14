@@ -108,8 +108,11 @@ async function main() {
       await sleep(40);
       for (const bytes of pane.data()) await write(view, bytes);
       await write(full, before);
+      let resized = 0;
+      pane.handle.resize = () => (resized += 1);
       pty.pause(pane.id, LINES);
-      let stream = "";
+      // Line drawing from here on: the dropped designation must carry over.
+      let stream = "\x1b(0";
       for (let i = 50; stream.length < 20 * MB; i += 1) stream += line(i);
       for (const chunk of chunks(stream, 4093)) pane.handle.emit(chunk);
       const held = session(pane.id).detachedBacklogBytes;
@@ -120,12 +123,23 @@ async function main() {
       await replayed(pane.id);
       const slices = pane.data();
       assert.ok(slices.length > 1, "the replay goes out in slices");
-      assert.ok(slices.every((s) => s.length <= SLICE), "no slice is larger than 128 KB");
+      assert.ok(slices.every((s) => s.length <= SLICE + 1024), "no slice is much larger than 128 KB");
+      const replay = Buffer.concat(slices);
+      const inside = new Uint8Array(replay.length + 1);
+      for (const match of replay.toString("latin1").matchAll(/\x1b[[(][0-9;?]*[A-Za-z0-9]|[\xc0-\xff][\x80-\xbf]+/g)) {
+        inside.fill(1, match.index + 1, match.index + match[0].length);
+      }
+      let edge = 0;
+      for (const slice of slices) {
+        edge += slice.length;
+        assert.equal(inside[edge], 0, `slice edge ${edge} is not inside an escape sequence or a character`);
+      }
       const announced = pane.sent.filter((m) => m.channel === `pty:replay:${pane.id}`).reduce((n, m) => n + m.payload.bytes, 0);
       assert.equal(announced, slices.reduce((n, s) => n + s.length, 0), "every replayed byte is announced as history");
       await write(full, stream);
       for (const bytes of slices) await write(view, bytes);
       assert.equal(text(view.buffer.normal), text(full.buffer.normal), "the view shows the same scrollback and screen as one that saw every byte");
+      assert.ok(resized > 0, "a drop made before the stream showed its screen asks for a repaint");
       full.dispose();
       view.dispose();
     });
@@ -207,15 +221,68 @@ async function main() {
         ["\x80 ok", true],
         ["\x1b]0;ti", false],
         ["tle\x07", true],
+        ["\x1bPq#0\x07", false],
+        ["\x1b\\", true],
         ["\x1b[", false],
         ["?1049h", true],
       ];
       for (const [input, ground] of steps) {
         const buf = Buffer.from(input, "latin1");
-        for (let at = 0; at < buf.length; ) at = scanner.scan(buf, at, buf.length, { ris: false, modes: new Map(), sgr: [] });
+        for (let at = 0; at < buf.length; ) at = scanner.scan(buf, at, buf.length, { ris: false, seq: new Map(), sgrReset: false, sgr: new Map() });
         assert.equal(scanner.atGround(), ground, `after ${JSON.stringify(input)}`);
       }
       assert.equal(scanner.alt, true, "a split switch to the alternate screen is seen");
+      assert.equal(scanner.opaque, false);
+      scanner.scan(Buffer.from([0xc2, 0x9b]), 0, 2, { ris: false, seq: new Map(), sgrReset: false, sgr: new Map() });
+      assert.equal(scanner.opaque, true, "a C1 control sent as a character is noticed");
+    });
+
+    // Main-screen output whose cut is only safe when the scanner reads it right.
+    const cases = {
+      "a scroll region": { head: "\x1b[5;24r\x1b[1;1HHEADER ROW ONE\x1b[24;1H", line: (i) => `${i} plain line\r\n` },
+      "scrolling down": { head: "PINNED MARK\r\n", line: (i) => `${i} plain line\r\n${i % 10 === 9 ? "\x1b[10T" : ""}` },
+      "many attribute changes": { head: `\x1b[1m${"\x1b[31m\x1b[32m\x1b[38;2;10;20;30m".repeat(3)}\x1b[4:3m`, line: (i) => `${i} plain line\r\n` },
+    };
+    for (const [name, { head, line: next }] of Object.entries(cases)) {
+      await section(`${name}: the view matches one that saw every byte`, async () => {
+        const pane = await open(name.replace(/\W+/g, "-"));
+        const full = terminal();
+        const view = terminal();
+        pty.pause(pane.id, LINES);
+        let stream = head;
+        for (let i = 0; stream.length < 3 * MB; i += 1) stream += next(i);
+        for (const chunk of chunks(stream, 4093)) pane.handle.emit(chunk);
+        pane.sent.length = 0;
+        pty.resume(pane.id, false, LINES);
+        await replayed(pane.id);
+        for (const bytes of pane.data()) await write(view, bytes);
+        await write(full, stream);
+        assert.equal(text(view.buffer.normal), text(full.buffer.normal), "same scrollback and screen");
+        const cell = (term) => {
+          const c = term.buffer.active.getLine(term.buffer.active.length - 2).getCell(0);
+          return [c.isBold(), c.getFgColor(), c.getFgColorMode(), c.isUnderline()];
+        };
+        assert.deepEqual(cell(view), cell(full), "same attributes on the last line");
+        full.dispose();
+        view.dispose();
+      });
+    }
+
+    await section("a program flipping screens many times stays bounded", async () => {
+      const pane = await open("flips");
+      pty.pause(pane.id, LINES);
+      const flip = Buffer.from("\x1b[?1049h\x1b[Hx\x1b[?1049l");
+      require("node:v8").setFlagsFromString("--expose-gc");
+      const gc = require("node:vm").runInNewContext("gc");
+      gc();
+      const heap = process.memoryUsage().heapUsed;
+      for (let i = 0; i < 300_000; i += 1) pane.handle.emit(flip);
+      gc();
+      const grown = process.memoryUsage().heapUsed - heap;
+      const held = session(pane.id).detachedBacklogBytes;
+      assert.ok(held <= 16 * MB + 64 * 1024, `held ${held}`);
+      assert.ok(grown < 64 * MB, `the heap grew ${Math.round(grown / MB)} MB`);
+      pty.killImmediate(pane.id);
     });
 
     const history = Buffer.alloc(SLICE * 5 + 77);
@@ -252,11 +319,14 @@ async function main() {
       await sleep(30);
       assert.equal(pane.data().length, first, "nothing is sent while paused");
       pane.handle.emit("NEW");
-      pty.resume(pane.id, true, 50_000);
-      pty.resume(pane.id, true, 50_000);
+      let resized = 0;
+      pane.handle.resize = () => (resized += 1);
+      pty.resume(pane.id, false, 50_000);
+      pty.resume(pane.id, false, 50_000);
       await replayed(pane.id);
-      await sleep(40);
+      await sleep(150);
       assert.equal(Buffer.concat(pane.data()).toString(), `${history.toString()}NEW`, "the rest arrives once, after what was sent");
+      assert.ok(resized > 0, "slices sent to the departing view are repainted");
     });
 
     // A reload of the window: main forgets the backlog, the raw tail repaints.
@@ -276,6 +346,19 @@ async function main() {
       pane.handle.emit("LIVE-AGAIN");
       await sleep(40);
       assert.ok(Buffer.concat(pane.data()).toString().endsWith("LIVE-AGAIN"), "live output reaches the reloaded window");
+    });
+
+    await section("a program exiting during a replay still delivers all of it, then the exit", async () => {
+      const pane = await open("exit");
+      pty.pause(pane.id, 50_000);
+      pane.handle.emit(history);
+      pane.sent.length = 0;
+      pty.resume(pane.id, false, 50_000);
+      pane.handle.kill();
+      await sleep(30);
+      assert.equal(Buffer.concat(pane.data()).toString(), history.toString(), "nothing lost");
+      const order = pane.sent.map((m) => m.channel.split(":")[1]);
+      assert.equal(order.at(-1), "exit", "the exit comes last");
     });
 
     await section("a kill during a replay stops it", async () => {

@@ -1880,7 +1880,8 @@ function enqueueData(id: string, data: string | Buffer): void {
 // replayed on resume. Idempotent: re-pausing an already-paused session is a
 // no-op. Pending chunks queued for the next 16 ms flush are absorbed into the
 // backlog so the small window between cleanup and pause is not lost. A pause
-// during a replay stops it; what was not sent yet stays for the next resume.
+// during a replay stops it; what was not sent yet stays for the next resume,
+// which repaints: slices already in flight reach a listener that is gone.
 // `scrollbackLines` is the view's scrollback setting, which bounds what the
 // backlog must keep.
 export function pause(id: string, scrollbackLines?: number): void {
@@ -1891,6 +1892,7 @@ export function pause(id: string, scrollbackLines?: number): void {
   if (s.replayTimer) {
     clearImmediate(s.replayTimer);
     s.replayTimer = null;
+    s.backlog.lossy = true;
   }
   if (!s.attached) return;
   s.attached = false;
@@ -2117,6 +2119,12 @@ export function detach(id: string): void {
 }
 
 function flushDataNow(s: Session): void {
+  // Every exit path flushes before it reports the exit: finish a replay in
+  // flight first, so the program's last output is not lost behind it.
+  while (s.replayTimer) {
+    clearImmediate(s.replayTimer);
+    replaySlice(s);
+  }
   if (s.flushTimer) {
     clearTimeout(s.flushTimer);
     s.flushTimer = null;

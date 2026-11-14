@@ -6,70 +6,102 @@
 //   scrollback, and the program repaints it on the redraw resume() requests
 //   whenever `lossy` is set.
 // - Main-screen output followed by `need` (scrollback + 2 x rows) line feeds
-//   with no upward or absolute cursor move between them. Each of those line
-//   feeds moves the cursor down (at most rows - 1 times) or scrolls one line
-//   up, so by the last one the older output sits above the kept scrollback.
+//   with no scroll region and nothing that moves the cursor up or lines down
+//   between them. Each of those line feeds moves the cursor down (at most
+//   rows - 1 times) or scrolls one line up, so by the last one the older
+//   output sits above the kept scrollback. Until the stream shows which
+//   screen it is on, such a drop also asks for a repaint.
 // - Anything past BACKLOG_HARD_BYTES, oldest first, as before the soft cap.
 // Pieces start and end where the escape parser is in its ground state and
-// outside a UTF-8 sequence. The modes, SGR attributes and full resets that
-// dropped bytes carried are written in their place, so a cut never prints
-// half an escape sequence or leaves the view on the wrong screen.
+// outside a UTF-8 sequence. The modes, character sets, cursor style, SGR
+// attributes and resets the dropped bytes carried are written in their place,
+// so a cut never prints half an escape sequence or leaves the view in the
+// wrong state. C1 controls sent as characters are not parsed here, so a
+// stream that carries them is only ever trimmed at the hard cap.
 
 export const BACKLOG_TARGET_BYTES = 2 * 1024 * 1024;
 export const BACKLOG_HARD_BYTES = 16 * 1024 * 1024;
 const PIECE_BYTES = 64 * 1024;
+// A piece's own memory, counted so that many tiny pieces (a program flipping
+// screens) still hit the caps.
+const PIECE_OVERHEAD = 1024;
 // Rows of the view that replays the backlog: it may be taller than the pty
 // the bytes were written for.
 const ROWS_BOUND = 500;
-const SGR_KEEP = 8;
 const EMPTY = Buffer.alloc(0);
 
-// Mode and attribute changes, in the order they were last made.
+// State that dropped bytes changed, in the order it was last changed.
 interface Delta {
   ris: boolean;
-  modes: Map<string, "h" | "l">;
-  sgr: string[];
+  seq: Map<string, string>;
+  sgrReset: boolean;
+  sgr: Map<string, string>;
 }
 
-const newDelta = (): Delta => ({ ris: false, modes: new Map(), sgr: [] });
-const sgrResets = (params: string): boolean => /^0*(?:[;:]|$)/.test(params);
+const newDelta = (): Delta => ({ ris: false, seq: new Map(), sgrReset: false, sgr: new Map() });
 
-function setMode(delta: Delta, key: string, value: "h" | "l"): void {
-  delta.modes.delete(key);
-  delta.modes.set(key, value);
-}
-
-function addSgr(sgr: string[], params: string): void {
-  if (sgrResets(params)) sgr.length = 0;
-  sgr.push(params);
-  if (sgr.length > SGR_KEEP) sgr.splice(0, sgr.length - SGR_KEEP);
+function setLast(map: Map<string, string>, key: string, value: string): void {
+  map.delete(key);
+  map.set(key, value);
 }
 
 function foldDelta(into: Delta, delta: Delta): void {
   if (delta.ris) {
     into.ris = true;
-    into.modes.clear();
-    into.sgr.length = 0;
+    into.seq.clear();
+    into.sgr.clear();
+    into.sgrReset = false;
   }
-  for (const [key, value] of delta.modes) setMode(into, key, value);
-  for (const params of delta.sgr) addSgr(into.sgr, params);
+  for (const [key, value] of delta.seq) setLast(into.seq, key, value);
+  if (delta.sgrReset) {
+    into.sgr.clear();
+    into.sgrReset = true;
+  }
+  for (const [key, value] of delta.sgr) setLast(into.sgr, key, value);
 }
 
 function encodeDelta(delta: Delta): Buffer {
   let text = delta.ris ? "\x1bc" : "";
-  for (const [key, value] of delta.modes) text += `\x1b[${key}${value}`;
-  for (const params of delta.sgr) text += `\x1b[${params}m`;
+  for (const value of delta.seq.values()) text += value;
+  const sgr = [...(delta.sgrReset ? ["0"] : []), ...delta.sgr.values()];
+  if (sgr.length > 0) text += `\x1b[${sgr.join(";")}m`;
   return Buffer.from(text, "latin1");
 }
 
-// Missing continuation bytes of a UTF-8 sequence that `buf[start..end)` ends inside.
-function utf8Missing(buf: Buffer, start: number, end: number): number {
-  for (let i = end - 1; i >= Math.max(start, end - 3); i -= 1) {
-    const b = buf[i];
-    if (b < 0x80) return 0;
-    if (b >= 0xc0) return Math.max(0, (b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : 2) - (end - i));
+// SGR parameters that set the same attribute share a slot; the last one wins.
+const SGR_SLOTS: Record<number, string> = {
+  1: "1", 2: "2", 3: "3", 23: "3", 4: "4", 21: "4", 24: "4", 5: "5", 6: "5", 25: "5",
+  7: "7", 27: "7", 8: "8", 28: "8", 9: "9", 29: "9", 53: "53", 55: "53", 59: "ul",
+};
+
+function applySgr(delta: Delta, params: string): void {
+  const parts = params === "" ? ["0"] : params.split(";");
+  for (let k = 0; k < parts.length; k += 1) {
+    const part = parts[k];
+    const n = Number(part.split(":")[0] || "0");
+    if (!Number.isInteger(n)) continue;
+    if (n === 0) {
+      delta.sgr.clear();
+      delta.sgrReset = true;
+    } else if (n === 22) {
+      setLast(delta.sgr, "1", "22");
+      setLast(delta.sgr, "2", "22");
+    } else if (n === 38 || n === 48 || n === 58) {
+      let value = part;
+      if (!part.includes(":")) {
+        const extra = parts[k + 1] === "5" ? 2 : parts[k + 1] === "2" ? 4 : 0;
+        value = parts.slice(k, k + extra + 1).join(";");
+        k += extra;
+      }
+      setLast(delta.sgr, n === 38 ? "fg" : n === 48 ? "bg" : "ul", value);
+    } else if ((n >= 30 && n <= 37) || n === 39 || (n >= 90 && n <= 97)) {
+      setLast(delta.sgr, "fg", part);
+    } else if ((n >= 40 && n <= 47) || n === 49 || (n >= 100 && n <= 107)) {
+      setLast(delta.sgr, "bg", part);
+    } else {
+      setLast(delta.sgr, SGR_SLOTS[n] ?? `x${n}`, part);
+    }
   }
-  return 0;
 }
 
 const GROUND = 0;
@@ -79,16 +111,24 @@ const CSI = 3;
 const STRING = 4;
 
 // Just enough of a VT parser to know the parser state, the screen in use, the
-// modes, and how far main-screen output has provably scrolled.
+// state worth carrying over a cut, and how far main-screen output has
+// provably scrolled.
 export class VtScanner {
   alt = false;
+  // A screen switch or a reset was seen, so `alt` is known rather than assumed.
+  screenKnown = false;
+  // A C1 control arrived as a character.
+  opaque = false;
   need = Infinity;
-  // Main-screen line feeds counted, and the count before which output is out of view.
+  // Main-screen line feeds counted, and the count up to which output is out of view.
   lf = 0;
   horizon = -1;
   private runStart = 0;
+  private region = false;
   private state = GROUND;
   private utf8 = 0;
+  private lead = 0;
+  private stringBel = false;
   private prefix = 0;
   private params = "";
   private inter = 0;
@@ -97,28 +137,35 @@ export class VtScanner {
     return this.state === GROUND && this.utf8 === 0;
   }
 
-  // Scans buf[pos..end), recording mode changes into `delta`. Stops just after
-  // a sequence that switches between the main and the alternate screen, so the
-  // caller can route the bytes on either side differently.
+  // Scans buf[pos..end), recording state changes into `delta`. Stops just
+  // after a sequence that switches between the main and the alternate screen,
+  // so the caller can route the bytes on either side differently.
   scan(buf: Buffer, pos: number, end: number, delta: Delta): number {
     let i = pos;
     while (i < end) {
       if (this.state === GROUND) {
-        while (this.utf8 > 0 && i < end && (buf[i] & 0xc0) === 0x80) {
-          this.utf8 -= 1;
-          i += 1;
+        let lineFeeds = 0;
+        for (; i < end; i += 1) {
+          const b = buf[i];
+          if (b === 0x1b) break;
+          if (b < 0x80) {
+            this.utf8 = 0;
+            if (b === 0x0a) lineFeeds += 1;
+            else if (b === 0x0e || b === 0x0f) setLast(delta.seq, "shift", String.fromCharCode(b));
+          } else if (b >= 0xc0) {
+            this.utf8 = b >= 0xf0 ? 3 : b >= 0xe0 ? 2 : 1;
+            this.lead = b;
+          } else if (this.utf8 > 0) {
+            // U+0080..U+009F: xterm reads these as C1 controls.
+            if (this.lead === 0xc2 && b <= 0x9f) this.opaque = true;
+            this.utf8 -= 1;
+            this.lead = 0;
+          }
         }
-        // A character split over more than two chunks is still open.
-        if (i === end) return end;
+        this.addLineFeeds(lineFeeds);
+        if (i >= end) return end;
+        i += 1;
         this.utf8 = 0;
-        const found = buf.indexOf(0x1b, i);
-        const stop = found === -1 || found >= end ? end : found;
-        if (!this.alt) this.countLineFeeds(buf, i, stop);
-        if (stop === end) {
-          this.utf8 = utf8Missing(buf, i, end);
-          return end;
-        }
-        i = stop + 1;
         this.state = ESC;
         continue;
       }
@@ -128,7 +175,7 @@ export class VtScanner {
       } else if (b === 0x18 || b === 0x1a) {
         this.state = GROUND;
       } else if (this.state === STRING) {
-        if (b === 0x07) this.state = GROUND;
+        if (b === 0x07 && this.stringBel) this.state = GROUND;
       } else if (b < 0x20 || b === 0x7f) {
         // C0 controls run inside a sequence without ending it.
       } else if (this.state === ESC) {
@@ -139,64 +186,88 @@ export class VtScanner {
           this.inter = 0;
         } else if (b === 0x5d || b === 0x50 || b === 0x58 || b === 0x5e || b === 0x5f) {
           this.state = STRING;
+          this.stringBel = b === 0x5d;
         } else if (b <= 0x2f) {
           this.state = ESC_INTER;
+          this.inter = b;
         } else {
           this.state = GROUND;
-          if (b === 0x63) {
-            delta.ris = true;
-            delta.modes.clear();
-            delta.sgr.length = 0;
-            this.breakRun();
-            if (this.alt) {
-              this.alt = false;
-              return i;
-            }
-          } else if (b === 0x4d || b === 0x38) {
-            // RI and DECRC move the cursor up.
-            if (!this.alt) this.breakRun();
-          }
+          if (b === 0x63 && this.reset(delta)) return i;
+          // RI and DECRC move the cursor up.
+          if (b === 0x4d || b === 0x38) this.breakRun();
         }
       } else if (this.state === ESC_INTER) {
         if (b >= 0x30) {
           this.state = GROUND;
+          // Character set designations (SCS).
+          if (this.inter >= 0x28 && this.inter <= 0x2f && this.inter !== 0x2c) {
+            setLast(delta.seq, `G${this.inter}`, `\x1b${String.fromCharCode(this.inter, b)}`);
+          }
           // DECALN (ESC # 8) homes the cursor.
-          if (b === 0x38 && !this.alt) this.breakRun();
+          if (this.inter === 0x23 && b === 0x38) this.breakRun();
         }
       } else if (b >= 0x40) {
         this.state = GROUND;
         if (this.csi(b, delta)) return i;
       } else if (b >= 0x30) {
         if (b >= 0x3c && this.params === "" && this.prefix === 0) this.prefix = b;
-        else if (this.params.length < 64) this.params += String.fromCharCode(b);
-      } else {
+        else if (this.params.length < 256) this.params += String.fromCharCode(b);
+      } else if (this.inter === 0) {
         this.inter = b;
       }
     }
     return i;
   }
 
+  // RIS. Returns true when it left the alternate screen.
+  private reset(delta: Delta): boolean {
+    delta.ris = true;
+    delta.seq.clear();
+    delta.sgr.clear();
+    delta.sgrReset = false;
+    this.region = false;
+    this.screenKnown = true;
+    const switched = this.alt;
+    this.alt = false;
+    this.breakRun();
+    return switched;
+  }
+
   // Returns true when the sequence switched screens.
   private csi(final: number, delta: Delta): boolean {
-    if (this.inter !== 0) return false;
-    const prefix = this.prefix;
+    const { prefix, inter, params } = this;
+    if (prefix === 0 && inter === 0x21 && final === 0x70) {
+      // DECSTR: a soft reset of modes, margins, character sets and attributes.
+      setLast(delta.seq, "DECSTR", "\x1b[!p");
+      delta.sgr.clear();
+      delta.sgrReset = true;
+      if (!this.alt) this.region = false;
+      return false;
+    }
+    if (prefix === 0 && inter === 0x20 && final === 0x71) {
+      setLast(delta.seq, "DECSCUSR", `\x1b[${params} q`);
+      return false;
+    }
+    if (inter !== 0) return false;
     if ((final === 0x68 || final === 0x6c) && (prefix === 0 || prefix === 0x3f)) {
       const value = final === 0x68 ? "h" : "l";
       let switched = false;
-      for (const part of this.params.split(";")) {
+      for (const part of params.split(";")) {
         if (!/^\d+$/.test(part)) continue;
         const mode = Number(part);
-        setMode(delta, `${prefix ? "?" : ""}${mode}`, value);
+        const key = `${prefix ? "?" : ""}${mode}`;
+        setLast(delta.seq, key, `\x1b[${key}${value}`);
         if (prefix === 0) continue;
         if (mode === 47 || mode === 1047 || mode === 1049) {
+          this.screenKnown = true;
           if ((value === "h") !== this.alt) {
             // Leaving the alternate screen puts the main cursor back where
             // the program left it, which may be higher up.
-            if (this.alt) this.breakRun();
             this.alt = value === "h";
+            this.breakRun();
             switched = true;
           }
-        } else if (!this.alt && (mode === 3 || mode === 6 || (mode === 1048 && value === "l"))) {
+        } else if (mode === 3 || mode === 6 || (mode === 1048 && value === "l")) {
           this.breakRun();
         }
       }
@@ -204,11 +275,16 @@ export class VtScanner {
     }
     if (prefix !== 0) return false;
     if (final === 0x6d) {
-      addSgr(delta.sgr, this.params);
+      applySgr(delta, params);
+    } else if (final === 0x72) {
+      // DECSTBM. Line feeds inside a region never move the rows outside it.
+      if (!this.alt) this.region = /[1-9]/.test(params);
+      this.breakRun();
     } else if (
-      !this.alt &&
-      // CUU, CPL, CUP, HVP, VPA, DECSTBM, SCORC
-      (final === 0x41 || final === 0x46 || final === 0x48 || final === 0x66 || final === 0x64 || final === 0x72 || final === 0x75)
+      // CUU, CPL, CUP, HVP, VPA, SCORC move the cursor up; SD, IL, DL and SU
+      // move lines; neither can be bounded without the cursor position.
+      final === 0x41 || final === 0x46 || final === 0x48 || final === 0x66 || final === 0x64 || final === 0x75 ||
+      final === 0x54 || final === 0x4c || final === 0x4d || final === 0x53
     ) {
       this.breakRun();
     }
@@ -216,13 +292,15 @@ export class VtScanner {
   }
 
   private breakRun(): void {
-    this.runStart = this.lf;
+    if (!this.alt) this.runStart = this.lf;
   }
 
-  private countLineFeeds(buf: Buffer, start: number, end: number): void {
-    let count = 0;
-    for (let at = buf.indexOf(0x0a, start); at !== -1 && at < end; at = buf.indexOf(0x0a, at + 1)) count += 1;
-    if (count === 0) return;
+  private addLineFeeds(count: number): void {
+    if (count === 0 || this.alt) return;
+    if (this.region) {
+      this.runStart = this.lf;
+      return;
+    }
     this.lf += count;
     if (this.lf - this.runStart >= this.need) this.horizon = this.lf - this.need;
   }
@@ -241,8 +319,16 @@ interface Piece {
   lfMark: number;
 }
 
+function observe(scanner: VtScanner, bufs: Buffer[], from: number): void {
+  const scratch = newDelta();
+  for (let i = from; i < bufs.length; i += 1) {
+    const buf = bufs[i];
+    for (let at = 0; at < buf.length; ) at = scanner.scan(buf, at, buf.length, scratch);
+  }
+}
+
 export class DetachedBacklog {
-  // Bytes of program output held (the replayed deltas are a few bytes more).
+  // Bytes held: program output plus PIECE_OVERHEAD per piece.
   bytes = 0;
   // Screen content was dropped, so the program must repaint after the replay.
   lossy = false;
@@ -251,6 +337,8 @@ export class DetachedBacklog {
   private raw: Buffer[] = [];
   private rawHead = 0;
   private scanner = new VtScanner();
+  // Follows what take() handed out, so every slice ends on a clean boundary.
+  private sent = new VtScanner();
   private need = Infinity;
 
   setView(scrollbackLines: number, rows: number): void {
@@ -271,6 +359,7 @@ export class DetachedBacklog {
     this.rawHead = 0;
     this.scanner = new VtScanner();
     this.scanner.need = this.need;
+    this.sent = new VtScanner();
   }
 
   push(chunk: Buffer): void {
@@ -292,9 +381,25 @@ export class DetachedBacklog {
     return out.filter((buf) => buf.length > 0);
   }
 
-  // Removes and returns the next at most `max` bytes of the replay, or null.
+  // Removes and returns the next slice of the replay, about `max` bytes and
+  // ending where no escape sequence or character is open, or null.
   take(max: number): Buffer | null {
     const out: Buffer[] = [];
+    let n = this.pull(out, max);
+    if (n === 0) return null;
+    observe(this.sent, out, 0);
+    while (!this.sent.atGround()) {
+      const from = out.length;
+      const added = this.pull(out, 64);
+      if (added === 0) break;
+      n += added;
+      observe(this.sent, out, from);
+    }
+    this.compactRaw();
+    return out.length === 1 ? out[0] : Buffer.concat(out, n);
+  }
+
+  private pull(out: Buffer[], max: number): number {
     let n = 0;
     if (this.head) {
       const encoded = encodeDelta(this.head);
@@ -308,7 +413,7 @@ export class DetachedBacklog {
         const encoded = encodeDelta(piece.delta);
         out.push(encoded);
         n += encoded.length;
-        this.pieces.shift();
+        this.shiftPiece();
         continue;
       }
       while (n < max && piece.bufs.length > 0) {
@@ -326,7 +431,7 @@ export class DetachedBacklog {
         piece.droppable = false;
       }
       if (piece.bufs.length > 0) break;
-      this.pieces.shift();
+      this.shiftPiece();
     }
     while (n < max && this.pieces.length === 0 && this.rawHead < this.raw.length) {
       let buf = this.raw[this.rawHead];
@@ -337,14 +442,12 @@ export class DetachedBacklog {
         this.raw[this.rawHead++] = EMPTY;
       }
       // The scanner must stay in step with the first byte not yet sent.
-      for (let at = 0; at < buf.length; ) at = this.scanner.scan(buf, at, buf.length, newDelta());
+      observe(this.scanner, [buf], 0);
       out.push(buf);
       n += buf.length;
       this.bytes -= buf.length;
     }
-    this.compactRaw();
-    if (n === 0) return null;
-    return out.length === 1 ? out[0] : Buffer.concat(out, n);
+    return n;
   }
 
   private trim(): void {
@@ -354,9 +457,14 @@ export class DetachedBacklog {
       this.process(chunk);
     }
     this.compactRaw();
-    while (this.pieces.length > 0) {
+    while (this.pieces.length > 0 && !this.scanner.opaque) {
       const piece = this.pieces[0];
-      if (!piece.closed || !piece.droppable || (!piece.synthetic && piece.lfMark > this.scanner.horizon)) break;
+      if (!piece.closed || !piece.droppable) break;
+      if (!piece.synthetic) {
+        if (piece.lfMark > this.scanner.horizon) break;
+        // Before the stream showed its screen, this may have been a full-screen frame.
+        if (!this.scanner.screenKnown) this.lossy = true;
+      }
       this.dropFirst();
     }
     while (this.bytes > BACKLOG_HARD_BYTES && this.pieces.length > 0) {
@@ -380,9 +488,10 @@ export class DetachedBacklog {
   private process(chunk: Buffer): void {
     for (let pos = 0; pos < chunk.length; ) {
       const alt = this.scanner.alt;
-      const piece = this.openPiece(alt);
+      const drop = alt && !this.scanner.opaque;
+      const piece = this.openPiece(drop);
       const next = this.scanner.scan(chunk, pos, chunk.length, piece.delta);
-      if (alt) {
+      if (drop) {
         this.bytes -= next - pos;
         this.lossy = true;
       } else {
@@ -411,6 +520,7 @@ export class DetachedBacklog {
       lfMark: 0,
     };
     this.pieces.push(piece);
+    this.bytes += PIECE_OVERHEAD;
     return piece;
   }
 
@@ -419,12 +529,17 @@ export class DetachedBacklog {
     piece.lfMark = this.scanner.lf;
   }
 
-  private dropFirst(): void {
+  private shiftPiece(): Piece | undefined {
     const piece = this.pieces.shift();
+    if (piece) this.bytes -= piece.bytes + PIECE_OVERHEAD;
+    return piece;
+  }
+
+  private dropFirst(): void {
+    const piece = this.shiftPiece();
     if (!piece) return;
     this.head ??= newDelta();
     foldDelta(this.head, piece.delta);
-    this.bytes -= piece.bytes;
   }
 
   private compactRaw(): void {
