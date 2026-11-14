@@ -124,13 +124,11 @@ interface ProcReader {
   readText(path: string): Promise<string>;
   readBytes(path: string): Promise<Buffer>;
   readdir(path: string): Promise<string[]>;
-  ownerOf(path: string): Promise<number>;
 }
 const systemProcReader: ProcReader = {
   readText: (path) => fsp.readFile(path, "utf8"),
   readBytes: (path) => fsp.readFile(path),
   readdir: (path) => fsp.readdir(path),
-  ownerOf: async (path) => (await fsp.stat(path)).uid,
 };
 let procReader: ProcReader = systemProcReader;
 
@@ -141,9 +139,11 @@ export function setProcReaderForTests(reader: Partial<ProcReader> | null): void 
 }
 
 // A read that failed because the process (or one of its threads) exited
-// while it was read. Any other failure (EACCES, EMFILE, EIO) says nothing
-// about the process, so the answer becomes "cannot tell" rather than a
-// listing without it: callers stop panes on what a listing leaves out.
+// while it was read. Any other failure (EACCES, EMFILE, EIO, a hidepid
+// mount, a hardened /proc) says nothing about the process: the /proc answer
+// is then incomplete and is never returned. The listing falls back to `ps`,
+// exactly what ran before /proc was read, and is null when `ps` fails too.
+// Callers stop panes on what a listing leaves out.
 function exitedWhileRead(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | null)?.code;
   return code === "ENOENT" || code === "ESRCH";
@@ -188,17 +188,8 @@ export function parseProcStat(text: string): { parentPid: number; startTicks: nu
   return { parentPid, startTicks, name: text.slice(open + 1, close) };
 }
 
-/**
- * One process from /proc: null when it exited while being read, UNKNOWN when
- * it could not be read. `othersMayHide`: a process of another user that
- * refuses the read is left out, as `ps` leaves it out (hidepid=1); that is
- * only right for the whole-machine listing, never for a pane's own subtree.
- */
-async function readLinuxProcess(
-  pid: number,
-  boot: number | null,
-  othersMayHide = false,
-): Promise<ListedProcess | null | Unknown> {
+/** One process from /proc: null when it exited while being read, UNKNOWN when it could not be read. */
+async function readLinuxProcess(pid: number, boot: number | null): Promise<ListedProcess | null | Unknown> {
   let stat: string;
   let argv: Buffer;
   try {
@@ -207,9 +198,7 @@ async function readLinuxProcess(
       procReader.readBytes(`/proc/${pid}/cmdline`),
     ]);
   } catch (error) {
-    if (exitedWhileRead(error)) return null;
-    if (othersMayHide && (await ownedByAnotherUser(pid))) return null;
-    return UNKNOWN;
+    return exitedWhileRead(error) ? null : UNKNOWN;
   }
   const parsed = parseProcStat(stat);
   if (!parsed) return UNKNOWN;
@@ -223,15 +212,6 @@ async function readLinuxProcess(
   return { pid, parentPid: parsed.parentPid, startedAt, command };
 }
 
-async function ownedByAnotherUser(pid: number): Promise<boolean> {
-  const uid = process.getuid?.();
-  if (uid === undefined || uid === 0) return false;
-  try {
-    return (await procReader.ownerOf(`/proc/${pid}`)) !== uid;
-  } catch {
-    return false;
-  }
-}
 
 async function linuxProcessTable(): Promise<readonly ListedProcess[] | null> {
   let names: string[];
@@ -242,7 +222,7 @@ async function linuxProcessTable(): Promise<readonly ListedProcess[] | null> {
   }
   const boot = await linuxBootSeconds();
   const rows = await Promise.all(
-    names.filter((name) => /^\d+$/.test(name)).map(Number).filter(safePid).map((pid) => readLinuxProcess(pid, boot, true)),
+    names.filter((name) => /^\d+$/.test(name)).map(Number).filter(safePid).map((pid) => readLinuxProcess(pid, boot)),
   );
   if (rows.includes(UNKNOWN)) return null;
   const listed = rows.filter((row): row is ListedProcess => row !== null && row !== UNKNOWN);
@@ -287,7 +267,7 @@ function linuxChildrenFiles(): boolean {
   return childrenFiles;
 }
 
-/** `rootPids` and everything below them, from /proc. Null when a read failed. */
+/** `rootPids` and everything below them, from /proc. Null when a read failed (incomplete). */
 async function linuxSubtrees(rootPids: readonly number[]): Promise<ListedProcess[] | null> {
   const boot = await linuxBootSeconds();
   const seen = new Set<number>();
@@ -316,8 +296,10 @@ export function processesUnder(
   rootPids: readonly number[],
   maxAgeMs = 0,
 ): Promise<readonly ListedProcess[] | null> {
-  if (linuxChildrenFiles()) return linuxSubtrees(rootPids);
-  return listProcessesWithCommands(maxAgeMs);
+  if (!linuxChildrenFiles()) return listProcessesWithCommands(maxAgeMs);
+  // An incomplete subtree is never an answer: the whole listing instead
+  // (from /proc when that reads in full, else `ps`).
+  return linuxSubtrees(rootPids).then((subtree) => subtree ?? listProcessesWithCommands(maxAgeMs));
 }
 
 /**
@@ -338,18 +320,24 @@ export function listProcessesWithCommands(
     return Promise.resolve(cachedWithCommands.list);
   }
   if (inflightWithCommands) return inflightWithCommands;
-  if (process.platform === "linux") {
-    inflightWithCommands = linuxProcessTable()
-      .then((list) => {
-        if (list) cachedWithCommands = { at: Date.now(), list };
-        return list;
-      })
-      .finally(() => {
-        inflightWithCommands = null;
-      });
-    return inflightWithCommands;
-  }
-  inflightWithCommands = new Promise<readonly ListedProcess[] | null>(
+  const read =
+    process.platform === "linux"
+      ? linuxProcessTable().then((list) => list ?? psListingWithCommands())
+      : psListingWithCommands();
+  inflightWithCommands = read
+    .then((list) => {
+      if (list) cachedWithCommands = { at: Date.now(), list };
+      return list;
+    })
+    .finally(() => {
+      inflightWithCommands = null;
+    });
+  return inflightWithCommands;
+}
+
+/** `ps -axww` with command lines; null when it fails, times out or overflows. */
+function psListingWithCommands(): Promise<readonly ListedProcess[] | null> {
+  return new Promise<readonly ListedProcess[] | null>(
     (resolve) => {
       let stdout = "";
       let overflowed = false;
@@ -358,7 +346,6 @@ export function listProcessesWithCommands(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        if (value) cachedWithCommands = { at: Date.now(), list: value };
         resolve(value);
       };
       let child: ReturnType<typeof spawn>;
@@ -404,10 +391,7 @@ export function listProcessesWithCommands(
         finish(parsed.length === 0 ? null : parsed);
       });
     },
-  ).finally(() => {
-    inflightWithCommands = null;
-  });
-  return inflightWithCommands;
+  );
 }
 
 function buildTree(

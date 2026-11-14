@@ -423,12 +423,11 @@ interface RepositoryCacheEntry {
 const repositoryCaches = new WeakMap<object, Map<string, RepositoryCacheEntry>>();
 
 /**
- * What decides a checkout's remotes: the git directory a checkout and all its
- * worktrees share, with the stamp of its config. With per-worktree config
- * (`extensions.worktreeConfig`) a worktree may set its own remote, so the key
- * is that worktree's own git directory and its `config.worktree` joins the
- * stamp. A config that includes other files is not cached (an included file
- * can change with no stamp here moving). Null outside a local repository.
+ * The git directory a checkout and all its worktrees share, with the stamp of
+ * its config. Only a plain repository is cached: when the answer could depend
+ * on anything else (an `[include]` or `[includeIf]`, any mention of
+ * `worktreeConfig`, a `config.worktree` file), this is null and every call
+ * asks `gh`, as before the cache. Null outside a local repository too.
  */
 export async function repositoryCacheKey(
   cwd: string,
@@ -436,38 +435,22 @@ export async function repositoryCacheKey(
   const dirs = await gitDirsOf(cwd);
   if (!dirs) return null;
   const configPath = join(dirs.commonDir, "config");
-  const [config, text] = await Promise.all([
+  const [config, text, ownWorktreeConfig, sharedWorktreeConfig] = await Promise.all([
     fs.stat(configPath).catch(() => null),
     fs.readFile(configPath, "utf8").catch(() => null),
+    fs.lstat(join(dirs.gitDir, "config.worktree")).catch(() => null),
+    fs.lstat(join(dirs.commonDir, "config.worktree")).catch(() => null),
   ]);
-  if (!config || text === null || /^\s*\[\s*include(?:if)?\b/im.test(text)) return null;
-  let keyDir = dirs.commonDir;
-  let configStamp = String(config.mtimeMs);
-  if (worktreeConfigEnabled(text)) {
-    keyDir = dirs.gitDir;
-    const own = await fs.stat(join(dirs.gitDir, "config.worktree")).catch(() => null);
-    configStamp += `:${own ? own.mtimeMs : "none"}`;
-  }
+  if (!config || text === null || !plainConfig(text) || ownWorktreeConfig || sharedWorktreeConfig) return null;
   // A worktree's .git file names the real path (/private/var on macOS), its
   // checkout may be reached through a link (/var).
-  const key = await fs.realpath(keyDir).catch(() => keyDir);
-  return { key, configStamp };
+  const key = await fs.realpath(dirs.commonDir).catch(() => dirs.commonDir);
+  return { key, configStamp: String(config.mtimeMs) };
 }
 
-/** True when a git config turns on per-worktree config files. */
-function worktreeConfigEnabled(text: string): boolean {
-  let section = "";
-  for (const line of text.split(/\r?\n/)) {
-    const header = /^\s*\[\s*([^\]\s]+)/.exec(line);
-    if (header) {
-      section = header[1].toLowerCase();
-      continue;
-    }
-    if (section !== "extensions") continue;
-    const entry = /^\s*worktreeconfig\s*(?:=\s*(\S+))?/i.exec(line);
-    if (entry) return !/^(?:false|no|off|0)$/i.test(entry[1] ?? "true");
-  }
-  return false;
+/** No include of another file and no per-worktree config, in any spelling or position. */
+function plainConfig(text: string): boolean {
+  return !/\[\s*include/i.test(text) && !/worktreeconfig/i.test(text);
 }
 
 /** Test seam: forget every cached repository identity. */

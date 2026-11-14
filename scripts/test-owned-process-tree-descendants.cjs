@@ -162,14 +162,25 @@ async function main() {
       }
 
       // A read that fails for any reason but "the process exited" is not a
-      // missing process: the answer is "cannot tell" (null), never a
-      // listing without it.
+      // missing process: an incomplete /proc answer is never returned. The
+      // listing falls back to ps (what ran before /proc), null when ps fails.
       const sleeper = mine.find((row) => row.parentPid === tree.pid).pid;
       const failing = (code, match) => (path) => {
         if (match(path)) return Promise.reject(Object.assign(new Error(code), { code }));
         return require("node:fs").promises.readFile(path, "utf8");
       };
       const statOf = (pid) => (path) => path === `/proc/${pid}/stat`;
+      const childrenOf = (pid) => (path) => path.startsWith(`/proc/${pid}/task/`) && path.endsWith("/children");
+      const holds = (list, pid) => Array.isArray(list) && list.some((row) => row.pid === pid && /^sleep 6$/.test(row.command));
+      const withoutPs = async (fn) => {
+        const saved = process.env.PATH;
+        process.env.PATH = "";
+        try {
+          return await fn();
+        } finally {
+          process.env.PATH = saved;
+        }
+      };
       try {
         mod.setProcReaderForTests({ readText: failing("ENOENT", statOf(sleeper)) });
         const goneWhole = await mod.listProcessesWithCommands(0);
@@ -181,25 +192,19 @@ async function main() {
         );
         for (const code of ["EACCES", "EMFILE", "EIO"]) {
           mod.setProcReaderForTests({ readText: failing(code, statOf(sleeper)) });
-          check(`${code} on a live child's stat makes the whole listing unknown`, (await mod.listProcessesWithCommands(0)) === null);
-          check(`${code} on a live child's stat makes its subtree unknown`, (await mod.processesUnder([tree.pid])) === null);
-          check(`${code} makes descendants unknown, not empty`, (await mod.descendantProcessesWithCommands(tree.pid)) === null);
+          check(`${code} on a live child: the machine listing comes from ps and holds it`, holds(await mod.listProcessesWithCommands(0), sleeper));
+          check(`${code} on a live child: its subtree falls back to the full listing and holds it`, holds(await mod.processesUnder([tree.pid]), sleeper));
+          check(`${code} on a live child: descendants still hold it`, holds(await mod.descendantProcessesWithCommands(tree.pid), sleeper));
+          await withoutPs(async () => {
+            check(`${code} and no ps: the machine listing is unknown`, (await mod.listProcessesWithCommands(0)) === null);
+            check(`${code} and no ps: descendants are unknown, not empty`, (await mod.descendantProcessesWithCommands(tree.pid)) === null);
+          });
         }
-        mod.setProcReaderForTests({ readText: failing("EACCES", (path) => path.startsWith(`/proc/${tree.pid}/task/`) && path.endsWith("/children")) });
-        check("an unreadable children file makes the subtree unknown, not empty", (await mod.processesUnder([tree.pid])) === null);
-        mod.setProcReaderForTests({ readText: failing("ESRCH", (path) => path.startsWith(`/proc/${tree.pid}/task/`) && path.endsWith("/children")) });
+        mod.setProcReaderForTests({ readText: failing("EACCES", childrenOf(tree.pid)) });
+        check("an unreadable children file: the subtree comes from the full listing", holds(await mod.processesUnder([tree.pid]), sleeper));
+        mod.setProcReaderForTests({ readText: failing("ESRCH", childrenOf(tree.pid)) });
         const threadGone = await mod.processesUnder([tree.pid]);
         check("a thread that ended while read lists no children and no error", Array.isArray(threadGone) && threadGone.length === 1);
-        mod.setProcReaderForTests({
-          readText: failing("EACCES", statOf(sleeper)),
-          ownerOf: async (path) => (path === `/proc/${sleeper}` ? process.getuid() + 1 : process.getuid()),
-        });
-        const hidden = await mod.listProcessesWithCommands(0);
-        check(
-          "another user's process that refuses the read is left out of the machine listing, as ps does",
-          process.getuid() === 0 || (Array.isArray(hidden) && !hidden.some((row) => row.pid === sleeper)),
-        );
-        check("but never out of a pane's subtree", (await mod.processesUnder([tree.pid])) === null);
       } finally {
         mod.setProcReaderForTests(null);
       }
@@ -207,6 +212,76 @@ async function main() {
       check("the lstart stamp is the C ctime form", /^[A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \d{4}$/.test(mod.lstartStamp(1_788_000_000)));
     } finally {
       tree.kill("SIGKILL");
+    }
+  }
+  // Through the hibernation classifier: a pane whose shell runs an agent and,
+  // a moment later, a detached job (setsid: off the tty, still in the tree).
+  // When that job's /proc entry cannot be read, the pane must stay awake,
+  // whatever the failure, and never because the job went missing.
+  if (process.platform === "linux") {
+    const bundle = path.join(path.dirname(outfile), "census.cjs");
+    await esbuild.build({
+      stdin: {
+        contents: `export * from "./src/main/owned-process-tree";
+          export { listCensusProcesses, classifyPaneProcessTree } from "./src/main/agent-hibernation-census";`,
+        resolveDir: ROOT,
+        sourcefile: "census-entry.ts",
+        loader: "ts",
+      },
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      outfile: bundle,
+      logLevel: "silent",
+      plugins: [{
+        name: "shared-alias",
+        setup(build) {
+          build.onResolve({ filter: /^@shared\// }, (args) => ({ path: path.join(ROOT, "src", "shared", `${args.path.slice(8)}.ts`) }));
+        },
+      }],
+    });
+    const census = require(bundle);
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), "codara-census-agent-"));
+    const agentPath = path.join(bin, "codex");
+    fs.writeFileSync(agentPath, `#!${process.execPath}\nsetInterval(() => {}, 1 << 30);\n`);
+    fs.chmodSync(agentPath, 0o755);
+    const pane = spawn("sh", ["-c", `"${agentPath}" & sleep 2; setsid sleep 30 & wait`], { stdio: "ignore" });
+    try {
+      await sleep(2_800);
+      const listed = await census.listCensusProcesses();
+      const job = listed.find((row) => row.parentPid === pane.pid && /^sleep 30$/.test(row.command));
+      check("the census sees the pane's agent and its detached job", Boolean(job) && listed.some((row) => row.parentPid === pane.pid && /codex/.test(row.command)));
+      check(
+        "without the job the pane could be stopped (the job alone decides)",
+        census.classifyPaneProcessTree(listed.filter((row) => row.pid !== job.pid), pane.pid, "codex").ok === true,
+      );
+      check("with the job it stays awake", census.classifyPaneProcessTree(listed, pane.pid, "codex").ok === false);
+      const failing = (code) => (file) =>
+        file === `/proc/${job.pid}/stat` || file === `/proc/${job.pid}/cmdline`
+          ? Promise.reject(Object.assign(new Error(code), { code }))
+          : require("node:fs").promises.readFile(file, file.endsWith("/cmdline") ? undefined : "utf8");
+      try {
+        for (const code of ["EACCES", "EMFILE", "EIO"]) {
+          census.setProcReaderForTests({ readText: failing(code), readBytes: failing(code) });
+          const read = await census.listCensusProcesses();
+          const verdict = read ? census.classifyPaneProcessTree(read, pane.pid, "codex") : { ok: false, reason: "process-list-unavailable" };
+          check(`${code} on the job's /proc entry: the pane stays awake (${verdict.reason})`, verdict.ok === false);
+          const saved = process.env.PATH;
+          process.env.PATH = "";
+          try {
+            check(`${code} and no ps: no listing, so no stop`, (await census.listCensusProcesses()) === null);
+          } finally {
+            process.env.PATH = saved;
+          }
+        }
+      } finally {
+        census.setProcReaderForTests(null);
+      }
+    } finally {
+      // Its children first: once the shell is gone they belong to init.
+      spawnSync("pkill", ["-KILL", "-P", String(pane.pid)]);
+      pane.kill("SIGKILL");
+      fs.rmSync(bin, { recursive: true, force: true });
     }
   }
   console.log(`\nAll ${pass} owned-process-tree checks passed.`);
