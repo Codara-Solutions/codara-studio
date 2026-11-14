@@ -45,6 +45,7 @@ function getStore(): TerminalScrollbackStore {
     hasSession: pty.hasSession,
     dimensions: pty.sessionDimensions,
     readTail: pty.readTail,
+    onExit: (paneId, handler) => pty.onExit(paneId, () => handler()),
     enabled,
     newSessionOwnsScreen: process.platform === "win32",
     log: (line) => logMain("scrollback", line),
@@ -91,6 +92,13 @@ export function setTerminalScrollbackEnabled(next: boolean): Promise<void> {
 export function registerTerminalScrollbackIpc(handle: IpcHandle): void {
   handle("terminalScrollback:usage", () => getStore().usage());
   handle("terminalScrollback:clear", () => getStore().clear());
+  // A pane left the screen: its output is saved now rather than at the next
+  // timed save, which can be up to a minute away.
+  handle("terminalScrollback:flush", async (_event, args: { paneId?: unknown }): Promise<void> => {
+    const paneId = typeof args?.paneId === "string" ? args.paneId : "";
+    if (!paneId || paneId.length > 256) return;
+    await flushTerminalScrollback(paneId);
+  });
   handle(
     "terminalScrollback:restore",
     async (

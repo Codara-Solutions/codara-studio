@@ -198,6 +198,16 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
     useEffect(() => {
       if (!visible) setLinkMenu(null);
     }, [visible]);
+
+    // Main saves each pane's output at most once a minute while it prints; a
+    // pane leaving the screen is saved at once.
+    const wasVisible = useRef(visible);
+    useEffect(() => {
+      if (wasVisible.current && !visible) {
+        void window.spark.terminalScrollback?.flush?.(sessionId).catch(() => undefined);
+      }
+      wasVisible.current = visible;
+    }, [visible, sessionId]);
     const focusTerminal = session.focus;
     const closeLinkMenu = useCallback(
       (refocusTerminal: boolean) => {
