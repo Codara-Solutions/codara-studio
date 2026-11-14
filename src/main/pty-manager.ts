@@ -1881,7 +1881,9 @@ function enqueueData(id: string, data: string | Buffer): void {
 // no-op. Pending chunks queued for the next 16 ms flush are absorbed into the
 // backlog so the small window between cleanup and pause is not lost. A pause
 // during a replay stops it; what was not sent yet stays for the next resume,
-// which repaints: slices already in flight reach a listener that is gone.
+// which repaints: slices already in flight reach a listener that is gone. A
+// full-screen program redraws them; main-screen lines among them are lost,
+// as live output in that window always was.
 // `scrollbackLines` is the view's scrollback setting, which bounds what the
 // backlog must keep.
 export function pause(id: string, scrollbackLines?: number): void {

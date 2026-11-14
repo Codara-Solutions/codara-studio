@@ -63,8 +63,9 @@ function foldDelta(into: Delta, delta: Delta): void {
 function encodeDelta(delta: Delta): Buffer {
   let text = delta.ris ? "\x1bc" : "";
   for (const value of delta.seq.values()) text += value;
-  const sgr = [...(delta.sgrReset ? ["0"] : []), ...delta.sgr.values()];
-  if (sgr.length > 0) text += `\x1b[${sgr.join(";")}m`;
+  // One sequence per slot: xterm reads at most 32 parameters per sequence.
+  if (delta.sgrReset) text += "\x1b[0m";
+  for (const value of delta.sgr.values()) text += `\x1b[${value}m`;
   return Buffer.from(text, "latin1");
 }
 
@@ -72,7 +73,10 @@ function encodeDelta(delta: Delta): Buffer {
 const SGR_SLOTS: Record<number, string> = {
   1: "1", 2: "2", 3: "3", 23: "3", 4: "4", 21: "4", 24: "4", 5: "5", 6: "5", 25: "5",
   7: "7", 27: "7", 8: "8", 28: "8", 9: "9", 29: "9", 53: "53", 55: "53", 59: "ul",
+  26: "26", 50: "26", 51: "51", 52: "51", 54: "51", 73: "73", 74: "73", 75: "73",
 };
+const sgrSlot = (n: number): string =>
+  SGR_SLOTS[n] ?? (n >= 10 && n <= 20 ? "font" : n >= 60 && n <= 65 ? "60" : `x${n}`);
 
 function applySgr(delta: Delta, params: string): void {
   const parts = params === "" ? ["0"] : params.split(";");
@@ -99,7 +103,7 @@ function applySgr(delta: Delta, params: string): void {
     } else if ((n >= 40 && n <= 47) || n === 49 || (n >= 100 && n <= 107)) {
       setLast(delta.sgr, "bg", part);
     } else {
-      setLast(delta.sgr, SGR_SLOTS[n] ?? `x${n}`, part);
+      setLast(delta.sgr, sgrSlot(n), part);
     }
   }
 }
@@ -388,7 +392,9 @@ export class DetachedBacklog {
     let n = this.pull(out, max);
     if (n === 0) return null;
     observe(this.sent, out, 0);
-    while (!this.sent.atGround()) {
+    // A huge string (an inline image) is not held back for: past 64 KB the
+    // slice ends inside it, as any slice did before.
+    for (let extended = 0; !this.sent.atGround() && extended < 64 * 1024; extended += 64) {
       const from = out.length;
       const added = this.pull(out, 64);
       if (added === 0) break;

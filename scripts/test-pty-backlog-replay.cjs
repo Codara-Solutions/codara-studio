@@ -241,6 +241,11 @@ async function main() {
     const cases = {
       "a scroll region": { head: "\x1b[5;24r\x1b[1;1HHEADER ROW ONE\x1b[24;1H", line: (i) => `${i} plain line\r\n` },
       "scrolling down": { head: "PINNED MARK\r\n", line: (i) => `${i} plain line\r\n${i % 10 === 9 ? "\x1b[10T" : ""}` },
+      "more attributes than one sequence holds": {
+        head: `${[56, 57, 66, 67, 68, 69, 70, 71, 72, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 11, 26, 51, 61, 73, 3, 5, 7, 9, 53]
+          .map((n) => `\x1b[${n}m`).join("")}\x1b[38;2;1;2;3m\x1b[48;2;4;5;6m`,
+        line: (i) => `${i} plain line\r\n`,
+      },
       "many attribute changes": { head: `\x1b[1m${"\x1b[31m\x1b[32m\x1b[38;2;10;20;30m".repeat(3)}\x1b[4:3m`, line: (i) => `${i} plain line\r\n` },
     };
     for (const [name, { head, line: next }] of Object.entries(cases)) {
@@ -260,13 +265,25 @@ async function main() {
         assert.equal(text(view.buffer.normal), text(full.buffer.normal), "same scrollback and screen");
         const cell = (term) => {
           const c = term.buffer.active.getLine(term.buffer.active.length - 2).getCell(0);
-          return [c.isBold(), c.getFgColor(), c.getFgColorMode(), c.isUnderline()];
+          return [c.isBold(), c.getFgColor(), c.getFgColorMode(), c.getBgColor(), c.isUnderline()];
         };
         assert.deepEqual(cell(view), cell(full), "same attributes on the last line");
         full.dispose();
         view.dispose();
       });
     }
+
+    await section("a huge escape string does not make one huge slice", async () => {
+      const pane = await open("image");
+      pty.pause(pane.id, LINES);
+      pane.handle.emit(`\x1b]1337;File=:${"QUJD".repeat(256 * 1024)}\x07done\r\n`);
+      pane.sent.length = 0;
+      pty.resume(pane.id, false, LINES);
+      await replayed(pane.id);
+      const slices = pane.data();
+      assert.ok(slices.every((s) => s.length <= SLICE + 64 * 1024 + 1024), `largest slice ${Math.max(...slices.map((s) => s.length))}`);
+      assert.ok(Buffer.concat(slices).toString().endsWith("done\r\n"));
+    });
 
     await section("a program flipping screens many times stays bounded", async () => {
       const pane = await open("flips");
