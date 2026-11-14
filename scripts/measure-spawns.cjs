@@ -15,7 +15,7 @@
 // Build with source maps so callers are named by source line:
 //   CODARA_MAIN_SOURCEMAP=1 npm run build
 //   node scripts/measure-spawns.cjs [--projects 14] [--worktrees 4]
-//     [--warmup-ms 30000] [--idle-ms 120000] [--json file]
+//     [--warmup-ms 30000] [--idle-ms 120000] [--json file] [--stale-worktrees]
 //
 // Linux only (a private Xvfb display; it refuses to open windows on the
 // desktop).
@@ -48,7 +48,7 @@ const INHERITED_KEYS = [
 ];
 
 function parseArgs(argv) {
-  const options = { projects: 14, worktrees: 4, warmupMs: 30_000, idleMs: 120_000, json: null };
+  const options = { projects: 14, worktrees: 4, warmupMs: 30_000, idleMs: 120_000, json: null, stale: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--projects") options.projects = Math.max(1, Number(argv[++i]) || 1);
@@ -56,6 +56,7 @@ function parseArgs(argv) {
     else if (arg === "--warmup-ms") options.warmupMs = Math.max(0, Number(argv[++i]) || 0);
     else if (arg === "--idle-ms") options.idleMs = Math.max(1_000, Number(argv[++i]) || 1_000);
     else if (arg === "--json") options.json = path.resolve(argv[++i]);
+    else if (arg === "--stale-worktrees") options.stale = true;
     else throw new Error(`unknown argument ${arg}`);
   }
   return options;
@@ -104,13 +105,27 @@ function seed(root, options) {
       const tree = path.join(root, "worktrees", `project-${p}`, branch);
       fs.mkdirSync(path.dirname(tree), { recursive: true });
       git(repo, ["worktree", "add", "-q", "-b", branch, tree]);
+      // Work in progress, as in a real lane: one commit of its own. With
+      // --stale-worktrees every lane is an old one with nothing in it.
+      if (!options.stale) {
+        fs.writeFileSync(path.join(tree, `${branch}.md`), `${branch}\n`);
+        git(tree, ["add", `${branch}.md`]);
+        git(tree, ["commit", "-q", "-m", branch]);
+      }
       workspaces.push({
         id: `ws-p${p}-w${w}`,
         name: `project-${p} ${branch}`,
         cwd: tree,
         color: "#42D6C7",
         workers: [],
-        copyBranch: { repoCwd: repo, branch, baseBranch: "main", city: branch, mode: "fork", createdAt: new Date(0).toISOString() },
+        copyBranch: {
+          repoCwd: repo,
+          branch,
+          baseBranch: "main",
+          city: branch,
+          mode: "fork",
+          createdAt: new Date(options.stale ? 0 : Date.now()).toISOString(),
+        },
       });
     }
   }
@@ -309,6 +324,7 @@ async function main() {
     result.focused = difference(focusedEnd, focusedStart);
     result.blurred = difference(blurredEnd, blurredStart);
     result.refocus10s = refocused.total - blurredEnd.total;
+    result.refocus = difference(refocused, blurredEnd);
     result.peak60sAfterWarmup = peakWindow(refocused, Math.floor((options.warmupMs + 5_000) / 1000), 60);
     result.peak60sFromBoot = peakWindow(refocused, 0, 60);
     console.log(
@@ -318,6 +334,9 @@ async function main() {
         table(`Idle, window focused (${result.focused.minutes.toFixed(1)} min)`, result.focused),
         table(`Idle, window blurred (${result.blurred.minutes.toFixed(1)} min)`, result.blurred),
         `Peak in any 60 s after warm-up: ${result.peak60sAfterWarmup}. Peak in any 60 s from boot: ${result.peak60sFromBoot}. In the 10 s after refocus: ${result.refocus10s}.`,
+        "",
+        "Refocus, by caller:",
+        ...Object.entries(result.refocus.byCaller).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([name, count]) => `- ${name}: ${count}`),
       ].join("\n"),
     );
   } finally {

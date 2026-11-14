@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitLog, GitStatus } from "@shared/types";
+import { useGitRefresh } from "./gitRefreshClock";
 
 // Single shared git status/log poll per active workspace, extracted verbatim
 // from GitPanel so the Source Control panel, the explorer's git decorations,
@@ -9,10 +10,11 @@ import type { GitLog, GitStatus } from "@shared/types";
 // gitVersion bumps after every mutation this app performs — consumers with
 // derived reads (open diff tabs, branch/stash sections) refetch on it.
 
-// How often git state is re-read while the window is visible. The fs watcher
-// drives most updates already — this poll is a safety net for changes the
-// watcher misses (e.g. ref / index writes that bypass the worktree).
-const POLL_MS = 10000;
+// The shared git clock (gitRefreshClock.ts) re-reads at once when this
+// checkout's git state moves (commit, checkout, stage, fetch) and when the
+// window regains focus; the fs watcher covers edits in the working tree. This
+// is the safety net for edits the watcher misses, while the window is focused.
+const SAFETY_MS = 60_000;
 
 // Cheap shallow equality on git status. Used to skip no-op setState calls so
 // downstream React.memo gates actually hold, instead of being defeated by
@@ -120,6 +122,7 @@ export function useSharedGitStatus(cwd: string | null): SharedGitStatus {
   statusRef.current = status;
   const logRef = useRef<GitLog | null>(log);
   logRef.current = log;
+  const lastReadAt = useRef(0);
 
   const refresh = useCallback(async (silent = false): Promise<void> => {
     const target = cwdRef.current;
@@ -129,6 +132,7 @@ export function useSharedGitStatus(cwd: string | null): SharedGitStatus {
       return;
     }
     if (!silent) setLoading(true);
+    lastReadAt.current = Date.now();
     try {
       const [nextStatus, nextLog] = await Promise.all([
         window.spark.git.status(target),
@@ -155,17 +159,13 @@ export function useSharedGitStatus(cwd: string | null): SharedGitStatus {
     if (cwd) void refresh(false);
   }, [cwd, refresh]);
 
-  // Lightweight poll so the state tracks changes made from the terminal or
-  // another tool. Skipped while the window is hidden.
-  useEffect(() => {
-    if (!cwd) return undefined;
-    const id = window.setInterval(() => {
-      if (document.visibilityState === "visible") {
-        void refresh(true);
-      }
-    }, POLL_MS);
-    return () => window.clearInterval(id);
-  }, [cwd, refresh]);
+  // Changes made from the terminal or another tool. Nothing runs while the
+  // window is unfocused.
+  useGitRefresh(cwd ? [cwd] : [], true, (changed, reason) => {
+    if (reason === "focus" || changed.length > 0 || Date.now() - lastReadAt.current >= SAFETY_MS) {
+      void refresh(true);
+    }
+  });
 
   // Snappier than the poll when the file watcher (driven by the file tree) is
   // live — a debounced refresh on any change under the workspace root.
@@ -185,7 +185,7 @@ export function useSharedGitStatus(cwd: string | null): SharedGitStatus {
 
   // Background auto-fetch moved remote refs for this root (ahead/behind, the
   // remote branches in the graph). The fs watcher ignores .git, so without
-  // this push the change would only land on the next 10s poll tick.
+  // this push the change would only land on the clock's next look.
   useEffect(() => {
     if (!cwd) return undefined;
     const onRemoteUpdated = window.spark.git.onRemoteUpdated;

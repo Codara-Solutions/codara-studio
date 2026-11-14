@@ -2235,9 +2235,13 @@ export function registerIpc(): void {
     return getGitStatus(cwd);
   });
 
-  // Cheap current-branch read for the workspace rail: one rev-parse, no file
-  // walk. Detached HEAD reports the short hash; non-repos report null.
+  // Cheap current-branch read for the workspace rail: HEAD's file when it
+  // names a loose branch, one rev-parse otherwise. Detached HEAD reports the
+  // short hash; non-repos report null.
   handle("git:currentBranch", async (_e, cwd: string): Promise<string | null> => {
+    const { branchFromFiles } = await import("./git-state");
+    const fromFiles = typeof cwd === "string" ? await branchFromFiles(cwd).catch(() => null) : null;
+    if (fromFiles) return fromFiles;
     const { readGitText } = await import("./git-exec");
     const name = await readGitText(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
     if (!name) return null;
@@ -2254,6 +2258,16 @@ export function registerIpc(): void {
   handle("git:diffStats", async (_e, cwd: string): Promise<GitDiffStats> => {
     const { getGitDiffStats } = await getGitOps();
     return getGitDiffStats(cwd);
+  });
+
+  // Fingerprints of each checkout's git state, read from files: the renderer
+  // runs its git reads only for checkouts whose fingerprint moved.
+  handle("git:signatures", async (_e, cwds: unknown): Promise<Record<string, string | null>> => {
+    if (!Array.isArray(cwds)) return {};
+    const wanted = [...new Set(cwds.filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0 && cwd.length <= 16_384))].slice(0, 1_000);
+    const { gitStateSignature } = await import("./git-state");
+    const entries = await Promise.all(wanted.map(async (cwd) => [cwd, await gitStateSignature(cwd).catch(() => null)] as const));
+    return Object.fromEntries(entries);
   });
 
   handle("git:laneChanges", async (_e, cwds: unknown): Promise<Record<string, LaneChanges>> => {
