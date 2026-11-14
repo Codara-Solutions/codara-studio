@@ -132,6 +132,8 @@ async function main() {
   });
   clock = installFakeClock();
   const mod = require(outfile);
+  // Exit detection through the process tree is exercised at the pre-backoff pace.
+  mod.setKnownAgentProcessRecheckMs(2_000);
   const T = globalThis.__TAN;
   const feed = (paneId, s) => {
     const handler = T.taps.get(paneId);

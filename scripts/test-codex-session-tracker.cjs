@@ -75,9 +75,11 @@ const esbuild = require("esbuild");
   let panes = [{ paneId: "a", pid: 100, generationId: "a1" }, { paneId: "b", pid: 200, generationId: "b1" }];
   let files = new Map();
   const records = new Map();
+  let clock = 1_000_000;
+  let probed = [];
   const tracker = createCodexSessionTracker({ panes: () => panes, processes: async () => processes,
-    files: async () => files, latest: (id) => records.get(id) ?? null,
-    record: (rec) => records.set(rec.paneId, rec) });
+    files: async (pids) => { probed = pids; return files; }, latest: (id) => records.get(id) ?? null,
+    record: (rec) => records.set(rec.paneId, rec), now: () => clock });
   await tracker.refresh();
   assert.equal(records.size, 0, "a delayed transcript does not adopt a neighboring pane's file");
   files = new Map([[101, [paths[0]]], [102, [paths[2]]], [200, [paths[1]]]]);
@@ -88,9 +90,38 @@ const esbuild = require("esbuild");
   const original = records.get("a");
   await tracker.refresh();
   assert.equal(records.get("a"), original, "idle polls do not churn the binding");
+  assert.deepEqual(probed, [], "a Codex whose session was found is not probed again (no lsof) on the next poll");
   files.set(101, [paths[1]]);
+  clock += 60_000;
   await tracker.refresh();
   assert.equal(records.get("a").sessionId, ids[1], "an in-process session switch replaces the exact ID");
+  // /resume inside a found Codex, then quit before the next re-check: the
+  // shutdown snapshot reads the open files again.
+  files.set(101, [paths[0]]);
+  await tracker.refresh();
+  assert.equal(records.get("a").sessionId, ids[1], "within the back-off the found session is not re-read");
+  await tracker.flush();
+  assert.equal(records.get("a").sessionId, ids[0], "flush reads a found Codex again and saves the session it switched to");
+  // The same while an ordinary poll (inside the back-off) is still running.
+  const gatedRecords = new Map();
+  let gate = null;
+  const listing = processes;
+  const gated = createCodexSessionTracker({ panes: () => panes,
+    processes: async () => { if (gate) await gate; return listing; },
+    files: async () => files, latest: (id) => gatedRecords.get(id) ?? null,
+    record: (rec) => gatedRecords.set(rec.paneId, rec), now: () => clock });
+  await gated.refresh();
+  assert.equal(gatedRecords.get("a").sessionId, ids[0]);
+  files.set(101, [paths[1]]);
+  let open;
+  gate = new Promise((resolve) => { open = resolve; });
+  const poll = gated.refresh();
+  const flushing = gated.flush();
+  open();
+  await poll;
+  await flushing;
+  assert.equal(gatedRecords.get("a").sessionId, ids[1], "flush during a running poll forces a fresh read after it");
+  tracker.stop();
   processes = null;
   await tracker.refresh();
   assert.equal(records.get("a").active, true, "a failed process listing is not an exit");

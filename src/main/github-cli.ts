@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { promises as fs } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import {
   GITHUB_PUBLISH_MAX_BODY_LENGTH,
   GITHUB_PUBLISH_MAX_TITLE_LENGTH,
@@ -404,6 +406,75 @@ async function cachedDiagnose(
   }
 }
 
+// `gh repo view` per repository. The work queue, the rail and every GitHub
+// action ask for the same identity from each worktree of a project, and the
+// answer changes only when the remotes do, which rewrites the repository's
+// config file.
+export const GITHUB_REPOSITORY_TTL_MS = 10 * 60_000;
+
+interface RepositoryCacheEntry {
+  value: Promise<GitHubRepositoryIdentity>;
+  configStamp: string;
+  expiresAt: number;
+}
+
+// Per command runner, so a harness's scripted runner never sees another's.
+const repositoryCaches = new WeakMap<object, Map<string, RepositoryCacheEntry>>();
+
+/**
+ * The git directory a checkout and all its worktrees share, with the stamp of
+ * its config. Only a plain repository is cached: when the answer could depend
+ * on anything else (an `[include]` or `[includeIf]`, any mention of
+ * `worktreeConfig`, a `config.worktree` file), this is null and every call
+ * asks `gh`, as before the cache. Null outside a local repository too.
+ */
+export async function repositoryCacheKey(
+  cwd: string,
+): Promise<{ key: string; configStamp: string } | null> {
+  if (!cwd.trim() || /^[a-z][a-z0-9+.-]*:\/\//i.test(cwd)) return null;
+  let dir = resolve(cwd);
+  for (;;) {
+    const dotGit = join(dir, ".git");
+    const found = await fs.stat(dotGit).catch(() => null);
+    if (found) {
+      let gitDir = dotGit;
+      let ownDir = dotGit;
+      if (found.isFile()) {
+        const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await fs.readFile(dotGit, "utf8").catch(() => ""));
+        if (!pointer) return null;
+        gitDir = ownDir = resolve(dir, pointer[1]);
+        const common = (await fs.readFile(join(gitDir, "commondir"), "utf8").catch(() => "")).trim();
+        if (common) gitDir = resolve(gitDir, common);
+      }
+      const configPath = join(gitDir, "config");
+      const [config, text, ownWorktreeConfig, sharedWorktreeConfig] = await Promise.all([
+        fs.stat(configPath).catch(() => null),
+        fs.readFile(configPath, "utf8").catch(() => null),
+        fs.lstat(join(ownDir, "config.worktree")).catch(() => null),
+        fs.lstat(join(gitDir, "config.worktree")).catch(() => null),
+      ]);
+      if (!config || text === null || !plainConfig(text) || ownWorktreeConfig || sharedWorktreeConfig) return null;
+      // A worktree's .git file names the real path (/private/var on macOS),
+      // its checkout may be reached through a link (/var).
+      const key = await fs.realpath(gitDir).catch(() => gitDir);
+      return { key, configStamp: String(config.mtimeMs) };
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/** No include of another file and no per-worktree config, in any spelling or position. */
+function plainConfig(text: string): boolean {
+  return !/\[\s*include/i.test(text) && !/worktreeconfig/i.test(text);
+}
+
+/** Test seam: forget every cached repository identity. */
+export function invalidateGitHubRepositoryCache(): void {
+  repositoryCaches.delete(runGitHubCliCommand);
+}
+
 export function createGitHubCliAdapter(
   dependencies: GitHubCliAdapterDependencies = {},
 ): GitHubCliAdapter {
@@ -510,13 +581,29 @@ export function createGitHubCliAdapter(
     },
 
     async resolveRepository(cwd: string): Promise<GitHubRepositoryIdentity> {
-      const stdout = await runRead(cwd, [
-        "repo",
-        "view",
-        "--json",
-        "nameWithOwner,url,defaultBranchRef",
-      ]);
-      return parseRepositoryIdentity(stdout);
+      const read = async () =>
+        parseRepositoryIdentity(
+          await runRead(cwd, ["repo", "view", "--json", "nameWithOwner,url,defaultBranchRef"]),
+        );
+      const identity = await repositoryCacheKey(cwd).catch(() => null);
+      if (!identity) return read();
+      let cache = repositoryCaches.get(runCommand);
+      if (!cache) repositoryCaches.set(runCommand, (cache = new Map()));
+      const cached = cache.get(identity.key);
+      if (cached && cached.configStamp === identity.configStamp && cached.expiresAt > cacheClock()) {
+        return { ...(await cached.value) };
+      }
+      const entry: RepositoryCacheEntry = {
+        value: read(),
+        configStamp: identity.configStamp,
+        expiresAt: cacheClock() + GITHUB_REPOSITORY_TTL_MS,
+      };
+      cache.set(identity.key, entry);
+      // A failure (signed out, offline, no GitHub remote) is asked again.
+      entry.value.catch(() => {
+        if (cache.get(identity.key) === entry) cache.delete(identity.key);
+      });
+      return { ...(await entry.value) };
     },
 
     async getCurrentPullRequest(
