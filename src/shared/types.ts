@@ -608,13 +608,30 @@ export interface AppState {
   activeWorkspaceId: string | null;
 }
 
-export const TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT = 10_000;
+// xterm keeps every retained line as cells in the renderer: about 2.8 MB per
+// 1,000 full lines at 200 columns (scripts/measure-terminal-scrollback-memory.mjs).
+// The default keeps one full terminal under 10 MB, and less on small machines.
+export const TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT = 3_000;
+export const TERMINAL_SCROLLBACK_LINE_LIMIT_LOW_MEMORY_DEFAULT = 2_000;
+export const TERMINAL_SCROLLBACK_LOW_MEMORY_BYTES = 8 * 1024 ** 3;
 export const TERMINAL_SCROLLBACK_LINE_LIMIT_MIN = 100;
 export const TERMINAL_SCROLLBACK_LINE_LIMIT_MAX = 50_000;
 
-export function normalizeTerminalScrollbackLineLimit(value: unknown): number {
+/** The scrollback a person who never set one gets, from os.totalmem(). */
+export function terminalScrollbackLineLimitDefault(totalMemoryBytes: number): number {
+  return Number.isFinite(totalMemoryBytes) &&
+    totalMemoryBytes > 0 &&
+    totalMemoryBytes <= TERMINAL_SCROLLBACK_LOW_MEMORY_BYTES
+    ? TERMINAL_SCROLLBACK_LINE_LIMIT_LOW_MEMORY_DEFAULT
+    : TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT;
+}
+
+export function normalizeTerminalScrollbackLineLimit(
+  value: unknown,
+  fallback: number = TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
+): number {
   const n = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(n)) return TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT;
+  if (!Number.isFinite(n)) return fallback;
   return Math.min(
     TERMINAL_SCROLLBACK_LINE_LIMIT_MAX,
     Math.max(TERMINAL_SCROLLBACK_LINE_LIMIT_MIN, Math.trunc(n)),
