@@ -24,7 +24,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `onboarding.json` | Where you are in the first-run guide. |
 | `terminal-scrollback/` | Each terminal pane's recent output, one file per pane (mode 0600, in a 0700 folder), so a pane reopened after a quit, an update or a crash shows what it printed before. Up to 3,000 lines and a few MB per pane and 64 MB in all, oldest first out. A file is deleted when you close its pane, when it has not been written for 30 days, and all of them when you turn off **Keep terminal output across restarts** (Settings, Sessions). It holds whatever the pane printed, so treat it like your shell history. |
 | `agent-socket.json` | The loopback address and token of the running app (mode 0600), rewritten on every start. |
-| `hooks/`, `hooks/processed/` | Claude Code hook events and Codex turn-complete events, one JSON file each. Processed files are kept for a week. |
+| `hooks/`, `hooks/processed/` | Claude Code hook events and Codex turn-complete events, one JSON file each. Processed files are kept for 24 hours. |
 | `claude-hooks/` | A durable copy of the hook script, so the hook survives app updates. |
 | `codex-hooks/` | A durable copy of the Codex notify script (`codara-codex-notify.py`), for the same reason. |
 | `builtin-mcp.json` | The CLIs you switched the Codara Studio MCP server off for. |

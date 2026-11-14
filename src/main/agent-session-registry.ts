@@ -152,14 +152,14 @@ async function loadFromDisk(): Promise<boolean> {
 
 const BACKFILL_BATCH = 64;
 // Hard stop for the backfill sweep. The processed/ dir can hold thousands of
-// files (7-day retention on a busy machine), and a cold first read of them —
+// files (24-hour retention on a busy machine), and a cold first read of them —
 // AV-scanned, just-migrated — has been measured north of 30s. The sweep runs
 // off the boot path, but past this budget the marginal heal isn't worth the IO.
 const BACKFILL_TIME_BUDGET_MS = 20_000;
 
 /**
  * One-time seed for installs that predate the registry: SessionStart events
- * already routed to run-store sit in <dir>/hooks/processed/ (7-day retention,
+ * already routed to run-store sit in <dir>/hooks/processed/ (24-hour retention,
  * see hook-watcher.ts). Replaying them means the FIRST boot with the registry
  * heals every stale pointer immediately — without this, a pane whose user
  * `/resume`d away from its pointer would stay broken for one more full
