@@ -1747,8 +1747,13 @@ export function useTabs(
   // in its own idle callback so warming several large workspaces never becomes
   // a single long main-thread task. Invalid/stale blobs are intentionally not
   // cached, preserving initialTabsState's cwd-aware first-run fallback.
+  // It waits for the first workspace, which arrives with the loaded settings:
+  // a layout warmed at the placeholder scrollback limit and adopted as live
+  // below would keep its output cut to that limit.
+  const workspacesLoaded = workspaceId !== null;
   useEffect(() => {
     preloadedWorkspaceTabsRef.current.clear();
+    if (!workspacesLoaded) return;
     const pendingWorkspaceIds: string[] = [];
     for (let index = 0; index < window.localStorage.length; index += 1) {
       const key = window.localStorage.key(index);
@@ -1822,7 +1827,7 @@ export function useTabs(
       }
       if (timeoutHandle !== null) window.clearTimeout(timeoutHandle);
     };
-  }, [normalizedTerminalScrollbackLineLimit]);
+  }, [normalizedTerminalScrollbackLineLimit, workspacesLoaded]);
 
   // When the workspace switches, swap tabs to that workspace's live in-memory
   // snapshot first, then fall back to its persisted layout. Persistence strips

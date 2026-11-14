@@ -29,7 +29,7 @@ const {
   trimTerminalScrollbackLines,
 } = mod.exports;
 
-assert.equal(TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT, 10_000);
+assert.equal(TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT, 3_000);
 assert.equal(normalizeTerminalScrollbackLineLimit(undefined), TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT);
 assert.equal(normalizeTerminalScrollbackLineLimit("not-a-number"), TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT);
 assert.equal(normalizeTerminalScrollbackLineLimit(TERMINAL_SCROLLBACK_LINE_LIMIT_MIN - 1), TERMINAL_SCROLLBACK_LINE_LIMIT_MIN);
