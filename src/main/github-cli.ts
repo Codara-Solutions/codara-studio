@@ -440,7 +440,10 @@ export async function repositoryCacheKey(
         if (common) gitDir = resolve(gitDir, common);
       }
       const config = await fs.stat(join(gitDir, "config")).catch(() => null);
-      return config ? { key: gitDir, configMtimeMs: config.mtimeMs } : null;
+      // A worktree's .git file names the real path (/private/var on macOS),
+      // its checkout may be reached through a link (/var).
+      const key = await fs.realpath(gitDir).catch(() => gitDir);
+      return config ? { key, configMtimeMs: config.mtimeMs } : null;
     }
     const parent = dirname(dir);
     if (parent === dir) return null;
