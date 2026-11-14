@@ -35,6 +35,8 @@ import type {
 import {
   DEFAULT_COPY_BRANCH_SETUP_COMMAND,
   EDITOR_THEME_IDS,
+  TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
+  TERMINAL_SCROLLBACK_LINE_LIMIT_LOW_MEMORY_DEFAULT,
   TERMINAL_SCROLLBACK_LINE_LIMIT_MAX,
   TERMINAL_SCROLLBACK_LINE_LIMIT_MIN,
   AUTOSAVE_DELAY_PRESETS,
@@ -833,7 +835,7 @@ function TerminalSettings({
         )}
         <NumberRow
           title="Scrollback lines"
-          desc={`Lines of output each terminal and worker pane keeps in memory, ${TERMINAL_SCROLLBACK_LINE_LIMIT_MIN.toLocaleString()} to ${TERMINAL_SCROLLBACK_LINE_LIMIT_MAX.toLocaleString()}.`}
+          desc={`Lines of output each terminal and worker pane keeps in memory, ${TERMINAL_SCROLLBACK_LINE_LIMIT_MIN.toLocaleString()} to ${TERMINAL_SCROLLBACK_LINE_LIMIT_MAX.toLocaleString()}. Default ${TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT.toLocaleString()}, or ${TERMINAL_SCROLLBACK_LINE_LIMIT_LOW_MEMORY_DEFAULT.toLocaleString()} on a computer with 8 GB of memory or less. Each 1,000 lines of a wide, full terminal costs about 3 MB.`}
           min={TERMINAL_SCROLLBACK_LINE_LIMIT_MIN}
           max={TERMINAL_SCROLLBACK_LINE_LIMIT_MAX}
           value={scrollbackLineLimit}
