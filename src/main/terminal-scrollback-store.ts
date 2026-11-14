@@ -27,6 +27,16 @@ import {
 // that is cut from the front at rawHardCapBytes: only the newest part of such
 // a flood can survive the line budget anyway.
 //
+// Disk writes are the other cost: an agent repainting its spinner never goes
+// quiet, so a save comes at most once per saveMaxWaitMs, and it appends only
+// the bytes printed since the last one. The file is rewritten whole only when
+// its raw part would pass rawHardCapBytes, the pane was resized, or the
+// record changed underneath (a restore, a clear, a failed write). Folds
+// happen in memory and do not touch the file: what is on disk (older history
+// plus every byte since) renders to the same screen. A save also runs when
+// the pane is hidden, when its process exits and at quit, so a crash loses at
+// most saveMaxWaitMs of output and a normal quit loses none.
+//
 // Lifetime: a file goes away when the user closes its pane (forget), when the
 // setting is turned off, when it has not been written for maxAgeMs, or when
 // the total budget evicts it, oldest first. Nothing here is synced anywhere.
@@ -66,8 +76,8 @@ export const DEFAULT_TERMINAL_SCROLLBACK_LIMITS: TerminalScrollbackLimits = {
   historyMaxChars: 512 * 1024,
   fileMaxBytes: 6 * 1024 * 1024,
   totalMaxBytes: 64 * 1024 * 1024,
-  saveDebounceMs: 2_000,
-  saveMaxWaitMs: 15_000,
+  saveDebounceMs: 10_000,
+  saveMaxWaitMs: 60_000,
   maxAgeMs: 30 * 24 * 60 * 60 * 1000,
   replayMaxChars: 1024 * 1024,
   foldMaxDuty: 0.1,
@@ -80,14 +90,23 @@ export interface TerminalScrollbackStoreDeps {
   hasSession(paneId: string): boolean;
   dimensions(paneId: string): { cols: number; rows: number } | null;
   readTail(paneId: string, maxBytes: number): Buffer | null;
+  // Calls the handler once, when the pane's current process exits.
+  onExit?(paneId: string, handler: () => void): () => void;
   enabled(): boolean;
   // Windows: every pane runs under ConPTY, which owns the screen of the
   // session it starts (see handOverScreen). False elsewhere.
   newSessionOwnsScreen?: boolean;
   limits?: Partial<TerminalScrollbackLimits>;
   now?: () => number;
+  // The save timers only, so a test can run minutes of output in virtual time.
+  timers?: {
+    setTimeout(fn: () => void, ms: number): SaveTimer;
+    clearTimeout(timer: SaveTimer): void;
+  };
   log?: (line: string) => void;
 }
+
+type SaveTimer = ReturnType<typeof setTimeout>;
 
 /** A pane's saved output as stored: folded history text, then raw bytes. */
 export interface TerminalScrollbackRecord {
@@ -119,6 +138,10 @@ export interface TerminalScrollbackReplayOptions {
 }
 
 const FILE_MAGIC = "CODARA-SCROLLBACK 1";
+// Raw bytes worth folding before a timed save rewrites the file.
+const FOLD_BEFORE_SAVE_BYTES = 4 * 1024;
+// About one folded screen: what a rewrite adds to the history it holds.
+const APPEND_SLACK_BYTES = 16 * 1024;
 const FILE_EXT = ".bin";
 const MAX_HEADER_BYTES = 4096;
 
@@ -142,12 +165,28 @@ interface PaneState {
   dirty: boolean;
   dirtySince: number;
   lastChunkAt: number;
-  timer: NodeJS.Timeout | null;
+  timer: SaveTimer | null;
+  offExit: (() => void) | null;
+  // Every byte since the last save was built: what an append writes.
+  pending: Buffer[];
+  pendingBytes: number;
+  // What the file holds since this state last wrote it whole; null means the
+  // next save rewrites it.
+  onDisk: OnDisk | null;
+  // A timed save waits for the fold it started.
+  saveAfterFold: boolean;
   // Produced output or had a live PTY in this app session: its record is no
   // longer the one from before the restart.
   live: boolean;
   generation: number;
   writing: Promise<void>;
+}
+
+interface OnDisk {
+  generation: number;
+  cols: number;
+  rows: number;
+  rawBytes: number;
 }
 
 interface FoldJob {
@@ -190,6 +229,7 @@ export class TerminalScrollbackStore {
   private readonly deps: TerminalScrollbackStoreDeps;
   private readonly limits: TerminalScrollbackLimits;
   private readonly now: () => number;
+  private readonly timers: NonNullable<TerminalScrollbackStoreDeps["timers"]>;
   private readonly panes = new Map<string, PaneState>();
   private readonly index = new Map<string, IndexEntry>();
   // Every pane the renderer reported, also while the setting is off, so
@@ -209,6 +249,7 @@ export class TerminalScrollbackStore {
     this.deps = deps;
     this.limits = { ...DEFAULT_TERMINAL_SCROLLBACK_LIMITS, ...(deps.limits ?? {}) };
     this.now = deps.now ?? Date.now;
+    this.timers = deps.timers ?? { setTimeout, clearTimeout };
   }
 
   /** Create the folder, drop stale and stray files, and index the rest. Idempotent. */
@@ -231,6 +272,7 @@ export class TerminalScrollbackStore {
       // Tap first, then read what the session already printed: nothing can
       // run between the two, so every byte is seen exactly once.
       state.untap = this.deps.tap(paneId, (chunk) => this.onChunk(state, chunk));
+      this.watchExit(state);
       if (this.deps.hasSession(paneId)) {
         state.live = true;
         const tail = this.deps.readTail(paneId, this.limits.rawHardCapBytes);
@@ -249,9 +291,8 @@ export class TerminalScrollbackStore {
     const state = this.panes.get(paneId);
     if (state) {
       state.generation += 1;
-      if (state.timer) clearTimeout(state.timer);
-      state.timer = null;
-      state.untap?.();
+      this.stopTimer(state);
+      this.unwatch(state);
       this.panes.delete(paneId);
       await state.writing.catch(() => undefined);
     }
@@ -273,7 +314,11 @@ export class TerminalScrollbackStore {
     try {
       const stat = await fs.stat(file);
       if (!stat.isFile() || stat.size > this.limits.fileMaxBytes) return null;
-      return parseRecord(await fs.readFile(file), paneId);
+      const record = parseRecord(await fs.readFile(file), paneId);
+      // Appends leave the header's time as it was at the last whole write.
+      const modified = new Date(stat.mtimeMs).toISOString();
+      if (record && modified > record.savedAt) record.savedAt = modified;
+      return record;
     } catch {
       return null;
     }
@@ -332,6 +377,10 @@ export class TerminalScrollbackStore {
       state.rawBytes = 0;
       state.cols = record.cols;
       state.rows = rows;
+      // The file has no marker line yet: the next save writes it whole.
+      state.pending = [];
+      state.pendingBytes = 0;
+      state.onDisk = null;
     } else if (handOver && !this.deps.hasSession(paneId)) {
       // Forced, for a pane whose process was stopped on purpose and is about
       // to start again (agent hibernation): the record goes on from the old
@@ -379,12 +428,15 @@ export class TerminalScrollbackStore {
     for (const state of this.panes.values()) {
       // A write or fold already underway checks the generation and drops its result.
       state.generation += 1;
-      if (state.timer) clearTimeout(state.timer);
-      state.timer = null;
+      this.stopTimer(state);
       state.history = "";
       state.handOver = false;
       state.raw = [];
       state.rawBytes = 0;
+      state.pending = [];
+      state.pendingBytes = 0;
+      state.onDisk = null;
+      state.saveAfterFold = false;
       state.folding = null;
       state.foldQueued = false;
       state.dirty = false;
@@ -433,10 +485,8 @@ export class TerminalScrollbackStore {
 
   dispose(): void {
     for (const state of this.panes.values()) {
-      if (state.timer) clearTimeout(state.timer);
-      state.timer = null;
-      state.untap?.();
-      state.untap = null;
+      this.stopTimer(state);
+      this.unwatch(state);
     }
     if (this.foldTimer) clearTimeout(this.foldTimer);
     this.foldTimer = null;
@@ -500,6 +550,11 @@ export class TerminalScrollbackStore {
         dirtySince: 0,
         lastChunkAt: 0,
         timer: null,
+        offExit: null,
+        pending: [],
+        pendingBytes: 0,
+        onDisk: null,
+        saveAfterFold: false,
         live: false,
         generation: 0,
         writing: Promise.resolve(),
@@ -514,6 +569,16 @@ export class TerminalScrollbackStore {
     state.live = true;
     state.raw.push(chunk);
     state.rawBytes += chunk.length;
+    if (state.onDisk) {
+      state.pending.push(chunk);
+      state.pendingBytes += chunk.length;
+      // Too much for an append anyway: the next save rewrites the file.
+      if (state.onDisk.rawBytes + state.pendingBytes > this.limits.rawHardCapBytes) {
+        state.onDisk = null;
+        state.pending = [];
+        state.pendingBytes = 0;
+      }
+    }
     const size = this.deps.dimensions(state.paneId);
     if (size) {
       state.cols = size.cols;
@@ -543,9 +608,33 @@ export class TerminalScrollbackStore {
     if (!state.timer) this.armSave(state, this.limits.saveDebounceMs);
   }
 
+  private stopTimer(state: PaneState): void {
+    if (state.timer) this.timers.clearTimeout(state.timer);
+    state.timer = null;
+  }
+
+  private unwatch(state: PaneState): void {
+    state.untap?.();
+    state.untap = null;
+    state.offExit?.();
+    state.offExit = null;
+  }
+
+  // An exit handler fires once per process; the next one in the same pane
+  // (a restarted shell, a resumed agent) needs its own.
+  private watchExit(state: PaneState): void {
+    if (!this.deps.onExit || state.offExit) return;
+    state.offExit = this.deps.onExit(state.paneId, () => {
+      state.offExit = null;
+      if (this.panes.get(state.paneId) !== state || !state.untap) return;
+      void this.save(state);
+      this.watchExit(state);
+    });
+  }
+
   private armSave(state: PaneState, delay: number): void {
     const generation = state.generation;
-    state.timer = setTimeout(() => {
+    state.timer = this.timers.setTimeout(() => {
       state.timer = null;
       if (state.generation !== generation || !state.dirty) return;
       const now = this.now();
@@ -559,7 +648,7 @@ export class TerminalScrollbackStore {
         this.armSave(state, Math.max(10, wait));
         return;
       }
-      void this.save(state);
+      this.timedSave(state);
     }, delay);
     state.timer.unref?.();
   }
@@ -609,6 +698,7 @@ export class TerminalScrollbackStore {
   private async fold(state: PaneState, job: FoldJob, generation: number): Promise<boolean> {
     if (state.generation !== generation || this.panes.get(state.paneId) !== state) {
       if (state.folding === job) state.folding = null;
+      this.saveIfWaiting(state);
       return false;
     }
     this.folds += 1;
@@ -629,8 +719,43 @@ export class TerminalScrollbackStore {
     } finally {
       if (state.folding === job) state.folding = null;
     }
+    this.saveIfWaiting(state);
     if (state.rawBytes >= this.limits.rawCompactBytes) this.queueFold(state);
     return true;
+  }
+
+  // A timed save that would rewrite the file folds first: a spinner's minute
+  // of repaints is a few hundred kB of raw bytes but only one screen folded.
+  // Saves that must not wait (a hidden pane, an exit, quit) write as is.
+  private timedSave(state: PaneState): void {
+    const name = scrollbackFileName(state.paneId);
+    if (state.folding || (!this.canAppend(state, name) && state.rawBytes >= FOLD_BEFORE_SAVE_BYTES)) {
+      state.saveAfterFold = true;
+      if (!state.folding) this.queueFold(state);
+      if (state.folding) return;
+      state.saveAfterFold = false;
+    }
+    void this.save(state);
+  }
+
+  private saveIfWaiting(state: PaneState): void {
+    if (!state.saveAfterFold) return;
+    state.saveAfterFold = false;
+    void this.save(state);
+  }
+
+  // Appending is right while the file still holds this record and the bytes
+  // since its last save are fewer than a rewrite of the folded history.
+  private canAppend(state: PaneState, name: string): boolean {
+    const disk = state.onDisk;
+    return (
+      !!disk &&
+      disk.generation === state.generation &&
+      disk.cols === state.cols &&
+      disk.rows === state.rows &&
+      this.index.has(name) &&
+      state.pendingBytes <= state.history.length + APPEND_SLACK_BYTES
+    );
   }
 
   private renderLimits(): ScrollbackRenderLimits {
@@ -638,11 +763,50 @@ export class TerminalScrollbackStore {
   }
 
   private save(state: PaneState): Promise<void> {
-    if (state.timer) clearTimeout(state.timer);
-    state.timer = null;
+    this.stopTimer(state);
     if (!state.dirty || !this.deps.enabled()) return state.writing;
     state.dirty = false;
     const generation = state.generation;
+    const name = scrollbackFileName(state.paneId);
+    state.writing = state.writing
+      .catch(() => undefined)
+      .then(async () => {
+        if (state.generation !== generation || this.panes.get(state.paneId) !== state) return;
+        // Decided here rather than when the save was asked for: the write
+        // before this one decides whether the file can take an append.
+        const disk = state.onDisk;
+        if (disk && this.canAppend(state, name)) {
+          if (state.pendingBytes === 0) return;
+          const tail = concat(state.pending);
+          state.pending = [];
+          state.pendingBytes = 0;
+          disk.rawBytes += tail.length;
+          await this.appendFile(name, tail);
+        } else {
+          const { body, rawBytes } = this.record(state);
+          state.pending = [];
+          state.pendingBytes = 0;
+          state.onDisk = { generation, cols: state.cols, rows: state.rows, rawBytes };
+          await this.writeFile(name, body);
+        }
+        await this.enforceTotal(name);
+      })
+      .catch((err) => {
+        this.log(`save failed for ${state.paneId}: ${err instanceof Error ? err.message : String(err)}`);
+        // Try again at the next save or flush (the one at quit included)
+        // instead of losing what this one held, with the file rewritten whole.
+        if (state.generation === generation && this.panes.get(state.paneId) === state) {
+          state.onDisk = null;
+          state.pending = [];
+          state.pendingBytes = 0;
+          state.dirty = true;
+        }
+      });
+    return state.writing;
+  }
+
+  // The whole file: header, folded history, then the raw bytes since.
+  private record(state: PaneState): { body: Buffer; rawBytes: number } {
     const base = state.folding ?? state;
     // The rows in the header are the ones this hand-over is made for, and the
     // ones the next restart parses the record at.
@@ -664,21 +828,7 @@ export class TerminalScrollbackStore {
       Buffer.from(history, "utf8"),
       raw,
     ]);
-    const name = scrollbackFileName(state.paneId);
-    state.writing = state.writing
-      .catch(() => undefined)
-      .then(async () => {
-        if (state.generation !== generation || this.panes.get(state.paneId) !== state) return;
-        await this.writeFile(name, body);
-        await this.enforceTotal(name);
-      })
-      .catch((err) => {
-        this.log(`save failed for ${state.paneId}: ${err instanceof Error ? err.message : String(err)}`);
-        // Try again at the next save or flush (the one at quit included)
-        // instead of losing what this one held.
-        if (state.generation === generation && this.panes.get(state.paneId) === state) state.dirty = true;
-      });
-    return state.writing;
+    return { body, rawBytes: raw.length };
   }
 
   private async writeFile(name: string, data: Buffer): Promise<void> {
@@ -694,6 +844,12 @@ export class TerminalScrollbackStore {
       throw err;
     }
     this.index.set(name, { size: data.length, mtimeMs: this.now() });
+  }
+
+  private async appendFile(name: string, data: Buffer): Promise<void> {
+    await fs.appendFile(join(this.deps.dir, name), data, { mode: 0o600 });
+    const entry = this.index.get(name);
+    this.index.set(name, { size: (entry?.size ?? 0) + data.length, mtimeMs: this.now() });
   }
 
   private async removeFile(name: string): Promise<void> {
@@ -719,8 +875,8 @@ export class TerminalScrollbackStore {
     const writes: Promise<void>[] = [];
     for (const state of this.panes.values()) {
       state.generation += 1;
-      if (state.timer) clearTimeout(state.timer);
-      state.untap?.();
+      this.stopTimer(state);
+      this.unwatch(state);
       writes.push(state.writing.catch(() => undefined));
     }
     this.panes.clear();

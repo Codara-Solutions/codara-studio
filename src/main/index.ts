@@ -885,8 +885,14 @@ function createWindow(): void {
   // minimized or hidden to the tray. Park terminal delivery from main as well
   // as from the renderer's visibility listener, closing the small race before
   // that listener runs (or when a wedged renderer cannot run it at all).
-  windowForEvents.on("minimize", () => pauseTerminalDelivery("window-hidden"));
-  windowForEvents.on("hide", () => pauseTerminalDelivery("window-hidden"));
+  windowForEvents.on("minimize", () => {
+    pauseTerminalDelivery("window-hidden");
+    void flushTerminalScrollback().catch(() => undefined);
+  });
+  windowForEvents.on("hide", () => {
+    pauseTerminalDelivery("window-hidden");
+    void flushTerminalScrollback().catch(() => undefined);
+  });
   windowForEvents.on("restore", () => notifyRenderersOfHostResume("window-visible"));
   windowForEvents.on("show", () => notifyRenderersOfHostResume("window-visible"));
 
