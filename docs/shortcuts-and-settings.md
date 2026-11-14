@@ -310,7 +310,7 @@ The pages:
 
 | Tab | What lives there |
 |---|---|
-| General | Getting started (reopens the first-run guide, turns feature tips on or off, and lets tips you have seen come back), Window (keep running in the background when the window is closed, middle-click to close tabs, the workspace switch badge), Sleep (keep the computer awake while agents work, always or never, and on a Linux laptop with the lid closed; see [Keep the computer awake](#keep-the-computer-awake)). |
+| General | Getting started (reopens the first-run guide, turns feature tips on or off, and lets tips you have seen come back), Window (keep running in the background when the window is closed, middle-click to close tabs, the workspace switch badge, and drawing with the graphics card; see [Draw with the graphics card](#draw-with-the-graphics-card)), Sleep (keep the computer awake while agents work, always or never, and on a Linux laptop with the lid closed; see [Keep the computer awake](#keep-the-computer-awake)). |
 | Appearance | Theme, and Glass (liquid glass for menus, popovers, toasts and dialogs, with tint, blur, refraction and fringe under **Fine-tune glass**). |
 | Notifications | In the app (toast and how long it stays), On your computer (native OS notification, sound, dock badge and taskbar flash). |
 | Editor | Code editor (Vim mode, word wrap, autosave) and inline AI autocomplete. |
@@ -446,6 +446,35 @@ when it is plugged in or out and every 30 seconds while the lock is wanted.
 On macOS and Windows a closed
 laptop sleeps unless an administrator changes a power setting, so the option
 is hidden there.
+
+### Draw with the graphics card
+
+**Draw with the graphics card (hardware acceleration)** in Settings,
+General, **Window** makes Codara smoother on slower computers. Where it
+applies depends on the system:
+
+- **Windows, macOS and Linux on X11** (including a Wayland desktop that runs
+  Codara through XWayland, `--ozone-platform=x11`): Codara never turns the
+  graphics card off, so it is already on. The row says so and has no switch.
+  Chromium may still draw on the CPU for a graphics driver it does not trust.
+- **Linux with native Wayland**: off by default, because a crash in the
+  graphics driver once closed Codara and every terminal with it. Turn the
+  switch on and restart Codara to use the graphics card. The Vulkan
+  backend stays off either way and WebGL keeps using OpenGL.
+
+If the graphics driver crashes while the switch is on, or Codara did not
+close properly the last time it ran with it on (it crashed, was killed or
+the computer froze), the next start draws on the CPU, turns the switch off,
+and says why once in a notice. The row keeps the reason under the switch.
+Turn it on again to try once more. The record lives in
+`~/.codarastudio/gpu-drawing.json`.
+
+`CODARA_WAYLAND_HARDWARE_ACCELERATION` wins over the switch on native
+Wayland, in both directions, and the row shows it has no effect while it is
+set: `1`, `true`, `on` or `yes` turn the graphics card on, `0`, `false`,
+`off` or `no` turn it off. Any other value, or none, leaves it to the
+switch. With the variable set, Codara does not turn anything off after a
+crash.
 
 ### Fix with agent
 

@@ -81,6 +81,7 @@ import * as pty from "./pty-manager";
 import { readSystemCpuTimes, systemResourceSnapshot, type PaneRoot } from "./system-metrics";
 import { serversService } from "./servers/service";
 import { registerKeepAwakeIpc } from "./keep-awake";
+import { registerGpuDrawingIpc } from "./gpu-drawing";
 import {
   configuredOpenRouterCoraModels,
   validateOpenRouterConfiguration,
@@ -3388,6 +3389,8 @@ export function registerIpc(): void {
   });
   // Keep awake, the control beside the system meters.
   registerKeepAwakeIpc(handle);
+  // Drawing with the graphics card: Settings, General, Window.
+  registerGpuDrawingIpc(handle);
   // The status bar's dev-build update line (dev-update-hint.ts); null when not running.
   handle("devUpdate:status", async () => (app.isPackaged ? null : (await import("./dev-update-hint")).devUpdateStatus()));
 

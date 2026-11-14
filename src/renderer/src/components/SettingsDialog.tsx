@@ -113,6 +113,7 @@ import {
   ValueRow,
 } from "./settings/SettingsPrimitives";
 import { PullRequestWatchOffRepos } from "./settings/PullRequestWatchOffRepos";
+import { GpuDrawingRow } from "./settings/GpuDrawingRow";
 import {
   entryLocation,
   matchRanges,
@@ -1243,6 +1244,7 @@ function GeneralSettings() {
               />
             }
           />
+          <GpuDrawingRow preferences={preferences} setPreference={setPreference} />
         </SettingsSection>
       ) : null}
 

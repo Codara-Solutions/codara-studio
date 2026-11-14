@@ -251,6 +251,7 @@ async function main() {
     for (const row of renderedRows(read(path.join(COMPONENTS, "keep-awake", "KeepAwakeSettings.tsx")))) rendered.general.add(row.name);
     for (const row of renderedRows(read(path.join(COMPONENTS, "session-search", "SessionSearchSettings.tsx")))) rendered.sessions.add(row.name);
     for (const row of renderedRows(read(path.join(COMPONENTS, "settings", "SavedTerminalOutputRow.tsx")))) rendered.terminal.add(row.name);
+    for (const row of renderedRows(read(path.join(COMPONENTS, "settings", "GpuDrawingRow.tsx")))) rendered.general.add(row.name);
     rendered["remote-access"] = new Set(
       renderedRows(read(path.join(COMPONENTS, "RemoteAccessSettings.tsx"))).map((row) => row.name),
     );

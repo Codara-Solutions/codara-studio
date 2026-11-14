@@ -284,6 +284,8 @@ function normalize(
       typeof src.keepRunningInBackground === "boolean"
         ? src.keepRunningInBackground
         : DEFAULT_PREFERENCES.keepRunningInBackground,
+    // Opt-in: only a stored true draws with the graphics card on native Wayland.
+    waylandHardwareAcceleration: src.waylandHardwareAcceleration === true,
     claudeFollowsActiveAccount:
       typeof src.claudeFollowsActiveAccount === "boolean"
         ? src.claudeFollowsActiveAccount
@@ -530,6 +532,14 @@ export function getPreferenceSync<K extends PrefKey>(key: K): AppPreferences[K] 
     syncCache = readFromDiskSync();
   }
   const value = syncCache[key];
+  return value === undefined ? DEFAULT_PREFERENCES[key] : value;
+}
+
+// Synchronously read a single preference straight from disk, leaving the
+// getPreferenceSync cache alone: for the startup switches, which run before
+// the Codara home's legacy migration and so must not pin what later reads see.
+export function readPreferenceFromDiskSync<K extends PrefKey>(key: K): AppPreferences[K] {
+  const value = readFromDiskSync()[key];
   return value === undefined ? DEFAULT_PREFERENCES[key] : value;
 }
 
