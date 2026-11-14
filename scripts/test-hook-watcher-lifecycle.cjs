@@ -106,6 +106,8 @@ async function assertExactlyOneRearm(watcher, trigger, label) {
   );
 }
 
+let largePruneLine = "";
+
 async function main() {
   globalThis.__hookSessionStarts = 0;
   globalThis.__hookSessionRecords = [];
@@ -246,20 +248,56 @@ async function main() {
 
     // Retention runs after startup as well as at boot, keeps fresh entries,
     // and advances through its bounded directory-cursor sweep.
+    assert.equal(watcher.__test.processedRetentionMs, 24 * 60 * 60 * 1000, "processed files are kept 24 hours");
     const oldFile = path.join(processedDir, "old.json");
     const freshFile = path.join(processedDir, "fresh.json");
     fs.writeFileSync(oldFile, "{}", "utf8");
     fs.writeFileSync(freshFile, "{}", "utf8");
-    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
-    fs.utimesSync(oldFile, eightDaysAgo, eightDaysAgo);
+    const hoursAgo = (hours) => new Date(Date.now() - hours * 60 * 60 * 1000);
+    fs.utimesSync(oldFile, hoursAgo(25), hoursAgo(25));
+    fs.utimesSync(freshFile, hoursAgo(23), hoursAgo(23));
     const pruneBefore = watcher.__test.diagnostics().pruneSweepCount;
     watcher.__test.pruneNow();
     await waitFor("processed retention prune", () => {
       const state = watcher.__test.diagnostics();
       return state && state.pruneSweepCount > pruneBefore;
     });
-    assert.equal(fs.existsSync(oldFile), false, "expired processed files must be pruned");
-    assert.equal(fs.existsSync(freshFile), true, "fresh processed files must be retained");
+    assert.equal(fs.existsSync(oldFile), false, "files older than 24 hours must be pruned");
+    assert.equal(fs.existsSync(freshFile), true, "files younger than 24 hours must be retained");
+
+    // The first sweep after the update meets a large backlog: it must finish
+    // in chunks without holding the main thread.
+    const backlog = 10_000;
+    const expired = [];
+    for (let i = 0; i < backlog; i += 1) {
+      const file = path.join(processedDir, `backlog-${i}.json`);
+      fs.writeFileSync(file, "{}");
+      const at = i % 10 < 7 ? hoursAgo(30 + (i % 100)) : hoursAgo(i % 20);
+      fs.utimesSync(file, at, at);
+      if (i % 10 < 7) expired.push(file);
+    }
+    const { monitorEventLoopDelay } = require("node:perf_hooks");
+    const loop = monitorEventLoopDelay({ resolution: 10 });
+    loop.enable();
+    const sweepStarted = Date.now();
+    const sweepsBefore = watcher.__test.diagnostics().pruneSweepCount;
+    watcher.__test.pruneNow();
+    await waitFor(
+      "large backlog prune",
+      () => watcher.__test.diagnostics().pruneSweepCount > sweepsBefore,
+      120_000,
+    );
+    const sweepMs = Date.now() - sweepStarted;
+    loop.disable();
+    const maxLagMs = Math.round(loop.max / 1e6);
+    assert.equal(expired.filter((file) => fs.existsSync(file)).length, 0, "every expired backlog file is pruned");
+    assert.equal(
+      fs.readdirSync(processedDir).filter((name) => name.startsWith("backlog-")).length,
+      backlog - expired.length,
+      "every fresh backlog file is kept",
+    );
+    assert.ok(maxLagMs < 250, `the sweep must not block the event loop (longest stall ${maxLagMs} ms)`);
+    largePruneLine = `PASS a ${backlog}-file backlog is pruned in ${sweepMs} ms (about ${Math.round((sweepMs * 30) / 1000)} s for 300,000), longest event-loop stall ${maxLagMs} ms`;
 
     // A stop wins the generation race against an already-scheduled re-arm.
     assert.equal(watcher.__test.emitWatcherError(), true);
@@ -286,6 +324,8 @@ async function main() {
   console.log("PASS concurrent starts, error bursts, and close events retain one watcher");
   console.log("PASS directory replacement rebinds the native watcher");
   console.log("PASS processed retention prunes after startup in bounded chunks");
+  console.log("PASS processed files are kept 24 hours");
+  console.log(largePruneLine);
   console.log("PASS a hook after the agent cd'ed records the session's start cwd");
   console.log("PASS a /clear outside the start dir records the start cwd via the spawn cwd");
   console.log("PASS stop cancels timers and wins pending re-arm races");
