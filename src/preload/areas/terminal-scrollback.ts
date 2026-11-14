@@ -33,6 +33,8 @@ export const terminalScrollbackApi = {
   usage: (): Promise<TerminalScrollbackUsage> => ipcRenderer.invoke("terminalScrollback:usage"),
   /** Deletes all saved terminal output; returns what was removed. */
   clear: (): Promise<TerminalScrollbackUsage> => ipcRenderer.invoke("terminalScrollback:clear"),
+  /** Saves a pane's output now, for a pane that just left the screen. */
+  flush: (paneId: string): Promise<void> => ipcRenderer.invoke("terminalScrollback:flush", { paneId }),
 
   /**
    * The output a pane had before Codara restarted, to write into its xterm
