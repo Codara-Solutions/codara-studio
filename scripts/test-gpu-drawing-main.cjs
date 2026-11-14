@@ -59,7 +59,10 @@ async function build() {
     logLevel: "silent",
     plugins: [stubPlugin],
   });
-  bundle = { outDir, outfile };
+  // require.cache is keyed by the real path; on macOS the temp folder sits
+  // behind a symlink (/var -> /private/var), and a cache entry deleted under
+  // the other spelling would hand every scenario the first module instance.
+  bundle = { outDir, outfile: fs.realpathSync(outfile) };
 }
 
 const homes = [];
@@ -113,7 +116,13 @@ async function scenarios() {
     check("nothing is written before the lock is owned", t.file() === null);
     t.mod.startGpuDrawingSafetyNet();
     const record = t.file()?.running;
-    check("the run records its pid, boot and start time", record?.pid === process.pid && typeof record.bootId === "string" && Number.isInteger(record.startTicks), JSON.stringify(t.file()));
+    check("the run records its pid", record?.pid === process.pid && typeof record.startedAt === "string", JSON.stringify(t.file()));
+    // The boot id and start time come from /proc, which only Linux has; the
+    // record is only ever written on Linux (native Wayland), and elsewhere the
+    // pid check alone stands.
+    if (process.platform === "linux") {
+      check("on Linux it also keeps the boot id and the process start time", typeof record?.bootId === "string" && Number.isInteger(record?.startTicks), JSON.stringify(t.file()));
+    }
     t.app.emit("child-process-gone", {}, { type: "Utility", reason: "crashed", exitCode: 1 });
     check("another process dying writes nothing", !t.file()?.fallback);
     t.app.emit("child-process-gone", {}, { type: "GPU", reason: "crashed", exitCode: 139 });
