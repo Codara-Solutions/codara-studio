@@ -130,14 +130,19 @@ function releaseHandleSlot(): void {
 }
 
 // processed/ retention. Files there exist only so a restart doesn't replay
-// already-routed events; after a week they are pure dead weight (the dir was
-// once found holding 114k files, slowing every readdir of its parent).
-const PROCESSED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+// already-routed events. The one other reader is the session registry's
+// one-time backfill (agent-session-registry.ts), which seeds an install that
+// predates the registry and only needs recent SessionStart / Stop events.
+// A busy machine writes more than one file a second, so a week once came to
+// 325k files and 1.9 GB; a day is plenty for both readers.
+const PROCESSED_RETENTION_MS = 24 * 60 * 60 * 1000;
 const PROCESSED_PRUNE_BATCH = 200;
 // Let app boot settle before spending IO on the prune.
 const PROCESSED_PRUNE_DELAY_MS = 30_000;
-// Continue a large sweep in small, yielded chunks, then revisit retention
-// periodically for long-running app sessions.
+// Continue a large sweep in small, yielded chunks, each followed by a pause at
+// least as long as the chunk took, so a first sweep over a six-figure backlog
+// takes at most half of the disk's time. Then revisit retention periodically
+// for long-running app sessions.
 const PROCESSED_PRUNE_CONTINUE_MS = 25;
 const PROCESSED_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -701,6 +706,7 @@ function schedulePrune(state: WatcherState, delayMs: number): void {
     if (state.stopped || active !== state) return;
 
     let sweepComplete = true;
+    const started = Date.now();
     const pending = (async () => {
       sweepComplete = await pruneProcessedChunk(state);
     })();
@@ -712,7 +718,9 @@ function schedulePrune(state: WatcherState, delayMs: number): void {
         if (!state.stopped && active === state) {
           schedulePrune(
             state,
-            sweepComplete ? PROCESSED_PRUNE_INTERVAL_MS : PROCESSED_PRUNE_CONTINUE_MS,
+            sweepComplete
+              ? PROCESSED_PRUNE_INTERVAL_MS
+              : Math.max(PROCESSED_PRUNE_CONTINUE_MS, Date.now() - started),
           );
         }
       });
@@ -778,7 +786,7 @@ async function pruneProcessedChunk(state: WatcherState): Promise<boolean> {
   if (state.pruneDir === dir) state.pruneDir = null;
   if (state.pruneCount > 0) {
     console.log(
-      `[hook-watcher] pruned ${state.pruneCount} processed hook files older than 7 days`,
+      `[hook-watcher] pruned ${state.pruneCount} processed hook files older than 24 hours`,
     );
   }
   state.pruneCount = 0;
@@ -1105,4 +1113,5 @@ export const __test = {
     if (active) schedulePrune(active, 0);
   },
   rearmBaseDelayMs: REARM_BASE_DELAY_MS,
+  processedRetentionMs: PROCESSED_RETENTION_MS,
 };
