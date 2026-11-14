@@ -123,9 +123,10 @@ async function main() {
     browser = await launchBrowser();
     const railSpark = () => {
       window.__calls = [];
+      window.__sig = {};
       window.spark = {
         app: { e2eBackground: true },
-        git: { signatures: async (cwds) => Object.fromEntries(cwds.map((cwd) => [cwd, "s0"])) },
+        git: { signatures: async (cwds) => Object.fromEntries(cwds.map((cwd) => [cwd, window.__sig[cwd] ?? "s0"])) },
         worktreeCleanup: {
           railStates: async (projects) => {
             window.__calls.push(projects ? [...projects].sort() : null);
@@ -190,8 +191,30 @@ async function main() {
       console.log("PASS the round waits while the window is unfocused, and not for a refocus");
     }
     {
-      // A change of workspaces restarts the round: it carries on with the
-      // projects read least recently, so none is starved by restarts.
+      // Leaving and coming back inside a pace does not read a project at the
+      // refocus either: a project needs a whole pace of focused window.
+      const page = await browser.newPage();
+      await page.addInitScript(railSpark);
+      await page.clock.install();
+      await page.goto("file://" + path.join(directory, "start.html"));
+      await page.waitForFunction(() => window.__calls.length === 1);
+      await page.clock.runFor(5_000);
+      await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+      await page.clock.runFor(24_000);
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.clock.runFor(10_000);
+      await page.waitForTimeout(100);
+      assert.equal(await page.evaluate(() => window.__calls.length), 1, "no read around the refocus");
+      await page.clock.runFor(60_000);
+      await page.waitForTimeout(100);
+      assert.deepEqual(await page.evaluate(() => window.__calls), [["/q"], ["/p"]], "then it carries on");
+      await page.close();
+      console.log("PASS leaving and coming back inside a pace reads nothing at the refocus");
+    }
+    {
+      // A change of workspaces restarts the round. The new round reads the
+      // projects with news first (a checkout never read, a change the clock
+      // reported while the project waited), then the least recently read.
       const page = await browser.newPage();
       await page.addInitScript(railSpark);
       await page.clock.install();
@@ -202,24 +225,26 @@ async function main() {
         { id: "s", name: "s", cwd: "/s", color: "#000", workers: [] },
       ]);
       await page.waitForTimeout(100);
-      await page.clock.runFor(31_000);
+      await page.clock.runFor(95_000);
       await page.waitForTimeout(100);
-      // The first round's /q, the restart's /q (visible first), then /p.
-      assert.deepEqual(await page.evaluate(() => window.__calls), [["/q"], ["/q"], ["/p"]]);
-      await page.evaluate((more) => window.__setWorkspaces((list) => [...list, ...more]), [
-        { id: "t", name: "t", cwd: "/t", color: "#000", workers: [] },
-      ]);
+      // The visible project was just read: the restart goes on with the rest.
+      assert.deepEqual(await page.evaluate(() => window.__calls), [["/q"], ["/p"], ["/r"], ["/s"]]);
+      assert.equal(await page.locator("#rows").textContent(), "q1,w1,w2 loaded");
+      // /s moves while a new round (a new project /v) waits to read it.
+      await page.evaluate(() => {
+        window.__sig["/s"] = "s1";
+        window.__setWorkspaces((list) => [...list, { id: "v", name: "v", cwd: "/v", color: "#000", workers: [] }]);
+      });
       await page.waitForTimeout(100);
-      await page.clock.runFor(31_000);
+      await page.clock.runFor(61_000);
       await page.waitForTimeout(100);
       assert.deepEqual(
-        (await page.evaluate(() => window.__calls)).slice(3),
-        [["/q"], ["/r"]],
-        "after another restart the projects never read come before /p, read a moment ago",
+        (await page.evaluate(() => window.__calls)).slice(4),
+        [["/q"], ["/v"], ["/s"]],
+        "the new project, then the one that moved, before /p and /r",
       );
-      assert.ok(!(await page.locator("#rows").textContent()).includes("loaded"), "not loaded while /s and /t wait");
       await page.close();
-      console.log("PASS a restarted round carries on with the projects read least recently");
+      console.log("PASS a restarted round reads the projects with news first, then the least recently read");
     }
 
     const open = async (name, init) => {

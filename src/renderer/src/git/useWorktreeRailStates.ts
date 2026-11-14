@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Workspace } from "@shared/types";
-import { gitReadsActive, gitReadsSettled, HIDDEN_EVERY, TICK_MS, useGitRefresh, type GitRefreshMemory } from "./gitRefreshClock";
+import { gitReadsSettled, HIDDEN_EVERY, TICK_MS, useGitRefresh, type GitRefreshMemory } from "./gitRefreshClock";
 import {
   railRowMerged,
   type WorktreeRailCleanupRequest,
@@ -81,6 +81,10 @@ export function useWorktreeRailStates(
   // running round.
   const readAt = useRef(new Map<string, number>());
   const queued = useRef(new Set<string>());
+  // Projects with news not read yet (a reported change, a checkout never
+  // read): read before the rest of a round. And every checkout a read covered.
+  const dirty = useRef(new Set<string>());
+  const readCwds = useRef(new Set<string>());
   const lastPendingAt = useRef(0);
   const statesRef = useRef(states);
   statesRef.current = states;
@@ -120,12 +124,12 @@ export function useWorktreeRailStates(
     let round = false;
     const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
     // A full read goes one project at a time: the visible workspace's first,
-    // then the least recently read, one every PACE_MS while the window is
-    // focused, so a start with dozens of workspaces does not run hundreds of
-    // git reads at once, and a round cut short by a change of workspaces
-    // carries on where it stopped. Each project's checkouts are baselined
-    // right before its own read; until then the clock's news about them is
-    // left to that read.
+    // then the projects with news, then the least recently read, one after
+    // each PACE_MS of focused window, so a start with dozens of workspaces
+    // does not run hundreds of git reads at once, and a round cut short by a
+    // change of workspaces carries on where it stopped. Each project's
+    // checkouts are baselined right before its own read; until then the
+    // clock's news about them moves the project up instead.
     const readAll = async () => {
       if (round) return;
       if (!window.spark.worktreeCleanup?.railStates) {
@@ -134,31 +138,44 @@ export function useWorktreeRailStates(
       }
       round = true;
       lastFullAt.current = Date.now();
+      const mine = new Set<string>();
       try {
         const local = workspacesRef.current.filter((ws) => !ws.remote);
         const visible = local.find((ws) => ws.id === visibleRef.current);
-        const projects = [...new Set(local.map(railProjectOf))];
+        const visibleProject = visible ? railProjectOf(visible) : null;
+        // A checkout no read covered yet (a new worktree) makes its project
+        // as urgent as a reported change.
+        for (const ws of local) if (!readCwds.current.has(ws.cwd)) dirty.current.add(railProjectOf(ws));
         const age = (project: string) => readAt.current.get(project) ?? 0;
-        const rest = projects.filter((project) => !visible || project !== railProjectOf(visible));
-        const order = [...(visible ? [railProjectOf(visible)] : []), ...rest.sort((a, b) => age(a) - age(b))];
-        for (const project of order) queued.current.add(project);
-        for (let index = 0; index < order.length; index++) {
+        const order = [...new Set(local.map(railProjectOf))].sort((a, b) => age(a) - age(b));
+        // A restart right after the visible project was read does not read it again.
+        const skipVisible = visibleProject !== null && !dirty.current.has(visibleProject) && Date.now() - age(visibleProject) < PACE_MS;
+        for (const project of order) if (!(skipVisible && project === visibleProject)) mine.add(project);
+        for (const project of mine) queued.current.add(project);
+        for (let index = skipVisible ? 1 : 0; mine.size > 0; index++) {
           // Only after a whole pace with the window focused: paused while
           // it is not, and a refocus is not a moment to read a project.
           while (index > 0) {
-            const focused = gitReadsActive();
             await wait(PACE_MS);
-            if (cancelled || (focused && gitReadsActive())) break;
+            if (cancelled || gitReadsSettled()) break;
           }
           if (cancelled) return;
-          const project = order[index];
-          queued.current.delete(project);
+          // The visible project first, then the ones with news, then the
+          // least recently read.
+          const left = order.filter((project) => mine.has(project));
+          const project =
+            (index === 0 && visibleProject && mine.has(visibleProject) ? visibleProject : null) ??
+            left.find((candidate) => dirty.current.has(candidate)) ??
+            left[0];
+          mine.delete(project);
           await memoryRef.current?.baseline(local.filter((ws) => railProjectOf(ws) === project).map((ws) => ws.cwd));
+          queued.current.delete(project);
           if (cancelled) return;
           await read(new Set([project]));
         }
       } finally {
         round = false;
+        if (!cancelled) for (const project of mine) queued.current.delete(project);
       }
     };
     // `projects`: re-read only these projects' rows; every row when absent.
@@ -175,20 +192,24 @@ export function useWorktreeRailStates(
       }
       inFlight = true;
       // The checkouts this read speaks for.
-      const readCwds = workspacesRef.current
+      const covers = workspacesRef.current
         .filter((ws) => !ws.remote && projects.has(railProjectOf(ws)))
         .map((ws) => ws.cwd);
       try {
         const overview = await api.railStates([...projects]).catch(() => null);
         if (cancelled) return;
-        for (const project of projects) readAt.current.set(project, Date.now());
+        for (const project of projects) {
+          readAt.current.set(project, Date.now());
+          dirty.current.delete(project);
+        }
+        for (const cwd of covers) readCwds.current.add(cwd);
         // Known once every project was read once, whatever it found: a row
         // with no state after that is one main never reads.
         if (workspacesRef.current.every((ws) => ws.remote || readAt.current.has(railProjectOf(ws)))) setLoaded(true);
         if (!overview) {
           // The clock already counted what this read was for: forget it, so
           // the next comparison asks again instead of the 30-minute read.
-          memoryRef.current?.forget(readCwds);
+          memoryRef.current?.forget(covers);
           return;
         }
         const list = overview.states;
@@ -248,6 +269,8 @@ export function useWorktreeRailStates(
     return () => {
       cancelled = true;
       queued.current.clear();
+      // A read asked for and not run yet is news for the next round.
+      for (const project of again ?? []) dirty.current.add(project);
       if (readRef.current === read) readRef.current = null;
     };
   }, [copyKey, refreshTick]);
@@ -260,10 +283,9 @@ export function useWorktreeRailStates(
       const now = Date.now();
       // Focus reads only the rows waiting on time or tabs; the full read
       // waits for a tick.
-      if (reason === "tick" && now - lastFullAt.current >= FULL_MS && gitReadsSettled()) {
-        void readRef.current?.();
-        return;
-      }
+      // A round already running ignores this; the changes below are read
+      // either way (a project waiting in the round is moved up instead).
+      if (reason === "tick" && now - lastFullAt.current >= FULL_MS && gitReadsSettled()) void readRef.current?.();
       const projects = new Set<string>();
       const byCwd = new Map(localWorkspaces.map((ws) => [ws.cwd, ws]));
       for (const cwd of changed) {
@@ -280,7 +302,9 @@ export function useWorktreeRailStates(
         }
         if (pending.length > 0) lastPendingAt.current = now;
       }
-      for (const project of queued.current) projects.delete(project);
+      for (const project of queued.current) {
+        if (projects.delete(project)) dirty.current.add(project);
+      }
       if (projects.size > 0) void readRef.current?.(projects);
     },
   );
