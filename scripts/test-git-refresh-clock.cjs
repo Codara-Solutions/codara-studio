@@ -106,6 +106,30 @@ async function main() {
       assert.deepEqual(seen.hidden.map((entry) => entry.changed), [["/off-screen"]]);
     });
 
+    await check("an on-screen watcher never swallows a change for an off-screen one on the same folder", async () => {
+      const shared = { visible: [], hidden: [] };
+      signatures.set("/both", "1");
+      const a = clock.watch({ cwds: ["/both"], visible: true, onRefresh: (changed) => shared.visible.push([...changed]) });
+      const b = clock.watch({ cwds: ["/both"], visible: false, onRefresh: (changed) => shared.hidden.push([...changed]) });
+      await clock.focus();
+      signatures.set("/both", "2");
+      for (let i = 0; i < clockModule.HIDDEN_EVERY; i++) await clock.tick();
+      assert.ok(shared.visible.some((changed) => changed.includes("/both")));
+      assert.ok(shared.hidden.some((changed) => changed.includes("/both")), "the off-screen watcher still sees it");
+      a();
+      b();
+    });
+
+    await check("a focus during a running tick is still delivered as a focus", async () => {
+      const reasons = [];
+      const stop = clock.watch({ cwds: ["/on-screen"], visible: true, onRefresh: (_changed, reason) => reasons.push(reason) });
+      const tick = clock.tick();
+      const focus = clock.focus();
+      await Promise.all([tick, focus]);
+      assert.deepEqual(reasons.slice(-2), ["tick", "focus"]);
+      stop();
+    });
+
     await check("losing focus stops the clock", async () => {
       clock.pause();
       assert.equal(intervals.size, 0);
@@ -192,6 +216,21 @@ async function main() {
       await settle();
       git(repo, ["update-ref", "refs/remotes/origin/feature", head]);
       assert.notEqual(await sig(repo), before, "a new remote branch");
+    });
+
+    await check("a commit on a branch with a slash moves the other checkouts' fingerprints", async () => {
+      git(repo, ["branch", "perf/slash"]);
+      const head = git(repo, ["rev-parse", "HEAD"]);
+      const before = await sig(tree);
+      await settle();
+      // Only that branch moves: a commit made elsewhere, no HEAD involved.
+      const commit = git(repo, ["commit-tree", "HEAD^{tree}", "-p", head, "-m", "elsewhere"]);
+      git(repo, ["update-ref", "refs/heads/perf/slash", commit]);
+      assert.notEqual(await sig(tree), before);
+      const mid = await sig(tree);
+      await settle();
+      git(repo, ["update-ref", "refs/remotes/origin/feat/deep", head]);
+      assert.notEqual(await sig(tree), mid, "a nested remote branch");
     });
 
     await check("the branch comes from HEAD's file for a loose ref only", async () => {

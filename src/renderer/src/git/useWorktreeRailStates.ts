@@ -124,7 +124,12 @@ export function useWorktreeRailStates(
           : null;
         setExternal((prev) => {
           const read = overview.external ?? NO_EXTERNAL;
-          const outside = covered ? [...prev.filter((entry) => !covered.has(entry.projectId)), ...read] : read;
+          // Main lists a read repository's outside worktrees under its main
+          // checkout's row, which may not be one of the rows read.
+          const fresh = new Set(read.map((entry) => entry.path));
+          const outside = covered
+            ? [...prev.filter((entry) => !covered.has(entry.projectId) && !fresh.has(entry.path)), ...read]
+            : read;
           return JSON.stringify(prev) === JSON.stringify(outside) ? prev : outside;
         });
         setStates((prev) => {

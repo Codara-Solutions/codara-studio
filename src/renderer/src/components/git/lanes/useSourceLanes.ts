@@ -18,6 +18,8 @@ import { useGitRefresh } from "../../../git/gitRefreshClock";
 // changes in the user's own checkout, and otherwise at most this often: edits
 // another lane has not committed or staged show by then.
 const SAFETY_MS = 5 * 60_000;
+// A lane with an agent at work changes without committing: read it this often.
+const WORKING_MS = 60_000;
 const OWN_EDIT_DEBOUNCE_MS = 3_000;
 
 export interface SourceLanesContext {
@@ -76,7 +78,15 @@ export function useSourceLanes(
     [cwdsKey, own.visible],
   );
   const lastReadAt = useRef(0);
+  const lastWorkingReadAt = useRef(0);
   const readRef = useRef<((only?: readonly string[]) => void) | null>(null);
+  const working = useMemo(() => {
+    const rows = project ? [project, ...worktrees] : [];
+    return rows
+      .filter((_row, index) => (lineLists[index] ?? []).some((line) => line.state === "working"))
+      .map((row) => row.cwd)
+      .filter((cwd) => wanted.includes(cwd));
+  }, [project, worktrees, lineLists, wanted]);
 
   useEffect(() => {
     if (wanted.length === 0) return;
@@ -124,8 +134,18 @@ export function useSourceLanes(
   }, [wanted, own.version, workspace?.cwd]);
 
   useGitRefresh(wanted, true, (changed, reason) => {
-    if (reason === "focus" || Date.now() - lastReadAt.current >= SAFETY_MS) readRef.current?.();
-    else if (changed.length > 0) readRef.current?.(changed);
+    const now = Date.now();
+    if (reason === "focus" || now - lastReadAt.current >= SAFETY_MS) {
+      lastWorkingReadAt.current = now;
+      readRef.current?.();
+      return;
+    }
+    const due = new Set(changed);
+    if (working.length > 0 && now - lastWorkingReadAt.current >= WORKING_MS) {
+      lastWorkingReadAt.current = now;
+      for (const cwd of working) due.add(cwd);
+    }
+    if (due.size > 0) readRef.current?.([...due]);
   });
 
   return useMemo(() => {

@@ -36,6 +36,25 @@ export async function gitDirsOf(cwd: string): Promise<GitDirs | null> {
   }
 }
 
+// A ref with a slash (`perf/x`, `origin/feat/y`) is written into its own
+// folder, whose time moves, not its parent's: every folder below counts.
+const MAX_REF_FOLDERS = 256;
+
+async function refFolders(root: string): Promise<string[]> {
+  const found: string[] = [];
+  let level = [root];
+  while (level.length > 0 && found.length < MAX_REF_FOLDERS) {
+    found.push(...level);
+    const next: string[] = [];
+    for (const dir of level) {
+      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) if (entry.isDirectory()) next.push(join(dir, entry.name));
+    }
+    level = next;
+  }
+  return found.slice(0, MAX_REF_FOLDERS);
+}
+
 async function stamp(path: string): Promise<string> {
   const info = await fs.stat(path).catch(() => null);
   return info ? `${info.mtimeMs}:${info.size}` : "-";
@@ -43,8 +62,9 @@ async function stamp(path: string): Promise<string> {
 
 /**
  * A fingerprint that moves when a commit, checkout, reset, stage, branch
- * update or fetch that changed something lands in this checkout. Edits to
- * files in the working tree do not move it (the file watcher covers those).
+ * update, stash or fetch that changed something lands in this checkout or a
+ * branch of its repository. Edits to files in the working tree do not move
+ * it (the file watcher covers those), nor do repositories using reftable.
  * Null outside a local repository.
  */
 export async function gitStateSignature(cwd: string): Promise<string | null> {
@@ -53,19 +73,21 @@ export async function gitStateSignature(cwd: string): Promise<string | null> {
   const { gitDir, commonDir } = dirs;
   const head = (await fs.readFile(join(gitDir, "HEAD"), "utf8").catch(() => "")).trim();
   const ref = /^ref:\s*(refs\/\S+)$/.exec(head)?.[1];
-  const remotes = await fs.readdir(join(commonDir, "refs", "remotes")).catch(() => [] as string[]);
+  const folders = (
+    await Promise.all(["heads", "remotes", "tags"].map((kind) => refFolders(join(commonDir, "refs", kind))))
+  ).flat();
   // A fetch rewrites FETCH_HEAD every time; only what it names counts.
   const fetched = await fs.readFile(join(commonDir, "FETCH_HEAD")).catch(() => null);
   const stamps = await Promise.all([
     join(gitDir, "index"),
     join(gitDir, "logs", "HEAD"),
     join(commonDir, "packed-refs"),
-    join(commonDir, "refs", "heads"),
+    join(commonDir, "refs", "stash"),
     join(commonDir, "config"),
     // A worktree added or removed, with or without a branch of its own.
     join(commonDir, "worktrees"),
     ...(ref ? [join(commonDir, ref)] : []),
-    ...remotes.map((remote) => join(commonDir, "refs", "remotes", remote)),
+    ...folders,
   ].map(stamp));
   const fetchedHash = fetched ? createHash("sha1").update(fetched).digest("hex") : "-";
   return [head, fetchedHash, ...stamps].join("|");

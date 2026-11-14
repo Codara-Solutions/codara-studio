@@ -44,37 +44,42 @@ export interface GitRefreshClock {
 
 export function createGitRefreshClock(env: GitRefreshEnv, active = false): GitRefreshClock {
   const watches = new Set<GitWatch>();
-  const known = new Map<string, string | null>();
+  // What each watcher last saw: an on-screen watcher of a folder must not
+  // swallow the change for an off-screen one compared later.
+  const seen = new WeakMap<GitWatch, Map<string, string | null>>();
   let timer: unknown = null;
   let ticks = 0;
   let running: Promise<void> | null = null;
+  let focusAfter: Promise<void> | null = null;
 
   const check = (reason: GitRefreshReason): Promise<void> => {
-    if (running) return running;
+    if (running) {
+      // A focus that lands mid-tick still reaches every watcher as a focus.
+      if (reason !== "focus") return running;
+      focusAfter ??= running.then(() => {
+        focusAfter = null;
+        return check("focus");
+      });
+      return focusAfter;
+    }
     ticks += 1;
     const everything = reason === "focus" || ticks % HIDDEN_EVERY === 0;
     const due = [...watches].filter((watch) => everything || watch.visible);
     running = (async () => {
       const wanted = [...new Set(due.flatMap((watch) => watch.cwds))];
-      const changed = new Set<string>();
-      if (wanted.length > 0) {
-        const next = await env.signatures(wanted).catch(() => null);
-        if (next) {
-          for (const cwd of wanted) {
-            if (!(cwd in next)) continue;
-            if (known.has(cwd) && known.get(cwd) !== next[cwd]) changed.add(cwd);
-            known.set(cwd, next[cwd]);
-          }
-        }
-      }
-      if (everything) {
-        const watched = new Set([...watches].flatMap((watch) => watch.cwds));
-        for (const cwd of known.keys()) if (!watched.has(cwd)) known.delete(cwd);
-      }
+      const next = wanted.length > 0 ? await env.signatures(wanted).catch(() => null) : null;
       for (const watch of due) {
         if (!watches.has(watch)) continue;
+        let last = seen.get(watch);
+        if (!last) seen.set(watch, (last = new Map()));
+        const changed: string[] = [];
+        for (const cwd of watch.cwds) {
+          if (!next || !(cwd in next)) continue;
+          if (last.has(cwd) && last.get(cwd) !== next[cwd]) changed.push(cwd);
+          last.set(cwd, next[cwd]);
+        }
         try {
-          watch.onRefresh(watch.cwds.filter((cwd) => changed.has(cwd)), reason);
+          watch.onRefresh(changed, reason);
         } catch {
           /* one watcher's failure never stops the others */
         }
@@ -127,20 +132,35 @@ function sharedClock(): GitRefreshClock {
   });
   shared = clock;
   // The e2e window is shown without ever taking focus.
-  let focused = document.hasFocus() || Boolean(window.spark?.app?.e2eBackground);
+  const e2e = Boolean(window.spark?.app?.e2eBackground);
+  let focused = document.hasFocus() || e2e;
   const update = () => {
     if (focused && document.visibilityState === "visible") void clock.focus();
     else clock.pause();
   };
+  let focusEvents = 0;
   window.addEventListener("focus", () => {
+    focusEvents += 1;
     focused = true;
     update();
   });
-  window.addEventListener("blur", () => {
-    focused = false;
-    update();
+  window.addEventListener("blur", (event) => {
+    // The e2e window never had real focus to lose; a test's own blur counts.
+    if (e2e && event.isTrusted) return;
+    // Focus moving into the in-app browser or an embedded page leaves the
+    // window in front: the user is often watching a preview while an agent
+    // works.
+    const at = focusEvents;
+    window.setTimeout(() => {
+      const inside = document.activeElement?.tagName;
+      if (at !== focusEvents || inside === "WEBVIEW" || inside === "IFRAME") return;
+      focused = false;
+      update();
+    }, 0);
   });
-  document.addEventListener("visibilitychange", update);
+  document.addEventListener("visibilitychange", () => {
+    if (!e2e) update();
+  });
   update();
   return clock;
 }
