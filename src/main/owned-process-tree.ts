@@ -119,11 +119,44 @@ const BOOT_TIME_MAX_AGE_MS = 60_000;
 let bootSeconds: { value: number | null; at: number } | null = null;
 let childrenFiles: boolean | undefined;
 
+// The /proc reads, replaceable by tests to inject read errors.
+interface ProcReader {
+  readText(path: string): Promise<string>;
+  readBytes(path: string): Promise<Buffer>;
+  readdir(path: string): Promise<string[]>;
+  ownerOf(path: string): Promise<number>;
+}
+const systemProcReader: ProcReader = {
+  readText: (path) => fsp.readFile(path, "utf8"),
+  readBytes: (path) => fsp.readFile(path),
+  readdir: (path) => fsp.readdir(path),
+  ownerOf: async (path) => (await fsp.stat(path)).uid,
+};
+let procReader: ProcReader = systemProcReader;
+
+/** Tests only: replace some /proc reads (null restores the real ones). */
+export function setProcReaderForTests(reader: Partial<ProcReader> | null): void {
+  procReader = reader ? { ...systemProcReader, ...reader } : systemProcReader;
+  bootSeconds = null;
+}
+
+// A read that failed because the process (or one of its threads) exited
+// while it was read. Any other failure (EACCES, EMFILE, EIO) says nothing
+// about the process, so the answer becomes "cannot tell" rather than a
+// listing without it: callers stop panes on what a listing leaves out.
+function exitedWhileRead(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ESRCH";
+}
+
+const UNKNOWN = Symbol("unknown");
+type Unknown = typeof UNKNOWN;
+
 async function linuxBootSeconds(): Promise<number | null> {
   if (bootSeconds && Date.now() - bootSeconds.at < BOOT_TIME_MAX_AGE_MS) return bootSeconds.value;
   let value: number | null = null;
   try {
-    const match = /^btime\s+(\d+)$/m.exec(await fsp.readFile("/proc/stat", "utf8"));
+    const match = /^btime\s+(\d+)$/m.exec(await procReader.readText("/proc/stat"));
     value = match ? Number(match[1]) : null;
   } catch {
     value = null;
@@ -155,55 +188,89 @@ export function parseProcStat(text: string): { parentPid: number; startTicks: nu
   return { parentPid, startTicks, name: text.slice(open + 1, close) };
 }
 
-async function readLinuxProcess(pid: number, boot: number | null): Promise<ListedProcess | null> {
+/**
+ * One process from /proc: null when it exited while being read, UNKNOWN when
+ * it could not be read. `othersMayHide`: a process of another user that
+ * refuses the read is left out, as `ps` leaves it out (hidepid=1); that is
+ * only right for the whole-machine listing, never for a pane's own subtree.
+ */
+async function readLinuxProcess(
+  pid: number,
+  boot: number | null,
+  othersMayHide = false,
+): Promise<ListedProcess | null | Unknown> {
+  let stat: string;
+  let argv: Buffer;
   try {
-    const [stat, argv] = await Promise.all([
-      fsp.readFile(`/proc/${pid}/stat`, "utf8"),
-      fsp.readFile(`/proc/${pid}/cmdline`),
+    [stat, argv] = await Promise.all([
+      procReader.readText(`/proc/${pid}/stat`),
+      procReader.readBytes(`/proc/${pid}/cmdline`),
     ]);
-    const parsed = parseProcStat(stat);
-    if (!parsed) return null;
-    const startedAt =
-      boot === null ? "" : lstartStamp(boot + Math.floor(parsed.startTicks / CLOCK_TICKS_PER_SECOND));
-    const words = argv.toString("utf8").split("\0");
-    while (words.length > 0 && words[words.length - 1] === "") words.pop();
-    // `ps` shows a process without a command line (a kernel thread, a
-    // zombie) by its bracketed name.
-    const command = words.length > 0 ? words.join(" ") : `[${parsed.name}]`;
-    return { pid, parentPid: parsed.parentPid, startedAt, command };
+  } catch (error) {
+    if (exitedWhileRead(error)) return null;
+    if (othersMayHide && (await ownedByAnotherUser(pid))) return null;
+    return UNKNOWN;
+  }
+  const parsed = parseProcStat(stat);
+  if (!parsed) return UNKNOWN;
+  const startedAt =
+    boot === null ? "" : lstartStamp(boot + Math.floor(parsed.startTicks / CLOCK_TICKS_PER_SECOND));
+  const words = argv.toString("utf8").split("\0");
+  while (words.length > 0 && words[words.length - 1] === "") words.pop();
+  // `ps` shows a process without a command line (a kernel thread, a
+  // zombie) by its bracketed name.
+  const command = words.length > 0 ? words.join(" ") : `[${parsed.name}]`;
+  return { pid, parentPid: parsed.parentPid, startedAt, command };
+}
+
+async function ownedByAnotherUser(pid: number): Promise<boolean> {
+  const uid = process.getuid?.();
+  if (uid === undefined || uid === 0) return false;
+  try {
+    return (await procReader.ownerOf(`/proc/${pid}`)) !== uid;
   } catch {
-    return null;
+    return false;
   }
 }
 
 async function linuxProcessTable(): Promise<readonly ListedProcess[] | null> {
   let names: string[];
   try {
-    names = await fsp.readdir("/proc");
+    names = await procReader.readdir("/proc");
   } catch {
     return null;
   }
   const boot = await linuxBootSeconds();
   const rows = await Promise.all(
-    names.filter((name) => /^\d+$/.test(name)).map(Number).filter(safePid).map((pid) => readLinuxProcess(pid, boot)),
+    names.filter((name) => /^\d+$/.test(name)).map(Number).filter(safePid).map((pid) => readLinuxProcess(pid, boot, true)),
   );
-  const listed = rows.filter((row): row is ListedProcess => row !== null);
+  if (rows.includes(UNKNOWN)) return null;
+  const listed = rows.filter((row): row is ListedProcess => row !== null && row !== UNKNOWN);
   return listed.length === 0 ? null : listed;
 }
 
-/** Direct children of `pid`, across all its threads. Null when it is gone. */
-async function linuxChildPids(pid: number): Promise<number[] | null> {
+/**
+ * Direct children of `pid`, across all its threads. Null when it is gone,
+ * UNKNOWN when a list could not be read (never an empty list in its place).
+ */
+async function linuxChildPids(pid: number): Promise<number[] | null | Unknown> {
   let tasks: string[];
   try {
-    tasks = await fsp.readdir(`/proc/${pid}/task`);
-  } catch {
-    return null;
+    tasks = await procReader.readdir(`/proc/${pid}/task`);
+  } catch (error) {
+    return exitedWhileRead(error) ? null : UNKNOWN;
   }
   const lists = await Promise.all(
-    tasks.map((task) => fsp.readFile(`/proc/${pid}/task/${task}/children`, "utf8").catch(() => "")),
+    tasks.map((task) =>
+      procReader.readText(`/proc/${pid}/task/${task}/children`).catch((error: unknown) =>
+        // A thread that ended has no children left to list.
+        exitedWhileRead(error) ? "" : UNKNOWN,
+      ),
+    ),
   );
+  if (lists.includes(UNKNOWN)) return UNKNOWN;
   const children = new Set<number>();
-  for (const list of lists) {
+  for (const list of lists as string[]) {
     for (const word of list.split(" ")) {
       const child = Number(word);
       if (word && safePid(child)) children.add(child);
@@ -220,8 +287,8 @@ function linuxChildrenFiles(): boolean {
   return childrenFiles;
 }
 
-/** `rootPids` and everything below them, from /proc. */
-async function linuxSubtrees(rootPids: readonly number[]): Promise<ListedProcess[]> {
+/** `rootPids` and everything below them, from /proc. Null when a read failed. */
+async function linuxSubtrees(rootPids: readonly number[]): Promise<ListedProcess[] | null> {
   const boot = await linuxBootSeconds();
   const seen = new Set<number>();
   let level = rootPids.filter((pid) => safePid(pid));
@@ -233,8 +300,9 @@ async function linuxSubtrees(rootPids: readonly number[]): Promise<ListedProcess
       Promise.all(fresh.map((pid) => readLinuxProcess(pid, boot))),
       Promise.all(fresh.map((pid) => linuxChildPids(pid))),
     ]);
-    for (const row of rows) if (row) listed.push(row);
-    level = children.flatMap((list) => list ?? []);
+    if (rows.includes(UNKNOWN) || children.includes(UNKNOWN)) return null;
+    for (const row of rows) if (row && row !== UNKNOWN) listed.push(row);
+    level = children.flatMap((list) => (list && list !== UNKNOWN ? list : []));
   }
   return listed;
 }

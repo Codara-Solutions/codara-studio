@@ -137,6 +137,73 @@ async function main() {
       const below = await mod.descendantProcessesWithCommands(tree.pid);
       check("descendants from /proc carry depth and leave out the root", below.length === 2 && below.every((row) => row.depth === 1));
       check("a gone root lists nothing", (await mod.descendantProcessesWithCommands(2 ** 22 + 7)) === null);
+      // Stored identities are "pid + start stamp"; the stamp from /proc must
+      // be the one ps prints for the same process, byte for byte (both are
+      // btime plus whole seconds of start ticks), not a second off.
+      const btime = () => require("node:fs").readFileSync("/proc/stat", "utf8").match(/^btime\s+(\d+)$/m)[1];
+      const btimeBefore = btime();
+      const everyPs = spawnSync("ps", ["-axo", "pid=,lstart="], { encoding: "utf8", env: mod.psTimeEnvironment() });
+      const everyProc = await mod.listProcessesWithCommands(0);
+      if (btime() === btimeBefore) {
+        const stamps = new Map();
+        for (const line of everyPs.stdout.split("\n")) {
+          const match = /^\s*(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+[\d:]{8}\s+\d{4})\s*$/.exec(line);
+          if (match) stamps.set(Number(match[1]), match[2]);
+        }
+        const both = everyProc.filter((row) => stamps.has(row.pid));
+        const differ = both.filter((row) => stamps.get(row.pid) !== row.startedAt);
+        check(
+          `every process's /proc start stamp is byte-identical to ps lstart (${both.length} compared)`,
+          both.length > 10 && differ.length === 0,
+        );
+        if (differ.length) console.error(differ.slice(0, 5).map((row) => [row.pid, stamps.get(row.pid), row.startedAt]));
+      } else {
+        console.log("SKIP stamp identity: the boot time moved during the read (clock step)");
+      }
+
+      // A read that fails for any reason but "the process exited" is not a
+      // missing process: the answer is "cannot tell" (null), never a
+      // listing without it.
+      const sleeper = mine.find((row) => row.parentPid === tree.pid).pid;
+      const failing = (code, match) => (path) => {
+        if (match(path)) return Promise.reject(Object.assign(new Error(code), { code }));
+        return require("node:fs").promises.readFile(path, "utf8");
+      };
+      const statOf = (pid) => (path) => path === `/proc/${pid}/stat`;
+      try {
+        mod.setProcReaderForTests({ readText: failing("ENOENT", statOf(sleeper)) });
+        const goneWhole = await mod.listProcessesWithCommands(0);
+        const goneUnder = await mod.processesUnder([tree.pid]);
+        check(
+          "a process that exits while read is left out of both listings",
+          goneWhole && !goneWhole.some((row) => row.pid === sleeper) && goneWhole.some((row) => row.pid === tree.pid) &&
+            goneUnder && goneUnder.length === 2 && !goneUnder.some((row) => row.pid === sleeper),
+        );
+        for (const code of ["EACCES", "EMFILE", "EIO"]) {
+          mod.setProcReaderForTests({ readText: failing(code, statOf(sleeper)) });
+          check(`${code} on a live child's stat makes the whole listing unknown`, (await mod.listProcessesWithCommands(0)) === null);
+          check(`${code} on a live child's stat makes its subtree unknown`, (await mod.processesUnder([tree.pid])) === null);
+          check(`${code} makes descendants unknown, not empty`, (await mod.descendantProcessesWithCommands(tree.pid)) === null);
+        }
+        mod.setProcReaderForTests({ readText: failing("EACCES", (path) => path.startsWith(`/proc/${tree.pid}/task/`) && path.endsWith("/children")) });
+        check("an unreadable children file makes the subtree unknown, not empty", (await mod.processesUnder([tree.pid])) === null);
+        mod.setProcReaderForTests({ readText: failing("ESRCH", (path) => path.startsWith(`/proc/${tree.pid}/task/`) && path.endsWith("/children")) });
+        const threadGone = await mod.processesUnder([tree.pid]);
+        check("a thread that ended while read lists no children and no error", Array.isArray(threadGone) && threadGone.length === 1);
+        mod.setProcReaderForTests({
+          readText: failing("EACCES", statOf(sleeper)),
+          ownerOf: async (path) => (path === `/proc/${sleeper}` ? process.getuid() + 1 : process.getuid()),
+        });
+        const hidden = await mod.listProcessesWithCommands(0);
+        check(
+          "another user's process that refuses the read is left out of the machine listing, as ps does",
+          process.getuid() === 0 || (Array.isArray(hidden) && !hidden.some((row) => row.pid === sleeper)),
+        );
+        check("but never out of a pane's subtree", (await mod.processesUnder([tree.pid])) === null);
+      } finally {
+        mod.setProcReaderForTests(null);
+      }
+
       check("the lstart stamp is the C ctime form", /^[A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \d{4}$/.test(mod.lstartStamp(1_788_000_000)));
     } finally {
       tree.kill("SIGKILL");

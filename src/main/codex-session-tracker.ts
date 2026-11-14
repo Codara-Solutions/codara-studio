@@ -158,8 +158,15 @@ export function createCodexSessionTracker(deps: {
   let revision = 0;
   const latest = deps.latest ?? latestSessionStart;
   const record = deps.record ?? recordSessionStart;
-  const refresh = (): Promise<void> => {
-    if (pending) return pending;
+  // `force` reads every Codex's open files now, past the found back-off: the
+  // shutdown snapshot must hold the session a /resume just switched to.
+  const refresh = (force = false): Promise<void> => {
+    if (pending) {
+      if (!force) return pending;
+      // After the running read, unless shutdown gave up on it meanwhile.
+      const calledRevision = revision;
+      return pending.then(() => (revision === calledRevision ? refresh(true) : undefined));
+    }
     const startedRevision = revision;
     pending = (async () => {
       const panes = deps.panes();
@@ -171,7 +178,7 @@ export function createCodexSessionTracker(deps: {
       const livePids = new Set(live.flatMap(({ pid }) => pid ? [pid] : []));
       for (const pid of foundAt.keys()) if (!livePids.has(pid)) foundAt.delete(pid);
       const startedAt = clock();
-      const probe = [...livePids].filter((pid) => startedAt - (foundAt.get(pid) ?? -Infinity) >= FOUND_RECHECK_MS);
+      const probe = [...livePids].filter((pid) => force || startedAt - (foundAt.get(pid) ?? -Infinity) >= FOUND_RECHECK_MS);
       const files = await (deps.files ?? openRollouts)(probe);
       if (revision !== startedRevision) return;
       for (const { pane, pid } of live) {
@@ -201,14 +208,14 @@ export function createCodexSessionTracker(deps: {
     return pending;
   };
   return {
-    refresh,
+    refresh: () => refresh(),
     start() { if (!timer) { timer = setInterval(() => { void refresh(); }, 3000); timer.unref(); } },
     stop() { if (timer) clearInterval(timer); timer = null; revision += 1; },
     async flush() {
       if (timer) clearInterval(timer);
       timer = null;
       let deadline: NodeJS.Timeout | undefined;
-      await Promise.race([refresh(), new Promise<void>((resolve) => { deadline = setTimeout(resolve, 1000); })]);
+      await Promise.race([refresh(true), new Promise<void>((resolve) => { deadline = setTimeout(resolve, 1000); })]);
       if (deadline) clearTimeout(deadline);
       // A slow process listing must not outlive the shutdown snapshot and
       // mark sessions inactive after shutdown kills their PTYs.
