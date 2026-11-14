@@ -7,7 +7,7 @@
 // parses before its first paint, and compares them with
 // scripts/bundle-budgets.json. Any metric over its limit fails, with a table
 // that says by how much. The CI workflow .github/workflows/budgets.yml runs
-// it on every pull request into Cora.
+// it on every pull request into main and every push to it.
 //
 //   node scripts/check-bundle-budgets.cjs                 # check out/
 //   node scripts/check-bundle-budgets.cjs --json r.json   # also write the numbers
