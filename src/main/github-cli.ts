@@ -429,7 +429,10 @@ export async function repositoryCacheKey(
   const dirs = await gitDirsOf(cwd);
   if (!dirs) return null;
   const config = await fs.stat(join(dirs.commonDir, "config")).catch(() => null);
-  return config ? { key: dirs.commonDir, configMtimeMs: config.mtimeMs } : null;
+  // A worktree's .git file names the real path (/private/var on macOS), its
+  // checkout may be reached through a link (/var).
+  const key = await fs.realpath(dirs.commonDir).catch(() => dirs.commonDir);
+  return config ? { key, configMtimeMs: config.mtimeMs } : null;
 }
 
 /** Test seam: forget every cached repository identity. */

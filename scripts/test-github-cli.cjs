@@ -1225,6 +1225,10 @@ async function main() {
       const repo = path.join(temp, "cached-repo");
       const tree = path.join(temp, "cached-tree");
       mkdirSync(repo);
+      // The checkout through a link, as macOS's /var is to /private/var: git
+      // writes real paths into the worktree's .git file.
+      const linked = path.join(temp, "cached-link");
+      require("node:fs").symlinkSync(repo, linked);
       const git = (cwd, args) => execFileSync("git", args, { cwd, stdio: "ignore", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
       git(repo, ["init", "-q", "-b", "main"]);
       git(repo, ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
@@ -1232,8 +1236,8 @@ async function main() {
       const payload = JSON.stringify({ nameWithOwner: "octo/cached", url: "https://github.com/octo/cached", defaultBranchRef: { name: "main" } });
       const failure = Object.assign(new Error("offline"), { stderr: "could not resolve host" });
       const { adapter, calls } = fakeAdapter(github, [failure, { stdout: payload, stderr: "" }, { stdout: payload, stderr: "" }, { stdout: payload, stderr: "" }]);
-      await assert.rejects(adapter.resolveRepository(repo));
-      assert.equal((await adapter.resolveRepository(repo)).nameWithOwner, "octo/cached", "a failure is not cached");
+      await assert.rejects(adapter.resolveRepository(linked));
+      assert.equal((await adapter.resolveRepository(linked)).nameWithOwner, "octo/cached", "a failure is not cached");
       const fromTree = await adapter.resolveRepository(path.join(tree));
       assert.equal(fromTree.nameWithOwner, "octo/cached");
       assert.equal(calls.length, 2, "a worktree of the same repository reuses the answer");
