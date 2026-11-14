@@ -84,6 +84,83 @@ async function main() {
       await page.close();
     }
     console.log("PASS the rail's worktree states say when they are known");
+
+    // The rail and the git clock: a change seen while a read runs is read
+    // when it ends, and a change between the first read and the clock's
+    // first comparison is not lost as a first sighting.
+    await esbuild.build({
+      stdin: {
+        contents: `import React from "react";
+          import { createRoot } from "react-dom/client";
+          import { useWorktreeRailStates } from "./src/renderer/src/git/useWorktreeRailStates";
+          const workspaces = [{ id: "wt", name: "wt", cwd: "/wt", color: "#000", workers: [], copyBranch: { repoCwd: "/repo", branch: "b", city: "x", mode: "fork", createdAt: "2026-10-25T10:00:00Z" } }];
+          function Harness() {
+            useWorktreeRailStates(workspaces, () => {}, () => false);
+            return <span id="mounted">yes</span>;
+          }
+          createRoot(document.getElementById("root")).render(<Harness />);`,
+        resolveDir: ROOT,
+        sourcefile: "rail-clock-harness.tsx",
+        loader: "tsx",
+      },
+      bundle: true,
+      platform: "browser",
+      format: "iife",
+      outfile: path.join(directory, "clock.js"),
+      jsx: "automatic",
+      alias: { "@shared": path.join(ROOT, "src", "shared") },
+      logLevel: "silent",
+      define: { "process.env.NODE_ENV": '"production"' },
+    });
+    fs.writeFileSync(path.join(directory, "clock.html"), '<!doctype html><html><body><div id="root"></div><script src="clock.js"></script></body></html>');
+    const railWithClock = async (holdFirstRead) => {
+      const page = await browser.newPage();
+      await page.addInitScript((hold) => {
+        window.__sig = { "/wt": "s0" };
+        window.__calls = [];
+        window.__release = [];
+        window.spark = {
+          app: { e2eBackground: true },
+          git: { signatures: async (cwds) => Object.fromEntries(cwds.map((cwd) => [cwd, window.__sig[cwd] ?? null])) },
+          worktreeCleanup: {
+            railStates: (projects) => {
+              window.__calls.push(projects ?? null);
+              const answer = { states: [], external: [] };
+              if (hold && window.__calls.length === 1) return new Promise((resolve) => window.__release.push(() => resolve(answer)));
+              return Promise.resolve(answer);
+            },
+            railCleanUp: async () => null,
+          },
+        };
+      }, holdFirstRead);
+      await page.goto("file://" + path.join(directory, "clock.html"));
+      await page.waitForFunction(() => window.__calls.length === 1);
+      return page;
+    };
+    {
+      const page = await railWithClock(true);
+      // A merge lands while the full read runs; focus makes the clock look.
+      await page.evaluate(() => { window.__sig["/wt"] = "s1"; window.dispatchEvent(new Event("focus")); });
+      await page.waitForTimeout(150);
+      await page.evaluate(() => window.__release.forEach((release) => release()));
+      await page.waitForTimeout(150);
+      assert.deepEqual(await page.evaluate(() => window.__calls), [null, ["/repo"]], "a change seen mid-read is read after it");
+      await page.close();
+      console.log("PASS a git change seen while a rail read runs is read when it ends");
+    }
+    {
+      const page = await railWithClock(false);
+      await page.waitForTimeout(100);
+      // A commit after the first read, before the clock's first comparison.
+      await page.evaluate(() => { window.__sig["/wt"] = "s1"; window.dispatchEvent(new Event("focus")); });
+      await page.waitForTimeout(150);
+      assert.deepEqual(await page.evaluate(() => window.__calls), [null, ["/repo"]], "the move after the first read is read");
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.waitForTimeout(150);
+      assert.equal(await page.evaluate(() => window.__calls.length), 2, "nothing moved since: no read");
+      await page.close();
+      console.log("PASS a change between the rail's first read and the first comparison is not lost");
+    }
   } finally {
     await browser?.close();
     fs.rmSync(directory, { recursive: true, force: true });

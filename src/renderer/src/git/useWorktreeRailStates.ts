@@ -76,6 +76,7 @@ export function useWorktreeRailStates(
   const statesRef = useRef(states);
   statesRef.current = states;
   const readRef = useRef<((projects?: ReadonlySet<string>) => Promise<void>) | null>(null);
+  const baselineRef = useRef<((cwds: readonly string[]) => Promise<void>) | null>(null);
   const autoTried = useRef(new Map<string, { at: number; waitMs: number }>());
   const onAutoRemovedRef = useRef(onAutoRemoved);
   onAutoRemovedRef.current = onAutoRemoved;
@@ -102,9 +103,15 @@ export function useWorktreeRailStates(
     // Per effect run: a read left over from the previous set of workspaces is
     // cancelled, not waited for, so the new set is read at once.
     let inFlight = false;
+    // Asked for while a read ran: read when it ends. The clock has already
+    // remembered the change it reported, so a dropped ask is never repeated.
+    let again: Set<string> | "all" | null = null;
     // `projects`: re-read only these projects' rows; every row when absent.
     const read = async (projects?: ReadonlySet<string>) => {
-      if (inFlight) return;
+      if (inFlight) {
+        again = !projects || again === "all" ? "all" : new Set([...(again ?? []), ...projects]);
+        return;
+      }
       const api = window.spark.worktreeCleanup;
       if (!api?.railStates) {
         setLoaded(true);
@@ -113,6 +120,10 @@ export function useWorktreeRailStates(
       inFlight = true;
       if (!projects) lastFullAt.current = Date.now();
       try {
+        // A full read starts the clock's memory: a change after this moment
+        // is compared against it, not lost as a first sighting.
+        if (!projects) await baselineRef.current?.(workspacesRef.current.filter((ws) => !ws.remote).map((ws) => ws.cwd));
+        if (cancelled) return;
         const overview = await api.railStates(projects ? [...projects] : undefined).catch(() => null);
         if (cancelled) return;
         setLoaded(true);
@@ -162,6 +173,9 @@ export function useWorktreeRailStates(
         report();
       } finally {
         inFlight = false;
+        const queued = again;
+        again = null;
+        if (queued && !cancelled) void read(queued === "all" ? undefined : queued);
       }
     };
 
@@ -174,7 +188,7 @@ export function useWorktreeRailStates(
   }, [copyKey, refreshTick]);
 
   const localWorkspaces = workspaces.filter((ws) => !ws.remote);
-  useGitRefresh(
+  baselineRef.current = useGitRefresh(
     localWorkspaces.map((ws) => ws.cwd),
     false,
     (changed, reason) => {

@@ -82,7 +82,8 @@ async function main() {
       assert.deepEqual(asked.pop().sort(), ["/off-screen", "/on-screen"]);
       assert.equal(seen.visible.at(-1).reason, "focus");
       assert.equal(seen.hidden.at(-1).reason, "focus");
-      assert.deepEqual(seen.visible.at(-1).changed, [], "a first sighting is not a change");
+      assert.deepEqual(seen.visible.at(-1).changed, ["/on-screen"], "a first sighting counts as a change: the watcher's own read may predate it");
+      assert.deepEqual(seen.hidden.at(-1).changed, ["/off-screen"]);
       assert.equal(intervals.size, 1);
     });
 
@@ -109,15 +110,47 @@ async function main() {
     await check("an on-screen watcher never swallows a change for an off-screen one on the same folder", async () => {
       const shared = { visible: [], hidden: [] };
       signatures.set("/both", "1");
-      const a = clock.watch({ cwds: ["/both"], visible: true, onRefresh: (changed) => shared.visible.push([...changed]) });
-      const b = clock.watch({ cwds: ["/both"], visible: false, onRefresh: (changed) => shared.hidden.push([...changed]) });
+      const seenA = new Map();
+      const seenB = new Map();
+      await clock.baseline(seenA, ["/both"]);
+      await clock.baseline(seenB, ["/both"]);
+      const a = clock.watch({ cwds: ["/both"], visible: true, seen: seenA, onRefresh: (changed) => shared.visible.push([...changed]) });
+      const b = clock.watch({ cwds: ["/both"], visible: false, seen: seenB, onRefresh: (changed) => shared.hidden.push([...changed]) });
       await clock.focus();
+      assert.ok(shared.hidden.every((changed) => changed.length === 0), "nothing moved since the baseline");
       signatures.set("/both", "2");
       for (let i = 0; i < clockModule.HIDDEN_EVERY; i++) await clock.tick();
       assert.ok(shared.visible.some((changed) => changed.includes("/both")));
       assert.ok(shared.hidden.some((changed) => changed.includes("/both")), "the off-screen watcher still sees it");
       a();
       b();
+    });
+
+    await check("a move between a watcher's baseline and its first comparison is a change", async () => {
+      const memory = new Map();
+      const calls = [];
+      signatures.set("/raced", "before-read");
+      await clock.baseline(memory, ["/raced"]);
+      // The hook's own read happens here; then a commit lands before the
+      // first comparison.
+      signatures.set("/raced", "after-read");
+      const stop = clock.watch({ cwds: ["/raced"], visible: false, seen: memory, onRefresh: (changed) => calls.push([...changed]) });
+      await clock.focus();
+      assert.deepEqual(calls.at(-1), ["/raced"]);
+      await clock.focus();
+      assert.deepEqual(calls.at(-1), [], "and only once");
+      stop();
+    });
+
+    await check("a watcher with a baseline and nothing moved reads nothing on its first comparison", async () => {
+      const memory = new Map();
+      const calls = [];
+      signatures.set("/still", "same");
+      await clock.baseline(memory, ["/still"]);
+      const stop = clock.watch({ cwds: ["/still"], visible: false, seen: memory, onRefresh: (changed) => calls.push([...changed]) });
+      await clock.focus();
+      assert.deepEqual(calls.at(-1), []);
+      stop();
     });
 
     await check("a focus during a running tick is still delivered as a focus", async () => {

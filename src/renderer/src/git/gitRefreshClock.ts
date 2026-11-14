@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 // One clock for every git read in the window, instead of a timer per hook.
 //
@@ -11,16 +11,26 @@ import { useEffect, useRef } from "react";
 // once and tells every watcher, so data on screen can refresh right away.
 // Watchers decide what to read: only the checkouts that moved, plus their own
 // slow safety re-read for what the fingerprint cannot see.
+//
+// A checkout seen for the first time counts as moved: a commit between a
+// hook's own first read and the first comparison would otherwise be lost. A
+// hook whose first read is costly (the rail) takes a baseline right before
+// it instead (`baseline`), and then only later moves count.
 
 export const TICK_MS = 3_000;
 export const HIDDEN_EVERY = 10;
 
 export type GitRefreshReason = "tick" | "focus";
 
+/** What a watcher last saw per checkout. */
+export type GitSeen = Map<string, string | null>;
+
 export interface GitWatch {
   cwds: readonly string[];
   /** On screen: compared every tick rather than every HIDDEN_EVERY ticks. */
   visible: boolean;
+  /** The watcher's own memory, kept across re-registrations and baselines. */
+  seen?: GitSeen;
   /** `changed`: the watched checkouts whose git state moved since the last look. */
   onRefresh(changed: readonly string[], reason: GitRefreshReason): void;
 }
@@ -40,13 +50,15 @@ export interface GitRefreshClock {
   isActive(): boolean;
   /** One tick, for tests. */
   tick(): Promise<void>;
+  /** Remember these checkouts' state now, before reading them: later moves count, not this one. */
+  baseline(seen: GitSeen, cwds: readonly string[]): Promise<void>;
 }
 
 export function createGitRefreshClock(env: GitRefreshEnv, active = false): GitRefreshClock {
   const watches = new Set<GitWatch>();
   // What each watcher last saw: an on-screen watcher of a folder must not
   // swallow the change for an off-screen one compared later.
-  const seen = new WeakMap<GitWatch, Map<string, string | null>>();
+  const seen = new WeakMap<GitWatch, GitSeen>();
   let timer: unknown = null;
   let ticks = 0;
   let running: Promise<void> | null = null;
@@ -70,12 +82,12 @@ export function createGitRefreshClock(env: GitRefreshEnv, active = false): GitRe
       const next = wanted.length > 0 ? await env.signatures(wanted).catch(() => null) : null;
       for (const watch of due) {
         if (!watches.has(watch)) continue;
-        let last = seen.get(watch);
+        let last = watch.seen ?? seen.get(watch);
         if (!last) seen.set(watch, (last = new Map()));
         const changed: string[] = [];
         for (const cwd of watch.cwds) {
           if (!next || !(cwd in next)) continue;
-          if (last.has(cwd) && last.get(cwd) !== next[cwd]) changed.push(cwd);
+          if (!last.has(cwd) || last.get(cwd) !== next[cwd]) changed.push(cwd);
           last.set(cwd, next[cwd]);
         }
         try {
@@ -118,6 +130,12 @@ export function createGitRefreshClock(env: GitRefreshEnv, active = false): GitRe
     },
     isActive: () => active,
     tick: () => check("tick"),
+    async baseline(memory, cwds) {
+      if (cwds.length === 0) return;
+      const now = await env.signatures([...cwds]).catch(() => null);
+      if (!now) return;
+      for (const cwd of cwds) if (cwd in now) memory.set(cwd, now[cwd]);
+    },
   };
 }
 
@@ -173,22 +191,27 @@ export function gitReadsActive(): boolean {
 /**
  * Calls `onRefresh` on the shared clock for these checkouts while the window
  * is focused: every tick (on screen) or every HIDDEN_EVERY ticks (off screen),
- * and at once when focus returns.
+ * and at once when focus returns. A checkout's first comparison counts as a
+ * change, unless the returned `baseline` was awaited for it right before the
+ * hook's own read of it.
  */
 export function useGitRefresh(
   cwds: readonly string[],
   visible: boolean,
   onRefresh: (changed: readonly string[], reason: GitRefreshReason) => void,
-): void {
+): (cwds: readonly string[]) => Promise<void> {
   const handler = useRef(onRefresh);
   handler.current = onRefresh;
+  const seen = useRef<GitSeen>(new Map());
   const key = cwds.join("\n");
   useEffect(() => {
     const list = key ? key.split("\n") : [];
     return sharedClock().watch({
       cwds: list,
       visible,
+      seen: seen.current,
       onRefresh: (changed, reason) => handler.current(changed, reason),
     });
   }, [key, visible]);
+  return useCallback((list: readonly string[]) => sharedClock().baseline(seen.current, list), []);
 }
