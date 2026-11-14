@@ -234,6 +234,9 @@ export interface GitHubCliAdapter {
   // Merged pull requests whose head is `branch`, for the agent worktree
   // merge proof.
   listPullRequestsForHead?(cwd: string, branch: string): Promise<GitHubMergedPullRequest[]>;
+  // Merged pull requests that hold commit `sha` (GitHub's search), for the
+  // proof of a branch pushed under another name. Callers match the head.
+  listPullRequestsForCommit?(cwd: string, sha: string): Promise<GitHubMergedPullRequest[]>;
   // The most recent merged pull requests, one call for a whole worktree list.
   listMergedPullRequests?(cwd: string, limit?: number): Promise<GitHubMergedPullRequest[]>;
   // The most recent pull requests closed without merging.
@@ -412,7 +415,7 @@ export const GITHUB_REPOSITORY_TTL_MS = 10 * 60_000;
 
 interface RepositoryCacheEntry {
   value: Promise<GitHubRepositoryIdentity>;
-  configMtimeMs: number;
+  configStamp: string;
   expiresAt: number;
 }
 
@@ -420,19 +423,51 @@ interface RepositoryCacheEntry {
 const repositoryCaches = new WeakMap<object, Map<string, RepositoryCacheEntry>>();
 
 /**
- * The git directory a checkout and all its worktrees share, and the mtime of
- * its config. Null outside a local repository (nothing is cached then).
+ * What decides a checkout's remotes: the git directory a checkout and all its
+ * worktrees share, with the stamp of its config. With per-worktree config
+ * (`extensions.worktreeConfig`) a worktree may set its own remote, so the key
+ * is that worktree's own git directory and its `config.worktree` joins the
+ * stamp. A config that includes other files is not cached (an included file
+ * can change with no stamp here moving). Null outside a local repository.
  */
 export async function repositoryCacheKey(
   cwd: string,
-): Promise<{ key: string; configMtimeMs: number } | null> {
+): Promise<{ key: string; configStamp: string } | null> {
   const dirs = await gitDirsOf(cwd);
   if (!dirs) return null;
-  const config = await fs.stat(join(dirs.commonDir, "config")).catch(() => null);
+  const configPath = join(dirs.commonDir, "config");
+  const [config, text] = await Promise.all([
+    fs.stat(configPath).catch(() => null),
+    fs.readFile(configPath, "utf8").catch(() => null),
+  ]);
+  if (!config || text === null || /^\s*\[\s*include(?:if)?\b/im.test(text)) return null;
+  let keyDir = dirs.commonDir;
+  let configStamp = String(config.mtimeMs);
+  if (worktreeConfigEnabled(text)) {
+    keyDir = dirs.gitDir;
+    const own = await fs.stat(join(dirs.gitDir, "config.worktree")).catch(() => null);
+    configStamp += `:${own ? own.mtimeMs : "none"}`;
+  }
   // A worktree's .git file names the real path (/private/var on macOS), its
   // checkout may be reached through a link (/var).
-  const key = await fs.realpath(dirs.commonDir).catch(() => dirs.commonDir);
-  return config ? { key, configMtimeMs: config.mtimeMs } : null;
+  const key = await fs.realpath(keyDir).catch(() => keyDir);
+  return { key, configStamp };
+}
+
+/** True when a git config turns on per-worktree config files. */
+function worktreeConfigEnabled(text: string): boolean {
+  let section = "";
+  for (const line of text.split(/\r?\n/)) {
+    const header = /^\s*\[\s*([^\]\s]+)/.exec(line);
+    if (header) {
+      section = header[1].toLowerCase();
+      continue;
+    }
+    if (section !== "extensions") continue;
+    const entry = /^\s*worktreeconfig\s*(?:=\s*(\S+))?/i.exec(line);
+    if (entry) return !/^(?:false|no|off|0)$/i.test(entry[1] ?? "true");
+  }
+  return false;
 }
 
 /** Test seam: forget every cached repository identity. */
@@ -555,12 +590,12 @@ export function createGitHubCliAdapter(
       let cache = repositoryCaches.get(runCommand);
       if (!cache) repositoryCaches.set(runCommand, (cache = new Map()));
       const cached = cache.get(identity.key);
-      if (cached && cached.configMtimeMs === identity.configMtimeMs && cached.expiresAt > cacheClock()) {
+      if (cached && cached.configStamp === identity.configStamp && cached.expiresAt > cacheClock()) {
         return { ...(await cached.value) };
       }
       const entry: RepositoryCacheEntry = {
         value: read(),
-        configMtimeMs: identity.configMtimeMs,
+        configStamp: identity.configStamp,
         expiresAt: cacheClock() + GITHUB_REPOSITORY_TTL_MS,
       };
       cache.set(identity.key, entry);
@@ -752,6 +787,28 @@ export function createGitHubCliAdapter(
         "merged",
         "--head",
         head,
+        "--limit",
+        "20",
+        "--json",
+        MERGED_PULL_REQUEST_JSON_FIELDS,
+      ]);
+      return parseMergedPullRequests(stdout);
+    },
+
+    async listPullRequestsForCommit(
+      cwd: string,
+      sha: string,
+    ): Promise<GitHubMergedPullRequest[]> {
+      if (typeof sha !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(sha)) {
+        throw new GitHubCliError("command-failed", "commit must be a full commit id.");
+      }
+      const stdout = await runRead(cwd, [
+        "pr",
+        "list",
+        "--state",
+        "merged",
+        "--search",
+        sha.toLowerCase(),
         "--limit",
         "20",
         "--json",

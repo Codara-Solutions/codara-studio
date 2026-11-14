@@ -387,6 +387,30 @@ async function main() {
     }
 
     {
+      // Merged pull requests by commit: a full id only, passed as a search.
+      const sha = "AB".repeat(20);
+      const merged = {
+        number: 9,
+        url: "https://github.com/codara/studio/pull/9",
+        headRefName: "feat/y",
+        headRefOid: sha,
+        baseRefName: "main",
+        isCrossRepository: false,
+        mergeCommit: { oid: "c".repeat(40) },
+      };
+      const { adapter, calls } = fakeAdapter(github, [{ stdout: JSON.stringify([merged]), stderr: "" }]);
+      const { mergeCommit: _merge, ...summary } = merged;
+      assert.deepEqual(await adapter.listPullRequestsForCommit("/repo", sha), [
+        { ...summary, headRefOid: sha.toLowerCase(), mergeCommitOid: "c".repeat(40) },
+      ]);
+      assert.deepEqual(calls[0].args.slice(0, 6), ["pr", "list", "--state", "merged", "--search", sha.toLowerCase()]);
+      for (const bad of ["abc1234", `${"a".repeat(40)} is:open`, "-x"]) {
+        await rejectsCode(adapter.listPullRequestsForCommit("/repo", bad), "command-failed");
+      }
+      assert.equal(calls.length, 1, "a bad commit id never reaches gh");
+    }
+
+    {
       const { adapter, calls } = fakeAdapter(github, [
         {
           stdout: JSON.stringify([
@@ -1260,6 +1284,27 @@ async function main() {
         github.setGitHubCliCacheClock(null);
       }
       assert.equal(await github.repositoryCacheKey("/repo"), null, "no repository, no cache");
+
+      // Per-worktree config: a worktree may point origin elsewhere, so it
+      // keeps its own answer.
+      assert.equal((await github.repositoryCacheKey(tree)).key, (await github.repositoryCacheKey(repo)).key, "shared config: one key");
+      git(repo, ["config", "extensions.worktreeConfig", "true"]);
+      git(tree, ["config", "--worktree", "remote.origin.url", "https://github.com/octo/other.git"]);
+      const mainKey = await github.repositoryCacheKey(repo);
+      const treeKey = await github.repositoryCacheKey(tree);
+      assert.notEqual(mainKey.key, treeKey.key, "worktree config: each worktree is its own key");
+      const other = JSON.stringify({ nameWithOwner: "octo/other", url: "https://github.com/octo/other", defaultBranchRef: { name: "main" } });
+      const split = fakeAdapter(github, [{ stdout: payload, stderr: "" }, { stdout: other, stderr: "" }, { stdout: other, stderr: "" }]);
+      assert.equal((await split.adapter.resolveRepository(repo)).nameWithOwner, "octo/cached");
+      assert.equal((await split.adapter.resolveRepository(tree)).nameWithOwner, "octo/other", "a worktree with its own remote gets its own identity");
+      assert.equal((await split.adapter.resolveRepository(tree)).nameWithOwner, "octo/other");
+      assert.equal(split.calls.length, 2, "and that answer is still cached");
+      const before = treeKey.configStamp;
+      git(tree, ["config", "--worktree", "remote.origin.url", "https://github.com/octo/moved.git"]);
+      utimesSync(path.join(repo, ".git", "worktrees", "cached-tree", "config.worktree"), new Date(), new Date(Date.now() + 10_000));
+      assert.notEqual((await github.repositoryCacheKey(tree)).configStamp, before, "a worktree's own remote change moves its stamp");
+      git(repo, ["config", "include.path", "shared.inc"]);
+      assert.equal(await github.repositoryCacheKey(repo), null, "a config that includes files is not cached");
     }
 
     console.log("All GitHub CLI adapter checks passed.");

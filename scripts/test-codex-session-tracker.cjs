@@ -95,6 +95,33 @@ const esbuild = require("esbuild");
   clock += 60_000;
   await tracker.refresh();
   assert.equal(records.get("a").sessionId, ids[1], "an in-process session switch replaces the exact ID");
+  // /resume inside a found Codex, then quit before the next re-check: the
+  // shutdown snapshot reads the open files again.
+  files.set(101, [paths[0]]);
+  await tracker.refresh();
+  assert.equal(records.get("a").sessionId, ids[1], "within the back-off the found session is not re-read");
+  await tracker.flush();
+  assert.equal(records.get("a").sessionId, ids[0], "flush reads a found Codex again and saves the session it switched to");
+  // The same while an ordinary poll (inside the back-off) is still running.
+  const gatedRecords = new Map();
+  let gate = null;
+  const listing = processes;
+  const gated = createCodexSessionTracker({ panes: () => panes,
+    processes: async () => { if (gate) await gate; return listing; },
+    files: async () => files, latest: (id) => gatedRecords.get(id) ?? null,
+    record: (rec) => gatedRecords.set(rec.paneId, rec), now: () => clock });
+  await gated.refresh();
+  assert.equal(gatedRecords.get("a").sessionId, ids[0]);
+  files.set(101, [paths[1]]);
+  let open;
+  gate = new Promise((resolve) => { open = resolve; });
+  const poll = gated.refresh();
+  const flushing = gated.flush();
+  open();
+  await poll;
+  await flushing;
+  assert.equal(gatedRecords.get("a").sessionId, ids[1], "flush during a running poll forces a fresh read after it");
+  tracker.stop();
   processes = null;
   await tracker.refresh();
   assert.equal(records.get("a").active, true, "a failed process listing is not an exit");
