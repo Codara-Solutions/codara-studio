@@ -316,7 +316,11 @@ export async function discoverRepos(
       let pending = shared ? listings.get(shared) : undefined;
       if (!pending) {
         pending = listWorktrees(from);
-        if (shared) listings.set(shared, pending);
+        if (shared) {
+          listings.set(shared, pending);
+          // A listing that failed is tried again by the next workspace.
+          pending.catch(() => listings.delete(shared));
+        }
       }
       listing = await pending;
     } catch {

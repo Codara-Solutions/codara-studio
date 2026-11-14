@@ -110,7 +110,9 @@ async function main() {
       import { useWorktreeRailStates } from "./src/renderer/src/git/useWorktreeRailStates";
       const workspaces = ${JSON.stringify(workspaces)};
       function Harness() {
-        const { states, loaded } = useWorktreeRailStates(workspaces, () => {}, () => true, "q1");
+        const [list, setList] = React.useState(workspaces);
+        window.__setWorkspaces = setList;
+        const { states, loaded } = useWorktreeRailStates(list, () => {}, () => true, "q1");
         if (states.q1 && window.__badgeAt === undefined) window.__badgeAt = performance.now();
         return <span id="rows">{Object.keys(states).sort().join(",") + (loaded ? " loaded" : "")}</span>;
       }
@@ -156,12 +158,44 @@ async function main() {
       await page.clock.install();
       await page.goto("file://" + path.join(directory, "start.html"));
       await page.waitForFunction(() => window.__calls.length === 1);
-      await page.clock.runFor(16_000);
+      await page.clock.runFor(31_000);
       await page.waitForTimeout(100);
       assert.deepEqual(await page.evaluate(() => window.__calls), [["/q"], ["/p"]], "then one project at a time");
       assert.equal(await page.locator("#rows").textContent(), "q1,w1,w2 loaded");
       await page.close();
       console.log("PASS the other projects follow one at a time, and the rail is loaded once all were read");
+    }
+    {
+      // A change of workspaces restarts the round: it carries on with the
+      // projects read least recently, so none is starved by restarts.
+      const page = await browser.newPage();
+      await page.addInitScript(railSpark);
+      await page.clock.install();
+      await page.goto("file://" + path.join(directory, "start.html"));
+      await page.waitForFunction(() => window.__calls.length === 1);
+      await page.evaluate((more) => window.__setWorkspaces((list) => [...list, ...more]), [
+        { id: "r", name: "r", cwd: "/r", color: "#000", workers: [] },
+        { id: "s", name: "s", cwd: "/s", color: "#000", workers: [] },
+      ]);
+      await page.waitForTimeout(100);
+      await page.clock.runFor(31_000);
+      await page.waitForTimeout(100);
+      // The first round's /q, the restart's /q (visible first), then /p.
+      assert.deepEqual(await page.evaluate(() => window.__calls), [["/q"], ["/q"], ["/p"]]);
+      await page.evaluate((more) => window.__setWorkspaces((list) => [...list, ...more]), [
+        { id: "t", name: "t", cwd: "/t", color: "#000", workers: [] },
+      ]);
+      await page.waitForTimeout(100);
+      await page.clock.runFor(31_000);
+      await page.waitForTimeout(100);
+      assert.deepEqual(
+        (await page.evaluate(() => window.__calls)).slice(3),
+        [["/q"], ["/r"]],
+        "after another restart the projects never read come before /p, read a moment ago",
+      );
+      assert.ok(!(await page.locator("#rows").textContent()).includes("loaded"), "not loaded while /s and /t wait");
+      await page.close();
+      console.log("PASS a restarted round carries on with the projects read least recently");
     }
 
     const open = async (name, init) => {
@@ -242,7 +276,8 @@ async function main() {
       await page.waitForFunction(() => window.__calls.length === 1);
       await page.waitForTimeout(100);
       // Past the focus gap, with q's git state moved while the window was away.
-      await page.clock.runFor(25_000);
+      // The start round reads /p, then /q 30 s later; then past the focus gap.
+      await page.clock.runFor(52_000);
       await page.evaluate(() => {
         window.__calls = [];
         window.__sig["/q1"] = "s1";

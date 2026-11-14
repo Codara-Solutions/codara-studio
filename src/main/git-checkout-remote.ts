@@ -48,7 +48,8 @@ async function currentBranchFromFiles(cwd: string): Promise<string | null> {
   if (!dirs) return null;
   const head = (await fs.readFile(join(dirs.gitDir, "HEAD"), "utf8").catch(() => "")).trim();
   const name = /^ref:\s*refs\/heads\/(\S+)$/.exec(head)?.[1];
-  if (name) return name;
+  // A reftable repository keeps a stub HEAD naming ".invalid".
+  if (name) return name === ".invalid" ? null : name;
   return /^[0-9a-f]{40,64}$/i.test(head) ? "" : null;
 }
 
@@ -67,6 +68,10 @@ async function shared(cwd: string, read: ReadGit): Promise<RepositoryRemotes | n
     urls: new Map(),
   };
   byRepository.set(identity.key, entry);
+  // No remote may be a git that failed to answer: the next checkout asks again.
+  void names.then((list) => {
+    if (list.length === 0 && byRepository.get(identity.key) === entry) byRepository.delete(identity.key);
+  });
   return entry;
 }
 

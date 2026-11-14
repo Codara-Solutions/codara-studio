@@ -108,6 +108,23 @@ async function main() {
     assert.equal(await mod.checkoutRemote(trees[3], read), "origin");
     console.log("PASS a detached checkout follows origin");
 
+    // A `git remote` that failed (an empty answer) is not kept for the
+    // other worktrees of the repository.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    git(repo, ["config", "branch.four.remote", "origin"]);
+    let failNext = true;
+    const flaky = async (cwd, args) => {
+      if (failNext && args[0] === "remote" && args.length === 1) {
+        failNext = false;
+        return "";
+      }
+      return read(cwd, args);
+    };
+    assert.equal(await mod.checkoutRemote(trees[0], flaky), null, "the failed read answers nothing");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(await mod.checkoutRemote(trees[1], flaky), "fork", "the next worktree asks again");
+    console.log("PASS a failed remote listing is asked again by the next worktree");
+
     // Per-worktree config: every checkout asks git, as before.
     git(repo, ["config", "extensions.worktreeConfig", "true"]);
     git(trees[0], ["config", "--worktree", "branch.one.remote", "fork"]);

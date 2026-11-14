@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Workspace } from "@shared/types";
-import { useGitRefresh, type GitRefreshMemory } from "./gitRefreshClock";
+import { gitReadsActive, HIDDEN_EVERY, TICK_MS, useGitRefresh, type GitRefreshMemory } from "./gitRefreshClock";
 import {
   railRowMerged,
   type WorktreeRailCleanupRequest,
@@ -13,7 +13,8 @@ import {
 // "merged" mark and its one-click cleanup, and the worktrees of the rail's
 // repositories made outside Codara, so none works out of sight. Read in full
 // when the set of workspaces changes and every FULL_MS, one project at a time
-// (the visible workspace's first, then one every PACE_MS); otherwise only the
+// (the visible workspace's first, then one every PACE_MS while the window is
+// focused); otherwise only the
 // projects whose git state moved (a merge, a fetch, a branch deleted: the
 // shared clock, gitRefreshClock.ts, while the window is focused), and the
 // projects with a row whose answer depends on time or tabs (merged, missing,
@@ -35,7 +36,9 @@ import {
 const FULL_MS = 30 * 60_000;
 const PENDING_MS = 5 * 60_000;
 const FOCUS_GAP_MS = 20_000;
-const PACE_MS = 15_000;
+// One project of a full read at a time, as often as the clock compares the
+// workspaces off screen.
+const PACE_MS = TICK_MS * HIDDEN_EVERY;
 const AUTO_RETRY_MS = 5 * 60_000;
 const AUTO_RETRY_MAX_MS = 60 * 60_000;
 
@@ -72,10 +75,12 @@ export function useWorktreeRailStates(
 } {
   const [states, setStates] = useState<Record<string, WorktreeRailState>>({});
   const [external, setExternal] = useState<readonly WorktreeRailExternal[]>(NO_EXTERNAL);
-  // The first read finished, whatever it found: a row with no state after
-  // that is one main never reads, not one still loading.
   const [loaded, setLoaded] = useState(false);
   const lastFullAt = useRef(0);
+  // When each project was last read, and the ones waiting their turn in the
+  // running round.
+  const readAt = useRef(new Map<string, number>());
+  const queued = useRef(new Set<string>());
   const lastPendingAt = useRef(0);
   const statesRef = useRef(states);
   statesRef.current = states;
@@ -113,9 +118,14 @@ export function useWorktreeRailStates(
     // remembered the change it reported, so a dropped ask is never repeated.
     let again: Set<string> | null = null;
     let round = false;
+    const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
     // A full read goes one project at a time: the visible workspace's first,
-    // then one every PACE_MS, so a start with dozens of workspaces does not
-    // run hundreds of git reads at once.
+    // then the least recently read, one every PACE_MS while the window is
+    // focused, so a start with dozens of workspaces does not run hundreds of
+    // git reads at once, and a round cut short by a change of workspaces
+    // carries on where it stopped. Each project's checkouts are baselined
+    // right before its own read; until then the clock's news about them is
+    // left to that read.
     const readAll = async () => {
       if (round) return;
       if (!window.spark.worktreeCleanup?.railStates) {
@@ -126,19 +136,24 @@ export function useWorktreeRailStates(
       lastFullAt.current = Date.now();
       try {
         const local = workspacesRef.current.filter((ws) => !ws.remote);
-        // A full read starts the clock's memory: a change after this moment
-        // is compared against it, not lost as a first sighting, and a
-        // project still waiting for its turn is not read early for it.
-        await memoryRef.current?.baseline(local.map((ws) => ws.cwd));
         const visible = local.find((ws) => ws.id === visibleRef.current);
-        const order = [...new Set([...(visible ? [railProjectOf(visible)] : []), ...local.map(railProjectOf)])];
+        const projects = [...new Set(local.map(railProjectOf))];
+        const age = (project: string) => readAt.current.get(project) ?? -Infinity;
+        const rest = projects.filter((project) => !visible || project !== railProjectOf(visible));
+        const order = [...(visible ? [railProjectOf(visible)] : []), ...rest.sort((a, b) => age(a) - age(b))];
+        for (const project of order) queued.current.add(project);
         for (let index = 0; index < order.length; index++) {
+          if (index > 0) {
+            await wait(PACE_MS);
+            while (!cancelled && !gitReadsActive()) await wait(TICK_MS);
+          }
           if (cancelled) return;
-          if (index > 0) await new Promise((resolve) => window.setTimeout(resolve, PACE_MS));
+          const project = order[index];
+          queued.current.delete(project);
+          await memoryRef.current?.baseline(local.filter((ws) => railProjectOf(ws) === project).map((ws) => ws.cwd));
           if (cancelled) return;
-          await read(new Set([order[index]]));
+          await read(new Set([project]));
         }
-        if (!cancelled) setLoaded(true);
       } finally {
         round = false;
       }
@@ -163,6 +178,10 @@ export function useWorktreeRailStates(
       try {
         const overview = await api.railStates([...projects]).catch(() => null);
         if (cancelled) return;
+        for (const project of projects) readAt.current.set(project, Date.now());
+        // Known once every project was read once, whatever it found: a row
+        // with no state after that is one main never reads.
+        if (workspacesRef.current.every((ws) => ws.remote || readAt.current.has(railProjectOf(ws)))) setLoaded(true);
         if (!overview) {
           // The clock already counted what this read was for: forget it, so
           // the next comparison asks again instead of the 30-minute read.
@@ -172,17 +191,22 @@ export function useWorktreeRailStates(
         const list = overview.states;
         // The rows and project ids this read speaks for.
         const covered = new Set(workspacesRef.current.filter((ws) => projects.has(railProjectOf(ws))).map((ws) => ws.id));
+        // Rows and projects that left the rail since are dropped.
+        const present = new Set(workspacesRef.current.map((ws) => ws.id));
         setExternal((prev) => {
           const read = overview.external ?? NO_EXTERNAL;
           // Main lists a read repository's outside worktrees under its main
           // checkout's row, which may not be one of the rows read.
           const fresh = new Set(read.map((entry) => entry.path));
-          const outside = [...prev.filter((entry) => !covered.has(entry.projectId) && !fresh.has(entry.path)), ...read];
+          const outside = [
+            ...prev.filter((entry) => present.has(entry.projectId) && !covered.has(entry.projectId) && !fresh.has(entry.path)),
+            ...read,
+          ];
           return JSON.stringify(prev) === JSON.stringify(outside) ? prev : outside;
         });
         setStates((prev) => {
           const next: Record<string, WorktreeRailState> = {};
-          for (const [id, state] of Object.entries(prev)) if (!covered.has(id)) next[id] = state;
+          for (const [id, state] of Object.entries(prev)) if (present.has(id) && !covered.has(id)) next[id] = state;
           for (const state of list) next[state.workspaceId] = state;
           return sameStates(prev, next) ? prev : next;
         });
@@ -220,6 +244,7 @@ export function useWorktreeRailStates(
     void read();
     return () => {
       cancelled = true;
+      queued.current.clear();
       if (readRef.current === read) readRef.current = null;
     };
   }, [copyKey, refreshTick]);
@@ -242,6 +267,7 @@ export function useWorktreeRailStates(
         const ws = byCwd.get(cwd);
         if (ws) projects.add(railProjectOf(ws));
       }
+      // Read in their turn of the running round, baselined right before.
       const pendingDue = now - lastPendingAt.current >= (reason === "focus" ? FOCUS_GAP_MS : PENDING_MS);
       if (pendingDue) {
         const pending = Object.values(statesRef.current).filter(railRowPending);
@@ -251,6 +277,7 @@ export function useWorktreeRailStates(
         }
         if (pending.length > 0) lastPendingAt.current = now;
       }
+      for (const project of queued.current) projects.delete(project);
       if (projects.size > 0) void readRef.current?.(projects);
     },
   );
