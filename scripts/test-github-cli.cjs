@@ -1285,26 +1285,40 @@ async function main() {
       }
       assert.equal(await github.repositoryCacheKey("/repo"), null, "no repository, no cache");
 
-      // Per-worktree config: a worktree may point origin elsewhere, so it
-      // keeps its own answer.
-      assert.equal((await github.repositoryCacheKey(tree)).key, (await github.repositoryCacheKey(repo)).key, "shared config: one key");
-      git(repo, ["config", "extensions.worktreeConfig", "true"]);
+      // Only a plain repository is cached. Anything that can make the answer
+      // depend on more than the shared config bypasses the cache.
+      assert.equal((await github.repositoryCacheKey(tree)).key, (await github.repositoryCacheKey(repo)).key, "a plain repository: one key for all its worktrees");
+      const configFile = path.join(repo, ".git", "config");
+      const plainText = require("node:fs").readFileSync(configFile, "utf8");
+      const restore = () => {
+        require("node:fs").writeFileSync(configFile, plainText);
+        for (const file of [path.join(repo, ".git", "config.worktree"), path.join(repo, ".git", "worktrees", "cached-tree", "config.worktree")]) rmSync(file, { force: true });
+      };
+      // worktreeConfig "false" then "true": git takes the last value.
+      require("node:fs").appendFileSync(configFile, "[extensions]\n\tworktreeConfig = false\n[extensions]\n\tworktreeConfig = true\n");
       git(tree, ["config", "--worktree", "remote.origin.url", "https://github.com/octo/other.git"]);
-      const mainKey = await github.repositoryCacheKey(repo);
-      const treeKey = await github.repositoryCacheKey(tree);
-      assert.notEqual(mainKey.key, treeKey.key, "worktree config: each worktree is its own key");
+      assert.equal(await github.repositoryCacheKey(tree), null, "any worktreeConfig (false then true) is not cached");
       const other = JSON.stringify({ nameWithOwner: "octo/other", url: "https://github.com/octo/other", defaultBranchRef: { name: "main" } });
       const split = fakeAdapter(github, [{ stdout: payload, stderr: "" }, { stdout: other, stderr: "" }, { stdout: other, stderr: "" }]);
       assert.equal((await split.adapter.resolveRepository(repo)).nameWithOwner, "octo/cached");
-      assert.equal((await split.adapter.resolveRepository(tree)).nameWithOwner, "octo/other", "a worktree with its own remote gets its own identity");
+      assert.equal((await split.adapter.resolveRepository(tree)).nameWithOwner, "octo/other", "the worktree with its own remote gets its own identity");
       assert.equal((await split.adapter.resolveRepository(tree)).nameWithOwner, "octo/other");
-      assert.equal(split.calls.length, 2, "and that answer is still cached");
-      const before = treeKey.configStamp;
-      git(tree, ["config", "--worktree", "remote.origin.url", "https://github.com/octo/moved.git"]);
-      utimesSync(path.join(repo, ".git", "worktrees", "cached-tree", "config.worktree"), new Date(), new Date(Date.now() + 10_000));
-      assert.notEqual((await github.repositoryCacheKey(tree)).configStamp, before, "a worktree's own remote change moves its stamp");
-      git(repo, ["config", "include.path", "shared.inc"]);
-      assert.equal(await github.repositoryCacheKey(repo), null, "a config that includes files is not cached");
+      assert.equal(split.calls.length, 3, "every call asks gh then");
+      restore();
+      // A config.worktree that includes a file holding the remote.
+      require("node:fs").appendFileSync(configFile, "[extensions]\n\tworktreeConfig\n");
+      const included = path.join(temp, "remote.inc");
+      require("node:fs").writeFileSync(included, "[remote \"origin\"]\n\turl = https://github.com/old/repo.git\n");
+      git(tree, ["config", "--worktree", "include.path", included]);
+      require("node:fs").writeFileSync(configFile, plainText);
+      assert.equal(await github.repositoryCacheKey(tree), null, "a worktree with a config.worktree file is not cached, whatever it holds");
+      restore();
+      for (const extra of ["[include]\n\tpath = shared.inc\n", "[includeIf \"gitdir:/x/\"]\n\tpath = shared.inc\n", "[Extensions]\n\tWorktreeConfig = no\n"]) {
+        require("node:fs").appendFileSync(configFile, extra);
+        assert.equal(await github.repositoryCacheKey(repo), null, `not cached with ${extra.split("\n")[0]}`);
+        restore();
+      }
+      assert.ok(await github.repositoryCacheKey(repo), "back to plain: cached again");
     }
 
     console.log("All GitHub CLI adapter checks passed.");
