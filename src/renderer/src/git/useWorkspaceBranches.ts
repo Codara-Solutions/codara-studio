@@ -84,8 +84,8 @@ export function useWorkspaceBranches(
   useGitRefresh(
     workspaces.map((ws) => ws.cwd),
     false,
-    (changed) => {
-      if (Date.now() - lastFullAt.current >= SAFETY_MS) void latestRefresh.current?.();
+    (changed, reason) => {
+      if (reason === "tick" && Date.now() - lastFullAt.current >= SAFETY_MS) void latestRefresh.current?.();
       else if (changed.length > 0) void latestRefresh.current?.(new Set(changed));
     },
   );

@@ -30,6 +30,7 @@ import {
   type RendererTerminal,
 } from "../agent-worktrees";
 import { errorText, readGitText, runGit } from "../git-exec";
+import { gitDirsOf } from "../git-state";
 import { parseWorktreePorcelain, type WorktreeRegistration } from "../git-worktree-porcelain";
 import {
   commitSubjectsBetween,
@@ -301,13 +302,23 @@ export async function discoverRepos(
 ): Promise<{ repos: RepoContext[]; errors: string[] }> {
   const byRoot = new Map<string, RepoContext>();
   const errors: string[] = [];
+  // Every worktree of a repository lists the same worktrees: one listing per
+  // shared git directory, not one per workspace.
+  const listings = new Map<string, Promise<WorktreeListing>>();
   for (const workspace of state.workspaces) {
     if (workspace.remote || !workspace.cwd || isRemotePath(workspace.cwd)) continue;
     const from = existsSync(workspace.cwd) ? workspace.cwd : workspace.copyBranch?.repoCwd;
     if (!from || isRemotePath(from) || !existsSync(from)) continue;
     let listing: WorktreeListing;
     try {
-      listing = await listWorktrees(from);
+      const dirs = await gitDirsOf(from).catch(() => null);
+      const shared = dirs && existsSync(dirs.commonDir) ? await canonicalPath(dirs.commonDir) : null;
+      let pending = shared ? listings.get(shared) : undefined;
+      if (!pending) {
+        pending = listWorktrees(from);
+        if (shared) listings.set(shared, pending);
+      }
+      listing = await pending;
     } catch {
       continue;
     }

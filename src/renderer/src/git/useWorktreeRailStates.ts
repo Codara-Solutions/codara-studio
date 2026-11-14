@@ -12,7 +12,8 @@ import {
 // Merge and folder state of every copy-branch workspace, for the rail's
 // "merged" mark and its one-click cleanup, and the worktrees of the rail's
 // repositories made outside Codara, so none works out of sight. Read in full
-// when the set of workspaces changes and every FULL_MS; otherwise only the
+// when the set of workspaces changes and every FULL_MS, one project at a time
+// (the visible workspace's first, then one every PACE_MS); otherwise only the
 // projects whose git state moved (a merge, a fetch, a branch deleted: the
 // shared clock, gitRefreshClock.ts, while the window is focused), and the
 // projects with a row whose answer depends on time or tabs (merged, missing,
@@ -34,6 +35,7 @@ import {
 const FULL_MS = 30 * 60_000;
 const PENDING_MS = 5 * 60_000;
 const FOCUS_GAP_MS = 20_000;
+const PACE_MS = 15_000;
 const AUTO_RETRY_MS = 5 * 60_000;
 const AUTO_RETRY_MAX_MS = 60 * 60_000;
 
@@ -60,6 +62,8 @@ export function useWorktreeRailStates(
   // Once per read, with every row it removed: one line, not one per row.
   onAutoRemoved: (removed: Array<{ result: WorktreeRailCleanupResult; mode: WorktreeRailCleanupRequest["mode"] }>) => void,
   isHeld: (workspaceId: string, folders: readonly string[]) => boolean,
+  /** On screen: its project is read first. */
+  visibleWorkspaceId: string | null = null,
 ): {
   states: Record<string, WorktreeRailState>;
   external: readonly WorktreeRailExternal[];
@@ -84,6 +88,8 @@ export function useWorktreeRailStates(
   isHeldRef.current = isHeld;
   const workspacesRef = useRef(workspaces);
   workspacesRef.current = workspaces;
+  const visibleRef = useRef(visibleWorkspaceId);
+  visibleRef.current = visibleWorkspaceId;
   const [refreshTick, setRefreshTick] = useState(0);
   const refresh = useCallback(() => setRefreshTick((tick) => tick + 1), []);
   // Every local workspace: a project with no copy-branch row can still have
@@ -105,11 +111,43 @@ export function useWorktreeRailStates(
     let inFlight = false;
     // Asked for while a read ran: read when it ends. The clock has already
     // remembered the change it reported, so a dropped ask is never repeated.
-    let again: Set<string> | "all" | null = null;
+    let again: Set<string> | null = null;
+    let round = false;
+    // A full read goes one project at a time: the visible workspace's first,
+    // then one every PACE_MS, so a start with dozens of workspaces does not
+    // run hundreds of git reads at once.
+    const readAll = async () => {
+      if (round) return;
+      if (!window.spark.worktreeCleanup?.railStates) {
+        setLoaded(true);
+        return;
+      }
+      round = true;
+      lastFullAt.current = Date.now();
+      try {
+        const local = workspacesRef.current.filter((ws) => !ws.remote);
+        // A full read starts the clock's memory: a change after this moment
+        // is compared against it, not lost as a first sighting, and a
+        // project still waiting for its turn is not read early for it.
+        await memoryRef.current?.baseline(local.map((ws) => ws.cwd));
+        const visible = local.find((ws) => ws.id === visibleRef.current);
+        const order = [...new Set([...(visible ? [railProjectOf(visible)] : []), ...local.map(railProjectOf)])];
+        for (let index = 0; index < order.length; index++) {
+          if (cancelled) return;
+          if (index > 0) await new Promise((resolve) => window.setTimeout(resolve, PACE_MS));
+          if (cancelled) return;
+          await read(new Set([order[index]]));
+        }
+        if (!cancelled) setLoaded(true);
+      } finally {
+        round = false;
+      }
+    };
     // `projects`: re-read only these projects' rows; every row when absent.
-    const read = async (projects?: ReadonlySet<string>) => {
+    const read = async (projects?: ReadonlySet<string>): Promise<void> => {
+      if (!projects) return readAll();
       if (inFlight) {
-        again = !projects || again === "all" ? "all" : new Set([...(again ?? []), ...projects]);
+        again = new Set([...(again ?? []), ...projects]);
         return;
       }
       const api = window.spark.worktreeCleanup;
@@ -118,19 +156,13 @@ export function useWorktreeRailStates(
         return;
       }
       inFlight = true;
-      if (!projects) lastFullAt.current = Date.now();
       // The checkouts this read speaks for.
       const readCwds = workspacesRef.current
-        .filter((ws) => !ws.remote && (!projects || projects.has(railProjectOf(ws))))
+        .filter((ws) => !ws.remote && projects.has(railProjectOf(ws)))
         .map((ws) => ws.cwd);
       try {
-        // A full read starts the clock's memory: a change after this moment
-        // is compared against it, not lost as a first sighting.
-        if (!projects) await memoryRef.current?.baseline(readCwds);
+        const overview = await api.railStates([...projects]).catch(() => null);
         if (cancelled) return;
-        const overview = await api.railStates(projects ? [...projects] : undefined).catch(() => null);
-        if (cancelled) return;
-        setLoaded(true);
         if (!overview) {
           // The clock already counted what this read was for: forget it, so
           // the next comparison asks again instead of the 30-minute read.
@@ -139,22 +171,18 @@ export function useWorktreeRailStates(
         }
         const list = overview.states;
         // The rows and project ids this read speaks for.
-        const covered = projects
-          ? new Set(workspacesRef.current.filter((ws) => projects.has(railProjectOf(ws))).map((ws) => ws.id))
-          : null;
+        const covered = new Set(workspacesRef.current.filter((ws) => projects.has(railProjectOf(ws))).map((ws) => ws.id));
         setExternal((prev) => {
           const read = overview.external ?? NO_EXTERNAL;
           // Main lists a read repository's outside worktrees under its main
           // checkout's row, which may not be one of the rows read.
           const fresh = new Set(read.map((entry) => entry.path));
-          const outside = covered
-            ? [...prev.filter((entry) => !covered.has(entry.projectId) && !fresh.has(entry.path)), ...read]
-            : read;
+          const outside = [...prev.filter((entry) => !covered.has(entry.projectId) && !fresh.has(entry.path)), ...read];
           return JSON.stringify(prev) === JSON.stringify(outside) ? prev : outside;
         });
         setStates((prev) => {
           const next: Record<string, WorktreeRailState> = {};
-          if (covered) for (const [id, state] of Object.entries(prev)) if (!covered.has(id)) next[id] = state;
+          for (const [id, state] of Object.entries(prev)) if (!covered.has(id)) next[id] = state;
           for (const state of list) next[state.workspaceId] = state;
           return sameStates(prev, next) ? prev : next;
         });
@@ -184,7 +212,7 @@ export function useWorktreeRailStates(
         inFlight = false;
         const queued = again;
         again = null;
-        if (queued && !cancelled) void read(queued === "all" ? undefined : queued);
+        if (queued && !cancelled) void read(queued);
       }
     };
 
@@ -202,7 +230,9 @@ export function useWorktreeRailStates(
     false,
     (changed, reason) => {
       const now = Date.now();
-      if (now - lastFullAt.current >= FULL_MS) {
+      // Focus reads only the rows waiting on time or tabs; the full read
+      // waits for a tick.
+      if (reason === "tick" && now - lastFullAt.current >= FULL_MS) {
         void readRef.current?.();
         return;
       }

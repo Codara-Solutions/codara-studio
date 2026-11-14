@@ -113,6 +113,12 @@ async function main() {
       define: { "process.env.NODE_ENV": '"production"' },
     });
     fs.writeFileSync(path.join(directory, "clock.html"), '<!doctype html><html><body><div id="root"></div><script src="clock.js"></script></body></html>');
+    // The rail is off screen: the clock compares it every HIDDEN_EVERY ticks
+    // of TICK_MS (gitRefreshClock.ts), on the page's own fake timers.
+    const hiddenTick = async (page) => {
+      await page.clock.runFor(30_000);
+      await page.waitForTimeout(150);
+    };
     const railWithClock = async (holdFirstRead) => {
       const page = await browser.newPage();
       await page.addInitScript((hold) => {
@@ -134,18 +140,19 @@ async function main() {
           },
         };
       }, holdFirstRead);
+      await page.clock.install();
       await page.goto("file://" + path.join(directory, "clock.html"));
       await page.waitForFunction(() => window.__calls.length === 1);
       return page;
     };
     {
       const page = await railWithClock(true);
-      // A merge lands while the full read runs; focus makes the clock look.
-      await page.evaluate(() => { window.__sig["/wt"] = "s1"; window.dispatchEvent(new Event("focus")); });
-      await page.waitForTimeout(150);
+      // A merge lands while the full read runs; the rail's next tick looks.
+      await page.evaluate(() => { window.__sig["/wt"] = "s1"; });
+      await hiddenTick(page);
       await page.evaluate(() => window.__release.forEach((release) => release()));
       await page.waitForTimeout(150);
-      assert.deepEqual(await page.evaluate(() => window.__calls), [null, ["/repo"]], "a change seen mid-read is read after it");
+      assert.deepEqual(await page.evaluate(() => window.__calls), [["/repo"], ["/repo"]], "a change seen mid-read is read after it");
       await page.close();
       console.log("PASS a git change seen while a rail read runs is read when it ends");
     }
@@ -153,26 +160,22 @@ async function main() {
       const page = await railWithClock(false);
       await page.waitForTimeout(100);
       // A commit after the first read, before the clock's first comparison.
-      await page.evaluate(() => { window.__sig["/wt"] = "s1"; window.dispatchEvent(new Event("focus")); });
-      await page.waitForTimeout(150);
-      assert.deepEqual(await page.evaluate(() => window.__calls), [null, ["/repo"]], "the move after the first read is read");
-      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-      await page.waitForTimeout(150);
+      await page.evaluate(() => { window.__sig["/wt"] = "s1"; });
+      await hiddenTick(page);
+      assert.deepEqual(await page.evaluate(() => window.__calls), [["/repo"], ["/repo"]], "the move after the first read is read");
+      await hiddenTick(page);
       assert.equal(await page.evaluate(() => window.__calls.length), 2, "nothing moved since: no read");
       await page.close();
       console.log("PASS a change between the rail's first read and the first comparison is not lost");
     }
     {
       // The first full read fails after its baseline: the next comparison
-      // (focus here; a tick does the same every HIDDEN_EVERY ticks) asks
-      // again instead of waiting for the 30-minute full read.
+      // (every HIDDEN_EVERY ticks) asks again instead of waiting for the
+      // 30-minute full read.
       const page = await railWithClock("fail");
-      await page.waitForTimeout(100);
-      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-      await page.waitForTimeout(150);
-      assert.deepEqual(await page.evaluate(() => window.__calls), [null, ["/repo"]], "a failed read is retried on the next comparison");
-      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-      await page.waitForTimeout(150);
+      await hiddenTick(page);
+      assert.deepEqual(await page.evaluate(() => window.__calls), [["/repo"], ["/repo"]], "a failed read is retried on the next comparison");
+      await hiddenTick(page);
       assert.equal(await page.evaluate(() => window.__calls.length), 2, "and once it succeeds, not again");
       await page.close();
       console.log("PASS a failed rail read is retried on the next comparison");

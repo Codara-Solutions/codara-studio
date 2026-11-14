@@ -918,6 +918,7 @@ export default function App() {
       (workspaceId: string, folders: readonly string[]) => railWorkspaceHeldRef.current(workspaceId, folders),
       [],
     ),
+    activeWorkspace?.id ?? null,
   );
 
   // Switch HUD: bumps once per real workspace change (never on first load),
