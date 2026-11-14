@@ -145,6 +145,7 @@ async function makeHarness(storeMod, dir, limits = {}) {
       handler?.();
     },
     hasExitWatch: (paneId) => exits.has(paneId),
+    now: () => now,
     // pty-manager drops the handlers without calling them on a duplicate exit.
     dropExitWatch: (paneId) => exits.delete(paneId),
     // Moves the clock, firing every save timer due on the way.
@@ -235,15 +236,22 @@ async function main() {
   {
     const h = await harness();
     h.store.track(["busy"]);
-    let n = 0;
+    const fsp = fs.promises;
+    const writeFile = fsp.writeFile;
     let firstSaveAt = -1;
-    for (let t = 0; t < 70_000; t += 500) {
+    const start = h.now();
+    fsp.writeFile = function (file, data, options) {
+      if (firstSaveAt < 0 && String(file).startsWith(h.dir)) firstSaveAt = h.now() - start;
+      return writeFile.call(this, file, data, options);
+    };
+    let n = 0;
+    for (let t = 0; t < 70_000; t += 100) {
       h.feed("busy", inkFrame(n++));
-      await h.advance(500);
-      if (firstSaveAt < 0 && h.exists("busy")) firstSaveAt = t + 500;
+      await h.advance(100);
     }
+    fsp.writeFile = writeFile;
     check(
-      "a pane that never goes quiet is saved 60 s after its first unsaved byte",
+      "a pane that never goes quiet is saved exactly 60 s after its first unsaved byte",
       firstSaveAt === 60_000,
       String(firstSaveAt),
     );
@@ -400,6 +408,61 @@ async function main() {
       "log output is appended until the raw part would pass the cap, then rewritten whole",
       crossed && !crossed.wrong && crossed.at > 24 * 1024 && crossed.at <= 34 * 1024,
       JSON.stringify(crossed),
+    );
+
+    // The disk takes only part of an append (filling up): the rest is still
+    // written, or, when it takes nothing, the pane stays unsaved and the
+    // next save rewrites the file whole.
+    const withHandleWrite = async (paneId, fakeWrite, run) => {
+      const realOpen = fsp.open;
+      fsp.open = async (file, flags, mode) => {
+        const handle = await realOpen.call(fsp, file, flags, mode);
+        if (flags === "r+" && String(file).endsWith(storeMod.scrollbackFileName(paneId))) {
+          const write = handle.write.bind(handle);
+          handle.write = (data, offset, length, position) => fakeWrite(write, data, offset, length, position);
+        }
+        return handle;
+      };
+      try {
+        await run();
+      } finally {
+        fsp.open = realOpen;
+      }
+    };
+    appended.store.track(["short"]);
+    appended.feed("short", "head\r\n");
+    await appended.store.flush("short");
+    let calls = 0;
+    await withHandleWrite(
+      "short",
+      (write, data, offset, length, position) => {
+        calls += 1;
+        return write(data, offset, Math.min(3, length), position);
+      },
+      async () => {
+        appended.feed("short", "abcdefghij\r\n");
+        await appended.store.flush("short");
+      },
+    );
+    check(
+      "an append the disk takes 3 bytes at a time is written whole",
+      calls > 1 && (await appended.store.read("short")).raw.toString("utf8") === "head\r\nabcdefghij\r\n",
+    );
+    await withHandleWrite(
+      "short",
+      async () => ({ bytesWritten: 0 }),
+      async () => {
+        appended.feed("short", "klmnop\r\n");
+        await appended.store.flush("short");
+      },
+    );
+    const stalled = countWrites(appended.dir);
+    await appended.store.flush("short");
+    stalled.restore();
+    check(
+      "an append that writes nothing leaves the pane unsaved, and the next save rewrites it",
+      stalled.writes === 1 && (await appended.store.read("short")).raw.toString("utf8") === "head\r\nabcdefghij\r\nklmnop\r\n",
+      JSON.stringify(stalled),
     );
 
     // The total budget evicts a file while its append is on the way: the

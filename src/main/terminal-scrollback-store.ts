@@ -142,7 +142,8 @@ const FILE_MAGIC = "CODARA-SCROLLBACK 1";
 const FOLD_BEFORE_SAVE_BYTES = 4 * 1024;
 // About one folded screen: what a rewrite adds to the history it holds.
 const APPEND_SLACK_BYTES = 16 * 1024;
-// Longest a timed save waits for the fold it started.
+// How long before the max wait the fold for a rewrite starts, and the
+// longest a save after quiet output waits for its fold.
 const FOLD_WAIT_MAX_MS = 5_000;
 const FILE_EXT = ".bin";
 const MAX_HEADER_BYTES = 4096;
@@ -648,16 +649,22 @@ export class TerminalScrollbackStore {
       if (state.generation !== generation || !state.dirty) return;
       const now = this.now();
       const quietFor = now - state.lastChunkAt;
-      const dirtyFor = now - state.dirtySince;
-      if (quietFor < this.limits.saveDebounceMs && dirtyFor < this.limits.saveMaxWaitMs) {
-        const wait = Math.min(
-          this.limits.saveDebounceMs - quietFor,
-          this.limits.saveMaxWaitMs - dirtyFor,
-        );
-        this.armSave(state, Math.max(10, wait));
+      const remaining = this.limits.saveMaxWaitMs - (now - state.dirtySince);
+      // The max wait is a promise to a crash: at it, save as is.
+      if (remaining <= 0) {
+        void this.save(state);
         return;
       }
-      this.timedSave(state);
+      if (quietFor >= this.limits.saveDebounceMs) {
+        this.timedSave(state, remaining);
+        return;
+      }
+      // Still printing. The fold a rewrite wants starts FOLD_WAIT_MAX_MS
+      // before the deadline, so the save at the deadline finds it done.
+      const lead = remaining - FOLD_WAIT_MAX_MS;
+      if (lead <= 0) this.foldAhead(state);
+      const wait = Math.min(this.limits.saveDebounceMs - quietFor, lead > 0 ? lead : remaining);
+      this.armSave(state, Math.max(10, wait));
     }, delay);
     state.timer.unref?.();
   }
@@ -736,24 +743,31 @@ export class TerminalScrollbackStore {
   // A timed save that would rewrite the file folds first: a spinner's minute
   // of repaints is a few hundred kB of raw bytes but only one screen folded.
   // Saves that must not wait (a hidden pane, an exit, quit) write as is.
-  private timedSave(state: PaneState): void {
-    const name = scrollbackFileName(state.paneId);
-    if (state.folding || (!this.canAppend(state, name) && state.rawBytes >= FOLD_BEFORE_SAVE_BYTES)) {
+  private timedSave(state: PaneState, remaining: number): void {
+    if (this.wantsFold(state) || state.folding) {
       state.saveAfterFold = true;
       if (!state.folding) this.queueFold(state);
       if (state.folding) {
-        // Folds of many busy panes queue behind each other: past this wait
-        // the save writes as is, so the max wait still holds.
+        // Folds of many busy panes queue behind each other: the save waits
+        // for this one only up to the max wait, then writes as is.
         state.timer = this.timers.setTimeout(() => {
           state.timer = null;
           this.saveIfWaiting(state);
-        }, FOLD_WAIT_MAX_MS);
+        }, Math.max(10, Math.min(FOLD_WAIT_MAX_MS, remaining)));
         state.timer.unref?.();
         return;
       }
       state.saveAfterFold = false;
     }
     void this.save(state);
+  }
+
+  private wantsFold(state: PaneState): boolean {
+    return !this.canAppend(state, scrollbackFileName(state.paneId)) && state.rawBytes >= FOLD_BEFORE_SAVE_BYTES;
+  }
+
+  private foldAhead(state: PaneState): void {
+    if (!state.folding && this.wantsFold(state)) this.queueFold(state);
   }
 
   private saveIfWaiting(state: PaneState): void {
@@ -869,8 +883,15 @@ export class TerminalScrollbackStore {
   private async appendFile(name: string, data: Buffer): Promise<void> {
     const handle = await fs.open(join(this.deps.dir, name), "r+");
     try {
-      const { size } = await handle.stat();
-      await handle.write(data, 0, data.length, size);
+      let position = (await handle.stat()).size;
+      // A short write (a disk filling up) must not count as saved: the
+      // caller's failure path then rewrites the file whole.
+      for (let offset = 0; offset < data.length; ) {
+        const { bytesWritten } = await handle.write(data, offset, data.length - offset, position);
+        if (bytesWritten <= 0) throw new Error("append made no progress");
+        offset += bytesWritten;
+        position += bytesWritten;
+      }
     } finally {
       await handle.close();
     }
