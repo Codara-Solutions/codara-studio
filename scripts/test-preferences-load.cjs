@@ -5,6 +5,11 @@
 // are still loading preferences, and a late read used to restore the old
 // value, which the next save then wrote to disk.
 //
+// The startup reads (readPreferenceFromDiskSync, getPreferenceSync) give the
+// defaults when the file is a named pipe or a link to one, instead of
+// blocking the process for good; each runs in a child with a deadline, so a
+// regression fails instead of hanging the suite (Linux and macOS only).
+//
 //   node scripts/test-preferences-load.cjs
 //
 // Exits non-zero on any failed assertion.
@@ -12,6 +17,7 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
+const { spawnSync } = require("node:child_process");
 const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -62,6 +68,31 @@ const sharedAlias = {
     check("and what is on disk", onDisk.remoteAccessEnabled === false);
     const again = await prefs.loadPreferences();
     check("a load after that returns the cache", again.remoteAccessEnabled === false);
+    if (process.platform !== "win32") {
+      for (const kind of ["a named pipe", "a link to a named pipe"]) {
+        const pipeHome = fs.mkdtempSync(path.join(outDir, "pipe-home-"));
+        const file = path.join(pipeHome, "spark-preferences.json");
+        const pipe = kind === "a named pipe" ? file : path.join(pipeHome, "pipe");
+        if (spawnSync("mkfifo", [pipe]).status !== 0) {
+          check(`mkfifo works (${kind})`, false);
+          continue;
+        }
+        if (pipe !== file) fs.symlinkSync(pipe, file);
+        const child = `
+          const prefs = require(process.argv[1]);
+          const fromDisk = prefs.readPreferenceFromDiskSync("remoteAccessEnabled");
+          const cached = prefs.getPreferenceSync("remoteAccessEnabled");
+          process.stdout.write(JSON.stringify({ fromDisk, cached }));
+        `;
+        const run = spawnSync(process.execPath, ["-e", child, fs.realpathSync(outfile)], {
+          env: { ...process.env, CODARA_HOME_DIR: pipeHome },
+          encoding: "utf8",
+          timeout: 15_000,
+        });
+        check(`${kind}: the startup reads return instead of blocking`, run.status === 0 && run.signal === null, `status ${run.status}, signal ${run.signal}`);
+        check(`${kind}: with the defaults`, run.stdout === JSON.stringify({ fromDisk: false, cached: false }), run.stdout);
+      }
+    }
   } finally {
     if (savedHome === undefined) delete process.env.CODARA_HOME_DIR;
     else process.env.CODARA_HOME_DIR = savedHome;

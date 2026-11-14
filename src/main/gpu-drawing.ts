@@ -25,6 +25,7 @@ import {
 import { isProcessAlive } from "./app-exit";
 import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
+import { readRegularFileSync } from "./read-regular-file-sync";
 import type { IpcHandle } from "./ipc";
 import { onPreferenceChange, readPreferenceFromDiskSync, setPreference } from "./preferences-store";
 
@@ -35,12 +36,16 @@ import { onPreferenceChange, readPreferenceFromDiskSync, setPreference } from ".
 // write is synchronous: the clean-exit write runs in process "exit".
 
 const PREFERENCE = "waylandHardwareAcceleration";
-// A quit that has not ended the process by then was called off (the live-work
-// prompt); its own hard-exit fallback fires after 5 s.
+// A backstop only: a quit marked here has passed the live-work prompt and
+// ends within the 5 s hard-exit fallback. A system shutdown the session
+// manager then calls off still stops counting as a quit after this.
 const QUIT_CANCELLED_AFTER_MS = 30_000;
+// The file holds one small record; anything bigger is not ours.
+const STATE_MAX_BYTES = 1024 * 1024;
 
 let plan: GpuDrawingPlan | null = null;
 let bootId: string | null = null;
+let markQuit: ((why: string) => void) | null = null;
 
 function statePath(): string {
   return join(codaraHome(), GPU_DRAWING_STATE_FILE);
@@ -48,7 +53,7 @@ function statePath(): string {
 
 function readState(): GpuDrawingState {
   try {
-    return parseGpuDrawingState(readFileSync(statePath(), "utf8"));
+    return parseGpuDrawingState(readRegularFileSync(statePath(), STATE_MAX_BYTES));
   } catch {
     return {};
   }
@@ -173,7 +178,10 @@ export function startGpuDrawingSafetyNet(): void {
       updateState((state) => stateAfterQuitCancelled(state, process.pid));
     }, QUIT_CANCELLED_AFTER_MS).unref();
   };
-  app.on("before-quit", () => quitStarted("before-quit"));
+  // Not on before-quit itself: the live-work prompt can call that quit off,
+  // and Codara's handler calls preventDefault on a quit it lets through too
+  // (to run its async cleanup), so the event cannot tell the two apart.
+  markQuit = quitStarted;
   powerMonitor.on("shutdown", () => quitStarted("system shutdown"));
 
   let recoverableExits = 0;
@@ -194,6 +202,14 @@ export function startGpuDrawingSafetyNet(): void {
   };
   app.on("will-quit", cleanExit);
   process.on("exit", cleanExit);
+}
+
+/**
+ * Called by Codara's before-quit handler once a quit has passed the live-work
+ * prompt and will end the process: a GPU exit from here on is not a crash.
+ */
+export function gpuDrawingQuitGoingAhead(why: string): void {
+  markQuit?.(why);
 }
 
 function chromiumGpuCompositing(): boolean | null {

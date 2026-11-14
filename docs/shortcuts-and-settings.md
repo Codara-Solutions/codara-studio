@@ -470,8 +470,9 @@ CPU, turns the switch off, and says why once in a notice. A GPU process
 that crashes, runs out of memory or cannot start counts at once; one that
 Chromium ends and restarts on its own (after a lost graphics context, as
 can happen on waking from sleep) counts only the second time in a run.
-Codara ending once it has started to quit, or with a system shutdown, does
-not count. A logout that ends Codara without asking it to quit can still
+Codara ending once it has started to quit (past the question about work
+still running, when it asks one), or with a system shutdown, does not
+count. A quit called off at that question changes nothing. A logout that ends Codara without asking it to quit can still
 look like a crash. The row keeps the reason under the switch.
 Turn it on again to try once more. The record lives in
 `~/.codarastudio/gpu-drawing.json`.

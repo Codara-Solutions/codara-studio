@@ -1,7 +1,8 @@
 // The main-process half of drawing with the graphics card
 // (src/main/gpu-drawing.ts) with a fake Electron app and preferences store and
 // a real state file in a temporary Codara home: the record a guarded run
-// writes, a GPU crash, a quit, the preference turned off during the run, the
+// writes, a GPU crash, a quit (called off or going ahead), the preference
+// turned off during the run, a named pipe in place of the state file, the
 // start after a fallback (preference turned off, one notice, cleared by
 // turning it on by hand), and the row where Codara never turns it off.
 //
@@ -13,6 +14,7 @@ const { EventEmitter } = require("node:events");
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
+const { spawnSync } = require("node:child_process");
 const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -153,10 +155,22 @@ async function scenarios() {
     const t = fresh({ preference: true });
     t.mod.decideGpuDrawingAtStartup(true);
     t.mod.startGpuDrawingSafetyNet();
+    // The live-work prompt called this quit off: Codara's handler never
+    // reported it as going ahead.
     t.app.emit("before-quit");
-    check("a quit marks the record", typeof t.file()?.running?.quitAt === "string");
-    t.app.emit("child-process-gone", {}, { type: "GPU", reason: "killed", exitCode: 9 });
-    check("a GPU exit during the quit is not a crash", !t.file()?.fallback);
+    check("a quit called off leaves the record unmarked", t.file()?.running && !t.file().running.quitAt);
+    t.app.emit("child-process-gone", {}, { type: "GPU", reason: "crashed", exitCode: 139 });
+    check("so a GPU crash after it still writes the marker", t.file()?.fallback?.reason === "gpu-crash");
+  }
+  {
+    const t = fresh({ preference: true });
+    t.mod.decideGpuDrawingAtStartup(true);
+    t.mod.startGpuDrawingSafetyNet();
+    t.app.emit("before-quit");
+    t.mod.gpuDrawingQuitGoingAhead("before-quit");
+    check("a quit that goes ahead marks the record", typeof t.file()?.running?.quitAt === "string");
+    t.app.emit("child-process-gone", {}, { type: "GPU", reason: "crashed", exitCode: 139 });
+    check("a GPU exit during that quit is not a crash", !t.file()?.fallback);
   }
   {
     const t = fresh({ preference: true });
@@ -236,11 +250,47 @@ async function scenarios() {
   }
 }
 
+// A state file that is a named pipe used to block the startup read for good.
+// The read runs in a child with a deadline, so a regression fails here
+// instead of hanging the suite. Named pipes: Linux and macOS only.
+function namedPipe() {
+  if (process.platform === "win32") return;
+  console.log("a named pipe where the state file should be");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "gpu-drawing-home-"));
+  homes.push(home);
+  const made = spawnSync("mkfifo", [path.join(home, "gpu-drawing.json")]);
+  if (made.status !== 0) {
+    check("mkfifo works", false, String(made.stderr));
+    return;
+  }
+  const child = `
+    const { EventEmitter } = require("node:events");
+    globalThis.__gpuStubs = {
+      electron: { app: new EventEmitter(), powerMonitor: new EventEmitter() },
+      preferences: { readPreferenceFromDiskSync: () => true, onPreferenceChange: () => () => {}, setPreference: async () => ({}) },
+      log: [],
+    };
+    process.stdout.write(JSON.stringify(require(process.argv[1]).decideGpuDrawingAtStartup(true)));
+  `;
+  const run = spawnSync(process.execPath, ["-e", child, bundle.outfile], {
+    env: { ...process.env, CODARA_HOME_DIR: home },
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+  check("the startup decision returns instead of blocking", run.status === 0 && run.signal === null, `status ${run.status}, signal ${run.signal}, ${run.stderr}`);
+  let plan = null;
+  try {
+    plan = JSON.parse(run.stdout);
+  } catch {}
+  check("and reads it as no state: the switch on draws with the graphics card", plan?.hardware === true && plan?.guarded === true, run.stdout);
+}
+
 (async () => {
   const savedHome = process.env.CODARA_HOME_DIR;
   await build();
   try {
     await scenarios();
+    namedPipe();
   } finally {
     if (savedHome === undefined) delete process.env.CODARA_HOME_DIR;
     else process.env.CODARA_HOME_DIR = savedHome;

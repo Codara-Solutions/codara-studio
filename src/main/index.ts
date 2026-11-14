@@ -115,7 +115,7 @@ import {
 } from "./orchestration/unified-account-migration";
 import { startClaudeFollow } from "./claude-follow/claude-follow-service";
 import { credentialMirror } from "./orchestration/credential-mirror";
-import { decideGpuDrawingAtStartup, startGpuDrawingSafetyNet } from "./gpu-drawing";
+import { decideGpuDrawingAtStartup, gpuDrawingQuitGoingAhead, startGpuDrawingSafetyNet } from "./gpu-drawing";
 
 // run-store is heavy (loads the manager protocol and agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
@@ -1955,6 +1955,8 @@ app.on("before-quit", (event) => {
     isQuitting = false;
     return;
   }
+  // Past the prompt this quit ends the process: a GPU exit is no crash now.
+  gpuDrawingQuitGoingAhead("before-quit");
   // Flag the quit BEFORE anything else. Otherwise the async cleanup below
   // preventDefault()s this quit, then later re-calls app.quit() — and on that
   // second pass the window `close` handler would still see isQuitting === false

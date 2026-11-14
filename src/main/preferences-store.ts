@@ -1,4 +1,4 @@
-import { readFileSync, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import {
   APP_THEME_IDS,
@@ -31,11 +31,14 @@ import { normalizeForecastIdeas } from "@shared/usage-forecast";
 import { normalizeRepository } from "@shared/pull-request-watch";
 import { writeFileAtomic } from "./fs-atomic";
 import { codaraHome } from "./codara-home";
+import { readRegularFileSync } from "./read-regular-file-sync";
 
 // Per-user UI preferences (theme + future toggles like vim mode, inline-AI
 // model id, etc.). Lives next to spark-state.json / spark-settings.json so
 // the existing migration in spark-home.ts covers it implicitly.
 const PREFS_FILE = "spark-preferences.json";
+// The startup reads skip a pipe, a device or a runaway file (defaults instead).
+const PREFS_SYNC_MAX_BYTES = 16 * 1024 * 1024;
 
 let cache: AppPreferences | null = null;
 // Separate cache for getPreferenceSync(): the sync reader is invoked before
@@ -522,7 +525,7 @@ export async function flushPreferences(): Promise<void> {
 
 function readFromDiskSync(): AppPreferences {
   try {
-    const raw = readFileSync(prefsPath(), "utf8");
+    const raw = readRegularFileSync(prefsPath(), PREFS_SYNC_MAX_BYTES);
     return normalize(JSON.parse(raw) as Partial<AppPreferences>, {
       migrateLegacyInlineDefault: true,
     });
