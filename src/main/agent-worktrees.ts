@@ -1763,6 +1763,8 @@ interface VerifyContext {
   runs: Promise<RunState[]>;
   rendererTerminals: Promise<RendererTerminal[] | null>;
   fetchedTargets: Map<string, Promise<string | null>>;
+  // Origin branches fetched with an explicit destination, by name.
+  freshOriginCommits?: Map<string, Promise<string | null>>;
   // Prefetched merged pull requests for a whole list, or the error gh gave.
   mergedPullRequests?: { list: GitHubMergedPullRequest[] } | { error: string };
 }
@@ -1955,9 +1957,16 @@ async function resolveExplicitTarget(
   }
   const upstream = await originUpstream(repo, ownBranch);
   if (upstream && resolved.branch === upstream) {
-    const defaultBranch = await resolveMergeDefaultBranch(repo);
-    const kept = [recordedBase, defaultBranch].filter((name): name is string => Boolean(name) && name !== "HEAD");
-    if (!kept.some((name) => name === upstream || shortBranch(name) === upstream)) {
+    // Kept only when the recorded base or the default branch is that very
+    // branch on origin. A remote prefix is dropped only when it names a
+    // configured remote: a local feature/base is not origin's base.
+    let kept = false;
+    for (const name of [recordedBase, await resolveMergeDefaultBranch(repo)]) {
+      if (!name || name === "HEAD") continue;
+      const remote = await splitRemoteRef(repo, name);
+      if (remote ? remote.remote === "origin" && remote.branch === upstream : name === upstream) kept = true;
+    }
+    if (!kept) {
       return { name: resolved.name, ref: null, commit: null, problem: "it is the worktree's own branch, pushed under another name" };
     }
   }
@@ -2002,6 +2011,32 @@ async function originUpstream(repo: string, branch: string): Promise<string | nu
   if (remote !== "origin" || !merge.startsWith("refs/heads/")) return null;
   const name = merge.slice("refs/heads/".length);
   return name && name !== branch ? name : null;
+}
+
+// What origin has for `branch` now: fetched into its tracking ref with an
+// explicit destination, since a configured fetch refspec that leaves the
+// branch out lets a plain fetch succeed without refreshing it. Null when the
+// fetch fails or the name is no branch name.
+async function freshOriginCommit(ctx: VerifyContext, branch: string): Promise<string | null> {
+  ctx.freshOriginCommits ??= new Map();
+  let pending = ctx.freshOriginCommits.get(branch);
+  if (!pending) {
+    pending = (async () => {
+      const repo = ctx.scope.repoCwd;
+      const ref = `refs/remotes/origin/${branch}`;
+      try {
+        await runGit(repo, ["check-ref-format", `refs/heads/${branch}`]);
+        await runGit(repo, ["fetch", "--no-tags", "--end-of-options", "origin", `+refs/heads/${branch}:${ref}`], {
+          timeout: FETCH_TIMEOUT_MS,
+        });
+      } catch {
+        return null;
+      }
+      return revParse(repo, `${ref}^{commit}`);
+    })();
+    ctx.freshOriginCommits.set(branch, pending);
+  }
+  return pending;
 }
 
 function shortBranch(target: string): string {
@@ -2344,18 +2379,17 @@ async function defaultBranchTarget(
   judged: string,
   ownBranch: string,
   options: VerifyOptions,
-): Promise<{ name: string; commit: string; fetchFailed: boolean } | null> {
+): Promise<{ name: string; commit: string } | null> {
   const name = await resolveMergeDefaultBranch(ctx.scope.repoCwd);
   if (!name || shortBranch(name) === ownBranch || name === ownBranch) return null;
   let resolved = await resolveTarget(ctx, name);
-  let fetchFailed = false;
   // Fetched before it is compared: a stale default branch can sit at the
   // judged commit while the remote's has moved on to include the work.
   if (resolved.commit && options.fetch && !options.pinned) {
-    fetchFailed = (await fetchTargetOnce(ctx, resolved.name)) !== null;
+    await fetchTargetOnce(ctx, resolved.name);
     resolved = await resolveTarget(ctx, name);
   }
-  return resolved.commit && resolved.commit !== judged ? { name: resolved.name, commit: resolved.commit, fetchFailed } : null;
+  return resolved.commit && resolved.commit !== judged ? { name: resolved.name, commit: resolved.commit } : null;
 }
 
 // Merged pull requests that may have this exact tip as head under another
@@ -2549,11 +2583,18 @@ async function proveMerged(
         verdict.pullRequest = stacked.pullRequest;
         if (stacked.via.length) verdict.details.via = stacked.via;
       } else {
-        // Opened from another branch name: landed only in a target fetched
-        // now, or the default branch; a stale target copy proves nothing.
-        const landing = [fallback?.fetchFailed ? null : fallback?.commit, targetFetchFailed ? null : target.commit].filter(
-          (commit): commit is string => Boolean(commit),
-        );
+        // Opened from another branch name: landed only in the target or
+        // the default branch as origin has it now. A local branch, or a copy
+        // this check did not refresh, proves nothing.
+        const landingBranches = new Set<string>();
+        if (options.fetch && targetOnOrigin) landingBranches.add(targetBranch);
+        const defaultRemote = explicitTarget ? null : await splitRemoteRef(repo, (await resolveMergeDefaultBranch(repo)) ?? "");
+        if (options.fetch && defaultRemote?.remote === "origin") landingBranches.add(defaultRemote.branch);
+        const landing: string[] = [];
+        for (const name of landingBranches) {
+          const commit = await freshOriginCommit(ctx, name);
+          if (commit) landing.push(commit);
+        }
         const byHead = await proveByMergedHead({
           repo,
           tip,

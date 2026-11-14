@@ -1034,6 +1034,59 @@ async function main() {
     git(pushedCopy.path, ["branch", "-q", "--unset-upstream"]);
     assert.equal((await aw.removeAgentWorktree(terminalAgent, { workspaceId: pushedCopy.workspaceId }, deps)).ok, true);
 
+    // A local base whose last segment is the upstream's name is not that
+    // branch on origin: the pushed copy stays refused.
+    git(repo, ["branch", "-q", "feature/suffix-base", "main"]);
+    const suffix = await aw.createAgentWorktree(terminalAgent, { branch: "fix/suffix", base: "feature/suffix-base" }, deps);
+    assert.equal(suffix.ok, true, JSON.stringify(suffix));
+    const suffixTip = commitFile(suffix.path, "suffix.txt", "unmerged\n", "unmerged work");
+    git(suffix.path, ["push", "-q", "-u", "origin", "HEAD:suffix-base"]);
+    const suffixNamed = await aw.removeAgentWorktree(terminalAgent, { workspaceId: suffix.workspaceId, target: "suffix-base" }, deps);
+    assert.equal(suffixNamed.code, "WORKTREE_TARGET_NOT_FOUND", JSON.stringify(suffixNamed));
+    assert.equal(git(repo, ["rev-parse", "refs/heads/fix/suffix"]), suffixTip, "the unmerged branch is kept");
+    git(repo, ["push", "-q", "origin", "--delete", "suffix-base"]);
+    git(repo, ["fetch", "-q", "--prune", "origin"]);
+    git(suffix.path, ["reset", "-q", "--hard", "HEAD~1"]);
+    git(suffix.path, ["branch", "-q", "--unset-upstream"]);
+    assert.equal((await aw.removeAgentWorktree(terminalAgent, { workspaceId: suffix.workspaceId }, deps)).ok, true);
+    git(repo, ["branch", "-q", "-D", "feature/suffix-base"]);
+
+    // The merge commit counts only in what origin has now: a local branch
+    // holding it, or a tracking ref the fetch refspec leaves stale, after
+    // origin dropped that merge, proves nothing.
+    const dropped = await mergedUnderOtherName("dropped-merge");
+    const preMerge = git(repo, ["rev-parse", `${dropped.squash}~1`]);
+    git(repo, ["checkout", "-q", "-b", "release-dropped-local", preMerge]);
+    git(repo, ["merge", "-q", "--squash", "fix/dropped-merge"]);
+    git(repo, ["commit", "-q", "-m", "squash into release"]);
+    const droppedMerge = git(repo, ["rev-parse", "HEAD"]);
+    const staleTip = commitFile(repo, "dropped-merge.txt", "rewritten on release\n", "release moves on");
+    git(repo, ["checkout", "-q", "main"]);
+    git(repo, ["push", "-q", "origin", `${preMerge}:refs/heads/release-dropped`]);
+    git(repo, ["update-ref", "refs/remotes/origin/release-dropped", staleTip]);
+    h.pulls = [{ ...dropped.pr, baseRefName: "release-dropped", mergeCommitOid: droppedMerge }];
+    assert.deepEqual(
+      (await checkOnly(dropped.made, { target: "release-dropped-local" })).blockers,
+      ["WORKTREE_NOT_MERGED"],
+      "a local branch holding a merge origin dropped",
+    );
+    git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"]);
+    try {
+      const staleRefused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: dropped.made.workspaceId, target: "origin/release-dropped" }, deps);
+      assert.equal(staleRefused.code, "WORKTREE_NOT_MERGED", JSON.stringify(staleRefused));
+    } finally {
+      git(repo, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    }
+    assert.equal(git(repo, ["rev-parse", "refs/heads/fix/dropped-merge"]), dropped.head, "the branch is kept");
+    // Once origin holds the merge again, the same target proves it.
+    git(repo, ["push", "-q", "-f", "origin", `${staleTip}:refs/heads/release-dropped`]);
+    const droppedRemoved = await aw.removeAgentWorktree(terminalAgent, { workspaceId: dropped.made.workspaceId, target: "origin/release-dropped" }, deps);
+    assert.equal(droppedRemoved.ok, true, JSON.stringify(droppedRemoved));
+    assert.equal(droppedRemoved.proof, "pull-request");
+    git(repo, ["push", "-q", "origin", "--delete", "release-dropped"]);
+    git(repo, ["fetch", "-q", "--prune", "origin"]);
+    git(repo, ["branch", "-q", "-D", "release-dropped-local"]);
+
     // One file under the ignored folder keeps blocking.
     const keptFile = await mergedUnderOtherName("kept-file");
     h.pulls = [keptFile.pr];
