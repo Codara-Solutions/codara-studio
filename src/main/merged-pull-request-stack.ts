@@ -144,13 +144,14 @@ export async function proveByMergedHead(input: HeadProofInput): Promise<HeadProo
   const landing = input.landing.filter((commit) => OID.test(commit));
   let elsewhere: HeadProof | null = null;
   const seen = new Set<number>();
+  let tipTree: string | null | undefined;
   for (const pr of input.candidates) {
     if (seen.has(pr.number)) continue;
     seen.add(pr.number);
     if (pr.isCrossRepository || !OID.test(pr.headRefOid) || pr.headRefOid.toLowerCase() !== tip) continue;
     const merged = pr.mergeCommitOid && OID.test(pr.mergeCommitOid) ? pr.mergeCommitOid.toLowerCase() : null;
     if (!merged) continue;
-    const tipTree = await input.treeOf(tip);
+    tipTree ??= await input.treeOf(tip);
     const holdsTip =
       (tipTree !== null && tipTree === (await input.treeOf(merged))) || (await input.contentIn(tip, merged)) === true;
     if (!holdsTip) continue;

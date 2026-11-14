@@ -1242,10 +1242,12 @@ the `blockers` and a `hint`:
   commit) counts only through a merged pull request from the same
   repository whose head is exactly the last commit, whose merge commit is in
   the target or the default branch as fetched now and holds that commit's
-  content; merged into another branch, the refusal names it in `retryWith`. A
+  content; merged into another branch, the refusal's hint names it. A
   recorded base that no longer exists is replaced by the default branch. A
   `target` the agent names must be another local or remote-tracking
-  branch, never the worktree's own branch, its pushed copy or a commit id;
+  branch, never the worktree's own branch, its pushed copy (under its own
+  name or its upstream's, unless that is its base or the default branch) or
+  a commit id;
 - it has no uncommitted or untracked files (edits hidden by
   `assume-unchanged` or `skip-worktree` count), no merge or rebase in
   progress, and no ignored files beyond build output and caches

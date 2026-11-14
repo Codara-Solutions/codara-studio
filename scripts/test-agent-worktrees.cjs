@@ -989,8 +989,9 @@ async function main() {
     h.pullsError = null;
     assert.equal((await checkOnly(closed.made)).wouldRemove, true);
 
-    // Merged into a branch that is not the target: the hint names it, and
-    // naming it proves the merge.
+    // Merged into a branch that is not the target: the hint names it without
+    // a retryWith (that branch may be unmerged itself), and naming it proves
+    // the merge.
     const elsewhereMerge = await mergedUnderOtherName("merged-elsewhere");
     git(repo, ["push", "-q", "origin", `${elsewhereMerge.squash}~1:refs/heads/release-elsewhere`]);
     git(repo, ["checkout", "-q", "-b", "release-elsewhere", "origin/release-elsewhere"]);
@@ -1004,11 +1005,34 @@ async function main() {
     h.pulls = [{ ...elsewhereMerge.pr, baseRefName: "release-elsewhere", mergeCommitOid: releaseMerge }];
     const elsewhereRefused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: elsewhereMerge.made.workspaceId }, deps);
     assert.equal(elsewhereRefused.code, "WORKTREE_NOT_MERGED", JSON.stringify(elsewhereRefused));
-    assert.deepEqual(elsewhereRefused.retryWith, { target: "release-elsewhere" });
-    assert.match(elsewhereRefused.hint, /release-elsewhere/);
+    assert.equal(elsewhereRefused.retryWith, undefined);
+    assert.match(elsewhereRefused.hint, /#\d+ merged this exact commit into release-elsewhere/);
     assert.equal((await checkOnly(elsewhereMerge.made, { target: "release-elsewhere" })).wouldRemove, true);
     h.pulls = [{ ...elsewhereMerge.pr, mergeCommitOid: releaseMerge }];
     assert.deepEqual((await checkOnly(elsewhereMerge.made)).blockers, ["WORKTREE_NOT_MERGED"], "a merge commit main does not hold");
+
+    // Its copy pushed under another name, with nothing merged, is never a
+    // target: neither suggested nor accepted.
+    const pushedCopy = await aw.createAgentWorktree(terminalAgent, { branch: "fix/pushed-copy" }, deps);
+    const pushedCopyTip = commitFile(pushedCopy.path, "pushed-copy.txt", "unmerged\n", "unmerged work");
+    git(pushedCopy.path, ["push", "-q", "-u", "origin", "HEAD:feat/pushed-copy"]);
+    h.pulls = [];
+    const copyRefused = await aw.removeAgentWorktree(terminalAgent, { workspaceId: pushedCopy.workspaceId }, deps);
+    assert.equal(copyRefused.code, "WORKTREE_NOT_MERGED", JSON.stringify(copyRefused));
+    assert.equal(copyRefused.retryWith, undefined, "the pushed copy is not offered as a target");
+    assert.equal(copyRefused.details.pushed, true, "pushed under its upstream's name");
+    assert.deepEqual(copyRefused.details.upstream, { branch: "origin/feat/pushed-copy", gone: false });
+    for (const target of ["feat/pushed-copy", "origin/feat/pushed-copy"]) {
+      const named = await aw.removeAgentWorktree(terminalAgent, { workspaceId: pushedCopy.workspaceId, target }, deps);
+      assert.equal(named.code, "WORKTREE_TARGET_NOT_FOUND", JSON.stringify(named));
+      assert.match(named.details.targetProblem, /pushed under another name/);
+    }
+    assert.equal(git(repo, ["rev-parse", "refs/heads/fix/pushed-copy"]), pushedCopyTip, "the unmerged branch is kept");
+    git(repo, ["push", "-q", "origin", "--delete", "feat/pushed-copy"]);
+    git(repo, ["fetch", "-q", "--prune", "origin"]);
+    git(pushedCopy.path, ["reset", "-q", "--hard", "HEAD~1"]);
+    git(pushedCopy.path, ["branch", "-q", "--unset-upstream"]);
+    assert.equal((await aw.removeAgentWorktree(terminalAgent, { workspaceId: pushedCopy.workspaceId }, deps)).ok, true);
 
     // One file under the ignored folder keeps blocking.
     const keptFile = await mergedUnderOtherName("kept-file");

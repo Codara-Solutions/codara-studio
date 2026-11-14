@@ -1924,13 +1924,15 @@ async function refIsPresent(cwd: string, ref: string): Promise<boolean> {
 }
 
 // A caller-named merge target must be a branch, local or remote-tracking,
-// other than the worktree's own. A commit id, a revision expression or the
-// branch itself would make the ancestor proof hold for any tip, and removal
-// would then delete unmerged work.
+// other than the worktree's own or its copy pushed under another name (its
+// upstream, unless that is the recorded base or the default branch). A commit
+// id, a revision expression or the branch itself would make the ancestor
+// proof hold for any tip, and removal would then delete unmerged work.
 async function resolveExplicitTarget(
   ctx: VerifyContext,
   raw: string,
   ownBranch: string,
+  recordedBase: string | null | undefined,
 ): Promise<{ name: string; ref: string | null; commit: string | null; problem?: string }> {
   const repo = ctx.scope.repoCwd;
   const name = raw.trim();
@@ -1950,6 +1952,14 @@ async function resolveExplicitTarget(
   }
   if (resolved.branch === ownBranch) {
     return { name: resolved.name, ref: null, commit: null, problem: "it is the worktree's own branch" };
+  }
+  const upstream = await originUpstream(repo, ownBranch);
+  if (upstream && resolved.branch === upstream) {
+    const defaultBranch = await resolveMergeDefaultBranch(repo);
+    const kept = [recordedBase, defaultBranch].filter((name): name is string => Boolean(name) && name !== "HEAD");
+    if (!kept.some((name) => name === upstream || shortBranch(name) === upstream)) {
+      return { name: resolved.name, ref: null, commit: null, problem: "it is the worktree's own branch, pushed under another name" };
+    }
   }
   return { name: resolved.name, ref: resolved.ref, commit: await revParse(repo, `${resolved.ref}^{commit}`) };
 }
@@ -2334,17 +2344,18 @@ async function defaultBranchTarget(
   judged: string,
   ownBranch: string,
   options: VerifyOptions,
-): Promise<{ name: string; commit: string } | null> {
+): Promise<{ name: string; commit: string; fetchFailed: boolean } | null> {
   const name = await resolveMergeDefaultBranch(ctx.scope.repoCwd);
   if (!name || shortBranch(name) === ownBranch || name === ownBranch) return null;
   let resolved = await resolveTarget(ctx, name);
+  let fetchFailed = false;
   // Fetched before it is compared: a stale default branch can sit at the
   // judged commit while the remote's has moved on to include the work.
   if (resolved.commit && options.fetch && !options.pinned) {
-    await fetchTargetOnce(ctx, resolved.name);
+    fetchFailed = (await fetchTargetOnce(ctx, resolved.name)) !== null;
     resolved = await resolveTarget(ctx, name);
   }
-  return resolved.commit && resolved.commit !== judged ? { name: resolved.name, commit: resolved.commit } : null;
+  return resolved.commit && resolved.commit !== judged ? { name: resolved.name, commit: resolved.commit, fetchFailed } : null;
 }
 
 // Merged pull requests that may have this exact tip as head under another
@@ -2424,7 +2435,7 @@ async function proveMerged(
   // With no default branch either, origin/HEAD names nothing: not found.
   if (!targetName || targetName === "HEAD") targetName = (await resolveMergeDefaultBranch(repo)) ?? "origin/HEAD";
   let target: { name: string; ref?: string | null; commit: string | null; problem?: string } = explicitTarget
-    ? await resolveExplicitTarget(ctx, explicitTarget, branch)
+    ? await resolveExplicitTarget(ctx, explicitTarget, branch, copy.baseBranch)
     : await resolveTarget(ctx, targetName);
   if (target.problem) {
     verdict.target = target.name;
@@ -2540,7 +2551,9 @@ async function proveMerged(
       } else {
         // Opened from another branch name: landed only in a target fetched
         // now, or the default branch; a stale target copy proves nothing.
-        const landing = [fallback?.commit, targetFetchFailed ? null : target.commit].filter((commit): commit is string => Boolean(commit));
+        const landing = [fallback?.fetchFailed ? null : fallback?.commit, targetFetchFailed ? null : target.commit].filter(
+          (commit): commit is string => Boolean(commit),
+        );
         const byHead = await proveByMergedHead({
           repo,
           tip,
@@ -2588,7 +2601,15 @@ async function proveMerged(
   )
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((name) => name && name !== "origin" && name !== "origin/HEAD" && name !== `origin/${branch}` && name !== target.name);
+    .filter(
+      (name) =>
+        name &&
+        name !== "origin" &&
+        name !== "origin/HEAD" &&
+        name !== `origin/${branch}` &&
+        name !== (upstream ? `origin/${upstream}` : null) &&
+        name !== target.name,
+    );
   if (holders.length) verdict.details.containedIn = holders.slice(0, 3);
   if (ghError) {
     verdict.mergeStatus = "unknown";
@@ -2990,7 +3011,8 @@ async function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): 
   const contained = Array.isArray(verdict.details.containedIn) ? (verdict.details.containedIn as string[]) : [];
   // Naming the branch it merged into helps only when that is not the target already judged.
   const mergedInto = verdict.details.mergedInto as { branch: string; pullRequest: { number: number } } | undefined;
-  const otherBranch = mergedInto && mergedInto.branch !== shortBranch(verdict.target ?? "") ? mergedInto : undefined;
+  const otherBranch =
+    mergedInto && mergedInto.branch !== verdict.target && `origin/${mergedInto.branch}` !== verdict.target ? mergedInto : undefined;
   const defaultTarget = code === "WORKTREE_TARGET_NOT_FOUND" ? await resolveMergeDefaultBranch(ctx.scope.repoCwd) : null;
   const dynamic: { hint?: string; retryWith?: Record<string, unknown> } = {};
   if (ownedButMerged) dynamic.hint = OWNED_BUT_MERGED_HINT;
@@ -3003,8 +3025,9 @@ async function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): 
   } else if (code === "WORKTREE_IGNORED_FILES") dynamic.retryWith = { discardIgnoredFiles: true };
   else if (code === "WORKTREE_NOT_MERGED") {
     if (otherBranch) {
-      dynamic.retryWith = { target: otherBranch.branch };
-      dynamic.hint = `pull request #${otherBranch.pullRequest.number} merged this exact commit into ${otherBranch.branch}: pass target:"${otherBranch.branch}" if that is where the work belongs`;
+      // No retryWith: that branch may itself be an open pull request's, and
+      // removing the worktree would then leave the work only there.
+      dynamic.hint = `pull request #${otherBranch.pullRequest.number} merged this exact commit into ${otherBranch.branch}, not ${verdict.target}: if ${otherBranch.branch} is itself merged or is where the work belongs, pass target:"${otherBranch.branch}"; otherwise merge ${otherBranch.branch} first`;
     } else if (contained.length) {
       dynamic.retryWith = { target: contained[0] };
       dynamic.hint = `its commits are already in ${contained[0]}: pass target:"${contained[0]}" if that is where the work was merged; otherwise push it and merge its PR into ${verdict.target}`;
@@ -3456,7 +3479,7 @@ async function removeLocked(
         const baseName =
           recordedBase && recordedBase !== "HEAD" ? recordedBase : await resolveMergeDefaultBranch(repo);
         const target = input.target?.trim()
-          ? await resolveExplicitTarget(ctx, input.target, branch)
+          ? await resolveExplicitTarget(ctx, input.target, branch, recordedBase)
           : baseName
             ? await resolveTarget(ctx, baseName)
             : { name: "origin/HEAD", commit: null };
