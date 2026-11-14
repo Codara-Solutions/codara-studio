@@ -13,7 +13,9 @@ on:
 
 concurrency:
   group: budgets-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # A newer push to a pull request replaces its run; every commit on main
+  # keeps its own result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

@@ -27,8 +27,8 @@ CI tests every pull request into `main` and every push to it on macOS
 (`ci.yml`: typechecks, build, every unit suite) and on Linux, headless under
 Xvfb (`ci-linux.yml`: build, every unit suite and an e2e smoke set).
 `budgets.yml` checks bundle sizes and reports startup time and memory on the
-same events. The app also
-packages for Windows (`npm run package:win`), but CI does not test it.
+same events. The app also packages for Windows (`npm run package:win`), but CI
+does not test it.
 
 **Your real data.** A dev build uses the same `~/.codarastudio` as an
 installed Codara Studio. It also writes the same hooks and MCP entries into
@@ -131,8 +131,10 @@ allowlist its own finding anyway.
 - Open it against `main` and fill in the template: what changed and why,
   how you tested it, anything the reviewer should know. Add screenshots for
   UI changes.
-- CI (`.github/workflows/ci.yml`) runs the four typechecks, a build and
-  every unit suite on macOS. Keep it green.
+- CI runs the four typechecks, a build and every unit suite on macOS
+  (`.github/workflows/ci.yml`), the build, every unit suite and an e2e smoke
+  set on Linux (`ci-linux.yml`), and the bundle budgets (`budgets.yml`).
+  Keep them green.
 - Keep it small. `PR hygiene` (`scripts/check-pr-hygiene.cjs`) counts the
   added and deleted lines, leaving out lockfiles and `docs/`: above 800 it
   warns, above 2,000 it fails unless the pull request has the `large-pr`

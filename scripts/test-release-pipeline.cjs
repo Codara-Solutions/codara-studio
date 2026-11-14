@@ -228,9 +228,14 @@ test("every branch-filtered push and pull request trigger covers main", () => {
   for (const required of ["budgets.yml", "ci-linux.yml", "ci.yml"]) assert.ok(files.includes(required), required);
   for (const name of files) {
     const triggers = yaml.load(fs.readFileSync(path.join(dir, name), "utf8")).on;
-    for (const event of ["push", "pull_request"]) {
-      const branches = triggers?.[event]?.branches;
-      if (branches) assert.ok(branches.includes("main"), `${name}: on.${event}.branches ${JSON.stringify(branches)} leaves out main`);
+    for (const event of ["push", "pull_request", "pull_request_target"]) {
+      const filter = triggers?.[event];
+      if (filter?.branches !== undefined) {
+        assert.ok(Array.isArray(filter.branches) && filter.branches.includes("main"), `${name}: on.${event}.branches ${JSON.stringify(filter.branches)} leaves out main`);
+      }
+      if (filter?.["branches-ignore"] !== undefined) {
+        assert.ok(!filter["branches-ignore"].includes("main"), `${name}: on.${event}.branches-ignore leaves out main`);
+      }
     }
   }
 });
