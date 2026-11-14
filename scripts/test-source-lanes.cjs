@@ -173,7 +173,8 @@ function git(cwd, ...args) {
     let clock = 1_000;
     const now = () => clock;
     let reads = 0;
-    const counting = { defaultBase: async () => (reads++, "main") };
+    let defaults = 0;
+    const counting = { workspaceBase: async () => (reads++, null), defaultBase: async () => (defaults++, "main") };
     const first = await api.readLaneChanges([tree, repo, tree], counting, now);
     assert.deepEqual(Object.keys(first).sort(), [repo, tree].sort(), "a folder asked twice is read once");
     const seen = reads;
@@ -182,6 +183,10 @@ function git(cwd, ...args) {
     clock += 6_000;
     await api.readLaneChanges([tree], counting, now);
     assert.ok(reads > seen, "an old read is read again");
+    assert.equal(defaults, 2, "the default branch is resolved once per folder while it is fresh");
+    clock += 5 * 60_000;
+    await api.readLaneChanges([tree], counting, now);
+    assert.equal(defaults, 3, "and again once it is old");
     const many = Array.from({ length: api.MAX_LANE_READS + 5 }, (_, index) => path.join(root, `nowhere-${index}`));
     assert.equal(Object.keys(await api.readLaneChanges(many, counting, now)).length, api.MAX_LANE_READS);
   } finally {

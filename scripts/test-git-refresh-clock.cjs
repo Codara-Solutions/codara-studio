@@ -1,0 +1,215 @@
+// The renderer's one git clock (src/renderer/src/git/gitRefreshClock.ts) and
+// the fingerprints it compares (src/main/git-state.ts):
+//   - a checkout on screen whose git state moves is re-read within 5 s;
+//   - off-screen checkouts are compared every HIDDEN_EVERY ticks;
+//   - nothing runs while the window is unfocused, and focus compares at once;
+//   - the fingerprint moves on commit, stage, checkout, branch and remote
+//     updates, and not on a working-tree edit or a `git status`;
+//   - the branch is read from HEAD's file for a loose ref, never guessed.
+//
+//   node scripts/test-git-refresh-clock.cjs
+
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { execFileSync } = require("node:child_process");
+const esbuild = require("esbuild");
+
+const ROOT = path.resolve(__dirname, "..");
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function load(dir, entry, name) {
+  const outfile = path.join(dir, `${name}.cjs`);
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, entry)],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    alias: { "@shared": path.join(ROOT, "src", "shared") },
+    logLevel: "silent",
+  });
+  return require(outfile);
+}
+
+let passed = 0;
+async function check(name, fn) {
+  await fn();
+  passed += 1;
+  console.log(`ok - ${name}`);
+}
+
+async function main() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-git-clock-"));
+  try {
+    const clockModule = await load(dir, "src/renderer/src/git/gitRefreshClock.ts", "clock");
+    const state = await load(dir, "src/main/git-state.ts", "state");
+
+    // ── The clock, with a scripted fingerprint source ──
+    const signatures = new Map();
+    let asked = [];
+    const intervals = new Set();
+    const env = {
+      signatures: async (cwds) => {
+        asked.push([...cwds]);
+        return Object.fromEntries(cwds.map((cwd) => [cwd, signatures.get(cwd) ?? null]));
+      },
+      setInterval: (fn, ms) => {
+        const handle = setInterval(fn, ms);
+        intervals.add(handle);
+        return handle;
+      },
+      clearInterval: (handle) => {
+        clearInterval(handle);
+        intervals.delete(handle);
+      },
+    };
+    const clock = clockModule.createGitRefreshClock(env);
+    const seen = { visible: [], hidden: [] };
+    signatures.set("/on-screen", "a");
+    signatures.set("/off-screen", "x");
+    const stopVisible = clock.watch({ cwds: ["/on-screen"], visible: true, onRefresh: (changed, reason) => seen.visible.push({ changed: [...changed], reason, at: Date.now() }) });
+    const stopHidden = clock.watch({ cwds: ["/off-screen"], visible: false, onRefresh: (changed, reason) => seen.hidden.push({ changed: [...changed], reason }) });
+
+    await check("an unfocused window starts no clock and reads nothing", async () => {
+      assert.equal(intervals.size, 0);
+      assert.equal(asked.length, 0);
+    });
+
+    await check("focus compares every checkout at once and tells every watcher", async () => {
+      await clock.focus();
+      assert.deepEqual(asked.pop().sort(), ["/off-screen", "/on-screen"]);
+      assert.equal(seen.visible.at(-1).reason, "focus");
+      assert.equal(seen.hidden.at(-1).reason, "focus");
+      assert.deepEqual(seen.visible.at(-1).changed, [], "a first sighting is not a change");
+      assert.equal(intervals.size, 1);
+    });
+
+    await check("a change on screen reaches its watcher within 5 s, on the real timer", async () => {
+      const changedAt = Date.now();
+      signatures.set("/on-screen", "b");
+      const deadline = changedAt + 5_000;
+      while (Date.now() < deadline && !seen.visible.some((entry) => entry.changed.includes("/on-screen"))) await sleep(50);
+      const hit = seen.visible.find((entry) => entry.changed.includes("/on-screen"));
+      assert.ok(hit, "the visible checkout was re-read");
+      assert.ok(hit.at - changedAt <= clockModule.TICK_MS + 500, `within one tick (${hit.at - changedAt} ms)`);
+    });
+
+    await check("off-screen checkouts are compared only every HIDDEN_EVERY ticks", async () => {
+      asked = [];
+      seen.hidden.length = 0;
+      signatures.set("/off-screen", "y");
+      for (let i = 0; i < clockModule.HIDDEN_EVERY; i++) await clock.tick();
+      const withHidden = asked.filter((cwds) => cwds.includes("/off-screen"));
+      assert.equal(withHidden.length, 1, "one comparison in HIDDEN_EVERY ticks");
+      assert.deepEqual(seen.hidden.map((entry) => entry.changed), [["/off-screen"]]);
+    });
+
+    await check("losing focus stops the clock", async () => {
+      clock.pause();
+      assert.equal(intervals.size, 0);
+      asked = [];
+      await sleep(clockModule.TICK_MS + 300);
+      assert.equal(asked.length, 0);
+    });
+
+    await check("a watcher that leaves is never called again, and the last one stops the timer", async () => {
+      await clock.focus();
+      stopHidden();
+      const before = seen.hidden.length;
+      await clock.focus();
+      assert.equal(seen.hidden.length, before);
+      stopVisible();
+      assert.equal(intervals.size, 0);
+    });
+
+    // ── Fingerprints from a real repository ──
+    const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0" };
+    const git = (cwd, args) => execFileSync("git", args, { cwd, env: gitEnv, encoding: "utf8" }).trim();
+    const repo = path.join(dir, "repo");
+    const tree = path.join(dir, "tree");
+    fs.mkdirSync(repo);
+    git(repo, ["init", "-q", "-b", "main"]);
+    git(repo, ["config", "user.email", "t@example.invalid"]);
+    git(repo, ["config", "user.name", "t"]);
+    fs.writeFileSync(path.join(repo, "a.txt"), "one\n");
+    git(repo, ["add", "a.txt"]);
+    git(repo, ["commit", "-q", "-m", "one"]);
+    git(repo, ["worktree", "add", "-q", "-b", "lane", tree]);
+    // Stamps are in ms; keep two writes from landing in the same one.
+    const settle = () => sleep(20);
+    const sig = (cwd) => state.gitStateSignature(cwd);
+
+    await check("a worktree finds its own git dir and the shared one", async () => {
+      const dirs = await state.gitDirsOf(path.join(tree));
+      assert.equal(fs.realpathSync(dirs.commonDir), fs.realpathSync(path.join(repo, ".git")));
+      assert.notEqual(dirs.gitDir, dirs.commonDir);
+      assert.equal(await state.gitDirsOf(path.join(os.tmpdir(), "codara-surely-not-a-repo", "x")), null);
+      assert.equal(await state.gitDirsOf("ssh://host/repo"), null);
+    });
+
+    await check("a working-tree edit and a git status leave the fingerprint alone", async () => {
+      const before = await sig(repo);
+      await settle();
+      fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
+      git(repo, ["status", "--porcelain"]);
+      assert.equal(await sig(repo), before);
+    });
+
+    await check("staging, committing and checking out move it", async () => {
+      let before = await sig(repo);
+      await settle();
+      git(repo, ["add", "a.txt"]);
+      assert.notEqual(await sig(repo), before, "stage");
+      before = await sig(repo);
+      await settle();
+      git(repo, ["commit", "-q", "-m", "two"]);
+      assert.notEqual(await sig(repo), before, "commit");
+      before = await sig(tree);
+      await settle();
+      git(tree, ["checkout", "-q", "-b", "other"]);
+      assert.notEqual(await sig(tree), before, "checkout in the worktree");
+    });
+
+    await check("a commit in the main checkout moves its worktrees' fingerprints (shared refs)", async () => {
+      const before = await sig(tree);
+      await settle();
+      fs.writeFileSync(path.join(repo, "b.txt"), "b\n");
+      git(repo, ["add", "b.txt"]);
+      git(repo, ["commit", "-q", "-m", "b"]);
+      assert.notEqual(await sig(tree), before);
+    });
+
+    await check("a remote branch update moves it, an unchanged fetch does not", async () => {
+      fs.mkdirSync(path.join(repo, ".git", "refs", "remotes", "origin"), { recursive: true });
+      const head = git(repo, ["rev-parse", "HEAD"]);
+      fs.writeFileSync(path.join(repo, ".git", "FETCH_HEAD"), `${head}\t\tbranch 'main' of example\n`);
+      const before = await sig(repo);
+      await settle();
+      fs.writeFileSync(path.join(repo, ".git", "FETCH_HEAD"), `${head}\t\tbranch 'main' of example\n`);
+      assert.equal(await sig(repo), before, "same fetch result");
+      await settle();
+      git(repo, ["update-ref", "refs/remotes/origin/feature", head]);
+      assert.notEqual(await sig(repo), before, "a new remote branch");
+    });
+
+    await check("the branch comes from HEAD's file for a loose ref only", async () => {
+      assert.equal(await state.branchFromFiles(repo), "main");
+      assert.equal(await state.branchFromFiles(tree), "other");
+      git(repo, ["pack-refs", "--all"]);
+      assert.equal(await state.branchFromFiles(repo), null, "a packed ref is left to git");
+      git(tree, ["checkout", "-q", "--detach"]);
+      assert.equal(await state.branchFromFiles(tree), null, "a detached HEAD is left to git");
+      assert.equal(await state.branchFromFiles(path.join(dir, "nowhere")), null);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  console.log(`\n${passed} git refresh clock checks passed.`);
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

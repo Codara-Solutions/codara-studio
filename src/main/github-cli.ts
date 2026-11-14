@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   GITHUB_PUBLISH_MAX_BODY_LENGTH,
   GITHUB_PUBLISH_MAX_TITLE_LENGTH,
@@ -16,6 +16,7 @@ import type {
   GitHubWorkspaceStatus,
 } from "@shared/github";
 import { resolveBinary } from "./binary-resolver";
+import { gitDirsOf } from "./git-state";
 
 export type {
   GitHubCheckSummary,
@@ -425,27 +426,10 @@ const repositoryCaches = new WeakMap<object, Map<string, RepositoryCacheEntry>>(
 export async function repositoryCacheKey(
   cwd: string,
 ): Promise<{ key: string; configMtimeMs: number } | null> {
-  if (!cwd.trim() || /^[a-z][a-z0-9+.-]*:\/\//i.test(cwd)) return null;
-  let dir = resolve(cwd);
-  for (;;) {
-    const dotGit = join(dir, ".git");
-    const found = await fs.stat(dotGit).catch(() => null);
-    if (found) {
-      let gitDir = dotGit;
-      if (found.isFile()) {
-        const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await fs.readFile(dotGit, "utf8").catch(() => ""));
-        if (!pointer) return null;
-        gitDir = resolve(dir, pointer[1]);
-        const common = (await fs.readFile(join(gitDir, "commondir"), "utf8").catch(() => "")).trim();
-        if (common) gitDir = resolve(gitDir, common);
-      }
-      const config = await fs.stat(join(gitDir, "config")).catch(() => null);
-      return config ? { key: gitDir, configMtimeMs: config.mtimeMs } : null;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
+  const dirs = await gitDirsOf(cwd);
+  if (!dirs) return null;
+  const config = await fs.stat(join(dirs.commonDir, "config")).catch(() => null);
+  return config ? { key: dirs.commonDir, configMtimeMs: config.mtimeMs } : null;
 }
 
 /** Test seam: forget every cached repository identity. */

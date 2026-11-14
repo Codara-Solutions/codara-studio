@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { buildRailFamily, buildRailTree, railMergeState } from "@shared/rail-tree";
 import { isRemotePath } from "@shared/remote";
 import { buildSourceLanes, type LaneChanges, type LaneInput, type SourceLanes } from "@shared/source-lanes";
@@ -6,13 +6,19 @@ import type { Workspace } from "@shared/types";
 import { railRowMerged, type WorktreeRailExternal, type WorktreeRailState } from "@shared/worktree-cleanup";
 import { usePullRequestWatches } from "../../../git/pullRequestWatchStore";
 import { useAgentLinesOf } from "../../workspace-status/agentLinesStore";
+import { useGitRefresh } from "../../../git/gitRefreshClock";
 
 // The lanes of the active workspace's project: the project's own checkout and
 // every worktree of it, wherever the user is standing. Agents land on the
 // lane they work in by the rail's own rule (buildRailFamily), so the rail and
 // this panel can never disagree on who works where.
 
-const POLL_MS = 15_000;
+// Lanes are read when the panel opens, when the window regains focus, when a
+// lane's git state moves (the shared clock, gitRefreshClock.ts), when a file
+// changes in the user's own checkout, and otherwise at most this often: edits
+// another lane has not committed or staged show by then.
+const SAFETY_MS = 5 * 60_000;
+const OWN_EDIT_DEBOUNCE_MS = 3_000;
 
 export interface SourceLanesContext {
   workspaces: readonly Workspace[];
@@ -65,30 +71,62 @@ export function useSourceLanes(
   );
   const cwdsKey = cwds.join("\n");
   const [changes, setChanges] = useState<Record<string, LaneChanges>>({});
+  const wanted = useMemo(
+    () => (own.visible && cwdsKey ? cwdsKey.split("\n").filter((cwd) => !isRemotePath(cwd)) : []),
+    [cwdsKey, own.visible],
+  );
+  const lastReadAt = useRef(0);
+  const readRef = useRef<((only?: readonly string[]) => void) | null>(null);
 
   useEffect(() => {
-    if (!own.visible || !cwdsKey) return;
-    const wanted = cwdsKey.split("\n").filter((cwd) => !isRemotePath(cwd));
     if (wanted.length === 0) return;
     let cancelled = false;
-    const read = () => {
+    // `only`: the lanes to re-read; the others keep what they showed.
+    const read = (only?: readonly string[]) => {
       if (document.hidden) return;
-      void window.spark.git.laneChanges(wanted).then(
+      const lanes = only ? wanted.filter((cwd) => only.includes(cwd)) : wanted;
+      if (lanes.length === 0) return;
+      if (!only) lastReadAt.current = Date.now();
+      void window.spark.git.laneChanges(lanes).then(
         (next) => {
-          if (!cancelled) setChanges(next);
+          if (cancelled) return;
+          setChanges((prev) => {
+            if (!only) return next;
+            const merged: Record<string, LaneChanges> = {};
+            for (const cwd of wanted) {
+              const value = next[cwd] ?? prev[cwd];
+              if (value) merged[cwd] = value;
+            }
+            return merged;
+          });
         },
         () => undefined,
       );
     };
+    readRef.current = read;
     read();
-    const timer = window.setInterval(read, POLL_MS);
-    window.addEventListener("focus", read);
+    // The user's own checkout: an edit there shows without waiting.
+    const ownCwd = workspace?.cwd;
+    let editTimer: number | null = null;
+    const unsubscribe = ownCwd && wanted.includes(ownCwd)
+      ? window.spark.fs.onChanged((event) => {
+          if (event.root !== ownCwd) return;
+          if (editTimer !== null) window.clearTimeout(editTimer);
+          editTimer = window.setTimeout(() => read([ownCwd]), OWN_EDIT_DEBOUNCE_MS);
+        })
+      : null;
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
-      window.removeEventListener("focus", read);
+      if (readRef.current === read) readRef.current = null;
+      if (editTimer !== null) window.clearTimeout(editTimer);
+      unsubscribe?.();
     };
-  }, [cwdsKey, own.visible, own.version]);
+  }, [wanted, own.version, workspace?.cwd]);
+
+  useGitRefresh(wanted, true, (changed, reason) => {
+    if (reason === "focus" || Date.now() - lastReadAt.current >= SAFETY_MS) readRef.current?.();
+    else if (changed.length > 0) readRef.current?.(changed);
+  });
 
   return useMemo(() => {
     if (!project || !workspace) return buildSourceLanes([]);

@@ -391,6 +391,13 @@ async function main() {
     });
 
     const states = Object.fromEntries((await rail.railWorktreeStates(deps)).map((entry) => [entry.workspaceId, entry]));
+    await check("a read of some projects returns only their rows", async () => {
+      const projects = [...new Set(h.state.workspaces.map(rail.railProjectOf))];
+      const own = await rail.railWorktreeOverview(deps, { external: false, projects });
+      assert.deepEqual(own.states.map((entry) => entry.workspaceId).sort(), Object.keys(states).sort(), "its own project reads every row");
+      const none = await rail.railWorktreeOverview(deps, { projects: [path.join(scratch, "elsewhere")] });
+      assert.deepEqual([none.states.length, none.external.length], [0, 0], "another project's read touches none of them");
+    });
     await check("the rail reads merge and folder state for every copy-branch workspace", async () => {
       assert.equal(states["ws-repo"], undefined, "the main checkout is not a copy-branch row");
       assert.equal(states["ws-merged"].merge, "merged");
