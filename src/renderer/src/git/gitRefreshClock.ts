@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
 // One clock for every git read in the window, instead of a timer per hook.
 //
@@ -192,14 +192,15 @@ export function gitReadsActive(): boolean {
  * Calls `onRefresh` on the shared clock for these checkouts while the window
  * is focused: every tick (on screen) or every HIDDEN_EVERY ticks (off screen),
  * and at once when focus returns. A checkout's first comparison counts as a
- * change, unless the returned `baseline` was awaited for it right before the
- * hook's own read of it.
+ * change, unless `baseline` was awaited for it right before the hook's own
+ * read of it. A read that failed calls `forget` for its checkouts, so their
+ * next comparison counts as a change again and the read is retried.
  */
 export function useGitRefresh(
   cwds: readonly string[],
   visible: boolean,
   onRefresh: (changed: readonly string[], reason: GitRefreshReason) => void,
-): (cwds: readonly string[]) => Promise<void> {
+): GitRefreshMemory {
   const handler = useRef(onRefresh);
   handler.current = onRefresh;
   const seen = useRef<GitSeen>(new Map());
@@ -213,5 +214,16 @@ export function useGitRefresh(
       onRefresh: (changed, reason) => handler.current(changed, reason),
     });
   }, [key, visible]);
-  return useCallback((list: readonly string[]) => sharedClock().baseline(seen.current, list), []);
+  const baseline = useCallback((list: readonly string[]) => sharedClock().baseline(seen.current, list), []);
+  const forget = useCallback((list: readonly string[]) => {
+    for (const cwd of list) seen.current.delete(cwd);
+  }, []);
+  return useMemo(() => ({ baseline, forget }), [baseline, forget]);
+}
+
+export interface GitRefreshMemory {
+  /** Remember these checkouts' state now, right before reading them. */
+  baseline(cwds: readonly string[]): Promise<void>;
+  /** A read of these checkouts failed: their next comparison is a change. */
+  forget(cwds: readonly string[]): void;
 }

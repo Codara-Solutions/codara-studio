@@ -126,7 +126,8 @@ async function main() {
             railStates: (projects) => {
               window.__calls.push(projects ?? null);
               const answer = { states: [], external: [] };
-              if (hold && window.__calls.length === 1) return new Promise((resolve) => window.__release.push(() => resolve(answer)));
+              if (hold === "fail" && window.__calls.length === 1) return Promise.reject(new Error("main is busy"));
+              if (hold === true && window.__calls.length === 1) return new Promise((resolve) => window.__release.push(() => resolve(answer)));
               return Promise.resolve(answer);
             },
             railCleanUp: async () => null,
@@ -160,6 +161,21 @@ async function main() {
       assert.equal(await page.evaluate(() => window.__calls.length), 2, "nothing moved since: no read");
       await page.close();
       console.log("PASS a change between the rail's first read and the first comparison is not lost");
+    }
+    {
+      // The first full read fails after its baseline: the next comparison
+      // (focus here; a tick does the same every HIDDEN_EVERY ticks) asks
+      // again instead of waiting for the 30-minute full read.
+      const page = await railWithClock("fail");
+      await page.waitForTimeout(100);
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.waitForTimeout(150);
+      assert.deepEqual(await page.evaluate(() => window.__calls), [null, ["/repo"]], "a failed read is retried on the next comparison");
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.waitForTimeout(150);
+      assert.equal(await page.evaluate(() => window.__calls.length), 2, "and once it succeeds, not again");
+      await page.close();
+      console.log("PASS a failed rail read is retried on the next comparison");
     }
   } finally {
     await browser?.close();

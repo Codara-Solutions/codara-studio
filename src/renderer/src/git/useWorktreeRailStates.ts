@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Workspace } from "@shared/types";
-import { useGitRefresh } from "./gitRefreshClock";
+import { useGitRefresh, type GitRefreshMemory } from "./gitRefreshClock";
 import {
   railRowMerged,
   type WorktreeRailCleanupRequest,
@@ -76,7 +76,7 @@ export function useWorktreeRailStates(
   const statesRef = useRef(states);
   statesRef.current = states;
   const readRef = useRef<((projects?: ReadonlySet<string>) => Promise<void>) | null>(null);
-  const baselineRef = useRef<((cwds: readonly string[]) => Promise<void>) | null>(null);
+  const memoryRef = useRef<GitRefreshMemory | null>(null);
   const autoTried = useRef(new Map<string, { at: number; waitMs: number }>());
   const onAutoRemovedRef = useRef(onAutoRemoved);
   onAutoRemovedRef.current = onAutoRemoved;
@@ -119,15 +119,24 @@ export function useWorktreeRailStates(
       }
       inFlight = true;
       if (!projects) lastFullAt.current = Date.now();
+      // The checkouts this read speaks for.
+      const readCwds = workspacesRef.current
+        .filter((ws) => !ws.remote && (!projects || projects.has(railProjectOf(ws))))
+        .map((ws) => ws.cwd);
       try {
         // A full read starts the clock's memory: a change after this moment
         // is compared against it, not lost as a first sighting.
-        if (!projects) await baselineRef.current?.(workspacesRef.current.filter((ws) => !ws.remote).map((ws) => ws.cwd));
+        if (!projects) await memoryRef.current?.baseline(readCwds);
         if (cancelled) return;
         const overview = await api.railStates(projects ? [...projects] : undefined).catch(() => null);
         if (cancelled) return;
         setLoaded(true);
-        if (!overview) return;
+        if (!overview) {
+          // The clock already counted what this read was for: forget it, so
+          // the next comparison asks again instead of the 30-minute read.
+          memoryRef.current?.forget(readCwds);
+          return;
+        }
         const list = overview.states;
         // The rows and project ids this read speaks for.
         const covered = projects
@@ -188,7 +197,7 @@ export function useWorktreeRailStates(
   }, [copyKey, refreshTick]);
 
   const localWorkspaces = workspaces.filter((ws) => !ws.remote);
-  baselineRef.current = useGitRefresh(
+  memoryRef.current = useGitRefresh(
     localWorkspaces.map((ws) => ws.cwd),
     false,
     (changed, reason) => {
