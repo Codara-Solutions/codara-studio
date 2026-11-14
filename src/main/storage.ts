@@ -1,12 +1,13 @@
 import { app, safeStorage } from "electron";
 import { promises as fs } from "node:fs";
+import { totalmem } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_COMMIT_MESSAGE_MODEL,
-  TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   normalizeCopyBranchCreator,
   normalizeGitHubOrigin,
   normalizeTerminalScrollbackLineLimit,
+  terminalScrollbackLineLimitDefault,
   type AppSettings,
   type AppState,
   type Workspace,
@@ -44,9 +45,8 @@ const EMPTY: AppState = {
   workspaceRailOrder: [],
   activeWorkspaceId: null,
 };
-const EMPTY_SETTINGS: AppSettings = {
+const EMPTY_SETTINGS: Omit<AppSettings, "terminalScrollbackLineLimit"> = {
   defaultShellId: null,
-  terminalScrollbackLineLimit: TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   terminalOsc52Clipboard: true,
   openRouterApiKey: "",
   openRouterModel: DEFAULT_OPENROUTER_MODEL,
@@ -75,8 +75,9 @@ const EMPTY_SETTINGS: AppSettings = {
 const ENCRYPTED_OPENROUTER_KEY = "openRouterApiKeyEncrypted";
 
 type SettingsFile = Partial<AppSettings> & { [ENCRYPTED_OPENROUTER_KEY]?: unknown };
-type SettingsOnDisk = Omit<AppSettings, "openRouterApiKey"> & {
+type SettingsOnDisk = Omit<AppSettings, "openRouterApiKey" | "terminalScrollbackLineLimit"> & {
   openRouterApiKey?: string;
+  terminalScrollbackLineLimit?: number;
   [ENCRYPTED_OPENROUTER_KEY]?: string;
 };
 
@@ -146,7 +147,10 @@ async function readSettingsFromDisk(): Promise<{
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
       console.error("[storage] failed to read settings, starting with defaults:", err);
     }
-    return { settings: { ...EMPTY_SETTINGS }, plaintextKey: false };
+    return {
+      settings: { ...EMPTY_SETTINGS, terminalScrollbackLineLimit: machineTerminalScrollbackLineLimit() },
+      plaintextKey: false,
+    };
   }
   const settings = normalizeSettings(parsed);
   const encrypted = typeof parsed[ENCRYPTED_OPENROUTER_KEY] === "string"
@@ -220,17 +224,30 @@ function notePlaintextKey(): void {
   );
 }
 
+// Settings files before this build stored the scrollback default like any
+// choice, so a stored number is read as one. A value equal to this machine's
+// default is left out of the file instead, so a later default reaches
+// everyone who never picked their own.
+function machineTerminalScrollbackLineLimit(): number {
+  return terminalScrollbackLineLimitDefault(totalmem());
+}
+
 function settingsForDisk(settings: AppSettings): SettingsOnDisk {
-  const { openRouterApiKey, ...rest } = settings;
+  const { terminalScrollbackLineLimit, ...withoutScrollback } = settings;
+  const chosen: SettingsOnDisk =
+    terminalScrollbackLineLimit === machineTerminalScrollbackLineLimit()
+      ? withoutScrollback
+      : settings;
+  const { openRouterApiKey, ...rest } = chosen;
   if (!openRouterApiKey) {
     return undecryptableOpenRouterKey
       ? { ...rest, [ENCRYPTED_OPENROUTER_KEY]: undecryptableOpenRouterKey }
-      : settings;
+      : chosen;
   }
   const encrypted = encryptOpenRouterKey(openRouterApiKey);
   if (encrypted === null) {
     notePlaintextKey();
-    return settings;
+    return chosen;
   }
   return { ...rest, [ENCRYPTED_OPENROUTER_KEY]: encrypted };
 }
@@ -355,7 +372,10 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
       typeof settings.defaultShellId === "string" && settings.defaultShellId.trim()
         ? settings.defaultShellId
         : null,
-    terminalScrollbackLineLimit: normalizeTerminalScrollbackLineLimit(settings.terminalScrollbackLineLimit),
+    terminalScrollbackLineLimit: normalizeTerminalScrollbackLineLimit(
+      settings.terminalScrollbackLineLimit ?? undefined,
+      machineTerminalScrollbackLineLimit(),
+    ),
     terminalOsc52Clipboard: settings.terminalOsc52Clipboard !== false,
     openRouterApiKey:
       typeof settings.openRouterApiKey === "string" ? settings.openRouterApiKey.trim() : "",
