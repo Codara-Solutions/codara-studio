@@ -17,6 +17,10 @@
 // of a replay with the first live bytes behind it, and a flag would then either
 // clear too early (live bytes attributed to history) or too late (a real
 // server start ignored).
+//
+// A paused pane's backlog is different: main sends it in slices on the replay
+// channel itself, each carrying its bytes and its end offset in one message,
+// so the pane knows exactly which slices it holds (slice / replayedTo).
 
 export interface ReplayTracker {
   /** Main announced `bytes` of replayed history heading down the data channel. */
@@ -29,10 +33,21 @@ export interface ReplayTracker {
    * skipping one auto-open is not.
    */
   consume(chunkLength: number): boolean;
+  /**
+   * One slice of a paused pane's backlog arrived on the replay channel,
+   * numbered by its end offset in the session's replay stream. Returns the
+   * bytes this pane has not received yet, or null when it has them all: main
+   * re-sends slices a previous pane may have missed, and on pane replacement
+   * the new pane can already hold them.
+   */
+  slice(data: Uint8Array, end: number): Uint8Array | null;
+  /** End offset of the last replay slice received; 0 before the first one. */
+  replayedTo(): number;
 }
 
 export function createReplayTracker(): ReplayTracker {
   let pending = 0;
+  let seen = 0;
   return {
     announce(bytes: number): void {
       if (!Number.isFinite(bytes) || bytes <= 0) return;
@@ -42,6 +57,16 @@ export function createReplayTracker(): ReplayTracker {
       if (pending <= 0) return false;
       pending = Math.max(0, pending - Math.max(0, chunkLength));
       return true;
+    },
+    slice(data: Uint8Array, end: number): Uint8Array | null {
+      if (!Number.isFinite(end) || end <= seen) return null;
+      const start = end - data.length;
+      const fresh = seen > start ? data.subarray(seen - start) : data;
+      seen = end;
+      return fresh;
+    },
+    replayedTo(): number {
+      return seen;
     },
   };
 }

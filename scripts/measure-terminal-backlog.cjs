@@ -84,7 +84,7 @@ async function measure(pty, controller, name, total) {
   await pty.spawn({ ...localOptions(id), cols: COLS, rows: ROWS, webContents: wc });
   const handle = controller.localSpawnCalls.at(-1).handle;
   await sleep(30);
-  pty.pause(id, 3_000);
+  pty.pause(id);
   const before = await used();
   const output = [...WORKLOADS[name](total)];
   const ingestStart = performance.now();
@@ -102,7 +102,11 @@ async function measure(pty, controller, name, total) {
     seen = sent.length;
     await sleep(50);
   }
-  const replay = sent.filter((m) => m.channel === `pty:data:${id}`).map((m) => m.payload);
+  // The replay: slices on the replay channel (each with its bytes), or the
+  // whole backlog as one message on the data channel.
+  const replay = sent
+    .map((m) => (m.channel === `pty:replay:${id}` ? m.payload.data : m.channel === `pty:data:${id}` ? m.payload : null))
+    .filter(Boolean);
   const term = new Terminal({ cols: COLS, rows: ROWS, scrollback: 3_000, allowProposedApi: true });
   const decoder = new TextDecoder();
   let longest = 0;

@@ -38,7 +38,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
     pty.resume(id, true);
     assert.deepEqual(sizes, [[79, 24]], "overlapping recovery requests share one size pulse");
     assert.deepEqual(controller.continuedForeground, [handle.pid], "a redraw also resumes the foreground job, once per pulse");
-    assert.equal(Buffer.from(sent.find((item) => item.channel === `pty:data:${id}`).payload).toString(), "idle animation delta", "backlog reaches the renderer before the new frame");
+    assert.equal(Buffer.from(sent.find((item) => item.channel === `pty:replay:${id}`).payload.data).toString(), "idle animation delta", "backlog reaches the renderer before the new frame");
     await settle();
     assert.deepEqual(sizes, [[79, 24], [80, 24]]);
     assert.ok(sent.filter((item) => item.channel === `pty:data:${id}`).some((item) => Buffer.from(item.payload).toString().includes("Full application frame")));

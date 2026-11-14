@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 "use strict";
 
-// The output a paused pane misses (src/main/pty-manager.ts pause/resume and
-// src/main/pty-backlog.ts): how much main keeps, how it goes back to the
-// window, and that the window then shows what it would have shown had it
-// seen every byte. A headless xterm stands in for the window: one terminal
-// gets the whole stream, another what the pane had before the pause plus the
-// replay, and the two must agree.
+// How a paused pane's backlog goes back to the window (src/main/pty-manager.ts
+// pause/resume/replaySlice/ackReplay and the renderer's replayTracker): in
+// slices of at most 128 KB, one per turn, in order, before live output, and
+// without losing or repeating a byte when the pane goes away mid-replay.
+//
+// IPC is simulated in both directions with one message per turn, so a pane
+// can unmount while slices are still on their way to it, and its pause call
+// reaches main after main has sent more. Panes use the real replay tracker.
 //
 //   node scripts/test-pty-backlog-replay.cjs
 
@@ -14,65 +16,141 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const esbuild = require("esbuild");
-const { Terminal } = require("@xterm/headless");
 const { createController, stubPlugin, localOptions, MODULE_TS, CACHE_ROOT } = require("./test-pty-spawn-serialization.cjs");
 
-const MB = 1024 * 1024;
 const SLICE = 128 * 1024;
-const COLS = 80;
-const ROWS = 24;
-const LINES = 1_000;
+const TRACKER_TS = path.join(__dirname, "..", "src", "renderer", "src", "components", "Terminal", "replayTracker.ts");
+const turn = () => new Promise((resolve) => setImmediate(resolve));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let pty;
 let controller;
+let createReplayTracker;
 
-async function open(id) {
-  const sent = [];
-  const wc = { isDestroyed: () => false, send: (channel, payload) => sent.push({ channel, payload }) };
-  await pty.spawn({ ...localOptions(id), cols: COLS, rows: ROWS, webContents: wc });
-  const handle = controller.localSpawnCalls.at(-1).handle;
-  await sleep(30);
-  const data = () => sent.filter((m) => m.channel === `pty:data:${id}`).map((m) => Buffer.from(m.payload));
-  return { id, sent, wc, handle, data };
+// One Electron window: messages from main reach the listeners registered at
+// delivery time, one per turn; calls from the window reach main in order, one
+// per turn after they are made.
+function createWindow(id) {
+  const listeners = new Map();
+  const toWindow = [];
+  const toMain = [];
+  const log = [];
+  let pumping = false;
+  const pump = () => {
+    if (pumping) return;
+    pumping = true;
+    setImmediate(function step() {
+      if (toWindow.length > 0) {
+        const { channel, payload } = toWindow.shift();
+        for (const fn of [...(listeners.get(channel) ?? [])]) fn(payload);
+      }
+      if (toMain.length > 0) toMain.shift()();
+      if (toWindow.length > 0 || toMain.length > 0) setImmediate(step);
+      else pumping = false;
+    });
+  };
+  const wc = {
+    isDestroyed: () => false,
+    send: (channel, payload) => {
+      log.push({ channel, payload });
+      toWindow.push({ channel, payload });
+      pump();
+    },
+  };
+  const on = (channel, fn) => {
+    if (!listeners.has(channel)) listeners.set(channel, new Set());
+    listeners.get(channel).add(fn);
+    return () => listeners.get(channel).delete(fn);
+  };
+  const call = (fn) => {
+    toMain.push(fn);
+    pump();
+  };
+  const idle = async () => {
+    for (let waited = 0; pumping || toWindow.length > 0 || toMain.length > 0; waited += 1) {
+      assert.ok(waited < 100_000, "the simulated IPC drains");
+      await turn();
+    }
+  };
+
+  // A TerminalPane as useTerminalSession wires it.
+  function mount() {
+    const tracker = createReplayTracker();
+    const pane = { received: [], tracker };
+    const offData = on(`pty:data:${id}`, (data) => {
+      tracker.consume(data.length);
+      pane.received.push(Buffer.from(data));
+    });
+    const offReplay = on(`pty:replay:${id}`, ({ bytes, end, data }) => {
+      if (!data || typeof end !== "number") {
+        tracker.announce(bytes);
+        return;
+      }
+      const fresh = tracker.slice(data, end);
+      if (fresh && fresh.length > 0) pane.received.push(Buffer.from(fresh));
+      call(() => pty.ackReplay(id, end));
+    });
+    call(() => pty.resume(id));
+    pane.unmount = () => {
+      const replayedTo = tracker.replayedTo();
+      call(() => pty.pause(id, replayedTo));
+      offData();
+      offReplay();
+    };
+    return pane;
+  }
+
+  return { wc, log, mount, idle, call };
 }
 
 function session(id) {
   return pty.resourceSnapshot().sessions.find((s) => s.id === id);
 }
 
-async function replayed(id) {
-  for (let waited = 0; !session(id).attached; waited += 5) {
-    assert.ok(waited < 5_000, "the replay finishes");
-    await sleep(5);
+async function open(id) {
+  const win = createWindow(id);
+  await pty.spawn({ ...localOptions(id), webContents: win.wc });
+  const handle = controller.localSpawnCalls.at(-1).handle;
+  await win.idle();
+  await sleep(30);
+  return { win, handle };
+}
+
+function emitInChunks(handle, bytes, size = 4096) {
+  for (let at = 0; at < bytes.length; at += size) handle.emit(bytes.subarray(at, at + size));
+}
+
+const all = (...panes) => Buffer.concat(panes.flatMap((pane) => pane.received));
+
+// Sol's probe: 1.32 MB missed while away, the pane comes back and leaves
+// again after `after` replay messages reached it, with its pause still on
+// the way to main. A later pane must end up with exactly the rest.
+async function leaveMidReplay(name, after, replaceAtOnce) {
+  const id = `replay-${name}`;
+  const { win, handle } = await open(id);
+  const first = win.mount();
+  await win.idle();
+  first.unmount();
+  await win.idle();
+  const history = Buffer.from(("0123456789".repeat(13) + "\r\n").repeat(10_000));
+  emitInChunks(handle, history);
+
+  const second = win.mount();
+  for (let seen = 0; seen < after; ) {
+    await turn();
+    seen = win.log.filter((m) => m.channel === `pty:replay:${id}` && m.payload.data).length;
   }
-}
-
-// Splits text into chunks of `size` bytes, so escape sequences and UTF-8
-// characters straddle chunk boundaries.
-function chunks(text, size) {
-  const bytes = Buffer.from(text);
-  const out = [];
-  for (let at = 0; at < bytes.length; at += size) out.push(bytes.subarray(at, at + size));
-  return out;
-}
-
-function line(i) {
-  return `\x1b[3${i % 8}m${String(i).padStart(7, "0")} é ✓ \x1b[0m${"x".repeat(40 + (i % 17))}\r\n`;
-}
-
-function terminal() {
-  return new Terminal({ cols: COLS, rows: ROWS, scrollback: LINES, allowProposedApi: true });
-}
-
-function write(term, bytes) {
-  return new Promise((resolve) => term.write(bytes, resolve));
-}
-
-function text(buffer) {
-  const rows = [];
-  for (let row = 0; row < buffer.length; row += 1) rows.push(buffer.getLine(row)?.translateToString(true) ?? "");
-  return rows.join("\n");
+  let third;
+  second.unmount();
+  if (replaceAtOnce) third = win.mount();
+  await win.idle();
+  if (!replaceAtOnce) third = win.mount();
+  await win.idle();
+  assert.equal(session(id).attached, true, `${name}: the replay finishes`);
+  const got = all(first, second, third);
+  assert.equal(got.length, history.length, `${name}: ${history.length - got.length} bytes lost or repeated`);
+  assert.ok(got.equals(history), `${name}: the panes together show the history once, in order`);
+  pty.killImmediate(id);
 }
 
 async function main() {
@@ -81,320 +159,128 @@ async function main() {
   try {
     const outfile = path.join(tmp, "pty.cjs");
     await esbuild.build({ entryPoints: [MODULE_TS], outfile, bundle: true, platform: "node", format: "cjs", plugins: [stubPlugin()], logLevel: "silent" });
+    const trackerFile = path.join(tmp, "tracker.cjs");
+    await esbuild.build({ entryPoints: [TRACKER_TS], outfile: trackerFile, bundle: true, platform: "node", format: "cjs", logLevel: "silent" });
     controller = createController();
     globalThis.__codaraPtySpawnHarness = controller;
     pty = require(outfile);
-    const backlogFile = path.join(tmp, "backlog.cjs");
-    await esbuild.build({ entryPoints: [path.join(path.dirname(MODULE_TS), "pty-backlog.ts")], outfile: backlogFile, bundle: true, platform: "node", format: "cjs", logLevel: "silent" });
-    const { VtScanner } = require(backlogFile);
+    ({ createReplayTracker } = require(trackerFile));
 
-    let failed = 0;
-    const section = async (name, fn) => {
-      try {
-        await fn();
-        console.log(`PASS ${name}`);
-      } catch (error) {
-        failed += 1;
-        console.log(`FAIL ${name}\n  ${error.message.split("\n")[0]}`);
-      }
-    };
-
-    await section("scrolling output is kept to the view's scrollback and replays the same screen", async () => {
-      const pane = await open("scrolling");
-      const full = terminal();
-      const view = terminal();
-      const before = Array.from({ length: 50 }, (_, i) => line(i)).join("");
-      pane.handle.emit(before);
+    // Slices: bounded, in order, the first before resume returns, live
+    // output only after the last.
+    {
+      const id = "replay-order";
+      const { win, handle } = await open(id);
+      const pane = win.mount();
+      await win.idle();
+      pane.unmount();
+      await win.idle();
+      const missed = Buffer.alloc(3 * 1024 * 1024 + 123);
+      for (let i = 0; i < missed.length; i += 1) missed[i] = 33 + (i % 90);
+      emitInChunks(handle, missed, 5000);
+      assert.equal(session(id).detachedBacklogBytes, missed.length);
+      const before = win.log.length;
+      pty.resume(id);
+      const firstSlice = win.log.slice(before).filter((m) => m.channel === `pty:replay:${id}`);
+      assert.equal(firstSlice.length, 1, "the first slice goes before resume returns");
+      assert.equal(firstSlice[0].payload.bytes, SLICE);
+      assert.equal(session(id).attached, false, "live output waits while the replay runs");
+      handle.emit(Buffer.from("LIVE"));
+      const back = win.mount();
+      await win.idle();
       await sleep(40);
-      for (const bytes of pane.data()) await write(view, bytes);
-      await write(full, before);
-      let resized = 0;
-      pane.handle.resize = () => (resized += 1);
-      pty.pause(pane.id, LINES);
-      // Line drawing from here on: the dropped designation must carry over.
-      let stream = "\x1b(0";
-      for (let i = 50; stream.length < 20 * MB; i += 1) stream += line(i);
-      for (const chunk of chunks(stream, 4093)) pane.handle.emit(chunk);
-      const held = session(pane.id).detachedBacklogBytes;
-      assert.ok(held <= 2 * MB, `a paused pane keeps at most 2 MB, kept ${held}`);
-      pane.sent.length = 0;
-      pty.resume(pane.id, false, LINES);
-      assert.ok(pane.data().length >= 1, "the first slice leaves before resume returns");
-      await replayed(pane.id);
-      const slices = pane.data();
-      assert.ok(slices.length > 1, "the replay goes out in slices");
-      assert.ok(slices.every((s) => s.length <= SLICE + 1024), "no slice is much larger than 128 KB");
-      const replay = Buffer.concat(slices);
-      const inside = new Uint8Array(replay.length + 1);
-      for (const match of replay.toString("latin1").matchAll(/\x1b[[(][0-9;?]*[A-Za-z0-9]|[\xc0-\xff][\x80-\xbf]+/g)) {
-        inside.fill(1, match.index + 1, match.index + match[0].length);
-      }
-      let edge = 0;
-      for (const slice of slices) {
-        edge += slice.length;
-        assert.equal(inside[edge], 0, `slice edge ${edge} is not inside an escape sequence or a character`);
-      }
-      const announced = pane.sent.filter((m) => m.channel === `pty:replay:${pane.id}`).reduce((n, m) => n + m.payload.bytes, 0);
-      assert.equal(announced, slices.reduce((n, s) => n + s.length, 0), "every replayed byte is announced as history");
-      await write(full, stream);
-      for (const bytes of slices) await write(view, bytes);
-      assert.equal(text(view.buffer.normal), text(full.buffer.normal), "the view shows the same scrollback and screen as one that saw every byte");
-      assert.ok(resized > 0, "a drop made before the stream showed its screen asks for a repaint");
-      full.dispose();
-      view.dispose();
-    });
-
-    await section("a full-screen program started while paused keeps its modes and repaints the same screen", async () => {
-      const pane = await open("full-screen");
-      const frame = (n) => `\x1b[H\x1b[2J${Array.from({ length: ROWS }, (_, r) => `\x1b[${r + 1};1H\x1b[3${(n + r) % 8}mframe ${n} row ${r} ✓`).join("")}\x1b[0m`;
-      pane.handle.resize = () => pane.handle.emit(frame(999_999));
-      const full = terminal();
-      const view = terminal();
-      await write(full, "$ ");
-      await write(view, "$ ");
-      pty.pause(pane.id, LINES);
-      let stream = "top\r\n\x1b[?1049h\x1b[?1h\x1b[?2004h\x1b[?25l";
-      for (let n = 0; stream.length < 20 * MB; n += 1) {
-        stream += `\x1b[${(n % ROWS) + 1};1H\x1b[2K\x1b[3${n % 8}m${n} ${"█".repeat(n % 50)}`;
-      }
-      for (const chunk of chunks(stream, 3001)) pane.handle.emit(chunk);
-      const held = session(pane.id).detachedBacklogBytes;
-      pane.sent.length = 0;
-      pty.resume(pane.id, false, LINES);
-      await replayed(pane.id);
-      await sleep(150);
-      const delivered = pane.data();
-      for (const bytes of delivered) await write(view, bytes);
-      await write(full, stream);
-      await write(full, frame(999_999));
-      await write(full, frame(999_999));
-      assert.equal(view.buffer.active.type, "alternate", "the view is on the alternate screen");
-      assert.equal(view.modes.applicationCursorKeysMode, true, "arrow keys still reach the program as it asked");
-      assert.equal(view.modes.bracketedPasteMode, true, "bracketed paste is still on");
-      assert.equal(text(view.buffer.alternate), text(full.buffer.alternate), "the program's repaint gives the same screen");
-      assert.equal(text(view.buffer.normal), text(full.buffer.normal), "the shell line under it is kept");
-      assert.ok(Buffer.concat(delivered).includes("frame 999999"), "a dropped screen asks the program to repaint");
-      assert.ok(held <= 2 * MB, `the full-screen output past the cap is not kept, kept ${held}`);
-      full.dispose();
-      view.dispose();
-    });
-
-    // Output that cannot be proven out of view keeps the old 16 MB cap.
-    await section("output kept under the hard cap is cut at a clean boundary", async () => {
-      const pane = await open("inline");
-      const view = terminal();
-      pty.pause(pane.id, LINES);
-      let stream = "\x1b[?2004h";
-      for (let n = 0; stream.length < 20 * MB; n += 1) {
-        stream += `${"\x1b[2K\x1b[1A".repeat(3)}\x1b[2K\r\x1b[2m${"-\\|/"[n % 4]} working ${n} é\x1b[0m\r\n\x1b[1mstatus ✓\x1b[0m\r\n\x1b[7m> \x1b[0m\r\n`;
-      }
-      const bytes = Buffer.from(stream);
-      for (const chunk of chunks(stream, 997)) pane.handle.emit(chunk);
-      const held = session(pane.id).detachedBacklogBytes;
-      pane.sent.length = 0;
-      pty.resume(pane.id, false, LINES);
-      await replayed(pane.id);
-      const replay = Buffer.concat(pane.data());
-      // The replay is a few bytes of restored modes, then the stream's tail
-      // byte for byte, starting where no escape sequence or character is open.
-      let restored = 0;
-      while (restored < 512 && !replay.subarray(restored).equals(bytes.subarray(bytes.length - (replay.length - restored)))) restored += 1;
-      assert.ok(restored < 512, "the replay ends with the stream's tail, nothing lost or repeated");
-      const cut = bytes.length - (replay.length - restored);
-      const inside = new Uint8Array(bytes.length + 1);
-      for (const match of bytes.toString("latin1").matchAll(/\x1b\[[0-9;?]*[A-Za-z]|[\xc0-\xff][\x80-\xbf]+/g)) {
-        inside.fill(1, match.index + 1, match.index + match[0].length);
-      }
-      assert.equal(inside[cut], 0, `the cut at ${cut} is not inside an escape sequence or a character`);
-      await write(view, replay);
-      assert.equal(view.modes.bracketedPasteMode, true, "a mode set in the dropped output survives");
-      assert.ok(held > 2 * MB && held <= 16 * MB, `cursor-relative output keeps the old cap, kept ${held}`);
-      view.dispose();
-    });
-
-    await section("the scanner knows when a sequence or a character is still open across chunks", async () => {
-      const scanner = new VtScanner();
-      const steps = [
-        ["\xf0", false],
-        ["\x9f", false],
-        ["\x98", false],
-        ["\x80 ok", true],
-        ["\x1b]0;ti", false],
-        ["tle\x07", true],
-        ["\x1bPq#0\x07", false],
-        ["\x1b\\", true],
-        ["\x1b[", false],
-        ["?1049h", true],
-      ];
-      for (const [input, ground] of steps) {
-        const buf = Buffer.from(input, "latin1");
-        for (let at = 0; at < buf.length; ) at = scanner.scan(buf, at, buf.length, { ris: false, seq: new Map(), sgrReset: false, sgr: new Map() });
-        assert.equal(scanner.atGround(), ground, `after ${JSON.stringify(input)}`);
-      }
-      assert.equal(scanner.alt, true, "a split switch to the alternate screen is seen");
-      assert.equal(scanner.opaque, false);
-      scanner.scan(Buffer.from([0xc2, 0x9b]), 0, 2, { ris: false, seq: new Map(), sgrReset: false, sgr: new Map() });
-      assert.equal(scanner.opaque, true, "a C1 control sent as a character is noticed");
-    });
-
-    // Main-screen output whose cut is only safe when the scanner reads it right.
-    const cases = {
-      "a scroll region": { head: "\x1b[5;24r\x1b[1;1HHEADER ROW ONE\x1b[24;1H", line: (i) => `${i} plain line\r\n` },
-      "scrolling down": { head: "PINNED MARK\r\n", line: (i) => `${i} plain line\r\n${i % 10 === 9 ? "\x1b[10T" : ""}` },
-      "more attributes than one sequence holds": {
-        head: `${[56, 57, 66, 67, 68, 69, 70, 71, 72, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 11, 26, 51, 61, 73, 3, 5, 7, 9, 53]
-          .map((n) => `\x1b[${n}m`).join("")}\x1b[38;2;1;2;3m\x1b[48;2;4;5;6m`,
-        line: (i) => `${i} plain line\r\n`,
-      },
-      "many attribute changes": { head: `\x1b[1m${"\x1b[31m\x1b[32m\x1b[38;2;10;20;30m".repeat(3)}\x1b[4:3m`, line: (i) => `${i} plain line\r\n` },
-    };
-    for (const [name, { head, line: next }] of Object.entries(cases)) {
-      await section(`${name}: the view matches one that saw every byte`, async () => {
-        const pane = await open(name.replace(/\W+/g, "-"));
-        const full = terminal();
-        const view = terminal();
-        pty.pause(pane.id, LINES);
-        let stream = head;
-        for (let i = 0; stream.length < 3 * MB; i += 1) stream += next(i);
-        for (const chunk of chunks(stream, 4093)) pane.handle.emit(chunk);
-        pane.sent.length = 0;
-        pty.resume(pane.id, false, LINES);
-        await replayed(pane.id);
-        for (const bytes of pane.data()) await write(view, bytes);
-        await write(full, stream);
-        assert.equal(text(view.buffer.normal), text(full.buffer.normal), "same scrollback and screen");
-        const cell = (term) => {
-          const c = term.buffer.active.getLine(term.buffer.active.length - 2).getCell(0);
-          return [c.isBold(), c.getFgColor(), c.getFgColorMode(), c.getBgColor(), c.isUnderline()];
-        };
-        assert.deepEqual(cell(view), cell(full), "same attributes on the last line");
-        full.dispose();
-        view.dispose();
-      });
+      await win.idle();
+      const slices = win.log.slice(before).filter((m) => m.channel === `pty:replay:${id}` && m.payload.data);
+      assert.ok(slices.every((m) => m.payload.data.length <= SLICE), "no slice is larger than 128 KB");
+      assert.equal(slices.length, Math.ceil((missed.length + 4) / SLICE));
+      const got = Buffer.concat(back.received);
+      assert.ok(got.equals(Buffer.concat([missed, Buffer.from("LIVE")])), "slices then live output, in order");
+      assert.equal(session(id).attached, true);
+      assert.equal(session(id).detachedBacklogBytes, 0);
+      pty.killImmediate(id);
+      console.log("PASS slices are bounded, in order, and live output follows them");
     }
 
-    await section("a huge escape string does not make one huge slice", async () => {
-      const pane = await open("image");
-      pty.pause(pane.id, LINES);
-      pane.handle.emit(`\x1b]1337;File=:${"QUJD".repeat(256 * 1024)}\x07done\r\n`);
-      pane.sent.length = 0;
-      pty.resume(pane.id, false, LINES);
-      await replayed(pane.id);
-      const slices = pane.data();
-      assert.ok(slices.every((s) => s.length <= SLICE + 64 * 1024 + 1024), `largest slice ${Math.max(...slices.map((s) => s.length))}`);
-      assert.ok(Buffer.concat(slices).toString().endsWith("done\r\n"));
-    });
+    // The pane leaves mid-replay and comes back later, or is replaced at once.
+    for (const after of [0, 1, 2, 5]) {
+      await leaveMidReplay(`later-${after}`, after, false);
+      await leaveMidReplay(`replaced-${after}`, after, true);
+    }
+    console.log("PASS a pane leaving mid-replay loses and repeats nothing");
 
-    await section("a program flipping screens many times stays bounded", async () => {
-      const pane = await open("flips");
-      pty.pause(pane.id, LINES);
-      const flip = Buffer.from("\x1b[?1049h\x1b[Hx\x1b[?1049l");
-      require("node:v8").setFlagsFromString("--expose-gc");
-      const gc = require("node:vm").runInNewContext("gc");
-      gc();
-      const heap = process.memoryUsage().heapUsed;
-      for (let i = 0; i < 300_000; i += 1) pane.handle.emit(flip);
-      gc();
-      const grown = process.memoryUsage().heapUsed - heap;
-      const held = session(pane.id).detachedBacklogBytes;
-      assert.ok(held <= 16 * MB + 64 * 1024, `held ${held}`);
-      assert.ok(grown < 64 * MB, `the heap grew ${Math.round(grown / MB)} MB`);
-      pty.killImmediate(pane.id);
-    });
+    // A hidden window pauses without unmounting: the listener stays, so what
+    // was sent still arrives and the rest follows on the next resume.
+    {
+      const id = "replay-hidden";
+      const { win, handle } = await open(id);
+      const pane = win.mount();
+      await win.idle();
+      pane.unmount();
+      await win.idle();
+      const history = Buffer.from("hidden window line\r\n".repeat(30_000));
+      emitInChunks(handle, history);
+      const back = win.mount();
+      await turn();
+      await turn();
+      win.call(() => pty.pause(id));
+      await win.idle();
+      assert.equal(session(id).attached, false);
+      win.call(() => pty.resume(id));
+      await win.idle();
+      assert.ok(Buffer.concat(back.received).equals(history), "a hidden window gets every byte once");
+      pty.killImmediate(id);
+      console.log("PASS a hidden-window pause mid-replay keeps every byte");
+    }
 
-    const history = Buffer.alloc(SLICE * 5 + 77);
-    for (let i = 0; i < history.length; i += 1) history[i] = 0x61 + (i % 26);
-
-    await section("live output and a resize during a replay arrive after it, in order", async () => {
-      const pane = await open("order");
-      pty.pause(pane.id, 50_000);
-      pane.handle.emit(history);
-      pane.sent.length = 0;
-      pty.resume(pane.id, false, 50_000);
-      assert.equal(pane.data().length, 1, "one slice per turn");
-      assert.ok(pane.data()[0].length <= SLICE, "the replay is sliced");
-      pane.handle.emit("LIVE");
-      pty.resize(pane.id, 90, 30);
-      pane.handle.emit("AFTER-RESIZE");
-      await replayed(pane.id);
-      await sleep(40);
-      const got = Buffer.concat(pane.data());
-      assert.equal(got.toString(), `${history.toString()}LIVEAFTER-RESIZE`, "live output and a resize wait for the replay, nothing is lost or repeated");
-    });
-
-    await section("a pause during a replay keeps the rest for the next resume", async () => {
-      const pane = await open("second-pause");
-      pty.pause(pane.id, 50_000);
-      pane.handle.emit(history);
-      pane.sent.length = 0;
-      pty.resume(pane.id, false, 50_000);
-      await new Promise((resolve) => setImmediate(resolve));
-      pty.pause(pane.id, 50_000);
-      const first = pane.data().length;
-      assert.ok(pane.data()[0].length <= SLICE, "the replay is sliced");
-      assert.ok(first >= 1 && first < 6, "the pause stopped the replay");
+    // The program exits mid-replay: the rest of the backlog reaches the
+    // window before the exit does.
+    {
+      const id = "replay-exit";
+      const { win, handle } = await open(id);
+      const pane = win.mount();
+      await win.idle();
+      pane.unmount();
+      await win.idle();
+      const history = Buffer.from("last words\r\n".repeat(60_000));
+      emitInChunks(handle, history);
+      const start = win.log.length;
+      const back = win.mount();
+      await turn();
+      await turn();
+      assert.equal(session(id).attached, false, "the replay is still running");
+      handle.kill();
+      await win.idle();
       await sleep(30);
-      assert.equal(pane.data().length, first, "nothing is sent while paused");
-      pane.handle.emit("NEW");
-      let resized = 0;
-      pane.handle.resize = () => (resized += 1);
-      pty.resume(pane.id, false, 50_000);
-      pty.resume(pane.id, false, 50_000);
-      await replayed(pane.id);
-      await sleep(150);
-      assert.equal(Buffer.concat(pane.data()).toString(), `${history.toString()}NEW`, "the rest arrives once, after what was sent");
-      assert.ok(resized > 0, "slices sent to the departing view are repainted");
-    });
+      const exitAt = win.log.findIndex((m) => m.channel === `pty:exit:${id}`);
+      assert.ok(exitAt >= 0, "the exit is reported");
+      assert.ok(!win.log.slice(exitAt + 1).some((m) => m.channel === `pty:replay:${id}`), "no slice follows the exit");
+      assert.ok(win.log.slice(start).some((m) => m.channel === `pty:replay:${id}`));
+      assert.ok(Buffer.concat(back.received).equals(history), "the backlog is complete when the exit arrives");
+      console.log("PASS an exit mid-replay comes after the whole backlog");
+    }
 
-    // A reload of the window: main forgets the backlog, the raw tail repaints.
-    await section("a reload during a replay stops it and live output resumes", async () => {
-      const pane = await open("reload");
-      pty.pause(pane.id, 50_000);
-      pane.handle.emit(history);
-      pane.sent.length = 0;
-      pty.resume(pane.id, false, 50_000);
-      pty.detachForWebContents(pane.wc);
+    // A reload drops the window's sessions mid-replay: nothing more is sent.
+    {
+      const id = "replay-reload";
+      const { win, handle } = await open(id);
+      const pane = win.mount();
+      await win.idle();
+      pane.unmount();
+      await win.idle();
+      emitInChunks(handle, Buffer.alloc(2 * 1024 * 1024, 65));
+      pty.resume(id);
+      pty.detachForWebContents(win.wc);
+      const sent = win.log.length;
       await sleep(30);
-      assert.equal(pane.data().length, 1, "no slice goes to a reloading window");
-      assert.ok(pane.data()[0].length <= SLICE, "the replay was cut short");
-      assert.equal(session(pane.id).attached, true);
-      assert.equal(session(pane.id).detachedBacklogBytes, 0);
-      await pty.spawn({ ...localOptions(pane.id), cols: COLS, rows: ROWS, webContents: pane.wc });
-      pane.handle.emit("LIVE-AGAIN");
-      await sleep(40);
-      assert.ok(Buffer.concat(pane.data()).toString().endsWith("LIVE-AGAIN"), "live output reaches the reloaded window");
-    });
+      assert.equal(win.log.length, sent, "no slice goes to a reloaded window");
+      assert.equal(session(id).detachedBacklogBytes, 0);
+      pty.killImmediate(id);
+      console.log("PASS a reload mid-replay stops it");
+    }
 
-    await section("a program exiting during a replay still delivers all of it, then the exit", async () => {
-      const pane = await open("exit");
-      pty.pause(pane.id, 50_000);
-      pane.handle.emit(history);
-      pane.sent.length = 0;
-      pty.resume(pane.id, false, 50_000);
-      pane.handle.kill();
-      await sleep(30);
-      assert.equal(Buffer.concat(pane.data()).toString(), history.toString(), "nothing lost");
-      const order = pane.sent.map((m) => m.channel.split(":")[1]);
-      assert.equal(order.at(-1), "exit", "the exit comes last");
-    });
-
-    await section("a kill during a replay stops it", async () => {
-      const pane = await open("kill");
-      pty.pause(pane.id, 50_000);
-      pane.handle.emit(history);
-      pane.sent.length = 0;
-      pty.resume(pane.id, false, 50_000);
-      pty.killImmediate(pane.id);
-      await sleep(30);
-      assert.equal(pane.data().length, 1, "no slice after the kill");
-      assert.ok(pane.data()[0].length <= SLICE, "the replay was cut short");
-      assert.equal(session(pane.id), undefined);
-    });
-
-    pty.disposeAll();
-    assert.equal(failed, 0, `${failed} failed`);
     console.log("\nPASS pty backlog replay");
   } finally {
+    pty?.disposeAll();
     delete globalThis.__codaraPtySpawnHarness;
     fs.rmSync(tmp, { recursive: true, force: true });
   }

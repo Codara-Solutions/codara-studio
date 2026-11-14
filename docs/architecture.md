@@ -39,12 +39,13 @@ Only the app's own page may call main:
 - **Backpressure at 256,000 unacknowledged bytes.** The renderer acknowledges
   what it has drawn. Past that mark main pauses the PTY, and it resumes it
   below 64,000 bytes. A fast producer therefore cannot flood a slow window.
-- **A 4 MB tail and a detached backlog per session.** The tail lets a pane
-  re-attach after its view is rebuilt. The backlog holds output while a
-  workspace is hidden, about 2 MB when what it drops can no longer show in
-  the pane's scrollback (`pty-backlog.ts`), up to 16 MB otherwise. On return
-  it is replayed in 128 KB slices, one per turn, so the window never parses
-  megabytes in one task.
+- **A 4 MB tail and a 16 MB detached backlog per session.** The tail lets a
+  pane re-attach after its view is rebuilt. The backlog holds output while a
+  workspace is hidden. On return it is replayed in 128 KB slices, one per
+  turn, so the window never parses megabytes in one task. Each slice travels
+  with its offset in the replay and stays in main until the pane confirms
+  it, so a pane that goes away mid-replay loses nothing and its successor
+  writes nothing twice.
 
 Shell integration (`resources/shell-integration/`, staged by `shell-init.ts`)
 adds OSC 133/633 prompt markers, so Codara knows when a command starts and

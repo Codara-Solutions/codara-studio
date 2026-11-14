@@ -12,7 +12,6 @@ import type {
   ProjectPolicyMode,
   ShellInfo,
 } from "@shared/types";
-import { normalizeTerminalScrollbackLineLimit, TERMINAL_SCROLLBACK_LINE_LIMIT_MAX } from "../shared/types";
 import { isRemotePath, parseRemotePath } from "@shared/remote";
 import { bracketedPaste } from "../shared/terminal-text";
 import {
@@ -78,7 +77,6 @@ import { mintPaneSocketCapability } from "./agent-socket-capabilities";
 import { pretrustClaudeFolder } from "./claude-pretrust";
 import { paneHelperBinDir, withPaneHelperOnPath } from "./pane-helper";
 import { continueForegroundJob } from "./terminal-foreground";
-import { DetachedBacklog } from "./pty-backlog";
 import {
   beginPosixPtyTreeTeardown,
   capturePosixPtyTree,
@@ -171,20 +169,29 @@ interface Session {
   // Whether the renderer has a live IPC listener bound to this session. When
   // the renderer-side TerminalPane unmounts during a workspace switch, it
   // calls pause(id), which flips this to false. enqueueData then diverts
-  // bytes into the backlog instead of webContents.send (which would be
+  // bytes into detachedBacklog instead of webContents.send (which would be
   // dropped on receipt with no listener). On reattach the renderer calls
   // resume(id), which drains the backlog through webContents.send first and
   // flips back to true so live data resumes normally. Default true — fresh
   // sessions are always attached at spawn time.
   attached: boolean;
-  // Bytes emitted by the pty while attached=false, replayed on resume so the
-  // user sees what the agent printed during the detached window (typical
-  // case: a Claude run that kept streaming while the user was in another
-  // workspace). Held down to what the view could still show (pty-backlog.ts).
-  // While a replay is in flight attached stays false and new output queues
-  // behind it, so live bytes never overtake history.
-  backlog: DetachedBacklog;
+  // Bytes emitted by the pty while attached=false. Replayed once on resume
+  // so the user sees everything the agent printed during the detached window
+  // (typical case: a Claude run that kept streaming while the user was in
+  // another workspace). Capped at DETACHED_BACKLOG_BYTES with FIFO trim —
+  // worst case the very oldest bytes of a long detachment fall off, which
+  // is fine since the in-memory xterm snapshot covers the pre-unmount era.
+  detachedBacklog: Buffer[];
+  detachedBacklogBytes: number;
+  // resume() replays the backlog in slices, one per turn (replaySlice).
+  // While one runs, attached stays false so live output queues behind it.
+  // Slices are numbered by their end offset in the session's replay stream
+  // (never reset) and kept until the renderer confirms them, so a pane that
+  // unmounts mid-replay gets back exactly the slices it never received, and
+  // a slice sent twice is recognised by its offset and written once.
   replayTimer: NodeJS.Immediate | null;
+  replayOffset: number;
+  replayInFlight: Array<{ buf: Buffer; end: number }>;
   // Set true synchronously by killNow before the underlying pty.kill() runs.
   // Gates the pty.onData closure: on Windows ConPTY drains stdout for up to
   // ~1 second after kill (FLUSH_DATA_INTERVAL in node-pty's windowsConoutConnection),
@@ -407,25 +414,36 @@ function announceReplay(s: Session, byteLength: number): void {
        is still correct, it just isn't tagged. */
   }
 }
-// A backlog replay goes out in slices of this size with a turn of the event
-// loop between them: one multi-megabyte message is one structured clone and
-// one xterm parse, a single long task that freezes the window.
+// Per-session cap for bytes held while the renderer is detached (workspace
+// switched away or the host is locked/asleep). 16 MB covers long tool output
+// accumulated over an extended laptop sleep while remaining bounded. The
+// backlog is FIFO-trimmed past the cap.
+const DETACHED_BACKLOG_BYTES = 16 * 1024 * 1024;
+// The backlog goes back in slices of this size with a turn of the event loop
+// between them: one multi-megabyte message is one structured clone and one
+// xterm parse, a single long task that freezes the window.
 const REPLAY_SLICE_BYTES = 128 * 1024;
 
-// Until a renderer says how much scrollback its view keeps, the backlog keeps
-// enough for the largest setting.
-function newBacklog(rows: number): DetachedBacklog {
-  const backlog = new DetachedBacklog();
-  backlog.setView(TERMINAL_SCROLLBACK_LINE_LIMIT_MAX, rows);
-  return backlog;
+function trimBacklog(s: Session): void {
+  while (
+    s.detachedBacklog.length > 1 &&
+    s.detachedBacklogBytes - (s.detachedBacklog[0]?.length ?? 0) > DETACHED_BACKLOG_BYTES
+  ) {
+    const dropped = s.detachedBacklog.shift();
+    if (dropped) s.detachedBacklogBytes -= dropped.length;
+  }
 }
 
-function dropBacklog(s: Session): void {
+// A slice put back by pause() keeps its replay offset, so the pane that
+// already received it (pane replacement) can drop the second copy.
+const resentSliceEnd = new WeakMap<Buffer, number>();
+
+function clearReplay(s: Session): void {
   if (s.replayTimer) {
     clearImmediate(s.replayTimer);
     s.replayTimer = null;
   }
-  s.backlog.reset();
+  s.replayInFlight = [];
 }
 
 // Agent-socket credentials a pane must never inherit. Scoped capabilities
@@ -744,7 +762,9 @@ async function spawnWithSessionLock(
       // this, `attached=false` survives the reattach and every future byte is
       // silently accumulated in a backlog that nobody drains.
       existing.attached = true;
-      dropBacklog(existing);
+      existing.detachedBacklog = [];
+      existing.detachedBacklogBytes = 0;
+      clearReplay(existing);
       const snapshot = tailSnapshot(existing);
       if (snapshot) {
         try {
@@ -1141,8 +1161,11 @@ async function doSpawnRemote(
     tailBytes: 0,
     tailHead: 0,
     attached: true,
-    backlog: newBacklog(rows),
+    detachedBacklog: [],
+    detachedBacklogBytes: 0,
     replayTimer: null,
+    replayOffset: 0,
+    replayInFlight: [],
     disposed: false,
     exitEmitted: false,
     sanctioned: false,
@@ -1607,8 +1630,11 @@ function doSpawn(
     tailBytes: 0,
     tailHead: 0,
     attached: true,
-    backlog: newBacklog(rows),
+    detachedBacklog: [],
+    detachedBacklogBytes: 0,
     replayTimer: null,
+    replayOffset: 0,
+    replayInFlight: [],
     disposed: false,
     exitEmitted: false,
     sanctioned: false,
@@ -1852,12 +1878,14 @@ function enqueueData(id: string, data: string | Buffer): void {
     s.tail = s.tail.slice(s.tailHead);
     s.tailHead = 0;
   }
-  // Renderer is detached (workspace switched away) or a replay is in flight:
-  // divert into the backlog instead of the pending flush queue. Sending via
-  // webContents.send while the renderer-side IPC listener is unbound would
-  // drop the bytes on the floor.
+  // Renderer is detached (workspace switched away) — divert into the backlog
+  // instead of the pending flush queue. The backlog is replayed in one shot
+  // when the renderer reattaches; sending via webContents.send while the
+  // renderer-side IPC listener is unbound would drop the bytes on the floor.
   if (!s.attached) {
-    s.backlog.push(chunk);
+    s.detachedBacklog.push(chunk);
+    s.detachedBacklogBytes += chunk.length;
+    trimBacklog(s);
     return;
   }
   s.pendingChunks.push(chunk);
@@ -1876,33 +1904,49 @@ function enqueueData(id: string, data: string | Buffer): void {
 }
 
 // Called by the renderer when a TerminalPane unmounts (workspace switch). Any
-// pty bytes that arrive while paused are diverted into the backlog and
+// pty bytes that arrive while paused are diverted into detachedBacklog and
 // replayed on resume. Idempotent: re-pausing an already-paused session is a
 // no-op. Pending chunks queued for the next 16 ms flush are absorbed into the
-// backlog so the small window between cleanup and pause is not lost. A pause
-// during a replay stops it; what was not sent yet stays for the next resume,
-// which repaints: slices already in flight reach a listener that is gone. A
-// full-screen program redraws them; main-screen lines among them are lost,
-// as live output in that window always was.
-// `scrollbackLines` is the view's scrollback setting, which bounds what the
-// backlog must keep.
-export function pause(id: string, scrollbackLines?: number): void {
+// backlog so the small window between cleanup and pause is not lost.
+//
+// A pause during a replay stops it; the rest waits for the next resume.
+// `replayedTo` is the end offset of the last replay slice the pane's listener
+// received, sent by a pane that removes its listener right after this call:
+// slices past it were still in flight and go back to the front of the
+// backlog. Without it (host suspend, a hidden document) the listener stays,
+// so every slice already sent still arrives.
+export function pause(id: string, replayedTo?: number): void {
   const s = sessions.get(id);
   if (!s) return;
   resetRenderFlow(s);
-  setBacklogView(s, scrollbackLines);
-  if (s.replayTimer) {
-    clearImmediate(s.replayTimer);
-    s.replayTimer = null;
-    s.backlog.lossy = true;
+  const inFlight = s.replayInFlight;
+  clearReplay(s);
+  if (typeof replayedTo === "number") {
+    const back: Buffer[] = [];
+    let backBytes = 0;
+    for (const { buf, end } of inFlight) {
+      if (end <= replayedTo) continue;
+      const start = end - buf.length;
+      const part = replayedTo > start ? buf.subarray(replayedTo - start) : buf;
+      resentSliceEnd.set(part, end);
+      back.push(part);
+      backBytes += part.length;
+    }
+    if (back.length > 0) {
+      s.detachedBacklog = [...back, ...s.detachedBacklog];
+      s.detachedBacklogBytes += backBytes;
+    }
   }
-  if (!s.attached) return;
-  s.attached = false;
-  if (s.pendingChunks.length > 0) {
-    for (const chunk of s.pendingChunks) s.backlog.push(chunk);
+  if (s.attached) {
+    s.attached = false;
+    for (const chunk of s.pendingChunks) {
+      s.detachedBacklog.push(chunk);
+      s.detachedBacklogBytes += chunk.length;
+    }
     s.pendingChunks = [];
     s.pendingBytes = 0;
   }
+  trimBacklog(s);
   if (s.flushTimer) {
     clearTimeout(s.flushTimer);
     s.flushTimer = null;
@@ -1918,55 +1962,106 @@ export function pause(id: string, scrollbackLines?: number): void {
 export function pauseAllForHostSuspend(): number {
   let paused = 0;
   for (const [id, s] of sessions) {
-    if (!s.webContents || s.webContents.isDestroyed() || !s.attached) continue;
+    if (!s.webContents || s.webContents.isDestroyed()) continue;
+    if (!s.attached && !s.replayTimer) continue;
     pause(id);
     paused += 1;
   }
   return paused;
 }
 
-// Called by the renderer when a TerminalPane (re)mounts. Drains the backlog
-// through the same webContents.send channel as live data so the onData
-// listener receives the missed bytes in arrival order, then flips `attached`
-// back to true so subsequent pty output resumes the normal flush path. The
-// first slice goes out before this returns; the rest follow one per turn,
-// and output that arrives meanwhile queues behind them. Safe to call on a
-// fresh session (no backlog, attached already true) and during a replay
-// (it carries on). A backlog that dropped screen content always redraws.
-export function resume(id: string, redraw = false, scrollbackLines?: number): void {
+// Called by the renderer when a TerminalPane (re)mounts. Drains the
+// detachedBacklog through the same webContents.send channel as live data so
+// the onData listener receives the missed bytes in arrival order, then flips
+// `attached` back to true so subsequent pty output resumes the normal flush
+// path. The first slice goes before this returns, the rest one per turn.
+// Safe to call on a fresh session (no backlog, attached already true) and
+// during a replay (it carries on).
+export function resume(id: string, redraw = false): void {
   const s = sessions.get(id);
   if (!s) return;
-  setBacklogView(s, scrollbackLines);
-  const repaint = redraw || s.backlog.lossy;
-  s.backlog.lossy = false;
   if (!s.replayTimer) replaySlice(s);
-  if (repaint) requestTerminalRedraw(s);
+  if (redraw) requestTerminalRedraw(s);
 }
 
+// Each slice is one message on the replay channel carrying its bytes and its
+// end offset together, so a pane can never get one without the other. Slices
+// are plain byte ranges: the renderer feeds them to xterm and its decoders as
+// Uint8Array in streaming mode, so a slice may end inside an escape sequence
+// or a UTF-8 character, exactly as pty chunks do.
 function replaySlice(s: Session): void {
   s.replayTimer = null;
   if (sessions.get(s.id) !== s || s.disposed) return;
   const wc = s.webContents;
-  const slice = wc && !wc.isDestroyed() ? s.backlog.take(REPLAY_SLICE_BYTES) : null;
-  if (slice && wc) {
-    announceReplay(s, slice.byteLength);
-    wc.send(s.dataChannel, new Uint8Array(slice.buffer, slice.byteOffset, slice.byteLength));
-    noteRenderBytesSent(s, slice.byteLength);
+  if (s.detachedBacklog.length > 0 && wc && !wc.isDestroyed()) {
+    const head = s.detachedBacklog[0];
+    const resentEnd = resentSliceEnd.get(head);
+    let slice: Buffer;
+    let end: number;
+    if (resentEnd !== undefined) {
+      s.detachedBacklog.shift();
+      slice = head;
+      end = resentEnd;
+    } else {
+      const parts: Buffer[] = [];
+      let size = 0;
+      let whole = 0;
+      for (const chunk of s.detachedBacklog) {
+        if (size + chunk.length > REPLAY_SLICE_BYTES) {
+          if (size < REPLAY_SLICE_BYTES) {
+            const room = REPLAY_SLICE_BYTES - size;
+            parts.push(chunk.subarray(0, room));
+            s.detachedBacklog[whole] = chunk.subarray(room);
+            size += room;
+          }
+          break;
+        }
+        parts.push(chunk);
+        size += chunk.length;
+        whole += 1;
+      }
+      s.detachedBacklog.splice(0, whole);
+      slice = parts.length === 1 ? parts[0] : Buffer.concat(parts, size);
+      s.replayOffset += size;
+      end = s.replayOffset;
+    }
+    const n = slice.length;
+    s.detachedBacklogBytes -= n;
+    try {
+      wc.send(s.replayChannel, {
+        bytes: n,
+        end,
+        data: new Uint8Array(slice.buffer, slice.byteOffset, slice.byteLength),
+      });
+    } catch {
+      /* frame disposed mid-send; the bytes stay in flight for a later pause */
+    }
+    s.replayInFlight.push({ buf: slice, end });
+    noteRenderBytesSent(s, n);
+    if (s.detachedBacklog.length > 0) {
+      s.replayTimer = setImmediate(() => replaySlice(s));
+      return;
+    }
   }
-  if (!slice || s.backlog.isEmpty()) {
-    const lossy = s.backlog.lossy;
-    s.backlog.reset();
-    s.attached = true;
-    s.lastAttachAt = Date.now();
-    if (lossy) requestTerminalRedraw(s);
-    return;
-  }
-  s.replayTimer = setImmediate(() => replaySlice(s));
+  s.detachedBacklog = [];
+  s.detachedBacklogBytes = 0;
+  s.attached = true;
+  s.lastAttachAt = Date.now();
 }
 
-function setBacklogView(s: Session, scrollbackLines: number | undefined): void {
-  if (typeof scrollbackLines !== "number" || !Number.isFinite(scrollbackLines)) return;
-  s.backlog.setView(normalizeTerminalScrollbackLineLimit(scrollbackLines, TERMINAL_SCROLLBACK_LINE_LIMIT_MAX), s.rows);
+// The renderer received every replay slice up to `end`.
+export function ackReplay(id: string, end: number): void {
+  const s = sessions.get(id);
+  if (!s || !Number.isFinite(end)) return;
+  while (s.replayInFlight.length > 0 && s.replayInFlight[0].end <= end) s.replayInFlight.shift();
+  // Put-back slices the current pane has meanwhile received need no resend.
+  while (s.detachedBacklog.length > 0) {
+    const head = s.detachedBacklog[0];
+    const resentEnd = resentSliceEnd.get(head);
+    if (resentEnd === undefined || resentEnd > end) break;
+    s.detachedBacklog.shift();
+    s.detachedBacklogBytes -= head.length;
+  }
 }
 
 // Called by the renderer's raw-tail-reattach panes (the ChatPanel backend
@@ -2111,7 +2206,9 @@ export function detach(id: string): void {
   resetRenderFlow(s);
   s.webContents = null;
   s.attached = true;
-  dropBacklog(s);
+  s.detachedBacklog = [];
+  s.detachedBacklogBytes = 0;
+  clearReplay(s);
   s.pendingChunks = [];
   s.pendingBytes = 0;
   if (s.flushTimer) {
@@ -2182,7 +2279,7 @@ export function resourceSnapshot(): PtyResourceSnapshot {
         hasRenderer,
         remote: session.pty.pid === 0 || isRemotePath(session.cwd),
         tailBytes: session.tailBytes,
-        detachedBacklogBytes: session.backlog.bytes,
+        detachedBacklogBytes: session.detachedBacklogBytes,
         pendingBytes: session.pendingBytes,
       };
     })
@@ -2663,7 +2760,9 @@ export function detachForWebContents(wc: WebContents): void {
     // duplicate replay and, critically, prevents `attached=false` from
     // stranding all future output after a renderer crash/reload.
     s.attached = true;
-    dropBacklog(s);
+    s.detachedBacklog = [];
+    s.detachedBacklogBytes = 0;
+    clearReplay(s);
     s.pendingChunks = [];
     s.pendingBytes = 0;
     if (s.flushTimer) {
@@ -2828,7 +2927,9 @@ async function disposeSessionsGraceful(
     s.tail = [];
     s.tailBytes = 0;
     s.tailHead = 0;
-    dropBacklog(s);
+    s.detachedBacklog = [];
+    s.detachedBacklogBytes = 0;
+    clearReplay(s);
     releaseNativeProfileSessionLeases(s);
     revokePaneAccess(s);
     sessions.delete(id);
@@ -2997,7 +3098,7 @@ export function sleepOutput(
   };
   return {
     tail: newest(s.tail.slice(s.tailHead)),
-    unsent: s.attached ? null : newest(s.backlog.buffers()),
+    unsent: s.attached ? null : newest(s.detachedBacklog),
   };
 }
 
@@ -3098,7 +3199,9 @@ function killNow(id: string): void {
   s.tail = [];
   s.tailBytes = 0;
   s.tailHead = 0;
-  dropBacklog(s);
+  s.detachedBacklog = [];
+  s.detachedBacklogBytes = 0;
+  clearReplay(s);
   releaseNativeProfileSessionLeases(s);
   revokePaneAccess(s);
   sessions.delete(id);

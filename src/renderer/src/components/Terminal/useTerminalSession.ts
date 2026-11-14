@@ -946,6 +946,10 @@ export function useTerminalSession({
     // so a mid-parse remount can't overwrite the cached full buffer with a
     // partially-populated one (see the snapshot replay block below).
     let replayPending = false;
+    // Replayed history on this pane's data stream, and which slices of a
+    // paused backlog it already holds. At effect level so the unmount cleanup
+    // can tell main where the replay stopped.
+    const replayTracker = createReplayTracker();
 
     // Defer one tick so a strict-mode mount → unmount → mount sequence cancels
     // the first spawn before it reaches main. Without this, dev rebuilds leak
@@ -2914,13 +2918,20 @@ export function useTerminalSession({
         }
       };
 
-      // Replayed history main is about to re-send on the live data channel
-      // (reattach frame, post-sleep backlog). Only the URL sniffer consults
-      // this — replayed bytes must still reach xterm exactly like live ones.
-      const replayTracker = createReplayTracker();
+      // Replayed history: a reattach frame announced ahead of the data
+      // channel, or a paused backlog arriving in slices on the replay channel
+      // itself. Replayed bytes reach xterm exactly like live ones; only the
+      // URL sniffer treats them differently. Each slice is acknowledged so
+      // main can drop it (read-only mirrors never resumed, so they never ack).
       const offReplay =
-        window.spark.pty.onReplay?.(sessionId, ({ bytes }) => {
-          replayTracker.announce(bytes);
+        window.spark.pty.onReplay?.(sessionId, ({ bytes, end, data }) => {
+          if (!data || typeof end !== "number") {
+            replayTracker.announce(bytes);
+            return;
+          }
+          const fresh = replayTracker.slice(data, end);
+          if (fresh && fresh.length > 0) handlePtyData(fresh, true);
+          if (!readOnlyRef.current) window.spark.pty.replayAck?.(sessionId, end);
         }) ?? (() => undefined);
 
       // Backpressure acks. Main counts every byte it ships on the data
@@ -2954,7 +2965,7 @@ export function useTerminalSession({
         ackPending = 0;
       });
 
-      const offData = window.spark.pty.onData(sessionId, (data) => {
+      function handlePtyData(data: Uint8Array | string, fromReplay = false): void {
         // Main ships Uint8Array. xterm.js's parser reassembles partial ANSI
         // sequences across writes when fed Uint8Array, which is what TUIs
         // (claude/codex/Ink) need to render cursor sequences without smearing.
@@ -2967,7 +2978,7 @@ export function useTerminalSession({
         // downstream reads the flag — including the hidden-pane early returns,
         // which must still consume the bytes or the replay would leak its
         // "history" marking onto the live output that follows.
-        const isReplayedChunk = replayTracker.consume(bytes.length);
+        const isReplayedChunk = fromReplay || replayTracker.consume(bytes.length);
         const writeChunk = (write: () => void) => {
           if (isReplayedChunk) writeAsReplay(term, write);
           else write();
@@ -3057,7 +3068,8 @@ export function useTerminalSession({
 
         // Banner-text fallback for start detection + byte-level fallbacks
         // for exit detection ran above, before the hidden-pane early return.
-      });
+      }
+      const offData = window.spark.pty.onData(sessionId, (data) => handlePtyData(data));
       // Watch the first ~20s of a resumed Claude's output for a resume-refusal
       // signature and self-heal (fresh forced-id launch + replacement pointer).
       // Shared by the boot restore path (below) and the in-place death re-arm
@@ -3753,11 +3765,7 @@ export function useTerminalSession({
       // resume issued here would drain a backlog the CANONICAL pane paused for,
       // stealing its bytes onto the shared channel at the wrong moment.
       if (!rawTailReattachRef.current && !readOnlyRef.current && !sleepingAtMount) {
-        void window.spark.pty.resume(
-          sessionId,
-          attachedExistingSession && !externalSizeOwnerRef.current,
-          scrollbackLineLimitRef.current,
-        );
+        void window.spark.pty.resume(sessionId, attachedExistingSession && !externalSizeOwnerRef.current);
       }
 
       // Two-stage debounce, ported from the terax design.
@@ -4069,7 +4077,7 @@ export function useTerminalSession({
         // the screen on remount.
         void window.spark.pty.detach?.(sessionId);
       } else if (!readOnlyRef.current) {
-        void window.spark.pty.pause?.(sessionId, scrollbackLineLimitRef.current);
+        void window.spark.pty.pause?.(sessionId, replayTracker.replayedTo());
       }
       for (const fn of cleanups) {
         try {
@@ -4357,7 +4365,7 @@ export function useTerminalSession({
       resume: async (redraw) => {
         refitAndResizeRef.current?.();
         if (!readOnlyRef.current) {
-          await window.spark.pty.resume(sessionId, redraw && !externalSizeOwnerRef.current, scrollbackLineLimitRef.current);
+          await window.spark.pty.resume(sessionId, redraw && !externalSizeOwnerRef.current);
         }
       },
       afterWrite: (done) => {
@@ -4381,7 +4389,7 @@ export function useTerminalSession({
         // Stop IPC/xterm churn while the whole window is minimized, hidden to
         // tray, or frozen by the OS. Main keeps a bounded ordered backlog and
         // recoverAfterHostWake resumes it only after xterm has repaired/refit.
-        if (!readOnlyRef.current) void window.spark.pty.pause(sessionId, scrollbackLineLimitRef.current);
+        if (!readOnlyRef.current) void window.spark.pty.pause(sessionId);
       }
     };
     window.addEventListener("blur", onBlur);
