@@ -8,6 +8,7 @@ import {
   type AppState,
   type Workspace,
 } from "@shared/types";
+import { checkoutRemote, checkoutRemoteUrl } from "./git-checkout-remote";
 import { runGit } from "./git-exec";
 import { createLimiter, workQueueRelevantFingerprint } from "./github-work-queue";
 import { publish, rearm, type PublishInput } from "./notify";
@@ -341,24 +342,16 @@ async function resolveRepoRef(cwd: string, deps_: GitHubPushWatchDependencies): 
     pending = (async () => {
       // The remote the checked-out branch tracks, else origin, else the sole
       // remote — same precedence the fetcher uses.
-      const read = async (args: string[]): Promise<string> => {
+      const read = async (dir: string, args: string[]): Promise<string | null> => {
         try {
-          return (await deps_.runGit(cwd, args, { internal: true })).stdout.trim();
+          return (await deps_.runGit(dir, args, { internal: true })).stdout.trim();
         } catch {
-          return "";
+          return null;
         }
       };
-      const remotes = (await read(["remote"])).split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
-      if (remotes.length === 0) return null;
-      let remote = "";
-      const branch = await read(["branch", "--show-current"]);
-      if (branch) {
-        const tracked = await read(["config", "--get", `branch.${branch}.remote`]);
-        if (tracked && remotes.includes(tracked)) remote = tracked;
-      }
-      if (!remote) remote = remotes.includes("origin") ? "origin" : remotes.length === 1 ? remotes[0] : "";
+      const remote = await checkoutRemote(cwd, read);
       if (!remote) return null;
-      const url = await read(["remote", "get-url", remote]);
+      const url = await checkoutRemoteUrl(cwd, remote, read);
       return url ? parseGitHubRemote(url) : null;
     })();
     repoRefByCwd.set(cwd, pending);
