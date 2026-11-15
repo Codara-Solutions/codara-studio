@@ -437,8 +437,10 @@ async function main() {
     }
 
     // A reload of the same window without detachForWebContents (Ctrl+R, a
-    // dev-server full reload): the new document's tokens are above every
-    // retired one, and main hands what the old listeners were owed to it.
+    // dev-server full reload): main retires the old document's tokens by
+    // value, so the new document's are accepted even when they are lower
+    // (its random base came out below the old one), and main hands what the
+    // old listeners were owed to it.
     {
       const reloadedTracker = path.join(tmp, "tracker-reloaded.cjs");
       fs.copyFileSync(trackerFile, reloadedTracker);
@@ -461,10 +463,13 @@ async function main() {
       }
       old.vanish();
       await sleep(5);
+      const realRandom = Math.random;
+      Math.random = () => 0;
       const { createReplayTracker: reloadedFactory } = require(reloadedTracker);
+      Math.random = realRandom;
       win.call(() => pty.forgetReplayListeners(win.wc));
       const fresh = win.mount({ factory: reloadedFactory });
-      assert.ok(fresh.tracker.token > old.tracker.token, "a reloaded document's tokens are above the old ones");
+      assert.ok(fresh.tracker.token < old.tracker.token, "the reloaded document's tokens are below the old ones");
       await win.idle();
       assert.equal(session(id).attached, true, "the reloaded pane drains the backlog");
       assertOnce("reload", all(first, ...cycles, old, fresh), history);
@@ -501,7 +506,7 @@ async function main() {
         assertOnce("reload while acks pending", all(late.first, pane, next), Buffer.concat([lateHistory, Buffer.from("LIVE-AFTER-RELOAD")]));
         pty.killImmediate(lateId);
       }
-      console.log("PASS a reload of the same window keeps replaying, in order, with tokens above the retired ones");
+      console.log("PASS a reload of the same window keeps replaying, in order, whatever its tokens' values");
     }
 
     for (let seed = 1; seed <= 40; seed += 1) await fuzz(seed);

@@ -190,11 +190,12 @@ interface Session {
   // unmounts mid-replay gets back exactly the slices it never took in.
   replayTimer: NodeJS.Immediate | null;
   replayToken: number | undefined;
-  // Tokens grow with each pane listener, across reloads too; a pause with an
-  // offset retires the pausing pane's token, and a late resume naming it (or
-  // an older one) is ignored.
-  replayRetiredToken: number;
-  replaySeenToken: number;
+  // A pause with an offset retires the pausing pane's token, and a reload
+  // retires every token the old document used; a late resume naming a
+  // retired token is ignored. Exact matches (tokens are random per
+  // document), at most REPLAY_TOKEN_MEMORY of each.
+  replayRetired: Set<number>;
+  replaySeen: Set<number>;
   replayInFlight: Array<{ buf: Buffer; end: number }>;
   // Set true synchronously by killNow before the underlying pty.kill() runs.
   // Gates the pty.onData closure: on Windows ConPTY drains stdout for up to
@@ -445,6 +446,20 @@ function trimBacklog(s: Session): void {
 let replayStreamEnd = 0;
 const resentSliceEnd = new WeakMap<Buffer, number>();
 
+const REPLAY_TOKEN_MEMORY = 64;
+
+function rememberToken(set: Set<number>, token: number): void {
+  set.delete(token);
+  set.add(token);
+  if (set.size > REPLAY_TOKEN_MEMORY) set.delete(set.values().next().value as number);
+}
+
+// The tokens used so far by this session's renderer listeners are all dead.
+function retireSeenTokens(s: Session): void {
+  for (const token of s.replaySeen) rememberToken(s.replayRetired, token);
+  s.replaySeen.clear();
+}
+
 function stopReplay(s: Session): void {
   if (s.replayTimer) {
     clearImmediate(s.replayTimer);
@@ -456,6 +471,7 @@ function clearReplay(s: Session): void {
   stopReplay(s);
   s.replayInFlight = [];
   s.replayToken = undefined;
+  retireSeenTokens(s);
 }
 
 // Agent-socket credentials a pane must never inherit. Scoped capabilities
@@ -1177,8 +1193,8 @@ async function doSpawnRemote(
     detachedBacklogBytes: 0,
     replayTimer: null,
     replayToken: undefined,
-    replayRetiredToken: 0,
-    replaySeenToken: 0,
+    replayRetired: new Set(),
+    replaySeen: new Set(),
     replayInFlight: [],
     disposed: false,
     exitEmitted: false,
@@ -1648,8 +1664,8 @@ function doSpawn(
     detachedBacklogBytes: 0,
     replayTimer: null,
     replayToken: undefined,
-    replayRetiredToken: 0,
-    replaySeenToken: 0,
+    replayRetired: new Set(),
+    replaySeen: new Set(),
     replayInFlight: [],
     disposed: false,
     exitEmitted: false,
@@ -1939,8 +1955,8 @@ export function pause(id: string, replayedTo?: number, token?: number): void {
   resetRenderFlow(s);
   stopReplay(s);
   if (token !== undefined) {
-    s.replayRetiredToken = Math.max(s.replayRetiredToken, token);
-    s.replaySeenToken = Math.max(s.replaySeenToken, token);
+    rememberToken(s.replayRetired, token);
+    s.replaySeen.delete(token);
   }
   if (typeof replayedTo === "number" && (token === undefined || token === s.replayToken)) {
     const inFlight = s.replayInFlight;
@@ -2005,10 +2021,10 @@ export function pauseAllForHostSuspend(): number {
 export function resume(id: string, redraw = false, token?: number): void {
   const s = sessions.get(id);
   if (!s) return;
-  if (token !== undefined && token <= s.replayRetiredToken) return;
+  if (token !== undefined && s.replayRetired.has(token)) return;
   if (token !== undefined) {
     s.replayToken = token;
-    s.replaySeenToken = Math.max(s.replaySeenToken, token);
+    rememberToken(s.replaySeen, token);
   }
   if (!s.replayTimer) replaySlice(s);
   if (redraw) requestTerminalRedraw(s);
@@ -2083,7 +2099,7 @@ function replaySlice(s: Session): void {
 
 // The window's document is being replaced (reload, dev-server full reload)
 // without detachForWebContents: its pane listeners are going away. Every
-// token they used is retired (the new document's tokens are higher), and
+// token they used is retired, and
 // slices still owed to them go back to the front of the backlog. If the
 // session was already attached (the last slice sent, acks pending), it is
 // paused like pause() does, so the new document's resume replays that
@@ -2092,7 +2108,7 @@ export function forgetReplayListeners(wc: WebContents): void {
   for (const s of sessions.values()) {
     if (s.webContents !== wc) continue;
     stopReplay(s);
-    s.replayRetiredToken = Math.max(s.replayRetiredToken, s.replaySeenToken);
+    retireSeenTokens(s);
     const back = s.replayInFlight.map(({ buf, end }) => {
       resentSliceEnd.set(buf, end);
       return buf;
