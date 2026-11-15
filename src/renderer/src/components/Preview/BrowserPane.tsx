@@ -169,6 +169,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   { tabId, url, partition, visible, onUrlChange, onReady, workspaceId = null },
   ref,
 ) {
+  const paneRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const webviewRef = useRef<WebviewElement | null>(null);
   const addressRef = useRef<AddressBarHandle | null>(null);
@@ -189,8 +190,6 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   const tabRecord = useBrowserTab(tabId);
   const asleep = Boolean(tabRecord?.asleep);
   const fullScreen = useBrowserFullScreen(tabId);
-  // Ctrl/Cmd+F over the page (BrowserPageFind.tsx).
-  const findHostRef = useRef<HTMLDivElement | null>(null);
 
   // `domReady` mirrored into a ref so the navigation effect below can gate
   // on it without taking it as a dependency (which would re-run that effect
@@ -902,6 +901,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
 
   return (
     <div
+      ref={paneRef}
       data-browser-pane
       style={{
         position: "absolute",
@@ -1047,152 +1047,147 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         </div>
       ) : null}
       <div
-        ref={findHostRef}
-        style={{ position: "relative", display: "flex", flexDirection: "column", flex: 1, minHeight: 0, minWidth: 0 }}
+        ref={containerRef}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          minWidth: 0,
+          background: "white",
+          position: "relative",
+          // Recess the webview under the chrome: a 1px soft hairline along the
+          // top edge makes the dark-chrome-to-white-page seam read as
+          // intentional depth rather than a raw cut.
+          boxShadow: "inset 0 1px 0 var(--rule-soft)",
+        }}
       >
-        <div
-          ref={containerRef}
-          style={{
-            flex: 1,
-            minHeight: 0,
-            minWidth: 0,
-            background: "white",
-            position: "relative",
-            // Recess the webview under the chrome: a 1px soft hairline along the
-            // top edge makes the dark-chrome-to-white-page seam read as
-            // intentional depth rather than a raw cut.
-            boxShadow: "inset 0 1px 0 var(--rule-soft)",
-          }}
-        >
-          {!url ? <EmptyState onFocusAddress={() => addressRef.current?.focus()} /> : null}
-          {url && !domReady && !error && !asleep ? (
-            <>
-              {/* Safari-style loading hairline: a 2px accent bar pinned to the
-                  top seam of the webview, shimmering left-to-right while the page
-                  loads. Replaces the centered pulsing "Loading" word. The
-                  shimmer animation collapses to a static bar under
-                  prefers-reduced-motion via the global reduced-motion rule. */}
-              <div
-                aria-hidden
+        {!url ? <EmptyState onFocusAddress={() => addressRef.current?.focus()} /> : null}
+        {url && !domReady && !error && !asleep ? (
+          <>
+            {/* Safari-style loading hairline: a 2px accent bar pinned to the
+                top seam of the webview, shimmering left-to-right while the page
+                loads. Replaces the centered pulsing "Loading" word. The
+                shimmer animation collapses to a static bar under
+                prefers-reduced-motion via the global reduced-motion rule. */}
+            <div
+              aria-hidden
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 2,
+                zIndex: 1,
+                pointerEvents: "none",
+                background:
+                  "linear-gradient(90deg, var(--accent-soft) 0%, var(--accent) 50%, var(--accent-soft) 100%)",
+                backgroundSize: "220% 100%",
+                animation: "spark-shimmer 1.1s linear infinite",
+              }}
+            />
+            <div
+              role="status"
+              aria-label="Loading"
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "var(--bg)",
+                pointerEvents: "none",
+              }}
+            >
+              <span
+                className="spark-eyebrow"
                 style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  height: 2,
-                  zIndex: 1,
-                  pointerEvents: "none",
-                  background:
-                    "linear-gradient(90deg, var(--accent-soft) 0%, var(--accent) 50%, var(--accent-soft) 100%)",
-                  backgroundSize: "220% 100%",
-                  animation: "spark-shimmer 1.1s linear infinite",
-                }}
-              />
-              <div
-                role="status"
-                aria-label="Loading"
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  background: "var(--bg)",
-                  pointerEvents: "none",
+                  color: "var(--muted)",
+                  animation: "spark-pulse 1.4s ease-in-out infinite",
                 }}
               >
-                <span
-                  className="spark-eyebrow"
-                  style={{
-                    color: "var(--muted)",
-                    animation: "spark-pulse 1.4s ease-in-out infinite",
-                  }}
-                >
-                  Loading
-                </span>
-              </div>
-            </>
-          ) : null}
-          {asleep && tabId ? (
-            <SleepingView
-              snapshot={tabRecord?.snapshot ?? null}
-              title={tabRecord?.title || currentUrl || url}
-              onWake={() => wakeTab(tabId)}
-            />
-          ) : null}
-          {fullScreen !== "off" ? <FullScreenHint mode={fullScreen} /> : null}
-          <AgentPresence tabId={tabId} visible={visible} pageRef={webviewRef} />
-          <PageDialogOverlay tabId={tabId} />
-          {responsive && visible && url ? (
-            <ResponsiveView
-              url={currentUrl || url}
-              onNavigate={(next) => {
-                const wv = getLiveWebview();
-                if (!wv?.loadURL) return;
-                try {
-                  if (wv.getURL?.() !== next) wv.loadURL(next);
-                } catch {
-                  /* webview not dom-ready */
-                }
-              }}
-              onClose={() => setResponsive(false)}
-            />
-          ) : null}
-          {pointMode === "pick" || pointMode === "compose" ? (
-            <PointPicker
-              run={runInPage}
-              mode={pointMode === "pick" ? "pick" : "passive"}
-              selection={picked}
-              onSelectionChange={setPicked}
-              onFinish={(selection) => void inspectPicked(selection)}
-              onCancel={stopPointing}
-            />
-          ) : null}
-          {pointMode === "compose" && tabId ? (
-            <PointComposer
-              tabId={tabId}
-              workspaceId={workspaceId}
-              inspection={inspection}
-              loading={inspectLoading}
-              error={inspectError}
-              anchor={picked[0] ? {
-                left: picked[0].info.rect.x / (picked[0].info.scale || 1),
-                top: picked[0].info.rect.y / (picked[0].info.scale || 1),
-                width: picked[0].info.rect.width / (picked[0].info.scale || 1),
-                height: picked[0].info.rect.height / (picked[0].info.scale || 1),
-              } : null}
-              hostSize={hostSize}
-              onRemove={removePicked}
-              onAddMore={() => setPointMode("pick")}
-              onClose={stopPointing}
-              onDone={finishPointing}
-            />
-          ) : null}
-          {pointMode === "comment" && tabId ? (
-            <CommentOverlay
-              tabId={tabId}
-              workspaceId={workspaceId}
-              run={runInPage}
-              capture={capturePage}
-              onClose={stopPointing}
-              onDone={finishPointing}
-            />
-          ) : null}
-          {pointNotice ? (
-            <div className="cp-toast spark-glass--strong spark-overlay-surface" role="status" data-testid="point-notice">
-              <span className="cp-toast__dot" aria-hidden />
-              {pointNotice}
+                Loading
+              </span>
             </div>
-          ) : null}
-        </div>
+          </>
+        ) : null}
+        {asleep && tabId ? (
+          <SleepingView
+            snapshot={tabRecord?.snapshot ?? null}
+            title={tabRecord?.title || currentUrl || url}
+            onWake={() => wakeTab(tabId)}
+          />
+        ) : null}
+        {fullScreen !== "off" ? <FullScreenHint mode={fullScreen} /> : null}
+        <AgentPresence tabId={tabId} visible={visible} pageRef={webviewRef} />
         {url ? (
           <Suspense fallback={null}>
             <BrowserPageFind
-              hostRef={findHostRef}
+              rootRef={paneRef}
               webviewRef={webviewRef as unknown as RefObject<Electron.WebviewTag | null>}
               ready={domReady && !asleep}
             />
           </Suspense>
+        ) : null}
+        <PageDialogOverlay tabId={tabId} />
+        {responsive && visible && url ? (
+          <ResponsiveView
+            url={currentUrl || url}
+            onNavigate={(next) => {
+              const wv = getLiveWebview();
+              if (!wv?.loadURL) return;
+              try {
+                if (wv.getURL?.() !== next) wv.loadURL(next);
+              } catch {
+                /* webview not dom-ready */
+              }
+            }}
+            onClose={() => setResponsive(false)}
+          />
+        ) : null}
+        {pointMode === "pick" || pointMode === "compose" ? (
+          <PointPicker
+            run={runInPage}
+            mode={pointMode === "pick" ? "pick" : "passive"}
+            selection={picked}
+            onSelectionChange={setPicked}
+            onFinish={(selection) => void inspectPicked(selection)}
+            onCancel={stopPointing}
+          />
+        ) : null}
+        {pointMode === "compose" && tabId ? (
+          <PointComposer
+            tabId={tabId}
+            workspaceId={workspaceId}
+            inspection={inspection}
+            loading={inspectLoading}
+            error={inspectError}
+            anchor={picked[0] ? {
+              left: picked[0].info.rect.x / (picked[0].info.scale || 1),
+              top: picked[0].info.rect.y / (picked[0].info.scale || 1),
+              width: picked[0].info.rect.width / (picked[0].info.scale || 1),
+              height: picked[0].info.rect.height / (picked[0].info.scale || 1),
+            } : null}
+            hostSize={hostSize}
+            onRemove={removePicked}
+            onAddMore={() => setPointMode("pick")}
+            onClose={stopPointing}
+            onDone={finishPointing}
+          />
+        ) : null}
+        {pointMode === "comment" && tabId ? (
+          <CommentOverlay
+            tabId={tabId}
+            workspaceId={workspaceId}
+            run={runInPage}
+            capture={capturePage}
+            onClose={stopPointing}
+            onDone={finishPointing}
+          />
+        ) : null}
+        {pointNotice ? (
+          <div className="cp-toast spark-glass--strong spark-overlay-surface" role="status" data-testid="point-notice">
+            <span className="cp-toast__dot" aria-hidden />
+            {pointNotice}
+          </div>
         ) : null}
       </div>
     </div>

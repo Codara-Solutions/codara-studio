@@ -12,7 +12,8 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 // - a terminal pane running an agent CLI. Claude Code and Codex draw on the
 //   alternate screen, where any other full-screen program keeps Ctrl+F
 //   (terminal-fullscreen-ctrl-f.spec.ts), so find never opened over the
-//   agent, the pane most of the day is spent in;
+//   agent, the pane most of the day is spent in. A program the agent opens
+//   in its place (an editor, a pager) still gets the key;
 // - the built-in browser, with focus inside the page: the key travels the
 //   guest's before-input-event forwarding, as a real key press does. The
 //   browser pane had no find at all.
@@ -22,7 +23,10 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 const FAKE_CLAUDE = String.raw`
   const fs = require("fs");
   const out = (text) => process.stdout.write(text);
-  out("\x1b[?1049h\x1b[2J\x1b[HClaude Code v2.1.300\r\n\r\nThe needle is on screen.\r\n> ");
+  const chrome = () =>
+    out("\x1b[?1049h\x1b[2J\x1b[HClaude Code v2.1.300\r\n\r\nThe needle is on screen.\r\n> \r\n" +
+      "\u23f5\u23f5 auto mode on (shift+tab to cycle)\x1b[4;3H");
+  chrome();
   out("\x1b]7501;app=claude:state=idle\x07");
   process.stdin.setRawMode(true);
   process.stdin.resume();
@@ -32,6 +36,8 @@ const FAKE_CLAUDE = String.raw`
   process.stdin.on("data", (data) => {
     seen.push(...data);
     fs.writeFileSync(process.argv[2], seen.join(","));
+    // "v" stands for the agent opening an editor over its own screen.
+    if (data.includes(0x76)) out("\x1b[2J\x1b[H~ child editor\r\n~\r\n~");
     if (data.includes(0x03)) { out("\x1b[?1049l"); process.exit(0); }
   });
 `;
@@ -136,6 +142,17 @@ test("Ctrl+F opens find in a shell pane, an agent pane and the browser", async (
     await input.press("x");
     await expect.poll(() => readFile(keysFile, "utf8").catch(() => ""), { timeout: 10_000 }).toMatch(/(^|,)120$/);
     results["agent got Ctrl+F"] = String((await readFile(keysFile, "utf8")).split(",").includes("6"));
+    // An editor the agent opened over its screen keeps Ctrl+F.
+    await input.press("v");
+    await expect.poll(() => readFile(keysFile, "utf8").catch(() => ""), { timeout: 10_000 }).toMatch(/(^|,)118$/);
+    await page.waitForTimeout(300);
+    await input.press(modKey("f"));
+    await expect
+      .poll(() => readFile(keysFile, "utf8").catch(() => ""), { timeout: 5_000 })
+      .toMatch(/(^|,)6$/)
+      .catch(() => undefined);
+    results["editor over the agent got Ctrl+F"] = String((await readFile(keysFile, "utf8")).endsWith(",6"));
+    results["find over the editor"] = await opened(terminalFind, 1_000);
     await input.press("Control+c");
 
     // The browser, focus in the page.
@@ -174,13 +191,22 @@ test("Ctrl+F opens find in a shell pane, an agent pane and the browser", async (
       await shot("browser-page-find", page.locator("[data-browser-pane]:visible"));
       await field.press("Escape");
       await expect(browserBar).toHaveCount(0);
+      // From the address bar too, as in a browser.
+      const address = page.locator("[data-browser-pane]:visible input").first();
+      await address.focus();
+      await address.press(modKey("f"));
+      results["browser address bar"] = await opened(browserBar);
+      await page.keyboard.press("Escape");
     }
 
     expect(results).toEqual({
       "shell prompt": "opens",
       "agent pane": "opens",
       "agent got Ctrl+F": "false",
+      "editor over the agent got Ctrl+F": process.platform === "darwin" ? "false" : "true",
+      "find over the editor": process.platform === "darwin" ? "opens" : "nothing",
       "browser page": "opens",
+      "browser address bar": "opens",
     });
   } finally {
     console.log(`[ctrl-f] ${JSON.stringify(results)}`);
@@ -190,9 +216,9 @@ test("Ctrl+F opens find in a shell pane, an agent pane and the browser", async (
   }
 });
 
-async function opened(locator: import("@playwright/test").Locator): Promise<string> {
+async function opened(locator: import("@playwright/test").Locator, timeout = 5_000): Promise<string> {
   try {
-    await expect(locator).toBeVisible({ timeout: 5_000 });
+    await expect(locator).toBeVisible({ timeout });
     return "opens";
   } catch {
     return "nothing";

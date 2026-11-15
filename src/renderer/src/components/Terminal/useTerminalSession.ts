@@ -1443,13 +1443,18 @@ export function useTerminalSession({
         // the alternate screen, so only Cmd+F opens find over it. An agent
         // CLI is the exception: Claude Code and Codex draw on the alternate
         // screen too, and their Ctrl+F (a page scroll, a cursor move) is not
-        // worth losing find in the panes people spend their day in.
+        // worth losing find in the panes people spend their day in. The
+        // agent's chrome on the bottom rows decides, not the pane's agent
+        // state: an editor or pager the agent opened (its chrome gone) keeps
+        // Ctrl+F, and a live agent counts before a remount re-detects it.
         if (
           (event.ctrlKey || event.metaKey) &&
           !event.altKey &&
           !event.shiftKey &&
           (event.key === "f" || event.key === "F") &&
-          (event.metaKey || term.buffer.active.type !== "alternate" || activeRuntime !== null)
+          (event.metaKey ||
+            term.buffer.active.type !== "alternate" ||
+            liveRuntimeFromTail(readTerminalTail(term, STATE_TAIL_ROWS)) !== null)
         ) {
           event.preventDefault();
           openSearch();
