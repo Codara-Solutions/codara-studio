@@ -106,8 +106,12 @@ export function feedbackFailure(result: FeedbackHttpResult): Exclude<FeedbackSen
       ? { ok: false, error: "timeout", message: "The feedback service did not answer within 10 seconds. Try again in a moment." }
       : { ok: false, error: "offline", message: "Could not reach the feedback service. Check your connection and try again." };
   }
-  const code = typeof result.body?.error === "string" ? result.body.error : "";
-  const field = typeof result.body?.field === "string" ? result.body.field : undefined;
+  const code = typeof result.body?.error === "string" && /^[a-z_]{1,40}$/.test(result.body.error) ? result.body.error : "";
+  // Only a plain identifier, as the contract names fields; never a key like
+  // "__proto__" that would read past FIELD_TEXT's own entries.
+  const rawField = result.body?.field;
+  const field = typeof rawField === "string" && /^[A-Za-z0-9_]{1,64}$/.test(rawField) ? rawField : undefined;
+  const fieldText = field && Object.hasOwn(FIELD_TEXT, field) ? FIELD_TEXT[field] : undefined;
   if (result.status === 429) {
     return {
       ok: false,
@@ -120,7 +124,7 @@ export function feedbackFailure(result: FeedbackHttpResult): Exclude<FeedbackSen
     const message =
       result.status === 413
         ? FIELD_TEXT.message
-        : (field && FIELD_TEXT[field]) ??
+        : fieldText ??
           `This version of Studio sent something the service does not accept${field ? ` (${field})` : ""}. Update Studio and try again.`;
     return { ok: false, error: "invalid", message, ...(field ? { field } : {}) };
   }
