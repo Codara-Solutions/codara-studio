@@ -320,8 +320,9 @@ export interface StripDrop {
 // group's last tab joins it only while the pointer is still over that tab, so
 // moving past its edge leaves the group. A collapsed group takes no tabs. At
 // the tab's own place the edge is the tab itself: pull it left over the group
-// to join, or right past its own edge to leave. Null when the drop changes
-// nothing.
+// to join, or right past its own edge to leave. A group's only tab keeps its
+// group anywhere between the neighbours on either side of the group. Null when
+// the drop changes nothing.
 export function resolveStripDrop(input: {
   slots: readonly StripDropSlot[];
   draggedId: TabId;
@@ -353,6 +354,10 @@ export function resolveStripDrop(input: {
 
   const othersOf = (groupId: string | null) =>
     groupId ? membersOf(groupId).filter((id) => id !== draggedId) : [];
+  // A group's only tab and its chip are one unit, so landing in front of its
+  // own chip is its own place. It leaves by moving past a neighbour or through
+  // "Remove from group", never by a drop that only deletes the group under it.
+  if (!home && right?.chip && right.groupId === current && othersOf(current).length === 0) return null;
   let anchor: StripDrop["anchor"] = null;
   if (!home) {
     if (left && !left.chip) {

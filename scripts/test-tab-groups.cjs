@@ -192,6 +192,45 @@ async function main() {
   const stay = groups.resolveStripDrop({ slots, draggedId: "c", insertIndex: 3, pointerX: 300, membersOf });
   check("a drop that changes nothing is null", stay === null);
 
+  // A group's only tab: in front of its own chip is still its own place.
+  const loneTabs = groups.normalizeTabGroups([
+    previewTab("a"),
+    previewTab("b", { group: { id: "g2", name: "Solo", color: "red" } }),
+    previewTab("c"),
+  ]);
+  const loneSlots = [
+    { id: "a", start: 0, end: 100, chip: false, groupId: null, collapsed: false },
+    { id: "chip:g2", start: 110, end: 150, chip: true, groupId: "g2", collapsed: false },
+    { id: "b", start: 150, end: 250, chip: false, groupId: "g2", collapsed: false },
+    { id: "c", start: 260, end: 360, chip: false, groupId: null, collapsed: false },
+  ];
+  const loneMembersOf = (groupId) => loneTabs.filter((tab) => tab.group?.id === groupId).map((tab) => tab.id);
+  const lone = (insertIndex, pointerX) =>
+    groups.resolveStripDrop({ slots: loneSlots, draggedId: "b", insertIndex, pointerX, membersOf: loneMembersOf });
+  check("the only tab dropped on its own chip keeps its group", lone(1, 120) === null);
+  check("the only tab dropped in the gap before its chip keeps its group", lone(1, 104) === null);
+  check("the only tab dropped on itself keeps its group", lone(2, 200) === null);
+  check("the only tab pulled past its own edge keeps its group", lone(2, 255) === null);
+  const loneOutLeft = lone(0, 20);
+  const loneOutLeftApplied = loneOutLeft && groups.applyStripDrop(loneTabs, "b", loneOutLeft);
+  check(
+    "the only tab dragged past the tab before it leaves, and the group goes",
+    loneOutLeft?.groupId === null && ids(loneOutLeftApplied) === "b,a,c" && !groupOf(loneOutLeftApplied, "b"),
+  );
+  const loneOutRight = lone(3, 340);
+  const loneOutRightApplied = loneOutRight && groups.applyStripDrop(loneTabs, "b", loneOutRight);
+  check(
+    "the only tab dragged past the tab after it leaves, and the group goes",
+    loneOutRight?.groupId === null && ids(loneOutRightApplied) === "a,c,b" && !groupOf(loneOutRightApplied, "b"),
+  );
+  check("Remove from group still takes the only tab out", !groupOf(groups.moveTabToGroup(loneTabs, "b", null), "b"));
+  // With a second member, the same drop in front of the chip still leaves.
+  const firstOut = groups.resolveStripDrop({ slots, draggedId: "b", insertIndex: 1, pointerX: 110, membersOf });
+  check(
+    "a group's first tab dropped on the chip of a two-tab group leaves it",
+    firstOut?.groupId === null && !groupOf(groups.applyStripDrop(dragTabs, "b", firstOut), "b"),
+  );
+
   // --- persistence round trip -----------------------------------------------
   const blob = JSON.parse(JSON.stringify({ v: 7, activeId: "a", tabs: inserted.tabs }));
   const restored = migratePersisted(blob);
