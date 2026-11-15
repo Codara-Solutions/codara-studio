@@ -144,7 +144,7 @@ const lines = (n, label) => Buffer.from(`${label} ${"0123456789".repeat(12)}\r\n
 
 function sameBytes(name, actual, expected) {
   assert.equal(actual.length, expected.length, `${name}: ${expected.length - actual.length} bytes missing (negative: repeated)`);
-  assert.ok(actual.equals(expected), `${name}: the bytes and their order are main's`);
+  assert.ok(Buffer.from(actual.buffer, actual.byteOffset, actual.byteLength).equals(expected), `${name}: the bytes and their order are main's`);
 }
 
 async function part1() {
@@ -359,8 +359,56 @@ async function part2() {
     assert.equal(tail(`${"\0".repeat(100)}€Z`, 3), "Z", "a kept tail never starts inside a character");
     assert.equal(tail(`${"x".repeat(100)}\x1b[31mZ more`, 14), "\x1b[31mZ more", "a kept tail starts at an escape sequence");
     assert.equal(tail(`${"x".repeat(100)}\r\nnext line`, 13), "next line", "or after a line feed");
+    // Plain lines ending in one colored prompt: the tail starts at the first
+    // line feed in range, not at the prompt's escape sequence.
+    const logs = `${"plain log line without color, 64 bytes long...................\n".repeat(25_000)}\x1b[32m$ \x1b[0m`;
+    const kept = slices.resumableTail(Buffer.from(logs), MB);
+    assert.ok(kept.length > MB - 64 && kept.length <= MB, `a 1 MB tail of plain lines keeps ${kept.length} bytes`);
   }
-  console.log("PASS slice edges next to a character or an escape sequence resume cleanly in a new xterm");
+  // Slices of random bytes: none empty or oversized, nothing lost.
+  for (let round = 0; round < 50; round += 1) {
+    const size = 1 + Math.floor(Math.random() * 600_000);
+    const bytes = Buffer.alloc(size);
+    const pool = [0x1b, 0x5b, 0x0a, 0x41, 0xe2, 0x82, 0xac, 0x00];
+    for (let i = 0; i < size; i += 1) bytes[i] = Math.random() < 0.999 ? 0x41 : pool[i % pool.length];
+    const pieces = slices.sliceForWrite(bytes);
+    for (const piece of pieces) assert.ok(piece.length > 0 && piece.length <= slices.WRITE_SLICE_BYTES);
+    sameBytes("random slices", Buffer.concat(pieces), bytes);
+  }
+
+  // What the unmounting pane hands on: unparsed bytes first, then the hidden
+  // ones, trimmed to the scrollback's line limit, then capped at 1 MB from a
+  // resumable point.
+  {
+    const unparsed = [Buffer.from("u1\n"), Buffer.from("u2\n")];
+    const hidden = [Buffer.from("h1\n"), Buffer.from("h2")];
+    sameBytes("handoff order", slices.handoffBytes(unparsed, hidden, 100), Buffer.from("u1\nu2\nh1\nh2"));
+    sameBytes("handoff line trim", slices.handoffBytes(unparsed, hidden, 2), Buffer.from("u2\nh1\nh2"));
+    assert.equal(slices.handoffBytes([], [], 100), null);
+  }
+
+  // xterm refuses a write past its discard mark: slices it took before are
+  // reported, so the caller acknowledges only the rest.
+  {
+    let calls = 0;
+    const writer = slices.createSliceWriter((slice, done) => {
+      calls += 1;
+      if (calls === 3) throw new Error("write data discarded");
+      done();
+    });
+    let acked = 0;
+    let error = null;
+    try {
+      writer.write(Buffer.alloc(5 * slices.WRITE_SLICE_BYTES), (n) => (acked += n));
+    } catch (caught) {
+      error = caught;
+    }
+    assert.ok(error, "the failure reaches the caller");
+    assert.equal(slices.bytesAcceptedBefore(error), 2 * slices.WRITE_SLICE_BYTES);
+    assert.equal(acked, 2 * slices.WRITE_SLICE_BYTES);
+    assert.equal(writer.unparsed().length, 0, "the refused slice is not counted as waiting");
+  }
+  console.log("PASS slice edges resume cleanly in a new xterm; handoff order, trim and cap; a refused slice");
 }
 
 async function main() {

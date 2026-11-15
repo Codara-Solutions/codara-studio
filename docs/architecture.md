@@ -43,10 +43,12 @@ Only the app's own page may call main:
   pane re-attach after its view is rebuilt. The backlog holds output while a
   workspace is hidden and comes back as one message when it is shown. The
   renderer writes large messages to xterm in slices of at most 128 KB
-  (`writeSlices.ts`), because xterm parses one write in a single task: a
-  16 MB write blocked the window for 100-300 ms, a slice for about 15 ms.
-  Slices end where a fresh parser can resume, and bytes xterm has not parsed
-  when the pane unmounts go to the next mount with the text snapshot.
+  (`writeSlices.ts`), because xterm parses one write in a single task: the
+  parse of a 16 MB write blocked the window for 100-300 ms, a slice for
+  about 15 ms. Receiving the message and the output sniffers still take one
+  task of about 30 ms for 16 MB. Slices end where a fresh parser can resume,
+  and when the pane unmounts, the PTY bytes still waiting in xterm's queue
+  go to the next mount with the text snapshot, ahead of the hidden-era bytes.
 
 Shell integration (`resources/shell-integration/`, staged by `shell-init.ts`)
 adds OSC 133/633 prompt markers, so Codara knows when a command starts and

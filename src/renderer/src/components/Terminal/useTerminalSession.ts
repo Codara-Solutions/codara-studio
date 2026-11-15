@@ -38,7 +38,13 @@ import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
 import { createReplayTracker } from "./replayTracker";
-import { createSliceWriter, resumableTail, type SliceWriter } from "./writeSlices";
+import {
+  bytesAcceptedBefore,
+  createSliceWriter,
+  handoffBytes,
+  resumableTail,
+  type SliceWriter,
+} from "./writeSlices";
 import { replayFloorRow, replayPersistedScrollback } from "./persistedScrollback";
 import {
   registerCwdHandler,
@@ -3029,8 +3035,11 @@ export function useTerminalSession({
               }),
             );
           } catch (error) {
-            ack(bytes.length);
-            if (clearNotificationSuppressionRef.current === token) {
+            // Slices xterm took before the throw are acknowledged, and clear
+            // the suppression, as they are parsed.
+            const accepted = bytesAcceptedBefore(error);
+            ack(bytes.length - accepted);
+            if (accepted === 0 && clearNotificationSuppressionRef.current === token) {
               clearNotificationSuppressionRef.current = null;
             }
             throw error;
@@ -4125,11 +4134,9 @@ export function useTerminalSession({
           // Bytes handed to xterm but not parsed yet (a large backlog is
           // written in slices, see writeSlices.ts) are not in the text either:
           // they come first, then the hidden-era bytes.
-          const unparsed = sliceWriterRef.current?.unparsed() ?? [];
-          const unparsedBytes = unparsed.reduce((total, chunk) => total + chunk.length, 0);
-          const pendingBytes = mergeHiddenBuffer(
-            [...unparsed, ...hiddenBufferRef.current],
-            unparsedBytes + hiddenBytesRef.current,
+          const pendingBytes = handoffBytes(
+            sliceWriterRef.current?.unparsed() ?? [],
+            hiddenBufferRef.current,
             scrollbackLineLimitRef.current,
           );
           if (text.length > 0 || (pendingBytes && pendingBytes.length > 0)) {
@@ -4243,8 +4250,9 @@ export function useTerminalSession({
           writeAsReplay(term, () =>
             writer ? writer.write(merged, undefined, clearSuppression) : term.write(merged, clearSuppression),
           );
-        } catch {
-          if (clearNotificationSuppressionRef.current === token) {
+        } catch (error) {
+          // Slices xterm took before the throw clear it as they are parsed.
+          if (bytesAcceptedBefore(error) === 0 && clearNotificationSuppressionRef.current === token) {
             clearNotificationSuppressionRef.current = null;
           }
           /* xterm may dispose mid-flush during a fast workspace switch */
@@ -4458,39 +4466,6 @@ function countLineFeeds(bytes: Uint8Array): number {
     if (byte === 10) count += 1;
   }
   return count;
-}
-
-// Coalesce the FIFO list of hidden-pane chunks into one contiguous buffer,
-// trimmed from the front to honor the configured scrollback line limit (so the
-// stashed pendingBytes never carry more lines than the terminal would retain).
-// Returns null when there's nothing to stash. Mirrors the line-limit backward
-// scan in trimHiddenBufferToLimits — kept here so the unmount snapshot path
-// applies the same semantics as the live hot path.
-function mergeHiddenBuffer(
-  chunks: Uint8Array[],
-  totalBytes: number,
-  scrollbackLineLimit: number,
-): Uint8Array | null {
-  if (totalBytes <= 0 || chunks.length === 0) return null;
-  const merged = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
-  const maxLineBreaks = Math.max(0, scrollbackLineLimit);
-  let start = 0;
-  let seen = 0;
-  for (let i = totalBytes - 1; i >= 0; i--) {
-    if (merged[i] !== 10) continue;
-    seen += 1;
-    if (seen > maxLineBreaks) {
-      start = i + 1;
-      break;
-    }
-  }
-  const trimmed = start > 0 ? merged.slice(start) : merged;
-  return trimmed.length > 0 ? trimmed : null;
 }
 
 // Read up to `maxLines` lines from the end of the xterm buffer (visible rows
