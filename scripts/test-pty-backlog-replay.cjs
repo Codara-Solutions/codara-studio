@@ -477,7 +477,31 @@ async function main() {
       assert.equal(session(id).attached, true, "unmount and remount after the reload still replay");
       assertOnce("remount after reload", all(again), more);
       pty.killImmediate(id);
-      console.log("PASS a reload of the same window keeps replaying, with tokens above the retired ones");
+      // The reload comes after the last slice went out (the session is live
+      // again) but before the pane took them all in: output printed then
+      // still comes after that history.
+      {
+        const lateId = "replay-reload-live";
+        const lateHistory = Buffer.from("reload while acks pending\r\n".repeat(40_000));
+        const late = await away(lateId, lateHistory);
+        const pane = late.win.mount();
+        for (let waited = 0; !session(lateId).attached; waited += 1) {
+          assert.ok(waited < 1000);
+          await turn();
+        }
+        assert.ok(pane.tracker.replayedTo() < late.win.log.at(-1).payload.end, "acks are still pending");
+        pane.vanish();
+        pty.forgetReplayListeners(late.win.wc);
+        late.handle.emit(Buffer.from("LIVE-AFTER-RELOAD"));
+        await sleep(30);
+        const next = late.win.mount({ factory: reloadedFactory });
+        await late.win.idle();
+        await sleep(30);
+        await late.win.idle();
+        assertOnce("reload while acks pending", all(late.first, pane, next), Buffer.concat([lateHistory, Buffer.from("LIVE-AFTER-RELOAD")]));
+        pty.killImmediate(lateId);
+      }
+      console.log("PASS a reload of the same window keeps replaying, in order, with tokens above the retired ones");
     }
 
     for (let seed = 1; seed <= 40; seed += 1) await fuzz(seed);

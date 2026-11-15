@@ -194,6 +194,7 @@ interface Session {
   // offset retires the pausing pane's token, and a late resume naming it (or
   // an older one) is ignored.
   replayRetiredToken: number;
+  replaySeenToken: number;
   replayInFlight: Array<{ buf: Buffer; end: number }>;
   // Set true synchronously by killNow before the underlying pty.kill() runs.
   // Gates the pty.onData closure: on Windows ConPTY drains stdout for up to
@@ -455,7 +456,6 @@ function clearReplay(s: Session): void {
   stopReplay(s);
   s.replayInFlight = [];
   s.replayToken = undefined;
-  s.replayRetiredToken = 0;
 }
 
 // Agent-socket credentials a pane must never inherit. Scoped capabilities
@@ -1178,6 +1178,7 @@ async function doSpawnRemote(
     replayTimer: null,
     replayToken: undefined,
     replayRetiredToken: 0,
+    replaySeenToken: 0,
     replayInFlight: [],
     disposed: false,
     exitEmitted: false,
@@ -1648,6 +1649,7 @@ function doSpawn(
     replayTimer: null,
     replayToken: undefined,
     replayRetiredToken: 0,
+    replaySeenToken: 0,
     replayInFlight: [],
     disposed: false,
     exitEmitted: false,
@@ -1936,7 +1938,10 @@ export function pause(id: string, replayedTo?: number, token?: number): void {
   if (!s) return;
   resetRenderFlow(s);
   stopReplay(s);
-  if (token !== undefined) s.replayRetiredToken = Math.max(s.replayRetiredToken, token);
+  if (token !== undefined) {
+    s.replayRetiredToken = Math.max(s.replayRetiredToken, token);
+    s.replaySeenToken = Math.max(s.replaySeenToken, token);
+  }
   if (typeof replayedTo === "number" && (token === undefined || token === s.replayToken)) {
     const inFlight = s.replayInFlight;
     s.replayInFlight = [];
@@ -2001,7 +2006,10 @@ export function resume(id: string, redraw = false, token?: number): void {
   const s = sessions.get(id);
   if (!s) return;
   if (token !== undefined && token <= s.replayRetiredToken) return;
-  if (token !== undefined) s.replayToken = token;
+  if (token !== undefined) {
+    s.replayToken = token;
+    s.replaySeenToken = Math.max(s.replaySeenToken, token);
+  }
   if (!s.replayTimer) replaySlice(s);
   if (redraw) requestTerminalRedraw(s);
 }
@@ -2074,25 +2082,41 @@ function replaySlice(s: Session): void {
 }
 
 // The window's document is being replaced (reload, dev-server full reload)
-// without detachForWebContents: its pane listeners are gone. Slices still owed
-// to them go back to the front of the backlog for the new document's panes,
-// and the token bookkeeping starts over.
+// without detachForWebContents: its pane listeners are going away. Every
+// token they used is retired (the new document's tokens are higher), and
+// slices still owed to them go back to the front of the backlog. If the
+// session was already attached (the last slice sent, acks pending), it is
+// paused like pause() does, so the new document's resume replays that
+// history before any newer output.
 export function forgetReplayListeners(wc: WebContents): void {
   for (const s of sessions.values()) {
     if (s.webContents !== wc) continue;
     stopReplay(s);
+    s.replayRetiredToken = Math.max(s.replayRetiredToken, s.replaySeenToken);
     const back = s.replayInFlight.map(({ buf, end }) => {
       resentSliceEnd.set(buf, end);
       return buf;
     });
-    if (back.length > 0) {
-      s.detachedBacklog = [...back, ...s.detachedBacklog];
-      s.detachedBacklogBytes += back.reduce((total, buf) => total + buf.length, 0);
-      trimBacklog(s);
-    }
     s.replayInFlight = [];
     s.replayToken = undefined;
-    s.replayRetiredToken = 0;
+    if (back.length === 0) continue;
+    s.detachedBacklog = [...back, ...s.detachedBacklog];
+    s.detachedBacklogBytes += back.reduce((total, buf) => total + buf.length, 0);
+    if (s.attached) {
+      resetRenderFlow(s);
+      s.attached = false;
+      for (const chunk of s.pendingChunks) {
+        s.detachedBacklog.push(chunk);
+        s.detachedBacklogBytes += chunk.length;
+      }
+      s.pendingChunks = [];
+      s.pendingBytes = 0;
+      if (s.flushTimer) {
+        clearTimeout(s.flushTimer);
+        s.flushTimer = null;
+      }
+    }
+    trimBacklog(s);
   }
 }
 
