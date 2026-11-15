@@ -41,9 +41,8 @@ import { createReplayTracker } from "./replayTracker";
 import {
   bytesAcceptedBefore,
   createSliceWriter,
-  handoffBytes,
-  resumableTail,
   type SliceWriter,
+  xtermQueueDrainer,
 } from "./writeSlices";
 import { replayFloorRow, replayPersistedScrollback } from "./persistedScrollback";
 import {
@@ -433,7 +432,7 @@ function rememberXtermBufferSnapshot(
   const pendingBytes =
     snapshot.pendingBytes &&
     snapshot.pendingBytes.byteLength > MAX_XTERM_SNAPSHOT_PENDING_BYTES
-      ? resumableTail(snapshot.pendingBytes, MAX_XTERM_SNAPSHOT_PENDING_BYTES).slice()
+      ? snapshot.pendingBytes.slice(-MAX_XTERM_SNAPSHOT_PENDING_BYTES)
       : snapshot.pendingBytes;
   const bounded = { ...snapshot, text, pendingBytes };
   forgetXtermBufferSnapshot(sessionId);
@@ -846,7 +845,7 @@ export function useTerminalSession({
   // hidden is fine. They resume on the next chunk after the flush.
   const hiddenBufferRef = useRef<Uint8Array[]>([]);
   // The mounted xterm's slice writer (writeSlices.ts): pty bytes reach xterm
-  // in slices of at most 128 KB, and what it has not parsed yet is known.
+  // in slices of at most 128 KB, finished at once before an unmount snapshot.
   const sliceWriterRef = useRef<SliceWriter | null>(null);
   const hiddenBytesRef = useRef<number>(0);
   const hiddenLineBreaksRef = useRef<number>(0);
@@ -1063,7 +1062,10 @@ export function useTerminalSession({
       termRef.current = term;
       // Before anything is written: widths are fixed as bytes are parsed.
       applyUnicode11Widths(term);
-      const sliceWriter = createSliceWriter((slice, parsed) => term.write(slice, parsed));
+      const sliceWriter = createSliceWriter(
+        (slice, parsed) => term.write(slice, parsed),
+        xtermQueueDrainer(term),
+      );
       sliceWriterRef.current = sliceWriter;
 
       // Observe the erase sequence xterm actually parses rather than guessing
@@ -4056,6 +4058,18 @@ export function useTerminalSession({
     };
 
     return () => {
+      // The snapshot below is the parsed screen as text: bytes still queued
+      // in xterm, or a sequence the parser is inside, cannot cross into it.
+      // A backlog written in slices (writeSlices.ts) can still be queued, so
+      // parse it now, with the pane's handlers live, as one write would have
+      // been. Raw-tail and read-only panes take no snapshot.
+      if (!rawTailReattachRef.current && !readOnlyRef.current) {
+        try {
+          sliceWriterRef.current?.drain();
+        } catch {
+          /* a failed parse leaves what xterm already has */
+        }
+      }
       disposed = true;
       clearNotificationSuppressionRef.current = null;
       window.clearTimeout(startTimer);
@@ -4131,12 +4145,9 @@ export function useTerminalSession({
           // Remembered unconditionally: a pane with nothing worth snapshotting
           // still has modes the running TUI expects to survive the remount.
           rememberedScreenModes.set(sessionId, captureTerminalScreenModes(dyingTerm));
-          // Bytes handed to xterm but not parsed yet (a large backlog is
-          // written in slices, see writeSlices.ts) are not in the text either:
-          // they come first, then the hidden-era bytes.
-          const pendingBytes = handoffBytes(
-            sliceWriterRef.current?.unparsed() ?? [],
+          const pendingBytes = mergeHiddenBuffer(
             hiddenBufferRef.current,
+            hiddenBytesRef.current,
             scrollbackLineLimitRef.current,
           );
           if (text.length > 0 || (pendingBytes && pendingBytes.length > 0)) {
@@ -4467,6 +4478,39 @@ function countLineFeeds(bytes: Uint8Array): number {
     if (byte === 10) count += 1;
   }
   return count;
+}
+
+// Coalesce the FIFO list of hidden-pane chunks into one contiguous buffer,
+// trimmed from the front to honor the configured scrollback line limit (so the
+// stashed pendingBytes never carry more lines than the terminal would retain).
+// Returns null when there's nothing to stash. Mirrors the line-limit backward
+// scan in trimHiddenBufferToLimits — kept here so the unmount snapshot path
+// applies the same semantics as the live hot path.
+function mergeHiddenBuffer(
+  chunks: Uint8Array[],
+  totalBytes: number,
+  scrollbackLineLimit: number,
+): Uint8Array | null {
+  if (totalBytes <= 0 || chunks.length === 0) return null;
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  const maxLineBreaks = Math.max(0, scrollbackLineLimit);
+  let start = 0;
+  let seen = 0;
+  for (let i = totalBytes - 1; i >= 0; i--) {
+    if (merged[i] !== 10) continue;
+    seen += 1;
+    if (seen > maxLineBreaks) {
+      start = i + 1;
+      break;
+    }
+  }
+  const trimmed = start > 0 ? merged.slice(start) : merged;
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 // Read up to `maxLines` lines from the end of the xterm buffer (visible rows

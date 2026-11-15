@@ -12,7 +12,9 @@
 // IPC does) and text decode (the agent sniffer reads every chunk) as one task,
 // then the xterm parse, both as one write (xterm parses a write in one go) and
 // as the renderer's 128 KB slices (writeSlices.ts), with the longest stretch
-// the event loop was blocked.
+// the event loop was blocked. Last, what an unmount right after the first
+// slice costs: the pane parses the queued rest in one call before its
+// snapshot.
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -113,7 +115,27 @@ async function longestParse(writes) {
   return longest;
 }
 
-async function measure(pty, controller, sliceForWrite, name, total) {
+// The pane unmounts as soon as xterm parsed its first slice: the time its
+// drain takes to parse what is still queued, and how much that is.
+async function drainAtUnmount(slices, writes) {
+  const term = new Terminal({ cols: COLS, rows: ROWS, scrollback: 3_000, allowProposedApi: true });
+  await new Promise((resolve) => term.write("", resolve));
+  const writer = slices.createSliceWriter((slice, parsed) => term.write(slice, parsed), slices.xtermQueueDrainer(term));
+  let first;
+  const firstParsed = new Promise((resolve) => (first = resolve));
+  for (const bytes of writes) writer.write(bytes, () => first());
+  // Resumes after xterm's parse task, never inside it.
+  await firstParsed;
+  const queued = writer.unparsed().reduce((total, bytes) => total + bytes.length, 0);
+  const start = performance.now();
+  writer.drain();
+  const ms = performance.now() - start;
+  term.dispose();
+  return { ms, queued };
+}
+
+async function measure(pty, controller, slices, name, total) {
+  const { sliceForWrite } = slices;
   const sent = [];
   const wc = { isDestroyed: () => false, send: (channel, payload) => sent.push({ channel, payload }) };
   const id = `measure-${name.replace(/\W+/g, "-")}`;
@@ -151,6 +173,7 @@ async function measure(pty, controller, sliceForWrite, name, total) {
   });
   const oneWrite = await longestParse(copies);
   const sliced = await longestParse(copies.flatMap((copy) => sliceForWrite(copy)));
+  const drain = await drainAtUnmount(slices, copies);
   pty.killImmediate(id);
   return {
     held,
@@ -162,6 +185,7 @@ async function measure(pty, controller, sliceForWrite, name, total) {
     receive,
     oneWrite,
     sliced,
+    drain,
   };
 }
 
@@ -178,16 +202,17 @@ async function main() {
     const pty = require(outfile);
     const slicesOut = path.join(tmp, "write-slices.cjs");
     await esbuild.build({ entryPoints: [WRITE_SLICES_TS], outfile: slicesOut, bundle: true, platform: "node", format: "cjs", logLevel: "silent" });
-    const { sliceForWrite } = require(slicesOut);
+    const slices = require(slicesOut);
     const fmt = (bytes) => `${(bytes / MB).toFixed(1)} MB`;
     console.log(`${total / MB} MB of output into a paused pane, ${COLS}x${ROWS}, 3,000 lines of scrollback`);
     for (const name of Object.keys(WORKLOADS)) {
-      const r = await measure(pty, controller, sliceForWrite, name, total);
+      const r = await measure(pty, controller, slices, name, total);
       console.log(`${name}:`);
       console.log(`  held after the output: ${fmt(r.held.heap + r.held.buffers)}: ${fmt(r.held.buffers)} of buffers and ${fmt(r.held.heap)} of heap (backlog ${fmt(r.backlog)}, tail ${fmt(r.tail)})`);
       console.log(`  main's time to take in the output: ${Math.round(r.ingest)} ms`);
       console.log(`  switch back: ${r.messages} messages, largest ${fmt(r.largest)}; receive and decode ${Math.round(r.receive)} ms`);
       console.log(`  xterm parse, longest block: one write ${Math.round(r.oneWrite)} ms, 128 KB slices ${Math.round(r.sliced)} ms`);
+      console.log(`  unmount right after the first slice: drains ${fmt(r.drain.queued)} in ${Math.round(r.drain.ms)} ms`);
     }
     pty.disposeAll();
   } finally {

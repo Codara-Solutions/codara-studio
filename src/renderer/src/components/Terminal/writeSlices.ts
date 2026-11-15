@@ -1,76 +1,51 @@
-// Feeds large pty chunks to xterm in slices, and remembers what xterm has not
-// parsed yet.
+// Feeds large pty chunks to xterm in slices, and can finish them at once.
 //
 // Main sends a paused pane's whole backlog (up to 16 MB) as one message when
 // the pane comes back. xterm's write buffer yields to the event loop between
 // chunks (every 12 ms), but parses one chunk in a single call, so one 16 MB
 // write froze the window for 100-300 ms. Written as slices of at most 128 KB,
-// the same bytes are parsed in the same order, and live output written after
+// the same bytes reach the same parser in the same order (it carries partial
+// characters and sequences across writes), and live output written after
 // them queues behind them in xterm's own buffer.
 //
-// The cost is a longer stretch during which bytes sit in xterm's queue
-// unparsed. If the pane unmounts then, its text snapshot cannot hold them, so
-// the caller hands `unparsed()` to the next mount with the snapshot instead
-// of dropping them. A slice therefore ends only where a fresh parser can pick
-// up: before ESC (every parser state, strings included, goes to the escape
-// state on it), else after a line feed, else outside a UTF-8 character.
+// The cost is a longer stretch during which accepted bytes sit in xterm's
+// queue unparsed. The pane's unmount snapshot is the parsed screen as text,
+// which can carry neither queued bytes nor the parser's state inside a
+// sequence, so an unmounting pane calls `drain()` first: every queued write
+// is parsed there and then, and the snapshot sees what one write would have
+// left. Without a way to drain, the writer does not slice.
 
 export const WRITE_SLICE_BYTES = 128 * 1024;
 
-const ESC = 0x1b;
-const LF = 0x0a;
-
-const isContinuation = (byte: number): boolean => (byte & 0xc0) === 0x80;
-
-function cutPoint(bytes: Uint8Array, from: number, max: number): number {
-  const end = from + max;
-  const floor = from + (max >> 1);
-  // Best: a line feed right before an escape sequence, so neither a line nor
-  // a sequence is split. Then before ESC, then after a line feed.
-  for (let at = end; at > floor; at -= 1) {
-    if (bytes[at] === ESC && bytes[at - 1] === LF) return at;
-  }
-  for (let at = end; at > floor; at -= 1) {
-    if (bytes[at] === ESC) return at;
-  }
-  for (let at = end; at > floor; at -= 1) {
-    if (bytes[at - 1] === LF) return at;
-  }
-  for (let at = end; at > from; at -= 1) {
-    if (!isContinuation(bytes[at])) return at;
-  }
-  return end;
-}
-
-/**
- * The last at most `max` bytes of `bytes`, starting at the first point a
- * fresh parser can resume from (before ESC or after a line feed), else
- * outside a UTF-8 character.
- */
-export function resumableTail(bytes: Uint8Array, max: number): Uint8Array {
-  if (bytes.length <= max) return bytes;
-  const from = bytes.length - max;
-  for (let at = from; at < bytes.length; at += 1) {
-    if (bytes[at] === ESC || bytes[at - 1] === LF) return bytes.subarray(at);
-  }
-  for (let at = from; at < bytes.length; at += 1) {
-    if (!isContinuation(bytes[at])) return bytes.subarray(at);
-  }
-  return bytes.subarray(bytes.length);
-}
-
-/** `bytes` as consecutive slices of at most `max` bytes, cut where a fresh parser can resume. */
+/** `bytes` as consecutive slices of at most `max` bytes. */
 export function sliceForWrite(bytes: Uint8Array, max = WRITE_SLICE_BYTES): Uint8Array[] {
   if (bytes.length <= max) return [bytes];
   const slices: Uint8Array[] = [];
-  let from = 0;
-  while (bytes.length - from > max) {
-    const at = cutPoint(bytes, from, max);
-    slices.push(bytes.subarray(from, at));
-    from = at;
-  }
-  slices.push(bytes.subarray(from));
+  for (let from = 0; from < bytes.length; from += max) slices.push(bytes.subarray(from, from + max));
   return slices;
+}
+
+interface XtermWriteQueue {
+  _innerWrite(lastTime?: number): void;
+}
+
+/**
+ * A function that parses everything queued in `term`'s write buffer now, in
+ * one call, running the write callbacks in order; null when this xterm build
+ * does not expose its write buffer.
+ *
+ * xterm has no public synchronous write (its `writeSync` is deprecated and
+ * replays chunks the async loop already parsed). The async loop,
+ * `WriteBuffer._innerWrite(lastTime)`, stops once 12 ms have passed since
+ * `lastTime`; from +Infinity that never happens, so it runs to the end of the
+ * queue, exactly as its timer-driven calls would. The timer it had already
+ * set then finds the queue empty. scripts/test-terminal-replay-slices.cjs
+ * checks this on both xterm builds the app ships.
+ */
+export function xtermQueueDrainer(term: object): (() => void) | null {
+  const queue = (term as { _core?: { _writeBuffer?: Partial<XtermWriteQueue> } })._core?._writeBuffer;
+  if (!queue || typeof queue._innerWrite !== "function") return null;
+  return () => (queue as XtermWriteQueue)._innerWrite(Number.POSITIVE_INFINITY);
 }
 
 // Bytes xterm took before a write of a later slice threw.
@@ -96,18 +71,25 @@ export interface SliceWriter {
   write(bytes: Uint8Array, onSlice?: (n: number) => void, onDone?: () => void): void;
   /** Bytes handed to xterm and not parsed yet, oldest first. */
   unparsed(): Uint8Array[];
+  /**
+   * When a slice is still waiting, parse everything queued in xterm now
+   * (its callbacks run as usual). Called before an unmount snapshot.
+   */
+  drain(): void;
 }
 
 export function createSliceWriter(
   write: (bytes: Uint8Array, parsed: () => void) => void,
+  drainQueue: (() => void) | null,
 ): SliceWriter {
   // xterm parses writes in order and runs each callback right after its
   // chunk, so the entries complete front to back. An entry can complete
   // inside `write` when xterm parses synchronously (right after user input).
   const queued: Array<{ bytes: Uint8Array; parsed: boolean }> = [];
+  const sliceBytes = drainQueue ? WRITE_SLICE_BYTES : Number.POSITIVE_INFINITY;
   return {
     write(bytes, onSlice, onDone) {
-      const slices = sliceForWrite(bytes);
+      const slices = sliceForWrite(bytes, sliceBytes);
       // The index of the last slice written, lowered when xterm refuses one.
       let last = slices.length - 1;
       let accepted = 0;
@@ -141,40 +123,8 @@ export function createSliceWriter(
     unparsed() {
       return queued.filter((entry) => !entry.parsed).map((entry) => entry.bytes);
     },
+    drain() {
+      if (drainQueue && queued.some((entry) => !entry.parsed)) drainQueue();
+    },
   };
-}
-
-/**
- * What an unmounting pane hands to its next mount: the bytes xterm had not
- * parsed (`unparsed()`), then the bytes that arrived while it was hidden, as
- * one buffer trimmed from the front to at most `scrollbackLineLimit` line
- * feeds (more would scroll out of the terminal anyway). Null when empty.
- */
-export function handoffBytes(
-  unparsed: Uint8Array[],
-  hidden: Uint8Array[],
-  scrollbackLineLimit: number,
-): Uint8Array | null {
-  const chunks = [...unparsed, ...hidden];
-  const totalBytes = chunks.reduce((total, chunk) => total + chunk.length, 0);
-  if (totalBytes <= 0) return null;
-  const merged = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
-  const maxLineBreaks = Math.max(0, scrollbackLineLimit);
-  let start = 0;
-  let seen = 0;
-  for (let i = totalBytes - 1; i >= 0; i--) {
-    if (merged[i] !== LF) continue;
-    seen += 1;
-    if (seen > maxLineBreaks) {
-      start = i + 1;
-      break;
-    }
-  }
-  const trimmed = start > 0 ? merged.slice(start) : merged;
-  return trimmed.length > 0 ? trimmed : null;
 }

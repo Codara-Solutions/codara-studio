@@ -46,9 +46,10 @@ Only the app's own page may call main:
   (`writeSlices.ts`), because xterm parses one write in a single task: the
   parse of a 16 MB write blocked the window for 100-300 ms, a slice for
   about 15 ms. Receiving the message and the output sniffers still take one
-  task of about 30 ms for 16 MB. Slices end where a fresh parser can resume,
-  and when the pane unmounts, the PTY bytes still waiting in xterm's queue
-  go to the next mount with the text snapshot, ahead of the hidden-era bytes.
+  task of about 30 ms for 16 MB. The pane's unmount snapshot is text, which
+  cannot carry bytes still queued in xterm or a sequence the parser is
+  inside, so a pane that unmounts mid-replay first parses the rest in one
+  call: that unmount costs what the single write used to.
 
 Shell integration (`resources/shell-integration/`, staged by `shell-init.ts`)
 adds OSC 133/633 prompt markers, so Codara knows when a command starts and
