@@ -3035,8 +3035,8 @@ export function useTerminalSession({
               }),
             );
           } catch (error) {
-            // Slices xterm took before the throw are acknowledged, and clear
-            // the suppression, as they are parsed.
+            // Slices xterm took before the throw are acknowledged as they are
+            // parsed, and the last of them clears the suppression (onDone).
             const accepted = bytesAcceptedBefore(error);
             ack(bytes.length - accepted);
             if (accepted === 0 && clearNotificationSuppressionRef.current === token) {
@@ -4251,7 +4251,8 @@ export function useTerminalSession({
             writer ? writer.write(merged, undefined, clearSuppression) : term.write(merged, clearSuppression),
           );
         } catch (error) {
-          // Slices xterm took before the throw clear it as they are parsed.
+          // When xterm took slices before the throw, the last of them clears
+          // it once parsed (onDone).
           if (bytesAcceptedBefore(error) === 0 && clearNotificationSuppressionRef.current === token) {
             clearNotificationSuppressionRef.current = null;
           }

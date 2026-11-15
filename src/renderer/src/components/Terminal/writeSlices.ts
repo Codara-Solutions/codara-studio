@@ -89,8 +89,9 @@ export interface SliceWriter {
   /**
    * Write `bytes` through `write` in slices. `onSlice(n)` runs as each slice
    * is parsed; `onDone` after the last one. If `write` throws, the slice and
-   * the ones after it are not written, `onDone` never runs, and the error
-   * propagates; `bytesAcceptedBefore(error)` says how much was written.
+   * the ones after it are not written and the error propagates;
+   * `bytesAcceptedBefore(error)` says how much was written. `onDone` then
+   * runs after the last slice written, or never if none was.
    */
   write(bytes: Uint8Array, onSlice?: (n: number) => void, onDone?: () => void): void;
   /** Bytes handed to xterm and not parsed yet, oldest first. */
@@ -107,7 +108,10 @@ export function createSliceWriter(
   return {
     write(bytes, onSlice, onDone) {
       const slices = sliceForWrite(bytes);
+      // The index of the last slice written, lowered when xterm refuses one.
+      let last = slices.length - 1;
       let accepted = 0;
+      let previous: { parsed: boolean } | null = null;
       slices.forEach((slice, index) => {
         const entry = { bytes: slice, parsed: false };
         queued.push(entry);
@@ -116,17 +120,22 @@ export function createSliceWriter(
             entry.parsed = true;
             while (queued.length > 0 && queued[0].parsed) queued.shift();
             onSlice?.(slice.length);
-            if (index === slices.length - 1) onDone?.();
+            if (index === last) onDone?.();
           });
         } catch (error) {
           const at = queued.indexOf(entry);
           if (at >= 0) queued.splice(at, 1);
+          last = index - 1;
           if (accepted > 0 && typeof error === "object" && error !== null) {
             acceptedBeforeErrors.set(error, accepted);
           }
+          // The slice before already parsed (xterm parsed it synchronously):
+          // its callback has passed, so the message is done now.
+          if (previous?.parsed) onDone?.();
           throw error;
         }
         accepted += slice.length;
+        previous = entry;
       });
     },
     unparsed() {

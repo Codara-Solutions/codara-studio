@@ -389,24 +389,31 @@ async function part2() {
 
   // xterm refuses a write past its discard mark: slices it took before are
   // reported, so the caller acknowledges only the rest.
-  {
+  for (const [refused, sync] of [[3, false], [3, true], [1, false]]) {
     let calls = 0;
+    const callbacks = [];
     const writer = slices.createSliceWriter((slice, done) => {
       calls += 1;
-      if (calls === 3) throw new Error("write data discarded");
-      done();
+      if (calls === refused) throw new Error("write data discarded");
+      if (sync) done();
+      else callbacks.push(done);
     });
     let acked = 0;
+    let doneCalls = 0;
     let error = null;
     try {
-      writer.write(Buffer.alloc(5 * slices.WRITE_SLICE_BYTES), (n) => (acked += n));
+      writer.write(Buffer.alloc(5 * slices.WRITE_SLICE_BYTES), (n) => (acked += n), () => (doneCalls += 1));
     } catch (caught) {
       error = caught;
     }
-    assert.ok(error, "the failure reaches the caller");
-    assert.equal(slices.bytesAcceptedBefore(error), 2 * slices.WRITE_SLICE_BYTES);
-    assert.equal(acked, 2 * slices.WRITE_SLICE_BYTES);
-    assert.equal(writer.unparsed().length, 0, "the refused slice is not counted as waiting");
+    for (const done of callbacks) done();
+    const taken = (refused - 1) * slices.WRITE_SLICE_BYTES;
+    const label = `slice ${refused} refused${sync ? ", earlier ones parsed at once" : ""}`;
+    assert.ok(error, `${label}: the failure reaches the caller`);
+    assert.equal(slices.bytesAcceptedBefore(error), taken, label);
+    assert.equal(acked, taken, label);
+    assert.equal(doneCalls, refused > 1 ? 1 : 0, `${label}: onDone runs once after the last slice taken, never when none was`);
+    assert.equal(writer.unparsed().length, 0, `${label}: the refused slice is not counted as waiting`);
   }
   console.log("PASS slice edges resume cleanly in a new xterm; handoff order, trim and cap; a refused slice");
 }
