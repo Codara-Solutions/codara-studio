@@ -53,6 +53,7 @@ async function load() {
     platform: "node",
     format: "cjs",
     external: ["electron", "ws"],
+    alias: { "@shared": path.join(ROOT, "src/shared") },
   });
   const mod = { exports: {} };
   new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
