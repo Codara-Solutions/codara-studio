@@ -9,9 +9,10 @@
 //     HEAD's file;
 //   - each worktree still gets its own branch's remote;
 //   - a config change is read again;
-//   - a repository with per-worktree config, or a global or system config
-//     file that includes another (an `includeIf "onbranch:..."` can give one
-//     worktree its own remote), asks git in every checkout;
+//   - a repository with per-worktree config, a global config file that
+//     includes another (an `includeIf "onbranch:..."` can give one worktree
+//     its own remote), or an environment that changes git's config (table
+//     below), asks git in every checkout;
 //   - a read that failed is neither kept nor handed to another checkout;
 //   - a bare repository inside another repository keeps its own identity.
 //
@@ -25,18 +26,23 @@ const path = require("node:path");
 const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
-// The module reads the files git reads, so this process's environment is the
-// one git runs with: a global file of the test's own, no system file.
-process.env.GIT_CONFIG_NOSYSTEM = "1";
-delete process.env.GIT_CONFIG_SYSTEM;
+// The module reads the files git reads, and git runs with this process's
+// environment: a home of the test's own holds the global file. Variables that
+// change git's config turn the sharing off, so none is set here.
+for (const name of Object.keys(process.env)) {
+  if (/^GIT_(CONFIG|DIR$|COMMON_DIR$|WORK_TREE$)/i.test(name)) delete process.env[name];
+}
 const git = (cwd, args) => execFileSync("git", args, { cwd, env: process.env, encoding: "utf8" }).trim();
 
 async function main() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-checkout-remote-"));
   try {
-    const globalConfig = path.join(dir, "global.gitconfig");
+    const home = path.join(dir, "home");
+    fs.mkdirSync(home);
+    process.env.HOME = home;
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+    const globalConfig = path.join(home, ".gitconfig");
     fs.writeFileSync(globalConfig, "[core]\n\tautocrlf = false\n");
-    process.env.GIT_CONFIG_GLOBAL = globalConfig;
     const outfile = path.join(dir, "remote.cjs");
     await esbuild.build({
       stdin: {
@@ -199,17 +205,6 @@ async function main() {
     assert.equal(await mod.checkoutRemote(trees[0], read), "special", "worktree one follows the remote its include gives it");
     assert.equal(calls.filter((call) => call === "remote").length, 2, "each checkout reads its own remotes");
     fs.writeFileSync(globalConfig, "[core]\n\tautocrlf = false\n");
-    const systemConfig = path.join(dir, "system.gitconfig");
-    fs.writeFileSync(systemConfig, `[include]\n\tpath = ${special}\n`);
-    delete process.env.GIT_CONFIG_NOSYSTEM;
-    process.env.GIT_CONFIG_SYSTEM = systemConfig;
-    mod.forgetCheckoutRemotes();
-    calls.length = 0;
-    await mod.checkoutRemote(trees[1], read);
-    await mod.checkoutRemote(trees[2], read);
-    assert.equal(calls.filter((call) => call === "remote").length, 2, "an include in the system file: per checkout");
-    process.env.GIT_CONFIG_NOSYSTEM = "1";
-    delete process.env.GIT_CONFIG_SYSTEM;
     const oldGit = async (cwd, args) => (args[0] === "var" ? null : read(cwd, args));
     mod.forgetCheckoutRemotes();
     calls.length = 0;
@@ -221,7 +216,39 @@ async function main() {
     await mod.checkoutRemote(trees[1], read);
     await mod.checkoutRemote(trees[2], read);
     assert.equal(calls.filter((call) => call === "remote").length, 1, "plain files again: shared");
-    console.log("PASS a global or system include, or an unknown git, reads per checkout");
+    console.log("PASS a global include, or a git that cannot name its config files, reads per checkout");
+
+    // The environment git runs with: any variable that changes which config
+    // it reads, or reads it relative to each checkout, turns sharing off.
+    const table = [
+      [{}, true, "nothing set: the default machine shares"],
+      [{ HOME: "/home/x", PATH: "/usr/bin", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" }, true, "unrelated variables"],
+      [{ GIT_CONFIG_GLOBAL: "relative.gitconfig" }, false, "a global file, relative or not"],
+      [{ GIT_CONFIG_GLOBAL: "/abs/global" }, false, "an absolute global file"],
+      [{ GIT_CONFIG_SYSTEM: "system.gitconfig" }, false, "a system file"],
+      [{ GIT_CONFIG_NOSYSTEM: "1" }, false, "no system file"],
+      [{ GIT_CONFIG_NOSYSTEM: "" }, false, "an empty value is set"],
+      [{ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "include.path", GIT_CONFIG_VALUE_0: "x" }, false, "config pairs"],
+      [{ GIT_CONFIG_KEY_3: "remote.x.url" }, false, "a config key alone"],
+      [{ GIT_CONFIG_PARAMETERS: "'include.path'='x'" }, false, "git -c parameters"],
+      [{ GIT_CONFIG: "/some/file" }, false, "the old single-file variable"],
+      [{ GIT_DIR: ".git" }, false, "a git directory"],
+      [{ GIT_COMMON_DIR: "/x" }, false, "a common directory"],
+      [{ GIT_WORK_TREE: "." }, false, "a work tree"],
+      [{ git_dir: ".git" }, false, "names in any case"],
+    ];
+    for (const [env, keeps, label] of table) {
+      assert.equal(mod.environmentKeepsConfig(env), keeps, label);
+    }
+    // An absolute, plain file: the variable alone turns sharing off.
+    process.env.GIT_CONFIG_GLOBAL = globalConfig;
+    mod.forgetCheckoutRemotes();
+    calls.length = 0;
+    await mod.checkoutRemote(trees[1], read);
+    await mod.checkoutRemote(trees[2], read);
+    delete process.env.GIT_CONFIG_GLOBAL;
+    assert.equal(calls.filter((call) => call === "remote").length, 2, "a config variable in the environment: per checkout");
+    console.log("PASS an environment that changes git's config reads per checkout");
 
     // A bare repository inside a checkout is its own repository: git stops
     // there and so do the files.
