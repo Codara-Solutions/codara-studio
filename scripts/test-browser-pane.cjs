@@ -8,7 +8,9 @@
 // - full screen steps: the button and F11 fill the window, F11 again takes
 //   the display, Esc always leaves;
 // - the address pill (toolbar/address.ts): a port alone opens localhost, and
-//   the dev server chip names the server a URL is on.
+//   the dev server chip names the server a URL is on; a file path (absolute,
+//   ~/ or a Windows drive) opens as a file:// URL, and an address the
+//   browser cannot load is refused with a notice instead of loading nothing.
 // The real window path is tests/e2e/browser-pane-toolbar.spec.ts.
 //
 //   node scripts/test-browser-pane.cjs
@@ -28,6 +30,7 @@ function bundle(contents) {
     platform: "node",
     format: "cjs",
     logLevel: "silent",
+    alias: { "@shared": path.join(ROOT, "src/shared") },
   });
   const mod = { exports: {} };
   new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
@@ -36,7 +39,8 @@ function bundle(contents) {
 
 const lib = bundle(`
   export * from "./tabs-memory/sleepPolicy";
-  export { normalizeUrl, serverForUrl, serverUrl } from "./toolbar/address";
+  export { isLoadableUrl, normalizeUrl, serverForUrl, serverUrl } from "./toolbar/address";
+  export { localFilePath } from "@shared/local-file-address";
 `);
 
 const MIN = 60_000;
@@ -119,6 +123,29 @@ function address() {
   assert.equal(normalizeUrl("127.0.0.1:4000/x"), "http://127.0.0.1:4000/x");
   assert.equal(normalizeUrl("vercel.com"), "https://vercel.com");
   assert.equal(normalizeUrl("https://example.com/a"), "https://example.com/a");
+
+  // A path is a file on this computer. Left as is, loadURL rejected it
+  // silently and a new tab resolved it against Studio's own page (the Vite
+  // server under npm run dev).
+  assert.equal(normalizeUrl("/home/me/report.pdf"), "file:///home/me/report.pdf");
+  assert.equal(normalizeUrl("  /home/me/My Docs/notes v2.md "), "file:///home/me/My%20Docs/notes%20v2.md");
+  assert.equal(normalizeUrl("/tmp/a#1.md"), "file:///tmp/a%231.md");
+  assert.equal(normalizeUrl("~/Documents/x.pdf", "/home/me"), "file:///home/me/Documents/x.pdf");
+  assert.equal(normalizeUrl("~/Documents/x.pdf", "/home/me/"), "file:///home/me/Documents/x.pdf");
+  assert.equal(normalizeUrl("C:\\Users\\me\\x.pdf"), "file:///C:/Users/me/x.pdf");
+  assert.equal(normalizeUrl("file:///tmp/x.pdf"), "file:///tmp/x.pdf");
+  assert.equal(normalizeUrl("//cdn.example.com/x.js"), "//cdn.example.com/x.js", "protocol-relative, not a path");
+  const { isLoadableUrl, localFilePath } = lib;
+  assert.equal(isLoadableUrl("file:///home/me/report.pdf"), true);
+  assert.equal(isLoadableUrl("https://example.com"), true);
+  assert.equal(isLoadableUrl(normalizeUrl("~/x.pdf")), false, "with no home known a ~ path is refused, not loaded as nothing");
+  assert.equal(isLoadableUrl(normalizeUrl("99999")), false);
+  assert.equal(localFilePath("~", "/home/me"), "/home/me");
+  assert.equal(localFilePath("~other/x", "/home/me"), null, "another user's home is not expanded");
+  assert.equal(localFilePath("~/x", null), null);
+  assert.equal(localFilePath("notes.md", "/home/me"), null);
+  assert.equal(localFilePath("http://localhost:3000", "/home/me"), null);
+  assert.equal(localFilePath("D:/data/x.md", null), "D:/data/x.md");
 
   const servers = [
     { id: "web", url: "http://localhost:5173/", port: 5173 },

@@ -20,10 +20,25 @@ import MoreMenu from "./toolbar/MoreMenu";
 import ServerChip from "./toolbar/ServerChip";
 import { ExitFullScreenIcon, FullScreenIcon } from "./toolbar/icons";
 import TabsChip from "./tabs-memory/TabsChip";
-import { normalizeUrl } from "./toolbar/address";
+import { isLoadableUrl, normalizeUrl } from "./toolbar/address";
 import "./browser-pane.css";
 
 const MOD_LABEL = IS_MAC ? "Cmd" : "Ctrl";
+
+// Expands a typed "~/..."; asked once, the first time a bar mounts.
+let homeDir: string | null = null;
+let homeAsked = false;
+function askHomeDir(): void {
+  if (homeAsked) return;
+  homeAsked = true;
+  void Promise.resolve(window.spark?.app?.home?.())
+    .then((home) => {
+      if (typeof home === "string" && home) homeDir = home;
+    })
+    .catch(() => {
+      homeAsked = false;
+    });
+}
 
 // AddressBar is the browser pane's toolbar (DESIGN.md, "Browser pane"):
 // back, forward and reload; the address pill with the workspace's dev
@@ -114,6 +129,8 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
     setDraft(url);
   }, [url]);
 
+  useEffect(askHomeDir, []);
+
   // Auto-focus the URL input on first mount when no URL is set, so the
   // "+ preview" button drops the user straight into a typing-ready state.
   // We do not refocus on subsequent renders — that would steal focus when
@@ -137,9 +154,9 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
   );
 
   const submit = () => {
-    const next = normalizeUrl(draft);
-    if (!next) {
-      setNotice("Enter a URL, or a port such as 3000 for a local server.");
+    const next = normalizeUrl(draft, homeDir);
+    if (!next || !isLoadableUrl(next)) {
+      setNotice("Enter a URL, a file path, or a port such as 3000 for a local server.");
       return;
     }
     setNotice(null);
