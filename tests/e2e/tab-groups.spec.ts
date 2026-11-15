@@ -5,7 +5,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { dispatchDrag } from "./drag";
+import { dispatchDrag, waitForStableLayout } from "./drag";
 import { mcpToolInPane, runInPane } from "./in-pane-mcp";
 
 const { rpcRaw } = require("../../cli/lib/rpc.cjs");
@@ -394,6 +394,97 @@ test("the user groups, recolors, renames, folds, drags, ungroups and closes tab 
     await expect(page.locator(tab(term))).toHaveCount(0);
     await expect(page.locator(".spark-tabbar-scroll [data-tab-group-chip]")).toHaveCount(0);
     for (const id of [p2, p3]) await expect(page.locator(tab(id))).toBeVisible();
+  } finally {
+    await teardown(fixture, app);
+  }
+});
+
+test("a group's only tab keeps its group when dropped in the group, and leaves it only on purpose", async ({}, testInfo) => {
+  test.setTimeout(150_000);
+  const fixture = await setup("codara-tab-groups-solo-", false);
+  let app: ElectronApplication | null = null;
+  try {
+    let page: Page;
+    ({ app, page } = await fixture.launch());
+    await page.locator('button[title="Toggle workspaces"]').click();
+    await page.locator('button[title="Toggle right sidebar"]').click();
+    const p1 = await openUserTab(fixture, page, "/one", true);
+    const p2 = await openUserTab(fixture, page, "/two", true);
+    const p3 = await openUserTab(fixture, page, "/three", true);
+    await page.mouse.move(4, 4);
+
+    const groupAlone = async (id: string, name: string): Promise<string> => {
+      await page.locator(tab(id)).click({ button: "right" });
+      await page.getByRole("button", { name: "Add to new group", exact: true }).click();
+      await expect(page.getByRole("textbox", { name: "Group name" })).toBeFocused();
+      await page.keyboard.type(name);
+      await page.keyboard.press("Enter");
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      const [group] = await stripGroups(page);
+      expect(group).toMatchObject({ name, members: [id] });
+      await waitForStableLayout(page, ".spark-tabbar-scroll [data-tab-id], .spark-tabbar-scroll [data-tab-group-chip]");
+      return group.id;
+    };
+
+    const solo = await groupAlone(p2, "Solo");
+    const chip = `.spark-tabbar-scroll [data-tab-group-chip="${solo}"]`;
+    const order = await stripIds(page);
+    const expectStillGrouped = async (step: string) => {
+      await expect(page.locator(chip), step).toHaveCount(1);
+      await expect(page.locator(tab(p2)), step).toHaveAttribute("data-tab-group", solo);
+      expect(await stripIds(page), step).toEqual(order);
+    };
+    await testInfo.attach("solo-group-before-drag", { body: await page.screenshot(), contentType: "image/png" });
+
+    // Points measured before the gesture, where a real pointer stays while the
+    // preview slides the chip and tabs away from under it.
+    const pointOn = async (selector: string, fx: number, dx = 0) => {
+      const box = (await page.locator(selector).boundingBox())!;
+      return { x: box.x + box.width * fx + dx, y: box.y + box.height / 2 };
+    };
+
+    // Held over the left half of its own chip: the strip promises no change.
+    const release = await dispatchDrag(page, tab(p2), await pointOn(chip, 0.2), { hold: true });
+    await expect(page.locator(".spark-tab-reorder-ghost--visible")).toHaveCount(0);
+    expect(await page.$eval(chip, (node) => (node as HTMLElement).style.transform)).toBe("");
+    await testInfo.attach("solo-tab-held-over-its-chip", { body: await page.screenshot(), contentType: "image/png" });
+    await release();
+    await expectStillGrouped("dropped on the left half of its own chip");
+    await testInfo.attach("solo-group-after-drop-on-chip", { body: await page.screenshot(), contentType: "image/png" });
+
+    await dispatchDrag(page, tab(p2), await pointOn(chip, 0, -6));
+    await expectStillGrouped("dropped in the gap before its chip");
+    await dispatchDrag(page, tab(p2), await pointOn(chip, 0.8));
+    await expectStillGrouped("dropped on the right half of its own chip");
+    await dispatchDrag(page, tab(p2), await pointOn(tab(p2), 0.3));
+    await expectStillGrouped("dropped on itself");
+    await dispatchDrag(page, tab(p2), await pointOn(tab(p2), 1, 6));
+    await expectStillGrouped("pulled just past its own edge");
+
+    // Dragged clearly past the tab after it, it leaves and the group goes.
+    await dispatchDrag(page, tab(p2), await pointOn(tab(p3), 0.75));
+    await expect(page.locator(chip)).toHaveCount(0);
+    await expect(page.locator(tab(p2))).not.toHaveAttribute("data-tab-group", /.+/);
+    expect((await stripIds(page)).slice(-2)).toEqual([p3, p2]);
+
+    // Dragged clearly past the tab before it, the same.
+    const again = await groupAlone(p2, "Again");
+    await dispatchDrag(page, tab(p2), await pointOn(tab(p1), 0.25));
+    await expect(page.locator(`[data-tab-group-chip="${again}"]`)).toHaveCount(0);
+    await expect(page.locator(tab(p2))).not.toHaveAttribute("data-tab-group", /.+/);
+    const afterLeft = await stripIds(page);
+    expect(afterLeft.indexOf(p2)).toBe(afterLeft.indexOf(p1) - 1);
+
+    // Remove from group, then closing the only tab, each end the group.
+    await groupAlone(p2, "Menu");
+    await page.locator(tab(p2)).click({ button: "right" });
+    await page.getByRole("button", { name: "Remove from group", exact: true }).click();
+    await expect(page.locator(".spark-tabbar-scroll [data-tab-group-chip]")).toHaveCount(0);
+    await groupAlone(p3, "Close");
+    await page.locator(tab(p3)).hover();
+    await page.locator(`${tab(p3)} .spark-tab__close`).click();
+    await expect(page.locator(tab(p3))).toHaveCount(0);
+    await expect(page.locator(".spark-tabbar-scroll [data-tab-group-chip]")).toHaveCount(0);
   } finally {
     await teardown(fixture, app);
   }
