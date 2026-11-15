@@ -748,3 +748,7 @@ existing patterns, not yet picked by Etienne from variants.
   workspace, the exact text as plain text on an opaque panel that scrolls
   past 180 px, a countdown, Don't send and Send. An expired card says nothing
   was sent and stays 8 seconds.
+- An admin's delete uses the same card: the item's kind, sender, date,
+  status and text, then Keep and Delete (`is-danger`). The admin token is
+  one password field in About, Feedback with Save and Remove; the window
+  only ever shows whether a token is set and where from.

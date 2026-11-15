@@ -435,7 +435,9 @@ sent, each error as a plain sentence, the install id; the dialog itself is
 `tests/e2e/feedback.spec.ts`), `test-feedback-agent` (`codara_feedback_send`:
 nothing reaches the service without a yes on a question showing the exact
 text, unless the person turned the question off; no, no answer, a closed
-window and a withdrawn call send nothing), `test-storage-state-transaction` (a failed write of `spark-state.json` does
+window and a withdrawn call send nothing), `test-feedback-admin` (the admin tools: nothing
+without a token, the token never in a result, a delete only after Delete on a
+question showing the stored item), `test-storage-state-transaction` (a failed write of `spark-state.json` does
 not leave half-saved workspaces in memory), `test-storage-openrouter-key`
 (the OpenRouter key is encrypted at rest and never lost), `test-fs-watcher-lifecycle` (the
 file watcher behind the explorer, `src/main/fs-watcher.ts`),

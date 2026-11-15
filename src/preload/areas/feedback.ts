@@ -5,7 +5,7 @@
 
 import { ipcRenderer } from "electron";
 
-import type { FeedbackAnswer, FeedbackAsk, FeedbackAskClosed, FeedbackDraft, FeedbackInfo, FeedbackSendResult } from "@shared/feedback";
+import type { FeedbackAdminTokenState, FeedbackAnswer, FeedbackAsk, FeedbackAskClosed, FeedbackDraft, FeedbackInfo, FeedbackSendResult } from "@shared/feedback";
 import { subscribe } from "../subscribe";
 
 export const feedbackApi = {
@@ -18,4 +18,9 @@ export const feedbackApi = {
   onAskClosed: subscribe<FeedbackAskClosed>("feedback:askClosed"),
   /** False when the question is no longer waited for. */
   answer: (id: string, answer: FeedbackAnswer): Promise<boolean> => ipcRenderer.invoke("feedback:answer", { id, answer }),
+  /** Write-only: main never hands the token back. */
+  adminTokenState: (): Promise<FeedbackAdminTokenState> => ipcRenderer.invoke("feedback:adminTokenState"),
+  saveAdminToken: (token: string): Promise<{ ok: true; state: FeedbackAdminTokenState } | { ok: false; message: string }> =>
+    ipcRenderer.invoke("feedback:adminTokenSave", token),
+  removeAdminToken: (): Promise<FeedbackAdminTokenState> => ipcRenderer.invoke("feedback:adminTokenRemove"),
 };

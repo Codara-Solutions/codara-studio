@@ -107,7 +107,44 @@ export interface FeedbackSendAsk {
   message: string;
 }
 
-export type FeedbackAsk = FeedbackSendAsk;
+export type FeedbackStatus = "open" | "done";
+
+/** A stored report, as the service's admin routes return it. Strangers' text. */
+export interface FeedbackItem {
+  id: string;
+  createdAt: string;
+  kind: FeedbackKind;
+  source: FeedbackSource;
+  message: string;
+  appVersion: string;
+  platform: string;
+  contact: string | null;
+  installId: string | null;
+  status: FeedbackStatus;
+  doneAt: string | null;
+}
+
+/** The question an admin's codara_feedback_delete always waits on. */
+export interface FeedbackDeleteAsk {
+  action: "delete";
+  id: string;
+  expiresAt: number;
+  agent: string;
+  workspaceName: string | null;
+  /** The item as the service stored it, never as the agent described it. */
+  item: Pick<FeedbackItem, "id" | "kind" | "source" | "createdAt" | "status" | "message">;
+}
+
+export type FeedbackAsk = FeedbackSendAsk | FeedbackDeleteAsk;
+/** A question as an agent's call asks it; the queue adds the id and the deadline. */
+export type FeedbackAskInput = Omit<FeedbackSendAsk, "id" | "expiresAt"> | Omit<FeedbackDeleteAsk, "id" | "expiresAt">;
+
+/** What the window may know about the admin token: never the token. */
+export interface FeedbackAdminTokenState {
+  source: "env" | "saved" | "none";
+  /** False when no keyring can encrypt a token on this system. */
+  canSave: boolean;
+}
 
 export interface FeedbackAskClosed {
   id: string;

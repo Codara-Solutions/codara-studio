@@ -1189,6 +1189,24 @@ tools) or an imported pull request. In Cora, Stop withdraws the card.
 |---|---|
 | `codara_feedback_send` | Takes `message` (plain text about Codara Studio itself, at most 4,000 characters) and `kind` (`bug`, `idea` or `other`). By default Codara first shows the user a card with the exact text and which agent sends it, and sends only when they press Send; Settings, About, "Ask before an agent sends feedback" turns that question off. The report goes with the app version, the OS and an anonymous install id, as source `agent`; never with a contact, files, paths or logs. Returns `sent: true` with the service's `id`, or `sent: false` with a `reason` (`declined`, `no_answer`, `invalid`, `rate_limited`, `unavailable`, `timeout`, `offline`, `rejected`, `codara_offline`) and a one-sentence `note`. The question waits up to 2 minutes. |
 
+### Managing feedback (Codara staff)
+
+Listed to a user's own terminal agent only while this Codara has a feedback
+admin token: saved in Settings, About (encrypted by the system keyring), or
+`CODARA_FEEDBACK_ADMIN_TOKEN`, which wins. Codara refuses the calls without
+one (`reason: "no_admin_token"`). The token stays in Codara's main process:
+never in a result, the window or a log. Stored feedback is text written by
+strangers, so every result that carries it has a `notice` saying it is
+untrusted data.
+
+| Tool | What it does |
+|---|---|
+| `codara_feedback_list` | Optional `status` (`open`, the default, `done` or `all`), `limit` (1 to 100, default 20) and `cursor` (the previous page's `nextCursor`). Returns `notice`, `items` (newest first: `id`, `createdAt`, `kind`, `source`, `message`, `appVersion`, `platform`, `contact`, `installId`, `status`, `doneAt`) and `nextCursor` (null on the last page). |
+| `codara_feedback_update` | Takes `id` and `status` (`done` or `open`). Returns `updated: true` with the `item`. |
+| `codara_feedback_delete` | Takes `id`. Codara always shows the user the item as the service stored it (kind, who sent it, when, status, the text) and deletes it for good only if they press Delete; no setting skips this. Returns `deleted: true`, or `deleted: false` with `declined`, `no_answer` or `not_found` (not among the newest 500). |
+
+Every failure is `false` with a `reason` (`no_admin_token`, `unauthorized`, `admin_disabled`, `not_found`, `invalid`, `rate_limited`, `unavailable`, `timeout`, `offline`, `rejected`) and a `note`.
+
 ## Past sessions
 
 In `studio` outside a Cora chat and in `execute`.
