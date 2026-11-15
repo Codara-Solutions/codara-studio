@@ -80,9 +80,15 @@ async function main() {
     }
     git(repo, ["config", "branch.two.remote", "fork"]);
 
+    // The files git var names: the test's own global file and a system file
+    // of its own, so the machine's system file plays no part.
+    const systemConfig = path.join(dir, "system.gitconfig");
+    fs.writeFileSync(systemConfig, "[core]\n\tlogallrefupdates = true\n");
+    let varAnswers = () => ({ GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_SYSTEM: systemConfig });
     const calls = [];
     const read = async (cwd, args) => {
       calls.push(args.join(" "));
+      if (args[0] === "var") return varAnswers()[args[1]] ?? null;
       try {
         return git(cwd, args);
       } catch {
@@ -205,6 +211,21 @@ async function main() {
     assert.equal(await mod.checkoutRemote(trees[0], read), "special", "worktree one follows the remote its include gives it");
     assert.equal(calls.filter((call) => call === "remote").length, 2, "each checkout reads its own remotes");
     fs.writeFileSync(globalConfig, "[core]\n\tautocrlf = false\n");
+    // A git var that fails once (a timeout at start) is asked once more.
+    let varFails = 1;
+    const onceFailing = async (cwd, args) => {
+      if (args[0] === "var" && varFails > 0) {
+        varFails -= 1;
+        return null;
+      }
+      return read(cwd, args);
+    };
+    mod.forgetCheckoutRemotes();
+    calls.length = 0;
+    await mod.checkoutRemote(trees[1], onceFailing);
+    await mod.checkoutRemote(trees[2], onceFailing);
+    await mod.checkoutRemote(trees[1], onceFailing);
+    assert.equal(calls.filter((call) => call === "remote").length, 2, "the first per checkout, then one shared read");
     const oldGit = async (cwd, args) => (args[0] === "var" ? null : read(cwd, args));
     mod.forgetCheckoutRemotes();
     calls.length = 0;
@@ -216,7 +237,22 @@ async function main() {
     await mod.checkoutRemote(trees[1], read);
     await mod.checkoutRemote(trees[2], read);
     assert.equal(calls.filter((call) => call === "remote").length, 1, "plain files again: shared");
-    console.log("PASS a global include, or a git that cannot name its config files, reads per checkout");
+    // An include in the system file, or a relative path named by git var:
+    // per checkout.
+    for (const [label, answers] of [
+      ["an include in the system file", () => ({ GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_SYSTEM: special.replace(/special/, "system-include") })],
+      ["a relative global file", () => ({ GIT_CONFIG_GLOBAL: "relative.gitconfig", GIT_CONFIG_SYSTEM: systemConfig })],
+    ]) {
+      fs.writeFileSync(special.replace(/special/, "system-include"), `[include]\n\tpath = ${systemConfig}\n`);
+      varAnswers = answers;
+      mod.forgetCheckoutRemotes();
+      calls.length = 0;
+      await mod.checkoutRemote(trees[1], read);
+      await mod.checkoutRemote(trees[2], read);
+      assert.equal(calls.filter((call) => call === "remote").length, 2, `${label}: per checkout`);
+    }
+    varAnswers = () => ({ GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_SYSTEM: systemConfig });
+    console.log("PASS a global or system include, a relative path, or a git that cannot name its files reads per checkout");
 
     // The environment git runs with: any variable that changes which config
     // it reads, or reads it relative to each checkout, turns sharing off.

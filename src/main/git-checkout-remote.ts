@@ -85,22 +85,29 @@ export function environmentKeepsConfig(env: NodeJS.ProcessEnv): boolean {
 }
 
 let outsideFiles: Promise<string[] | null> | null = null;
+let outsideFailures = 0;
 
 /**
  * The global and system config files this git reads (`git var`, git 2.42+),
  * asked once per run; null when git cannot tell or names a relative path
- * (then nothing is shared).
+ * (then nothing is shared). A failed ask is asked once more before the run
+ * gives up on sharing (a git too old to know the variables fails every time).
  */
 function outsideConfigFiles(cwd: string, read: ReadGit): Promise<string[] | null> {
-  outsideFiles ??= Promise.all([
-    read(cwd, ["var", "GIT_CONFIG_GLOBAL"]),
-    read(cwd, ["var", "GIT_CONFIG_SYSTEM"]),
-  ]).then(([global, system]) => {
-    if (global === null || system === null) return null;
-    const files = [...lines(global), ...lines(system)];
-    return files.every((file) => isAbsolute(file)) ? files : null;
-  });
-  return outsideFiles;
+  if (outsideFiles) return outsideFiles;
+  const asked = Promise.all([read(cwd, ["var", "GIT_CONFIG_GLOBAL"]), read(cwd, ["var", "GIT_CONFIG_SYSTEM"])]).then(
+    ([global, system]) => {
+      if (global === null || system === null) {
+        outsideFailures += 1;
+        if (outsideFailures < 2 && outsideFiles === asked) outsideFiles = null;
+        return null;
+      }
+      const files = [...lines(global), ...lines(system)];
+      return files.every((file) => isAbsolute(file)) ? files : null;
+    },
+  );
+  outsideFiles = asked;
+  return asked;
 }
 
 /** The global and system files' stamps when none of them could make worktrees differ; null otherwise. */
@@ -196,4 +203,5 @@ export async function checkoutRemoteUrl(cwd: string, remote: string, read: ReadG
 export function forgetCheckoutRemotes(): void {
   byRepository.clear();
   outsideFiles = null;
+  outsideFailures = 0;
 }
