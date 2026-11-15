@@ -288,11 +288,12 @@ const unsubscribes: Array<() => void> = [];
 const repoKeyByCwd = new Map<string, Promise<string | null>>();
 const remoteByCwd = new Map<string, Promise<string | null>>();
 
-function readText(cwd: string, args: string[]): Promise<string> {
+/** Trimmed output, or null when git failed. */
+function readText(cwd: string, args: string[]): Promise<string | null> {
   return deps
     .runGit(cwd, args, { internal: true })
     .then((r) => r.stdout.trim())
-    .catch(() => "");
+    .catch(() => null);
 }
 
 // `rev-parse --git-common-dir` prints a path relative to cwd on many gits

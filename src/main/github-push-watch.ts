@@ -342,11 +342,11 @@ async function resolveRepoRef(cwd: string, deps_: GitHubPushWatchDependencies): 
     pending = (async () => {
       // The remote the checked-out branch tracks, else origin, else the sole
       // remote — same precedence the fetcher uses.
-      const read = async (dir: string, args: string[]): Promise<string> => {
+      const read = async (dir: string, args: string[]): Promise<string | null> => {
         try {
           return (await deps_.runGit(dir, args, { internal: true })).stdout.trim();
         } catch {
-          return "";
+          return null;
         }
       };
       const remote = await checkoutRemote(cwd, read);

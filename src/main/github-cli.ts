@@ -449,7 +449,7 @@ export async function repositoryCacheKey(
 }
 
 /** No include of another file and no per-worktree config, in any spelling or position. */
-function plainConfig(text: string): boolean {
+export function plainConfig(text: string): boolean {
   return !/\[\s*include/i.test(text) && !/worktreeconfig/i.test(text);
 }
 

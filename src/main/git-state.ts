@@ -15,13 +15,29 @@ export interface GitDirs {
   commonDir: string;
 }
 
-/** The git directories of the checkout holding `cwd`; null outside a local repository. */
+/** HEAD, objects and refs: what git takes for a git directory (a bare repository). */
+async function looksLikeGitDirectory(dir: string): Promise<boolean> {
+  const head = await fs.stat(join(dir, "HEAD")).catch(() => null);
+  if (!head?.isFile()) return false;
+  const [objects, refs] = await Promise.all([
+    fs.stat(join(dir, "objects")).catch(() => null),
+    fs.stat(join(dir, "refs")).catch(() => null),
+  ]);
+  return Boolean(objects?.isDirectory() && refs?.isDirectory());
+}
+
+/**
+ * The git directories of the checkout holding `cwd`; null outside a local
+ * repository, and null when `cwd` is in a bare repository (git stops there
+ * and would not climb to an enclosing checkout): callers then ask git.
+ */
 export async function gitDirsOf(cwd: string): Promise<GitDirs | null> {
   if (!cwd.trim() || isRemotePath(cwd) || /^[a-z][a-z0-9+.-]*:\/\//i.test(cwd)) return null;
   let dir = resolve(cwd);
   for (;;) {
     const dotGit = join(dir, ".git");
     const found = await fs.stat(dotGit).catch(() => null);
+    if (!found && (await looksLikeGitDirectory(dir))) return null;
     if (found?.isDirectory()) return { gitDir: dotGit, commonDir: dotGit };
     if (found?.isFile()) {
       const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await fs.readFile(dotGit, "utf8").catch(() => ""));
