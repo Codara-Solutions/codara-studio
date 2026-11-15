@@ -1,4 +1,5 @@
-// The feedback admin token: CODARA_FEEDBACK_ADMIN_TOKEN when set, else the
+// The feedback admin token: CODARA_FEEDBACK_ADMIN_TOKEN when Codara started
+// with it (admin-env.ts takes it out of the environment first), else the
 // one saved in Settings, About, kept in feedback.json encrypted with the
 // operating system's keyring (Electron safeStorage). Without a keyring it is
 // not saved at all, never in plain text. The token never goes to the
@@ -6,7 +7,8 @@
 
 import { safeStorage } from "electron";
 import type { FeedbackAdminTokenState } from "@shared/feedback";
-import { ADMIN_TOKEN_PATTERN, FEEDBACK_ADMIN_TOKEN_ENV } from "./admin";
+import { ADMIN_TOKEN_PATTERN } from "./admin";
+import { feedbackAdminEnvToken } from "./admin-env";
 import { feedbackStore } from "./service";
 
 // With CODARA_DISABLE_KEYCHAIN=1 (tests) the keyring is never touched.
@@ -20,7 +22,7 @@ function keyring(): typeof safeStorage | null {
 }
 
 function envToken(): string | null {
-  const value = (process.env[FEEDBACK_ADMIN_TOKEN_ENV] ?? "").trim();
+  const value = feedbackAdminEnvToken();
   return value && ADMIN_TOKEN_PATTERN.test(value) ? value : null;
 }
 

@@ -7,7 +7,6 @@
 import { FEEDBACK_KINDS, type FeedbackItem, type FeedbackStatus } from "../../shared/feedback";
 import { feedbackRequest, type FeedbackHttpResult, type FeedbackRequestOptions } from "./client";
 
-export const FEEDBACK_ADMIN_TOKEN_ENV = "CODARA_FEEDBACK_ADMIN_TOKEN";
 /** Printable ASCII without spaces, as a bearer token is. */
 export const ADMIN_TOKEN_PATTERN = /^[\x21-\x7e]{16,512}$/;
 export const FEEDBACK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

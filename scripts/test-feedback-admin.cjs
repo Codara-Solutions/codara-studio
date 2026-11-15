@@ -102,6 +102,24 @@ async function main() {
     assert.deepEqual(await admin.adminDeleteFeedback({ id: target.id }, deps()), { deleted: true, id: target.id });
     assert.equal(service.state.items.length, 2);
 
+    // A token removed while the question waits deletes nothing.
+    const third = service.state.items[0];
+    const beforeRemoval = service.state.requests.length;
+    const removed = await admin.adminDeleteFeedback(
+      { id: third.id },
+      {
+        ...deps(),
+        ask: async () => {
+          token = null;
+          return "yes";
+        },
+      },
+    );
+    token = TOKEN;
+    assert.equal(removed.reason, "no_admin_token");
+    assert.ok(!service.state.requests.slice(beforeRemoval).some((request) => request.method === "DELETE"));
+    assert.equal(service.state.items.length, 2);
+
     // An item this session never listed is looked up before the question.
     seen.clear();
     const other = service.state.items[1];
@@ -141,6 +159,16 @@ async function main() {
   } finally {
     await service.close();
   }
+
+  // The env token leaves the environment the moment main loads, before any
+  // terminal or agent is spawned, so no child inherits it.
+  process.env.CODARA_FEEDBACK_ADMIN_TOKEN = ` ${TOKEN} `;
+  const { feedbackAdminEnvToken } = await load("src/main/feedback/admin-env.ts");
+  assert.equal(process.env.CODARA_FEEDBACK_ADMIN_TOKEN, undefined);
+  assert.equal(feedbackAdminEnvToken(), TOKEN);
+  const fs = require("node:fs");
+  const imports = fs.readFileSync(path.join(ROOT, "src", "main", "index.ts"), "utf8").split("\n").filter((line) => line.startsWith("import"));
+  assert.equal(imports[1], 'import "./feedback/admin-env";', "index.ts takes the token out before anything else spawns");
 
   const disabled = await startFeedbackService();
   try {

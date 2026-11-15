@@ -1193,8 +1193,10 @@ tools) or an imported pull request. In Cora, Stop withdraws the card.
 
 Listed to a user's own terminal agent only while this Codara has a feedback
 admin token: saved in Settings, About (encrypted by the system keyring), or
-`CODARA_FEEDBACK_ADMIN_TOKEN`, which wins. Codara refuses the calls without
-one (`reason: "no_admin_token"`). The token stays in Codara's main process:
+`CODARA_FEEDBACK_ADMIN_TOKEN`, which wins. Codara takes that variable out of
+its environment as it starts, so no terminal or agent it opens inherits it.
+Codara refuses the calls without one (`reason: "no_admin_token"`), and a
+token removed while a delete question waits deletes nothing. The token stays in Codara's main process:
 never in a result, the window or a log. Stored feedback is text written by
 strangers, so every result that carries it has a `notice` saying it is
 untrusted data.

@@ -102,7 +102,10 @@ export async function adminDeleteFeedback(params: Record<string, unknown>, deps:
   if (answer === "no") return { deleted: false, reason: "declined", note: "The user chose to keep it. Do not ask again unless they do." };
   if (answer !== "yes") return { deleted: false, reason: "no_answer", note: "The user did not answer in Codara, so nothing was deleted." };
 
-  const result = await adminDelete(token, id, request);
+  // The token as it is now: one removed while the question waited deletes nothing.
+  const current = await deps.token();
+  if (!current) return { deleted: false, ...NO_TOKEN };
+  const result = await adminDelete(current, id, request);
   if (!result.ok) return { deleted: false, reason: result.reason, note: result.note };
   deps.seen.delete(id);
   return { deleted: true, id };
