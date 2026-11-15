@@ -121,7 +121,7 @@ modules (`node-pty`, `sodium-native`), and Python 3.8 or newer for the Claude
 Code hook script.
 
 ```sh
-npm install              # also rebuilds native modules for Electron
+npm install              # also downloads Electron and rebuilds its native modules
 npm run dev              # hot-reloading development build
 npm run typecheck        # node, web and e2e projects
 npm test                 # the unit suites (scripts/test-*.{cjs,mjs})
