@@ -119,6 +119,8 @@ test("a PDF and a Markdown file show in the browser by link, URL and path", asyn
       SPARK_SKIP_LEGACY_MIGRATION: "1",
       SPARK_NO_SHELL_INTEGRATION: "1",
       SPARK_ALLOW_MULTI: "1",
+      // "~/..." below expands to the test's own folder.
+      HOME: root,
     },
   });
   const request = async (method: string, params: Record<string, unknown> = {}) => {
@@ -155,6 +157,8 @@ test("a PDF and a Markdown file show in the browser by link, URL and path", asyn
     // And in a tab it already has.
     await request("preview.navigate", { tabId, url: join(spaced, "notes v2.md") });
     await expectMarkdown(fileUrl(join(spaced, "notes v2.md")));
+    await request("preview.navigate", { tabId, url: "~/workspace/doc.pdf" });
+    await expectPdf(fileUrl(join(cwd, "doc.pdf")));
 
     // URLs passed by an agent, local and served.
     for (const [url, kind] of [
@@ -183,6 +187,8 @@ test("a PDF and a Markdown file show in the browser by link, URL and path", asyn
     const typed: Array<[string, string, "pdf" | "md"]> = [
       [join(spaced, "my report.pdf"), fileUrl(join(spaced, "my report.pdf")), "pdf"],
       [join(cwd, "notes.md"), fileUrl(join(cwd, "notes.md")), "md"],
+      ["~/workspace/doc.pdf", fileUrl(join(cwd, "doc.pdf")), "pdf"],
+      ["~/workspace/Shared Docs/notes v2.md", fileUrl(join(spaced, "notes v2.md")), "md"],
       [fileUrl(join(cwd, "doc.pdf")), fileUrl(join(cwd, "doc.pdf")), "pdf"],
       [`${origin}/notes.md`, `${origin}/notes.md`, "md"],
     ];

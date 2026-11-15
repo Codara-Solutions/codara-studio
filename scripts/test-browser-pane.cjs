@@ -130,6 +130,7 @@ function address() {
   assert.equal(normalizeUrl("/home/me/report.pdf"), "file:///home/me/report.pdf");
   assert.equal(normalizeUrl("  /home/me/My Docs/notes v2.md "), "file:///home/me/My%20Docs/notes%20v2.md");
   assert.equal(normalizeUrl("/tmp/a#1.md"), "file:///tmp/a%231.md");
+  assert.equal(normalizeUrl("/tmp/a?b.md"), "file:///tmp/a%3Fb.md", "a ? in a name is not a query");
   assert.equal(normalizeUrl("~/Documents/x.pdf", "/home/me"), "file:///home/me/Documents/x.pdf");
   assert.equal(normalizeUrl("~/Documents/x.pdf", "/home/me/"), "file:///home/me/Documents/x.pdf");
   assert.equal(normalizeUrl("C:\\Users\\me\\x.pdf"), "file:///C:/Users/me/x.pdf");
@@ -146,6 +147,7 @@ function address() {
   assert.equal(localFilePath("notes.md", "/home/me"), null);
   assert.equal(localFilePath("http://localhost:3000", "/home/me"), null);
   assert.equal(localFilePath("D:/data/x.md", null), "D:/data/x.md");
+  assert.equal(localFilePath("D:/data/x.md", null, false), null, "off Windows a drive path is no path");
 
   const servers = [
     { id: "web", url: "http://localhost:5173/", port: 5173 },

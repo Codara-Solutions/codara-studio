@@ -51,13 +51,13 @@ export async function checkNavigateUrl(params: Record<string, unknown>): Promise
     throw new PreviewToolParamsError("navigate needs a url, or a tabId and a group to move that tab into the group.");
   }
   if (hasUrl && typeof params.url === "string") {
-    // A plain path loads nothing in Chromium (local-file-address.ts).
-    const local = localFilePath(params.url, homedir());
-    const asked = local ? pathToFileURL(local).href : params.url;
-    // In an SSH workspace localhost means the host: open its forwarded port.
-    const remote = await resolveRemotePreviewUrl(params.workspaceId, asked);
+    // In an SSH workspace localhost means the host: open its forwarded port,
+    // and a plain path names a file there, which the resolver refuses.
+    const remote = await resolveRemotePreviewUrl(params.workspaceId, params.url);
     if (remote && "error" in remote) throw new Error(remote.error);
-    const url = remote ? remote.url : asked;
+    // A plain path loads nothing in Chromium (local-file-address.ts).
+    const local = remote ? null : localFilePath(params.url, homedir(), process.platform === "win32");
+    const url = remote ? remote.url : local ? pathToFileURL(local).href : params.url;
     params.url = url;
     const reachable = await waitForLoopbackPreviewServer(url);
     if (!reachable) {
