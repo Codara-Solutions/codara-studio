@@ -135,13 +135,17 @@ async function main() {
       window.__calls = [];
       window.__sig = {};
       window.__merged = [];
+      // Milliseconds a read of a project takes ("*": every project).
+      window.__slow = {};
       window.spark = {
         app: { e2eBackground: true },
         git: { signatures: async (cwds) => Object.fromEntries(cwds.map((cwd) => [cwd, window.__sig[cwd] ?? "s0"])) },
         worktreeCleanup: {
           railStates: async (projects) => {
             window.__calls.push(projects ? [...projects].sort() : null);
-            const rows = { "/p": ["w1", "w2"], "/q": ["q1"] };
+            const slow = Math.max(0, ...(projects ?? []).map((project) => window.__slow[project] ?? window.__slow["*"] ?? 0));
+            if (slow > 0) await new Promise((resolve) => setTimeout(resolve, slow));
+            const rows = { "/p": ["w1", "w2"], "/q": ["q1"], "/c": ["c"] };
             const ids = (projects ?? ["/p", "/q"]).flatMap((project) => rows[project] ?? []);
             return {
               states: ids.map((id) => ({
@@ -314,6 +318,76 @@ async function main() {
       assert.deepEqual((await calls(page)).slice(2), [["/q"]], "a move on screen within one tick");
       await page.close();
       console.log("PASS the selected project is read at once when it waits, and watched every tick");
+    }
+    {
+      // A slow background read (25 s) of one project does not hold up the
+      // project the user selects: its row has a state within 5 s.
+      const page = await startPage();
+      await page.evaluate(() => {
+        window.__slow["/p"] = 25_000;
+        window.__setWorkspaces((list) => [...list, { id: "c", name: "c", cwd: "/c", color: "#000", workers: [] }]);
+      });
+      await page.waitForTimeout(100);
+      await run(page, 31_000);
+      assert.deepEqual((await calls(page)).at(-1), ["/p"], "the round is reading /p, slowly");
+      await page.evaluate(() => window.__setVisible("c"));
+      await page.waitForTimeout(100);
+      await run(page, 5_000);
+      assert.match(await page.locator("#rows").textContent(), /^c,q1/, "the selected project's row within 5 s");
+      await run(page, 25_000);
+      assert.match(await page.locator("#rows").textContent(), /^c,q1,w1,w2 loaded/, "and /p's when its read ends");
+      await page.close();
+      console.log("PASS a slow background read does not hold up the selected project");
+    }
+    {
+      // Reads that take 25 s while a workspace is added every 20 s: no read
+      // is thrown away, every project is read and the rail is loaded.
+      const page = await startPage();
+      await page.evaluate(() => {
+        window.__slow["*"] = 25_000;
+      });
+      for (let index = 0; index < 8; index++) {
+        await page.evaluate(
+          (id) => window.__setWorkspaces((list) => [...list, { id, name: id, cwd: `/${id}`, color: "#000", workers: [] }]),
+          `m${index}`,
+        );
+        await page.waitForTimeout(50);
+        await run(page, 20_000);
+      }
+      assert.ok((await calls(page)).some((call) => call[0] === "/p"), "the project waiting first is read");
+      for (let step = 0; step < 12; step++) await run(page, 30_000);
+      const read = new Set((await calls(page)).map((call) => call[0]));
+      for (const project of ["/p", "/q", ...Array.from({ length: 8 }, (_, index) => `/m${index}`)]) {
+        assert.ok(read.has(project), `${project} is read`);
+      }
+      assert.match(await page.locator("#rows").textContent(), / loaded$/, "and the rail is loaded");
+      await page.close();
+      console.log("PASS slow reads and steady workspace changes: every project is read, the rail is loaded");
+    }
+    {
+      // Sol's schedule: reads that take 25 s while a worktree of the visible
+      // project is added every 20 s. Nothing in flight is thrown away for the
+      // other projects, the round goes on, and once the additions stop every
+      // project is read and the rail is loaded.
+      const page = await startPage();
+      await page.evaluate(() => {
+        window.__slow["*"] = 25_000;
+      });
+      for (let index = 2; index < 10; index++) {
+        await page.evaluate(
+          (worktree) => window.__setWorkspaces((list) => [...list, worktree]),
+          { id: `q${index}`, name: `q${index}`, cwd: `/q${index}`, color: "#000", workers: [], copyBranch: { repoCwd: "/q", branch: `q${index}`, city: "x", mode: "fork", createdAt: "2026-10-25T10:00:00Z" } },
+        );
+        await page.waitForTimeout(50);
+        await run(page, 20_000);
+      }
+      assert.ok((await calls(page)).some((call) => call[0] === "/p"), "the other project is read during the additions");
+      for (let step = 0; step < 4; step++) await run(page, 30_000);
+      const read = new Set((await calls(page)).map((call) => call[0]));
+      assert.ok(read.has("/p") && read.has("/q"), "every project is read");
+      assert.match(await page.locator("#rows").textContent(), / loaded$/, "and the rail is loaded");
+      await page.close();
+      console.log("PASS slow reads while the visible project keeps growing: the rest is read, the rail is loaded");
     }
     {
       // A merge lands in the visible project while the window is away: the

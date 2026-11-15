@@ -9,6 +9,7 @@ import {
   type GitRefreshMemory,
   type GitSeen,
 } from "./gitRefreshClock";
+import { createRailRound, roundStep, takeTurn, type RailRound } from "./railReadRound";
 import {
   railRowMerged,
   type WorktreeRailCleanupRequest,
@@ -25,7 +26,10 @@ import {
 // selected (unless it was read and nothing is waiting on it), compared on
 // every clock tick and at once when the window regains focus, and read when
 // its git state moved. Its rows are a function of that git state, the
-// folders, time and tabs, so this keeps them current within one tick.
+// folders, time and tabs, so this keeps them current within one tick. Such
+// urgent reads, and rows waiting on removal at a focus, run at once beside a
+// background read of another project; a read of a project already running
+// is joined, or run again after it when its git state moved meanwhile.
 //
 // The other projects are read in a round, one project at a time, when the set
 // of workspaces first loads, on refresh() and every FULL_MS: one project after
@@ -33,7 +37,9 @@ import {
 // off-screen comparison (gitReadsSettled), so a start with dozens of
 // workspaces never runs hundreds of git reads at once. The round wakes at the
 // moment both hold, pauses while the window is unfocused and keeps its place
-// across changes of workspaces. Projects with news (a change the clock
+// across changes of workspaces (railReadRound.ts holds it outside the effects;
+// a read in flight keeps running and its answer is kept for every project
+// whose set of workspaces did not change meanwhile). Projects with news (a change the clock
 // reported while the project waited, a checkout no read covered yet) go first,
 // taking every other turn so the rest still move. Between rounds, projects
 // whose git state moved are read (the clock compares them every
@@ -95,26 +101,16 @@ export function useWorktreeRailStates(
   const [states, setStates] = useState<Record<string, WorktreeRailState>>({});
   const [external, setExternal] = useState<readonly WorktreeRailExternal[]>(NO_EXTERNAL);
   const [loaded, setLoaded] = useState(false);
-  // The running round, kept across changes of workspaces: the projects it
-  // still has to read, when it last read one, when the last round started,
-  // and whether its last turn went to a project with news.
-  const roundLeft = useRef(new Set<string>());
-  const lastRoundReadAt = useRef(Date.now());
-  const lastFullAt = useRef(0);
-  const lastTurnNews = useRef(false);
-  // When each project was last read; projects with news not read yet (a
-  // reported change, a checkout never read); every checkout a read covered.
-  const readAt = useRef(new Map<string, number>());
-  const dirty = useRef(new Set<string>());
+  // The round, the reads in flight and what was read: outlive every effect.
+  const roundRef = useRef<RailRound | null>(null);
+  roundRef.current ??= createRailRound(Date.now());
+  const round = roundRef.current;
   const readCwds = useRef(new Set<string>());
-  // Projects being read (or baselined for a read) now: news about them is
-  // read after, not deferred to the round they are leaving.
-  const reading = useRef(new Set<string>());
   const lastPendingAt = useRef(0);
+  const timer = useRef<number | null>(null);
+  const mounted = useRef(true);
   const statesRef = useRef(states);
   statesRef.current = states;
-  const readRef = useRef<((projects: ReadonlySet<string>) => Promise<void>) | null>(null);
-  const scheduleRef = useRef<() => void>(() => {});
   const memoryRef = useRef<GitRefreshMemory | null>(null);
   // What the clock last saw of every checkout, shared by the visible and the
   // background watch, so a checkout moving between them is not read twice.
@@ -142,207 +138,234 @@ export function useWorktreeRailStates(
   const visibleProjectRef = useRef(visibleProject);
   visibleProjectRef.current = visibleProject;
 
+  // The read machinery uses refs only; timers and the clock call the latest.
+  const local = () => workspacesRef.current.filter((ws) => !ws.remote);
+  const members = (project: string) =>
+    local()
+      .filter((ws) => railProjectOf(ws) === project)
+      .map((ws) => `${ws.id}\n${ws.cwd}`)
+      .sort()
+      .join("\0");
+
+  const markLoaded = () => {
+    if (local().every((ws) => round.readAt.has(railProjectOf(ws)))) setLoaded(true);
+  };
+
+  // One read of these projects' rows. Not tied to an effect: it keeps
+  // running when the workspaces change, and its answer is kept for every
+  // project whose workspaces are the same as when it started.
+  const runRead = async (projects: readonly string[], lane: "urgent" | "background"): Promise<void> => {
+    const api = window.spark.worktreeCleanup;
+    if (!api?.railStates) {
+      setLoaded(true);
+      return;
+    }
+    const before = new Map(projects.map((project) => [project, members(project)]));
+    for (const project of projects) {
+      const entry = round.reading.get(project) ?? { again: null };
+      entry.members = before.get(project);
+      round.reading.set(project, entry);
+    }
+    if (lane === "background") round.backgroundBusy = true;
+    try {
+      const overview = await api.railStates([...projects]).catch(() => null);
+      if (!mounted.current) return;
+      const kept = new Set(projects.filter((project) => members(project) === before.get(project)));
+      for (const project of projects) {
+        if (kept.has(project)) continue;
+        // Its workspaces changed meanwhile: news, read again.
+        round.dirty.add(project);
+        round.left.add(project);
+      }
+      const now = Date.now();
+      for (const project of kept) {
+        round.readAt.set(project, now);
+        round.dirty.delete(project);
+        round.left.delete(project);
+      }
+      const rows = local().filter((ws) => kept.has(railProjectOf(ws)));
+      const covers = rows.map((ws) => ws.cwd);
+      for (const cwd of covers) readCwds.current.add(cwd);
+      // Known once every project was read once, whatever it found: a row
+      // with no state after that is one main never reads.
+      markLoaded();
+      if (!overview) {
+        // The clock already counted what this read was for: forget it, so
+        // the next comparison asks again instead of the 30-minute read.
+        // The visible project is compared every tick: its retry waits a
+        // pace, so a failing main is not asked every 3 s.
+        if (kept.has(visibleProjectRef.current ?? "")) window.setTimeout(() => memoryRef.current?.forget(covers), PACE_MS);
+        else memoryRef.current?.forget(covers);
+        return;
+      }
+      if (kept.size === 0) return;
+      // The rows and project ids this read speaks for.
+      const covered = new Set(rows.map((ws) => ws.id));
+      const list = overview.states.filter((state) => covered.has(state.workspaceId));
+      // Rows and projects that left the rail since are dropped.
+      const presentIds = new Set(workspacesRef.current.map((ws) => ws.id));
+      // Main lists a read repository's outside worktrees under its main
+      // checkout's row, which may not be one of the rows read: kept only when
+      // the whole read is (otherwise the read again brings them).
+      if (kept.size === projects.length) setExternal((prev) => {
+        const read = overview.external ?? NO_EXTERNAL;
+        const fresh = new Set(read.map((entry) => entry.path));
+        const outside = [
+          ...prev.filter((entry) => presentIds.has(entry.projectId) && !covered.has(entry.projectId) && !fresh.has(entry.path)),
+          ...read,
+        ];
+        return JSON.stringify(prev) === JSON.stringify(outside) ? prev : outside;
+      });
+      setStates((prev) => {
+        const next: Record<string, WorktreeRailState> = {};
+        for (const [id, state] of Object.entries(prev)) if (presentIds.has(id) && !covered.has(id)) next[id] = state;
+        for (const state of list) next[state.workspaceId] = state;
+        return sameStates(prev, next) ? prev : next;
+      });
+      const removed: Array<{ result: WorktreeRailCleanupResult; mode: WorktreeRailCleanupRequest["mode"] }> = [];
+      for (const state of list) {
+        const mode = state.autoCandidate ? "auto" : state.autoRemoveMerged ? "auto-merged" : null;
+        const cwd = workspacesRef.current.find((ws) => ws.id === state.workspaceId)?.cwd;
+        if (!mode || (mode === "auto-merged" && isHeldRef.current(state.workspaceId, cwd ? [cwd] : []))) continue;
+        const tried = autoTried.current.get(state.workspaceId);
+        if (tried && now - tried.at < tried.waitMs) continue;
+        autoTried.current.set(state.workspaceId, {
+          at: now,
+          waitMs: tried ? Math.min(tried.waitMs * 2, AUTO_RETRY_MAX_MS) : AUTO_RETRY_MS,
+        });
+        const result = await api.railCleanUp({ workspaceId: state.workspaceId, mode }).catch(() => null);
+        if (result?.status === "removed") removed.push({ result, mode });
+        if (!mounted.current) break;
+      }
+      // Reported even when the removal's own state change already changed
+      // the workspaces.
+      if (removed.length) onAutoRemovedRef.current(removed);
+    } finally {
+      const rerun = { urgent: [] as string[], background: [] as string[] };
+      for (const project of projects) {
+        const again = round.reading.get(project)?.again;
+        round.reading.delete(project);
+        if (again) rerun[again].push(project);
+      }
+      if (lane === "background") round.backgroundBusy = false;
+      if (mounted.current) {
+        if (rerun.urgent.length) request(rerun.urgent, "urgent", false);
+        if (rerun.background.length) request(rerun.background, "background", false);
+        if (!round.backgroundBusy && round.backgroundAsk.size > 0) {
+          const asks = [...round.backgroundAsk];
+          round.backgroundAsk.clear();
+          request(asks, "background", false);
+        }
+        schedule();
+      }
+    }
+  };
+
+  // A project already being read is joined, unless its git state moved or
+  // its workspaces changed after that read started: then it is read again
+  // right after, on the asking lane.
+  const join = (project: string, lane: "urgent" | "background", moved: boolean): boolean => {
+    const running = round.reading.get(project);
+    if (!running) return false;
+    const stale = moved || (running.members !== undefined && running.members !== members(project));
+    if (stale && running.again !== "urgent") running.again = lane;
+    return true;
+  };
+
+  // Ask for a read. Urgent reads start at once; background reads wait for
+  // the running one.
+  const request = (projects: Iterable<string>, lane: "urgent" | "background", moved: boolean) => {
+    const fresh: string[] = [];
+    for (const project of projects) if (!join(project, lane, moved)) fresh.push(project);
+    if (fresh.length === 0) return;
+    if (lane === "background" && round.backgroundBusy) {
+      for (const project of fresh) round.backgroundAsk.add(project);
+      return;
+    }
+    void runRead(fresh, lane);
+  };
+
+  // A project read now on its own lane, baselined right before.
+  const readNow = async (project: string, lane: "urgent" | "background") => {
+    if (join(project, lane, false)) return;
+    round.reading.set(project, { again: null });
+    if (lane === "background") round.backgroundBusy = true;
+    const cwds = local()
+      .filter((ws) => railProjectOf(ws) === project)
+      .map((ws) => ws.cwd);
+    await memoryRef.current?.baseline(cwds);
+    if (lane === "background") round.backgroundBusy = false;
+    if (!mounted.current) {
+      round.reading.delete(project);
+      return;
+    }
+    await runRead([project], lane);
+  };
+
+  // The round's next move (railReadRound.ts): a turn now, or a wake-up at the
+  // moment the next one is due. Nothing while unfocused: a focus asks again.
+  const schedule = () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
+    if (!mounted.current) return;
+    const now = Date.now();
+    const step = roundStep(round, now, gitReadsSettleAt(), PACE_MS);
+    if (!step) return;
+    if ("wakeAt" in step) {
+      timer.current = window.setTimeout(() => ops.current.schedule(), Math.max(0, step.wakeAt - now) + 5);
+      return;
+    }
+    takeTurn(round, step.read, step.news, now);
+    round.reading.delete(step.read);
+    void readNow(step.read, "background");
+  };
+
+  const ops = useRef({ schedule, request, readNow });
+  ops.current = { schedule, request, readNow };
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (timer.current !== null) window.clearTimeout(timer.current);
+      timer.current = null;
+    };
+  }, []);
+
+  // The workspaces changed (or refresh()): the round takes in news and
+  // drops what left, where it stands. Nothing in flight is cancelled.
   useEffect(() => {
     if (!copyKey) {
       setStates((prev) => (Object.keys(prev).length ? {} : prev));
       setExternal(NO_EXTERNAL);
-      roundLeft.current.clear();
+      round.left.clear();
       return;
     }
-    let cancelled = false;
-    // Per effect run: a read left over from the previous set of workspaces is
-    // cancelled, not waited for, so the new set is read at once.
-    let inFlight = false;
-    // Asked for while a read ran: read when it ends. The clock has already
-    // remembered the change it reported, so a dropped ask is never repeated.
-    let again: Set<string> | null = null;
-    let timer: number | null = null;
-
-    const local = workspacesRef.current.filter((ws) => !ws.remote);
-    const present = new Set(local.map(railProjectOf));
+    if (!window.spark.worktreeCleanup?.railStates) {
+      setLoaded(true);
+      return;
+    }
+    const all = local();
+    const present = new Set(all.map(railProjectOf));
     // A checkout no read covered yet (a new worktree) is news for its project.
-    for (const ws of local) if (!readCwds.current.has(ws.cwd)) dirty.current.add(railProjectOf(ws));
-    for (const project of roundLeft.current) if (!present.has(project)) roundLeft.current.delete(project);
-    for (const project of dirty.current) if (!present.has(project)) dirty.current.delete(project);
+    for (const ws of all) if (!readCwds.current.has(ws.cwd)) round.dirty.add(railProjectOf(ws));
+    for (const project of [...round.left]) if (!present.has(project)) round.left.delete(project);
+    for (const project of [...round.dirty]) if (!present.has(project)) round.dirty.delete(project);
     const firstLoad = lastRefreshTick.current === null;
     if (lastRefreshTick.current !== refreshTick) {
       // The first load and refresh(): a round over every project.
       lastRefreshTick.current = refreshTick;
-      lastFullAt.current = Date.now();
-      for (const project of present) roundLeft.current.add(project);
+      round.lastFullAt = Date.now();
+      for (const project of present) round.left.add(project);
     }
     // News joins the round where it stands; nothing read is read again.
-    for (const project of dirty.current) roundLeft.current.add(project);
-    if (local.every((ws) => readAt.current.has(railProjectOf(ws)))) setLoaded(true);
-
-    // `projects`: re-read only these projects' rows.
-    const read = async (projects: ReadonlySet<string>): Promise<void> => {
-      if (inFlight) {
-        again = new Set([...(again ?? []), ...projects]);
-        return;
-      }
-      const api = window.spark.worktreeCleanup;
-      if (!api?.railStates) {
-        setLoaded(true);
-        return;
-      }
-      inFlight = true;
-      for (const project of projects) reading.current.add(project);
-      // The checkouts this read speaks for.
-      const covers = workspacesRef.current
-        .filter((ws) => !ws.remote && projects.has(railProjectOf(ws)))
-        .map((ws) => ws.cwd);
-      try {
-        const overview = await api.railStates([...projects]).catch(() => null);
-        if (cancelled) {
-          // Read again in the next run, first.
-          for (const project of projects) dirty.current.add(project);
-          return;
-        }
-        for (const project of projects) {
-          readAt.current.set(project, Date.now());
-          dirty.current.delete(project);
-          roundLeft.current.delete(project);
-        }
-        for (const cwd of covers) readCwds.current.add(cwd);
-        // Known once every project was read once, whatever it found: a row
-        // with no state after that is one main never reads.
-        if (workspacesRef.current.every((ws) => ws.remote || readAt.current.has(railProjectOf(ws)))) setLoaded(true);
-        if (!overview) {
-          // The clock already counted what this read was for: forget it, so
-          // the next comparison asks again instead of the 30-minute read.
-          // The visible project is compared every tick: its retry waits a
-          // pace, so a failing main is not asked every 3 s.
-          const onScreen = projects.has(visibleProjectRef.current ?? "");
-          if (onScreen) window.setTimeout(() => memoryRef.current?.forget(covers), PACE_MS);
-          else memoryRef.current?.forget(covers);
-          return;
-        }
-        const list = overview.states;
-        // The rows and project ids this read speaks for.
-        const covered = new Set(workspacesRef.current.filter((ws) => projects.has(railProjectOf(ws))).map((ws) => ws.id));
-        // Rows and projects that left the rail since are dropped.
-        const presentIds = new Set(workspacesRef.current.map((ws) => ws.id));
-        setExternal((prev) => {
-          const read = overview.external ?? NO_EXTERNAL;
-          // Main lists a read repository's outside worktrees under its main
-          // checkout's row, which may not be one of the rows read.
-          const fresh = new Set(read.map((entry) => entry.path));
-          const outside = [
-            ...prev.filter((entry) => presentIds.has(entry.projectId) && !covered.has(entry.projectId) && !fresh.has(entry.path)),
-            ...read,
-          ];
-          return JSON.stringify(prev) === JSON.stringify(outside) ? prev : outside;
-        });
-        setStates((prev) => {
-          const next: Record<string, WorktreeRailState> = {};
-          for (const [id, state] of Object.entries(prev)) if (presentIds.has(id) && !covered.has(id)) next[id] = state;
-          for (const state of list) next[state.workspaceId] = state;
-          return sameStates(prev, next) ? prev : next;
-        });
-        const now = Date.now();
-        const removed: Array<{ result: WorktreeRailCleanupResult; mode: WorktreeRailCleanupRequest["mode"] }> = [];
-        // Reported even when the removal's own state change already
-        // restarted this effect, or it was cancelled partway.
-        const report = () => {
-          if (removed.length) onAutoRemovedRef.current(removed.splice(0));
-        };
-        for (const state of list) {
-          const mode = state.autoCandidate ? "auto" : state.autoRemoveMerged ? "auto-merged" : null;
-          const cwd = workspacesRef.current.find((ws) => ws.id === state.workspaceId)?.cwd;
-          if (!mode || (mode === "auto-merged" && isHeldRef.current(state.workspaceId, cwd ? [cwd] : []))) continue;
-          const tried = autoTried.current.get(state.workspaceId);
-          if (tried && now - tried.at < tried.waitMs) continue;
-          autoTried.current.set(state.workspaceId, {
-            at: now,
-            waitMs: tried ? Math.min(tried.waitMs * 2, AUTO_RETRY_MAX_MS) : AUTO_RETRY_MS,
-          });
-          const result = await api.railCleanUp({ workspaceId: state.workspaceId, mode }).catch(() => null);
-          if (result?.status === "removed") removed.push({ result, mode });
-          if (cancelled) return report();
-        }
-        report();
-      } finally {
-        inFlight = false;
-        for (const project of projects) reading.current.delete(project);
-        const queued = again;
-        again = null;
-        if (queued && !cancelled) void read(queued);
-      }
-    };
-
-    // The round's next turn: PACE_MS after its last read, once focus has
-    // settled. Woken at that moment, not polled; while the window is
-    // unfocused nothing is due and the next focus schedules again.
-    const schedule = () => {
-      if (timer !== null) window.clearTimeout(timer);
-      timer = null;
-      if (cancelled || roundLeft.current.size === 0) return;
-      const settles = gitReadsSettleAt();
-      if (settles === null) return;
-      const due = Math.max(lastRoundReadAt.current + PACE_MS, settles);
-      timer = window.setTimeout(turn, Math.max(0, due - Date.now()) + 5);
-    };
-    // Baselined right before its own read; until then the clock's news about
-    // it moves it up instead. It leaves the round once read; a read cut
-    // short keeps it there.
-    const readInRound = async (project: string) => {
-      lastRoundReadAt.current = Date.now();
-      const cwds = workspacesRef.current
-        .filter((candidate) => !candidate.remote && railProjectOf(candidate) === project)
-        .map((candidate) => candidate.cwd);
-      reading.current.add(project);
-      try {
-        await memoryRef.current?.baseline(cwds);
-        if (cancelled) return;
-        await read(new Set([project]));
-      } finally {
-        reading.current.delete(project);
-      }
-      schedule();
-    };
-    const turn = () => {
-      timer = null;
-      if (cancelled) return;
-      if (!gitReadsSettled() || Date.now() < lastRoundReadAt.current + PACE_MS) return schedule();
-      const age = (project: string) => readAt.current.get(project) ?? 0;
-      const left = [...roundLeft.current].sort((a, b) => age(a) - age(b));
-      // News first, every other turn, so the rest still move under steady news.
-      const news = left.find((project) => dirty.current.has(project));
-      const oldest = left.find((project) => !dirty.current.has(project));
-      const project = news !== undefined && (!lastTurnNews.current || oldest === undefined) ? news : (oldest ?? news);
-      if (project === undefined) return;
-      lastTurnNews.current = project === news;
-      void readInRound(project);
-    };
-
-    readRef.current = read;
-    scheduleRef.current = schedule;
+    for (const project of round.dirty) round.left.add(project);
     // With no project on screen to read first, the round's first turn is now.
-    const first = firstLoad && !visibleProjectRef.current ? [...roundLeft.current][0] : undefined;
-    if (first !== undefined) void readInRound(first);
-    else schedule();
-    return () => {
-      cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
-      // A read asked for and not run yet is news for the next run.
-      for (const project of again ?? []) dirty.current.add(project);
-      if (readRef.current === read) readRef.current = null;
-      if (scheduleRef.current === schedule) scheduleRef.current = () => {};
-    };
+    if (firstLoad && !visibleProjectRef.current) round.startNow = true;
+    markLoaded();
+    ops.current.schedule();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [copyKey, refreshTick]);
-
-  // Read a project now, outside the round, baselined right before.
-  const readNow = useCallback(async (project: string) => {
-    const cwds = workspacesRef.current.filter((ws) => !ws.remote && railProjectOf(ws) === project).map((ws) => ws.cwd);
-    reading.current.add(project);
-    try {
-      await memoryRef.current?.baseline(cwds);
-      await readRef.current?.(new Set([project]));
-    } finally {
-      reading.current.delete(project);
-    }
-  }, []);
 
   // The visible project at once when selected (and when its set of checkouts
   // changes), unless it was read and nothing is waiting on it: a checkout no
@@ -360,26 +383,23 @@ export function useWorktreeRailStates(
     const cwds = visibleKey.split("\n");
     const rows = workspacesRef.current.filter((ws) => !ws.remote && railProjectOf(ws) === project);
     const waiting =
-      !readAt.current.has(project) ||
-      dirty.current.has(project) ||
-      roundLeft.current.has(project) ||
+      !round.readAt.has(project) ||
+      round.dirty.has(project) ||
+      round.left.has(project) ||
       cwds.some((cwd) => !readCwds.current.has(cwd)) ||
-      (Date.now() - (readAt.current.get(project) ?? 0) >= FOCUS_GAP_MS &&
+      (Date.now() - (round.readAt.get(project) ?? 0) >= FOCUS_GAP_MS &&
         rows.some((ws) => {
           const state = statesRef.current[ws.id];
           return state !== undefined && railRowPending(state);
         }));
-    if (waiting) void readNow(project);
-  }, [visibleKey, readNow]);
+    if (waiting) void ops.current.readNow(project, "urgent");
+  }, [visibleKey, round]);
 
   const onBackground = (changed: readonly string[], reason: "tick" | "focus") => {
     const now = Date.now();
-    // A focus wakes the round where it paused.
-    if (reason === "focus") scheduleRef.current();
-    if (reason === "tick" && now - lastFullAt.current >= FULL_MS && gitReadsSettled()) {
-      lastFullAt.current = now;
-      for (const ws of localWorkspaces) roundLeft.current.add(railProjectOf(ws));
-      scheduleRef.current();
+    if (reason === "tick" && now - round.lastFullAt >= FULL_MS && gitReadsSettled()) {
+      round.lastFullAt = now;
+      for (const ws of localWorkspaces) round.left.add(railProjectOf(ws));
     }
     const projects = new Set<string>();
     const byCwd = new Map(localWorkspaces.map((ws) => [ws.cwd, ws]));
@@ -390,22 +410,28 @@ export function useWorktreeRailStates(
     // A project waiting in the round, not baselined yet, is moved up rather
     // than read now: at start every checkout's first comparison is a change.
     for (const project of projects) {
-      if (roundLeft.current.has(project) && !reading.current.has(project)) {
+      if (round.left.has(project) && !round.reading.has(project)) {
         projects.delete(project);
-        dirty.current.add(project);
+        round.dirty.add(project);
       }
     }
-    // Rows waiting on time or tabs are read now, round or not.
+    if (projects.size > 0) ops.current.request(projects, "background", true);
+    // Rows waiting on time or tabs are read now, round or not; at a focus on
+    // the urgent lane.
     const pendingDue = now - lastPendingAt.current >= (reason === "focus" ? FOCUS_GAP_MS : PENDING_MS);
     if (pendingDue) {
-      const pending = Object.values(statesRef.current).filter(railRowPending);
-      for (const state of pending) {
+      const pending = new Set<string>();
+      for (const state of Object.values(statesRef.current).filter(railRowPending)) {
         const ws = localWorkspaces.find((candidate) => candidate.id === state.workspaceId);
-        if (ws) projects.add(railProjectOf(ws));
+        if (ws) pending.add(railProjectOf(ws));
       }
-      if (pending.length > 0) lastPendingAt.current = now;
+      if (pending.size > 0) {
+        lastPendingAt.current = now;
+        ops.current.request(pending, reason === "focus" ? "urgent" : "background", false);
+      }
     }
-    if (projects.size > 0) void readRef.current?.(projects);
+    // A focus wakes the round where it paused.
+    ops.current.schedule();
   };
 
   // Two watches over one memory: the visible project's checkouts every tick
@@ -420,7 +446,7 @@ export function useWorktreeRailStates(
     true,
     (changed) => {
       const project = visibleProjectRef.current;
-      if (project && changed.length > 0) void readRef.current?.(new Set([project]));
+      if (project && changed.length > 0) ops.current.request([project], "urgent", true);
     },
     seen.current,
   );
