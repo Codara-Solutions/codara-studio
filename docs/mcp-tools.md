@@ -1196,7 +1196,11 @@ admin token: saved in Settings, About (encrypted by the system keyring), or
 `CODARA_FEEDBACK_ADMIN_TOKEN`, which wins. Codara takes that variable out of
 its environment as it starts, so no terminal or agent it opens inherits it.
 Codara refuses the calls without one (`reason: "no_admin_token"`), and a
-token removed while a delete question waits deletes nothing. The token stays in Codara's main process:
+token removed while a delete question waits deletes nothing. The question
+guards the tools Codara gives agents. It is not a wall against a program
+running under your own account, which can read whatever your account can
+(the keyring once it is unlocked, a process's start-up environment): keep
+the token on machines and accounts where you trust what runs. The token stays in Codara's main process:
 never in a result, the window or a log. Stored feedback is text written by
 strangers, so every result that carries it has a `notice` saying it is
 untrusted data.
