@@ -4128,7 +4128,7 @@ export function useTerminalSession({
         // the screen on remount.
         void window.spark.pty.detach?.(sessionId);
       } else if (!readOnlyRef.current) {
-        void window.spark.pty.pause?.(sessionId, replayTracker.replayedTo());
+        void window.spark.pty.pause?.(sessionId, replayTracker.replayedTo(), replayTracker.token);
       }
       if (replayTokenRef.current === replayTracker.token) replayTokenRef.current = undefined;
       for (const fn of cleanups) {

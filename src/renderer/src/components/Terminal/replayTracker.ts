@@ -52,7 +52,10 @@ export interface ReplayTracker {
   replayedTo(): number;
 }
 
-let lastToken = 0;
+// Tokens only grow, also across reloads of the same window (main keeps the
+// highest token a pause retired and ignores resumes at or below it): count
+// from this document's start time in microseconds-ish steps.
+let lastToken = Math.floor(performance.timeOrigin + performance.now()) * 1000;
 
 export function createReplayTracker(): ReplayTracker {
   let pending = 0;

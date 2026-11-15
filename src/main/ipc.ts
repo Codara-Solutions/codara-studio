@@ -3415,8 +3415,12 @@ export function registerIpc(): void {
   // same data channel before live output continues.
   // A pane that unmounts passes the end offset of the last replay slice it
   // received, so slices still in flight go back into the backlog.
-  handle("pty:pause", async (_e, args: { id: string; replayedTo?: unknown }) => {
-    pty.pause(args.id, typeof args.replayedTo === "number" ? args.replayedTo : undefined);
+  handle("pty:pause", async (_e, args: { id: string; replayedTo?: unknown; token?: unknown }) => {
+    pty.pause(
+      args.id,
+      typeof args.replayedTo === "number" ? args.replayedTo : undefined,
+      typeof args.token === "number" ? args.token : undefined,
+    );
   });
   handle("pty:resume", async (_e, args: { id: string; redraw?: boolean; token?: unknown }) => {
     pty.resume(args.id, args.redraw === true, typeof args.token === "number" ? args.token : undefined);

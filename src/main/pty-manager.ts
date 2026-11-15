@@ -190,8 +190,9 @@ interface Session {
   // unmounts mid-replay gets back exactly the slices it never took in.
   replayTimer: NodeJS.Immediate | null;
   replayToken: number | undefined;
-  // Tokens grow with each pane listener; a pause with an offset retires its
-  // token, and a late resume naming it (or an older one) is ignored.
+  // Tokens grow with each pane listener, across reloads too; a pause with an
+  // offset retires the pausing pane's token, and a late resume naming it (or
+  // an older one) is ignored.
   replayRetiredToken: number;
   replayInFlight: Array<{ buf: Buffer; end: number }>;
   // Set true synchronously by killNow before the underlying pty.kill() runs.
@@ -454,8 +455,6 @@ function clearReplay(s: Session): void {
   stopReplay(s);
   s.replayInFlight = [];
   s.replayToken = undefined;
-  // Every reset site drops the renderer (or its pause state); a new
-  // renderer counts its tokens from 1 again.
   s.replayRetiredToken = 0;
 }
 
@@ -1930,15 +1929,17 @@ function enqueueData(id: string, data: string | Buffer): void {
 // removes its listener right after this call: slices past it go back to the
 // front of the backlog. Without it (host suspend, a hidden document) the
 // listener stays, so slices in flight stay owed to it until it confirms them.
-export function pause(id: string, replayedTo?: number): void {
+// `token` names the pausing pane: it is retired, and only the pane the slices
+// were addressed to gives them back.
+export function pause(id: string, replayedTo?: number, token?: number): void {
   const s = sessions.get(id);
   if (!s) return;
   resetRenderFlow(s);
   stopReplay(s);
-  if (typeof replayedTo === "number") {
+  if (token !== undefined) s.replayRetiredToken = Math.max(s.replayRetiredToken, token);
+  if (typeof replayedTo === "number" && (token === undefined || token === s.replayToken)) {
     const inFlight = s.replayInFlight;
     s.replayInFlight = [];
-    if (s.replayToken !== undefined) s.replayRetiredToken = Math.max(s.replayRetiredToken, s.replayToken);
     s.replayToken = undefined;
     const back: Buffer[] = [];
     let backBytes = 0;
@@ -2070,6 +2071,29 @@ function replaySlice(s: Session): void {
   s.detachedBacklogBytes = 0;
   s.attached = true;
   s.lastAttachAt = Date.now();
+}
+
+// The window's document is being replaced (reload, dev-server full reload)
+// without detachForWebContents: its pane listeners are gone. Slices still owed
+// to them go back to the front of the backlog for the new document's panes,
+// and the token bookkeeping starts over.
+export function forgetReplayListeners(wc: WebContents): void {
+  for (const s of sessions.values()) {
+    if (s.webContents !== wc) continue;
+    stopReplay(s);
+    const back = s.replayInFlight.map(({ buf, end }) => {
+      resentSliceEnd.set(buf, end);
+      return buf;
+    });
+    if (back.length > 0) {
+      s.detachedBacklog = [...back, ...s.detachedBacklog];
+      s.detachedBacklogBytes += back.reduce((total, buf) => total + buf.length, 0);
+      trimBacklog(s);
+    }
+    s.replayInFlight = [];
+    s.replayToken = undefined;
+    s.replayRetiredToken = 0;
+  }
 }
 
 // The pane took in every replay slice addressed to it up to `end`.

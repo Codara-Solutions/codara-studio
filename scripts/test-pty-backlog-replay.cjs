@@ -80,8 +80,8 @@ function createWindow(id) {
   // listeners (and the resume that follows them) by that many turns, as
   // start() runs from a timer after the commit. A watch-only pane is a
   // read-only mirror: it never resumes, pauses or acknowledges.
-  function mount({ late = 0, watchOnly = false } = {}) {
-    const tracker = createReplayTracker();
+  function mount({ late = 0, watchOnly = false, resume = true, factory = createReplayTracker } = {}) {
+    const tracker = factory();
     const pane = { received: [], tracker, mounted: true, registered: false };
     const offs = [];
     const takeIn = (fn) => setImmediate(() => pane.mounted && fn());
@@ -108,7 +108,7 @@ function createWindow(id) {
         }),
       );
       pane.registered = true;
-      if (!watchOnly) call(() => pty.resume(id, false, tracker.token));
+      if (!watchOnly && resume) call(() => pty.resume(id, false, tracker.token));
     };
     if (late === 0) register();
     else {
@@ -124,8 +124,13 @@ function createWindow(id) {
       pane.mounted = false;
       if (!watchOnly) {
         const replayedTo = tracker.replayedTo();
-        call(() => pty.pause(id, replayedTo));
+        call(() => pty.pause(id, replayedTo, tracker.token));
       }
+      for (const off of offs) off();
+    };
+    // The document goes away (reload): listeners vanish, nothing is sent.
+    pane.vanish = () => {
+      pane.mounted = false;
       for (const off of offs) off();
     };
     return pane;
@@ -307,21 +312,22 @@ async function main() {
     // A pane's own resume reaches main after its pause (start() awaited in
     // between): main ignores the retired listener, before or after the next
     // pane's resume.
-    for (const beforeNext of [true, false]) {
-      const id = `replay-late-resume-${beforeNext}`;
+    for (const [beforeNext, resumedFirst] of [[true, true], [false, true], [true, false], [false, false]]) {
+      const id = `replay-late-resume-${beforeNext}-${resumedFirst}`;
       const history = Buffer.from("late resume line\r\n".repeat(60_000));
       const { win, first } = await away(id, history);
-      const gone = win.mount();
-      for (let waited = 0; sliceCount(win, id) < 2; waited += 1) {
+      const gone = win.mount({ resume: resumedFirst });
+      for (let waited = 0; resumedFirst && sliceCount(win, id) < 2; waited += 1) {
         assert.ok(waited < 1000);
         await turn();
       }
+      await turn();
       gone.unmount();
       if (beforeNext) win.call(() => pty.resume(id, false, gone.tracker.token));
       const next = win.mount();
       if (!beforeNext) win.call(() => pty.resume(id, false, gone.tracker.token));
       await win.idle();
-      assertOnce(`late resume ${beforeNext}`, all(first, gone, next), history);
+      assertOnce(`late resume ${beforeNext} ${resumedFirst}`, all(first, gone, next), history);
       pty.killImmediate(id);
     }
     console.log("PASS a late resume from a pane already gone is ignored");
@@ -428,6 +434,50 @@ async function main() {
       assertOnce("respawn", all(first, pane, next), Buffer.concat([upToHide, after]));
       pty.killImmediate(id);
       console.log("PASS a pane keeps taking in replays after a respawn at the same id");
+    }
+
+    // A reload of the same window without detachForWebContents (Ctrl+R, a
+    // dev-server full reload): the new document's tokens are above every
+    // retired one, and main hands what the old listeners were owed to it.
+    {
+      const reloadedTracker = path.join(tmp, "tracker-reloaded.cjs");
+      fs.copyFileSync(trackerFile, reloadedTracker);
+      const id = "replay-reload-document";
+      const history = Buffer.from("reloaded document line\r\n".repeat(60_000));
+      const { win, handle, first } = await away(id, history);
+      const cycles = [];
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        const pane = win.mount();
+        cycles.push(pane);
+        await turn();
+        await turn();
+        pane.unmount();
+        await turn();
+      }
+      const old = win.mount();
+      for (let waited = 0; sliceCount(win, id) < 8; waited += 1) {
+        assert.ok(waited < 1000);
+        await turn();
+      }
+      old.vanish();
+      await sleep(5);
+      const { createReplayTracker: reloadedFactory } = require(reloadedTracker);
+      win.call(() => pty.forgetReplayListeners(win.wc));
+      const fresh = win.mount({ factory: reloadedFactory });
+      assert.ok(fresh.tracker.token > old.tracker.token, "a reloaded document's tokens are above the old ones");
+      await win.idle();
+      assert.equal(session(id).attached, true, "the reloaded pane drains the backlog");
+      assertOnce("reload", all(first, ...cycles, old, fresh), history);
+      fresh.unmount();
+      await win.idle();
+      const more = Buffer.from("after the reload\r\n".repeat(20_000));
+      emitInChunks(handle, more);
+      const again = win.mount({ factory: reloadedFactory });
+      await win.idle();
+      assert.equal(session(id).attached, true, "unmount and remount after the reload still replay");
+      assertOnce("remount after reload", all(again), more);
+      pty.killImmediate(id);
+      console.log("PASS a reload of the same window keeps replaying, with tokens above the retired ones");
     }
 
     for (let seed = 1; seed <= 40; seed += 1) await fuzz(seed);

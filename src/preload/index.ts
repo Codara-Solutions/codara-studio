@@ -1320,8 +1320,8 @@ const api = {
     exists: (id: string): Promise<boolean> => ipcRenderer.invoke("pty:exists", { id }),
     resourceSnapshot: (): Promise<PtyResourceSnapshot> =>
       ipcRenderer.invoke("pty:resourceSnapshot"),
-    pause: (id: string, replayedTo?: number): Promise<void> =>
-      ipcRenderer.invoke("pty:pause", { id, replayedTo }),
+    pause: (id: string, replayedTo?: number, token?: number): Promise<void> =>
+      ipcRenderer.invoke("pty:pause", { id, replayedTo, token }),
     resume: (id: string, redraw = false, token?: number): Promise<void> =>
       ipcRenderer.invoke("pty:resume", { id, redraw, token }),
     // Backpressure ack (see pty-manager ackRenderBytes). Fire-and-forget.
