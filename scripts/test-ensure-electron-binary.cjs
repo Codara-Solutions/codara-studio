@@ -41,15 +41,22 @@ function fakeDownload(dir) {
 
 function counted(install) {
   const calls = [];
-  return { calls, install: (dir) => (calls.push(dir), install(dir)) };
+  const options = [];
+  return { calls, options, install: (dir, opts) => (calls.push(dir), options.push(opts), install(dir)) };
 }
+
+// The variables this script reads must not leak in from whoever runs the test.
+const NO_ENV = {};
+const CHILD_ENV = { ...process.env };
+delete CHILD_ENV.ELECTRON_EXEC_PATH;
+delete CHILD_ENV.ELECTRON_SKIP_BINARY_DOWNLOAD;
 
 try {
   // Already there: nothing is downloaded.
   {
     const dir = electronDir({ pathTxt: "electron", binary: "electron" });
     const spy = counted(fakeDownload);
-    const result = ensureElectronBinary({ electronDir: dir, install: spy.install });
+    const result = ensureElectronBinary({ env: NO_ENV, electronDir: dir, install: spy.install });
     assert.equal(result.status, "present");
     assert.equal(result.binary, path.join(dir, "dist", "electron"));
     assert.equal(spy.calls.length, 0);
@@ -61,7 +68,7 @@ try {
     assert.equal(installedBinary(dir), null);
     const spy = counted(fakeDownload);
     const lines = [];
-    const result = ensureElectronBinary({ electronDir: dir, install: spy.install, log: (line) => lines.push(line) });
+    const result = ensureElectronBinary({ env: NO_ENV, electronDir: dir, install: spy.install, log: (line) => lines.push(line) });
     assert.equal(result.status, "downloaded");
     assert.deepEqual(spy.calls, [dir]);
     assert.equal(lines.length, 1);
@@ -72,19 +79,61 @@ try {
   for (const pathTxt of ["electron", "", "  \n"]) {
     const dir = electronDir({ pathTxt });
     const spy = counted(fakeDownload);
-    assert.equal(ensureElectronBinary({ electronDir: dir, install: spy.install }).status, "downloaded");
+    assert.equal(ensureElectronBinary({ env: NO_ENV, electronDir: dir, install: spy.install }).status, "downloaded");
     assert.equal(spy.calls.length, 1);
+  }
+
+  // path.txt is read untrimmed, as electron-vite reads it: a name with a
+  // trailing newline is not the program that is on disk.
+  {
+    const dir = electronDir({ pathTxt: "electron\n", binary: "electron" });
+    assert.equal(installedBinary(dir), null);
+  }
+
+  // ELECTRON_EXEC_PATH: electron-vite starts that program and never looks at
+  // path.txt, so nothing is checked or downloaded, strict or not.
+  for (const strict of [false, true]) {
+    const dir = electronDir({ installer: null });
+    const spy = counted(fakeDownload);
+    const env = { ELECTRON_EXEC_PATH: "/opt/electron/electron" };
+    const result = ensureElectronBinary({ env, strict, electronDir: dir, install: spy.install });
+    assert.deepEqual(result, { status: "external", binary: "/opt/electron/electron" });
+    assert.equal(spy.calls.length, 0);
+  }
+
+  // ELECTRON_SKIP_BINARY_DOWNLOAD: no download during an install, but
+  // `npm run dev` (--strict) still gets the program it cannot start without.
+  {
+    const env = { ELECTRON_SKIP_BINARY_DOWNLOAD: "1" };
+    const lenient = counted(fakeDownload);
+    assert.equal(ensureElectronBinary({ env, electronDir: electronDir(), install: lenient.install }).status, "skipped");
+    assert.equal(lenient.calls.length, 0);
+    const strict = counted(fakeDownload);
+    assert.equal(ensureElectronBinary({ env, strict: true, electronDir: electronDir(), install: strict.install }).status, "downloaded");
+    assert.equal(strict.calls.length, 1);
+    const present = electronDir({ pathTxt: "electron", binary: "electron" });
+    assert.equal(ensureElectronBinary({ env, electronDir: present, install: lenient.install }).status, "present");
+  }
+
+  // Only an install gives the download a time limit.
+  {
+    const lenient = counted(fakeDownload);
+    ensureElectronBinary({ env: NO_ENV, electronDir: electronDir(), install: lenient.install });
+    assert.equal(lenient.options[0].timeoutMs, 10 * 60_000);
+    const strict = counted(fakeDownload);
+    ensureElectronBinary({ env: NO_ENV, strict: true, electronDir: electronDir(), install: strict.install });
+    assert.equal(strict.options[0].timeoutMs, undefined);
   }
 
   // The download fails, or says it worked and left nothing.
   {
     const dir = electronDir();
-    const result = ensureElectronBinary({ electronDir: dir, install: () => ({ ok: false, reason: "no network" }) });
+    const result = ensureElectronBinary({ env: NO_ENV, electronDir: dir, install: () => ({ ok: false, reason: "no network" }) });
     assert.deepEqual(result, { status: "failed", reason: "no network" });
   }
   {
     const dir = electronDir();
-    const result = ensureElectronBinary({ electronDir: dir, install: () => ({ ok: true }) });
+    const result = ensureElectronBinary({ env: NO_ENV, electronDir: dir, install: () => ({ ok: true }) });
     assert.equal(result.status, "failed");
     assert.match(result.reason, /still missing/);
   }
@@ -93,7 +142,7 @@ try {
   {
     const dir = electronDir({ installer: null });
     const spy = counted(fakeDownload);
-    assert.equal(ensureElectronBinary({ electronDir: dir, install: spy.install }).status, "missing-package");
+    assert.equal(ensureElectronBinary({ env: NO_ENV, electronDir: dir, install: spy.install }).status, "missing-package");
     assert.equal(spy.calls.length, 0);
   }
 
@@ -107,11 +156,11 @@ try {
         fs.writeFileSync(path.join(__dirname, "path.txt"), "electron");
       `,
     });
-    assert.equal(ensureElectronBinary({ electronDir: dir }).status, "downloaded");
+    assert.equal(ensureElectronBinary({ env: NO_ENV, electronDir: dir }).status, "downloaded");
   }
   {
     const dir = electronDir({ installer: "process.exit(3);" });
-    const result = ensureElectronBinary({ electronDir: dir });
+    const result = ensureElectronBinary({ env: NO_ENV, electronDir: dir });
     assert.equal(result.status, "failed");
     assert.match(result.reason, /exit code 3/);
   }
@@ -125,10 +174,24 @@ try {
     fs.mkdirSync(path.join(repo, "node_modules", "electron"), { recursive: true });
     fs.copyFileSync(SCRIPT, path.join(repo, "scripts", "ensure-electron-binary.cjs"));
     const installer = path.join(repo, "node_modules", "electron", "install.js");
+    let extraEnv = {};
     const run = (...args) =>
-      spawnSync(process.execPath, [path.join(repo, "scripts", "ensure-electron-binary.cjs"), ...args], { encoding: "utf8" });
+      spawnSync(process.execPath, [path.join(repo, "scripts", "ensure-electron-binary.cjs"), ...args], {
+        encoding: "utf8",
+        env: { ...CHILD_ENV, ...extraEnv },
+      });
 
     fs.writeFileSync(installer, "process.exit(1);");
+    extraEnv = { ELECTRON_EXEC_PATH: "/opt/electron/electron" };
+    const external = run("--strict");
+    assert.equal(external.status, 0, external.stderr);
+    assert.equal(external.stdout + external.stderr, "");
+    extraEnv = { ELECTRON_SKIP_BINARY_DOWNLOAD: "1" };
+    const skipped = run();
+    assert.equal(skipped.status, 0, skipped.stderr);
+    assert.match(skipped.stdout, /ELECTRON_SKIP_BINARY_DOWNLOAD is set/);
+    extraEnv = {};
+
     const lenient = run();
     assert.equal(lenient.status, 0, lenient.stderr);
     assert.match(lenient.stderr, /could not download the Electron program/);
