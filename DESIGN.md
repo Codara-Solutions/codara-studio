@@ -726,3 +726,20 @@ is new (two soft notes falling a fifth, as loud as done), so a failure no
 longer sounds like a question or a success. Every failure kind plays failed
 (`notifySoundKind`, enforced at publish). Native notifications are always
 silent, so the Sound setting is the only switch for sound.
+
+## Feedback (2026-11)
+
+**Chosen:** Send feedback is the quick-command dialog's surface (glass panel
+over the light palette scrim, top centered) with the app's own segmented
+control, inputs and buttons; no new tokens. Chosen by the builder from the
+existing patterns, not yet picked by Etienne from variants.
+
+**Rules:**
+
+- Kind (Bug, Idea, Other), the message with a live count against 4,000, and
+  an optional email. One plain line above the buttons says exactly what is
+  sent, with the real version and platform filled in.
+- A stray click on the scrim never drops the text; Escape, Cancel and Done
+  close it. An error keeps the text and says what to do next in one sentence
+  in the danger color; the sent state replaces the form with one line and
+  Done.

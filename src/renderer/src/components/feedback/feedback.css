@@ -1,0 +1,89 @@
+/* Send feedback. Tokens only, on the quick-command dialog's surface
+   (DESIGN.md, "Feedback"). */
+
+.fb-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 72px 16px 16px;
+  font-family: var(--font-sans);
+}
+
+.fb-layer > .spark-scrim {
+  z-index: 0;
+}
+
+.fb-dialog {
+  z-index: 1;
+  width: min(480px, calc(100vw - 32px));
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+  border-radius: 12px;
+  padding: 18px;
+  display: grid;
+  gap: 12px;
+  color: var(--ink);
+}
+
+.fb-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.fb-kinds {
+  justify-self: start;
+}
+
+.fb-field {
+  display: grid;
+  gap: 5px;
+}
+
+.fb-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.fb-message {
+  height: auto;
+  min-height: 120px;
+  padding: 8px 10px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.fb-count {
+  justify-self: end;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.fb-count.is-over {
+  color: var(--danger);
+}
+
+.fb-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.fb-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--danger);
+}
+
+.fb-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+

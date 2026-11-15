@@ -266,6 +266,7 @@ const loadAgentCapabilitiesDialog = () => import("./components/AgentCapabilities
 const SettingsDialog = lazy(loadSettingsDialog);
 const OnboardingDialog = lazy(() => import("./components/onboarding/OnboardingDialog"));
 const FeatureTipsHost = lazy(() => import("./components/feature-tips/FeatureTipsHost"));
+const FeedbackHost = lazy(() => import("./components/feedback/FeedbackHost"));
 const SessionSearchIntroHost = lazy(() => import("./components/session-search/SessionSearchIntroHost"));
 const SessionInspector = lazy(() => import("./components/SessionInspector"));
 const AgentCapabilitiesDialog = lazy(loadAgentCapabilitiesDialog);
@@ -6103,6 +6104,7 @@ export default function App() {
         window.dispatchEvent(new CustomEvent("spark:open-settings"));
       },
       "capabilities.open": () => window.dispatchEvent(new CustomEvent("spark:open-capabilities")),
+      "feedback.open": () => window.dispatchEvent(new CustomEvent("spark:open-feedback")),
       "session.openInspector": () => setInspectorOpen((open) => !open),
       "automations.open": () => tabs.openAutomationsTab(),
       "usage.open": () => tabs.openUsageTab(),
@@ -7257,6 +7259,11 @@ export default function App() {
         <CrossWorkspacePrompt />
         <TabActionPrompt />
 
+        {booted && (
+          <Suspense fallback={null}>
+            <FeedbackHost />
+          </Suspense>
+        )}
         {booted && (
           <Suspense fallback={null}>
             <FeatureTipsHost onboardingOpen={onboardingOpen} hasWorkspaces={workspaces.length > 0} />

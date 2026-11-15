@@ -498,7 +498,7 @@ export default function SettingsDialog({
               {renderedTab === "shared-pages" && <SharedPagesSettings />}
               {renderedTab === "keybindings" && <KeybindingsTab />}
               {renderedTab === "runs" && <RunsSettings onOpenRun={onOpenRun} />}
-              {renderedTab === "about" && <AboutSettings />}
+              {renderedTab === "about" && <AboutSettings onClose={onClose} />}
             </SettingsPage>
             </SettingsRevealContext.Provider>
           )}
@@ -4026,7 +4026,7 @@ function formatRunCreated(value: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function AboutSettings() {
+function AboutSettings({ onClose }: { onClose: () => void }) {
   const [platform, setPlatform] = useState<string>("");
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<string | null>(null);
@@ -4108,6 +4108,24 @@ function AboutSettings() {
         {cleanupNotice ? (
           <SettingRow title="Earlier versions" desc={cleanupNotice} />
         ) : null}
+      </SettingsSection>
+      <SettingsSection title="Feedback" description="Tell Codara about a bug or an idea.">
+        <SettingRow
+          title="Send feedback"
+          desc="Sends your message, the app version, your operating system and an anonymous install id, and your email only if you add one."
+          control={
+            <button
+              type="button"
+              className="spark-btn"
+              onClick={() => {
+                onClose();
+                window.dispatchEvent(new CustomEvent("spark:open-feedback"));
+              }}
+            >
+              Send feedback…
+            </button>
+          }
+        />
       </SettingsSection>
       <SettingsSection
         title="Diagnostics"

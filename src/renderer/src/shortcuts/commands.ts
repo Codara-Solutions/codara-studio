@@ -27,6 +27,7 @@ export type CommandId =
   | "workspace.forward"
   | "settings.open"
   | "capabilities.open"
+  | "feedback.open"
   | "automations.open"
   | "usage.open"
   | "review.open"
@@ -182,6 +183,12 @@ export const COMMANDS: Command[] = [
     group: "General",
     // No default chord: the obvious Mod+Shift+K is CodeMirror's delete-line.
     // Bind one in Settings, Keybindings if you open it often.
+    defaultChords: [],
+  },
+  {
+    id: "feedback.open",
+    label: "Send feedback to Codara",
+    group: "General",
     defaultChords: [],
   },
   {
