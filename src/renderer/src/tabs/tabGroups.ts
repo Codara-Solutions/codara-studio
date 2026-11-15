@@ -355,9 +355,18 @@ export function resolveStripDrop(input: {
   const othersOf = (groupId: string | null) =>
     groupId ? membersOf(groupId).filter((id) => id !== draggedId) : [];
   // A group's only tab and its chip are one unit, so landing in front of its
-  // own chip is its own place. It leaves by moving past a neighbour or through
-  // "Remove from group", never by a drop that only deletes the group under it.
-  if (!home && right?.chip && right.groupId === current && othersOf(current).length === 0) return null;
+  // own chip, outside any other group, is its own place. It leaves by moving
+  // past a neighbour or through "Remove from group", never by a drop that only
+  // deletes the group under it.
+  if (
+    !home &&
+    groupId === null &&
+    right?.chip &&
+    right.groupId === current &&
+    othersOf(current).length === 0
+  ) {
+    return null;
+  }
   let anchor: StripDrop["anchor"] = null;
   if (!home) {
     if (left && !left.chip) {

@@ -224,6 +224,28 @@ async function main() {
     loneOutRight?.groupId === null && ids(loneOutRightApplied) === "a,c,b" && !groupOf(loneOutRightApplied, "b"),
   );
   check("Remove from group still takes the only tab out", !groupOf(groups.moveTabToGroup(loneTabs, "b", null), "b"));
+  // Next to another group, the only tab still joins that group's end while
+  // the pointer is over its last tab.
+  const pairTabs = groups.normalizeTabGroups([
+    previewTab("x", { group: { id: "h", name: "H", color: "green" } }),
+    previewTab("y", { group: { id: "g3", name: "Solo", color: "red" } }),
+  ]);
+  const pairSlots = [
+    { id: "chip:h", start: 0, end: 40, chip: true, groupId: "h", collapsed: false },
+    { id: "x", start: 40, end: 140, chip: false, groupId: "h", collapsed: false },
+    { id: "chip:g3", start: 150, end: 190, chip: true, groupId: "g3", collapsed: false },
+    { id: "y", start: 190, end: 290, chip: false, groupId: "g3", collapsed: false },
+  ];
+  const pairMembersOf = (groupId) => pairTabs.filter((tab) => tab.group?.id === groupId).map((tab) => tab.id);
+  const pair = (insertIndex, pointerX) =>
+    groups.resolveStripDrop({ slots: pairSlots, draggedId: "y", insertIndex, pointerX, membersOf: pairMembersOf });
+  const joinsPrevious = pair(2, 120);
+  check(
+    "the only tab dropped over the last tab of the group before joins that group",
+    joinsPrevious?.groupId === "h" && groupOf(groups.applyStripDrop(pairTabs, "y", joinsPrevious), "y")?.id === "h",
+  );
+  check("the only tab dropped in the gap after that group keeps its own", pair(2, 145) === null);
+
   // With a second member, the same drop in front of the chip still leaves.
   const firstOut = groups.resolveStripDrop({ slots, draggedId: "b", insertIndex: 1, pointerX: 110, membersOf });
   check(
