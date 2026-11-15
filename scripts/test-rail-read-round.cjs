@@ -74,7 +74,6 @@ async function main() {
         const step = roundStep(round, now, 0, PACE);
         order.push(step.read);
         takeTurn(round, step.read, step.news, now);
-        round.reading.delete(step.read);
         round.left.delete(step.read);
         round.dirty.delete(step.read);
       }
@@ -95,7 +94,7 @@ async function main() {
       assert.deepEqual(roundStep(round, 1_000, null, PACE), { read: "/a", news: false }, "the first turn at once");
       takeTurn(round, "/a", false, 1_000);
       assert.equal(round.startNow, false);
-      assert.ok(round.reading.has("/a"));
+      assert.equal(round.lastTurnAt, 1_000);
       console.log("PASS the first turn can run at once, unfocused or not");
     }
   } finally {

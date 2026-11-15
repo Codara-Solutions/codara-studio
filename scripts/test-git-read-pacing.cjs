@@ -381,13 +381,33 @@ async function main() {
         await page.waitForTimeout(50);
         await run(page, 20_000);
       }
-      assert.ok((await calls(page)).some((call) => call[0] === "/p"), "the other project is read during the additions");
+      assert.equal(
+        (await calls(page)).filter((call) => call[0] === "/p").length,
+        1,
+        "the other project is read once during the additions, its answer kept",
+      );
       for (let step = 0; step < 4; step++) await run(page, 30_000);
       const read = new Set((await calls(page)).map((call) => call[0]));
       assert.ok(read.has("/p") && read.has("/q"), "every project is read");
       assert.match(await page.locator("#rows").textContent(), / loaded$/, "and the rail is loaded");
       await page.close();
       console.log("PASS slow reads while the visible project keeps growing: the rest is read, the rail is loaded");
+    }
+    {
+      // refresh() while a read runs: that read may predate what the refresh
+      // is for, so the project is read again after it.
+      const page = await startPage();
+      await page.evaluate(() => {
+        window.__slow["/p"] = 25_000;
+      });
+      await run(page, 31_000);
+      assert.deepEqual((await calls(page)).at(-1), ["/p"], "/p is being read");
+      await page.evaluate(() => window.__refresh());
+      await page.waitForTimeout(100);
+      await run(page, 30_000);
+      assert.equal((await calls(page)).filter((call) => call[0] === "/p").length, 2, "read again after the refresh");
+      await page.close();
+      console.log("PASS refresh() during a read reads that project again");
     }
     {
       // A merge lands in the visible project while the window is away: the

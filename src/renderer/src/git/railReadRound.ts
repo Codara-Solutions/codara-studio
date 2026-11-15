@@ -69,10 +69,10 @@ export function roundStep(round: RailRound, now: number, settlesAt: number | nul
   return oldest !== undefined ? { read: oldest, news: false } : null;
 }
 
-/** Records that the round started reading `project` now. */
+/** Records that the round starts reading `project` now (the read itself marks it in `reading`). */
 export function takeTurn(round: RailRound, project: string, news: boolean, now: number): void {
+  void project;
   round.lastTurnAt = now;
   round.lastTurnNews = news;
   round.startNow = false;
-  if (!round.reading.has(project)) round.reading.set(project, { again: null });
 }

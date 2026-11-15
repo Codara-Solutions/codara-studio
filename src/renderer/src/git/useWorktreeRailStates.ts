@@ -66,6 +66,9 @@ const FOCUS_GAP_MS = 20_000;
 const PACE_MS = TICK_MS * HIDDEN_EVERY;
 const AUTO_RETRY_MS = 5 * 60_000;
 const AUTO_RETRY_MAX_MS = 60 * 60_000;
+// A read main never answers counts as failed after this, so it cannot hold
+// its project and its lane for good.
+const READ_DEADLINE_MS = 2 * 60_000;
 
 function sameStates(a: Record<string, WorktreeRailState>, b: Record<string, WorktreeRailState>): boolean {
   const keys = Object.keys(a);
@@ -157,9 +160,12 @@ export function useWorktreeRailStates(
   const runRead = async (projects: readonly string[], lane: "urgent" | "background"): Promise<void> => {
     const api = window.spark.worktreeCleanup;
     if (!api?.railStates) {
+      for (const project of projects) round.reading.delete(project);
       setLoaded(true);
       return;
     }
+    // Read here: not again when the queue drains.
+    for (const project of projects) round.backgroundAsk.delete(project);
     const before = new Map(projects.map((project) => [project, members(project)]));
     for (const project of projects) {
       const entry = round.reading.get(project) ?? { again: null };
@@ -168,12 +174,19 @@ export function useWorktreeRailStates(
     }
     if (lane === "background") round.backgroundBusy = true;
     try {
-      const overview = await api.railStates([...projects]).catch(() => null);
+      let deadline: number | undefined;
+      const overview = await Promise.race([
+        api.railStates([...projects]).catch(() => null),
+        new Promise<null>((resolve) => {
+          deadline = window.setTimeout(() => resolve(null), READ_DEADLINE_MS);
+        }),
+      ]);
+      window.clearTimeout(deadline);
       if (!mounted.current) return;
       const kept = new Set(projects.filter((project) => members(project) === before.get(project)));
       for (const project of projects) {
-        if (kept.has(project)) continue;
-        // Its workspaces changed meanwhile: news, read again.
+        // Its workspaces changed meanwhile: news, read again (unless it left).
+        if (kept.has(project) || members(project) === "") continue;
         round.dirty.add(project);
         round.left.add(project);
       }
@@ -194,7 +207,11 @@ export function useWorktreeRailStates(
         // the next comparison asks again instead of the 30-minute read.
         // The visible project is compared every tick: its retry waits a
         // pace, so a failing main is not asked every 3 s.
-        if (kept.has(visibleProjectRef.current ?? "")) window.setTimeout(() => memoryRef.current?.forget(covers), PACE_MS);
+        if (kept.has(visibleProjectRef.current ?? "")) {
+          window.setTimeout(() => {
+            if (mounted.current) memoryRef.current?.forget(covers);
+          }, PACE_MS);
+        }
         else memoryRef.current?.forget(covers);
         return;
       }
@@ -316,7 +333,6 @@ export function useWorktreeRailStates(
       return;
     }
     takeTurn(round, step.read, step.news, now);
-    round.reading.delete(step.read);
     void readNow(step.read, "background");
   };
 
@@ -357,6 +373,8 @@ export function useWorktreeRailStates(
       lastRefreshTick.current = refreshTick;
       round.lastFullAt = Date.now();
       for (const project of present) round.left.add(project);
+      // A read already running may predate what the refresh is for.
+      for (const entry of round.reading.values()) entry.again ??= "background";
     }
     // News joins the round where it stands; nothing read is read again.
     for (const project of round.dirty) round.left.add(project);
@@ -400,6 +418,7 @@ export function useWorktreeRailStates(
     if (reason === "tick" && now - round.lastFullAt >= FULL_MS && gitReadsSettled()) {
       round.lastFullAt = now;
       for (const ws of localWorkspaces) round.left.add(railProjectOf(ws));
+      for (const entry of round.reading.values()) entry.again ??= "background";
     }
     const projects = new Set<string>();
     const byCwd = new Map(localWorkspaces.map((ws) => [ws.cwd, ws]));
