@@ -184,8 +184,13 @@ async function main() {
     await check("reads due by time wait a whole off-screen round after focus returns", async () => {
       const fresh = clockModule.createGitRefreshClock(env);
       assert.equal(fresh.isSettled(), false, "unfocused");
+      assert.equal(fresh.settlesAt(), null, "no settling time while unfocused");
+      const before = Date.now();
       await fresh.focus();
       assert.equal(fresh.isSettled(), false, "just focused");
+      const at = fresh.settlesAt();
+      const round = clockModule.TICK_MS * clockModule.HIDDEN_EVERY;
+      assert.ok(at >= before + round && at <= Date.now() + round, "settles a whole round after the focus");
       const realNow = Date.now;
       try {
         Date.now = () => realNow() + clockModule.TICK_MS * clockModule.HIDDEN_EVERY;
@@ -197,6 +202,7 @@ async function main() {
       }
       fresh.pause();
       assert.equal(fresh.isSettled(), false, "paused");
+      assert.equal(fresh.settlesAt(), null, "paused: no settling time");
     });
 
     await check("losing focus stops the clock", async () => {

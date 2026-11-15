@@ -52,6 +52,8 @@ export interface GitRefreshClock {
   isActive(): boolean;
   /** Focused for a whole off-screen round: time for reads that are only due by the clock. */
   isSettled(): boolean;
+  /** When isSettled() turns true while focus lasts; null while unfocused. */
+  settlesAt(): number | null;
   /** One tick, for tests. */
   tick(): Promise<void>;
   /** Remember these checkouts' state now, before reading them: later moves count, not this one. */
@@ -146,6 +148,7 @@ export function createGitRefreshClock(env: GitRefreshEnv, active = false): GitRe
     },
     isActive: () => active,
     isSettled: () => active && Date.now() - focusedAt >= TICK_MS * HIDDEN_EVERY,
+    settlesAt: () => (active ? focusedAt + TICK_MS * HIDDEN_EVERY : null),
     tick: () => check("tick"),
     async baseline(memory, cwds) {
       if (cwds.length === 0) return;
@@ -214,6 +217,11 @@ export function gitReadsSettled(): boolean {
   return sharedClock().isSettled();
 }
 
+/** When gitReadsSettled() turns true if focus lasts; null while unfocused (a focus tells every watcher). */
+export function gitReadsSettleAt(): number | null {
+  return sharedClock().settlesAt();
+}
+
 /**
  * Calls `onRefresh` on the shared clock for these checkouts while the window
  * is focused: every tick (on screen) or every HIDDEN_EVERY ticks (off screen).
@@ -222,15 +230,19 @@ export function gitReadsSettled(): boolean {
  * change, unless `baseline` was awaited for it right before the hook's own
  * read of it. A read that failed calls `forget` for its checkouts, so their
  * next comparison counts as a change again and the read is retried.
+ * `memory`: shared by two watches of one hook that split its checkouts (on
+ * screen, off screen), so a checkout moving between them keeps what was seen.
  */
 export function useGitRefresh(
   cwds: readonly string[],
   visible: boolean,
   onRefresh: (changed: readonly string[], reason: GitRefreshReason) => void,
+  memory?: GitSeen,
 ): GitRefreshMemory {
   const handler = useRef(onRefresh);
   handler.current = onRefresh;
-  const seen = useRef<GitSeen>(new Map());
+  const own = useRef<GitSeen>(new Map());
+  const seen = useRef<GitSeen>(memory ?? own.current);
   const key = cwds.join("\n");
   useEffect(() => {
     const list = key ? key.split("\n") : [];

@@ -7,13 +7,20 @@
 //   - at start the rail reads the visible workspace's project first, and its
 //     rows have their state within 5 s; the other projects follow one at a
 //     time, and the rail says it is loaded once all were read;
+//   - the visible project is read on its own: at once when a project still
+//     waiting in the round is selected, and at once on refocus when its git
+//     state moved while the window was away;
+//   - the round keeps its place when workspaces come and go, reads news
+//     every other turn so no project starves, wakes when focus has settled
+//     however focus comes and goes, and reads nothing while unfocused;
 //   - reads due only by time wait until the window has been focused for a
 //     whole off-screen round after it comes back;
 //   - on focus, Source Control's lanes re-read the user's own lane and the lanes whose
 //     git state moved, not every lane of the project;
 //   - the rail re-reads at once only the projects with a row waiting on time
-//     or tabs (merged, missing, about to be removed); a project whose git
-//     state moved off screen waits for its next off-screen comparison.
+//     or tabs (merged, missing, about to be removed), even one waiting in
+//     the round; a project whose git state moved off screen waits for its
+//     next off-screen comparison.
 //
 //   node scripts/test-git-read-pacing.cjs
 
@@ -113,8 +120,11 @@ async function main() {
       const workspaces = ${JSON.stringify(workspaces)};
       function Harness() {
         const [list, setList] = React.useState(workspaces);
+        const [visible, setVisible] = React.useState("q1");
         window.__setWorkspaces = setList;
-        const { states, loaded } = useWorktreeRailStates(list, () => {}, () => true, "q1");
+        window.__setVisible = setVisible;
+        const { states, loaded, refresh } = useWorktreeRailStates(list, () => {}, () => true, visible);
+        window.__refresh = refresh;
         if (states.q1 && window.__badgeAt === undefined) window.__badgeAt = performance.now();
         return <span id="rows">{Object.keys(states).sort().join(",") + (loaded ? " loaded" : "")}</span>;
       }
@@ -124,6 +134,7 @@ async function main() {
     const railSpark = () => {
       window.__calls = [];
       window.__sig = {};
+      window.__merged = [];
       window.spark = {
         app: { e2eBackground: true },
         git: { signatures: async (cwds) => Object.fromEntries(cwds.map((cwd) => [cwd, window.__sig[cwd] ?? "s0"])) },
@@ -133,7 +144,14 @@ async function main() {
             const rows = { "/p": ["w1", "w2"], "/q": ["q1"] };
             const ids = (projects ?? ["/p", "/q"]).flatMap((project) => rows[project] ?? []);
             return {
-              states: ids.map((id) => ({ workspaceId: id, missing: false, branch: id, branchGone: false, merge: "ahead", autoCandidate: false })),
+              states: ids.map((id) => ({
+                workspaceId: id,
+                missing: false,
+                branch: id,
+                branchGone: false,
+                merge: window.__merged.includes(id) ? "merged" : "ahead",
+                autoCandidate: false,
+              })),
               external: [],
             };
           },
@@ -211,40 +229,133 @@ async function main() {
       await page.close();
       console.log("PASS leaving and coming back inside a pace reads nothing at the refocus");
     }
-    {
-      // A change of workspaces restarts the round. The new round reads the
-      // projects with news first (a checkout never read, a change the clock
-      // reported while the project waited), then the least recently read.
+    const startPage = async () => {
       const page = await browser.newPage();
       await page.addInitScript(railSpark);
       await page.clock.install();
       await page.goto("file://" + path.join(directory, "start.html"));
       await page.waitForFunction(() => window.__calls.length === 1);
+      return page;
+    };
+    const run = async (page, ms) => {
+      await page.clock.runFor(ms);
+      await page.waitForTimeout(100);
+    };
+    const calls = (page) => page.evaluate(() => window.__calls);
+    const fire = (page, name) => page.evaluate((event) => window.dispatchEvent(new Event(event)), name);
+    {
+      // A change of workspaces keeps the round's place and pace. New projects
+      // are news: in a round they take every other turn, so the others move.
+      const page = await startPage();
+      await run(page, 31_000);
+      assert.deepEqual(await calls(page), [["/q"], ["/p"]]);
       await page.evaluate((more) => window.__setWorkspaces((list) => [...list, ...more]), [
         { id: "r", name: "r", cwd: "/r", color: "#000", workers: [] },
         { id: "s", name: "s", cwd: "/s", color: "#000", workers: [] },
       ]);
       await page.waitForTimeout(100);
-      await page.clock.runFor(95_000);
+      await page.evaluate(() => window.__refresh());
       await page.waitForTimeout(100);
-      // The visible project was just read: the restart goes on with the rest.
-      assert.deepEqual(await page.evaluate(() => window.__calls), [["/q"], ["/p"], ["/r"], ["/s"]]);
+      await run(page, 95_000);
+      // The start's last turn went to news (/p, never compared before), so
+      // this round starts with the oldest.
+      assert.deepEqual((await calls(page)).slice(2), [["/q"], ["/r"], ["/p"]], "the oldest, news, the oldest");
       assert.equal(await page.locator("#rows").textContent(), "q1,w1,w2 loaded");
-      // /s moves while a new round (a new project /v) waits to read it.
-      await page.evaluate(() => {
-        window.__sig["/s"] = "s1";
-        window.__setWorkspaces((list) => [...list, { id: "v", name: "v", cwd: "/v", color: "#000", workers: [] }]);
-      });
-      await page.waitForTimeout(100);
-      await page.clock.runFor(61_000);
-      await page.waitForTimeout(100);
-      assert.deepEqual(
-        (await page.evaluate(() => window.__calls)).slice(4),
-        [["/q"], ["/v"], ["/s"]],
-        "the new project, then the one that moved, before /p and /r",
-      );
       await page.close();
-      console.log("PASS a restarted round reads the projects with news first, then the least recently read");
+      console.log("PASS a change of workspaces keeps the round's place; news takes every other turn");
+    }
+    {
+      // A workspace added every 20 s neither resets the pace nor starves the
+      // project that was waiting first.
+      const page = await startPage();
+      for (let index = 0; index < 8; index++) {
+        await page.evaluate(
+          (id) => window.__setWorkspaces((list) => [...list, { id, name: id, cwd: `/${id}`, color: "#000", workers: [] }]),
+          `n${index}`,
+        );
+        await page.waitForTimeout(50);
+        await run(page, 20_000);
+      }
+      const seen = await calls(page);
+      assert.ok(seen.some((call) => call[0] === "/p"), `the first project waiting is read (${JSON.stringify(seen)})`);
+      assert.ok(seen.length - 1 >= 5, `one project every 30 s goes on (${seen.length - 1} in 160 s)`);
+      await page.close();
+      console.log("PASS workspaces added every 20 s starve no project");
+    }
+    {
+      // Focus that comes and goes out of step with the 30 s pace: the round
+      // wakes when focus has settled, not on the next 30 s poll.
+      const page = await startPage();
+      await fire(page, "blur");
+      await run(page, 31_000);
+      await fire(page, "focus");
+      await run(page, 29_000);
+      assert.equal((await calls(page)).length, 1, "not before focus has settled");
+      await run(page, 2_000);
+      assert.deepEqual(await calls(page), [["/q"], ["/p"]], "30 s after focus returned");
+      await page.close();
+      console.log("PASS the round wakes when focus has settled, however focus comes and goes");
+    }
+    {
+      // Selecting a project still waiting in the round reads it at once.
+      const page = await startPage();
+      await page.evaluate(() => window.__setVisible("w1"));
+      await page.waitForTimeout(150);
+      assert.deepEqual(await calls(page), [["/q"], ["/p"]], "the selected project at once");
+      // Selecting a project read and with nothing waiting reads nothing; its
+      // checkouts are then compared every tick.
+      await page.evaluate(() => window.__setVisible("q1"));
+      await page.waitForTimeout(150);
+      assert.equal((await calls(page)).length, 2, "nothing waits on /q: no read");
+      await page.evaluate(() => {
+        window.__sig["/q1"] = "s1";
+      });
+      await run(page, 3_100);
+      assert.deepEqual((await calls(page)).slice(2), [["/q"]], "a move on screen within one tick");
+      await page.close();
+      console.log("PASS the selected project is read at once when it waits, and watched every tick");
+    }
+    {
+      // A merge lands in the visible project while the window is away: the
+      // refocus reads it at once. Nothing moved: nothing is read.
+      const page = await startPage();
+      await run(page, 31_000);
+      assert.equal((await calls(page)).length, 2);
+      await fire(page, "blur");
+      await run(page, 60_000);
+      await fire(page, "focus");
+      await run(page, 100);
+      assert.equal((await calls(page)).length, 2, "a refocus with nothing moved reads nothing");
+      await fire(page, "blur");
+      await page.evaluate(() => {
+        window.__sig["/q"] = "s1";
+        window.__sig["/q1"] = "s1";
+      });
+      await run(page, 60_000);
+      await fire(page, "focus");
+      await run(page, 100);
+      assert.deepEqual((await calls(page)).slice(2), [["/q"]], "the visible project at once on refocus");
+      await page.close();
+      console.log("PASS a refocus reads the visible project at once when it moved");
+    }
+    {
+      // A row waiting on removal is read on focus even while its project
+      // waits in a round.
+      const page = await startPage();
+      await page.evaluate(() => {
+        window.__merged = ["w1"];
+      });
+      await run(page, 31_000);
+      assert.deepEqual(await calls(page), [["/q"], ["/p"]]);
+      await page.evaluate(() => window.__refresh());
+      await page.waitForTimeout(100);
+      await fire(page, "blur");
+      await run(page, 25_000);
+      await fire(page, "focus");
+      await run(page, 100);
+      assert.deepEqual((await calls(page)).slice(2), [["/p"]], "the project waiting on removal at once, round or not");
+      await page.close();
+      console.log("PASS a row waiting on removal is read on focus even while its project waits in the round");
     }
 
     const open = async (name, init) => {
