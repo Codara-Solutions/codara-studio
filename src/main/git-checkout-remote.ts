@@ -5,15 +5,18 @@
 // Every worktree of a plain repository reads the same config, so the remotes,
 // what each branch tracks and each remote's URL are read once per repository
 // and again when a config file changes; the branch comes from HEAD's file.
-// Shared only when the answer cannot differ per worktree: the repository's
-// config is plain (repositoryCacheKey in github-cli.ts: no include, no
-// per-worktree config) and so are the global and system files git reads (an
-// `includeIf "onbranch:..."` there can give one worktree its own remote).
+// Shared only when the answer cannot differ per worktree: nothing in the
+// environment git runs with changes its config (environmentKeepsConfig), the
+// repository's config is plain (repositoryCacheKey in github-cli.ts: no
+// include, no per-worktree config) and so are the global and system files git
+// reads (an `includeIf "onbranch:..."` there can give one worktree its own
+// remote). The default machine (none of those variables, no includes) shares.
 // Anything else, or anything unclear, asks git per checkout as before. A read
 // that failed is never kept nor handed to another checkout.
 
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
+import { gitChildEnv } from "./git-env";
 import { plainConfig, repositoryCacheKey } from "./github-cli";
 import { gitDirsOf } from "./git-state";
 
@@ -56,32 +59,53 @@ async function currentBranchFromFiles(cwd: string): Promise<string | null> {
   return /^[0-9a-f]{40,64}$/i.test(head) ? "" : null;
 }
 
-// Config given through the environment applies to every git we start and
-// may include other files.
-const ENVIRONMENT_CONFIG = ["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG"];
+// Variables that change which config git reads, or read it from a place that
+// can differ per checkout (a relative path is resolved from each checkout).
+const CONFIG_VARIABLES = [
+  "GIT_CONFIG",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_CONFIG_NOSYSTEM",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_DIR",
+  "GIT_COMMON_DIR",
+  "GIT_WORK_TREE",
+];
+
+/**
+ * True when the environment git runs with leaves its config alone: none of
+ * CONFIG_VARIABLES, no GIT_CONFIG_KEY_n or GIT_CONFIG_VALUE_n, set at all
+ * (an empty value counts as set). Otherwise nothing is shared.
+ */
+export function environmentKeepsConfig(env: NodeJS.ProcessEnv): boolean {
+  return Object.keys(env).every(
+    (name) => !CONFIG_VARIABLES.includes(name.toUpperCase()) && !/^GIT_CONFIG_(KEY|VALUE)_\d+$/i.test(name),
+  );
+}
 
 let outsideFiles: Promise<string[] | null> | null = null;
 
 /**
  * The global and system config files this git reads (`git var`, git 2.42+),
- * asked once per run; null when git cannot tell (then nothing is shared).
- * GIT_CONFIG_SYSTEM fails when GIT_CONFIG_NOSYSTEM turns the system file off.
+ * asked once per run; null when git cannot tell or names a relative path
+ * (then nothing is shared).
  */
 function outsideConfigFiles(cwd: string, read: ReadGit): Promise<string[] | null> {
   outsideFiles ??= Promise.all([
     read(cwd, ["var", "GIT_CONFIG_GLOBAL"]),
     read(cwd, ["var", "GIT_CONFIG_SYSTEM"]),
   ]).then(([global, system]) => {
-    if (global === null) return null;
-    if (system === null && !process.env.GIT_CONFIG_NOSYSTEM) return null;
-    return [...lines(global), ...lines(system ?? "")];
+    if (global === null || system === null) return null;
+    const files = [...lines(global), ...lines(system)];
+    return files.every((file) => isAbsolute(file)) ? files : null;
   });
   return outsideFiles;
 }
 
 /** The global and system files' stamps when none of them could make worktrees differ; null otherwise. */
 async function outsideStamp(cwd: string, read: ReadGit): Promise<string | null> {
-  if (ENVIRONMENT_CONFIG.some((name) => process.env[name])) return null;
+  if (!environmentKeepsConfig(gitChildEnv(process.env))) return null;
   const files = await outsideConfigFiles(cwd, read);
   if (!files) return null;
   const stamps = await Promise.all(
