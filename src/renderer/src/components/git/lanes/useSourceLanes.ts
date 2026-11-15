@@ -6,17 +6,18 @@ import type { Workspace } from "@shared/types";
 import { railRowMerged, type WorktreeRailExternal, type WorktreeRailState } from "@shared/worktree-cleanup";
 import { usePullRequestWatches } from "../../../git/pullRequestWatchStore";
 import { useAgentLinesOf } from "../../workspace-status/agentLinesStore";
-import { useGitRefresh } from "../../../git/gitRefreshClock";
+import { gitReadsSettled, useGitRefresh } from "../../../git/gitRefreshClock";
 
 // The lanes of the active workspace's project: the project's own checkout and
 // every worktree of it, wherever the user is standing. Agents land on the
 // lane they work in by the rail's own rule (buildRailFamily), so the rail and
 // this panel can never disagree on who works where.
 
-// Lanes are read when the panel opens, when the window regains focus, when a
-// lane's git state moves (the shared clock, gitRefreshClock.ts), when a file
-// changes in the user's own checkout, and otherwise at most this often: edits
-// another lane has not committed or staged show by then.
+// Lanes are read when the panel opens, when a lane's git state moves (the
+// shared clock, gitRefreshClock.ts), when a file changes in the user's own
+// checkout, the user's own lane when the window regains focus, and otherwise
+// at most this often: edits another lane has not committed or staged show by
+// then.
 const SAFETY_MS = 5 * 60_000;
 // A lane with an agent at work changes without committing: read it this often.
 const WORKING_MS = 60_000;
@@ -133,14 +134,18 @@ export function useSourceLanes(
     };
   }, [wanted, own.version, workspace?.cwd]);
 
+  const ownCwd = workspace?.cwd;
   useGitRefresh(wanted, true, (changed, reason) => {
     const now = Date.now();
-    if (reason === "focus" || now - lastReadAt.current >= SAFETY_MS) {
+    // Focus re-reads the user's own lane and the lanes whose git state moved;
+    // the rest wait for their own clock.
+    if (reason === "tick" && now - lastReadAt.current >= SAFETY_MS && gitReadsSettled()) {
       lastWorkingReadAt.current = now;
       readRef.current?.();
       return;
     }
     const due = new Set(changed);
+    if (reason === "focus" && ownCwd && wanted.includes(ownCwd)) due.add(ownCwd);
     if (working.length > 0 && now - lastWorkingReadAt.current >= WORKING_MS) {
       lastWorkingReadAt.current = now;
       for (const cwd of working) due.add(cwd);

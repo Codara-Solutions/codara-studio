@@ -2,7 +2,8 @@
 // the fingerprints it compares (src/main/git-state.ts):
 //   - a checkout on screen whose git state moves is re-read within 5 s;
 //   - off-screen checkouts are compared every HIDDEN_EVERY ticks;
-//   - nothing runs while the window is unfocused, and focus compares at once;
+//   - nothing runs while the window is unfocused, and focus compares what is
+//     on screen at once and leaves the rest to their next tick;
 //   - the fingerprint moves on commit, stage, checkout, branch and remote
 //     updates, and not on a working-tree edit or a `git status`;
 //   - the branch is read from HEAD's file for a loose ref, never guessed.
@@ -72,19 +73,36 @@ async function main() {
     const stopVisible = clock.watch({ cwds: ["/on-screen"], visible: true, onRefresh: (changed, reason) => seen.visible.push({ changed: [...changed], reason, at: Date.now() }) });
     const stopHidden = clock.watch({ cwds: ["/off-screen"], visible: false, onRefresh: (changed, reason) => seen.hidden.push({ changed: [...changed], reason }) });
 
+    const hiddenTick = async () => {
+      for (let i = 0; i < clockModule.HIDDEN_EVERY; i++) await clock.tick();
+    };
+
     await check("an unfocused window starts no clock and reads nothing", async () => {
       assert.equal(intervals.size, 0);
       assert.equal(asked.length, 0);
     });
 
-    await check("focus compares every checkout at once and tells every watcher", async () => {
+    await check("focus compares only what is on screen at once, and tells every watcher", async () => {
       await clock.focus();
-      assert.deepEqual(asked.pop().sort(), ["/off-screen", "/on-screen"]);
+      assert.deepEqual(asked.pop(), ["/on-screen"], "an off-screen checkout is not compared on focus");
       assert.equal(seen.visible.at(-1).reason, "focus");
       assert.equal(seen.hidden.at(-1).reason, "focus");
       assert.deepEqual(seen.visible.at(-1).changed, ["/on-screen"], "a first sighting counts as a change: the watcher's own read may predate it");
-      assert.deepEqual(seen.hidden.at(-1).changed, ["/off-screen"]);
+      assert.deepEqual(seen.hidden.at(-1).changed, [], "off screen: told of the focus, nothing to read yet");
       assert.equal(intervals.size, 1);
+      // Its first comparison is its next off-screen tick.
+      for (let i = 0; i < clockModule.HIDDEN_EVERY; i++) await clock.tick();
+      assert.deepEqual(seen.hidden.at(-1), { changed: ["/off-screen"], reason: "tick" });
+    });
+
+    await check("a refocus after a change off screen re-reads nothing off screen until its tick", async () => {
+      clock.pause();
+      signatures.set("/off-screen", "x2");
+      const before = seen.hidden.length;
+      await clock.focus();
+      assert.deepEqual(seen.hidden.slice(before).map((entry) => entry.changed), [[]]);
+      for (let i = 0; i < clockModule.HIDDEN_EVERY; i++) await clock.tick();
+      assert.deepEqual(seen.hidden.at(-1).changed, ["/off-screen"]);
     });
 
     await check("a change on screen reaches its watcher within 5 s, on the real timer", async () => {
@@ -135,9 +153,9 @@ async function main() {
       // first comparison.
       signatures.set("/raced", "after-read");
       const stop = clock.watch({ cwds: ["/raced"], visible: false, seen: memory, onRefresh: (changed) => calls.push([...changed]) });
-      await clock.focus();
+      await hiddenTick();
       assert.deepEqual(calls.at(-1), ["/raced"]);
-      await clock.focus();
+      await hiddenTick();
       assert.deepEqual(calls.at(-1), [], "and only once");
       stop();
     });
@@ -148,7 +166,7 @@ async function main() {
       signatures.set("/still", "same");
       await clock.baseline(memory, ["/still"]);
       const stop = clock.watch({ cwds: ["/still"], visible: false, seen: memory, onRefresh: (changed) => calls.push([...changed]) });
-      await clock.focus();
+      await hiddenTick();
       assert.deepEqual(calls.at(-1), []);
       stop();
     });
@@ -161,6 +179,30 @@ async function main() {
       await Promise.all([tick, focus]);
       assert.deepEqual(reasons.slice(-2), ["tick", "focus"]);
       stop();
+    });
+
+    await check("reads due by time wait a whole off-screen round after focus returns", async () => {
+      const fresh = clockModule.createGitRefreshClock(env);
+      assert.equal(fresh.isSettled(), false, "unfocused");
+      assert.equal(fresh.settlesAt(), null, "no settling time while unfocused");
+      const before = Date.now();
+      await fresh.focus();
+      assert.equal(fresh.isSettled(), false, "just focused");
+      const at = fresh.settlesAt();
+      const round = clockModule.TICK_MS * clockModule.HIDDEN_EVERY;
+      assert.ok(at >= before + round && at <= Date.now() + round, "settles a whole round after the focus");
+      const realNow = Date.now;
+      try {
+        Date.now = () => realNow() + clockModule.TICK_MS * clockModule.HIDDEN_EVERY;
+        assert.equal(fresh.isSettled(), true, "a round later");
+        await fresh.focus();
+        assert.equal(fresh.isSettled(), true, "a focus while focused changes nothing");
+      } finally {
+        Date.now = realNow;
+      }
+      fresh.pause();
+      assert.equal(fresh.isSettled(), false, "paused");
+      assert.equal(fresh.settlesAt(), null, "paused: no settling time");
     });
 
     await check("losing focus stops the clock", async () => {

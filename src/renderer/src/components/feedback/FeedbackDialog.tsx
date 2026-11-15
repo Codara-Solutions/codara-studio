@@ -113,7 +113,7 @@ export default function FeedbackDialog({ onClose }: { onClose: () => void }): Re
         role="dialog"
         aria-modal="true"
         aria-labelledby={`${ids}-title`}
-        className="spark-glass--strong spark-overlay-surface fb-dialog"
+        className="fb-solid fb-dialog"
         data-testid="feedback-dialog"
         onKeyDown={onKeyDown}
       >
