@@ -2,6 +2,9 @@
 // (components/Preview/previewRpc.ts) through the preview bridge. Waits and
 // "find by description" run in main against any browser target.
 
+import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { localFilePath } from "@shared/local-file-address";
 import { callTarget, markAgentAction, markAgentActionDone } from "../browser/agent-action";
 import { findElements } from "../browser/find";
 import { browserBackend, resolveBrowserTarget, type BrowserTarget } from "../browser/targets";
@@ -48,11 +51,14 @@ export async function checkNavigateUrl(params: Record<string, unknown>): Promise
     throw new PreviewToolParamsError("navigate needs a url, or a tabId and a group to move that tab into the group.");
   }
   if (hasUrl && typeof params.url === "string") {
-    // In an SSH workspace localhost means the host: open its forwarded port.
+    // In an SSH workspace localhost means the host: open its forwarded port,
+    // and a plain path names a file there, which the resolver refuses.
     const remote = await resolveRemotePreviewUrl(params.workspaceId, params.url);
     if (remote && "error" in remote) throw new Error(remote.error);
-    const url = remote ? remote.url : params.url;
-    if (remote) params.url = url;
+    // A plain path loads nothing in Chromium (local-file-address.ts).
+    const local = remote ? null : localFilePath(params.url, homedir(), process.platform === "win32");
+    const url = remote ? remote.url : local ? pathToFileURL(local).href : params.url;
+    params.url = url;
     const reachable = await waitForLoopbackPreviewServer(url);
     if (!reachable) {
       throw new Error(

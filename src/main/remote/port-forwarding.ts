@@ -356,6 +356,11 @@ export class PortForwardManager {
   async resolvePreviewUrl(workspaceId: string, rawUrl: string): Promise<RemotePreviewUrl | null> {
     const hostId = this.hostOfWorkspace(workspaceId);
     if (!hostId) return null;
+    if (/^\s*(~|\/(?!\/))/.test(rawUrl)) {
+      return {
+        error: `${rawUrl.trim()} is a path on ${hostId}, and the browser shows files on this computer only. Open it in an editor tab of the workspace instead.`,
+      };
+    }
     let url: URL;
     try {
       url = new URL(rawUrl);
