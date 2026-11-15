@@ -10,7 +10,9 @@ const assert = require("node:assert/strict");
 const { utils } = require("ssh2");
 const { generateAcceptedHostKey } = require("./ssh-test-host-key.cjs");
 
-const good = utils.generateKeyPairSync("ed25519").private;
+// The fixture itself comes from the helper: a raw generated key would fail
+// this test by chance, which is the flake being fixed.
+const good = generateAcceptedHostKey();
 assert.ok(!(utils.parseKey(good) instanceof Error), "fixture key must parse");
 
 // A malformed key first, a good one second: the helper returns the good one.
