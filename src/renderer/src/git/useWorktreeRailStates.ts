@@ -38,9 +38,11 @@ import {
 // workspaces never runs hundreds of git reads at once. The round wakes at the
 // moment both hold, pauses while the window is unfocused and keeps its place
 // across changes of workspaces (railReadRound.ts holds it outside the effects;
-// a read in flight keeps running and its answer is kept for every project
-// whose set of workspaces did not change meanwhile). Projects with news (a change the clock
-// reported while the project waited, a checkout no read covered yet) go first,
+// a read in flight keeps running and its rows are kept for every project
+// whose set of workspaces did not change meanwhile; when one did, every
+// project of that read is read again). Projects with news (a change the clock
+// reported while the project waited, a row no read covered yet, a project
+// reopened under a new workspace) go first,
 // taking every other turn so the rest still move. Between rounds, projects
 // whose git state moved are read (the clock compares them every
 // HIDDEN_EVERY ticks), and so are projects with a row whose answer depends on
@@ -83,6 +85,11 @@ export function railProjectOf(workspace: Pick<Workspace, "cwd" | "copyBranch">):
   return workspace.copyBranch?.repoCwd ?? workspace.cwd;
 }
 
+/** A row as reads cover it: a folder reopened under a new workspace is a new row. */
+function rowKey(workspace: Pick<Workspace, "id" | "cwd">): string {
+  return `${workspace.id}\n${workspace.cwd}`;
+}
+
 /** A row whose answer can change with no git change: time, tabs, a folder. */
 function railRowPending(state: WorktreeRailState): boolean {
   return state.missing || state.autoCandidate || state.autoRemoveMerged === true || railRowMerged(state);
@@ -108,7 +115,8 @@ export function useWorktreeRailStates(
   const roundRef = useRef<RailRound | null>(null);
   roundRef.current ??= createRailRound(Date.now());
   const round = roundRef.current;
-  const readCwds = useRef(new Set<string>());
+  // The rows (rowKey) some kept read covered.
+  const readRows = useRef(new Set<string>());
   const lastPendingAt = useRef(0);
   const timer = useRef<number | null>(null);
   const mounted = useRef(true);
@@ -146,7 +154,7 @@ export function useWorktreeRailStates(
   const members = (project: string) =>
     local()
       .filter((ws) => railProjectOf(ws) === project)
-      .map((ws) => `${ws.id}\n${ws.cwd}`)
+      .map(rowKey)
       .sort()
       .join("\0");
 
@@ -184,21 +192,28 @@ export function useWorktreeRailStates(
       window.clearTimeout(deadline);
       if (!mounted.current) return;
       const kept = new Set(projects.filter((project) => members(project) === before.get(project)));
+      // Main lists a read repository's outside worktrees under its main
+      // checkout's row, which may not be one of the rows read, so they are
+      // applied only when the whole read is kept. Otherwise every project of
+      // the read is read again, its rows kept meanwhile: a project counts as
+      // read only once all its read brought was applied.
+      const whole = kept.size === projects.length;
       for (const project of projects) {
         // Its workspaces changed meanwhile: news, read again (unless it left).
-        if (kept.has(project) || members(project) === "") continue;
+        if ((whole && kept.has(project)) || members(project) === "") continue;
         round.dirty.add(project);
         round.left.add(project);
       }
       const now = Date.now();
       for (const project of kept) {
         round.readAt.set(project, now);
+        if (!whole) continue;
         round.dirty.delete(project);
         round.left.delete(project);
       }
       const rows = local().filter((ws) => kept.has(railProjectOf(ws)));
       const covers = rows.map((ws) => ws.cwd);
-      for (const cwd of covers) readCwds.current.add(cwd);
+      for (const ws of rows) readRows.current.add(rowKey(ws));
       // Known once every project was read once, whatever it found: a row
       // with no state after that is one main never reads.
       markLoaded();
@@ -221,10 +236,7 @@ export function useWorktreeRailStates(
       const list = overview.states.filter((state) => covered.has(state.workspaceId));
       // Rows and projects that left the rail since are dropped.
       const presentIds = new Set(workspacesRef.current.map((ws) => ws.id));
-      // Main lists a read repository's outside worktrees under its main
-      // checkout's row, which may not be one of the rows read: kept only when
-      // the whole read is (otherwise the read again brings them).
-      if (kept.size === projects.length) setExternal((prev) => {
+      if (whole) setExternal((prev) => {
         const read = overview.external ?? NO_EXTERNAL;
         const fresh = new Set(read.map((entry) => entry.path));
         const outside = [
@@ -363,8 +375,14 @@ export function useWorktreeRailStates(
     }
     const all = local();
     const present = new Set(all.map(railProjectOf));
-    // A checkout no read covered yet (a new worktree) is news for its project.
-    for (const ws of all) if (!readCwds.current.has(ws.cwd)) round.dirty.add(railProjectOf(ws));
+    // A row that left is forgotten, and so is a project with no row left:
+    // reopened, even in the same folder under a new workspace, it is new.
+    const rowsNow = new Set(all.map(rowKey));
+    for (const key of [...readRows.current]) if (!rowsNow.has(key)) readRows.current.delete(key);
+    for (const project of [...round.readAt.keys()]) if (!present.has(project)) round.readAt.delete(project);
+    // A row no read covered yet (a new worktree, a reopened project) is news
+    // for its project.
+    for (const ws of all) if (!readRows.current.has(rowKey(ws))) round.dirty.add(railProjectOf(ws));
     for (const project of [...round.left]) if (!present.has(project)) round.left.delete(project);
     for (const project of [...round.dirty]) if (!present.has(project)) round.dirty.delete(project);
     const firstLoad = lastRefreshTick.current === null;
@@ -385,26 +403,21 @@ export function useWorktreeRailStates(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [copyKey, refreshTick]);
 
-  // The visible project at once when selected (and when its set of checkouts
-  // changes), unless it was read and nothing is waiting on it: a checkout no
-  // read covered, a reported change, its turn in the round, a row waiting on
-  // time or tabs.
-  const visibleKey = visibleProject
-    ? localWorkspaces
-        .filter((ws) => railProjectOf(ws) === visibleProject)
-        .map((ws) => ws.cwd)
-        .join("\n")
-    : "";
+  // The visible project at once when selected (and when its set of rows
+  // changes), unless it was read and nothing is waiting on it: a row no read
+  // covered, a reported change, its turn in the round, a row waiting on time
+  // or tabs.
+  const visibleRows = visibleProject ? localWorkspaces.filter((ws) => railProjectOf(ws) === visibleProject) : [];
+  const visibleKey = visibleRows.map(rowKey).join("\0");
   useEffect(() => {
     const project = visibleProjectRef.current;
     if (!project || !visibleKey) return;
-    const cwds = visibleKey.split("\n");
     const rows = workspacesRef.current.filter((ws) => !ws.remote && railProjectOf(ws) === project);
     const waiting =
       !round.readAt.has(project) ||
       round.dirty.has(project) ||
       round.left.has(project) ||
-      cwds.some((cwd) => !readCwds.current.has(cwd)) ||
+      rows.some((ws) => !readRows.current.has(rowKey(ws))) ||
       (Date.now() - (round.readAt.get(project) ?? 0) >= FOCUS_GAP_MS &&
         rows.some((ws) => {
           const state = statesRef.current[ws.id];
@@ -455,7 +468,7 @@ export function useWorktreeRailStates(
 
   // Two watches over one memory: the visible project's checkouts every tick
   // and at once on focus, the others every HIDDEN_EVERY ticks.
-  const visibleCwds = visibleKey ? visibleKey.split("\n") : [];
+  const visibleCwds = visibleRows.map((ws) => ws.cwd);
   const backgroundCwds = localWorkspaces
     .filter((ws) => visibleProject === null || railProjectOf(ws) !== visibleProject)
     .map((ws) => ws.cwd);

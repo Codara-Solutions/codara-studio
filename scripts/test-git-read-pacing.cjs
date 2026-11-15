@@ -10,6 +10,9 @@
 //   - the visible project is read on its own: at once when a project still
 //     waiting in the round is selected, and at once on refocus when its git
 //     state moved while the window was away;
+//   - a read whose answer is partly thrown away (a project's workspaces
+//     changed while it ran) loses no other project's outside worktrees, and a
+//     project reopened under a new workspace is read again;
 //   - the round keeps its place when workspaces come and go, reads news
 //     every other turn so no project starves, wakes when focus has settled
 //     however focus comes and goes, and reads nothing while unfocused;
@@ -127,6 +130,22 @@ async function main() {
         window.__refresh = refresh;
         if (states.q1 && window.__badgeAt === undefined) window.__badgeAt = performance.now();
         return <span id="rows">{Object.keys(states).sort().join(",") + (loaded ? " loaded" : "")}</span>;
+      }
+      createRoot(document.getElementById("root")).render(<Harness />);`,
+    );
+    await bundle(
+      directory,
+      "external",
+      `import React from "react";
+      import { createRoot } from "react-dom/client";
+      import { useWorktreeRailStates } from "./src/renderer/src/git/useWorktreeRailStates";
+      const workspaces = ${JSON.stringify(workspaces)};
+      function Harness() {
+        const [list, setList] = React.useState(workspaces);
+        window.__setWorkspaces = setList;
+        const { external } = useWorktreeRailStates(list, () => {}, () => true, null);
+        window.__external = external;
+        return <span id="rows">{external.map((entry) => entry.projectId + ":" + entry.branch).sort().join(",")}</span>;
       }
       createRoot(document.getElementById("root")).render(<Harness />);`,
     );
@@ -450,6 +469,88 @@ async function main() {
       assert.deepEqual((await calls(page)).slice(2), [["/p"]], "the project waiting on removal at once, round or not");
       await page.close();
       console.log("PASS a row waiting on removal is read on focus even while its project waits in the round");
+    }
+
+    // Main lists each project's outside worktree under the row of its main
+    // checkout (__owner), at the version the test sets.
+    const externalSpark = () => {
+      window.__calls = [];
+      window.__sig = {};
+      window.__slow = {};
+      window.__version = 1;
+      window.__owner = { "/p": "p", "/q": "q" };
+      window.spark = {
+        app: { e2eBackground: true },
+        git: { signatures: async (cwds) => Object.fromEntries(cwds.map((cwd) => [cwd, window.__sig[cwd] ?? "s0"])) },
+        worktreeCleanup: {
+          railStates: async (projects) => {
+            window.__calls.push([...projects].sort());
+            const version = window.__version;
+            const owners = projects.map((project) => [project, window.__owner[project]]);
+            const slow = Math.max(0, ...projects.map((project) => window.__slow[project] ?? 0));
+            if (slow > 0) await new Promise((resolve) => setTimeout(resolve, slow));
+            return {
+              states: [],
+              external: owners
+                .filter(([, owner]) => owner)
+                .map(([project, owner]) => ({ projectId: owner, path: `${project}-outside`, branch: `v${version}`, head: `h${version}`, locked: false })),
+            };
+          },
+          railCleanUp: async () => null,
+        },
+      };
+    };
+    const startExternal = async () => {
+      const page = await browser.newPage();
+      await page.addInitScript(externalSpark);
+      await page.clock.install();
+      await page.goto("file://" + path.join(directory, "external.html"));
+      await page.waitForFunction(() => window.__calls.length === 1);
+      await run(page, 31_000);
+      assert.deepEqual(await calls(page), [["/p"], ["/q"]], "the start round reads both projects");
+      assert.equal(await page.locator("#rows").textContent(), "p:v1,q:v1");
+      return page;
+    };
+    {
+      // A read of /p and /q together, both moved; a worktree is added to /p
+      // while it runs. /p is read again; /q's outside worktree, which moved
+      // too, is not lost with the part of the read that was thrown away.
+      const page = await startExternal();
+      await page.evaluate(() => {
+        window.__version = 2;
+        window.__slow["/p"] = 20_000;
+        window.__sig["/p"] = "s1";
+        window.__sig["/q"] = "s1";
+      });
+      await run(page, 30_000);
+      assert.deepEqual((await calls(page)).at(-1), ["/p", "/q"], "one read of both projects");
+      await page.evaluate((worktree) => window.__setWorkspaces((list) => [...list, worktree]), copy("w3", "/w3", "/p"));
+      await page.waitForTimeout(100);
+      await page.evaluate(() => {
+        window.__slow = {};
+      });
+      for (let step = 0; step < 4; step++) await run(page, 30_000);
+      assert.equal(await page.locator("#rows").textContent(), "p:v2,q:v2", "both projects' outside worktrees are current");
+      await page.close();
+      console.log("PASS a read thrown away for one project keeps the other's outside worktrees current");
+    }
+    {
+      // A project closed and reopened in the same folder under a new
+      // workspace is read again, and its outside worktrees hang under the
+      // new row.
+      const page = await startExternal();
+      await page.evaluate(() => window.__setWorkspaces((list) => list.filter((ws) => ws.id !== "q" && ws.id !== "q1")));
+      await run(page, 1_000);
+      await page.evaluate(() => {
+        window.__owner["/q"] = "q-again";
+        window.__setWorkspaces((list) => [...list, { id: "q-again", name: "q", cwd: "/q", color: "#000", workers: [] }]);
+      });
+      await page.waitForTimeout(100);
+      for (let step = 0; step < 2; step++) await run(page, 30_000);
+      assert.deepEqual((await calls(page)).slice(2), [["/q"]], "the reopened project is read");
+      assert.match(await page.locator("#rows").textContent(), /q-again:v1/, "its outside worktree under the new row");
+      await page.close();
+      console.log("PASS a project reopened under a new workspace is read again and shows its outside worktrees");
     }
 
     const open = async (name, init) => {
