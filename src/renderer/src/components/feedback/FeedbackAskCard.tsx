@@ -6,9 +6,9 @@ import "./feedback.css";
 
 // An agent asked to send feedback to Codara (codara_feedback_send), or an
 // admin's agent asked to delete a stored item (codara_feedback_delete). The
-// same floating card as the tab approval: who asks, the exact text as plain
-// text on an opaque panel, a countdown to the agent's timeout, and the two
-// answers. FeedbackHost queues the questions and shows the oldest.
+// tab approval's floating card on a solid surface (feedback.css): who asks,
+// the exact text as plain text, a countdown to the agent's timeout, and the
+// two answers. FeedbackHost queues the questions and shows the oldest.
 
 // An expired card stays this long, so it never just vanishes.
 const EXPIRED_CARD_MS = 8_000;
@@ -50,7 +50,7 @@ export default function FeedbackAskCard({
 
   if (expired) {
     return (
-      <section role="status" aria-label="Feedback request expired" data-feedback-ask={request.id} data-expired="true" className="spark-glass--strong spark-overlay-surface chrome-pairing">
+      <section role="status" aria-label="Feedback request expired" data-feedback-ask={request.id} data-expired="true" className="fb-solid chrome-pairing">
         <div className="chrome-pairing__title">Request expired</div>
         <p className="chrome-pairing__body">{`${request.agent} stopped waiting. Nothing was ${deleting ? "deleted" : "sent"}.`}</p>
         <div className="chrome-pairing__actions">
@@ -74,7 +74,7 @@ export default function FeedbackAskCard({
   };
 
   return (
-    <section role="dialog" aria-label={title} data-feedback-ask={request.id} className="spark-glass--strong spark-overlay-surface chrome-pairing">
+    <section role="dialog" aria-label={title} data-feedback-ask={request.id} className="fb-solid chrome-pairing">
       <div className="chrome-pairing__title">{title}</div>
       <p className="chrome-pairing__body">{lead}</p>
       <p className="fb-quote" data-testid="feedback-ask-text">

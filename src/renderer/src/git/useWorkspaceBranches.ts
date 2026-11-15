@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Workspace } from "@shared/types";
-import { useGitRefresh } from "./gitRefreshClock";
+import { gitReadsSettled, useGitRefresh } from "./gitRefreshClock";
 
 // Current branch per workspace for the rail's row subtitle. The shared git
 // status only covers the active workspace, so this keeps a light cache for
@@ -84,8 +84,8 @@ export function useWorkspaceBranches(
   useGitRefresh(
     workspaces.map((ws) => ws.cwd),
     false,
-    (changed) => {
-      if (Date.now() - lastFullAt.current >= SAFETY_MS) void latestRefresh.current?.();
+    (changed, reason) => {
+      if (reason === "tick" && Date.now() - lastFullAt.current >= SAFETY_MS && gitReadsSettled()) void latestRefresh.current?.();
       else if (changed.length > 0) void latestRefresh.current?.(new Set(changed));
     },
   );

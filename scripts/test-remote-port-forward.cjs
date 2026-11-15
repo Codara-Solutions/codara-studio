@@ -634,6 +634,13 @@ async function testLifecycle() {
   assert.match(notListening.error, new RegExp(`Nothing is listening on port ${deadRemote} on box`));
   assert.equal(await api.resolveRemotePreviewUrl("ws-local", "http://localhost:5173/"), null, "local workspaces are untouched");
   assert.equal(await api.resolveRemotePreviewUrl("ws-remote", "https://example.com/"), null);
+  // A plain path in a remote workspace names a file on the host, which the
+  // browser here cannot show; it must not open the same path on this computer.
+  for (const path of ["/home/u/report.pdf", "~/notes.md"]) {
+    const refused = await api.resolveRemotePreviewUrl("ws-remote", path);
+    assert.ok(refused && "error" in refused && refused.error.includes("is a path on"), `${path}: ${JSON.stringify(refused)}`);
+  }
+  assert.equal(await api.resolveRemotePreviewUrl("ws-local", "/home/u/report.pdf"), null, "a local workspace's path is the browser's own");
   ok("codara_preview_navigate to localhost:<port> in a remote workspace opens the forward, or says nothing listens");
 
   // A port that stops listening loses its automatic forward; a manual one stays.

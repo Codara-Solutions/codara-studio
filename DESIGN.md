@@ -729,10 +729,11 @@ silent, so the Sound setting is the only switch for sound.
 
 ## Feedback (2026-11)
 
-**Chosen:** Send feedback is the quick-command dialog's surface (glass panel
-over the light palette scrim, top centered) with the app's own segmented
-control, inputs and buttons; no new tokens. Chosen by the builder from the
-existing patterns, not yet picked by Etienne from variants.
+**Chosen:** Send feedback sits top centered over the light palette scrim on
+a solid surface (`.fb-solid`, the pairing QR card's recipe: panel colour,
+rule border, a deep shadow), never glass, so text behind never shows
+through with or without blur; the agent cards use the same surface. The
+app's own segmented control, inputs and buttons; no new tokens.
 
 **Rules:**
 
@@ -744,7 +745,7 @@ existing patterns, not yet picked by Etienne from variants.
   in the danger color; the sent state replaces the form with one line and
   Done.
 - When an agent calls `codara_feedback_send`, the question is the tab
-  approval's floating card (`chrome-pairing`): who asks and from which
+  approval's floating card (`chrome-pairing`) on the solid surface: who asks and from which
   workspace, the exact text as plain text on an opaque panel that scrolls
   past 180 px, a countdown, Don't send and Send. An expired card says nothing
   was sent and stays 8 seconds.

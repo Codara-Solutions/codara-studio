@@ -1,10 +1,13 @@
 import {
   forwardRef,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useImperativeHandle,
   useRef,
   useState,
+  type RefObject,
 } from "react";
 import { isFreshPartition } from "@shared/browser-partition";
 import { holdPreviewCapturePaint, withPreviewCapturePaint } from "./capturePaint";
@@ -160,10 +163,13 @@ interface Props {
 
 type PointMode = "pick" | "compose" | "comment";
 
+const BrowserPageFind = lazy(() => import("./BrowserPageFind"));
+
 const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   { tabId, url, partition, visible, onUrlChange, onReady, workspaceId = null },
   ref,
 ) {
+  const paneRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const webviewRef = useRef<WebviewElement | null>(null);
   const addressRef = useRef<AddressBarHandle | null>(null);
@@ -895,6 +901,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
 
   return (
     <div
+      ref={paneRef}
       data-browser-pane
       style={{
         position: "absolute",
@@ -1111,6 +1118,15 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         ) : null}
         {fullScreen !== "off" ? <FullScreenHint mode={fullScreen} /> : null}
         <AgentPresence tabId={tabId} visible={visible} pageRef={webviewRef} />
+        {url ? (
+          <Suspense fallback={null}>
+            <BrowserPageFind
+              rootRef={paneRef}
+              webviewRef={webviewRef as unknown as RefObject<Electron.WebviewTag | null>}
+              ready={domReady && !asleep}
+            />
+          </Suspense>
+        ) : null}
         <PageDialogOverlay tabId={tabId} />
         {responsive && visible && url ? (
           <ResponsiveView

@@ -2,10 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { collisionText, type LaneCollisions } from "@shared/lane-collisions";
 import { isRemotePath } from "@shared/remote";
 import type { SourceLane, SourceLanes } from "@shared/source-lanes";
-import { useGitRefresh } from "../../../git/gitRefreshClock";
+import { gitReadsSettled, useGitRefresh } from "../../../git/gitRefreshClock";
 
-// Read when the running lanes or their work change, when focus returns, when
-// a lane's git state moves (the shared clock), and otherwise at most this often.
+// Read when the running lanes or their work change (the lanes re-read on
+// focus), when a lane's git state moves (the shared clock), and otherwise at
+// most this often.
 const SAFETY_MS = 5 * 60_000;
 
 function running(lane: SourceLane): boolean {
@@ -48,7 +49,7 @@ export function useLaneCollisions(lanes: SourceLanes): Record<string, string> {
   }, [paths, work]);
 
   useGitRefresh(paths ? paths.split("\n") : [], true, (changed, reason) => {
-    if (reason === "focus" || changed.length > 0 || Date.now() - lastReadAt.current >= SAFETY_MS) readRef.current?.();
+    if (changed.length > 0 || (reason === "tick" && Date.now() - lastReadAt.current >= SAFETY_MS && gitReadsSettled())) readRef.current?.();
   });
 
   return useMemo(() => {
