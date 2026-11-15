@@ -190,6 +190,9 @@ interface Session {
   // unmounts mid-replay gets back exactly the slices it never took in.
   replayTimer: NodeJS.Immediate | null;
   replayToken: number | undefined;
+  // Tokens grow with each pane listener; a pause with an offset retires its
+  // token, and a late resume naming it (or an older one) is ignored.
+  replayRetiredToken: number;
   replayInFlight: Array<{ buf: Buffer; end: number }>;
   // Set true synchronously by killNow before the underlying pty.kill() runs.
   // Gates the pty.onData closure: on Windows ConPTY drains stdout for up to
@@ -451,6 +454,9 @@ function clearReplay(s: Session): void {
   stopReplay(s);
   s.replayInFlight = [];
   s.replayToken = undefined;
+  // Every reset site drops the renderer (or its pause state); a new
+  // renderer counts its tokens from 1 again.
+  s.replayRetiredToken = 0;
 }
 
 // Agent-socket credentials a pane must never inherit. Scoped capabilities
@@ -1172,6 +1178,7 @@ async function doSpawnRemote(
     detachedBacklogBytes: 0,
     replayTimer: null,
     replayToken: undefined,
+    replayRetiredToken: 0,
     replayInFlight: [],
     disposed: false,
     exitEmitted: false,
@@ -1641,6 +1648,7 @@ function doSpawn(
     detachedBacklogBytes: 0,
     replayTimer: null,
     replayToken: undefined,
+    replayRetiredToken: 0,
     replayInFlight: [],
     disposed: false,
     exitEmitted: false,
@@ -1930,6 +1938,7 @@ export function pause(id: string, replayedTo?: number): void {
   if (typeof replayedTo === "number") {
     const inFlight = s.replayInFlight;
     s.replayInFlight = [];
+    if (s.replayToken !== undefined) s.replayRetiredToken = Math.max(s.replayRetiredToken, s.replayToken);
     s.replayToken = undefined;
     const back: Buffer[] = [];
     let backBytes = 0;
@@ -1990,6 +1999,7 @@ export function pauseAllForHostSuspend(): number {
 export function resume(id: string, redraw = false, token?: number): void {
   const s = sessions.get(id);
   if (!s) return;
+  if (token !== undefined && token <= s.replayRetiredToken) return;
   if (token !== undefined) s.replayToken = token;
   if (!s.replayTimer) replaySlice(s);
   if (redraw) requestTerminalRedraw(s);

@@ -304,6 +304,28 @@ async function main() {
     }
     console.log("PASS a pane leaving mid-replay loses and repeats nothing (later, replaced, late listener, replaced twice)");
 
+    // A pane's own resume reaches main after its pause (start() awaited in
+    // between): main ignores the retired listener, before or after the next
+    // pane's resume.
+    for (const beforeNext of [true, false]) {
+      const id = `replay-late-resume-${beforeNext}`;
+      const history = Buffer.from("late resume line\r\n".repeat(60_000));
+      const { win, first } = await away(id, history);
+      const gone = win.mount();
+      for (let waited = 0; sliceCount(win, id) < 2; waited += 1) {
+        assert.ok(waited < 1000);
+        await turn();
+      }
+      gone.unmount();
+      if (beforeNext) win.call(() => pty.resume(id, false, gone.tracker.token));
+      const next = win.mount();
+      if (!beforeNext) win.call(() => pty.resume(id, false, gone.tracker.token));
+      await win.idle();
+      assertOnce(`late resume ${beforeNext}`, all(first, gone, next), history);
+      pty.killImmediate(id);
+    }
+    console.log("PASS a late resume from a pane already gone is ignored");
+
     // A hidden window pauses without unmounting: what was sent still
     // arrives, and the rest follows on show. Unmounting while hidden puts
     // back what the pane had not taken in.

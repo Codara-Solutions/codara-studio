@@ -2937,19 +2937,20 @@ export function useTerminalSession({
             return;
           }
           const fresh = replayTracker.slice(data, end, token, readOnlyRef.current);
-          chunkQueuedInXterm = false;
-          if (fresh && fresh.length > 0) {
-            handlePtyData(fresh, true);
-            for (const tap of replayTaps) tap(fresh);
-          }
-          if (token === undefined || token !== replayTracker.token) return;
+          const own = token !== undefined && token === replayTracker.token;
+          // Runs in the task that parses the slice, so an unmount can never
+          // fall between the parse and the bookkeeping.
           const tookIn = () => {
-            if (disposed) return;
+            if (!own || disposed) return;
             replayTracker.tookIn(end);
             window.spark.pty.replayAck?.(sessionId, end);
           };
-          if (chunkQueuedInXterm) term.write("", tookIn);
-          else tookIn();
+          if (fresh && fresh.length > 0) {
+            handlePtyData(fresh, true, tookIn);
+            for (const tap of replayTaps) tap(fresh);
+          } else {
+            tookIn();
+          }
         }) ?? (() => undefined);
 
       // Backpressure acks. Main counts every byte it ships on the data
@@ -2983,10 +2984,9 @@ export function useTerminalSession({
         ackPending = 0;
       });
 
-      // Set when handlePtyData hands its chunk to xterm rather than the
-      // hidden buffer, so the replay handler knows when the chunk is in.
-      let chunkQueuedInXterm = false;
-      function handlePtyData(data: Uint8Array | string, fromReplay = false): void {
+      // `tookIn` runs once the chunk is in: from xterm's write callback for
+      // the chunk itself, or at once when the hidden buffer keeps it.
+      function handlePtyData(data: Uint8Array | string, fromReplay = false, tookIn?: () => void): void {
         // Main ships Uint8Array. xterm.js's parser reassembles partial ANSI
         // sequences across writes when fed Uint8Array, which is what TUIs
         // (claude/codex/Ink) need to render cursor sequences without smearing.
@@ -3001,7 +3001,6 @@ export function useTerminalSession({
         // "history" marking onto the live output that follows.
         const isReplayedChunk = fromReplay || replayTracker.consume(bytes.length);
         const writeChunk = (write: () => void) => {
-          chunkQueuedInXterm = true;
           if (isReplayedChunk) writeAsReplay(term, write);
           else write();
         };
@@ -3026,7 +3025,12 @@ export function useTerminalSession({
           // INVARIANT: hiddenBufferRef stays empty, so reveal is a repaint of the
           // same xterm instance rather than a replay step.
           if (writeWhileHiddenRef.current) {
-            writeChunk(() => term.write(bytes, () => ack(bytes.length)));
+            writeChunk(() =>
+              term.write(bytes, () => {
+                ack(bytes.length);
+                tookIn?.();
+              }),
+            );
             onActivityRef.current?.();
             return;
           }
@@ -3039,6 +3043,7 @@ export function useTerminalSession({
           // hidden pane can't pin arbitrary renderer memory or retain more
           // hidden output lines than the terminal is configured to display.
           trimHiddenBufferToLimits();
+          tookIn?.();
           onActivityRef.current?.();
           return;
         }
@@ -3051,6 +3056,7 @@ export function useTerminalSession({
             writeChunk(() =>
               term.write(bytes, () => {
                 ack(bytes.length);
+                tookIn?.();
                 if (clearNotificationSuppressionRef.current === token) {
                   clearNotificationSuppressionRef.current = null;
                 }
@@ -3064,7 +3070,12 @@ export function useTerminalSession({
             throw error;
           }
         } else {
-          writeChunk(() => term.write(bytes, () => ack(bytes.length)));
+          writeChunk(() =>
+            term.write(bytes, () => {
+              ack(bytes.length);
+              tookIn?.();
+            }),
+          );
         }
         onActivityRef.current?.();
 
@@ -3797,11 +3808,15 @@ export function useTerminalSession({
       // resume issued here would drain a backlog the CANONICAL pane paused for,
       // stealing its bytes onto the shared channel at the wrong moment.
       if (!rawTailReattachRef.current && !readOnlyRef.current && !sleepingAtMount) {
-        void window.spark.pty.resume(
-          sessionId,
-          attachedExistingSession && !externalSizeOwnerRef.current,
-          replayTracker.token,
-        );
+        // start() may have awaited since its last disposed check: a pane
+        // already gone must not claim the replay after its own pause.
+        if (!disposed) {
+          void window.spark.pty.resume(
+            sessionId,
+            attachedExistingSession && !externalSizeOwnerRef.current,
+            replayTracker.token,
+          );
+        }
       }
 
       // Two-stage debounce, ported from the terax design.
