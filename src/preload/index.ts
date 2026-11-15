@@ -239,8 +239,9 @@ import type {
 type PtyDataHandler = (data: Uint8Array | string) => void;
 // Without `data`: that many bytes of replayed history follow on the data
 // channel. With `data`: one slice of a paused pane's backlog, numbered by its
-// end offset in the session's replay stream.
-type PtyReplayInfo = { bytes: number; end?: number; data?: Uint8Array };
+// end offset in the replay stream and addressed to the listener whose resume
+// carried `token`.
+type PtyReplayInfo = { bytes: number; end?: number; token?: number; data?: Uint8Array };
 type PtyReplayHandler = (info: PtyReplayInfo) => void;
 type PtyExitHandler = (info: PtyExitInfo) => void;
 type HostResumeHandler = (info: {
@@ -1321,8 +1322,8 @@ const api = {
       ipcRenderer.invoke("pty:resourceSnapshot"),
     pause: (id: string, replayedTo?: number): Promise<void> =>
       ipcRenderer.invoke("pty:pause", { id, replayedTo }),
-    resume: (id: string, redraw = false): Promise<void> =>
-      ipcRenderer.invoke("pty:resume", { id, redraw }),
+    resume: (id: string, redraw = false, token?: number): Promise<void> =>
+      ipcRenderer.invoke("pty:resume", { id, redraw, token }),
     // Backpressure ack (see pty-manager ackRenderBytes). Fire-and-forget.
     ack: (id: string, bytes: number): void => {
       ipcRenderer.send("pty:ack", { id, bytes });

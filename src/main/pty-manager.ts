@@ -185,12 +185,11 @@ interface Session {
   detachedBacklogBytes: number;
   // resume() replays the backlog in slices, one per turn (replaySlice).
   // While one runs, attached stays false so live output queues behind it.
-  // Slices are numbered by their end offset in the session's replay stream
-  // (never reset) and kept until the renderer confirms them, so a pane that
-  // unmounts mid-replay gets back exactly the slices it never received, and
-  // a slice sent twice is recognised by its offset and written once.
+  // Each slice is addressed to the listener that asked for the replay
+  // (replayToken) and kept until that listener confirms it, so a pane that
+  // unmounts mid-replay gets back exactly the slices it never took in.
   replayTimer: NodeJS.Immediate | null;
-  replayOffset: number;
+  replayToken: number | undefined;
   replayInFlight: Array<{ buf: Buffer; end: number }>;
   // Set true synchronously by killNow before the underlying pty.kill() runs.
   // Gates the pty.onData closure: on Windows ConPTY drains stdout for up to
@@ -434,16 +433,24 @@ function trimBacklog(s: Session): void {
   }
 }
 
-// A slice put back by pause() keeps its replay offset, so the pane that
-// already received it (pane replacement) can drop the second copy.
+// Replay offsets: one counter for every session, so an offset a pane holds
+// from an earlier session at the same id (respawn) is below every new one.
+// A slice put back by pause() keeps its offset when it is sent again, so a
+// read-only mirror that already wrote it can drop the second copy.
+let replayStreamEnd = 0;
 const resentSliceEnd = new WeakMap<Buffer, number>();
 
-function clearReplay(s: Session): void {
+function stopReplay(s: Session): void {
   if (s.replayTimer) {
     clearImmediate(s.replayTimer);
     s.replayTimer = null;
   }
+}
+
+function clearReplay(s: Session): void {
+  stopReplay(s);
   s.replayInFlight = [];
+  s.replayToken = undefined;
 }
 
 // Agent-socket credentials a pane must never inherit. Scoped capabilities
@@ -1164,7 +1171,7 @@ async function doSpawnRemote(
     detachedBacklog: [],
     detachedBacklogBytes: 0,
     replayTimer: null,
-    replayOffset: 0,
+    replayToken: undefined,
     replayInFlight: [],
     disposed: false,
     exitEmitted: false,
@@ -1633,7 +1640,7 @@ function doSpawn(
     detachedBacklog: [],
     detachedBacklogBytes: 0,
     replayTimer: null,
-    replayOffset: 0,
+    replayToken: undefined,
     replayInFlight: [],
     disposed: false,
     exitEmitted: false,
@@ -1910,18 +1917,20 @@ function enqueueData(id: string, data: string | Buffer): void {
 // backlog so the small window between cleanup and pause is not lost.
 //
 // A pause during a replay stops it; the rest waits for the next resume.
-// `replayedTo` is the end offset of the last replay slice the pane's listener
-// received, sent by a pane that removes its listener right after this call:
-// slices past it were still in flight and go back to the front of the
-// backlog. Without it (host suspend, a hidden document) the listener stays,
-// so every slice already sent still arrives.
+// `replayedTo` is the end offset of the last replay slice the pane took in
+// (xterm parsed it, or the hidden-pane buffer kept it), sent by a pane that
+// removes its listener right after this call: slices past it go back to the
+// front of the backlog. Without it (host suspend, a hidden document) the
+// listener stays, so slices in flight stay owed to it until it confirms them.
 export function pause(id: string, replayedTo?: number): void {
   const s = sessions.get(id);
   if (!s) return;
   resetRenderFlow(s);
-  const inFlight = s.replayInFlight;
-  clearReplay(s);
+  stopReplay(s);
   if (typeof replayedTo === "number") {
+    const inFlight = s.replayInFlight;
+    s.replayInFlight = [];
+    s.replayToken = undefined;
     const back: Buffer[] = [];
     let backBytes = 0;
     for (const { buf, end } of inFlight) {
@@ -1976,16 +1985,19 @@ export function pauseAllForHostSuspend(): number {
 // `attached` back to true so subsequent pty output resumes the normal flush
 // path. The first slice goes before this returns, the rest one per turn.
 // Safe to call on a fresh session (no backlog, attached already true) and
-// during a replay (it carries on).
-export function resume(id: string, redraw = false): void {
+// during a replay (it carries on). `token` names the pane listener the
+// slices are for; other listeners on the channel ignore them.
+export function resume(id: string, redraw = false, token?: number): void {
   const s = sessions.get(id);
   if (!s) return;
+  if (token !== undefined) s.replayToken = token;
   if (!s.replayTimer) replaySlice(s);
   if (redraw) requestTerminalRedraw(s);
 }
 
-// Each slice is one message on the replay channel carrying its bytes and its
-// end offset together, so a pane can never get one without the other. Slices
+// Each slice is one message on the replay channel carrying its bytes, its end
+// offset and the listener it is for, so a pane never gets one without the
+// others. Slices
 // are plain byte ranges: the renderer feeds them to xterm and its decoders as
 // Uint8Array in streaming mode, so a slice may end inside an escape sequence
 // or a UTF-8 character, exactly as pty chunks do.
@@ -2022,8 +2034,8 @@ function replaySlice(s: Session): void {
       }
       s.detachedBacklog.splice(0, whole);
       slice = parts.length === 1 ? parts[0] : Buffer.concat(parts, size);
-      s.replayOffset += size;
-      end = s.replayOffset;
+      replayStreamEnd += size;
+      end = replayStreamEnd;
     }
     const n = slice.length;
     s.detachedBacklogBytes -= n;
@@ -2031,6 +2043,7 @@ function replaySlice(s: Session): void {
       wc.send(s.replayChannel, {
         bytes: n,
         end,
+        token: s.replayToken,
         data: new Uint8Array(slice.buffer, slice.byteOffset, slice.byteLength),
       });
     } catch {
@@ -2049,19 +2062,11 @@ function replaySlice(s: Session): void {
   s.lastAttachAt = Date.now();
 }
 
-// The renderer received every replay slice up to `end`.
+// The pane took in every replay slice addressed to it up to `end`.
 export function ackReplay(id: string, end: number): void {
   const s = sessions.get(id);
   if (!s || !Number.isFinite(end)) return;
   while (s.replayInFlight.length > 0 && s.replayInFlight[0].end <= end) s.replayInFlight.shift();
-  // Put-back slices the current pane has meanwhile received need no resend.
-  while (s.detachedBacklog.length > 0) {
-    const head = s.detachedBacklog[0];
-    const resentEnd = resentSliceEnd.get(head);
-    if (resentEnd === undefined || resentEnd > end) break;
-    s.detachedBacklog.shift();
-    s.detachedBacklogBytes -= head.length;
-  }
 }
 
 // Called by the renderer's raw-tail-reattach panes (the ChatPanel backend
