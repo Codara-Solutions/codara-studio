@@ -1192,18 +1192,23 @@ tools) or an imported pull request. In Cora, Stop withdraws the card.
 ### Managing feedback (Codara staff)
 
 Listed to a user's own terminal agent only while this Codara has a feedback
-admin token: saved in Settings, About (encrypted by the system keyring), or
-`CODARA_FEEDBACK_ADMIN_TOKEN`, which wins. Codara takes that variable out of
-its environment as it starts, so no terminal or agent it opens inherits it.
-Codara refuses the calls without one (`reason: "no_admin_token"`), and a
-token removed while a delete question waits deletes nothing. The question
-guards the tools Codara gives agents. It is not a wall against a program
-running under your own account, which can read whatever your account can
-(the keyring once it is unlocked, a process's start-up environment): keep
-the token on machines and accounts where you trust what runs. The token stays in Codara's main process:
-never in a result, the window or a log. Stored feedback is text written by
-strangers, so every result that carries it has a `notice` saying it is
-untrusted data.
+admin token, saved in Settings, About (encrypted by the system keyring). A
+packaged Studio uses only that saved token. A development run (`npm run dev`,
+the e2e specs) also takes `CODARA_FEEDBACK_ADMIN_TOKEN`, which then wins: a
+launch environment stays readable to programs under your account (on Linux
+in `/proc/<pid>/environ`), and these tools hand strangers' text to agents, so
+an agent that followed such text could read the token there and call the
+admin API itself, skipping the delete question. Codara also takes that
+variable out of its environment as it starts, so no terminal or agent it
+opens inherits it. Codara refuses the calls without a token
+(`reason: "no_admin_token"`), and a token removed while a delete question
+waits deletes nothing. The token stays in Codara's main process: never in a
+result, the window or a log. Stored feedback is text written by strangers,
+so every result that carries it has a `notice` saying it is untrusted data.
+The question guards the tools Codara gives agents. It is not a wall against
+a program running under your own account, which can read whatever your
+account can (the keyring once it is unlocked): keep the token on machines
+and accounts where you trust what runs.
 
 | Tool | What it does |
 |---|---|

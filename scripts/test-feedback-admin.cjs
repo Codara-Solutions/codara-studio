@@ -160,13 +160,35 @@ async function main() {
     await service.close();
   }
 
+  const fs = require("node:fs");
   // The env token leaves the environment the moment main loads, before any
   // terminal or agent is spawned, so no child inherits it.
   process.env.CODARA_FEEDBACK_ADMIN_TOKEN = ` ${TOKEN} `;
   const { feedbackAdminEnvToken } = await load("src/main/feedback/admin-env.ts");
   assert.equal(process.env.CODARA_FEEDBACK_ADMIN_TOKEN, undefined);
-  assert.equal(feedbackAdminEnvToken(), TOKEN);
-  const fs = require("node:fs");
+  assert.equal(feedbackAdminEnvToken(false), TOKEN, "a development run honours it");
+  // A packaged app with the variable set: no token, so no admin tools are
+  // listed (feedback.admin_status reads the same token) and nothing is read.
+  assert.equal(feedbackAdminEnvToken(true), "");
+  const packagedService = await startFeedbackService({ adminToken: TOKEN });
+  try {
+    const packagedDeps = {
+      token: async () => feedbackAdminEnvToken(true) || null,
+      caller: async () => ({ agent: "Codex", workspaceName: null }),
+      ask: async () => "yes",
+      seen: new Map(),
+      request: { env: { CODARA_FEEDBACK_URL: packagedService.url } },
+    };
+    assert.equal((await admin.adminListFeedback({}, packagedDeps)).reason, "no_admin_token");
+    assert.equal((await admin.adminDeleteFeedback({ id: "00000000-0000-4000-8000-000000000001" }, packagedDeps)).reason, "no_admin_token");
+    assert.equal(packagedService.state.requests.length, 0, "a packaged app reads nothing with an env token");
+  } finally {
+    await packagedService.close();
+  }
+  const tokenSource = fs.readFileSync(path.join(ROOT, "src", "main", "feedback", "admin-token.ts"), "utf8");
+  assert.match(tokenSource, /feedbackAdminEnvToken\(app\.isPackaged\)/, "the app passes whether it is packaged");
+  const configured = fs.readFileSync(path.join(ROOT, "src", "main", "feedback", "admin-tool.ts"), "utf8");
+  assert.match(configured, /configured: \(await feedbackAdminToken\(\)\) !== null/, "the tools are listed from the same token");
   const imports = fs.readFileSync(path.join(ROOT, "src", "main", "index.ts"), "utf8").split("\n").filter((line) => line.startsWith("import"));
   assert.equal(imports[1], 'import "./feedback/admin-env";', "index.ts takes the token out before anything else spawns");
 

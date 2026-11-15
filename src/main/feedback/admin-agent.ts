@@ -1,8 +1,8 @@
 // codara_feedback_list, codara_feedback_update and codara_feedback_delete
 // (socket feedback.list, feedback.update, feedback.delete): a Codara admin's
 // agent reads and manages stored feedback. Every call needs the admin token
-// (Settings, About, or CODARA_FEEDBACK_ADMIN_TOKEN); without it main refuses
-// even if a server listed the tools. A delete always asks the person first,
+// (Settings, About; CODARA_FEEDBACK_ADMIN_TOKEN in a development run);
+// without it main refuses even if a server listed the tools. A delete always asks the person first,
 // showing the item, and no setting turns that off. Pure apart from the
 // injected deps, so scripts/test-feedback-admin.cjs runs every branch.
 
@@ -28,7 +28,7 @@ const LOOKUP_PAGES = 5;
 
 const NO_TOKEN = {
   reason: "no_admin_token" as AdminFailure,
-  note: "No feedback admin token is set in this Codara (Settings, About, or CODARA_FEEDBACK_ADMIN_TOKEN).",
+  note: "No feedback admin token is set in this Codara (Settings, About).",
 };
 
 function remember(seen: Map<string, FeedbackItem>, item: FeedbackItem): void {

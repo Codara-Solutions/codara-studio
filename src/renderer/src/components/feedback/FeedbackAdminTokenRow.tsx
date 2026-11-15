@@ -8,9 +8,9 @@ import { SettingRow } from "../settings/SettingsPrimitives";
 
 function stateText(state: FeedbackAdminTokenState | null): string {
   if (!state) return "";
-  if (state.source === "env") return "Set by CODARA_FEEDBACK_ADMIN_TOKEN. Agents in your terminals can read and manage feedback.";
+  if (state.source === "env") return "Set by CODARA_FEEDBACK_ADMIN_TOKEN in this development run. Agents in your terminals can read and manage feedback.";
   if (state.source === "saved") return "Saved, encrypted with your system keyring. Agents in your terminals can read and manage feedback.";
-  if (!state.canSave) return "This system has no keyring to encrypt a token. Set CODARA_FEEDBACK_ADMIN_TOKEN instead.";
+  if (!state.canSave) return "This system has no keyring to encrypt a token, so none can be saved here.";
   return "For Codara staff: lets your agents read and manage feedback. Deleting always asks you first.";
 }
 

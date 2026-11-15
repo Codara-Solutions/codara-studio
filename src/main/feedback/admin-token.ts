@@ -1,11 +1,12 @@
-// The feedback admin token: CODARA_FEEDBACK_ADMIN_TOKEN when Codara started
-// with it (admin-env.ts takes it out of the environment first), else the
+// The feedback admin token: in a development run CODARA_FEEDBACK_ADMIN_TOKEN
+// when Codara started with it (admin-env.ts; a packaged app ignores it),
+// else the
 // one saved in Settings, About, kept in feedback.json encrypted with the
 // operating system's keyring (Electron safeStorage). Without a keyring it is
 // not saved at all, never in plain text. The token never goes to the
 // renderer, a log line or a tool result: the renderer only learns its state.
 
-import { safeStorage } from "electron";
+import { app, safeStorage } from "electron";
 import type { FeedbackAdminTokenState } from "@shared/feedback";
 import { ADMIN_TOKEN_PATTERN } from "./admin";
 import { feedbackAdminEnvToken } from "./admin-env";
@@ -22,7 +23,7 @@ function keyring(): typeof safeStorage | null {
 }
 
 function envToken(): string | null {
-  const value = feedbackAdminEnvToken();
+  const value = feedbackAdminEnvToken(app.isPackaged);
   return value && ADMIN_TOKEN_PATTERN.test(value) ? value : null;
 }
 
@@ -53,7 +54,7 @@ export async function saveFeedbackAdminToken(raw: unknown): Promise<{ ok: true; 
   const token = typeof raw === "string" ? raw.trim() : "";
   if (!ADMIN_TOKEN_PATTERN.test(token)) return { ok: false, message: "That does not look like an admin token: 16 to 512 characters, no spaces." };
   const encryption = keyring();
-  if (!encryption) return { ok: false, message: "This system has no keyring to encrypt the token, so it cannot be saved. Set CODARA_FEEDBACK_ADMIN_TOKEN instead." };
+  if (!encryption) return { ok: false, message: "This system has no keyring to encrypt the token, so it cannot be saved." };
   let encoded: string;
   try {
     const encrypted = encryption.encryptString(token);
