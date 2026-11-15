@@ -52,6 +52,31 @@ export async function gitDirsOf(cwd: string): Promise<GitDirs | null> {
   }
 }
 
+// Variables that make git find the repository some other way than climbing
+// from the folder to its .git (a relative GIT_DIR is even resolved from each
+// folder), or stop it climbing.
+const DISCOVERY_VARIABLES = [
+  "GIT_DIR",
+  "GIT_COMMON_DIR",
+  "GIT_WORK_TREE",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
+
+/** True when none of DISCOVERY_VARIABLES is set, in any case (an empty value counts as set). */
+export function environmentKeepsDiscovery(env: NodeJS.ProcessEnv): boolean {
+  return Object.keys(env).every((name) => !DISCOVERY_VARIABLES.includes(name.toUpperCase()));
+}
+
+/**
+ * gitDirsOf when git, run with this process's environment, finds the
+ * repository the way the files do; null when the environment changes how git
+ * finds it, so callers that group or name repositories ask git instead.
+ */
+export async function gitDirsAsGitFinds(cwd: string): Promise<GitDirs | null> {
+  return environmentKeepsDiscovery(process.env) ? gitDirsOf(cwd) : null;
+}
+
 // A ref with a slash (`perf/x`, `origin/feat/y`) is written into its own
 // folder, whose time moves, not its parent's: every folder below counts.
 const MAX_REF_FOLDERS = 256;
