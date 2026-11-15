@@ -11,20 +11,13 @@ import type {
   WorkspaceStatusMap,
   WorkspaceStatusPatch,
 } from "@shared/workspace-status";
+import { subscribe } from "../subscribe";
 
 export const workspaceStatusApi = {
   list: (): Promise<WorkspaceStatusMap> => ipcRenderer.invoke("workspaceStatus:list"),
   set: (workspaceId: string, patch: WorkspaceStatusPatch): Promise<WorkspaceStatusEntry | null> =>
     ipcRenderer.invoke("workspaceStatus:set", workspaceId, patch),
-  onChanged: (listener: (change: WorkspaceStatusChange) => void): (() => void) => {
-    const wrapped = (_event: unknown, change: WorkspaceStatusChange): void => listener(change);
-    ipcRenderer.on("workspaceStatus:changed", wrapped);
-    return () => ipcRenderer.removeListener("workspaceStatus:changed", wrapped);
-  },
+  onChanged: subscribe<WorkspaceStatusChange>("workspaceStatus:changed"),
   agentNotes: (): Promise<AgentNoteMap> => ipcRenderer.invoke("workspaceStatus:agentNotes"),
-  onAgentNoteChanged: (listener: (change: AgentNoteChange) => void): (() => void) => {
-    const wrapped = (_event: unknown, change: AgentNoteChange): void => listener(change);
-    ipcRenderer.on("workspaceStatus:agentNoteChanged", wrapped);
-    return () => ipcRenderer.removeListener("workspaceStatus:agentNoteChanged", wrapped);
-  },
+  onAgentNoteChanged: subscribe<AgentNoteChange>("workspaceStatus:agentNoteChanged"),
 };

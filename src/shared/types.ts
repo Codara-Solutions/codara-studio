@@ -1438,6 +1438,9 @@ export interface AppPreferences {
   // Lets agents remove merged worktrees the user created too. Default off:
   // agents remove only worktrees an agent created.
   agentsMayRemoveUserWorktrees?: boolean;
+  // codara_feedback_send shows the user the text and sends only on their
+  // yes. Default on; off sends an agent's feedback without asking.
+  askBeforeAgentFeedback?: boolean;
   // Removes a worktree from the rail on its own once its work is provably
   // merged and nothing is left in it or using it. Default on. Off leaves such
   // a worktree in its project's merged group, one click from removal.
@@ -1668,6 +1671,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   terminalRightClick: "paste",
   agentWorktreesEnabled: true,
   agentsMayRemoveUserWorktrees: false,
+  askBeforeAgentFeedback: true,
   worktreeAutoRemoveMerged: true,
   agentWorktreeRegenerableIgnoredByRepo: {},
   restoreAgentSessions: false,

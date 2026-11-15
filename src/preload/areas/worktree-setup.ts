@@ -13,6 +13,7 @@ import type {
   WorktreeSetupSuggestion,
   WorktreeSetupWriteResult,
 } from "@shared/worktree-setup";
+import { subscribe } from "../subscribe";
 
 export interface WorktreeSetupStartInput {
   sourceCwd: string;
@@ -52,15 +53,7 @@ export const worktreeSetupApi = {
   readLog: (id: string, from = 0): Promise<WorktreeSetupLogChunk | null> =>
     ipcRenderer.invoke("worktreeSetup:readLog", { id, from }),
   dismiss: (id: string): Promise<boolean> => ipcRenderer.invoke("worktreeSetup:dismiss", { id }),
-  onChanged: (listener: (status: WorktreeSetupStatus) => void): (() => void) => {
-    const wrapped = (_event: unknown, status: WorktreeSetupStatus): void => listener(status);
-    ipcRenderer.on("worktreeSetup:changed", wrapped);
-    return () => ipcRenderer.removeListener("worktreeSetup:changed", wrapped);
-  },
+  onChanged: subscribe<WorktreeSetupStatus>("worktreeSetup:changed"),
   /** A setup Codara took off the tray, such as the one of a worktree it rolled back. */
-  onDismissed: (listener: (id: string) => void): (() => void) => {
-    const wrapped = (_event: unknown, id: string): void => listener(id);
-    ipcRenderer.on("worktreeSetup:dismissed", wrapped);
-    return () => ipcRenderer.removeListener("worktreeSetup:dismissed", wrapped);
-  },
+  onDismissed: subscribe<string>("worktreeSetup:dismissed"),
 };

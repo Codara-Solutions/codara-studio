@@ -20,6 +20,7 @@ import { codePreviewTools } from "./code";
 import { checkNavigateUrl, corePreviewTools } from "./core";
 import { cosTaskTools } from "./cos-tasks";
 import { devtoolsPreviewTools } from "./devtools";
+import { feedbackTools } from "./feedback";
 import { inboxPreviewTools } from "./inbox";
 import { inputPreviewTools } from "./input";
 import { openFileTools } from "./open-file";
@@ -49,6 +50,7 @@ const TABLES: readonly PreviewToolTable[] = [
   tabTools,
   openFileTools,
   chromeLinkTools,
+  feedbackTools,
   // A snippet's browser calls go through runPreviewTool like any socket call.
   codePreviewTools((method, params, host) => runPreviewTool(method, params, host)),
 ];

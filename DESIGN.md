@@ -743,3 +743,8 @@ existing patterns, not yet picked by Etienne from variants.
   close it. An error keeps the text and says what to do next in one sentence
   in the danger color; the sent state replaces the form with one line and
   Done.
+- When an agent calls `codara_feedback_send`, the question is the tab
+  approval's floating card (`chrome-pairing`): who asks and from which
+  workspace, the exact text as plain text on an opaque panel that scrolls
+  past 180 px, a countdown, Don't send and Send. An expired card says nothing
+  was sent and stays 8 seconds.

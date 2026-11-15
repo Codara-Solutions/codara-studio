@@ -10,21 +10,14 @@ import type {
   CrossWorkspaceApprovalRequest,
   CrossWorkspaceGrant,
 } from "@shared/cross-workspace";
+import { subscribe, subscribeSignal } from "../subscribe";
 
 export const crossWorkspaceApi = {
   /** Requests still waiting for an answer, for a window that mounts after they were sent. */
   pending: (): Promise<CrossWorkspaceApprovalRequest[]> => ipcRenderer.invoke("crossWorkspace:pending"),
-  onApproval: (listener: (request: CrossWorkspaceApprovalRequest) => void): (() => void) => {
-    const wrapped = (_event: unknown, payload: CrossWorkspaceApprovalRequest): void => listener(payload);
-    ipcRenderer.on("crossWorkspace:approval", wrapped);
-    return () => ipcRenderer.removeListener("crossWorkspace:approval", wrapped);
-  },
+  onApproval: subscribe<CrossWorkspaceApprovalRequest>("crossWorkspace:approval"),
   /** The request is no longer waited for (it timed out, or another card's Always answered it). */
-  onApprovalClosed: (listener: (payload: CrossWorkspaceApprovalClosed) => void): (() => void) => {
-    const wrapped = (_event: unknown, payload: CrossWorkspaceApprovalClosed): void => listener(payload);
-    ipcRenderer.on("crossWorkspace:approvalClosed", wrapped);
-    return () => ipcRenderer.removeListener("crossWorkspace:approvalClosed", wrapped);
-  },
+  onApprovalClosed: subscribe<CrossWorkspaceApprovalClosed>("crossWorkspace:approvalClosed"),
   /** False when the request is no longer waited for. */
   answer: (id: string, answer: CrossWorkspaceAnswer): Promise<boolean> =>
     ipcRenderer.invoke("crossWorkspace:answer", { id, answer }),
@@ -32,11 +25,7 @@ export const crossWorkspaceApi = {
   setAllowAll: (value: boolean): Promise<boolean> => ipcRenderer.invoke("crossWorkspace:setAllowAll", value),
   grants: (): Promise<CrossWorkspaceGrant[]> => ipcRenderer.invoke("crossWorkspace:grants"),
   /** A grant was added or revoked. */
-  onGrantsChanged: (listener: () => void): (() => void) => {
-    const wrapped = (): void => listener();
-    ipcRenderer.on("crossWorkspace:grantsChanged", wrapped);
-    return () => ipcRenderer.removeListener("crossWorkspace:grantsChanged", wrapped);
-  },
+  onGrantsChanged: subscribeSignal("crossWorkspace:grantsChanged"),
   revoke: (callerWorkspaceId: string, targetWorkspaceId: string): Promise<boolean> =>
     ipcRenderer.invoke("crossWorkspace:revoke", { callerWorkspaceId, targetWorkspaceId }),
 };

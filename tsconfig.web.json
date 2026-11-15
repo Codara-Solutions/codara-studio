@@ -27,6 +27,7 @@
     "src/renderer/src/**/*",
     "src/shared/**/*",
     "src/preload/preload-types.d.ts",
+    "src/preload/subscribe.ts",
     "src/preload/areas/**/*"
   ]
 }

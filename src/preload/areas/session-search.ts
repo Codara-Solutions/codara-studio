@@ -10,6 +10,7 @@ import type {
   SessionSearchStatus,
   SessionTranscript,
 } from "@shared/session-search";
+import { subscribe } from "../subscribe";
 
 export const sessionSearchApi = {
   /** `load` reads the index's numbers when they are not known yet (Settings). */
@@ -27,9 +28,5 @@ export const sessionSearchApi = {
   rebuild: (): Promise<SessionSearchStatus> => ipcRenderer.invoke("sessionSearch:rebuild"),
   deleteIndex: (): Promise<SessionSearchStatus> => ipcRenderer.invoke("sessionSearch:delete"),
   dismissIntro: (): Promise<SessionSearchStatus> => ipcRenderer.invoke("sessionSearch:dismiss-intro"),
-  onStatus: (handler: (status: SessionSearchStatus) => void): (() => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, status: SessionSearchStatus) => handler(status);
-    ipcRenderer.on("sessionSearch:status", listener);
-    return () => ipcRenderer.off("sessionSearch:status", listener);
-  },
+  onStatus: subscribe<SessionSearchStatus>("sessionSearch:status"),
 };

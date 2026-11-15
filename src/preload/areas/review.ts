@@ -5,6 +5,7 @@
 import { ipcRenderer } from "electron";
 import { AGENT_REVIEW_CHANGED_CHANNEL, type AgentReviewState } from "@shared/agent-review";
 import type { ReviewDiff, ReviewDiffRequest, ReviewNote } from "@shared/review-notes";
+import { subscribe } from "../subscribe";
 
 export interface AgentReviewRequest {
   workspaceId: string;
@@ -42,11 +43,7 @@ export const reviewApi = {
   acknowledgeAgentReview: (id: string, savedIds: readonly string[]): Promise<void> =>
     ipcRenderer.invoke("agentReview:acknowledge", id, savedIds),
   dismissAgentReview: (id: string): Promise<void> => ipcRenderer.invoke("agentReview:dismiss", id),
-  onAgentReviewChanged: (listener: (state: AgentReviewState) => void): (() => void) => {
-    const wrapped = (_event: unknown, state: AgentReviewState): void => listener(state);
-    ipcRenderer.on(AGENT_REVIEW_CHANGED_CHANNEL, wrapped);
-    return () => ipcRenderer.removeListener(AGENT_REVIEW_CHANGED_CHANNEL, wrapped);
-  },
+  onAgentReviewChanged: subscribe<AgentReviewState>(AGENT_REVIEW_CHANGED_CHANNEL),
   /** Starts an agent on the user's task, through the same path agents use. */
   startAgent: (request: NewAgentRequest): Promise<{ id: string; title: string; branch: string | null; workspace: string }> =>
     ipcRenderer.invoke("sourceAgents:start", request),

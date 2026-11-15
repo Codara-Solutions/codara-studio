@@ -6,13 +6,10 @@
 import { ipcRenderer } from "electron";
 
 import type { KeepAwakeStatus } from "@shared/keep-awake";
+import { subscribe } from "../subscribe";
 
 export const keepAwakeApi = {
   /** The current status, re-read now. null before main has started it. */
   status: (): Promise<KeepAwakeStatus | null> => ipcRenderer.invoke("keepAwake:status"),
-  onChanged: (handler: (status: KeepAwakeStatus) => void): (() => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, status: KeepAwakeStatus) => handler(status);
-    ipcRenderer.on("keepAwake:changed", listener);
-    return () => ipcRenderer.off("keepAwake:changed", listener);
-  },
+  onChanged: subscribe<KeepAwakeStatus>("keepAwake:changed"),
 };

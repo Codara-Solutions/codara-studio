@@ -5,6 +5,7 @@
 import { ipcRenderer } from "electron";
 
 import type { PortForwardNotice, PortsSnapshot } from "@shared/port-forwarding";
+import { subscribe } from "../subscribe";
 
 export const portsApi = {
   /** The forwards of the workspace's host; null for a local workspace. */
@@ -13,15 +14,7 @@ export const portsApi = {
     ipcRenderer.invoke("ports:forward", { workspaceId, port }),
   stop: (workspaceId: string, port: number): Promise<PortsSnapshot> =>
     ipcRenderer.invoke("ports:stop", { workspaceId, port }),
-  onChanged: (listener: (payload: { hostId: string }) => void): (() => void) => {
-    const wrapped = (_event: unknown, payload: { hostId: string }): void => listener(payload);
-    ipcRenderer.on("ports:changed", wrapped);
-    return () => ipcRenderer.removeListener("ports:changed", wrapped);
-  },
+  onChanged: subscribe<{ hostId: string }>("ports:changed"),
   /** Codara forwarded a port on its own. */
-  onNotice: (listener: (notice: PortForwardNotice) => void): (() => void) => {
-    const wrapped = (_event: unknown, notice: PortForwardNotice): void => listener(notice);
-    ipcRenderer.on("ports:notice", wrapped);
-    return () => ipcRenderer.removeListener("ports:notice", wrapped);
-  },
+  onNotice: subscribe<PortForwardNotice>("ports:notice"),
 };

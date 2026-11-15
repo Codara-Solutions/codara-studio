@@ -5,6 +5,7 @@
 import { ipcRenderer } from "electron";
 
 import type { ChromeLinkState, SeparateBrowserTool } from "@shared/chrome-link";
+import { subscribe } from "../subscribe";
 
 export const chromeLinkApi = {
   state: (): Promise<ChromeLinkState> => ipcRenderer.invoke("chromeLink:state"),
@@ -21,9 +22,5 @@ export const chromeLinkApi = {
   prepareExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:prepareExtension"),
   /** The same, and open the folder in the file manager. */
   revealExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:revealExtension"),
-  onChanged: (handler: (state: ChromeLinkState) => void): (() => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, state: ChromeLinkState) => handler(state);
-    ipcRenderer.on("chromeLink:changed", listener);
-    return () => ipcRenderer.off("chromeLink:changed", listener);
-  },
+  onChanged: subscribe<ChromeLinkState>("chromeLink:changed"),
 };

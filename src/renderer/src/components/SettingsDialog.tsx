@@ -4027,6 +4027,7 @@ function formatRunCreated(value: string): string {
 }
 
 function AboutSettings({ onClose }: { onClose: () => void }) {
+  const { preferences, setPreference } = usePreferences();
   const [platform, setPlatform] = useState<string>("");
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<string | null>(null);
@@ -4125,6 +4126,11 @@ function AboutSettings({ onClose }: { onClose: () => void }) {
               Send feedback…
             </button>
           }
+        />
+        <ToggleRow
+          title="Ask before an agent sends feedback"
+          desc="Shows you the exact text an agent wants to send, and sends it only if you agree. Off sends it without asking."
+          {...bindToggle("askBeforeAgentFeedback", preferences, setPreference)}
         />
       </SettingsSection>
       <SettingsSection

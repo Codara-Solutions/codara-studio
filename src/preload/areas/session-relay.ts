@@ -4,6 +4,7 @@
 import { ipcRenderer } from "electron";
 
 import type { PendingRelay, RelayDecision, RelayOutcome } from "@shared/session-relay";
+import { subscribeSignal } from "../subscribe";
 
 export interface RelayList {
   pending: PendingRelay[];
@@ -19,9 +20,5 @@ export const sessionRelayApi = {
   list: (): Promise<RelayList> => ipcRenderer.invoke("relay:list"),
   decide: (relayId: string, decision: RelayDecision): Promise<RelayDecideReply> =>
     ipcRenderer.invoke("relay:decide", relayId, decision),
-  onChanged: (listener: () => void): (() => void) => {
-    const wrapped = (): void => listener();
-    ipcRenderer.on("relay:changed", wrapped);
-    return () => ipcRenderer.removeListener("relay:changed", wrapped);
-  },
+  onChanged: subscribeSignal("relay:changed"),
 };
