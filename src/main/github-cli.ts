@@ -16,7 +16,7 @@ import type {
   GitHubWorkspaceStatus,
 } from "@shared/github";
 import { resolveBinary } from "./binary-resolver";
-import { gitDirsOf } from "./git-state";
+import { gitDirsAsGitFinds } from "./git-state";
 
 export type {
   GitHubCheckSummary,
@@ -432,7 +432,7 @@ const repositoryCaches = new WeakMap<object, Map<string, RepositoryCacheEntry>>(
 export async function repositoryCacheKey(
   cwd: string,
 ): Promise<{ key: string; configStamp: string } | null> {
-  const dirs = await gitDirsOf(cwd);
+  const dirs = await gitDirsAsGitFinds(cwd);
   if (!dirs) return null;
   const configPath = join(dirs.commonDir, "config");
   const [config, text, ownWorktreeConfig, sharedWorktreeConfig] = await Promise.all([
@@ -449,7 +449,7 @@ export async function repositoryCacheKey(
 }
 
 /** No include of another file and no per-worktree config, in any spelling or position. */
-function plainConfig(text: string): boolean {
+export function plainConfig(text: string): boolean {
   return !/\[\s*include/i.test(text) && !/worktreeconfig/i.test(text);
 }
 

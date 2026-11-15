@@ -228,6 +228,36 @@ function commit(cwd, file, message, who) {
       "one fetch refreshes every workspace sharing the repository",
     );
 
+    // A relative GIT_DIR is resolved from each folder: a clone and its
+    // worktree share a common directory by their .git files, yet git reads a
+    // different repository in each. Two repositories, two fetches.
+    const pair = path.join(root, "pair");
+    git(root, ["clone", "-q", remote, pair]);
+    const pairTree = path.join(root, "pair-wt");
+    git(pair, ["worktree", "add", "-q", pairTree, "feat/x"]);
+    for (const cwd of [pair, pairTree]) {
+      const alternate = path.join(cwd, ".alternate");
+      git(root, ["init", "-q", "--bare", "-b", "main", alternate]);
+      git(root, ["--git-dir", alternate, "remote", "add", "origin", remote]);
+    }
+    process.env.GIT_DIR = ".alternate";
+    try {
+      h.state = {
+        ...h.state,
+        workspaces: [
+          { id: "pair", name: "pair", cwd: pair, color: "#000", workers: [] },
+          { id: "pair-wt", name: "pair-wt", cwd: pairTree, color: "#000", workers: [] },
+        ],
+      };
+      for (const l of h.stateListeners) l(h.state);
+      await mod.waitForGitAutoFetchRebuild();
+      const groups = snap().map((repo) => repo.cwds);
+      assert.deepEqual(groups, [[pair], [pairTree]], "GIT_DIR=.alternate: two repositories, not one");
+    } finally {
+      delete process.env.GIT_DIR;
+    }
+    console.log("PASS: an environment that changes how git finds the repository is not grouped by the files");
+
     mod.stopGitAutoFetch();
     console.log("PASS: git-auto-fetch against real git");
   } finally {
