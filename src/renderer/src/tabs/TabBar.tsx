@@ -469,10 +469,14 @@ function TabBar({
       ) {
         return;
       }
+      // A drop that changes nothing opens no hole, even where the pointer has
+      // crossed a midpoint (a group's only tab over its own chip).
       const offsets: Record<TabId, number> = {};
-      plan.offsets.forEach((offset, index) => {
-        if (offset !== 0) offsets[slots[index].id] = offset;
-      });
+      if (drop) {
+        plan.offsets.forEach((offset, index) => {
+          if (offset !== 0) offsets[slots[index].id] = offset;
+        });
+      }
       const next: ReorderPreview = {
         draggedId: plan.draggedId,
         insertIndex: plan.insertIndex,
