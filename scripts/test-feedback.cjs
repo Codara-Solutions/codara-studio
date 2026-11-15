@@ -118,6 +118,13 @@ async function main() {
     assert.match(badVersion.message, /does not accept \(appVersion\)\. Update Studio/);
     const badKind = client.feedbackFailure({ status: 400, body: { error: "invalid_field", field: "kind" } });
     assert.equal(badKind.message, "The kind must be Bug, Idea or Other.");
+    // A field the contract does not name never reaches past the sentences.
+    for (const field of ["__proto__", "constructor", "toString", "a b <x>", 7]) {
+      const odd = client.feedbackFailure({ status: 400, body: { error: "invalid_field", field } });
+      assert.equal(typeof odd.message, "string", String(field));
+      assert.match(odd.message, /does not accept/);
+    }
+    assert.equal(client.feedbackFailure({ status: 400, body: { field: "a b <x>" } }).field, undefined);
     const tooLarge = client.feedbackFailure({ status: 413, body: { error: "payload_too_large", maxBytes: 32768 } });
     assert.equal(tooLarge.error, "invalid");
 
