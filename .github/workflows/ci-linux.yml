@@ -61,6 +61,7 @@ jobs:
           npx playwright test
           tests/e2e/empty-new-workspace.spec.ts
           tests/e2e/terminal-switch.spec.ts
+          tests/e2e/terminal-replay-remount.spec.ts
           tests/e2e/settings-search.spec.ts
           tests/e2e/file-link-smoke.spec.ts
           tests/e2e/orchestration-smoke.spec.ts

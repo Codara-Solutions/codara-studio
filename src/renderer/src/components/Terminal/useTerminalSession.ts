@@ -38,6 +38,12 @@ import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
 import { createReplayTracker } from "./replayTracker";
+import {
+  bytesAcceptedBefore,
+  createSliceWriter,
+  type SliceWriter,
+  xtermQueueDrainer,
+} from "./writeSlices";
 import { replayFloorRow, replayPersistedScrollback } from "./persistedScrollback";
 import {
   registerCwdHandler,
@@ -838,6 +844,9 @@ export function useTerminalSession({
   // surfaced via UI affordances on the visible pane, so deferring them while
   // hidden is fine. They resume on the next chunk after the flush.
   const hiddenBufferRef = useRef<Uint8Array[]>([]);
+  // The mounted xterm's slice writer (writeSlices.ts): pty bytes reach xterm
+  // in slices of at most 128 KB, finished at once before an unmount snapshot.
+  const sliceWriterRef = useRef<SliceWriter | null>(null);
   const hiddenBytesRef = useRef<number>(0);
   const hiddenLineBreaksRef = useRef<number>(0);
   // A visible pane can still be catching up on output accumulated while its
@@ -1053,6 +1062,11 @@ export function useTerminalSession({
       termRef.current = term;
       // Before anything is written: widths are fixed as bytes are parsed.
       applyUnicode11Widths(term);
+      const sliceWriter = createSliceWriter(
+        (slice, parsed) => term.write(slice, parsed),
+        xtermQueueDrainer(term),
+      );
+      sliceWriterRef.current = sliceWriter;
 
       // Observe the erase sequence xterm actually parses rather than guessing
       // from keyboard input or shell command names. Returning false keeps xterm's
@@ -3000,7 +3014,7 @@ export function useTerminalSession({
           // INVARIANT: hiddenBufferRef stays empty, so reveal is a repaint of the
           // same xterm instance rather than a replay step.
           if (writeWhileHiddenRef.current) {
-            writeChunk(() => term.write(bytes, () => ack(bytes.length)));
+            writeChunk(() => sliceWriter.write(bytes, ack));
             onActivityRef.current?.();
             return;
           }
@@ -3023,22 +3037,24 @@ export function useTerminalSession({
           clearNotificationSuppressionRef.current = token;
           try {
             writeChunk(() =>
-              term.write(bytes, () => {
-                ack(bytes.length);
+              sliceWriter.write(bytes, ack, () => {
                 if (clearNotificationSuppressionRef.current === token) {
                   clearNotificationSuppressionRef.current = null;
                 }
               }),
             );
           } catch (error) {
-            ack(bytes.length);
-            if (clearNotificationSuppressionRef.current === token) {
+            // Slices xterm took before the throw are acknowledged as they are
+            // parsed, and the last of them clears the suppression (onDone).
+            const accepted = bytesAcceptedBefore(error);
+            ack(bytes.length - accepted);
+            if (accepted === 0 && clearNotificationSuppressionRef.current === token) {
               clearNotificationSuppressionRef.current = null;
             }
             throw error;
           }
         } else {
-          writeChunk(() => term.write(bytes, () => ack(bytes.length)));
+          writeChunk(() => sliceWriter.write(bytes, ack));
         }
         onActivityRef.current?.();
 
@@ -4049,6 +4065,18 @@ export function useTerminalSession({
     };
 
     return () => {
+      // The snapshot below is the parsed screen as text: bytes still queued
+      // in xterm, or a sequence the parser is inside, cannot cross into it.
+      // A backlog written in slices (writeSlices.ts) can still be queued, so
+      // parse it now, with the pane's handlers live, as one write would have
+      // been. Raw-tail and read-only panes take no snapshot.
+      if (!rawTailReattachRef.current && !readOnlyRef.current) {
+        try {
+          sliceWriterRef.current?.drain();
+        } catch {
+          /* a failed parse leaves what xterm already has */
+        }
+      }
       disposed = true;
       clearNotificationSuppressionRef.current = null;
       window.clearTimeout(startTimer);
@@ -4152,6 +4180,7 @@ export function useTerminalSession({
         /* ignore */
       }
       termRef.current = null;
+      sliceWriterRef.current = null;
       fitRef.current = null;
       viewportRecoveryRef.current = null;
       // The hidden-pane bytes have been folded into the snapshot's pendingBytes
@@ -4230,15 +4259,19 @@ export function useTerminalSession({
         try {
           // Output that arrived while the pane was hidden: an OSC 52 copy in
           // it was not asked for by anyone looking at this pane.
+          const clearSuppression = () => {
+            if (clearNotificationSuppressionRef.current === token) {
+              clearNotificationSuppressionRef.current = null;
+            }
+          };
+          const writer = sliceWriterRef.current;
           writeAsReplay(term, () =>
-            term.write(merged, () => {
-              if (clearNotificationSuppressionRef.current === token) {
-                clearNotificationSuppressionRef.current = null;
-              }
-            }),
+            writer ? writer.write(merged, undefined, clearSuppression) : term.write(merged, clearSuppression),
           );
-        } catch {
-          if (clearNotificationSuppressionRef.current === token) {
+        } catch (error) {
+          // When xterm took slices before the throw, the last of them clears
+          // it once parsed (onDone).
+          if (bytesAcceptedBefore(error) === 0 && clearNotificationSuppressionRef.current === token) {
             clearNotificationSuppressionRef.current = null;
           }
           /* xterm may dispose mid-flush during a fast workspace switch */

@@ -220,9 +220,14 @@ async function main() {
   assert.match(guardBody, /!visibleRef\.current\) return "background"/);
   assert.match(session, /writeAsReplay\(term, \(\) => \{\s*if \(replay\)/, "the snapshot replay is history");
   assert.match(session, /if \(isReplayedChunk\) writeAsReplay\(term, write\);/, "main's announced replay is history");
-  assert.match(session, /writeAsReplay\(term, \(\) =>\s*term\.write\(merged,/, "output buffered while hidden is history");
+  assert.match(
+    session,
+    /writeAsReplay\(term, \(\) =>\s*writer \? writer\.write\(merged, [^)]*\) : term\.write\(merged,/,
+    "output buffered while hidden is history",
+  );
   assert.doesNotMatch(session, /replayParseDepthRef/, "the replay depth belongs to each terminal, not to the pane");
-  const directWrites = session.match(/(?<!writeChunk\(\(\) =>\s*)term\.write\(bytes,/g) ?? [];
+  const directWrites = session.match(/(?<!writeChunk\(\(\) =>\s*)(?:term|sliceWriter)\.write\(bytes,/g) ?? [];
+  assert.ok((session.match(/writeChunk\(\(\) =>\s*sliceWriter\.write\(bytes,/g) ?? []).length >= 3, "PTY chunks reach xterm through the slice writer");
   assert.equal(directWrites.length, 0, "every PTY chunk write goes through writeChunk");
   assert.match(wiring, /registerOscHandler\(52, handler\)/);
   assert.match(wiring, /enabled === null\) return "unknown"/);
