@@ -14,6 +14,9 @@
 //     its own remote), or an environment that changes git's config (table
 //     below), asks git in every checkout;
 //   - a read that failed is neither kept nor handed to another checkout;
+//   - an environment that changes how git finds the repository asks git in
+//     every checkout;
+//   - a branch that is itself a symbolic ref follows where the chain ends;
 //   - a bare repository inside another repository keeps its own identity.
 //
 //   node scripts/test-git-checkout-remote.cjs
@@ -30,7 +33,9 @@ const ROOT = path.resolve(__dirname, "..");
 // environment: a home of the test's own holds the global file. Variables that
 // change git's config turn the sharing off, so none is set here.
 for (const name of Object.keys(process.env)) {
-  if (/^GIT_(CONFIG|DIR$|COMMON_DIR$|WORK_TREE$)/i.test(name)) delete process.env[name];
+  if (/^GIT_(CONFIG|DIR$|COMMON_DIR$|WORK_TREE$|CEILING_DIRECTORIES$|DISCOVERY_ACROSS_FILESYSTEM$)/i.test(name)) {
+    delete process.env[name];
+  }
 }
 const git = (cwd, args) => execFileSync("git", args, { cwd, env: process.env, encoding: "utf8" }).trim();
 
@@ -48,7 +53,7 @@ async function main() {
       stdin: {
         contents: [
           `export * from ${JSON.stringify(path.join(ROOT, "src", "main", "git-checkout-remote.ts"))};`,
-          `export { gitDirsOf } from ${JSON.stringify(path.join(ROOT, "src", "main", "git-state.ts"))};`,
+          `export { environmentKeepsDiscovery, gitDirsOf } from ${JSON.stringify(path.join(ROOT, "src", "main", "git-state.ts"))};`,
         ].join("\n"),
         resolveDir: ROOT,
         loader: "ts",
@@ -286,6 +291,32 @@ async function main() {
     assert.equal(calls.filter((call) => call === "remote").length, 2, "a config variable in the environment: per checkout");
     console.log("PASS an environment that changes git's config reads per checkout");
 
+    // The environment can also change how git finds the repository (a
+    // relative GIT_DIR is resolved from each folder): the files no longer say
+    // which repository a folder is in, so nothing is shared.
+    const discovery = [
+      [{}, true, "nothing set"],
+      [{ HOME: "/home/x", GIT_TERMINAL_PROMPT: "0", GIT_INDEX_FILE: "/x/index" }, true, "unrelated variables"],
+      [{ GIT_DIR: ".alternate" }, false, "a git directory"],
+      [{ GIT_COMMON_DIR: "/x" }, false, "a common directory"],
+      [{ GIT_WORK_TREE: "." }, false, "a work tree"],
+      [{ GIT_CEILING_DIRECTORIES: "/home" }, false, "a ceiling"],
+      [{ GIT_DISCOVERY_ACROSS_FILESYSTEM: "1" }, false, "discovery across file systems"],
+      [{ GIT_CEILING_DIRECTORIES: "" }, false, "an empty value is set"],
+      [{ git_dir: ".git" }, false, "names in any case"],
+    ];
+    for (const [env, keeps, label] of discovery) {
+      assert.equal(mod.environmentKeepsDiscovery(env), keeps, label);
+    }
+    process.env.GIT_CEILING_DIRECTORIES = path.join(dir, "nowhere");
+    mod.forgetCheckoutRemotes();
+    calls.length = 0;
+    await mod.checkoutRemote(trees[1], read);
+    await mod.checkoutRemote(trees[2], read);
+    delete process.env.GIT_CEILING_DIRECTORIES;
+    assert.equal(calls.filter((call) => call === "remote").length, 2, "a discovery variable in the environment: per checkout");
+    console.log("PASS an environment that changes how git finds the repository reads per checkout");
+
     // A bare repository inside a checkout is its own repository: git stops
     // there and so do the files.
     const nested = path.join(repo, "nested.git");
@@ -298,6 +329,20 @@ async function main() {
     assert.equal(await mod.checkoutRemote(repo, read), "origin");
     fs.rmSync(nested, { recursive: true, force: true });
     console.log("PASS a bare repository inside a checkout keeps its own identity");
+
+    // HEAD -> alias -> main: git names main, so main's remote is followed,
+    // not what the alias would track.
+    git(repo, ["config", "branch.main.remote", "fork"]);
+    git(repo, ["symbolic-ref", "refs/heads/alias", "refs/heads/main"]);
+    git(repo, ["symbolic-ref", "HEAD", "refs/heads/alias"]);
+    assert.equal(git(repo, ["branch", "--show-current"]), "main", "git names where the chain ends");
+    mod.forgetCheckoutRemotes();
+    assert.equal(await mod.checkoutRemote(repo, read), "fork", "an indirect branch follows its target's remote");
+    assert.equal(await mod.checkoutRemote(trees[0], read), "origin", "the other worktrees keep sharing");
+    git(repo, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(repo, ["update-ref", "--no-deref", "-d", "refs/heads/alias"]);
+    git(repo, ["config", "--unset", "branch.main.remote"]);
+    console.log("PASS a branch that is a symbolic ref follows the remote of the branch it names");
 
     // Per-worktree config: every checkout asks git, as before.
     git(repo, ["config", "extensions.worktreeConfig", "true"]);

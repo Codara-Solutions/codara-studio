@@ -6,7 +6,8 @@
 // what each branch tracks and each remote's URL are read once per repository
 // and again when a config file changes; the branch comes from HEAD's file.
 // Shared only when the answer cannot differ per worktree: nothing in the
-// environment git runs with changes its config (environmentKeepsConfig), the
+// environment git runs with changes its config (environmentKeepsConfig) or how
+// it finds the repository (environmentKeepsDiscovery in git-state.ts), the
 // repository's config is plain (repositoryCacheKey in github-cli.ts: no
 // include, no per-worktree config) and so are the global and system files git
 // reads (an `includeIf "onbranch:..."` there can give one worktree its own
@@ -18,7 +19,7 @@ import { promises as fs } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { gitChildEnv } from "./git-env";
 import { plainConfig, repositoryCacheKey } from "./github-cli";
-import { gitDirsOf } from "./git-state";
+import { gitDirsAsGitFinds } from "./git-state";
 
 /** Runs git in `cwd`: its trimmed output, or null when it failed. */
 export type ReadGit = (cwd: string, args: string[]) => Promise<string | null>;
@@ -50,12 +51,19 @@ export function parseBranchRemotes(text: string): Map<string, string> {
 
 /** What `git branch --show-current` prints, from HEAD's file; null when only git can tell. */
 async function currentBranchFromFiles(cwd: string): Promise<string | null> {
-  const dirs = await gitDirsOf(cwd).catch(() => null);
+  const dirs = await gitDirsAsGitFinds(cwd).catch(() => null);
   if (!dirs) return null;
   const head = (await fs.readFile(join(dirs.gitDir, "HEAD"), "utf8").catch(() => "")).trim();
   const name = /^ref:\s*refs\/heads\/(\S+)$/.exec(head)?.[1];
   // A reftable repository keeps a stub HEAD naming ".invalid".
-  if (name) return name === ".invalid" ? null : name;
+  if (name === ".invalid") return null;
+  if (name) {
+    // A branch that is itself a symbolic ref (HEAD -> alias -> main): git
+    // names where the chain ends, so only git can tell. Packed refs are never
+    // symbolic, so a missing loose file leaves the name as it is.
+    const loose = await fs.readFile(join(dirs.commonDir, "refs", "heads", name), "utf8").catch(() => "");
+    return /^ref:/.test(loose) ? null : name;
+  }
   return /^[0-9a-f]{40,64}$/i.test(head) ? "" : null;
 }
 

@@ -16,7 +16,7 @@ import {
 } from "./git-exec";
 import { checkoutRemote } from "./git-checkout-remote";
 import { invalidateGitCache } from "./git-ops";
-import { gitDirsOf } from "./git-state";
+import { gitDirsAsGitFinds } from "./git-state";
 import { createLimiter, workQueueRelevantFingerprint } from "./github-work-queue";
 import { getPreferenceCached } from "./preferences-store";
 import { loadState, onStateSaved } from "./storage";
@@ -305,7 +305,7 @@ function resolveRepoKey(cwd: string): Promise<string | null> {
     pending = (async () => {
       // HEAD's .git names it without starting git (git-state.ts); a folder
       // that does not exist any more, or anything unusual, asks git.
-      const fromFiles = await gitDirsOf(cwd).catch(() => null);
+      const fromFiles = await gitDirsAsGitFinds(cwd).catch(() => null);
       const known = fromFiles && (await access(fromFiles.commonDir).then(() => fromFiles.commonDir, () => null));
       const raw = known ?? (await readText(cwd, ["rev-parse", "--git-common-dir"]));
       if (!raw) return null;

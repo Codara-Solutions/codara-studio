@@ -5,7 +5,8 @@
 // src/main/worktree-cleanup/inspect.ts) lists a repository's worktrees once,
 // not once per workspace: every worktree of a repository lists the same ones.
 // Counted with the spawn census (src/main/spawn-census.ts) on a real
-// repository with three worktrees.
+// repository with three worktrees. When the environment changes how git
+// finds the repository (GIT_DIR and the like), each workspace lists its own.
 //
 //   node scripts/test-rail-discovery-reads.cjs
 
@@ -75,24 +76,36 @@ async function main() {
     }
 
     const census = path.join(dir, "census.json");
-    const result = spawnSync(process.execPath, ["-e", PROBE], {
-      encoding: "utf8",
-      env: {
-        ...gitEnv,
-        CODARA_SPAWN_CENSUS: census,
-        CENSUS_MODULE: path.join(dir, "census.cjs"),
-        INSPECT_MODULE: inspectModule,
-        PROBE_STATE: JSON.stringify({ workspaces, activeWorkspaceId: "main" }),
-      },
-    });
-    assert.equal(result.status, 0, result.stderr);
-    const repos = JSON.parse(result.stdout.trim().split("\n").pop());
+    const probe = (extraEnv) => {
+      fs.rmSync(census, { force: true });
+      const result = spawnSync(process.execPath, ["-e", PROBE], {
+        encoding: "utf8",
+        env: {
+          ...gitEnv,
+          ...extraEnv,
+          CODARA_SPAWN_CENSUS: census,
+          CENSUS_MODULE: path.join(dir, "census.cjs"),
+          INSPECT_MODULE: inspectModule,
+          PROBE_STATE: JSON.stringify({ workspaces, activeWorkspaceId: "main" }),
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const repos = JSON.parse(result.stdout.trim().split("\n").pop());
+      return { repos, counts: JSON.parse(fs.readFileSync(census, "utf8")).byProgram };
+    };
+    const { repos, counts } = probe({});
     assert.equal(repos.length, 1, "one repository");
     assert.deepEqual(repos[0].workspaces, ["main", "one", "two", "three"], "every workspace under it");
     assert.equal(repos[0].registrations, 4, "with its four worktrees");
-    const counts = JSON.parse(fs.readFileSync(census, "utf8")).byProgram;
     assert.equal(counts["git worktree"], 1, `one worktree listing for four workspaces (${counts["git worktree"]})`);
     console.log("PASS the rail lists a repository's worktrees once, not once per workspace");
+
+    // A relative GIT_DIR is resolved from each folder: the files say one
+    // repository, git reads four. Each workspace lists its own.
+    for (const ws of workspaces) git(dir, ["init", "-q", "--bare", "-b", "main", path.join(ws.cwd, ".alternate")]);
+    const alternate = probe({ GIT_DIR: ".alternate" });
+    assert.equal(alternate.counts["git worktree"], 4, `GIT_DIR=.alternate: one listing per workspace (${alternate.counts["git worktree"]})`);
+    console.log("PASS an environment that changes how git finds the repository lists per workspace");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
     if (inspectModule) fs.rmSync(inspectModule, { force: true });

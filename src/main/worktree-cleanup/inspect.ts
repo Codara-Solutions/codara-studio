@@ -30,7 +30,7 @@ import {
   type RendererTerminal,
 } from "../agent-worktrees";
 import { errorText, readGitText, runGit } from "../git-exec";
-import { gitDirsOf } from "../git-state";
+import { gitDirsAsGitFinds } from "../git-state";
 import { parseWorktreePorcelain, type WorktreeRegistration } from "../git-worktree-porcelain";
 import {
   commitSubjectsBetween,
@@ -311,7 +311,7 @@ export async function discoverRepos(
     if (!from || isRemotePath(from) || !existsSync(from)) continue;
     let listing: WorktreeListing;
     try {
-      const dirs = await gitDirsOf(from).catch(() => null);
+      const dirs = await gitDirsAsGitFinds(from).catch(() => null);
       const shared = dirs && existsSync(dirs.commonDir) ? await canonicalPath(dirs.commonDir) : null;
       let pending = shared ? listings.get(shared) : undefined;
       if (!pending) {
