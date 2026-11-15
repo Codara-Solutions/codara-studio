@@ -525,7 +525,7 @@ function sortedEqual(actual, expected, label) {
     }
 
     const directMemory = await listTools("talk", { ...RUN, CODARA_PI_DIRECT_TASK: "1" });
-    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember", "codara_recall", ...WORKTREE_TOOLS, ...SESSION_TOOLS, "codara_share_offer", "codara_open_file", "codara_feedback_send"], "direct Cora roster mismatch");
+    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember", "codara_recall", ...WORKTREE_TOOLS, ...SESSION_TOOLS, "codara_share_offer", "codara_open_file"], "direct Cora roster mismatch");
     const directDefinition = directMemory.definitions.find((tool) => tool.name === "codara_remember");
     assert.ok(!("runId" in directDefinition.inputSchema.properties), "direct memory cannot choose a different run");
     assert.ok(JSON.stringify(directDefinition).length < 1500, "direct memory keeps a compact tool schema");

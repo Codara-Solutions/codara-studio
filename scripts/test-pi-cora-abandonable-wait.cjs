@@ -44,7 +44,7 @@ async function loadExtension() {
   return mod.exports.default;
 }
 
-const TOOLS = ["codara_wait_for_workers", "codara_wait_for_automation", "codara_spawn_workers", "codara_ask_user"];
+const TOOLS = ["codara_wait_for_workers", "codara_wait_for_automation", "codara_feedback_send", "codara_spawn_workers", "codara_ask_user"];
 
 async function main() {
   const extension = await loadExtension();
@@ -83,6 +83,7 @@ async function main() {
   const signalOf = (name) => calls.find((call) => call.name === name)?.signal;
   assert.equal(signalOf("codara_wait_for_workers"), turn.signal, "a worker wait follows the turn's abort");
   assert.equal(signalOf("codara_wait_for_automation"), turn.signal, "an automation wait follows the turn's abort");
+  assert.equal(signalOf("codara_feedback_send"), turn.signal, "Stop withdraws a feedback card, so nothing is sent after it");
   assert.equal(signalOf("codara_spawn_workers"), undefined, "a spawn always finishes");
   assert.equal(signalOf("codara_ask_user"), undefined, "a question always finishes");
 

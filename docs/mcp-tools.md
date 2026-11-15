@@ -99,7 +99,7 @@ environment variable that Codara sets for the agent:
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
 
 A Cora chat that answers directly, without workers, gets `studio` plus
-`codara_remember`, `codara_share_offer`, `codara_open_file`, `codara_feedback_send` and the worktree tools, with the whiteboard and board
+`codara_remember`, `codara_share_offer`, `codara_open_file` and the worktree tools, with the whiteboard and board
 read-only. Cora's chat workers and Talk chats do not get the worktree tools. Requests to draw
 on the whiteboard, change the board or schedule work therefore go to the
 orchestrating chat, and a direct chat hands over to it when a follow-up needs
@@ -1181,8 +1181,9 @@ directly. Never for workers or an imported pull request.
 
 ## Feedback to Codara
 
-In `studio` outside a Cora chat, in `execute`, and in a Cora chat that answers
-directly. Never for workers, automations or an imported pull request.
+In `studio` outside a Cora chat and in `execute`. Never for workers,
+automations, a Cora chat that answers directly (its worker filters Studio
+tools) or an imported pull request. In Cora, Stop withdraws the card.
 
 | Tool | What it does |
 |---|---|

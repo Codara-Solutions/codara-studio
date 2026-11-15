@@ -2046,7 +2046,7 @@ if (IS_AUTOMATION_MODE) {
   TOOLS = WORKER_TOOLS;
   TOOL_TO_RPC = WORKER_TOOL_TO_RPC;
 } else if (process.env.CODARA_PI_DIRECT_TASK === "1") {
-  TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL, RECALL_TOOL, ...WORKTREE_TOOLS, ...SESSION_TOOLS, SHARE_TOOL, OPEN_FILE_TOOL, FEEDBACK_TOOL];
+  TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL, RECALL_TOOL, ...WORKTREE_TOOLS, ...SESSION_TOOLS, SHARE_TOOL, OPEN_FILE_TOOL];
   TOOL_TO_RPC = {
     ...STUDIO_TOOL_TO_RPC,
     codara_remember: "orchestrator.remember",
@@ -2055,7 +2055,6 @@ if (IS_AUTOMATION_MODE) {
     ...SESSION_TOOL_TO_RPC,
     codara_share_offer: "share.offer",
     codara_open_file: "file.open",
-    codara_feedback_send: "feedback.send",
   };
 } else if (STARTUP_RUN_ID) {
   // A chat worker or talk chat: Codara refuses worktree changes from either,
