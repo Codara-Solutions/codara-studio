@@ -729,10 +729,11 @@ silent, so the Sound setting is the only switch for sound.
 
 ## Feedback (2026-11)
 
-**Chosen:** Send feedback is the quick-command dialog's surface (glass panel
-over the light palette scrim, top centered) with the app's own segmented
-control, inputs and buttons; no new tokens. Chosen by the builder from the
-existing patterns, not yet picked by Etienne from variants.
+**Chosen:** Send feedback sits top centered over the light palette scrim on
+a solid surface (`.fb-solid`, the pairing QR card's recipe: panel colour,
+rule border, a deep shadow), never glass, so text behind never shows
+through with or without blur; the agent cards use the same surface. The
+app's own segmented control, inputs and buttons; no new tokens.
 
 **Rules:**
 
