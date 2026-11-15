@@ -4,24 +4,27 @@
 //
 // Every worktree of a plain repository reads the same config, so the remotes,
 // what each branch tracks and each remote's URL are read once per repository
-// and again when its config file changes; the branch comes from HEAD's file.
-// When the answer could differ per worktree (repositoryCacheKey in
-// github-cli.ts: includes, per-worktree config) or the files say nothing
-// clear, each checkout asks git as before.
+// and again when a config file changes; the branch comes from HEAD's file.
+// Shared only when the answer cannot differ per worktree: the repository's
+// config is plain (repositoryCacheKey in github-cli.ts: no include, no
+// per-worktree config) and so are the global and system files git reads (an
+// `includeIf "onbranch:..."` there can give one worktree its own remote).
+// Anything else, or anything unclear, asks git per checkout as before. A read
+// that failed is never kept nor handed to another checkout.
 
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { repositoryCacheKey } from "./github-cli";
+import { plainConfig, repositoryCacheKey } from "./github-cli";
 import { gitDirsOf } from "./git-state";
 
-/** Runs git in `cwd` and gives its trimmed output, "" when it failed. */
-export type ReadGit = (cwd: string, args: string[]) => Promise<string>;
+/** Runs git in `cwd`: its trimmed output, or null when it failed. */
+export type ReadGit = (cwd: string, args: string[]) => Promise<string | null>;
 
 interface RepositoryRemotes {
   stamp: string;
-  names: Promise<string[]>;
-  tracking: Promise<Map<string, string>>;
-  urls: Map<string, Promise<string>>;
+  names: Promise<string[] | null>;
+  tracking: Promise<Map<string, string> | null> | null;
+  urls: Map<string, Promise<string | null>>;
 }
 
 const byRepository = new Map<string, RepositoryRemotes>();
@@ -30,7 +33,7 @@ function lines(text: string): string[] {
   return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
-/** `branch.<name>.remote` entries from `git config -z --get-regexp`; the last value wins, as `git config --get` answers. */
+/** `branch.<name>.remote` entries from `git config -z --list`; the last value wins, as `git config --get` answers. */
 export function parseBranchRemotes(text: string): Map<string, string> {
   const out = new Map<string, string>();
   for (const entry of text.split("\0")) {
@@ -53,58 +56,120 @@ async function currentBranchFromFiles(cwd: string): Promise<string | null> {
   return /^[0-9a-f]{40,64}$/i.test(head) ? "" : null;
 }
 
+// Config given through the environment applies to every git we start and
+// may include other files.
+const ENVIRONMENT_CONFIG = ["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG"];
+
+let outsideFiles: Promise<string[] | null> | null = null;
+
+/**
+ * The global and system config files this git reads (`git var`, git 2.42+),
+ * asked once per run; null when git cannot tell (then nothing is shared).
+ * GIT_CONFIG_SYSTEM fails when GIT_CONFIG_NOSYSTEM turns the system file off.
+ */
+function outsideConfigFiles(cwd: string, read: ReadGit): Promise<string[] | null> {
+  outsideFiles ??= Promise.all([
+    read(cwd, ["var", "GIT_CONFIG_GLOBAL"]),
+    read(cwd, ["var", "GIT_CONFIG_SYSTEM"]),
+  ]).then(([global, system]) => {
+    if (global === null) return null;
+    if (system === null && !process.env.GIT_CONFIG_NOSYSTEM) return null;
+    return [...lines(global), ...lines(system ?? "")];
+  });
+  return outsideFiles;
+}
+
+/** The global and system files' stamps when none of them could make worktrees differ; null otherwise. */
+async function outsideStamp(cwd: string, read: ReadGit): Promise<string | null> {
+  if (ENVIRONMENT_CONFIG.some((name) => process.env[name])) return null;
+  const files = await outsideConfigFiles(cwd, read);
+  if (!files) return null;
+  const stamps = await Promise.all(
+    files.map(async (file) => {
+      const info = await fs.stat(file).catch(() => null);
+      if (!info) return "-";
+      const text = await fs.readFile(file, "utf8").catch(() => null);
+      return text !== null && plainConfig(text) ? `${info.mtimeMs}:${info.size}` : null;
+    }),
+  );
+  return stamps.includes(null) ? null : stamps.join("|");
+}
+
 async function shared(cwd: string, read: ReadGit): Promise<RepositoryRemotes | null> {
   const identity = await repositoryCacheKey(cwd).catch(() => null);
   if (!identity) return null;
+  const outside = await outsideStamp(cwd, read);
+  if (outside === null) return null;
+  const stamp = `${identity.configStamp}|${outside}`;
   const known = byRepository.get(identity.key);
-  if (known && known.stamp === identity.configStamp) return known;
-  const names = read(cwd, ["remote"]).then(lines);
+  if (known && known.stamp === stamp) return known;
   const entry: RepositoryRemotes = {
-    stamp: identity.configStamp,
-    names,
-    tracking: names.then((list) =>
-      list.length ? read(cwd, ["config", "-z", "--get-regexp", "^branch\\..*\\.remote$"]).then(parseBranchRemotes) : new Map(),
-    ),
+    stamp,
+    names: read(cwd, ["remote"]).then((text) => (text === null ? null : lines(text))),
+    tracking: null,
     urls: new Map(),
   };
   byRepository.set(identity.key, entry);
-  // No remote may be a git that failed to answer: the next checkout asks again.
-  void names.then((list) => {
-    if (list.length === 0 && byRepository.get(identity.key) === entry) byRepository.delete(identity.key);
+  void entry.names.then((list) => {
+    if (list === null && byRepository.get(identity.key) === entry) byRepository.delete(identity.key);
   });
   return entry;
 }
 
+/** Every `branch.*.remote`, once per repository. `--list` rather than `--get-regexp`, which fails when nothing matches. */
+function trackingOf(repository: RepositoryRemotes, cwd: string, read: ReadGit): Promise<Map<string, string> | null> {
+  if (!repository.tracking) {
+    const asked = read(cwd, ["config", "-z", "--list"]).then((text) => (text === null ? null : parseBranchRemotes(text)));
+    repository.tracking = asked;
+    void asked.then((map) => {
+      if (map === null && repository.tracking === asked) repository.tracking = null;
+    });
+  }
+  return repository.tracking;
+}
+
 /** The remote worth following for this checkout, or null (none, or two or more with no origin). */
 export async function checkoutRemote(cwd: string, read: ReadGit): Promise<string | null> {
-  const repository = await shared(cwd, read);
-  const remotes = repository ? await repository.names : lines(await read(cwd, ["remote"]));
+  const candidate = await shared(cwd, read);
+  const sharedNames = candidate ? await candidate.names : null;
+  // A shared read that failed is not trusted: this checkout asks git itself.
+  const repository = sharedNames ? candidate : null;
+  const remotes = sharedNames ?? lines((await read(cwd, ["remote"])) ?? "");
   if (remotes.length === 0) return null;
   const fromFiles = repository ? await currentBranchFromFiles(cwd) : null;
-  const branch = fromFiles ?? (await read(cwd, ["branch", "--show-current"]));
+  const branch = fromFiles ?? ((await read(cwd, ["branch", "--show-current"])) ?? "");
   if (branch) {
-    const tracked = repository
-      ? ((await repository.tracking).get(branch) ?? "")
-      : await read(cwd, ["config", "--get", `branch.${branch}.remote`]);
+    const map = repository ? await trackingOf(repository, cwd, read) : null;
+    const tracked = map
+      ? (map.get(branch) ?? "")
+      : ((await read(cwd, ["config", "--get", `branch.${branch}.remote`])) ?? "");
     if (tracked && remotes.includes(tracked)) return tracked;
   }
   if (remotes.includes("origin")) return "origin";
   return remotes.length === 1 ? remotes[0] : null;
 }
 
-/** `git remote get-url <remote>`, once per plain repository. */
+/** `git remote get-url <remote>`, once per plain repository; "" when git could not answer. */
 export async function checkoutRemoteUrl(cwd: string, remote: string, read: ReadGit): Promise<string> {
   const repository = await shared(cwd, read);
-  if (!repository) return read(cwd, ["remote", "get-url", remote]);
-  let url = repository.urls.get(remote);
-  if (!url) {
-    url = read(cwd, ["remote", "get-url", remote]);
-    repository.urls.set(remote, url);
+  if (repository) {
+    let url = repository.urls.get(remote);
+    if (!url) {
+      const asked = read(cwd, ["remote", "get-url", remote]);
+      url = asked;
+      repository.urls.set(remote, asked);
+      void asked.then((answer) => {
+        if (answer === null && repository.urls.get(remote) === asked) repository.urls.delete(remote);
+      });
+    }
+    const answer = await url;
+    if (answer !== null) return answer;
   }
-  return url;
+  return (await read(cwd, ["remote", "get-url", remote])) ?? "";
 }
 
 /** Test seam. */
 export function forgetCheckoutRemotes(): void {
   byRepository.clear();
+  outsideFiles = null;
 }
