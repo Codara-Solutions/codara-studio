@@ -299,6 +299,20 @@ async function main() {
   const { env, workspaces, census } = seed(root, options);
   const app = await electron.launch({ args: [ROOT], env, timeout: 60_000 });
   const result = { workspaces: workspaces.length, projects: options.projects, cpus: os.cpus().length };
+  // The first write at least a minute after boot: who started the first
+  // minute's children (the file is rewritten every 5 s).
+  let firstMinute = null;
+  const watchFirstMinute = setInterval(() => {
+    try {
+      const now = readCensus(census);
+      if (now.writtenAt - now.startedAt >= 60_000) {
+        firstMinute = now;
+        clearInterval(watchFirstMinute);
+      }
+    } catch {
+      /* not written yet */
+    }
+  }, 500);
   try {
     const page = await app.firstWindow({ timeout: 60_000 });
     await page.locator(`[data-workspace-id="${workspaces[0].id}"]`).first().waitFor({ state: "visible", timeout: 60_000 });
@@ -327,10 +341,34 @@ async function main() {
     result.refocus = difference(refocused, blurredEnd);
     result.peak60sAfterWarmup = peakWindow(refocused, Math.floor((options.warmupMs + 5_000) / 1000), 60);
     result.peak60sFromBoot = peakWindow(refocused, 0, 60);
+    result.firstMinuteTotal = Array.from({ length: 60 }, (_, s) => refocused.perSecond[String(s)] ?? 0).reduce((a, b) => a + b, 0);
+    if (firstMinute) {
+      result.firstMinute = difference(firstMinute, { total: 0, writtenAt: firstMinute.startedAt, byProgram: {}, byCaller: {} });
+    }
+    const counts = (entries, limit) =>
+      Object.entries(entries)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, limit)
+        .map(([name, count]) => `| ${name.replace(/\|/g, "\\|")} | ${count} |`);
+    const first = result.firstMinute
+      ? [
+          `### First ${(result.firstMinute.minutes * 60).toFixed(0)} s from boot: ${result.firstMinute.total} child processes (${result.firstMinuteTotal} in the first 60 s)`,
+          "",
+          "| Program | Count |",
+          "|---|---:|",
+          ...counts(result.firstMinute.byProgram, 25),
+          "",
+          "| Program @ caller | Count |",
+          "|---|---:|",
+          ...counts(result.firstMinute.byCaller, 30),
+          "",
+        ].join("\n")
+      : `First 60 s from boot: ${result.firstMinuteTotal} child processes.\n`;
     console.log(
       [
         `## Spawn census: ${workspaces.length} workspaces (${options.projects} projects, ${options.worktrees} worktrees each), one terminal running a Codex stand-in, ${os.cpus().length} CPUs`,
         "",
+        first,
         table(`Idle, window focused (${result.focused.minutes.toFixed(1)} min)`, result.focused),
         table(`Idle, window blurred (${result.blurred.minutes.toFixed(1)} min)`, result.blurred),
         `Peak in any 60 s after warm-up: ${result.peak60sAfterWarmup}. Peak in any 60 s from boot: ${result.peak60sFromBoot}. In the 10 s after refocus: ${result.refocus10s}.`,
@@ -340,6 +378,7 @@ async function main() {
       ].join("\n"),
     );
   } finally {
+    clearInterval(watchFirstMinute);
     await app.close().catch(() => {});
   }
   if (options.json) {

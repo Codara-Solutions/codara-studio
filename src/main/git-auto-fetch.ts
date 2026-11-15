@@ -14,7 +14,9 @@ import {
   runGit,
   type RunResult,
 } from "./git-exec";
+import { checkoutRemote } from "./git-checkout-remote";
 import { invalidateGitCache } from "./git-ops";
+import { gitDirsAsGitFinds } from "./git-state";
 import { createLimiter, workQueueRelevantFingerprint } from "./github-work-queue";
 import { getPreferenceCached } from "./preferences-store";
 import { loadState, onStateSaved } from "./storage";
@@ -286,11 +288,12 @@ const unsubscribes: Array<() => void> = [];
 const repoKeyByCwd = new Map<string, Promise<string | null>>();
 const remoteByCwd = new Map<string, Promise<string | null>>();
 
-function readText(cwd: string, args: string[]): Promise<string> {
+/** Trimmed output, or null when git failed. */
+function readText(cwd: string, args: string[]): Promise<string | null> {
   return deps
     .runGit(cwd, args, { internal: true })
     .then((r) => r.stdout.trim())
-    .catch(() => "");
+    .catch(() => null);
 }
 
 // `rev-parse --git-common-dir` prints a path relative to cwd on many gits
@@ -300,7 +303,11 @@ function resolveRepoKey(cwd: string): Promise<string | null> {
   let pending = repoKeyByCwd.get(cwd);
   if (!pending) {
     pending = (async () => {
-      const raw = await readText(cwd, ["rev-parse", "--git-common-dir"]);
+      // HEAD's .git names it without starting git (git-state.ts); a folder
+      // that does not exist any more, or anything unusual, asks git.
+      const fromFiles = await gitDirsAsGitFinds(cwd).catch(() => null);
+      const known = fromFiles && (await access(fromFiles.commonDir).then(() => fromFiles.commonDir, () => null));
+      const raw = known ?? (await readText(cwd, ["rev-parse", "--git-common-dir"]));
       if (!raw) return null;
       const absolute = path.resolve(cwd, raw);
       let canonical = absolute;
@@ -323,20 +330,7 @@ function resolveRepoKey(cwd: string): Promise<string | null> {
 function resolveRemote(cwd: string): Promise<string | null> {
   let pending = remoteByCwd.get(cwd);
   if (!pending) {
-    pending = (async () => {
-      const remotes = (await readText(cwd, ["remote"]))
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean);
-      if (remotes.length === 0) return null;
-      const branch = await readText(cwd, ["branch", "--show-current"]);
-      if (branch) {
-        const tracked = await readText(cwd, ["config", "--get", `branch.${branch}.remote`]);
-        if (tracked && remotes.includes(tracked)) return tracked;
-      }
-      if (remotes.includes("origin")) return "origin";
-      return remotes.length === 1 ? remotes[0] : null;
-    })();
+    pending = checkoutRemote(cwd, readText);
     remoteByCwd.set(cwd, pending);
   }
   return pending;
