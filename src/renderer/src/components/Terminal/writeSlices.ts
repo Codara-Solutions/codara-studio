@@ -41,6 +41,10 @@ interface XtermWriteQueue {
  * queue, exactly as its timer-driven calls would. The timer it had already
  * set then finds the queue empty. scripts/test-terminal-replay-slices.cjs
  * checks this on both xterm builds the app ships.
+ *
+ * Never call it from a write callback or a parser handler: the loop running
+ * there has not advanced past its current chunk, which would be parsed
+ * twice. React runs effect cleanups outside both.
  */
 export function xtermQueueDrainer(term: object): (() => void) | null {
   const queue = (term as { _core?: { _writeBuffer?: Partial<XtermWriteQueue> } })._core?._writeBuffer;
