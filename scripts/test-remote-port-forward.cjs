@@ -31,7 +31,8 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const esbuild = require("esbuild");
-const { Server: SshServer, utils: sshUtils } = require("ssh2");
+const { Server: SshServer } = require("ssh2");
+const { generateAcceptedHostKey } = require("./ssh-test-host-key.cjs");
 
 const ROOT = path.resolve(__dirname, "..");
 const TMP = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-port-forward-")));
@@ -372,7 +373,7 @@ function listingOutput() {
 }
 
 function startSshServer() {
-  const hostKey = sshUtils.generateKeyPairSync("ed25519").private;
+  const hostKey = generateAcceptedHostKey();
   const server = new SshServer({ hostKeys: [hostKey] }, (client) => {
     remote.clients.push(client);
     client.on("error", () => undefined);
