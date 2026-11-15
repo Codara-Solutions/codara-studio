@@ -7,10 +7,12 @@
 //
 //   node --expose-gc scripts/measure-terminal-backlog.cjs [megabytes]
 //
-// The window's task is approximated with @xterm/headless, which parses with
-// the same code as the renderer's xterm: one message's structured clone (what
-// IPC does), its text decode (the agent sniffer reads every chunk), and the
-// xterm parse of that message, which runs in one go.
+// The window's work is approximated with @xterm/headless, which parses with
+// the same code as the renderer's xterm: each message's structured clone (what
+// IPC does) and text decode (the agent sniffer reads every chunk) as one task,
+// then the xterm parse, both as one write (xterm parses a write in one go) and
+// as the renderer's 128 KB slices (writeSlices.ts), with the longest stretch
+// the event loop was blocked.
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -18,6 +20,8 @@ const v8 = require("node:v8");
 const esbuild = require("esbuild");
 const { Terminal } = require("@xterm/headless");
 const { createController, stubPlugin, localOptions, MODULE_TS, CACHE_ROOT } = require("./test-pty-spawn-serialization.cjs");
+
+const WRITE_SLICES_TS = path.join(__dirname, "..", "src", "renderer", "src", "components", "Terminal", "writeSlices.ts");
 
 const MB = 1024 * 1024;
 const COLS = 200;
@@ -77,7 +81,39 @@ async function used() {
   return { heap: usage.heapUsed, buffers: usage.arrayBuffers };
 }
 
-async function measure(pty, controller, name, total) {
+// Longest stretch the event loop is blocked between start and stop, sampled
+// with a 1 ms timer chain.
+function blockMonitor() {
+  let last = performance.now();
+  let longest = 0;
+  let stopped = false;
+  const tick = () => {
+    const now = performance.now();
+    longest = Math.max(longest, now - last);
+    last = now;
+    if (!stopped) setTimeout(tick, 1);
+  };
+  setTimeout(tick, 1);
+  return async () => {
+    // The monitor sees the last stretch on its next tick.
+    await sleep(5);
+    stopped = true;
+    return longest;
+  };
+}
+
+// The longest blocked stretch while xterm parses `writes`, queued at once.
+async function longestParse(writes) {
+  const term = new Terminal({ cols: COLS, rows: ROWS, scrollback: 3_000, allowProposedApi: true });
+  await new Promise((resolve) => term.write("", resolve));
+  const stop = blockMonitor();
+  await new Promise((resolve) => writes.forEach((w, i) => term.write(w, i === writes.length - 1 ? resolve : undefined)));
+  const longest = await stop();
+  term.dispose();
+  return longest;
+}
+
+async function measure(pty, controller, sliceForWrite, name, total) {
   const sent = [];
   const wc = { isDestroyed: () => false, send: (channel, payload) => sent.push({ channel, payload }) };
   const id = `measure-${name.replace(/\W+/g, "-")}`;
@@ -102,22 +138,19 @@ async function measure(pty, controller, name, total) {
     seen = sent.length;
     await sleep(50);
   }
-  // The replay: slices on the replay channel (each with its bytes), or the
-  // whole backlog as one message on the data channel.
-  const replay = sent
-    .map((m) => (m.channel === `pty:replay:${id}` ? m.payload.data : m.channel === `pty:data:${id}` ? m.payload : null))
-    .filter(Boolean);
-  const term = new Terminal({ cols: COLS, rows: ROWS, scrollback: 3_000, allowProposedApi: true });
+  // The replay: the whole backlog as one message on the data channel.
+  const replay = sent.filter((m) => m.channel === `pty:data:${id}`).map((m) => m.payload);
   const decoder = new TextDecoder();
-  let longest = 0;
-  for (const payload of replay) {
+  let receive = 0;
+  const copies = replay.map((payload) => {
     const start = performance.now();
     const copy = v8.deserialize(v8.serialize(payload));
     decoder.decode(copy, { stream: true });
-    await new Promise((resolve) => term.write(copy, resolve));
-    longest = Math.max(longest, performance.now() - start);
-  }
-  term.dispose();
+    receive = Math.max(receive, performance.now() - start);
+    return copy;
+  });
+  const oneWrite = await longestParse(copies);
+  const sliced = await longestParse(copies.flatMap((copy) => sliceForWrite(copy)));
   pty.killImmediate(id);
   return {
     held,
@@ -126,7 +159,9 @@ async function measure(pty, controller, name, total) {
     tail: snapshot.tailBytes,
     messages: replay.length,
     largest: Math.max(0, ...replay.map((p) => p.byteLength)),
-    longest,
+    receive,
+    oneWrite,
+    sliced,
   };
 }
 
@@ -141,14 +176,18 @@ async function main() {
     const controller = createController();
     globalThis.__codaraPtySpawnHarness = controller;
     const pty = require(outfile);
+    const slicesOut = path.join(tmp, "write-slices.cjs");
+    await esbuild.build({ entryPoints: [WRITE_SLICES_TS], outfile: slicesOut, bundle: true, platform: "node", format: "cjs", logLevel: "silent" });
+    const { sliceForWrite } = require(slicesOut);
     const fmt = (bytes) => `${(bytes / MB).toFixed(1)} MB`;
     console.log(`${total / MB} MB of output into a paused pane, ${COLS}x${ROWS}, 3,000 lines of scrollback`);
     for (const name of Object.keys(WORKLOADS)) {
-      const r = await measure(pty, controller, name, total);
+      const r = await measure(pty, controller, sliceForWrite, name, total);
       console.log(`${name}:`);
       console.log(`  held after the output: ${fmt(r.held.heap + r.held.buffers)}: ${fmt(r.held.buffers)} of buffers and ${fmt(r.held.heap)} of heap (backlog ${fmt(r.backlog)}, tail ${fmt(r.tail)})`);
       console.log(`  main's time to take in the output: ${Math.round(r.ingest)} ms`);
-      console.log(`  switch back: ${r.messages} messages, largest ${fmt(r.largest)}, longest task ${Math.round(r.longest)} ms`);
+      console.log(`  switch back: ${r.messages} messages, largest ${fmt(r.largest)}; receive and decode ${Math.round(r.receive)} ms`);
+      console.log(`  xterm parse, longest block: one write ${Math.round(r.oneWrite)} ms, 128 KB slices ${Math.round(r.sliced)} ms`);
     }
     pty.disposeAll();
   } finally {

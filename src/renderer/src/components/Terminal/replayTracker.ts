@@ -17,11 +17,6 @@
 // of a replay with the first live bytes behind it, and a flag would then either
 // clear too early (live bytes attributed to history) or too late (a real
 // server start ignored).
-//
-// A paused pane's backlog is different: main sends it in slices on the replay
-// channel itself, each carrying its bytes, its end offset and the listener it
-// is for in one message, so a pane knows exactly which slices are its own and
-// which it took in (slice / tookIn / replayedTo).
 
 export interface ReplayTracker {
   /** Main announced `bytes` of replayed history heading down the data channel. */
@@ -34,35 +29,11 @@ export interface ReplayTracker {
    * skipping one auto-open is not.
    */
   consume(chunkLength: number): boolean;
-  /** This listener's name in resume(): main addresses its slices to it. */
-  readonly token: number;
-  /**
-   * One slice of a paused pane's backlog arrived on the replay channel.
-   * Returns the bytes to write, or null. A slice addressed to this listener
-   * is always written: main sends each such slice once, after this listener
-   * exists. One addressed to another listener is skipped, unless this pane
-   * only watches (a read-only mirror) or the slice is addressed to nobody;
-   * then only bytes past what it already wrote are kept (a slice put back by
-   * a pause comes again with its first offset).
-   */
-  slice(data: Uint8Array, end: number, token: number | undefined, watchOnly: boolean): Uint8Array | null;
-  /** The pane took in (parsed or kept) its slice ending at `end`. */
-  tookIn(end: number): void;
-  /** End offset of the last slice addressed to this listener it took in; 0 before. */
-  replayedTo(): number;
 }
-
-// Unique per listener, also across reloads of the same window: main retires
-// tokens by exact value, so each document counts from its own random base.
-let lastToken = Math.floor(Math.random() * 2 ** 40) * 1000;
 
 export function createReplayTracker(): ReplayTracker {
   let pending = 0;
-  let seen = 0;
-  let taken = 0;
-  const token = ++lastToken;
   return {
-    token,
     announce(bytes: number): void {
       if (!Number.isFinite(bytes) || bytes <= 0) return;
       pending += bytes;
@@ -71,25 +42,6 @@ export function createReplayTracker(): ReplayTracker {
       if (pending <= 0) return false;
       pending = Math.max(0, pending - Math.max(0, chunkLength));
       return true;
-    },
-    slice(data: Uint8Array, end: number, to: number | undefined, watchOnly: boolean): Uint8Array | null {
-      if (!Number.isFinite(end)) return null;
-      if (to === token) {
-        seen = Math.max(seen, end);
-        return data;
-      }
-      if (to !== undefined && !watchOnly) return null;
-      if (end <= seen) return null;
-      const start = end - data.length;
-      const fresh = seen > start ? data.subarray(seen - start) : data;
-      seen = end;
-      return fresh;
-    },
-    tookIn(end: number): void {
-      taken = Math.max(taken, end);
-    },
-    replayedTo(): number {
-      return taken;
     },
   };
 }

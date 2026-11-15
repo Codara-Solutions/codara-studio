@@ -183,20 +183,6 @@ interface Session {
   // is fine since the in-memory xterm snapshot covers the pre-unmount era.
   detachedBacklog: Buffer[];
   detachedBacklogBytes: number;
-  // resume() replays the backlog in slices, one per turn (replaySlice).
-  // While one runs, attached stays false so live output queues behind it.
-  // Each slice is addressed to the listener that asked for the replay
-  // (replayToken) and kept until that listener confirms it, so a pane that
-  // unmounts mid-replay gets back exactly the slices it never took in.
-  replayTimer: NodeJS.Immediate | null;
-  replayToken: number | undefined;
-  // A pause with an offset retires the pausing pane's token, and a reload
-  // retires every token the old document used; a late resume naming a
-  // retired token is ignored. Exact matches (tokens are random per
-  // document), at most REPLAY_TOKEN_MEMORY of each.
-  replayRetired: Set<number>;
-  replaySeen: Set<number>;
-  replayInFlight: Array<{ buf: Buffer; end: number }>;
   // Set true synchronously by killNow before the underlying pty.kill() runs.
   // Gates the pty.onData closure: on Windows ConPTY drains stdout for up to
   // ~1 second after kill (FLUSH_DATA_INTERVAL in node-pty's windowsConoutConnection),
@@ -424,55 +410,6 @@ function announceReplay(s: Session, byteLength: number): void {
 // accumulated over an extended laptop sleep while remaining bounded. The
 // backlog is FIFO-trimmed past the cap.
 const DETACHED_BACKLOG_BYTES = 16 * 1024 * 1024;
-// The backlog goes back in slices of this size with a turn of the event loop
-// between them: one multi-megabyte message is one structured clone and one
-// xterm parse, a single long task that freezes the window.
-const REPLAY_SLICE_BYTES = 128 * 1024;
-
-function trimBacklog(s: Session): void {
-  while (
-    s.detachedBacklog.length > 1 &&
-    s.detachedBacklogBytes - (s.detachedBacklog[0]?.length ?? 0) > DETACHED_BACKLOG_BYTES
-  ) {
-    const dropped = s.detachedBacklog.shift();
-    if (dropped) s.detachedBacklogBytes -= dropped.length;
-  }
-}
-
-// Replay offsets: one counter for every session, so an offset a pane holds
-// from an earlier session at the same id (respawn) is below every new one.
-// A slice put back by pause() keeps its offset when it is sent again, so a
-// read-only mirror that already wrote it can drop the second copy.
-let replayStreamEnd = 0;
-const resentSliceEnd = new WeakMap<Buffer, number>();
-
-const REPLAY_TOKEN_MEMORY = 64;
-
-function rememberToken(set: Set<number>, token: number): void {
-  set.delete(token);
-  set.add(token);
-  if (set.size > REPLAY_TOKEN_MEMORY) set.delete(set.values().next().value as number);
-}
-
-// The tokens used so far by this session's renderer listeners are all dead.
-function retireSeenTokens(s: Session): void {
-  for (const token of s.replaySeen) rememberToken(s.replayRetired, token);
-  s.replaySeen.clear();
-}
-
-function stopReplay(s: Session): void {
-  if (s.replayTimer) {
-    clearImmediate(s.replayTimer);
-    s.replayTimer = null;
-  }
-}
-
-function clearReplay(s: Session): void {
-  stopReplay(s);
-  s.replayInFlight = [];
-  s.replayToken = undefined;
-  retireSeenTokens(s);
-}
 
 // Agent-socket credentials a pane must never inherit. Scoped capabilities
 // carry them for Cora's Pi processes, which are not PTYs.
@@ -792,7 +729,6 @@ async function spawnWithSessionLock(
       existing.attached = true;
       existing.detachedBacklog = [];
       existing.detachedBacklogBytes = 0;
-      clearReplay(existing);
       const snapshot = tailSnapshot(existing);
       if (snapshot) {
         try {
@@ -1191,11 +1127,6 @@ async function doSpawnRemote(
     attached: true,
     detachedBacklog: [],
     detachedBacklogBytes: 0,
-    replayTimer: null,
-    replayToken: undefined,
-    replayRetired: new Set(),
-    replaySeen: new Set(),
-    replayInFlight: [],
     disposed: false,
     exitEmitted: false,
     sanctioned: false,
@@ -1662,11 +1593,6 @@ function doSpawn(
     attached: true,
     detachedBacklog: [],
     detachedBacklogBytes: 0,
-    replayTimer: null,
-    replayToken: undefined,
-    replayRetired: new Set(),
-    replaySeen: new Set(),
-    replayInFlight: [],
     disposed: false,
     exitEmitted: false,
     sanctioned: false,
@@ -1917,7 +1843,13 @@ function enqueueData(id: string, data: string | Buffer): void {
   if (!s.attached) {
     s.detachedBacklog.push(chunk);
     s.detachedBacklogBytes += chunk.length;
-    trimBacklog(s);
+    while (
+      s.detachedBacklog.length > 1 &&
+      s.detachedBacklogBytes - (s.detachedBacklog[0]?.length ?? 0) > DETACHED_BACKLOG_BYTES
+    ) {
+      const dropped = s.detachedBacklog.shift();
+      if (dropped) s.detachedBacklogBytes -= dropped.length;
+    }
     return;
   }
   s.pendingChunks.push(chunk);
@@ -1940,53 +1872,27 @@ function enqueueData(id: string, data: string | Buffer): void {
 // replayed on resume. Idempotent: re-pausing an already-paused session is a
 // no-op. Pending chunks queued for the next 16 ms flush are absorbed into the
 // backlog so the small window between cleanup and pause is not lost.
-//
-// A pause during a replay stops it; the rest waits for the next resume.
-// `replayedTo` is the end offset of the last replay slice the pane took in
-// (xterm parsed it, or the hidden-pane buffer kept it), sent by a pane that
-// removes its listener right after this call: slices past it go back to the
-// front of the backlog. Without it (host suspend, a hidden document) the
-// listener stays, so slices in flight stay owed to it until it confirms them.
-// `token` names the pausing pane: it is retired, and only the pane the slices
-// were addressed to gives them back.
-export function pause(id: string, replayedTo?: number, token?: number): void {
+export function pause(id: string): void {
   const s = sessions.get(id);
   if (!s) return;
   resetRenderFlow(s);
-  stopReplay(s);
-  if (token !== undefined) {
-    rememberToken(s.replayRetired, token);
-    s.replaySeen.delete(token);
-  }
-  if (typeof replayedTo === "number" && (token === undefined || token === s.replayToken)) {
-    const inFlight = s.replayInFlight;
-    s.replayInFlight = [];
-    s.replayToken = undefined;
-    const back: Buffer[] = [];
-    let backBytes = 0;
-    for (const { buf, end } of inFlight) {
-      if (end <= replayedTo) continue;
-      const start = end - buf.length;
-      const part = replayedTo > start ? buf.subarray(replayedTo - start) : buf;
-      resentSliceEnd.set(part, end);
-      back.push(part);
-      backBytes += part.length;
-    }
-    if (back.length > 0) {
-      s.detachedBacklog = [...back, ...s.detachedBacklog];
-      s.detachedBacklogBytes += backBytes;
-    }
-  }
-  if (s.attached) {
-    s.attached = false;
+  if (!s.attached) return;
+  s.attached = false;
+  if (s.pendingChunks.length > 0) {
     for (const chunk of s.pendingChunks) {
       s.detachedBacklog.push(chunk);
       s.detachedBacklogBytes += chunk.length;
     }
     s.pendingChunks = [];
     s.pendingBytes = 0;
+    while (
+      s.detachedBacklog.length > 1 &&
+      s.detachedBacklogBytes - (s.detachedBacklog[0]?.length ?? 0) > DETACHED_BACKLOG_BYTES
+    ) {
+      const dropped = s.detachedBacklog.shift();
+      if (dropped) s.detachedBacklogBytes -= dropped.length;
+    }
   }
-  trimBacklog(s);
   if (s.flushTimer) {
     clearTimeout(s.flushTimer);
     s.flushTimer = null;
@@ -2002,8 +1908,7 @@ export function pause(id: string, replayedTo?: number, token?: number): void {
 export function pauseAllForHostSuspend(): number {
   let paused = 0;
   for (const [id, s] of sessions) {
-    if (!s.webContents || s.webContents.isDestroyed()) continue;
-    if (!s.attached && !s.replayTimer) continue;
+    if (!s.webContents || s.webContents.isDestroyed() || !s.attached) continue;
     pause(id);
     paused += 1;
   }
@@ -2014,133 +1919,32 @@ export function pauseAllForHostSuspend(): number {
 // detachedBacklog through the same webContents.send channel as live data so
 // the onData listener receives the missed bytes in arrival order, then flips
 // `attached` back to true so subsequent pty output resumes the normal flush
-// path. The first slice goes before this returns, the rest one per turn.
-// Safe to call on a fresh session (no backlog, attached already true) and
-// during a replay (it carries on). `token` names the pane listener the
-// slices are for; other listeners on the channel ignore them.
-export function resume(id: string, redraw = false, token?: number): void {
+// path. Safe to call on a fresh session (no backlog, attached already true).
+export function resume(id: string, redraw = false): void {
   const s = sessions.get(id);
   if (!s) return;
-  if (token !== undefined && s.replayRetired.has(token)) return;
-  if (token !== undefined) {
-    s.replayToken = token;
-    rememberToken(s.replaySeen, token);
-  }
-  if (!s.replayTimer) replaySlice(s);
-  if (redraw) requestTerminalRedraw(s);
-}
-
-// Each slice is one message on the replay channel carrying its bytes, its end
-// offset and the listener it is for, so a pane never gets one without the
-// others. Slices
-// are plain byte ranges: the renderer feeds them to xterm and its decoders as
-// Uint8Array in streaming mode, so a slice may end inside an escape sequence
-// or a UTF-8 character, exactly as pty chunks do.
-function replaySlice(s: Session): void {
-  s.replayTimer = null;
-  if (sessions.get(s.id) !== s || s.disposed) return;
-  const wc = s.webContents;
-  if (s.detachedBacklog.length > 0 && wc && !wc.isDestroyed()) {
-    const head = s.detachedBacklog[0];
-    const resentEnd = resentSliceEnd.get(head);
-    let slice: Buffer;
-    let end: number;
-    if (resentEnd !== undefined) {
-      s.detachedBacklog.shift();
-      slice = head;
-      end = resentEnd;
-    } else {
-      const parts: Buffer[] = [];
-      let size = 0;
-      let whole = 0;
-      for (const chunk of s.detachedBacklog) {
-        if (size + chunk.length > REPLAY_SLICE_BYTES) {
-          if (size < REPLAY_SLICE_BYTES) {
-            const room = REPLAY_SLICE_BYTES - size;
-            parts.push(chunk.subarray(0, room));
-            s.detachedBacklog[whole] = chunk.subarray(room);
-            size += room;
-          }
-          break;
-        }
-        parts.push(chunk);
-        size += chunk.length;
-        whole += 1;
-      }
-      s.detachedBacklog.splice(0, whole);
-      slice = parts.length === 1 ? parts[0] : Buffer.concat(parts, size);
-      replayStreamEnd += size;
-      end = replayStreamEnd;
-    }
-    const n = slice.length;
-    s.detachedBacklogBytes -= n;
-    try {
-      wc.send(s.replayChannel, {
-        bytes: n,
-        end,
-        token: s.replayToken,
-        data: new Uint8Array(slice.buffer, slice.byteOffset, slice.byteLength),
-      });
-    } catch {
-      /* frame disposed mid-send; the bytes stay in flight for a later pause */
-    }
-    s.replayInFlight.push({ buf: slice, end });
-    noteRenderBytesSent(s, n);
-    if (s.detachedBacklog.length > 0) {
-      s.replayTimer = setImmediate(() => replaySlice(s));
-      return;
-    }
+  if (
+    s.detachedBacklog.length > 0 &&
+    s.webContents &&
+    !s.webContents.isDestroyed()
+  ) {
+    const total = s.detachedBacklogBytes;
+    const merged =
+      s.detachedBacklog.length === 1
+        ? s.detachedBacklog[0]
+        : Buffer.concat(s.detachedBacklog, total);
+    announceReplay(s, merged.byteLength);
+    s.webContents.send(
+      s.dataChannel,
+      new Uint8Array(merged.buffer, merged.byteOffset, merged.byteLength),
+    );
+    noteRenderBytesSent(s, merged.byteLength);
   }
   s.detachedBacklog = [];
   s.detachedBacklogBytes = 0;
   s.attached = true;
   s.lastAttachAt = Date.now();
-}
-
-// The window's document is being replaced (reload, dev-server full reload)
-// without detachForWebContents: its pane listeners are going away. Every
-// token they used is retired, and
-// slices still owed to them go back to the front of the backlog. If the
-// session was already attached (the last slice sent, acks pending), it is
-// paused like pause() does, so the new document's resume replays that
-// history before any newer output.
-export function forgetReplayListeners(wc: WebContents): void {
-  for (const s of sessions.values()) {
-    if (s.webContents !== wc) continue;
-    stopReplay(s);
-    retireSeenTokens(s);
-    const back = s.replayInFlight.map(({ buf, end }) => {
-      resentSliceEnd.set(buf, end);
-      return buf;
-    });
-    s.replayInFlight = [];
-    s.replayToken = undefined;
-    if (back.length === 0) continue;
-    s.detachedBacklog = [...back, ...s.detachedBacklog];
-    s.detachedBacklogBytes += back.reduce((total, buf) => total + buf.length, 0);
-    if (s.attached) {
-      resetRenderFlow(s);
-      s.attached = false;
-      for (const chunk of s.pendingChunks) {
-        s.detachedBacklog.push(chunk);
-        s.detachedBacklogBytes += chunk.length;
-      }
-      s.pendingChunks = [];
-      s.pendingBytes = 0;
-      if (s.flushTimer) {
-        clearTimeout(s.flushTimer);
-        s.flushTimer = null;
-      }
-    }
-    trimBacklog(s);
-  }
-}
-
-// The pane took in every replay slice addressed to it up to `end`.
-export function ackReplay(id: string, end: number): void {
-  const s = sessions.get(id);
-  if (!s || !Number.isFinite(end)) return;
-  while (s.replayInFlight.length > 0 && s.replayInFlight[0].end <= end) s.replayInFlight.shift();
+  if (redraw) requestTerminalRedraw(s);
 }
 
 // Called by the renderer's raw-tail-reattach panes (the ChatPanel backend
@@ -2287,7 +2091,6 @@ export function detach(id: string): void {
   s.attached = true;
   s.detachedBacklog = [];
   s.detachedBacklogBytes = 0;
-  clearReplay(s);
   s.pendingChunks = [];
   s.pendingBytes = 0;
   if (s.flushTimer) {
@@ -2297,12 +2100,6 @@ export function detach(id: string): void {
 }
 
 function flushDataNow(s: Session): void {
-  // Every exit path flushes before it reports the exit: finish a replay in
-  // flight first, so the program's last output is not lost behind it.
-  while (s.replayTimer) {
-    clearImmediate(s.replayTimer);
-    replaySlice(s);
-  }
   if (s.flushTimer) {
     clearTimeout(s.flushTimer);
     s.flushTimer = null;
@@ -2841,7 +2638,6 @@ export function detachForWebContents(wc: WebContents): void {
     s.attached = true;
     s.detachedBacklog = [];
     s.detachedBacklogBytes = 0;
-    clearReplay(s);
     s.pendingChunks = [];
     s.pendingBytes = 0;
     if (s.flushTimer) {
@@ -3008,7 +2804,6 @@ async function disposeSessionsGraceful(
     s.tailHead = 0;
     s.detachedBacklog = [];
     s.detachedBacklogBytes = 0;
-    clearReplay(s);
     releaseNativeProfileSessionLeases(s);
     revokePaneAccess(s);
     sessions.delete(id);
@@ -3280,7 +3075,6 @@ function killNow(id: string): void {
   s.tailHead = 0;
   s.detachedBacklog = [];
   s.detachedBacklogBytes = 0;
-  clearReplay(s);
   releaseNativeProfileSessionLeases(s);
   revokePaneAccess(s);
   sessions.delete(id);

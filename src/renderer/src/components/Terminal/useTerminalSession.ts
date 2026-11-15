@@ -38,6 +38,7 @@ import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
 import { createReplayTracker } from "./replayTracker";
+import { createSliceWriter, resumableTail, type SliceWriter } from "./writeSlices";
 import { replayFloorRow, replayPersistedScrollback } from "./persistedScrollback";
 import {
   registerCwdHandler,
@@ -426,7 +427,7 @@ function rememberXtermBufferSnapshot(
   const pendingBytes =
     snapshot.pendingBytes &&
     snapshot.pendingBytes.byteLength > MAX_XTERM_SNAPSHOT_PENDING_BYTES
-      ? snapshot.pendingBytes.slice(-MAX_XTERM_SNAPSHOT_PENDING_BYTES)
+      ? resumableTail(snapshot.pendingBytes, MAX_XTERM_SNAPSHOT_PENDING_BYTES).slice()
       : snapshot.pendingBytes;
   const bounded = { ...snapshot, text, pendingBytes };
   forgetXtermBufferSnapshot(sessionId);
@@ -838,9 +839,9 @@ export function useTerminalSession({
   // surfaced via UI affordances on the visible pane, so deferring them while
   // hidden is fine. They resume on the next chunk after the flush.
   const hiddenBufferRef = useRef<Uint8Array[]>([]);
-  // The replay token of the mounted pane's live listeners (see replayTracker),
-  // undefined while none are registered.
-  const replayTokenRef = useRef<number | undefined>(undefined);
+  // The mounted xterm's slice writer (writeSlices.ts): pty bytes reach xterm
+  // in slices of at most 128 KB, and what it has not parsed yet is known.
+  const sliceWriterRef = useRef<SliceWriter | null>(null);
   const hiddenBytesRef = useRef<number>(0);
   const hiddenLineBreaksRef = useRef<number>(0);
   // A visible pane can still be catching up on output accumulated while its
@@ -949,10 +950,6 @@ export function useTerminalSession({
     // so a mid-parse remount can't overwrite the cached full buffer with a
     // partially-populated one (see the snapshot replay block below).
     let replayPending = false;
-    // Replayed history on this pane's data stream, and which slices of a
-    // paused backlog it took in. One per listener lifetime (this effect run),
-    // at effect level so the unmount cleanup can tell main where it stopped.
-    const replayTracker = createReplayTracker();
 
     // Defer one tick so a strict-mode mount → unmount → mount sequence cancels
     // the first spawn before it reaches main. Without this, dev rebuilds leak
@@ -1060,6 +1057,8 @@ export function useTerminalSession({
       termRef.current = term;
       // Before anything is written: widths are fixed as bytes are parsed.
       applyUnicode11Widths(term);
+      const sliceWriter = createSliceWriter((slice, parsed) => term.write(slice, parsed));
+      sliceWriterRef.current = sliceWriter;
 
       // Observe the erase sequence xterm actually parses rather than guessing
       // from keyboard input or shell command names. Returning false keeps xterm's
@@ -2921,36 +2920,13 @@ export function useTerminalSession({
         }
       };
 
-      // Replayed history: a reattach frame announced ahead of the data
-      // channel, or a paused backlog arriving in slices on the replay channel
-      // itself. Replayed bytes reach xterm exactly like live ones; only the
-      // URL sniffer treats them differently. Each slice is acknowledged so
-      // main can drop it (read-only mirrors never resumed, so they never ack).
-      // A slice counts as taken in once xterm has parsed it (or the hidden
-      // buffer kept it): that is what the unmount snapshot holds, so what
-      // main gets back on unmount is exactly what the snapshot lacks.
-      const replayTaps = new Set<(bytes: Uint8Array) => void>();
+      // Replayed history main is about to re-send on the live data channel
+      // (reattach frame, post-sleep backlog). Only the URL sniffer consults
+      // this — replayed bytes must still reach xterm exactly like live ones.
+      const replayTracker = createReplayTracker();
       const offReplay =
-        window.spark.pty.onReplay?.(sessionId, ({ bytes, end, token, data }) => {
-          if (!data || typeof end !== "number") {
-            replayTracker.announce(bytes);
-            return;
-          }
-          const fresh = replayTracker.slice(data, end, token, readOnlyRef.current);
-          const own = token !== undefined && token === replayTracker.token;
-          // Runs in the task that parses the slice, so an unmount can never
-          // fall between the parse and the bookkeeping.
-          const tookIn = () => {
-            if (!own || disposed) return;
-            replayTracker.tookIn(end);
-            window.spark.pty.replayAck?.(sessionId, end);
-          };
-          if (fresh && fresh.length > 0) {
-            handlePtyData(fresh, true, tookIn);
-            for (const tap of replayTaps) tap(fresh);
-          } else {
-            tookIn();
-          }
+        window.spark.pty.onReplay?.(sessionId, ({ bytes }) => {
+          replayTracker.announce(bytes);
         }) ?? (() => undefined);
 
       // Backpressure acks. Main counts every byte it ships on the data
@@ -2984,9 +2960,7 @@ export function useTerminalSession({
         ackPending = 0;
       });
 
-      // `tookIn` runs once the chunk is in: from xterm's write callback for
-      // the chunk itself, or at once when the hidden buffer keeps it.
-      function handlePtyData(data: Uint8Array | string, fromReplay = false, tookIn?: () => void): void {
+      const offData = window.spark.pty.onData(sessionId, (data) => {
         // Main ships Uint8Array. xterm.js's parser reassembles partial ANSI
         // sequences across writes when fed Uint8Array, which is what TUIs
         // (claude/codex/Ink) need to render cursor sequences without smearing.
@@ -2999,7 +2973,7 @@ export function useTerminalSession({
         // downstream reads the flag — including the hidden-pane early returns,
         // which must still consume the bytes or the replay would leak its
         // "history" marking onto the live output that follows.
-        const isReplayedChunk = fromReplay || replayTracker.consume(bytes.length);
+        const isReplayedChunk = replayTracker.consume(bytes.length);
         const writeChunk = (write: () => void) => {
           if (isReplayedChunk) writeAsReplay(term, write);
           else write();
@@ -3025,12 +2999,7 @@ export function useTerminalSession({
           // INVARIANT: hiddenBufferRef stays empty, so reveal is a repaint of the
           // same xterm instance rather than a replay step.
           if (writeWhileHiddenRef.current) {
-            writeChunk(() =>
-              term.write(bytes, () => {
-                ack(bytes.length);
-                tookIn?.();
-              }),
-            );
+            writeChunk(() => sliceWriter.write(bytes, ack));
             onActivityRef.current?.();
             return;
           }
@@ -3043,7 +3012,6 @@ export function useTerminalSession({
           // hidden pane can't pin arbitrary renderer memory or retain more
           // hidden output lines than the terminal is configured to display.
           trimHiddenBufferToLimits();
-          tookIn?.();
           onActivityRef.current?.();
           return;
         }
@@ -3054,9 +3022,7 @@ export function useTerminalSession({
           clearNotificationSuppressionRef.current = token;
           try {
             writeChunk(() =>
-              term.write(bytes, () => {
-                ack(bytes.length);
-                tookIn?.();
+              sliceWriter.write(bytes, ack, () => {
                 if (clearNotificationSuppressionRef.current === token) {
                   clearNotificationSuppressionRef.current = null;
                 }
@@ -3070,12 +3036,7 @@ export function useTerminalSession({
             throw error;
           }
         } else {
-          writeChunk(() =>
-            term.write(bytes, () => {
-              ack(bytes.length);
-              tookIn?.();
-            }),
-          );
+          writeChunk(() => sliceWriter.write(bytes, ack));
         }
         onActivityRef.current?.();
 
@@ -3101,10 +3062,7 @@ export function useTerminalSession({
 
         // Banner-text fallback for start detection + byte-level fallbacks
         // for exit detection ran above, before the hidden-pane early return.
-      }
-      const offData = window.spark.pty.onData(sessionId, (data) => handlePtyData(data));
-      // Both listeners exist from here on: resumes may name this one.
-      replayTokenRef.current = replayTracker.token;
+      });
       // Watch the first ~20s of a resumed Claude's output for a resume-refusal
       // signature and self-heal (fresh forced-id launch + replacement pointer).
       // Shared by the boot restore path (below) and the in-place death re-arm
@@ -3116,7 +3074,7 @@ export function useTerminalSession({
         let rawWatchTail = "";
         let watchDone = false;
         const watchDecoder = new TextDecoder();
-        const watchData = (data: Uint8Array | string) => {
+        const stopWatch = window.spark.pty.onData(sessionId, (data) => {
           if (watchDone || disposed) return;
           const bytes =
             data instanceof Uint8Array ? data : new TextEncoder().encode(String(data));
@@ -3146,15 +3104,7 @@ export function useTerminalSession({
             if (disposed) return;
             void window.spark.pty.write(sessionId, `${fresh.command}\r`);
           }, 400);
-        };
-        // A backlog replayed after a minimised window arrives on the replay
-        // channel, so the watch reads those slices too.
-        const offWatchData = window.spark.pty.onData(sessionId, watchData);
-        replayTaps.add(watchData);
-        const stopWatch = () => {
-          offWatchData();
-          replayTaps.delete(watchData);
-        };
+        });
         const watchTimer = window.setTimeout(() => {
           watchDone = true;
           stopWatch();
@@ -3808,15 +3758,7 @@ export function useTerminalSession({
       // resume issued here would drain a backlog the CANONICAL pane paused for,
       // stealing its bytes onto the shared channel at the wrong moment.
       if (!rawTailReattachRef.current && !readOnlyRef.current && !sleepingAtMount) {
-        // start() may have awaited since its last disposed check: a pane
-        // already gone must not claim the replay after its own pause.
-        if (!disposed) {
-          void window.spark.pty.resume(
-            sessionId,
-            attachedExistingSession && !externalSizeOwnerRef.current,
-            replayTracker.token,
-          );
-        }
+        void window.spark.pty.resume(sessionId, attachedExistingSession && !externalSizeOwnerRef.current);
       }
 
       // Two-stage debounce, ported from the terax design.
@@ -4128,9 +4070,8 @@ export function useTerminalSession({
         // the screen on remount.
         void window.spark.pty.detach?.(sessionId);
       } else if (!readOnlyRef.current) {
-        void window.spark.pty.pause?.(sessionId, replayTracker.replayedTo(), replayTracker.token);
+        void window.spark.pty.pause?.(sessionId);
       }
-      if (replayTokenRef.current === replayTracker.token) replayTokenRef.current = undefined;
       for (const fn of cleanups) {
         try {
           fn();
@@ -4181,9 +4122,14 @@ export function useTerminalSession({
           // Remembered unconditionally: a pane with nothing worth snapshotting
           // still has modes the running TUI expects to survive the remount.
           rememberedScreenModes.set(sessionId, captureTerminalScreenModes(dyingTerm));
+          // Bytes handed to xterm but not parsed yet (a large backlog is
+          // written in slices, see writeSlices.ts) are not in the text either:
+          // they come first, then the hidden-era bytes.
+          const unparsed = sliceWriterRef.current?.unparsed() ?? [];
+          const unparsedBytes = unparsed.reduce((total, chunk) => total + chunk.length, 0);
           const pendingBytes = mergeHiddenBuffer(
-            hiddenBufferRef.current,
-            hiddenBytesRef.current,
+            [...unparsed, ...hiddenBufferRef.current],
+            unparsedBytes + hiddenBytesRef.current,
             scrollbackLineLimitRef.current,
           );
           if (text.length > 0 || (pendingBytes && pendingBytes.length > 0)) {
@@ -4209,6 +4155,7 @@ export function useTerminalSession({
         /* ignore */
       }
       termRef.current = null;
+      sliceWriterRef.current = null;
       fitRef.current = null;
       viewportRecoveryRef.current = null;
       // The hidden-pane bytes have been folded into the snapshot's pendingBytes
@@ -4287,12 +4234,14 @@ export function useTerminalSession({
         try {
           // Output that arrived while the pane was hidden: an OSC 52 copy in
           // it was not asked for by anyone looking at this pane.
+          const clearSuppression = () => {
+            if (clearNotificationSuppressionRef.current === token) {
+              clearNotificationSuppressionRef.current = null;
+            }
+          };
+          const writer = sliceWriterRef.current;
           writeAsReplay(term, () =>
-            term.write(merged, () => {
-              if (clearNotificationSuppressionRef.current === token) {
-                clearNotificationSuppressionRef.current = null;
-              }
-            }),
+            writer ? writer.write(merged, undefined, clearSuppression) : term.write(merged, clearSuppression),
           );
         } catch {
           if (clearNotificationSuppressionRef.current === token) {
@@ -4416,11 +4365,8 @@ export function useTerminalSession({
       },
       resume: async (redraw) => {
         refitAndResizeRef.current?.();
-        // Only once this pane's listeners exist (replayTokenRef): the mount
-        // path issues its own resume right after registering them.
-        const token = replayTokenRef.current;
-        if (!readOnlyRef.current && token !== undefined) {
-          await window.spark.pty.resume(sessionId, redraw && !externalSizeOwnerRef.current, token);
+        if (!readOnlyRef.current) {
+          await window.spark.pty.resume(sessionId, redraw && !externalSizeOwnerRef.current);
         }
       },
       afterWrite: (done) => {

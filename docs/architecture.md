@@ -41,11 +41,12 @@ Only the app's own page may call main:
   below 64,000 bytes. A fast producer therefore cannot flood a slow window.
 - **A 4 MB tail and a 16 MB detached backlog per session.** The tail lets a
   pane re-attach after its view is rebuilt. The backlog holds output while a
-  workspace is hidden. On return it is replayed in 128 KB slices, one per
-  turn, so the window never parses megabytes in one task. Each slice travels
-  with its offset in the replay and stays in main until the pane confirms
-  it, so a pane that goes away mid-replay loses nothing and its successor
-  writes nothing twice.
+  workspace is hidden and comes back as one message when it is shown. The
+  renderer writes large messages to xterm in slices of at most 128 KB
+  (`writeSlices.ts`), because xterm parses one write in a single task: a
+  16 MB write blocked the window for 100-300 ms, a slice for about 15 ms.
+  Slices end where a fresh parser can resume, and bytes xterm has not parsed
+  when the pane unmounts go to the next mount with the text snapshot.
 
 Shell integration (`resources/shell-integration/`, staged by `shell-init.ts`)
 adds OSC 133/633 prompt markers, so Codara knows when a command starts and

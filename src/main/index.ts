@@ -1136,9 +1136,6 @@ function createWindow(): void {
     // root it no longer shows would otherwise stay watched until the window
     // closes.
     fsWatcher.disposeForWebContents(windowForEvents.webContents);
-    // And terminal replay listeners: what was owed to them goes to the new
-    // document's panes.
-    pty.forgetReplayListeners(windowForEvents.webContents);
   });
   // The page itself failed to load (dead dev server, missing asset). Retry via
   // the same escalation ladder after a short delay — an immediate reload against

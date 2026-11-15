@@ -237,12 +237,7 @@ import type {
 } from "@shared/types";
 
 type PtyDataHandler = (data: Uint8Array | string) => void;
-// Without `data`: that many bytes of replayed history follow on the data
-// channel. With `data`: one slice of a paused pane's backlog, numbered by its
-// end offset in the replay stream and addressed to the listener whose resume
-// carried `token`.
-type PtyReplayInfo = { bytes: number; end?: number; token?: number; data?: Uint8Array };
-type PtyReplayHandler = (info: PtyReplayInfo) => void;
+type PtyReplayHandler = (info: { bytes: number }) => void;
 type PtyExitHandler = (info: PtyExitInfo) => void;
 type HostResumeHandler = (info: {
   reason: "resume" | "unlock-screen" | "window-visible";
@@ -1320,17 +1315,12 @@ const api = {
     exists: (id: string): Promise<boolean> => ipcRenderer.invoke("pty:exists", { id }),
     resourceSnapshot: (): Promise<PtyResourceSnapshot> =>
       ipcRenderer.invoke("pty:resourceSnapshot"),
-    pause: (id: string, replayedTo?: number, token?: number): Promise<void> =>
-      ipcRenderer.invoke("pty:pause", { id, replayedTo, token }),
-    resume: (id: string, redraw = false, token?: number): Promise<void> =>
-      ipcRenderer.invoke("pty:resume", { id, redraw, token }),
+    pause: (id: string): Promise<void> => ipcRenderer.invoke("pty:pause", { id }),
+    resume: (id: string, redraw = false): Promise<void> =>
+      ipcRenderer.invoke("pty:resume", { id, redraw }),
     // Backpressure ack (see pty-manager ackRenderBytes). Fire-and-forget.
     ack: (id: string, bytes: number): void => {
       ipcRenderer.send("pty:ack", { id, bytes });
-    },
-    // Replay slices received up to `end` (see pty-manager ackReplay).
-    replayAck: (id: string, end: number): void => {
-      ipcRenderer.send("pty:replayAck", { id, end });
     },
     onHostResume: (handler: HostResumeHandler): (() => void) => {
       const listener = (
@@ -1362,7 +1352,7 @@ const api = {
     // started. See announceReplay in src/main/pty-manager.ts.
     onReplay: (id: string, handler: PtyReplayHandler): (() => void) => {
       const channel = `pty:replay:${id}`;
-      const listener = (_e: Electron.IpcRendererEvent, info: PtyReplayInfo) => handler(info);
+      const listener = (_e: Electron.IpcRendererEvent, info: { bytes: number }) => handler(info);
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.off(channel, listener);
     },
