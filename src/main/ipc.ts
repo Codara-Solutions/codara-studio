@@ -539,6 +539,7 @@ import { registerTabActionIpc } from "./tab-action-ipc";
 import { registerWorktreeSetupIpc } from "./worktree-setup";
 import { registerPortForwardIpc } from "./remote/port-forward-runtime";
 import { registerShareIpc } from "./share/ipc";
+import { registerFeedbackIpc } from "./feedback/ipc";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -4404,6 +4405,7 @@ export function registerIpc(): void {
   registerPortForwardIpc(handle);
   registerShareIpc(handle);
   registerSessionSearchIpc(handle);
+  registerFeedbackIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);

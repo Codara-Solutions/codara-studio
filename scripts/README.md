@@ -430,7 +430,10 @@ replace an installed AppImage from a build that merely inherited it).
 
 ### App state, files and system meters
 
-`test-storage-state-transaction` (a failed write of `spark-state.json` does
+`test-feedback` (Send feedback's client against a local fake of the
+feedback service, `tests/e2e/fixtures/feedback-service.cjs`: the exact fields
+sent, each error as a plain sentence, the install id; the dialog itself is
+`tests/e2e/feedback.spec.ts`), `test-storage-state-transaction` (a failed write of `spark-state.json` does
 not leave half-saved workspaces in memory), `test-storage-openrouter-key`
 (the OpenRouter key is encrypted at rest and never lost), `test-fs-watcher-lifecycle` (the
 file watcher behind the explorer, `src/main/fs-watcher.ts`),

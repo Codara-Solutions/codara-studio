@@ -67,6 +67,7 @@ import { agentHibernationApi } from "./areas/agent-hibernation";
 import { worktreeCleanupApi } from "./areas/worktree-cleanup";
 import { crossWorkspaceApi } from "./areas/cross-workspace";
 import { tabActionsApi } from "./areas/tab-actions";
+import { feedbackApi } from "./areas/feedback";
 import { worktreeSetupApi } from "./areas/worktree-setup";
 import { portsApi } from "./areas/ports";
 import { shareApi } from "./areas/share";
@@ -1934,6 +1935,7 @@ const api = {
   featureTips: featureTipsApi,
   ports: portsApi,
   sessionSearch: sessionSearchApi,
+  feedback: feedbackApi,
 };
 
 function isBrowserUrl(url: string): boolean {
