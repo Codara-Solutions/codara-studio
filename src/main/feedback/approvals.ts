@@ -1,9 +1,9 @@
 // The questions an agent's feedback call waits on: "send this?" before
 // codara_feedback_send, and "delete this?" before an admin delete. Pure apart
 // from the injected window, so scripts/test-feedback-agent.cjs drives it
-// without Electron; ask-ipc.ts wires it to the window.
+// without Electron; asks.ts wires it to the window.
 
-import type { FeedbackAnswer, FeedbackAsk, FeedbackAskClosed } from "@shared/feedback";
+import type { FeedbackAnswer, FeedbackAsk, FeedbackAskClosed, FeedbackAskInput } from "@shared/feedback";
 
 export interface FeedbackAsksDeps {
   // False when no window can show the question.
@@ -31,7 +31,7 @@ export class FeedbackAsks {
   // nobody answered in time, or the agent stopped waiting. The question
   // closes then, so a late Send acts for nobody. Only a click answers it:
   // nothing an agent says counts as the person's yes.
-  ask(input: Omit<FeedbackAsk, "id" | "expiresAt">, options: { timeoutMs: number; signal?: AbortSignal }): Promise<FeedbackAnswer | null> {
+  ask(input: FeedbackAskInput, options: { timeoutMs: number; signal?: AbortSignal }): Promise<FeedbackAnswer | null> {
     if (options.signal?.aborted) return Promise.resolve(null);
     const id = this.deps.newId?.() ?? `feedback-${++this.nextId}`;
     const request = { ...input, id, expiresAt: Date.now() + options.timeoutMs } as FeedbackAsk;

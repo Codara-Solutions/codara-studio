@@ -4,17 +4,16 @@ import { FEEDBACK_KIND_LABELS, type FeedbackAnswer, type FeedbackAsk } from "@sh
 import "../chrome/chrome-link.css";
 import "./feedback.css";
 
-// An agent asked to send feedback to Codara (codara_feedback_send). The tab
-// approval's floating card on a solid surface (feedback.css): who asks, the
-// exact text as plain text, a countdown to the agent's timeout, Don't send
-// and Send. FeedbackHost queues the questions and shows the oldest.
+// An agent asked to send feedback to Codara (codara_feedback_send), or an
+// admin's agent asked to delete a stored item (codara_feedback_delete). The
+// tab approval's floating card on a solid surface (feedback.css): who asks,
+// the exact text as plain text, a countdown to the agent's timeout, and the
+// two answers. FeedbackHost queues the questions and shows the oldest.
 
 // An expired card stays this long, so it never just vanishes.
 const EXPIRED_CARD_MS = 8_000;
 
-export interface QueuedFeedbackAsk extends FeedbackAsk {
-  expired?: boolean;
-}
+export type QueuedFeedbackAsk = FeedbackAsk & { expired?: boolean };
 
 export default function FeedbackAskCard({
   request,
@@ -39,13 +38,21 @@ export default function FeedbackAskCard({
   }, [expired, onDismiss]);
 
   const who = request.workspaceName ? `${request.agent} in ${request.workspaceName}` : request.agent;
-  const title = `${who} wants to send feedback to Codara`;
+  const deleting = request.action === "delete";
+  const title = deleting ? `${who} wants to delete feedback for good` : `${who} wants to send feedback to Codara`;
+  const quoted = deleting ? request.item.message : request.message;
+  const lead = deleting
+    ? `${FEEDBACK_KIND_LABELS[request.item.kind]} from ${request.item.source === "agent" ? "an agent" : "a person"}, ${new Date(request.item.createdAt).toLocaleString()}, ${request.item.status}:`
+    : `${FEEDBACK_KIND_LABELS[request.kind]}, exactly as it would be sent:`;
+  const note = deleting
+    ? "Deleting it on the feedback service cannot be undone."
+    : "With the app version, your operating system and the anonymous install id. Settings, About can stop this question.";
 
   if (expired) {
     return (
       <section role="status" aria-label="Feedback request expired" data-feedback-ask={request.id} data-expired="true" className="fb-solid chrome-pairing">
         <div className="chrome-pairing__title">Request expired</div>
-        <p className="chrome-pairing__body">{`${request.agent} stopped waiting. Nothing was sent.`}</p>
+        <p className="chrome-pairing__body">{`${request.agent} stopped waiting. Nothing was ${deleting ? "deleted" : "sent"}.`}</p>
         <div className="chrome-pairing__actions">
           <button type="button" className="spark-btn" onClick={onDismiss}>
             Dismiss
@@ -69,22 +76,20 @@ export default function FeedbackAskCard({
   return (
     <section role="dialog" aria-label={title} data-feedback-ask={request.id} className="fb-solid chrome-pairing">
       <div className="chrome-pairing__title">{title}</div>
-      <p className="chrome-pairing__body">{`${FEEDBACK_KIND_LABELS[request.kind]}, exactly as it would be sent:`}</p>
+      <p className="chrome-pairing__body">{lead}</p>
       <p className="fb-quote" data-testid="feedback-ask-text">
-        {request.message}
+        {quoted}
       </p>
-      <p className="chrome-pairing__body">
-        With the app version, your operating system and the anonymous install id. Settings, About can stop this question.
-      </p>
+      <p className="chrome-pairing__body">{note}</p>
       <div className="chrome-pairing__actions">
         <span className="chrome-pairing__countdown" aria-live="off">
           {Math.max(0, Math.ceil((request.expiresAt - now) / 1000))} s
         </span>
         <button type="button" className="spark-btn" disabled={busy} onClick={() => void decide("no")}>
-          Don't send
+          {deleting ? "Keep" : "Don't send"}
         </button>
-        <button type="button" className="spark-btn is-primary" disabled={busy} onClick={() => void decide("yes")}>
-          Send
+        <button type="button" className={`spark-btn ${deleting ? "is-danger" : "is-primary"}`} disabled={busy} onClick={() => void decide("yes")}>
+          {deleting ? "Delete" : "Send"}
         </button>
       </div>
     </section>

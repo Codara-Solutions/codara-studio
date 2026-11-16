@@ -94,9 +94,10 @@ check("every search result points at something the page renders", () => {
   const sessionSearch = read(...components, "session-search", "SessionSearchSettings.tsx");
   const savedOutput = read(...components, "settings", "SavedTerminalOutputRow.tsx");
   const gpuDrawing = read(...components, "settings", "GpuDrawingRow.tsx");
+  const feedbackAdmin = read(...components, "feedback", "FeedbackAdminTokenRow.tsx");
   const machines = read(...components, "machines", "MachinesSettings.tsx");
   const crossWorkspace = read(...components, "cross-workspace", "CrossWorkspaceTerminalsSetting.tsx");
-  const rendered = [dialog, remote, behavior, chromeLink, keepInChrome, launchArgs, keepAwake, quickCommands, keybindings, sessionSearch, savedOutput, gpuDrawing, machines, crossWorkspace].join("\n");
+  const rendered = [dialog, remote, behavior, chromeLink, keepInChrome, launchArgs, keepAwake, quickCommands, keybindings, sessionSearch, savedOutput, gpuDrawing, feedbackAdmin, machines, crossWorkspace].join("\n");
   const cards = read(...components, "AccountCards.tsx");
   const families = read("src", "shared", "agent-families.ts");
   for (const [, tab, title] of entries) {

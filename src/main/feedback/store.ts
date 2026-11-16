@@ -1,6 +1,8 @@
 // feedback.json in Studio's home: the anonymous install id the service rate
 // limits by. It is a random UUID made the first time feedback is sent and
 // kept from then on; nothing about the machine or the person goes into it.
+// A Codara admin's token is kept here too, only ever encrypted by the
+// system keyring (admin-token.ts).
 
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -11,6 +13,8 @@ const INSTALL_ID = /^[0-9A-Za-z_-]{8,64}$/;
 
 export interface FeedbackFileData {
   installId?: string;
+  /** safeStorage ciphertext, base64. Never the token itself. */
+  adminToken?: string;
 }
 
 export interface FeedbackStoreDeps {
@@ -51,6 +55,11 @@ export class FeedbackStore {
   }
 
   private pendingId: Promise<string> | null = null;
+
+  /** Merges into the file; a field set to undefined is removed. */
+  async update(patch: Partial<FeedbackFileData>): Promise<void> {
+    await this.save({ ...(await this.read()), ...patch });
+  }
 
   protected save(next: FeedbackFileData): Promise<void> {
     this.data = next;

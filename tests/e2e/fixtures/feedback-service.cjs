@@ -3,8 +3,9 @@
 // A local stand-in for the studio-feedback service (its docs/feedback-api.md),
 // for scripts/test-feedback.cjs and the feedback e2e specs. It answers like
 // the real one, keeps what it accepted in memory, and can be told to answer
-// the next requests with a rate limit, an outage or nothing at all. Tests
-// never call the real service.
+// the next requests with a rate limit, an outage or nothing at all. Started
+// with { adminToken } it also serves the admin routes. Tests never call the
+// real service.
 
 const http = require("node:http");
 
@@ -29,7 +30,7 @@ function invalidField(body) {
   return null;
 }
 
-function startFeedbackService() {
+function startFeedbackService(options = {}) {
   const state = {
     items: [],
     requests: [],
@@ -43,6 +44,49 @@ function startFeedbackService() {
   function send(res, status, body, headers = {}) {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
     res.end(JSON.stringify(body));
+  }
+
+  // The admin routes: Bearer adminToken, or 503 admin_disabled when the fake
+  // was started without one. The cursor is the next item's index.
+  function admin(req, res, url, raw) {
+    if (!options.adminToken) return send(res, 503, { error: "admin_disabled" });
+    const match = /^Bearer (.+)$/i.exec(req.headers.authorization || "");
+    if (!match || match[1] !== options.adminToken) return send(res, 401, { error: "unauthorized" }, { "WWW-Authenticate": "Bearer" });
+    if (url.pathname === "/v1/admin/feedback") {
+      if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" }, { Allow: "GET" });
+      const status = url.searchParams.get("status") ?? "open";
+      const limit = Number(url.searchParams.get("limit") ?? "50");
+      const start = Number(url.searchParams.get("cursor") ?? "0");
+      if (!["open", "done", "all"].includes(status) || !Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(start)) {
+        return send(res, 400, { error: "invalid_query" });
+      }
+      const matching = state.items.filter((item) => status === "all" || item.status === status);
+      const page = matching.slice(start, start + limit);
+      return send(res, 200, { items: page, nextCursor: start + limit < matching.length ? String(start + limit) : null });
+    }
+    const id = url.pathname.slice("/v1/admin/feedback/".length);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) return send(res, 400, { error: "invalid_id" });
+    const index = state.items.findIndex((item) => item.id === id);
+    if (req.method === "PATCH") {
+      let body;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return send(res, 400, { error: "invalid_json" });
+      }
+      if (!body || !["open", "done"].includes(body.status) || Object.keys(body).length !== 1) return send(res, 400, { error: "invalid_field", field: "status" });
+      if (index < 0) return send(res, 404, { error: "not_found" });
+      const item = state.items[index];
+      item.doneAt = body.status === "done" ? (item.doneAt ?? new Date(Date.UTC(2026, 10, 15, 13)).toISOString()) : null;
+      item.status = body.status;
+      return send(res, 200, { item });
+    }
+    if (req.method === "DELETE") {
+      if (index < 0) return send(res, 404, { error: "not_found" });
+      const [{ message: _message, contact: _contact, ...deleted }] = state.items.splice(index, 1);
+      return send(res, 200, { deleted });
+    }
+    return send(res, 405, { error: "method_not_allowed" }, { Allow: "PATCH, DELETE" });
   }
 
   const server = http.createServer((req, res) => {
@@ -59,6 +103,9 @@ function startFeedbackService() {
       }
       if (forced === "rate_limited") return send(res, 429, { error: "rate_limited" }, { "Retry-After": "1500" });
       if (forced === "unavailable") return send(res, 503, { error: "unavailable" });
+      if (url.pathname === "/v1/admin/feedback" || url.pathname.startsWith("/v1/admin/feedback/")) {
+        return admin(req, res, url, raw);
+      }
       if (url.pathname !== "/v1/feedback") return send(res, 404, { error: "not_found" });
       if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" }, { Allow: "POST" });
       if (!/^application\/json(;\s*charset=utf-8)?$/i.test(req.headers["content-type"] || "")) {

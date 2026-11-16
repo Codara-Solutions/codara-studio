@@ -1,4 +1,5 @@
 import "./appimage-launch-boot";
+import "./feedback/admin-env";
 import "./spawn-census";
 import {
   app,

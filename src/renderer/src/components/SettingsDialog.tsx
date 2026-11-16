@@ -130,6 +130,7 @@ import { useDiagnostics } from "./settings/DiagnosticsControls";
 import WorktreeSetupSettingsControl from "./worktree-setup/WorktreeSetupSettingsControl";
 import CrossWorkspaceTerminalsSetting from "./cross-workspace/CrossWorkspaceTerminalsSetting";
 import CrossWorkspaceGrantsList, { tabActionGrantSource } from "./cross-workspace/CrossWorkspaceGrantsList";
+import FeedbackAdminTokenRow from "./feedback/FeedbackAdminTokenRow";
 
 export type { SettingsTab } from "./settings/settings-index";
 
@@ -4132,6 +4133,7 @@ function AboutSettings({ onClose }: { onClose: () => void }) {
           desc="Shows you the exact text an agent wants to send, and sends it only if you agree. Off sends it without asking."
           {...bindToggle("askBeforeAgentFeedback", preferences, setPreference)}
         />
+        <FeedbackAdminTokenRow />
       </SettingsSection>
       <SettingsSection
         title="Diagnostics"
