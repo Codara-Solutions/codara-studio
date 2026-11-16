@@ -54,11 +54,13 @@ const requireFromExtension = createRequire(import.meta.url);
 // nothing, so it is safe to walk away from: handing it the turn's abort lets
 // Stop and Send now leave Pi idle at once, and the next turn keeps the process
 // instead of replacing one stuck in a long wait. Every other Studio call may
-// already be changing the run, so it finishes.
+// already be changing the run, so it finishes. codara_feedback_send waits on
+// the user's card: Stop withdraws the card, so nothing is sent after it.
 const ABANDONABLE_BRIDGE_TOOLS = new Set([
   "codara_wait_for_workers",
   "codara_wait_for_automation",
   "codara_workflow_wait",
+  "codara_feedback_send",
 ]);
 const UNTRUSTED_PULL_REQUEST_POLICY = "untrusted-pull-request";
 const UNTRUSTED_MANAGER_BRIDGE_TOOLS = new Set([

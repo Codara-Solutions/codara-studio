@@ -115,6 +115,10 @@ const WORKTREE_SETUP_TIMEOUT_MS = 9 * 60_000 + 30_000;
 // codara_worktree_cleanup remove waits up to 5 minutes for the user's answer,
 // then removes; the deadline stays under Codex's 11-minute tool limit.
 const WORKTREE_CLEANUP_TIMEOUT_MS = 10 * 60_000 + 30_000;
+// codara_feedback_send waits up to 2 minutes for the user's answer
+// (FEEDBACK_ASK_TIMEOUT_MS in src/main/feedback/agent.ts), then up to 10 s
+// for the feedback service.
+const FEEDBACK_SEND_TIMEOUT_MS = 2 * 60_000 + 30_000;
 // codara_terminal_create with a worktree: the approval card (40 s), the
 // worktree, the terminal, and when the terminal fails the rollback (its
 // setup stop, 10 s, then a guarded removal), so the error with
@@ -559,6 +563,24 @@ const OPEN_FILE_TOOL = {
     properties: {
       path: { type: "string" },
       line: { type: "integer", minimum: 1 },
+    },
+    additionalProperties: false,
+  },
+};
+
+// Feedback about Studio to Codara (src/main/feedback/agent.ts). Studio shows
+// the user the exact text and who sends it, and sends only on their yes,
+// unless they turned that question off.
+const FEEDBACK_TOOL = {
+  name: "codara_feedback_send",
+  description:
+    "Send feedback about Codara Studio itself to Codara. Plain text, at most 4000 characters: no secrets, no file contents, no personal data. The user sees the exact text first and may refuse. Goes with the app version, OS and an anonymous install id.",
+  inputSchema: {
+    type: "object",
+    required: ["message", "kind"],
+    properties: {
+      message: { type: "string" },
+      kind: { type: "string", enum: ["bug", "idea", "other"] },
     },
     additionalProperties: false,
   },
@@ -2005,6 +2027,7 @@ if (IS_AUTOMATION_MODE) {
     SESSION_SEARCH_TOOL,
     SHARE_TOOL,
     OPEN_FILE_TOOL,
+    FEEDBACK_TOOL,
   ];
   TOOL_TO_RPC = {
     ...STUDIO_TOOL_TO_RPC,
@@ -2017,6 +2040,7 @@ if (IS_AUTOMATION_MODE) {
     codara_session_search: "session.search",
     codara_share_offer: "share.offer",
     codara_open_file: "file.open",
+    codara_feedback_send: "feedback.send",
   };
 } else if (IS_WORKER_MODE) {
   TOOLS = WORKER_TOOLS;
@@ -2051,6 +2075,7 @@ if (IS_AUTOMATION_MODE) {
     SESSION_SEARCH_TOOL,
     SHARE_TOOL,
     OPEN_FILE_TOOL,
+    FEEDBACK_TOOL,
   ];
   TOOL_TO_RPC = {
     ...STUDIO_TOOL_TO_RPC,
@@ -2063,6 +2088,7 @@ if (IS_AUTOMATION_MODE) {
     codara_session_search: "session.search",
     codara_share_offer: "share.offer",
     codara_open_file: "file.open",
+    codara_feedback_send: "feedback.send",
   };
 }
 if (IS_UNTRUSTED_PULL_REQUEST) {
@@ -2143,6 +2169,8 @@ const OPEN_WORLD_TOOL_NAMES = new Set([
   "codara_terminal_run",
   "codara_terminal_create",
   "codara_terminal_write",
+  // Sends text to Codara's feedback service.
+  "codara_feedback_send",
   // Fetches the base and runs the repository's setup command.
   "codara_worktree_create",
   // Asks GitHub and the remote, and may delete a remote branch.
@@ -2298,6 +2326,7 @@ const PROGRESS_RPCS = new Set([
   "worktree.remove",
   "worktree.setup",
   "worktree.cleanup",
+  "feedback.send",
 ]);
 const PROGRESS_INTERVAL_MS = 10_000;
 const SESSION_WAIT_DEFAULT_SECONDS = 120;
@@ -2320,6 +2349,7 @@ function rpcTimeoutMs(rpc, args) {
   if (rpc === "worktree.create") return args && args.workspace ? WORKTREE_CREATE_ELSEWHERE_TIMEOUT_MS : WORKTREE_CREATE_TIMEOUT_MS;
   if (rpc === "worktree.setup") return WORKTREE_SETUP_TIMEOUT_MS;
   if (rpc === "worktree.cleanup") return WORKTREE_CLEANUP_TIMEOUT_MS;
+  if (rpc === "feedback.send") return FEEDBACK_SEND_TIMEOUT_MS;
   if (rpc.startsWith("worktree.")) return WORKTREE_TIMEOUT_MS;
   return PREVIEW_TERMINAL_TIMEOUT_MS;
 }
@@ -2356,6 +2386,7 @@ const CALLER_LOCATED_RPCS = new Set([
   "session.list_all",
   "session.relay",
   "review.findings",
+  "feedback.send",
 ]);
 // The browser code tool is scoped like the single browser tools it drives.
 function isBrowserRpc(rpc) {
@@ -2419,7 +2450,7 @@ function stampWorktreeCaller(rpc, args, ctx) {
 
 // Which agent wrote a workspace status, when Codara cannot tell from the pane.
 function stampWorkspaceStatusCaller(rpc, args, ctx) {
-  if (rpc !== "workspace.status" && !Object.values(TASK_TOOL_TO_RPC).includes(rpc)) return;
+  if (rpc !== "workspace.status" && rpc !== "feedback.send" && !Object.values(TASK_TOOL_TO_RPC).includes(rpc)) return;
   args.callerClient = (ctx && ctx.client) || CLIENT_NAME || "agent";
 }
 
@@ -2945,6 +2976,9 @@ async function callTool(params, ctx = {}) {
     if (rpc === "file.open" && err && err.code === "SPARK_OFFLINE") {
       return toToolResult({ opened: false, reason: "codara_offline", note: "Codara is not open, so no editor tab was opened." });
     }
+    if (rpc === "feedback.send" && err && err.code === "SPARK_OFFLINE") {
+      return toToolResult({ sent: false, reason: "codara_offline", note: "Codara is not open, so nothing was sent." });
+    }
     if (rpc === "share.offer" && err && err.code === "SPARK_OFFLINE") {
       return toToolResult({ offered: false, reason: "codara_offline", note: "Codara is not open, so nothing was offered." });
     }
@@ -3131,6 +3165,7 @@ function toolManifest() {
     tasks: names(TASK_TOOLS),
     share: names([SHARE_TOOL]),
     files: names([OPEN_FILE_TOOL]),
+    feedback: names([FEEDBACK_TOOL]),
     worktree: names(WORKTREE_TOOLS),
     whiteboard: names(WHITEBOARD_TOOLS),
     board: names(BOARD_TOOLS),

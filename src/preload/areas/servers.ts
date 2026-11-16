@@ -15,6 +15,7 @@ import type {
   LaunchArgsSettings,
   StatusSnapshot,
 } from "@shared/servers";
+import { subscribe } from "../subscribe";
 
 export const serversApi = {
   status: (workspaceId: string | null, options?: { detail?: boolean }): Promise<StatusSnapshot> =>
@@ -30,11 +31,7 @@ export const serversApi = {
   save: (input: DevServerSaveInput): Promise<DevServerStatus> => ipcRenderer.invoke("servers:save", input),
   forget: (workspaceId: string, id: string): Promise<{ id: string; forgotten: boolean }> =>
     ipcRenderer.invoke("servers:forget", { workspaceId, id }),
-  onChanged: (listener: (payload: { workspaceId: string }) => void): (() => void) => {
-    const wrapped = (_event: unknown, payload: { workspaceId: string }): void => listener(payload);
-    ipcRenderer.on("servers:changed", wrapped);
-    return () => ipcRenderer.removeListener("servers:changed", wrapped);
-  },
+  onChanged: subscribe<{ workspaceId: string }>("servers:changed"),
   launchArgs: {
     get: (): Promise<LaunchArgsSettings> => ipcRenderer.invoke("servers:launchArgs:get"),
     check: (runtime: LaunchArgRuntime, text: string): Promise<LaunchArgsCheck> =>

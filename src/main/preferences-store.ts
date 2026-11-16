@@ -339,6 +339,7 @@ function normalize(
       typeof src.agentsMayRemoveUserWorktrees === "boolean"
         ? src.agentsMayRemoveUserWorktrees
         : DEFAULT_PREFERENCES.agentsMayRemoveUserWorktrees,
+    askBeforeAgentFeedback: src.askBeforeAgentFeedback !== false,
     worktreeAutoRemoveMerged:
       typeof src.worktreeAutoRemoveMerged === "boolean"
         ? src.worktreeAutoRemoveMerged

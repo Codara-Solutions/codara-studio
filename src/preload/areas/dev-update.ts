@@ -4,13 +4,10 @@
 import { ipcRenderer } from "electron";
 
 import type { DevUpdateHint } from "@shared/dev-update-hint";
+import { subscribe } from "../subscribe";
 
 export const devUpdateApi = {
   /** Read again now; null when there is nothing to say. */
   status: (): Promise<DevUpdateHint | null> => ipcRenderer.invoke("devUpdate:status"),
-  onChanged: (handler: (hint: DevUpdateHint | null) => void): (() => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, hint: DevUpdateHint | null) => handler(hint);
-    ipcRenderer.on("devUpdate:changed", listener);
-    return () => ipcRenderer.off("devUpdate:changed", listener);
-  },
+  onChanged: subscribe<DevUpdateHint | null>("devUpdate:changed"),
 };

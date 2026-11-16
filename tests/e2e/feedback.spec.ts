@@ -1,8 +1,10 @@
 import { expect, test, type ElectronApplication, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
+import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MCP_SERVER } from "./in-pane-mcp";
 
 const { startFeedbackService } = require("./fixtures/feedback-service.cjs");
 
@@ -76,6 +78,45 @@ async function shots(page: Page, name: string): Promise<void> {
     }
   }
   await page.evaluate(() => window.spark.preferences.set("theme", "codara-classic"));
+}
+
+// The codara-studio MCP server over stdio, as an agent CLI launches it.
+function mcpClient(home: string): { tool(name: string, args: Record<string, unknown>): Promise<any>; close(): void; ready: Promise<unknown> } {
+  const child = spawn(process.execPath, [MCP_SERVER], {
+    env: { ...process.env, CODARA_HOME_DIR: home, SPARK_HOME_DIR: home, SPARK_USER_DATA_DIR: home, SPARK_MCP_MODE: "" },
+    stdio: ["pipe", "pipe", "inherit"],
+  });
+  const waiting = new Map<number, (message: any) => void>();
+  let buffered = "";
+  let nextId = 1;
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    buffered += chunk;
+    let index;
+    while ((index = buffered.indexOf("\n")) >= 0) {
+      const line = buffered.slice(0, index).trim();
+      buffered = buffered.slice(index + 1);
+      const message = line ? JSON.parse(line) : null;
+      if (message && typeof message.id === "number") waiting.get(message.id)?.(message);
+    }
+  });
+  const call = (method: string, params: Record<string, unknown>) =>
+    new Promise<any>((done) => {
+      const id = nextId++;
+      waiting.set(id, done);
+      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    });
+  const ready = call("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "claude-code", version: "1" } });
+  return {
+    ready,
+    // The tool's JSON result, parsed from its text content.
+    tool: async (name, args) => {
+      const message = await call("tools/call", { name, arguments: args });
+      const text = (message.result?.content ?? []).map((part: { text?: string }) => part.text ?? "").join("");
+      return message.result?.isError ? { isError: true, text } : JSON.parse(text);
+    },
+    close: () => child.kill(),
+  };
 }
 
 async function openFromSettings(page: Page): Promise<void> {
@@ -157,6 +198,63 @@ test("a person sends feedback from Settings and sees each state", async () => {
       expect(service.state.items).toHaveLength(1);
     });
   } finally {
+    await app?.close().catch(() => undefined);
+    await service.close();
+    await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("an agent's report waits for the person's Send, unless they turned the question off", async () => {
+  test.setTimeout(180_000);
+  const fixture = await prepare();
+  const service = await startFeedbackService();
+  let app: ElectronApplication | null = null;
+  const agent = mcpClient(fixture.codaraHome);
+  try {
+    app = await launch(fixture, service.url);
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.locator(".spark-tabbar")).toBeVisible({ timeout: 30_000 });
+    await agent.ready;
+    const card = page.locator("[data-feedback-ask]");
+    const text = "The rail flickers when a worktree is removed.\n<b>Steps</b>: remove one, watch the rail.";
+
+    await test.step("yes: the card shows who asks and the exact text, then it is sent", async () => {
+      const pending = agent.tool("codara_feedback_send", { kind: "bug", message: text });
+      await expect(card).toBeVisible({ timeout: 15_000 });
+      await expect(card.locator(".chrome-pairing__title")).toHaveText("Claude Code wants to send feedback to Codara");
+      // Plain text, never markup.
+      await expect(card.getByTestId("feedback-ask-text")).toHaveText(text);
+      await expect(card.locator("b")).toHaveCount(0);
+      expect(service.state.requests).toHaveLength(0);
+      await shots(page, "feedback-agent-ask");
+      await card.getByRole("button", { name: "Send", exact: true }).click();
+      const result = await pending;
+      expect(result).toEqual({ sent: true, id: service.state.items[0].id });
+      await expect(card).toBeHidden();
+      const body = JSON.parse(service.state.requests.at(-1).body);
+      expect(body).toMatchObject({ kind: "bug", source: "agent", message: text });
+      expect(body).not.toHaveProperty("contact");
+    });
+
+    await test.step("no: nothing reaches the service", async () => {
+      const pending = agent.tool("codara_feedback_send", { kind: "idea", message: "Pin tabs." });
+      await expect(card).toBeVisible({ timeout: 15_000 });
+      await card.getByRole("button", { name: "Don't send" }).click();
+      expect(await pending).toMatchObject({ sent: false, reason: "declined" });
+      await expect(card).toBeHidden();
+      expect(service.state.requests).toHaveLength(1);
+    });
+
+    await test.step("the setting off: sent without a question", async () => {
+      await page.evaluate(() => window.spark.preferences.set("askBeforeAgentFeedback", false));
+      const result = await agent.tool("codara_feedback_send", { kind: "other", message: "Straight through." });
+      expect(result).toMatchObject({ sent: true });
+      await expect(card).toHaveCount(0);
+      expect(JSON.parse(service.state.requests.at(-1).body)).toMatchObject({ source: "agent", message: "Straight through." });
+    });
+  } finally {
+    agent.close();
     await app?.close().catch(() => undefined);
     await service.close();
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);

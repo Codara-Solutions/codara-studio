@@ -91,3 +91,25 @@ export function retryAfterText(seconds: number | undefined): string {
   const minutes = Math.max(1, Math.ceil(seconds / 60));
   return `in ${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
+
+export type FeedbackAnswer = "yes" | "no";
+
+/** The question an agent's codara_feedback_send waits on. */
+export interface FeedbackSendAsk {
+  action: "send";
+  id: string;
+  expiresAt: number;
+  /** "Claude Code", "Codex", ...: who is asking. */
+  agent: string;
+  workspaceName: string | null;
+  kind: FeedbackKind;
+  /** Exactly what would be sent, trimmed. */
+  message: string;
+}
+
+export type FeedbackAsk = FeedbackSendAsk;
+
+export interface FeedbackAskClosed {
+  id: string;
+  reason: "expired" | "withdrawn";
+}

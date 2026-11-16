@@ -15,6 +15,7 @@ import type {
   CaptureRecordRequest,
   CaptureRecordResponse,
 } from "@shared/capture";
+import { subscribe } from "../subscribe";
 
 export const captureApi = {
   record: (request: CaptureRecordRequest): Promise<CaptureRecordResponse> => ipcRenderer.invoke("capture:record", request),
@@ -22,15 +23,7 @@ export const captureApi = {
     ipcRenderer.invoke("capture:recordingFile", request),
   frameEmulation: (request: CaptureFrameEmulationRequest): Promise<{ ok: true }> =>
     ipcRenderer.invoke("capture:frameEmulation", request),
-  onRecordingChanged: (handler: (change: CaptureRecordingChange) => void): (() => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, change: CaptureRecordingChange) => handler(change);
-    ipcRenderer.on("capture:recording-changed", listener);
-    return () => ipcRenderer.off("capture:recording-changed", listener);
-  },
-  onGuestPaint: (handler: (request: CaptureGuestPaintRequest) => void): (() => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, request: CaptureGuestPaintRequest) => handler(request);
-    ipcRenderer.on("capture:guest-paint", listener);
-    return () => ipcRenderer.off("capture:guest-paint", listener);
-  },
+  onRecordingChanged: subscribe<CaptureRecordingChange>("capture:recording-changed"),
+  onGuestPaint: subscribe<CaptureGuestPaintRequest>("capture:guest-paint"),
   ackGuestPaint: (ack: CaptureGuestPaintAck): void => ipcRenderer.send("capture:guest-paint-ack", ack),
 };
