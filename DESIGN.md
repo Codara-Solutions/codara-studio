@@ -666,7 +666,7 @@ white.
 
 **Chosen:** A, "Go inside". Clicking a worker in Cora swaps the whole
 conversation for that worker's own chat, the way Claude Code shows a subagent.
-Etienne picked A on 17 Nov 2026 ("I like A") from four mock-ups of the same
+Etienne picked A on 2026-11-17 ("I like A") from four mock-ups of the same
 chat: A go inside, B a side list of workers beside Main, C Main and the worker
 side by side, D the worker's steps expanded in place under its row. What he
 asked for: see what message a worker got and what it does, in a view that
@@ -678,12 +678,13 @@ the worker view reuses.
 **Rules it implies:**
 
 - A worker's view reuses the chat's own components: its steps are drawn by the
-  same rows as Cora's turns, fold by the same rules, and its brief and the
-  messages sent to it are user bubbles. A worker never gets a renderer of its
+  same rows as Cora's turns and fold the same way (only a worker that finished
+  well folds, and failures stay in sight). Its brief and the messages sent to
+  it are user bubbles and never fold. A worker never gets a renderer of its
   own.
 - The terminal is a fallback behind a menu ("Raw terminal output", for output
-  the chat can't draw), never a primary button in Cora. Runs and terminal
-  agents outside Cora keep their terminals.
+  the chat can't draw), never a primary button in Cora's chat. The board, Runs
+  and terminal agents outside the chat keep their terminals.
 - Main stays mounted underneath while you are inside a worker, so Back or Esc
   returns to exactly where you were, and focus goes back to the row you opened.
 - One slim bar says where you are: Main, the worker, its model, its state and
