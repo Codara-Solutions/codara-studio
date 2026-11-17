@@ -218,15 +218,15 @@ test("a PDF zooms at the pointer and takes the zoom keys while focused", async (
     // The top pages draw again on the way back; let that finish first.
     await expect(pageAt(1).locator("canvas")).toBeVisible();
     await page.waitForTimeout(500);
-    const before = await drawCounts();
+    const drawsBefore = await drawCounts();
     await long.click({ position: { x: 30, y: 30 } });
     await page.keyboard.press("Control+=");
     await expect(level).toHaveText("110%");
-    await expect.poll(async () => (await drawCounts())[0]).toBeGreaterThan(before[0]);
+    await expect.poll(async () => (await drawCounts())[0]).toBeGreaterThan(drawsBefore[0]);
     // Let any other redraw land before counting.
     await page.waitForTimeout(800);
-    const after = await drawCounts();
-    const redrawn = after.flatMap((count, i) => (count > before[i] ? [i + 1] : []));
+    const drawsAfter = await drawCounts();
+    const redrawn = drawsAfter.flatMap((count, i) => (count > drawsBefore[i] ? [i + 1] : []));
     expect(redrawn.length).toBeGreaterThan(0);
     expect(Math.max(...redrawn)).toBeLessThanOrEqual(3);
   } finally {
