@@ -172,6 +172,16 @@ export function agentActedSince(card: AgentBoardCard, at: number): boolean {
  * failure ends a snooze before its time. A finished turn never does, so a
  * snoozed long job stays out of the way until the user asked to see it.
  */
+/**
+ * agentActedSince for a subagent on its parent's row: a working one that
+ * shows new signs of work (a note, a commit) counts too, since its `since`
+ * stays at the start of its work.
+ */
+function subagentActedSince(card: AgentBoardCard, at: number): boolean {
+  if (card.bucket === "working" && (card.activeAt ?? 0) > at) return true;
+  return agentActedSince(card, at);
+}
+
 export function snoozeEndsEarly(card: AgentBoardCard, at: number): boolean {
   if (!(card.since > at)) return false;
   return card.bucket === "needs-you" || card.tone === "danger";
@@ -223,7 +233,7 @@ export function reconcileAgentInbox(
     }
     const pr = context.pullRequests[card.workspaceId];
     const settle = prefs.settled[card.key];
-    if (settle && [card, ...kids].some((entry) => agentActedSince(entry, settle.at))) {
+    if (settle && (agentActedSince(card, settle.at) || kids.some((kid) => subagentActedSince(kid, settle.at)))) {
       const target = edit();
       delete target.settled[card.key];
       // New work after the merge is news: the same merge never hides it again.

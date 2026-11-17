@@ -177,6 +177,7 @@ export function backgroundAgentCards(input: BackgroundAgentInput): AgentBoardCar
       reply: null,
       origin: { name: fromName, target: creatorCard?.target ?? null },
       ...(creatorCard ? { parentKey: creatorCard.key } : {}),
+      activeAt: lastActivity,
     });
   }
   return out;

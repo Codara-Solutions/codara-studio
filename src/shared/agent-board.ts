@@ -175,6 +175,11 @@ export interface AgentBoardCard {
    * key. The Agents tab lists it under that card, not as a row of its own.
    */
   parentKey?: string;
+  /**
+   * A background agent's last sign of work (a note, a commit, its creation),
+   * which `since` does not track while it keeps working.
+   */
+  activeAt?: number;
 }
 
 export interface AgentWorkOrigin {
