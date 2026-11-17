@@ -54,7 +54,9 @@ test("History is open by default and a commit opens its files in place", async (
       await page.getByTestId("commit-files").getByRole("button", { name: /Open full view/ }).click();
       await expect(page.getByTitle("Back to history")).toBeVisible({ timeout: 15_000 });
       await page.getByTitle("Back to history").click();
-      await expect(commit(page, "fix(theme): calmer colours")).toBeVisible();
+      // It comes back as it was left: still open.
+      await expect(commit(page, "fix(theme): calmer colours")).toHaveAttribute("aria-expanded", "true");
+      await expect(page.getByTestId("commit-file")).toHaveCount(1);
     });
 
     await test.step("opening another commit moves the files there; a second click folds", async () => {
@@ -70,10 +72,18 @@ test("History is open by default and a commit opens its files in place", async (
 
     await test.step("the graph header fetches and reads the history again", async () => {
       await page.locator("#source-control-tabpanel-changes").getByText("History", { exact: true }).dispatchEvent("mouseover");
-      await expect(page.getByTitle("Fetch from the remote")).toBeVisible();
-      await page.getByTitle("Read the history again").click();
-      await expect(page.getByTestId("commit-row")).toHaveCount(2);
-      expect(git(repo, ["status", "--porcelain"], env)).toBe("");
+      // A commit made outside the app shows once the history is read again.
+      git(repo, ["commit", "-q", "--allow-empty", "-m", "chore: made in a terminal"], env);
+      // Main keeps a log read for 3 s, so a click right after a poll can get
+      // that read back; the next click reads git again.
+      await expect(async () => {
+        await page.locator("#source-control-tabpanel-changes").getByText("History", { exact: true }).dispatchEvent("mouseover");
+        await page.getByTitle("Read the history again").click();
+        await expect(page.getByTestId("commit-row")).toHaveCount(3, { timeout: 2_000 });
+      }).toPass({ timeout: 20_000 });
+      await expect(page.getByTestId("commit-row").first()).toContainText("chore: made in a terminal");
+      // Fetch is the same action as the branch line's (covered there); the
+      // fixture's origin is not a reachable remote, so it is not clicked here.
     });
   } finally {
     await app?.close().catch(() => undefined);

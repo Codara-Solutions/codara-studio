@@ -1,4 +1,8 @@
 import React, { useEffect, useState } from "react";
+
+// A bulk commit (a vendored package) can touch thousands of files; past this
+// many the rest is one line pointing at the full view.
+const MAX_FILES = 200;
 import type { GitCommitDetail } from "@shared/types";
 import { DiffNumbers, FOLDER_TEXT_STYLE, ROW_STYLE, StatusLetter } from "./ChangeRow";
 import { Spinner, splitPath } from "./git-ui";
@@ -58,11 +62,18 @@ export default function CommitFilesInline({
       </>,
     );
 
+  const shown = detail.files.slice(0, MAX_FILES);
+  const hidden = detail.files.length - shown.length;
+  const inspect = (event: React.MouseEvent): void => {
+    event.stopPropagation();
+    onInspect(hash);
+  };
+
   return (
-    <div role="list" aria-label={`Files in ${detail.shortHash}`} data-testid="commit-files" style={{ paddingBottom: 2 }}>
-      {detail.files.length === 0
-        ? note("No file changes (an empty or merge commit).")
-        : detail.files.map((file) => {
+    <div data-testid="commit-files" style={{ paddingBottom: 2 }}>
+      {detail.files.length === 0 ? note("No file changes (an empty or merge commit).") : null}
+      <div role="list" aria-label={`Files in ${detail.shortHash}`}>
+        {shown.map((file) => {
             const { dir, name } = splitPath(file.path);
             return (
               <div
@@ -72,8 +83,15 @@ export default function CommitFilesInline({
                 data-path={file.path}
                 className="scm-row"
                 title={`${file.oldPath ? `${file.oldPath} → ` : ""}${file.path}\nClick to open its diff in this commit · double-click to keep the tab`}
+                tabIndex={0}
                 onClick={() => onOpenFileDiff(file.path, hash)}
                 onDoubleClick={() => onOpenFileDiff(file.path, hash, { pin: true })}
+                onKeyDown={(event) => {
+                  // Enter opens the diff; Shift+Enter keeps the tab.
+                  if (event.key !== "Enter" || event.repeat) return;
+                  event.preventDefault();
+                  onOpenFileDiff(file.path, hash, event.shiftKey ? { pin: true } : undefined);
+                }}
                 style={{ ...ROW_STYLE, paddingLeft: indent }}
               >
                 <span
@@ -96,15 +114,20 @@ export default function CommitFilesInline({
               </div>
             );
           })}
+      </div>
+      {hidden > 0
+        ? note(
+            <button type="button" className="scm-link" onClick={inspect}>
+              {hidden} more files · Open full view
+            </button>,
+          )
+        : null}
       {note(
         <button
           type="button"
           className="scm-link"
           title="Open the full view: message, author, every diff inline, arrow keys to step through commits"
-          onClick={(event) => {
-            event.stopPropagation();
-            onInspect(hash);
-          }}
+          onClick={inspect}
         >
           {detail.author} · {detail.relativeDate} · Open full view
         </button>,

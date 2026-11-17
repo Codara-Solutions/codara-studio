@@ -107,6 +107,8 @@ export default function CommitHistory({
   const toggleOpen = React.useCallback((hash: string) => {
     setOpenHash((current) => (current === hash ? null : hash));
   }, []);
+  // Another checkout (worktrees share commits) starts with nothing open.
+  useEffect(() => setOpenHash(null), [cwd]);
   const commitCount = rows.filter((r) => r.hash).length;
   // Keep view-model identity stable across renders when `rows` itself didn't
   // change — GitPanel's shallow-compare keeps `rows` stable for no-op polls,
@@ -133,10 +135,11 @@ export default function CommitHistory({
     };
   }, [menu]);
 
-  const openMenu = (row: GitLogRow, x: number, y: number): void => {
+  // Stable, so the memoized rows really skip re-rendering when one opens.
+  const openMenu = React.useCallback((row: GitLogRow, x: number, y: number): void => {
     if (!row.hash) return;
     setMenu({ row, x, y });
-  };
+  }, []);
 
   return (
     <>
@@ -268,7 +271,7 @@ const CommitRowView = React.memo(function CommitRowView({
       tabIndex={isCommit ? 0 : undefined}
       aria-expanded={isCommit ? isOpen : undefined}
       onKeyDown={(event) => {
-        if (!isCommit || !row.hash || event.target !== event.currentTarget) return;
+        if (!isCommit || !row.hash || event.target !== event.currentTarget || event.repeat) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           onOpen(row.hash);

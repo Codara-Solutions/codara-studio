@@ -129,6 +129,10 @@
 .scm-row:hover {
   background: var(--hover);
 }
+.scm-row:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
 
 /* Quiet text that acts: the footer of a commit opened in place. */
 .scm-link {
