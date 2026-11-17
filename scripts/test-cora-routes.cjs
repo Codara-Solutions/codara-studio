@@ -144,6 +144,11 @@ assert.match(runStore, /const workerSettings = isAutomationRun \? null : routeSe
 assert.match(runStore, /coraWorkerModelAvailability\(workerSettings\)/, "worker eligibility counts every route");
 assert.match(read("src/renderer/src/components/SessionInspector.tsx"), /<RoutesTable rows=\{routes\} \/>/);
 assert.match(read("src/renderer/src/components/capabilities/BehaviorSection.tsx"), /CLAUDE_PI_LOGIN_BILLING_NOTE/);
-assert.match(read("src/main/storage.ts"), /coraRouteOrder: normalizeCoraRouteOrder\(settings\.coraRouteOrder\)/);
+assert.match(read("src/main/storage.ts"), /coraRouteOrder: settings\.coraRouteOrder === undefined \? undefined : normalizeCoraRouteOrder/, "unset stays unset after an upgrade");
+assert.doesNotMatch(read("src/main/storage.ts"), /coraRouteOrder: \[\.\.\.DEFAULT_CORA_ROUTE_ORDER\]/);
+// A chat on a pinned account is never routed off it.
+assert.match(runStore, /if \(chat\.backend !== "pi" \|\| chat\.accountProfileId\) return chat\.model;/);
+// A Stop that began during setup ends the turn, whatever the status was at its start.
+assert.match(runStore, /forcePauseStartCount\(run\.id\) !== entryStops/);
 
 console.log("cora routes: ok");

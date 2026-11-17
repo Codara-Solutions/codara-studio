@@ -454,7 +454,9 @@ async function freezeManagerExecutionAccount(
  */
 async function routedManagerModel(run: RunState): Promise<string> {
   const chat = resolveChatBackendConfig(run);
-  if (chat.backend !== "pi") return chat.model;
+  // A chat on a pinned account stays on it: routing it elsewhere would drop
+  // the pin without a word.
+  if (chat.backend !== "pi" || chat.accountProfileId) return chat.model;
   return loadSettings().then((settings) => routeCoraModel(chat.model, settings)).catch(() => chat.model);
 }
 
@@ -7160,8 +7162,9 @@ async function askManagerBackendUnderTurnLock(
   // failed".
   let accountFailure: unknown;
   let chatConfig: ChatBackendConfig;
-  const entryStatus = run.status;
   const entryEpoch = conversationEpoch(run);
+  const entryStatus = run.status;
+  const entryStops = forcePauseStartCount(run.id);
   const routedModel = await routedManagerModel(run);
   try {
     run = await pinImplicitPiManagerAccount(run, routedModel);
@@ -7180,11 +7183,8 @@ async function askManagerBackendUnderTurnLock(
     if (
       !latest ||
       conversationEpoch(latest) !== entryEpoch ||
-      (latest.status !== entryStatus &&
-        (latest.status === "paused" ||
-          latest.status === "blocked" ||
-          latest.status === "cancelled" ||
-          isTerminalRunStatus(latest.status)))
+      forcePauseStartCount(run.id) !== entryStops ||
+      (latest.status !== entryStatus && (latest.status === "cancelled" || isTerminalRunStatus(latest.status)))
     ) {
       return latest ?? null;
     }
@@ -16481,8 +16481,17 @@ export async function undoToCheckpoint(
 const forcePausingRuns = new Map<string, number>();
 const forcePauseWindowWaiters = new Map<string, Array<() => void>>();
 
+// How many Stops or cancels ever began per run, so a turn can tell that one
+// landed while it was setting up even after it finished.
+const forcePauseStarts = new Map<string, number>();
+
+function forcePauseStartCount(runId: string): number {
+  return forcePauseStarts.get(runId) ?? 0;
+}
+
 function openForcePauseWindow(runId: string): void {
   forcePausingRuns.set(runId, (forcePausingRuns.get(runId) ?? 0) + 1);
+  forcePauseStarts.set(runId, forcePauseStartCount(runId) + 1);
 }
 
 function closeForcePauseWindow(runId: string): void {

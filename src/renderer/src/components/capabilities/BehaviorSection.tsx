@@ -86,11 +86,12 @@ function RouteOrderRow({
   value,
   onChange,
 }: {
-  value: CoraRoute[];
+  /** Undefined until the user picks: every model launches as picked. */
+  value: CoraRoute[] | undefined;
   onChange: (next: CoraRoute[]) => void;
 }) {
-  const current = value.join(",");
-  const choices = ROUTE_ORDER_CHOICES.some((order) => order.join(",") === current)
+  const current = value ? value.join(",") : "";
+  const choices = !value || ROUTE_ORDER_CHOICES.some((order) => order.join(",") === current)
     ? ROUTE_ORDER_CHOICES
     : [value, ...ROUTE_ORDER_CHOICES];
   return (
@@ -99,8 +100,9 @@ function RouteOrderRow({
         <span id="route-order-title" style={toggleTitleStyle}>How Cora reaches models</span>
         <span style={toggleDetailStyle}>
           Cora and her workers use the first of these that can carry the model you picked: your Claude, ChatGPT or
-          xAI sign-in, an OpenRouter key with that model verified, or Subcloud once it is set up. A route with
-          nothing set up is skipped. The Costs tab of each run shows the route, account and tokens it used.{" "}
+          xAI sign-in, an OpenRouter key with that model verified, or Subcloud once it is set up. A route never
+          set up is skipped. A sign-in that expired or reached its limit is not swapped for a paid key: that run
+          stops and says what to fix. The Costs tab of each run shows the route, account and tokens it used.{" "}
           {CLAUDE_PI_LOGIN_BILLING_NOTE}
         </span>
       </span>
@@ -111,6 +113,7 @@ function RouteOrderRow({
         onChange={(event) => onChange(normalizeCoraRouteOrder(event.target.value.split(",")))}
         style={{ width: "auto", minWidth: 120 }}
       >
+        {!value && <option value="">As picked (no reordering)</option>}
         {choices.map((order) => (
           <option key={order.join(",")} value={order.join(",")}>
             {routeOrderLabel(order)}
@@ -159,7 +162,7 @@ export default function BehaviorSection({
           }
         />
         <RouteOrderRow
-          value={normalizeCoraRouteOrder(view.coraRouteOrder)}
+          value={view.coraRouteOrder === undefined ? undefined : normalizeCoraRouteOrder(view.coraRouteOrder)}
           onChange={(coraRouteOrder) =>
             onChange({ coraRouteOrder }, `Cora now tries ${routeOrderLabel(coraRouteOrder)}.`)
           }

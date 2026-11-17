@@ -14,18 +14,25 @@ export interface CoraWorkerModelAvailability {
   disconnected: string[];
 }
 
-/** Subscription providers with a usable sign-in, read without refreshing.
- *  Null when the store cannot be read. The auth modules load lazily, as in
- *  pi-runtime-electron, so bundles that only need the settings filter do not
- *  pull in the credential stores. */
-async function usableSubscriptions(): Promise<Set<PiSubscriptionProvider> | null> {
+/** Subscription providers with a usable sign-in, and those set up at all
+ *  (signed in once, even if expired or signed out since), read without
+ *  refreshing. Null when the store cannot be read. The auth modules load
+ *  lazily, as in pi-runtime-electron, so bundles that only need the settings
+ *  filter do not pull in the credential stores. */
+async function subscriptionState(): Promise<{
+  usable: Set<PiSubscriptionProvider>;
+  configured: Set<PiSubscriptionProvider>;
+} | null> {
   try {
     const [{ inspectPiAccountProfileAuthStore }, { usablePiProviders }] = await Promise.all([
       import("./pi-account-auth-store"),
       import("./pi-worker-providers"),
     ]);
     const inspection = await inspectPiAccountProfileAuthStore();
-    return usablePiProviders(inspection.statuses);
+    return {
+      usable: usablePiProviders(inspection.statuses),
+      configured: new Set(inspection.statuses.map((status) => status.provider)),
+    };
   } catch {
     return null;
   }
@@ -43,12 +50,17 @@ async function nativeCatalogModels(): Promise<Set<string> | undefined> {
   }
 }
 
-/** What each Cora route can carry right now. */
+/**
+ * What each Cora route can carry right now. A sign-in counts once it was set
+ * up, even when it has expired or was signed out: that launch then fails and
+ * says to sign in again, instead of moving to a paid key without a word. A
+ * sign-in at its usage limit is not handed to another route either.
+ */
 export async function coraRouteAvailability(settings: AppSettings): Promise<CoraRouteAvailability | null> {
-  const [subscriptions, nativeModels] = await Promise.all([usableSubscriptions(), nativeCatalogModels()]);
-  if (!subscriptions) return null;
+  const [state, nativeModels] = await Promise.all([subscriptionState(), nativeCatalogModels()]);
+  if (!state) return null;
   return {
-    subscriptions,
+    subscriptions: state.configured,
     openRouterModels: new Set(configuredOpenRouterCoraModels(settings)),
     ...(nativeModels ? { nativeModels } : {}),
   };
@@ -64,6 +76,8 @@ export async function routeCoraModel(
   settings: AppSettings,
   availability?: CoraRouteAvailability | null,
 ): Promise<string> {
+  // No order chosen in Settings: every model launches as picked.
+  if (settings.coraRouteOrder === undefined) return model;
   const known = availability === undefined ? await coraRouteAvailability(settings) : availability;
   if (!known) return model;
   return chooseCoraRoute(model, normalizeCoraRouteOrder(settings.coraRouteOrder), known)?.model ?? model;
@@ -79,12 +93,14 @@ export async function coraWorkerModelAvailability(
   settings: AppSettings,
 ): Promise<CoraWorkerModelAvailability> {
   const enabled = availableCoraWorkerModels(settings);
-  const availability = await coraRouteAvailability(settings);
-  if (!availability) return { connected: enabled, disconnected: [] };
-  const split = partitionWorkerModelsByAccount(enabled, availability.subscriptions);
+  const [state, availability] = await Promise.all([subscriptionState(), coraRouteAvailability(settings)]);
+  if (!state || !availability) return { connected: enabled, disconnected: [] };
+  const split = partitionWorkerModelsByAccount(enabled, state.usable);
+  if (settings.coraRouteOrder === undefined) return split;
   const order = normalizeCoraRouteOrder(settings.coraRouteOrder);
-  // A model whose sign-in is missing still runs when a later route carries it.
-  const rerouted = split.disconnected.filter((id) => chooseCoraRoute(id, order, availability) !== null);
+  // A model whose sign-in was never set up still runs when OpenRouter
+  // carries it; a broken sign-in keeps it waiting for the user.
+  const rerouted = split.disconnected.filter((id) => chooseCoraRoute(id, order, availability)?.route === "openrouter");
   return {
     connected: [...split.connected, ...rerouted],
     disconnected: split.disconnected.filter((id) => !rerouted.includes(id)),
