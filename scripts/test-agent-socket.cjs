@@ -330,6 +330,10 @@ async function main() {
       SPARK_NO_SHELL_INTEGRATION: "1",
       // Keeps the booted app off the user's desktop (headless on Linux).
       SPARK_E2E_BACKGROUND: "1",
+      // A share service address turns Share as link on, so the share.offer
+      // checks below reach the path gates. An offer never uploads, so nothing
+      // listens there.
+      CODARA_SHARE_URL: "http://127.0.0.1:9",
     },
     stdio: "ignore",
   });

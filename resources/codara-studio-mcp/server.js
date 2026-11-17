@@ -2265,25 +2265,43 @@ const FEEDBACK_ADMIN_LISTED = FEEDBACK_ADMIN_TOOLS.map(annotated);
 // tools rather than holding up the agent's start.
 const FEEDBACK_ADMIN_PROBE_MS = 1_500;
 
-async function listedTools() {
-  if (!OFFERS_FEEDBACK_ADMIN) return TOOLS;
+// Share as link is off in a build with no share service, and Codara says so
+// in its handshake. An agent told to offer sharing would only collect
+// refusals, so the tool and its guidance are listed only when the running app
+// says sharing is on.
+function shareOfferAvailable() {
   try {
-    if (!fs.existsSync(handshakePath())) return TOOLS;
+    const parsed = JSON.parse(fs.readFileSync(handshakePath(), "utf8"));
+    return Boolean(parsed) && parsed.shareAvailable === true;
+  } catch {
+    return false;
+  }
+}
+
+function baseTools() {
+  return shareOfferAvailable() ? TOOLS : TOOLS.filter((tool) => tool.name !== SHARE_TOOL.name);
+}
+
+async function listedTools() {
+  const tools = baseTools();
+  if (!OFFERS_FEEDBACK_ADMIN) return tools;
+  try {
+    if (!fs.existsSync(handshakePath())) return tools;
     // A stale handshake can wait for Codara longer than the probe may take.
     const status = await Promise.race([
       postJsonRpc("feedback.admin_status", {}, FEEDBACK_ADMIN_PROBE_MS, AbortSignal.timeout(FEEDBACK_ADMIN_PROBE_MS)).catch(() => null),
       new Promise((resolve) => setTimeout(resolve, FEEDBACK_ADMIN_PROBE_MS, null).unref()),
     ]);
-    return status && status.configured === true ? [...TOOLS, ...FEEDBACK_ADMIN_LISTED] : TOOLS;
+    return status && status.configured === true ? [...tools, ...FEEDBACK_ADMIN_LISTED] : tools;
   } catch {
-    return TOOLS;
+    return tools;
   }
 }
 
 // Guidance every tool shares, sent once in the initialize result instead of
 // being repeated across descriptions.
 function buildInstructions() {
-  const listed = new Set(TOOLS.map((tool) => tool.name));
+  const listed = new Set(baseTools().map((tool) => tool.name));
   const parts = [
     "Codara Studio tools act inside the running Codara desktop app. Every call is routed to this session's own workspace and chat; never pass ids for them.",
   ];

@@ -1,6 +1,7 @@
 // Harness for src/main/share/ (Share as link, main-process side): the share
 // key on disk (modes, reuse, symlink and corrupt-file handling), the local
-// list of shared pages, request signing and building, the base URL override,
+// list of shared pages, request signing and building, the base URL override
+// and the switch that keeps Share off until the service is live,
 // response parsing, the ShareService over a fake fetch, the agent offer
 // gate, and the CDN downloader (allowlist, redirects, caps, integrity) over a
 // fake fetch. Everything runs in a throwaway directory; nothing touches the
@@ -114,6 +115,7 @@ async function main() {
   const protocol = await bundle(path.join(ROOT, "src", "main", "share", "protocol.ts"), "share-protocol.cjs");
   const serviceMod = await bundle(path.join(ROOT, "src", "main", "share", "service.ts"), "share-service.cjs");
   const offerMod = await bundle(path.join(ROOT, "src", "main", "share", "offer.ts"), "share-offer.cjs");
+  const sharedShare = await bundle(path.join(ROOT, "src", "shared", "share.ts"), "share-shared.cjs");
   const remoteMod = {
     ...(await bundle(path.join(ROOT, "src", "main", "share", "remote.ts"), "share-remote.cjs")),
     ...(await bundle(path.join(ROOT, "src", "shared", "share-assets.ts"), "share-assets.cjs")),
@@ -263,8 +265,8 @@ async function main() {
       assert.ok(service.isPageId(ID_A), "Studio's id pattern matches the service's ids");
     });
 
-    await check("the base URL defaults to the constant and accepts only safe overrides", () => {
-      assert.equal(protocol.shareBaseUrl({}), protocol.DEFAULT_SHARE_BASE_URL);
+    await check("the base URL defaults to the constant once live and accepts only safe overrides", () => {
+      assert.equal(protocol.shareBaseUrl({}, true), protocol.DEFAULT_SHARE_BASE_URL);
       assert.ok(protocol.DEFAULT_SHARE_BASE_URL.startsWith("https://"));
       assert.equal(protocol.shareBaseUrl({ CODARA_SHARE_URL: "https://share.example.com/" }), "https://share.example.com");
       assert.equal(protocol.shareBaseUrl({ CODARA_SHARE_URL: "http://127.0.0.1:9001" }), "http://127.0.0.1:9001");
@@ -273,6 +275,38 @@ async function main() {
       assert.throws(() => protocol.shareBaseUrl({ CODARA_SHARE_URL: "https://u:p@share.example.com" }), /plain/);
       assert.throws(() => protocol.shareBaseUrl({ CODARA_SHARE_URL: "https://share.example.com/?x=1" }), /plain/);
       assert.throws(() => protocol.shareBaseUrl({ CODARA_SHARE_URL: "not a url" }), /valid URL/);
+    });
+
+    // Issue #187: the default host had no DNS record and Share as link was
+    // offered anyway, so every share failed with a network error.
+    await check("while the service is not live, Share is off unless CODARA_SHARE_URL names an instance", () => {
+      assert.equal(typeof protocol.SHARE_SERVICE_LIVE, "boolean");
+      const off = protocol.shareServiceStatus({}, false);
+      assert.equal(off.available, false);
+      assert.equal(off.message, sharedShare.SHARE_UNAVAILABLE_MESSAGE);
+      assert.doesNotMatch(off.message, /[–—]/, "no em or en dashes in user copy");
+      assert.throws(() => protocol.shareBaseUrl({}, false), (err) => err.message === sharedShare.SHARE_UNAVAILABLE_MESSAGE);
+      assert.deepEqual(protocol.shareServiceStatus({}, true), { available: true });
+      assert.deepEqual(protocol.shareServiceStatus({ CODARA_SHARE_URL: "http://127.0.0.1:9001" }, false), { available: true });
+      const bad = protocol.shareServiceStatus({ CODARA_SHARE_URL: "http://share.example.com" }, true);
+      assert.equal(bad.available, false);
+      assert.match(bad.message, /https/);
+      assert.equal(
+        protocol.shareServiceStatus({}).available,
+        protocol.SHARE_SERVICE_LIVE,
+        "the build's default follows the one constant",
+      );
+    });
+
+    await check("the share host is the one the docs and the codara-share service name", () => {
+      const docs = fs.readFileSync(path.join(ROOT, "docs", "share-links.md"), "utf8");
+      assert.ok(docs.includes(protocol.DEFAULT_SHARE_BASE_URL), "docs/share-links.md names the production host");
+      assert.match(docs, /SHARE_SERVICE_LIVE/, "docs/share-links.md says how the switch works");
+      const repo = shareRepo();
+      if (repo) {
+        const readme = fs.readFileSync(path.join(repo, "README.md"), "utf8");
+        assert.ok(readme.includes(protocol.DEFAULT_SHARE_BASE_URL), "codara-share's README deploys the same host");
+      }
     });
 
     await check("responses are parsed strictly and the link is built locally", () => {
@@ -374,6 +408,45 @@ async function main() {
         baseUrl: () => "https://s.test",
       });
       await assert.rejects(limited.create({ html: "<p>x</p>", title: "x", ttlDays: 7 }), /limit of shared pages/);
+    });
+
+    await check("ShareService says plainly that sharing is off when there is no service", async () => {
+      const dir = path.join(tmp, "unavailable", "share");
+      records.upsertShareRecord(dir, { id: ID_A, url: `https://s.test/p/${ID_A}`, title: "a.md", size: 1, createdAt: 1, expiresAt: Date.now() + 60_000 });
+      let fetched = 0;
+      const off = new serviceMod.ShareService({
+        shareDir: dir,
+        fetchImpl: async () => {
+          fetched += 1;
+          throw new TypeError("fetch failed");
+        },
+        baseUrl: () => protocol.shareBaseUrl({}, false),
+      });
+      const listed = await off.list();
+      assert.equal(listed.unavailable, true);
+      assert.equal(listed.error, sharedShare.SHARE_UNAVAILABLE_MESSAGE);
+      assert.deepEqual(listed.pages.map((p) => p.id), [ID_A]);
+      await assert.rejects(off.create({ html: "<p>x</p>", title: "x", ttlDays: 7 }), (err) => err.message === sharedShare.SHARE_UNAVAILABLE_MESSAGE);
+      assert.equal(fetched, 0, "nothing goes over the network");
+    });
+
+    await check("an agent's offer is refused while sharing is off", async () => {
+      const dir = fs.mkdtempSync(path.join(tmp, "offer-off-"));
+      const page = path.join(dir, "report.md");
+      fs.writeFileSync(page, "# hi");
+      const gate = new offerMod.ShareOfferGate({
+        assertReadable: async () => {},
+        status: () => protocol.shareServiceStatus({}, false),
+      });
+      const refused = await gate.check(page, "pane:1");
+      assert.equal(refused.ok, false);
+      assert.equal(refused.reason, "unavailable");
+      assert.match(refused.message, /not available yet/);
+      const on = new offerMod.ShareOfferGate({
+        assertReadable: async () => {},
+        status: () => protocol.shareServiceStatus({ CODARA_SHARE_URL: "http://127.0.0.1:9001" }, false),
+      });
+      assert.equal((await on.check(page, "pane:1")).ok, true);
     });
 
     await check("an agent's offer names an existing page the app may read, once per caller per window", async () => {
