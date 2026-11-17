@@ -891,6 +891,12 @@ function createWindow(): void {
   // is trusted the moment the renderer can send it, while the fail-closed
   // initial state keeps a forged in-page URL (pushState) from ever qualifying.
   registerTrustedMainWindow(windowForEvents);
+  // A new window (macOS recreates it from the dock) has no mounted renderer
+  // yet, and a closed one has none at all: terminal and preview ops wait.
+  markRendererNotReady();
+  windowForEvents.once("closed", () => {
+    if (mainWindow === windowForEvents || mainWindow === null) markRendererNotReady();
+  });
 
   windowForEvents.on("maximize", () => sendWindowState(windowForEvents));
   windowForEvents.on("unmaximize", () => sendWindowState(windowForEvents));

@@ -5821,24 +5821,19 @@ export default function App() {
     };
     setListShareableStudioTerminalsFn(listShareableTerminals);
     setListDeliverablePanesFn(() => deliverablePanes(workspaceLayouts()));
-    // Push-notify main when the phone-visible inventory changes. Main owns
-    // debouncing and fan-out; this stays a bare ping so a burst of tab
-    // operations costs a string compare per commit, nothing more.
-    const fingerprint = JSON.stringify(
-      listShareableTerminals().map((entry) => [
-        entry.paneId,
-        entry.tabId,
-        entry.workspaceId,
-        entry.title ?? null,
-        entry.profile,
-      ]),
-    );
+    // Send main the inventory whenever any of it changes: main answers
+    // terminal.list and its ownership checks from this copy, so they need no
+    // round trip into a renderer that may be busy, and tells paired phones
+    // when what they show changed. A burst of tab operations costs a string
+    // compare per commit and one message per change.
+    const inventory = listShareableTerminals();
+    const fingerprint = JSON.stringify(inventory);
     if (fingerprint !== sharedTerminalFingerprintRef.current) {
       sharedTerminalFingerprintRef.current = fingerprint;
       // Optional-called: in dev the renderer can be hot-updated ahead of its
       // preload, and throwing here unmounts App — which unregisters every
       // bridge adapter and kills phone/MCP terminal creation with it.
-      window.spark?.terminalBridge?.notifyInventoryChanged?.();
+      window.spark?.terminalBridge?.notifyInventoryChanged?.(inventory);
     }
     setCreateAgentTerminalFn((input) => {
       if (input.workspaceId && !validWorkspaceIds.has(input.workspaceId)) {

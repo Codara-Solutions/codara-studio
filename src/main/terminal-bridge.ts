@@ -29,7 +29,7 @@
 import { BrowserWindow, ipcMain } from "electron";
 import { randomBytes } from "node:crypto";
 import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
-import { isRendererReady, RENDERER_STARTING_MESSAGE, whenRendererReady } from "./renderer-readiness";
+import { holdUntilRendererReady, isRendererReady, onRendererNotReady } from "./renderer-readiness";
 
 // "create" mints a renderer-owned terminal tab, "destroy" closes it by id,
 // and "resize" keeps a phone-owned xterm grid in lockstep with its PTY. The
@@ -102,6 +102,8 @@ let listenerRegistered = false;
 export function registerTerminalBridge(): void {
   if (listenerRegistered) return;
   listenerRegistered = true;
+  // A new document or a dead renderer has none of the panes it listed.
+  onRendererNotReady(forgetInventory);
   ipcMain.on(RESPONSE_CHANNEL, (event, payload: BridgeResponse) => {
     // Gate the sender like preview-bridge:response. Only the trusted main
     // frame's terminalRpc legitimately answers a tab-create/destroy request; a
@@ -132,8 +134,11 @@ export function registerTerminalBridge(): void {
       entry.reject(new Error(payload.error || "terminal op failed"));
     }
   });
-  ipcMain.on(INVENTORY_CHANNEL, (event) => {
+  ipcMain.on(INVENTORY_CHANNEL, (event, payload?: unknown) => {
     if (!isTrustedOnSender(event, INVENTORY_CHANNEL)) return;
+    // A renderer that sends the inventory with the ping keeps main's copy
+    // current; listeners hear only changes to what a phone shows.
+    if (payload !== undefined && !acceptInventory(payload)) return;
     for (const listener of inventoryListeners) {
       try {
         listener();
@@ -154,7 +159,7 @@ export function onStudioTerminalInventoryChanged(
 export async function requestTerminalOp<T = unknown>(
   op: TerminalOpName,
   params: TerminalOpParams = {},
-  opts?: { timeoutMs?: number; onLate?: (result: T) => void },
+  opts?: { timeoutMs?: number; onLate?: (result: T) => void; signal?: AbortSignal },
 ): Promise<T> {
   let win = pickTargetWindow();
   if (!win) {
@@ -162,10 +167,9 @@ export async function requestTerminalOp<T = unknown>(
       "No Codara window is open. Open Codara before calling terminal.create.",
     );
   }
-  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const started = Date.now();
-  // Until React has mounted, nothing in the renderer hears the request.
-  if (!isRendererReady() && !(await whenRendererReady(timeoutMs))) throw new Error(RENDERER_STARTING_MESSAGE);
+  // Until React has mounted, nothing in the renderer hears the request. The
+  // hold has its own limit, and the op's timeout starts once it is over.
+  if (!isRendererReady()) await holdUntilRendererReady(opts?.signal);
   win = pickTargetWindow() ?? win;
   if (win.webContents.isDestroyed() || win.webContents.isLoading()) {
     // wait briefly for the renderer to be ready
@@ -173,12 +177,15 @@ export async function requestTerminalOp<T = unknown>(
   }
 
   const reqId = randomBytes(8).toString("hex");
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const request: BridgeRequest = { reqId, op, params };
   const target = win;
+  const mutation = MUTATING_OPS.has(op) ? beginMutation() : null;
 
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(reqId);
+      mutation?.settle();
       const onLate = opts?.onLate;
       if (onLate) {
         const lateTimer = setTimeout(() => late.delete(reqId), LATE_WINDOW_MS);
@@ -186,10 +193,16 @@ export async function requestTerminalOp<T = unknown>(
         late.set(reqId, { onLate: (result) => onLate(result as T), timer: lateTimer });
       }
       reject(new Error(`terminal op '${op}' timed out after ${timeoutMs}ms`));
-    }, Math.max(0, timeoutMs - (Date.now() - started)));
+    }, timeoutMs);
     pending.set(reqId, {
-      resolve: (value) => resolve(value as T),
-      reject,
+      resolve: (value) => {
+        mutation?.settle();
+        resolve(value as T);
+      },
+      reject: (error) => {
+        mutation?.settle();
+        reject(error);
+      },
       timer,
     });
     try {
@@ -197,9 +210,75 @@ export async function requestTerminalOp<T = unknown>(
     } catch (err) {
       pending.delete(reqId);
       clearTimeout(timer);
+      mutation?.settle();
       reject(err instanceof Error ? err : new Error(String(err)));
     }
   });
+}
+
+// ── The panes' inventory, kept in main ──────────────────────────────────────
+// The renderer sends its shareable panes with every change (App.tsx), so
+// terminal.list and the ownership checks built on it answer from here without
+// a round trip into a renderer that may be busy for seconds on a loaded
+// machine. The copy is only trusted while it can be as current as a round trip
+// would be: a create, destroy, group or tab action that main sent changes the
+// panes after the renderer answers, so from the moment one is sent until the
+// renderer's next inventory arrives after it settled, callers fall back to the
+// round trip.
+const MUTATING_OPS: ReadonlySet<TerminalOpName> = new Set(["create", "destroy", "group", "tabAct"]);
+const MAX_INVENTORY_ENTRIES = 5_000;
+export interface StudioTerminalInventoryEntry {
+  paneId: string;
+  tabId: string;
+  workspaceId: string;
+  [key: string]: unknown;
+}
+let inventory: StudioTerminalInventoryEntry[] | null = null;
+let phoneFingerprint: string | null = null;
+let mutationsInFlight = 0;
+let awaitingInventoryAfterMutation = false;
+
+function isInventoryEntry(value: unknown): value is StudioTerminalInventoryEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Record<string, unknown>;
+  return typeof entry.paneId === "string" && typeof entry.tabId === "string" && typeof entry.workspaceId === "string";
+}
+
+/** Stores a pushed inventory; true when what a phone shows changed. */
+function acceptInventory(payload: unknown): boolean {
+  if (!Array.isArray(payload) || payload.length > MAX_INVENTORY_ENTRIES || !payload.every(isInventoryEntry)) return false;
+  inventory = payload;
+  if (mutationsInFlight === 0) awaitingInventoryAfterMutation = false;
+  const fingerprint = JSON.stringify(
+    payload.map((entry) => [entry.paneId, entry.tabId, entry.workspaceId, entry.title ?? null, entry.profile ?? null]),
+  );
+  const changed = fingerprint !== phoneFingerprint;
+  phoneFingerprint = fingerprint;
+  return changed;
+}
+
+function forgetInventory(): void {
+  inventory = null;
+  phoneFingerprint = null;
+}
+
+function beginMutation(): { settle: () => void } {
+  mutationsInFlight += 1;
+  awaitingInventoryAfterMutation = true;
+  let settled = false;
+  return {
+    settle: () => {
+      if (settled) return;
+      settled = true;
+      mutationsInFlight -= 1;
+    },
+  };
+}
+
+/** The renderer's panes as it last sent them, or null when a round trip is needed. */
+export function cachedStudioTerminalInventory(): StudioTerminalInventoryEntry[] | null {
+  if (!inventory || mutationsInFlight > 0 || awaitingInventoryAfterMutation) return null;
+  return inventory.map((entry) => ({ ...entry }));
 }
 
 // The app window first: only its renderer answers these requests, and a

@@ -371,6 +371,18 @@ async function main() {
         return false;
       }
     };
+    // A client that lists before the window has booted is answered once it
+    // has, from the panes the renderer then sends main; its 5 s start only
+    // after the window is ready (renderer-readiness.ts).
+    const readyBeforeList = rendererReady();
+    const listStarted = Date.now();
+    const early = await rpc(handshake, "terminal.list", {});
+    console.log(`  note: the early terminal.list was sent ${readyBeforeList ? "after" : "before"} the window booted and answered in ${Date.now() - listStarted} ms`);
+    check(
+      "terminal.list sent before the window booted is answered once it has",
+      Array.isArray(early.result?.panes),
+      `${readyBeforeList ? "(the window was already ready) " : ""}after ${Date.now() - listStarted} ms: ${JSON.stringify(early).slice(0, 180)}`,
+    );
     for (let waited = 0; !rendererReady(); waited += 250) {
       if (app.exitCode !== null || app.signalCode !== null) throw new Error("Electron exited before its window booted");
       // With the 60 s handshake wait this stays inside the runner's 180 s

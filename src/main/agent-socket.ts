@@ -24,7 +24,7 @@ import { listProcessesWithCommands, processChain, processChainIn, processStartMs
 import { latestSessionStart } from "./agent-session-registry";
 import { CallerPaneResolver } from "./caller-pane";
 import { processCwds } from "./pi-session-tracker";
-import { requestTerminalOp } from "./terminal-bridge";
+import { cachedStudioTerminalInventory, requestTerminalOp } from "./terminal-bridge";
 import { windowHoldsFolder } from "./window-held";
 import {
   cleanTerminalText,
@@ -1266,6 +1266,11 @@ const CALLER_PLACEMENT_CACHE_MS = 5_000;
 const callerPlacementCache = new Map<string, { at: number; placement: CallerPlacement | null }>();
 
 async function listStudioTerminals(): Promise<StudioTerminalListing[]> {
+  // The copy the renderer keeps main up to date with, when it is as current
+  // as a round trip would be: a busy renderer (seconds on a loaded machine)
+  // made this 5 s round trip time out.
+  const cached = cachedStudioTerminalInventory();
+  if (cached) return cached as unknown as StudioTerminalListing[];
   const inventory = await requestTerminalOp<StudioTerminalListing[]>("list", {}, { timeoutMs: 5_000 });
   return Array.isArray(inventory) ? inventory : [];
 }
@@ -1939,6 +1944,13 @@ async function createTerminal(
       ? (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === callerPaneId)
       : undefined;
   const agentOwner = openingAgentOwner(run, workspaceId, callerPane, agentCaller.sessionId ?? null, rawRetention === "service");
+  // A create held while the window starts is dropped when its caller goes
+  // away, so it cannot leave a tab nobody drives.
+  const callerGone = new AbortController();
+  const onCallerGone = (): void => {
+    if (!res.writableFinished) callerGone.abort();
+  };
+  res.once("close", onCallerGone);
   try {
     const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string; group?: string }>(
       "create",
@@ -1954,6 +1966,7 @@ async function createTerminal(
         ...(agentOwner ? { agentOwner } : {}),
       },
       {
+        signal: callerGone.signal,
         // Waiting for the user took part of the MCP server's 60 s budget; keep
         // the whole call inside it, spawn wait included.
         ...(crossWorkspace
@@ -1974,7 +1987,7 @@ async function createTerminal(
             }
           : {}),
       },
-    );
+    ).finally(() => res.off("close", onCallerGone));
     // The renderer resolves as soon as the tab is added to state, but the PTY
     // spawns a beat later when TerminalPane mounts and calls pty:spawn. Wait for
     // the session to come online so the returned paneId is immediately usable by
