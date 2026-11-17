@@ -134,41 +134,34 @@ function waitResult(reason) {
   assert.match(indexSource, /waitForSessionsInChunks\(/);
   assert.match(indexSource, /"codara_session_wait",\n  "codara_feedback_send"/, "Stop can walk away from a session wait");
 
-  // python3 guard: only bare `python` at the start of a command segment.
-  for (const command of [
-    "python script.py",
-    "cd src && python -m pytest",
-    "FOO=1 python x.py",
-    "env PYTHONPATH=. python x.py",
-    "sudo python setup.py install",
-    "ls | python -c 'print(1)'",
-  ]) {
-    assert.equal(python.runsBarePython(command), true, command);
-  }
-  for (const command of [
-    "python3 script.py",
-    "python3.12 -m venv .venv",
-    "git commit -m \"fix; python x\"",
-    "echo python",
-    "pytest",
-    "pip install python-dotenv",
-    "/usr/bin/python x.py",
-    ".venv/bin/python -m pytest",
-    "cat <<'DOC'\npython x.py\nDOC",
-    "python3 - <<EOF\npython = 'snake'\nprint(python)\nEOF",
-    "cat <<-DOC\n\tpython x.py\n\tDOC",
-  ]) {
-    assert.equal(python.runsBarePython(command), false, command);
-  }
+  // python3 hint: added to a bash result whose shell could not find a bare
+  // `python`, only on a machine that has python3 and no python.
   const missing = { hasPython: false, hasPython3: true };
-  assert.equal(python.runsBarePython("cat <<DOC\ntext\nDOC\npython x.py"), true, "a command after the heredoc still counts");
-  assert.equal(python.runsBarePython("cat <<< python && python x.py"), true, "a here-string is not a heredoc");
-  const blocked = python.barePythonDecision("bash", { command: "python x.py" }, missing);
-  assert.equal(blocked?.block, true);
-  assert.match(blocked.reason, /python3/);
-  assert.equal(python.barePythonDecision("bash", { command: "python x.py" }, { hasPython: true, hasPython3: true }), undefined);
-  assert.equal(python.barePythonDecision("bash", { command: "python x.py" }, { hasPython: false, hasPython3: false }), undefined, "no python3 either: nothing better to suggest");
-  assert.equal(python.barePythonDecision("read", { path: "python" }, missing), undefined);
+  const out = (text) => ({ toolName: "bash", content: [{ type: "text", text }] });
+  for (const text of [
+    "bash: line 1: python: command not found\n\nCommand exited with code 127",
+    "/bin/sh: 1: python: not found",
+    "zsh: command not found: python",
+    "sh: python: command not found",
+  ]) {
+    const hinted = python.barePythonHint(out(text), missing);
+    assert.ok(hinted, text);
+    assert.equal(hinted.content.at(-1).text, python.PYTHON3_HINT);
+    assert.equal(hinted.content[0].text, text, "the shell's own output stays");
+  }
+  for (const text of [
+    "bash: python3: command not found",
+    "zsh: command not found: python3.12",
+    "ok",
+    "ModuleNotFoundError: No module named 'python'",
+    "pip: python-dotenv: not found in index",
+  ]) {
+    assert.equal(python.barePythonHint(out(text), missing), undefined, text);
+  }
+  const notFound = out("bash: python: command not found");
+  assert.equal(python.barePythonHint(notFound, { hasPython: true, hasPython3: true }), undefined);
+  assert.equal(python.barePythonHint(notFound, { hasPython: false, hasPython3: false }), undefined, "no python3 either: nothing better to suggest");
+  assert.equal(python.barePythonHint({ ...notFound, toolName: "read" }, missing), undefined);
 
   // PATH lookup.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-python-guard-"));
@@ -182,7 +175,8 @@ function waitResult(reason) {
   }
   const workerSource = fs.readFileSync(path.join(piCora, "worker.ts"), "utf8");
   for (const source of [indexSource, workerSource]) {
-    assert.match(source, /barePythonDecision\(event\.toolName, event\.input, python\)/);
+    assert.match(source, /pi\.on\("tool_result", \(event\) => barePythonHint\(event, python\)\);/);
+    assert.doesNotMatch(source, /barePythonDecision/, "nothing is refused on a guess");
   }
 
   console.log("pi-cora session tools and python guard: ok");

@@ -37,7 +37,7 @@ export const CORA_ENGINEERING_RULES = `For engineering work, use the native file
 - Preserve unrelated and pre-existing work. Do not commit, push, install
   packages, weaken tests, or delete data unless the user explicitly asks.
 - Run Python as python3, never a bare python: many machines have no python
-  command, and a bash call that runs one is refused there.
+  command, and a bash call that runs one fails there.
 - When work is restricted to a workspace, keep temporary check files inside
   it too. Remove only temporary files you created.
 - Treat exact names and behavior as tests. After the named check passes, run

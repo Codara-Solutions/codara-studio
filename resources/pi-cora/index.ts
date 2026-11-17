@@ -11,7 +11,7 @@ import { registerServiceTierPolicy } from "./service-tier";
 import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
 import { studioBrowserOnlyDecision } from "./studio-browser-policy";
-import { barePythonDecision, pythonAvailability } from "./python-guard";
+import { barePythonHint, pythonAvailability } from "./python-guard";
 import {
   MANAGER_SESSION_WAIT_DESCRIPTION,
   SESSION_WAIT_MANAGER_DEFAULT_SECONDS,
@@ -195,10 +195,11 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
   registerServiceTierPolicy(pi);
   // Browser automation is confined to Codara's own Browser webview. The
   // native shell must not become a side door into Safari/Chrome/Edge.
-  // A bare `python` on a machine that has only python3 fails every time.
+  pi.on("tool_call", (event) => studioBrowserOnlyDecision(event.toolName, event.input));
+  // A bare `python` on a machine that has only python3 fails every time;
+  // the failed call's output says how to fix it.
   const python = pythonAvailability();
-  pi.on("tool_call", (event) => studioBrowserOnlyDecision(event.toolName, event.input) ??
-    barePythonDecision(event.toolName, event.input, python));
+  pi.on("tool_result", (event) => barePythonHint(event, python));
 
   pi.on("before_agent_start", async (event) => {
     const untrustedContract = untrustedPullRequest
