@@ -236,6 +236,15 @@ async function main() {
   const gone = await runStore.messageWorkerAttempt(runId, attemptId, "Are you there?");
   check("a finished worker takes no more messages", gone.delivered === false);
 
+  const many = runStore.steeringForContract(Array.from({ length: 10 }, (_, i) => `message ${i + 1} ${"s".repeat(3_000)}`));
+  check(
+    "steering re-sent after a compaction keeps the newest messages within its budget and says what it left out",
+    many.length > 1 &&
+      /earlier steering messages left out/.test(many[0]) &&
+      many.at(-1).startsWith("Later steering 10:") &&
+      many.slice(1).join("").length <= 16_000,
+    JSON.stringify(many.map((section) => section.slice(0, 30))),
+  );
   const oldId = "run-worker-feed-old";
   const oldAttempt = "attempt-old";
   writeRun(oldId, (taskId) => [{

@@ -21565,6 +21565,26 @@ async function runFakeWorkflowWorkerSession({
   }
 }
 
+// Steering re-sent after a compaction: the newest messages that fit in
+// 16,000 characters, so a worker messaged often from the chat does not carry
+// every message ever sent into each compacted prompt.
+const STEERING_CONTRACT_CHARS = 16_000;
+
+export function steeringForContract(steering: readonly string[]): string[] {
+  const kept: string[] = [];
+  let total = 0;
+  for (let index = steering.length - 1; index >= 0; index -= 1) {
+    const section = `Later steering ${index + 1}:\n${steering[index]}`;
+    if (kept.length > 0 && total + section.length > STEERING_CONTRACT_CHARS) {
+      kept.unshift(`(${index + 1} earlier steering ${index === 0 ? "message" : "messages"} left out; the newest are below.)`);
+      break;
+    }
+    kept.unshift(section);
+    total += section.length;
+  }
+  return kept;
+}
+
 async function runPiWorkerSession({
   run,
   task,
@@ -21630,7 +21650,7 @@ async function runPiWorkerSession({
       ...(task.allowedPaths.length ? [`Edit only: ${task.allowedPaths.join(", ")}`] : []),
       ...(task.forbiddenPaths.length ? [`Do not edit: ${task.forbiddenPaths.join(", ")}`] : []),
       ...(contractSections ? [contractSections] : []),
-      ...taskSteering.map((text, index) => `Later steering ${index + 1}:\n${text}`),
+      ...steeringForContract(taskSteering),
       ...(memory ? [`Cora memory and profile (re-sent after compaction; they still apply):\n${memory}`] : []),
     ].join("\n\n");
   };
