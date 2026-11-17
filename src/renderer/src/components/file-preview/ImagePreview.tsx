@@ -1,0 +1,177 @@
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { DockablePaneBar } from "../../tabs/dockChromeSlot";
+import { useViewerZoom } from "../zoom/useViewerZoom";
+import ZoomControl from "../zoom/ZoomControl";
+
+interface Props {
+  src: string;
+  alt: string;
+  onError: () => void;
+  toolbarAction?: ReactNode;
+  forceLocalToolbar?: boolean;
+}
+
+// Subtle checkerboard so transparent images/SVGs read against something.
+const CHECKER_BG: React.CSSProperties = {
+  backgroundImage:
+    "linear-gradient(45deg, color-mix(in oklab, var(--ink) 5%, transparent) 25%, transparent 25%)," +
+    "linear-gradient(-45deg, color-mix(in oklab, var(--ink) 5%, transparent) 25%, transparent 25%)," +
+    "linear-gradient(45deg, transparent 75%, color-mix(in oklab, var(--ink) 5%, transparent) 75%)," +
+    "linear-gradient(-45deg, transparent 75%, color-mix(in oklab, var(--ink) 5%, transparent) 75%)",
+  backgroundSize: "16px 16px",
+  backgroundPosition: "0 0, 0 8px, 8px -8px, -8px 0",
+};
+
+const PADDING = 24;
+
+// An image or SVG that fits the pane, never upscaled, until zoomed: Ctrl+wheel
+// or pinch at the pointer, the zoom keys while focused, the toolbar, and a
+// double-click that toggles fit and actual pixels. Once it is larger than the
+// pane, dragging pans it.
+export default function ImagePreview({ src, alt, onError, toolbarAction, forceLocalToolbar }: Props) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
+  const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
+  const [viewport, setViewport] = useState({ w: 0, h: 0 });
+  const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setViewport({ w: el.clientWidth, h: el.clientHeight }));
+    ro.observe(el);
+    setViewport({ w: el.clientWidth, h: el.clientHeight });
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => setNatural(null), [src]);
+
+  const fitZoom =
+    natural && viewport.w > 0
+      ? Math.min(1, (viewport.w - PADDING * 2) / natural.w, (viewport.h - PADDING * 2) / natural.h)
+      : 1;
+  const safeFit = Math.max(0.01, fitZoom);
+  const { zoom, fitted, zoomTo, fit, apply } = useViewerZoom({
+    rootRef,
+    scrollerRef,
+    contentRef: imageRef,
+    min: Math.min(0.1, safeFit),
+    max: 16,
+    fitZoom: safeFit,
+    enabled: natural !== null,
+  });
+
+  const pannable =
+    natural !== null && (natural.w * zoom + PADDING * 2 > viewport.w + 1 || natural.h * zoom + PADDING * 2 > viewport.h + 1);
+
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    const scroller = scrollerRef.current;
+    if (!pannable || !scroller || event.button !== 0) return;
+    // A press on a scrollbar drags the scrollbar, not the image.
+    const box = scroller.getBoundingClientRect();
+    if (event.clientX - box.left >= scroller.clientWidth || event.clientY - box.top >= scroller.clientHeight) return;
+    drag.current = { x: event.clientX, y: event.clientY, left: scroller.scrollLeft, top: scroller.scrollTop };
+    scroller.setPointerCapture(event.pointerId);
+    setDragging(true);
+  };
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const scroller = scrollerRef.current;
+    const start = drag.current;
+    if (!scroller || !start) return;
+    scroller.scrollLeft = start.left - (event.clientX - start.x);
+    scroller.scrollTop = start.top - (event.clientY - start.y);
+  };
+  const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!drag.current) return;
+    drag.current = null;
+    scrollerRef.current?.releasePointerCapture(event.pointerId);
+    setDragging(false);
+  };
+
+  const onDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const scroller = scrollerRef.current;
+    if (!scroller || !natural) return;
+    if (!fitted) {
+      fit();
+      return;
+    }
+    const box = scroller.getBoundingClientRect();
+    // A small image already shows at 100% when fitted; double-click then doubles it.
+    zoomTo(safeFit >= 0.999 ? 2 : 1, { x: event.clientX - box.left, y: event.clientY - box.top });
+  };
+
+  return (
+    <div ref={rootRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+      <DockablePaneBar forceLocal={forceLocalToolbar}>
+        <span
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontVariantNumeric: "tabular-nums",
+            marginRight: "auto",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {natural ? `${natural.w} × ${natural.h}` : ""}
+        </span>
+        <ZoomControl
+          zoom={zoom}
+          onZoomOut={() => apply("out")}
+          onZoomIn={() => apply("in")}
+          onFit={fit}
+          fitTitle="Fit to view (double-click the image toggles 100%)"
+        />
+        {toolbarAction}
+      </DockablePaneBar>
+      <div
+        ref={scrollerRef}
+        data-image-viewport
+        // Focusable so a click inside sends the zoom keys to this image.
+        tabIndex={-1}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onDoubleClick={onDoubleClick}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          overflow: "auto",
+          padding: PADDING,
+          outline: "none",
+          cursor: dragging ? "grabbing" : pannable ? "grab" : "default",
+        }}
+      >
+        <img
+          ref={imageRef}
+          key={src}
+          src={src}
+          alt={alt}
+          draggable={false}
+          onLoad={(e) => {
+            const img = e.currentTarget;
+            // An SVG without its own size lays out at the CSS default box.
+            setNatural({ w: img.naturalWidth || 300, h: img.naturalHeight || 150 });
+          }}
+          onError={onError}
+          style={{
+            // Auto margins centre it while it fits and let it scroll from its
+            // edge once it is larger than the pane.
+            margin: "auto",
+            flex: "0 0 auto",
+            ...(natural
+              ? { width: natural.w * zoom, height: natural.h * zoom, maxWidth: "none" }
+              : { maxWidth: "100%", maxHeight: "100%" }),
+            objectFit: "contain",
+            borderRadius: 3,
+            boxShadow: "0 2px 18px rgba(0,0,0,0.35)",
+            userSelect: "none",
+            ...CHECKER_BG,
+          }}
+        />
+      </div>
+    </div>
+  );
+}

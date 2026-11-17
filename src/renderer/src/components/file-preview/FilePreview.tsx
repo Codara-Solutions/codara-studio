@@ -11,6 +11,7 @@ const DocxPreview = lazy(() => import("./DocxPreview"));
 const PptxPreview = lazy(() => import("./PptxPreview"));
 const SpreadsheetPreview = lazy(() => import("./SpreadsheetPreview"));
 const WhiteboardFilePreview = lazy(() => import("./WhiteboardFilePreview"));
+const ImagePreview = lazy(() => import("./ImagePreview"));
 
 interface Props {
   path: string;
@@ -23,17 +24,6 @@ interface Props {
   onWhiteboardDirtyChange?: (dirty: boolean) => void;
   onWhiteboardSaved?: (path: string) => void;
 }
-
-// Subtle checkerboard so transparent images/SVGs read against something.
-const CHECKER_BG: React.CSSProperties = {
-  backgroundImage:
-    "linear-gradient(45deg, color-mix(in oklab, var(--ink) 5%, transparent) 25%, transparent 25%)," +
-    "linear-gradient(-45deg, color-mix(in oklab, var(--ink) 5%, transparent) 25%, transparent 25%)," +
-    "linear-gradient(45deg, transparent 75%, color-mix(in oklab, var(--ink) 5%, transparent) 75%)," +
-    "linear-gradient(-45deg, transparent 75%, color-mix(in oklab, var(--ink) 5%, transparent) 75%)",
-  backgroundSize: "16px 16px",
-  backgroundPosition: "0 0, 0 8px, 8px -8px, -8px 0",
-};
 
 // FilePreview — visual host for image / svg / pdf / video / audio / docx files.
 // Content loads via file:// URLs (no byte round-trip through IPC), with a
@@ -49,7 +39,6 @@ export default function FilePreview({
 }: Props) {
   const [stat, setStat] = useState<{ size: number; mtimeMs: number } | null>(null);
   const [missing, setMissing] = useState(false);
-  const [dimensions, setDimensions] = useState<{ w: number; h: number } | null>(null);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
 
@@ -73,7 +62,6 @@ export default function FilePreview({
     let cancelled = false;
     setStat(null);
     setMissing(false);
-    setDimensions(null);
     setBlobUrl(null);
     setLoadFailed(false);
 
@@ -228,75 +216,27 @@ export default function FilePreview({
     );
   }
 
-  // Images only (the size readout that used to sit beside it is gone — not
-  // information anyone acts on). Null until the image reports its natural
-  // size, so no empty strip flashes while loading.
-  const caption = dimensions ? (
-    <div
-      style={{
-        flex: "0 0 24px",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 12,
-        color: "var(--muted)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 11,
-        fontVariantNumeric: "tabular-nums",
-        borderTop: "1px solid var(--rule-soft)",
-        background: "var(--panel)",
-      }}
-    >
-      <span>
-        {dimensions.w} × {dimensions.h}
-      </span>
-    </div>
-  ) : null;
-
   if (kind === "image" || kind === "svg") {
     return (
-      <div style={hostStyle}>
-        {toolbarAction && <FloatingPreviewAction>{toolbarAction}</FloatingPreviewAction>}
-        <div
-          style={{
-            flex: 1,
-            minHeight: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            overflow: "auto",
-            padding: 24,
-          }}
-        >
-          {loadFailed ? (
-            <span style={{ color: "var(--muted)", fontSize: 12 }}>
-              This {kind === "svg" ? "SVG" : "image"} could not be rendered.
-            </span>
-          ) : (
-            <img
-              key={src}
+      <div style={{ ...hostStyle, overflow: "hidden" }}>
+        {loadFailed ? (
+          <span style={{ margin: "auto", color: "var(--muted)", fontSize: 12 }}>
+            This {kind === "svg" ? "SVG" : "image"} could not be rendered.
+          </span>
+        ) : (
+          <Suspense fallback={null}>
+            <ImagePreview
               src={src}
               alt={path}
-              onLoad={(e) => {
-                const img = e.currentTarget;
-                setDimensions({ w: img.naturalWidth, h: img.naturalHeight });
-              }}
               onError={() => {
                 if (!blobUrl) activateBlobFallback();
                 else setLoadFailed(true);
               }}
-              style={{
-                maxWidth: "100%",
-                maxHeight: "100%",
-                objectFit: "contain",
-                borderRadius: 3,
-                boxShadow: "0 2px 18px rgba(0,0,0,0.35)",
-                ...CHECKER_BG,
-              }}
+              toolbarAction={toolbarAction}
+              forceLocalToolbar={forceLocalToolbar}
             />
-          )}
-        </div>
-        {caption}
+          </Suspense>
+        )}
       </div>
     );
   }
@@ -389,7 +329,6 @@ export default function FilePreview({
             style={{ maxWidth: "100%", maxHeight: "100%", borderRadius: 4, outline: "none" }}
           />
         </div>
-        {caption}
       </div>
     );
   }
@@ -418,7 +357,6 @@ export default function FilePreview({
           style={{ width: "min(480px, 100%)" }}
         />
       </div>
-      {caption}
     </div>
   );
 }
