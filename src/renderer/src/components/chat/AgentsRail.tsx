@@ -1,9 +1,12 @@
 import {
   useCallback,
   useEffect,
+  useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type FocusEvent,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -42,24 +45,40 @@ interface Props {
   mainGlyph: ReactNode;
   onOpenWorker: (workerId: string) => void;
   onOpenMain: () => void;
+  /** A chat kept hidden in the background reads no activity. */
+  suspended?: boolean;
 }
 
-/** Ticks once a second while `active`: elapsed times only show in the list and the tooltip. */
-function useNow(active: boolean): number {
+/**
+ * Ticks once a second while `active`: elapsed times only show in the list
+ * and the tooltip. Otherwise it moves with the run, so the marks' spoken
+ * labels stay close without a timer.
+ */
+function useNow(active: boolean, run: RunState): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!active) return undefined;
     setNow(Date.now());
+    if (!active) return undefined;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [active]);
-  return active ? now : Date.now();
+  }, [active, run]);
+  return now;
 }
 
-export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onOpenMain }: Props): JSX.Element | null {
+export default function AgentsRail({
+  run,
+  insideId,
+  mainGlyph,
+  onOpenWorker,
+  onOpenMain,
+  suspended = false,
+}: Props): JSX.Element | null {
   const workers = useMemo(() => listChatWorkers(run), [run]);
-  const activity = useWorkerActivity(run.id);
+  const activity = useWorkerActivity(run.id, !suspended);
+  const listId = useId();
   const [open, setOpen] = useState(false);
+  // The strip key the list was opened from, where Esc brings focus back.
+  const openedFrom = useRef<string | null>(null);
   const [tip, setTip] = useState<{ id: string; top: number } | null>(null);
   const [focusKey, setFocusKey] = useState<string>(insideId ?? MAIN);
   const stripRef = useRef<HTMLDivElement | null>(null);
@@ -67,7 +86,7 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   const anyRunning = workers.some((worker) => worker.status === "running");
-  const now = useNow(anyRunning && (open || tip !== null));
+  const now = useNow(anyRunning && (open || tip !== null), run);
   const items = useMemo(() => railWorkers(run, workers, activity, now), [run, workers, activity, now]);
   const { marks, more } = railMarks(items, insideId);
   const summary = railSummary(items);
@@ -84,19 +103,40 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
   const stripKeysRef = useRef(stripKeys);
   stripKeysRef.current = stripKeys;
 
+  // The tab stop follows the worker you are in, however you got there.
+  useEffect(() => {
+    setFocusKey(insideId ?? MAIN);
+  }, [insideId]);
+  // A mark that moved into "+N" or went away while focused hands focus to
+  // the stop that replaced it, instead of dropping it to the page.
+  // A removed button fires no blur, so the strip still counts as focused.
+  const stripFocused = useRef(false);
+  useLayoutEffect(() => {
+    const strip = stripRef.current;
+    if (!strip || !stripFocused.current || strip.contains(document.activeElement)) return;
+    if (document.activeElement && document.activeElement !== document.body) return;
+    strip.querySelector<HTMLElement>(`[data-rail-key="${CSS.escape(stopKey)}"]`)?.focus();
+  });
+
   const focusStrip = useCallback((key: string) => {
     setFocusKey(key);
     stripRef.current?.querySelector<HTMLElement>(`[data-rail-key="${CSS.escape(key)}"]`)?.focus();
   }, []);
 
-  const openList = useCallback(() => {
+  const openList = useCallback((from: string | null) => {
+    openedFrom.current = from;
     setTip(null);
     setOpen(true);
   }, []);
   const foldList = useCallback(
     (refocus: boolean) => {
       setOpen(false);
-      if (refocus) window.requestAnimationFrame(() => focusStrip(stripKeysRef.current.includes(current) ? current : EXPAND));
+      if (!refocus) return;
+      const back = openedFrom.current;
+      window.requestAnimationFrame(() => {
+        const keys = stripKeysRef.current;
+        focusStrip(back && keys.includes(back) ? back : keys.includes(current) ? current : EXPAND);
+      });
     },
     [current, focusStrip],
   );
@@ -108,7 +148,10 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
     window.requestAnimationFrame(() => {
       const rows = listRef.current?.querySelectorAll<HTMLElement>("[data-rail-row]");
       if (!rows?.length) return;
-      const here = [...rows].find((row) => row.dataset.railRow === current);
+      // The row of the mark you opened it from, else the one you are in.
+      const from = openedFrom.current;
+      const here =
+        [...rows].find((row) => row.dataset.railRow === from) ?? [...rows].find((row) => row.dataset.railRow === current);
       (here ?? rows[0]).focus();
     });
     const onPointerDown = (event: PointerEvent) => {
@@ -120,7 +163,7 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const go = (id: string) => {
+  const go = (id: string, fromList = false) => {
     // A worker that never started has nothing to show inside yet.
     const item = byId.get(id);
     if (item && !openable(item)) return;
@@ -128,6 +171,8 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
     setTip(null);
     if (id === MAIN) onOpenMain();
     else onOpenWorker(id);
+    // The row you chose goes away with the list: focus lands on its mark.
+    if (fromList) window.requestAnimationFrame(() => focusStrip(stripKeysRef.current.includes(id) ? id : EXPAND));
   };
 
   const onStripKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -142,7 +187,8 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
       focusStrip(event.key === "Home" ? stripKeys[0]! : stripKeys[stripKeys.length - 1]!);
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
-      openList();
+      if (open) listRef.current?.querySelector<HTMLElement>("[data-rail-row]")?.focus();
+      else openList(stopKey);
     } else if (event.key === "Escape" && open) {
       event.preventDefault();
       event.stopPropagation();
@@ -176,20 +222,30 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
   const showTip = (id: string, element: HTMLElement, fromFocus = false) => {
     // A click focuses the mark too; only keyboard focus shows the tooltip.
     if (open || (fromFocus && !element.matches(":focus-visible"))) return;
-    setTip({ id, top: element.offsetTop });
+    // Kept inside the rail near the bottom of a short pane.
+    const room = (rootRef.current?.clientHeight ?? 0) - 72;
+    setTip({ id, top: Math.max(0, Math.min(element.offsetTop - (stripRef.current?.scrollTop ?? 0), room)) });
   };
 
   const onStripClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     // The strip's empty space opens the list too; its buttons handle their own.
-    if (event.target === event.currentTarget) openList();
+    if (event.target === event.currentTarget) openList(null);
+  };
+
+  // Focus leaving the rail (Tab past the last row) folds the list.
+  const onRootBlur = (event: FocusEvent<HTMLDivElement>) => {
+    const next = event.relatedTarget as Node | null;
+    if (open && next && rootRef.current && !rootRef.current.contains(next)) setOpen(false);
   };
 
   if (items.length === 0) return null;
   const tipItem = tip && tip.id !== MAIN ? byId.get(tip.id) : null;
+  // A worker that went away takes its tooltip with it.
+  const tipShown = tip !== null && !open && (tip.id === MAIN || Boolean(tipItem));
   const mainLine = running > 0 ? `waiting on ${running}` : summary;
 
   return (
-    <div ref={rootRef} className="cora-agents-rail" data-agents-rail data-open={open || undefined}>
+    <div ref={rootRef} className="cora-agents-rail" data-agents-rail data-open={open || undefined} onBlur={onRootBlur}>
       <nav aria-label="Agents" className="cora-agents-rail__nav">
         <div
           ref={stripRef}
@@ -199,6 +255,12 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
           className="cora-agents-strip"
           onKeyDown={onStripKeyDown}
           onClick={onStripClick}
+          onFocus={() => {
+            stripFocused.current = true;
+          }}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) stripFocused.current = false;
+          }}
           onMouseLeave={() => setTip(null)}
         >
           <button
@@ -215,6 +277,7 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
             }}
             onBlur={() => setTip(null)}
             onMouseEnter={(event) => showTip(MAIN, event.currentTarget)}
+            onMouseLeave={() => setTip(null)}
             onClick={() => go(MAIN)}
           >
             {mainGlyph}
@@ -241,6 +304,7 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
                 }}
                 onBlur={() => setTip(null)}
                 onMouseEnter={(event) => showTip(id, event.currentTarget)}
+                onMouseLeave={() => setTip(null)}
                 onClick={() => go(id)}
               >
                 <ActivityIcon state={ICON[item.state]} color={item.state === "done" ? "var(--ok)" : undefined} />
@@ -254,9 +318,10 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
               data-rail-key={MORE}
               aria-label={`${more} more ${more === 1 ? "worker" : "workers"}, open the list`}
               aria-expanded={open}
+              aria-controls={open ? listId : undefined}
               tabIndex={stopKey === MORE ? 0 : -1}
               onFocus={() => setFocusKey(MORE)}
-              onClick={() => (open ? foldList(false) : openList())}
+              onClick={() => (open ? foldList(false) : openList(MORE))}
             >
               +{more}
             </button>
@@ -267,14 +332,15 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
             data-rail-key={EXPAND}
             aria-label={open ? "Fold the agents list" : "Open the agents list"}
             aria-expanded={open}
+            aria-controls={open ? listId : undefined}
             tabIndex={stopKey === EXPAND ? 0 : -1}
             onFocus={() => setFocusKey(EXPAND)}
-            onClick={() => (open ? foldList(false) : openList())}
+            onClick={() => (open ? foldList(false) : openList(EXPAND))}
           >
             <ChevronGlyph open={false} />
           </button>
         </div>
-        {tip && !open && (
+        {tip && tipShown && (
           <div className="cora-agents-tip" role="presentation" style={{ top: tip.top }} aria-hidden>
             {tipItem ? (
               <>
@@ -290,7 +356,7 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
           </div>
         )}
         {open && (
-          <div ref={listRef} className="cora-agents-list" role="group" aria-label="Agents list" onKeyDown={onListKeyDown}>
+          <div ref={listRef} id={listId} className="cora-agents-list" role="group" aria-label="Agents list" onKeyDown={onListKeyDown}>
             <div className="cora-agents-list__head">
               <span>Agents · {items.length}</span>
               <span className="cora-agents-list__summary">{summary}</span>
@@ -301,7 +367,7 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
               data-rail-row={MAIN}
               data-current={current === MAIN || undefined}
               aria-current={current === MAIN ? "true" : undefined}
-              onClick={() => go(MAIN)}
+              onClick={() => go(MAIN, true)}
             >
               <span className="cora-agents-row__icon">{mainGlyph}</span>
               <span className="cora-agents-row__name">Main · Cora</span>
@@ -322,7 +388,7 @@ export default function AgentsRail({ run, insideId, mainGlyph, onOpenWorker, onO
                     data-current={current === item.worker.id || undefined}
                     aria-current={current === item.worker.id ? "true" : undefined}
                     aria-disabled={!openable(item) || undefined}
-                    onClick={() => go(item.worker.id)}
+                    onClick={() => go(item.worker.id, true)}
                   >
                     <span className="cora-agents-row__icon">
                       <ActivityIcon state={ICON[item.state]} color={item.state === "done" ? "var(--ok)" : undefined} />
