@@ -217,6 +217,16 @@ const piDist = path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-age
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+  // The extension cannot import src/shared, so it keeps its own copy of the
+  // literal-slash label and check; both copies must stay the same.
+  const literalParts = (rel) => {
+    const text = fs.readFileSync(path.join(ROOT, rel), "utf8");
+    const label = /const LITERAL_SLASH_LABEL = ("[^"]*");/.exec(text);
+    const check = /\n  return (text\.startsWith\("\/"\) \? `\$\{LITERAL_SLASH_LABEL\}\\n\$\{text\}` : text);/.exec(text);
+    assert.ok(label && check, `${rel} keeps the literal-slash label and check`);
+    return [label[1], check[1]];
+  };
+  assert.deepEqual(literalParts("resources/pi-cora/skill-commands.ts"), literalParts("src/shared/user-commands.ts"));
   console.log("pi-cora skill commands and user rules: ok");
 })().catch((error) => {
   console.error(error);
