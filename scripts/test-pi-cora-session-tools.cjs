@@ -140,7 +140,6 @@ function waitResult(reason) {
     "cd src && python -m pytest",
     "FOO=1 python x.py",
     "env PYTHONPATH=. python x.py",
-    "/usr/bin/python x.py",
     "sudo python setup.py install",
     "ls | python -c 'print(1)'",
   ]) {
@@ -153,10 +152,17 @@ function waitResult(reason) {
     "echo python",
     "pytest",
     "pip install python-dotenv",
+    "/usr/bin/python x.py",
+    ".venv/bin/python -m pytest",
+    "cat <<'DOC'\npython x.py\nDOC",
+    "python3 - <<EOF\npython = 'snake'\nprint(python)\nEOF",
+    "cat <<-DOC\n\tpython x.py\n\tDOC",
   ]) {
     assert.equal(python.runsBarePython(command), false, command);
   }
   const missing = { hasPython: false, hasPython3: true };
+  assert.equal(python.runsBarePython("cat <<DOC\ntext\nDOC\npython x.py"), true, "a command after the heredoc still counts");
+  assert.equal(python.runsBarePython("cat <<< python && python x.py"), true, "a here-string is not a heredoc");
   const blocked = python.barePythonDecision("bash", { command: "python x.py" }, missing);
   assert.equal(blocked?.block, true);
   assert.match(blocked.reason, /python3/);

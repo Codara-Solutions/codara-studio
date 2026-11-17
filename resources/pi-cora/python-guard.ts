@@ -15,9 +15,28 @@ export function commandOnPath(name: string, env: NodeJS.ProcessEnv = process.env
   return dirs.some((dir) => suffixes.some((suffix) => existsSync(join(dir, `${name}${suffix}`))));
 }
 
-/** Whether a shell command line starts a bare `python` (not python3 or py). */
+/** The command without heredoc bodies, which are data, not commands. */
+export function withoutHeredocBodies(command: string): string {
+  const out: string[] = [];
+  const pending: Array<{ tag: string; tabs: boolean }> = [];
+  for (const line of command.split(/\r?\n/)) {
+    if (pending.length > 0) {
+      const { tag, tabs } = pending[0];
+      if ((tabs ? line.replace(/^\t+/, "") : line) === tag) pending.shift();
+      continue;
+    }
+    out.push(line);
+    for (const match of line.matchAll(/(?<!<)<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/g)) {
+      pending.push({ tag: match[3], tabs: match[1] === "-" });
+    }
+  }
+  return out.join("\n");
+}
+
+/** Whether a shell command line starts a bare `python` (not python3, py or
+ *  an interpreter named by its path, such as .venv/bin/python). */
 export function runsBarePython(command: string): boolean {
-  const normalized = command.replace(/\\\r?\n/g, " ");
+  const normalized = withoutHeredocBodies(command).replace(/\\\r?\n/g, " ");
   for (const rawSegment of splitShellSegments(normalized)) {
     const segment = rawSegment
       .trim()
@@ -25,7 +44,7 @@ export function runsBarePython(command: string): boolean {
       .replace(/^(?:(?:sudo|nohup|command|exec|time)\s+)+/i, "")
       .replace(/^env(?:\s+-\S+)*(?:\s+[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+))*\s+/i, "")
       .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/, "");
-    if (/^(?:\S*\/)?python(?:\s|$)/.test(segment)) return true;
+    if (/^python(?:\s|$)/.test(segment)) return true;
   }
   return false;
 }
