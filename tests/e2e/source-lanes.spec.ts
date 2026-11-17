@@ -234,7 +234,7 @@ const laneOrder = (page: Page) =>
 async function shots(page: Page, name: string): Promise<void> {
   const dir = process.env.SOURCE_LANES_SHOTS;
   if (!dir) return;
-  const panel = page.getByTestId("commit-dock").locator("..");
+  const panel = page.getByRole("tablist", { name: "Source Control views" }).locator("..");
   for (const theme of ["dracula", "codara-daylight"] as const) {
     await page.evaluate((value) => window.spark.preferences.set("theme", value), theme);
     await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
@@ -336,6 +336,7 @@ test("every checkout is a lane with its changes, its PR and its next step", asyn
     await test.step("the journey marks failed checks as failed, with no green tick", async () => {
       await page.locator('[data-workspace-id="wt-failing"]').click();
       await expect(lane(page, "feat/failing")).toHaveAttribute("data-own", "true", { timeout: 15_000 });
+      await page.getByRole("tablist", { name: "Source Control views" }).getByRole("tab", { name: /^Pull request/ }).click();
       const journey = page.getByRole("list", { name: "Review journey" });
       const failed = journey.locator('[role="listitem"][data-state="failed"]');
       await expect(failed).toContainText("Checks found problems", { timeout: 30_000 });

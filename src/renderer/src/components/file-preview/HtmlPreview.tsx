@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { pathToFileUrl } from "../../lib/pathToFileUrl";
 import { isRemotePath } from "@shared/remote";
 import FindBar from "../find/FindBar";
 import { useWebviewFind } from "../find/useWebviewFind";
+
+const BrowserPageZoom = lazy(() => import("../Preview/BrowserPageZoom"));
 
 // HtmlPreview — rendered view for .html/.htm files, hosted in an Electron
 // <webview> so the page runs in its own guest process with its scripts and
@@ -29,6 +31,7 @@ interface Props {
 }
 
 export default function HtmlPreview({ path, mtimeMs }: Props) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const webviewRef = useRef<WebviewElement | null>(null);
   const [domReady, setDomReady] = useState(false);
@@ -116,7 +119,7 @@ export default function HtmlPreview({ path, mtimeMs }: Props) {
   }
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+    <div ref={rootRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       <div ref={findHostRef} className="codara-find-host" onKeyDown={find.onKeyDown}>
         <div ref={hostRef} style={{ flex: 1, minHeight: 0, position: "relative" }}>
           {error && (
@@ -148,12 +151,16 @@ export default function HtmlPreview({ path, mtimeMs }: Props) {
           alignItems: "center",
           justifyContent: "flex-end",
           gap: 4,
+          fontSize: 11,
           padding: "0 6px",
           color: "var(--muted)",
           borderTop: "1px solid var(--rule-soft)",
           background: "var(--panel)",
         }}
       >
+        <Suspense fallback={null}>
+          <BrowserPageZoom rootRef={rootRef} webviewRef={webviewRef} ready={domReady && !error} />
+        </Suspense>
         <button
           type="button"
           onClick={handleReload}

@@ -1,9 +1,12 @@
 import { memo, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import MermaidBlock from "./MermaidBlock";
 import MarkdownReviewLayer from "../review/MarkdownReviewLayer";
 import FindBar from "../find/FindBar";
 import { useDomFind } from "../find/useDomFind";
+import { useViewerZoom } from "../zoom/useViewerZoom";
+import ZoomControl from "../zoom/ZoomControl";
 import { markdownRehypePipeline, markdownRemarkPlugins } from "./pipeline";
 import "./markdown.css";
 
@@ -49,6 +52,8 @@ const previewRehypePlugins = markdownRehypePipeline([rehypeSourceLines]);
 interface Props {
   text: string;
   basePath: string;
+  /** Where the zoom row goes: a slot in the editor's toolbar. */
+  zoomSlot?: HTMLElement | null;
 }
 
 function dirnameOf(p: string): string {
@@ -72,10 +77,12 @@ function resolveResource(href: string, baseDir: string): string {
   return `file://${baseDir}/${trimmed}`;
 }
 
-function MarkdownPreview({ text, basePath }: Props) {
+function MarkdownPreview({ text, basePath, zoomSlot }: Props) {
   const baseDir = useMemo(() => dirnameOf(basePath), [basePath]);
   const hostRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const zoomRef = useRef<HTMLDivElement>(null);
+  const { zoom, controls } = useViewerZoom({ rootRef: hostRef, scrollerRef: rootRef, contentRef: zoomRef, min: 0.5, max: 3 });
   const find = useDomFind({
     hostRef,
     contentRef: rootRef,
@@ -153,15 +160,28 @@ function MarkdownPreview({ text, basePath }: Props) {
         }}
       >
         <MarkdownReviewLayer containerRef={rootRef} basePath={basePath} text={text} />
-        <ReactMarkdown
-          remarkPlugins={markdownRemarkPlugins}
-          rehypePlugins={previewRehypePlugins}
-          components={components}
-        >
-          {text}
-        </ReactMarkdown>
+        {/* CSS zoom scales the CSS pixel inside, so the text reflows in the
+            same column, as a browser's zoom does. */}
+        <div ref={zoomRef} className="spark-markdown__zoom" style={{ zoom }}>
+          <ReactMarkdown
+            remarkPlugins={markdownRemarkPlugins}
+            rehypePlugins={previewRehypePlugins}
+            components={components}
+          >
+            {text}
+          </ReactMarkdown>
+        </div>
       </div>
       {find.bar && <FindBar {...find.bar} />}
+      {zoomSlot &&
+        createPortal(
+          <ZoomControl
+            {...controls}
+            fitLabel="100%"
+            fitTitle="Reset zoom"
+          />,
+          zoomSlot,
+        )}
     </div>
   );
 }

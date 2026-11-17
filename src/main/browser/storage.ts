@@ -272,7 +272,7 @@ export async function readStorage(
 function refuseOnUserBrowser(target: BrowserTarget, what: string): void {
   if (target.kind === "chrome") {
     throw new StorageParamsError(
-      `Codara does not ${what} in your own browser, where it would sign you out of sites. Use a Codara browser tab (storage action fresh gives a logged-out one).`,
+      `Codara does not ${what} in your own browser, where it would sign you out of sites. On a Chrome tab get works, and set and clear work on area local or session; for a clean session use a Codara browser tab (storage action fresh gives a logged-out one).`,
     );
   }
 }

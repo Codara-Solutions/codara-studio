@@ -3,6 +3,8 @@ import { renderAsync } from "docx-preview";
 import { DockablePaneBar } from "../../tabs/dockChromeSlot";
 import FindBar from "../find/FindBar";
 import { useDomFind } from "../find/useDomFind";
+import { useViewerZoom } from "../zoom/useViewerZoom";
+import ZoomControl from "../zoom/ZoomControl";
 
 interface Props {
   path: string;
@@ -11,8 +13,6 @@ interface Props {
   toolbarAction?: ReactNode;
   forceLocalToolbar?: boolean;
 }
-
-const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2];
 
 // Word-document viewer. docx-preview renders the OOXML package straight into
 // a host <div> as real DOM (one element tree per page, incl. headers/footers),
@@ -26,10 +26,10 @@ export default function DocxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
   const hostRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
   // Natural width of the rendered page, used to center it in the scroller.
   const [pageWidth, setPageWidth] = useState<number | null>(null);
   const findHostRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const find = useDomFind({
     hostRef: findHostRef,
     contentRef: hostRef,
@@ -71,12 +71,14 @@ export default function DocxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
     };
   }, [path, mtimeMs]);
 
-  const zoomOut = () => {
-    setZoom((z) => [...ZOOM_STEPS].reverse().find((s) => s < z - 0.001) ?? ZOOM_STEPS[0]);
-  };
-  const zoomIn = () => {
-    setZoom((z) => ZOOM_STEPS.find((s) => s > z + 0.001) ?? ZOOM_STEPS[ZOOM_STEPS.length - 1]);
-  };
+  const { zoom, controls } = useViewerZoom({
+    rootRef,
+    scrollerRef: scrollRef,
+    contentRef: hostRef,
+    min: 0.5,
+    max: 3,
+    enabled: error === null,
+  });
 
   if (error) {
     return (
@@ -90,34 +92,14 @@ export default function DocxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
   }
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+    <div ref={rootRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       <DockablePaneBar forceLocal={forceLocalToolbar}>
         {loading && <span style={{ marginRight: "auto", whiteSpace: "nowrap" }}>Loading document…</span>}
-        <button type="button" className="spark-btn" style={zoomBtnStyle} onClick={zoomOut} title="Zoom out">
-          −
-        </button>
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontVariantNumeric: "tabular-nums",
-            minWidth: 42,
-            textAlign: "center",
-          }}
-        >
-          {Math.round(zoom * 100)}%
-        </span>
-        <button type="button" className="spark-btn" style={zoomBtnStyle} onClick={zoomIn} title="Zoom in">
-          +
-        </button>
-        <button
-          type="button"
-          className="spark-btn"
-          style={{ ...zoomBtnStyle, width: "auto", padding: "0 8px" }}
-          onClick={() => setZoom(1)}
-          title="Reset zoom"
-        >
-          100%
-        </button>
+        <ZoomControl
+          {...controls}
+          fitLabel="100%"
+          fitTitle="Reset zoom"
+        />
         {toolbarAction}
       </DockablePaneBar>
       <div ref={findHostRef} className="codara-find-host" onKeyDown={find.onKeyDown}>
@@ -149,15 +131,3 @@ export default function DocxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
     </div>
   );
 }
-
-const zoomBtnStyle: React.CSSProperties = {
-  width: 24,
-  height: 22,
-  padding: 0,
-  fontSize: 13,
-  lineHeight: 1,
-  flex: "0 0 auto",
-  // Docked, these live in the chrome band's pointer-none slot; each control
-  // re-enables the pointer for itself.
-  pointerEvents: "auto",
-};

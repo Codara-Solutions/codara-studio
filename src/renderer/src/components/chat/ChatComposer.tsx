@@ -879,6 +879,7 @@ export default function ChatComposer({
             kind: "note",
             message,
             attachments,
+            typedByUser: true,
           });
         }
       } else {
@@ -889,6 +890,8 @@ export default function ChatComposer({
           kind: "note",
           message,
           attachments,
+          // Typed here: only such a note can run a skill (user-commands.ts).
+          typedByUser: true,
         });
       }
       if (draftKey) chatComposerDrafts.delete(draftKey);
