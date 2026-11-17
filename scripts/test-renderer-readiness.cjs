@@ -33,7 +33,7 @@ const stubs = {
       contents: `
         const stub = globalThis.__readyStub;
         export const ipcMain = { on: (channel, listener) => stub.listeners.set(channel, listener) };
-        export const BrowserWindow = { getFocusedWindow: () => null, getAllWindows: () => [stub.window] };
+        export const BrowserWindow = { getFocusedWindow: () => null, getAllWindows: () => (stub.window ? [stub.window] : []) };
       `,
     }));
     build.onLoad({ filter: /^trust$/, namespace: "ready-stub" }, () => ({
@@ -64,19 +64,29 @@ async function main() {
     const sent = [];
     globalThis.__readyStub = {
       listeners: new Map(),
-      window: { webContents: { isDestroyed: () => false, isLoading: () => false, send: (_channel, request) => sent.push(request) } },
+      window: {
+        webContents: {
+          isDestroyed: () => false,
+          isLoading: () => false,
+          isLoadingMainFrame: () => false,
+          send: (_channel, request) => sent.push(request),
+        },
+      },
     };
     const entry = path.join(temp, "entry.ts");
     fs.writeFileSync(
       entry,
       `export * from ${JSON.stringify(path.join(ROOT, "src", "main", "terminal-bridge.ts"))};\n` +
-        `export * from ${JSON.stringify(path.join(ROOT, "src", "main", "renderer-readiness.ts"))};\n`,
+        `export * from ${JSON.stringify(path.join(ROOT, "src", "main", "renderer-readiness.ts"))};\n` +
+        `export * as preview from ${JSON.stringify(path.join(ROOT, "src", "main", "preview-bridge.ts"))};\n` +
+        `export * from ${JSON.stringify(path.join(ROOT, "src", "main", "terminal-create-deadline.ts"))};\n`,
     );
     const outfile = path.join(temp, "bridge.cjs");
     await esbuild.build({ entryPoints: [entry], outfile, bundle: true, platform: "node", format: "cjs", plugins: [stubs], logLevel: "silent" });
     const clock = require("./fake-clock.cjs").installFakeClock();
     const bridge = require(outfile);
     bridge.registerTerminalBridge();
+    bridge.preview.registerPreviewBridge();
     const respond = (reqId, result) =>
       globalThis.__readyStub.listeners.get("terminal-bridge:response")({}, { reqId, ok: true, result });
 
@@ -276,6 +286,73 @@ async function main() {
       assert.deepEqual(short.outcome, { error: bridge.RENDERER_STARTING_MESSAGE }, "the hold ends with the call's deadline");
       bridge.markRendererReady();
       await clock.advance(5 * 60_000); // let the timed-out create's late window pass
+    });
+
+    await check("a late answer clears its 5-minute timer", async () => {
+      push([pane("a")]);
+      const before = sent.length;
+      const timersBefore = clock.pending();
+      const create = settled(bridge.requestTerminalOp("create", { title: "t" }, { timeoutMs: 5_000 }));
+      await clock.advance(5_000);
+      assert.ok(create.outcome && create.outcome.error);
+      assert.equal(clock.pending(), timersBefore + 1, "the late window's timer");
+      respond(sent[before].reqId, { tabId: "tab-t", paneId: "t" });
+      assert.equal(clock.pending(), timersBefore, "cleared by the late answer");
+      push([pane("a"), pane("t")]);
+    });
+
+    await check("terminal.create's lookups and create share one deadline: the whole call fits under the MCP server's 60 s", async () => {
+      const reserve = 10_750; // spawn wait + settle, after the create
+      bridge.markRendererNotReady(); // a window that never gets ready
+      const startedAt = Date.now();
+      const deadline = bridge.createDeadline(reserve);
+      const call = settled(
+        (async () => {
+          // The caller's pane workspace and the caller's pane, then the create.
+          await bridge.requestTerminalOp("list", {}, bridge.lookupOptions(deadline)).catch(() => []);
+          await bridge.requestTerminalOp("list", {}, bridge.lookupOptions(deadline)).catch(() => []);
+          await bridge.requestTerminalOp("create", {}, bridge.createOpOptions(deadline, false)).catch(() => undefined);
+          return Date.now() - startedAt;
+        })(),
+      );
+      for (let i = 0; i < 120 && !call.outcome; i += 1) await clock.advance(1_000);
+      assert.ok(call.outcome && typeof call.outcome.value === "number", "the call ended");
+      assert.ok(call.outcome.value + reserve <= 56_000, `ops took ${call.outcome.value} ms, plus ${reserve} ms of spawn wait`);
+      bridge.markRendererReady();
+    });
+
+    await check("before the first window exists, ops are held, not refused; after it, no window fails at once", async () => {
+      const window = globalThis.__readyStub.window;
+      globalThis.__readyStub.window = null; // the socket answers before createWindow()
+      bridge.markRendererNotReady();
+      assert.equal(bridge.isStartingUp(), true);
+      const before = sent.length;
+      const list = settled(bridge.requestTerminalOp("list", {}, { timeoutMs: 5_000 }));
+      const previewOp = settled(bridge.preview.requestPreviewOp("list", {}, { timeoutMs: 5_000 }));
+      await clock.advance(2_000);
+      assert.equal(list.outcome, null, "the list waits for the window");
+      assert.equal(previewOp.outcome, null, "and so does a preview op");
+      globalThis.__readyStub.window = window;
+      bridge.markFirstWindowCreated();
+      bridge.markRendererNotReady();
+      push([pane("a")]);
+      bridge.markRendererReady();
+      await clock.advance(0);
+      assert.deepEqual(list.outcome && list.outcome.value.map((entry) => entry.paneId), ["a"]);
+      assert.equal(sent.length, before + 1, "only the preview op went to the window");
+      globalThis.__readyStub.listeners.get("preview-bridge:response")({}, { reqId: sent[before].reqId, ok: true, result: [] });
+      await clock.advance(0);
+      assert.deepEqual(previewOp.outcome, { value: [] });
+      globalThis.__readyStub.window = null; // macOS, every window closed
+      bridge.markRendererNotReady();
+      assert.equal(bridge.isStartingUp(), false);
+      const closed = settled(bridge.requestTerminalOp("list", {}, { timeoutMs: 5_000 }));
+      const closedPreview = settled(bridge.preview.requestPreviewOp("list", {}, { timeoutMs: 5_000 }));
+      await clock.advance(0);
+      assert.match(closed.outcome && closed.outcome.error, /No Codara window is open/);
+      assert.match(closedPreview.outcome && closedPreview.outcome.error, /No Codara window is open/);
+      globalThis.__readyStub.window = window;
+      bridge.markRendererReady();
     });
 
     await check("App.tsx sends its panes before it tells main it is ready", () => {

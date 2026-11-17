@@ -26,7 +26,7 @@
 import { BrowserWindow, ipcMain, type WebContents } from "electron";
 import { randomBytes } from "node:crypto";
 import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
-import { holdUntilRendererReady, isRendererReady } from "./renderer-readiness";
+import { holdUntilRendererReady, isRendererReady, isStartingUp } from "./renderer-readiness";
 
 export type PreviewOpName =
   | "whiteboard_inspect"
@@ -120,11 +120,16 @@ export async function requestPreviewOp<T = unknown>(
   params: PreviewOpParams = {},
   opts?: { timeoutMs?: number },
 ): Promise<T> {
-  const win = pickTargetWindow();
+  const noWindow = () =>
+    new Error("No Codara window is open. Open Codara and a preview tab before calling preview tools.");
+  let win = pickTargetWindow();
   if (!win) {
-    throw new Error(
-      "No Codara window is open. Open Codara and a preview tab before calling preview tools.",
-    );
+    // While the app starts, the window may not exist yet: hold for it. Once it
+    // has been created, none means closed, and the op fails at once.
+    if (!isStartingUp()) throw noWindow();
+    await holdUntilRendererReady();
+    win = pickTargetWindow();
+    if (!win) throw noWindow();
   }
   if (win.webContents.isDestroyed()) throw new Error("The Codara window closed before the preview request could start.");
   // The agent-socket handshake is written before the renderer bundle has

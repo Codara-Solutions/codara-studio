@@ -29,7 +29,7 @@
 import { BrowserWindow, ipcMain } from "electron";
 import { randomBytes } from "node:crypto";
 import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
-import { holdUntilRendererReady, isRendererReady, onRendererNotReady, RENDERER_HOLD_MS } from "./renderer-readiness";
+import { holdUntilRendererReady, isRendererReady, isStartingUp, onRendererNotReady, RENDERER_HOLD_MS } from "./renderer-readiness";
 
 // "create" mints a renderer-owned terminal tab, "destroy" closes it by id,
 // and "resize" keeps a phone-owned xterm grid in lockstep with its PTY. The
@@ -116,7 +116,8 @@ export function registerTerminalBridge(): void {
     const lateMutation = lateMutations.get(payload.reqId);
     if (lateMutation) {
       lateMutations.delete(payload.reqId);
-      unansweredMutations.delete(lateMutation);
+      clearTimeout(lateMutation.expiry);
+      unansweredMutations.delete(lateMutation.token);
     }
     const entry = pending.get(payload.reqId);
     if (!entry) {
@@ -198,12 +199,11 @@ export async function requestTerminalOp<T = unknown>(
     holdWithinTimeout?: boolean;
   },
 ): Promise<T> {
+  const noWindow = () => new Error("No Codara window is open. Open Codara before calling terminal.create.");
+  // While the app starts, the window may not exist yet: that is held like a
+  // window that has not mounted. Once it has been created, none means closed.
   let win = pickTargetWindow();
-  if (!win) {
-    throw new Error(
-      "No Codara window is open. Open Codara before calling terminal.create.",
-    );
-  }
+  if (!win && !isStartingUp()) throw noWindow();
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   let opTimeoutMs = timeoutMs;
   // Until React has mounted, nothing in the renderer hears the request. The
@@ -221,6 +221,7 @@ export async function requestTerminalOp<T = unknown>(
     if (opts?.holdWithinTimeout) opTimeoutMs = Math.max(0, timeoutMs - (Date.now() - heldSince));
     win = pickTargetWindow() ?? win;
   }
+  if (!win) throw noWindow();
   // A window that has just got ready sent its panes first (App.tsx), so a
   // list held for it needs no round trip into the renderer at its busiest.
   if (op === "list") {
@@ -300,7 +301,7 @@ let phoneFingerprint: string | null = null;
 // Mutations the renderer has not answered yet; timed-out ones stay until a
 // late answer arrives (lateMutations, by request id) or LATE_WINDOW_MS ends.
 const unansweredMutations = new Set<symbol>();
-const lateMutations = new Map<string, symbol>();
+const lateMutations = new Map<string, { token: symbol; expiry: NodeJS.Timeout }>();
 let awaitingInventoryAfterMutation = false;
 
 function isInventoryEntry(value: unknown): value is StudioTerminalInventoryEntry {
@@ -328,6 +329,7 @@ function forgetInventory(): void {
   inventory = null;
   phoneFingerprint = null;
   unansweredMutations.clear();
+  for (const { expiry } of lateMutations.values()) clearTimeout(expiry);
   lateMutations.clear();
   awaitingInventoryAfterMutation = false;
 }
@@ -342,12 +344,12 @@ function beginMutation(): { answered: () => void; timedOut: (reqId: string) => v
     },
     timedOut: (reqId) => {
       if (!unansweredMutations.has(token)) return;
-      lateMutations.set(reqId, token);
       const expiry = setTimeout(() => {
         lateMutations.delete(reqId);
         unansweredMutations.delete(token);
       }, LATE_WINDOW_MS);
       expiry.unref?.();
+      lateMutations.set(reqId, { token, expiry });
     },
   };
 }

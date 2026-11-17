@@ -15,7 +15,7 @@ import {
   type WebContents,
 } from "electron";
 import { flushMainLog, logMain } from "./file-log";
-import { markRendererNotReady, markRendererReady } from "./renderer-readiness";
+import { markFirstWindowCreated, markRendererNotReady, markRendererReady } from "./renderer-readiness";
 import { errorBoundaryLogEntry } from "@shared/error-boundary";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -548,7 +548,7 @@ ipcMain.on("app:renderer-ready", (e) => {
 // test-agent-socket.cjs can send terminal.list before the window counts as
 // ready on any machine, however fast it boots.
 function markRendererReadyUnlessTestGate(): void {
-  const gate = E2E_BACKGROUND ? process.env.CODARA_E2E_READY_GATE : undefined;
+  const gate = E2E_BACKGROUND && !app.isPackaged ? process.env.CODARA_E2E_READY_GATE : undefined;
   if (!gate) {
     markRendererReady();
     return;
@@ -914,6 +914,9 @@ function createWindow(): void {
   // A new window (macOS recreates it from the dock) has no mounted renderer
   // yet, and a closed one has none at all: terminal and preview ops wait.
   markRendererNotReady();
+  // From now on a missing window means it was closed, not that the app is
+  // still starting: ops fail at once instead of waiting for one.
+  markFirstWindowCreated();
   windowForEvents.once("closed", () => {
     if (mainWindow === windowForEvents || mainWindow === null) markRendererNotReady();
   });

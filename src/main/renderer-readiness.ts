@@ -19,6 +19,10 @@ export const RENDERER_HOLD_MS = 30_000;
 
 let tracked = false;
 let ready = false;
+// The socket answers before the first window exists (index.ts creates it after
+// loading state and preferences). Until then a missing window means "starting",
+// not "closed"; after it, a missing window fails an op at once.
+let firstWindowCreated = false;
 const waiters = new Set<() => void>();
 const notReadyListeners = new Set<() => void>();
 
@@ -38,6 +42,15 @@ export function markRendererReady(): void {
   tracked = true;
   ready = true;
   for (const wake of [...waiters]) wake();
+}
+
+export function markFirstWindowCreated(): void {
+  firstWindowCreated = true;
+}
+
+/** True while the app is tracked and its first window has not been created yet. */
+export function isStartingUp(): boolean {
+  return tracked && !firstWindowCreated;
 }
 
 export function isRendererReady(): boolean {
