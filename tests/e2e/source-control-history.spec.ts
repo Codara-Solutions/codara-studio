@@ -70,6 +70,28 @@ test("History is open by default and a commit opens its files in place", async (
       await expect(page.getByTestId("commit-files")).toHaveCount(0);
     });
 
+    await test.step("a double-click opens a commit and leaves it open", async () => {
+      const first = commit(page, "feat: first widgets");
+      await first.dblclick();
+      await expect(first).toHaveAttribute("aria-expanded", "true");
+      await first.click();
+      await expect(first).toHaveAttribute("aria-expanded", "false");
+    });
+
+    await test.step("the graph is one Tab stop, and arrows move between commits", async () => {
+      const rows = page.getByTestId("commit-row");
+      await expect(page.locator('[data-testid="commit-row"][tabindex="0"]')).toHaveCount(1);
+      await rows.first().focus();
+      await page.keyboard.press("ArrowDown");
+      await expect(rows.nth(1)).toBeFocused();
+      await expect(rows.nth(1)).toHaveAttribute("tabindex", "0");
+      await expect(rows.first()).toHaveAttribute("tabindex", "-1");
+      await page.keyboard.press("Home");
+      await expect(rows.first()).toBeFocused();
+      await page.keyboard.press("End");
+      await expect(rows.last()).toBeFocused();
+    });
+
     await test.step("the graph header fetches and reads the history again", async () => {
       await page.locator("#source-control-tabpanel-changes").getByText("History", { exact: true }).dispatchEvent("mouseover");
       // A commit made outside the app shows once the history is read again.

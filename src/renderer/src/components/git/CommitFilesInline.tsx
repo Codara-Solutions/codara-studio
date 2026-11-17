@@ -1,12 +1,23 @@
 import React, { useEffect, useState } from "react";
-
-// A bulk commit (a vendored package) can touch thousands of files; past this
-// many the rest is one line pointing at the full view.
-const MAX_FILES = 200;
 import type { GitCommitDetail } from "@shared/types";
 import { DiffNumbers, FOLDER_TEXT_STYLE, ROW_STYLE, StatusLetter } from "./ChangeRow";
 import { Spinner, splitPath } from "./git-ui";
 import "./source-control.css";
+
+// A bulk commit (a vendored package) can touch thousands of files; past this
+// many the rest is one line pointing at the full view.
+const MAX_FILES = 200;
+
+// A commit never changes, so its detail is read once: opening it again, or
+// clicking up and down the graph, costs no new git processes. Kept small.
+const CACHE_SIZE = 40;
+const detailCache = new Map<string, GitCommitDetail>();
+
+function remember(key: string, detail: GitCommitDetail): void {
+  detailCache.delete(key);
+  detailCache.set(key, detail);
+  if (detailCache.size > CACHE_SIZE) detailCache.delete(detailCache.keys().next().value as string);
+}
 
 // A commit opened in place under its history row (DESIGN.md, "Source
 // Control"): its files as the same compact rows the change lists use, each
@@ -26,19 +37,27 @@ export default function CommitFilesInline({
   onOpenFileDiff: (path: string, hash: string, options?: { pin?: boolean }) => void;
   onInspect: (hash: string) => void;
 }): React.ReactElement {
-  const [detail, setDetail] = useState<GitCommitDetail | null>(null);
+  const key = `${cwd}\0${hash}`;
+  const [detail, setDetail] = useState<GitCommitDetail | null>(() => detailCache.get(key) ?? null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    setDetail(null);
     setError(null);
+    const cached = detailCache.get(key);
+    if (cached) {
+      setDetail(cached);
+      return;
+    }
+    setDetail(null);
     window.spark.git
       .commitDetail(cwd, hash)
       .then((result) => {
         if (cancelled) return;
-        if (result.ok) setDetail(result.detail);
-        else setError(result.error);
+        if (result.ok) {
+          remember(key, result.detail);
+          setDetail(result.detail);
+        } else setError(result.error);
       })
       .catch((err: Error) => {
         if (!cancelled) setError(err.message);
@@ -46,7 +65,7 @@ export default function CommitFilesInline({
     return () => {
       cancelled = true;
     };
-  }, [cwd, hash]);
+  }, [cwd, hash, key]);
 
   const note = (content: React.ReactNode): React.ReactElement => (
     <div style={{ ...ROW_STYLE, paddingLeft: indent, color: "var(--muted-2)", fontSize: 11.5, gap: 6 }}>

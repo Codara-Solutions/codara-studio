@@ -110,6 +110,37 @@ export default function CommitHistory({
   // Another checkout (worktrees share commits) starts with nothing open.
   useEffect(() => setOpenHash(null), [cwd]);
   const commitCount = rows.filter((r) => r.hash).length;
+
+  // The graph is one Tab stop: the row last focused (or the open one, else
+  // the newest) takes Tab, and the arrow keys, Home and End move between
+  // commits (a roving tabindex).
+  const listRef = React.useRef<HTMLDivElement>(null);
+  const [focusHash, setFocusHash] = useState<string | null>(null);
+  const commitHashes = useMemo(() => rows.flatMap((r) => (r.hash ? [r.hash] : [])), [rows]);
+  const tabHash =
+    focusHash && commitHashes.includes(focusHash)
+      ? focusHash
+      : openHash && commitHashes.includes(openHash)
+        ? openHash
+        : (commitHashes[0] ?? null);
+  const moveFocus = React.useCallback(
+    (from: string, key: string) => {
+      const index = commitHashes.indexOf(from);
+      if (index < 0) return;
+      const next =
+        key === "ArrowDown"
+          ? Math.min(index + 1, commitHashes.length - 1)
+          : key === "ArrowUp"
+            ? Math.max(index - 1, 0)
+            : key === "Home"
+              ? 0
+              : commitHashes.length - 1;
+      const hash = commitHashes[next];
+      setFocusHash(hash);
+      listRef.current?.querySelector<HTMLElement>(`[data-commit-hash="${CSS.escape(hash)}"]`)?.focus();
+    },
+    [commitHashes],
+  );
   // Keep view-model identity stable across renders when `rows` itself didn't
   // change — GitPanel's shallow-compare keeps `rows` stable for no-op polls,
   // so this memo lets the memoized commit rows actually skip re-rendering.
@@ -159,7 +190,7 @@ export default function CommitHistory({
         ) : rows.length === 0 ? (
           <Hint text="No commits yet." />
         ) : (
-          <div style={{ padding: "1px 6px 2px 0" }}>
+          <div ref={listRef} style={{ padding: "1px 6px 2px 0" }}>
             {graphRows.map((viewModel, index) => {
               const hash = viewModel.row.hash;
               const isOpen = Boolean(hash) && hash === openHash;
@@ -169,7 +200,10 @@ export default function CommitHistory({
                     viewModel={viewModel}
                     highlighted={Boolean(hash) && hash === highlightHash}
                     open={isOpen}
+                    tabbable={Boolean(hash) && hash === tabHash}
                     onOpen={toggleOpen}
+                    onFocusRow={setFocusHash}
+                    onMove={moveFocus}
                     onOpenMenu={openMenu}
                   />
                   {isOpen && hash ? (
@@ -215,14 +249,22 @@ const CommitRowView = React.memo(function CommitRowView({
   viewModel,
   highlighted,
   open: isOpen,
+  tabbable,
   onOpen,
+  onFocusRow,
+  onMove,
   onOpenMenu,
 }: {
   viewModel: CommitGraphViewModel;
   highlighted: boolean;
   /** Its files are showing under it. */
   open: boolean;
+  /** The graph's one Tab stop. */
+  tabbable: boolean;
   onOpen: (hash: string) => void;
+  onFocusRow: (hash: string) => void;
+  /** Arrow keys, Home and End: focus another commit. */
+  onMove: (from: string, key: string) => void;
   onOpenMenu: (row: GitLogRow, x: number, y: number) => void;
 }) {
   const row = viewModel.row;
@@ -254,6 +296,8 @@ const CommitRowView = React.memo(function CommitRowView({
     if (!isCommit || !row.hash) return;
     e.preventDefault();
     e.stopPropagation();
+    // A double-click's second click would fold what the first one opened.
+    if (e.detail > 1) return;
     onOpen(row.hash);
   };
   const contextMenu = (e: React.MouseEvent): void => {
@@ -268,10 +312,19 @@ const CommitRowView = React.memo(function CommitRowView({
       data-commit-hash={row.hash || undefined}
       data-testid={isCommit ? "commit-row" : undefined}
       role={isCommit ? "button" : undefined}
-      tabIndex={isCommit ? 0 : undefined}
+      tabIndex={isCommit ? (tabbable ? 0 : -1) : undefined}
       aria-expanded={isCommit ? isOpen : undefined}
+      onFocus={(event) => {
+        if (isCommit && row.hash && event.target === event.currentTarget) onFocusRow(row.hash);
+      }}
       onKeyDown={(event) => {
-        if (!isCommit || !row.hash || event.target !== event.currentTarget || event.repeat) return;
+        if (!isCommit || !row.hash || event.target !== event.currentTarget) return;
+        if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Home" || event.key === "End") {
+          event.preventDefault();
+          onMove(row.hash, event.key);
+          return;
+        }
+        if (event.repeat) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           onOpen(row.hash);
