@@ -116,10 +116,13 @@ async function main() {
   let releaseSlowRead;
   const slowReadMayFinish = new Promise((resolve) => (releaseSlowRead = resolve));
   let slowReadStarted = false;
+  let markSlowReadHolding;
+  const slowReadHolding = new Promise((resolve) => (markSlowReadHolding = resolve));
   fs.promises.readFile = async function readFile(file, ...rest) {
     const content = await realReadFile.call(this, file, ...rest);
     if (!slowReadStarted && String(file) === runFile) {
       slowReadStarted = true;
+      markSlowReadHolding();
       await slowReadMayFinish;
     }
     return content;
@@ -128,17 +131,17 @@ async function main() {
   const runStore = require(outfile);
   try {
     const slowRead = runStore.getRun(runId); // the renderer listing runs
-    for (let i = 0; i < 200 && !slowReadStarted; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.ok(slowReadStarted, "the slow read has the file and is waiting");
+    await slowReadHolding; // it has the file as it was before the plan
 
     await runStore.updateManagerPlan(runId, {
       goal: "Migrate every service",
       milestones: [{ id: "m2", title: "billing", status: "pending" }],
     });
     releaseSlowRead();
-    await slowRead;
+    const slowResult = await slowRead;
 
     const current = await runStore.getRun(runId);
+    assert.equal(slowResult, current, "the slow read itself returns the cached, newer run");
     assert.equal(
       current.managerPlan?.milestones?.[0]?.status,
       "pending",
