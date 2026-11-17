@@ -3,16 +3,68 @@ import { _electron as electron } from "playwright";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 
-// Zoom in file viewers. A PDF zooms with Ctrl+wheel at the pointer, the
-// toolbar and the zoom keys. While a viewer has focus, Ctrl+= / Ctrl+- /
-// Ctrl+0 zoom it and leave the window's zoom alone; with focus elsewhere they
-// still zoom the window. Ctrl+F still finds in a zoomed PDF.
+// Zoom in file viewers. An image zooms at the pointer with Ctrl+wheel, pans
+// by dragging once larger than the pane, and a double-click toggles fit and
+// 100%. A PDF zooms with Ctrl+wheel and the zoom keys. While a viewer has
+// focus, Ctrl+= / Ctrl+- / Ctrl+0 zoom it and leave the window's zoom alone;
+// with focus elsewhere they still zoom the window. Ctrl+F still finds in a
+// zoomed PDF.
 //
 // SPARK_ZOOM_SHOTS=<dir> also saves screenshots of each zoomed viewer, light
 // and dark, at the default and the minimum window width.
 
 const SHOTS = process.env.SPARK_ZOOM_SHOTS;
+
+let crcTable: number[] | null = null;
+function crc32(bytes: Buffer): number {
+  if (!crcTable) {
+    crcTable = Array.from({ length: 256 }, (_, n) => {
+      let c = n;
+      for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      return c >>> 0;
+    });
+  }
+  let crc = 0xffffffff;
+  for (const byte of bytes) crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/** An RGB PNG of a 10x6 grid of coloured tiles, so a zoom shows real detail. */
+function tilesPng(width: number, height: number): Buffer {
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    const row = y * (width * 3 + 1);
+    for (let x = 0; x < width; x += 1) {
+      const tx = Math.floor((x / width) * 10);
+      const ty = Math.floor((y / height) * 6);
+      const at = row + 1 + x * 3;
+      raw[at] = 40 + tx * 21;
+      raw[at + 1] = 60 + ty * 30;
+      raw[at + 2] = (tx + ty) % 2 ? 230 : 90;
+    }
+  }
+  const chunk = (type: string, data: Buffer) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([length, body, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(raw)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
 
 /** A small valid PDF with real text: one string of Helvetica per line. */
 function textPdf(pages: string[][]): Buffer {
@@ -86,13 +138,15 @@ async function shoot(page: Page, name: string, restore: { width: number; height:
   await page.waitForTimeout(200);
 }
 
-test("a PDF zooms at the pointer and takes the zoom keys while focused", async () => {
+test("images and PDFs zoom at the pointer and take the zoom keys while focused", async () => {
   test.setTimeout(240_000);
   const root = await mkdtemp(join(tmpdir(), "codara-viewer-zoom-"));
   const home = join(root, "home");
   const cwd = join(root, "project");
   await mkdir(home, { recursive: true });
   await mkdir(cwd, { recursive: true });
+  await writeFile(join(cwd, "photo.png"), tilesPng(2000, 1200));
+  await writeFile(join(cwd, "second.png"), tilesPng(1600, 1000));
   await writeFile(
     join(cwd, "report.pdf"),
     textPdf([
@@ -135,7 +189,105 @@ test("a PDF zooms at the pointer and takes the zoom keys while focused", async (
       await expect(page.getByRole("tab", { name })).toBeVisible();
     };
     const level = page.getByTestId("viewer-zoom-level").filter({ visible: true });
+    const percent = async () => Number((await level.textContent())?.replace("%", ""));
     const baseWidth = await windowWidth(page);
+
+    // ── Image: fitted, never wider than the pane.
+    await open("photo.png");
+    const viewport = page.locator("[data-image-viewport]:visible");
+    const image = viewport.locator("img");
+    await expect(page.getByText("2000 × 1200")).toBeVisible({ timeout: 15_000 });
+    const fitted = await percent();
+    expect(fitted).toBeLessThan(100);
+    const box = (await viewport.boundingBox())!;
+    const imageBox = (await image.boundingBox())!;
+    expect(imageBox.width).toBeLessThanOrEqual(box.width);
+
+    // Ctrl+wheel zooms in from fit (an axis that still fits the pane stays centred).
+    await ctrlWheel(page, imageBox.x + imageBox.width / 2, imageBox.y + imageBox.height / 2, -100);
+    await expect.poll(percent).toBeGreaterThan(fitted);
+    await ctrlWheel(page, imageBox.x + imageBox.width / 2, imageBox.y + imageBox.height / 2, 100);
+    await expect.poll(percent).toBe(fitted);
+
+    // Double-click shows actual pixels at the pointer, and again fits.
+    await viewport.dblclick({ position: { x: box.width / 2, y: box.height / 2 } });
+    await expect.poll(percent).toBe(100);
+    expect(Math.round((await image.boundingBox())!.width)).toBe(2000);
+    await viewport.dblclick({ position: { x: 40, y: 40 } });
+    await expect.poll(percent).toBe(fitted);
+    await viewport.dblclick({ position: { x: box.width / 2, y: box.height / 2 } });
+    await expect.poll(percent).toBe(100);
+    // Actual pixels are drawn smooth; only 200% and up shows hard pixels.
+    expect(await image.evaluate((el) => el.style.imageRendering)).toBe("auto");
+
+    // Larger than the pane, Ctrl+wheel keeps the point under the pointer there.
+    const pointer = { x: box.x + box.width * 0.3, y: box.y + box.height * 0.4 };
+    const fractionUnder = async () => {
+      const b = (await image.boundingBox())!;
+      return { fx: (pointer.x - b.x) / b.width, fy: (pointer.y - b.y) / b.height };
+    };
+    const before = await fractionUnder();
+    for (let i = 0; i < 3; i += 1) await ctrlWheel(page, pointer.x, pointer.y, -100);
+    await expect.poll(percent).toBeGreaterThan(150);
+    const after = await fractionUnder();
+    expect(Math.abs(after.fx - before.fx)).toBeLessThan(0.005);
+    expect(Math.abs(after.fy - before.fy)).toBeLessThan(0.005);
+    for (let i = 0; i < 2; i += 1) await ctrlWheel(page, pointer.x, pointer.y, 100);
+    await expect.poll(percent).toBeLessThan(150);
+    const back = await fractionUnder();
+    expect(Math.abs(back.fx - before.fx)).toBeLessThan(0.005);
+    expect(Math.abs(back.fy - before.fy)).toBeLessThan(0.005);
+    expect(await windowWidth(page)).toBe(baseWidth);
+
+    // Dragging pans it.
+    await expect(viewport).toHaveCSS("cursor", "grab");
+    const scrollOf = () => viewport.evaluate((el) => ({ left: el.scrollLeft, top: el.scrollTop }));
+    const scrolled = await scrollOf();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 - 150, box.y + box.height / 2 - 80, { steps: 5 });
+    await page.mouse.up();
+    const panned = await scrollOf();
+    expect(panned.left - scrolled.left).toBeGreaterThan(140);
+    expect(panned.top - scrolled.top).toBeGreaterThan(70);
+    await shoot(page, "image-zoomed", size);
+
+    // The zoom keys act on the focused image, not the window.
+    await page.keyboard.press("Control+0");
+    await expect.poll(percent).toBe(fitted);
+    await page.keyboard.press("Control+=");
+    await expect.poll(percent).toBeGreaterThan(fitted);
+    await page.keyboard.press("Control+-");
+    await page.keyboard.press("Control+-");
+    await expect.poll(percent).toBeLessThan(fitted);
+    await page.keyboard.press("Control+0");
+    await expect.poll(percent).toBe(fitted);
+    expect(await windowWidth(page)).toBe(baseWidth);
+
+    // With focus outside every viewer, they zoom the window as before.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("Control+=");
+    await expect.poll(() => windowWidth(page)).toBeLessThan(baseWidth);
+    // The image still fits its pane, which is now fewer CSS pixels wide.
+    await expect.poll(percent).toBeLessThan(fitted);
+    await page.keyboard.press("Control+0");
+    await expect.poll(() => windowWidth(page)).toBe(baseWidth);
+
+    // Another image opened in the same preview tab starts at fit, not at
+    // this one's zoom.
+    await viewport.click({ position: { x: 5, y: 5 } });
+    await page.keyboard.press("Control+=");
+    await page.keyboard.press("Control+=");
+    await expect.poll(percent).toBeGreaterThan(fitted);
+    await open("second.png");
+    await expect(page.getByText("1600 × 1000")).toBeVisible();
+    const img = image;
+    const fits = () =>
+      img.evaluate((el) => {
+        const pane = el.parentElement!;
+        return el.getBoundingClientRect().width <= pane.clientWidth && pane.scrollLeft === 0;
+      });
+    await expect.poll(fits).toBe(true);
 
     // ── PDF: 100% is the page width fitted to the pane.
     await open("report.pdf");
@@ -188,7 +340,8 @@ test("a PDF zooms at the pointer and takes the zoom keys while focused", async (
     await expect(bar).toHaveCount(0);
     expect(await windowWidth(page)).toBe(baseWidth);
 
-    // With focus outside every viewer, the keys zoom the window as before.
+    // With focus outside every viewer the keys zoom the window, and the PDF
+    // keeps its own 100%.
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press("Control+=");
     await expect.poll(() => windowWidth(page)).toBeLessThan(baseWidth);

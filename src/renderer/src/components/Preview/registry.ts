@@ -1,6 +1,7 @@
 import type { BrowserPaneHandle } from "./BrowserPane";
 import { clearDriver, forgetPresenceTab } from "./agent-presence/store";
 import { tabLink } from "@shared/tab-links";
+import type { TabChoice } from "@shared/browser-change";
 import { tabGroupNameOf } from "../../tabs/tabGroupBridge";
 import { isTabAsleep } from "./tabs-memory/browserTabs";
 
@@ -180,6 +181,24 @@ export function listPreviewTabs(workspaceId?: string | null, callerPaneId?: stri
   });
 }
 
+/** The tabs of the caller's workspace it may name by tabId, its own marked, for an error that names a missing tab. */
+export function previewTabChoices(
+  runId?: string | null,
+  workspaceId?: string | null,
+  callerPaneId?: string | null,
+): TabChoice[] {
+  const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
+  return [...entries.values()]
+    .filter((entry) => entry.workspaceId === workspace)
+    .map((entry) => ({
+      id: entry.id,
+      title: entry.handle.getTitle() || "",
+      url: entry.handle.getURL() || entry.url,
+      current: entry.id === activeId && entry.workspaceId === activeWorkspaceId,
+      yours: runId ? entry.runId === runId : Boolean(paneId && agentPaneOwners.get(entry.id) === paneId),
+    }));
+}
+
 /** A run ended: its tabs stop showing it as driving. */
 export function clearPreviewControl(runId: string): void {
   clearDriver(`run:${runId}`);
@@ -195,6 +214,20 @@ let openPreviewTabFn: OpenPreviewTabFn | null = null;
 
 export function setOpenPreviewTabFn(fn: OpenPreviewTabFn | null): void {
   openPreviewTabFn = fn;
+}
+
+// The tab opener is set once the workspace view mounts, which a window that
+// is starting or reloading has not done yet. A call waits for it rather than
+// failing, up to this long.
+export const OPEN_TAB_READY_MS = 10_000;
+
+async function readyOpenPreviewTabFn(timeoutMs = OPEN_TAB_READY_MS): Promise<OpenPreviewTabFn> {
+  const deadline = Date.now() + timeoutMs;
+  while (!openPreviewTabFn && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+  if (openPreviewTabFn) return openPreviewTabFn;
+  throw new Error(
+    `Codara's window is still starting, so no browser tab could open within ${Math.round(timeoutMs / 1000)} s. Call codara_preview_navigate again in a few seconds; codara_preview_list shows when tabs are back.`,
+  );
 }
 
 type ClosePreviewTabFn = (id: string) => void;
@@ -250,16 +283,16 @@ export async function openIsolatedPreviewTab(
   callerIdentity?: AgentOpenerIdentity | null,
 ): Promise<RegistryEntry> {
   const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
-  if (!openPreviewTabFn) throw new Error("Codara is not ready to open browser tabs yet. Retry in a moment.");
+  const open = await readyOpenPreviewTabFn();
   const id = await Promise.resolve(
-    openPreviewTabFn(url, runId, workspace, { partition, ...(group ? { group } : {}) }),
+    open(url, runId, workspace, { partition, ...(group ? { group } : {}) }),
   );
   recordAgentOpener(id, paneId, callerIdentity);
   return waitForRegisteredTab(id, workspace);
 }
 
 // `group` only applies when a tab is opened; a reused tab stays where the
-// user or an earlier call put it.
+// user or an earlier call put it. `fresh` always opens a new tab.
 export async function ensurePreviewTab(
   url: string,
   runId?: string | null,
@@ -267,13 +300,43 @@ export async function ensurePreviewTab(
   callerPaneId?: string | null,
   group?: string | null,
   callerIdentity?: AgentOpenerIdentity | null,
+  options: { fresh?: boolean } = {},
 ): Promise<{ tab: RegistryEntry; opened: boolean }> {
   const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
+  if (options.fresh) return openAgentTab(url, runId, workspace, paneId, group, callerIdentity, true);
   const existing = findReusablePreviewTab(runId, workspace, paneId);
   if (existing) return { tab: existing, opened: false };
-  if (!openPreviewTabFn) throw new Error("Codara is not ready to open browser tabs yet. Retry in a moment.");
+  // Calls of one caller that arrive together share the tab the first opens,
+  // which is already loading its URL: none of them loads it again.
+  const key = runId ? `run:${runId}` : paneId ? `pane:${paneId}` : `workspace:${workspace ?? ""}`;
+  const pending = openingTabs.get(key);
+  if (pending) return pending;
+  const opening = openAgentTab(url, runId, workspace, paneId, group, callerIdentity, false);
+  openingTabs.set(key, opening);
+  try {
+    return await opening;
+  } finally {
+    if (openingTabs.get(key) === opening) openingTabs.delete(key);
+  }
+}
+
+const openingTabs = new Map<string, Promise<{ tab: RegistryEntry; opened: boolean }>>();
+
+async function openAgentTab(
+  url: string,
+  runId: string | null | undefined,
+  workspace: string | null,
+  paneId: string | null,
+  group: string | null | undefined,
+  callerIdentity: AgentOpenerIdentity | null | undefined,
+  fresh: boolean,
+): Promise<{ tab: RegistryEntry; opened: boolean }> {
+  const open = await readyOpenPreviewTabFn();
+  // The window may have opened this caller's tab while the call waited for it.
+  const existing = fresh ? null : findReusablePreviewTab(runId, workspace, paneId);
+  if (existing) return { tab: existing, opened: false };
   const id = await Promise.resolve(
-    openPreviewTabFn(url, runId, workspace, group ? { group } : undefined),
+    open(url, runId, workspace, group ? { group } : undefined),
   );
   recordAgentOpener(id, paneId, callerIdentity);
   return { tab: await waitForRegisteredTab(id, workspace), opened: true };
