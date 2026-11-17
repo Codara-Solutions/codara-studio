@@ -10,6 +10,7 @@
 
 import { subscriptionForModelId } from "./agent-families";
 import type { PiSubscriptionProvider } from "./types";
+import { ALLOWED_WORKER_MODELS } from "./worker-model-roster";
 
 export type CoraRoute = "subscription" | "openrouter" | "subcloud";
 
@@ -47,23 +48,39 @@ export function routeOfModelId(model: string | undefined | null): CoraRoute | nu
   return subscriptionForModelId(id) ? "subscription" : null;
 }
 
-/** The same model spelled for each route that can carry it. */
+/** Native ids a sign-in is known to serve. An OpenRouter id moves onto a
+ *  sign-in only when its native spelling is one of these: OpenRouter spells
+ *  some models differently (`claude-sonnet-4.5` against `claude-sonnet-4-5`)
+ *  and lists models a subscription does not offer. */
+const NATIVE_ROUTABLE_MODELS: ReadonlySet<string> = new Set(ALLOWED_WORKER_MODELS);
+
+/** `gpt-5.6-sol@high` as its model id and its effort suffix. */
+function splitEffort(model: string): { base: string; effort: string } {
+  const at = model.indexOf("@");
+  return at >= 0 ? { base: model.slice(0, at), effort: model.slice(at) } : { base: model, effort: "" };
+}
+
+/** The same model spelled for each route that can carry it. A native
+ *  `@effort` suffix stays on the native spelling only; OpenRouter gets the
+ *  effort through Pi's thinking option instead. */
 export function routeSpellings(model: string): Partial<Record<CoraRoute, string>> {
-  const id = model.trim();
-  const route = routeOfModelId(id);
+  const { base, effort } = splitEffort(model.trim());
+  const route = routeOfModelId(base);
   if (route === "subscription") {
-    const provider = subscriptionForModelId(id);
-    return provider ? { subscription: id, openrouter: `${OPENROUTER_PREFIX[provider]}${id}` } : {};
+    const provider = subscriptionForModelId(base);
+    return provider ? { subscription: `${base}${effort}`, openrouter: `${OPENROUTER_PREFIX[provider]}${base}` } : {};
   }
   if (route === "openrouter") {
     for (const [provider, prefix] of Object.entries(OPENROUTER_PREFIX) as Array<[PiSubscriptionProvider, string]>) {
-      if (!id.startsWith(prefix)) continue;
-      const native = id.slice(prefix.length);
-      if (subscriptionForModelId(native) === provider) return { subscription: native, openrouter: id };
+      if (!base.startsWith(prefix)) continue;
+      const native = base.slice(prefix.length);
+      if (subscriptionForModelId(native) === provider && NATIVE_ROUTABLE_MODELS.has(native)) {
+        return { subscription: native, openrouter: base };
+      }
     }
-    return { openrouter: id };
+    return { openrouter: base };
   }
-  return route ? { [route]: id } : {};
+  return route ? { [route]: `${base}${effort}` } : {};
 }
 
 export interface CoraRouteAvailability {
@@ -94,7 +111,7 @@ export function chooseCoraRoute(
     const id = spellings[route];
     if (!id) continue;
     if (route === "subscription") {
-      const provider = subscriptionForModelId(id);
+      const provider = subscriptionForModelId(splitEffort(id).base);
       if (provider && availability.subscriptions.has(provider)) return { route, model: id };
     } else if (route === "openrouter") {
       if (availability.openRouterModels.has(id)) return { route, model: id };

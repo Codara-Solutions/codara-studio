@@ -22,7 +22,9 @@ function loadTypeScriptModule(sourcePath) {
   loaded.filename = sourcePath;
   loaded.paths = Module._nodeModulePaths(path.dirname(sourcePath));
   loaded.require = (id) => {
-    const sibling = id.startsWith("./") ? path.join(path.dirname(sourcePath), `${id}.ts`) : null;
+    const sibling = id.startsWith("./")
+      ? path.join(path.dirname(sourcePath), `${id}.ts`)
+      : id.startsWith("@shared/") ? path.join(ROOT, "src", "shared", `${id.slice("@shared/".length)}.ts`) : null;
     if (sibling && fs.existsSync(sibling)) return loadTypeScriptModule(sibling);
     return Module.prototype.require.call(loaded, id);
   };
@@ -46,6 +48,11 @@ assert.deepEqual(routes.routeSpellings("gpt-5.6-sol"), { subscription: "gpt-5.6-
 assert.deepEqual(routes.routeSpellings("x-ai/grok-4.6"), { subscription: "grok-4.6", openrouter: "x-ai/grok-4.6" });
 assert.deepEqual(routes.routeSpellings("moonshotai/kimi-k2"), { openrouter: "moonshotai/kimi-k2" });
 assert.deepEqual(routes.routeSpellings("openai/claude-opus-5"), { openrouter: "openai/claude-opus-5" }, "a mismatched prefix is not a sign-in model");
+// OpenRouter moves onto a sign-in only for a native id the sign-in serves.
+assert.deepEqual(routes.routeSpellings("anthropic/claude-sonnet-4.5"), { openrouter: "anthropic/claude-sonnet-4.5" });
+assert.deepEqual(routes.routeSpellings("openai/gpt-4o"), { openrouter: "openai/gpt-4o" });
+// A native effort suffix stays native; OpenRouter gets effort as thinking.
+assert.deepEqual(routes.routeSpellings("gpt-5.6-sol@high"), { subscription: "gpt-5.6-sol@high", openrouter: "openai/gpt-5.6-sol" });
 
 const order = routes.DEFAULT_CORA_ROUTE_ORDER;
 const both = { subscriptions: new Set(["anthropic"]), openRouterModels: new Set(["anthropic/claude-opus-5", "openai/gpt-5.6-sol"]) };
@@ -54,7 +61,13 @@ assert.deepEqual(routes.chooseCoraRoute("claude-opus-5", order, both), { route: 
 assert.deepEqual(routes.chooseCoraRoute("anthropic/claude-opus-5", order, both), { route: "subscription", model: "claude-opus-5" });
 // No ChatGPT sign-in: the same model goes through OpenRouter, verified only.
 assert.deepEqual(routes.chooseCoraRoute("gpt-5.6-sol", order, both), { route: "openrouter", model: "openai/gpt-5.6-sol" });
+assert.deepEqual(routes.chooseCoraRoute("gpt-5.6-sol@high", order, both), { route: "openrouter", model: "openai/gpt-5.6-sol" });
 assert.equal(routes.chooseCoraRoute("gpt-5.6-terra", order, both), null, "an unverified OpenRouter id is never used");
+assert.equal(
+  routes.chooseCoraRoute("openai/gpt-4o", order, { subscriptions: new Set(["openai-codex"]), openRouterModels: new Set() }),
+  null,
+  "a ChatGPT sign-in does not take a model it does not offer",
+);
 // The user's order wins.
 assert.deepEqual(
   routes.chooseCoraRoute("claude-opus-5", ["openrouter", "subscription", "subcloud"], both),
@@ -88,9 +101,20 @@ assert.deepEqual(
 );
 
 // Applied where the manager and the workers launch, and shown where users look.
-assert.match(read("src/main/orchestration/pi-backend.ts"), /resolveCodaraCoraRouteModel\(pickedInput\.chat\.model\)/);
+// The manager routes before its account is pinned and frozen, so a GPT pick
+// with no ChatGPT sign-in reaches OpenRouter and records no sign-in account.
+const runStore = read("src/main/orchestration/run-store.ts");
+const routedAt = runStore.indexOf("const routedModel = await routedManagerModel(run);");
+assert.ok(routedAt > 0);
+assert.ok(runStore.indexOf("run = await pinImplicitPiManagerAccount(run, routedModel);") > routedAt);
+assert.ok(
+  runStore.indexOf("chatConfig = await freezeManagerExecutionAccount({ ...resolveChatBackendConfig(run), model: routedModel });") > routedAt,
+);
+assert.doesNotMatch(read("src/main/orchestration/pi-backend.ts"), /resolveCodaraCoraRouteModel/, "no await between a cancel and the launch");
 assert.match(read("src/main/orchestration/pi-backend.ts"), /provider === "anthropic" \? `\. \$\{CLAUDE_PI_LOGIN_BILLING_NOTE\}`/);
-assert.match(read("src/main/orchestration/run-store.ts"), /routeCoraModel\(plannedPiWorkerModel, workerSettings\)/);
+assert.match(runStore, /routeCoraModel\(plannedPiWorkerModel, routeSettings\)/);
+assert.match(runStore, /const workerSettings = isAutomationRun \? null : routeSettings;/, "automation workers are routed too");
+assert.match(runStore, /coraWorkerModelAvailability\(workerSettings\)/, "worker eligibility counts every route");
 assert.match(read("src/renderer/src/components/SessionInspector.tsx"), /<RoutesTable rows=\{routes\} \/>/);
 assert.match(read("src/renderer/src/components/capabilities/BehaviorSection.tsx"), /CLAUDE_PI_LOGIN_BILLING_NOTE/);
 assert.match(read("src/main/storage.ts"), /coraRouteOrder: normalizeCoraRouteOrder\(settings\.coraRouteOrder\)/);

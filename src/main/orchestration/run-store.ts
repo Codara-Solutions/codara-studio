@@ -445,8 +445,22 @@ async function freezeManagerExecutionAccount(
   };
 }
 
+/**
+ * The chat's model on the first route in Settings' order that carries it now
+ * (cora-routes.ts): a picked GPT model with no ChatGPT sign-in runs through a
+ * verified OpenRouter id, and the reverse. Resolved before the account is
+ * pinned or frozen, so the account and the SparkCall match the route the
+ * turn really takes. Pi only; a failed settings read keeps the picked model.
+ */
+async function routedManagerModel(run: RunState): Promise<string> {
+  const chat = resolveChatBackendConfig(run);
+  if (chat.backend !== "pi") return chat.model;
+  return loadSettings().then((settings) => routeCoraModel(chat.model, settings)).catch(() => chat.model);
+}
+
 async function pinImplicitPiManagerAccount(
   run: RunState,
+  model: string = resolveChatBackendConfig(run).model,
 ): Promise<RunState> {
   const initial = resolveChatBackendConfig(run);
   if (
@@ -456,9 +470,9 @@ async function pinImplicitPiManagerAccount(
   ) {
     return run;
   }
-  const provider = piProviderForManagerModel(initial.model);
+  const provider = piProviderForManagerModel(model);
   if (!provider) return run;
-  const candidate = await selectImplicitPiAccount(provider, initial.model);
+  const candidate = await selectImplicitPiAccount(provider, model);
   if (!candidate) return run;
 
   // Re-resolve the route as an exact identity pin before persisting it. A
@@ -485,7 +499,7 @@ async function pinImplicitPiManagerAccount(
         current.backend !== "pi" ||
         current.accountProfileId ||
         draft.sparkCalls.length > 0 ||
-        piProviderForManagerModel(current.model) !== provider
+        current.model !== initial.model
       ) {
         return false;
       }
@@ -7146,12 +7160,13 @@ async function askManagerBackendUnderTurnLock(
   // failed".
   let accountFailure: unknown;
   let chatConfig: ChatBackendConfig;
+  const routedModel = await routedManagerModel(run);
   try {
-    run = await pinImplicitPiManagerAccount(run);
-    chatConfig = await freezeManagerExecutionAccount(resolveChatBackendConfig(run));
+    run = await pinImplicitPiManagerAccount(run, routedModel);
+    chatConfig = await freezeManagerExecutionAccount({ ...resolveChatBackendConfig(run), model: routedModel });
   } catch (error) {
     accountFailure = error ?? new Error("Cora could not resolve an account for this turn");
-    chatConfig = resolveChatBackendConfig(run);
+    chatConfig = { ...resolveChatBackendConfig(run), model: routedModel };
   }
   // The Pi manager backend owns its own request
   // lifecycle, spawn/resume a real agent session, stream events, and return
@@ -14927,25 +14942,31 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // its Pi session gets what they pasted, in memory; prompt.md, a relaunch
   // and the shell/manual pty paste keep the scrubbed text.
   const livePiPrompt = isPiWorker && run.executionMode === "direct" ? withPastedText(run.id, promptText) : null;
-  const workerSettings = isPiWorker && !isAutomationRun ? await loadSettings() : null;
-  const usableWorkerRuntimes = workerSettings
-    ? await detectConfiguredAgentRuntimes()
-        .then((diagnostics) => new Set<string>(diagnostics.filter(runtimeAssignable).map((item) => item.kind)))
-        .catch(() => undefined)
-    : undefined;
+  const routeSettings = isPiWorker ? await loadSettings().catch(() => null) : null;
+  const workerSettings = isAutomationRun ? null : routeSettings;
+  // Enabled models some route can carry now: a GPT model with no ChatGPT
+  // sign-in stays eligible when its OpenRouter id is verified, instead of
+  // being swapped for another family before routing runs.
+  const routableWorkerModels = workerSettings
+    ? await coraWorkerModelAvailability(workerSettings)
+        .then((availability) => availability.connected)
+        .catch(() => [] as string[])
+    : [];
   const plannedPiWorkerModel = isPiWorker
     ? piModelForWorker(
         task,
         isAutomationRun,
-        workerSettings ? availableCoraWorkerModels(workerSettings) : undefined,
+        workerSettings
+          ? routableWorkerModels.length > 0 ? routableWorkerModels : availableCoraWorkerModels(workerSettings)
+          : undefined,
         run.executionMode === "direct" && !isAutomationRun,
-        usableWorkerRuntimes,
       )
     : undefined;
   // The same model on the first route in Settings' order that carries it
   // now; attempt.model records that id, so the run shows the route it used.
-  const piWorkerModel = plannedPiWorkerModel && workerSettings
-    ? await routeCoraModel(plannedPiWorkerModel, workerSettings).catch(() => plannedPiWorkerModel)
+  // Automation runs keep their pinned model and are routed the same way.
+  const piWorkerModel = plannedPiWorkerModel && routeSettings
+    ? await routeCoraModel(plannedPiWorkerModel, routeSettings).catch(() => plannedPiWorkerModel)
     : plannedPiWorkerModel;
   // Keep the attempt's runtime in step with the provider the model launches
   // on, so labels and session reuse never contradict the session.

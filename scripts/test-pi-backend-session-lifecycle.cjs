@@ -122,7 +122,6 @@ async function loadBackend() {
       module.exports = {
         cleanupPiMcpBridgeConfig: async (plan) => h().cleanupPlan(plan),
         createCodaraPiLaunchPlan: async (options) => h().createPlan(options),
-        resolveCodaraCoraRouteModel: async (model) => model,
         resolveCodaraOpenRouterApiKey: async () => "test-openrouter-key",
         resolveCodaraPiExecutionAccount: async (request) => h().resolveAccount(request),
         resolveCodaraPiFastMode: async (provider, model) => h().fastModeFor(provider, model),
