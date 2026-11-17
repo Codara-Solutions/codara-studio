@@ -147,8 +147,32 @@ assert.match(read("src/renderer/src/components/capabilities/BehaviorSection.tsx"
 assert.match(read("src/main/storage.ts"), /coraRouteOrder: settings\.coraRouteOrder === undefined \? undefined : normalizeCoraRouteOrder/, "unset stays unset after an upgrade");
 assert.doesNotMatch(read("src/main/storage.ts"), /coraRouteOrder: \[\.\.\.DEFAULT_CORA_ROUTE_ORDER\]/);
 // A chat on a pinned account is never routed off it.
-assert.match(runStore, /if \(chat\.backend !== "pi" \|\| chat\.accountProfileId\) return chat\.model;/);
+assert.match(runStore, /if \(chat\.backend !== "pi" \|\| managerRoutePinnedByUser\(run\)\) return chat\.model;/);
+assert.match(runStore, /draft\.chatAccountProfileId = candidate\.accountProfileId;\n\s+draft\.chatAccountProfileImplicit = true;/);
+assert.match(runStore, /draft\.chatAccountProfileId = resolved\.account\.profileId;\n\s+\/\/ The user picked this account to resume on\.\n\s+delete draft\.chatAccountProfileImplicit;/);
+// Two turns of a chat on anthropic/claude-opus-5 with sign-ins first: turn 1
+// routes to the sign-in and Cora pins that account implicitly; turn 2 must
+// still route, not go back to the paid OpenRouter spelling.
+{
+  const signInFirst = ["subscription", "openrouter", "subcloud"];
+  const avail = { subscriptions: new Set(["anthropic"]), openRouterModels: new Set(["anthropic/claude-opus-5"]) };
+  const turn = (run) => (routes.managerRoutePinnedByUser(run) ? run.chatModel : routes.chooseCoraRoute(run.chatModel, signInFirst, avail)?.model ?? run.chatModel);
+  const chat = { chatModel: "anthropic/claude-opus-5" };
+  assert.equal(turn(chat), "claude-opus-5", "turn 1 runs on the sign-in");
+  Object.assign(chat, { chatAccountProfileId: "acct-1", chatAccountProfileImplicit: true });
+  assert.equal(turn(chat), "claude-opus-5", "turn 2 after Cora's own pin still follows the order");
+  delete chat.chatAccountProfileImplicit;
+  assert.equal(turn(chat), "anthropic/claude-opus-5", "a pin the user chose keeps the chat as picked");
+}
 // A Stop that began during setup ends the turn, whatever the status was at its start.
 assert.match(runStore, /forcePauseStartCount\(run\.id\) !== entryStops/);
 
 console.log("cora routes: ok");
+
+// "As picked" stays selectable after an order was chosen, and picking it
+// clears the setting.
+{
+  const behavior = read("src/renderer/src/components/capabilities/BehaviorSection.tsx");
+  assert.match(behavior, /\n\s+<option value="">As picked \(no reordering\)<\/option>/);
+  assert.match(behavior, /event\.target\.value \? normalizeCoraRouteOrder\(event\.target\.value\.split\(","\)\) : undefined/);
+}

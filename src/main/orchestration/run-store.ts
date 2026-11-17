@@ -333,7 +333,7 @@ import {
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
 import { coraWorkerModelAvailability, routeCoraModel } from "./worker-model-availability";
-import { coraRouteLabel, effortOfModelId, workerFamilyOfModelId } from "@shared/cora-routes";
+import { coraRouteLabel, effortOfModelId, managerRoutePinnedByUser, workerFamilyOfModelId } from "@shared/cora-routes";
 import { shouldResumeForUserMessage } from "./user-message-resume";
 import {
   captureWorkerDiff,
@@ -455,11 +455,10 @@ async function freezeManagerExecutionAccount(
  */
 async function routedManagerModel(run: RunState): Promise<string> {
   const chat = resolveChatBackendConfig(run);
-  // A chat on a pinned account stays on it: routing it elsewhere would drop
-  // the pin without a word.
-  if (chat.backend !== "pi" || chat.accountProfileId) return chat.model;
+  if (chat.backend !== "pi" || managerRoutePinnedByUser(run)) return chat.model;
   return loadSettings().then((settings) => routeCoraModel(chat.model, settings)).catch(() => chat.model);
 }
+
 
 async function pinImplicitPiManagerAccount(
   run: RunState,
@@ -507,6 +506,7 @@ async function pinImplicitPiManagerAccount(
         return false;
       }
       draft.chatAccountProfileId = candidate.accountProfileId;
+      draft.chatAccountProfileImplicit = true;
       draft.updatedAt = timestamp;
     },
   });
@@ -11866,6 +11866,8 @@ export async function resumeManagerTurnRecovery(
         const accountChanged =
           draft.chatAccountProfileId !== resolved.account.profileId;
         draft.chatAccountProfileId = resolved.account.profileId;
+        // The user picked this account to resume on.
+        delete draft.chatAccountProfileImplicit;
         if (accountChanged) {
           delete draft.chatSessionUuid;
           delete draft.chatSessionMode;

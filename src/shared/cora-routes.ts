@@ -210,3 +210,14 @@ export function coraRouteRows(
 /** Pi's own warning for its Claude sign-in, said where Cora uses it. */
 export const CLAUDE_PI_LOGIN_BILLING_NOTE =
   "Pi's Claude sign-in is billed as extra usage, per token, not from your Claude plan limits.";
+
+/** A chat on an account the user chose stays on it: routing it elsewhere
+ *  would drop that pin without a word. The pin Cora took itself on turn 1
+ *  (chatAccountProfileImplicit) does not stop routing, or turn 2 would leave
+ *  the route order. */
+export function managerRoutePinnedByUser(run: {
+  chatAccountProfileId?: string;
+  chatAccountProfileImplicit?: true;
+}): boolean {
+  return Boolean(run.chatAccountProfileId) && run.chatAccountProfileImplicit !== true;
+}

@@ -3480,6 +3480,10 @@ export interface RunState {
    * retrofitted.
    */
   chatAccountProfileId?: string;
+  /** chatAccountProfileId was chosen by Cora on the first turn
+   *  (pinImplicitPiManagerAccount), not by the user. Such a pin follows the
+   *  route order; a pin the user chose keeps the chat on its account. */
+  chatAccountProfileImplicit?: true;
   /**
    * Concrete native Codex CLI account profile this chat was pinned to at
    * launch, resolved from the provider's active account in Settings. This is

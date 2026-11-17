@@ -88,7 +88,7 @@ function RouteOrderRow({
 }: {
   /** Undefined until the user picks: every model launches as picked. */
   value: CoraRoute[] | undefined;
-  onChange: (next: CoraRoute[]) => void;
+  onChange: (next: CoraRoute[] | undefined) => void;
 }) {
   const current = value ? value.join(",") : "";
   const choices = !value || ROUTE_ORDER_CHOICES.some((order) => order.join(",") === current)
@@ -110,10 +110,12 @@ function RouteOrderRow({
         className="spark-input"
         aria-labelledby="route-order-title"
         value={current}
-        onChange={(event) => onChange(normalizeCoraRouteOrder(event.target.value.split(",")))}
+        onChange={(event) =>
+          onChange(event.target.value ? normalizeCoraRouteOrder(event.target.value.split(",")) : undefined)
+        }
         style={{ width: "auto", minWidth: 120 }}
       >
-        {!value && <option value="">As picked (no reordering)</option>}
+        <option value="">As picked (no reordering)</option>
         {choices.map((order) => (
           <option key={order.join(",")} value={order.join(",")}>
             {routeOrderLabel(order)}
@@ -164,7 +166,12 @@ export default function BehaviorSection({
         <RouteOrderRow
           value={view.coraRouteOrder === undefined ? undefined : normalizeCoraRouteOrder(view.coraRouteOrder)}
           onChange={(coraRouteOrder) =>
-            onChange({ coraRouteOrder }, `Cora now tries ${routeOrderLabel(coraRouteOrder)}.`)
+            onChange(
+              { coraRouteOrder },
+              coraRouteOrder
+                ? `Cora now tries ${routeOrderLabel(coraRouteOrder)}.`
+                : "Cora launches every model as picked.",
+            )
           }
         />
         <ToggleRow
