@@ -11,6 +11,13 @@ import { registerServiceTierPolicy } from "./service-tier";
 import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
 import { studioBrowserOnlyDecision } from "./studio-browser-policy";
+import { barePythonHint, pythonAvailability } from "./python-guard";
+import {
+  MANAGER_SESSION_WAIT_DESCRIPTION,
+  managerSessionWaitSchema,
+  waitForSessionsInChunks,
+  withSessionDefaults,
+} from "./session-tools";
 import { createWhiteboardReviewGuard } from "./whiteboard-review-policy";
 import {
   buildCoraPiSystemPrompt,
@@ -60,6 +67,7 @@ const ABANDONABLE_BRIDGE_TOOLS = new Set([
   "codara_wait_for_workers",
   "codara_wait_for_automation",
   "codara_workflow_wait",
+  "codara_session_wait",
   "codara_feedback_send",
 ]);
 const UNTRUSTED_PULL_REQUEST_POLICY = "untrusted-pull-request";
@@ -170,6 +178,10 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
   // Browser automation is confined to Codara's own Browser webview. The
   // native shell must not become a side door into Safari/Chrome/Edge.
   pi.on("tool_call", (event) => studioBrowserOnlyDecision(event.toolName, event.input));
+  // A bare `python` on a machine that has only python3 fails every time;
+  // the failed call's output says how to fix it.
+  const python = pythonAvailability();
+  pi.on("tool_result", (event) => barePythonHint(event, python));
 
   pi.on("before_agent_start", async (event) => {
     const untrustedContract = untrustedPullRequest
@@ -209,26 +221,34 @@ ${mcp?.promptSuffix() ?? ""}`,
     if (untrustedPullRequest && !UNTRUSTED_MANAGER_BRIDGE_TOOLS.has(tool.name)) continue;
     const family = studioToolFamily(tool.name);
     if (family) familyTools.set(family, [...(familyTools.get(family) ?? []), tool]);
+    const sessionWait = tool.name === "codara_session_wait";
+    const description = sessionWait ? MANAGER_SESSION_WAIT_DESCRIPTION : tool.description;
     pi.registerTool({
       name: tool.name,
       label: tool.name.replace(/^codara_/, "Codara · ").replaceAll("_", " "),
-      description: tool.description,
+      description,
       // A deferred family tool carries no snippet: Pi lists snippets in the
       // system prompt, and activating a family must not rewrite that prompt.
       ...(family && !alwaysActiveFamilies.has(family)
         ? {}
-        : { promptSnippet: toolPromptSnippet(tool.description) }),
-      parameters: tool.inputSchema as never,
-      async execute(_toolCallId, params, signal) {
+        : { promptSnippet: toolPromptSnippet(description) }),
+      parameters: (sessionWait ? managerSessionWaitSchema(tool.inputSchema) : tool.inputSchema) as never,
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
         if (tool.name === "codara_complete") {
           const reason = whiteboardReview.completionBlock();
           if (reason) throw new Error(reason);
         }
-        const result = await bridge.callToolByName(
-          tool.name,
-          params,
-          ABANDONABLE_BRIDGE_TOOLS.has(tool.name) ? signal : undefined,
-        );
+        const abandonable = ABANDONABLE_BRIDGE_TOOLS.has(tool.name) ? signal : undefined;
+        const args = tool.name === "codara_session_start" ? withSessionDefaults(params) : params;
+        // Which session models are allowed is decided by Studio
+        // (src/main/session-model-policy.ts), from the user's own messages.
+        const result = sessionWait
+          ? await waitForSessionsInChunks(
+              (chunkArgs, chunkSignal) => bridge.callToolByName(tool.name, chunkArgs, chunkSignal),
+              params,
+              { signal: abandonable, hasPendingMessages: () => ctx?.hasPendingMessages?.() === true },
+            )
+          : await bridge.callToolByName(tool.name, args, abandonable);
         // Pi's extension contract represents a failed tool by rejecting the
         // execute promise; an `isError` property on the returned result is not
         // consumed by Pi. Translate MCP failures explicitly so the model and

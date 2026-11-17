@@ -144,7 +144,10 @@ Browser. Close temporary terminals with codara_terminal_close when done.
 Agent sessions: codara_session_start opens a real Claude Code or Codex session in
 a tab of any workspace with its brief submitted; it outlives this chat. Read it
 with codara_session_wait or codara_session_status, follow up with
-codara_session_message. Prefer codara_spawn_workers for work this chat verifies.`,
+codara_session_message. Prefer codara_spawn_workers for work this chat verifies:
+Pi workers are the default, and Codara shows their tool calls, model and
+usage. A session runs Opus at high effort unless you name a model and effort.
+Wait with one long codara_session_wait (up to 1200 s), never a polling loop.`,
   whiteboard: `Whiteboard: build an explanation through investigation, draft, inspection,
 and revision. A single write is not a finished board. First read with
 codara_whiteboard_get, preserve human edits, and pass baseRevision to
