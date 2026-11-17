@@ -164,6 +164,7 @@ interface Props {
 type PointMode = "pick" | "compose" | "comment";
 
 const BrowserPageFind = lazy(() => import("./BrowserPageFind"));
+const BrowserPageZoom = lazy(() => import("./BrowserPageZoom"));
 
 const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   { tabId, url, partition, visible, onUrlChange, onReady, workspaceId = null },
@@ -972,6 +973,18 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         onTogglePoint={() => startPointing("pick")}
         onToggleComment={() => startPointing("comment")}
         onCopyTabId={(detail) => void copyTabReference(detail)}
+        zoomTool={
+          url ? (
+            <Suspense fallback={null}>
+              <BrowserPageZoom
+                rootRef={paneRef}
+                webviewRef={webviewRef as unknown as RefObject<Electron.WebviewTag | null>}
+                ready={domReady && !asleep}
+                shown={visible}
+              />
+            </Suspense>
+          ) : null
+        }
         recordTool={
           <CaptureActions
             url={asleep ? "" : currentUrl || url}
