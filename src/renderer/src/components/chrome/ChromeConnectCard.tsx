@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { chromeConnectProgress, type ChromeConnectStep, type ChromeLinkState } from "@shared/chrome-link";
 import { useConnectCardOnScreen } from "./useChromeLink";
 import "./chrome-link.css";
+import "./chrome-connect.css";
 
 /**
  * How the extension gets into the browser. Today the user loads Codara's
