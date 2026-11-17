@@ -44,7 +44,8 @@ How `scripts/run-all-tests.cjs` works:
     instead of 180.
   - A file with a `// test-runner: serial (why)` line runs after the pool,
     with nothing else running. Today that is `test-cora-harness.mjs` (its
-    timing checks), `test-renderer-chunks.mjs` (a
+    timing checks), `test-app-exit-electron.cjs` (Chromium's exit time on a
+    loaded macOS runner), `test-renderer-chunks.mjs` (a
     production Vite build, about 2 GB) and `test-workflow-sandbox.cjs` (its
     heap-limit case grows QuickJS's WebAssembly memory to 2 GB).
   - No suite starts while `MemAvailable` is below `CODARA_TEST_MIN_FREE_MB`
@@ -55,11 +56,19 @@ How `scripts/run-all-tests.cjs` works:
     without a name unique to the suite.
   - Durations are kept in `node_modules/.cache/codara-tests/timings.json`,
     and the next run starts the longest suites first.
+  - `CODARA_TEST_PART=pool` runs every suite except the serial ones, and
+    `CODARA_TEST_PART=serial` only those. CI runs the two parts on two
+    machines at once.
+  - `CODARA_TEST_BUDGET_SECONDS=900` stops the run once it has taken that
+    long and fails it, naming the suites it stopped and the ones that never
+    started. CI sets one so a slow suite fails with that message instead of
+    hitting the job timeout.
 - The whole run peaks at about 2.5 GB, almost all of it from the two serial
   suites. Keep a new suite well under that, or tag it.
 - The runner prints `ok` or `FAIL` for each file as it finishes, then a pass
-  count, then the last 6000 characters of each failure's output, in name
-  order. It exits with code 1 if any file failed.
+  count, the 15 slowest suites, then the last 6000 characters of each
+  failure's output, in name order. It exits with code 1 if any file failed.
+  On GitHub Actions it also writes the slowest suites to the job summary.
 - Never wait on real time in a suite. Code that runs on timers (quiet
   windows, sweeps, retries) can run on `scripts/fake-clock.cjs`: install it
   before loading the bundle and call `await clock.advance(ms)` where the
@@ -104,9 +113,12 @@ Most suites need only `npm install`. These are the exceptions:
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
 
 CI (`.github/workflows/ci.yml`, macOS, pull requests into `main` and pushes
-to it) runs the
-four typechecks, then `npm run build`, then `npx playwright install
-chromium`, then `npm run test:all`. `.github/workflows/ci-linux.yml` runs the
+to it) runs on two machines at once. `test (pool)` runs `npm run build`, `npx
+playwright install chromium`, then `npm run test:all` with
+`CODARA_TEST_PART=pool` two suites at a time; `test (serial, typecheck)`
+runs the four typechecks and the build, then the serial suites. Each has a time budget
+(`CODARA_TEST_BUDGET_SECONDS`), and the required `test` check passes only
+when both do. `.github/workflows/ci-linux.yml` runs the
 same on Linux under Xvfb for pull requests into `main` and pushes to it,
 without the typechecks (they do not depend on the platform), then a smoke set
 of Playwright specs (listed in the workflow). On your machine, run the same
