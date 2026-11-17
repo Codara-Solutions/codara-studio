@@ -26,14 +26,14 @@ const MARKDOWN = [
   "",
 ].join("\n");
 
-const CSV = ["name,city", ...Array.from({ length: 50 }, (_, i) => `Row ${i + 1},Lisbon`), ""].join("\n");
+const CSV = ["name,city", ...Array.from({ length: 400 }, (_, i) => `Row ${i + 1},Lisbon`), ""].join("\n");
 
 /** A small workbook: two sheets of numbers, enough rows to scroll. */
 async function workbook(): Promise<Buffer> {
   const ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"';
   const rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
   const rows = Array.from(
-    { length: 80 },
+    { length: 700 },
     (_, r) => `<row r="${r + 1}"><c r="A${r + 1}"><v>${r + 1}</v></c><c r="B${r + 1}"><v>${(r + 1) * 10}</v></c></row>`,
   ).join("");
   const zip = new JSZip();
@@ -76,7 +76,7 @@ async function setTheme(page: Page, mode: "light" | "dark"): Promise<void> {
   );
 }
 
-test("Markdown, CSV and whiteboard previews zoom on their own", async () => {
+test("Markdown, CSV, spreadsheet and whiteboard previews zoom on their own", async () => {
   test.setTimeout(180_000);
   const root = await mkdtemp(join(tmpdir(), "codara-preview-zoom-"));
   const home = join(root, "home");
@@ -181,6 +181,15 @@ test("Markdown, CSV and whiteboard previews zoom on their own", async () => {
     await expect.poll(fontSize).toBe("13px");
     await page.keyboard.press("Control+0");
     await expect.poll(fontSize).toBe("12px");
+    // Far down the table, a zoom keeps the same rows on screen.
+    await page.locator(".csv-grid [data-virtuoso-scroller]").evaluate((el) => el.scrollTo(0, 300 * 37));
+    const deepCell = page.locator('.csv-grid td[data-cell="305:0"]');
+    await expect(deepCell).toBeInViewport();
+    await deepCell.click();
+    await page.keyboard.press("Control+=");
+    await expect.poll(() => deepCell.evaluate((el) => getComputedStyle(el).fontSize)).toBe("13px");
+    await expect(deepCell).toBeInViewport();
+    await page.keyboard.press("Control+0");
     expect(await windowWidth()).toBe(baseWidth);
 
     // ── Spreadsheet: its cells and rows scale, and the list stays whole.
@@ -206,8 +215,32 @@ test("Markdown, CSV and whiteboard previews zoom on their own", async () => {
     await expect(level).toHaveText("100%");
     // The last row is still reachable at a zoomed row height.
     await page.keyboard.press("Control+=");
-    await page.locator("[data-virtuoso-scroller]:visible").evaluate((el) => el.scrollTo(0, el.scrollHeight));
-    await expect(page.locator('td[data-cell="79:0"]:visible')).toBeInViewport();
+    await expect(level).toHaveText("110%");
+    // The list remounts at the new row height and is whole: 700 rows of 34 px.
+    const list = page.locator("[data-virtuoso-scroller]:visible");
+    await expect.poll(() => list.evaluate((el) => el.scrollHeight)).toBeGreaterThanOrEqual(700 * 34);
+    await expect(async () => {
+      await list.evaluate((el) => el.scrollTo(0, el.scrollHeight));
+      await expect(page.locator('td[data-cell="699:0"]:visible')).toBeInViewport({ timeout: 500 });
+    }).toPass({ timeout: 5_000 });
+    await page.keyboard.press("Control+0");
+    await expect(level).toHaveText("100%");
+    // Far down the sheet, the row under the pointer stays under it.
+    const row500 = page.locator('td[data-cell="505:0"]:visible');
+    await expect(async () => {
+      await list.evaluate((el) => el.scrollTo(0, 500 * 31));
+      await expect(row500).toBeInViewport({ timeout: 500 });
+    }).toPass({ timeout: 5_000 });
+    const r500 = (await row500.boundingBox())!;
+    const pointer = { x: r500.x + 20, y: r500.y + r500.height / 2 };
+    await ctrlWheel(page, pointer.x, pointer.y, -100);
+    await expect(level).not.toHaveText("100%");
+    await expect
+      .poll(async () => {
+        const box = await row500.boundingBox();
+        return box !== null && box.y <= pointer.y && pointer.y <= box.y + box.height;
+      })
+      .toBe(true);
     await page.keyboard.press("Control+0");
     await expect(level).toHaveText("100%");
     // Another sheet remounts the list; Ctrl+wheel still zooms it.

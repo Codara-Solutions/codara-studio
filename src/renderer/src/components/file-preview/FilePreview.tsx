@@ -363,6 +363,7 @@ export default function FilePreview({
           }
         >
           <SpreadsheetPreview
+  key={path}
             path={path}
             mtimeMs={stat?.mtimeMs ?? 0}
             toolbarAction={toolbarAction}

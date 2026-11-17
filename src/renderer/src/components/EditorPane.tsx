@@ -666,7 +666,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         )}
         {doc.status === "ready" && isMarkdown && secretKnown && viewMode === "preview" && (
           <Suspense fallback={null}>
-            <MarkdownPreview text={doc.content} basePath={path} zoomSlot={zoomSlot} />
+            <MarkdownPreview key={path} text={doc.content} basePath={path} zoomSlot={zoomSlot} />
           </Suspense>
         )}
         {doc.status === "ready" && isCsv && secretKnown && (

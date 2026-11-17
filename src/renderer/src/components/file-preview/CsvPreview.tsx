@@ -373,7 +373,7 @@ export default function CsvPreview({ path, text, onChange, dirty, onSave }: {
               : <TableVirtuoso
                 ref={tableRef}
                 scrollerRef={(element) => { scrollerRef.current = element instanceof HTMLElement ? element : null; }}
-                key={`${settings.density}-${settings.wrap}-${settings.fontSize}`}
+                key={`${settings.density}-${settings.wrap}`}
                 data={rows}
                 computeItemKey={(_, row) => row.index}
                 rangeChanged={() => requestAnimationFrame(focusPendingCell)}
