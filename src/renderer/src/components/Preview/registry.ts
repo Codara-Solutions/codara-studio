@@ -306,10 +306,11 @@ export async function ensurePreviewTab(
   if (options.fresh) return openAgentTab(url, runId, workspace, paneId, group, callerIdentity, true);
   const existing = findReusablePreviewTab(runId, workspace, paneId);
   if (existing) return { tab: existing, opened: false };
-  // Calls of one caller that arrive together share the tab the first opens.
+  // Calls of one caller that arrive together share the tab the first opens,
+  // which is already loading its URL: none of them loads it again.
   const key = runId ? `run:${runId}` : paneId ? `pane:${paneId}` : `workspace:${workspace ?? ""}`;
   const pending = openingTabs.get(key);
-  if (pending) return { tab: (await pending).tab, opened: false };
+  if (pending) return pending;
   const opening = openAgentTab(url, runId, workspace, paneId, group, callerIdentity, false);
   openingTabs.set(key, opening);
   try {

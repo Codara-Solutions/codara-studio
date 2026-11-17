@@ -153,7 +153,9 @@ async function main() {
   assert.equal(first.tabId, "tab-new-1");
   assert.equal(second.tabId, "tab-new-1");
   assert.equal(nextId, 1, "one tab opened");
+  assert.deepEqual([first.opened, second.opened], [true, true], "both see the tab as just opened");
   const app = pages.get("tab-new-1");
+  assert.deepEqual(app.loads, [], "the shared new tab is not loaded a second time");
   app.title = "App";
   console.log("concurrent navigates share one new tab");
 
