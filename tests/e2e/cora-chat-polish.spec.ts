@@ -344,18 +344,65 @@ test("plain conversational Cora turns omit empty technical disclosures", async (
     await expect(page.locator('[data-manager-call-id="spark-conversation-only"]')).toHaveCount(0);
 
     // Fast mode is opt-in: off on a fresh profile, and its tooltip states the
-    // cost (or why the chat's model cannot run fast) before anyone turns it on.
+    // cost before anyone turns it on.
     const fastToggle = page.locator(".composer-fast").last();
     await expect(fastToggle).toBeVisible();
     await expect(fastToggle).toHaveAttribute("aria-pressed", "false");
-    await expect(fastToggle).toHaveAttribute(
-      "title",
-      /^Fast mode (off\. Fast costs more|unavailable\. )/,
-    );
+    await expect(fastToggle).toHaveAttribute("title", /^Fast mode off\. Fast costs more/);
   } finally {
     await app?.close();
   }
 });
+
+test("the composer offers fast mode only on a Codex model", async () => {
+  const fixture = await prepareFixture("codara-fast-codex-only-");
+  await seedPersistedConversationOnlyRun(fixture.userDataDir, fixture.workspaceDir, "run-fast-codex", {
+    title: "Codex chat",
+    chatModel: "gpt-5.6-sol",
+  });
+  await seedPersistedConversationOnlyRun(fixture.userDataDir, fixture.workspaceDir, "run-fast-claude", {
+    title: "Claude chat",
+    chatModel: "claude-opus-5-5",
+  });
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...process.env,
+        SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
+        SPARK_NO_SHELL_INTEGRATION: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.waitForLoadState("domcontentloaded");
+    await selectCoraTab(page);
+    const composer = page.locator(".composer-shell").last();
+
+    await selectChatFromHistory(page, "Codex chat", "run-fast-codex");
+    await expect(composer).toContainText("GPT-5.6 Sol");
+    await expect(page.locator(".composer-fast").last()).toBeVisible();
+    await shot(composer, "fast-mode-codex.png");
+
+    // Not a disabled switch with a reason: on Claude it is not drawn at all.
+    await selectChatFromHistory(page, "Claude chat", "run-fast-claude");
+    await expect(composer).toContainText("Claude Opus 5.5");
+    await expect(page.locator(".composer-fast")).toHaveCount(0);
+    await shot(composer, "fast-mode-claude.png");
+  } finally {
+    await app?.close();
+  }
+});
+
+// FAST_MODE_SHOTS=<dir> also saves the composer as proof.
+async function shot(target: Locator, name: string): Promise<void> {
+  const dir = process.env.FAST_MODE_SHOTS;
+  if (dir) await target.screenshot({ path: join(dir, name) });
+}
 
 test("a memory learned from a message shows under it and Undo forgets it", async () => {
   const fixture = await prepareFixture("codara-memory-chip-");
@@ -912,13 +959,15 @@ async function seedPersistedConversationOnlyRun(
   userDataDir: string,
   workspaceDir: string,
   runId: string,
+  overrides: { title?: string; chatModel?: string } = {},
 ): Promise<void> {
   const runDir = join(userDataDir, "runs", runId);
   await mkdir(runDir, { recursive: true });
   await writeFile(join(runDir, "run.json"), JSON.stringify({
     id: runId,
     workspaceId: "ws-e2e",
-    title: "Conversation only",
+    title: overrides.title ?? "Conversation only",
+    ...(overrides.chatModel ? { chatModel: overrides.chatModel } : {}),
     status: "complete",
     settingsSnapshot: { workspaceCwd: workspaceDir },
     artifactDir: runDir,
