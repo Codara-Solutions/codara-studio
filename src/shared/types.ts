@@ -4024,6 +4024,11 @@ export interface HumanRunMessage {
    *  finished, so the next turn is told it is not new and not to redo work
    *  that already started. */
   redelivered?: true;
+  /** The user typed this note in Studio's composer or on the phone. Set only
+   *  by those two entry points (ipc.ts, remote-access); agents, deliveries,
+   *  answers and synthetic notes never carry it. Only such a message can run
+   *  a skill by starting with a slash command (src/shared/user-commands.ts). */
+  typedByUser?: true;
 }
 
 export interface WorkerArtifactPaths {
@@ -5179,6 +5184,9 @@ export interface StartAutopilotInput {
   // first human message on the run so the manager sees it during plan_analysis.
   initialUserNote?: string;
   initialUserNoteClientMessageId?: string;
+  /** Set by the composer's IPC handler and the phone handler only: the user
+   *  typed the initial note (HumanRunMessage.typedByUser). */
+  initialNoteTypedByUser?: true;
   initialAttachments?: AddRunMessageAttachmentInput[];
   // Which Cora manager backend should drive this run. Set by the explorer's
   // "Run plan" engine flyout and the Source Control "Smart Merge" engine
@@ -5243,6 +5251,9 @@ export interface AddRunMessageInput {
   answersMessageId?: string;
   /** Internal recursion guard used while addDirectIteration records its note. */
   skipDirectDispatch?: true;
+  /** Set by the composer's IPC handler and the phone handler only; see
+   *  HumanRunMessage.typedByUser. */
+  typedByUser?: true;
 }
 
 export interface CancelQueuedMessageInput {

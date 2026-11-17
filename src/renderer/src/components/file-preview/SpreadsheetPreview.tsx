@@ -1,9 +1,16 @@
-import { forwardRef, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import readExcelFile, { type SheetData } from "read-excel-file/browser";
-import { TableVirtuoso, type TableComponents, type TableVirtuosoHandle } from "react-virtuoso";
+import {
+  TableVirtuoso,
+  type IndexLocationWithAlign,
+  type TableComponents,
+  type TableVirtuosoHandle,
+} from "react-virtuoso";
 import { DockablePaneBar } from "../../tabs/dockChromeSlot";
 import FindBar from "../find/FindBar";
 import { useGridFind, type GridSource } from "../find/useGridFind";
+import { useViewerZoom } from "../zoom/useViewerZoom";
+import ZoomControl from "../zoom/ZoomControl";
 
 interface Props {
   path: string;
@@ -117,8 +124,65 @@ export default function SpreadsheetPreview({
     label: "Find in spreadsheet",
   });
 
+  // The grid is virtualized at a fixed row height, so zoom scales the cells'
+  // sizes and text rather than the rendered rows. The list does not take a
+  // new fixed row height, so it remounts at each zoom, starting at the row
+  // that was under the pointer (or the middle, for a key) and keeping it there.
+  const { zoom, controls } = useViewerZoom({
+    rootRef,
+    scrollerRef,
+    min: 0.5,
+    max: 3,
+    enabled: !loading && !error && !!sheet,
+    keepPoint: false,
+  });
+  const cells = useMemo(() => scaledCells(zoom), [zoom]);
+  const pointer = useRef<{ x: number; y: number } | null>(null);
+  const placed = useRef<{
+    zoom: number;
+    sheet: number;
+    start: IndexLocationWithAlign | number;
+    left: number | null;
+    focus: boolean;
+  }>({ zoom, sheet: activeSheet, start: 0, left: null, focus: false });
+  if (placed.current.sheet !== activeSheet) {
+    placed.current = { zoom, sheet: activeSheet, start: 0, left: null, focus: false };
+  } else if (placed.current.zoom !== zoom) {
+    // Read in render, from the list still on screen at the old zoom.
+    const scroller = scrollerRef.current;
+    const before = scaledCells(placed.current.zoom);
+    let start: IndexLocationWithAlign | number = 0;
+    let left: number | null = null;
+    if (scroller) {
+      const box = scroller.getBoundingClientRect();
+      const at = pointer.current;
+      const y = at && at.y >= box.top && at.y <= box.bottom ? at.y - box.top : scroller.clientHeight / 2;
+      const row = (scroller.scrollTop + y - before.rowHeight) / before.rowHeight;
+      const top = row * cells.rowHeight - (y - cells.rowHeight);
+      if (top > 0) {
+        const index = Math.floor(top / cells.rowHeight);
+        start = { index, align: "start", offset: top - index * cells.rowHeight };
+      }
+      left = scroller.scrollLeft * (zoom / placed.current.zoom);
+    }
+    placed.current = {
+      zoom,
+      sheet: activeSheet,
+      start,
+      left,
+      focus: !!rootRef.current?.contains(document.activeElement),
+    };
+  }
+  useLayoutEffect(() => {
+    const scroller = scrollerRef.current;
+    const { left, focus } = placed.current;
+    // The focused cell went with the old list; the keys stay with the sheet.
+    if (focus && !rootRef.current?.contains(document.activeElement)) rootRef.current?.focus({ preventScroll: true });
+    if (scroller && left !== null) scroller.scrollLeft = left;
+  }, [zoom]);
+
   return (
-    <div ref={rootRef} style={hostStyle} onKeyDown={find.onKeyDown}>
+    <div ref={rootRef} tabIndex={-1} style={{ ...hostStyle, outline: "none" }} onKeyDown={find.onKeyDown}>
       <DockablePaneBar forceLocal={forceLocalToolbar}>
         <span
           style={{
@@ -157,6 +221,7 @@ export default function SpreadsheetPreview({
             </span>
           )
         )}
+        <ZoomControl {...controls} fitLabel="100%" fitTitle="Reset zoom" />
         {toolbarAction}
       </DockablePaneBar>
 
@@ -174,24 +239,30 @@ export default function SpreadsheetPreview({
               and {Math.min(sheet.sourceColumns, MAX_VISIBLE_COLUMNS).toLocaleString()} columns.
             </div>
           )}
-          <div className="codara-find-host">
+          <div
+            className="codara-find-host"
+            onPointerMove={(event) => {
+              pointer.current = { x: event.clientX, y: event.clientY };
+            }}
+          >
             <TableVirtuoso
               ref={tableRef}
               scrollerRef={(element) => {
                 scrollerRef.current = element instanceof HTMLElement ? element : null;
               }}
-              key={activeSheet}
+              key={`${activeSheet}@${cells.rowHeight}`}
+              initialTopMostItemIndex={placed.current.start}
               data={sheet.rows}
               components={tableComponents}
-              fixedItemHeight={31}
+              fixedItemHeight={cells.rowHeight}
               fixedHeaderContent={() => (
                 <tr>
                   <th
-                    style={{ ...headerCell, ...rowNumberCell, top: 0, zIndex: 3 }}
+                    style={{ ...cells.header, ...cells.rowNumber, top: 0, zIndex: 3 }}
                     aria-label="Row number"
                   />
                   {columnIndexes.map((column) => (
-                    <th key={column} style={headerCell}>
+                    <th key={column} style={cells.header}>
                       {columnLabel(column)}
                     </th>
                   ))}
@@ -199,13 +270,13 @@ export default function SpreadsheetPreview({
               )}
               itemContent={(rowIndex, row) => (
                 <>
-                  <th scope="row" style={rowNumberCell}>
+                  <th scope="row" style={cells.rowNumber}>
                     {rowIndex + 1}
                   </th>
                   {columnIndexes.map((column) => {
                     const display = formatCell(row[column]);
                     return (
-                      <td key={column} data-cell={`${rowIndex}:${column}`} style={dataCell} title={display}>
+                      <td key={column} data-cell={`${rowIndex}:${column}`} style={cells.data} title={display}>
                         {display}
                       </td>
                     );
@@ -385,3 +456,25 @@ const dataCell: React.CSSProperties = {
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
 };
+
+function scaledCells(zoom: number) {
+  // Whole pixels, so every row is exactly the height the list was told.
+  const px = (value: number) => Math.round(value * zoom);
+  const scale = (style: React.CSSProperties): React.CSSProperties => {
+    const out: React.CSSProperties = { ...style };
+    for (const key of ["width", "minWidth", "maxWidth", "height", "fontSize"] as const) {
+      const value = style[key];
+      if (typeof value === "number") out[key] = px(value);
+    }
+    if (typeof style.padding === "string") {
+      out.padding = style.padding.replace(/(\d+(?:\.\d+)?)px/g, (_, n: string) => `${px(Number(n))}px`);
+    }
+    return out;
+  };
+  return {
+    rowHeight: px(31),
+    header: scale(headerCell),
+    rowNumber: scale(rowNumberCell),
+    data: { ...scale(dataCell), lineHeight: `${px(31) - 1}px` },
+  };
+}
