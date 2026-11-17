@@ -1600,8 +1600,14 @@ app.whenReady().then(async () => {
     // Electron reports one wheel event twice in the same task, so a task's
     // reports count once.
     let wheelZoom: "in" | "out" | null = null;
+    let lastWheelZoom = { at: 0, direction: "in" as "in" | "out" };
     contents.on("zoom-changed", (_event, direction) => {
-      if (wheelZoom) return;
+      // One wheel event is reported twice in a task; a touchpad pinch sends
+      // dozens a second, each a whole 10% step, so at most one step per
+      // 60 ms in one direction reaches the tab (a turn back always does).
+      const now = Date.now();
+      if (wheelZoom || (direction === lastWheelZoom.direction && now - lastWheelZoom.at < 60)) return;
+      lastWheelZoom = { at: now, direction };
       wheelZoom = direction;
       setImmediate(() => {
         const host = contents.isDestroyed() ? null : contents.hostWebContents;

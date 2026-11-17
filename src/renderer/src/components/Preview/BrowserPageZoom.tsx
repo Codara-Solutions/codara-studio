@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import { isShown } from "../find/find-router";
 import { registerZoomTarget } from "../zoom/zoom-router";
 import { stepZoom, zoomPercent, type ZoomAction } from "../zoom/zoom-math";
+import { createPageZoomPeers, type PageZoomPeer } from "./page-zoom-peers";
 
 // A browser tab's own zoom, as in a browser: Ctrl+wheel and pinch in the page,
 // Ctrl+= / Ctrl+- / Ctrl+0 with focus anywhere in the tab (the page, the
@@ -22,11 +23,7 @@ import { stepZoom, zoomPercent, type ZoomAction } from "../zoom/zoom-math";
 const MIN = 0.25;
 const MAX = 5;
 
-interface Shown {
-  site: () => string | null;
-  adopt: (zoom: number) => void;
-}
-const onScreen = new Set<Shown>();
+const onScreen = createPageZoomPeers();
 
 /**
  * Chromium's zoom key for a page: its session, and its host (or its scheme
@@ -55,7 +52,7 @@ export default function BrowserPageZoom({
 }) {
   const [zoom, setZoom] = useState(1);
   const latest = useRef({ zoom, ready, shown });
-  const self = useRef<Shown | null>(null);
+  const self = useRef<PageZoomPeer | null>(null);
   latest.current = { zoom, ready, shown };
 
   const visible = useCallback(
@@ -77,9 +74,7 @@ export default function BrowserPageZoom({
       // The guest is between loads; the next navigation applies it.
       return;
     }
-    const site = siteOf(webview);
-    if (!site) return;
-    for (const other of onScreen) if (other !== self.current && other.site() === site) other.adopt(latest.current.zoom);
+    onScreen.share(self.current, siteOf(webview), latest.current.zoom);
   }, [webviewRef, visible]);
 
   useEffect(() => {
@@ -87,7 +82,7 @@ export default function BrowserPageZoom({
   }, [ready, shown, zoom, applyToPage]);
 
   useEffect(() => {
-    const entry: Shown = {
+    const entry: PageZoomPeer = {
       site: () => (visible() ? siteOf(webviewRef.current) : null),
       // Taken at once, not at the next render: two panes shown together with
       // stale levels would otherwise keep handing each other the old one.
@@ -97,9 +92,9 @@ export default function BrowserPageZoom({
       },
     };
     self.current = entry;
-    onScreen.add(entry);
+    const remove = onScreen.add(entry);
     return () => {
-      onScreen.delete(entry);
+      remove();
       self.current = null;
     };
   }, [webviewRef, visible]);
@@ -111,6 +106,8 @@ export default function BrowserPageZoom({
     // The window's zoom changes its CSS size, so a resize covers it; a pane
     // that comes back on screen (an editor tab brought to front) grows from
     // nothing, which the observer sees.
+    // did-navigate is the first point the new site's zoom can be set: before
+    // the commit, a write lands on the old site's entry.
     webview.addEventListener("did-navigate", applyToPage);
     window.addEventListener("resize", applyToPage);
     const observer = new ResizeObserver(applyToPage);
@@ -119,7 +116,11 @@ export default function BrowserPageZoom({
     // its size, and marked aria-hidden: watch that to reapply when shown.
     const surface = root.parentElement?.closest("[aria-hidden]");
     const watcher = new MutationObserver(applyToPage);
-    if (surface) watcher.observe(surface, { attributes: true, attributeFilter: ["aria-hidden", "style"] });
+    if (surface)
+      watcher.observe(surface, {
+        attributes: true,
+        attributeFilter: ["aria-hidden", "style"],
+      });
     root.addEventListener("pointerenter", applyToPage);
     root.addEventListener("focusin", applyToPage);
     return () => {
@@ -138,9 +139,7 @@ export default function BrowserPageZoom({
       const next = action === "reset" ? 1 : stepZoom(current, action === "in" ? 1 : -1, MIN, MAX);
       latest.current.zoom = next;
       setZoom(next);
-      const site = visible() ? siteOf(webviewRef.current) : null;
-      if (!site) return;
-      for (const other of onScreen) if (other !== self.current && other.site() === site) other.adopt(next);
+      onScreen.share(self.current, visible() ? siteOf(webviewRef.current) : null, next);
     },
     [visible, webviewRef],
   );
@@ -169,32 +168,43 @@ export default function BrowserPageZoom({
     [webviewRef, act],
   );
 
-  if (Math.abs(zoom - 1) < 1e-3) return null;
+  // Screen readers hear the level when it changes, chip or not.
+  const announce = (
+    <span className="spark-sr-only" aria-live="polite">
+      {Math.abs(zoom - 1) < 1e-3 ? "Page zoom 100%" : `Page zoom ${zoomPercent(zoom)}`}
+    </span>
+  );
+  const atDefault = Math.abs(zoom - 1) < 1e-3;
   // One chip, as a browser's zoom badge: the address bar has no room for a
   // whole zoom row, and the keys and the wheel do the stepping.
   return (
-    <button
-      type="button"
-      className="spark-btn"
-      data-testid="page-zoom"
-      onClick={() => {
-        act("reset");
-        // The chip goes away with the zoom; focus goes back to the page so
-        // the zoom keys still reach this tab.
-        webviewRef.current?.focus();
-      }}
-      title="Page zoom. Click to reset to 100%"
-      aria-label={`Page zoom ${zoomPercent(zoom)}, reset`}
-      style={{
-        height: 22,
-        padding: "0 7px",
-        flex: "0 0 auto",
-        fontFamily: "var(--font-mono)",
-        fontSize: 11,
-        fontVariantNumeric: "tabular-nums",
-      }}
-    >
-      <span data-testid="viewer-zoom-level">{zoomPercent(zoom)}</span>
-    </button>
+    <>
+      {announce}
+      {!atDefault && (
+        <button
+          type="button"
+          className="spark-btn"
+          data-testid="page-zoom"
+          onClick={() => {
+            act("reset");
+            // The chip goes away with the zoom; focus goes back to the page so
+            // the zoom keys still reach this tab.
+            webviewRef.current?.focus();
+          }}
+          title="Page zoom. Click to reset to 100%"
+          aria-label={`Page zoom ${zoomPercent(zoom)}, reset`}
+          style={{
+            height: 22,
+            padding: "0 7px",
+            flex: "0 0 auto",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          <span data-testid="viewer-zoom-level">{zoomPercent(zoom)}</span>
+        </button>
+      )}
+    </>
   );
 }

@@ -179,6 +179,27 @@ test("a browser tab zooms on its own and keeps its level across navigations", as
     // A second tab on the same site.
     // An agent's click lands on the link at 125%: its native pointer input
     // is scaled by the tab's zoom.
+    // The agent's visible cursor lands on the element too, at 125%.
+    await request("preview.hover", { selector: "#next" });
+    const target = await app.evaluate(async ({ webContents }) => {
+      const guest = webContents.getAllWebContents().find((wc) => wc.getType() === "webview" && wc.getTitle() === "Zoom one");
+      return guest?.executeJavaScript(
+        "(() => { const r = document.getElementById('next').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()",
+      );
+    });
+    const view = (await pane.locator("webview").boundingBox())!;
+    const cursorAt = () =>
+      pane.locator("[data-agent-cursor]").evaluate((el) => {
+        const m = new DOMMatrixReadOnly(getComputedStyle(el).transform);
+        const root = el.parentElement!.getBoundingClientRect();
+        return { x: root.x + m.m41, y: root.y + m.m42 };
+      });
+    await expect
+      .poll(async () => {
+        const at = await cursorAt();
+        return Math.round(Math.abs(at.x - (view.x + target.x * 1.25)) + Math.abs(at.y - (view.y + target.y * 1.25)));
+      })
+      .toBeLessThan(6);
     await request("preview.mouse", { selector: "#pop", action: "click" });
     // Chromium keeps one zoom per site, so the tab in use sets it.
     const browserTabs = page.locator('[role="tab"][data-tab-id]').filter({ hasText: /localhost/ });

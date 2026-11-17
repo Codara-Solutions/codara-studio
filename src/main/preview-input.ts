@@ -96,11 +96,14 @@ type GuestInfo = PreviewGuestInfo;
 // sendInputEvent places the pointer in the guest's view pixels, and a page
 // measures in CSS pixels, which the guest's zoom (the window's zoom times the
 // tab's own) scales: every pointer event goes through here.
+// A wheel's deltas are scaled the same way, so a scroll moves the page by
+// the CSS pixels asked for.
 function sendMouse(wc: WebContents, event: { type: string; x: number; y: number; [key: string]: unknown }): void {
   const zoom = wc.getZoomFactor() || 1;
-  wc.sendInputEvent({ ...event, x: Math.round(event.x * zoom), y: Math.round(event.y * zoom) } as Parameters<
-    WebContents["sendInputEvent"]
-  >[0]);
+  const scaled: Record<string, unknown> = { ...event, x: Math.round(event.x * zoom), y: Math.round(event.y * zoom) };
+  if (typeof event.deltaX === "number") scaled.deltaX = Math.round(event.deltaX * zoom);
+  if (typeof event.deltaY === "number") scaled.deltaY = Math.round(event.deltaY * zoom);
+  wc.sendInputEvent(scaled as unknown as Parameters<WebContents["sendInputEvent"]>[0]);
 }
 
 // Resolve a click point in the guest's CSS-pixel viewport space. Accepts
