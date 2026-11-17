@@ -84,6 +84,25 @@ function node(parent = null) {
     assert.equal(zoom.wheelPixels(1, 2), 800, "page mode");
   });
 
+  await test("a viewer that zooms in steps: a notch is one step, a pinch adds up to its scale", () => {
+    assert.deepEqual(zoom.wheelStep(0, -100, 1, 0.5, 3), { carry: 0, next: 1.1 });
+    assert.deepEqual(zoom.wheelStep(0, 100, 1, 0.5, 3), { carry: 0, next: 0.9 });
+    // A whole 1.5x pinch in small deltas (about -40.5px in all) reaches 150%.
+    let level = 1;
+    let carry = 0;
+    for (let i = 0; i < 81; i += 1) {
+      const step = zoom.wheelStep(carry, -Math.log(1.5) * 100 / 81, level, 0.5, 3);
+      carry = step.carry;
+      if (step.next !== null) level = step.next;
+    }
+    assert.equal(level, 1.5);
+    // A slight pinch zooms nothing yet, and a turn the other way starts over.
+    assert.equal(zoom.wheelStep(0, -2, 1, 0.5, 3).next, null);
+    assert.ok(zoom.wheelStep(0.05, 2, 1, 0.5, 3).carry < 0);
+    // At the limit nothing builds up.
+    assert.deepEqual(zoom.wheelStep(0, -5, 3, 0.5, 3), { carry: 0, next: null });
+  });
+
   await test("zoom levels read as whole percents", () => {
     assert.equal(zoom.zoomPercent(1), "100%");
     assert.equal(zoom.zoomPercent(0.3333), "33%");
