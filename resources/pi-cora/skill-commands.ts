@@ -10,51 +10,89 @@
 //
 // Pure, so scripts/test-pi-cora-skill-commands.cjs can load it outside Pi.
 
-const NEW_INPUT_MARKER = "[NEW USER INPUT FOR THIS TURN]";
-const COMMAND_LINE = /^\/(skill:)?([A-Za-z0-9][A-Za-z0-9._-]*)(?:[ \t]+([\s\S]*))?$/;
+// Studio's own wrappers (agent-backend.ts: buildManagerTurnPrompt,
+// renderBundledManagerInput). Only these exact lines, in these positions,
+// are skipped; any other text is the user's.
+const REPLAY_START = "[CORA CONVERSATION REPLAY";
+const REPLAY_END = "[END CORA CONVERSATION REPLAY]\n\n\n\n[NEW USER INPUT FOR THIS TURN]\n\n";
+const SEND_NOW_LINE =
+  "[The user stopped your previous reply to send this now. What that reply already did stands, and workers it started keep running.]";
+const REDELIVERED_LINE =
+  "[Already received; your previous reply was interrupted. Do not redo work already started]";
+const QUEUED_HEADER =
+  "The user sent the following queued messages in this order. Treat all of them as input for this manager turn:";
+const QUEUED_SECTION =
+  /^\d+\. \[(?:User turn|Queued message|Linked answer|Already received; your previous reply was interrupted\. Do not redo work already started)\]$/;
+const COMMAND_LINE = /^\/(skill:)?([A-Za-z0-9][A-Za-z0-9._-]*)(?:[ \t]+(.*))?$/;
 
-/** Lines Studio adds around the user's words (agent-backend.ts). */
-function isFramingLine(line: string): boolean {
-  return (
-    /^\[[^\n]*\]$/.test(line) ||
-    /^\d+\. \[[^\]\n]+\]$/.test(line) ||
-    line.startsWith("The user sent the following queued messages")
-  );
-}
-
-/** Skill names from Pi's command list (`skill:<name>` entries). */
-export function skillNamesFromCommands(commands: ReadonlyArray<{ name?: unknown; source?: unknown }>): Set<string> {
-  const names = new Set<string>();
+/** Skill names from Pi's command list (`skill:<name>` entries), each with
+ *  its SKILL.md path when Pi reports one. */
+export function skillNamesFromCommands(
+  commands: ReadonlyArray<{ name?: unknown; source?: unknown; sourceInfo?: unknown }>,
+): Map<string, string | undefined> {
+  const names = new Map<string, string | undefined>();
   for (const command of commands) {
     if (command.source !== "skill" || typeof command.name !== "string") continue;
-    if (command.name.startsWith("skill:")) names.add(command.name.slice("skill:".length));
+    if (!command.name.startsWith("skill:")) continue;
+    const info = command.sourceInfo as { path?: unknown } | undefined;
+    names.set(command.name.slice("skill:".length), typeof info?.path === "string" ? info.path : undefined);
   }
   return names;
 }
 
+/** Indexes of the lines that open one of the user's messages. */
+function messageFirstLines(lines: readonly string[]): number[] {
+  let index = 0;
+  if (lines[index] === SEND_NOW_LINE) index += 1;
+  if (lines[index] !== QUEUED_HEADER) {
+    if (lines[index] === REDELIVERED_LINE) index += 1;
+    return [index];
+  }
+  const firsts: number[] = [];
+  for (let at = index + 1; at < lines.length - 1; at += 1) {
+    if (QUEUED_SECTION.test(lines[at])) firsts.push(at + 1);
+  }
+  return firsts;
+}
+
 /**
  * The turn text with the user's skill command first, in the form Pi expands,
- * or null when the user's input does not start with a known skill command.
- * Only the first line of the new input counts, as in Claude Code: a slash
- * later in a message, or in a replayed earlier turn, is just text.
+ * or null when no message of this turn starts with a known skill command.
+ * Only the first line of each of the user's messages counts, as in Claude
+ * Code: a slash later in a message, or in a replayed earlier turn, is text.
+ * When queued messages hold several commands, the first runs through Pi and
+ * each other one is replaced by a pointer to its skill file.
  */
-export function rewriteSkillCommand(text: string, skillNames: ReadonlySet<string>): string | null {
-  if (skillNames.size === 0) return null;
-  const markerAt = text.indexOf(NEW_INPUT_MARKER);
-  const inputStart = markerAt >= 0 ? markerAt + NEW_INPUT_MARKER.length : 0;
-  const lines = text.slice(inputStart).split("\n");
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index].trim();
-    if (!line || isFramingLine(line)) continue;
-    const match = COMMAND_LINE.exec(line);
-    if (!match || !skillNames.has(match[2])) return null;
-    const args = match[3]?.trim() ?? "";
-    const context = [text.slice(0, inputStart), ...lines.slice(0, index), ...lines.slice(index + 1)]
-      .join("\n")
-      .trim();
-    const payload = [args, context].filter(Boolean).join("\n\n");
-    const rewritten = payload ? `/skill:${match[2]} ${payload}` : `/skill:${match[2]}`;
-    return rewritten === text ? null : rewritten;
+export function rewriteSkillCommand(
+  text: string,
+  skills: ReadonlyMap<string, string | undefined>,
+): string | null {
+  if (skills.size === 0) return null;
+  let inputStart = 0;
+  if (text.startsWith(REPLAY_START)) {
+    const end = text.lastIndexOf(REPLAY_END);
+    if (end < 0) return null;
+    inputStart = end + REPLAY_END.length;
   }
-  return null;
+  const lines = text.slice(inputStart).split("\n");
+  const found: Array<{ index: number; name: string; args: string }> = [];
+  for (const index of messageFirstLines(lines)) {
+    const match = COMMAND_LINE.exec(lines[index]?.trim() ?? "");
+    if (match && skills.has(match[2])) found.push({ index, name: match[2], args: match[3]?.trim() ?? "" });
+  }
+  if (found.length === 0) return null;
+  const [first, ...others] = found;
+  const rest = [...lines];
+  for (const other of others) {
+    const path = skills.get(other.name);
+    const pointer = path
+      ? `[The user ran the skill ${other.name} here. Read ${path} and follow it for this message.]`
+      : `[The user ran the skill ${other.name} here; follow it for this message.]`;
+    rest[other.index] = other.args ? `${pointer}\n${other.args}` : pointer;
+  }
+  rest.splice(first.index, 1);
+  const context = [text.slice(0, inputStart), ...rest].join("\n").trim();
+  const payload = [first.args, context].filter(Boolean).join("\n\n");
+  const rewritten = payload ? `/skill:${first.name} ${payload}` : `/skill:${first.name}`;
+  return rewritten === text ? null : rewritten;
 }
