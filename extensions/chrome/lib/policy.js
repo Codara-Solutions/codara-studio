@@ -319,6 +319,87 @@ export function isTabShared(share, tab) {
   return share.all === true || (share.windows ?? []).includes(tab.windowId) || (share.tabs ?? []).includes(tab.id);
 }
 
+// The popup's "Agents may use" choice. Each reach is a view of the sharing
+// state that already exists (shareAll, shareWindows, shareTabs, stopped), so
+// picking one never grants more than the switches it replaced did, and a
+// user's stored choices read back as the same reach after an update.
+export const REACHES = Object.freeze(["tabs", "window", "all"]);
+
+export const REACH_TEXT = Object.freeze({
+  tabs: { label: "Tabs I pick", includes: "Only the tabs you switch on, one at a time." },
+  window: { label: "This window", includes: "Every tab in this window, including ones you open in it later. Other windows stay off." },
+  all: { label: "Everything", includes: "Every tab in this browser, including ones you open later." },
+});
+
+/** The reach the popup shows for one window: { all, windows } as in isTabShared. */
+export function reachOf(share, windowId) {
+  if (share?.all === true) return "all";
+  if (typeof windowId === "number" && (share?.windows ?? []).includes(windowId)) return "window";
+  return "tabs";
+}
+
+/**
+ * The storage patch for picking a reach in one window, given the current
+ * { all, windows, stopped } and the ids of that window's tabs. "all" and
+ * "window" lift the stops they cover, as the old switches did; "tabs" keeps
+ * the tabs shared one by one and every other window as they were.
+ */
+export function reachPatch(share, reach, windowId, windowTabIds = []) {
+  const windows = share?.windows ?? [];
+  const stopped = share?.stopped ?? [];
+  switch (reach) {
+    case "all":
+      return { shareAll: true, stopped: [] };
+    case "window":
+      if (typeof windowId !== "number") throw new Error("This window cannot be shared.");
+      return {
+        shareAll: false,
+        shareWindows: windows.includes(windowId) ? windows : [...windows, windowId],
+        stopped: stopped.filter((id) => !windowTabIds.includes(id)),
+      };
+    case "tabs":
+      return { shareAll: false, shareWindows: windows.filter((id) => id !== windowId) };
+    default:
+      throw new Error(`Unknown reach ${reach}.`);
+  }
+}
+
+const TOOL_VERBS = {
+  click: "clicked",
+  type: "typed",
+  press_key: "pressed a key",
+  key: "pressed a key",
+  hover: "pointed",
+  scroll: "scrolled",
+  drag: "dragged",
+  navigate: "opened a page",
+  screenshot: "took a screenshot",
+  snapshot: "read the page",
+  find: "searched the page",
+  evaluate: "ran a script",
+  wait_for: "waited for the page",
+  run: "ran steps",
+  console: "read the console",
+  network: "read the network log",
+  chrome: "managed tabs",
+  close: "closed a tab",
+};
+
+/** What an agent's last tool call did, in a few plain words ("clicked"). */
+export function toolVerb(tool) {
+  const short = String(tool ?? "").replace(/^codara_preview_/, "").replace(/^preview\./, "");
+  if (!short) return "used this tab";
+  return TOOL_VERBS[short] ?? `used ${short.replace(/_/g, " ")}`;
+}
+
+// Studio's agent colours (src/renderer/src/styles.css); any other agent uses the accent.
+const AGENT_RUNTIMES = new Set(["claude", "codex", "grok", "pi"]);
+
+/** The CSS colour of an agent, from the runtime Codara reports for it. */
+export function agentColorVar(runtime) {
+  return AGENT_RUNTIMES.has(runtime) ? `var(--agent-${runtime})` : "var(--accent)";
+}
+
 /** How long after an agent's last call its name stays on the toolbar button. */
 export const USAGE_ACTIVE_MS = 8_000;
 

@@ -29,6 +29,8 @@ import {
   isTabShared,
   openedTabAnswer,
   parseBlockedSites,
+  reachOf,
+  reachPatch,
   USAGE_ACTIVE_MS,
   redactCdpEvent,
   shouldReload,
@@ -224,7 +226,7 @@ async function relayCommand(request) {
   if (permission === "never") throw new Error(`${method} is not available on tabs of your own browser.`);
   if (permission === "storage" && !state.storageTabs.includes(tab.id)) {
     throw new Error(
-      `Cookies and site storage of ${agentTabId(tab.id)} need the user's permission: turn on "Allow cookie and storage access" for this tab in the Codara extension popup.`,
+      `Cookies and site storage of ${agentTabId(tab.id)} need the user's permission: turn on "Read cookies and storage here" for this tab in the Codara extension popup.`,
     );
   }
   if (permission === "storage") {
@@ -243,7 +245,7 @@ async function relayCommand(request) {
 
 async function openTab(request) {
   if (!state.allowOpen) {
-    throw new Error('Opening tabs is off. The user can turn on "Let agents open new tabs" in the Codara extension popup.');
+    throw new Error('Opening tabs is off. The user can turn on "Open new tabs in a group" in the Codara extension popup.');
   }
   const url = String(request.url ?? "");
   if (!/^https?:\/\//i.test(url)) throw new Error("Agents can open http and https pages only.");
@@ -288,10 +290,24 @@ async function groupOpenedTab(tab, requested) {
 
 const usageBadgeTimers = new Map();
 
+// The last call Codara reported on a tab. name and runtime come from Codara
+// 0.43 on; an older Codara sends only the agent's label.
+function usageOf(message) {
+  const text = (value, max) => (typeof value === "string" ? value.slice(0, max) : "");
+  const agent = text(message.agent, 120) || "An agent";
+  return {
+    agent,
+    name: text(message.name, 60) || agent,
+    runtime: /^[a-z0-9-]{1,24}$/.test(message.runtime ?? "") ? message.runtime : null,
+    tool: text(message.tool, 80),
+    at: Number(message.at) || Date.now(),
+  };
+}
+
 function handleMessage(message) {
   if (message.type === "usage" && typeof message.tabId === "number") {
     void save({
-      usage: { ...state.usage, [message.tabId]: { agent: String(message.agent ?? "An agent"), tool: String(message.tool ?? ""), at: Number(message.at) || Date.now() } },
+      usage: { ...state.usage, [message.tabId]: usageOf(message) },
     }).then(() => {
       // The button names the agent while it acts, then goes back to "an agent".
       const tabId = message.tabId;
@@ -509,6 +525,7 @@ async function popupState(request) {
     paired: Boolean(state.token),
     shareAll: state.shareAll,
     windowShared: typeof request.windowId === "number" && state.shareWindows.includes(request.windowId),
+    reach: reachOf(shareChoice(), request.windowId),
     allowOpen: state.allowOpen,
     blockedSites: state.blockedSites,
     current: current ? describeTab(current) : null,
@@ -567,6 +584,13 @@ async function handlePopup(request) {
       await save(request.on === true ? { shareAll: true, stopped: [] } : { shareAll: false });
       if (request.on === true) void link.wake();
       break;
+    case "setReach": {
+      const windowId = typeof request.windowId === "number" ? request.windowId : null;
+      const inWindow = windowId === null ? [] : (await chrome.tabs.query({ windowId })).map((tab) => tab.id);
+      await save(reachPatch(shareChoice(), request.reach, windowId, inWindow));
+      if (request.reach !== "tabs") void link.wake();
+      break;
+    }
     case "stopAll":
       await save({ shareAll: false, shareWindows: [], shareTabs: [], stopped: [], storageTabs: [] });
       break;

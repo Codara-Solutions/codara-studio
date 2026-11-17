@@ -16,8 +16,10 @@ tools it uses for its own browser tabs.
 3. Click the Codara icon in the toolbar and choose **Connect to Codara**. The
    popup and Codara show the same six-digit code; press **Allow** in Codara
    only when they match.
-4. In the popup, turn on **Let agents use this tab** for each tab agents may
-   use. The popup shows the tab's id (`chrome:<tabId>`) with a copy button.
+4. In the popup, turn on the switch next to the tab's title for each tab
+   agents may use, or pick how far sharing reaches under **Agents may use**.
+   Agents find shared tabs on their own; the tab's id (`chrome:<tabId>`) and
+   its copy button are under **Details**.
 
 ## How it connects
 
@@ -61,8 +63,12 @@ tools it uses for its own browser tabs.
 
 ## What agents can and cannot do
 
-- Only tabs you shared: this tab, every tab in this window, or every tab in
-  the browser (asks for confirmation). Stop one tab or all from the popup.
+- Only tabs you shared. **Agents may use** picks how far: **Tabs I pick**
+  (the ones you switch on), **This window** (every tab in it, also new ones)
+  or **Everything** (every tab in the browser; asks for confirmation). Stop
+  one tab or all from the popup. Chrome keeps every extension off its own
+  pages and the Chrome Web Store; the popup says so there instead of
+  offering a switch.
 - Never a site on the blocked list (Options, or **Blocked sites** in the
   popup). It starts with examples for banks, payment services, password
   managers and account sign-in pages; one host per line, `*.` for
