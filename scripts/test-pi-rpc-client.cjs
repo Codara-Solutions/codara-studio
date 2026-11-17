@@ -184,11 +184,18 @@ async function main() {
     descendantPid = descendant.pid;
     assert.equal(alive(descendantPid), true, "fixture descendant should be running before stop");
   }
-  await client.stop();
-  if (process.platform !== "win32") {
-    await waitFor(() => !alive(descendantPid), 3_000, "detached Pi tool descendant teardown");
-    assert.equal(alive(unrelated.pid), true, "stopping Pi must not touch an unrelated process");
-    try { process.kill(unrelated.pid, "SIGKILL"); } catch {}
+  try {
+    await client.stop();
+    if (process.platform !== "win32") {
+      await waitFor(() => !alive(descendantPid), 3_000, "detached Pi tool descendant teardown");
+      assert.equal(alive(unrelated.pid), true, "stopping Pi must not touch an unrelated process");
+    }
+  } finally {
+    // Both are detached and the descendant ignores SIGTERM: when the check
+    // above fails they would run on for good, holding the checkout busy.
+    for (const pid of [unrelated?.pid, descendantPid]) {
+      if (pid) try { process.kill(pid, "SIGKILL"); } catch {}
+    }
   }
   assert.equal(client.state().phase, "stopped");
   assert.equal(client.state().pendingCount, 0);
