@@ -10,6 +10,7 @@ import type {
   SharedPagesList,
   ShareExpiryDays,
   ShareOffer,
+  ShareStatus,
 } from "@shared/share";
 import type {
   ShareAssetRequest,
@@ -19,6 +20,8 @@ import type {
 } from "@shared/share-assets";
 
 export const shareApi = {
+  /** Whether this build has a share service to send pages to. */
+  status: (): Promise<ShareStatus> => ipcRenderer.invoke("share:status"),
   create: (input: ShareCreateInput): Promise<SharedPage> => ipcRenderer.invoke("share:create", input),
   list: (): Promise<SharedPagesList> => ipcRenderer.invoke("share:list"),
   /** A local file the page embeds; main checks where it really is before reading it. */

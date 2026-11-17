@@ -1,3 +1,5 @@
+// test-runner: timeout=600 (about 130 s alone on a macOS CI runner, where every
+// in-use scan runs lsof; more beside other suites)
 // Integration test for src/main/agent-worktrees.ts, the policy behind the
 // worktree.* agent-socket methods and the codara_worktree_* MCP tools. The
 // module takes every app dependency as an argument, so it is bundled with

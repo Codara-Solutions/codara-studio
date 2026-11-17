@@ -86,6 +86,15 @@ export class ShareService {
     let remote: RemotePage[] | null;
     try {
       base = this.baseUrl();
+    } catch (err) {
+      return {
+        pages: local.filter((page) => page.expiresAt > Date.now()),
+        offline: true,
+        unavailable: true,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+    try {
       const response = await this.send(listPagesRequest(base, this.signer()));
       remote = parseRemotePageList(await this.json(response, 200));
     } catch (err) {
