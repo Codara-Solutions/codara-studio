@@ -15,8 +15,10 @@ import {
   type WebContents,
 } from "electron";
 import { flushMainLog, logMain } from "./file-log";
+import { markFirstWindowCreated, markRendererNotReady, markRendererReady } from "./renderer-readiness";
 import { errorBoundaryLogEntry } from "@shared/error-boundary";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { broadcastGitRemoteUpdated, registerIpc, setTrayHook } from "./ipc";
@@ -49,7 +51,7 @@ import { registerPreviewBridge } from "./preview-bridge";
 import { routeGuestPopups } from "./guest-popups";
 import { isFreshPartition } from "../shared/browser-partition";
 import { openLinkFromApp } from "./open-link";
-import { registerTerminalBridge } from "./terminal-bridge";
+import { onHeldTerminalOp, registerTerminalBridge } from "./terminal-bridge";
 import {
   registerDesktopCommandBridge,
   requestDesktopNewTerminal,
@@ -514,6 +516,9 @@ let bootGaveUp = false;
 // than once; only the first one for the current WebContents load may flush
 // cleanup retries or print a boot line.
 let rendererReadyForCurrentLoad = false;
+// Terminal and preview ops wait on this instead of sending into a window that
+// cannot hear them yet (renderer-readiness.ts).
+markRendererNotReady();
 ipcMain.on("app:renderer-ready", (e) => {
   // Same gate as the health pong: only the trusted main frame may disarm the
   // boot watchdog. App.tsx sends this after React mounts, which only happens
@@ -523,6 +528,7 @@ ipcMain.on("app:renderer-ready", (e) => {
   if (!isTrustedOnSender(e, "app:renderer-ready")) return;
   if (rendererReadyForCurrentLoad) return;
   rendererReadyForCurrentLoad = true;
+  markRendererReadyUnlessTestGate();
   if (bootWatchdog) {
     clearTimeout(bootWatchdog);
     bootWatchdog = null;
@@ -536,6 +542,25 @@ ipcMain.on("app:renderer-ready", (e) => {
   retryPendingAgentTerminalCleanups();
   logMain("boot", "renderer ready");
 });
+
+// Under test only (SPARK_E2E_BACKGROUND=1): with CODARA_E2E_READY_GATE set,
+// ops stay held for a mounted window until that file exists, so
+// test-agent-socket.cjs can send terminal.list before the window counts as
+// ready on any machine, however fast it boots.
+function markRendererReadyUnlessTestGate(): void {
+  const gate = E2E_BACKGROUND && !app.isPackaged ? process.env.CODARA_E2E_READY_GATE : undefined;
+  if (!gate) {
+    markRendererReady();
+    return;
+  }
+  const deadline = Date.now() + 120_000;
+  const poll = (): void => {
+    if (!rendererReadyForCurrentLoad) return; // a new document took over
+    if (existsSync(gate) || Date.now() > deadline) markRendererReady();
+    else setTimeout(poll, 50);
+  };
+  poll();
+}
 
 function onBootFailure(reason: string): void {
   // The renderer entry itself is untrusted; the ladder below cannot fix that and
@@ -886,6 +911,15 @@ function createWindow(): void {
   // is trusted the moment the renderer can send it, while the fail-closed
   // initial state keeps a forged in-page URL (pushState) from ever qualifying.
   registerTrustedMainWindow(windowForEvents);
+  // A new window (macOS recreates it from the dock) has no mounted renderer
+  // yet, and a closed one has none at all: terminal and preview ops wait.
+  markRendererNotReady();
+  // From now on a missing window means it was closed, not that the app is
+  // still starting: ops fail at once instead of waiting for one.
+  markFirstWindowCreated();
+  windowForEvents.once("closed", () => {
+    if (mainWindow === windowForEvents || mainWindow === null) markRendererNotReady();
+  });
 
   windowForEvents.on("maximize", () => sendWindowState(windowForEvents));
   windowForEvents.on("unmaximize", () => sendWindowState(windowForEvents));
@@ -1081,6 +1115,7 @@ function createWindow(): void {
   // reload/destroy, so don't fight it.
   windowForEvents.webContents.on("render-process-gone", (_e, details) => {
     clearUnresponsiveRecoveryTimer(windowForEvents.webContents);
+    markRendererNotReady();
     logMain("crash", `renderer process gone: ${details.reason} (exitCode ${details.exitCode})`);
     if (details.reason === "clean-exit") return;
     recoverRenderer(`render-process-gone:${details.reason}`);
@@ -1130,6 +1165,7 @@ function createWindow(): void {
   windowForEvents.webContents.on("did-start-navigation", (details) => {
     if (!details.isMainFrame || details.isSameDocument) return;
     rendererReadyForCurrentLoad = false;
+    markRendererNotReady();
     armBootWatchdog();
     // Pane overlays are document state with no restore path.
     closeAllPaneOverlays();
@@ -1390,6 +1426,16 @@ app.whenReady().then(async () => {
   }
   registerPreviewBridge();
   registerTerminalBridge();
+  onHeldTerminalOp((event) =>
+    logMain(
+      "terminal-bridge",
+      event.phase === "held"
+        ? `held ${event.op} until the window is ready`
+        : `held ${event.op} ${event.heldMs} ms, ${
+            event.phase === "copy" ? "answered from main's copy" : event.phase === "sent" ? "sent to the window" : "gave up"
+          }`,
+    ),
+  );
   // Non-fatal: Studio's own chords work without it, and a desktop script that
   // cannot connect falls back to typing the key.
   if (process.platform === "linux") {
