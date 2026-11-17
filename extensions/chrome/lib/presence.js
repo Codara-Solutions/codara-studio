@@ -28,6 +28,15 @@ const CAPTURE_METHODS = new Set([
   "Accessibility.queryAXTree",
   "Accessibility.getRootAXNode",
   "Page.startScreencast",
+  // DOM reads that can pierce the closed shadow root.
+  "DOM.describeNode",
+  "DOM.getOuterHTML",
+  "DOM.requestChildNodes",
+  "DOM.performSearch",
+  "DOM.getSearchResults",
+  "DOM.getNodeForLocation",
+  "DOM.querySelector",
+  "DOM.querySelectorAll",
 ]);
 
 /** Whether a command the agent sends must not see the overlay. */
@@ -38,6 +47,29 @@ export function hidesPresence(method) {
 /** Whether a command is the agent's input on the page (a click, a key, touch). */
 export function isAgentInput(method) {
   return String(method ?? "").startsWith("Input.");
+}
+
+// The host's inline style, which no page element is expected to carry. The
+// DOM events the extension forwards drop a node with it, so an agent that
+// mirrors the DOM never learns the overlay is there.
+const HOST_STYLE = "all: initial !important; position: fixed !important; inset: 0 !important; z-index: 2147483647 !important; pointer-events: none !important; display: block !important;";
+
+/** Whether a CDP DOM node is the overlay's host. */
+export function isPresenceNode(node) {
+  if (!node || node.nodeName !== "DIV" || !Array.isArray(node.attributes)) return false;
+  const style = node.attributes.indexOf("style");
+  return style >= 0 && style % 2 === 0 && String(node.attributes[style + 1] ?? "").includes("z-index: 2147483647 !important");
+}
+
+function strip(nodes) {
+  return nodes.filter((node) => !isPresenceNode(node)).map((node) => (Array.isArray(node.children) ? { ...node, children: strip(node.children) } : node));
+}
+
+/** A DOM event's params without the overlay, or null when the event is only about it. */
+export function withoutPresenceNodes(method, params) {
+  if (method === "DOM.childNodeInserted") return isPresenceNode(params?.node) ? null : params;
+  if (method === "DOM.setChildNodes" && Array.isArray(params?.nodes)) return { ...params, nodes: strip(params.nodes) };
+  return params;
 }
 
 /** The point an agent's mouse command lands on, or null. */
@@ -77,7 +109,7 @@ const AGENT_COLORS = {
 const ACCENT = ["#2aa298", "#2aa298"];
 
 /** The view the page draws: plain data, no page content. */
-export function presenceView({ name, runtime, glow, state }) {
+export function presenceView({ name, runtime, glow, state, serial }) {
   const colors = AGENT_COLORS[runtime] ?? ACCENT;
   return {
     name: String(name || "An agent").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 40),
@@ -85,18 +117,21 @@ export function presenceView({ name, runtime, glow, state }) {
     dark: COLOR_RE.test(colors[1]) ? colors[1] : ACCENT[1],
     glow: glow !== false,
     state: state === "stopped" ? "stopped" : "working",
+    // Which agent the pill showed when the user pressed it.
+    serial: Number.isInteger(serial) ? serial : 0,
   };
 }
 
 // Runs in the isolated world, stringified. Idempotent: a second install
 // keeps the first one's element. Every method swallows its own errors, so
 // nothing reaches the page's console or the agent's exception log.
-function install() {
+function install(hostStyle) {
   if (globalThis.__codaraPresence) return true;
   let host = null;
   let parts = null;
   let view = null;
-  let inputUntil = 0;
+  let holds = 0;
+  let holdSafety = null;
   let hidden = false;
   let expiry = null;
   let point = null;
@@ -124,19 +159,23 @@ function install() {
     host = document.createElement("div");
     host.setAttribute("aria-hidden", "true");
     // Inline and important, so no page style can move, hide or reveal it.
-    host.style.cssText = "all: initial !important; position: fixed !important; inset: 0 !important; z-index: 2147483647 !important; pointer-events: none !important; display: block !important;";
+    host.style.cssText = hostStyle;
     const root = host.attachShadow({ mode: "closed" });
     root.innerHTML = `<style>${css}</style><div class="glow"></div><div class="ptr"><svg width="20" height="24" viewBox="0 0 20 24"><path d="M2 2 L2 19 L6.6 15.2 L9.8 22 L13 20.6 L9.9 14 L16 13.6 Z"/></svg><span class="nm"></span></div><div class="pill" role="status"><span class="dot"></span><span class="txt"></span><button type="button" tabindex="-1"></button></div>`;
     parts = { glow: root.querySelector(".glow"), ptr: root.querySelector(".ptr"), nm: root.querySelector(".nm"), pill: root.querySelector(".pill"), txt: root.querySelector(".txt"), btn: root.querySelector("button") };
-    // The page never sees the user's click on the pill.
+    // The page never sees the user's click on the pill, and keeps its focus.
     for (const type of ["pointerdown", "pointerup", "mousedown", "mouseup", "click", "keydown", "keyup"]) {
-      parts.pill.addEventListener(type, (event) => event.stopPropagation());
+      parts.pill.addEventListener(type, (event) => {
+        event.stopPropagation();
+        if (type === "mousedown") event.preventDefault();
+      });
     }
+    parts.pill.classList.toggle("agent-input", holds > 0);
     parts.btn.addEventListener("click", (event) => {
-      // An agent's own synthetic click can land here: only a click while no
-      // agent input is in flight counts.
-      if (!event.isTrusted || Date.now() < inputUntil) return;
-      events.push(view?.state === "stopped" ? "undo" : "stop");
+      // The agent's own input is trusted too: a click while it is being
+      // dispatched is the agent's, not the user's.
+      if (!event.isTrusted || holds > 0 || !view) return;
+      events.push({ action: view.state === "stopped" ? "undo" : "stop", serial: view.serial });
     });
   };
   const place = () => {
@@ -179,19 +218,32 @@ function install() {
       } catch {}
       return true;
     },
-    // An agent's input is on its way: the pill lets it through to the page,
-    // and a mouse command moves the pointer to where it lands.
+    // The agent's input is being dispatched (on) or done (off): only for that
+    // long the pill lets clicks through, so the agent cannot press Stop on
+    // itself and the user's Stop works between its actions.
+    hold(on, x, y, press) {
+      try {
+        holds = on ? holds + 1 : Math.max(0, holds - 1);
+        clearTimeout(holdSafety);
+        // A release that never comes (the worker went away) ends on its own.
+        if (holds > 0) {
+          holdSafety = setTimeout(() => {
+            holds = 0;
+            parts?.pill.classList.remove("agent-input");
+          }, 2000);
+        }
+        parts?.pill.classList.toggle("agent-input", holds > 0);
+        if (on) api.move(x, y, press);
+      } catch {}
+      return true;
+    },
+    // The pointer goes to where the agent acts.
     move(x, y, press) {
       try {
         if (view?.state === "stopped") return true;
-        inputUntil = Date.now() + 1200;
         // The first input can arrive before the first show: keep the point.
         if (typeof x === "number") point = { x, y };
         if (!parts) return true;
-        parts.pill.classList.add("agent-input");
-        setTimeout(() => {
-          if (Date.now() >= inputUntil) parts.pill.classList.remove("agent-input");
-        }, 1300);
         place();
         if (press && typeof x === "number" && !reduced()) {
           parts.ptr.classList.add("press");
@@ -200,13 +252,16 @@ function install() {
       } catch {}
       return true;
     },
+    // True only once the overlay is out of the page (on) or back (off).
     conceal(on) {
       try {
         hidden = on;
         if (on) host?.remove();
         else if (view) attach();
-      } catch {}
-      return true;
+        return on ? !host?.isConnected : true;
+      } catch {
+        return false;
+      }
     },
     take() {
       return events.splice(0);
@@ -225,10 +280,10 @@ function install() {
 }
 
 /** The expression that installs the overlay's API in the isolated world. */
-export const PRESENCE_INSTALL = `(${install.toString()})()`;
+export const PRESENCE_INSTALL = `(${install.toString()})(${JSON.stringify(HOST_STYLE)})`;
 
 /** The expression that calls one of the overlay's methods with JSON arguments. */
 export function presenceCall(method, ...args) {
-  if (!["show", "move", "conceal", "take", "remove"].includes(method)) throw new Error(`Unknown presence call ${method}.`);
+  if (!["show", "hold", "move", "conceal", "take", "remove"].includes(method)) throw new Error(`Unknown presence call ${method}.`);
   return `globalThis.__codaraPresence ? globalThis.__codaraPresence.${method}(${args.map((arg) => JSON.stringify(arg)).join(", ")}) : null`;
 }

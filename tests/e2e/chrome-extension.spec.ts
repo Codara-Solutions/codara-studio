@@ -357,6 +357,10 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     const pillButton = async () => {
       const page = await browser!.newCDPSession(account);
       const { root } = await page.send("DOM.getDocument", { depth: -1, pierce: true });
+      // The style the extension's DOM event filter knows the host by (isPresenceNode).
+      const html: any = (root as any).children.find((node: any) => node.nodeName === "HTML");
+      const host: any = html.children.find((node: any) => node.shadowRoots?.[0]?.shadowRootType === "closed");
+      expect(host.attributes[host.attributes.indexOf("style") + 1]).toContain("z-index: 2147483647 !important");
       const find = (node: any): any => node.nodeName === "BUTTON" && node.attributes?.includes("tabindex") ? node : [...(node.children ?? []), ...(node.shadowRoots ?? [])].map(find).find(Boolean);
       const { model } = await page.send("DOM.getBoxModel", { backendNodeId: find(root).backendNodeId });
       await page.detach();
@@ -364,6 +368,8 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     };
     const stop = await pillButton();
     await account.mouse.click(stop.x, stop.y);
+    // Pressing Stop leaves the user's focus where it was.
+    await expect(account.locator("#note")).toBeFocused();
     await expect.poll(() => request("preview.snapshot", { tabId }).then(() => "allowed", (error) => String(error))).toMatch(/The user stopped .* from using browser tab chrome:\d+ and took it back/);
     const undo = await pillButton();
     await account.mouse.click(undo.x, undo.y);
