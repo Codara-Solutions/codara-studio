@@ -7,10 +7,11 @@ name: CI
 # runner's default pool (cores - 2, sized for a shared desktop) ran one suite
 # at a time, and the serial suites (test-cora-harness alone is over 4 minutes)
 # cannot share a machine. They are split across two macOS runners: the pool,
-# three at a time, next to the serial suites and the typechecks. Each half has
-# a time budget that fails it with the slowest suites named, long before the
-# job timeout would cancel it. "test" is the required check and only reports
-# the two halves.
+# two at a time, next to the serial suites and the typechecks. Three at a time
+# saturated the 3 cores, ran no faster and pushed timing-sensitive suites past
+# their limits. Each half has a time budget that fails it with the slowest
+# suites named, long before the job timeout would cancel it. "test" is the
+# required check and only reports the two halves.
 
 on:
   push:
@@ -41,13 +42,20 @@ jobs:
       # real Chromium (chat-surface-routing) — give them what they need.
       - run: npm run build
       - run: npx playwright install chromium
+      # The last run's durations start the longest suites first, so a slow
+      # one does not start last. npm ci empties node_modules, so this restores
+      # after it.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: node_modules/.cache/codara-tests
+          key: codara-test-timings-${{ runner.os }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: codara-test-timings-${{ runner.os }}-${{ github.job }}-
       - name: Unit suites, all but the serial ones
         env:
           CODARA_TEST_PART: pool
-          # The runner is not shared, so use every core. /proc/meminfo does
-          # not exist on macOS, so the memory guard never holds a suite back;
-          # heavy suites still run one at a time.
-          CODARA_TEST_JOBS: "3"
+          # /proc/meminfo does not exist on macOS, so the memory guard never
+          # holds a suite back; heavy suites still run one at a time.
+          CODARA_TEST_JOBS: "2"
           CODARA_TEST_BUDGET_SECONDS: "900"
         run: npm run test:all
 
@@ -66,7 +74,9 @@ jobs:
       - run: npm run typecheck:web
       - run: npm run typecheck:e2e
       - run: npm run typecheck:pi-cora
-      # None of the serial suites needs the build or Playwright's Chromium.
+      # test-app-exit-electron boots the built app. No serial suite needs
+      # Playwright's Chromium.
+      - run: npm run build
       - name: Serial unit suites
         env:
           CODARA_TEST_PART: serial

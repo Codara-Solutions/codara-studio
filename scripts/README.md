@@ -44,7 +44,8 @@ How `scripts/run-all-tests.cjs` works:
     instead of 180.
   - A file with a `// test-runner: serial (why)` line runs after the pool,
     with nothing else running. Today that is `test-cora-harness.mjs` (its
-    timing checks), `test-renderer-chunks.mjs` (a
+    timing checks), `test-app-exit-electron.cjs` (Chromium's exit time on a
+    loaded macOS runner), `test-renderer-chunks.mjs` (a
     production Vite build, about 2 GB) and `test-workflow-sandbox.cjs` (its
     heap-limit case grows QuickJS's WebAssembly memory to 2 GB).
   - No suite starts while `MemAvailable` is below `CODARA_TEST_MIN_FREE_MB`
@@ -114,8 +115,8 @@ Most suites need only `npm install`. These are the exceptions:
 CI (`.github/workflows/ci.yml`, macOS, pull requests into `main` and pushes
 to it) runs on two machines at once. `test (pool)` runs `npm run build`, `npx
 playwright install chromium`, then `npm run test:all` with
-`CODARA_TEST_PART=pool` three suites at a time; `test (serial, typecheck)`
-runs the four typechecks, then the serial suites. Each has a time budget
+`CODARA_TEST_PART=pool` two suites at a time; `test (serial, typecheck)`
+runs the four typechecks and the build, then the serial suites. Each has a time budget
 (`CODARA_TEST_BUDGET_SECONDS`), and the required `test` check passes only
 when both do. `.github/workflows/ci-linux.yml` runs the
 same on Linux under Xvfb for pull requests into `main` and pushes to it,
