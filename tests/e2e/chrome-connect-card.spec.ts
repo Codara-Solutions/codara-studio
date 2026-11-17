@@ -90,6 +90,7 @@ test("the connect card walks from Add to Pair to Share a tab on what Codara sees
     await expect(firstRun.getByRole("button", { name: "Reveal folder" })).toBeVisible();
     await expect(firstRun.locator('li[aria-current="step"]')).toHaveText("1Add");
     await expect(firstRun.getByRole("status")).toContainText("Waiting for the extension");
+    await expect(firstRun.getByRole("button", { name: "Copy", exact: true })).toBeVisible();
 
     browser = await chromium.launchPersistentContext(profile, {
       executablePath: executablePath ?? undefined,
@@ -111,7 +112,8 @@ test("the connect card walks from Add to Pair to Share a tab on what Codara sees
     await expect(popup.locator("#pairing-code")).toHaveText(/^\d{3} \d{3}$/, { timeout: 10_000 });
     const code = (await popup.locator("#pairing-code").textContent()) ?? "";
     await expect(firstRun).toHaveAttribute("data-chrome-connect", "pair");
-    await expect(firstRun.getByLabel("Pairing code")).toHaveText(code);
+    await expect(firstRun.locator(".chrome-connect__code")).toHaveText(code);
+    await expect(firstRun.getByText("Code", { exact: true })).toBeVisible();
     // The card's Allow is brought into view: the floating prompt stays away.
     await expect(firstRun.getByRole("button", { name: "Allow" })).toBeInViewport();
     await expect(firstRun.locator('li[data-state="done"]')).toHaveCount(1);
@@ -150,6 +152,34 @@ test("the connect card walks from Add to Pair to Share a tab on what Codara sees
     await popup.locator("#share-tab").check();
     await card.getByRole("button", { name: "Cancel" }).click();
     await expect(card).toHaveAttribute("data-chrome-connect", "done");
+
+    // Once no card is on screen, a pairing asks through the floating prompt again.
+    await settings.locator("[data-chrome-link]").getByRole("button", { name: "Disconnect" }).click();
+    await expect(card).toHaveAttribute("data-chrome-connect", "add");
+    await codara.keyboard.press("Escape");
+    await expect(settings).toBeHidden();
+    await expect(codara.locator("[data-chrome-connect]")).toHaveCount(0);
+    await popup.reload();
+    await popup.locator("#connect-button").click();
+    await expect(popup.locator("#pairing-code")).toHaveText(/^\d{3} \d{3}$/, { timeout: 10_000 });
+    const prompt = codara.locator("[data-chrome-pairing]");
+    await expect(prompt).toBeVisible();
+    await prompt.getByRole("button", { name: "Allow" }).click();
+    await expect(popup.locator("#status-text")).toHaveText(/^Studio \d/);
+
+    // A paired browser that is not running is not "connected": the card says so.
+    await browser.close();
+    browser = null;
+    await expect(async () => {
+      await codara.getByTitle("Settings").first().click({ force: true });
+      await expect(settings).toBeVisible({ timeout: 2_000 });
+    }).toPass({ timeout: 20_000 });
+    await settings.getByRole("button", { name: "Browser", exact: true }).click();
+    await expect(card).toHaveAttribute("data-chrome-connect", "offline");
+    await expect(card).toContainText(/is paired but not connected/);
+    await expect(card.locator('li[aria-current="step"]')).toHaveText("2Pair");
+    await card.getByRole("button", { name: "Add the extension again" }).click();
+    await expect(card).toHaveAttribute("data-chrome-connect", "add");
 
   } finally {
     await browser?.close().catch(() => undefined);

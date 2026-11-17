@@ -34,6 +34,8 @@ export default function ChromeConnectCard({
   useConnectCardOnScreen();
   const progress = chromeConnectProgress(state);
   const [another, setAnother] = useState(false);
+  // With the store route, the folder steps stay one click away.
+  const [unpacked, setUnpacked] = useState(false);
   const [folder, setFolder] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -50,7 +52,8 @@ export default function ChromeConnectCard({
   useEffect(() => {
     if (pairingId) pairRef.current?.scrollIntoView({ block: "nearest" });
   }, [pairingId]);
-  const current = STEPS.findIndex((item) => item.id === step);
+  // Paired but offline: the browser has to come back and pair again or reconnect, so Pair is current.
+  const current = STEPS.findIndex((item) => item.id === (step === "offline" ? "pair" : step));
 
   const run = async (action: () => Promise<unknown>) => {
     setError(null);
@@ -71,6 +74,22 @@ export default function ChromeConnectCard({
     });
   const shownFolder = folder ?? state.extensionFolder;
   const pairing = state.pending[0];
+
+  // Nothing can connect while the link is off: say why instead of the steps.
+  if (!state.enabled || !state.port) {
+    return (
+      <div className="chrome-connect" data-chrome-connect="off">
+        <div className="chrome-connect__top">
+          <span className="chrome-connect__title">Connect your browser</span>
+        </div>
+        <div className="chrome-connect__error" role="alert">
+          {!state.enabled
+            ? "The browser link is turned off for this Codara, so no browser can connect."
+            : state.error ?? "The browser link is starting."}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="chrome-connect" data-chrome-connect={step}>
@@ -97,16 +116,19 @@ export default function ChromeConnectCard({
 
       <div className="chrome-connect__focus" ref={pairRef}>
         {step === "add" ? (
-          route.kind === "store" ? (
+          route.kind === "store" && !unpacked ? (
             <>
               <div className="chrome-connect__h">Add Codara to your browser</div>
               <p className="chrome-connect__d">
-                The store page opens in your browser. Press <strong>Add to Chrome</strong>, then the Codara icon in the toolbar and{" "}
-                <strong>Connect to Codara</strong>.
+                The store page opens in your default browser. If that is not the browser you want to connect, open the same page there.
+                Press <strong>Add to Chrome</strong>, then the Codara icon in the toolbar and <strong>Connect to Codara</strong>.
               </p>
               <div className="chrome-connect__actions">
                 <button type="button" className="spark-btn is-primary" onClick={() => void run(() => window.spark.openInSystemBrowser(route.url))}>
                   Add from Chrome Web Store
+                </button>
+                <button type="button" className="chrome-connect__link" onClick={() => setUnpacked(true)}>
+                  Load unpacked instead
                 </button>
               </div>
             </>
@@ -143,9 +165,9 @@ export default function ChromeConnectCard({
                   </div>
                 </li>
                 <li>
-                  In your browser open{" "}
-                  <button type="button" className="chrome-connect__copy spark-mono" title="Copy" onClick={() => void copy("address", async () => "chrome://extensions")}>
-                    {copied === "address" ? "Copied" : "chrome://extensions"}
+                  In your browser open <span className="spark-mono">chrome://extensions</span>{" "}
+                  <button type="button" className="chrome-connect__copy" onClick={() => void copy("address", async () => "chrome://extensions")}>
+                    {copied === "address" ? "Copied" : "Copy"}
                   </button>{" "}
                   (Edge: <span className="spark-mono">edge://extensions</span>), turn on <strong>Developer mode</strong>, choose{" "}
                   <strong>Load unpacked</strong> and pick that folder.
@@ -161,8 +183,9 @@ export default function ChromeConnectCard({
             <div className="chrome-connect__h">{pairing.browser.name} is asking to connect</div>
             <p className="chrome-connect__d">The Codara popup in your browser shows a code. Allow only if it is the same.</p>
             <div className="chrome-connect__pair">
-              <span className="chrome-connect__code spark-mono" aria-label="Pairing code">
-                {pairing.code}
+              <span className="chrome-connect__code-wrap">
+                <span className="chrome-connect__code-label">Code</span>{" "}
+                <span className="chrome-connect__code spark-mono">{pairing.code}</span>
               </span>
               <span className="chrome-connect__actions">
                 <button type="button" className="spark-btn" disabled={busy} onClick={() => void run(() => window.spark.chromeLink.deny(pairing.id))}>
@@ -172,6 +195,19 @@ export default function ChromeConnectCard({
                   Allow
                 </button>
               </span>
+            </div>
+          </>
+        ) : step === "offline" ? (
+          <>
+            <div className="chrome-connect__h">{`${progress.offline.join(", ")} ${progress.offline.length === 1 ? "is" : "are"} paired but not connected`}</div>
+            <p className="chrome-connect__d">
+              Open it, or add the extension again. It connects by itself while Codara is running; if it does not, click the Codara icon in
+              the toolbar and press <strong>Connect to Codara</strong>.
+            </p>
+            <div className="chrome-connect__actions">
+              <button type="button" className="spark-btn" onClick={() => setAnother(true)}>
+                Add the extension again
+              </button>
             </div>
           </>
         ) : step === "share" ? (
@@ -197,12 +233,14 @@ export default function ChromeConnectCard({
         )}
       </div>
 
-      {step === "add" || step === "share" ? (
+      {step === "add" || step === "share" || step === "offline" ? (
         <div className="chrome-connect__wait" role="status">
           <span className="chrome-connect__pulse" aria-hidden="true" />
           {step === "add"
             ? "Waiting for the extension. This moves on by itself when you press Connect to Codara."
-            : "Waiting for a shared tab. This moves on by itself."}
+            : step === "offline"
+              ? "Waiting for the browser. This moves on by itself when it connects."
+              : "Waiting for a shared tab. This moves on by itself."}
         </div>
       ) : null}
       {another && step === "add" ? (

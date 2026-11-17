@@ -95,14 +95,20 @@ the pairing prompt somewhere else; nothing said which step you were on.
 
 - Each step ends on what Codara sees, never on a click in the card: a
   pairing request (the extension was added and Connect was pressed), a
-  paired browser, a shared tab. Codara cannot see an extension that has not
-  pressed Connect, by design, so Add waits for that.
+  paired browser that is connected now, a shared tab in one. Codara cannot
+  see an extension that has not pressed Connect, by design, so Add waits for
+  that. A pairing whose browser is not connected does not count: the card
+  says "<browser> is paired but not connected: open it, or add the extension
+  again" at Pair.
+- With the link off or no free port, the card shows why instead of steps.
 - A pairing request always shows, even on a finished card, and the card asks
   it itself: while a card is on screen the floating prompt stays away, so
   there is one Allow.
 - How the extension gets in is one route value. Today it is the unpacked
   folder; when the Chrome Web Store listing is live, the store route turns
-  Add into one "Add from Chrome Web Store" button and nothing else changes.
+  Add into one "Add from Chrome Web Store" button (it opens the page in the
+  default browser, and says so) with "Load unpacked instead" under it, and
+  nothing else changes.
 - Firefox is one line ("Firefox: coming later") until its build exists.
 
 ## The extension's popup (2026-11)

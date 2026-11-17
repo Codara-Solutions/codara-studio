@@ -636,13 +636,17 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
 
   // Connecting a browser, step by step, from what Codara sees.
   const tab = (id, blocked = false) => ({ id, blocked });
-  const browser = (tabs) => ({ tabs });
-  assert.deepEqual(lib.chromeConnectProgress({ browsers: [], pending: [] }), { step: "add", paired: 0, shared: 0 });
+  const browser = (tabs, connected = true, name = "Chrome") => ({ tabs, connected, browser: { name } });
+  assert.deepEqual(lib.chromeConnectProgress({ browsers: [], pending: [] }), { step: "add", paired: 0, shared: 0, offline: [] });
   assert.equal(lib.chromeConnectProgress({ browsers: [], pending: [{}] }).step, "pair", "Connect pressed: the extension is there");
-  assert.deepEqual(lib.chromeConnectProgress({ browsers: [browser([])], pending: [] }), { step: "share", paired: 1, shared: 0 });
+  assert.deepEqual(lib.chromeConnectProgress({ browsers: [browser([])], pending: [] }), { step: "share", paired: 1, shared: 0, offline: [] });
   assert.equal(lib.chromeConnectProgress({ browsers: [browser([tab(1, true)])], pending: [] }).step, "share", "a blocked tab is not shared");
-  assert.deepEqual(lib.chromeConnectProgress({ browsers: [browser([tab(1)]), browser([tab(2), tab(3)])], pending: [] }), { step: "done", paired: 2, shared: 3 });
+  assert.deepEqual(lib.chromeConnectProgress({ browsers: [browser([tab(1)]), browser([tab(2), tab(3)])], pending: [] }), { step: "done", paired: 2, shared: 3, offline: [] });
   assert.equal(lib.chromeConnectProgress({ browsers: [browser([tab(1)])], pending: [{}] }).step, "pair", "a second browser asking comes first");
+  // Only connected browsers count: a stale pairing is not "connected".
+  assert.deepEqual(lib.chromeConnectProgress({ browsers: [browser([], false, "Brave")], pending: [] }), { step: "offline", paired: 0, shared: 0, offline: ["Brave"] });
+  assert.deepEqual(lib.chromeConnectProgress({ browsers: [browser([], false, "Brave"), browser([tab(4)])], pending: [] }), { step: "done", paired: 1, shared: 1, offline: ["Brave"] });
+  assert.equal(lib.chromeConnectProgress({ browsers: [browser([], false)], pending: [{}] }).step, "pair");
 
   console.log("chrome link: origin and host checks, pairing over ECDH with code and Allow, a swapped key refused, bound tokens never sent, sealed frames with injected and replayed ones dropping the link, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair, stops from the page kept across reconnects and restarts, presence settings and connect steps");
   setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref();
