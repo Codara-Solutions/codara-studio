@@ -4,7 +4,7 @@
 
 import { ipcRenderer } from "electron";
 
-import type { ChromeLinkState, SeparateBrowserTool } from "@shared/chrome-link";
+import type { ChromeLinkState, ChromePresenceSettings, SeparateBrowserTool } from "@shared/chrome-link";
 import { subscribe } from "../subscribe";
 
 export const chromeLinkApi = {
@@ -22,5 +22,7 @@ export const chromeLinkApi = {
   prepareExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:prepareExtension"),
   /** The same, and open the folder in the file manager. */
   revealExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:revealExtension"),
+  /** The agent's pointer and Stop pill, and the page-edge glow, on tabs of the user's browser. */
+  setPresence: (patch: { overlay?: boolean; glow?: boolean }): Promise<ChromePresenceSettings> => ipcRenderer.invoke("chromeLink:setPresence", patch),
   onChanged: subscribe<ChromeLinkState>("chromeLink:changed"),
 };

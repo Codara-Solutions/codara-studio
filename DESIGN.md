@@ -75,10 +75,8 @@ cursors in Figma for the name tag beside the arrow.
   banner offers Undo for six seconds; closing the tab forgets the stop.
 - The banner sits on the overlay surface (`.spark-glass--strong
   .spark-overlay-surface`), the same read tier as the pointing panels.
-- On a tab of the user's own Chrome there is no layer in the page, which
-  would need new extension permissions. Chrome shows its own "Codara started
-  debugging this browser" bar, the extension's button names the agent while
-  it acts, and the popup's Stop ends it there.
+- On a tab of the user's own Chrome the extension draws the same hand in
+  the page; see "The agent on the user's Chrome page" below.
 - The component lives in `components/Preview/agent-presence/` with its own
   CSS and store; BrowserPane only mounts it, so the toolbar can move freely.
 
@@ -120,6 +118,43 @@ pages) it still showed a share button that could never work.
 - Keyboard: the reach is a radio group with one tab stop and arrow keys; the
   switches are native checkboxes with `role="switch"`; the 1 s refresh never
   rebuilds a list that did not change, so focus stays put.
+
+## The agent on the user's Chrome page (2026-11)
+
+**Chosen:** variant 3 of four from the same options page (labelled pointer;
+halo and ripple; pointer, page-edge glow and Stop pill; nothing in the
+page): a pointer in the agent's colour with its name, a thin glow around the
+page in that colour, and a "<agent> working" pill with Stop at the bottom.
+The owner asked for a way to remove the glow: **Glow around the page**, and
+**Show the agent's pointer and Stop** to turn the whole overlay off, both in
+the extension's popup and Settings > Browser, on by default.
+
+**Why:** on the user's own Chrome nothing in the page said an agent was
+acting, and the only stop at hand was Chrome's debugging bar Cancel, which
+stops sharing every tab.
+
+**Rules:**
+
+- Drawn through the debugger session the extension already holds: an
+  isolated world (`Page.createIsolatedWorld`), a closed shadow root hung off
+  `<html>` (outside `<body>`, where the snapshot reads) and `aria-hidden`.
+  No new permission, no content script, page CSP does not apply.
+- It never takes the user's input: `pointer-events: none` everywhere except
+  the pill, whose events stop in the shadow root. The pill lets the agent's
+  own clicks through while its input is in flight, so an agent cannot press
+  Stop on itself. Stop is mouse only (out of the page's tab order); the
+  popup is the keyboard path.
+- Never in what the agent reads: screenshots, DOM and accessibility captures
+  take the overlay out for the call and put it back. Nothing in it reads the
+  page; the only thing that leaves it is the user's Stop or Undo.
+- Stop refuses that agent's next calls on that tab only, with the same
+  message as on a Codara tab, and offers Undo for six seconds. Other agents
+  and other tabs are unaffected.
+- It shows only on attached, shared tabs, goes away eight seconds after the
+  agent's last call, is drawn again after a navigation, and removes itself
+  if the debugger session ends without a goodbye.
+- The pointer glides (320 ms) only without `prefers-reduced-motion`. Colours
+  are Studio's agent tokens, light or dark with the page's scheme.
 
 ## Tab links and agent tab approvals (2026-10)
 

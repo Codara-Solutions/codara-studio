@@ -201,6 +201,10 @@ function render() {
   $("reach").hidden = false;
   if (!pendingAnswer) renderReach(view.reach, view.otherWindows);
   $("allow-open").checked = view.allowOpen;
+  $("on-page").hidden = false;
+  $("presence-overlay").checked = view.presence.overlay;
+  $("presence-glow").checked = view.presence.overlay && view.presence.glow;
+  $("presence-glow").disabled = !view.presence.overlay;
 
   $("shared").hidden = view.shared.length === 0;
   $("shared-label").textContent = `Shared, ${view.shared.length} tab${view.shared.length === 1 ? "" : "s"}`;
@@ -269,6 +273,8 @@ async function start() {
     }
   });
   $("allow-open").addEventListener("change", (event) => void act("setAllowOpen", { on: event.target.checked }));
+  $("presence-overlay").addEventListener("change", (event) => void act("setPresence", { overlay: event.target.checked }));
+  $("presence-glow").addEventListener("change", (event) => void act("setPresence", { glow: event.target.checked }));
   $("stop-all").addEventListener("click", () => void act("stopAll"));
   $("copy-id").addEventListener("click", async (event) => {
     const button = event.currentTarget;

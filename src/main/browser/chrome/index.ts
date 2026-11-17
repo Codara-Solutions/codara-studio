@@ -12,7 +12,7 @@ import { app, BrowserWindow, shell } from "electron";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { ChromeLinkState, SeparateBrowserTool } from "../../../shared/chrome-link";
+import type { ChromeLinkState, ChromePresenceSettings, SeparateBrowserTool } from "../../../shared/chrome-link";
 import { codaraHome } from "../../codara-home";
 import type { IpcHandle } from "../../ipc";
 import { paneAgentRuntime } from "../../pane-agent-runtime";
@@ -31,6 +31,7 @@ import type { ChromeLink } from "./link";
 import { ChromeLinkServer } from "./link-server";
 import { applyKeepAgentsInChrome } from "./keep-agents-in-chrome";
 import { ChromeLinkStore } from "./link-store";
+import { adoptPresenceSettings, forgetChromeStops, loadPresenceSettings, presenceSettings, stopChromeDriver } from "./presence";
 import { CHROME_LINK_PORTS } from "./protocol";
 import { setChromeLinkRuntime } from "./runtime";
 
@@ -163,7 +164,30 @@ export function chromeLinkState(): ChromeLinkState {
     }),
     pending: server?.pendingPairings().map(({ id, code, browser, extensionId, expiresAt }) => ({ id, code, browser, extensionId, expiresAt })) ?? [],
     activity: recentChromeActivity(50),
+    presence: presenceSettings(),
   };
+}
+
+function sendPresenceSettings(except?: ChromeLink): void {
+  for (const link of server?.links() ?? []) {
+    if (link !== except) link.send({ type: "presence_settings", ...presenceSettings() });
+  }
+}
+
+/** What the extension tells Codara about the agent's presence on its tabs. */
+function onPresenceMessage(link: ChromeLink, message: Record<string, unknown>): void {
+  if (message.type === "presence_settings") {
+    if (adoptPresenceSettings(message)) {
+      sendPresenceSettings(link);
+      broadcast();
+    } else if (presenceSettings().at > (typeof message.at === "number" ? message.at : 0)) {
+      link.send({ type: "presence_settings", ...presenceSettings() });
+    }
+    return;
+  }
+  if (typeof message.tabId !== "number" || typeof message.key !== "string" || !message.key) return;
+  // Stop on the page refuses that agent's next calls on that tab only.
+  stopChromeDriver(link.linkId, message.tabId, message.key, message.type === "presence_stop");
 }
 
 function broadcast(): void {
@@ -189,6 +213,7 @@ export function startChromeLink(): void {
   store = new ChromeLinkStore(join(dir, "links.json"));
   setChromeActivityFile(join(dir, "activity.jsonl"));
   setChromeAgentLabeler(agentLabel);
+  loadPresenceSettings(join(dir, "presence.json"));
   const linkServer = new ChromeLinkServer({ store, app: { name: "Codara", version: app.getVersion() }, ports: linkPorts() });
   const chromeBackend = new ChromeTargetBackend(linkServer);
   server = linkServer;
@@ -196,11 +221,14 @@ export function startChromeLink(): void {
   setChromeLinkRuntime({ server: linkServer, backend: chromeBackend });
   linkServer.onLinkUp((link) => {
     link.onTabs(() => chromeBackend.syncTabs(link));
+    link.onMessage((message) => onPresenceMessage(link, message));
+    link.send({ type: "presence_settings", ...presenceSettings() });
     unregisterBackend ??= registerBrowserBackend(chromeBackend);
     offerExtensionUpdate(link);
   });
   linkServer.onLinkDown((link) => {
     chromeBackend.forgetLink(link);
+    forgetChromeStops(link.linkId);
     if (linkServer.links().length === 0) {
       unregisterBackend?.();
       unregisterBackend = null;
@@ -214,10 +242,17 @@ export function startChromeLink(): void {
   });
   linkServer.onChange(broadcast);
   onChromeActivity(broadcast);
-  setChromeUsageSink((entry, ref) => {
+  setChromeUsageSink((entry, ref, driver) => {
     const links = linkServer.links();
     const link = ref.linkId ? linkServer.link(ref.linkId) : links.find((candidate) => candidate.tabs.has(ref.tabId));
-    link?.send({ type: "usage", tabId: ref.tabId, agent: entry.agent, tool: entry.tool, at: Date.parse(entry.at) });
+    link?.send({
+      type: "usage",
+      tabId: ref.tabId,
+      agent: entry.agent,
+      tool: entry.tool,
+      at: Date.parse(entry.at),
+      ...(driver ? { key: driver.key, name: driver.name, runtime: driver.runtime } : {}),
+    });
   });
   try {
     // Keep a copy the user already loaded current with this Codara: any
@@ -247,6 +282,20 @@ export function registerChromeLinkIpc(handle: IpcHandle): void {
   // Reading the list also re-applies it, so a tool the user added since boot
   // is off for the next session once Settings shows it.
   handle("chromeLink:separateBrowserTools", async (): Promise<SeparateBrowserTool[]> => applyKeepAgentsInChrome());
+  handle("chromeLink:setPresence", async (_event, patch: unknown): Promise<ChromePresenceSettings> => {
+    const changes = patch && typeof patch === "object" ? (patch as Partial<ChromePresenceSettings>) : {};
+    const current = presenceSettings();
+    const next = {
+      overlay: typeof changes.overlay === "boolean" ? changes.overlay : current.overlay,
+      glow: typeof changes.glow === "boolean" ? changes.glow : current.glow,
+      at: Math.max(Date.now(), current.at + 1),
+    };
+    if (adoptPresenceSettings(next)) {
+      sendPresenceSettings();
+      broadcast();
+    }
+    return presenceSettings();
+  });
   handle("chromeLink:prepareExtension", async (): Promise<string> => prepareExtensionFolder(true));
   handle("chromeLink:revealExtension", async (): Promise<string> => {
     const folder = prepareExtensionFolder(true);

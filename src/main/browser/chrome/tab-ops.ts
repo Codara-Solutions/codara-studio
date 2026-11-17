@@ -108,9 +108,16 @@ export async function evaluate(target: BrowserTarget, params: Params): Promise<u
   return { value: await run(target, expression) };
 }
 
+/** Point the agent's cursor on the page at the element it acts on; never fails the action. */
+async function pointAt(target: BrowserTarget, selector: string, action: string): Promise<void> {
+  const spot = await point(target, { selector }).catch(() => null);
+  if (spot) await target.showActivity(action, spot).catch(() => {});
+}
+
 export async function click(target: BrowserTarget, params: Params): Promise<unknown> {
   const selector = str(params, "selector");
   if (!selector) throw new Error("click requires 'selector'");
+  await pointAt(target, selector, "click");
   return checked(await run<{ ok?: boolean; error?: string }>(target, probe(clickProbe, { selector })));
 }
 
@@ -119,6 +126,7 @@ export async function type(target: BrowserTarget, params: Params): Promise<unkno
   const text = str(params, "text");
   if (!selector) throw new Error("type requires 'selector'");
   if (text === null) throw new Error("type requires 'text'");
+  await pointAt(target, selector, "type");
   return checked(await run<{ ok?: boolean; error?: string }>(target, probe(typeProbe, { selector, text, clearFirst: params.clearFirst === true })));
 }
 

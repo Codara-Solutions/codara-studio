@@ -48,6 +48,18 @@ export interface ChromeLinkActivity {
   detail?: string;
 }
 
+/**
+ * How an agent shows on a shared tab of the user's browser: the pointer and
+ * Stop pill (overlay) and the page-edge glow. The extension's popup and
+ * Settings > Browser change the same values; the newer change (at, epoch ms)
+ * wins when they meet.
+ */
+export interface ChromePresenceSettings {
+  overlay: boolean;
+  glow: boolean;
+  at: number;
+}
+
 export interface ChromeLinkState {
   /** False when Codara runs with its Chrome link turned off. */
   enabled: boolean;
@@ -61,6 +73,7 @@ export interface ChromeLinkState {
   browsers: ChromeLinkBrowserState[];
   pending: ChromeLinkPairing[];
   activity: ChromeLinkActivity[];
+  presence: ChromePresenceSettings;
 }
 
 /**

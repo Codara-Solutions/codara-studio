@@ -328,6 +328,48 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
       mcp.close();
     }
 
+    // The agent on the page: pointer, glow and pill in a closed shadow root
+    // hung off <html>, in the user's view and never in the agent's.
+    const overlays = () => account.evaluate(() => Array.from(document.documentElement.children).filter((el) => el.tagName === "DIV" && el.getAttribute("aria-hidden") === "true" && el.shadowRoot === null).length);
+    const agentShot = async () => (await request("preview.screenshot", { tabId, format: "png" })).dataUrl as string;
+    // No caret blinking between the pictures compared below.
+    await request("preview.evaluate", { tabId, code: "document.activeElement?.blur(); true" });
+    await request("preview.click", { tabId, selector: "h1" });
+    await expect.poll(overlays).toBe(1);
+    expect(JSON.stringify(await request("preview.snapshot", { tabId }))).not.toContain("working");
+    expect(JSON.stringify(await request("preview.evaluate", { tabId, code: "document.body.innerText" }))).not.toContain("working");
+    const shown = { agent: await agentShot(), user: await account.screenshot() };
+    await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.setPresence({ overlay: false }));
+    await expect.poll(overlays).toBe(0);
+    expect(await agentShot()).toBe(shown.agent);
+    expect((await account.screenshot()).equals(shown.user)).toBe(false);
+    // Back on: it survives a reload, and Stop on the pill refuses this agent
+    // on this tab until the user presses Undo.
+    await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.setPresence({ overlay: true }));
+    await expect.poll(() => worker.evaluate(() => (self as unknown as { codara: any }).codara.state().presence.overlay)).toBe(true);
+    await request("preview.click", { tabId, selector: "h1" });
+    await account.reload();
+    await expect.poll(overlays, { timeout: 5_000 }).toBe(1);
+    // The user's own mouse and keys go through it to the page.
+    await account.locator("#note").click();
+    await account.keyboard.type("mine");
+    await expect(account.locator("#note")).toHaveValue("mine");
+    const pillButton = async () => {
+      const page = await browser!.newCDPSession(account);
+      const { root } = await page.send("DOM.getDocument", { depth: -1, pierce: true });
+      const find = (node: any): any => node.nodeName === "BUTTON" && node.attributes?.includes("tabindex") ? node : [...(node.children ?? []), ...(node.shadowRoots ?? [])].map(find).find(Boolean);
+      const { model } = await page.send("DOM.getBoxModel", { backendNodeId: find(root).backendNodeId });
+      await page.detach();
+      return { x: (model.content[0] + model.content[2]) / 2, y: (model.content[1] + model.content[5]) / 2 };
+    };
+    const stop = await pillButton();
+    await account.mouse.click(stop.x, stop.y);
+    await expect.poll(() => request("preview.snapshot", { tabId }).then(() => "allowed", (error) => String(error))).toMatch(/The user stopped .* from using browser tab chrome:\d+ and took it back/);
+    const undo = await pillButton();
+    await account.mouse.click(undo.x, undo.y);
+    await expect.poll(() => request("preview.snapshot", { tabId }).then(() => "allowed", (error) => String(error))).toBe("allowed");
+    await agentShot();
+
     // Codara logs who did what, and the popup names the agent.
     const state = await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.state());
     const tools = state.activity.filter((entry: { tab: string }) => entry.tab === tabId).map((entry: { tool: string }) => entry.tool);

@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 
 import type { ChromeLinkBrowserState } from "@shared/chrome-link";
-import { Disclosure, SettingRow, SettingsSection } from "../settings/SettingsPrimitives";
+import { Disclosure, SettingRow, SettingsSection, ToggleRow } from "../settings/SettingsPrimitives";
 import KeepAgentsInChromeRow from "./KeepAgentsInChromeRow";
 import { formatWhen, useChromeLink } from "./useChromeLink";
 import "./chrome-link.css";
@@ -51,6 +51,20 @@ export default function ChromeLinkSection(): React.ReactElement | null {
       description="Let agents use tabs of your own Chrome, Edge, Brave or other Chromium browser, with your sign-ins. They see only the tabs you share from the extension's popup, never blocked sites, and every action is logged."
     >
       <KeepAgentsInChromeRow />
+
+      <ToggleRow
+        title="Show the agent on your pages"
+        desc="While an agent works in a tab you shared: a pointer in its colour with its name, and a Stop button at the bottom of the page that takes the tab back from that agent. The extension's popup has the same switches."
+        checked={state.presence.overlay}
+        onChange={(overlay) => void run(() => window.spark.chromeLink.setPresence({ overlay }))}
+      />
+      <ToggleRow
+        title="Glow around the page"
+        desc="A thin edge in the agent's colour while it works."
+        checked={state.presence.overlay && state.presence.glow}
+        disabled={!state.presence.overlay}
+        onChange={(glow) => void run(() => window.spark.chromeLink.setPresence({ glow }))}
+      />
 
       <SettingRow
         title="Link status"

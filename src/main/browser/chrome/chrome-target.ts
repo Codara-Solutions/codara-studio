@@ -181,9 +181,10 @@ export class ChromeTargetBackend implements BrowserTargetBackend {
       },
       evaluate: (expression, options) => evaluateOverCdp(session, expression, options),
       captureViewport: () => captureChromeViewport(session),
-      // The browser's own debugging bar and the extension's badge show the
-      // tab is controlled; there is no in-page cursor to move.
-      async showActivity() {},
+      // The extension draws the agent's pointer there (extensions/chrome/lib/presence.js).
+      async showActivity(action, point) {
+        if (point) link.send({ type: "presence_point", tabId: tab.tabId, x: point.x, y: point.y, press: action === "click" });
+      },
       storageAllowed: () => (link.tabs.get(tab.tabId) ?? tab).storage === true,
     };
     return target;

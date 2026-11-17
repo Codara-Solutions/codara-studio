@@ -10,6 +10,7 @@ import { describeDriver } from "../browser/agent-driver";
 import { guardPageDialogs } from "../browser/dialog-guard";
 import { recordActedTab, withActedTab } from "../browser/acted-tab";
 import { noteChromeToolCall } from "../browser/chrome/activity";
+import { assertChromeDriverAllowed } from "../browser/chrome/presence";
 import { BrowserTabRefError, parseTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { normalizeTabGroupName } from "../../shared/tab-group-name";
@@ -155,6 +156,8 @@ async function dispatchPreviewTool(
   if (!(await host.mayUseUserBrowser(params))) {
     throw new PreviewToolParamsError("This session may not use tabs of your own browser.");
   }
+  // An agent the user stopped from the page's pill is refused there before anything runs.
+  assertChromeDriverAllowed(ref, String(params.tabId), params.driver);
   // Every call that reaches the user's own browser is logged with its agent.
   noteChromeToolCall(method, params);
   if (entry.targets === "any") return guardPageDialogs(method, params, () => entry.run(params, method, host));

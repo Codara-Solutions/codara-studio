@@ -12,6 +12,19 @@
 
 import { LinkClient } from "./lib/link-client.js";
 import {
+  PRESENCE_IDLE_MS,
+  PRESENCE_INSTALL,
+  PRESENCE_UNDO_MS,
+  PRESENCE_WORLD,
+  hidesPresence,
+  isAgentInput,
+  newerSettings,
+  pointerOf,
+  presenceCall,
+  presenceSettings,
+  presenceView,
+} from "./lib/presence.js";
+import {
   DEFAULT_BLOCKED_SITES,
   DEFAULT_PORTS,
   LINK_PATH,
@@ -56,6 +69,7 @@ const LOCAL_DEFAULTS = {
   ports: null,
   lastReload: null,
   linkScan: null,
+  presence: { overlay: true, glow: true, at: 0 },
 };
 const RELOAD_CARRY = "reloadCarry";
 const ALARM = "codara-link";
@@ -159,7 +173,10 @@ const link = new LinkClient({
     return state.linkScan;
   },
   saveScan: (scan) => save({ linkScan: scan }),
-  onConnected: () => void reportTabs(),
+  onConnected: () => {
+    void reportTabs();
+    void ready.then(() => link.send({ type: "presence_settings", ...presenceSettings(state.presence) }));
+  },
   onDisconnected: () => void detachAll(),
 });
 
@@ -187,6 +204,7 @@ async function handleRequest(request) {
         await chrome.debugger.attach({ tabId: tab.id }, "1.3");
         await save({ attached: withValue(state.attached, tab.id) });
         void refresh();
+        void drawPresence(tab.id);
       }
       return {};
     }
@@ -240,7 +258,126 @@ async function relayCommand(request) {
     if (rule) throw new Error(`${url} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`);
   }
   if (!state.attached.includes(tab.id)) throw new Error(`${agentTabId(tab.id)} is not attached.`);
-  return (await chrome.debugger.sendCommand({ tabId: tab.id }, method, request.params ?? {})) ?? {};
+  const send = async () => (await chrome.debugger.sendCommand({ tabId: tab.id }, method, request.params ?? {})) ?? {};
+  if (!presence.has(tab.id)) return send();
+  if (isAgentInput(method)) {
+    const point = pointerOf(method, request.params);
+    await inWorld(tab.id, presenceCall("move", point?.x ?? null, point?.y ?? null, point?.press ?? false));
+  }
+  if (!hidesPresence(method)) return send();
+  // What the agent captures is the page as it is, without the overlay.
+  await inWorld(tab.id, presenceCall("conceal", true));
+  try {
+    return await send();
+  } finally {
+    await inWorld(tab.id, presenceCall("conceal", false));
+  }
+}
+
+// ── The agent on the page ───────────────────────────────────────────────────
+//
+// lib/presence.js draws it; this keeps, per attached tab, who drives it and
+// whether the user stopped them. Memory only: a restarted worker draws again
+// on the agent's next call.
+
+const presence = new Map();
+const worlds = new Map();
+const PRESENCE_POLL_MS = 400;
+const PRESENCE_CALL_MS = 1_000;
+
+/** Run an overlay call in the tab's isolated world, installing it first. Never throws. */
+async function inWorld(tabId, expression) {
+  const target = { tabId };
+  const evaluate = async () => {
+    let contextId = worlds.get(tabId);
+    if (!contextId) {
+      const { frameTree } = await chrome.debugger.sendCommand(target, "Page.getFrameTree");
+      ({ executionContextId: contextId } = await chrome.debugger.sendCommand(target, "Page.createIsolatedWorld", { frameId: frameTree.frame.id, worldName: PRESENCE_WORLD }));
+      worlds.set(tabId, contextId);
+    }
+    const answer = await chrome.debugger.sendCommand(target, "Runtime.evaluate", { expression: `${PRESENCE_INSTALL}; ${expression}`, contextId, returnByValue: true });
+    if (answer?.exceptionDetails) throw new Error("presence");
+    return answer?.result?.value;
+  };
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(undefined), PRESENCE_CALL_MS);
+  });
+  try {
+    return await Promise.race([evaluate().catch(() => (worlds.delete(tabId), evaluate())), deadline]);
+  } catch {
+    worlds.delete(tabId);
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function drawPresence(tabId) {
+  await ready;
+  const entry = presence.get(tabId);
+  if (!entry || !state.attached.includes(tabId)) return;
+  const settings = presenceSettings(state.presence);
+  const ttl = (entry.state === "stopped" ? PRESENCE_UNDO_MS : PRESENCE_IDLE_MS) + 2_000;
+  await inWorld(tabId, presenceCall("show", presenceView({ ...entry, glow: settings.glow }), ttl));
+}
+
+async function clearPresence(tabId, { draw = true } = {}) {
+  const entry = presence.get(tabId);
+  if (!entry) return;
+  presence.delete(tabId);
+  clearTimeout(entry.timer);
+  clearInterval(entry.poll);
+  if (draw && state.attached.includes(tabId)) await inWorld(tabId, presenceCall("remove"));
+  worlds.delete(tabId);
+}
+
+/** An agent's call on a shared tab: name it on the page until it goes quiet. */
+function notePresence(tabId, usage) {
+  // Turned off: nothing is drawn, installed or polled in the page.
+  if (!presenceSettings(state.presence).overlay) return;
+  const previous = presence.get(tabId);
+  // A stopped agent keeps the Undo notice; another agent takes the tab over.
+  if (previous?.state === "stopped" && previous.key === usage.key) return;
+  const entry = previous ?? {};
+  Object.assign(entry, { key: usage.key, name: usage.name, runtime: usage.runtime, state: "working" });
+  clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => void clearPresence(tabId), PRESENCE_IDLE_MS);
+  // The pill's Stop and Undo stay in the page until read here.
+  entry.poll ??= setInterval(() => void readPresenceClicks(tabId), PRESENCE_POLL_MS);
+  presence.set(tabId, entry);
+  void drawPresence(tabId);
+}
+
+async function readPresenceClicks(tabId) {
+  const clicks = await inWorld(tabId, presenceCall("take"));
+  const entry = presence.get(tabId);
+  if (!entry || !Array.isArray(clicks) || clicks.length === 0) return;
+  const action = clicks.at(-1);
+  if (action === "stop" && entry.state !== "stopped") {
+    if (entry.key) link.send({ type: "presence_stop", tabId, key: entry.key });
+    // An older Codara cannot refuse one agent: take the whole tab back.
+    else await handlePopup({ type: "stopTab", tabId });
+    entry.state = "stopped";
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => void clearPresence(tabId), PRESENCE_UNDO_MS);
+  } else if (action === "undo" && entry.state === "stopped") {
+    link.send({ type: "presence_allow", tabId, key: entry.key });
+    entry.state = "working";
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => void clearPresence(tabId), PRESENCE_IDLE_MS);
+  } else {
+    return;
+  }
+  await drawPresence(tabId);
+}
+
+async function setPresence(settings) {
+  await save({ presence: settings });
+  for (const tabId of [...presence.keys()]) {
+    if (settings.overlay) void drawPresence(tabId);
+    else void clearPresence(tabId);
+  }
 }
 
 async function openTab(request) {
@@ -299,6 +436,7 @@ function usageOf(message) {
     agent,
     name: text(message.name, 60) || agent,
     runtime: /^[a-z0-9-]{1,24}$/.test(message.runtime ?? "") ? message.runtime : null,
+    key: typeof message.key === "string" ? message.key.slice(0, 200) : null,
     tool: text(message.tool, 80),
     at: Number(message.at) || Date.now(),
   };
@@ -312,11 +450,29 @@ function handleMessage(message) {
       // The button names the agent while it acts, then goes back to "an agent".
       const tabId = message.tabId;
       void updateTabBadge(tabId);
+      if (state.attached.includes(tabId) || state.shareTabs.includes(tabId) || state.shareAll || state.shareWindows.length) {
+        void chrome.tabs.get(tabId).then((tab) => {
+          if (isTabShared(shareChoice(), tab) && !blockingRule(tab.url, rules)) notePresence(tabId, state.usage[tabId]);
+        }, () => {});
+      }
       clearTimeout(usageBadgeTimers.get(tabId));
       usageBadgeTimers.set(tabId, setTimeout(() => {
         usageBadgeTimers.delete(tabId);
         void updateTabBadge(tabId);
       }, USAGE_ACTIVE_MS + 100));
+    });
+  } else if (message.type === "presence_point" && typeof message.tabId === "number") {
+    // Where an action by selector lands; mouse commands carry their own point.
+    if (presence.has(message.tabId) && Number.isFinite(message.x) && Number.isFinite(message.y)) {
+      void inWorld(message.tabId, presenceCall("move", Math.round(message.x), Math.round(message.y), message.press === true));
+    }
+  } else if (message.type === "presence_settings") {
+    // The newer change wins; tell Codara when ours is the newer one.
+    void ready.then(async () => {
+      const mine = presenceSettings(state.presence);
+      const next = newerSettings(mine, message);
+      if (next.at !== mine.at) await setPresence(next);
+      else if (mine.at > presenceSettings(message).at) link.send({ type: "presence_settings", ...mine });
     });
   } else if (message.type === "revoked") {
     void detachAll();
@@ -344,6 +500,7 @@ async function reloadForUpdate(message) {
 
 async function detachTab(tabId) {
   if (!state.attached.includes(tabId)) return;
+  await clearPresence(tabId);
   await save({ attached: without(state.attached, tabId) });
   await chrome.debugger.detach({ tabId }).catch(() => {});
   void refresh();
@@ -376,6 +533,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (!state || typeof source.tabId !== "number" || !state.attached.includes(source.tabId)) return;
   // A frame's or worker's session never passed the blocked-sites check.
   if (source.sessionId) return;
+  // The overlay's own world is not the page's.
+  if (method === "Runtime.executionContextCreated" && params?.context?.name === PRESENCE_WORLD) return;
   if (method === "Page.frameNavigated" && !params?.frame?.parentId && blockingRule(params?.frame?.url, rules)) {
     void detachTab(source.tabId).then(() => link.send({ type: "detached", tabId: source.tabId, reason: "blocked_site" }));
     return;
@@ -394,6 +553,8 @@ chrome.debugger.onDetach.addListener(async (source, reason) => {
   const tabId = source.tabId;
   if (typeof tabId !== "number" || !state.attached.includes(tabId)) return;
   const patch = { attached: without(state.attached, tabId) };
+  // No debugger to remove it with: the overlay's own timer takes it down.
+  void clearPresence(tabId, { draw: false });
   // Cancel on Chrome's debugging bar is the user saying stop: every tab
   // agents could use is stopped until the user shares it again.
   if (reason === "canceled_by_user") {
@@ -469,6 +630,11 @@ chrome.tabs.onAttached.addListener(scheduleRefresh);
 chrome.tabs.onDetached.addListener(scheduleRefresh);
 chrome.tabs.onReplaced.addListener(scheduleRefresh);
 chrome.tabs.onUpdated.addListener(async (tabId, change) => {
+  // A new document drops the overlay with its isolated world: draw it again.
+  if (change.status !== undefined && presence.has(tabId)) {
+    worlds.delete(tabId);
+    if (change.status === "complete") void drawPresence(tabId);
+  }
   if (change.url !== undefined) {
     await ready;
     if (state.attached.includes(tabId) && blockingRule(change.url, rules)) {
@@ -528,6 +694,7 @@ async function popupState(request) {
     reach: reachOf(shareChoice(), request.windowId),
     otherWindows: state.shareWindows.filter((id) => id !== request.windowId).length,
     allowOpen: state.allowOpen,
+    presence: presenceSettings(state.presence),
     blockedSites: state.blockedSites,
     current: current ? describeTab(current) : null,
     shared: tabs.filter((tab) => isTabShared(shareChoice(), tab)).map(describeTab),
@@ -603,6 +770,17 @@ async function handlePopup(request) {
     case "setAllowOpen":
       await save({ allowOpen: request.on === true });
       break;
+    case "setPresence": {
+      const mine = presenceSettings(state.presence);
+      const next = {
+        overlay: typeof request.overlay === "boolean" ? request.overlay : mine.overlay,
+        glow: typeof request.glow === "boolean" ? request.glow : mine.glow,
+        at: Math.max(Date.now(), mine.at + 1),
+      };
+      await setPresence(next);
+      link.send({ type: "presence_settings", ...next });
+      break;
+    }
     case "setBlockedSites":
       await save({ blockedSites: typeof request.text === "string" ? request.text : DEFAULT_BLOCKED_SITES });
       break;

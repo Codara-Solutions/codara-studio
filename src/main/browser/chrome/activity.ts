@@ -20,7 +20,25 @@ export interface ChromeActivityEntry {
 }
 
 type AgentLabeler = (params: Record<string, unknown>) => string;
-type UsageSink = (entry: ChromeActivityEntry, ref: { tabId: number; linkId: string | null }) => void;
+/** Who made a call, as main stamped it (agent-driver.ts); the extension draws its name and colour. */
+export interface ChromeUsageDriver {
+  key: string;
+  name: string;
+  runtime: string | null;
+}
+
+type UsageSink = (entry: ChromeActivityEntry, ref: { tabId: number; linkId: string | null }, driver: ChromeUsageDriver | null) => void;
+
+function usageDriver(value: unknown): ChromeUsageDriver | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.key !== "string" || !record.key) return null;
+  return {
+    key: record.key,
+    name: typeof record.name === "string" && record.name ? record.name : "An agent",
+    runtime: typeof record.runtime === "string" && record.runtime ? record.runtime : null,
+  };
+}
 
 const RECENT_LIMIT = 200;
 const FILE_LIMIT_BYTES = 2_000_000;
@@ -109,7 +127,7 @@ export function noteChromeToolCall(method: string, params: Record<string, unknow
   if (detail) entry.detail = detail;
   recordChromeActivity(entry);
   try {
-    usageSink?.(entry, { tabId: ref.tabId, linkId: ref.linkId });
+    usageSink?.(entry, { tabId: ref.tabId, linkId: ref.linkId }, usageDriver(params.driver));
   } catch {
     /* the popup's "used by" line is best effort */
   }

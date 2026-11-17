@@ -26,6 +26,7 @@ export class ChromeLink {
   private readonly detachListeners = new Set<(tabId: number, reason: string) => void>();
   private readonly tabsListeners = new Set<() => void>();
   private readonly closeListeners = new Set<() => void>();
+  private readonly messageListeners = new Set<(message: Record<string, unknown>) => void>();
   private closed = false;
 
   constructor(
@@ -110,8 +111,17 @@ export class ChromeLink {
         this.send({ type: "pong" });
         return;
       default:
+        // The extension's own notices (presence_settings, presence_stop, presence_allow).
+        if (typeof message.type === "string" && message.type.startsWith("presence_")) {
+          for (const listener of this.messageListeners) listener(message);
+        }
         return;
     }
+  }
+
+  onMessage(listener: (message: Record<string, unknown>) => void): () => void {
+    this.messageListeners.add(listener);
+    return () => this.messageListeners.delete(listener);
   }
 
   onEvent(listener: EventListener): () => void {

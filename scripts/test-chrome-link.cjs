@@ -44,6 +44,7 @@ async function load() {
         `export { pageActivity } from "../page-activity";`,
         `export { currentEmulation, resetEmulation } from "../emulation";`,
         `export { MARK_BASELINE_EXPRESSION } from "../wait";`,
+        `export * from "./presence";`,
       ].join("\n"),
       resolveDir: path.join(ROOT, "src/main/browser/chrome"),
       loader: "ts",
@@ -583,7 +584,31 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   assert.deepEqual(lib.sanitizeExtensionFeatures(["reload", "reload", "Bad Feature", 3, "x".repeat(40)]), ["reload"]);
   assert.deepEqual(lib.sanitizeExtensionFeatures("reload"), []);
 
-  console.log("chrome link: origin and host checks, pairing over ECDH with code and Allow, a swapped key refused, bound tokens never sent, sealed frames with injected and replayed ones dropping the link, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair");
+  // The agent on the page: Stop on the pill refuses that agent on that tab
+  // only; settings from the popup and Settings meet by time.
+  const claude = { key: "pane:p1", name: "Claude Code", runtime: "claude" };
+  const codex = { key: "pane:p2", name: "Codex", runtime: "codex" };
+  lib.stopChromeDriver("link-a", 12, claude.key, true);
+  assert.throws(() => lib.assertChromeDriverAllowed({ tabId: 12, linkId: null }, "chrome:12", claude), /stopped Claude Code from using browser tab chrome:12/);
+  assert.throws(() => lib.assertChromeDriverAllowed({ tabId: 12, linkId: "link-a" }, "chrome:link-a/12", claude), lib.ChromeDriverStoppedError);
+  lib.assertChromeDriverAllowed({ tabId: 12, linkId: null }, "chrome:12", codex);
+  lib.assertChromeDriverAllowed({ tabId: 13, linkId: null }, "chrome:13", claude);
+  lib.assertChromeDriverAllowed({ tabId: 12, linkId: "link-b" }, "chrome:link-b/12", claude);
+  lib.stopChromeDriver("link-a", 12, claude.key, false);
+  lib.assertChromeDriverAllowed({ tabId: 12, linkId: null }, "chrome:12", claude);
+  lib.stopChromeDriver("link-a", 12, claude.key, true);
+  lib.forgetChromeStops("link-a");
+  lib.assertChromeDriverAllowed({ tabId: 12, linkId: null }, "chrome:12", claude);
+  const presenceFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codara-presence-")), "presence.json");
+  lib.loadPresenceSettings(presenceFile);
+  assert.deepEqual(lib.presenceSettings(), { overlay: true, glow: true, at: 0 }, "on by default");
+  assert.equal(lib.adoptPresenceSettings({ glow: false, at: 10 }), true);
+  assert.equal(lib.adoptPresenceSettings({ glow: true, at: 10 }), false, "a tie keeps what Codara holds");
+  assert.equal(lib.adoptPresenceSettings({ overlay: false, at: 5 }), false, "an older change loses");
+  lib.loadPresenceSettings(presenceFile);
+  assert.deepEqual(lib.presenceSettings(), { overlay: true, glow: false, at: 10 }, "kept across restarts");
+
+  console.log("chrome link: origin and host checks, pairing over ECDH with code and Allow, a swapped key refused, bound tokens never sent, sealed frames with injected and replayed ones dropping the link, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair, stops from the page and presence settings");
   setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref();
 })().catch((error) => {
   console.error(error);
