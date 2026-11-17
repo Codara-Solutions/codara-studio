@@ -21,7 +21,7 @@ export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
  * library (credential storage, sign-in flows, the model catalog); Cora's
  * sessions run the Pi the user installed.
  */
-export const CODARA_PI_VERSION = "1.5.0";
+export const CODARA_PI_VERSION = "1.5.2";
 /**
  * The oldest installed Pi Cora runs on. Its RPC mode, command-line flags and
  * the extension events Cora's extensions use are unchanged through 1.5, apart
@@ -473,6 +473,9 @@ export const CODARA_PI_RETRY_SETTINGS = {
   baseDelayMs: 2_000,
 } as const;
 
+/** Warm the prompt cache only while a run streams (Pi 1.5.0's default). */
+export const CODARA_PI_CACHE_WARMING = "streaming";
+
 /**
  * Merge Codara's keys into the settings.json of an isolated Pi agent dir and
  * return the result, leaving every other key as it was. `shellPath` is set
@@ -485,6 +488,11 @@ export function mergeCodaraPiAgentSettings(
   const base = isRecord(existing) ? { ...existing } : {};
   const retry = isRecord(base.retry) ? base.retry : {};
   base.retry = { ...retry, ...CODARA_PI_RETRY_SETTINGS };
+  // Pi 1.5.1 made "idle" the default: it re-sends a cached prompt between
+  // runs for up to 30 minutes to keep the cache warm. Cora's manager sits
+  // idle for minutes while workers run, and on OpenRouter each warm is a
+  // charge the user never asked for, so Codara keeps 1.5.0's behavior.
+  if (typeof base.cacheWarming !== "string") base.cacheWarming = CODARA_PI_CACHE_WARMING;
   if (options.shellPath) base.shellPath = options.shellPath;
   return base;
 }
