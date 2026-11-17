@@ -277,6 +277,17 @@ export class PiTurnAccumulator {
       return;
     }
 
+    if (event.type === "entry_appended") {
+      // A cache warm Pi sent during the turn (cacheWarming "streaming"): a
+      // billed request, so it counts in this call's tokens and cost.
+      const entry = asRecord(event.entry);
+      if (entry?.type === "usage" && entry.kind === "cache_warm") {
+        this.addUsage(asRecord(entry.usage));
+        this.emitUsage();
+      }
+      return;
+    }
+
     if (event.type === "compaction_end") {
       const result = asRecord(event.result);
       if (!result) return;

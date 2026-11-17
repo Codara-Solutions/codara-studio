@@ -377,6 +377,8 @@ async function runAgent(cli, pi, home) {
     engine: { compact: pi.compact, estimateTokens: pi.estimateTokens },
   };
   useCompactionSettings(pi.SettingsManager, compaction.state, compaction.config);
+  const { useStreamingCacheWarming } = await import("./cache-warming.mjs");
+  useStreamingCacheWarming(pi.SettingsManager);
   const locks = lockSessions(pi, (error) => {
     run.finished = true;
     // After the terminal interface has given the screen back.

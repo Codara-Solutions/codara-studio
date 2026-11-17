@@ -21894,6 +21894,18 @@ async function runPiWorkerSession({
           `\r\n  ${paneToolStartMarker(label)}` +
           `${detail ? `\r\n    ${paneDim(detail)}` : ""}\r\n`,
         );
+      } else if (event.type === "entry_appended") {
+        // A cache warm Pi sent mid-run: billed, so counted, but it does not
+        // change what the context holds.
+        const warm = piWorkerMessageUsage(event);
+        if (warm) {
+          sawUsage = true;
+          usageTotals.input += warm.input;
+          usageTotals.output += warm.output;
+          usageTotals.cacheRead += warm.cacheRead;
+          usageTotals.cacheWrite += warm.cacheWrite;
+          if (provider === "openrouter") measuredCostTotal += warm.cost;
+        }
       } else if (event.type === "tool_execution_end") {
         const failed = event.isError === true;
         const marker = `  ${failed ? paneToolFailMarker() : paneToolOkMarker()}`;
