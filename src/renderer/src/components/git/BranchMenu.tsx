@@ -6,6 +6,8 @@ import { BranchIcon, Caret, Count, Empty, GroupLabel, IconButton, Spinner } from
 interface Props {
   /** Sits on the trigger's row, right of it. */
   trailing?: React.ReactNode;
+  /** A quiet word on the branch's sync state, after its name ("in sync"). */
+  note?: React.ReactNode;
   cwd: string;
   /** Called after any branch mutation so the panel re-reads git state. */
   onChanged: () => void;
@@ -22,6 +24,7 @@ interface Props {
 // of the panel re-reads git state.
 export default function BranchMenu({
   trailing,
+  note,
   cwd,
   onChanged,
   refreshKey,
@@ -222,7 +225,6 @@ export default function BranchMenu({
       ref={rootRef}
       style={{
         position: "relative",
-        borderBottom: "1px solid var(--rule-soft)",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", minWidth: 0 }}>
@@ -258,8 +260,8 @@ export default function BranchMenu({
           gap: 6,
           flex: 1,
           minWidth: 0,
-          height: 30,
-          padding: "0 8px 0 10px",
+          height: 32,
+          padding: "0 8px 0 12px",
           border: "none",
           borderBottom: "none",
           background: open ? "color-mix(in oklab, var(--ink) 4%, transparent)" : "transparent",
@@ -275,10 +277,11 @@ export default function BranchMenu({
         </span>
         <span
           style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
+            fontFamily: "var(--font-sans)",
+            fontSize: 12.5,
             fontWeight: 600,
-            color: list.detached ? "var(--warn)" : "var(--ink-dim)",
+            color: list.detached ? "var(--warn)" : "var(--ink)",
+            minWidth: "4ch",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -287,6 +290,7 @@ export default function BranchMenu({
           {label}
         </span>
         {currentName && <CurrentTrack branch={local.find((b) => b.current)} />}
+        {note}
         <span style={{ flex: 1 }} />
         {(loading || busy) && <Spinner size={11} />}
         <Caret open={open} />

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 import type { ChromeLinkState } from "@shared/chrome-link";
 
@@ -30,4 +30,30 @@ export function formatWhen(iso: string | null): string {
   const hours = Math.round(minutes / 60);
   if (hours < 48) return `${hours} h ago`;
   return new Date(iso).toLocaleDateString();
+}
+
+// The connect card shows a pairing's code with Allow and Deny itself. While
+// one is on screen the floating prompt stays away: one Allow, not two.
+let cardsOnScreen = 0;
+const cardListeners = new Set<() => void>();
+const subscribeCards = (listener: () => void) => {
+  cardListeners.add(listener);
+  return () => cardListeners.delete(listener);
+};
+
+/** Mark a connect card as on screen while the calling component is mounted. */
+export function useConnectCardOnScreen(): void {
+  useEffect(() => {
+    cardsOnScreen += 1;
+    cardListeners.forEach((listener) => listener());
+    return () => {
+      cardsOnScreen -= 1;
+      cardListeners.forEach((listener) => listener());
+    };
+  }, []);
+}
+
+/** Whether a connect card is on screen. */
+export function useConnectCardShown(): boolean {
+  return useSyncExternalStore(subscribeCards, () => cardsOnScreen > 0);
 }
