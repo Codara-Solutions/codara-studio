@@ -397,6 +397,7 @@ journey, an issue queue and a stash list pushed the files and the history apart.
   second click, since it deletes files git never had). A lone new file
   keeps its own row. The fold is computed in the renderer (`change-list.ts`); git
   still lists every file, so the diff view can open each one.
+- Staged Changes never folds: what is about to be committed shows file by file.
 
 ## Worktrees in the rail (2026-10)
 
