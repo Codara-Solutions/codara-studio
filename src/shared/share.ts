@@ -31,8 +31,19 @@ export interface SharedPagesList {
   pages: SharedPage[];
   /** True when the service could not be reached and the list is this computer's copy. */
   offline: boolean;
+  /** True when this build has no share service to talk to (src/main/share/availability.ts). */
+  unavailable?: boolean;
   error?: string;
 }
+
+/** Whether this build may offer Share as link. */
+export interface ShareStatus {
+  available: boolean;
+  /** Why not, in plain words, when it is not available. */
+  message?: string;
+}
+
+export const SHARE_UNAVAILABLE_MESSAGE = "Share as link is not available yet: Codara's share service is not online.";
 
 export interface ShareCreateInput {
   html: string;

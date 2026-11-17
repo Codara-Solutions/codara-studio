@@ -28,6 +28,16 @@ const MODES = [
 
 function listedTools(env) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codara-manifest-"));
+  // A Codara with sharing on, so the rosters are complete: codara_share_offer
+  // is listed only when the handshake says shareAvailable. Not for a user's
+  // own terminal (no run id): with a handshake that roster first asks Codara
+  // about the feedback admin tools, and the closed stdin cancels the answer.
+  if (env.SPARK_RUN_ID) {
+    fs.writeFileSync(
+      path.join(home, "agent-socket.json"),
+      JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64), shareAvailable: true }),
+    );
+  }
   try {
     const input = [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } },
