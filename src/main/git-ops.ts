@@ -1,5 +1,6 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, rmdir, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { isRemotePath } from "@shared/remote";
 import type {
   GitDiff,
   GitDiffLine,
@@ -202,8 +203,13 @@ function emptyStatus(isRepo: boolean, error?: string): GitStatus {
 // Exported so the commit-message module can read parsed status without going
 // through the cache (it needs a point-in-time snapshot for the prompt).
 export async function computeGitStatus(cwd: string): Promise<GitStatus> {
+  // The prefix is where the workspace sits below the repository root ("" at
+  // the root, "src/" for a workspace opened at src). Status paths are from
+  // the root, so the panel needs it to tell the workspace's files apart.
+  let prefix = "";
   try {
-    await runGit(cwd, ["rev-parse", "--is-inside-work-tree"]);
+    const { stdout } = await runGit(cwd, ["rev-parse", "--is-inside-work-tree", "--show-prefix"]);
+    prefix = stdout.split("\n")[1]?.trim() ?? "";
   } catch (err) {
     const message = errorText(err);
     return isNotARepo(message) ? emptyStatus(false) : emptyStatus(false, message);
@@ -220,7 +226,7 @@ export async function computeGitStatus(cwd: string): Promise<GitStatus> {
       "--untracked-files=all",
       "-z",
     ]);
-    return parseStatus(stdout);
+    return { ...parseStatus(stdout), prefix };
   } catch (err) {
     return emptyStatus(true, errorText(err));
   }
@@ -468,14 +474,122 @@ async function mutate(
   }
 }
 
-export function stageFiles(cwd: string, paths: string[]): Promise<GitOpResult> {
-  if (paths.length === 0) return Promise.resolve({ ok: true });
-  return mutate(cwd, ["add", "--", ...paths]);
+// Paths handed to git by the panel are names, never patterns, and they are
+// the status read's paths, which git gives from the repository root:
+// - `literal`: a folder named "[ab]" or a file named "*.ts" matches only
+//   itself (`--` ends options; it does not turn off pathspec magic, and a
+//   name starting with ":" would otherwise be read as magic too);
+// - `top`: the path is taken from the root, so a workspace opened in a
+//   folder below it stages, unstages and discards the file the row shows.
+export function exactPath(path: string): string {
+  return `:(top,literal)${path}`;
+}
+
+// Paths per git call: a folded folder can hold thousands of files, past
+// what one command line takes on Windows.
+const PATHS_PER_CALL = 200;
+
+function chunks<T>(items: readonly T[], size = PATHS_PER_CALL): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+// One listed file and nothing under it: if the file became a folder after it
+// was listed, the exclude keeps whatever is inside that folder.
+function onlyThisFile(path: string): string[] {
+  return [exactPath(path), `:(top,literal,exclude)${path}/`];
+}
+
+async function listNew(cwd: string, dir: string): Promise<string[]> {
+  const { stdout } = await runGit(cwd, [
+    "ls-files",
+    "--others",
+    "--exclude-standard",
+    "--full-name",
+    "-z",
+    "--",
+    exactPath(`${dir}/`),
+  ]);
+  return stdout.split("\0").filter(Boolean);
+}
+
+export async function stageFiles(cwd: string, paths: string[]): Promise<GitOpResult> {
+  if (paths.length === 0) return { ok: true };
+  for (const part of chunks(paths)) {
+    const result = await mutate(cwd, ["add", "--", ...part.map(exactPath)]);
+    if (!result.ok) return result;
+  }
+  return { ok: true };
+}
+
+/**
+ * Deletes the new files of a folded folder, exactly the ones the panel showed.
+ * Git lists the folder's untracked files again first; if that list is not
+ * the one the row showed (an agent wrote a file since), nothing is deleted
+ * and the caller is told to look again. Ignored files and nested
+ * repositories stay, and a folder is removed only once it is empty.
+ */
+export async function discardNewFolder(cwd: string, dir: string, shown: string[]): Promise<GitOpResult> {
+  try {
+    const now = (await listNew(cwd, dir)).sort();
+    const expected = [...shown].sort();
+    if (now.length !== expected.length || now.some((path, i) => path !== expected[i])) {
+      invalidateGitCache(cwd);
+      return { ok: false, error: `${dir}/ changed since it was shown. Nothing was deleted: check it again.` };
+    }
+    // A "path/" entry is a nested repository: git clean keeps those.
+    const files = now.filter((path) => !path.endsWith("/"));
+    let deleted = 0;
+    for (const part of chunks(files, PATHS_PER_CALL / 2)) {
+      try {
+        const { stdout } = await runGit(cwd, ["clean", "-f", "--", ...part.flatMap(onlyThisFile)]);
+        deleted += stdout.split("\n").filter((line) => line.startsWith("Removing ")).length;
+      } catch (err) {
+        invalidateGitCache(cwd);
+        return {
+          ok: false,
+          error: `${errorText(err)} (${deleted} of the ${files.length} files in ${dir}/ were already deleted)`,
+        };
+      }
+    }
+    // A listed file that turned into a folder meanwhile was kept, with what
+    // it holds; say which.
+    const left = await listNew(cwd, dir);
+    const kept = files.filter((path) => left.some((other) => other === path || other.startsWith(`${path}/`)));
+    if (!isRemotePath(cwd)) {
+      const root = (await runGit(cwd, ["rev-parse", "--show-toplevel"])).stdout.trim();
+      const dirs = new Set<string>();
+      for (const file of files) {
+        const parts = file.split("/");
+        for (let i = parts.length - 1; i > 0; i -= 1) {
+          const parent = parts.slice(0, i).join("/");
+          if (parent.length < dir.length) break;
+          dirs.add(parent);
+        }
+      }
+      // Deepest first; rmdir refuses a folder that still holds anything.
+      for (const folder of [...dirs].sort((a, b) => b.length - a.length)) {
+        await rmdir(join(root, folder)).catch(() => undefined);
+      }
+    }
+    invalidateGitCache(cwd);
+    if (kept.length > 0) {
+      return {
+        ok: false,
+        error: `Deleted ${files.length - kept.length} of ${files.length} files in ${dir}/. Kept ${kept.join(", ")}: it changed while deleting.`,
+      };
+    }
+    return { ok: true };
+  } catch (err) {
+    invalidateGitCache(cwd);
+    return { ok: false, error: errorText(err) };
+  }
 }
 
 export function unstageFiles(cwd: string, paths: string[]): Promise<GitOpResult> {
   if (paths.length === 0) return Promise.resolve({ ok: true });
-  return mutate(cwd, ["reset", "-q", "HEAD", "--", ...paths]);
+  return mutate(cwd, ["reset", "-q", "HEAD", "--", ...paths.map(exactPath)]);
 }
 
 export function stageAll(cwd: string): Promise<GitOpResult> {
@@ -497,10 +611,10 @@ export async function discardChanges(
   const tracked = files.filter((f) => !f.untracked).map((f) => f.path);
   const untracked = files.filter((f) => f.untracked).map((f) => f.path);
   try {
-    if (tracked.length > 0) await runGit(cwd, ["checkout", "--", ...tracked]);
+    if (tracked.length > 0) await runGit(cwd, ["checkout", "--", ...tracked.map(exactPath)]);
     // `-d` so an untracked directory entry (git reports these as "dir/") is
     // actually removed; plain `clean -f` silently skips directories.
-    if (untracked.length > 0) await runGit(cwd, ["clean", "-fd", "--", ...untracked]);
+    if (untracked.length > 0) await runGit(cwd, ["clean", "-fd", "--", ...untracked.map(exactPath)]);
     invalidateGitCache(cwd);
     return { ok: true };
   } catch (err) {

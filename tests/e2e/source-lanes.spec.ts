@@ -9,8 +9,8 @@ import { delimiter, join } from "node:path";
 // worktrees of one repository and a scripted `gh` with one failing and one
 // ready pull request. Every checkout is a lane with what it changed, the
 // active one is last and holds today's detail, a lane's row unfolds it without
-// switching workspace, its next step is one click, and the commit box stays
-// docked under the list. The journey no longer ticks failed checks.
+// switching workspace, its next step is one click, and the commit box sits at
+// the top of the active lane. The journey no longer ticks failed checks.
 // SOURCE_LANES_SHOTS=<dir> also saves the panel in dracula and daylight.
 
 interface Fixture {
@@ -210,20 +210,18 @@ cat "$file"
 }
 
 const lane = (page: Page, branch: string) => page.locator(`[data-testid="source-lane"][data-lane-branch="${branch}"]`);
-// Where an element sits as it is, with no scrolling here: fully between the top of
-// the list and the dock, and what a click at its centre would really land on.
-async function clearOfDock(page: Page, testId: string) {
+// Where an element sits as it is, with no scrolling here: fully inside the Changes
+// tab's scroller, and what a click at its centre would really land on.
+async function inView(page: Page, testId: string) {
   return page.getByTestId("source-lanes").getByTestId(testId).first().evaluate((node) => {
     const box = node.getBoundingClientRect();
-    const dockNode = document.querySelector('[data-testid="commit-dock"]') as HTMLElement;
-    const dock = dockNode.getBoundingClientRect();
-    const scroller = (dockNode.previousElementSibling as HTMLElement).getBoundingClientRect();
+    const scroller = (document.getElementById("source-control-tabpanel-changes") as HTMLElement).getBoundingClientRect();
     const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
     return {
       clickable: node === hit || node.contains(hit),
-      above: box.bottom <= dock.top,
+      above: box.bottom <= scroller.bottom,
       below: box.top >= scroller.top,
-      panelWidth: dock.width,
+      panelWidth: scroller.width,
     };
   });
 }
@@ -234,7 +232,7 @@ const laneOrder = (page: Page) =>
 async function shots(page: Page, name: string): Promise<void> {
   const dir = process.env.SOURCE_LANES_SHOTS;
   if (!dir) return;
-  const panel = page.getByTestId("commit-dock").locator("..");
+  const panel = page.getByRole("tablist", { name: "Source Control views" }).locator("..");
   for (const theme of ["dracula", "codara-daylight"] as const) {
     await page.evaluate((value) => window.spark.preferences.set("theme", value), theme);
     await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
@@ -285,16 +283,9 @@ test("every checkout is a lane with its changes, its PR and its next step", asyn
       const fix = lane(page, "feat/failing").locator('[data-git-fix="checks"]');
       await expect(fix).toHaveText("Fix checks");
       await lane(page, "feat/ready").getByRole("button", { expanded: false }).click();
-      // Unfolding near the bottom of the narrow panel brings the buttons into view, clear of the dock.
-      await expect.poll(() => clearOfDock(page, "source-lane-merge")).toMatchObject({ clickable: true, above: true, below: true });
-      expect((await clearOfDock(page, "source-lane-merge")).panelWidth).toBeLessThan(300);
-      const end = await page.getByTestId("commit-dock").evaluate((dock) => {
-        const scroller = dock.previousElementSibling as HTMLElement;
-        scroller.scrollTop = scroller.scrollHeight;
-        const last = Array.from(document.querySelectorAll('[data-testid="source-lanes"] [data-testid="source-lane"]')).at(-1)!;
-        return dock.getBoundingClientRect().top - last.getBoundingClientRect().bottom;
-      });
-      expect(end, "the end of the list scrolls clear of the dock").toBeGreaterThanOrEqual(8);
+      // Unfolding near the bottom of the narrow panel brings the buttons into view.
+      await expect.poll(() => inView(page, "source-lane-merge")).toMatchObject({ clickable: true, above: true, below: true });
+      expect((await inView(page, "source-lane-merge")).panelWidth).toBeLessThan(300);
       await lane(page, "feat/ready").getByTestId("source-lane-merge").scrollIntoViewIfNeeded();
       await shots(page, "lanes");
       await lane(page, "feat/ready").getByTestId("source-lane-merge").click();
@@ -304,15 +295,16 @@ test("every checkout is a lane with its changes, its PR and its next step", asyn
       await expect(dialog).toHaveCount(0);
     });
 
-    await test.step("the commit box stays docked and commits this checkout", async () => {
-      const dock = page.getByTestId("commit-dock");
-      const message = dock.getByPlaceholder("Message  (Ctrl+Enter to commit)");
+    await test.step("the commit box sits at the top of the active lane and commits this checkout", async () => {
+      const dock = lane(page, "main").getByTestId("commit-box");
+      const message = dock.getByRole("textbox", { name: "Commit message" });
+      await message.scrollIntoViewIfNeeded();
       await expect(message).toBeVisible();
-      const list = page.getByTestId("source-lanes");
-      expect((await dock.boundingBox())!.y).toBeGreaterThanOrEqual((await list.boundingBox())!.y);
+      const firstFile = lane(page, "main").getByText("notes.md");
+      expect((await dock.boundingBox())!.y).toBeLessThan((await firstFile.boundingBox())!.y);
       await dock.getByRole("button", { name: "More commit options" }).click();
       await expect(page.getByRole("menuitem", { name: "Split into commits" })).toBeVisible();
-      // A click needs the item on screen: the dock scrolls and must not clip the menu.
+      // A click needs the item on screen: the panel scrolls and must not clip the menu.
       await page.getByRole("menuitemcheckbox", { name: "Amend last commit" }).click();
       await message.fill("x");
       await expect(dock.getByRole("button", { name: "Amend Last Commit" })).toBeVisible();
@@ -336,6 +328,7 @@ test("every checkout is a lane with its changes, its PR and its next step", asyn
     await test.step("the journey marks failed checks as failed, with no green tick", async () => {
       await page.locator('[data-workspace-id="wt-failing"]').click();
       await expect(lane(page, "feat/failing")).toHaveAttribute("data-own", "true", { timeout: 15_000 });
+      await page.getByRole("tablist", { name: "Source Control views" }).getByRole("tab", { name: /^Pull request/ }).click();
       const journey = page.getByRole("list", { name: "Review journey" });
       const failed = journey.locator('[role="listitem"][data-state="failed"]');
       await expect(failed).toContainText("Checks found problems", { timeout: 30_000 });

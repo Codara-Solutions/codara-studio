@@ -34,6 +34,17 @@ function accountSite(request: IncomingMessage, response: ServerResponse): void {
     response.end(JSON.stringify({ saved: url.searchParams.get("note") }));
     return;
   }
+  if (url.pathname === "/strict") {
+    // A strict page: no inline styles or scripts, Trusted Types, and a fixed
+    // link at the bottom centre, where the agent's pill sits.
+    response.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Security-Policy": "default-src 'none'; style-src 'nonce-n0nce'; require-trusted-types-for 'script'",
+    });
+    response.end(`<!doctype html><title>Strict</title><style nonce="n0nce">#fixed{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);width:320px;height:40px;display:block;background:#ddd}</style>
+      <h1>Strict page</h1><a id="fixed" href="#clicked">Fixed link</a>`);
+    return;
+  }
   response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
   if (url.pathname === "/account") {
     response.end(signedIn
@@ -203,7 +214,8 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await expect(prompt.getByLabel("Pairing code")).toHaveText(code);
     await prompt.getByRole("button", { name: "Allow" }).click();
     await expect(prompt).toHaveCount(0);
-    await expect(popup.locator("#status")).toHaveText(/Connected to Codara/);
+    await expect(popup.locator("#status-text")).toHaveText(/^Studio \d/);
+    await expect(popup.locator("#status")).toHaveAttribute("title", /Connected to Codara/);
 
     // The service worker loses its socket (suspended, or Codara restarted):
     // it reconnects on its own, both sides proving the pairing.
@@ -218,7 +230,9 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await expect(request("preview.snapshot", { tabId: `chrome:${accountTab}` })).rejects.toThrow(/is not shared with agents/);
 
     // The user shares the signed-in tab from the popup.
-    // One button shares the tab and copies the id the user hands an agent.
+    // The tab's id waits under Details: one button shares the tab and copies it.
+    await expect(popup.locator("#tab-id")).toBeHidden();
+    await popup.locator("#tab-details summary").click();
     await expect(popup.locator("#copy-id")).toHaveText("Share and copy id");
     await popup.locator("#copy-id").click();
     await expect(popup.locator("#share-tab")).toBeChecked();
@@ -227,18 +241,19 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
 
     // Sharing every tab asks inside the popup (a native confirm is clipped
     // by the popup's size); cancelling leaves it off.
-    await popup.locator("#share-all").check();
+    const everything = popup.getByRole("radio", { name: "Everything" });
+    await everything.click();
     await expect(popup.locator("#ask")).toBeVisible();
     await popup.locator("#ask-no").click();
     await expect(popup.locator("#ask")).toBeHidden();
-    await expect(popup.locator("#share-all")).not.toBeChecked();
-    // Allowing after the popup's 1 s refresh redrew the switch still turns it on.
-    await popup.locator("#share-all").check();
+    await expect(everything).toHaveAttribute("aria-checked", "false");
+    // Allowing after the popup's 1 s refresh redrew the choice still picks it.
+    await everything.click();
     await popup.waitForTimeout(1_500);
     await popup.locator("#ask-yes").click();
-    await expect(popup.locator("#share-all")).toBeChecked();
+    await expect(everything).toHaveAttribute("aria-checked", "true");
     await expect.poll(() => popup.evaluate(() => chrome.runtime.sendMessage({ type: "state" }).then((view: { shareAll: boolean }) => view.shareAll))).toBe(true);
-    await popup.locator("#share-all").uncheck();
+    await popup.getByRole("radio", { name: "Tabs I pick" }).click();
     await expect.poll(() => popup.evaluate(() => chrome.runtime.sendMessage({ type: "state" }).then((view: { shareAll: boolean }) => view.shareAll))).toBe(false);
     await expect.poll(async () => {
       const { tabs } = await request("preview.list");
@@ -324,16 +339,161 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
       mcp.close();
     }
 
+    // The agent on the page: pointer, glow and pill in a closed shadow root
+    // hung off <html>, in the user's view and never in the agent's.
+    const overlays = () => account.evaluate(() => Array.from(document.documentElement.children).filter((el) => el.tagName === "DIV" && el.getAttribute("aria-hidden") === "true" && el.shadowRoot === null).length);
+    const agentShot = async () => (await request("preview.screenshot", { tabId, format: "png" })).dataUrl as string;
+    // No caret blinking between the pictures compared below.
+    await request("preview.evaluate", { tabId, code: "document.activeElement?.blur(); true" });
+    await request("preview.click", { tabId, selector: "h1" });
+    await expect.poll(overlays).toBe(1);
+    expect(JSON.stringify(await request("preview.snapshot", { tabId }))).not.toContain("working");
+    expect(JSON.stringify(await request("preview.evaluate", { tabId, code: "document.body.innerText" }))).not.toContain("working");
+    const shown = { agent: await agentShot(), user: await account.screenshot() };
+    await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.setPresence({ overlay: false }));
+    await expect.poll(overlays).toBe(0);
+    expect(await agentShot()).toBe(shown.agent);
+    expect((await account.screenshot()).equals(shown.user)).toBe(false);
+    // Back on: it survives a reload, and Stop on the pill refuses this agent
+    // on this tab until the user gives it back from the popup.
+    await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.setPresence({ overlay: true }));
+    await expect.poll(() => worker.evaluate(() => (self as unknown as { codara: any }).codara.state().presence.overlay)).toBe(true);
+    await request("preview.click", { tabId, selector: "h1" });
+    await account.reload();
+    await expect.poll(overlays, { timeout: 5_000 }).toBe(1);
+    // The user's own mouse and keys go through it to the page.
+    await account.locator("#note").click();
+    await account.keyboard.type("mine");
+    await expect(account.locator("#note")).toHaveValue("mine");
+    const pillButton = async () => {
+      const page = await browser!.newCDPSession(account);
+      const { root } = await page.send("DOM.getDocument", { depth: -1, pierce: true });
+      // The style the extension's DOM event filter knows the host by (isPresenceNode).
+      const html: any = (root as any).children.find((node: any) => node.nodeName === "HTML");
+      const host: any = html.children.find((node: any) => node.shadowRoots?.[0]?.shadowRootType === "closed");
+      expect(host.attributes[host.attributes.indexOf("style") + 1]).toContain("z-index: 2147483647 !important");
+      const find = (node: any): any => node.nodeName === "BUTTON" && node.attributes?.includes("tabindex") ? node : [...(node.children ?? []), ...(node.shadowRoots ?? [])].map(find).find(Boolean);
+      const button = find(root);
+      const box = button ? await page.send("DOM.getBoxModel", { backendNodeId: button.backendNodeId }).catch(() => null) : null;
+      await page.detach();
+      const content = box?.model.content;
+      return content ? { x: (content[0] + content[2]) / 2, y: (content[1] + content[5]) / 2 } : null;
+    };
+    const stop = await pillButton();
+    await account.mouse.click(stop!.x, stop!.y);
+    // Pressing Stop leaves the user's focus where it was.
+    await expect(account.locator("#note")).toBeFocused();
+    const asAgent = (params: Record<string, unknown> = {}) => request("preview.snapshot", { tabId, ...params }).then(() => "allowed", (error) => String(error));
+    await expect.poll(() => asAgent()).toMatch(/The user stopped .* from using browser tab chrome:\d+ and took it back/);
+    // Once Codara confirms, the pill has no button (no Undo on the page) and says where to give it back.
+    await expect.poll(pillButton).toBeNull();
+    // Another agent on the same tab is not stopped, and gets its own pill.
+    expect(await asAgent({ callerPid: 999991 })).toBe("allowed");
+    expect(await pillButton()).not.toBeNull();
+    // The stop survives the link dropping and coming back.
+    await worker.evaluate(() => (self as unknown as { codara: any }).codara.link.socket?.close());
+    await expect.poll(async () => (await request("preview.chrome", { action: "status" })).connected, { timeout: 15_000 }).toBe(true);
+    expect(await asAgent()).toMatch(/The user stopped/);
+    // Give back lives in the popup (and Settings > Browser).
+    await popup.reload();
+    await expect(popup.locator("#tab-stopped")).toContainText("You stopped");
+    await popup.locator("#tab-stopped button", { hasText: "Give back" }).click();
+    await expect.poll(() => asAgent()).toBe("allowed");
+    await expect(popup.locator("#tab-stopped")).toBeHidden();
+
+    // Codara owns the stop list; the extension's copy follows it.
+    const extension = () => worker.evaluate((id) => {
+      const state = (self as unknown as { codara: any }).codara.state();
+      return { stopped: (state.stoppedAgents[id] ?? []).length, pending: state.pendingStops.length };
+    }, accountTab);
+    const stopOnPage = async () => {
+      await request("preview.click", { tabId, selector: "h1" });
+      await expect.poll(pillButton, { timeout: 5_000 }).not.toBeNull();
+      const button = await pillButton();
+      await account.mouse.click(button!.x, button!.y);
+    };
+    // Unshare then reshare ends the stop on both sides: the agent works with its pointer again.
+    await stopOnPage();
+    await expect.poll(() => asAgent()).toMatch(/The user stopped/);
+    await expect.poll(extension).toEqual({ stopped: 1, pending: 0 });
+    await popup.reload();
+    await popup.locator("#share-tab").uncheck();
+    await expect.poll(extension).toEqual({ stopped: 0, pending: 0 });
+    await popup.locator("#share-tab").check();
+    await expect.poll(() => asAgent()).toBe("allowed");
+    await request("preview.click", { tabId, selector: "h1" });
+    await expect.poll(pillButton, { timeout: 5_000 }).not.toBeNull();
+    // Stop pressed while Codara cannot be reached: kept, the tab relays nothing,
+    // and Codara gets it first thing after the reconnect.
+    await worker.evaluate(() => {
+      const link = (self as unknown as { codara: any }).codara.link;
+      link.realSend = link.send;
+      link.send = () => false;
+    });
+    const button = await pillButton();
+    await account.mouse.click(button!.x, button!.y);
+    await expect.poll(extension).toEqual({ stopped: 0, pending: 1 });
+    await worker.evaluate(() => {
+      const link = (self as unknown as { codara: any }).codara.link;
+      link.send = link.realSend;
+      link.disconnect("idle");
+      void link.connect();
+    });
+    await expect.poll(extension, { timeout: 15_000 }).toEqual({ stopped: 1, pending: 0 });
+    await expect.poll(() => asAgent()).toMatch(/The user stopped/);
+    // Give back from Codara while the extension is away: its copy is replaced on reconnect.
+    await worker.evaluate(() => (self as unknown as { codara: any }).codara.link.disconnect("idle"));
+    const studioState = () => codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.state());
+    await expect.poll(async () => (await studioState()).browsers[0].connected).toBe(false);
+    const key = (await studioState()).browsers[0].linkId as string;
+    expect(await extension()).toEqual({ stopped: 1, pending: 0 });
+    const agentKey = await worker.evaluate((id) => (self as unknown as { codara: any }).codara.state().stoppedAgents[id][0].key as string, accountTab);
+    await codara.evaluate(([linkId, tab, agent]) => (window as unknown as { spark: any }).spark.chromeLink.giveBack(linkId, tab, agent), [key, accountTab, agentKey] as const);
+    await worker.evaluate(() => void (self as unknown as { codara: any }).codara.link.connect());
+    await expect.poll(extension, { timeout: 15_000 }).toEqual({ stopped: 0, pending: 0 });
+    await expect.poll(() => asAgent()).toBe("allowed");
+
+    // A strict page (CSP without inline styles, Trusted Types) still gets a
+    // styled pill, and a click by selector on a fixed link under the pill lands.
+    await request("preview.navigate", { tabId, url: `${origin}/strict` });
+    await request("preview.snapshot", { tabId });
+    await expect.poll(overlays, { timeout: 5_000 }).toBe(1);
+    const pill = await pillButton();
+    const viewport = account.viewportSize()!;
+    expect(pill!.y).toBeGreaterThan(viewport.height - 60);
+    expect(Math.abs(pill!.x - viewport.width / 2)).toBeLessThan(120);
+    await request("preview.click", { tabId, selector: "#fixed" });
+    await expect.poll(() => account.evaluate(() => location.hash)).toBe("#clicked");
+    // A recording that outlives the pill's idle clear stays overlay-free until it stops.
+    await request("preview.record", { tabId });
+    await expect.poll(overlays).toBe(0);
+    await account.waitForTimeout(9_500);
+    await request("preview.click", { tabId, selector: "h1" });
+    await account.waitForTimeout(800);
+    expect(await overlays()).toBe(0);
+    await request("preview.record", { tabId, stop: true });
+    await expect.poll(overlays, { timeout: 5_000 }).toBe(1);
+    // A full-page capture leaves it out too.
+    const full = await request("preview.screenshot", { tabId, format: "png", fullPage: true });
+    expect(String(full.dataUrl ?? "").length).toBeGreaterThan(100);
+    await expect.poll(overlays).toBe(1);
+    // The overlay's own world is not the agent's.
+    const frameId = (await request("preview.cdp", { tabId, method: "Page.getFrameTree" })).result?.frameTree?.frame?.id ?? "main";
+    expect(await request("preview.cdp", { tabId, method: "Page.createIsolatedWorld", params: { frameId, worldName: "codara-presence" } }).then(() => "allowed", (error) => String(error))).toMatch(/reserved by the Codara extension|not available on a tab of your own browser/);
+    await request("preview.navigate", { tabId, url: `${origin}/account` });
+    await agentShot();
+
     // Codara logs who did what, and the popup names the agent.
     const state = await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.state());
     const tools = state.activity.filter((entry: { tab: string }) => entry.tab === tabId).map((entry: { tool: string }) => entry.tool);
     expect(tools).toEqual(expect.arrayContaining(["codara_preview_snapshot", "codara_preview_type", "codara_preview_click", "codara_preview_screenshot"]));
-    await expect(popup.locator("#tab-usage")).toContainText("codara_preview_screenshot");
+    await expect(popup.locator("#tab-usage")).toContainText("took a screenshot");
+    await expect(popup.locator("#tab-agent-name")).not.toBeEmpty();
 
     // Tabs in the user's browser: opening needs the popup's switch, and an
     // agent closes only tabs it opened or the user shared.
     expect(await request("preview.chrome", { action: "status" })).toMatchObject({ connected: true, browsers: [{ sharedTabs: 1, mayOpenTabs: false }] });
-    await expect(request("preview.chrome", { action: "open", url: `${origin}/opened` })).rejects.toThrow(/open new tabs/);
+    await expect(request("preview.chrome", { action: "open", url: `${origin}/opened` })).rejects.toThrow(/Open new tabs in a group/);
     await popup.locator("#allow-open").check();
     await expect.poll(async () => (await request("preview.chrome", { action: "status" })).browsers[0].mayOpenTabs).toBe(true);
     const opened = await request("preview.chrome", { action: "open", url: `${origin}/opened` });
@@ -402,7 +562,7 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     // Disconnect in Codara: the extension forgets its token and every tab is out of reach.
     const linkId = state.browsers[0].linkId;
     await codara.evaluate((id) => (window as unknown as { spark: any }).spark.chromeLink.disconnect(id), linkId);
-    await expect(popup.locator("#status")).toHaveText("Not connected");
+    await expect(popup.locator("#status-text")).toHaveText("Not connected");
     // Playwright does not hand over a restarted worker; the popup reaches the same extension APIs.
     expect(await popup.evaluate(() => chrome.storage.local.get({ token: null }).then((stored: { token: string | null }) => stored.token))).toBeNull();
     await expect(request("preview.snapshot", { tabId })).rejects.toThrow(/No Chrome browser is connected/);

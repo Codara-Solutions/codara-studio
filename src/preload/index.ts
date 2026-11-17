@@ -925,6 +925,9 @@ const api = {
       ipcRenderer.invoke("git:unstageAll", cwd),
     discard: (cwd: string, files: GitFileChange[]): Promise<GitOpResult> =>
       ipcRenderer.invoke("git:discard", { cwd, files }),
+    /** Deletes a folded folder's new files, only if they are still exactly `files`. */
+    discardFolder: (cwd: string, dir: string, files: string[]): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:discardFolder", { cwd, dir, files }),
     commit: (cwd: string, message: string, amend?: boolean): Promise<GitOpResult> =>
       ipcRenderer.invoke("git:commit", { cwd, message, amend }),
     generateCommitMessage: (cwd: string): Promise<GitCommitMessageResult> =>

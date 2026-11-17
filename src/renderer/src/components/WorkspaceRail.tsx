@@ -1106,6 +1106,7 @@ function WorkspaceRail(props: RailProps) {
             onActivateWorkspace={props.onActivate}
             onOpenExternalWorktree={props.onOpenExternalWorktree}
             onCleanUpWorkspace={props.onCleanUpWorkspace}
+            onOpenFile={props.onOpenFile}
           />
         );
       case "explorer": {

@@ -6,77 +6,96 @@
     <title>Codara</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
-  <body>
-    <header class="bar">
-      <img src="icons/icon-32.png" alt="" width="20" height="20" />
+  <body class="popup">
+    <header class="hd">
+      <img src="icons/icon-32.png" alt="" width="18" height="18" />
       <strong>Codara</strong>
-      <span id="status" class="pill" data-state="idle">Not connected</span>
+      <span id="status" class="cs" data-state="idle" role="status"><span class="dot" aria-hidden="true"></span><span id="status-text">Not connected</span></span>
     </header>
 
-    <section id="connect" class="card" hidden>
+    <section id="connect" class="sec" hidden>
       <p id="connect-text">Connect this browser to Codara so agents can use the tabs you share.</p>
       <p id="pairing" class="pairing" hidden>
         Allow this code in Codara:
         <span id="pairing-code" class="code"></span>
       </p>
-      <p id="connect-error" class="error" hidden></p>
-      <button id="connect-button" type="button" class="primary">Connect to Codara</button>
+      <p id="connect-error" class="error" role="alert" hidden></p>
+      <button id="connect-button" type="button" class="btn pri wide">Connect to Codara</button>
     </section>
 
-    <section id="this-tab" class="card" hidden>
-      <h2>This tab</h2>
-      <div class="tab-title" id="tab-title"></div>
+    <section id="this-tab" class="sec" hidden>
+      <div class="row">
+        <span id="tab-fav" class="fav" aria-hidden="true"></span>
+        <div class="grow">
+          <div id="tab-title" class="ttl"></div>
+          <div id="tab-host" class="host"></div>
+        </div>
+        <input id="share-tab" class="sw" type="checkbox" role="switch" aria-label="Let agents use this tab" />
+      </div>
       <p id="tab-note" class="note" hidden></p>
-      <label class="row">
-        <span>Let agents use this tab</span>
-        <input id="share-tab" type="checkbox" role="switch" />
-      </label>
-      <div id="tab-copy" class="row" hidden>
-        <code id="tab-id"></code>
-        <button id="copy-id" type="button" class="accent">Copy tab id</button>
+      <div id="tab-agent" class="row" hidden>
+        <span class="agentchip"><i id="tab-agent-dot"></i><span id="tab-agent-name"></span></span>
+        <span id="tab-usage" class="dim grow"></span>
       </div>
-      <div id="tab-shared" hidden>
-        <p id="tab-usage" class="note"></p>
-        <label class="row">
-          <span>Allow cookie and storage access</span>
-          <input id="share-storage" type="checkbox" role="switch" />
-        </label>
-      </div>
+      <p id="tab-paused" class="note why" hidden>Shared tabs were paused after a problem reading saved stops: share each tab again.</p>
+      <ul id="tab-stopped" class="stopped" hidden></ul>
+      <details id="tab-details" class="details">
+        <summary>Details</summary>
+        <div class="row">
+          <code id="tab-id"></code>
+          <button id="copy-id" type="button" class="btn">Copy tab id</button>
+        </div>
+      </details>
     </section>
 
-    <section id="more" class="card" hidden>
-      <h2>Share more</h2>
+    <section id="reach" class="sec" hidden>
+      <div id="reach-label" class="lbl">Agents may use</div>
+      <div id="reach-choice" class="seg" role="radiogroup" aria-labelledby="reach-label" aria-describedby="reach-note">
+        <button type="button" role="radio" data-reach="tabs">Tabs I pick</button>
+        <button type="button" role="radio" data-reach="window">This window</button>
+        <button type="button" role="radio" data-reach="all">Everything</button>
+      </div>
+      <p id="reach-note" class="note"></p>
       <label class="row">
-        <span>All tabs in this window</span>
-        <input id="share-window" type="checkbox" role="switch" />
+        <span class="grow">Open new tabs in a group</span>
+        <input id="allow-open" class="sw" type="checkbox" role="switch" />
+      </label>
+      <label id="storage-row" class="row">
+        <span class="grow">Read and change cookies and storage here</span>
+        <input id="share-storage" class="sw" type="checkbox" role="switch" aria-describedby="storage-note" />
+      </label>
+      <p id="storage-note" class="note">Even when off, agents see site storage, non-HttpOnly cookies and requests, sign-in headers included.</p>
+    </section>
+
+    <section id="on-page" class="sec" hidden>
+      <div class="lbl">On the page</div>
+      <label class="row">
+        <span class="grow">Show the agent's pointer and Stop</span>
+        <input id="presence-overlay" class="sw" type="checkbox" role="switch" />
       </label>
       <label class="row">
-        <span>Every tab in this browser</span>
-        <input id="share-all" type="checkbox" role="switch" />
-      </label>
-      <label class="row">
-        <span>Let agents open new tabs</span>
-        <input id="allow-open" type="checkbox" role="switch" />
+        <span class="grow">Glow around the page</span>
+        <input id="presence-glow" class="sw" type="checkbox" role="switch" />
       </label>
     </section>
 
-    <section id="ask" class="card ask" hidden>
+    <section id="ask" class="sec ask" hidden>
       <p id="ask-text"></p>
       <div class="row end">
-        <button id="ask-no" type="button">Cancel</button>
-        <button id="ask-yes" type="button" class="accent">Allow</button>
+        <button id="ask-no" type="button" class="btn">Cancel</button>
+        <button id="ask-yes" type="button" class="btn pri">Allow</button>
       </div>
     </section>
 
-    <section id="shared" class="card" hidden>
+    <section id="shared" class="sec" hidden>
       <div class="row">
-        <h2>Shared tabs</h2>
-        <button id="stop-all" type="button" class="danger">Stop all</button>
+        <div id="shared-label" class="lbl grow">Shared tabs</div>
+        <button id="stop-all" type="button" class="btn stop">Stop all</button>
       </div>
-      <ul id="shared-list"></ul>
+      <ul id="shared-list" aria-labelledby="shared-label"></ul>
     </section>
 
-    <footer class="bar">
+    <footer class="pfoot">
       <button id="open-options" type="button" class="link">Blocked sites</button>
       <button id="unpair" type="button" class="link" hidden>Disconnect</button>
     </footer>
