@@ -132,3 +132,12 @@
   font-size: 13px;
   white-space: pre-wrap;
 }
+/* The whole prompt under what Cora wrote: the standing rules every worker
+   gets, set apart by a hairline and quieter text. */
+.cora-worker-brief__prompt {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--rule-soft);
+  color: var(--ink-dim);
+  font-size: 13px;
+}

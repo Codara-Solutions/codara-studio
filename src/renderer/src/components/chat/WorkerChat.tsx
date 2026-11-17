@@ -17,6 +17,7 @@ import {
   workerElapsed,
   workerRows,
   workerStepCount,
+  workerTaskBrief,
   type WorkerRow,
   type WorkerViewState,
 } from "./worker-view";
@@ -54,6 +55,8 @@ export default function WorkerChat({
   const report = useRunReports(run).get(attemptId) ?? null;
   const attempt = run.workerAttempts.find((candidate) => candidate.id === attemptId) ?? null;
   const brief = useBrief(run.id, attemptId);
+  const taskBrief = workerTaskBrief(run, attempt);
+  const [showPrompt, setShowPrompt] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pinned = useRef(running);
 
@@ -85,7 +88,34 @@ export default function WorkerChat({
             {attempt?.startedAt ? <time dateTime={attempt.startedAt}>· {formatMessageTime(attempt.startedAt)}</time> : null}
           </div>
           <div className="cora-message cora-message--user" style={USER_BUBBLE_STYLE}>
-            {brief.text !== null ? (
+            {taskBrief ? (
+              // What Cora wrote for this worker first; the whole prompt it
+              // received, standing rules included, one click away.
+              <>
+                <div className="cora-worker-brief__task" data-worker-brief-task>
+                  <CollapsibleUserText id={`worker-brief:${attemptId}`} text={taskBrief.text} findCurrent={false} />
+                </div>
+                <button
+                  type="button"
+                  className="cora-user-more"
+                  aria-expanded={showPrompt}
+                  onClick={() => setShowPrompt(!showPrompt)}
+                >
+                  {showPrompt ? "Hide the full prompt" : "Show the full prompt, with the standing rules"}
+                </button>
+                {showPrompt && (
+                  <div className="cora-worker-brief__prompt" data-worker-brief-prompt>
+                    {brief.text !== null ? (
+                      <Markdown text={brief.text} />
+                    ) : (
+                      <span className="cora-worker-view__muted">
+                        {brief.error ? "The prompt could not be read." : "Reading the prompt…"}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </>
+            ) : brief.text !== null ? (
               <CollapsibleUserText id={`worker-brief:${attemptId}`} text={brief.text} findCurrent={false} />
             ) : (
               <span className="cora-worker-view__muted">{brief.error ? "The brief could not be read." : "Reading the brief…"}</span>
