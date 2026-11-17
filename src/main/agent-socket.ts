@@ -86,6 +86,7 @@ import { defaultShell } from "./shells";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { loadSettings, loadState, saveState, updateState } from "./storage";
 import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
+import { shareServiceStatus } from "./share/availability";
 import { ShareOfferGate } from "./share/offer";
 import {
   createAgentWorktree,
@@ -477,6 +478,9 @@ async function writeHandshakeFile(input: { url: string; token: string }): Promis
     token: input.token,
     pid: process.pid,
     appVersion: app.getVersion(),
+    // The MCP server lists codara_share_offer and its guidance only when this
+    // is true (share/availability.ts).
+    shareAvailable: shareServiceStatus().available,
     writtenAt: new Date().toISOString(),
   }, null, 2);
   await writeFileAtomic(handshakeFilePath(), payload, { mode: 0o600 });
@@ -1471,7 +1475,10 @@ async function handleAgentNotify(
   return successResponse(id, { published: true });
 }
 
-const shareOfferGate = new ShareOfferGate({ assertReadable: assertAllowedReadPathResolved });
+const shareOfferGate = new ShareOfferGate({
+  assertReadable: assertAllowedReadPathResolved,
+  status: () => shareServiceStatus(),
+});
 
 // An agent asks Studio to offer sharing a page it wrote. This only shows the
 // user the Share prompt for that file; nothing is uploaded unless they click
