@@ -32,6 +32,11 @@ export interface ViewerZoomOptions {
   fitZoom?: number;
   /** False until the scroller is mounted (still loading, an error). */
   enabled?: boolean;
+  /**
+   * false: the viewer keeps its own place across a zoom (a virtual list that
+   * remounts at the new row height and starts at the row it was on).
+   */
+  keepPoint?: boolean;
 }
 
 export interface ViewerZoom {
@@ -58,6 +63,7 @@ export function useViewerZoom({
   wheel = "smooth",
   fitZoom = 1,
   enabled = true,
+  keepPoint = true,
 }: ViewerZoomOptions): ViewerZoom {
   const [state, setState] = useState({ zoom: fitZoom, fitted: true });
   const zoom = state.fitted ? fitZoom : state.zoom;
@@ -89,11 +95,11 @@ export function useViewerZoom({
     const point = anchor.current;
     anchor.current = null;
     const scroller = scrollerRef.current;
-    if (!point || !scroller || previous === zoom) return;
+    if (!point || !scroller || previous === zoom || !keepPoint) return;
     const box = contentBox(scroller);
     scroller.scrollLeft += box.left + point.fx * box.width - point.x;
     scroller.scrollTop += box.top + point.fy * box.height - point.y;
-  }, [zoom, scrollerRef, contentBox]);
+  }, [zoom, scrollerRef, contentBox, keepPoint]);
 
   // A pin whose zoom never showed (a tiny pinch that snapped back to fit)
   // must not move the view on a later zoom, after the user has scrolled.
