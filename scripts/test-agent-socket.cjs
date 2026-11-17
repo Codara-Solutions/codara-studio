@@ -149,6 +149,11 @@ function rpcRaw(handshake, body, headers = {}) {
           Authorization: `Bearer ${handshake.token}`,
           ...headers,
         },
+        // A connection of its own for each call. Through Node's keep-alive
+        // agent a call could go out on a connection the app was closing,
+        // and CI then failed with ECONNRESET on a random call while the app
+        // ran on with nothing in its log. Nothing here tests connection reuse.
+        agent: false,
       },
       (res) => {
         let data = "";
