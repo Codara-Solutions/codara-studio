@@ -1168,7 +1168,7 @@ directly. Never for workers or an imported pull request.
 
 | Tool | What it does |
 |---|---|
-| `codara_share_offer` | Takes `path`, an HTML or Markdown file (absolute, or relative to the agent's working directory) in a folder open in Codara, at most 5 MB. Codara opens the file and shows its Share prompt; nothing is uploaded unless you click Share there, and the agent never gets the link. Returns `offered: true`, or `offered: false` with a `reason` (`invalid`, `not_shareable`, `missing`, `too_large`, `not_allowed`, `rate_limited`, `no_window`, `codara_offline`). One prompt per agent every 10 seconds. See [share-links.md](./share-links.md). |
+| `codara_share_offer` | Takes `path`, an HTML or Markdown file (absolute, or relative to the agent's working directory) in a folder open in Codara, at most 5 MB. Codara opens the file and shows its Share prompt; nothing is uploaded unless you click Share there, and the agent never gets the link. Returns `offered: true`, or `offered: false` with a `reason` (`unavailable` while this build has no share service, `invalid`, `not_shareable`, `missing`, `too_large`, `not_allowed`, `rate_limited`, `no_window`, `codara_offline`). One prompt per agent every 10 seconds. See [share-links.md](./share-links.md). |
 
 ## Opening a file for the user
 
