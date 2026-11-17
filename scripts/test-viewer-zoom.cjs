@@ -5,8 +5,8 @@
 //   node scripts/test-viewer-zoom.cjs
 //
 // Both modules are pure, so they run here as bundled TypeScript. Zoom at the
-// pointer, panning and the real key routing are covered by
-// tests/e2e/viewer-zoom.spec.ts.
+// pointer and the real key routing are covered by
+// tests/e2e/viewer-zoom.spec.ts and tests/e2e/pptx-file-preview.spec.ts.
 
 const assert = require("node:assert/strict");
 const path = require("node:path");
