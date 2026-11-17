@@ -44,7 +44,8 @@ How `scripts/run-all-tests.cjs` works:
     instead of 180.
   - A file with a `// test-runner: serial (why)` line runs after the pool,
     with nothing else running. Today that is `test-cora-harness.mjs` (its
-    timing checks), `test-renderer-chunks.mjs` (a
+    timing checks), `test-app-exit-electron.cjs` (Chromium's exit time on a
+    loaded macOS runner), `test-renderer-chunks.mjs` (a
     production Vite build, about 2 GB) and `test-workflow-sandbox.cjs` (its
     heap-limit case grows QuickJS's WebAssembly memory to 2 GB).
   - No suite starts while `MemAvailable` is below `CODARA_TEST_MIN_FREE_MB`
@@ -55,11 +56,19 @@ How `scripts/run-all-tests.cjs` works:
     without a name unique to the suite.
   - Durations are kept in `node_modules/.cache/codara-tests/timings.json`,
     and the next run starts the longest suites first.
+  - `CODARA_TEST_PART=pool` runs every suite except the serial ones, and
+    `CODARA_TEST_PART=serial` only those. CI runs the two parts on two
+    machines at once.
+  - `CODARA_TEST_BUDGET_SECONDS=900` stops the run once it has taken that
+    long and fails it, naming the suites it stopped and the ones that never
+    started. CI sets one so a slow suite fails with that message instead of
+    hitting the job timeout.
 - The whole run peaks at about 2.5 GB, almost all of it from the two serial
   suites. Keep a new suite well under that, or tag it.
 - The runner prints `ok` or `FAIL` for each file as it finishes, then a pass
-  count, then the last 6000 characters of each failure's output, in name
-  order. It exits with code 1 if any file failed.
+  count, the 15 slowest suites, then the last 6000 characters of each
+  failure's output, in name order. It exits with code 1 if any file failed.
+  On GitHub Actions it also writes the slowest suites to the job summary.
 - Never wait on real time in a suite. Code that runs on timers (quiet
   windows, sweeps, retries) can run on `scripts/fake-clock.cjs`: install it
   before loading the bundle and call `await clock.advance(ms)` where the
@@ -99,14 +108,17 @@ Most suites need only `npm install`. These are the exceptions:
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
 | `dbus-daemon`, `libnotify4`, `python3-gi`, Xvfb (Linux) | `test-notify-linux-click.cjs` | Runs a private bus with a fake notification server. Prints SKIP without them, and fails on CI. |
 | Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-browser-devtools.cjs`, `test-browser-cdp-access.cjs`, `test-browser-insight.cjs`, `test-browser-capture-chromium.cjs`, `test-preview-waits.cjs`, `test-preview-dialogs.cjs`, `test-preview-find-outline.cjs`, `test-preview-console-filter.cjs`, `test-studio-csp.cjs`, `test-browser-code.cjs`, `test-git-read-pacing.cjs` | Install it with `npx playwright install chromium`. Without it they print SKIP for the real-page checks. |
-| Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-agent-worktree-differential.cjs`, `test-worktree-cleanup.cjs`, `test-worktree-cleanup-agent.cjs`, `test-worktree-setup.cjs`, `test-git-auto-fetch-git.cjs`, `test-dev-update-hint.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-review-diff.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs`, `test-git-checkout-remote.cjs`, `test-rail-discovery-reads.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
+| Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-agent-worktree-base.cjs`, `test-agent-worktree-differential.cjs`, `test-worktree-cleanup.cjs`, `test-worktree-cleanup-agent.cjs`, `test-worktree-setup.cjs`, `test-git-auto-fetch-git.cjs`, `test-dev-update-hint.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-review-diff.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs`, `test-git-checkout-remote.cjs`, `test-rail-discovery-reads.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
 
 CI (`.github/workflows/ci.yml`, macOS, pull requests into `main` and pushes
-to it) runs the
-four typechecks, then `npm run build`, then `npx playwright install
-chromium`, then `npm run test:all`. `.github/workflows/ci-linux.yml` runs the
+to it) runs on two machines at once. `test (pool)` runs `npm run build`, `npx
+playwright install chromium`, then `npm run test:all` with
+`CODARA_TEST_PART=pool` two suites at a time; `test (serial, typecheck)`
+runs the four typechecks and the build, then the serial suites. Each has a time budget
+(`CODARA_TEST_BUDGET_SECONDS`), and the required `test` check passes only
+when both do. `.github/workflows/ci-linux.yml` runs the
 same on Linux under Xvfb for pull requests into `main` and pushes to it,
 without the typechecks (they do not depend on the platform), then a smoke set
 of Playwright specs (listed in the workflow). On your machine, run the same
@@ -512,7 +524,10 @@ runs it end to end with a scripted `gh`),
 tricks it tries), `test-agent-worktrees` (worktrees agents create and remove
 through the MCP tools: merge proofs, every refusal, recovery refs, the audit
 log, the repository lock and the process scan, against throwaway
-repositories with a fake git config), `test-agent-worktree-differential`
+repositories with a fake git config), `test-agent-worktree-base` (which
+commit a new worktree forks from: a local `main` behind origin, an upstream,
+offline, `fetch: false`, and `HEAD`, the default and `checkout` unchanged),
+`test-agent-worktree-differential`
 (each removal scenario against the merge proofs as they were before the
 proof through another branch name's pull request: nothing removable now
 that was kept then, except through that proof), `test-agent-worktrees-docs` (every
