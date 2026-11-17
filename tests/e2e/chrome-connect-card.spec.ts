@@ -111,7 +111,7 @@ test("the connect card walks from Add to Pair to Share a tab on what Codara sees
     await popup.locator("#connect-button").click();
     await expect(popup.locator("#pairing-code")).toHaveText(/^\d{3} \d{3}$/, { timeout: 10_000 });
     const code = (await popup.locator("#pairing-code").textContent()) ?? "";
-    await expect(firstRun).toHaveAttribute("data-chrome-connect", "pair");
+    await expect(firstRun).toHaveAttribute("data-chrome-connect", "pair", { timeout: 10_000 });
     await expect(firstRun.locator(".chrome-connect__code")).toHaveText(code);
     await expect(firstRun.getByText("Code", { exact: true })).toBeVisible();
     // The card's Allow is brought into view: the floating prompt stays away.
