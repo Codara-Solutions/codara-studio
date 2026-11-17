@@ -22,6 +22,14 @@ async function waitFor(predicate, timeoutMs, label) {
   assert.fail(`timed out waiting for ${label}`);
 }
 
+// The default request timeout of the fixture clients. It also bounds start(),
+// whose get_state handshake waits for a fresh node process to boot, which on a
+// busy CI runner takes longer than the 250 ms this used to be. Nothing here
+// tests the default: the timeout cases pass their own 20 ms and never get an
+// answer in time. So it is only a guard against a hang, and it is also the
+// deadline of the waits for a state below.
+const HANG_GUARD_MS = 10_000;
+
 const tsModuleCache = new Map();
 
 function loadTypeScriptModule(sourcePath) {
@@ -134,7 +142,7 @@ async function main() {
   const { PiRpcClient } = loadTypeScriptModule(
     path.join(__dirname, "..", "src", "main", "orchestration", "pi-rpc-client.ts"),
   );
-  const client = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs: 30 });
+  const client = new PiRpcClient(plan(), { requestTimeoutMs: HANG_GUARD_MS, shutdownGraceMs: 30 });
   assert.deepEqual(await client.start(), { sessionId: "fixture" });
   assert.equal(client.state().phase, "running");
   const events = [];
@@ -187,7 +195,7 @@ async function main() {
   try {
     await client.stop();
     if (process.platform !== "win32") {
-      await waitFor(() => !alive(descendantPid), 3_000, "detached Pi tool descendant teardown");
+      await waitFor(() => !alive(descendantPid), HANG_GUARD_MS, "detached Pi tool descendant teardown");
       assert.equal(alive(unrelated.pid), true, "stopping Pi must not touch an unrelated process");
     }
   } finally {
@@ -200,7 +208,7 @@ async function main() {
   assert.equal(client.state().phase, "stopped");
   assert.equal(client.state().pendingCount, 0);
 
-  const malformed = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs: 30 });
+  const malformed = new PiRpcClient(plan(), { requestTimeoutMs: HANG_GUARD_MS, shutdownGraceMs: 30 });
   await malformed.start();
   await assert.rejects(
     malformed.request({ type: "malformed" }),
@@ -220,30 +228,37 @@ async function main() {
 
   const stderr = new PiRpcClient(
     plan({ FIXTURE_STDERR: "1" }),
-    { requestTimeoutMs: 250, maxStderrBytes: 8, shutdownGraceMs: 30 },
+    { requestTimeoutMs: HANG_GUARD_MS, maxStderrBytes: 8, shutdownGraceMs: 30 },
   );
   await stderr.start();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  // The fixture writes its 14 stderr bytes in two pieces, the second 2 ms
+  // later, on a pipe that is not ordered against stdout: wait until all of
+  // them have been read (kept or dropped) rather than for a fixed 10 ms.
+  await waitFor(
+    () => Buffer.byteLength(stderr.diagnostics().stderr) + stderr.diagnostics().droppedStderrBytes >= 14,
+    HANG_GUARD_MS,
+    "the fixture's whole stderr",
+  );
   assert.equal(stderr.diagnostics().stderr, "😀tail");
   assert.equal(stderr.diagnostics().droppedStderrBytes, 6);
   await stderr.stop();
   // A crash after the last response leaves nothing pending to reject; the
   // failure subscription is the only way a waiting turn hears about it.
-  const crashing = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs: 30 });
+  const crashing = new PiRpcClient(plan(), { requestTimeoutMs: HANG_GUARD_MS, shutdownGraceMs: 30 });
   await crashing.start();
   const failures = [];
   crashing.onFailure((failure) => failures.push(failure));
   const removed = [];
   crashing.onFailure((failure) => removed.push(failure))();
   await crashing.request({ type: "exit_later" });
-  await waitFor(() => failures.length === 1, 3_000, "failure listener after child exit");
+  await waitFor(() => failures.length === 1, HANG_GUARD_MS, "failure listener after child exit");
   assert.equal(failures[0].code, "PROCESS_EXIT");
   assert.equal(failures[0].message, "Pi RPC process exited (3)");
   assert.equal(removed.length, 0, "an unsubscribed listener is not called");
   assert.equal(crashing.state().phase, "failed");
   await crashing.stop();
 
-  const stopped = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs: 30 });
+  const stopped = new PiRpcClient(plan(), { requestTimeoutMs: HANG_GUARD_MS, shutdownGraceMs: 30 });
   await stopped.start();
   let stopFailures = 0;
   stopped.onFailure(() => { stopFailures += 1; });
@@ -255,7 +270,7 @@ async function main() {
   // the line limit; it is skipped, whole or split across chunks, and the
   // session carries on. Any other oversized record is still fatal.
   for (const split of [false, true]) {
-    const oversized = new PiRpcClient(plan(), { requestTimeoutMs: 500, maxLineBytes: 1024, shutdownGraceMs: 30 });
+    const oversized = new PiRpcClient(plan(), { requestTimeoutMs: HANG_GUARD_MS, maxLineBytes: 1024, shutdownGraceMs: 30 });
     await oversized.start();
     const seen = [];
     oversized.onEvent((event) => seen.push(event.type));
@@ -265,7 +280,7 @@ async function main() {
     assert.equal(oversized.diagnostics().droppedOversizedEvents, 1);
     await oversized.stop();
   }
-  const fatal = new PiRpcClient(plan(), { requestTimeoutMs: 500, maxLineBytes: 1024, shutdownGraceMs: 30 });
+  const fatal = new PiRpcClient(plan(), { requestTimeoutMs: HANG_GUARD_MS, maxLineBytes: 1024, shutdownGraceMs: 30 });
   await fatal.start();
   await assert.rejects(fatal.request({ type: "big_message_end" }), (error) => error.code === "PROTOCOL_ERROR");
   assert.equal(fatal.state().failure.message, "Pi RPC output exceeded the line limit");
