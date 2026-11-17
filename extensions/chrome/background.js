@@ -14,15 +14,17 @@ import { LinkClient } from "./lib/link-client.js";
 import {
   PRESENCE_IDLE_MS,
   PRESENCE_INSTALL,
-  PRESENCE_UNDO_MS,
+  PRESENCE_STOPPED_MS,
   PRESENCE_WORLD,
   hidesPresence,
-  isAgentInput,
+  holdsPresence,
   newerSettings,
   pointerOf,
   presenceCall,
+  presenceClick,
   presenceSettings,
   presenceView,
+  presenceWorldError,
   withoutPresenceNodes,
 } from "./lib/presence.js";
 import {
@@ -61,6 +63,8 @@ const SESSION_DEFAULTS = {
   agentGroups: [],
   attached: [],
   usage: {},
+  // tabId -> [{ key, name }]: agents the user stopped from the page, until given back.
+  stoppedAgents: {},
 };
 const LOCAL_DEFAULTS = {
   token: null,
@@ -259,10 +263,15 @@ async function relayCommand(request) {
     if (rule) throw new Error(`${url} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`);
   }
   if (!state.attached.includes(tab.id)) throw new Error(`${agentTabId(tab.id)} is not attached.`);
+  // The overlay's own world is not the agent's to use.
+  const reserved = presenceWorldError(method, request.params, worlds.get(tab.id) ?? null);
+  if (reserved) throw new Error(reserved);
   const send = async () => (await chrome.debugger.sendCommand({ tabId: tab.id }, method, request.params ?? {})) ?? {};
   if (!presence.has(tab.id)) return send();
-  if (isAgentInput(method)) {
-    // The pill lets this input through while it is dispatched, no longer.
+  if (method === "Page.startScreencast") return startScreencast(tab.id, send);
+  if (method === "Page.stopScreencast") return stopScreencast(tab.id, send);
+  if (holdsPresence(method)) {
+    // The pill lets clicks through while this runs (at most 2 s), no longer.
     const point = pointerOf(method, request.params);
     await inWorld(tab.id, presenceCall("hold", true, point?.x ?? null, point?.y ?? null, point?.press ?? false));
     try {
@@ -275,49 +284,101 @@ async function relayCommand(request) {
   return withoutPresence(tab.id, send);
 }
 
-// Captures in flight per tab: the overlay comes back after the last one.
+// Captures in flight per tab, a running screencast counting as one: the
+// overlay comes back after the last one ends.
 const capturing = new Map();
+const screencasts = new Set();
+
+async function concealFor(tabId) {
+  capturing.set(tabId, (capturing.get(tabId) ?? 0) + 1);
+  const hidden = (await inWorld(tabId, presenceCall("conceal", true))) === true || (await inWorld(tabId, presenceCall("conceal", true))) === true;
+  if (!hidden) {
+    await revealAfter(tabId);
+    throw new Error("The page did not answer in time, so Codara could not keep its agent overlay out of this capture. Try again.");
+  }
+}
+
+async function revealAfter(tabId) {
+  const left = (capturing.get(tabId) ?? 1) - 1;
+  if (left > 0) capturing.set(tabId, left);
+  else {
+    capturing.delete(tabId);
+    await inWorld(tabId, presenceCall("conceal", false));
+  }
+}
 
 /** What the agent captures is the page as it is: the overlay is out until every capture ends. */
 async function withoutPresence(tabId, send) {
-  capturing.set(tabId, (capturing.get(tabId) ?? 0) + 1);
+  await concealFor(tabId);
   try {
-    const hidden = (await inWorld(tabId, presenceCall("conceal", true))) === true || (await inWorld(tabId, presenceCall("conceal", true))) === true;
-    if (!hidden) throw new Error("The page did not answer in time, so Codara could not keep its agent overlay out of this capture. Try again.");
     return await send();
   } finally {
-    const left = (capturing.get(tabId) ?? 1) - 1;
-    if (left > 0) capturing.set(tabId, left);
-    else {
-      capturing.delete(tabId);
-      await inWorld(tabId, presenceCall("conceal", false));
-    }
+    await revealAfter(tabId);
+  }
+}
+
+/** A recording keeps the overlay out of every frame until it stops. */
+async function startScreencast(tabId, send) {
+  if (screencasts.has(tabId)) return send();
+  await concealFor(tabId);
+  try {
+    const answer = await send();
+    screencasts.add(tabId);
+    return answer;
+  } catch (error) {
+    await revealAfter(tabId);
+    throw error;
+  }
+}
+
+async function stopScreencast(tabId, send) {
+  try {
+    return await send();
+  } finally {
+    if (screencasts.delete(tabId)) await revealAfter(tabId);
   }
 }
 
 // ── The agent on the page ───────────────────────────────────────────────────
 //
-// lib/presence.js draws it; this keeps, per attached tab, who drives it and
-// whether the user stopped them. Memory only: a restarted worker draws again
-// on the agent's next call.
+// lib/presence.js draws it; this keeps, per attached tab, who drives it, the
+// host's node ids (so forwarded DOM events leave it out) and the agents the
+// user stopped. The stops also live in Codara, which refuses the agent.
 
 const presence = new Map();
+// tabId -> the isolated world's execution context id, installed.
 const worlds = new Map();
-let presenceSerial = 0;
+// tabId -> { backendIds, nodeIds, contextId }: what DOM and Runtime events must not show.
+const hiddenNodes = new Map();
 const PRESENCE_POLL_MS = 400;
 const PRESENCE_CALL_MS = 1_000;
 
+function hiddenFor(tabId) {
+  let hidden = hiddenNodes.get(tabId);
+  if (!hidden) hiddenNodes.set(tabId, (hidden = { backendIds: new Set(), nodeIds: new Set(), contextId: null }));
+  hidden.contextId = worlds.get(tabId) ?? hidden.contextId;
+  return hidden;
+}
+
+async function worldOf(tabId) {
+  const target = { tabId };
+  let contextId = worlds.get(tabId);
+  if (contextId) return contextId;
+  const { frameTree } = await chrome.debugger.sendCommand(target, "Page.getFrameTree");
+  ({ executionContextId: contextId } = await chrome.debugger.sendCommand(target, "Page.createIsolatedWorld", { frameId: frameTree.frame.id, worldName: PRESENCE_WORLD }));
+  // Installed once per world; a navigation makes a new world.
+  const installed = await chrome.debugger.sendCommand(target, "Runtime.evaluate", { expression: PRESENCE_INSTALL, contextId, returnByValue: true });
+  if (installed?.exceptionDetails) throw new Error("presence");
+  worlds.set(tabId, contextId);
+  hiddenFor(tabId).contextId = contextId;
+  return contextId;
+}
+
 /** Run an overlay call in the tab's isolated world, installing it first. Never throws. */
 async function inWorld(tabId, expression) {
-  const target = { tabId };
   const evaluate = async () => {
-    let contextId = worlds.get(tabId);
-    if (!contextId) {
-      const { frameTree } = await chrome.debugger.sendCommand(target, "Page.getFrameTree");
-      ({ executionContextId: contextId } = await chrome.debugger.sendCommand(target, "Page.createIsolatedWorld", { frameId: frameTree.frame.id, worldName: PRESENCE_WORLD }));
-      worlds.set(tabId, contextId);
-    }
-    const answer = await chrome.debugger.sendCommand(target, "Runtime.evaluate", { expression: `${PRESENCE_INSTALL}; ${expression}`, contextId, returnByValue: true });
+    const contextId = await worldOf(tabId);
+    const answer = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { expression, contextId, returnByValue: true });
     if (answer?.exceptionDetails) throw new Error("presence");
     return answer?.result?.value;
   };
@@ -335,17 +396,38 @@ async function inWorld(tabId, expression) {
   }
 }
 
+/** Learn the host's backend node id, by reference, so DOM events about it are dropped. */
+async function learnHostNode(tabId) {
+  const target = { tabId };
+  try {
+    const contextId = await worldOf(tabId);
+    const { result } = await chrome.debugger.sendCommand(target, "Runtime.evaluate", { expression: presenceCall("hostNode"), contextId });
+    if (!result?.objectId) return;
+    const { node } = await chrome.debugger.sendCommand(target, "DOM.describeNode", { objectId: result.objectId });
+    await chrome.debugger.sendCommand(target, "Runtime.releaseObject", { objectId: result.objectId }).catch(() => {});
+    if (Number.isInteger(node?.backendNodeId)) hiddenFor(tabId).backendIds.add(node.backendNodeId);
+  } catch {
+    // The inline style still marks it.
+  }
+}
+
 async function drawPresence(tabId) {
   await ready;
   const entry = presence.get(tabId);
   if (!entry || !state.attached.includes(tabId)) return;
   const settings = presenceSettings(state.presence);
-  const ttl = (entry.state === "stopped" ? PRESENCE_UNDO_MS : PRESENCE_IDLE_MS) + 2_000;
-  await inWorld(tabId, presenceCall("show", presenceView({ ...entry, glow: settings.glow }), ttl));
+  const ttl = (entry.state === "stopped" ? PRESENCE_STOPPED_MS : PRESENCE_IDLE_MS) + 2_000;
+  const shown = await inWorld(tabId, presenceCall("show", presenceView({ ...entry, glow: settings.glow }), ttl));
+  if (shown === "new") await learnHostNode(tabId);
 }
 
 async function clearPresence(tabId, { draw = true } = {}) {
   const entry = presence.get(tabId);
+  if (screencasts.delete(tabId)) capturing.delete(tabId);
+  if (!draw) {
+    capturing.delete(tabId);
+    hiddenNodes.delete(tabId);
+  }
   if (!entry) return;
   presence.delete(tabId);
   clearTimeout(entry.timer);
@@ -354,57 +436,72 @@ async function clearPresence(tabId, { draw = true } = {}) {
   worlds.delete(tabId);
 }
 
+function stoppedOn(tabId) {
+  return Array.isArray(state.stoppedAgents?.[tabId]) ? state.stoppedAgents[tabId] : [];
+}
+
+async function setStopped(tabId, agents) {
+  const next = { ...(state.stoppedAgents ?? {}) };
+  if (agents.length) next[tabId] = agents;
+  else delete next[tabId];
+  await save({ stoppedAgents: next });
+}
+
 /** An agent's call on a shared tab: name it on the page until it goes quiet. */
 function notePresence(tabId, usage) {
   // Turned off: nothing is drawn, installed or polled in the page.
   if (!presenceSettings(state.presence).overlay) return;
+  // A stopped agent is refused; its calls do not bring the pill back.
+  if (usage.key && stoppedOn(tabId).some((agent) => agent.key === usage.key)) return;
   const previous = presence.get(tabId);
-  // A stopped agent keeps the Undo notice; another agent takes the tab over.
   if (previous?.state === "stopped" && previous.key === usage.key) return;
   const entry = previous ?? { history: new Map() };
-  // A new agent on the pill gets a new serial: a Stop pressed on the old
-  // one still stops the old one.
-  if (!previous || previous.key !== usage.key) entry.serial = ++presenceSerial;
-  Object.assign(entry, { key: usage.key, name: usage.name, runtime: usage.runtime, state: "working" });
-  entry.history.set(entry.serial, usage.key);
+  // A new agent on the pill gets a new random id: a Stop pressed on the old
+  // one still stops the old one, and ids never repeat after a worker restart.
+  if (!previous || previous.key !== usage.key || previous.state === "stopped") entry.id = crypto.randomUUID();
+  Object.assign(entry, { key: usage.key, name: usage.name, runtime: usage.runtime, state: "working", keyless: !usage.key });
+  entry.history.set(entry.id, { key: usage.key, name: usage.name });
   clearTimeout(entry.timer);
   entry.timer = setTimeout(() => void clearPresence(tabId), PRESENCE_IDLE_MS);
-  // The pill's Stop and Undo stay in the page until read here.
+  // The pill's Stop stays in the page until read here.
   entry.poll ??= setInterval(() => void readPresenceClicks(tabId), PRESENCE_POLL_MS);
   presence.set(tabId, entry);
   void drawPresence(tabId);
 }
 
 async function readPresenceClicks(tabId) {
+  // Nothing to read on a tab the extension no longer drives.
+  if (!state.attached.includes(tabId)) return clearPresence(tabId, { draw: false });
   const clicks = await inWorld(tabId, presenceCall("take"));
   const entry = presence.get(tabId);
   if (!entry || !Array.isArray(clicks) || clicks.length === 0) return;
-  const shown = clicks.filter((click) => click && typeof click === "object");
-  // Stop pressed on an agent that has since handed the tab to another: stop
-  // the one the user saw.
-  for (const click of shown) {
-    if (click.action !== "stop" || click.serial === entry.serial) continue;
-    const key = entry.history.get(click.serial);
-    if (key) link.send({ type: "presence_stop", tabId, key });
-    else await handlePopup({ type: "stopTab", tabId });
+  let stoppedShown = false;
+  for (const click of clicks.map(presenceClick)) {
+    // Only ids this extension handed out count; a page cannot make them up.
+    const agent = click && entry.history.get(click.id);
+    if (!agent) continue;
+    if (agent.key) {
+      link.send({ type: "presence_stop", tabId, key: agent.key, name: agent.name });
+      if (!stoppedOn(tabId).some((stopped) => stopped.key === agent.key)) await setStopped(tabId, [...stoppedOn(tabId), { key: agent.key, name: agent.name }]);
+    } else {
+      // An older Codara cannot refuse one agent: take the whole tab back.
+      await handlePopup({ type: "stopTab", tabId });
+    }
+    if (click.id === entry.id) stoppedShown = true;
   }
-  const action = shown.filter((click) => click.serial === entry.serial).at(-1)?.action;
-  if (action === "stop" && entry.state !== "stopped") {
-    if (entry.key) link.send({ type: "presence_stop", tabId, key: entry.key });
-    // An older Codara cannot refuse one agent: take the whole tab back.
-    else await handlePopup({ type: "stopTab", tabId });
-    entry.state = "stopped";
-    clearTimeout(entry.timer);
-    entry.timer = setTimeout(() => void clearPresence(tabId), PRESENCE_UNDO_MS);
-  } else if (action === "undo" && entry.state === "stopped") {
-    link.send({ type: "presence_allow", tabId, key: entry.key });
-    entry.state = "working";
-    clearTimeout(entry.timer);
-    entry.timer = setTimeout(() => void clearPresence(tabId), PRESENCE_IDLE_MS);
-  } else {
-    return;
-  }
+  if (!stoppedShown || entry.state === "stopped") return;
+  entry.state = "stopped";
+  clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => void clearPresence(tabId), PRESENCE_STOPPED_MS);
   await drawPresence(tabId);
+}
+
+/** Give a tab back to an agent the user stopped there (from the popup, or Codara's Settings). */
+async function giveBack(tabId, key, { tellCodara = true } = {}) {
+  await setStopped(tabId, stoppedOn(tabId).filter((agent) => agent.key !== key));
+  if (tellCodara) link.send({ type: "presence_allow", tabId, key });
+  const entry = presence.get(tabId);
+  if (entry?.state === "stopped" && entry.key === key) await clearPresence(tabId);
 }
 
 async function setPresence(settings) {
@@ -501,6 +598,9 @@ function handleMessage(message) {
     if (presence.has(message.tabId) && Number.isFinite(message.x) && Number.isFinite(message.y)) {
       void inWorld(message.tabId, presenceCall("move", Math.round(message.x), Math.round(message.y), message.press === true));
     }
+  } else if (message.type === "presence_allowed" && typeof message.tabId === "number" && typeof message.key === "string") {
+    // Given back from Codara's Settings.
+    void ready.then(() => giveBack(message.tabId, message.key, { tellCodara: false }));
   } else if (message.type === "presence_settings") {
     // The newer change wins; tell Codara when ours is the newer one.
     void ready.then(async () => {
@@ -570,8 +670,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.sessionId) return;
   // The overlay's own world and node are not the page's.
   if (method === "Runtime.executionContextCreated" && params?.context?.name === PRESENCE_WORLD) return;
-  if (method === "DOM.childNodeInserted" || method === "DOM.setChildNodes") {
-    params = withoutPresenceNodes(method, params);
+  if (method.startsWith("DOM.") || method === "Runtime.executionContextDestroyed") {
+    params = withoutPresenceNodes(method, params, hiddenFor(source.tabId));
     if (!params) return;
   }
   if (method === "Page.frameNavigated" && !params?.frame?.parentId && blockingRule(params?.frame?.url, rules)) {
@@ -687,11 +787,21 @@ chrome.tabGroups?.onRemoved.addListener(async (group) => {
   await ready;
   if (state.agentGroups.includes(group.id)) await save({ agentGroups: without(state.agentGroups, group.id) });
 });
+// A closed window's sharing goes with it: window ids are not reused within a
+// session, but the list should say what is really shared.
+chrome.windows.onRemoved.addListener(async (windowId) => {
+  await ready;
+  if (state.shareWindows.includes(windowId)) await save({ shareWindows: without(state.shareWindows, windowId) });
+});
+
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   await ready;
   const usage = { ...state.usage };
   delete usage[tabId];
+  const stoppedAgents = { ...state.stoppedAgents };
+  delete stoppedAgents[tabId];
   await save({
+    stoppedAgents,
     shareTabs: without(state.shareTabs, tabId),
     stopped: without(state.stopped, tabId),
     storageTabs: without(state.storageTabs, tabId),
@@ -704,8 +814,9 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 
 // ── The popup and the options page ──────────────────────────────────────────
 
-function describeTab(tab) {
+function describeTab(tab, fileAccess = true) {
   const rule = blockingRule(tab.url, rules);
+  const url = tab.url ?? tab.pendingUrl;
   return {
     tabId: tab.id,
     windowId: tab.windowId,
@@ -713,30 +824,39 @@ function describeTab(tab) {
     title: tab.title ?? "",
     url: tab.url ?? tab.pendingUrl ?? "",
     shared: isTabShared(shareChoice(), tab),
-    restricted: isRestrictedUrl(tab.url ?? tab.pendingUrl),
+    // Why Chrome keeps the extension off this tab: its own pages, or a local
+    // file while "Allow access to file URLs" is off.
+    restricted: isRestrictedUrl(url) ? "browser" : isRestrictedUrl(url, { fileAccess }) ? "file" : false,
     blocked: rule?.raw ?? null,
     attached: state.attached.includes(tab.id),
     storage: state.storageTabs.includes(tab.id),
     openedByAgent: state.agentTabs.includes(tab.id),
     usage: state.usage[tab.id] ?? null,
+    stoppedAgents: stoppedOn(tab.id),
   };
 }
 
 async function popupState(request) {
   const tabs = await chrome.tabs.query({});
   const current = typeof request.tabId === "number" ? tabs.find((tab) => tab.id === request.tabId) : null;
+  const fileAccess = await chrome.extension.isAllowedFileSchemeAccess().catch(() => false);
+  // Only open windows count; a closed window's id can stay in the list.
+  const open = new Set(tabs.map((tab) => tab.windowId));
+  const otherWindows = state.shareWindows.filter((id) => id !== request.windowId && open.has(id));
   return {
     status: link.status,
     paired: Boolean(state.token),
     shareAll: state.shareAll,
     windowShared: typeof request.windowId === "number" && state.shareWindows.includes(request.windowId),
     reach: reachOf(shareChoice(), request.windowId),
-    otherWindows: state.shareWindows.filter((id) => id !== request.windowId).length,
+    otherWindows: otherWindows.length,
+    // Tabs switched on one by one in other windows that are not shared whole.
+    otherTabs: tabs.filter((tab) => tab.windowId !== request.windowId && !otherWindows.includes(tab.windowId) && state.shareTabs.includes(tab.id) && isTabShared(shareChoice(), tab)).length,
     allowOpen: state.allowOpen,
     presence: presenceSettings(state.presence),
     blockedSites: state.blockedSites,
-    current: current ? describeTab(current) : null,
-    shared: tabs.filter((tab) => isTabShared(shareChoice(), tab)).map(describeTab),
+    current: current ? describeTab(current, fileAccess) : null,
+    shared: tabs.filter((tab) => isTabShared(shareChoice(), tab)).map((tab) => describeTab(tab, fileAccess)),
   };
 }
 
@@ -775,6 +895,9 @@ async function handlePopup(request) {
       break;
     case "stopTab":
       await setTabShared(Number(request.tabId), false);
+      break;
+    case "giveBack":
+      if (typeof request.key === "string") await giveBack(Number(request.tabId), request.key);
       break;
     case "shareWindow": {
       const windowId = Number(request.windowId);

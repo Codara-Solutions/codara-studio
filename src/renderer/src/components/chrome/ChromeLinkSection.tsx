@@ -99,11 +99,25 @@ export default function ChromeLinkSection(): React.ReactElement | null {
                   {browser.tabs.length > 0 ? (
                     <ul className="chrome-tabs">
                       {browser.tabs.map((tab) => (
-                        <li key={tab.id}>
-                          <span className="spark-mono">{tab.id}</span>
-                          <span className="chrome-tabs__title">{tab.blocked ? "Blocked site" : tab.title || tab.url}</span>
-                          <span>{tab.attached ? "in use" : tab.storage ? "cookies allowed" : ""}</span>
-                        </li>
+                        <React.Fragment key={tab.id}>
+                          <li>
+                            <span className="spark-mono">{tab.id}</span>
+                            <span className="chrome-tabs__title">{tab.blocked ? "Blocked site" : tab.title || tab.url}</span>
+                            <span>{tab.attached ? "in use" : tab.storage ? "cookie tools on" : ""}</span>
+                          </li>
+                          {tab.stopped.map((agent) => (
+                            <li key={`${tab.id}-${agent.key}`} className="chrome-tabs__stopped">
+                              <span className="chrome-tabs__title">{`You stopped ${agent.name} here.`}</span>
+                              <button
+                                type="button"
+                                className="spark-btn"
+                                onClick={() => void run(() => window.spark.chromeLink.giveBack(browser.linkId, Number(tab.id.split(/[:/]/).pop()), agent.key))}
+                              >
+                                Give back
+                              </button>
+                            </li>
+                          ))}
+                        </React.Fragment>
                       ))}
                     </ul>
                   ) : null}

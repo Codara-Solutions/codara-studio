@@ -600,6 +600,31 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   lib.stopChromeDriver("link-a", 12, claude.key, true);
   lib.forgetChromeStops("link-a");
   lib.assertChromeDriverAllowed({ tabId: 12, linkId: null }, "chrome:12", claude);
+  // A stop outlives a reconnect and a Codara restart; it ends only when the
+  // user gives the tab back, unshares or closes it, or unpairs the browser.
+  const stopsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codara-stops-")), "presence-stops.json");
+  lib.loadChromeStops(stopsFile);
+  lib.stopChromeDriver("link-a", 12, claude.key, true, "Claude Code");
+  lib.chromeLinkDown("link-a", true);
+  assert.throws(() => lib.assertChromeDriverAllowed({ tabId: 12, linkId: "link-a" }, "chrome:12", claude), /stopped Claude Code/, "still refused after the link drops and comes back");
+  assert.equal((fs.statSync(stopsFile).mode & 0o777).toString(8), "600");
+  lib.loadChromeStops(stopsFile);
+  assert.throws(() => lib.assertChromeDriverAllowed({ tabId: 12, linkId: "link-a" }, "chrome:12", claude), /stopped Claude Code/, "still refused after Codara restarts");
+  assert.deepEqual([...lib.chromeStops("link-a")], [[12, [{ key: claude.key, name: "Claude Code" }]]]);
+  lib.keepChromeStopsFor("link-a", [12, 14]);
+  assert.throws(() => lib.assertChromeDriverAllowed({ tabId: 12, linkId: "link-a" }, "chrome:12", claude), /stopped/, "a tab still shared keeps its stop");
+  lib.keepChromeStopsFor("link-a", [14]);
+  lib.assertChromeDriverAllowed({ tabId: 12, linkId: "link-a" }, "chrome:12", claude);
+  lib.loadChromeStops(stopsFile);
+  lib.assertChromeDriverAllowed({ tabId: 12, linkId: "link-a" }, "chrome:12", claude);
+  lib.stopChromeDriver("link-a", 15, claude.key, true, "Claude Code");
+  lib.chromeLinkDown("link-a", false);
+  lib.loadChromeStops(stopsFile);
+  lib.assertChromeDriverAllowed({ tabId: 15, linkId: "link-a" }, "chrome:15", claude);
+  lib.stopChromeDriver("link-a", 16, claude.key, true, "Claude Code");
+  lib.stopChromeDriver("link-a", 16, claude.key, false);
+  lib.loadChromeStops(stopsFile);
+  lib.assertChromeDriverAllowed({ tabId: 16, linkId: "link-a" }, "chrome:16", claude);
   const presenceFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codara-presence-")), "presence.json");
   lib.loadPresenceSettings(presenceFile);
   assert.deepEqual(lib.presenceSettings(), { overlay: true, glow: true, at: 0 }, "on by default");
@@ -619,7 +644,7 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   assert.deepEqual(lib.chromeConnectProgress({ browsers: [browser([tab(1)]), browser([tab(2), tab(3)])], pending: [] }), { step: "done", paired: 2, shared: 3 });
   assert.equal(lib.chromeConnectProgress({ browsers: [browser([tab(1)])], pending: [{}] }).step, "pair", "a second browser asking comes first");
 
-  console.log("chrome link: origin and host checks, pairing over ECDH with code and Allow, a swapped key refused, bound tokens never sent, sealed frames with injected and replayed ones dropping the link, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair, stops from the page, presence settings and connect steps");
+  console.log("chrome link: origin and host checks, pairing over ECDH with code and Allow, a swapped key refused, bound tokens never sent, sealed frames with injected and replayed ones dropping the link, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair, stops from the page kept across reconnects and restarts, presence settings and connect steps");
   setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref();
 })().catch((error) => {
   console.error(error);

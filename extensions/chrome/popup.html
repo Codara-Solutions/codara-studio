@@ -37,6 +37,7 @@
         <span class="agentchip"><i id="tab-agent-dot"></i><span id="tab-agent-name"></span></span>
         <span id="tab-usage" class="dim grow"></span>
       </div>
+      <ul id="tab-stopped" class="stopped" hidden></ul>
       <details id="tab-details" class="details">
         <summary>Details</summary>
         <div class="row">
@@ -60,8 +61,9 @@
       </label>
       <label id="storage-row" class="row">
         <span class="grow">Read and change cookies and storage here</span>
-        <input id="share-storage" class="sw" type="checkbox" role="switch" />
+        <input id="share-storage" class="sw" type="checkbox" role="switch" aria-describedby="storage-note" />
       </label>
+      <p id="storage-note" class="note">Even when off, agents can read what this page's own scripts can (local storage, cookies that are not HttpOnly) and its requests and responses.</p>
     </section>
 
     <section id="on-page" class="sec" hidden>

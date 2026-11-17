@@ -65,10 +65,12 @@ tools it uses for its own browser tabs.
 
 While an agent works in a shared tab, the page shows a pointer in its colour
 with its name, a thin glow around the page and an "<agent> working" pill with
-**Stop**, which takes that tab back from that agent only (Undo for six
-seconds). It is drawn through the debugger session in an isolated world, out
-of the agent's screenshots and snapshots, and never takes your clicks or
-typing. **On the page** in the popup, or Settings > Browser in Codara, turns
+**Stop**, which takes that tab back from that agent only, until you give it
+back from the popup (or Settings > Browser in Codara). It is drawn through the
+debugger session in an isolated world, out of the agent's screenshots,
+snapshots and recordings, and never takes your clicks or typing. The page
+itself can notice and remove it, but cannot read it or press Stop for you; if
+a dialog or fullscreen video covers it, use **Stop** in the popup. **On the page** in the popup, or Settings > Browser in Codara, turns
 the glow or the whole overlay off.
 
 ## What agents can and cannot do
@@ -87,10 +89,11 @@ the glow or the whole overlay off.
 - Browser pages (`chrome://`, the extension stores, other extensions) are
   never usable.
 - Cookies and site storage (`Network.getCookies`, `DOMStorage.*`,
-  `IndexedDB.*`, `Fetch.*` and similar) need **Allow cookie and storage
-  access** for that tab, and reach only that tab's site: another site's
+  `IndexedDB.*`, `Fetch.*` and similar) need **Read and change cookies and
+  storage here** for that tab, and reach only that tab's site: another site's
   cookies or storage, or a blocked site's, are refused even with it.
-  Without it, cookie headers are removed from network events. Profile-wide
+  Without it, cookie headers are removed from network events; other request
+  headers (such as `Authorization`) and response bodies still reach agents. Profile-wide
   cookie reads, clearing browser data, closing tabs it did not open, loading
   other URLs with your cookies (`Network.loadNetworkResource`), redirecting
   downloads and every `Browser.*` and `Target.*` command that would reach
