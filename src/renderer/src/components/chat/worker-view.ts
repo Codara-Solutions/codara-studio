@@ -49,6 +49,24 @@ export function canMessageWorker(attempt: WorkerAttempt | null): boolean {
   );
 }
 
+/**
+ * What Cora wrote for this worker: its task's own title and description, the
+ * part of its prompt that is not the standing rules every worker gets. Read
+ * from the task the attempt ran, never cut out of the prompt text, so the
+ * prompt itself (what the worker receives) stays exactly as it is. Null when
+ * the task has no description of its own; the view then shows the prompt.
+ */
+export function workerTaskBrief(
+  run: Pick<RunState, "workerTasks">,
+  attempt: Pick<WorkerAttempt, "workerTaskId"> | null,
+): { title: string; text: string } | null {
+  if (!attempt) return null;
+  const task = run.workerTasks.find((candidate) => candidate.id === attempt.workerTaskId);
+  const text = task?.description.trim();
+  if (!task || !text) return null;
+  return { title: task.title, text };
+}
+
 /** "12s", "3m 12s", "1h 4m": how long the attempt ran, or has run so far. */
 export function workerElapsed(attempt: WorkerAttempt | null, now: number): string | null {
   const started = attempt?.startedAt ? Date.parse(attempt.startedAt) : NaN;

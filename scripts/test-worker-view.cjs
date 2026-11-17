@@ -79,6 +79,24 @@ function run(view) {
   check("a shell worker takes keystrokes, not chat messages", !view.canMessageWorker(attempt("running", "shell")));
   check("a finished worker cannot be messaged", !view.canMessageWorker(attempt("succeeded")));
 
+  // The brief: what Cora wrote for this worker, from the task the attempt ran.
+  const tasks = {
+    workerTasks: [
+      { id: "t1", title: "Fix the count", description: "  Goal: stop counting the main worktree.\nDone when: a test pins it.  " },
+      { id: "t2", title: "Retry of it", description: "Second try, with the failing case first." },
+      { id: "t3", title: "No words", description: "   " },
+    ],
+  };
+  const brief = view.workerTaskBrief(tasks, { workerTaskId: "t1" });
+  check(
+    "the brief is the task's own words, trimmed",
+    brief?.title === "Fix the count" && brief.text === "Goal: stop counting the main worktree.\nDone when: a test pins it.",
+  );
+  check("a retry shows its own task's words", view.workerTaskBrief(tasks, { workerTaskId: "t2" })?.text.startsWith("Second try"));
+  check("a task without words falls back to the prompt", view.workerTaskBrief(tasks, { workerTaskId: "t3" }) === null);
+  check("an unknown task falls back to the prompt", view.workerTaskBrief(tasks, { workerTaskId: "nope" }) === null);
+  check("no attempt, no brief", view.workerTaskBrief(tasks, null) === null);
+
   // Elapsed time.
   const started = Date.parse(at);
   check("seconds", view.workerElapsed(attempt("running", "claude", { startedAt: at }), started + 12_400) === "12s");
