@@ -26,6 +26,7 @@ import SplitCommitsDialog from "./SplitCommitsDialog";
 import CommitHistory from "./CommitHistory";
 import GitHubSection from "./GitHubSection";
 import StashSection from "./StashSection";
+import SourceControlTabs, { tabPanelProps, type SourceControlTab } from "./SourceControlTabs";
 import SourceLanesList from "./lanes/SourceLanesList";
 import { useSourceLanes, type SourceLanesContext } from "./lanes/useSourceLanes";
 import { CommitHookFix, ConflictFixBanner } from "./fix/GitPanelFixes";
@@ -67,11 +68,11 @@ interface Props extends SourceLanesContext {
   onCleanUpWorkspace?: (id: string, confirmIgnored?: string) => Promise<WorktreeRailCleanupResult | null>;
 }
 
-// The left-rail Source Control panel (DESIGN.md, "Source Control"): one lane per
-// checkout of the project, the active checkout's lane holding its branch,
-// change lists, stash, GitHub state and history, and the commit box docked
-// below, over the git backend in src/main/git-ops.ts. Slots into the rail's
-// collapsible section layout.
+// The left-rail Source Control panel (DESIGN.md, "Source Control"): a tab
+// strip (Changes, Issues, Pull request, Stashes) over the git backend in
+// src/main/git-ops.ts. Changes holds one lane per checkout of the project, the
+// active checkout's lane holding its branch, change lists and history, and the
+// commit box docked below. Slots into the rail's collapsible section layout.
 export default function GitPanel({
   cwd,
   workspace,
@@ -119,6 +120,9 @@ export default function GitPanel({
   const [message, setMessage] = useState("");
   const [sections, setSections] = useState({ staged: false, changes: false, history: false });
   const [githubRefreshNonce, setGitHubRefreshNonce] = useState(0);
+  const [tab, setTab] = useState<SourceControlTab>("changes");
+  const [issueCount, setIssueCount] = useState<number | null>(null);
+  const [stashCount, setStashCount] = useState(0);
   // A commit selected for inspection — when set, the body shows CommitDetail
   // (the history/inspection agent builds that view).
   const [detailHash, setDetailHash] = useState<string | null>(null);
@@ -141,6 +145,9 @@ export default function GitPanel({
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const savedScrollRef = useRef<number | null>(null);
+  // The Changes scroller's position while another tab is showing: a hidden
+  // element drops its scrollTop, so it is read before the switch.
+  const changesScrollRef = useRef<number | null>(null);
 
   // Reset panel-local state whenever the workspace changes.
   useEffect(() => {
@@ -152,7 +159,23 @@ export default function GitPanel({
     setMessage("");
     setDiffStats(null);
     setSections({ staged: false, changes: false, history: false });
+    changesScrollRef.current = null;
   }, [cwd]);
+
+  const changeTab = useCallback(
+    (next: SourceControlTab) => {
+      if (tab === "changes" && next !== "changes") changesScrollRef.current = bodyRef.current?.scrollTop ?? null;
+      setTab(next);
+    },
+    [tab],
+  );
+
+  useLayoutEffect(() => {
+    if (tab !== "changes") return;
+    const saved = changesScrollRef.current;
+    changesScrollRef.current = null;
+    if (saved !== null && bodyRef.current) bodyRef.current.scrollTop = saved;
+  }, [tab]);
 
   // Per-file counts follow the shared status poll: every gitVersion bump
   // re-reads the cached numstat (same 2s TTL as status, so this coalesces
@@ -470,6 +493,24 @@ export default function GitPanel({
   const canCommit = message.trim().length > 0 && changeCount > 0;
   const canGenerateMessage = changeCount > 0;
   const commitLabel = stagedCount === 0 && unstagedCount > 0 ? "Commit All" : "Commit";
+  // Tabs only make sense over a repository; a folder that is not one keeps
+  // the single page that offers to initialize it.
+  const showTabs = !collapsed && Boolean(cwd) && Boolean(status?.isRepo);
+  const notices =
+    cwd && status?.isRepo ? (
+      <>
+        <ConflictFixBanner cwd={cwd} status={status} />
+        {displayError && (
+          <ErrorStrip
+            text={displayError}
+            onDismiss={() => {
+              setOpError(null);
+              setCommitFailure(null);
+            }}
+          />
+        )}
+      </>
+    ) : null;
 
   return (
     <div
@@ -517,9 +558,61 @@ export default function GitPanel({
         }
       />
 
+      {showTabs && cwd && status ? (
+        <>
+          <SourceControlTabs
+            tab={tab}
+            counts={{ changes: changeCount, issues: issueCount, stashes: stashCount }}
+            onChange={changeTab}
+          />
+          {/* A conflict or a failed git action shows on every tab: a stash
+              pop that conflicts happens on Stashes, not on Changes. */}
+          {tab !== "changes" ? notices : null}
+          {/* Issues and Pull request share one GitHub block, so GitHub is read
+              once for both. Like Stashes it stays mounted behind its tab, so
+              the tab counts are known before a tab is opened. */}
+          <div className="scm-tabpanel" {...tabPanelProps(["issues", "pull-request"], tab)}>
+            <GitHubSection
+              cwd={cwd}
+              gitStatus={status}
+              view={tab === "pull-request" ? "pull-request" : "issues"}
+              onQueueCount={setIssueCount}
+              onShowChanges={() => changeTab("changes")}
+              refreshKey={gitVersion}
+              userRefreshKey={githubRefreshNonce}
+              queue={
+                workspace && !workspace.remote
+                  ? {
+                      sourceWorkspaceId: workspace.id,
+                      refreshKey: githubRefreshNonce,
+                      onOpenItem: onOpenGitHubQueueItem,
+                    }
+                  : null
+              }
+              onRefresh={() => setGitHubRefreshNonce((value) => value + 1)}
+              onPublished={() => {
+                setGitHubRefreshNonce((value) => value + 1);
+                notifyChanged();
+              }}
+            />
+          </div>
+          <div className="scm-tabpanel" {...tabPanelProps(["stashes"], tab)}>
+            <StashSection
+              cwd={cwd}
+              onChanged={handleGitChanged}
+              refreshKey={gitVersion}
+              disabled={disabled}
+              alwaysShow
+              onCount={setStashCount}
+            />
+          </div>
+        </>
+      ) : null}
+
       {!collapsed && (
         <div
           ref={bodyRef}
+          {...(showTabs ? tabPanelProps(["changes"], tab) : {})}
           style={{
             flex: 1,
             minHeight: 0,
@@ -651,34 +744,6 @@ export default function GitPanel({
 
                         {changeCount === 0 && <CleanState />}
 
-                        <StashSection
-                          cwd={cwd}
-                          onChanged={handleGitChanged}
-                          refreshKey={gitVersion}
-                          disabled={disabled}
-                        />
-
-                        <GitHubSection
-                          cwd={cwd}
-                          gitStatus={status}
-                          refreshKey={gitVersion}
-                          userRefreshKey={githubRefreshNonce}
-                          queue={
-                            workspace && !workspace.remote
-                              ? {
-                                  sourceWorkspaceId: workspace.id,
-                                  refreshKey: githubRefreshNonce,
-                                  onOpenItem: onOpenGitHubQueueItem,
-                                }
-                              : null
-                          }
-                          onRefresh={() => setGitHubRefreshNonce((value) => value + 1)}
-                          onPublished={() => {
-                            setGitHubRefreshNonce((value) => value + 1);
-                            notifyChanged();
-                          }}
-                        />
-
                         <CommitHistory
                           cwd={cwd}
                           rows={log?.rows ?? []}
@@ -701,7 +766,7 @@ export default function GitPanel({
           )}
         </div>
       )}
-      {!collapsed && cwd && status?.isRepo && !detailHash ? (
+      {!collapsed && cwd && status?.isRepo && !detailHash && tab === "changes" ? (
         <div
           data-testid="commit-dock"
           style={{
@@ -712,16 +777,7 @@ export default function GitPanel({
             background: "var(--panel-2)",
           }}
         >
-          <ConflictFixBanner cwd={cwd} status={status} />
-          {displayError && (
-            <ErrorStrip
-              text={displayError}
-              onDismiss={() => {
-                setOpError(null);
-                setCommitFailure(null);
-              }}
-            />
-          )}
+          {notices}
           {commitFailure && opError === commitFailure.output ? (
             <CommitHookFix cwd={cwd} output={commitFailure.output} commitMessage={commitFailure.message} />
           ) : null}
