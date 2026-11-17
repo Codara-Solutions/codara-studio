@@ -2906,7 +2906,7 @@ function FastModeRow() {
   return (
     <ToggleRow
       title="Fast mode"
-      desc={`Cora and her workers answer faster on models that support it. ${FAST_MODE_COST_NOTE}`}
+      desc={`Cora and her workers answer faster on Codex models. Claude always runs at standard speed. ${FAST_MODE_COST_NOTE}`}
       checked={fastMode.enabled}
       onChange={() => fastMode.toggle()}
     />
