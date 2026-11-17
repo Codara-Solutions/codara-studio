@@ -149,16 +149,22 @@ export default function ChatPanel({
   const inside = insideWorker !== null && chatView === "chat" && activeRun !== null;
   // Anything that asks for Main's composer (its shortcut, a prefill from the
   // browser or a stop) brings Main back first: the composer is inert while a
-  // worker covers it. Synchronously, so the composer's own deferred focus
-  // lands after inert is gone.
+  // worker covers it. A prefill lands in the draft either way and focuses it
+  // a tick later; a focus request is sent again once Main is back, since the
+  // composer's own listener may already have tried an inert textarea.
   useEffect(() => {
     if (!inside || suspendGlobalEvents) return undefined;
-    const leave = () => flushSync(() => setInsideTarget(null));
-    window.addEventListener("spark:focus-composer", leave);
-    window.addEventListener("spark:prefill-composer", leave);
+    const leave = (event: Event) => {
+      flushSync(() => setInsideTarget(null));
+      if (event.type === "spark:focus-composer") {
+        window.requestAnimationFrame(() => window.dispatchEvent(new Event("spark:focus-composer")));
+      }
+    };
+    window.addEventListener("spark:focus-composer", leave, true);
+    window.addEventListener("spark:prefill-composer", leave, true);
     return () => {
-      window.removeEventListener("spark:focus-composer", leave);
-      window.removeEventListener("spark:prefill-composer", leave);
+      window.removeEventListener("spark:focus-composer", leave, true);
+      window.removeEventListener("spark:prefill-composer", leave, true);
     };
   }, [inside, suspendGlobalEvents]);
   const leaveWorker = useCallback(() => {

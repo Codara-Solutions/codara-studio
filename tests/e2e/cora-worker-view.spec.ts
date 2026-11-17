@@ -154,6 +154,14 @@ test("Cora goes inside a running and a finished worker and comes back to Main wh
     expect(finishedRowId).toBeTruthy();
     await expect(page.locator(`[data-worker-row="${finishedRowId}"]`)).toBeFocused();
 
+    // Asking for Main's composer from inside a worker (its shortcut, a
+    // prefill) brings Main back with the composer focused.
+    await finishedRow.click();
+    await expect(bar).toBeVisible();
+    await page.evaluate(() => window.dispatchEvent(new Event("spark:focus-composer")));
+    await expect(bar).toHaveCount(0);
+    await expect(page.getByRole("textbox", { name: "Message Cora" }).last()).toBeFocused();
+
     // Inside the finished worker, another worker ending pings the bar.
     await finishedRow.click();
     await expect(bar).toContainText("Read how the fold counts");
