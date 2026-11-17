@@ -46,14 +46,11 @@ function createHarness() {
     turnOptions: [],
     holdNextTurn: false,
     // Stands in for AppSettings.openAiFastMode, which the composer's flash
-    // button writes, narrowed the way resolveCodaraPiFastMode narrows it: a
-    // Claude model without fast mode never sees it.
+    // button writes, narrowed the way resolveCodaraPiFastMode narrows it:
+    // only a Codex session ever sees it.
     fastMode: false,
-    fastModeFor(provider, model) {
-      if (provider === "anthropic" && !["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"].includes(model)) {
-        return false;
-      }
-      return harness.fastMode;
+    fastModeFor(provider) {
+      return provider === "openai-codex" ? harness.fastMode : false;
     },
     resolveAccount: async () => ({
       accountProfileId: "11111111-1111-4111-8111-111111111111",
@@ -542,8 +539,8 @@ async function testSupersedingRequestReclaimsPendingOwner(backend, harness) {
 // Fast mode reaches the runtime only as launch-time env (CODARA_PI_FAST_MODE),
 // so it has to sit in the session's reuse key: flipping the composer's flash
 // button must rotate the process on the next turn instead of silently doing
-// nothing. A model without fast mode never carries it, so a flip cannot
-// restart (and re-cache) a session it would not change.
+// nothing. A non-Codex model never carries it, so a flip cannot restart (and
+// re-cache) a session it would not change.
 async function testFastModeIsPartOfSessionIdentity(backend, harness) {
   harness.fastMode = false;
   const input = requestInput("run-fast-mode");
@@ -575,34 +572,25 @@ async function testFastModeIsPartOfSessionIdentity(backend, harness) {
   assert.equal(backOff.plan.fastMode, false);
   await backend.disposeChat("run-fast-mode");
 
-  // Claude Opus runs fast like a GPT model does.
-  const opus = requestInput("run-fast-mode-opus", "claude-opus-5");
-  harness.fastMode = false;
-  await backend.requestManagerDecision(opus);
-  const opusOff = harness.clients.at(-1);
-  assert.equal(opusOff.plan.fastMode, false);
-  harness.fastMode = true;
-  await backend.requestManagerDecision(opus);
-  const opusOn = harness.clients.at(-1);
-  assert.notEqual(opusOn, opusOff, "fast mode on must relaunch a Claude Opus session");
-  assert.equal(opusOn.plan.fastMode, true, "a Claude Opus session launches with fast mode");
-  harness.fastMode = false;
-  await backend.disposeChat("run-fast-mode-opus");
-
-  const sonnet = requestInput("run-fast-mode-sonnet", "claude-sonnet-5");
-  await backend.requestManagerDecision(sonnet);
-  const claude = harness.clients.at(-1);
-  assert.equal(claude.plan.fastMode, false);
-  harness.fastMode = true;
-  await backend.requestManagerDecision(sonnet);
-  assert.equal(
-    harness.clients.at(-1),
-    claude,
-    "fast mode cannot rotate a session whose model has no fast mode",
-  );
-  assert.equal(harness.clients.at(-1).plan.fastMode, false);
-  harness.fastMode = false;
-  await backend.disposeChat("run-fast-mode-sonnet");
+  // Claude never runs fast, Opus included: the flip neither relaunches the
+  // session nor reaches its plan.
+  for (const model of ["claude-opus-5", "claude-sonnet-5"]) {
+    const chat = requestInput(`run-fast-mode-${model}`, model);
+    harness.fastMode = false;
+    await backend.requestManagerDecision(chat);
+    const claude = harness.clients.at(-1);
+    assert.equal(claude.plan.fastMode, false);
+    harness.fastMode = true;
+    await backend.requestManagerDecision(chat);
+    assert.equal(
+      harness.clients.at(-1),
+      claude,
+      `fast mode cannot rotate a ${model} session`,
+    );
+    assert.equal(harness.clients.at(-1).plan.fastMode, false, `${model} launches at standard speed`);
+    harness.fastMode = false;
+    await backend.disposeChat(`run-fast-mode-${model}`);
+  }
 }
 
 async function testEmptyFinalGetsOneRecoveryPrompt(backend, harness) {
