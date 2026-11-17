@@ -529,7 +529,9 @@ section headers, the snooze presets and the undo notice in the footer).
   chip on that session's third line (a `--info` dot while one works,
   `--warn` while one waits). The chip opens one muted line per subagent in
   place: title and time, the branch on hover. An orphan (its session
-  closed) stays a normal row; every count is main agents only. Etienne: "I
+  closed) stays a normal row; every count is main agents only. A settled
+  row is one line with no chip; a subagent that starts work or asks brings
+  its settled parent back, and one that asks ends its snooze. Etienne: "I
   mostly want to see the main agents only, not the sub agents".
 
 ## Merged worktrees leave on their own (2026-11)

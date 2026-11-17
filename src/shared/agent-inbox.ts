@@ -207,13 +207,23 @@ export function reconcileAgentInbox(
   };
   const autoSettled: AgentInboxReconcile["autoSettled"] = [];
   const present = new Set<string>();
+  // A subagent sits on its parent's row, so what it does counts as the
+  // parent's: a settled or snoozed coordinator comes back when one of its
+  // subagents would have.
+  const { children } = groupAgentInboxCards(model);
   for (const card of allCards(model)) {
     present.add(card.key);
+    const kids = children.get(card.key) ?? [];
     const snooze = prefs.snoozed[card.key];
-    if (snooze && (context.now >= snooze.until || snoozeEndsEarly(card, snooze.at))) delete edit().snoozed[card.key];
+    if (
+      snooze &&
+      (context.now >= snooze.until || [card, ...kids].some((entry) => snoozeEndsEarly(entry, snooze.at)))
+    ) {
+      delete edit().snoozed[card.key];
+    }
     const pr = context.pullRequests[card.workspaceId];
     const settle = prefs.settled[card.key];
-    if (settle && agentActedSince(card, settle.at)) {
+    if (settle && [card, ...kids].some((entry) => agentActedSince(entry, settle.at))) {
       const target = edit();
       delete target.settled[card.key];
       // New work after the merge is news: the same merge never hides it again.

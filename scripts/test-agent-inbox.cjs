@@ -403,6 +403,21 @@ function testSubagents(I) {
   const three2 = [...later.done, ...later.working].find((entry) => entry.key === "pane:three");
   check("settling a subagent itself does not move it off its parent", keys(three2.subagents).includes("worktree:b"));
 
+  const settledAt = NOW - 30 * MIN;
+  const quietPrefs = I.emptyAgentInboxPrefs();
+  quietPrefs.settled["pane:three"] = { at: settledAt };
+  quietPrefs.snoozed["pane:one"] = { at: settledAt, until: NOW + HOUR };
+  const quiet2 = I.reconcileAgentInbox(model(cards), quietPrefs, { now: NOW, pullRequests: {} });
+  check("a subagent that starts work or asks brings its settled parent back", !quiet2.prefs.settled["pane:three"], quiet2.prefs.settled);
+  check("a working subagent does not end its parent's snooze", Boolean(quiet2.prefs.snoozed["pane:one"]));
+  const asking = cards.map((entry) => (entry.key === "worktree:a" ? { ...entry, bucket: "needs-you", tone: "warn", since: NOW - MIN } : entry));
+  const woken = I.reconcileAgentInbox(model(asking), quietPrefs, { now: NOW, pullRequests: {} });
+  check("a subagent that asks ends its parent's snooze", !woken.prefs.snoozed["pane:one"], woken.prefs.snoozed);
+  const stillPrefs = I.emptyAgentInboxPrefs();
+  stillPrefs.settled["pane:three"] = { at: NOW };
+  const still = I.reconcileAgentInbox(model(cards), stillPrefs, { now: NOW, pullRequests: {} });
+  check("subagents with nothing new keep their parent settled", Boolean(still.prefs.settled["pane:three"]));
+
   const chained = I.buildAgentInbox(
     model([card("pane:p", working), kid("worktree:x", "pane:p"), kid("worktree:y", "worktree:x"), kid("worktree:self", "worktree:self")]),
     I.emptyAgentInboxPrefs(),

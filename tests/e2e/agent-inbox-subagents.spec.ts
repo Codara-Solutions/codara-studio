@@ -103,15 +103,15 @@ test("subagents sit behind a count chip on their coordinator's row; an orphan st
   await Promise.all([mkdir(home), mkdir(userHome), mkdir(repo), mkdir(notes), mkdir(trees), mkdir(join(root, "gh"))]);
   const gitConfig = join(root, "gitconfig");
   await writeFile(gitConfig, "[user]\n\tname = Test\n\temail = test@example.com\n");
-  const clean = Object.fromEntries(
-    Object.entries(process.env).filter(
-      ([key]) => !/^(SPARK_|CODARA_|CLAUDE_CONFIG_DIR$|CODEX_HOME$|GROK_HOME$|ZDOTDIR$)/.test(key),
-    ),
-  );
+  // playwright.config.ts already dropped the live app's pane variables and
+  // set the test-only ones (background window, no keychain, no Chrome link).
   const env = {
-    ...clean,
+    ...process.env,
     HOME: userHome,
     USERPROFILE: userHome,
+    CLAUDE_CONFIG_DIR: join(userHome, ".claude"),
+    CODEX_HOME: join(userHome, ".codex"),
+    GROK_HOME: join(userHome, ".grok"),
     GIT_CONFIG_GLOBAL: gitConfig,
     GIT_CONFIG_NOSYSTEM: "1",
     GH_CONFIG_DIR: join(root, "gh"),
