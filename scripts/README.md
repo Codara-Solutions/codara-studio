@@ -47,7 +47,9 @@ How `scripts/run-all-tests.cjs` works:
     timing checks), `test-app-exit-electron.cjs` (Chromium's exit time on a
     loaded macOS runner), `test-renderer-chunks.mjs` (a
     production Vite build, about 2 GB) and `test-workflow-sandbox.cjs` (its
-    heap-limit case grows QuickJS's WebAssembly memory to 2 GB).
+    heap-limit case grows QuickJS's WebAssembly memory to 2 GB) and
+    `test-clipboard-files.cjs` (the real macOS pasteboard through
+    osascript, with the app's 3 s limit per call).
   - No suite starts while `MemAvailable` is below `CODARA_TEST_MIN_FREE_MB`
     (default 2048) and another suite is still running.
   - Each suite gets its own empty `TMPDIR`, removed when it finishes, so
@@ -74,6 +76,37 @@ How `scripts/run-all-tests.cjs` works:
   before loading the bundle and call `await clock.advance(ms)` where the
   suite would sleep. `test-terminal-agent-notify.cjs` is the example; it
   went from 157 s to under a second.
+
+### Pool-safe suites
+
+CI runs the pool two suites at a time on a 3-core macOS runner, so every
+suite gets less CPU than on your machine, and how much less changes from run
+to run. A suite that passes alone can fail there. Rules:
+
+- Wait for a state, not for a time. Poll for the file, the message or the
+  run status the next step needs; a deadline on that poll only bounds a hang,
+  so make it generous (20 s), never tight. Waiting until "something started"
+  is not waiting until it settled: `test-run-message-scrub.cjs` sent its next
+  message while the previous turn was still running, and it was queued.
+- Time a wait between two events the code under test causes (two requests
+  to a stub, a request and the exit), never across a whole child process:
+  Node's startup alone takes seconds on a busy runner, which fails an upper
+  bound and lets a lower bound pass with no wait at all.
+  `test-cora-harness.mjs` times retries by the stub's request times
+  (`stub.requests[i].at`).
+- A fixed sleep does not order your code against a timer in the code under
+  test: on a busy CPU both come due in the same turn of the loop.
+  `test-diagnostics-records.cjs` waits for a window boundary before it stalls
+  the loop.
+- Listen on port 0 and write under `os.tmpdir()` (the runner gives each
+  suite its own). `test-pool-safe-suites.cjs` reads every suite and the
+  helper modules it loads from `scripts/`, and fails on `listen()` with a
+  number or a constant set to one, and on a write call whose path starts
+  with a literal `/tmp` (directly or through `path.join` or
+  `path.resolve`). It cannot see a path built any other way.
+- To reproduce CI, slow the suite, not the machine: on Linux
+  `CODARA_TEST_JOBS=2 systemd-run --user --scope -p CPUQuota=100% npm test -- <regex>`
+  runs the matching suites two at a time on one core.
 
 The Playwright specs are separate. They live in `tests/e2e/`:
 
