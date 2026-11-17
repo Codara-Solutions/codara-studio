@@ -84,6 +84,9 @@ export default function SharedPagesSettings() {
       {list?.unavailable ? (
         <InlineMessage tone="warn" role="status">
           {list.error ?? "Share as link is not available yet."}
+          {list.pages.length > 0
+            ? " The links below were shared through another share service; they stay listed here until they expire."
+            : null}
         </InlineMessage>
       ) : list?.offline ? (
         <InlineMessage tone="warn" role="status">

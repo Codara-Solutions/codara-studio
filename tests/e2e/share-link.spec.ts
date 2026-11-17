@@ -304,6 +304,16 @@ test("without a share service, Share as link is not offered anywhere", async () 
     await expect(page.getByRole("group", { name: "File view mode" })).toBeVisible({ timeout: 20_000 });
     expect(await page.evaluate(() => window.spark.share.status())).toMatchObject({ available: false });
     await expect(page.getByRole("button", { name: "Share as link" })).toHaveCount(0);
+    // No page is being built for a service, so main downloads nothing for one.
+    const download = await page.evaluate(() =>
+      window.spark.share
+        .fetchRemote({ url: "https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js", kind: "script", maxBytes: 1024 })
+        .then(
+          () => "downloaded",
+          (err: unknown) => String(err),
+        ),
+    );
+    expect(download).toMatch(/not available yet/);
 
     await page.evaluate(() =>
       window.dispatchEvent(new CustomEvent("spark:open-settings", { detail: { section: "shared-pages" } })),
@@ -315,7 +325,12 @@ test("without a share service, Share as link is not offered anywhere", async () 
     await expect
       .poll(async () => (await readFile(handshakeFile, "utf8").catch(() => "")).length > 0, { timeout: 20_000 })
       .toBe(true);
-    const { url, token } = JSON.parse(await readFile(handshakeFile, "utf8")) as { url: string; token: string };
+    const { url, token, shareAvailable } = JSON.parse(await readFile(handshakeFile, "utf8")) as {
+      url: string;
+      token: string;
+      shareAvailable?: boolean;
+    };
+    expect(shareAvailable, "the MCP server reads this to leave codara_share_offer out").toBe(false);
     const response = await fetch(`${url}/rpc`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },

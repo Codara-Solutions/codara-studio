@@ -478,6 +478,9 @@ async function writeHandshakeFile(input: { url: string; token: string }): Promis
     token: input.token,
     pid: process.pid,
     appVersion: app.getVersion(),
+    // The MCP server lists codara_share_offer and its guidance only when this
+    // is true (share/availability.ts).
+    shareAvailable: shareServiceStatus().available,
     writtenAt: new Date().toISOString(),
   }, null, 2);
   await writeFileAtomic(handshakeFilePath(), payload, { mode: 0o600 });
