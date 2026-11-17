@@ -1,14 +1,60 @@
 import assert from "node:assert/strict";
+import vm from "node:vm";
 
 import {
   PRESENCE_INSTALL,
   hidesPresence,
+  isPresenceNode,
   newerSettings,
   pointerOf,
   presenceCall,
   presenceSettings,
   presenceView,
+  withoutPresenceNodes,
 } from "../lib/presence.js";
+
+// Just enough DOM for the page script: elements that keep their listeners and classes.
+function fakePage() {
+  const element = () => {
+    const classes = new Set();
+    const listeners = {};
+    return {
+      listeners,
+      style: { cssText: "", setProperty() {} },
+      isConnected: false,
+      classList: { add: (name) => classes.add(name), remove: (name) => classes.delete(name), toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)), contains: (name) => classes.has(name) },
+      addEventListener(type, listener) {
+        (listeners[type] ??= []).push(listener);
+      },
+      setAttribute() {},
+      append() {},
+      replaceChildren() {},
+      remove() {
+        this.isConnected = false;
+      },
+    };
+  };
+  const parts = {};
+  const document = {
+    createElement() {
+      const node = element();
+      node.attachShadow = () => ({
+        set innerHTML(_html) {},
+        querySelector: (selector) => (parts[selector] ??= element()),
+      });
+      return node;
+    },
+    documentElement: { append: (node) => (node.isConnected = true) },
+  };
+  const context = vm.createContext({ document, matchMedia: () => ({ matches: false }), setTimeout, clearTimeout });
+  const api = vm.runInContext(`${PRESENCE_INSTALL}; globalThis.__codaraPresence`, context);
+  const fire = (target, type) => {
+    const event = { isTrusted: true, prevented: false, stopPropagation() {}, preventDefault() { this.prevented = true; } };
+    for (const listener of target.listeners[type] ?? []) listener(event);
+    return event;
+  };
+  return { api, parts, fire };
+}
 
 export function run() {
   // What the agent captures never shows the overlay; its own commands never move it.
@@ -43,5 +89,46 @@ export function run() {
   assert.match(PRESENCE_INSTALL, /attachShadow\(\{ mode: "closed" \}\)/);
   assert.match(PRESENCE_INSTALL, /aria-hidden/);
   assert.doesNotMatch(PRESENCE_INSTALL, /innerText|document\.(body|title|cookie|querySelector|getElement)|location\.|localStorage/, "the overlay reads nothing from the page");
-  return "presence: captures hide the overlay, the pointer follows the agent's mouse, settings sync by time, the page gets plain data";
+  // The page script itself.
+  const { api, parts, fire } = fakePage();
+  // Values from the page's realm, compared as data.
+  const take = () => JSON.parse(JSON.stringify(api.take()));
+  const viewOf = (serial, state = "working") => presenceView({ name: `Agent ${serial}`, serial, state });
+  api.show(viewOf(1), 10_000);
+  // A Stop is bound to the agent shown when it was pressed, even if another
+  // agent takes the pill before the extension reads it.
+  fire(parts.button, "click");
+  api.show(viewOf(2), 10_000);
+  assert.deepEqual(take(), [{ action: "stop", serial: 1 }]);
+  // The pill lets clicks through only while the agent's input is dispatched.
+  api.hold(true, 5, 6, true);
+  assert.equal(parts[".pill"].classList.contains("agent-input"), true);
+  fire(parts.button, "click");
+  assert.deepEqual(take(), [], "a click during the agent's input is the agent's");
+  api.hold(false);
+  assert.equal(parts[".pill"].classList.contains("agent-input"), false, "the user's Stop works again right after");
+  fire(parts.button, "click");
+  assert.deepEqual(take(), [{ action: "stop", serial: 2 }]);
+  // Pressing the pill never moves the page's focus.
+  assert.equal(fire(parts[".pill"], "mousedown").prevented, true);
+  // Concealing says when the overlay is really out.
+  assert.equal(api.conceal(true), true);
+  api.show(viewOf(2), 10_000);
+  assert.equal(api.conceal(true), true, "a redraw while concealed stays out");
+  assert.equal(api.conceal(false), true);
+  api.remove();
+
+  // DOM events never carry the overlay's host.
+  const host = { nodeName: "DIV", attributes: ["aria-hidden", "true", "style", "all: initial !important; position: fixed !important; inset: 0px !important; z-index: 2147483647 !important;"] };
+  const page = { nodeName: "DIV", attributes: ["style", "z-index: 2"] };
+  assert.equal(isPresenceNode(host), true);
+  assert.equal(isPresenceNode(page), false);
+  assert.equal(isPresenceNode({ nodeName: "DIV", attributes: ["title", "z-index: 2147483647 !important"] }), false, "only the style attribute counts");
+  assert.equal(withoutPresenceNodes("DOM.childNodeInserted", { parentNodeId: 1, node: host }), null);
+  assert.deepEqual(withoutPresenceNodes("DOM.setChildNodes", { parentId: 1, nodes: [{ nodeName: "BODY", children: [page, host] }, host] }), { parentId: 1, nodes: [{ nodeName: "BODY", children: [page] }] });
+  for (const method of ["DOM.describeNode", "DOM.getOuterHTML", "DOM.requestChildNodes", "DOM.performSearch", "DOM.getNodeForLocation"]) {
+    assert.equal(hidesPresence(method), true, method);
+  }
+
+  return "presence: captures hide the overlay, the pointer follows the agent's mouse, settings sync by time, the page gets plain data, Stop is bound to the agent shown and works between its inputs, DOM events skip the overlay";
 }

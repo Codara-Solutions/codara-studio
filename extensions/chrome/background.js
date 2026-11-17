@@ -23,6 +23,7 @@ import {
   presenceCall,
   presenceSettings,
   presenceView,
+  withoutPresenceNodes,
 } from "./lib/presence.js";
 import {
   DEFAULT_BLOCKED_SITES,
@@ -261,16 +262,36 @@ async function relayCommand(request) {
   const send = async () => (await chrome.debugger.sendCommand({ tabId: tab.id }, method, request.params ?? {})) ?? {};
   if (!presence.has(tab.id)) return send();
   if (isAgentInput(method)) {
+    // The pill lets this input through while it is dispatched, no longer.
     const point = pointerOf(method, request.params);
-    await inWorld(tab.id, presenceCall("move", point?.x ?? null, point?.y ?? null, point?.press ?? false));
+    await inWorld(tab.id, presenceCall("hold", true, point?.x ?? null, point?.y ?? null, point?.press ?? false));
+    try {
+      return await send();
+    } finally {
+      await inWorld(tab.id, presenceCall("hold", false));
+    }
   }
   if (!hidesPresence(method)) return send();
-  // What the agent captures is the page as it is, without the overlay.
-  await inWorld(tab.id, presenceCall("conceal", true));
+  return withoutPresence(tab.id, send);
+}
+
+// Captures in flight per tab: the overlay comes back after the last one.
+const capturing = new Map();
+
+/** What the agent captures is the page as it is: the overlay is out until every capture ends. */
+async function withoutPresence(tabId, send) {
+  capturing.set(tabId, (capturing.get(tabId) ?? 0) + 1);
   try {
+    const hidden = (await inWorld(tabId, presenceCall("conceal", true))) === true || (await inWorld(tabId, presenceCall("conceal", true))) === true;
+    if (!hidden) throw new Error("The page did not answer in time, so Codara could not keep its agent overlay out of this capture. Try again.");
     return await send();
   } finally {
-    await inWorld(tab.id, presenceCall("conceal", false));
+    const left = (capturing.get(tabId) ?? 1) - 1;
+    if (left > 0) capturing.set(tabId, left);
+    else {
+      capturing.delete(tabId);
+      await inWorld(tabId, presenceCall("conceal", false));
+    }
   }
 }
 
@@ -282,6 +303,7 @@ async function relayCommand(request) {
 
 const presence = new Map();
 const worlds = new Map();
+let presenceSerial = 0;
 const PRESENCE_POLL_MS = 400;
 const PRESENCE_CALL_MS = 1_000;
 
@@ -339,8 +361,12 @@ function notePresence(tabId, usage) {
   const previous = presence.get(tabId);
   // A stopped agent keeps the Undo notice; another agent takes the tab over.
   if (previous?.state === "stopped" && previous.key === usage.key) return;
-  const entry = previous ?? {};
+  const entry = previous ?? { history: new Map() };
+  // A new agent on the pill gets a new serial: a Stop pressed on the old
+  // one still stops the old one.
+  if (!previous || previous.key !== usage.key) entry.serial = ++presenceSerial;
   Object.assign(entry, { key: usage.key, name: usage.name, runtime: usage.runtime, state: "working" });
+  entry.history.set(entry.serial, usage.key);
   clearTimeout(entry.timer);
   entry.timer = setTimeout(() => void clearPresence(tabId), PRESENCE_IDLE_MS);
   // The pill's Stop and Undo stay in the page until read here.
@@ -353,7 +379,16 @@ async function readPresenceClicks(tabId) {
   const clicks = await inWorld(tabId, presenceCall("take"));
   const entry = presence.get(tabId);
   if (!entry || !Array.isArray(clicks) || clicks.length === 0) return;
-  const action = clicks.at(-1);
+  const shown = clicks.filter((click) => click && typeof click === "object");
+  // Stop pressed on an agent that has since handed the tab to another: stop
+  // the one the user saw.
+  for (const click of shown) {
+    if (click.action !== "stop" || click.serial === entry.serial) continue;
+    const key = entry.history.get(click.serial);
+    if (key) link.send({ type: "presence_stop", tabId, key });
+    else await handlePopup({ type: "stopTab", tabId });
+  }
+  const action = shown.filter((click) => click.serial === entry.serial).at(-1)?.action;
   if (action === "stop" && entry.state !== "stopped") {
     if (entry.key) link.send({ type: "presence_stop", tabId, key: entry.key });
     // An older Codara cannot refuse one agent: take the whole tab back.
@@ -533,8 +568,12 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (!state || typeof source.tabId !== "number" || !state.attached.includes(source.tabId)) return;
   // A frame's or worker's session never passed the blocked-sites check.
   if (source.sessionId) return;
-  // The overlay's own world is not the page's.
+  // The overlay's own world and node are not the page's.
   if (method === "Runtime.executionContextCreated" && params?.context?.name === PRESENCE_WORLD) return;
+  if (method === "DOM.childNodeInserted" || method === "DOM.setChildNodes") {
+    params = withoutPresenceNodes(method, params);
+    if (!params) return;
+  }
   if (method === "Page.frameNavigated" && !params?.frame?.parentId && blockingRule(params?.frame?.url, rules)) {
     void detachTab(source.tabId).then(() => link.send({ type: "detached", tabId: source.tabId, reason: "blocked_site" }));
     return;
