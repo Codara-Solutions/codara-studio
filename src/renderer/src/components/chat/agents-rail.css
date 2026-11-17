@@ -22,7 +22,10 @@
   padding: 8px 0;
   border-right: 1px solid var(--rule-soft);
   background: color-mix(in oklab, var(--bg) 40%, var(--panel));
-  overflow: hidden;
+  /* A short pane scrolls the marks instead of cutting them off. */
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
 }
 .cora-agents-strip__rule {
   flex: 0 0 auto;
