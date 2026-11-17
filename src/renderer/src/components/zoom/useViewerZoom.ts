@@ -33,11 +33,10 @@ export interface ViewerZoomOptions {
   /** False until the scroller is mounted (still loading, an error). */
   enabled?: boolean;
   /**
-   * "frame": keep the point under the pointer two frames after a zoom, not
-   * in the same commit, for content that settles its size later (a virtual
-   * list sets its spacer heights after it renders).
+   * false: the viewer keeps its own place across a zoom (a virtual list that
+   * remounts at the new row height and starts at the row it was on).
    */
-  settle?: "now" | "frame";
+  keepPoint?: boolean;
 }
 
 export interface ViewerZoom {
@@ -64,7 +63,7 @@ export function useViewerZoom({
   wheel = "smooth",
   fitZoom = 1,
   enabled = true,
-  settle = "now",
+  keepPoint = true,
 }: ViewerZoomOptions): ViewerZoom {
   const [state, setState] = useState({ zoom: fitZoom, fitted: true });
   const zoom = state.fitted ? fitZoom : state.zoom;
@@ -96,21 +95,11 @@ export function useViewerZoom({
     const point = anchor.current;
     anchor.current = null;
     const scroller = scrollerRef.current;
-    if (!point || !scroller || previous === zoom) return;
-    const keep = () => {
-      const box = contentBox(scroller);
-      scroller.scrollLeft += box.left + point.fx * box.width - point.x;
-      scroller.scrollTop += box.top + point.fy * box.height - point.y;
-    };
-    if (settle === "now") {
-      keep();
-      return;
-    }
-    let frame = requestAnimationFrame(() => {
-      frame = requestAnimationFrame(keep);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [zoom, scrollerRef, contentBox, settle]);
+    if (!point || !scroller || previous === zoom || !keepPoint) return;
+    const box = contentBox(scroller);
+    scroller.scrollLeft += box.left + point.fx * box.width - point.x;
+    scroller.scrollTop += box.top + point.fy * box.height - point.y;
+  }, [zoom, scrollerRef, contentBox, keepPoint]);
 
   // A pin whose zoom never showed (a tiny pinch that snapped back to fit)
   // must not move the view on a later zoom, after the user has scrolled.
