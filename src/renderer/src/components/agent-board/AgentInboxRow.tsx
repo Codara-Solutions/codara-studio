@@ -163,6 +163,24 @@ function subagentTone(row: Row): string {
   return row.status;
 }
 
+// Up and Down move between the lines; Escape goes back to the chip. The
+// list's own arrow keys (rows) never see these.
+function onSubagentKeys(event: KeyboardEvent<HTMLUListElement>): void {
+  const lines = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("[data-agent-subagent]"));
+  const index = lines.indexOf(event.target as HTMLButtonElement);
+  if (index < 0) return;
+  let next: HTMLElement | null | undefined = null;
+  if (event.key === "ArrowDown") next = lines[Math.min(lines.length - 1, index + 1)];
+  else if (event.key === "ArrowUp") next = lines[Math.max(0, index - 1)];
+  else if (event.key === "Escape") {
+    next = event.currentTarget.closest(".agent-inbox-row")?.querySelector<HTMLElement>("[data-agent-subagents-chip]");
+  }
+  if (!next) return;
+  event.preventDefault();
+  event.stopPropagation();
+  next.focus();
+}
+
 /**
  * The background agents a row's agent started, as one quiet line each under
  * it: a dot for its state, its title and its time, the branch on hover.
@@ -178,7 +196,12 @@ function SubagentList({
   onOpen: (row: Row) => void;
 }) {
   return (
-    <ul className="agent-inbox-row__subagents" id={`agent-subagents-${row.key}`} aria-label={`Subagents of ${row.title}`}>
+    <ul
+      className="agent-inbox-row__subagents"
+      id={`agent-subagents-${row.key}`}
+      aria-label={`Subagents of ${row.title}`}
+      onKeyDown={onSubagentKeys}
+    >
       {row.subagents.map((kid) => (
         <li key={kid.key}>
           <button
@@ -242,7 +265,7 @@ function AgentInboxRowView({
     row.pinned ? "pinned" : null,
     row.branch ? `branch ${row.branch}` : null,
     row.pullRequest ? `pull request ${row.pullRequest.number}` : null,
-    chip ? chip.label : null,
+    chip ? chip.spoken : null,
   ]
     .filter(Boolean)
     .join(", ");
@@ -343,7 +366,7 @@ function AgentInboxRowView({
             tabIndex={focusable ? 0 : -1}
             aria-expanded={kidsOpen}
             aria-controls={kidsOpen ? `agent-subagents-${row.key}` : undefined}
-            aria-label={`${chip.label} of ${row.title}`}
+            aria-label={`${chip.spoken}, of ${row.title}`}
             onClick={() => onToggleSubagents(row.key)}
           >
             {chip.tone && <span className={`agent-inbox-row__chip-dot is-${chip.tone}`} aria-hidden />}

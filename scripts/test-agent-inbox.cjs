@@ -383,8 +383,10 @@ function testSubagents(I) {
   const a = rowOf("pane:one").subagents[0];
   check("a subagent row has its title, time and branch", a.title === "title worktree:a" && a.time === "4m" && a.branch === "feat/zoom-viewers", a);
   check("Working counts main agents only", view.working.length === 3, keys(view.working));
-  check("Needs you leaves out a blocked subagent behind its parent", view.needs.length === 0 && view.needsYou === 0);
-  check("Done holds the finished parent, not its subagent", JSON.stringify(keys(view.done)) === JSON.stringify(["pane:three"]));
+  check("a subagent waiting on the user lifts its finished parent into Needs you", JSON.stringify(keys(view.needs)) === JSON.stringify(["pane:three"]), keys(view.needs));
+  check("the badge counts that parent once", view.needsYou === 1, view.needsYou);
+  check("the lifted parent keeps its own status word", rowOf("pane:three").status === "age", rowOf("pane:three").status);
+  check("Done no longer holds it", view.done.length === 0, keys(view.done));
   check("total counts main agents only", view.total === 4, view.total);
 
   check("no chip without subagents", I.agentInboxSubagentChip([]) === null);
@@ -392,6 +394,7 @@ function testSubagents(I) {
   check("one working subagent: '1 subagent' with a working dot", one.label === "1 subagent" && one.tone === "info", one);
   const three = I.agentInboxSubagentChip(rowOf("pane:three").subagents);
   check("three, one waiting: '3 subagents' with a warn dot", three.label === "3 subagents" && three.tone === "warn", three);
+  check("the chip says what its dot means", three.spoken === "3 subagents, 1 waiting for you, 1 working" && one.spoken === "1 subagent, 1 working", [three.spoken, one.spoken]);
   const quiet = I.agentInboxSubagentChip([rowOf("pane:three").subagents[2]]);
   check("nothing running: no dot", quiet.tone === null, quiet);
 
@@ -400,7 +403,7 @@ function testSubagents(I) {
   prefs.settled["worktree:b"] = { at: NOW };
   const later = I.buildAgentInbox(model(cards), prefs, context);
   check("a subagent follows its settled parent", JSON.stringify(keys(later.settled[0].subagents)) === JSON.stringify(["worktree:a"]));
-  const three2 = [...later.done, ...later.working].find((entry) => entry.key === "pane:three");
+  const three2 = SECTIONS.flatMap((section) => later[section]).find((entry) => entry.key === "pane:three");
   check("settling a subagent itself does not move it off its parent", keys(three2.subagents).includes("worktree:b"));
 
   const settledAt = NOW - 30 * MIN;
@@ -408,15 +411,31 @@ function testSubagents(I) {
   quietPrefs.settled["pane:three"] = { at: settledAt };
   quietPrefs.snoozed["pane:one"] = { at: settledAt, until: NOW + HOUR };
   const quiet2 = I.reconcileAgentInbox(model(cards), quietPrefs, { now: NOW, pullRequests: {} });
-  check("a subagent that starts work or asks brings its settled parent back", !quiet2.prefs.settled["pane:three"], quiet2.prefs.settled);
+  check("a subagent that starts work brings its settled parent back", !quiet2.prefs.settled["pane:three"], quiet2.prefs.settled);
   check("a working subagent does not end its parent's snooze", Boolean(quiet2.prefs.snoozed["pane:one"]));
   const asking = cards.map((entry) => (entry.key === "worktree:a" ? { ...entry, bucket: "needs-you", tone: "warn", since: NOW - MIN } : entry));
   const woken = I.reconcileAgentInbox(model(asking), quietPrefs, { now: NOW, pullRequests: {} });
-  check("a subagent that asks ends its parent's snooze", !woken.prefs.snoozed["pane:one"], woken.prefs.snoozed);
+  check("a subagent that asks does not end its parent's snooze", Boolean(woken.prefs.snoozed["pane:one"]), woken.prefs.snoozed);
+  const snoozedView = I.buildAgentInbox(model(asking), woken.prefs, context);
+  check(
+    "snoozed parent, subagent waiting: the subagent is its own Needs you row",
+    keys(snoozedView.needs).includes("worktree:a") && keys(snoozedView.snoozed).includes("pane:one") &&
+      snoozedView.snoozed.find((entry) => entry.key === "pane:one").subagents.length === 0,
+    { needs: keys(snoozedView.needs), snoozed: keys(snoozedView.snoozed) },
+  );
   const stillPrefs = I.emptyAgentInboxPrefs();
   stillPrefs.settled["pane:three"] = { at: NOW };
   const still = I.reconcileAgentInbox(model(cards), stillPrefs, { now: NOW, pullRequests: {} });
   check("subagents with nothing new keep their parent settled", Boolean(still.prefs.settled["pane:three"]));
+  const settledView = I.buildAgentInbox(model(cards), stillPrefs, context);
+  const settledThree = settledView.settled.find((entry) => entry.key === "pane:three");
+  check(
+    "settled parent, subagent already waiting: the parent stays settled, the subagent is its own Needs you row",
+    Boolean(settledThree) && JSON.stringify(keys(settledView.needs)) === JSON.stringify(["worktree:c"]) &&
+      !keys(settledThree.subagents).includes("worktree:c") && keys(settledThree.subagents).includes("worktree:b") &&
+      settledView.needsYou === 1,
+    { needs: keys(settledView.needs), kids: settledThree && keys(settledThree.subagents) },
+  );
 
   const chained = I.buildAgentInbox(
     model([card("pane:p", working), kid("worktree:x", "pane:p"), kid("worktree:y", "worktree:x"), kid("worktree:self", "worktree:self")]),

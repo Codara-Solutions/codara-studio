@@ -217,20 +217,15 @@ export function reconcileAgentInbox(
   };
   const autoSettled: AgentInboxReconcile["autoSettled"] = [];
   const present = new Set<string>();
-  // A subagent sits on its parent's row, so what it does counts as the
-  // parent's: a settled or snoozed coordinator comes back when one of its
-  // subagents would have.
-  const { children } = groupAgentInboxCards(model);
+  // A subagent sits on its parent's row, so a settled coordinator comes back
+  // when one of its subagents starts or shows new work. One that waits on the
+  // user does not wake it: it is a row of its own (groupAgentInboxCards).
+  const { children } = groupAgentInboxCards(model, prefs, context.now);
   for (const card of allCards(model)) {
     present.add(card.key);
     const kids = children.get(card.key) ?? [];
     const snooze = prefs.snoozed[card.key];
-    if (
-      snooze &&
-      (context.now >= snooze.until || [card, ...kids].some((entry) => snoozeEndsEarly(entry, snooze.at)))
-    ) {
-      delete edit().snoozed[card.key];
-    }
+    if (snooze && (context.now >= snooze.until || snoozeEndsEarly(card, snooze.at))) delete edit().snoozed[card.key];
     const pr = context.pullRequests[card.workspaceId];
     const settle = prefs.settled[card.key];
     if (settle && (agentActedSince(card, settle.at) || kids.some((kid) => subagentActedSince(kid, settle.at)))) {
@@ -352,19 +347,36 @@ function row(card: AgentBoardCard, prefs: AgentInboxPrefs, context: AgentInboxCo
  * The board split into the agents the user talks to and, by parent key, the
  * background agents each one started. A subagent whose parent is not on the
  * board (its session closed) stays a main agent, and so does one whose parent
- * is itself listed under another card, so no card is ever lost.
+ * is itself listed under another card, so no card is ever lost. A subagent
+ * waiting on the user under a settled or snoozed parent stays a row too: the
+ * user may put the parent away while it waits, and the question must still
+ * show.
  */
-export function groupAgentInboxCards(model: AgentBoardModel): {
+export function groupAgentInboxCards(
+  model: AgentBoardModel,
+  prefs?: Pick<AgentInboxPrefs, "settled" | "snoozed">,
+  now = 0,
+): {
   main: AgentBoardCard[];
   children: Map<string, AgentBoardCard[]>;
 } {
   const cards = allCards(model);
   const roots = new Set(cards.filter((card) => !card.parentKey).map((card) => card.key));
+  const away = (key: string): boolean => {
+    if (!prefs) return false;
+    const snooze = prefs.snoozed[key];
+    return Boolean(prefs.settled[key]) || Boolean(snooze && now < snooze.until);
+  };
   const main: AgentBoardCard[] = [];
   const children = new Map<string, AgentBoardCard[]>();
   for (const card of cards) {
     const parent = card.parentKey;
-    if (parent && parent !== card.key && roots.has(parent)) {
+    if (
+      parent &&
+      parent !== card.key &&
+      roots.has(parent) &&
+      !(card.bucket === "needs-you" && away(parent))
+    ) {
       const list = children.get(parent);
       if (list) list.push(card);
       else children.set(parent, [card]);
@@ -377,17 +389,25 @@ export function groupAgentInboxCards(model: AgentBoardModel): {
 
 export type AgentInboxChipTone = "warn" | "info" | null;
 
-/**
- * The chip on a parent's row: "1 subagent", "3 subagents", with a dot in
- * `--warn` while one waits on the user, else `--info` while one works, else
- * none.
- */
-export function agentInboxSubagentChip(subagents: readonly AgentInboxRow[]): { label: string; tone: AgentInboxChipTone } | null {
+export interface AgentInboxSubagentChip {
+  /** "1 subagent", "3 subagents". */
+  label: string;
+  /** `--warn` while one waits on the user, else `--info` while one works, else no dot. */
+  tone: AgentInboxChipTone;
+  /** What the dot stands for, in words: "3 subagents, 1 waiting for you, 2 working". */
+  spoken: string;
+}
+
+/** The chip on a parent's row; null when it started no subagent. */
+export function agentInboxSubagentChip(subagents: readonly AgentInboxRow[]): AgentInboxSubagentChip | null {
   if (subagents.length === 0) return null;
   const label = `${subagents.length} subagent${subagents.length === 1 ? "" : "s"}`;
-  if (subagents.some((entry) => entry.card.bucket === "needs-you")) return { label, tone: "warn" };
-  if (subagents.some((entry) => entry.card.bucket === "working")) return { label, tone: "info" };
-  return { label, tone: null };
+  const waiting = subagents.filter((entry) => entry.card.bucket === "needs-you").length;
+  const working = subagents.filter((entry) => entry.card.bucket === "working").length;
+  const spoken = [label, waiting > 0 ? `${waiting} waiting for you` : null, working > 0 ? `${working} working` : null]
+    .filter(Boolean)
+    .join(", ");
+  return { label, tone: waiting > 0 ? "warn" : working > 0 ? "info" : null, spoken };
 }
 
 /**
@@ -405,18 +425,20 @@ export function buildAgentInbox(
   const working: AgentInboxRow[] = [];
   const snoozed: AgentInboxRow[] = [];
   const settled: AgentInboxRow[] = [];
-  const { main, children } = groupAgentInboxCards(model);
+  const { main, children } = groupAgentInboxCards(model, prefs, context.now);
   for (const card of main) {
     const entry = row(card, prefs, context);
-    const kids = children.get(card.key);
+    const kids = children.get(card.key) ?? [];
     // A subagent follows its parent to whichever section it is in; what the
-    // user decided about the subagent itself does not move it.
-    if (kids) entry.subagents = kids.map((kid) => row(kid, prefs, context));
+    // user decided about the subagent itself does not move it. One that
+    // waits on the user lifts its parent into Needs you.
+    entry.subagents = kids.map((kid) => row(kid, prefs, context));
+    const waiting = kids.some((kid) => kid.bucket === "needs-you");
     const snooze = prefs.snoozed[card.key];
     if (prefs.settled[card.key]) settled.push(entry);
     else if (snooze && context.now < snooze.until) snoozed.push(entry);
+    else if (card.bucket === "needs-you" || waiting) needs.push(entry);
     else if (card.bucket === "working") working.push(entry);
-    else if (card.bucket === "needs-you") needs.push(entry);
     else done.push(entry);
   }
   // Pinned rows lead, the earliest pin first; the board's order stays

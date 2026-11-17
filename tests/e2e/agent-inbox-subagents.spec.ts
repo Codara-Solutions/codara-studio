@@ -65,6 +65,21 @@ async function boardChanged(app: ElectronApplication): Promise<void> {
   });
 }
 
+// What workspace.status would push after a subagent's note on its worktree.
+async function sendNote(app: ElectronApplication, workspaceId: string, status: string, text: string, at: number) {
+  const key = `worktree:${workspaceId}`;
+  const note = {
+    key,
+    workspaceId,
+    entry: { status, note: text, updatedAt: at, by: { kind: "agent", label: "Claude Code" }, checkpoints: [] },
+    worktreePath: `/wt/${workspaceId}`,
+    from: { workspaceId: "ws-notes", workspaceName: "Notes" },
+  };
+  await app.evaluate(({ BrowserWindow }, change) => {
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send("workspaceStatus:agentNoteChanged", change);
+  }, { key, note });
+}
+
 async function shoot(page: Page, name: string): Promise<void> {
   if (!SHOTS) return;
   for (const [mode, themeId] of [
@@ -221,12 +236,43 @@ test("subagents sit behind a count chip on their coordinator's row; an orphan st
       await expect(zoom.locator(".agent-inbox-subagent__branch")).toBeVisible();
       await page.mouse.move(0, 0);
       await shoot(page, "agents-subagent-list");
+      await lines.nth(0).focus();
+      await page.keyboard.press("ArrowDown");
+      await expect(lines.nth(1)).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(chip).toBeFocused();
     });
 
     await test.step("the chip closes the list again", async () => {
       await chip.click();
       await expect(chip).toHaveAttribute("aria-expanded", "false");
       await expect(coordinator.locator("[data-agent-subagent]")).toHaveCount(0);
+    });
+
+    const needs = page.locator('[data-agent-section="needs"]');
+    const settledShelf = page.locator('[data-agent-section="settled"]');
+
+    await test.step("a subagent that asks turns the dot amber and lifts its coordinator into Needs you", async () => {
+      await sendNote(app, "wt-docs", "blocked", "Which base branch?", Date.now());
+      await expect(needs.locator('[data-agent-card="pane:p-coord"]')).toBeVisible({ timeout: 15_000 });
+      await expect(needs.locator(".agent-inbox__shelf-count")).toHaveText("1");
+      await expect(chip.locator(".agent-inbox-row__chip-dot.is-warn")).toHaveCount(1);
+      await expect(chip).toHaveAttribute("aria-label", /3 subagents, 1 waiting for you, 2 working/);
+      await expect(page.locator('[data-agent-card="worktree:wt-docs"]')).toHaveCount(0);
+    });
+
+    await test.step("settled while its subagent waits, the coordinator stays away and the subagent is its own row", async () => {
+      await coordinator.locator("[data-agent-card-open]").focus();
+      await page.keyboard.press("e");
+      await expect(settledShelf.locator(".agent-inbox__shelf-count")).toHaveText("1", { timeout: 15_000 });
+      await expect(needs.locator('[data-agent-card="worktree:wt-docs"]')).toBeVisible();
+      await expect(needs.locator(".agent-inbox__shelf-count")).toHaveText("1");
+    });
+
+    await test.step("a fresh note from a working subagent brings the settled coordinator back", async () => {
+      await sendNote(app, "wt-zoom", "in_progress", "Back on the PDF viewer", Date.now() + 1_000);
+      await expect(settledShelf.locator(".agent-inbox__shelf-count")).toHaveText("0", { timeout: 15_000 });
+      await expect(needs.locator('[data-agent-card="pane:p-coord"]')).toBeVisible();
     });
   } finally {
     await app.close();
