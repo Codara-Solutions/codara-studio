@@ -1050,7 +1050,7 @@ const noInput = {};
   // Pi 1.5.1 turned on Anthropic message threads. The hook still sees the
   // whole request: pi-ai calls onPayload (before_provider_request) on the full
   // params, and only then cuts a thread continue from them. And the hook keeps
-  // the threads beta while it adds or removes fast mode.
+  // the threads beta while it strips fast mode, which Claude never gets.
   {
     const piAi = fs.readFileSync(
       path.join(__dirname, "..", "node_modules", "@earendil-works", "pi-ai", "dist", "api", "anthropic-messages.js"),
@@ -1071,7 +1071,8 @@ const noInput = {};
     for (const fastMode of [true, false]) {
       const shaped = apply(full(), "anthropic", fastMode);
       assert.ok(shaped.betas.includes(THREADS), `fast mode ${fastMode} keeps the threads beta`);
-      assert.equal(shaped.betas.includes(BETA), fastMode);
+      assert.equal(shaped.betas.includes(BETA), false, `fast mode ${fastMode} never adds the fast beta for Claude`);
+      assert.equal("speed" in shaped, false, `fast mode ${fastMode} never sends speed for Claude`);
       assert.deepEqual(shaped.messages, full().messages, "the hook sees and keeps every message");
       assert.deepEqual(shaped.system, full().system);
     }
