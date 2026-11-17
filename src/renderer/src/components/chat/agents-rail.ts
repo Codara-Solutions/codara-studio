@@ -43,13 +43,35 @@ const TOOL_VERB: Partial<Record<ReturnType<typeof toolActivityKind>, string>> = 
   web: "Fetch",
 };
 
+// Within a kind, a few tools say more than its verb: a web search is no
+// fetch, writing a file is no edit, listing a folder is no read.
+const NAMED_VERB: Record<string, string> = {
+  websearch: "Search the web",
+  web_search: "Search the web",
+  write: "Write",
+  write_file: "Write",
+  writefile: "Write",
+  create_file: "Write",
+  save: "Write",
+  ls: "List",
+  list: "List",
+  list_dir: "List",
+  list_directory: "List",
+  listdirectory: "List",
+};
+
+function toolVerb(tool: string): string {
+  const named = NAMED_VERB[tool.replace(/^mcp__codara-studio__/, "").toLowerCase()];
+  return named ?? TOOL_VERB[toolActivityKind(tool)] ?? toolDisplayName(tool);
+}
+
 /** A step a live worker is on, in a few words. */
 export function workerActivityLabel(step: WorkerActivityStep | null | undefined): string | null {
   if (!step) return null;
   if (step.kind === "starting") return "Starting";
   if (step.kind === "reply") return "Writing a reply";
   if (step.kind === "thinking") return "Thinking";
-  const name = TOOL_VERB[toolActivityKind(step.tool)] ?? toolDisplayName(step.tool);
+  const name = toolVerb(step.tool);
   return step.target ? `${name} · ${step.target}` : name;
 }
 
