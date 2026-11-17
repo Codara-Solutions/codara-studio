@@ -1913,6 +1913,13 @@ const api = {
       const clamped = Math.max(-5, Math.min(8, next));
       webFrame.setZoomLevel(clamped);
     },
+    getZoomFactor: (): number => webFrame.getZoomFactor(),
+    // Ctrl+wheel or a pinch in a browser page, by the page's webContents id.
+    onGuestWheelZoom: (handler: (webContentsId: number, direction: "in" | "out") => void): (() => void) => {
+      const listener = (_e: unknown, p: { webContentsId: number; direction: "in" | "out" }) => handler(p.webContentsId, p.direction);
+      ipcRenderer.on("webview:wheel-zoom", listener);
+      return () => ipcRenderer.removeListener("webview:wheel-zoom", listener);
+    },
   },
   servers: serversApi,
   skillOrigins: skillOriginsApi,

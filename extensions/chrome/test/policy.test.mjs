@@ -19,10 +19,17 @@ import {
   isRestrictedUrl,
   isTabShared,
   openedTabAnswer,
+  otherWindowsText,
   parseBlockedSites,
   redactCdpEvent,
+  REACH_TEXT,
+  REACHES,
+  agentColorVar,
+  reachOf,
+  reachPatch,
   shouldReload,
   storageScopeError,
+  toolVerb,
 } from "../lib/policy.js";
 
 export function run() {
@@ -51,6 +58,10 @@ export function run() {
   for (const url of ["about:blank", "https://chrome.google.com/other", "http://127.0.0.1:3000/", "file:///tmp/x.html", ""]) {
     assert.equal(isRestrictedUrl(url), false, url);
   }
+  // Local files are off until "Allow access to file URLs" is on.
+  assert.equal(isRestrictedUrl("file:///tmp/x.html", { fileAccess: false }), true);
+  assert.equal(isRestrictedUrl("file:///tmp/x.html", { fileAccess: true }), false);
+  assert.equal(isRestrictedUrl("https://a.b/", { fileAccess: false }), false);
 
   assert.equal(cdpPermission("Runtime.evaluate"), "allow");
   assert.equal(cdpPermission("Input.dispatchMouseEvent"), "allow");
@@ -162,5 +173,43 @@ export function run() {
   assert.equal(badgeTitle({ shared: true, attached: true, usage: { ...usage, at: now - USAGE_ACTIVE_MS }, now }), "Codara: an agent is using this tab", "and stops naming it once it is idle");
   assert.equal(badgeTitle({ shared: true, attached: false, usage, now }), "Codara: agents may use this tab");
   assert.equal(badgeTitle({ shared: false, attached: true, usage, now }), "Codara");
-  return "policy: toolbar button names the driving agent, blocked sites, browser pages, protocol permissions, cookie redaction, sharing, agent tab groups, closing tabs and self-updates";
+
+  // The popup's reach is a view of the stored switches: what a user had
+  // before the update reads back as one reach, and no reach shares more than
+  // the switches it stands for.
+  assert.equal(reachOf({ all: false, windows: [] }, 7), "tabs", "a fresh install shares nothing beyond picked tabs");
+  assert.equal(reachOf({ all: false, windows: [7] }, 7), "window");
+  assert.equal(reachOf({ all: false, windows: [7] }, 8), "tabs", "another window's sharing is its own");
+  assert.equal(reachOf({ all: true, windows: [] }, 7), "all");
+  assert.equal(reachOf({ all: true, windows: [7] }, 7), "all", "every tab outranks one window");
+  const before = { all: false, windows: [3], tabs: [41], stopped: [50, 70] };
+  assert.deepEqual(reachPatch(before, "window", 7, [70, 71]), { shareAll: false, shareWindows: [3, 7], stopped: [50] }, "a window lifts only its own tabs' stops");
+  assert.deepEqual(reachPatch({ ...before, windows: [3, 7] }, "tabs", 7, [70]), { shareAll: false, shareWindows: [3] }, "picked tabs and other windows stay as they were");
+  assert.deepEqual(reachPatch(before, "all", 7, []), { shareAll: true, stopped: [] }, "as the old every-tab switch");
+  assert.deepEqual(reachPatch({ all: true, windows: [7], stopped: [70] }, "window", 7, [70, 71]).stopped, [70], "narrowing from every tab keeps the tabs the user stopped");
+  assert.ok(!("shareTabs" in reachPatch(before, "tabs", 7, [])), "the tabs a user shared one by one are never touched");
+  assert.ok(!("allowOpen" in reachPatch(before, "all", 7, [])), "opening tabs keeps its own switch");
+  assert.throws(() => reachPatch(before, "everything", 7, []), /Unknown reach/);
+  for (const reach of REACHES) {
+    const patch = reachPatch(before, reach, 7, [70]);
+    const after = { all: patch.shareAll ?? before.all, windows: patch.shareWindows ?? before.windows, tabs: before.tabs, stopped: patch.stopped ?? before.stopped };
+    assert.equal(reachOf(after, 7), reach, `picking ${reach} reads back as ${reach}`);
+    assert.ok(REACH_TEXT[reach].label && REACH_TEXT[reach].includes, "every reach says what it includes");
+  }
+  assert.equal(toolVerb("codara_preview_click"), "clicked");
+  assert.equal(toolVerb("codara_preview_screenshot"), "took a screenshot");
+  assert.equal(toolVerb("codara_preview_set_viewport"), "used set viewport");
+  assert.equal(toolVerb(""), "used this tab");
+  assert.equal(agentColorVar("claude"), "var(--agent-claude)");
+  assert.equal(agentColorVar("aider"), "var(--accent)", "an agent without a colour of its own uses the accent");
+  assert.equal(agentColorVar("x);background:url(y"), "var(--accent)");
+  // The reach note counts what stays shared elsewhere: whole windows and
+  // tabs switched on one by one.
+  assert.equal(otherWindowsText({}), "Other windows stay off.");
+  assert.equal(otherWindowsText({ otherWindows: 1 }), "Another window you shared stays shared.");
+  assert.equal(otherWindowsText({ otherWindows: 3 }), "3 other windows you shared stay shared.");
+  assert.equal(otherWindowsText({ otherTabs: 1 }), "A tab you shared in another window stays shared.");
+  assert.equal(otherWindowsText({ otherWindows: 1, otherTabs: 2 }), "Another window you shared stays shared. 2 tabs you shared in other windows stay shared.");
+
+  return "policy: popup reach maps to the stored switches, toolbar button names the driving agent, blocked sites, browser pages, protocol permissions, cookie redaction, sharing, agent tab groups, closing tabs and self-updates";
 }

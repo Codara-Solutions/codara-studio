@@ -13,9 +13,8 @@
 // preview-bridge (the renderer's registry owns "which tab" — active vs a given
 // tabId vs first-open fallback), then grab the live guest with
 // webContents.fromId(). Every coordinate op resolves the point in the guest's
-// CSS-pixel viewport space, which is exactly what sendInputEvent expects and
-// what capturePage screenshots are captured in (before devicePixelRatio
-// scaling) — so an agent can click what it sees in a screenshot.
+// CSS-pixel viewport space, which sendMouse scales by the guest's zoom for
+// sendInputEvent — so an agent can click what it sees in a screenshot.
 //
 // The DevTools protocol session, and the console and network recordings it
 // keeps, belong to the tab (browser/preview-cdp.ts): they start when Chromium
@@ -93,6 +92,19 @@ export function registerPreviewInput(): void {
 // The guest, its tab and viewport metrics (browser/preview-guest.ts).
 const resolveGuest = resolvePreviewGuest;
 type GuestInfo = PreviewGuestInfo;
+
+// sendInputEvent places the pointer in the guest's view pixels, and a page
+// measures in CSS pixels, which the guest's zoom (the window's zoom times the
+// tab's own) scales: every pointer event goes through here.
+// A wheel's deltas are scaled the same way, so a scroll moves the page by
+// the CSS pixels asked for.
+function sendMouse(wc: WebContents, event: { type: string; x: number; y: number; [key: string]: unknown }): void {
+  const zoom = wc.getZoomFactor() || 1;
+  const scaled: Record<string, unknown> = { ...event, x: Math.round(event.x * zoom), y: Math.round(event.y * zoom) };
+  if (typeof event.deltaX === "number") scaled.deltaX = Math.round(event.deltaX * zoom);
+  if (typeof event.deltaY === "number") scaled.deltaY = Math.round(event.deltaY * zoom);
+  wc.sendInputEvent(scaled as unknown as Parameters<WebContents["sendInputEvent"]>[0]);
+}
 
 // Resolve a click point in the guest's CSS-pixel viewport space. Accepts
 // explicit { x, y } or a CSS { selector } whose on-screen center we probe.
@@ -219,21 +231,21 @@ async function opScroll(params: Record<string, unknown>): Promise<unknown> {
   // For scroll, do NOT scrollIntoView the selector — the point is only the
   // wheel origin; centering it would fight the scroll the caller asked for.
   const { x, y } = await glideToTarget(wc, info, params, params, "Scrolling", { scrollIntoView: false });
-  wc.sendInputEvent({
+  sendMouse(wc, {
     type: "mouseWheel",
     x: Math.round(x),
     y: Math.round(y),
     deltaX: Math.round(deltaX),
     deltaY: Math.round(deltaY),
     canScroll: true,
-  } as Parameters<WebContents["sendInputEvent"]>[0]);
+  });
   return { ok: true, x, y, deltaX, deltaY };
 }
 
 async function opHover(params: Record<string, unknown>): Promise<unknown> {
   const { wc, info } = await resolveGuest(params);
   const { x, y } = await glideToTarget(wc, info, params, params, "Moving");
-  wc.sendInputEvent({ type: "mouseMove", x: Math.round(x), y: Math.round(y) });
+  sendMouse(wc, { type: "mouseMove", x: Math.round(x), y: Math.round(y) });
   return { ok: true, x, y };
 }
 
@@ -246,16 +258,10 @@ async function opMouse(params: Record<string, unknown>): Promise<unknown> {
   const py = Math.round(y);
   const button: "left" | "right" = action === "rightclick" ? "right" : "left";
   const down = (clickCount: number) =>
-    wc.sendInputEvent({ type: "mouseDown", x: px, y: py, button, clickCount, modifiers } as Parameters<
-      WebContents["sendInputEvent"]
-    >[0]);
+    sendMouse(wc, { type: "mouseDown", x: px, y: py, button, clickCount, modifiers });
   const up = (clickCount: number) =>
-    wc.sendInputEvent({ type: "mouseUp", x: px, y: py, button, clickCount, modifiers } as Parameters<
-      WebContents["sendInputEvent"]
-    >[0]);
-  wc.sendInputEvent({ type: "mouseMove", x: px, y: py, modifiers } as Parameters<
-    WebContents["sendInputEvent"]
-  >[0]);
+    sendMouse(wc, { type: "mouseUp", x: px, y: py, button, clickCount, modifiers });
+  sendMouse(wc, { type: "mouseMove", x: px, y: py, modifiers });
   switch (action) {
     case "down":
       down(1);
@@ -293,10 +299,8 @@ async function opDrag(params: Record<string, unknown>): Promise<unknown> {
   const sx = Math.round(start.x);
   const sy = Math.round(start.y);
   let at = { x: sx, y: sy };
-  wc.sendInputEvent({ type: "mouseMove", x: sx, y: sy });
-  wc.sendInputEvent({ type: "mouseDown", x: sx, y: sy, button: "left", clickCount: 1 } as Parameters<
-    WebContents["sendInputEvent"]
-  >[0]);
+  sendMouse(wc, { type: "mouseMove", x: sx, y: sy });
+  sendMouse(wc, { type: "mouseDown", x: sx, y: sy, button: "left", clickCount: 1 });
   let finished = false;
   // A Stop or a closed tab mid-drag throws out of the loop. The page must not
   // be left with its button held down, and releasing it where the drag got to
@@ -307,9 +311,7 @@ async function opDrag(params: Record<string, unknown>): Promise<unknown> {
       const mx = Math.round(start.x + (end.x - start.x) * t);
       const my = Math.round(start.y + (end.y - start.y) * t);
       await showCursor(info, params, "Dragging", { x: mx, y: my }, { follow: true });
-      wc.sendInputEvent({ type: "mouseMove", x: mx, y: my, button: "left" } as Parameters<
-        WebContents["sendInputEvent"]
-      >[0]);
+      sendMouse(wc, { type: "mouseMove", x: mx, y: my, button: "left" });
       at = { x: mx, y: my };
     }
     finished = true;
@@ -319,9 +321,7 @@ async function opDrag(params: Record<string, unknown>): Promise<unknown> {
     // The tab can close during the Escape; a throw here would replace the
     // error that ended the drag.
     if (!wc.isDestroyed()) {
-      wc.sendInputEvent({ type: "mouseUp", ...release, button: "left", clickCount: 1 } as Parameters<
-        WebContents["sendInputEvent"]
-      >[0]);
+      sendMouse(wc, { type: "mouseUp", ...release, button: "left", clickCount: 1 });
     }
   }
   return { ok: true, from: start, to: end, steps };
@@ -340,9 +340,7 @@ async function abortDrag(wc: WebContents, origin: { x: number; y: number }): Pro
   ]);
   clearTimeout(timer);
   if (wc.isDestroyed()) return;
-  wc.sendInputEvent({ type: "mouseMove", ...origin, button: "left" } as Parameters<
-    WebContents["sendInputEvent"]
-  >[0]);
+  sendMouse(wc, { type: "mouseMove", ...origin, button: "left" });
 }
 
 async function opUpload(params: Record<string, unknown>): Promise<unknown> {

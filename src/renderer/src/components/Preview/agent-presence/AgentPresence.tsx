@@ -79,9 +79,21 @@ export default function AgentPresence({ tabId, visible, pageRef }: Props) {
       const page = pageRef.current?.getBoundingClientRect();
       return root && page ? { x: page.left - root.left, y: page.top - root.top } : { x: 0, y: 0 };
     };
+    // Page CSS pixels to this overlay's: a tab's own page zoom (its guest
+    // zoom over the window's) scales the page inside the webview.
+    const pageScale = (): number => {
+      try {
+        const zoom = (pageRef.current as Electron.WebviewTag | null)?.getZoomFactor?.();
+        const own = window.spark?.view?.getZoomFactor?.() || 1;
+        return zoom && zoom > 0 ? zoom / own : 1;
+      } catch {
+        return 1;
+      }
+    };
     const place = (point: Point, at: Point) => {
       const cursor = cursorRef.current;
-      if (cursor) cursor.style.transform = `translate3d(${point.x + at.x}px, ${point.y + at.y}px, 0)`;
+      const k = pageScale();
+      if (cursor) cursor.style.transform = `translate3d(${point.x * k + at.x}px, ${point.y * k + at.y}px, 0)`;
     };
     const highlight = (box: Box | undefined, at: Point) => {
       const element = highlightRef.current;
@@ -90,10 +102,11 @@ export default function AgentPresence({ tabId, visible, pageRef }: Props) {
         element.removeAttribute("data-active");
         return;
       }
+      const k = pageScale();
       Object.assign(element.style, {
-        transform: `translate3d(${box.x + at.x}px, ${box.y + at.y}px, 0)`,
-        width: `${box.width}px`,
-        height: `${box.height}px`,
+        transform: `translate3d(${box.x * k + at.x}px, ${box.y * k + at.y}px, 0)`,
+        width: `${box.width * k}px`,
+        height: `${box.height * k}px`,
       });
       element.setAttribute("data-active", "");
     };
