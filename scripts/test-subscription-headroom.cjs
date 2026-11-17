@@ -534,7 +534,8 @@ async function main() {
   });
   check(
     "buildManagerTurnPrompt appends the headroom section at the tail",
-    withSection.endsWith(decisive) && withSection.startsWith("Build the thing"),
+    // Pi's command header (src/shared/user-commands.ts) is the only line before the user's words.
+    withSection.endsWith(decisive) && withSection.startsWith("[CODARA USER COMMANDS []]\nBuild the thing"),
     withSection.slice(-200),
   );
   const withBoth = backend.buildManagerTurnPrompt(runFixture, [message], {

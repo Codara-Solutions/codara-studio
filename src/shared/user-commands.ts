@@ -28,9 +28,10 @@ export function userCommandOf(message: string): UserCommand | null {
   return match ? { name: match[1], args: match[2]?.trim() ?? "" } : null;
 }
 
-/** The header for a turn's messages, in order, or "" when none opens with a
- *  command. */
+/** The header for a turn's messages, in order. Every Pi turn carries one,
+ *  with an empty list when no message opens with a command, so a message
+ *  that starts with header-shaped text is never read as the header. */
 export function userCommandsHeader(messages: readonly string[]): string {
   const commands = messages.map(userCommandOf).filter((command): command is UserCommand => command !== null);
-  return commands.length === 0 ? "" : `${USER_COMMANDS_HEADER_PREFIX}${JSON.stringify(commands)}]`;
+  return `${USER_COMMANDS_HEADER_PREFIX}${JSON.stringify(commands)}]`;
 }
