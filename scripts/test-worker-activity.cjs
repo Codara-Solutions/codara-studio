@@ -22,7 +22,8 @@ const electronStub = {
     }));
   },
 };
-// React is only imported for the hook; the merge under test is pure.
+// React is only imported so the modules load (the hook, and run-format.ts for
+// the model label); no test relies on hook behaviour.
 const reactStub = {
   name: "react-stub",
   setup(build) {
@@ -220,6 +221,9 @@ function model(rail) {
   check("a model reads as people say it, from the attempt when the row has none", byId.toast.model === "Opus 5.5", byId.toast.model);
   const labelled = rail.railWorkers(run, [{ ...workers[1], model: "claude-opus-5" }], activity, now)[0];
   check("the row's model wins over the attempt's", labelled.model === "Opus 5", labelled.model);
+  const noModelRun = { ...run, workerAttempts: run.workerAttempts.map((attempt) => ({ ...attempt, model: undefined })) };
+  const bare = rail.railWorkers(noModelRun, [workers[1]], activity, now)[0];
+  check("no model anywhere falls back to the runtime's name", bare.model === "Claude", bare.model);
   check(
     "a mark reads name-free: model, state, time and step",
     rail.railWorkerLine(byId.toast) === "Opus 5.5 · running · 3m 10s · Run command · npm test -- merged-fold",
@@ -232,10 +236,19 @@ function model(rail) {
     groups.length === 2 && groups[1].label === "Step 2 · Fix merged fold" && groups[1].workers.length === 2,
     JSON.stringify(groups.map((group) => group.label)),
   );
+  const label = (tool, target) => rail.workerActivityLabel({ kind: "tool", tool, ...(target ? { target } : {}) });
   check(
     "every provider's spelling of a command reads the same",
-    rail.workerActivityLabel({ kind: "tool", tool: "bash", target: "npm test" }) === "Run command · npm test" &&
-      rail.workerActivityLabel({ kind: "tool", tool: "read", target: "a.ts" }) === "Read · a.ts",
+    ["Bash", "bash", "shell", "Shell"].every((tool) => label(tool, "npm test") === "Run command · npm test"),
+    ["Bash", "bash", "shell", "Shell"].map((tool) => label(tool, "npm test")).join(" | "),
+  );
+  check("a read reads as one", label("read", "a.ts") === "Read · a.ts");
+  check("a web search is no fetch", label("web_search", "fold count") === "Search the web · fold count" && label("WebFetch", "https://example.com") === "Fetch · https://example.com");
+  check("writing and listing keep their own verbs", label("write", "new.ts") === "Write · new.ts" && label("ls", "src") === "List · src" && label("edit", "a.ts") === "Edit · a.ts");
+  check(
+    "other tools keep their own names",
+    label("codara_spawn_workers") === "Delegate workers" && label("mcp__codara-studio__codara_whiteboard_get") === "Read whiteboard",
+    `${label("codara_spawn_workers")} | ${label("mcp__codara-studio__codara_whiteboard_get")}`,
   );
   check("a reply and thinking have their own words", rail.workerActivityLabel({ kind: "reply" }) === "Writing a reply" && rail.workerActivityLabel({ kind: "thinking" }) === "Thinking");
   check("an ended worker has no step", rail.workerActivityLabel(null) === null);
