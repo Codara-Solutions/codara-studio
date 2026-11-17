@@ -15,7 +15,10 @@ export function isTopTierModel(model: string): boolean {
 }
 
 /** A request for the top tier: "use fable", "run it on Mythos". */
-const TOP_TIER_REQUEST = /\b(?:use|using|run(?:\s+it)?(?:\s+on)?|with|on|switch(?:\s+it)?\s+to|try)\s+(?:claude[\s-]+)?(?:fable|mythos)\b/gi;
+// Only an ask: "use", "run (it) on", "switch (it) to", "try". "with" and
+// "on" alone also match descriptions ("built on Fable", "the run with Fable
+// failed"), so they do not count.
+const TOP_TIER_REQUEST = /\b(?:use|run(?:\s+it)?\s+on|switch(?:\s+it)?\s+to|try)\s+(?:claude[\s-]+)?(?:fable|mythos)\b/gi;
 const NEGATION_BEFORE = /\b(?:don'?t|do\s+not|never|not|no|without|avoid|stop)\b[^.!?\n]{0,20}$/i;
 
 /** The user's own words in a note: quoted lines and fenced blocks (a pasted

@@ -46,6 +46,8 @@ const ROOT = path.join(__dirname, "..");
     assert.equal(policy.asksForTopTier("use fable for the audit"), true);
     assert.equal(policy.asksForTopTier("Run it on Mythos please"), true);
     assert.equal(policy.asksForTopTier("switch to claude-fable"), true);
+    assert.equal(policy.asksForTopTier("try mythos for this one"), true);
+    assert.equal(policy.asksForTopTier("run on fable"), true);
     for (const text of [
       "don't use Fable, it is too expensive",
       "do not run it on mythos",
@@ -53,6 +55,10 @@ const ROOT = path.join(__dirname, "..");
       "Fable is too expensive",
       "the log says:\n```\nmodel: claude-fable-5\nuse fable fallback\n```\nwhy?",
       "> use fable\nthat line is from the old brief",
+      "this plan was built on Fable last week",
+      "the run with Fable failed",
+      "we were using fable yesterday",
+      "run fable",
     ]) {
       assert.equal(policy.asksForTopTier(text), false, text);
     }
