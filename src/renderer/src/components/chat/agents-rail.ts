@@ -1,6 +1,7 @@
 import type { RunState, WorkerAttempt } from "@shared/types";
 import type { WorkerActivity, WorkerActivityStep } from "@shared/worker-feed";
-import type { ChatWorker } from "./timeline";
+import { workerModelLabel } from "../runs/run-format";
+import { runtimeLabel, type ChatWorker } from "./timeline";
 import { toolActivityKind, toolDisplayName } from "./tool-labels";
 import { workerAttempt, workerElapsed, workerViewState, type WorkerViewState } from "./worker-view";
 
@@ -16,7 +17,7 @@ export interface RailWorker {
   worker: ChatWorker;
   attempt: WorkerAttempt | null;
   state: WorkerViewState;
-  model: string | null;
+  model: string;
   /** "3m 02s" while running, how long it ran once done; null before it started. */
   elapsed: string | null;
   /** What a running worker is doing now ("Run command · npm test"); null when unknown. */
@@ -74,8 +75,8 @@ export function railWorkers(
       worker,
       attempt,
       state,
-      // The row's label ("Opus 5"), as the step card and the worker bar show it.
-      model: worker.model ?? attempt?.model ?? null,
+      // "Opus 5", as the worker bar shows it, never the raw id.
+      model: workerModelLabel(worker.model ?? attempt?.model, runtimeLabel(worker.runtime)),
       elapsed: workerElapsed(attempt, now),
       activity: state === "running" ? workerActivityLabel(live?.step) : null,
       reason: state === "failed" ? workerFailureReason(attempt) : null,

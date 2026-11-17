@@ -28,7 +28,8 @@ const reactStub = {
   setup(build) {
     build.onResolve({ filter: /^react$/ }, () => ({ path: "react", namespace: "stub-react" }));
     build.onLoad({ filter: /.*/, namespace: "stub-react" }, () => ({
-      contents: "export const useEffect = () => undefined; export const useState = (v) => [v, () => undefined];",
+      contents:
+        "export const useEffect = () => undefined; export const useState = (v) => [v, () => undefined]; export const useMemo = (f) => f(); export const useRef = (v) => ({ current: v }); export const useCallback = (f) => f; export default {};",
       loader: "js",
     }));
   },
@@ -194,8 +195,8 @@ function model(rail) {
   const workers = [];
   const add = (id, stepId, status, extra = {}) => {
     tasks.push({ id, stepId, title: id, description: "" });
-    attempts.push({ id: `att-${id}`, workerTaskId: id, status, runtime: "pi", model: "Opus 5.5", startedAt: at(10), ...extra });
-    workers.push({ id, taskId: id, title: id, runtime: "pi", status: "running", attemptId: `att-${id}` });
+    attempts.push({ id: `att-${id}`, workerTaskId: id, status, runtime: "claude", model: "claude-opus-5-5", startedAt: at(10), ...extra });
+    workers.push({ id, taskId: id, title: id, runtime: "claude", status: "running", attemptId: `att-${id}` });
   };
   add("read", "s1", "succeeded", { finishedAt: at(100) });
   add("toast", "s2", "running");
@@ -216,9 +217,9 @@ function model(rail) {
   check("a finished worker's time is how long it ran", byId.read.state === "done" && byId.read.elapsed === "1m 30s", byId.read.elapsed);
   check("a running worker shows what it is doing", byId.toast.activity === "Run command · npm test -- merged-fold", byId.toast.activity);
   check("a failed worker shows its reason's first line", byId.light.reason === "typecheck, 2 errors", byId.light.reason);
-  check("a running worker's model comes from its attempt when its row has none", byId.toast.model === "Opus 5.5");
-  const labelled = rail.railWorkers(run, [{ ...workers[1], model: "Opus 5" }], activity, now)[0];
-  check("the row's model label wins over the raw id", labelled.model === "Opus 5");
+  check("a model reads as people say it, from the attempt when the row has none", byId.toast.model === "Opus 5.5", byId.toast.model);
+  const labelled = rail.railWorkers(run, [{ ...workers[1], model: "claude-opus-5" }], activity, now)[0];
+  check("the row's model wins over the attempt's", labelled.model === "Opus 5", labelled.model);
   check(
     "a mark reads name-free: model, state, time and step",
     rail.railWorkerLine(byId.toast) === "Opus 5.5 · running · 3m 10s · Run command · npm test -- merged-fold",
