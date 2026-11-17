@@ -156,7 +156,10 @@ function rpcRaw(handshake, body, headers = {}) {
         res.on("end", () => resolve({ status: res.statusCode, body: data }));
       },
     );
-    req.on("error", reject);
+    req.on("error", (error) => {
+      error.message = `${error.message} (during ${typeof body === "string" ? "a raw request" : body.method})`;
+      reject(error);
+    });
     req.end(payload);
   });
 }
@@ -2290,6 +2293,19 @@ async function main() {
       !/request too large/.test(bigWhiteboard.error?.message ?? "") && !bigWhiteboard.parseError,
       JSON.stringify(bigWhiteboard).slice(0, 200),
     );
+  } catch (error) {
+    // A reset connection alone does not say whether the app died or only
+    // dropped the socket; the home with its log is removed below.
+    console.error(
+      `  app at the failure: ${app.exitCode !== null || app.signalCode !== null ? `exited (code ${app.exitCode}, signal ${app.signalCode})` : "still running"}`,
+    );
+    try {
+      const log = fs.readFileSync(path.join(HOME, "logs", "main.log"), "utf8");
+      console.error(`  last lines of the app's main.log:\n${log.split("\n").slice(-40).join("\n")}`);
+    } catch {
+      console.error("  the app wrote no main.log");
+    }
+    throw error;
   } finally {
     // Launch the binary directly and await its exit: killing Electron's Node
     // CLI wrapper leaves the app writing into the directory being removed.

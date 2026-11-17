@@ -314,11 +314,15 @@ function takeFault() {
 }
 
 async function handleModel(req, res, flavour) {
+  // Arrival time, so a test can time the gap between two requests instead of
+  // a whole cora process, whose startup alone varies by seconds on a busy CPU.
+  const at = Date.now();
   const body = JSON.parse(await readBody(req));
   const view = flavour === "anthropic" ? anthropicView(body) : responsesView(body);
   const step = plan(view);
   const fault = takeFault();
   requests.push({
+    at,
     flavour,
     fault,
     path: req.url,

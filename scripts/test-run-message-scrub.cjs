@@ -158,7 +158,9 @@ function runFiles(runId) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function waitFor(condition, ms = 4000) {
+// Returns as soon as the condition holds; the limit only bounds a hang, so it
+// is sized for a loaded CI runner, not for this machine.
+async function waitFor(condition, ms = 20_000) {
   const start = Date.now();
   while (Date.now() - start < ms) {
     if (condition()) return true;
@@ -219,7 +221,10 @@ async function main() {
   await runStore.answerRunQuestion({ runId, questionMessageId: question.id, message: `use prod, password: ${PASSWORD}` });
   const answer = readRun().humanMessages.find((message) => message.kind === "answer");
   check("the answer is kept, with the password replaced", answer?.message === "use prod, password: [redacted]", answer?.message);
-  await waitFor(() => prompts.length >= 2);
+  // Wait for the second turn to settle on its own question, not only to
+  // start: a note sent while it still runs is queued behind that question and
+  // never starts a third turn, which is what failed on busy CI runners.
+  await waitFor(() => prompts.length >= 2 && Boolean(readRun().blockedOn) && readRun().blockedOn.questionMessageId !== question.id);
 
   check("the turn that delivers the note sees the key", prompts[0]?.includes(KEY), prompts[0]?.slice(-400));
   check("the turn that delivers the answer sees the password", prompts[1]?.includes(PASSWORD), prompts[1]?.slice(-400));
