@@ -140,9 +140,11 @@ export function useViewerZoom({
 
   const apply = useCallback(
     (action: ZoomAction) => {
-      const { min, max } = latest.current;
+      const { min, max, fitted, fitZoom } = latest.current;
+      // From the level on screen: a pinch can leave `requested` a hair off it.
+      const from = fitted ? fitZoom : requested.current;
       if (action === "reset") fit();
-      else zoomTo(stepZoom(requested.current, action === "in" ? 1 : -1, min, max));
+      else zoomTo(stepZoom(from, action === "in" ? 1 : -1, min, max));
     },
     [fit, zoomTo],
   );
@@ -168,11 +170,14 @@ export function useViewerZoom({
     [rootRef, apply],
   );
 
+  // On the root, which outlives a viewer's scroller (a spreadsheet remounts
+  // its list per sheet); only wheels over the scroller count.
   useEffect(() => {
-    const scroller = scrollerRef.current;
-    if (!enabled || !scroller) return;
+    const root = rootRef.current;
+    if (!enabled || !root) return;
     const onWheel = (event: WheelEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) return;
+      const scroller = scrollerRef.current;
+      if (!(event.ctrlKey || event.metaKey) || !scroller || !scroller.contains(event.target as Node)) return;
       // Chromium would otherwise scroll, and a pinch must never reach the page zoom.
       event.preventDefault();
       const box = scroller.getBoundingClientRect();
@@ -187,9 +192,9 @@ export function useViewerZoom({
       wheelCarry.current = step.carry;
       if (step.next !== null) zoomTo(step.next, point);
     };
-    scroller.addEventListener("wheel", onWheel, { passive: false });
-    return () => scroller.removeEventListener("wheel", onWheel);
-  }, [enabled, scrollerRef, zoomTo]);
+    root.addEventListener("wheel", onWheel, { passive: false });
+    return () => root.removeEventListener("wheel", onWheel);
+  }, [enabled, rootRef, scrollerRef, zoomTo]);
 
   return { zoom, fitted: state.fitted, zoomTo, fit, apply, controls: { zoom, ...controls } };
 }
