@@ -18,6 +18,15 @@ try {
     true,
     "bounded work in a small workspace uses the direct lane",
   );
+  for (const prompt of ["/ceo", "/skill:verify the parser", "/ketchup"]) {
+    assert.equal(
+      await shouldUseDirectExecution({ cwd: root, prompt }),
+      false,
+      `${prompt} runs a skill, which only the manager expands`,
+    );
+    assert.equal(followUpNeedsManager(prompt), true, `${prompt} as a follow-up goes to the manager`);
+  }
+  assert.equal(followUpNeedsManager("fix src/app.ts"), false);
   assert.equal(isConversationalRequest("hello!"), true);
   assert.equal(isConversationalRequest("what is your favorite food?"), true);
   assert.equal(isConversationalRequest("fix the hello button"), false);

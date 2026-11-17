@@ -12,6 +12,8 @@ import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
 import { studioBrowserOnlyDecision } from "./studio-browser-policy";
 import { barePythonDecision, pythonAvailability } from "./python-guard";
+import { rewriteSkillCommand, skillNamesFromCommands } from "./skill-commands";
+import { loadUserRulesSection } from "./user-rules";
 import {
   MANAGER_SESSION_WAIT_DESCRIPTION,
   SESSION_WAIT_MANAGER_DEFAULT_SECONDS,
@@ -175,6 +177,17 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
   let mcp: McpBridgeHandle | null = null;
   const whiteboardReview = createWhiteboardReviewGuard();
   pi.on("input", () => { whiteboardReview.reset(); });
+  // A skill the user types runs even when it is hidden from the model
+  // (disable-model-invocation), wherever Studio framed the turn's text.
+  if (!untrustedPullRequest) {
+    pi.on("input", (event) => {
+      const text = rewriteSkillCommand(event.text, skillNamesFromCommands(pi.getCommands()));
+      return text === null ? undefined : { action: "transform" as const, text };
+    });
+  }
+  // Read once per process: a file that changed mid-chat would rewrite the
+  // cached system prompt on every turn.
+  const userRules = untrustedPullRequest ? "" : loadUserRulesSection();
   pi.on("agent_end", (event) => {
     const last = event.messages.at(-1) as { stopReason?: string } | undefined;
     if (last?.stopReason === "aborted" || last?.stopReason === "error") return;
@@ -224,7 +237,7 @@ Imported pull-request security contract:
 
 ${buildCoraPiSystemPrompt(activeMode(), activeExecutionPolicy(), { alwaysVerifyEdits: alwaysVerifyEdits(), untrusted: untrustedPullRequest })}${workerModelContract()}
 ${untrustedContract}
-${mcp?.promptSuffix() ?? ""}`,
+${mcp?.promptSuffix() ?? ""}${userRules ? `\n\n${userRules}` : ""}`,
     };
   });
 

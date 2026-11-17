@@ -10,6 +10,10 @@ const MANAGED_REQUEST =
 const STUDIO_SURFACE_REQUEST =
   /\b(?:whiteboard|kanban|board|automations?|loom|schedul(?:e|ed|ing)|cron(?:tab|job)?|recurring|nightly|hourly|every (?:day|night|hour|morning|evening|week|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d+\s*(?:min(?:ute)?s?|hours?|days?)))\b/i;
 
+// A slash command (`/ceo`, `/skill:verify`) runs a skill, and only the
+// manager's Pi session expands skills the user invokes.
+const SLASH_COMMAND = /^\/[A-Za-z0-9]/;
+
 const SOCIAL_REQUEST = /^(?:(?:hi|hello|hey|yo|sup|what(?:'s| is) up|good (?:morning|afternoon|evening)|how are you)(?:\s+(?:cora|there))?[!?.\s]*|(?:thanks|thank you|sounds good|okay|ok|cool|nice|great)[!?.\s]*|what(?:'s| is) your (?:favorite|favourite)\b[^\n]{0,120}|who are you[!?.\s]*|tell me (?:a|another) joke[!?.\s]*)$/i;
 
 /**
@@ -19,7 +23,7 @@ const SOCIAL_REQUEST = /^(?:(?:hi|hello|hey|yo|sup|what(?:'s| is) up|good (?:mor
  */
 export function followUpNeedsManager(prompt: string): boolean {
   const text = prompt.trim();
-  return text.length > 4_000 || MANAGED_REQUEST.test(text) || STUDIO_SURFACE_REQUEST.test(text);
+  return text.length > 4_000 || SLASH_COMMAND.test(text) || MANAGED_REQUEST.test(text) || STUDIO_SURFACE_REQUEST.test(text);
 }
 
 export function isConversationalRequest(prompt: string): boolean {
@@ -66,7 +70,7 @@ export async function shouldUseDirectExecution(
 
   const prompt = input.prompt.trim();
   if (isConversationalRequest(prompt)) return false;
-  if (prompt.length > 4_000 || MANAGED_REQUEST.test(prompt)) return false;
+  if (prompt.length > 4_000 || SLASH_COMMAND.test(prompt) || MANAGED_REQUEST.test(prompt)) return false;
   if (STUDIO_SURFACE_REQUEST.test(prompt)) return false;
   return true;
 }

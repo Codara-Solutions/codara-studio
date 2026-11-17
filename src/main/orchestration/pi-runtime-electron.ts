@@ -25,6 +25,7 @@ import {
   hasVerifiedOpenRouterKey,
 } from "../openrouter-config";
 import { coraWorkerModelAvailability, routeCoraModel } from "./worker-model-availability";
+import { userAgentRulesPath } from "./user-agent-rules";
 import { forgetResolvedBinary, resolveBinary } from "../binary-resolver";
 import { getEnrichedEnv } from "../path-reconstruction";
 import { writeFileAtomic } from "../fs-atomic";
@@ -749,6 +750,10 @@ export async function createCodaraPiLaunchPlan(
       plan.env.CODARA_PI_WORKER_MODELS_DISCONNECTED = JSON.stringify(workerModels.disconnected);
     }
     if (settings.coraAlwaysVerifyEdits) plan.env.CODARA_PI_ALWAYS_VERIFY_EDITS = "1";
+    if (!untrustedPullRequest) {
+      const rulesPath = userAgentRulesPath();
+      if (rulesPath) plan.env.CODARA_PI_USER_RULES_PATH = rulesPath;
+    }
     return untrustedPullRequest
       ? attachUntrustedSocketCapability(plan, {
           audience: "untrusted-pi-manager",
