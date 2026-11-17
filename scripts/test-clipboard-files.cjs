@@ -55,6 +55,19 @@ async function main() {
 
   console.log("NOTE: this test overwrites the system clipboard while it runs.\n");
 
+  // The first AppKit script in a fresh macOS session loads the scripting
+  // bridge, which on a slow CI runner took the whole of the app's 3 s limit
+  // (PR 253's serial job: the very first write failed after 3 s). That cold
+  // start is not what this test checks, so it is paid here, outside the limit,
+  // and its time is printed; the checks below still run under the app's 3 s.
+  const warmStarted = Date.now();
+  try {
+    execFileSync("osascript", ["-e", 'use framework "AppKit"', "-e", "return 1"], { timeout: 30_000, stdio: "ignore" });
+  } catch {
+    /* the checks below report a pasteboard that does not work */
+  }
+  console.log(`osascript with AppKit, first run: ${Date.now() - warmStarted} ms`);
+
   // Real, existing files under the repo — exact absolute paths must round-trip.
   const p1 = path.join(ROOT, "package.json");
   const p2 = path.join(ROOT, "tsconfig.json");
@@ -62,8 +75,9 @@ async function main() {
   assert.ok(fs.existsSync(p2), `fixture exists: ${p2}`);
 
   // ── Round-trip: single file ──
+  const write1Started = Date.now();
   const wrote1 = await mod.writeClipboardFilePaths([p1]);
-  check("writeClipboardFilePaths([p1]) returns true", wrote1 === true);
+  check(`writeClipboardFilePaths([p1]) returns true (${Date.now() - write1Started} ms)`, wrote1 === true);
   const read1 = await mod.readClipboardFilePaths();
   check(
     "readClipboardFilePaths returns exactly [p1]",
