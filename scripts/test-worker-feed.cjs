@@ -78,13 +78,13 @@ async function main() {
   // ── parse, merge, fold ──
   const at = "2026-11-17T10:00:00.000Z";
   const lines = [
-    JSON.stringify({ k: "tool", id: "c1", at, name: "read", input: { path: "a.ts" } }),
+    JSON.stringify({ k: "tool", id: "r1", at, call: "c1", name: "read", input: { path: "a.ts" } }),
     "not json",
     JSON.stringify({ k: "bogus", id: "x", at }),
-    JSON.stringify({ k: "result", id: "c1", at, output: "contents" }),
-    JSON.stringify({ k: "result", id: "gone", at, output: "orphan" }),
+    JSON.stringify({ k: "result", id: "r2", at, call: "c1", output: "contents" }),
+    JSON.stringify({ k: "result", id: "r3", at, call: "gone", output: "orphan" }),
     JSON.stringify({ k: "text", id: "t1", at, text: "Found it." }),
-    JSON.stringify({ k: "tool", id: "c2", at, name: "bash", input: { command: "npm test" } }),
+    JSON.stringify({ k: "tool", id: "r4", at, call: "c2", name: "bash", input: { command: "npm test" } }),
     '{"k":"text","id":"t2","at":"' + at + '","te',
   ].join("\n");
   const parsed = shared.parseWorkerFeed(lines);
@@ -105,10 +105,26 @@ async function main() {
     partial: { id: "t3", text: "Running the" },
   });
   check("a partial that already settled is not drawn twice", settled.length === 1 && !settled[0].streaming);
+  const repeated = shared.foldWorkerFeed({
+    records: [
+      { k: "tool", id: "a", at, call: "call_0", name: "read" },
+      { k: "result", id: "b", at, call: "call_0", output: "first" },
+      { k: "tool", id: "c", at, call: "call_0", name: "edit" },
+      { k: "result", id: "d", at, call: "call_0", output: "second" },
+    ],
+    partial: null,
+  });
+  check(
+    "a provider that repeats one call id still gets each result on its own call",
+    repeated.length === 2 && repeated[0].output === "first" && repeated[1].output === "second",
+    JSON.stringify(repeated),
+  );
+  check("an input whose getter throws is dropped, not thrown", shared.boundToolInput({ get bad() { throw new Error("x"); } }) === undefined);
 
   // ── the writer ──
   const feedPath = path.join(dir, "feed.jsonl");
   fs.writeFileSync(feedPath, "left over from an earlier launch\n");
+  fs.writeFileSync(`${feedPath}.99999.tmp`, "left by a crash between write and rename\n");
   const sent = [];
   let clock = Date.parse(at);
   const writer = main.createWorkerFeedWriter({
@@ -120,6 +136,7 @@ async function main() {
     now: () => new Date((clock += 1000)),
   });
   check("a new session's feed is live", main.liveWorkerFeedSnapshot("attempt-1")?.live === true);
+  check("a new session tells the renderer to read again", sent[0]?.reset === true);
   writer.textDelta("Let me ");
   writer.textDelta("look.");
   check(
@@ -144,7 +161,8 @@ async function main() {
       JSON.stringify(["text", "tool", "result", "tool", "result", "steer", "note", "text"]),
     JSON.stringify(live.records.map((record) => record.k)),
   );
-  check("a call without an id or name still gets both", live.records[3].id.startsWith("call-") && live.records[3].name === "tool");
+  check("a call without a provider id or name still gets an id and a name", Boolean(live.records[3].id) && live.records[3].call === undefined && live.records[3].name === "tool");
+  check("every record id is unique and carries the session", new Set(live.records.map((record) => record.id)).size === live.records.length && live.records.every((record) => /^[a-z0-9]+-[a-z0-9]+$/.test(record.id)));
   check("a steer is trimmed and a blank one dropped", live.records[5].text === "Also update the docs." && live.records[5].from === "user");
   check("a message past the cap is clipped", live.records[7].text.length === LIMITS.textChars);
   check("every record is pushed with its run and attempt", sent.filter((update) => update.records).every((update) => update.runId === "run-1" && update.attemptId === "attempt-1"));
@@ -159,6 +177,12 @@ async function main() {
     `${reread?.length} vs ${live.records.length}`,
   );
   check("a feed that was never written reads as null", (await main.readWorkerFeedFile(path.join(dir, "none.jsonl"))) === null);
+  check("a temp file left by a crash is removed", !fs.existsSync(`${feedPath}.99999.tmp`));
+  const relaunch = main.createWorkerFeedWriter({ runId: "run-1", attemptId: "attempt-1", path: feedPath, publish: () => {}, now: () => new Date((clock += 1000)) });
+  relaunch.note("second session", "info");
+  const relaunchId = relaunch.snapshot().records[0].id;
+  await relaunch.close();
+  check("a relaunch of the same attempt never reuses an id of the session before", live.records.every((record) => record.id !== relaunchId));
 
   // ── the cap ──
   const cappedPath = path.join(dir, "capped.jsonl");
@@ -171,18 +195,42 @@ async function main() {
     maxBytes: 4_000,
   });
   for (let i = 0; i < 60; i += 1) capped.note(`step ${i} ${"n".repeat(80)}`, "info");
+  capped.tool("call-x", "read", { path: "x" });
+  capped.result("call-x", "r", false);
   await capped.close();
   const cappedRecords = await main.readWorkerFeedFile(cappedPath);
   const size = fs.statSync(cappedPath).size;
   check("a feed past its cap stays under it", size <= 4_000, size);
   check("the dropped records are counted first", cappedRecords[0].k === "elided" && cappedRecords.filter((record) => record.k === "elided").length === 1);
   check(
-    "the newest records are the ones kept, and the count adds up",
-    cappedRecords.at(-1).text.startsWith("step 59 ") && cappedRecords[0].count + cappedRecords.length - 1 === 60,
+    "the newest records are the ones kept, and the count is in steps (a result belongs to its call)",
+    cappedRecords.at(-1).k === "result" &&
+      cappedRecords[0].count + cappedRecords.filter((record) => record.k !== "elided" && record.k !== "result").length === 61,
     `${cappedRecords[0].count} + ${cappedRecords.length - 1}`,
   );
   check("a rewrite tells the renderer to read again", cappedSent.some((update) => update.reset === true));
   check("the rewrite leaves no temp file", fs.readdirSync(dir).every((name) => !name.endsWith(".tmp")));
+  const hugePath = path.join(dir, "huge.jsonl");
+  const huge1 = main.createWorkerFeedWriter({ runId: "run-1", attemptId: "attempt-3", path: hugePath, publish: () => {}, maxBytes: 2_000 });
+  huge1.note("small", "info");
+  huge1.steer("w".repeat(3_000), "user");
+  const hugeRecords = huge1.snapshot().records;
+  await huge1.close();
+  check("a record larger than the cap is still kept as the newest", hugeRecords.at(-1)?.k === "steer", JSON.stringify(hugeRecords.map((record) => record.k)));
+
+  if (process.platform !== "win32") {
+    const outside = path.join(dir, "outside.txt");
+    fs.writeFileSync(outside, "the user's file\n");
+    const linked = path.join(dir, "linked.jsonl");
+    fs.symlinkSync(outside, linked);
+    const planted = main.createWorkerFeedWriter({ runId: "run-1", attemptId: "attempt-4", path: linked, publish: () => {} });
+    planted.note("written by the feed", "info");
+    await planted.close();
+    check(
+      "a link planted at the feed's path is replaced, never written through",
+      fs.readFileSync(outside, "utf8") === "the user's file\n" && !fs.lstatSync(linked).isSymbolicLink(),
+    );
+  }
 
   fs.rmSync(dir, { recursive: true, force: true });
   if (failures > 0) {

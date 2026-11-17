@@ -8,18 +8,21 @@
 /** The file name of an attempt's feed, in the attempt's own directory. */
 export const WORKER_FEED_FILE = "feed.jsonl";
 
+// Every record has its own id, unique within the attempt, so a renderer can
+// merge pushes and re-reads by it. A tool call's provider id goes in `call`:
+// some providers repeat one ("call_0") for every call.
 export type WorkerFeedRecord =
   /** A tool call started. `input` is bounded by boundToolInput. */
-  | { k: "tool"; id: string; at: string; name: string; input?: unknown }
-  /** The result of the tool call with the same id. */
-  | { k: "result"; id: string; at: string; output: string; error?: true }
+  | { k: "tool"; id: string; at: string; call?: string; name: string; input?: unknown }
+  /** The result of the latest call with this `call` id that has none yet. */
+  | { k: "result"; id: string; at: string; call: string; output: string; error?: true }
   /** One finished assistant message. */
   | { k: "text"; id: string; at: string; text: string }
   /** A message the worker was sent while it ran: by the user, or by Codara (a report reminder). */
   | { k: "steer"; id: string; at: string; text: string; from: "user" | "cora" }
   /** Something about the session rather than from the model: a provider error, a retry, a compaction. */
   | { k: "note"; id: string; at: string; text: string; tone: "info" | "error" }
-  /** The feed outgrew its cap and this many earlier records were dropped. Always first when present. */
+  /** The feed outgrew its cap and this many earlier steps (calls, replies, messages, notes) were dropped. Always first when present. */
   | { k: "elided"; id: string; at: string; count: number };
 
 export interface WorkerFeedSnapshot {
@@ -43,7 +46,7 @@ export interface WorkerFeedUpdate {
   records?: WorkerFeedRecord[];
   /** Present when the streaming message changed; null when it ended or was dropped. */
   partial?: { id: string; text: string } | null;
-  /** The feed was rewritten (it outgrew its cap): read it again instead of appending. */
+  /** The feed was rewritten (it outgrew its cap, or a new session started): read it again instead of appending. */
   reset?: true;
   /** The worker session ended. */
   ended?: true;
@@ -85,19 +88,18 @@ export function boundToolOutput(text: string): string {
  * write cannot grow the feed by megabytes. JSON-safe by construction.
  */
 export function boundToolInput(value: unknown): unknown {
-  const bounded = boundValue(value, WORKER_FEED_LIMITS.inputStringChars, 0);
-  let json: string;
   try {
-    json = JSON.stringify(bounded) ?? "";
+    const bounded = boundValue(value, WORKER_FEED_LIMITS.inputStringChars, 0);
+    if ((JSON.stringify(bounded) ?? "").length <= WORKER_FEED_LIMITS.inputJsonChars) return bounded;
+    const tighter = boundValue(value, 400, 0);
+    const tighterJson = JSON.stringify(tighter) ?? "";
+    if (tighterJson.length <= WORKER_FEED_LIMITS.inputJsonChars) return tighter;
+    // Wide rather than long: many fields or items. The call's shape is lost but its text is kept.
+    return clipText(tighterJson, WORKER_FEED_LIMITS.inputJsonChars);
   } catch {
+    // A getter that throws, or a BigInt: the call is kept without its input.
     return undefined;
   }
-  if (json.length <= WORKER_FEED_LIMITS.inputJsonChars) return bounded;
-  const tighter = boundValue(value, 400, 0);
-  const tighterJson = JSON.stringify(tighter) ?? "";
-  if (tighterJson.length <= WORKER_FEED_LIMITS.inputJsonChars) return tighter;
-  // Wide rather than long: many fields or items. The call's shape is lost but its text is kept.
-  return clipText(tighterJson, WORKER_FEED_LIMITS.inputJsonChars);
 }
 
 function boundValue(value: unknown, maxString: number, depth: number): unknown {
@@ -128,7 +130,7 @@ export function isWorkerFeedRecord(value: unknown): value is WorkerFeedRecord {
     case "tool":
       return typeof record.name === "string";
     case "result":
-      return typeof record.output === "string";
+      return typeof record.call === "string" && typeof record.output === "string";
     case "text":
       return typeof record.text === "string";
     case "steer":
@@ -202,11 +204,11 @@ export function foldWorkerFeed(
   feed: Pick<WorkerFeedSnapshot, "records" | "partial">,
 ): WorkerFeedEntry[] {
   const entries: WorkerFeedEntry[] = [];
-  const tools = new Map<string, Extract<WorkerFeedEntry, { kind: "tool" }>>();
+  // Calls still waiting for a result, by provider call id, oldest first.
+  const open = new Map<string, Array<Extract<WorkerFeedEntry, { kind: "tool" }>>>();
   for (const record of feed.records) {
     switch (record.k) {
       case "tool": {
-        if (tools.has(record.id)) break;
         const entry: Extract<WorkerFeedEntry, { kind: "tool" }> = {
           kind: "tool",
           id: `tool:${record.id}`,
@@ -215,14 +217,17 @@ export function foldWorkerFeed(
           toolName: record.name,
           input: record.input,
         };
-        tools.set(record.id, entry);
+        if (record.call) open.set(record.call, [...(open.get(record.call) ?? []), entry]);
         entries.push(entry);
         break;
       }
       case "result": {
-        // A result whose call was dropped with the oldest records has nothing to attach to.
-        const tool = tools.get(record.id);
-        if (!tool || tool.output !== undefined) break;
+        // The latest open call with that id: a provider that repeats ids runs
+        // its calls one at a time. A result whose call was dropped with the
+        // oldest records has nothing to attach to.
+        const waiting = open.get(record.call);
+        const tool = waiting?.pop();
+        if (!tool) break;
         tool.output = record.output;
         if (record.error) tool.isError = true;
         break;
