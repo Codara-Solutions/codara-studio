@@ -34,6 +34,14 @@ interface Props {
   /** The block's one refresh affordance — re-reads status and queue. */
   onRefresh: () => void;
   onPublished: () => void;
+  /**
+   * Which Source Control tab shows the block: Issues holds the repository's
+   * issue and pull request list, Pull request holds this branch's journey.
+   * One instance serves both, so GitHub is read once for the two tabs.
+   */
+  view: "issues" | "pull-request";
+  /** The list's size for the Issues tab label, null until it is read. */
+  onQueueCount?: (total: number | null) => void;
 }
 
 interface Snapshot {
@@ -58,11 +66,11 @@ export default function GitHubSection({
   queue,
   onRefresh,
   onPublished,
+  view,
+  onQueueCount,
 }: Props): React.ReactElement {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
-  const [headerHover, setHeaderHover] = useState(false);
   const [refreshHover, setRefreshHover] = useState(false);
   // Background/initial reads are intentionally invisible in the header. Only
   // an explicit click earns a progress label; otherwise a slow `gh` command
@@ -95,10 +103,9 @@ export default function GitHubSection({
     [],
   );
 
-  // A new workspace context starts the block fresh: open, with any stale
+  // A new workspace context starts the block fresh, with any stale
   // per-workspace state dropped.
   useEffect(() => {
-    setCollapsed(false);
     setQueueMerge(null);
     setQueueSummary({ loading: false, total: null });
   }, [cwd]);
@@ -153,17 +160,14 @@ export default function GitHubSection({
   );
 
   // A new workspace or branch has no snapshot yet, so that read is loud. The
-  // block starts open, so this normally fires right away; if the user has
-  // collapsed it, the read waits (each one is a `gh` subprocess tree) until
-  // the section is expanded again — which is also what picks up a branch that
-  // moved while the block was closed.
+  // block stays mounted behind its tabs, so this fires right away and the
+  // Issues count is ready before the tab is opened.
   useEffect(() => {
-    if (collapsed) return;
     loadStatus(false);
     return () => {
       requestId.current += 1;
     };
-  }, [collapsed, loadStatus, currentBranch]);
+  }, [loadStatus, currentBranch]);
 
   // Both keys are watched together: the panel's own refresh bumps the user key
   // and the git version at once, and this must be one read, not two. A read the
@@ -182,22 +186,16 @@ export default function GitHubSection({
     // resume path's clock instead of firing per save. Nothing is lost by
     // waiting: focus, the fallback timer, or the user's own refresh all catch
     // up, and a branch change is handled loudly by the effect above.
-    // A collapsed block shows nothing a silent read could update, and opening
-    // it reads loudly anyway — so only the user's own refresh gets through.
-    if (
-      !loud &&
-      (collapsed || Date.now() - lastReadAt.current < RESUME_REFRESH_MIN_INTERVAL_MS)
-    ) {
+    if (!loud && Date.now() - lastReadAt.current < RESUME_REFRESH_MIN_INTERVAL_MS) {
       return;
     }
     loadStatus(!loud);
-  }, [collapsed, loadStatus, refreshKey, userRefreshKey]);
+  }, [loadStatus, refreshKey, userRefreshKey]);
 
   // Coming back to the window is the strongest signal that GitHub may have
   // moved on without us; the slow interval only covers a window left open.
-  // Both stay quiet, and neither runs while the block is collapsed.
+  // Both stay quiet.
   useEffect(() => {
-    if (collapsed) return;
     const silentRefresh = (): void => {
       if (document.visibilityState !== "visible") return;
       loadStatus(true);
@@ -217,7 +215,7 @@ export default function GitHubSection({
       window.removeEventListener("focus", resume);
       document.removeEventListener("visibilitychange", resume);
     };
-  }, [collapsed, loadStatus]);
+  }, [loadStatus]);
 
   const status = snapshot?.cwd === cwd ? snapshot.status : null;
 
@@ -288,6 +286,9 @@ export default function GitHubSection({
         ? 1
         : 0
       : null;
+  useEffect(() => {
+    onQueueCount?.(count);
+  }, [count, onQueueCount]);
   const nothingOpen = Boolean(
     ready && !ready.pullRequest && queue && queueSummary.total === 0,
   );
@@ -301,86 +302,26 @@ export default function GitHubSection({
   const dirtyCount = gitStatus ? gitStatus.staged.length + gitStatus.unstaged.length : 0;
 
   return (
-    <section
-      aria-label="GitHub"
-      style={{ borderBottom: "1px solid var(--rule-soft)" }}
-    >
+    <section aria-label={view === "issues" ? "GitHub issues and pull requests" : "Pull request"}>
       <div
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 5,
-          minHeight: 34,
-          padding: "3px 8px",
-          background: "color-mix(in oklab, var(--panel-raised, var(--panel)) 52%, transparent)",
+          justifyContent: "flex-end",
+          gap: 6,
+          padding: "6px 10px 0",
         }}
       >
-        <button
-          type="button"
-          aria-expanded={!collapsed}
-          title={collapsed ? "Show GitHub issues and pull requests" : "Hide GitHub issues and pull requests"}
-          onClick={() => setCollapsed((value) => !value)}
-          onMouseEnter={() => setHeaderHover(true)}
-          onMouseLeave={() => setHeaderHover(false)}
-          style={{
-            appearance: "none",
-            minWidth: 0,
-            flex: 1,
-            height: 27,
-            padding: "0 6px",
-            border: "none",
-            borderRadius: 6,
-            background: headerHover ? "var(--hover)" : "transparent",
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            cursor: "default",
-            textAlign: "left",
-            transition: "background var(--motion-fast) var(--ease-out)",
-          }}
-        >
-          <ChevronIcon open={!collapsed} />
-          <span
-            style={{
-            fontFamily: "var(--font-sans)",
-            fontSize: 10,
-            letterSpacing: "0.12em",
-            fontWeight: 800,
-            textTransform: "uppercase",
-            color: "var(--ink-dim)",
-            }}
+        {view === "issues" && issuesUrl ? (
+          <button
+            type="button"
+            title="Open this repository's issues on GitHub"
+            onClick={() => openLink(issuesUrl)}
+            style={linkButtonStyle}
           >
-            GitHub
-          </span>
-          {count !== null && count > 0 ? (
-            <span
-              style={{
-                minWidth: 17,
-                padding: "1px 5px",
-                borderRadius: 999,
-                background: "var(--hover)",
-                color: "var(--muted)",
-                fontFamily: "var(--font-mono)",
-                fontSize: 9,
-                fontVariantNumeric: "tabular-nums",
-                textAlign: "center",
-              }}
-            >
-              {count}
-            </span>
-          ) : null}
-          <span style={{ flex: 1 }} />
-          <span
-            style={{
-              color: "var(--muted-2)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 9,
-              fontWeight: 650,
-            }}
-          >
-            {collapsed ? "Show" : "Hide"}
-          </span>
-        </button>
+            View all issues
+          </button>
+        ) : null}
         <button
           type="button"
           title="Refresh GitHub issues and pull requests"
@@ -394,7 +335,7 @@ export default function GitHubSection({
           onMouseLeave={() => setRefreshHover(false)}
           style={{
             appearance: "none",
-            height: 27,
+            height: 24,
             minWidth: manualRefresh ? 76 : 65,
             padding: "0 7px",
             border: "1px solid var(--rule-soft)",
@@ -407,8 +348,8 @@ export default function GitHubSection({
             gap: 5,
             cursor: "default",
             fontFamily: "var(--font-sans)",
-            fontSize: 9,
-            fontWeight: 650,
+            fontSize: 10.5,
+            fontWeight: 600,
             opacity: manualRefresh ? 0.78 : 1,
             transition:
               "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
@@ -419,44 +360,38 @@ export default function GitHubSection({
         </button>
       </div>
 
-      <div
-        style={{
-          // Hidden (not unmounted) when collapsed so the queue keeps its
-          // cached snapshot and its visible-only refresh stays stopped.
-          display: collapsed ? "none" : "flex",
-          flexDirection: "column",
-          gap: 7,
-          padding: "8px 10px 10px",
-        }}
-      >
-        <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 7, padding: "8px 10px 10px" }}>
         {!status ? (
           <MutedText>Checking GitHub…</MutedText>
         ) : status.kind !== "ready" ? (
           <Guidance status={status} />
         ) : (
           <>
-            <JourneyTimeline
-              gitStatus={gitStatus}
-              pullRequest={status.pullRequest ?? null}
-              blockReason={blockReason}
-              onShare={() => {
-                setPublishResult(null);
-                setPublishOpen(true);
-              }}
-            />
-            {status.pullRequest ? (
-              <PullRequestView
-                cwd={cwd}
-                status={status}
-                markingReady={markingReady}
-                markReadyResult={markReadyResult}
-                onMarkReady={() => void markReady()}
-                onMerge={() => {
-                  setMergeResult(null);
-                  setMergeOpen(true);
-                }}
-              />
+            {view === "pull-request" ? (
+              <>
+                <JourneyTimeline
+                  gitStatus={gitStatus}
+                  pullRequest={status.pullRequest ?? null}
+                  blockReason={blockReason}
+                  onShare={() => {
+                    setPublishResult(null);
+                    setPublishOpen(true);
+                  }}
+                />
+                {status.pullRequest ? (
+                  <PullRequestView
+                    cwd={cwd}
+                    status={status}
+                    markingReady={markingReady}
+                    markReadyResult={markReadyResult}
+                    onMarkReady={() => void markReady()}
+                    onMerge={() => {
+                      setMergeResult(null);
+                      setMergeOpen(true);
+                    }}
+                  />
+                ) : null}
+              </>
             ) : nothingOpen && dirtyCount === 0 && gitStatus?.ahead === 0 ? (
               <div
                 style={{
@@ -485,43 +420,35 @@ export default function GitHubSection({
                 All clear. No open pull requests or issues.
               </div>
             ) : null}
+            {/* Hidden, never unmounted, on the Pull request tab: the list keeps
+                its cached snapshot and the Issues count, and its visible-only
+                refresh stops while it is off screen. */}
             {queue ? (
-              <GitHubWorkQueue
-                key={queue.sourceWorkspaceId}
-                cwd={cwd}
-                sourceWorkspaceId={queue.sourceWorkspaceId}
-                refreshKey={queue.refreshKey}
-                onOpenItem={queue.onOpenItem}
-                onReviewMerge={(repository, pullRequest) => {
-                  setMergeResult(null);
-                  setQueueMerge({ repository, pullRequest });
-                }}
-                omitPullRequest={
-                  status.pullRequest
-                    ? {
-                        repository: status.repository.nameWithOwner,
-                        number: status.pullRequest.number,
-                      }
-                    : null
-                }
-                onSummary={handleQueueSummary}
-              />
+              <div style={{ display: view === "issues" ? "block" : "none" }}>
+                <GitHubWorkQueue
+                  key={queue.sourceWorkspaceId}
+                  cwd={cwd}
+                  sourceWorkspaceId={queue.sourceWorkspaceId}
+                  refreshKey={queue.refreshKey}
+                  onOpenItem={queue.onOpenItem}
+                  onReviewMerge={(repository, pullRequest) => {
+                    setMergeResult(null);
+                    setQueueMerge({ repository, pullRequest });
+                  }}
+                  omitPullRequest={
+                    status.pullRequest
+                      ? {
+                          repository: status.repository.nameWithOwner,
+                          number: status.pullRequest.number,
+                        }
+                      : null
+                  }
+                  onSummary={handleQueueSummary}
+                />
+              </div>
             ) : null}
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              {issuesUrl ? (
-                <button
-                  type="button"
-                  title="Open this repository's issues on GitHub"
-                  onClick={() => openLink(issuesUrl)}
-                  style={linkButtonStyle}
-                >
-                  View all issues
-                </button>
-              ) : null}
-            </div>
           </>
         )}
-        </div>
       </div>
       {publishOpen && status?.kind === "ready" ? (
         <ShareForReviewDialog

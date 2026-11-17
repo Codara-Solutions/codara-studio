@@ -1,0 +1,101 @@
+/* Source Control's text tab strip (DESIGN.md, "Source Control"): VS Code's
+   panel tabs in Studio's tokens. The selected tab is ink with an accent rule
+   under it; the others rest on --muted. Counts are quiet text on a soft fill. */
+.scm-tabs {
+  position: relative;
+  container-type: inline-size;
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--rule-soft);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.scm-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.scm-tab {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  margin-bottom: -1px;
+  padding: 0 8px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: default;
+  transition: color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out);
+}
+
+.scm-tab:hover {
+  color: var(--ink-dim);
+}
+
+.scm-tab[aria-selected="true"] {
+  color: var(--ink);
+  font-weight: 500;
+  border-bottom-color: var(--accent);
+}
+
+.scm-tab:focus-visible {
+  outline: none;
+  border-radius: 5px 5px 0 0;
+  box-shadow: var(--focus-ring);
+}
+
+.scm-tab-count {
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--hover-strong);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 15px;
+  text-align: center;
+}
+
+.scm-tab-short {
+  display: none;
+}
+
+/* A narrow rail: tighter tabs and "PR" for Pull request, so all four fit. */
+@container (max-width: 300px) {
+  .scm-tab {
+    gap: 4px;
+    padding: 0 5px;
+    font-size: 11.5px;
+  }
+
+  .scm-tab-long {
+    display: none;
+  }
+
+  .scm-tab-short {
+    display: inline;
+  }
+}
+
+/* A tab's page. Changes keeps the panel's own scroller; the others scroll on
+   their own so switching never drags one tab's scroll into another. */
+.scm-tabpanel {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.scm-tabpanel[hidden] {
+  display: none;
+}
