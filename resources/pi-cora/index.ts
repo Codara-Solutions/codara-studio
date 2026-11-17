@@ -17,8 +17,6 @@ import { loadUserRulesSection } from "./user-rules";
 import {
   MANAGER_SESSION_WAIT_DESCRIPTION,
   managerSessionWaitSchema,
-  namesTopTier,
-  sessionModelRefusal,
   waitForSessionsInChunks,
   withSessionDefaults,
 } from "./session-tools";
@@ -176,9 +174,6 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
   // Read once per process: a file that changed mid-chat would rewrite the
   // cached system prompt on every turn.
   const userRules = untrustedPullRequest ? "" : loadUserRulesSection();
-  // A session on the top tier starts only after the user named it here.
-  let userNamedTopTier = false;
-  pi.on("input", (event) => { if (namesTopTier(event.text)) userNamedTopTier = true; });
   pi.on("agent_end", (event) => {
     const last = event.messages.at(-1) as { stopReason?: string } | undefined;
     if (last?.stopReason === "aborted" || last?.stopReason === "error") return;
@@ -262,13 +257,8 @@ ${mcp?.promptSuffix() ?? ""}${userRules ? `\n\n${userRules}` : ""}`,
         }
         const abandonable = ABANDONABLE_BRIDGE_TOOLS.has(tool.name) ? signal : undefined;
         const args = tool.name === "codara_session_start" ? withSessionDefaults(params) : params;
-        if (tool.name === "codara_session_start") {
-          const refusal = sessionModelRefusal(args, {
-            allowed: modelIdList(process.env.CODARA_PI_WORKER_MODELS),
-            userNamedTopTier,
-          });
-          if (refusal) throw new Error(refusal);
-        }
+        // Which session models are allowed is decided by Studio
+        // (src/main/session-model-policy.ts), from the user's own messages.
         const result = sessionWait
           ? await waitForSessionsInChunks(
               (chunkArgs, chunkSignal) => bridge.callToolByName(tool.name, chunkArgs, chunkSignal),

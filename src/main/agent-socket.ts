@@ -55,6 +55,7 @@ import {
   type AgentSessionCaller,
   type AgentSessionView,
 } from "./agent-sessions";
+import { disabledWorkerModels, hasQueuedUserInput, managerSessionModelRefusal } from "./session-model-policy";
 import { buildLiveSessions } from "@shared/live-sessions";
 import { agentBoardActivity } from "./agent-board";
 import { parseRelayRequest, relayAnswerForgery } from "@shared/session-relay";
@@ -2196,6 +2197,13 @@ async function handleSessionStart(
   const state = await loadState();
   const refusal = await agentSessionCallerRefusal(params, caller.workspaceId, caller.run, state);
   if (refusal) return errorResponse(id, ERR_FORBIDDEN, refusal);
+  if (role === "manager" && caller.run) {
+    const modelRefusal = managerSessionModelRefusal(request.model, {
+      messages: caller.run.humanMessages,
+      disabled: disabledWorkerModels((await loadSettings().catch(() => null)) ?? {}),
+    });
+    if (modelRefusal) return errorResponse(id, ERR_INVALID_PARAMS, modelRefusal);
+  }
   const workspace = stringParam(params, "workspace") ?? caller.workspaceId;
   if (!workspace) {
     return errorResponse(id, ERR_INVALID_PARAMS, "Codara could not tell which workspace you run in; pass workspace");
@@ -2335,6 +2343,13 @@ async function handleSessionWait(
   }
   const result = await sessions.wait({ records, mode, timeoutMs, cancelled: () => clientGone(res) });
   if (result.reason === "cancelled") return errorResponse(id, ERR_INTERNAL, "session.wait aborted: client disconnected");
+  // Cora waits in short chunks; Studio holds the user's queued messages
+  // itself (Pi never sees them mid-turn), so it says so here and her wait
+  // ends at the chunk's end instead of running on.
+  if (result.reason === "timeout" && caller.run) {
+    const latest = await (await getRunStore()).getRun(caller.run.id).catch(() => null);
+    if (latest && hasQueuedUserInput(latest.humanMessages)) return successResponse(id, { ...result, userMessageQueued: true });
+  }
   return successResponse(id, result);
 }
 

@@ -48,41 +48,6 @@ export function withSessionDefaults(params: unknown): unknown {
   return next;
 }
 
-/** The top tier: a session on it starts only when the user named it. */
-const TOP_TIER = /(?:^|[-/])(?:fable|mythos)(?:$|[-.@])/i;
-const CLAUDE_ALIASES = new Set(["opus", "sonnet", "haiku"]);
-
-/** Whether the user's own words name a top-tier model. */
-export function namesTopTier(text: unknown): boolean {
-  return typeof text === "string" && /\b(?:fable|mythos)\b/i.test(text);
-}
-
-/**
- * Why a session may not start on the model Cora named, or null. The same
- * allowlist as workers (the enabled models, CODARA_PI_WORKER_MODELS): an exact
- * id, or a Claude Code alias (`opus`) whose word one enabled Claude id has.
- * The top tier needs the user to have named it in this chat. `allowed` null
- * means the list is unknown, and only the top-tier rule applies.
- */
-export function sessionModelRefusal(
-  params: unknown,
-  options: { allowed: readonly string[] | null; userNamedTopTier: boolean },
-): string | null {
-  if (!isRecord(params) || typeof params.model !== "string") return null;
-  const model = params.model.trim();
-  if (!model) return null;
-  const lower = model.toLowerCase();
-  if ((TOP_TIER.test(lower) || lower === "fable" || lower === "mythos") && !options.userNamedTopTier) {
-    return `Session model ${model} is the top tier, used only when the user asks for it by name. Start the session on a standard model (omit model for Opus).`;
-  }
-  if (!options.allowed) return null;
-  const enabled = options.allowed.map((id) => id.toLowerCase().split("@")[0]);
-  if (enabled.includes(lower.split("@")[0])) return null;
-  if (CLAUDE_ALIASES.has(lower) && enabled.some((id) => id.startsWith("claude-") && id.includes(lower))) return null;
-  if (TOP_TIER.test(lower) || lower === "fable" || lower === "mythos") return null;
-  return `Session model ${model} is not enabled. Use one of: ${options.allowed.join(", ") || "none enabled"}, or omit model.`;
-}
-
 /** The manager's codara_session_wait schema: its own default and maximum. */
 export function managerSessionWaitSchema(schema: Record<string, unknown>): Record<string, unknown> {
   const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
@@ -109,6 +74,18 @@ function sessionStatuses(result: BridgeResultLike): string[] {
     return parsed.sessions.map((session) => (isRecord(session) && typeof session.status === "string" ? session.status : ""));
   } catch {
     return [];
+  }
+}
+
+/** Studio marks a chunk's answer when the user queued a message meanwhile. */
+export function userMessageQueued(result: BridgeResultLike): boolean {
+  const text = (result.content ?? []).find((block) => block.type === "text" && typeof block.text === "string");
+  if (!text) return false;
+  try {
+    const parsed = JSON.parse(text.text as string) as unknown;
+    return isRecord(parsed) && parsed.userMessageQueued === true;
+  } catch {
+    return false;
   }
 }
 
@@ -162,7 +139,7 @@ export async function waitForSessionsInChunks(
     if (result.isError === true || sessionWaitReason(result) !== "timeout") return result;
     if (sessionStatuses(result).some((status) => status === "needs_you" || status === "failed")) return result;
     if (options.signal?.aborted) return result;
-    if (options.hasPendingMessages?.()) {
+    if (userMessageQueued(result) || options.hasPendingMessages?.()) {
       return {
         ...result,
         content: [
