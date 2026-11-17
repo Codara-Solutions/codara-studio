@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { _electron as electron, type ElectronApplication } from "playwright";
 import { existsSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { git, prepare, roomy, shots } from "./source-control-fixture";
 
@@ -122,6 +122,110 @@ test("Changes lists files compactly, folds new folders and acts on hover", async
       await confirm.click();
       await expect(folder(page, "dist")).toHaveCount(0, { timeout: 15_000 });
       expect(existsSync(join(repo, "dist"))).toBe(false);
+    });
+  } finally {
+    await app?.close().catch(() => undefined);
+    await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+// Folder names are names, never patterns: a folded row's Stage and Discard
+// reach its own files and nothing else, whatever characters the name holds.
+test("a folded folder acts on its own files only, whatever its name", async () => {
+  test.skip(process.platform === "win32", "the fake gh is a POSIX script, and these names are not valid there");
+  test.setTimeout(180_000);
+  const fixture = await prepare();
+  const { repo, env } = fixture;
+  let app: ElectronApplication | null = null;
+  const put = async (path: string) => {
+    await mkdir(join(repo, path, ".."), { recursive: true });
+    await writeFile(join(repo, path), `${path}\n`);
+  };
+  try {
+    // Each folded folder sits next to a lone file its name would match as a pattern.
+    for (const dir of ["[ab]", "*star", "?q", "-dash", ":colon"]) {
+      await put(`${dir}/1.txt`);
+      await put(`${dir}/2.txt`);
+    }
+    for (const lone of ["a/unrelated", "xstar/keep.txt", "aq/keep.txt", "-/keep.txt"]) await put(lone);
+
+    app = await electron.launch({ args: ["."], env });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.getByRole("tablist", { name: "Source Control views" })).toBeVisible({ timeout: 45_000 });
+    await roomy(app, page);
+
+    const untracked = () => git(repo, ["ls-files", "--others", "--exclude-standard"], env).split("\n").filter(Boolean).sort();
+    const staged = () => git(repo, ["diff", "--cached", "--name-only"], env).split("\n").filter(Boolean).sort();
+
+    for (const dir of ["[ab]", "*star", "?q"]) {
+      await test.step(`discarding "${dir}" deletes its 2 files and nothing else`, async () => {
+        await expect(folder(page, dir)).toContainText("2 files", { timeout: 15_000 });
+        await folder(page, dir).dispatchEvent("mouseover");
+        await folder(page, dir).getByTitle("Discard these 2 new files").click();
+        // The second click names what goes.
+        const confirm = folder(page, dir).getByRole("button", { name: "Delete 2?" });
+        await expect(confirm).toHaveAttribute("title", `Delete the 2 new files in ${dir}/. This cannot be undone`);
+        await confirm.click();
+        await expect(folder(page, dir)).toHaveCount(0, { timeout: 15_000 });
+        expect(existsSync(join(repo, dir))).toBe(false);
+        for (const lone of ["a/unrelated", "xstar/keep.txt", "aq/keep.txt", "-/keep.txt"]) {
+          expect(existsSync(join(repo, lone)), lone).toBe(true);
+        }
+      });
+    }
+
+    await test.step('staging "-dash" and ":colon" stages their files and nothing else', async () => {
+      for (const dir of ["-dash", ":colon"]) {
+        await folder(page, dir).dispatchEvent("mouseover");
+        await folder(page, dir).getByTitle("Stage these 2 new files").click();
+        await expect(folder(page, dir)).toHaveCount(0, { timeout: 15_000 });
+      }
+      expect(staged()).toEqual(["-dash/1.txt", "-dash/2.txt", ":colon/1.txt", ":colon/2.txt"].sort());
+      expect(untracked()).toEqual(["-/keep.txt", "a/unrelated", "aq/keep.txt", "xstar/keep.txt"].sort());
+    });
+  } finally {
+    await app?.close().catch(() => undefined);
+    await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+// A workspace opened below the repository root: files elsewhere in the repo
+// are listed by their path from the root (a status read can also give them
+// as "../…", which never folds; see the unit suite), and staging one of them
+// stages that file only, not the workspace's own edit.
+test("files outside a workspace opened below the repo root keep their own rows", async () => {
+  test.skip(process.platform === "win32", "the fake gh is a POSIX script");
+  test.setTimeout(180_000);
+  const fixture = await prepare();
+  const { repo, env } = fixture;
+  let app: ElectronApplication | null = null;
+  try {
+    const statePath = join(env.CODARA_HOME_DIR, "spark-state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    state.workspaces[0].cwd = join(repo, "src");
+    await writeFile(statePath, JSON.stringify(state));
+    await writeFile(join(repo, "one.txt"), "one\n");
+    await writeFile(join(repo, "two.txt"), "two\n");
+    await writeFile(join(repo, "src", "theme.ts"), "export const theme = 4;\n");
+
+    app = await electron.launch({ args: ["."], env });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.getByRole("tablist", { name: "Source Control views" })).toBeVisible({ timeout: 45_000 });
+    await roomy(app, page);
+
+    await test.step("files outside the workspace are rows of their own", async () => {
+      await expect(row(page, "one.txt")).toBeVisible({ timeout: 15_000 });
+      await expect(row(page, "two.txt")).toBeVisible();
+      await expect(page.getByTestId("change-folder")).toHaveCount(0);
+    });
+
+    await test.step("staging one of them stages that file only", async () => {
+      await row(page, "one.txt").dispatchEvent("mouseover");
+      await row(page, "one.txt").getByTitle("Stage changes").click();
+      await expect.poll(() => git(repo, ["diff", "--cached", "--name-only"], env)).toBe("one.txt");
+      expect(git(repo, ["diff", "--name-only"], env)).toBe("src/theme.ts");
     });
   } finally {
     await app?.close().catch(() => undefined);

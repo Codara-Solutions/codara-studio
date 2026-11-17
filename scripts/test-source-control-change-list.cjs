@@ -70,6 +70,16 @@ test("the folder a file was renamed out of holds a change too", ({ groupChanges 
   assert.deepEqual(rows(groupChanges(list)), ["lib/b.ts", "src/new-1.ts", "src/new-2.ts"]);
 });
 
+test("paths outside a workspace opened below the repo root never fold", ({ groupChanges }) => {
+  const list = [change("lib/a.ts"), fresh("../one"), fresh("../two"), fresh("../up/x.ts"), fresh("../up/y.ts")];
+  assert.deepEqual(rows(groupChanges(list)), ["lib/a.ts", "../one", "../two", "../up/x.ts", "../up/y.ts"]);
+});
+
+test("folder names with pattern characters fold like any other", ({ groupChanges }) => {
+  const list = [fresh("[ab]/1.txt"), fresh("[ab]/2.txt"), fresh("a/unrelated")];
+  assert.deepEqual(rows(groupChanges(list)), ["[ab]/ (2)", "a/unrelated"]);
+});
+
 test("a folder name that prefixes another is a different folder", ({ groupChanges }) => {
   const list = [change("src2/x.ts"), fresh("src/a.ts"), fresh("src/b.ts")];
   assert.deepEqual(rows(groupChanges(list)), ["src2/x.ts", "src/ (2)"]);
