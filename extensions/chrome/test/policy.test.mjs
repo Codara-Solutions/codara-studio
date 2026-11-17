@@ -181,6 +181,7 @@ export function run() {
   assert.deepEqual(reachPatch(before, "window", 7, [70, 71]), { shareAll: false, shareWindows: [3, 7], stopped: [50] }, "a window lifts only its own tabs' stops");
   assert.deepEqual(reachPatch({ ...before, windows: [3, 7] }, "tabs", 7, [70]), { shareAll: false, shareWindows: [3] }, "picked tabs and other windows stay as they were");
   assert.deepEqual(reachPatch(before, "all", 7, []), { shareAll: true, stopped: [] }, "as the old every-tab switch");
+  assert.deepEqual(reachPatch({ all: true, windows: [7], stopped: [70] }, "window", 7, [70, 71]).stopped, [70], "narrowing from every tab keeps the tabs the user stopped");
   assert.ok(!("shareTabs" in reachPatch(before, "tabs", 7, [])), "the tabs a user shared one by one are never touched");
   assert.ok(!("allowOpen" in reachPatch(before, "all", 7, [])), "opening tabs keeps its own switch");
   assert.throws(() => reachPatch(before, "everything", 7, []), /Unknown reach/);

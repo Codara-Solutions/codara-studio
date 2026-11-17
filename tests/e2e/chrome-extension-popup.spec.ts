@@ -92,7 +92,7 @@ test("the popup offers one switch per tab, a reach that maps to the old switches
     await expect(popup.locator("#tab-note")).toBeHidden();
     await expect(popup.locator("#share-tab")).not.toBeChecked();
     await expect(popup.getByRole("radio", { name: "Tabs I pick" })).toHaveAttribute("aria-checked", "true");
-    await expect(popup.locator("#reach-note")).toContainText("Only the tabs you switch on");
+    await expect(popup.locator("#reach-note")).toContainText("In this window, only the tabs you switch on. Other windows stay off.");
     await expect(popup.locator("#allow-open")).not.toBeChecked();
     expect(await sharing(worker)).toEqual({ shareAll: false, shareWindows: [], shareTabs: [], allowOpen: false });
     // The tab id is in Details, not in the main view.
@@ -139,6 +139,12 @@ test("the popup offers one switch per tab, a reach that maps to the old switches
     expect((await sharing(worker)).shareAll).toBe(true);
     await popup.locator("#stop-all").click();
     await expect.poll(async () => sharing(worker)).toEqual({ shareAll: false, shareWindows: [], shareTabs: [], allowOpen: false });
+
+    // A window shared from its own popup keeps its choice, and this one says so.
+    const otherWindow = await worker.evaluate(() => chrome.windows.create({ url: "about:blank" }).then((made: { id: number }) => made.id));
+    await worker.evaluate((id) => (self as unknown as { codara: any }).codara.handlePopup({ type: "shareWindow", windowId: id, on: true }), otherWindow);
+    await expect(popup.locator("#reach-note")).toContainText("Another window you shared stays shared.");
+    await popup.locator("#stop-all").click();
 
     // A user who had shared every tab before the update finds "Everything"
     // picked, with nothing added or lost.

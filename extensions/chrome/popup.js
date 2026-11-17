@@ -127,14 +127,18 @@ function renderShared(list) {
   }
 }
 
-function renderReach(reach) {
+function renderReach(reach, otherWindows = 0) {
   for (const button of $("reach-choice").querySelectorAll("[data-reach]")) {
     const on = button.dataset.reach === reach;
     button.setAttribute("aria-checked", String(on));
     // One tab stop for the group; the arrow keys move inside it.
     button.tabIndex = on ? 0 : -1;
   }
-  $("reach-note").textContent = `${REACH_TEXT[reach].includes} Blocked sites and browser pages stay off.`;
+  // Windows shared from their own popup keep their choice; say so, or the
+  // line would promise less access than there is.
+  const others =
+    reach === "all" ? "" : otherWindows ? ` ${otherWindows === 1 ? "Another window you shared stays" : `${otherWindows} other windows you shared stay`} shared.` : " Other windows stay off.";
+  $("reach-note").textContent = `${REACH_TEXT[reach].includes}${others} Blocked sites and browser pages stay off.`;
 }
 
 function renderTab(tab, connected) {
@@ -195,7 +199,7 @@ function render() {
   renderTab(view.current, connected);
 
   $("reach").hidden = false;
-  if (!pendingAnswer) renderReach(view.reach);
+  if (!pendingAnswer) renderReach(view.reach, view.otherWindows);
   $("allow-open").checked = view.allowOpen;
 
   $("shared").hidden = view.shared.length === 0;
@@ -227,7 +231,7 @@ async function pickReach(reach) {
     renderReach("all");
     const yes = await ask("Let agents use every tab in this browser, including ones you open later? Sites on your blocked list stay off.", "Share every tab");
     if (!yes) {
-      renderReach(view.reach);
+      renderReach(view.reach, view.otherWindows);
       return;
     }
   }

@@ -107,8 +107,9 @@ pages) it still showed a share button that could never work.
 - Each reach is a view of the sharing state that already existed (every tab,
   shared windows, tabs shared one by one, stopped tabs): picking one never
   shares more than the switches it replaced, and what a user had before the
-  update reads back as the same reach. `reachOf` and `reachPatch` in
-  `lib/policy.js` hold the mapping and its tests. Everything still asks first.
+  update reads back as the same reach. Narrowing from Everything keeps the
+  tabs the user stopped. `reachOf` and `reachPatch` in `lib/policy.js` hold
+  the mapping and its tests. Everything still asks first.
 - Under the choice, one line says what the reach includes. Opening new tabs
   keeps its own switch and stays off until the user turns it on.
 - No tab ids in the main view. The id and its copy button sit under

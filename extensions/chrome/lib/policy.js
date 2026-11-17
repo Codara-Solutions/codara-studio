@@ -326,8 +326,8 @@ export function isTabShared(share, tab) {
 export const REACHES = Object.freeze(["tabs", "window", "all"]);
 
 export const REACH_TEXT = Object.freeze({
-  tabs: { label: "Tabs I pick", includes: "Only the tabs you switch on, one at a time." },
-  window: { label: "This window", includes: "Every tab in this window, including ones you open in it later. Other windows stay off." },
+  tabs: { label: "Tabs I pick", includes: "In this window, only the tabs you switch on." },
+  window: { label: "This window", includes: "Every tab in this window, including ones you open in it later." },
   all: { label: "Everything", includes: "Every tab in this browser, including ones you open later." },
 });
 
@@ -340,9 +340,10 @@ export function reachOf(share, windowId) {
 
 /**
  * The storage patch for picking a reach in one window, given the current
- * { all, windows, stopped } and the ids of that window's tabs. "all" and
- * "window" lift the stops they cover, as the old switches did; "tabs" keeps
- * the tabs shared one by one and every other window as they were.
+ * { all, windows, stopped } and the ids of that window's tabs. Widening to
+ * "all" or "window" lifts the stops it covers, as the old switches did;
+ * narrowing from "all" keeps every stop the user made; "tabs" keeps the tabs
+ * shared one by one and every other window as they were.
  */
 export function reachPatch(share, reach, windowId, windowTabIds = []) {
   const windows = share?.windows ?? [];
@@ -355,7 +356,7 @@ export function reachPatch(share, reach, windowId, windowTabIds = []) {
       return {
         shareAll: false,
         shareWindows: windows.includes(windowId) ? windows : [...windows, windowId],
-        stopped: stopped.filter((id) => !windowTabIds.includes(id)),
+        stopped: share?.all === true ? stopped : stopped.filter((id) => !windowTabIds.includes(id)),
       };
     case "tabs":
       return { shareAll: false, shareWindows: windows.filter((id) => id !== windowId) };

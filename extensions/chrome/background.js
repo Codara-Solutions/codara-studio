@@ -226,7 +226,7 @@ async function relayCommand(request) {
   if (permission === "never") throw new Error(`${method} is not available on tabs of your own browser.`);
   if (permission === "storage" && !state.storageTabs.includes(tab.id)) {
     throw new Error(
-      `Cookies and site storage of ${agentTabId(tab.id)} need the user's permission: turn on "Read cookies and storage here" for this tab in the Codara extension popup.`,
+      `Cookies and site storage of ${agentTabId(tab.id)} need the user's permission: turn on "Read and change cookies and storage here" for this tab in the Codara extension popup.`,
     );
   }
   if (permission === "storage") {
@@ -526,6 +526,7 @@ async function popupState(request) {
     shareAll: state.shareAll,
     windowShared: typeof request.windowId === "number" && state.shareWindows.includes(request.windowId),
     reach: reachOf(shareChoice(), request.windowId),
+    otherWindows: state.shareWindows.filter((id) => id !== request.windowId).length,
     allowOpen: state.allowOpen,
     blockedSites: state.blockedSites,
     current: current ? describeTab(current) : null,
