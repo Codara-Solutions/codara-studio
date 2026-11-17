@@ -42,6 +42,8 @@ interface Props {
   view: "issues" | "pull-request";
   /** The list's size for the Issues tab label, null until it is read. */
   onQueueCount?: (total: number | null) => void;
+  /** Switches Source Control to its Changes tab (the journey's "commit" link). */
+  onShowChanges?: () => void;
 }
 
 interface Snapshot {
@@ -68,6 +70,7 @@ export default function GitHubSection({
   onPublished,
   view,
   onQueueCount,
+  onShowChanges,
 }: Props): React.ReactElement {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(false);
@@ -367,6 +370,7 @@ export default function GitHubSection({
                   gitStatus={gitStatus}
                   pullRequest={status.pullRequest ?? null}
                   blockReason={blockReason}
+                  onShowChanges={onShowChanges}
                   onShare={() => {
                     setPublishResult(null);
                     setPublishOpen(true);
@@ -1358,11 +1362,13 @@ function JourneyTimeline({
   pullRequest,
   blockReason,
   onShare,
+  onShowChanges,
 }: {
   gitStatus: GitStatus | null;
   pullRequest: GitHubPullRequestSummary | null;
   blockReason: string | null;
   onShare: () => void;
+  onShowChanges?: () => void;
 }): React.ReactElement {
   const dirty = gitStatus ? gitStatus.staged.length + gitStatus.unstaged.length : 0;
   const ahead = gitStatus?.ahead ?? 0;
@@ -1371,7 +1377,7 @@ function JourneyTimeline({
     key: string;
     state: "done" | "failed" | "now" | "idle";
     title: string;
-    detail: string;
+    detail: React.ReactNode;
     action?: React.ReactNode;
   };
 
@@ -1429,7 +1435,18 @@ function JourneyTimeline({
         title: dirty > 0 ? "Save your work" : "Work saved",
         detail:
           dirty > 0
-            ? `${dirty} file${dirty === 1 ? "" : "s"} changed. Commit them on the Changes tab`
+            ? (
+                <>
+                  {dirty} file{dirty === 1 ? "" : "s"} changed.{" "}
+                  {onShowChanges ? (
+                    <button type="button" className="scm-link" onClick={onShowChanges}>
+                      Commit them on the Changes tab
+                    </button>
+                  ) : (
+                    "Commit them on the Changes tab"
+                  )}
+                </>
+              )
             : `${ahead} commit${ahead === 1 ? "" : "s"} ready to share`,
       },
       {
