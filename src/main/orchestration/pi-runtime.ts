@@ -473,7 +473,13 @@ export const CODARA_PI_RETRY_SETTINGS = {
   baseDelayMs: 2_000,
 } as const;
 
-/** Warm the prompt cache only while a run streams (Pi 1.5.0's default). */
+/**
+ * Pi's "streaming" cache warming (its default before 1.5.1): idle between
+ * runs spends nothing; during an active run Pi re-sends the cached prompt
+ * only when it expects the warm to save more than it costs (a long tool
+ * call). Each warm is counted in the run's Costs (pi-turn.ts,
+ * pi-worker-usage.ts).
+ */
 export const CODARA_PI_CACHE_WARMING = "streaming";
 
 /**
@@ -488,10 +494,11 @@ export function mergeCodaraPiAgentSettings(
   const base = isRecord(existing) ? { ...existing } : {};
   const retry = isRecord(base.retry) ? base.retry : {};
   base.retry = { ...retry, ...CODARA_PI_RETRY_SETTINGS };
-  // Pi 1.5.1 made "idle" the default: it re-sends a cached prompt between
-  // runs for up to 30 minutes to keep the cache warm. Cora's manager sits
-  // idle for minutes while workers run, and on OpenRouter each warm is a
-  // charge the user never asked for, so Codara keeps 1.5.0's behavior.
+  // Pi 1.5.1 made "idle" the default: it also re-sends a cached prompt
+  // between runs, for up to 30 minutes. Cora's manager sits idle for minutes
+  // while workers run, and on OpenRouter each warm is a charge the user never
+  // asked for, so Codara keeps "streaming": nothing between runs, cost-aware
+  // warms only during a run.
   if (typeof base.cacheWarming !== "string") base.cacheWarming = CODARA_PI_CACHE_WARMING;
   if (options.shellPath) base.shellPath = options.shellPath;
   return base;
