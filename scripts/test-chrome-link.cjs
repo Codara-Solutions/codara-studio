@@ -39,7 +39,7 @@ async function load() {
         `export { chromeLinkTool } from "./link-tool";`,
         `export { registerBrowserBackend, resolveBrowserTarget } from "../targets";`,
         `export { consoleRing } from "../recorders/console";`,
-        `export { navigate } from "./tab-ops";`,
+        `export { click, navigate, type } from "./tab-ops";`,
         `export { chromeTargetTools } from "../../preview-tools/chrome";`,
         `export { pageActivity } from "../page-activity";`,
         `export { currentEmulation, resetEmulation } from "../emulation";`,
@@ -426,7 +426,10 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   // extension decides again whether agents may close that tab.
   assert.deepEqual(await tools["preview.close"]({ tabId: "chrome:12" }, "preview.close", host), { ok: true, tabId: "chrome:12", action: "close", closed: true });
   assert.deepEqual(answers.at(-1), { id: answers.at(-1).id, type: "close", tabId: 12 });
-  await assert.rejects(tools["preview.close"]({ tabId: "chrome:4040" }, "preview.close", host), /not shared with agents, or it is closed/);
+  // Closing a tab that is gone is what the call asked for, so a retry succeeds.
+  assert.deepEqual(await tools["preview.close"]({ tabId: "chrome:4040" }, "preview.close", host), { ok: true, tabId: "chrome:4040", action: "close", alreadyClosed: true });
+  await assert.rejects(lib.chromeLinkTool({ action: "activate", tabId: "chrome:4040" }, "preview.chrome", host), /not shared with agents, or it is closed\. Shared Chrome tabs: chrome:12 /);
+  await assert.rejects(lib.chromeLinkTool({ action: "list" }, "preview.chrome", host), /status lists the shared Chrome tabs/);
 
   // The extension refuses: the error reaches the agent as is.
   const refusing = extension(port, { answer: async () => { throw new Error("Cookies and site storage of chrome:5 need the user's permission"); } });
@@ -539,14 +542,42 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
     },
     async send(method) {
       assert.equal(method, "Page.navigate");
+      pageNavigations += 1;
+      shown = { url: "https://a.example/next", title: "Next" };
       setTimeout(() => pageDomains.has("Page") && pageListeners.get("Page.loadEventFired")?.({}), 20);
       return { frameId: "F", loaderId: "L" };
     },
   };
+  let pageNavigations = 0;
+  let shown = { url: "https://a.example/", title: "Start" };
+  const pageTarget = { ref: "chrome:12", session: pageSession, info: async () => shown };
   const navigateStarted = Date.now();
-  const navigated = await lib.navigate({ ref: "chrome:12", session: pageSession, info: async () => ({ url: "https://a.example/next", title: "Next" }) }, { url: "https://a.example/next" });
-  assert.deepEqual(navigated, { url: "https://a.example/next", title: "Next", tabId: "chrome:12", opened: false });
+  const navigated = await lib.navigate(pageTarget, { url: "https://a.example/next" });
+  assert.deepEqual(navigated, { url: "https://a.example/next", title: "Next", tabId: "chrome:12", opened: false, change: 'Loaded a.example/next ("Next").' });
   assert.ok(Date.now() - navigateStarted < 2_000, "navigate waited for the load event, not its timeout");
+  // The same URL again is not reloaded unless asked, and says what changed since.
+  shown = { url: "https://a.example/next", title: "Next, 2 unread" };
+  const repeated = await lib.navigate(pageTarget, { url: "https://a.example/next" });
+  assert.equal(pageNavigations, 1, "a repeated navigate does not reload");
+  assert.equal(repeated.alreadyThere, true);
+  assert.match(repeated.change, /^Already on a\.example\/next \("Next, 2 unread"\); title changed from "Next"\. Not reloaded: pass reload true to reload\.$/);
+  await lib.navigate(pageTarget, { url: "https://a.example/next", reload: true });
+  assert.equal(pageNavigations, 2, "reload true loads the page again");
+  // A click and a typed value say what they did, as on Codara tabs.
+  const clickTarget = {
+    ...pageTarget,
+    async evaluate(expression) {
+      if (expression.includes("new PointerEvent")) {
+        shown = { url: "https://a.example/done", title: "Done" };
+        return { ok: true, tag: "a" };
+      }
+      if (expression.includes("__codaraChanges")) return { changes: null };
+      if (expression.includes("setter.call")) return { ok: true, value: "•••" };
+      return null;
+    },
+  };
+  assert.equal((await lib.click(clickTarget, { selector: "#go" })).change, 'Now on a.example/done ("Done").');
+  assert.equal((await lib.type(clickTarget, { selector: "#pw", text: "abc" })).change, 'The field now holds "•••".');
   // Keeping the loaded extension current: the copy follows any changed
   // file, and a connected extension older than it reloads or is shown.
   const shipped = fs.mkdtempSync(path.join(os.tmpdir(), "codara-ext-src-"));

@@ -6,6 +6,7 @@
 // both; input goes through the DevTools protocol, which needs neither focus
 // nor a visible tab.
 
+import { CHANGES_STOP_EXPRESSION, describeAlreadyThere, describeChange, describePage, describeTyped, sameUrl, type PageState } from "../../../shared/browser-change";
 import { createPreviewDOM } from "../../../shared/preview-dom";
 import { createPreviewNames } from "../../../shared/preview-names";
 import { snapshotProbe } from "../../../renderer/src/components/Preview/domSnapshot";
@@ -41,9 +42,33 @@ function checked<T extends { ok?: boolean; error?: string }>(value: T): T {
   return value;
 }
 
+// Each tab's last navigate by an agent, so a repeated one can say what changed since.
+const lastNavigates = new Map<string, { title: string; at: number }>();
+const LAST_NAVIGATES_MAX = 200;
+
+function rememberNavigate(ref: string, title: string): void {
+  lastNavigates.delete(ref);
+  lastNavigates.set(ref, { title, at: Date.now() });
+  if (lastNavigates.size > LAST_NAVIGATES_MAX) lastNavigates.delete(lastNavigates.keys().next().value as string);
+}
+
 export async function navigate(target: BrowserTarget, params: Params): Promise<unknown> {
   const url = str(params, "url");
   if (!url) throw new Error("navigate requires 'url'");
+  // The page the tab already shows is not loaded again, as on Codara tabs.
+  if (params.reload !== true) {
+    const shown = await target.info().catch(() => null);
+    if (shown && sameUrl(shown.url, url)) {
+      return {
+        url: shown.url,
+        title: shown.title,
+        tabId: target.ref,
+        opened: false,
+        alreadyThere: true,
+        change: describeAlreadyThere(shown, lastNavigates.get(target.ref) ?? null),
+      };
+    }
+  }
   const session = target.session;
   // The load events below arrive only with the Page domain on; without it
   // every navigation would wait out the whole timeout.
@@ -68,7 +93,8 @@ export async function navigate(target: BrowserTarget, params: Params): Promise<u
     void releasePage().catch(() => {});
   }
   const info = await target.info();
-  return { url: info.url, title: info.title, tabId: target.ref, opened: false };
+  rememberNavigate(target.ref, info.title);
+  return { url: info.url, title: info.title, tabId: target.ref, opened: false, change: `Loaded ${describePage(info)}.` };
 }
 
 export async function url(target: BrowserTarget): Promise<unknown> {
@@ -108,10 +134,30 @@ export async function evaluate(target: BrowserTarget, params: Params): Promise<u
   return { value: await run(target, expression) };
 }
 
+// How long a click's page gets to react before the result describes it, and
+// how long reading that may take before the page counts as still loading.
+const CLICK_SETTLE_MS = 150;
+const CLICK_READ_MS = 400;
+
+async function pageState(target: BrowserTarget): Promise<PageState | null> {
+  return target.info().then((info) => ({ url: info.url, title: info.title }), () => null);
+}
+
 export async function click(target: BrowserTarget, params: Params): Promise<unknown> {
   const selector = str(params, "selector");
   if (!selector) throw new Error("click requires 'selector'");
-  return checked(await run<{ ok?: boolean; error?: string }>(target, probe(clickProbe, { selector })));
+  const before = await pageState(target);
+  const result = checked(await run<{ ok?: boolean; error?: string }>(target, probe(clickProbe, { selector, watch: true })));
+  if (!before) return result;
+  await new Promise((resolve) => setTimeout(resolve, CLICK_SETTLE_MS));
+  const read = await Promise.race([
+    target.evaluate<{ changes?: unknown }>(CHANGES_STOP_EXPRESSION).catch(() => null),
+    new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), CLICK_READ_MS)),
+  ]);
+  const after = await Promise.race([pageState(target), new Promise<null>((resolve) => setTimeout(() => resolve(null), CLICK_READ_MS))]);
+  if (!after) return { ...result, change: "The page is still loading after the click." };
+  const changes = read && typeof read.changes === "number" ? read.changes : null;
+  return { ...result, change: describeChange(before, { ...after, loading: read === undefined }, changes) };
 }
 
 export async function type(target: BrowserTarget, params: Params): Promise<unknown> {
@@ -119,7 +165,8 @@ export async function type(target: BrowserTarget, params: Params): Promise<unkno
   const text = str(params, "text");
   if (!selector) throw new Error("type requires 'selector'");
   if (text === null) throw new Error("type requires 'text'");
-  return checked(await run<{ ok?: boolean; error?: string }>(target, probe(typeProbe, { selector, text, clearFirst: params.clearFirst === true })));
+  const result = checked(await run<{ ok?: boolean; error?: string }>(target, probe(typeProbe, { selector, text, clearFirst: params.clearFirst === true })));
+  return { ...result, change: describeTyped(result) };
 }
 
 // Stringified into the page: the element's viewport center, scrolled into view first unless asked not to.
@@ -329,7 +376,7 @@ export async function networkEntries(target: BrowserTarget, params: Params): Pro
 export async function resize(target: BrowserTarget, params: Params): Promise<unknown> {
   const width = num(params, "width");
   const height = num(params, "height");
-  if (!width || !height) throw new Error("resize requires numeric 'width' and 'height'");
+  if (!width || !height || width < 0 || height < 0) throw new Error("resize needs width and height in CSS pixels above 0, such as 375 and 667.");
   // The user's window keeps its size; the page lays out at the asked size.
   // It is the tab's emulated viewport, so emulate reset clears it and the
   // emulation state no longer names a device it replaced.

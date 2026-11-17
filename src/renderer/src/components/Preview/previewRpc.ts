@@ -12,6 +12,16 @@
 import type { CoraWhiteboard } from "@shared/types";
 import { createPreviewDOM } from "@shared/preview-dom";
 import { createPreviewNames } from "@shared/preview-names";
+import {
+  CHANGES_STOP_EXPRESSION,
+  describeAlreadyThere,
+  describeChange,
+  describePage,
+  describeTabChoices,
+  describeTyped,
+  sameUrl,
+  type PageState,
+} from "@shared/browser-change";
 import { snapshotProbe } from "./domSnapshot";
 import { clickProbe, locateProbe, typeProbe, pressKeyProbe } from "./domActions";
 import { assertDriverAllowed, moveAgentCursor, noteDriving, readDriver, type Box, type CursorMove } from "./agent-presence/store";
@@ -27,6 +37,7 @@ import {
   hasPreviewTab,
   listPreviewTabs,
   pickPreviewTab,
+  previewTabChoices,
 } from "./registry";
 import { assignTabToGroup, tabGroupNameOf } from "../../tabs/tabGroupBridge";
 
@@ -179,16 +190,7 @@ async function requireTab(params: Record<string, unknown>, { wake = true, wakeUr
     readString(params, "workspaceId"),
     readString(params, "callerPaneId"),
   );
-  if (!tab) {
-    if (runId && !params.tabId) {
-      throw new Error(
-        "No preview tab belongs to this run. Call codara_preview_navigate first to open one (or pass an explicit tabId).",
-      );
-    }
-    throw new Error(
-      "No browser tab is open. Open a Browser tab in Codara (right-click a file → Open in Browser, or open a localhost URL) before calling preview tools.",
-    );
-  }
+  if (!tab) throw missingTabError(params);
   // A driver the user stopped on this tab is refused before anything runs.
   const driver = readDriver(params.driver);
   assertDriverAllowed(tab.id, driver);
@@ -196,6 +198,21 @@ async function requireTab(params: Record<string, unknown>, { wake = true, wakeUr
   actedTabs.set(params, tab.id);
   if (wake) tab = await wakeForAgent(tab, wakeUrl);
   return tab;
+}
+
+// Names the tabs the caller could have used and the one call that opens its
+// own, so an agent with a stale or missing tabId need not list tabs first.
+function missingTabError(params: Record<string, unknown>): Error {
+  const tabId = readString(params, "tabId");
+  const runId = readString(params, "runId");
+  const choices = previewTabChoices(runId, readString(params, "workspaceId"), readString(params, "callerPaneId"));
+  const head = tabId
+    ? hasPreviewTab(tabId)
+      ? `Browser tab ${tabId} is in another workspace.`
+      : `Browser tab ${tabId} is closed.`
+    : `${runId ? "This run" : "This session"} has no browser tab open.`;
+  const usable = choices.length ? ` Tabs you can pass as tabId: ${describeTabChoices(choices)}.` : " Your workspace has no browser tabs open.";
+  return new Error(`${head}${usable} To open your own, call codara_preview_navigate with a url.`);
 }
 
 // A sleeping tab has no page; an agent's call loads it again first and then
@@ -266,9 +283,8 @@ function closeTab(params: Record<string, unknown>) {
     return { ok: true, tabId: tab.id, closed: true };
   }
   const own = findReusablePreviewTab(runId, workspaceId, callerPaneId);
-  if (!own) {
-    throw new Error("This session has no browser tab of its own open. Pass the tabId from codara_preview_list to close another tab of your workspace.");
-  }
+  // A repeated close finds nothing left to close, which is what it asked for.
+  if (!own) return { ok: true, alreadyClosed: true, note: "This session has no browser tab of its own open; nothing was closed." };
   assertDriverAllowed(own.id, readDriver(params.driver));
   closePreviewTab(own.id);
   return { ok: true, tabId: own.id, closed: true };
@@ -309,14 +325,14 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   // move made in this same call.
   let joined: string | null = null;
   const driver = readDriver(params.driver);
-  if (params.tabId) {
-    tab = pickPreviewTab(
-      typeof params.tabId === "string" ? params.tabId : null,
-      null,
-      readString(params, "workspaceId"),
-      readString(params, "callerPaneId"),
-    );
-    if (!tab) throw new Error(`preview tab not found: ${String(params.tabId)}`);
+  const namedId = readString(params, "tabId");
+  const named = namedId ? pickPreviewTab(namedId, null, readString(params, "workspaceId"), readString(params, "callerPaneId")) : null;
+  // A closed tab's id with a url loads it where a navigate without a tabId
+  // would; a tab of another workspace is still refused.
+  if (namedId && !named && (!url || hasPreviewTab(namedId))) throw missingTabError(params);
+  const replaced = namedId && !named ? namedId : null;
+  if (named) {
+    tab = named;
     assertDriverAllowed(tab.id, driver);
     // A tab the call names joins the group; with no url that is all it does.
     if (group) joined = assignTabToGroup(tab.id, tab.workspaceId, group);
@@ -346,6 +362,23 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   } else {
     throw new Error("navigate requires 'url'");
   }
+  const note = replaced ? { note: `Tab ${replaced} is closed, so this ${opened ? "opened a new tab" : "used your own tab"}.` } : {};
+  // The page the tab already shows is not loaded again: agents repeat a
+  // navigate to check where they are, and a reload would lose page state.
+  if (url && !opened && params.reload !== true && !isTabAsleep(tab.id) && tab.handle.isReady() && sameUrl(tab.handle.getURL(), url)) {
+    const now = pageState(tab.handle);
+    joined ??= tabGroupNameOf(tab.id);
+    return {
+      url: now.url,
+      title: now.title,
+      tabId: tab.id,
+      opened,
+      alreadyThere: true,
+      ...(joined ? { group: joined } : {}),
+      change: describeAlreadyThere(now, lastNavigates.get(tab.id) ?? null),
+      ...note,
+    };
+  }
   // A tab ensurePreviewTab just opened is already loading the URL. Loading
   // it again would abort or repeat that first load, which runs the page's
   // requests twice and records the first load's as never finished.
@@ -363,13 +396,47 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   }
   await waitDomReady(tab.handle, 15_000);
   joined ??= tabGroupNameOf(tab.id);
+  const reached = { ...pageState(tab.handle), loading: outcome === "committed" };
+  rememberNavigate(tab.id, reached.title);
   return {
-    url: tab.handle.getURL(),
+    url: reached.url,
+    title: reached.title,
     tabId: tab.id,
     opened,
     ...(joined ? { group: joined } : {}),
+    change: `Loaded ${describePage(reached)}.`,
+    ...note,
     ...(outcome === "committed" ? { loading: true, note: "The page arrived but is still loading. Call codara_preview_wait_for before reading it." } : {}),
   };
+}
+
+// Each tab's last navigate by an agent, so a repeated one can say what changed since.
+const lastNavigates = new Map<string, { title: string; at: number }>();
+const LAST_NAVIGATES_MAX = 200;
+
+function rememberNavigate(tabId: string, title: string): void {
+  lastNavigates.delete(tabId);
+  lastNavigates.set(tabId, { title, at: Date.now() });
+  if (lastNavigates.size > LAST_NAVIGATES_MAX) lastNavigates.delete(lastNavigates.keys().next().value as string);
+}
+
+function pageState(handle: { getURL: () => string; getTitle: () => string }): PageState {
+  return { url: handle.getURL(), title: handle.getTitle() };
+}
+
+// How long a click's page gets to react before the result describes it, and
+// how long reading that may take before the page counts as still loading.
+const CLICK_SETTLE_MS = 150;
+const CLICK_READ_MS = 400;
+
+async function clickChange(tab: Awaited<ReturnType<typeof requireTab>>, before: PageState): Promise<string> {
+  await new Promise((resolve) => setTimeout(resolve, CLICK_SETTLE_MS));
+  const read = await Promise.race([
+    runGuestScript(tab.handle, CHANGES_STOP_EXPRESSION).catch(() => null),
+    new Promise((resolve) => setTimeout(() => resolve(undefined), CLICK_READ_MS)),
+  ]);
+  const changes = read && typeof read === "object" ? (read as { changes?: unknown }).changes : null;
+  return describeChange(before, { ...pageState(tab.handle), loading: read === undefined }, typeof changes === "number" ? changes : null);
 }
 
 async function urlOf(params: Record<string, unknown>): Promise<unknown> {
@@ -441,8 +508,10 @@ async function click(params: Record<string, unknown>): Promise<unknown> {
   if (!selector) throw new Error("click requires 'selector'");
   const tab = await requireTab(params);
   await approach(tab, params, selector, { action: "Clicking", press: true });
-  const code = `(${clickProbe.toString()})(${JSON.stringify({ selector })}, ${createPreviewDOM.toString()})`;
-  return runGuestScript(tab.handle, code);
+  const before = pageState(tab.handle);
+  const code = `(${clickProbe.toString()})(${JSON.stringify({ selector, watch: true })}, ${createPreviewDOM.toString()})`;
+  const result = await runGuestScript(tab.handle, code);
+  return { ...(result as Record<string, unknown>), change: await clickChange(tab, before) };
 }
 
 async function typeText(params: Record<string, unknown>): Promise<unknown> {
@@ -454,7 +523,8 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
   const tab = await requireTab(params);
   await approach(tab, params, selector, { action: "Typing" }, true);
   const code = `(${typeProbe.toString()})(${JSON.stringify({ selector, text, clearFirst })}, ${createPreviewDOM.toString()})`;
-  return runGuestScript(tab.handle, code);
+  const result = await runGuestScript(tab.handle, code);
+  return result && typeof result === "object" ? { ...(result as Record<string, unknown>), change: describeTyped(result) } : result;
 }
 
 async function pressKey(params: Record<string, unknown>): Promise<unknown> {
@@ -511,11 +581,13 @@ async function paint(params: Record<string, unknown>): Promise<unknown> {
 async function resize(params: Record<string, unknown>): Promise<unknown> {
   const width = readNumber(params, "width");
   const height = readNumber(params, "height");
-  if (!width || !height) throw new Error("resize requires numeric 'width' and 'height'");
+  if (!width || !height || width < 0 || height < 0) throw new Error(RESIZE_NEEDS);
   const tab = await requireTab(params);
   const applied = tab.handle.resizeViewport(width, height);
   return { ok: true, ...applied, tabId: tab.id };
 }
+
+const RESIZE_NEEDS = "resize needs width and height in CSS pixels above 0, such as 375 and 667.";
 
 const METRICS_TIMEOUT_MS = 400;
 
@@ -543,9 +615,9 @@ async function getWebContentsId(params: Record<string, unknown>): Promise<unknow
   });
   // Keyboard dispatch needs the embedder iframe focused as well as its guest field.
   if (params.focus === true) tab.handle.focusContent();
-  const webContentsId = tab.handle.getWebContentsId();
+  const webContentsId = await waitWebContentsId(tab.handle, WEB_CONTENTS_ID_WAIT_MS);
   if (webContentsId === null) {
-    throw new Error("preview tab is not ready (no web contents id yet)");
+    throw new Error(`Browser tab ${tab.id} has not loaded a page within ${WEB_CONTENTS_ID_WAIT_MS / 1000} s. Call again once it shows one, or navigate it with codara_preview_navigate.`);
   }
   let viewport: { width: number; height: number } | null = null;
   let devicePixelRatio = 1;
@@ -574,6 +646,18 @@ async function getWebContentsId(params: Record<string, unknown>): Promise<unknow
     viewport,
     devicePixelRatio,
   };
+}
+
+// A tab that just opened or woke has no guest until its page is dom-ready.
+const WEB_CONTENTS_ID_WAIT_MS = 5_000;
+
+async function waitWebContentsId(handle: { getWebContentsId: () => number | null }, timeoutMs: number): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const id = handle.getWebContentsId();
+    if (id !== null || Date.now() >= deadline) return id;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
 }
 
 async function waitDomReady(handle: { isReady: () => boolean }, timeoutMs: number): Promise<void> {

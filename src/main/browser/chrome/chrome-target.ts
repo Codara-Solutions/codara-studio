@@ -4,6 +4,7 @@
 // "started debugging" bar), with the same console and network recorders a
 // Codara tab has.
 
+import { describeTabChoices } from "../../../shared/browser-change";
 import { CdpSession } from "../cdp-session";
 import { startConsoleRecorder } from "../recorders/console";
 import { startNetworkRecorder } from "../recorders/network";
@@ -81,7 +82,7 @@ export async function captureChromeViewport(session: CdpSession): Promise<Buffer
       clip: { x: view.x, y: view.y, width: view.width, height: view.height, scale: 1 },
     }),
     BEYOND_VIEWPORT_CAPTURE_MS,
-    "The browser did not paint the tab in time. Bring its window forward once, or retry.",
+    "Chrome did not paint the tab within 20 s, which a tab in a minimized or hidden window can do. Read it with codara_preview_snapshot, which needs no paint, or ask the user to bring its window forward once.",
   );
   return Buffer.from(shot.data, "base64");
 }
@@ -148,7 +149,11 @@ export class ChromeTargetBackend implements BrowserTargetBackend {
       if (reason === "canceled_by_user") {
         throw new Error(`The user stopped agents in ${id} from the browser's debugging bar. They can share it again from the Codara extension popup.`);
       }
-      throw new Error(`${id} is not shared with agents, or it is closed. The user shares a tab from the Codara extension popup; codara_preview_list shows the shared ones.`);
+      const shared = this.summaries().map((summary) => ({ id: summary.id, title: summary.title, url: summary.url, current: summary.isActive }));
+      throw new Error(
+        `${id} is not shared with agents, or it is closed. Shared Chrome tabs: ${describeTabChoices(shared)}. ` +
+          "codara_preview_chrome open opens a new one; the user shares more from the Codara extension popup.",
+      );
     }
     if (tab.blocked) throw new Error(`${id} is on a site the user blocked for agents.`);
     return { link, tab };
