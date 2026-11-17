@@ -206,6 +206,9 @@ export default function FilePreview({
           }
         >
           <PdfPreview
+            // A new file starts at fit, not at the last file's zoom (the preview
+            // tab is reused when you open another file).
+            key={path}
             path={path}
             mtimeMs={stat?.mtimeMs ?? 0}
             toolbarAction={toolbarAction}
@@ -252,6 +255,9 @@ export default function FilePreview({
           }
         >
           <DocxPreview
+            // A new file starts at fit, not at the last file's zoom (the preview
+            // tab is reused when you open another file).
+            key={path}
             path={path}
             mtimeMs={stat?.mtimeMs ?? 0}
             toolbarAction={toolbarAction}
@@ -273,6 +279,9 @@ export default function FilePreview({
           }
         >
           <PptxPreview
+            // A new file starts at fit, not at the last file's zoom (the preview
+            // tab is reused when you open another file).
+            key={path}
             path={path}
             mtimeMs={stat?.mtimeMs ?? 0}
             toolbarAction={toolbarAction}

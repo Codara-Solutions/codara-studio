@@ -281,8 +281,17 @@ test("images and PDFs zoom at the pointer and take the zoom keys while focused",
     await expect(level).toHaveText("110%");
     await expect.poll(pageWidth).toBeGreaterThan(width100 * 1.05);
     const pdfBox = (await pdf.boundingBox())!;
-    await ctrlWheel(page, pdfBox.x + pdfBox.width / 2, pdfBox.y + 200, -100);
+    // The page point under the pointer stays under it across a wheel step.
+    const at = { x: pdfBox.x + pdfBox.width * 0.4, y: pdfBox.y + 200 };
+    const b110 = (await firstPage.boundingBox())!;
+    const fraction = { x: (at.x - b110.x) / b110.width, y: (at.y - b110.y) / b110.height };
+    await ctrlWheel(page, at.x, at.y, -100);
     await expect(level).toHaveText("125%");
+    await expect.poll(pageWidth).toBeGreaterThan(b110.width * 1.1);
+    const b125 = (await firstPage.boundingBox())!;
+    // A few pixels of drift: the gaps and padding between pages do not scale.
+    expect(Math.abs(b125.x + fraction.x * b125.width - at.x)).toBeLessThan(8);
+    expect(Math.abs(b125.y + fraction.y * b125.height - at.y)).toBeLessThan(8);
     await ctrlWheel(page, pdfBox.x + pdfBox.width / 2, pdfBox.y + 200, 100);
     await expect(level).toHaveText("110%");
     await page.getByRole("button", { name: "Zoom in" }).filter({ visible: true }).click();
