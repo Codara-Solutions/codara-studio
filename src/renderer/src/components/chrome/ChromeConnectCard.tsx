@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import { chromeConnectProgress, type ChromeConnectStep, type ChromeLinkState } from "@shared/chrome-link";
 import { useConnectCardOnScreen } from "./useChromeLink";
@@ -38,9 +38,18 @@ export default function ChromeConnectCard({
   const [copied, setCopied] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const pairRef = useRef<HTMLDivElement>(null);
   // A new browser paired: the extra round is over.
   useEffect(() => setAnother(false), [progress.paired]);
-  const step: ChromeConnectStep = another && progress.step === "done" ? "add" : progress.step;
+  // Another browser's round stays at Add until it asks to pair, whatever the
+  // first browser's tabs do meanwhile.
+  const step: ChromeConnectStep = another && progress.step !== "pair" ? "add" : progress.step;
+  const pairingId = state.pending[0]?.id;
+  // The floating prompt stays away while a card is on screen, so the card's
+  // own Allow must be in view (never focused: approving takes a deliberate click).
+  useEffect(() => {
+    if (pairingId) pairRef.current?.scrollIntoView({ block: "nearest" });
+  }, [pairingId]);
   const current = STEPS.findIndex((item) => item.id === step);
 
   const run = async (action: () => Promise<unknown>) => {
@@ -86,7 +95,7 @@ export default function ChromeConnectCard({
         })}
       </ol>
 
-      <div className="chrome-connect__focus">
+      <div className="chrome-connect__focus" ref={pairRef}>
         {step === "add" ? (
           route.kind === "store" ? (
             <>

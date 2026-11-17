@@ -112,6 +112,8 @@ test("the connect card walks from Add to Pair to Share a tab on what Codara sees
     const code = (await popup.locator("#pairing-code").textContent()) ?? "";
     await expect(firstRun).toHaveAttribute("data-chrome-connect", "pair");
     await expect(firstRun.getByLabel("Pairing code")).toHaveText(code);
+    // The card's Allow is brought into view: the floating prompt stays away.
+    await expect(firstRun.getByRole("button", { name: "Allow" })).toBeInViewport();
     await expect(firstRun.locator('li[data-state="done"]')).toHaveCount(1);
     await expect(codara.locator("[data-chrome-pairing]")).toHaveCount(0);
     await firstRun.getByRole("button", { name: "Allow" }).click();
@@ -141,6 +143,11 @@ test("the connect card walks from Add to Pair to Share a tab on what Codara sees
     // Another browser starts again at Add; Cancel goes back.
     await card.getByRole("button", { name: "Connect another browser" }).click();
     await expect(card).toHaveAttribute("data-chrome-connect", "add");
+    // The first browser's tabs changing meanwhile does not end that round.
+    await popup.locator("#share-tab").uncheck();
+    await expect(settings.getByText("0 shared tabs", { exact: false })).toBeVisible();
+    await expect(card).toHaveAttribute("data-chrome-connect", "add");
+    await popup.locator("#share-tab").check();
     await card.getByRole("button", { name: "Cancel" }).click();
     await expect(card).toHaveAttribute("data-chrome-connect", "done");
 
