@@ -185,8 +185,10 @@ function renderTab(tab, connected) {
       const back = document.createElement("button");
       back.type = "button";
       back.className = "btn";
-      back.textContent = "Give back";
-      back.setAttribute("aria-label", `Give this tab back to ${agent.name}`);
+      // Codara owns the list: until it answers, the agent stays stopped.
+      back.textContent = agent.waiting ? "Waiting for Codara" : "Give back";
+      back.disabled = agent.waiting === true;
+      back.setAttribute("aria-label", agent.waiting ? `Waiting for Codara about ${agent.name}` : `Give this tab back to ${agent.name}`);
       back.addEventListener("click", () => void act("giveBack", { tabId: tab.tabId, key: agent.key }));
       item.append(text, back);
       return item;

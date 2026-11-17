@@ -60,15 +60,17 @@ export function holdsPresence(method) {
 
 /**
  * An agent's command that would reach into the overlay's own world: creating
- * a world of the same name, or running in its context. Returns the refusal,
- * or null.
+ * a world of the same name, or running in or resolving into its context (by
+ * id, or by unique id). world: { contextId, uniqueIds } of the tab, or a bare
+ * context id. Returns the refusal, or null.
  */
-export function presenceWorldError(method, params, contextId) {
+export function presenceWorldError(method, params, world) {
   const record = params && typeof params === "object" ? params : {};
+  const { contextId = null, uniqueIds = new Set() } = world && typeof world === "object" ? world : { contextId: world ?? null };
   if (method === "Page.createIsolatedWorld" && record.worldName === PRESENCE_WORLD) return "That world name is reserved by the Codara extension.";
-  if (String(method ?? "").startsWith("Runtime.") && contextId != null && (record.contextId === contextId || record.executionContextId === contextId)) {
-    return "That execution context belongs to the Codara extension.";
-  }
+  const ids = [record.contextId, record.executionContextId].filter((id) => id != null);
+  if (contextId != null && ids.includes(contextId)) return "That execution context belongs to the Codara extension.";
+  if (typeof record.uniqueContextId === "string" && uniqueIds.has(record.uniqueContextId)) return "That execution context belongs to the Codara extension.";
   return null;
 }
 
@@ -178,6 +180,50 @@ export function presenceView({ name, runtime, glow, state, id, keyless }) {
     // An older Codara cannot refuse one agent: Stop unshares the tab.
     keyless: keyless === true,
   };
+}
+
+// ── Stops: Codara owns the list, the extension keeps a copy ─────────────────
+
+const KEY_RE = /^[\w:.-]{1,200}$/;
+
+/**
+ * Codara's stop list as the extension's copy, { [tabId]: [{ key, name }] }.
+ * The copy is replaced by it, never merged: Codara's list is the only truth.
+ */
+export function stopCopyFrom(message) {
+  const copy = {};
+  for (const stop of Array.isArray(message?.stops) ? message.stops : []) {
+    if (!Number.isInteger(stop?.tabId) || typeof stop.key !== "string" || !KEY_RE.test(stop.key)) continue;
+    const name = typeof stop.name === "string" && stop.name ? stop.name.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 80) : "An agent";
+    (copy[stop.tabId] ??= []).push({ key: stop.key, name });
+  }
+  return copy;
+}
+
+/** Requests waiting for Codara's answer: those it acknowledged leave. */
+export function pendingAfterAck(pending, acked) {
+  return (Array.isArray(pending) ? pending : []).filter((request) => request.id !== acked);
+}
+
+/**
+ * The agents to show as stopped on a tab, failing closed: Codara's copy, a
+ * Stop Codara has not confirmed yet, and a give back it has not confirmed
+ * (still stopped, marked waiting).
+ */
+export function stoppedAgentsOn(copy, pending, tabId) {
+  const agents = new Map();
+  for (const agent of Array.isArray(copy?.[tabId]) ? copy[tabId] : []) agents.set(agent.key, { key: agent.key, name: agent.name, waiting: false });
+  for (const request of Array.isArray(pending) ? pending : []) {
+    if (request.tabId !== tabId) continue;
+    const known = agents.get(request.key);
+    agents.set(request.key, { key: request.key, name: known?.name ?? request.name ?? "An agent", waiting: true });
+  }
+  return [...agents.values()];
+}
+
+/** Whether Codara has yet to confirm a Stop on this tab: until then the extension relays nothing there. */
+export function stopPending(pending, tabId) {
+  return (Array.isArray(pending) ? pending : []).some((request) => request.tabId === tabId && request.op === "stop");
 }
 
 /** A click the page script reported, checked: { id } for a Stop, or null. */
@@ -381,6 +427,9 @@ function install(hostStyle) {
     remove() {
       try {
         view = null;
+        // A capture that never ended (its tab went quiet mid-recording) must
+        // not keep the next overlay hidden.
+        hidden = false;
         clearTimeout(expiry);
         host?.remove();
       } catch {}

@@ -164,10 +164,18 @@ stops sharing every tab.
   back from the Codara popup." and has no button: the page never offers
   Undo, so the spot that said Stop cannot take it back, and a page cannot
   lure a click into it. Give back lives in the popup and in Settings >
-  Browser. The stop is kept in Codara (`chrome-link/presence-stops.json`)
-  across reconnects and restarts, and ends only on give back, when the tab
-  closes or stops being shared, or when the browser is unpaired. Other
-  agents and other tabs are unaffected.
+  Browser. Codara owns the stop list (`chrome-link/presence-stops.json`,
+  written aside and renamed) and sends it to the extension on connect and on
+  every change; the extension replaces its copy with it, never merges. A
+  Stop or give back in the browser is a request: the pill says "Stopped"
+  only once Codara confirms, the tab relays nothing while a Stop waits, and
+  one pressed while Codara is away is sent first after the reconnect. A
+  stop belongs to one browser session (an id the extension keeps in session
+  storage), so a reused tab id after a browser restart is never refused. It
+  ends only on give back, when the tab closes or stops being shared, or when
+  the browser is unpaired. An unreadable list is kept aside as `.corrupt`
+  and Codara fails closed: agents are refused on that browser's tabs until
+  the user shares each again. Other agents and other tabs are unaffected.
 - A modal dialog or fullscreen element covers the pill, and a page that
   removes the host takes Stop with it until the next call; the popup's Stop
   is the fallback that always works. Printing leaves the overlay out.

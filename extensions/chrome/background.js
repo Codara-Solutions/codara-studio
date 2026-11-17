@@ -22,9 +22,13 @@ import {
   pointerOf,
   presenceCall,
   presenceClick,
+  pendingAfterAck,
   presenceSettings,
   presenceView,
   presenceWorldError,
+  stopCopyFrom,
+  stopPending,
+  stoppedAgentsOn,
   withoutPresenceNodes,
 } from "./lib/presence.js";
 import {
@@ -63,8 +67,13 @@ const SESSION_DEFAULTS = {
   agentGroups: [],
   attached: [],
   usage: {},
-  // tabId -> [{ key, name }]: agents the user stopped from the page, until given back.
+  // tabId -> [{ key, name }]: Codara's list of agents the user stopped, as
+  // Codara last sent it. Replaced, never merged: Codara owns the list.
   stoppedAgents: {},
+  // Stops and give backs Codara has not confirmed yet: [{ id, op, tabId, key, name }].
+  pendingStops: [],
+  // This browser session's id: stops never outlive it (tab ids are reused).
+  browserSession: null,
 };
 const LOCAL_DEFAULTS = {
   token: null,
@@ -103,6 +112,10 @@ async function load() {
   }
   state = { ...SESSION_DEFAULTS, ...session, ...LOCAL_DEFAULTS, ...local };
   rules = parseBlockedSites(state.blockedSites);
+  if (typeof state.browserSession !== "string") {
+    state.browserSession = crypto.randomUUID();
+    await chrome.storage.session.set({ browserSession: state.browserSession });
+  }
 }
 
 async function save(patch) {
@@ -179,6 +192,8 @@ const link = new LinkClient({
   },
   saveScan: (scan) => save({ linkScan: scan }),
   onConnected: () => {
+    // Stops pressed while Codara was away go first; their tabs relay nothing until Codara confirms.
+    void ready.then(() => sendPending());
     void reportTabs();
     void ready.then(() => link.send({ type: "presence_settings", ...presenceSettings(state.presence) }));
   },
@@ -264,12 +279,16 @@ async function relayCommand(request) {
   }
   if (!state.attached.includes(tab.id)) throw new Error(`${agentTabId(tab.id)} is not attached.`);
   // The overlay's own world is not the agent's to use.
-  const reserved = presenceWorldError(method, request.params, worlds.get(tab.id) ?? null);
+  if (stopPending(state.pendingStops, tab.id)) {
+    throw new Error(`The user pressed Stop on ${agentTabId(tab.id)}; Codara has not confirmed it yet, so nothing runs there. Do not retry; ask the user.`);
+  }
+  const reserved = presenceWorldError(method, request.params, hiddenFor(tab.id));
   if (reserved) throw new Error(reserved);
   const send = async () => (await chrome.debugger.sendCommand({ tabId: tab.id }, method, request.params ?? {})) ?? {};
+  // Always: a recording's end brings the overlay back even if it went quiet meanwhile.
+  if (method === "Page.stopScreencast") return stopScreencast(tab.id, send);
   if (!presence.has(tab.id)) return send();
   if (method === "Page.startScreencast") return startScreencast(tab.id, send);
-  if (method === "Page.stopScreencast") return stopScreencast(tab.id, send);
   if (holdsPresence(method)) {
     // The pill lets clicks through while this runs (at most 2 s), no longer.
     const point = pointerOf(method, request.params);
@@ -336,6 +355,7 @@ async function stopScreencast(tabId, send) {
     return await send();
   } finally {
     if (screencasts.delete(tabId)) await revealAfter(tabId);
+    else if (!capturing.has(tabId) && worlds.has(tabId)) await inWorld(tabId, presenceCall("conceal", false));
   }
 }
 
@@ -355,7 +375,7 @@ const PRESENCE_CALL_MS = 1_000;
 
 function hiddenFor(tabId) {
   let hidden = hiddenNodes.get(tabId);
-  if (!hidden) hiddenNodes.set(tabId, (hidden = { backendIds: new Set(), nodeIds: new Set(), contextId: null }));
+  if (!hidden) hiddenNodes.set(tabId, (hidden = { backendIds: new Set(), nodeIds: new Set(), contextId: null, uniqueIds: new Set() }));
   hidden.contextId = worlds.get(tabId) ?? hidden.contextId;
   return hidden;
 }
@@ -423,6 +443,7 @@ async function drawPresence(tabId) {
 
 async function clearPresence(tabId, { draw = true } = {}) {
   const entry = presence.get(tabId);
+  // A recording still running: the page script's remove() resets its hidden flag.
   if (screencasts.delete(tabId)) capturing.delete(tabId);
   if (!draw) {
     capturing.delete(tabId);
@@ -437,14 +458,41 @@ async function clearPresence(tabId, { draw = true } = {}) {
 }
 
 function stoppedOn(tabId) {
-  return Array.isArray(state.stoppedAgents?.[tabId]) ? state.stoppedAgents[tabId] : [];
+  return stoppedAgentsOn(state.stoppedAgents, state.pendingStops, tabId);
 }
 
-async function setStopped(tabId, agents) {
-  const next = { ...(state.stoppedAgents ?? {}) };
-  if (agents.length) next[tabId] = agents;
-  else delete next[tabId];
-  await save({ stoppedAgents: next });
+/** Send every request Codara has not confirmed; they stay until it answers with its list. */
+function sendPending() {
+  for (const request of state.pendingStops) {
+    link.send({ type: request.op === "stop" ? "presence_stop" : "presence_allow", id: request.id, tabId: request.tabId, key: request.key, name: request.name, session: state.browserSession });
+  }
+}
+
+/** A Stop or a give back is a request to Codara, which owns the list. */
+async function requestStop(op, tabId, key, name) {
+  await save({ pendingStops: [...state.pendingStops, { id: crypto.randomUUID(), op, tabId, key, name: name ?? null }] });
+  sendPending();
+  scheduleRefresh();
+}
+
+/** Codara's list: the copy is replaced by it, and what it acknowledged stops waiting. */
+async function applyStops(message) {
+  const copy = stopCopyFrom(message);
+  const pendingStops = typeof message.acked === "string" ? pendingAfterAck(state.pendingStops, message.acked) : state.pendingStops;
+  await save({ stoppedAgents: copy, pendingStops });
+  for (const [tabId, entry] of presence) {
+    const stopped = stoppedOn(tabId).some((agent) => agent.key === entry.key);
+    if (stopped && entry.state === "working") {
+      // Confirmed: the pill says so now.
+      entry.state = "stopped";
+      clearTimeout(entry.timer);
+      entry.timer = setTimeout(() => void clearPresence(tabId), PRESENCE_STOPPED_MS);
+      void drawPresence(tabId);
+    } else if (!stopped && entry.state === "stopped" && entry.key) {
+      void clearPresence(tabId);
+    }
+  }
+  scheduleRefresh();
 }
 
 /** An agent's call on a shared tab: name it on the page until it goes quiet. */
@@ -481,27 +529,19 @@ async function readPresenceClicks(tabId) {
     const agent = click && entry.history.get(click.id);
     if (!agent) continue;
     if (agent.key) {
-      link.send({ type: "presence_stop", tabId, key: agent.key, name: agent.name });
-      if (!stoppedOn(tabId).some((stopped) => stopped.key === agent.key)) await setStopped(tabId, [...stoppedOn(tabId), { key: agent.key, name: agent.name }]);
+      // Shown as stopped once Codara confirms; nothing runs on the tab meanwhile.
+      if (!stoppedOn(tabId).some((stopped) => stopped.key === agent.key)) await requestStop("stop", tabId, agent.key, agent.name);
     } else {
       // An older Codara cannot refuse one agent: take the whole tab back.
       await handlePopup({ type: "stopTab", tabId });
+      if (click.id === entry.id) stoppedShown = true;
     }
-    if (click.id === entry.id) stoppedShown = true;
   }
   if (!stoppedShown || entry.state === "stopped") return;
   entry.state = "stopped";
   clearTimeout(entry.timer);
   entry.timer = setTimeout(() => void clearPresence(tabId), PRESENCE_STOPPED_MS);
   await drawPresence(tabId);
-}
-
-/** Give a tab back to an agent the user stopped there (from the popup, or Codara's Settings). */
-async function giveBack(tabId, key, { tellCodara = true } = {}) {
-  await setStopped(tabId, stoppedOn(tabId).filter((agent) => agent.key !== key));
-  if (tellCodara) link.send({ type: "presence_allow", tabId, key });
-  const entry = presence.get(tabId);
-  if (entry?.state === "stopped" && entry.key === key) await clearPresence(tabId);
 }
 
 async function setPresence(settings) {
@@ -598,9 +638,9 @@ function handleMessage(message) {
     if (presence.has(message.tabId) && Number.isFinite(message.x) && Number.isFinite(message.y)) {
       void inWorld(message.tabId, presenceCall("move", Math.round(message.x), Math.round(message.y), message.press === true));
     }
-  } else if (message.type === "presence_allowed" && typeof message.tabId === "number" && typeof message.key === "string") {
-    // Given back from Codara's Settings.
-    void ready.then(() => giveBack(message.tabId, message.key, { tellCodara: false }));
+  } else if (message.type === "presence_stops") {
+    // Codara's stop list, the only truth: on connect and on every change.
+    void ready.then(() => applyStops(message));
   } else if (message.type === "presence_settings") {
     // The newer change wins; tell Codara when ours is the newer one.
     void ready.then(async () => {
@@ -669,7 +709,11 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   // A frame's or worker's session never passed the blocked-sites check.
   if (source.sessionId) return;
   // The overlay's own world and node are not the page's.
-  if (method === "Runtime.executionContextCreated" && params?.context?.name === PRESENCE_WORLD) return;
+  if (method === "Runtime.executionContextCreated" && params?.context?.name === PRESENCE_WORLD) {
+    // Its unique id is refused to agents too.
+    if (typeof params.context.uniqueId === "string") hiddenFor(source.tabId).uniqueIds.add(params.context.uniqueId);
+    return;
+  }
   if (method.startsWith("DOM.") || method === "Runtime.executionContextDestroyed") {
     params = withoutPresenceNodes(method, params, hiddenFor(source.tabId));
     if (!params) return;
@@ -730,7 +774,7 @@ async function reportTabs() {
       openedByAgent: state.agentTabs.includes(tab.id),
     });
   }
-  link.send({ type: "tabs", tabs: shared, allowOpen: state.allowOpen });
+  link.send({ type: "tabs", tabs: shared, allowOpen: state.allowOpen, session: state.browserSession });
 }
 
 async function updateBadge(tab) {
@@ -800,8 +844,10 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   delete usage[tabId];
   const stoppedAgents = { ...state.stoppedAgents };
   delete stoppedAgents[tabId];
+  const pendingStops = state.pendingStops.filter((request) => request.tabId !== tabId);
   await save({
     stoppedAgents,
+    pendingStops,
     shareTabs: without(state.shareTabs, tabId),
     stopped: without(state.stopped, tabId),
     storageTabs: without(state.storageTabs, tabId),
@@ -897,7 +943,7 @@ async function handlePopup(request) {
       await setTabShared(Number(request.tabId), false);
       break;
     case "giveBack":
-      if (typeof request.key === "string") await giveBack(Number(request.tabId), request.key);
+      if (typeof request.key === "string") await requestStop("allow", Number(request.tabId), request.key);
       break;
     case "shareWindow": {
       const windowId = Number(request.windowId);
