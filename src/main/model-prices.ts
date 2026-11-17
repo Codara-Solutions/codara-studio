@@ -68,6 +68,15 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   "anthropic/claude-sonnet-4": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
   "anthropic/claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
 
+  // Standard short-context (<= 272K input) rates, 30-minute cache writes,
+  // verified 2026-11-17:
+  // https://developers.openai.com/api/docs/models/gpt-6.2-sol
+  // https://developers.openai.com/api/docs/pricing
+  "openai/gpt-6.2-sol": { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+  // https://developers.openai.com/api/docs/models/gpt-6.2-astra
+  // https://developers.openai.com/api/docs/pricing
+  "openai/gpt-6.2-astra": { input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 },
+
   // Standard short-context rates, verified 2026-09-05:
   // https://developers.openai.com/api/docs/models/gpt-6-astra
   "openai/gpt-6-astra": { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
