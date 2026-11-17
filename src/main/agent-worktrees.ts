@@ -1743,7 +1743,7 @@ async function createAgentWorktreeInner(
         // Only a base spelled as the branch: "@" or "@{-1}" name a commit
         // through HEAD, which stays as it is like base "HEAD".
         const localBranchBase =
-          fullName.startsWith("refs/heads/") && (baseName === fullName || `refs/heads/${baseName}` === fullName);
+          fullName.startsWith("refs/heads/") && [baseName, `refs/${baseName}`, `refs/heads/${baseName}`].includes(fullName);
         // A local branch named like a remote one ("origin/x") is no remote base.
         const remoteBase =
           baseName && baseName !== "HEAD" && !localBranchBase ? await splitRemoteRef(repoCwd, baseName) : null;

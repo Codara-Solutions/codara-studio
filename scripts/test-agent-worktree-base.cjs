@@ -242,6 +242,10 @@ async function main() {
       assert.equal(headOf(full), remoteMain, "refs/heads/main is the local main, so origin/main is fetched");
       assert.equal(full.baseRef, "origin/main");
       assert.equal(full.base, "refs/heads/main");
+      remoteMain = pushMain(1);
+      const short = await create({ branch: "fix/heads-name", base: "heads/main" });
+      assert.equal(headOf(short), remoteMain, "heads/main is the local main too");
+      assert.equal(short.baseRef, "origin/main");
 
       git(repo, ["branch", "-q", "origin/local-base", localMain]);
       git(repo, ["branch", "-q", "--set-upstream-to", "refs/remotes/origin/main", "origin/local-base"]);
