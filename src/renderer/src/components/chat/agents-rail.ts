@@ -1,7 +1,7 @@
 import type { RunState, WorkerAttempt } from "@shared/types";
 import type { WorkerActivity, WorkerActivityStep } from "@shared/worker-feed";
 import type { ChatWorker } from "./timeline";
-import { toolDisplayName } from "./tool-labels";
+import { toolActivityKind, toolDisplayName } from "./tool-labels";
 import { workerAttempt, workerElapsed, workerViewState, type WorkerViewState } from "./worker-view";
 
 // The logic behind the chat's agents rail (AgentsRail.tsx): one entry per
@@ -32,13 +32,23 @@ export interface RailGroup {
   workers: RailWorker[];
 }
 
+// Providers spell the same tool differently ("Bash", "bash", "shell"): the
+// kind names it the same way for all of them.
+const TOOL_VERB: Partial<Record<ReturnType<typeof toolActivityKind>, string>> = {
+  run: "Run command",
+  read: "Read",
+  edit: "Edit",
+  search: "Search",
+  web: "Fetch",
+};
+
 /** A step a live worker is on, in a few words. */
 export function workerActivityLabel(step: WorkerActivityStep | null | undefined): string | null {
   if (!step) return null;
   if (step.kind === "starting") return "Starting";
   if (step.kind === "reply") return "Writing a reply";
   if (step.kind === "thinking") return "Thinking";
-  const name = toolDisplayName(step.tool);
+  const name = TOOL_VERB[toolActivityKind(step.tool)] ?? toolDisplayName(step.tool);
   return step.target ? `${name} · ${step.target}` : name;
 }
 
@@ -64,7 +74,8 @@ export function railWorkers(
       worker,
       attempt,
       state,
-      model: attempt?.model ?? worker.model ?? null,
+      // The row's label ("Opus 5"), as the step card and the worker bar show it.
+      model: worker.model ?? attempt?.model ?? null,
       elapsed: workerElapsed(attempt, now),
       activity: state === "running" ? workerActivityLabel(live?.step) : null,
       reason: state === "failed" ? workerFailureReason(attempt) : null,

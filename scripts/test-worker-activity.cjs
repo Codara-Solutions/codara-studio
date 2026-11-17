@@ -216,7 +216,9 @@ function model(rail) {
   check("a finished worker's time is how long it ran", byId.read.state === "done" && byId.read.elapsed === "1m 30s", byId.read.elapsed);
   check("a running worker shows what it is doing", byId.toast.activity === "Run command · npm test -- merged-fold", byId.toast.activity);
   check("a failed worker shows its reason's first line", byId.light.reason === "typecheck, 2 errors", byId.light.reason);
-  check("a running worker's model comes from its attempt", byId.toast.model === "Opus 5.5");
+  check("a running worker's model comes from its attempt when its row has none", byId.toast.model === "Opus 5.5");
+  const labelled = rail.railWorkers(run, [{ ...workers[1], model: "Opus 5" }], activity, now)[0];
+  check("the row's model label wins over the raw id", labelled.model === "Opus 5");
   check(
     "a mark reads name-free: model, state, time and step",
     rail.railWorkerLine(byId.toast) === "Opus 5.5 · running · 3m 10s · Run command · npm test -- merged-fold",
@@ -228,6 +230,11 @@ function model(rail) {
     "the list groups workers under their step",
     groups.length === 2 && groups[1].label === "Step 2 · Fix merged fold" && groups[1].workers.length === 2,
     JSON.stringify(groups.map((group) => group.label)),
+  );
+  check(
+    "every provider's spelling of a command reads the same",
+    rail.workerActivityLabel({ kind: "tool", tool: "bash", target: "npm test" }) === "Run command · npm test" &&
+      rail.workerActivityLabel({ kind: "tool", tool: "read", target: "a.ts" }) === "Read · a.ts",
   );
   check("a reply and thinking have their own words", rail.workerActivityLabel({ kind: "reply" }) === "Writing a reply" && rail.workerActivityLabel({ kind: "thinking" }) === "Thinking");
   check("an ended worker has no step", rail.workerActivityLabel(null) === null);
