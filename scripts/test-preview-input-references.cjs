@@ -7,6 +7,7 @@ const esbuild = require("esbuild");
 
 async function main() {
   const requests = [], events = [], commands = [];
+  let zoomFactor = 1;
   const document = { activeElement: null };
   const target = {
     isConnected: true,
@@ -28,6 +29,7 @@ async function main() {
   const ref = vm.runInContext('contract.createPreviewDOM().ref(target)', context);
   const wc = { id: 7, isDestroyed: () => false, on() {}, once() {},
     executeJavaScript: async code => vm.runInContext(code, context),
+    getZoomFactor: () => zoomFactor,
     sendInputEvent: event => events.push(event),
     debugger: { on() {}, isAttached: () => true, sendCommand: async (...args) => commands.push(args) },
   };
@@ -48,6 +50,14 @@ async function main() {
   assert.equal(events[0].y, 30);
   assert.equal(requests[0].params.workspaceId, 'workspace-a');
   assert.equal(requests[0].params.runId, 'run-a');
+  // A zoomed page: the CSS point is scaled to the guest's view pixels.
+  zoomFactor = 2;
+  await call('mouse', { selector: ref, runId: 'run-a', workspaceId: 'workspace-a' });
+  assert.equal(events.length, 6);
+  assert.equal(events[3].x, 100, 'pointer input follows the page zoom');
+  assert.equal(events[3].y, 60);
+  zoomFactor = 1;
+  events.length = 3;
   await call('press_key', { selector: ref, key: 'Enter', runId: 'run-a', workspaceId: 'workspace-a' });
   assert.equal(document.activeElement, target);
   assert.ok(commands.some(([name]) => name === 'Input.dispatchKeyEvent'));

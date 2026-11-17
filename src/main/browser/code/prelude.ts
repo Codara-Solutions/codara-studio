@@ -408,7 +408,8 @@ export const BROWSER_PRELUDE = String.raw`(function () {
     }
     async goto(url, options) {
       options = options || {};
-      var result = await this._call("preview.navigate", Object.assign({ url: String(url) }, pick(options, ["group"])));
+      // goto always loads, as in Playwright; a plain navigate leaves the page it already shows.
+      var result = await this._call("preview.navigate", Object.assign({ url: String(url), reload: true }, pick(options, ["group"])));
       if (options.waitUntil) await this.waitForLoadState(options.waitUntil, options);
       return pick(result, ["url", "tabId", "opened"]);
     }

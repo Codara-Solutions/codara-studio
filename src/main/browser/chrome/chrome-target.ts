@@ -4,6 +4,7 @@
 // "started debugging" bar), with the same console and network recorders a
 // Codara tab has.
 
+import { describeTabChoices } from "../../../shared/browser-change";
 import { CdpSession } from "../cdp-session";
 import { startConsoleRecorder } from "../recorders/console";
 import { startNetworkRecorder } from "../recorders/network";
@@ -81,7 +82,7 @@ export async function captureChromeViewport(session: CdpSession): Promise<Buffer
       clip: { x: view.x, y: view.y, width: view.width, height: view.height, scale: 1 },
     }),
     BEYOND_VIEWPORT_CAPTURE_MS,
-    "The browser did not paint the tab in time. Bring its window forward once, or retry.",
+    "Chrome did not paint the tab within 20 s, which a tab in a minimized or hidden window can do. Read it with codara_preview_snapshot, which needs no paint, or ask the user to bring its window forward once.",
   );
   return Buffer.from(shot.data, "base64");
 }
@@ -90,6 +91,8 @@ export class ChromeTargetBackend implements BrowserTargetBackend {
   readonly kind = "chrome" as const;
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly stopReasons = new Map<string, string>();
+  // Tabs a Codara close removed, so closing one again reads as done.
+  private readonly closedTabs = new Set<string>();
 
   constructor(private readonly source: ChromeLinkSource) {}
 
@@ -148,10 +151,38 @@ export class ChromeTargetBackend implements BrowserTargetBackend {
       if (reason === "canceled_by_user") {
         throw new Error(`The user stopped agents in ${id} from the browser's debugging bar. They can share it again from the Codara extension popup.`);
       }
-      throw new Error(`${id} is not shared with agents, or it is closed. The user shares a tab from the Codara extension popup; codara_preview_list shows the shared ones.`);
+      const shared = this.summaries().map((summary) => ({ id: summary.id, title: summary.title, url: summary.url, current: summary.isActive }));
+      const gone = this.goneReason(ref);
+      const head =
+        gone === "unshared"
+          ? `${id} is not shared with agents any more (it is still open in Chrome).`
+          : gone === "closed"
+            ? `${id} is closed.`
+            : `${id} is not shared with agents, or it is closed.`;
+      throw new Error(
+        `${head} Shared Chrome tabs: ${describeTabChoices(shared)}. ` +
+          "codara_preview_chrome open opens a new one; the user shares more from the Codara extension popup.",
+      );
     }
     if (tab.blocked) throw new Error(`${id} is on a site the user blocked for agents.`);
     return { link, tab };
+  }
+
+  /** Why a tab that is no longer listed went: closed (by a Codara close or in Chrome), unshared, or unknown. */
+  goneReason(ref: Extract<BrowserTabRef, { kind: "chrome" }>): "closed" | "unshared" | null {
+    for (const link of this.source.links()) {
+      if (ref.linkId && link.linkId !== ref.linkId) continue;
+      if (link.tabs.has(ref.tabId)) return null;
+      const key = `${link.linkId}/${ref.tabId}`;
+      if (this.closedTabs.has(key) || this.stopReasons.get(key) === "target_closed") return "closed";
+      if (this.stopReasons.get(key) === "unshared") return "unshared";
+    }
+    return null;
+  }
+
+  noteClosed(link: ChromeLink, tabId: number): void {
+    this.closedTabs.add(`${link.linkId}/${tabId}`);
+    if (this.closedTabs.size > 200) this.closedTabs.delete(this.closedTabs.values().next().value as string);
   }
 
   async resolve(ref: BrowserTabRef | null, params: Record<string, unknown>): Promise<BrowserTarget> {

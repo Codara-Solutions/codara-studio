@@ -235,6 +235,7 @@ import { useWorkspaceJump } from "./components/jump/useWorkspaceJump";
 import { nextTerminalStop, type TerminalSwitchScope } from "./components/jump/terminal-switch";
 import type { JumpSources } from "./components/jump/jump-model";
 import { requestShareOffer, setShareWorkspaceRoots } from "./components/share/offer-store";
+import { routeZoom } from "./components/zoom/zoom-router";
 import {
   buildAwayDigest,
   captureAwayDigestBaseline,
@@ -6158,9 +6159,11 @@ export default function App() {
           tabs.setActiveTab(existing.id);
         }
       },
-      "view.zoomIn": () => window.spark.view.zoomBy(1),
-      "view.zoomOut": () => window.spark.view.zoomBy(-1),
-      "view.zoomReset": () => window.spark.view.setZoomLevel(0),
+      // A focused viewer (an image, a PDF, a document) zooms its content;
+      // anywhere else the keys zoom the whole window.
+      "view.zoomIn": () => routeZoom("in") || window.spark.view.zoomBy(1),
+      "view.zoomOut": () => routeZoom("out") || window.spark.view.zoomBy(-1),
+      "view.zoomReset": () => routeZoom("reset") || window.spark.view.setZoomLevel(0),
       "view.selectByIndex": (event) => {
         const index = Number.parseInt(event.key, 10);
         if (Number.isFinite(index) && index >= 1) {

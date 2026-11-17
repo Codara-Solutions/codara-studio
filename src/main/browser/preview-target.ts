@@ -19,7 +19,8 @@ function viewScale(wc: WebContents): number {
   const host = wc.hostWebContents;
   const window = host && !host.isDestroyed() ? BrowserWindow.fromWebContents(host) : null;
   if (!host || !window) return 1;
-  return screen.getDisplayMatching(window.getBounds()).scaleFactor * host.getZoomFactor();
+  // The guest's own zoom: the window's, times the tab's page zoom.
+  return screen.getDisplayMatching(window.getBounds()).scaleFactor * wc.getZoomFactor();
 }
 
 /** The renderer's routing fields, forwarded so it picks the same tab for every call. */

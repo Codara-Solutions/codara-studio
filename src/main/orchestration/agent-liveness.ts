@@ -274,6 +274,9 @@ export const PI_LONG_POLL_TOOL_NAMES: ReadonlySet<string> = new Set([
   "codara_wait_for_workers",
   "codara_ask_user",
   "codara_wait_for_automation",
+  // The manager's session wait loops in code for up to 20 min
+  // (resources/pi-cora/session-tools.ts).
+  "codara_session_wait",
 ]);
 
 export function isLongPollToolName(name: unknown): boolean {

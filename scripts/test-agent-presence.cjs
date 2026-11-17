@@ -163,6 +163,7 @@ async function trustedInput() {
     id: 7, on() {}, once() {},
     isDestroyed: () => destroyed,
     executeJavaScript: async () => { probes++; return { ok: true, ...center }; },
+    getZoomFactor: () => 1,
     sendInputEvent: (event) => {
       if (destroyed) throw new Error("Object has been destroyed");
       events.push(event);

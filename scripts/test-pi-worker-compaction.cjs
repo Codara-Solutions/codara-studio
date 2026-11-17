@@ -28,6 +28,11 @@ for (const [type, key] of [["message_end", "message"], ["compaction_end", "resul
   assert.equal(usage.cost, 0.25);
 }
 assert.equal(usageExports.piWorkerMessageUsage({ type: "compaction_end", aborted: true }), null);
+// Pi's own cache warms are billed requests: counted for workers too.
+const warm = usageExports.piWorkerMessageUsage({ type: "entry_appended", entry: { type: "usage", kind: "cache_warm", usage: { input: 3, output: 1, cacheRead: 9000, cacheWrite: 0, cost: { total: 0.01 } } } });
+assert.deepEqual({ ...warm }, { input: 3, output: 1, cacheRead: 9000, cacheWrite: 0, cost: 0.01 });
+assert.equal(usageExports.piWorkerMessageUsage({ type: "entry_appended", entry: { type: "custom", usage: { input: 3 } } }), null);
+
 const runStore = fs.readFileSync(require.resolve("../src/main/orchestration/run-store.ts"), "utf8");
 assert.match(runStore, /event.type === "message_end" \|\| event.type === "compaction_end"/);
 // Memory is pinned context: the summary leaves it out and the continuation

@@ -7,14 +7,14 @@ const { PREVIEW_WAIT_MAX_MS } = require("./lib/limits.cjs");
 
 module.exports = {
   order: 10,
-  budget: 4690,
+  budget: 4610,
   tools: [
     {
       name: "codara_preview_list",
       rpc: "preview.list",
       annotations: { readOnly: true },
       description:
-        "Your workspace's browser tabs, then Chrome tabs the user shared (kind \"chrome\"): id, link, title, URL, group, isActive, isLastViewed. Match the user's references to a tabId; ask if ambiguous.",
+        "Your workspace's browser tabs, then Chrome tabs the user shared (kind \"chrome\"): id, link, title, URL, group, isActive, isLastViewed. Map the user's words to a tabId; ask if unsure.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     {
@@ -23,13 +23,14 @@ module.exports = {
       annotations: { openWorld: true },
       step: { order: 10, properties: { group: { type: "string" } } },
       description:
-        "Load an http, https or file URL in tabId, or in this session's tab (opened if needed). Waits briefly for dom-ready.",
+        "Load an http, https or file URL in tabId, or in this session's tab (opened if needed). Same URL: reloads only with reload.",
       inputSchema: {
         type: "object",
         properties: {
           tabId: { type: "string" },
-          url: { type: "string", description: "Absolute URL to load." },
-          group: { type: "string", description: "Tab group for the new tab, or for tabId (url then optional), named after your task." },
+          url: { type: "string" },
+          group: { type: "string", description: "Tab group for the new tab, or for tabId (url then optional), named for your task." },
+          reload: { type: "boolean" },
         },
         additionalProperties: false,
       },
@@ -39,7 +40,7 @@ module.exports = {
       rpc: "preview.close",
       annotations: { destructive: true, idempotent: true },
       description:
-        "Close tabId, or this session's tab, in your workspace. A chrome: tabId closes a Chrome tab an agent opened or the user shared. A retry returns alreadyClosed=true.",
+        "Close tabId, or this session's tab, in your workspace, or a chrome: tab an agent opened or the user shared. A retry returns alreadyClosed.",
       inputSchema: { type: "object", properties: { tabId: { type: "string" } }, additionalProperties: false },
     },
     {
@@ -48,7 +49,7 @@ module.exports = {
       annotations: { readOnly: true },
       step: { order: 70 },
       description:
-        "Read the page: @references (any tool's selector), labels, values, states, link targets. selector scopes it; since=<snapshotId> returns only the diff. Re-read after a stale reference.",
+        "Read the page: @references (any tool's selector), labels, values, states, link targets. selector scopes it; since=<snapshotId> returns only the diff.",
       inputSchema: {
         type: "object",
         properties: {
