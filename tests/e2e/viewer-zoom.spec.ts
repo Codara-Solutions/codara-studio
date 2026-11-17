@@ -100,6 +100,8 @@ test("a PDF zooms at the pointer and takes the zoom keys while focused", async (
       ["Beta needle here", "and another needle"],
     ]),
   );
+  const LONG_PAGES = 30;
+  await writeFile(join(cwd, "long.pdf"), textPdf(Array.from({ length: LONG_PAGES }, (_, i) => [`Long page ${i + 1}`])));
   await writeFile(
     join(home, "spark-state.json"),
     JSON.stringify({
@@ -193,6 +195,40 @@ test("a PDF zooms at the pointer and takes the zoom keys while focused", async (
     await expect(level).toHaveText("100%");
     await page.keyboard.press("Control+0");
     await expect.poll(() => windowWidth(page)).toBe(baseWidth);
+
+    // ── A long PDF: after reading through it, only the pages near the
+    // viewport keep a canvas, and a zoom redraws only those.
+    await open("long.pdf");
+    const long = page
+      .locator(".codara-find-scroller:visible")
+      .filter({ has: page.locator(`[data-pdf-page="${LONG_PAGES}"]`) });
+    const pageAt = (n: number) => long.locator(`[data-pdf-page="${n}"]`);
+    await expect(pageAt(1).locator("canvas")).toBeVisible({ timeout: 15_000 });
+    for (let n = 2; n <= LONG_PAGES; n++) {
+      await pageAt(n).evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await expect(pageAt(n)).toHaveAttribute("data-pdf-draws", /\d/, { timeout: 15_000 });
+    }
+    await long.evaluate((el) => (el.scrollTop = 0));
+    // Pages far off screen let their canvas go.
+    await expect.poll(() => long.locator("canvas").count(), { timeout: 10_000 }).toBeLessThanOrEqual(4);
+    const drawCounts = () =>
+      long
+        .locator("[data-pdf-page]")
+        .evaluateAll((els) => els.map((el) => Number((el as HTMLElement).dataset.pdfDraws ?? 0)));
+    // The top pages draw again on the way back; let that finish first.
+    await expect(pageAt(1).locator("canvas")).toBeVisible();
+    await page.waitForTimeout(500);
+    const drawsBefore = await drawCounts();
+    await long.click({ position: { x: 30, y: 30 } });
+    await page.keyboard.press("Control+=");
+    await expect(level).toHaveText("110%");
+    await expect.poll(async () => (await drawCounts())[0]).toBeGreaterThan(drawsBefore[0]);
+    // Let any other redraw land before counting.
+    await page.waitForTimeout(800);
+    const drawsAfter = await drawCounts();
+    const redrawn = drawsAfter.flatMap((count, i) => (count > drawsBefore[i] ? [i + 1] : []));
+    expect(redrawn.length).toBeGreaterThan(0);
+    expect(Math.max(...redrawn)).toBeLessThanOrEqual(3);
   } finally {
     await app.close();
   }
