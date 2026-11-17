@@ -131,6 +131,8 @@ test("Cora goes inside a running and a finished worker and comes back to Main wh
     await expect(bar).toContainText("Read how the fold counts");
     await expect(bar).toContainText("done");
     await expect(bar).toContainText("1 of 3");
+    // The arrow that went disabled handed focus to the other one.
+    await expect(page.getByRole("button", { name: /^Next worker: Watch the toast count/ })).toBeFocused();
     await expect(view.getByRole("button", { name: /Worked for/ })).toBeVisible();
     await expect(view.getByText("Done: Read how the fold counts. One file changed and the tests pass.")).toBeVisible();
     const report = view.getByRole("region", { name: "Final report" });
@@ -147,7 +149,10 @@ test("Cora goes inside a running and a finished worker and comes back to Main wh
     await expect(bar).toHaveCount(0);
     await expect(page.getByTestId("cora-conversation")).toBeVisible();
     await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBe(before);
-    await expect(page.locator("[data-worker-row]:focus")).toHaveCount(1);
+    // Focus is back on the row of the worker you left from (the finished one).
+    const finishedRowId = await finishedRow.getAttribute("data-worker-row");
+    expect(finishedRowId).toBeTruthy();
+    await expect(page.locator(`[data-worker-row="${finishedRowId}"]`)).toBeFocused();
 
     // Inside the finished worker, another worker ending pings the bar.
     await finishedRow.click();

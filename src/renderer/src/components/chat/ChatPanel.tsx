@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import type {
   AddRunMessageAttachmentInput,
   BoardCard,
@@ -133,13 +133,34 @@ export default function ChatPanel({
   );
   const usingHoistedChatView = chatViewProp !== undefined;
   const [whiteboardOpened, setWhiteboardOpened] = useState(false);
-  // The worker the user went inside, by logical worker id; null is Main.
-  // Main stays mounted underneath, hidden, so it keeps its scroll position.
-  const [insideWorker, setInsideWorker] = useState<string | null>(null);
-  useEffect(() => {
-    setInsideWorker(null);
-  }, [activeRun?.id]);
+  // The worker the user went inside, by logical worker id, for the run it
+  // belongs to: another chat is never shown inside a worker, not even for the
+  // one render before an effect could reset it. Null is Main. Main stays
+  // mounted underneath, hidden, so it keeps its scroll position.
+  const [insideTarget, setInsideTarget] = useState<{ runId: string; workerId: string } | null>(null);
+  const insideWorker =
+    insideTarget && activeRun && insideTarget.runId === activeRun.id ? insideTarget.workerId : null;
+  const activeRunId = activeRun?.id ?? null;
+  const setInsideWorker = useCallback(
+    (workerId: string | null) =>
+      setInsideTarget(workerId && activeRunId ? { runId: activeRunId, workerId } : null),
+    [activeRunId],
+  );
   const inside = insideWorker !== null && chatView === "chat" && activeRun !== null;
+  // Anything that asks for Main's composer (its shortcut, a prefill from the
+  // browser or a stop) brings Main back first: the composer is inert while a
+  // worker covers it. Synchronously, so the composer's own deferred focus
+  // lands after inert is gone.
+  useEffect(() => {
+    if (!inside || suspendGlobalEvents) return undefined;
+    const leave = () => flushSync(() => setInsideTarget(null));
+    window.addEventListener("spark:focus-composer", leave);
+    window.addEventListener("spark:prefill-composer", leave);
+    return () => {
+      window.removeEventListener("spark:focus-composer", leave);
+      window.removeEventListener("spark:prefill-composer", leave);
+    };
+  }, [inside, suspendGlobalEvents]);
   const leaveWorker = useCallback(() => {
     const left = insideWorker;
     setInsideWorker(null);

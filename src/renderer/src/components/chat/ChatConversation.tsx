@@ -3280,7 +3280,7 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
           className="cora-step-worker-open"
           data-worker-row={worker.id}
           title={`${worker.title}: ${worker.status}${titleSuffix}`}
-          aria-label={`Open ${worker.title}, ${detail}`}
+          aria-label={detail ? `Open ${worker.title}, ${detail}` : `Open ${worker.title}`}
           onClick={() => openWorker?.(worker.id)}
         >
           {rowContent}
