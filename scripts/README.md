@@ -61,8 +61,9 @@ How `scripts/run-all-tests.cjs` works:
   - Durations are kept in `node_modules/.cache/codara-tests/timings.json`,
     and the next run starts the longest suites first.
   - `CODARA_TEST_PART=pool` runs every suite except the serial ones, and
-    `CODARA_TEST_PART=serial` only those. CI runs the two parts on two
-    machines at once.
+    `CODARA_TEST_PART=serial` only those. CI runs them on three machines at
+    once: the pool in two shards (`CODARA_TEST_SHARD=1/2` and `2/2`, every
+    other suite in name order), the serial suites on the third.
   - `CODARA_TEST_BUDGET_SECONDS=900` stops the run once it has taken that
     long and fails it, naming the suites it stopped and the ones that never
     started. CI sets one so a slow suite fails with that message instead of

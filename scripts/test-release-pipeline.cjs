@@ -234,7 +234,7 @@ test("direct main pushes run release checks before the next nightly", () => {
   const shards = pool.strategy.matrix.shard;
   const poolEnv = pool.steps.find((step) => step.run === "npm run test:all").env;
   assert.equal(poolEnv.CODARA_TEST_JOBS, "1");
-  assert.equal(poolEnv.CODARA_TEST_SHARD, `\${{ matrix.shard }}/${shards.length}`);
+  assert.equal(poolEnv.CODARA_TEST_SHARD, "${{ matrix.shard }}/${{ strategy.job-total }}");
   assert.deepEqual(shards, Array.from({ length: shards.length }, (_, i) => i + 1));
   assert.equal(pool.strategy["fail-fast"], false);
 });
