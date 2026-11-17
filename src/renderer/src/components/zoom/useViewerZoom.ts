@@ -32,6 +32,12 @@ export interface ViewerZoomOptions {
   fitZoom?: number;
   /** False until the scroller is mounted (still loading, an error). */
   enabled?: boolean;
+  /**
+   * "frame": keep the point under the pointer two frames after a zoom, not
+   * in the same commit, for content that settles its size later (a virtual
+   * list sets its spacer heights after it renders).
+   */
+  settle?: "now" | "frame";
 }
 
 export interface ViewerZoom {
@@ -58,6 +64,7 @@ export function useViewerZoom({
   wheel = "smooth",
   fitZoom = 1,
   enabled = true,
+  settle = "now",
 }: ViewerZoomOptions): ViewerZoom {
   const [state, setState] = useState({ zoom: fitZoom, fitted: true });
   const zoom = state.fitted ? fitZoom : state.zoom;
@@ -90,10 +97,20 @@ export function useViewerZoom({
     anchor.current = null;
     const scroller = scrollerRef.current;
     if (!point || !scroller || previous === zoom) return;
-    const box = contentBox(scroller);
-    scroller.scrollLeft += box.left + point.fx * box.width - point.x;
-    scroller.scrollTop += box.top + point.fy * box.height - point.y;
-  }, [zoom, scrollerRef, contentBox]);
+    const keep = () => {
+      const box = contentBox(scroller);
+      scroller.scrollLeft += box.left + point.fx * box.width - point.x;
+      scroller.scrollTop += box.top + point.fy * box.height - point.y;
+    };
+    if (settle === "now") {
+      keep();
+      return;
+    }
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(keep);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [zoom, scrollerRef, contentBox, settle]);
 
   // A pin whose zoom never showed (a tiny pinch that snapped back to fit)
   // must not move the view on a later zoom, after the user has scrolled.
