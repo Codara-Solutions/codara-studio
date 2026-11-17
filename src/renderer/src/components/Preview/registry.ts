@@ -292,7 +292,7 @@ export async function openIsolatedPreviewTab(
 }
 
 // `group` only applies when a tab is opened; a reused tab stays where the
-// user or an earlier call put it.
+// user or an earlier call put it. `fresh` always opens a new tab.
 export async function ensurePreviewTab(
   url: string,
   runId?: string | null,
@@ -300,11 +300,40 @@ export async function ensurePreviewTab(
   callerPaneId?: string | null,
   group?: string | null,
   callerIdentity?: AgentOpenerIdentity | null,
+  options: { fresh?: boolean } = {},
 ): Promise<{ tab: RegistryEntry; opened: boolean }> {
   const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
+  if (options.fresh) return openAgentTab(url, runId, workspace, paneId, group, callerIdentity, true);
   const existing = findReusablePreviewTab(runId, workspace, paneId);
   if (existing) return { tab: existing, opened: false };
+  // Calls of one caller that arrive together share the tab the first opens.
+  const key = runId ? `run:${runId}` : paneId ? `pane:${paneId}` : `workspace:${workspace ?? ""}`;
+  const pending = openingTabs.get(key);
+  if (pending) return { tab: (await pending).tab, opened: false };
+  const opening = openAgentTab(url, runId, workspace, paneId, group, callerIdentity, false);
+  openingTabs.set(key, opening);
+  try {
+    return await opening;
+  } finally {
+    if (openingTabs.get(key) === opening) openingTabs.delete(key);
+  }
+}
+
+const openingTabs = new Map<string, Promise<{ tab: RegistryEntry; opened: boolean }>>();
+
+async function openAgentTab(
+  url: string,
+  runId: string | null | undefined,
+  workspace: string | null,
+  paneId: string | null,
+  group: string | null | undefined,
+  callerIdentity: AgentOpenerIdentity | null | undefined,
+  fresh: boolean,
+): Promise<{ tab: RegistryEntry; opened: boolean }> {
   const open = await readyOpenPreviewTabFn();
+  // The window may have opened this caller's tab while the call waited for it.
+  const existing = fresh ? null : findReusablePreviewTab(runId, workspace, paneId);
+  if (existing) return { tab: existing, opened: false };
   const id = await Promise.resolve(
     open(url, runId, workspace, group ? { group } : undefined),
   );

@@ -19,6 +19,8 @@ import {
   describePage,
   describeTabChoices,
   describeTyped,
+  pageAnsweredFine,
+  PAGE_LOAD_CHECK_EXPRESSION,
   sameUrl,
   type PageState,
 } from "@shared/browser-change";
@@ -36,6 +38,7 @@ import {
   findReusablePreviewTab,
   hasPreviewTab,
   listPreviewTabs,
+  previewTabOpener,
   pickPreviewTab,
   previewTabChoices,
 } from "./registry";
@@ -89,6 +92,43 @@ function stampActedTab(result: unknown, tabId: string | undefined): unknown {
   return { tabId, ...record };
 }
 
+// The tab ids each caller was shown, so a close or a call naming one that is
+// gone now can say "closed", while an id it never saw stays an error.
+const seenTabs = new Map<string, Set<string>>();
+const SEEN_CALLERS_MAX = 200;
+const SEEN_TABS_MAX = 100;
+
+function callerKey(params: Record<string, unknown>): string {
+  const runId = readString(params, "runId");
+  const paneId = readString(params, "callerPaneId");
+  return runId ? `run:${runId}` : paneId ? `pane:${paneId}` : `workspace:${readString(params, "workspaceId") ?? ""}`;
+}
+
+function markSeen(params: Record<string, unknown>, ids: string[]): void {
+  if (ids.length === 0) return;
+  const key = callerKey(params);
+  const seen = seenTabs.get(key) ?? new Set<string>();
+  seenTabs.delete(key);
+  seenTabs.set(key, seen);
+  for (const id of ids) {
+    seen.delete(id);
+    seen.add(id);
+  }
+  while (seen.size > SEEN_TABS_MAX) seen.delete(seen.values().next().value as string);
+  if (seenTabs.size > SEEN_CALLERS_MAX) seenTabs.delete(seenTabs.keys().next().value as string);
+}
+
+function noteSeenTabs(params: Record<string, unknown>, result: unknown): void {
+  if (!result || typeof result !== "object") return;
+  const record = result as { tabId?: unknown; tabs?: unknown };
+  const ids = Array.isArray(record.tabs) ? record.tabs.map((tab) => (tab as { id?: unknown })?.id) : [record.tabId];
+  markSeen(params, ids.filter((id): id is string => typeof id === "string" && id !== ""));
+}
+
+function sawTab(params: Record<string, unknown>, tabId: string): boolean {
+  return seenTabs.get(callerKey(params))?.has(tabId) === true;
+}
+
 export function registerPreviewRpcHandler(): void {
   if (registered) return;
   registered = true;
@@ -105,6 +145,7 @@ export function registerPreviewRpcHandler(): void {
     };
     try {
       const result = stampActedTab(await dispatch(req), req.params ? actedTabs.get(req.params) : undefined);
+      if (req.params) noteSeenTabs(req.params, result);
       previewBridge.sendResponse({ reqId: req.reqId, ok: true, result } satisfies BridgeResponse);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -209,8 +250,11 @@ function missingTabError(params: Record<string, unknown>): Error {
   const head = tabId
     ? hasPreviewTab(tabId)
       ? `Browser tab ${tabId} is in another workspace.`
-      : `Browser tab ${tabId} is closed.`
+      : sawTab(params, tabId)
+        ? `Browser tab ${tabId} is closed.`
+        : `No browser tab has the id ${tabId}.`
     : `${runId ? "This run" : "This session"} has no browser tab open.`;
+  markSeen(params, choices.map((choice) => choice.id));
   const usable = choices.length ? ` Tabs you can pass as tabId: ${describeTabChoices(choices)}.` : " Your workspace has no browser tabs open.";
   return new Error(`${head}${usable} To open your own, call codara_preview_navigate with a url.`);
 }
@@ -275,8 +319,9 @@ function closeTab(params: Record<string, unknown>) {
   if (tabId) {
     const tab = pickPreviewTab(tabId, runId, workspaceId, callerPaneId);
     if (!tab) {
-      if (!hasPreviewTab(tabId)) return { ok: true, tabId, alreadyClosed: true };
-      throw new Error(`Browser tab ${tabId} is not in your workspace, so you cannot close it.`);
+      // Only a tab this caller was shown counts as closed; an id it never saw is a mistake to report.
+      if (!hasPreviewTab(tabId) && sawTab(params, tabId)) return { ok: true, tabId, alreadyClosed: true };
+      throw missingTabError(params);
     }
     assertDriverAllowed(tab.id, readDriver(params.driver));
     closePreviewTab(tab.id);
@@ -284,7 +329,7 @@ function closeTab(params: Record<string, unknown>) {
   }
   const own = findReusablePreviewTab(runId, workspaceId, callerPaneId);
   // A repeated close finds nothing left to close, which is what it asked for.
-  if (!own) return { ok: true, alreadyClosed: true, note: "This session has no browser tab of its own open; nothing was closed." };
+  if (!own) return { ok: true, closed: false, note: "This session has no browser tab of its own open; nothing was closed." };
   assertDriverAllowed(own.id, readDriver(params.driver));
   closePreviewTab(own.id);
   return { ok: true, tabId: own.id, closed: true };
@@ -339,6 +384,25 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     if (!url) {
       return { url: tab.handle.getURL(), tabId: tab.id, opened, group: joined ?? tabGroupNameOf(tab.id) };
     }
+  } else if (url && replaced) {
+    // A closed tab's stand-in: the tab this caller's own navigate opened, or
+    // a new one. Never the tab on screen or another tab the caller drives.
+    const runId = readString(params, "runId");
+    const workspaceId = readString(params, "workspaceId");
+    const callerPaneId = readString(params, "callerPaneId");
+    const ownId = runId || callerPaneId ? navigateOpened.get(callerKey(params)) : undefined;
+    const own = ownId ? pickPreviewTab(ownId, null, workspaceId, callerPaneId) : null;
+    const opener = own ? previewTabOpener(own.id) : null;
+    const provablyMine = Boolean(own && opener && (runId ? opener.runId === runId : opener.paneId === callerPaneId && !opener.runId));
+    if (own && provablyMine) {
+      assertDriverAllowed(own.id, driver);
+      ({ tab, opened } = { tab: own, opened: false });
+    } else {
+      ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId, group, {
+        sessionId: readString(params, "callerSessionId"),
+        process: readString(params, "callerProcess"),
+      }, { fresh: true }));
+    }
   } else if (url) {
     // runId is the calling run's identity, stamped by the MCP server; the
     // reused-or-opened tab must belong to that run (or, with no run, to the
@@ -362,10 +426,16 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   } else {
     throw new Error("navigate requires 'url'");
   }
-  const note = replaced ? { note: `Tab ${replaced} is closed, so this ${opened ? "opened a new tab" : "used your own tab"}.` } : {};
+  if (opened) rememberNavigateOpened(params, tab.id);
+  const instead = opened ? "opened a new tab" : "used the tab your last navigate opened";
+  const notes: string[] = replaced ? [`${sawTab(params, replaced) ? `Tab ${replaced} is closed` : `No tab has the id ${replaced}`}, so this ${instead}.`] : [];
+  const substituted = replaced ? { replacedTabId: replaced } : {};
   // The page the tab already shows is not loaded again: agents repeat a
   // navigate to check where they are, and a reload would lose page state.
-  if (url && !opened && params.reload !== true && !isTabAsleep(tab.id) && tab.handle.isReady() && sameUrl(tab.handle.getURL(), url)) {
+  if (
+    url && !opened && params.reload !== true && !isTabAsleep(tab.id) && tab.handle.isReady() && sameUrl(tab.handle.getURL(), url) &&
+    lastNavigates.get(tab.id)?.failed !== true && (await pageLoadedFine(tab, url))
+  ) {
     const now = pageState(tab.handle);
     joined ??= tabGroupNameOf(tab.id);
     return {
@@ -376,7 +446,8 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
       alreadyThere: true,
       ...(joined ? { group: joined } : {}),
       change: describeAlreadyThere(now, lastNavigates.get(tab.id) ?? null),
-      ...note,
+      ...substituted,
+      ...(notes.length ? { note: notes.join(" ") } : {}),
     };
   }
   // A tab ensurePreviewTab just opened is already loading the URL. Loading
@@ -392,6 +463,7 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     if (!asleep) outcome = await tab.handle.loadURL(url);
   }
   if (outcome === "timeout") {
+    rememberNavigate(tab.id, tab.handle.getTitle(), true);
     throw new Error(`The page at ${url} did not respond within 15 s. Check that its server answers, then navigate again.`);
   }
   await waitDomReady(tab.handle, 15_000);
@@ -405,19 +477,45 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     opened,
     ...(joined ? { group: joined } : {}),
     change: `Loaded ${describePage(reached)}.`,
-    ...note,
-    ...(outcome === "committed" ? { loading: true, note: "The page arrived but is still loading. Call codara_preview_wait_for before reading it." } : {}),
+    ...substituted,
+    ...(outcome === "committed" ? { loading: true } : {}),
+    ...(notes.length || outcome === "committed"
+      ? { note: [...notes, ...(outcome === "committed" ? ["The page arrived but is still loading. Call codara_preview_wait_for before reading it."] : [])].join(" ") }
+      : {}),
   };
 }
 
-// Each tab's last navigate by an agent, so a repeated one can say what changed since.
-const lastNavigates = new Map<string, { title: string; at: number }>();
+// Each tab's last navigate by an agent, so a repeated one can say what
+// changed since, and loads one that failed again.
+const lastNavigates = new Map<string, { title: string; at: number; failed?: boolean }>();
 const LAST_NAVIGATES_MAX = 200;
+// The tab each caller's navigate last opened: the only tab a navigate naming
+// a closed tab may use in its place.
+const navigateOpened = new Map<string, string>();
 
-function rememberNavigate(tabId: string, title: string): void {
+function rememberNavigate(tabId: string, title: string, failed = false): void {
   lastNavigates.delete(tabId);
-  lastNavigates.set(tabId, { title, at: Date.now() });
+  lastNavigates.set(tabId, { title, at: Date.now(), ...(failed ? { failed } : {}) });
   if (lastNavigates.size > LAST_NAVIGATES_MAX) lastNavigates.delete(lastNavigates.keys().next().value as string);
+}
+
+function rememberNavigateOpened(params: Record<string, unknown>, tabId: string): void {
+  const key = callerKey(params);
+  navigateOpened.delete(key);
+  navigateOpened.set(key, tabId);
+  if (navigateOpened.size > LAST_NAVIGATES_MAX) navigateOpened.delete(navigateOpened.keys().next().value as string);
+}
+
+// A page that answered with an error status, or a load that failed and left
+// Chromium's error page, is loaded again rather than reported as reached.
+const LOAD_CHECK_MS = 400;
+
+async function pageLoadedFine(tab: Awaited<ReturnType<typeof requireTab>>, url: string): Promise<boolean> {
+  const page = await Promise.race([
+    runGuestScript(tab.handle, PAGE_LOAD_CHECK_EXPRESSION).catch(() => null),
+    new Promise((resolve) => setTimeout(() => resolve(null), LOAD_CHECK_MS)),
+  ]);
+  return pageAnsweredFine(page, url);
 }
 
 function pageState(handle: { getURL: () => string; getTitle: () => string }): PageState {

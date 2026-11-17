@@ -6,7 +6,17 @@
 // both; input goes through the DevTools protocol, which needs neither focus
 // nor a visible tab.
 
-import { CHANGES_STOP_EXPRESSION, describeAlreadyThere, describeChange, describePage, describeTyped, sameUrl, type PageState } from "../../../shared/browser-change";
+import {
+  CHANGES_STOP_EXPRESSION,
+  describeAlreadyThere,
+  describeChange,
+  describePage,
+  describeTyped,
+  pageAnsweredFine,
+  PAGE_LOAD_CHECK_EXPRESSION,
+  sameUrl,
+  type PageState,
+} from "../../../shared/browser-change";
 import { createPreviewDOM } from "../../../shared/preview-dom";
 import { createPreviewNames } from "../../../shared/preview-names";
 import { snapshotProbe } from "../../../renderer/src/components/Preview/domSnapshot";
@@ -43,22 +53,32 @@ function checked<T extends { ok?: boolean; error?: string }>(value: T): T {
 }
 
 // Each tab's last navigate by an agent, so a repeated one can say what changed since.
-const lastNavigates = new Map<string, { title: string; at: number }>();
+const lastNavigates = new Map<string, { title: string; at: number; failed?: boolean }>();
 const LAST_NAVIGATES_MAX = 200;
+const LOAD_CHECK_MS = 400;
 
-function rememberNavigate(ref: string, title: string): void {
+async function pageLoadedFine(target: BrowserTarget, url: string): Promise<boolean> {
+  const page = await Promise.race([
+    target.evaluate(PAGE_LOAD_CHECK_EXPRESSION).catch(() => null),
+    new Promise((resolve) => setTimeout(() => resolve(null), LOAD_CHECK_MS)),
+  ]);
+  return pageAnsweredFine(page, url);
+}
+
+function rememberNavigate(ref: string, title: string, failed = false): void {
   lastNavigates.delete(ref);
-  lastNavigates.set(ref, { title, at: Date.now() });
+  lastNavigates.set(ref, { title, at: Date.now(), ...(failed ? { failed } : {}) });
   if (lastNavigates.size > LAST_NAVIGATES_MAX) lastNavigates.delete(lastNavigates.keys().next().value as string);
 }
 
 export async function navigate(target: BrowserTarget, params: Params): Promise<unknown> {
   const url = str(params, "url");
   if (!url) throw new Error("navigate requires 'url'");
-  // The page the tab already shows is not loaded again, as on Codara tabs.
-  if (params.reload !== true) {
+  // The page the tab already shows is not loaded again, as on Codara tabs,
+  // unless its last load failed or answered with an error status.
+  if (params.reload !== true && lastNavigates.get(target.ref)?.failed !== true) {
     const shown = await target.info().catch(() => null);
-    if (shown && sameUrl(shown.url, url)) {
+    if (shown && sameUrl(shown.url, url) && (await pageLoadedFine(target, url))) {
       return {
         url: shown.url,
         title: shown.title,
@@ -86,7 +106,10 @@ export async function navigate(target: BrowserTarget, params: Params): Promise<u
       }
     });
     const result = await session.send<{ errorText?: string; loaderId?: string }>("Page.navigate", { url });
-    if (result.errorText) throw new Error(`The browser could not load ${url}: ${result.errorText}`);
+    if (result.errorText) {
+      rememberNavigate(target.ref, "", true);
+      throw new Error(`The browser could not load ${url}: ${result.errorText}`);
+    }
     // A same-document navigation (a #hash change) fires no load event.
     if (result.loaderId) await loaded;
   } finally {

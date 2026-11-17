@@ -422,12 +422,29 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   await lib.chromeLinkTool({ action: "activate", tabId: "chrome:12" }, "preview.chrome", host);
   assert.deepEqual(answers.at(-1), { id: answers.at(-1).id, type: "activate", tabId: 12 });
   await assert.rejects(lib.chromeLinkTool({ action: "close", tabId: "tab-3" }, "preview.chrome", host), /tabId of a Chrome tab/);
+  // A tab the user stopped sharing is still open in Chrome: not closed.
+  const sharedTabs = [...link.tabs.values()];
+  const withoutMail = sharedTabs.filter((tab) => tab.tabId !== 12);
+  chrome.send({ type: "detached", tabId: 12, reason: "unshared" });
+  chrome.send({ type: "tabs", allowOpen: true, tabs: withoutMail });
+  await until(() => !link.tabs.has(12), "the unshared tab leaving the list");
+  await assert.rejects(tools["preview.close"]({ tabId: "chrome:12" }, "preview.close", host), /chrome:12 is not shared with agents any more \(it is still open in Chrome\)/);
+  chrome.send({ type: "tabs", allowOpen: true, tabs: sharedTabs });
+  await until(() => link.tabs.has(12), "the tab shared again");
   // codara_preview_close with a chrome: tabId is the link's close; the
   // extension decides again whether agents may close that tab.
   assert.deepEqual(await tools["preview.close"]({ tabId: "chrome:12" }, "preview.close", host), { ok: true, tabId: "chrome:12", action: "close", closed: true });
   assert.deepEqual(answers.at(-1), { id: answers.at(-1).id, type: "close", tabId: 12 });
-  // Closing a tab that is gone is what the call asked for, so a retry succeeds.
-  assert.deepEqual(await tools["preview.close"]({ tabId: "chrome:4040" }, "preview.close", host), { ok: true, tabId: "chrome:4040", action: "close", alreadyClosed: true });
+  // Once the tab is gone, closing it again is what the call asked for.
+  chrome.send({ type: "tabs", allowOpen: true, tabs: withoutMail });
+  await until(() => !link.tabs.has(12), "the closed tab leaving the list");
+  const closes = answers.length;
+  assert.deepEqual(await tools["preview.close"]({ tabId: "chrome:12" }, "preview.close", host), { ok: true, tabId: "chrome:12", action: "close", alreadyClosed: true });
+  assert.equal(answers.length, closes, "nothing was sent for it");
+  chrome.send({ type: "tabs", allowOpen: true, tabs: sharedTabs });
+  await until(() => link.tabs.has(12), "the tab listed again");
+  // An id that was never there stays an error that lists the shared tabs.
+  await assert.rejects(tools["preview.close"]({ tabId: "chrome:4040" }, "preview.close", host), /chrome:4040 is not shared with agents, or it is closed\. Shared Chrome tabs: chrome:12 "Mail" "mail\.example"/);
   await assert.rejects(lib.chromeLinkTool({ action: "activate", tabId: "chrome:4040" }, "preview.chrome", host), /not shared with agents, or it is closed\. Shared Chrome tabs: chrome:12 /);
   await assert.rejects(lib.chromeLinkTool({ action: "list" }, "preview.chrome", host), /status lists the shared Chrome tabs/);
 
@@ -550,19 +567,29 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   };
   let pageNavigations = 0;
   let shown = { url: "https://a.example/", title: "Start" };
-  const pageTarget = { ref: "chrome:12", session: pageSession, info: async () => shown };
+  let shownStatus = 200;
+  const pageTarget = {
+    ref: "chrome:12",
+    session: pageSession,
+    info: async () => shown,
+    evaluate: async (expression) => (expression.includes("getEntriesByType") ? { href: shown.url, status: shownStatus } : null),
+  };
   const navigateStarted = Date.now();
   const navigated = await lib.navigate(pageTarget, { url: "https://a.example/next" });
-  assert.deepEqual(navigated, { url: "https://a.example/next", title: "Next", tabId: "chrome:12", opened: false, change: 'Loaded a.example/next ("Next").' });
+  assert.deepEqual(navigated, { url: "https://a.example/next", title: "Next", tabId: "chrome:12", opened: false, change: 'Loaded "a.example/next" (title "Next").' });
   assert.ok(Date.now() - navigateStarted < 2_000, "navigate waited for the load event, not its timeout");
   // The same URL again is not reloaded unless asked, and says what changed since.
   shown = { url: "https://a.example/next", title: "Next, 2 unread" };
   const repeated = await lib.navigate(pageTarget, { url: "https://a.example/next" });
   assert.equal(pageNavigations, 1, "a repeated navigate does not reload");
   assert.equal(repeated.alreadyThere, true);
-  assert.match(repeated.change, /^Already on a\.example\/next \("Next, 2 unread"\); title changed from "Next"\. Not reloaded: pass reload true to reload\.$/);
+  assert.match(repeated.change, /^Already on "a\.example\/next" \(title "Next, 2 unread"\); title changed from "Next" since your navigate \d+ s ago\. Not reloaded: pass reload: true to reload\.$/);
   await lib.navigate(pageTarget, { url: "https://a.example/next", reload: true });
   assert.equal(pageNavigations, 2, "reload true loads the page again");
+  shownStatus = 404;
+  await lib.navigate(pageTarget, { url: "https://a.example/next" });
+  assert.equal(pageNavigations, 3, "a page that answered 404 is loaded again");
+  shownStatus = 200;
   // A click and a typed value say what they did, as on Codara tabs.
   const clickTarget = {
     ...pageTarget,
@@ -576,7 +603,7 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
       return null;
     },
   };
-  assert.equal((await lib.click(clickTarget, { selector: "#go" })).change, 'Now on a.example/done ("Done").');
+  assert.equal((await lib.click(clickTarget, { selector: "#go" })).change, 'Now on "a.example/done" (title "Done").');
   assert.equal((await lib.type(clickTarget, { selector: "#pw", text: "abc" })).change, 'The field now holds "•••".');
   // Keeping the loaded extension current: the copy follows any changed
   // file, and a connected extension older than it reloads or is shown.
