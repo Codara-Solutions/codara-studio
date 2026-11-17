@@ -43,8 +43,7 @@ export function wheelZoomFactor(pixels: number): number {
 /**
  * One Ctrl+wheel event in a viewer that zooms in steps (the PDF, which
  * renders each level). A mouse notch is one step. A pinch's small deltas add
- * up, as the scale they stand for, until they reach the next step, and the
- * rest carries on. Returns the new carry and the level to go to, if any.
+ * up, as the scale they stand for, step by step, and the rest carries on. Returns the new carry and the level to go to, if any.
  */
 export function wheelStep(
   carry: number,
@@ -56,12 +55,17 @@ export function wheelStep(
   const direction = pixels < 0 ? 1 : -1;
   if (Math.abs(pixels) >= 50) return { carry: 0, next: stepZoom(zoom, direction, min, max) };
   const amount = -pixels / 100;
-  const total = Math.sign(amount) === Math.sign(carry) ? carry + amount : amount;
-  const next = stepZoom(zoom, direction, min, max);
-  const need = Math.abs(Math.log(next / zoom));
-  if (need < 1e-6) return { carry: 0, next: null };
-  if (Math.abs(total) < need) return { carry: total, next: null };
-  return { carry: total - direction * need, next };
+  let total = Math.sign(amount) === Math.sign(carry) ? carry + amount : amount;
+  let level = zoom;
+  // One event can cross several steps; each one crossed is taken.
+  for (;;) {
+    const next = stepZoom(level, direction, min, max);
+    const need = Math.abs(Math.log(next / level));
+    if (need < 1e-6) return { carry: 0, next: level === zoom ? null : level };
+    if (Math.abs(total) < need) return { carry: total, next: level === zoom ? null : level };
+    total -= direction * need;
+    level = next;
+  }
 }
 
 export function zoomPercent(zoom: number): string {
