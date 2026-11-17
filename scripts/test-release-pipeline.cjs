@@ -221,7 +221,7 @@ test("direct main pushes run release checks before the next nightly", () => {
   // them they must cover both parts of the runner and all four typechecks.
   const { test: gate, ...halves } = workflow.jobs;
   assert.deepEqual(gate.needs.slice().sort(), ["test-pool", "test-serial"]);
-  assert.equal(gate.if, "${{ !cancelled() }}");
+  assert.equal(gate.if, "${{ always() }}");
   assert.match(gate.steps.at(-1).run, /"\$POOL" = success \] && \[ "\$SERIAL" = success \]/);
   const parts = gate.needs.flatMap((name) =>
     halves[name].steps.filter((step) => step.run === "npm run test:all").map((step) => step.env?.CODARA_TEST_PART),

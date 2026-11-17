@@ -76,8 +76,9 @@ jobs:
   test:
     needs: [test-pool, test-serial]
     # A skipped required check counts as passed, so this job must run and fail
-    # whenever either half did not succeed, timeouts included.
-    if: ${{ !cancelled() }}
+    # whenever either half did not succeed: failures, timeouts and
+    # cancellations included.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
