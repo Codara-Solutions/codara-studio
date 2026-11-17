@@ -376,6 +376,21 @@ journey, an issue queue and a stash list pushed the files and the history apart.
   so the Issues count is known before the tab is opened and switching tabs never costs
   a `gh` run.
 - Arrow keys, Home and End move between tabs (WAI-ARIA tabs).
+- The commit box sits under the active checkout's branch line, before the files:
+  branch, message, Commit. Commit is the panel's one accent-filled button; its arrow
+  holds Amend and Split. The message is one quiet line until it is written in. The
+  branch line says "in sync" or "not published" in a word.
+- Staged Changes and Changes are flat lists, one 22px row per file: the name in ink,
+  its folder dimmed after it, the line counts, the status letter. Hover trades the
+  counts for Open, Discard and Stage (Unstage when staged); the letter stays, and
+  hovering it says what it means ("U: new file git does not track yet").
+- Status letters are calm: an edit is the accent, a new file grey, only a deletion or
+  a conflict red. Nothing in the lists is yellow; yellow is kept for what needs you.
+- New files git does not track yet, two or more under a folder that holds no other
+  change, fold into one grey row for the shallowest such folder with "N files". It
+  unfolds in place, and its hover stages or discards all of them. A lone new file
+  keeps its own row. The fold is computed in the renderer (`change-list.ts`); git
+  still lists every file, so the diff view can open each one.
 
 ## Worktrees in the rail (2026-10)
 

@@ -17,7 +17,7 @@ import type { GitHubWorkQueueItem } from "@shared/github";
 import type { WorktreeRailCleanupResult, WorktreeRailExternal } from "@shared/worktree-cleanup";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import { ReviewNotesIcon } from "../review/ReviewNotesIcon";
-import ChangeTree from "./ChangeTree";
+import ChangeList from "./ChangeList";
 import ChangeSection from "./ChangeSection";
 import BranchMenu from "./BranchMenu";
 import CommitComposer, { GitSyncButtons, GitSyncNote } from "./CommitComposer";
@@ -66,6 +66,8 @@ interface Props extends SourceLanesContext {
   onActivateWorkspace: (id: string) => void;
   onOpenExternalWorktree?: (entry: WorktreeRailExternal) => void;
   onCleanUpWorkspace?: (id: string, confirmIgnored?: string) => Promise<WorktreeRailCleanupResult | null>;
+  /** Opens a file in the editor by its absolute path. */
+  onOpenFile?: (absolutePath: string) => void;
 }
 
 // The left-rail Source Control panel (DESIGN.md, "Source Control"): a tab
@@ -92,6 +94,7 @@ export default function GitPanel({
   onActivateWorkspace,
   onOpenExternalWorktree,
   onCleanUpWorkspace,
+  onOpenFile,
 }: Props): React.ReactElement {
   // Status/log/loading/gitVersion live in the App-owned shared hook
   // (useSharedGitStatus) so the explorer decorations and diff tabs read the
@@ -239,6 +242,26 @@ export default function GitPanel({
       if (cwd) void runAction("discard", () => window.spark.git.discard(cwd, [file]));
     },
     [cwd, runAction],
+  );
+  const stageMany = useCallback(
+    (files: GitFileChange[]) => {
+      if (cwd) void runAction("stage", () => window.spark.git.stage(cwd, files.map((file) => file.path)));
+    },
+    [cwd, runAction],
+  );
+  const discardMany = useCallback(
+    (files: GitFileChange[]) => {
+      if (cwd) void runAction("discard", () => window.spark.git.discard(cwd, files));
+    },
+    [cwd, runAction],
+  );
+  const openFile = useCallback(
+    (file: GitFileChange) => {
+      if (!cwd || !onOpenFile) return;
+      const sep = cwd.includes("\\") ? "\\" : "/";
+      onOpenFile(cwd.replace(/[\\/]+$/, "") + sep + file.path.replace(/\//g, sep));
+    },
+    [cwd, onOpenFile],
   );
   const stageAll = useCallback(() => {
     if (cwd) void runAction("stageAll", () => window.spark.git.stageAll(cwd));
@@ -715,7 +738,7 @@ export default function GitPanel({
                               },
                             ]}
                           >
-                            <ChangeTree
+                            <ChangeList
                               files={staged}
                               staged
                               disabled={disabled}
@@ -728,6 +751,9 @@ export default function GitPanel({
                               onStage={stageOne}
                               onUnstage={unstageOne}
                               onDiscard={discardOne}
+                              onOpenFile={onOpenFile ? openFile : undefined}
+                              onStageMany={stageMany}
+                              onDiscardMany={discardMany}
                             />
                           </ChangeSection>
                         )}
@@ -755,7 +781,7 @@ export default function GitPanel({
                               },
                             ]}
                           >
-                            <ChangeTree
+                            <ChangeList
                               files={unstaged}
                               staged={false}
                               disabled={disabled}
@@ -768,6 +794,9 @@ export default function GitPanel({
                               onStage={stageOne}
                               onUnstage={unstageOne}
                               onDiscard={discardOne}
+                              onOpenFile={onOpenFile ? openFile : undefined}
+                              onStageMany={stageMany}
+                              onDiscardMany={discardMany}
                             />
                           </ChangeSection>
                         )}
