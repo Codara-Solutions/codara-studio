@@ -37,6 +37,8 @@
         <span class="agentchip"><i id="tab-agent-dot"></i><span id="tab-agent-name"></span></span>
         <span id="tab-usage" class="dim grow"></span>
       </div>
+      <p id="tab-paused" class="note why" hidden>Shared tabs were paused after a problem reading saved stops: share each tab again.</p>
+      <ul id="tab-stopped" class="stopped" hidden></ul>
       <details id="tab-details" class="details">
         <summary>Details</summary>
         <div class="row">
@@ -63,6 +65,18 @@
         <input id="share-storage" class="sw" type="checkbox" role="switch" aria-describedby="storage-note" />
       </label>
       <p id="storage-note" class="note">Even when off, agents see site storage, non-HttpOnly cookies and requests, sign-in headers included.</p>
+    </section>
+
+    <section id="on-page" class="sec" hidden>
+      <div class="lbl">On the page</div>
+      <label class="row">
+        <span class="grow">Show the agent's pointer and Stop</span>
+        <input id="presence-overlay" class="sw" type="checkbox" role="switch" />
+      </label>
+      <label class="row">
+        <span class="grow">Glow around the page</span>
+        <input id="presence-glow" class="sw" type="checkbox" role="switch" />
+      </label>
     </section>
 
     <section id="ask" class="sec ask" hidden>
