@@ -20,7 +20,7 @@ import { ReviewNotesIcon } from "../review/ReviewNotesIcon";
 import ChangeTree from "./ChangeTree";
 import ChangeSection from "./ChangeSection";
 import BranchMenu from "./BranchMenu";
-import CommitComposer, { GitSyncButtons } from "./CommitComposer";
+import CommitComposer, { GitSyncButtons, GitSyncNote } from "./CommitComposer";
 import CommitDetail from "./CommitDetail";
 import SplitCommitsDialog from "./SplitCommitsDialog";
 import CommitHistory from "./CommitHistory";
@@ -30,6 +30,7 @@ import SourceControlTabs, { tabPanelProps, type SourceControlTab } from "./Sourc
 import SourceLanesList from "./lanes/SourceLanesList";
 import { useSourceLanes, type SourceLanesContext } from "./lanes/useSourceLanes";
 import { CommitHookFix, ConflictFixBanner } from "./fix/GitPanelFixes";
+import { useRailFold } from "../rail/railFolds";
 import type { SharedGitStatus } from "../../git/useSharedGitStatus";
 import {
   CommitIcon,
@@ -71,8 +72,8 @@ interface Props extends SourceLanesContext {
 // The left-rail Source Control panel (DESIGN.md, "Source Control"): a tab
 // strip (Changes, Issues, Pull request, Stashes) over the git backend in
 // src/main/git-ops.ts. Changes holds one lane per checkout of the project, the
-// active checkout's lane holding its branch, change lists and history, and the
-// commit box docked below. Slots into the rail's collapsible section layout.
+// active checkout's lane holding its branch, the commit box, the change lists
+// and the history. Slots into the rail's collapsible section layout.
 export default function GitPanel({
   cwd,
   workspace,
@@ -102,6 +103,9 @@ export default function GitPanel({
     workspace,
     { branch: status?.branch ?? null, visible: !collapsed && Boolean(status?.isRepo), version: gitVersion },
   );
+  // The same fold the active lane's row reads (SourceLanesList), so the
+  // commit box can leave a folded lane for the top of the list.
+  const ownLaneOpen = useRailFold(`lane-own:${workspace?.id ?? cwd}`, true);
   const laneActions = useMemo(
     () => ({
       onOpenWorkspace: onActivateWorkspace,
@@ -118,6 +122,7 @@ export default function GitPanel({
   const [commitFailure, setCommitFailure] = useState<{ output: string; message: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState("");
+  const [amend, setAmend] = useState(false);
   const [sections, setSections] = useState({ staged: false, changes: false, history: false });
   const [githubRefreshNonce, setGitHubRefreshNonce] = useState(0);
   const [tab, setTab] = useState<SourceControlTab>("changes");
@@ -157,6 +162,7 @@ export default function GitPanel({
     setReturnHighlightHash(null);
     savedScrollRef.current = null;
     setMessage("");
+    setAmend(false);
     setDiffStats(null);
     setSections({ staged: false, changes: false, history: false });
     changesScrollRef.current = null;
@@ -496,6 +502,8 @@ export default function GitPanel({
   // Tabs only make sense over a repository; a folder that is not one keeps
   // the single page that offers to initialize it.
   const showTabs = !collapsed && Boolean(cwd) && Boolean(status?.isRepo);
+  // A rejected commit's hook output and its Fix with agent sit with the error
+  // they explain, wherever the commit box is scrolled to.
   const notices =
     cwd && status?.isRepo ? (
       <>
@@ -509,7 +517,31 @@ export default function GitPanel({
             }}
           />
         )}
+        {commitFailure && opError === commitFailure.output ? (
+          <CommitHookFix cwd={cwd} output={commitFailure.output} commitMessage={commitFailure.message} />
+        ) : null}
       </>
+    ) : null;
+  const commitInLane = Boolean(lanes.own) && ownLaneOpen;
+  const commitBox =
+    cwd && status?.isRepo ? (
+      <CommitComposer
+        message={message}
+        onMessageChange={setMessage}
+        onCommit={(nextAmend) => void handleCommit(nextAmend)}
+        amend={amend}
+        onAmendChange={setAmend}
+        onGenerateMessage={() => void handleGenerateMessage()}
+        canCommit={canCommit}
+        canGenerateMessage={canGenerateMessage}
+        commitLabel={commitLabel}
+        stagedCount={stagedCount}
+        busy={busy}
+        branch={status.branch}
+        detached={status.detached}
+        onSplit={() => setSplitOpen(true)}
+        canSplit={status.staged.length + status.unstaged.length >= 2 && !status.hasConflicts}
+      />
     ) : null;
 
   return (
@@ -565,9 +597,9 @@ export default function GitPanel({
             counts={{ changes: changeCount, issues: issueCount, stashes: stashCount }}
             onChange={changeTab}
           />
-          {/* A conflict or a failed git action shows on every tab: a stash
-              pop that conflicts happens on Stashes, not on Changes. */}
-          {tab !== "changes" ? notices : null}
+          {/* A conflict or a failed git action shows on every tab, under the
+              strip: a stash pop that conflicts happens on Stashes. */}
+          {notices}
           {/* Issues and Pull request share one GitHub block, so GitHub is read
               once for both. Like Stashes it stays mounted behind its tab, so
               the tab counts are known before a tab is opened. */}
@@ -645,6 +677,11 @@ export default function GitPanel({
                 ) : !status.isRepo ? (
                   <NonRepoState busy={disabled} onInit={handleInit} />
                 ) : (
+                  <>
+                  {/* The box always commits the active checkout. Its place is
+                      under that lane's branch line; with the lane folded, or
+                      no lane to hold it, it keeps the top of the list. */}
+                  {commitInLane ? null : commitBox}
                   <SourceLanesList
                     lanes={lanes}
                     projectKey={workspace?.id ?? cwd}
@@ -656,6 +693,14 @@ export default function GitPanel({
                           onChanged={handleGitChanged}
                           refreshKey={gitVersion}
                           disabled={disabled}
+                          note={
+                            <GitSyncNote
+                              upstream={status.upstream}
+                              ahead={status.ahead}
+                              behind={status.behind}
+                              detached={status.detached}
+                            />
+                          }
                           trailing={
                             <GitSyncButtons
                               busy={busy}
@@ -668,6 +713,8 @@ export default function GitPanel({
                             />
                           }
                         />
+
+                        {commitInLane ? commitBox : null}
 
                         {stagedCount > 0 && (
                           <ChangeSection
@@ -760,44 +807,13 @@ export default function GitPanel({
                       </>
                     }
                   />
+                  </>
                 )}
               </div>
             </>
           )}
         </div>
       )}
-      {!collapsed && cwd && status?.isRepo && !detailHash && tab === "changes" ? (
-        <div
-          data-testid="commit-dock"
-          style={{
-            flex: "0 0 auto",
-            maxHeight: "60%",
-            overflowY: "auto",
-            borderTop: "1px solid var(--rule)",
-            background: "var(--panel-2)",
-          }}
-        >
-          {notices}
-          {commitFailure && opError === commitFailure.output ? (
-            <CommitHookFix cwd={cwd} output={commitFailure.output} commitMessage={commitFailure.message} />
-          ) : null}
-          <CommitComposer
-            message={message}
-            onMessageChange={setMessage}
-            onCommit={(amend) => void handleCommit(amend)}
-            onGenerateMessage={() => void handleGenerateMessage()}
-            canCommit={canCommit}
-            canGenerateMessage={canGenerateMessage}
-            commitLabel={commitLabel}
-            stagedCount={stagedCount}
-            busy={busy}
-            branch={status.branch}
-            detached={status.detached}
-            onSplit={() => setSplitOpen(true)}
-            canSplit={status.staged.length + status.unstaged.length >= 2 && !status.hasConflicts}
-          />
-        </div>
-      ) : null}
       {splitOpen && cwd ? (
         <SplitCommitsDialog
           cwd={cwd}
