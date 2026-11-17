@@ -299,7 +299,10 @@ async function main() {
     await check("cleanup: the stacked worktree reads merged against the default branch, not the stale local base", async () => {
       const ctx = repoContext([pr454, pr453]);
       const target = await inspect.targetFor(ctx, apiWorkspace());
-      assert.equal(target.name, "feat/roles", "the recorded base resolves to the stale local branch");
+      // The worktree recorded origin/feat/roles, the ref it forked from;
+      // GitHub deleted it, so the default branch stands in.
+      assert.equal(apiWorkspace().copyBranch.baseBranch, "origin/feat/roles");
+      assert.equal(target.name, "origin/main", "the recorded base is gone, not read from a stale local branch");
       const facts = await inspect.mergeFacts(ctx, apiTip, "feat/roles-api", target);
       assert.equal(facts.state, "merged", JSON.stringify(facts));
       assert.equal(facts.proof, "pull-request");

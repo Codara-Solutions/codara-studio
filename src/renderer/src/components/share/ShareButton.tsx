@@ -1,9 +1,12 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { SHARE_OFFER_EVENT, clearShareOffer, pendingShareOffer } from "./offer-store";
+import { useShareStatus } from "./status";
 
 // The editor toolbar's Share button for HTML and Markdown files. It also opens
 // its prompt when an agent offered this file (codara_share_offer); either way
-// nothing is uploaded until the user clicks Share in the prompt.
+// nothing is uploaded until the user clicks Share in the prompt. A build with
+// no share service shows no button at all: offering an action that can only
+// fail is worse than not offering it.
 
 const SharePopover = lazy(() => import("./SharePopover"));
 
@@ -18,6 +21,7 @@ export default function ShareButton({
 }) {
   const anchorRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
+  const status = useShareStatus();
 
   useEffect(() => {
     if (pendingShareOffer(path)) setOpen(true);
@@ -28,6 +32,8 @@ export default function ShareButton({
     window.addEventListener(SHARE_OFFER_EVENT, onOffer);
     return () => window.removeEventListener(SHARE_OFFER_EVENT, onOffer);
   }, [path]);
+
+  if (!status?.available) return null;
 
   return (
     <>
