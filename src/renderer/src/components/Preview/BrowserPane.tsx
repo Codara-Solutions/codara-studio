@@ -10,7 +10,7 @@ import {
   type RefObject,
 } from "react";
 import { isFreshPartition } from "@shared/browser-partition";
-import { holdPreviewCapturePaint, withPreviewCapturePaint } from "./capturePaint";
+import { captureFrameDataUrl, holdPreviewCapturePaint, withPreviewCapturePaint } from "./capturePaint";
 import AgentPresence from "./agent-presence/AgentPresence";
 import PageDialogOverlay from "./PageDialogOverlay";
 import AddressBar, { type AddressBarHandle } from "./AddressBar";
@@ -490,29 +490,8 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   const capturePage = useCallback(async (): Promise<string> => {
     const wv = getLiveWebview();
     if (!wv || !wv.capturePage) throw new Error("preview tab is not ready");
-    return withPreviewCapturePaint(wv, async () => {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        let img: CapturedImage | undefined;
-        try {
-          img = await Promise.race([
-            wv.capturePage?.(),
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new Error("capture timed out")), 4_000);
-            }),
-          ]);
-        } catch (err) {
-          throw new Error(`preview screenshot failed: ${(err as Error)?.message || String(err)}`);
-        } finally {
-          clearTimeout(timer);
-        }
-        const size = img?.getSize?.();
-        const dataUrl = size?.width && size?.height ? img?.toDataURL?.() : "";
-        if (dataUrl && dataUrl.length > 256) return dataUrl;
-        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 120));
-      }
-      throw new Error("preview screenshot unavailable: the browser returned an empty frame. Check navigation with codara_preview_snapshot before retrying.");
-    });
+    const capture = wv.capturePage.bind(wv);
+    return withPreviewCapturePaint(wv, () => captureFrameDataUrl(capture));
   }, [getLiveWebview]);
 
   const startPointing = useCallback(

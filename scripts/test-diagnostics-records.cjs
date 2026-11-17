@@ -272,7 +272,26 @@ async function main() {
     const lines = [];
     assert.equal(probe.startEventLoopProbe((line) => lines.push(line), { CODARA_EVENT_LOOP_WINDOW_MS: "300" }), true);
     assert.equal(probe.eventLoopProbeRunning(), true);
-    await sleep(350);
+    // histogram.reset() at a window boundary also forgets the last sample, so
+    // a stall that starts in the same turn of the loop as a boundary is
+    // measured from nothing and never shows. On a busy CPU a fixed sleep and
+    // the window timer fire together often enough to fail CI. So start the
+    // stall just after a boundary: the histogram's 50 ms timer is due before
+    // the 120 ms sleep, and the next boundary is still 180 ms away.
+    // A boundary is a new last window; its length stops growing at the cap.
+    const lastWindowAt = () => probe.recentEventLoopWindows().at(-1)?.t ?? null;
+    for (let attempt = 0; ; attempt += 1) {
+      assert.ok(attempt < 20, "never found a quiet start inside a window");
+      const seen = lastWindowAt();
+      const deadline = Date.now() + 5_000;
+      while (lastWindowAt() === seen) {
+        assert.ok(Date.now() < deadline, "the probe recorded no window for 5 s");
+        await sleep(5);
+      }
+      const boundary = lastWindowAt();
+      await sleep(120);
+      if (lastWindowAt() === boundary && Date.now() - boundary < 200) break;
+    }
     const end = Date.now() + 1_200;
     while (Date.now() < end) {
       // The stall under test.
