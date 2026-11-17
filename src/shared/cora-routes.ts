@@ -61,6 +61,25 @@ export function effortOfModelId(model: string | undefined | null): string | unde
   return at >= 0 ? model!.slice(at + 1).trim() || undefined : undefined;
 }
 
+const WORKER_RUNTIME: Record<PiSubscriptionProvider, "claude" | "codex" | "grok"> = {
+  anthropic: "claude",
+  "openai-codex": "codex",
+  xai: "grok",
+};
+
+/** The worker family a model belongs to on any route: `gpt-5.6-sol` and
+ *  `openai/gpt-5.6-sol` are both "codex". Undefined for other vendors. */
+export function workerFamilyOfModelId(model: string | undefined | null): "claude" | "codex" | "grok" | undefined {
+  const { base } = splitEffort((model ?? "").trim());
+  if (!base) return undefined;
+  for (const [provider, prefix] of Object.entries(OPENROUTER_PREFIX) as Array<[PiSubscriptionProvider, string]>) {
+    if (base.startsWith(prefix)) return WORKER_RUNTIME[provider];
+  }
+  if (base.includes("/")) return undefined;
+  const provider = subscriptionForModelId(base);
+  return provider ? WORKER_RUNTIME[provider] : undefined;
+}
+
 /** `gpt-5.6-sol@high` as its model id and its effort suffix. */
 function splitEffort(model: string): { base: string; effort: string } {
   const at = model.indexOf("@");

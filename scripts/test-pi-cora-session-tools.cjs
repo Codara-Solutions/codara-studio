@@ -137,7 +137,7 @@ function waitResult(reason) {
   // python3 hint: added to a bash result whose shell could not find a bare
   // `python`, only on a machine that has python3 and no python.
   const missing = { hasPython: false, hasPython3: true };
-  const out = (text) => ({ toolName: "bash", content: [{ type: "text", text }] });
+  const out = (text) => ({ toolName: "bash", isError: true, content: [{ type: "text", text }] });
   for (const text of [
     "bash: line 1: python: command not found\n\nCommand exited with code 127",
     "/bin/sh: 1: python: not found",
@@ -162,6 +162,8 @@ function waitResult(reason) {
   assert.equal(python.barePythonHint(notFound, { hasPython: true, hasPython3: true }), undefined);
   assert.equal(python.barePythonHint(notFound, { hasPython: false, hasPython3: false }), undefined, "no python3 either: nothing better to suggest");
   assert.equal(python.barePythonHint({ ...notFound, toolName: "read" }, missing), undefined);
+  assert.equal(python.barePythonHint({ ...notFound, isError: false }, missing), undefined, "a successful call that printed the text");
+  assert.match(python.PYTHON3_HINT, /Rerun only the python step/);
 
   // PATH lookup.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-python-guard-"));
@@ -174,8 +176,9 @@ function waitResult(reason) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
   const workerSource = fs.readFileSync(path.join(piCora, "worker.ts"), "utf8");
+  assert.match(indexSource, /pi\.on\("tool_result", \(event\) => barePythonHint\(event, python\)\);/);
+  assert.match(workerSource, /const hinted = barePythonHint\(event, python\);/, "the worker's one tool_result handler adds it");
   for (const source of [indexSource, workerSource]) {
-    assert.match(source, /pi\.on\("tool_result", \(event\) => barePythonHint\(event, python\)\);/);
     assert.doesNotMatch(source, /barePythonDecision/, "nothing is refused on a guess");
   }
 
