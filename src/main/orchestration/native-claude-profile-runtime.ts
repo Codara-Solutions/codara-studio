@@ -96,6 +96,18 @@ export async function resolveNewNativeClaudeProfile(
 }
 
 /**
+ * Whether the account a new Claude terminal would launch with is signed in,
+ * without reconciling or preparing anything: a cheap check before a launch.
+ */
+export async function newNativeClaudeProfileConnected(): Promise<boolean> {
+  const profile = await resolveClaudeCliExecutionProfile(nativeClaudeProfileStore, {
+    useDefault: true,
+    requireConnected: true,
+  }).catch(() => null);
+  return profile?.connected === true;
+}
+
+/**
  * A restored pane or a transcript lookup for an earlier session. Its
  * account is history: managed sessions all run in the one live slot, so it
  * resolves like a new launch and continues on the Active account, the same
