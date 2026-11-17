@@ -700,6 +700,45 @@ the worker view reuses.
 - Colour means state, as in the chat: running, done and failed use the status
   tokens; nothing else in the bar is tinted.
 
+## Cora agents rail (2026-11)
+
+**Chosen:** option 2, "Collapsible agents rail". Etienne picked it on
+2026-11-17 ("the number 2") after asking to "see the sub agents listed that are
+running in cora". He chose it from three mock-ups of the same chat: 1 an agents
+chip in the header, 2 the rail, 3 a line of running workers above the composer.
+It is a 32 px strip on the chat's left edge, with Cora on top and one mark per
+worker. It folds open into the full list over the chat.
+
+**Why:** every worker's state shows at once, in Main and inside a worker,
+without opening anything. A mark carries no name, so hover and the list say the
+rest.
+
+**Rules it implies:**
+
+- The strip shows only when the chat has workers, and it never grows: it is
+  32 px in every pane. The opened list and the tooltips float over the chat and
+  never push it aside.
+- A mark's shape carries the state, not only its colour: the chat's own
+  activity icons (spinner running, check done, the failed glyph failed, hollow
+  queued). The worker you are in, or Main, is the filled mark with a bar at
+  the edge.
+- Hover or keyboard focus shows the name, model, state, time and current step,
+  or the reason for a failed worker. Hover never moves focus. A click goes
+  inside the worker, and Cora's mark goes back to Main.
+- The list is grouped by step, like the step card. Running rows add the step
+  they are on, failed rows add their reason, and Main's row reads "waiting on
+  N".
+- Past eight workers, the running ones come first, then "+N", which opens the
+  list. The worker you are in always keeps its mark.
+- The strip is one tab stop. Up and down move between marks, Enter goes
+  inside, right opens the list, and Esc folds it and stops there, so it never
+  also leaves the worker.
+- The count of workers lives on the rail only: the composer drops its "N
+  workers running" line while the rail shows.
+- What a worker is doing now comes from a short summary the main process keeps
+  for each live worker and pushes when it changes. The rail never reads a
+  worker's feed.
+
 ## Automations (2026-11)
 
 **Chosen:** variant A, inbox and run history, from four variants built with the
