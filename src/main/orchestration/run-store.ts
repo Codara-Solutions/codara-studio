@@ -1056,6 +1056,12 @@ export async function getRun(runId: string): Promise<RunState | null> {
   // Cache MISS: read + parse + normalize from disk, then populate the cache.
   try {
     const raw = await fs.readFile(runPath(runId), "utf8");
+    // Another caller may have cached this run while the file was read, and
+    // changed it since: that copy is newer than what this read found on disk.
+    // Replacing it would hand every later reader the old run, and the next
+    // save would write the change away (a manager plan, a status).
+    const raced = runCache.get(runId);
+    if (raced) return raced;
     const run = normalizeRun(JSON.parse(raw) as RunState);
     runCache.set(run.id, run);
     return run;
