@@ -29,7 +29,7 @@
 import { BrowserWindow, ipcMain } from "electron";
 import { randomBytes } from "node:crypto";
 import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
-import { holdUntilRendererReady, isRendererReady, onRendererNotReady } from "./renderer-readiness";
+import { holdUntilRendererReady, isRendererReady, onRendererNotReady, RENDERER_HOLD_MS } from "./renderer-readiness";
 
 // "create" mints a renderer-owned terminal tab, "destroy" closes it by id,
 // and "resize" keeps a phone-owned xterm grid in lockstep with its PTY. The
@@ -111,6 +111,13 @@ export function registerTerminalBridge(): void {
     // The real renderer always answers from the committed, allowlisted document.
     if (!isTrustedOnSender(event, RESPONSE_CHANNEL)) return;
     if (!payload || typeof payload.reqId !== "string") return;
+    // A create or destroy that timed out may still have been carried out:
+    // only now has the renderer answered it.
+    const lateMutation = lateMutations.get(payload.reqId);
+    if (lateMutation) {
+      lateMutations.delete(payload.reqId);
+      unansweredMutations.delete(lateMutation);
+    }
     const entry = pending.get(payload.reqId);
     if (!entry) {
       const gaveUp = late.get(payload.reqId);
@@ -156,10 +163,40 @@ export function onStudioTerminalInventoryChanged(
   return () => inventoryListeners.delete(listener);
 }
 
+// Ops held for a starting window are rare (boot and reloads) and worth a line
+// in main.log (index.ts): when one was held, and whether it then went to the
+// window or was answered from main's copy of the panes.
+export type HeldTerminalOpEvent =
+  | { op: TerminalOpName; phase: "held" }
+  | { op: TerminalOpName; phase: "sent" | "copy" | "failed"; heldMs: number };
+const heldListeners = new Set<(event: HeldTerminalOpEvent) => void>();
+
+export function onHeldTerminalOp(listener: (event: HeldTerminalOpEvent) => void): () => void {
+  heldListeners.add(listener);
+  return () => heldListeners.delete(listener);
+}
+
+function reportHeld(event: HeldTerminalOpEvent): void {
+  for (const listener of heldListeners) {
+    try {
+      listener(event);
+    } catch (err) {
+      console.error("[terminal-bridge] held-op listener failed:", err);
+    }
+  }
+}
+
 export async function requestTerminalOp<T = unknown>(
   op: TerminalOpName,
   params: TerminalOpParams = {},
-  opts?: { timeoutMs?: number; onLate?: (result: T) => void; signal?: AbortSignal },
+  opts?: {
+    timeoutMs?: number;
+    onLate?: (result: T) => void;
+    signal?: AbortSignal;
+    // The hold for a starting window comes out of timeoutMs instead of
+    // preceding it, for a caller with one deadline for the whole call.
+    holdWithinTimeout?: boolean;
+  },
 ): Promise<T> {
   let win = pickTargetWindow();
   if (!win) {
@@ -167,17 +204,39 @@ export async function requestTerminalOp<T = unknown>(
       "No Codara window is open. Open Codara before calling terminal.create.",
     );
   }
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  let opTimeoutMs = timeoutMs;
   // Until React has mounted, nothing in the renderer hears the request. The
   // hold has its own limit, and the op's timeout starts once it is over.
-  if (!isRendererReady()) await holdUntilRendererReady(opts?.signal);
-  win = pickTargetWindow() ?? win;
+  let heldSince: number | null = null;
+  if (!isRendererReady()) {
+    heldSince = Date.now();
+    reportHeld({ op, phase: "held" });
+    try {
+      await holdUntilRendererReady(opts?.signal, opts?.holdWithinTimeout ? Math.min(RENDERER_HOLD_MS, timeoutMs) : RENDERER_HOLD_MS);
+    } catch (error) {
+      reportHeld({ op, phase: "failed", heldMs: Date.now() - heldSince });
+      throw error;
+    }
+    if (opts?.holdWithinTimeout) opTimeoutMs = Math.max(0, timeoutMs - (Date.now() - heldSince));
+    win = pickTargetWindow() ?? win;
+  }
+  // A window that has just got ready sent its panes first (App.tsx), so a
+  // list held for it needs no round trip into the renderer at its busiest.
+  if (op === "list") {
+    const cached = cachedStudioTerminalInventory();
+    if (cached) {
+      if (heldSince !== null) reportHeld({ op, phase: "copy", heldMs: Date.now() - heldSince });
+      return cached as T;
+    }
+  }
+  if (heldSince !== null) reportHeld({ op, phase: "sent", heldMs: Date.now() - heldSince });
   if (win.webContents.isDestroyed() || win.webContents.isLoading()) {
     // wait briefly for the renderer to be ready
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
   }
 
   const reqId = randomBytes(8).toString("hex");
-  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const request: BridgeRequest = { reqId, op, params };
   const target = win;
   const mutation = MUTATING_OPS.has(op) ? beginMutation() : null;
@@ -185,7 +244,9 @@ export async function requestTerminalOp<T = unknown>(
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(reqId);
-      mutation?.settle();
+      // The renderer may still carry it out: the copy stays unused until it
+      // answers and its next inventory arrives.
+      mutation?.timedOut(reqId);
       const onLate = opts?.onLate;
       if (onLate) {
         const lateTimer = setTimeout(() => late.delete(reqId), LATE_WINDOW_MS);
@@ -193,14 +254,14 @@ export async function requestTerminalOp<T = unknown>(
         late.set(reqId, { onLate: (result) => onLate(result as T), timer: lateTimer });
       }
       reject(new Error(`terminal op '${op}' timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
+    }, opTimeoutMs);
     pending.set(reqId, {
       resolve: (value) => {
-        mutation?.settle();
+        mutation?.answered();
         resolve(value as T);
       },
       reject: (error) => {
-        mutation?.settle();
+        mutation?.answered();
         reject(error);
       },
       timer,
@@ -210,21 +271,22 @@ export async function requestTerminalOp<T = unknown>(
     } catch (err) {
       pending.delete(reqId);
       clearTimeout(timer);
-      mutation?.settle();
+      mutation?.answered();
       reject(err instanceof Error ? err : new Error(String(err)));
     }
   });
 }
 
 // ── The panes' inventory, kept in main ──────────────────────────────────────
-// The renderer sends its shareable panes with every change (App.tsx), so
-// terminal.list and the ownership checks built on it answer from here without
-// a round trip into a renderer that may be busy for seconds on a loaded
-// machine. The copy is only trusted while it can be as current as a round trip
-// would be: a create, destroy, group or tab action that main sent changes the
-// panes after the renderer answers, so from the moment one is sent until the
-// renderer's next inventory arrives after it settled, callers fall back to the
-// round trip.
+// The renderer sends its shareable panes with every change, and before it
+// tells main it is ready (App.tsx), so terminal.list and the ownership checks
+// built on it answer from here without a round trip into a renderer that may
+// be busy for seconds on a loaded machine. The copy is only trusted while it
+// can be as current as a round trip would be: while the window is ready, and
+// not from the moment main sends a create, destroy, group or tab action until
+// the renderer has answered every one of them (a timed-out one included, up
+// to LATE_WINDOW_MS) and then sent its panes again. Until then callers fall
+// back to the round trip.
 const MUTATING_OPS: ReadonlySet<TerminalOpName> = new Set(["create", "destroy", "group", "tabAct"]);
 const MAX_INVENTORY_ENTRIES = 5_000;
 export interface StudioTerminalInventoryEntry {
@@ -235,7 +297,10 @@ export interface StudioTerminalInventoryEntry {
 }
 let inventory: StudioTerminalInventoryEntry[] | null = null;
 let phoneFingerprint: string | null = null;
-let mutationsInFlight = 0;
+// Mutations the renderer has not answered yet; timed-out ones stay until a
+// late answer arrives (lateMutations, by request id) or LATE_WINDOW_MS ends.
+const unansweredMutations = new Set<symbol>();
+const lateMutations = new Map<string, symbol>();
 let awaitingInventoryAfterMutation = false;
 
 function isInventoryEntry(value: unknown): value is StudioTerminalInventoryEntry {
@@ -248,7 +313,7 @@ function isInventoryEntry(value: unknown): value is StudioTerminalInventoryEntry
 function acceptInventory(payload: unknown): boolean {
   if (!Array.isArray(payload) || payload.length > MAX_INVENTORY_ENTRIES || !payload.every(isInventoryEntry)) return false;
   inventory = payload;
-  if (mutationsInFlight === 0) awaitingInventoryAfterMutation = false;
+  if (unansweredMutations.size === 0) awaitingInventoryAfterMutation = false;
   const fingerprint = JSON.stringify(
     payload.map((entry) => [entry.paneId, entry.tabId, entry.workspaceId, entry.title ?? null, entry.profile ?? null]),
   );
@@ -257,27 +322,39 @@ function acceptInventory(payload: unknown): boolean {
   return changed;
 }
 
+// A new document or a dead renderer: its panes are gone, and so are the
+// answers it still owed.
 function forgetInventory(): void {
   inventory = null;
   phoneFingerprint = null;
+  unansweredMutations.clear();
+  lateMutations.clear();
+  awaitingInventoryAfterMutation = false;
 }
 
-function beginMutation(): { settle: () => void } {
-  mutationsInFlight += 1;
+function beginMutation(): { answered: () => void; timedOut: (reqId: string) => void } {
+  const token = Symbol("terminal mutation");
+  unansweredMutations.add(token);
   awaitingInventoryAfterMutation = true;
-  let settled = false;
   return {
-    settle: () => {
-      if (settled) return;
-      settled = true;
-      mutationsInFlight -= 1;
+    answered: () => {
+      unansweredMutations.delete(token);
+    },
+    timedOut: (reqId) => {
+      if (!unansweredMutations.has(token)) return;
+      lateMutations.set(reqId, token);
+      const expiry = setTimeout(() => {
+        lateMutations.delete(reqId);
+        unansweredMutations.delete(token);
+      }, LATE_WINDOW_MS);
+      expiry.unref?.();
     },
   };
 }
 
 /** The renderer's panes as it last sent them, or null when a round trip is needed. */
 export function cachedStudioTerminalInventory(): StudioTerminalInventoryEntry[] | null {
-  if (!inventory || mutationsInFlight > 0 || awaitingInventoryAfterMutation) return null;
+  if (!isRendererReady() || !inventory || unansweredMutations.size > 0 || awaitingInventoryAfterMutation) return null;
   return inventory.map((entry) => ({ ...entry }));
 }
 

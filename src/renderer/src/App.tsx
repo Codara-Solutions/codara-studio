@@ -2356,15 +2356,6 @@ export default function App() {
     return () => off?.();
   }, []);
 
-  // Boot handshake for main's renderer watchdog: React is mounted, the boot
-  // splash is gone. If a loaded page never sends this, main escalates recovery
-  // instead of leaving the user staring at the breathing-square splash.
-  useEffect(() => {
-    if (rendererReadySignaled) return;
-    rendererReadySignaled = true;
-    window.spark.app.signalReady?.();
-  }, []);
-
   // Theme the UI with the workspace's exact identity color. The frame lets
   // ThemeProvider stamp its palette first so our per-workspace accent remains
   // authoritative after a theme change.
@@ -5937,6 +5928,19 @@ export default function App() {
       setCloseAgentTerminalFn(null);
     };
   }, [tabs, activeWorkspace?.cwd, activeWorkspace?.id, home, validWorkspaceIds]);
+
+  // Boot handshake for main's renderer watchdog: React is mounted, the boot
+  // splash is gone. If a loaded page never sends this, main escalates recovery
+  // instead of leaving the user staring at the breathing-square splash.
+  // Declared after the effect above, so on the first commit the pane list
+  // reaches main before this does: once main counts the window ready, its copy
+  // of the panes exists and terminal.list needs no round trip into the
+  // renderer at its busiest moment.
+  useEffect(() => {
+    if (rendererReadySignaled) return;
+    rendererReadySignaled = true;
+    window.spark.app.signalReady?.();
+  }, []);
 
   // A user may close or move a bridge-created pane before main later sends its
   // destroy notification. Keep the process-lifetime placement registry aligned

@@ -77,11 +77,12 @@ export function whenRendererReady(
 
 /**
  * Holds an op until the window is ready. Throws when the window does not get
- * ready within RENDERER_HOLD_MS, or when the caller aborts.
+ * ready within `limitMs` (RENDERER_HOLD_MS unless the caller has less time),
+ * or when the caller aborts.
  */
-export async function holdUntilRendererReady(signal?: AbortSignal): Promise<void> {
+export async function holdUntilRendererReady(signal?: AbortSignal, limitMs: number = RENDERER_HOLD_MS): Promise<void> {
   if (isRendererReady()) return;
-  const outcome = await whenRendererReady(RENDERER_HOLD_MS, signal);
+  const outcome = await whenRendererReady(limitMs, signal);
   if (outcome === "aborted") throw new Error(RENDERER_HOLD_ABORTED_MESSAGE);
   if (outcome === "timeout") throw new Error(RENDERER_STARTING_MESSAGE);
 }

@@ -18,6 +18,7 @@ import { flushMainLog, logMain } from "./file-log";
 import { markRendererNotReady, markRendererReady } from "./renderer-readiness";
 import { errorBoundaryLogEntry } from "@shared/error-boundary";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { broadcastGitRemoteUpdated, registerIpc, setTrayHook } from "./ipc";
@@ -50,7 +51,7 @@ import { registerPreviewBridge } from "./preview-bridge";
 import { routeGuestPopups } from "./guest-popups";
 import { isFreshPartition } from "../shared/browser-partition";
 import { openLinkFromApp } from "./open-link";
-import { registerTerminalBridge } from "./terminal-bridge";
+import { onHeldTerminalOp, registerTerminalBridge } from "./terminal-bridge";
 import {
   registerDesktopCommandBridge,
   requestDesktopNewTerminal,
@@ -527,7 +528,7 @@ ipcMain.on("app:renderer-ready", (e) => {
   if (!isTrustedOnSender(e, "app:renderer-ready")) return;
   if (rendererReadyForCurrentLoad) return;
   rendererReadyForCurrentLoad = true;
-  markRendererReady();
+  markRendererReadyUnlessTestGate();
   if (bootWatchdog) {
     clearTimeout(bootWatchdog);
     bootWatchdog = null;
@@ -541,6 +542,25 @@ ipcMain.on("app:renderer-ready", (e) => {
   retryPendingAgentTerminalCleanups();
   logMain("boot", "renderer ready");
 });
+
+// Under test only (SPARK_E2E_BACKGROUND=1): with CODARA_E2E_READY_GATE set,
+// ops stay held for a mounted window until that file exists, so
+// test-agent-socket.cjs can send terminal.list before the window counts as
+// ready on any machine, however fast it boots.
+function markRendererReadyUnlessTestGate(): void {
+  const gate = E2E_BACKGROUND ? process.env.CODARA_E2E_READY_GATE : undefined;
+  if (!gate) {
+    markRendererReady();
+    return;
+  }
+  const deadline = Date.now() + 120_000;
+  const poll = (): void => {
+    if (!rendererReadyForCurrentLoad) return; // a new document took over
+    if (existsSync(gate) || Date.now() > deadline) markRendererReady();
+    else setTimeout(poll, 50);
+  };
+  poll();
+}
 
 function onBootFailure(reason: string): void {
   // The renderer entry itself is untrusted; the ladder below cannot fix that and
@@ -1403,6 +1423,16 @@ app.whenReady().then(async () => {
   }
   registerPreviewBridge();
   registerTerminalBridge();
+  onHeldTerminalOp((event) =>
+    logMain(
+      "terminal-bridge",
+      event.phase === "held"
+        ? `held ${event.op} until the window is ready`
+        : `held ${event.op} ${event.heldMs} ms, ${
+            event.phase === "copy" ? "answered from main's copy" : event.phase === "sent" ? "sent to the window" : "gave up"
+          }`,
+    ),
+  );
   // Non-fatal: Studio's own chords work without it, and a desktop script that
   // cannot connect falls back to typing the key.
   if (process.platform === "linux") {

@@ -8,7 +8,8 @@
 // and a window that never gets ready fails with a message that says so.
 // Before the app starts tracking, nothing is held back. terminal.list answers
 // from the panes the renderer sends main with every change, and only while
-// that copy is as current as a round trip. Runs src/main/terminal-bridge.ts
+// that copy is as current as a round trip; a list held for a starting window
+// is answered from it once the window is ready. Runs src/main/terminal-bridge.ts
 // against an Electron stub, on scripts/fake-clock.cjs. The end-to-end case (a
 // socket client lists before the window is ready) is in test-agent-socket.cjs.
 //
@@ -184,6 +185,9 @@ async function main() {
       assert.deepEqual(destroy.outcome, { error: "terminal op 'destroy' timed out after 5000ms" });
       assert.equal(bridge.cachedStudioTerminalInventory(), null, "a destroy that timed out may still land");
       push([pane("a")]);
+      assert.equal(bridge.cachedStudioTerminalInventory(), null, "not until the renderer answered it");
+      respond(sent.at(-1).reqId, { closed: true });
+      push([pane("a")]);
       assert.deepEqual(bridge.cachedStudioTerminalInventory().map((entry) => entry.paneId), ["a"]);
       const list = bridge.requestTerminalOp("list", {}, { timeoutMs: 5_000 });
       await clock.advance(0);
@@ -198,6 +202,89 @@ async function main() {
       assert.equal(bridge.cachedStudioTerminalInventory(), null);
       bridge.markRendererReady();
       assert.equal(bridge.cachedStudioTerminalInventory(), null, "until the new document sends its panes");
+    });
+
+    await check("a list held for a starting window is answered from the panes it sent before getting ready, with no round trip", async () => {
+      const events = [];
+      const stop = bridge.onHeldTerminalOp((event) => events.push(event.phase));
+      bridge.markRendererNotReady();
+      const before = sent.length;
+      const list = settled(bridge.requestTerminalOp("list", {}, { timeoutMs: 5_000 }));
+      await clock.advance(3_000);
+      push([pane("a"), pane("b")]); // App.tsx sends its panes before signalReady
+      assert.equal(bridge.cachedStudioTerminalInventory(), null, "not used while the window is not ready");
+      bridge.markRendererReady();
+      await clock.advance(0);
+      assert.deepEqual(list.outcome && list.outcome.value.map((entry) => entry.paneId), ["a", "b"]);
+      assert.equal(sent.length, before, "no op went to the window");
+      assert.deepEqual(events, ["held", "copy"]);
+      stop();
+    });
+
+    await check("the copy is not used while the window is not ready, so an old document sending after a navigation began cannot refill it", async () => {
+      bridge.markRendererReady();
+      push([pane("a")]);
+      bridge.markRendererNotReady(); // did-start-navigation
+      push([pane("old")]);
+      assert.equal(bridge.cachedStudioTerminalInventory(), null);
+      push([pane("new")]); // the new document, before its signalReady
+      bridge.markRendererReady();
+      assert.deepEqual(bridge.cachedStudioTerminalInventory().map((entry) => entry.paneId), ["new"]);
+    });
+
+    await check("a create that timed out keeps the copy unused until panes sent after its late answer", async () => {
+      push([pane("a")]);
+      const before = sent.length;
+      const create = settled(bridge.requestTerminalOp("create", { title: "late" }, { timeoutMs: 5_000 }));
+      await clock.advance(5_000);
+      assert.deepEqual(create.outcome, { error: "terminal op 'create' timed out after 5000ms" });
+      push([pane("a")]); // rendered before the renderer carried the create out
+      assert.equal(bridge.cachedStudioTerminalInventory(), null, "panes sent before the late answer may predate the create");
+      respond(sent[before].reqId, { tabId: "tab-late", paneId: "late" });
+      assert.equal(bridge.cachedStudioTerminalInventory(), null, "answered late, its panes not sent yet");
+      push([pane("a"), pane("late")]);
+      assert.deepEqual(bridge.cachedStudioTerminalInventory().map((entry) => entry.paneId), ["a", "late"]);
+    });
+
+    await check("a timed-out create that is never answered blocks the copy for the late window only", async () => {
+      push([pane("a")]);
+      const create = settled(bridge.requestTerminalOp("create", { title: "lost" }, { timeoutMs: 5_000 }));
+      await clock.advance(5_000);
+      assert.ok(create.outcome && create.outcome.error);
+      push([pane("a")]);
+      assert.equal(bridge.cachedStudioTerminalInventory(), null);
+      await clock.advance(5 * 60_000);
+      push([pane("a")]);
+      assert.deepEqual(bridge.cachedStudioTerminalInventory().map((entry) => entry.paneId), ["a"]);
+    });
+
+    await check("a call with one deadline holds within it: the op gets what the hold left", async () => {
+      bridge.markRendererNotReady();
+      const before = sent.length;
+      const create = settled(bridge.requestTerminalOp("create", { title: "t" }, { timeoutMs: 40_000, holdWithinTimeout: true }));
+      await clock.advance(25_000);
+      bridge.markRendererReady();
+      await clock.advance(0);
+      assert.equal(sent.length, before + 1);
+      await clock.advance(14_999);
+      assert.equal(create.outcome, null);
+      await clock.advance(1);
+      assert.deepEqual(create.outcome, { error: "terminal op 'create' timed out after 40000ms" }, "40 s in all, hold included");
+      bridge.markRendererNotReady();
+      const short = settled(bridge.requestTerminalOp("create", { title: "t" }, { timeoutMs: 20_000, holdWithinTimeout: true }));
+      await clock.advance(20_000);
+      assert.deepEqual(short.outcome, { error: bridge.RENDERER_STARTING_MESSAGE }, "the hold ends with the call's deadline");
+      bridge.markRendererReady();
+      await clock.advance(5 * 60_000); // let the timed-out create's late window pass
+    });
+
+    await check("App.tsx sends its panes before it tells main it is ready", () => {
+      const app = fs.readFileSync(path.join(ROOT, "src", "renderer", "src", "App.tsx"), "utf8");
+      const component = app.indexOf("export default function App(");
+      const panes = app.indexOf("notifyInventoryChanged?.(inventory)");
+      const ready = app.indexOf("window.spark.app.signalReady?.()");
+      assert.ok(component >= 0 && panes > component && ready > panes, "effects run in order: the pane list's effect must come first");
+      assert.equal(app.indexOf("signalReady?.()", ready + "window.spark.app.signalReady?.()".length), -1, "one ready signal");
     });
 
     await check("paired phones hear only changes to what they show", async () => {

@@ -1967,6 +1967,11 @@ async function createTerminal(
       },
       {
         signal: callerGone.signal,
+        // One deadline for the call: a hold for a starting window comes out of
+        // the op's timeout, so a create stays inside the MCP server's 60 s
+        // (same workspace: 30 s op + 10 s spawn wait + 0.75 s settle; across
+        // workspaces: CROSS_WORKSPACE_CREATE_BUDGET_MS, 55 s, in all).
+        holdWithinTimeout: true,
         // Waiting for the user took part of the MCP server's 60 s budget; keep
         // the whole call inside it, spawn wait included.
         ...(crossWorkspace
