@@ -35,6 +35,7 @@ export interface RailGroup {
 /** A step a live worker is on, in a few words. */
 export function workerActivityLabel(step: WorkerActivityStep | null | undefined): string | null {
   if (!step) return null;
+  if (step.kind === "starting") return "Starting";
   if (step.kind === "reply") return "Writing a reply";
   if (step.kind === "thinking") return "Thinking";
   const name = toolDisplayName(step.tool);
@@ -112,7 +113,9 @@ export function railGroups(run: RunState, items: readonly RailWorker[]): RailGro
     }
     group.workers.push(item);
   }
-  return groups;
+  // In step order, whatever order the workers came in.
+  const index = (group: RailGroup) => steps.get(group.stepId)?.index ?? Number.MAX_SAFE_INTEGER;
+  return groups.sort((a, b) => index(a) - index(b));
 }
 
 /** "2 running · 1 failed": the strip's count, read aloud and in Main's row. */

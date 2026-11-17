@@ -5,6 +5,8 @@
 // Cora's own turns. The terminal and its log keep their text copy; this is the
 // structured one.
 
+import { scrubSecrets } from "./memory-items";
+
 /** The file name of an attempt's feed, in the attempt's own directory. */
 export const WORKER_FEED_FILE = "feed.jsonl";
 
@@ -269,6 +271,7 @@ export function foldWorkerFeed(
  * holds a feed per worker to know this.
  */
 export type WorkerActivityStep =
+  | { kind: "starting" }
   | { kind: "tool"; tool: string; target?: string }
   | { kind: "reply" }
   | { kind: "thinking" };
@@ -285,12 +288,15 @@ export interface WorkerActivity {
 
 export const WORKER_ACTIVITY_CHANNEL = "orchestration:workerActivity";
 
-const ACTIVITY_TARGET_KEYS = ["path", "file_path", "filePath", "filename", "notebook_path", "command", "pattern", "query", "url"];
+// A search's pattern says more than the folder it searched, so it comes first.
+const ACTIVITY_TARGET_KEYS = ["pattern", "query", "file_path", "filePath", "path", "filename", "notebook_path", "command", "url"];
 const ACTIVITY_PATH_KEYS = new Set(["path", "file_path", "filePath", "filename", "notebook_path"]);
 
 /**
  * The one thing a tool call acts on, short: a file's name, a command, a search
  * or a page. Only these few fields leave the main process, never the input.
+ * A page keeps its host and path (a query string can sign or carry a key),
+ * and what reads like a credential is replaced, as memory text is.
  */
 export function workerActivityTarget(input: unknown): string | undefined {
   if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
@@ -299,7 +305,12 @@ export function workerActivityTarget(input: unknown): string | undefined {
     const candidate = value[key];
     if (typeof candidate !== "string" || !candidate.trim()) continue;
     const flat = candidate.replace(/\s+/g, " ").trim();
-    const text = ACTIVITY_PATH_KEYS.has(key) ? flat.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? flat : flat;
+    const named = ACTIVITY_PATH_KEYS.has(key)
+      ? flat.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? flat
+      : key === "url"
+        ? flat.replace(/[?#].*$/, "")
+        : flat;
+    const text = scrubSecrets(named);
     return text.length <= 120 ? text : `${text.slice(0, 119)}…`;
   }
   return undefined;

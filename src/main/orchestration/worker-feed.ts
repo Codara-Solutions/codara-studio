@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { BrowserWindow } from "electron";
 
+import { redactPastedSecrets } from "./pasted-secrets";
+
 import {
   WORKER_ACTIVITY_CHANNEL,
   WORKER_FEED_LIMITS,
@@ -167,6 +169,9 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
   let step: WorkerActivityStep | null = null;
   let activityAt = "";
   let shown: WorkerActivity | null = null;
+  // Set once close() starts: nothing after that is a step any more.
+  let closing = false;
+  const openCalls = new Map<string, WorkerActivityStep>();
   // Only a change is pushed: a tool call, a reply starting, the turn going
   // back to thinking, or the end. Text deltas never are.
   const setStep = (next: WorkerActivityStep | null) => {
@@ -175,7 +180,11 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
     activityAt = now().toISOString();
     const activity: WorkerActivity = { runId, attemptId, seq: (activitySeq += 1), at: activityAt, step };
     // A relaunch of the attempt has its own writer: ending this one never
-    // drops the entry the newer one set.
+    // drops the entry the newer one set, nor tells the renderer it ended.
+    if (!step && liveActivity.has(attemptId) && liveActivity.get(attemptId) !== shown) {
+      shown = null;
+      return;
+    }
     if (step) liveActivity.set(attemptId, activity);
     else if (liveActivity.get(attemptId) === shown) liveActivity.delete(attemptId);
     shown = step ? activity : null;
@@ -270,7 +279,7 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
     const message = partial;
     partial = null;
     if (!message) return;
-    if (!closed) setStep({ kind: "thinking" });
+    if (!closing) setStep([...openCalls.values()].pop() ?? { kind: "thinking" });
     if (message.text.trim()) {
       append({ k: "text", id: message.id, at: at(), text: clipText(message.text, WORKER_FEED_LIMITS.textChars) });
     }
@@ -289,12 +298,21 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
         name: typeof name === "string" && name ? clipText(name, 200) : "tool",
         ...(bounded !== undefined ? { input: bounded } : {}),
       });
-      const target = workerActivityTarget(input);
-      setStep({
+      if (closing) return;
+      const found = workerActivityTarget(input);
+      const target = found ? redactPastedSecrets(runId, found) : undefined;
+      const toolStep: WorkerActivityStep = {
         kind: "tool",
         tool: typeof name === "string" && name ? clipText(name, 200) : "tool",
         ...(target ? { target } : {}),
-      });
+      };
+      // Calls can overlap: the rail shows the newest one still open, and
+      // goes back to thinking only once none is.
+      if (typeof call === "string" && call) {
+        openCalls.delete(call);
+        openCalls.set(call, toolStep);
+      }
+      setStep(toolStep);
     },
     result(call, output, isError) {
       if (typeof call !== "string" || !call) return;
@@ -306,13 +324,16 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
         output: boundToolOutput(output),
         ...(isError ? { error: true as const } : {}),
       });
-      if (!closed) setStep({ kind: "thinking" });
+      if (closing) return;
+      openCalls.delete(call);
+      const stillOpen = [...openCalls.values()].pop();
+      setStep(stillOpen ?? { kind: "thinking" });
     },
     textDelta(delta) {
       if (closed || !delta) return;
       if (!partial) {
         partial = { id: nextId(), text: "" };
-        setStep({ kind: "reply" });
+        if (!closing) setStep({ kind: "reply" });
       }
       // Past the cap the rest of the message only reaches the terminal log.
       if (partial.text.length >= WORKER_FEED_LIMITS.textChars) return;
@@ -345,6 +366,7 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
     },
     async close() {
       if (closed) return;
+      closing = true;
       endMessage();
       closed = true;
       // Readers keep the live copy until the file holds everything in it.
@@ -358,6 +380,6 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
   };
   liveFeeds.set(attemptId, writer);
   send({ reset: true });
-  setStep({ kind: "thinking" });
+  setStep({ kind: "starting" });
   return writer;
 }

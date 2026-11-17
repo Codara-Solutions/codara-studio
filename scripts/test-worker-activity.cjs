@@ -90,6 +90,10 @@ function targets(shared) {
   check("a search keeps its pattern", target({ pattern: "foldCount" }) === "foldCount");
   const long = target({ command: "x".repeat(400) });
   check("a long target is clipped to one row", long.length === 120 && long.endsWith("…"), String(long.length));
+  check("a search names its pattern, not the folder", target({ pattern: "foldCount", path: "src" }) === "foldCount");
+  check("a page keeps its host and path only", target({ url: "https://example.com/a/b?sig=abc123&token=x#frag" }) === "https://example.com/a/b");
+  const scrubbed = target({ command: "curl -H 'Authorization: Bearer sk-abcdefghijklmnop1234567890' https://example.com" });
+  check("a credential in a command is replaced", !scrubbed.includes("sk-abcdefghijklmnop1234567890"), scrubbed);
   check("no known field, no target", target({ content: "secret-ish body" }) === undefined && target("text") === undefined && target(null) === undefined);
 }
 
@@ -107,7 +111,7 @@ async function writer(mod, dir) {
       now: () => new Date((clock += 1000)),
     });
   const feed = open("a1");
-  check("a new session starts thinking", pushed.at(-1)?.step?.kind === "thinking");
+  check("a new session is starting", pushed.at(-1)?.step?.kind === "starting");
   feed.tool("call-1", "Bash", { command: "npm test", env: { TOKEN: "never sent" } });
   const tool = pushed.at(-1);
   check(
@@ -126,6 +130,13 @@ async function writer(mod, dir) {
   check("an ended reply goes back to thinking", pushed.at(-1).step.kind === "thinking");
   feed.steer("Also cover the empty list.", "user");
   check("a message to the worker is not a step", pushed.at(-1).step.kind === "thinking" && pushed.length === count + 3);
+  // Overlapping calls: the newest one still open shows until none is.
+  feed.tool("p1", "read", { path: "src/one.ts" });
+  feed.tool("p2", "read", { path: "src/two.ts" });
+  feed.result("p2", "ok", false);
+  check("with a call still open, a result shows that call", pushed.at(-1).step.target === "one.ts", JSON.stringify(pushed.at(-1).step));
+  feed.result("p1", "ok", false);
+  check("once none is open, back to thinking", pushed.at(-1).step.kind === "thinking");
   check("seq only rises", pushed.every((entry, index) => index === 0 || entry.seq > pushed[index - 1].seq));
 
   const other = open("a2");
@@ -138,14 +149,23 @@ async function writer(mod, dir) {
   );
   check("another run reads none of them", mod.readWorkerActivity("run-2").length === 0);
 
+  const beforeClose = pushed.length;
   await feed.close();
-  check("closing pushes the end", pushed.at(-1).attemptId === "a1" && pushed.at(-1).step === null);
+  check("closing pushes the end, and only that", pushed.at(-1).attemptId === "a1" && pushed.at(-1).step === null && pushed.length === beforeClose + 1);
+  feed.tool("late", "Bash", { command: "echo late" });
+  check("a call after the end is no step", pushed.length === beforeClose + 1 && !mod.readWorkerActivity("run-1").some((entry) => entry.attemptId === "a1"));
   check("an ended worker leaves the read", mod.readWorkerActivity("run-1").map((entry) => entry.attemptId).join() === "a2");
 
   // A relaunch of the same attempt: the old session ending never drops the new one.
   const relaunched = open("a2");
   relaunched.tool("c2", "edit", { path: "src/b.ts" });
+  const pushedBefore = pushed.length;
   await other.close();
+  check(
+    "the old session closing tells the renderer nothing",
+    pushed.slice(pushedBefore).every((entry) => entry.attemptId !== "a2" || entry.step !== null),
+    JSON.stringify(pushed.slice(pushedBefore)),
+  );
   const after = mod.readWorkerActivity("run-1");
   check("a relaunch keeps its entry when the old session closes", after.length === 1 && after[0].step.target === "b.ts", JSON.stringify(after));
   await relaunched.close();
@@ -217,7 +237,11 @@ function model(rail) {
     worker: { id: `w${index}` },
     state: index % 3 === 0 ? "running" : "done",
   }));
-  check("eight or fewer: every mark, in step order", rail.railMarks(many.slice(0, 8), null).more === 0);
+  const few = rail.railMarks(many.slice(0, 8), null);
+  check("eight or fewer: every mark, in step order", few.more === 0 && few.marks.map((item) => item.worker.id).join() === "w0,w1,w2,w3,w4,w5,w6,w7");
+  const shuffled = rail.railGroups(run, [items[1], items[0], items[2]]);
+  check("groups follow the steps, not the order workers came in", shuffled[0].label.startsWith("Step 1"));
+  check("a session starting says so", rail.workerActivityLabel({ kind: "starting" }) === "Starting");
   const folded = rail.railMarks(many, null);
   check("more than eight: eight marks and +N", folded.marks.length === 8 && folded.more === 5);
   check("running ones come first", folded.marks.slice(0, 5).every((item) => item.state === "running"));
