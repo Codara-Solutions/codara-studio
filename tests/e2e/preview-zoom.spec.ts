@@ -28,7 +28,7 @@ const MARKDOWN = [
 
 const CSV = ["name,city", ...Array.from({ length: 50 }, (_, i) => `Row ${i + 1},Lisbon`), ""].join("\n");
 
-/** A small workbook: one sheet of numbers, enough rows to scroll. */
+/** A small workbook: two sheets of numbers, enough rows to scroll. */
 async function workbook(): Promise<Buffer> {
   const ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"';
   const rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -43,12 +43,14 @@ async function workbook(): Promise<Buffer> {
       '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
       '<Default Extension="xml" ContentType="application/xml"/>' +
       '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
-      '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+      '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+      '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
   );
   zip.file("_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
-  zip.file("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook ${ns} xmlns:r="${rel}"><sheets><sheet name="Numbers" sheetId="1" r:id="rId1"/></sheets></workbook>`);
-  zip.file("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
+  zip.file("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook ${ns} xmlns:r="${rel}"><sheets><sheet name="Numbers" sheetId="1" r:id="rId1"/><sheet name="More" sheetId="2" r:id="rId2"/></sheets></workbook>`);
+  zip.file("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${rel}/worksheet" Target="worksheets/sheet2.xml"/></Relationships>`);
   zip.file("xl/worksheets/sheet1.xml", `<?xml version="1.0" encoding="UTF-8"?><worksheet ${ns}><sheetData>${rows}</sheetData></worksheet>`);
+  zip.file("xl/worksheets/sheet2.xml", `<?xml version="1.0" encoding="UTF-8"?><worksheet ${ns}><sheetData>${rows}</sheetData></worksheet>`);
   return zip.generateAsync({ type: "nodebuffer" });
 }
 
@@ -206,6 +208,14 @@ test("Markdown, CSV and whiteboard previews zoom on their own", async () => {
     await page.keyboard.press("Control+=");
     await page.locator("[data-virtuoso-scroller]:visible").evaluate((el) => el.scrollTo(0, el.scrollHeight));
     await expect(page.locator('td[data-cell="79:0"]:visible')).toBeInViewport();
+    await page.keyboard.press("Control+0");
+    await expect(level).toHaveText("100%");
+    // Another sheet remounts the list; Ctrl+wheel still zooms it.
+    await page.getByLabel("Spreadsheet sheet").selectOption("1");
+    await expect(sheetCell).toBeVisible();
+    const cellBox2 = (await sheetCell.boundingBox())!;
+    await ctrlWheel(page, cellBox2.x + 20, cellBox2.y + 10, -100);
+    await expect(level).not.toHaveText("100%");
     await page.keyboard.press("Control+0");
     expect(await windowWidth()).toBe(baseWidth);
 
