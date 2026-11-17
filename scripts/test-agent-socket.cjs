@@ -354,6 +354,23 @@ async function main() {
     }
     check("handshake file written", Boolean(handshake && handshake.url && handshake.token));
     if (!handshake) throw new Error("no handshake — is out/ built?");
+    // The socket answers before the window has booted, and terminal and
+    // preview ops go through the renderer: one sent before React mounts is
+    // never heard and times out after 5 s. On a loaded CI runner the boot
+    // takes longer than the checks below take to reach the first such op.
+    const mainLog = path.join(HOME, "logs", "main.log");
+    const rendererReady = () => {
+      try {
+        return /\[boot\] renderer ready$/m.test(fs.readFileSync(mainLog, "utf8"));
+      } catch {
+        return false;
+      }
+    };
+    for (let waited = 0; !rendererReady(); waited += 250) {
+      if (app.exitCode !== null || app.signalCode !== null) throw new Error("Electron exited before its window booted");
+      if (waited >= 120_000) throw new Error("the window never booted (no 'renderer ready' in main.log after 120 s)");
+      await sleep(250);
+    }
 
     // Auth: wrong token → 401, no JSON-RPC processing.
     const bad = await rpcRaw(handshake, { jsonrpc: "2.0", id: 1, method: "preview.list", params: {} }, { Authorization: "Bearer wrong" });
