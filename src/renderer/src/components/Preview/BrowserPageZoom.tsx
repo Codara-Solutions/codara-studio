@@ -14,7 +14,8 @@ import { stepZoom, zoomPercent, type ZoomAction } from "../zoom/zoom-math";
 // again after each navigation and window zoom, and whenever it is shown or
 // the pointer or focus comes into it: of two tabs on one site at different
 // levels, the one in use is right. Two such tabs on screen at once (docked
-// side by side) can only show one zoom, so zooming one sets the other's level
+// side by side) can only show one zoom, so whenever one applies its level
+// (a zoom, a navigation, the pointer coming in) the other takes that level
 // too and their chips agree. Loaded on its own (BrowserPane and HtmlPreview
 // import it lazily), like the find bar.
 
@@ -27,11 +28,14 @@ interface Shown {
 }
 const onScreen = new Set<Shown>();
 
-/** Chromium's zoom key for a page: its host, or its scheme when it has none (file:). */
+/**
+ * Chromium's zoom key for a page: its session, and its host (or its scheme
+ * when it has none, as file: pages).
+ */
 function siteOf(webview: Electron.WebviewTag | null): string | null {
   try {
     const url = new URL(webview?.getURL() ?? "");
-    return url.hostname || url.protocol;
+    return `${webview?.getAttribute("partition") ?? ""} ${url.hostname || url.protocol}`;
   } catch {
     return null;
   }
@@ -51,6 +55,7 @@ export default function BrowserPageZoom({
 }) {
   const [zoom, setZoom] = useState(1);
   const latest = useRef({ zoom, ready, shown });
+  const self = useRef<Shown | null>(null);
   latest.current = { zoom, ready, shown };
 
   const visible = useCallback(
@@ -67,7 +72,11 @@ export default function BrowserPageZoom({
       webview.setZoomFactor(window.spark.view.getZoomFactor() * latest.current.zoom);
     } catch {
       // The guest is between loads; the next navigation applies it.
+      return;
     }
+    const site = siteOf(webview);
+    if (!site) return;
+    for (const other of onScreen) if (other !== self.current && other.site() === site) other.adopt(latest.current.zoom);
   }, [webviewRef, visible]);
 
   useEffect(() => {
@@ -76,9 +85,11 @@ export default function BrowserPageZoom({
 
   useEffect(() => {
     const entry: Shown = { site: () => (visible() ? siteOf(webviewRef.current) : null), adopt: setZoom };
+    self.current = entry;
     onScreen.add(entry);
     return () => {
       onScreen.delete(entry);
+      self.current = null;
     };
   }, [webviewRef, visible]);
 
@@ -93,12 +104,18 @@ export default function BrowserPageZoom({
     window.addEventListener("resize", applyToPage);
     const observer = new ResizeObserver(applyToPage);
     observer.observe(root);
+    // An editor tab or a docked pane is hidden with visibility, which keeps
+    // its size, and marked aria-hidden: watch that to reapply when shown.
+    const surface = root.parentElement?.closest("[aria-hidden]");
+    const watcher = new MutationObserver(applyToPage);
+    if (surface) watcher.observe(surface, { attributes: true, attributeFilter: ["aria-hidden", "style"] });
     root.addEventListener("pointerenter", applyToPage);
     root.addEventListener("focusin", applyToPage);
     return () => {
       webview.removeEventListener("did-navigate", applyToPage);
       window.removeEventListener("resize", applyToPage);
       observer.disconnect();
+      watcher.disconnect();
       root.removeEventListener("pointerenter", applyToPage);
       root.removeEventListener("focusin", applyToPage);
     };
@@ -112,7 +129,7 @@ export default function BrowserPageZoom({
       setZoom(next);
       const site = visible() ? siteOf(webviewRef.current) : null;
       if (!site) return;
-      for (const other of onScreen) if (other.site() === site) other.adopt(next);
+      for (const other of onScreen) if (other !== self.current && other.site() === site) other.adopt(next);
     },
     [visible, webviewRef],
   );
