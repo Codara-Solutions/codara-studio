@@ -99,6 +99,18 @@ test("Cora goes inside a running and a finished worker and comes back to Main wh
     const view = page.locator("[data-worker-view]");
     await expect(view.locator("[data-worker-brief]")).toContainText("Brief from Cora");
     await expect(view.locator("[data-worker-brief]")).toContainText("Watch the toast count");
+    // What Cora wrote for this worker comes first; the standing rules every
+    // worker gets sit behind the full-prompt toggle.
+    const brief = view.locator("[data-worker-brief]");
+    await expect(brief.locator("[data-worker-brief-task]")).toContainText("Check the toast count while the fix lands.");
+    await expect(brief).not.toContainText("You are a Cora worker");
+    const fullPrompt = brief.getByRole("button", { name: "Show the full prompt, with the standing rules" });
+    await expect(fullPrompt).toHaveAttribute("aria-expanded", "false");
+    await fullPrompt.click();
+    await expect(brief.locator("[data-worker-brief-prompt]")).toContainText("You are a Cora worker", { timeout: 10_000 });
+    await expect(brief.locator("[data-worker-brief-prompt]")).toContainText("Check the toast count while the fix lands.");
+    await brief.getByRole("button", { name: "Hide the full prompt" }).click();
+    await expect(brief.locator("[data-worker-brief-prompt]")).toHaveCount(0);
     // Its steps, drawn with the main chat's rows.
     await expect(view.getByText("Checking that the tests pass before changing anything.")).toBeVisible({ timeout: 15_000 });
     await expect(view.locator('[data-execution-kind="tool"]')).toHaveCount(2);
