@@ -1,4 +1,7 @@
-import { promises as fs } from "node:fs";
+import { constants, promises as fs } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { basename, dirname, join } from "node:path";
 import { BrowserWindow } from "electron";
 
 import {
@@ -21,8 +24,9 @@ import {
 export const WORKER_FEED_CHANNEL = "orchestration:workerFeed";
 
 export interface WorkerFeedWriter {
-  tool(id: unknown, name: unknown, input: unknown): void;
-  result(id: unknown, output: string, isError: boolean): void;
+  /** `call` is the provider's tool call id, which pairs the call with its result. */
+  tool(call: unknown, name: unknown, input: unknown): void;
+  result(call: unknown, output: string, isError: boolean): void;
   textDelta(delta: string): void;
   /** Ends the streaming assistant message, if any, as one text record. */
   endMessage(): void;
@@ -80,6 +84,12 @@ export async function readWorkerFeedFile(path: string): Promise<WorkerFeedRecord
   }
 }
 
+// The attempt directory is writable by the worker itself (an automation
+// worker's fence includes it), so the writer never follows a link it may have
+// planted there: it creates its files fresh, refusing an existing one or a link.
+const CREATE_FRESH =
+  constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_APPEND | (constants.O_NOFOLLOW ?? 0);
+
 export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): WorkerFeedWriter {
   const { runId, attemptId, path } = options;
   const publish = options.publish ?? publishWorkerFeedUpdate;
@@ -91,11 +101,28 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
   let bytes = 0;
   let elided = 0;
   let sequence = 0;
+  // Ids carry the session, so a relaunch of the same attempt never reuses one
+  // a renderer still holds from the session before.
+  const session = now().getTime().toString(36);
   let partial: { id: string; text: string } | null = null;
   let partialTimer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
-  // A relaunch of the same attempt starts a new session, so it starts a new feed.
-  let queue: Promise<void> = fs.writeFile(path, "", "utf8").catch(() => undefined);
+  let rewriteFailed = false;
+  // Null when the file could not be created: the feed then lives in memory only.
+  let file: FileHandle | null = null;
+  // A relaunch of the same attempt starts a new session, so it starts a new
+  // feed, and drops a temp file a crash left between write and rename.
+  let queue: Promise<void> = (async () => {
+    const prefix = `${basename(path)}.`;
+    const stale = await fs.readdir(dirname(path)).catch(() => [] as string[]);
+    await Promise.all(
+      stale
+        .filter((name) => name.startsWith(prefix) && name.endsWith(".tmp"))
+        .map((name) => fs.rm(join(dirname(path), name), { force: true }).catch(() => undefined)),
+    );
+    await fs.rm(path, { force: true });
+    file = await fs.open(path, CREATE_FRESH, 0o600);
+  })().catch(() => undefined);
 
   const enqueue = (work: () => Promise<void>) => {
     queue = queue.then(work).catch(() => undefined);
@@ -107,18 +134,43 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
       // A renderer going away must not end the worker's session.
     }
   };
-  const nextId = () => `${(sequence += 1).toString(36)}`;
+  const nextId = () => `${session}-${(sequence += 1).toString(36)}`;
   const at = () => now().toISOString();
+
+  const rewrite = () => {
+    const text = records.map((entry) => JSON.stringify(entry.record)).join("\n") + "\n";
+    enqueue(async () => {
+      const temp = `${path}.${randomUUID()}.tmp`;
+      let next: FileHandle | null = null;
+      try {
+        next = await fs.open(temp, CREATE_FRESH, 0o600);
+        await next.writeFile(text, "utf8");
+        await fs.rename(temp, path);
+        await file?.close().catch(() => undefined);
+        file = next;
+        rewriteFailed = false;
+      } catch {
+        // The old, longer file is still there; the next append rewrites again.
+        rewriteFailed = true;
+        await next?.close().catch(() => undefined);
+        await fs.rm(temp, { force: true }).catch(() => undefined);
+      }
+    });
+    send({ reset: true });
+  };
 
   const compact = () => {
     let kept = 0;
     let start = records.length;
-    while (start > 0 && kept + records[start - 1].bytes <= maxBytes / 2) {
+    // The newest record always stays, even one larger than the budget.
+    while (start > 0 && (start === records.length || kept + records[start - 1].bytes <= maxBytes / 2)) {
       start -= 1;
       kept += records[start].bytes;
     }
-    const dropped = records.slice(0, start).filter((entry) => entry.record.k !== "elided").length;
-    elided += dropped;
+    // Counted in steps the reader would see: a result belongs to its call.
+    elided += records
+      .slice(0, start)
+      .filter((entry) => entry.record.k !== "elided" && entry.record.k !== "result").length;
     const marker: WorkerFeedRecord = { k: "elided", id: nextId(), at: at(), count: elided };
     const markerLine = `${JSON.stringify(marker)}\n`;
     records = [
@@ -126,13 +178,7 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
       ...records.slice(start).filter((entry) => entry.record.k !== "elided"),
     ];
     bytes = records.reduce((sum, entry) => sum + entry.bytes, 0);
-    const text = records.map((entry) => JSON.stringify(entry.record)).join("\n") + "\n";
-    const temp = `${path}.${process.pid}.tmp`;
-    enqueue(async () => {
-      await fs.writeFile(temp, text, "utf8");
-      await fs.rename(temp, path);
-    });
-    send({ reset: true });
+    rewrite();
   };
 
   const append = (record: WorkerFeedRecord) => {
@@ -145,7 +191,13 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
       compact();
       return;
     }
-    enqueue(() => fs.appendFile(path, line, "utf8"));
+    if (rewriteFailed) {
+      rewrite();
+      return;
+    }
+    enqueue(async () => {
+      await file?.write(line);
+    });
     send({ records: [record] });
   };
 
@@ -172,20 +224,28 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
   };
 
   const writer: WorkerFeedWriter = {
-    tool(id, name, input) {
+    tool(call, name, input) {
       endMessage();
       const bounded = boundToolInput(input);
       append({
         k: "tool",
-        id: typeof id === "string" && id ? id : `call-${nextId()}`,
+        id: nextId(),
         at: at(),
-        name: typeof name === "string" && name ? name : "tool",
+        ...(typeof call === "string" && call ? { call: clipText(call, 200) } : {}),
+        name: typeof name === "string" && name ? clipText(name, 200) : "tool",
         ...(bounded !== undefined ? { input: bounded } : {}),
       });
     },
-    result(id, output, isError) {
-      if (typeof id !== "string" || !id) return;
-      append({ k: "result", id, at: at(), output: boundToolOutput(output), ...(isError ? { error: true as const } : {}) });
+    result(call, output, isError) {
+      if (typeof call !== "string" || !call) return;
+      append({
+        k: "result",
+        id: nextId(),
+        at: at(),
+        call: clipText(call, 200),
+        output: boundToolOutput(output),
+        ...(isError ? { error: true as const } : {}),
+      });
     },
     textDelta(delta) {
       if (closed || !delta) return;
@@ -223,11 +283,15 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
       if (closed) return;
       endMessage();
       closed = true;
-      if (liveFeeds.get(attemptId) === writer) liveFeeds.delete(attemptId);
+      // Readers keep the live copy until the file holds everything in it.
       await queue;
+      await file?.close().catch(() => undefined);
+      file = null;
+      if (liveFeeds.get(attemptId) === writer) liveFeeds.delete(attemptId);
       send({ ended: true });
     },
   };
   liveFeeds.set(attemptId, writer);
+  send({ reset: true });
   return writer;
 }
