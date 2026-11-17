@@ -69,7 +69,10 @@ export default function BrowserPageZoom({
     // would take its site's zoom from the tab on screen.
     if (!webview || !visible()) return;
     try {
-      webview.setZoomFactor(window.spark.view.getZoomFactor() * latest.current.zoom);
+      // Only a change is written: the observers fire often (every resize),
+      // and a write the page does not need still reaches the guest.
+      const factor = window.spark.view.getZoomFactor() * latest.current.zoom;
+      if (Math.abs(webview.getZoomFactor() - factor) > 1e-4) webview.setZoomFactor(factor);
     } catch {
       // The guest is between loads; the next navigation applies it.
       return;
@@ -84,7 +87,15 @@ export default function BrowserPageZoom({
   }, [ready, shown, zoom, applyToPage]);
 
   useEffect(() => {
-    const entry: Shown = { site: () => (visible() ? siteOf(webviewRef.current) : null), adopt: setZoom };
+    const entry: Shown = {
+      site: () => (visible() ? siteOf(webviewRef.current) : null),
+      // Taken at once, not at the next render: two panes shown together with
+      // stale levels would otherwise keep handing each other the old one.
+      adopt: (level) => {
+        latest.current.zoom = level;
+        setZoom(level);
+      },
+    };
     self.current = entry;
     onScreen.add(entry);
     return () => {
