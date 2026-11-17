@@ -77,10 +77,27 @@ const stops = new Map<string, Map<number, Map<string, StopRecord>>>();
 const sessions = new Map<string, string | null>();
 let stopsFile: string | null = null;
 // After an unreadable stops file Codara cannot know who was stopped, so it
-// fails closed: per link, the tabs it reported first stay refused to every
-// agent until the user shares them again; a link that has not reported yet is
-// refused on every tab. null when the file was read.
-let failsafe: Map<string, Set<number>> | null = null;
+// fails closed for the browsers paired then: per link, the tabs it reports
+// first stay refused to every agent until the user shares them again (null:
+// not reported yet, every tab refused). A browser paired later is unaffected,
+// and it switches off once no paused tab is left. null when the file was read.
+let failsafe: Map<string, Set<number> | null> | null = null;
+let connectedLinks: () => string[] = () => [];
+
+/** The link ids connected now, to place a tab ref without a link id (one browser). */
+export function setChromeConnectedLinks(list: () => string[]): void {
+  connectedLinks = list;
+}
+
+function settleFailsafe(): void {
+  if (failsafe && [...failsafe.values()].every((tabs) => tabs !== null && tabs.size === 0)) failsafe = null;
+}
+
+/** Tabs of a browser paused after an unreadable stops file: "all" before its first report. */
+export function chromePausedTabs(linkId: string): "all" | number[] {
+  const tabs = failsafe?.get(linkId);
+  return tabs === null ? "all" : [...(tabs ?? [])];
+}
 let onStopsChanged: ((linkId: string) => void) | null = null;
 
 /** Called with a link id whenever that browser's stop list changed (to send it the new list). */
@@ -108,7 +125,7 @@ function saveStops(): void {
   const file = {
     version: 2,
     stops: rows,
-    failsafe: failsafe ? Object.fromEntries([...failsafe].map(([linkId, tabs]) => [linkId, [...tabs]])) : null,
+    failsafe: failsafe ? Object.fromEntries([...failsafe].map(([linkId, tabs]) => [linkId, tabs ? [...tabs] : null])) : null,
   };
   try {
     mkdirSync(dirname(stopsFile), { recursive: true });
@@ -142,7 +159,7 @@ function readRows(value: unknown): { rows: unknown[]; failsafe: unknown } {
  * Stops outlive a reconnect and a Codara restart. A missing file is an empty
  * list; an unreadable one is kept aside as .corrupt and Codara fails closed.
  */
-export function loadChromeStops(path: string): void {
+export function loadChromeStops(path: string, pairedLinkIds: string[] = []): void {
   stopsFile = path;
   stops.clear();
   sessions.clear();
@@ -161,7 +178,8 @@ export function loadChromeStops(path: string): void {
       }
     }
     if (saved && typeof saved === "object") {
-      failsafe = new Map(Object.entries(saved as Record<string, unknown>).map(([linkId, tabs]) => [linkId, new Set(Array.isArray(tabs) ? tabs.filter(Number.isInteger) : [])]));
+      failsafe = new Map(Object.entries(saved as Record<string, unknown>).map(([linkId, tabs]) => [linkId, Array.isArray(tabs) ? new Set(tabs.filter(Number.isInteger)) : null]));
+      settleFailsafe();
     }
   } catch (error) {
     stops.clear();
@@ -171,7 +189,9 @@ export function loadChromeStops(path: string): void {
       // Left in place; the failsafe below still holds.
     }
     console.warn(`[chrome-link] could not read ${path} (${error instanceof Error ? error.message : String(error)}); kept it as .corrupt and refusing agents on browser tabs until they are shared again.`);
-    failsafe = new Map();
+    // Only the browsers paired now can have had stops.
+    failsafe = new Map(pairedLinkIds.map((linkId) => [linkId, null]));
+    settleFailsafe();
     saveStops();
   }
 }
@@ -204,6 +224,7 @@ export function chromeStopList(linkId: string): { tabId: number; key: string; na
 export function forgetChromeStops(linkId: string): void {
   const had = stops.delete(linkId);
   const hadFailsafe = failsafe?.delete(linkId) ?? false;
+  settleFailsafe();
   sessions.delete(linkId);
   if (had || hadFailsafe) changed(linkId);
 }
@@ -227,18 +248,15 @@ export function keepChromeStopsFor(linkId: string, session: string | null, share
     if (keys.size === 0) tabs!.delete(tabId);
   }
   if (tabs?.size === 0) stops.delete(linkId);
-  if (failsafe) {
+  if (failsafe?.has(linkId)) {
     const suspect = failsafe.get(linkId);
-    if (!suspect) {
+    if (suspect === null) {
       failsafe.set(linkId, new Set(shared));
-      dirty = true;
     } else {
-      for (const tabId of suspect) {
-        if (shared.has(tabId)) continue;
-        suspect.delete(tabId);
-        dirty = true;
-      }
+      for (const tabId of suspect ?? []) if (!shared.has(tabId)) suspect!.delete(tabId);
     }
+    settleFailsafe();
+    dirty = true;
   }
   if (dirty) changed(linkId);
 }
@@ -250,17 +268,20 @@ export function chromeLinkDown(linkId: string, stillPaired: boolean): void {
 
 function failsafeRefuses(ref: { tabId: number; linkId: string | null }): boolean {
   if (!failsafe) return false;
-  if (ref.linkId) return failsafe.get(ref.linkId)?.has(ref.tabId) ?? true;
-  // One browser: refuse until it reported, then only its suspect tabs.
-  if (failsafe.size === 0) return true;
-  return [...failsafe.values()].some((tabs) => tabs.has(ref.tabId));
+  // A ref without a link id means one browser is connected.
+  const connected = connectedLinks();
+  const linkId = ref.linkId ?? (connected.length === 1 ? connected[0] : null);
+  if (!linkId) return [...failsafe.values()].some((tabs) => tabs === null || tabs.has(ref.tabId));
+  if (!failsafe.has(linkId)) return false;
+  const tabs = failsafe.get(linkId);
+  return tabs === null || tabs!.has(ref.tabId);
 }
 
 /** Throws the message the agent reads when the user stopped it on this tab from the page. */
 export function assertChromeDriverAllowed(ref: { tabId: number; linkId: string | null }, tabRef: string, driver: unknown): void {
   if (failsafeRefuses(ref)) {
     throw new ChromeDriverStoppedError(
-      `Codara could not read its list of agents the user stopped, so it refuses agents on browser tab ${tabRef} until the user shares it again ` +
+      `Shared tabs were paused after a problem reading saved stops: browser tab ${tabRef} is refused to agents until the user shares it again ` +
         "(switch it off and on in the Codara popup). Do not retry; ask the user.",
     );
   }

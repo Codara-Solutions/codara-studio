@@ -13,6 +13,8 @@ export interface ChromeLinkTabState {
   openedByAgent: boolean;
   /** Agents the user stopped on this tab from the page; "Give back" lets them in again. */
   stopped: { key: string; name: string }[];
+  /** Refused to agents after Codara could not read its saved stops, until the user shares it again. */
+  paused: boolean;
 }
 
 export interface ChromeLinkBrowserState {

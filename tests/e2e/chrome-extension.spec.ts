@@ -464,6 +464,15 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     expect(Math.abs(pill!.x - viewport.width / 2)).toBeLessThan(120);
     await request("preview.click", { tabId, selector: "#fixed" });
     await expect.poll(() => account.evaluate(() => location.hash)).toBe("#clicked");
+    // A recording that outlives the pill's idle clear stays overlay-free until it stops.
+    await request("preview.record", { tabId });
+    await expect.poll(overlays).toBe(0);
+    await account.waitForTimeout(9_500);
+    await request("preview.click", { tabId, selector: "h1" });
+    await account.waitForTimeout(800);
+    expect(await overlays()).toBe(0);
+    await request("preview.record", { tabId, stop: true });
+    await expect.poll(overlays, { timeout: 5_000 }).toBe(1);
     // A full-page capture leaves it out too.
     const full = await request("preview.screenshot", { tabId, format: "png", fullPage: true });
     expect(String(full.dataUrl ?? "").length).toBeGreaterThan(100);
