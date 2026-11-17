@@ -3,6 +3,8 @@ import { init } from "pptx-preview";
 import { DockablePaneBar } from "../../tabs/dockChromeSlot";
 import FindBar from "../find/FindBar";
 import { useDomFind } from "../find/useDomFind";
+import { useViewerZoom } from "../zoom/useViewerZoom";
+import ZoomControl from "../zoom/ZoomControl";
 
 interface Props {
   path: string;
@@ -11,8 +13,6 @@ interface Props {
   toolbarAction?: ReactNode;
   forceLocalToolbar?: boolean;
 }
-
-const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2];
 
 // Width every slide is rendered at, in CSS px. pptx-preview scales a deck to
 // exactly `viewPort.width` (scale = viewPort.width / deck width) and bakes the
@@ -40,7 +40,6 @@ export default function PptxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
   const hostRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
   const [slideCount, setSlideCount] = useState(0);
   const [containerWidth, setContainerWidth] = useState(0);
   // Bumped to force the render effect to re-run when this deck's charts were
@@ -48,6 +47,7 @@ export default function PptxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
   const [recoverNonce, setRecoverNonce] = useState(0);
   const renderedGeneration = useRef(0);
   const findHostRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const find = useDomFind({
     hostRef: findHostRef,
     contentRef: hostRef,
@@ -126,12 +126,14 @@ export default function PptxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
     setRecoverNonce((n) => n + 1);
   }, []);
 
-  const zoomOut = () => {
-    setZoom((z) => [...ZOOM_STEPS].reverse().find((s) => s < z - 0.001) ?? ZOOM_STEPS[0]);
-  };
-  const zoomIn = () => {
-    setZoom((z) => ZOOM_STEPS.find((s) => s > z + 0.001) ?? ZOOM_STEPS[ZOOM_STEPS.length - 1]);
-  };
+  const { zoom, apply, fit } = useViewerZoom({
+    rootRef,
+    scrollerRef: scrollRef,
+    contentRef: hostRef,
+    min: 0.5,
+    max: 3,
+    enabled: error === null,
+  });
 
   if (error) {
     return (
@@ -148,36 +150,19 @@ export default function PptxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
   const fitScale = containerWidth > 0 ? Math.max(0.1, (containerWidth - 48) / BASE_WIDTH) : 1;
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+    <div ref={rootRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       <DockablePaneBar forceLocal={forceLocalToolbar}>
         <span style={{ marginRight: "auto", whiteSpace: "nowrap" }}>
           {loading ? "Loading presentation…" : slideCount > 0 ? `${slideCount} slides` : ""}
         </span>
-        <button type="button" className="spark-btn" style={zoomBtnStyle} onClick={zoomOut} title="Zoom out">
-          −
-        </button>
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontVariantNumeric: "tabular-nums",
-            minWidth: 42,
-            textAlign: "center",
-          }}
-        >
-          {Math.round(zoom * 100)}%
-        </span>
-        <button type="button" className="spark-btn" style={zoomBtnStyle} onClick={zoomIn} title="Zoom in">
-          +
-        </button>
-        <button
-          type="button"
-          className="spark-btn"
-          style={{ ...zoomBtnStyle, width: "auto", padding: "0 8px" }}
-          onClick={() => setZoom(1)}
-          title="Fit to width"
-        >
-          Fit
-        </button>
+        <ZoomControl
+          zoom={zoom}
+          onZoomOut={() => apply("out")}
+          onZoomIn={() => apply("in")}
+          onFit={fit}
+          fitLabel="Fit"
+          fitTitle="Fit to width"
+        />
         {toolbarAction}
       </DockablePaneBar>
       <div ref={findHostRef} className="codara-find-host" onKeyDown={find.onKeyDown}>
@@ -204,15 +189,3 @@ export default function PptxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
     </div>
   );
 }
-
-const zoomBtnStyle: React.CSSProperties = {
-  width: 24,
-  height: 22,
-  padding: 0,
-  fontSize: 13,
-  lineHeight: 1,
-  flex: "0 0 auto",
-  // Docked, these live in the chrome band's pointer-none slot; each control
-  // re-enables the pointer for itself.
-  pointerEvents: "auto",
-};

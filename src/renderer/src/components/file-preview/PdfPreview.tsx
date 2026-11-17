@@ -10,6 +10,8 @@ import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import { DockablePaneBar } from "../../tabs/dockChromeSlot";
 import FindBar from "../find/FindBar";
 import { usePdfFind } from "./usePdfFind";
+import { useViewerZoom } from "../zoom/useViewerZoom";
+import ZoomControl from "../zoom/ZoomControl";
 import "./pdf-text-layer.css";
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -24,8 +26,6 @@ interface Props {
   forceLocalToolbar?: boolean;
 }
 
-const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2, 3];
-
 // Scrollable, lazily-rendered pdf.js viewer. Document bytes arrive over IPC
 // (fetch()/XHR cannot read file:// URLs from either the dev http origin or
 // the packaged file origin); pages render to canvases only when scrolled
@@ -33,12 +33,15 @@ const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2, 3];
 // also gets pdf.js's text layer, which makes its text findable (Ctrl+F) and
 // selectable.
 export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToolbar }: Props) {
+  const rootRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
-  // Width of page 1 at scale 1, used to compute the fit-width base scale.
-  const [baseWidth, setBaseWidth] = useState<number | null>(null);
+  // Page 1 at scale 1: its width gives the fit-width base scale, and its size
+  // stands in for every page not drawn yet, so a zoom keeps the page under
+  // the pointer where it was.
+  const [baseSize, setBaseSize] = useState<{ w: number; h: number } | null>(null);
+  const baseWidth = baseSize?.w ?? null;
   const [containerWidth, setContainerWidth] = useState(0);
   const findHostRef = useRef<HTMLDivElement>(null);
 
@@ -62,6 +65,16 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
     [doc],
   );
   const find = usePdfFind({ doc, hostRef: findHostRef, scrollerRef: containerRef, getTextContent });
+  // 1 is the page width fitted to the pane; pdf.js repaints every page on a
+  // change, so the wheel moves in steps.
+  const { zoom, apply, fit } = useViewerZoom({
+    rootRef,
+    scrollerRef: containerRef,
+    min: 0.5,
+    max: 3,
+    wheel: "steps",
+    enabled: doc !== null && baseWidth !== null,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -78,7 +91,8 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
         if (cancelled) return; // task.destroy() in cleanup tears the doc down
         const first = await pdf.getPage(1);
         if (cancelled) return;
-        setBaseWidth(first.getViewport({ scale: 1 }).width);
+        const firstViewport = first.getViewport({ scale: 1 });
+        setBaseSize({ w: firstViewport.width, h: firstViewport.height });
         setDoc(pdf);
       } catch (e: unknown) {
         if (!cancelled) setError((e as Error)?.message ?? String(e));
@@ -120,44 +134,19 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
   const fitScale = containerWidth > 0 ? Math.max(0.1, (containerWidth - 48) / baseWidth) : 1;
   const scale = fitScale * zoom;
 
-  const zoomOut = () => {
-    setZoom((z) => [...ZOOM_STEPS].reverse().find((s) => s < z - 0.001) ?? ZOOM_STEPS[0]);
-  };
-  const zoomIn = () => {
-    setZoom((z) => ZOOM_STEPS.find((s) => s > z + 0.001) ?? ZOOM_STEPS[ZOOM_STEPS.length - 1]);
-  };
-
   return (
-    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+    <div ref={rootRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       <DockablePaneBar forceLocal={forceLocalToolbar}>
         <span style={{ fontFamily: "var(--font-mono)", marginRight: "auto", whiteSpace: "nowrap" }}>
           {doc.numPages} page{doc.numPages === 1 ? "" : "s"}
         </span>
-        <button type="button" className="spark-btn" style={zoomBtnStyle} onClick={zoomOut} title="Zoom out">
-          −
-        </button>
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontVariantNumeric: "tabular-nums",
-            minWidth: 42,
-            textAlign: "center",
-          }}
-        >
-          {Math.round(zoom * 100)}%
-        </span>
-        <button type="button" className="spark-btn" style={zoomBtnStyle} onClick={zoomIn} title="Zoom in">
-          +
-        </button>
-        <button
-          type="button"
-          className="spark-btn"
-          style={{ ...zoomBtnStyle, width: "auto", padding: "0 8px" }}
-          onClick={() => setZoom(1)}
-          title="Fit width"
-        >
-          Fit
-        </button>
+        <ZoomControl
+          zoom={zoom}
+          onZoomOut={() => apply("out")}
+          onZoomIn={() => apply("in")}
+          onFit={fit}
+          fitTitle="Fit width"
+        />
         {toolbarAction}
       </DockablePaneBar>
       <div ref={findHostRef} className="codara-find-host" onKeyDown={find.onKeyDown}>
@@ -174,6 +163,7 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
               doc={doc}
               pageNumber={i + 1}
               scale={scale}
+              placeholder={{ w: baseSize!.w * scale, h: baseSize!.h * scale }}
               getTextContent={getTextContent}
               onTextLayer={find.onTextLayer}
             />
@@ -185,18 +175,6 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
   );
 }
 
-const zoomBtnStyle: React.CSSProperties = {
-  width: 24,
-  height: 22,
-  padding: 0,
-  fontSize: 13,
-  lineHeight: 1,
-  flex: "0 0 auto",
-  // Docked, these live in the chrome band's pointer-none slot; each control
-  // re-enables the pointer for itself.
-  pointerEvents: "auto",
-};
-
 // One page: a fixed-size placeholder that swaps in a rendered canvas, and
 // the text layer over it, when scrolled near the viewport
 // (IntersectionObserver, 600px lookahead).
@@ -204,12 +182,14 @@ function PdfPage({
   doc,
   pageNumber,
   scale,
+  placeholder,
   getTextContent,
   onTextLayer,
 }: {
   doc: PDFDocumentProxy;
   pageNumber: number;
   scale: number;
+  placeholder: { w: number; h: number };
   getTextContent: (pageNumber: number) => Promise<PdfTextContent>;
   onTextLayer: (pageNumber: number, divs: HTMLElement[] | null) => void;
 }) {
@@ -290,10 +270,8 @@ function PdfPage({
         ["--scale-round-x" as string]: "1px",
         ["--scale-round-y" as string]: "1px",
         justifySelf: "center",
-        width: size?.w,
-        height: size?.h,
-        minHeight: size ? undefined : 240,
-        minWidth: size ? undefined : 200,
+        width: (size ?? placeholder).w,
+        height: (size ?? placeholder).h,
         background: "#fff",
         borderRadius: 2,
         boxShadow: "0 2px 14px rgba(0,0,0,0.4)",
