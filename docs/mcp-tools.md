@@ -1255,7 +1255,7 @@ workspaces are not supported yet.
 
 | Tool | What it does |
 |---|---|
-| `codara_worktree_create` | Creates a worktree on a new branch (default `agent/<purpose>-<id>`, from the default branch after a fetch) or, with `checkout: true`, on an existing branch. The agent's own cwd does not change; it works under the returned `path`. Codara starts the repository's [worktree setup](./worktree-setup.md) there (files from `.worktreeinclude`, links, the setup command from `.codara/worktree.json` and your own copy-branch command) and returns its state as `setup`; `setupCommand` is now always null. A setup command or terminal command not yet approved for the repository does not run: `setup.state` is `awaiting-approval` until you run or allow it from Codara, and the agent must never run either itself (see [Approving the setup command](./worktree-setup.md#approving-the-setup-command)). With `waitForSetup: true`, or when the setup file asks for it, the call waits up to 5 minutes for setup to end. Because it can run that command, it is annotated as destructive and open-world, not read-only. Asking again for the same branch returns the existing worktree. At most 20 agent worktrees per repository. |
+| `codara_worktree_create` | Creates a worktree on a new branch (default `agent/<purpose>-<id>`, from the default branch after a fetch; a `base` such as `main` that tracks a remote branch forks from that branch freshly fetched, see below) or, with `checkout: true`, on an existing branch. The agent's own cwd does not change; it works under the returned `path`. Codara starts the repository's [worktree setup](./worktree-setup.md) there (files from `.worktreeinclude`, links, the setup command from `.codara/worktree.json` and your own copy-branch command) and returns its state as `setup`; `setupCommand` is now always null. A setup command or terminal command not yet approved for the repository does not run: `setup.state` is `awaiting-approval` until you run or allow it from Codara, and the agent must never run either itself (see [Approving the setup command](./worktree-setup.md#approving-the-setup-command)). With `waitForSetup: true`, or when the setup file asks for it, the call waits up to 5 minutes for setup to end. Because it can run that command, it is annotated as destructive and open-world, not read-only. Asking again for the same branch returns the existing worktree. At most 20 agent worktrees per repository. |
 | `codara_worktree_setup` | The setup state of a worktree: what was copied and linked, each command with its exit code, the error and the end of the log (`logLines`, at most 200). Without `workspaceId` or `path`, the worktree the agent works in. `wait: true` waits for setup to end, also while you decide on a command awaiting approval, up to `timeoutSeconds` (default 300, at most 540). Read-only. |
 | `codara_worktree_list` | Lists the repository's Codara-managed worktrees: who created each, uncommitted and ignored files, terminals, runs and processes using it, merge status, and `removable` with the `blockers` that `codara_worktree_remove` would report. `checkMerge: true` fetches and asks GitHub, so it is slower. Worktrees Codara does not manage are listed under `unmanaged` and are never touched. Worktrees the agent made in other repositories are listed under `elsewhere` with their `repoCwd`, also when the agent runs in a folder that is no repository. |
 | `codara_worktree_remove` | Removes a worktree and, by default, the branch it created. `dryRun: true` only checks. `workspace` names its repository's workspace when the agent runs elsewhere and did not make it. |
@@ -1385,6 +1385,19 @@ commits, `checkout` for an existing branch, `workspace` for a folder that
 holds repositories (`nestedRepositories` lists them), a valid `base`.
 `codara_worktree_create` returns `fetch`: `ok`, `skipped`, or
 `failed: <reason>` (then `baseCommit` is the last fetched remote head).
+It says where the worktree starts with `base` (as asked), `baseRef` (the
+ref it forked from) and `baseCommit`. A `base` that names a local branch
+tracking a remote one (its upstream, or for the default branch, `main` say,
+that branch on origin) means the remote branch: Codara fetches it and forks
+from `origin/main`, not from a local `main` the main checkout may not have
+pulled. When the local branch lacks commits the remote has, the result
+carries `baseBehindRemote` (how many); when it has commits the remote lacks,
+`baseAheadOfRemote` and a warning, since the worktree starts without them.
+Offline, it forks from the last fetched `origin/main` with a warning, and
+from the local branch only when that remote branch was never fetched.
+`fetch: false` forks from the base as it is here: a local branch at its own
+commit, a remote-tracking ref at its last fetched commit. `HEAD`, tags,
+commits and branches that track nothing are used as they are.
 Every create and removal, refused or not, is logged to
 `~/.codarastudio/logs/worktree-audit.jsonl`. **Let agents create and remove
 worktrees** in Settings turns creating and removing off; listing still works.

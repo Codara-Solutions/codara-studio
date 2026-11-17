@@ -649,7 +649,7 @@ const WORKTREE_TOOLS = [
       properties: {
         workspace: { type: "string", description: "Another workspace (id or folder); the user approves once." },
         branch: { type: "string", description: "Default agent/<purpose>-<id>." },
-        base: { type: "string", description: "Default the default branch, fetched; HEAD is your commit." },
+        base: { type: "string", description: "Default the default branch. Fetched: main means origin/main; HEAD is your commit." },
         checkout: { type: "boolean", description: "Use an existing branch." },
         purpose: { type: "string", description: "One line: what it is for." },
         title: { type: "string", description: "Rail label. Default the branch." },
