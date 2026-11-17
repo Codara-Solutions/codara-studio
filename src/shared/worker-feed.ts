@@ -261,3 +261,46 @@ export function foldWorkerFeed(
   }
   return entries;
 }
+
+/**
+ * What a live worker is doing right now, in a few words: the chat's agents
+ * rail shows it for every running worker at once. The main process keeps one
+ * per live feed and pushes it only when it changes, so the renderer never
+ * holds a feed per worker to know this.
+ */
+export type WorkerActivityStep =
+  | { kind: "tool"; tool: string; target?: string }
+  | { kind: "reply" }
+  | { kind: "thinking" };
+
+export interface WorkerActivity {
+  runId: string;
+  attemptId: string;
+  /** Rises with every change across all workers: the newer of two copies wins. */
+  seq: number;
+  at: string;
+  /** Null once the worker's session ended. */
+  step: WorkerActivityStep | null;
+}
+
+export const WORKER_ACTIVITY_CHANNEL = "orchestration:workerActivity";
+
+const ACTIVITY_TARGET_KEYS = ["path", "file_path", "filePath", "filename", "notebook_path", "command", "pattern", "query", "url"];
+const ACTIVITY_PATH_KEYS = new Set(["path", "file_path", "filePath", "filename", "notebook_path"]);
+
+/**
+ * The one thing a tool call acts on, short: a file's name, a command, a search
+ * or a page. Only these few fields leave the main process, never the input.
+ */
+export function workerActivityTarget(input: unknown): string | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const value = input as Record<string, unknown>;
+  for (const key of ACTIVITY_TARGET_KEYS) {
+    const candidate = value[key];
+    if (typeof candidate !== "string" || !candidate.trim()) continue;
+    const flat = candidate.replace(/\s+/g, " ").trim();
+    const text = ACTIVITY_PATH_KEYS.has(key) ? flat.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? flat : flat;
+    return text.length <= 120 ? text : `${text.slice(0, 119)}…`;
+  }
+  return undefined;
+}

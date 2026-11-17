@@ -191,8 +191,14 @@ import {
 import { describeRunSettlement, isRunSettled, unresolvedWorkerTasks } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport, readWorkerReportWithProblem } from "./worker-report";
-import { createWorkerFeedWriter, liveWorkerFeedSnapshot, readWorkerFeedFile, type WorkerFeedWriter } from "./worker-feed";
-import { WORKER_FEED_FILE, WORKER_FEED_LIMITS, type WorkerFeedSnapshot } from "@shared/worker-feed";
+import {
+  createWorkerFeedWriter,
+  liveWorkerFeedSnapshot,
+  readWorkerActivity,
+  readWorkerFeedFile,
+  type WorkerFeedWriter,
+} from "./worker-feed";
+import { WORKER_FEED_FILE, WORKER_FEED_LIMITS, type WorkerActivity, type WorkerFeedSnapshot } from "@shared/worker-feed";
 import { evaluateWorkerSessionReuse } from "./worker-session-reuse";
 import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonomy";
 import {
@@ -1134,6 +1140,15 @@ export async function readWorkerAttemptLog(
   // The log mirrors the pane, so it carries cursor and screen escapes the
   // inspector would print as literal junk.
   return { text: stripAnsiAndControls(text ?? ""), truncated: size > WORKER_LOG_TAIL_BYTES };
+}
+
+/**
+ * What each live worker of a run is doing now, for the chat's agents rail:
+ * from memory only, one short entry per running Pi worker. Workers without a
+ * feed (shell, Claude Code, Codex) have none and show their state alone.
+ */
+export function readRunWorkerActivity(runId: string): WorkerActivity[] {
+  return readWorkerActivity(runId);
 }
 
 /**
