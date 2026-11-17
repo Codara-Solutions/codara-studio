@@ -47,7 +47,9 @@ How `scripts/run-all-tests.cjs` works:
     timing checks), `test-app-exit-electron.cjs` (Chromium's exit time on a
     loaded macOS runner), `test-renderer-chunks.mjs` (a
     production Vite build, about 2 GB) and `test-workflow-sandbox.cjs` (its
-    heap-limit case grows QuickJS's WebAssembly memory to 2 GB).
+    heap-limit case grows QuickJS's WebAssembly memory to 2 GB) and
+    `test-clipboard-files.cjs` (the real macOS pasteboard through
+    osascript, with the app's 3 s limit per call).
   - No suite starts while `MemAvailable` is below `CODARA_TEST_MIN_FREE_MB`
     (default 2048) and another suite is still running.
   - Each suite gets its own empty `TMPDIR`, removed when it finishes, so
