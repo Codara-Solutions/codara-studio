@@ -44,6 +44,7 @@ async function load() {
         `export { pageActivity } from "../page-activity";`,
         `export { currentEmulation, resetEmulation } from "../emulation";`,
         `export { MARK_BASELINE_EXPRESSION } from "../wait";`,
+        `export * from "./presence";`,
       ].join("\n"),
       resolveDir: path.join(ROOT, "src/main/browser/chrome"),
       loader: "ts",
@@ -641,7 +642,120 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   assert.deepEqual(lib.sanitizeExtensionFeatures(["reload", "reload", "Bad Feature", 3, "x".repeat(40)]), ["reload"]);
   assert.deepEqual(lib.sanitizeExtensionFeatures("reload"), []);
 
-  console.log("chrome link: origin and host checks, pairing over ECDH with code and Allow, a swapped key refused, bound tokens never sent, sealed frames with injected and replayed ones dropping the link, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair");
+  // The agent on the page: Stop on the pill refuses that agent on that tab
+  // only; settings from the popup and Settings meet by time.
+  const claude = { key: "pane:p1", name: "Claude Code", runtime: "claude" };
+  const codex = { key: "pane:p2", name: "Codex", runtime: "codex" };
+  lib.stopChromeDriver("link-a", 12, claude.key, true);
+  assert.throws(() => lib.assertChromeDriverAllowed({ tabId: 12, linkId: null }, "chrome:12", claude), /stopped Claude Code from using browser tab chrome:12/);
+  assert.throws(() => lib.assertChromeDriverAllowed({ tabId: 12, linkId: "link-a" }, "chrome:link-a/12", claude), lib.ChromeDriverStoppedError);
+  lib.assertChromeDriverAllowed({ tabId: 12, linkId: null }, "chrome:12", codex);
+  lib.assertChromeDriverAllowed({ tabId: 13, linkId: null }, "chrome:13", claude);
+  lib.assertChromeDriverAllowed({ tabId: 12, linkId: "link-b" }, "chrome:link-b/12", claude);
+  lib.stopChromeDriver("link-a", 12, claude.key, false);
+  lib.assertChromeDriverAllowed({ tabId: 12, linkId: null }, "chrome:12", claude);
+  lib.stopChromeDriver("link-a", 12, claude.key, true);
+  lib.forgetChromeStops("link-a");
+  lib.assertChromeDriverAllowed({ tabId: 12, linkId: null }, "chrome:12", claude);
+  // A stop outlives a reconnect and a Codara restart; it ends only when the
+  // user gives the tab back, unshares or closes it, or unpairs the browser.
+  const stopsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codara-stops-")), "presence-stops.json");
+  const refused = (tabId, who = claude) => {
+    try {
+      lib.assertChromeDriverAllowed({ tabId, linkId: "link-a" }, `chrome:${tabId}`, who);
+      return false;
+    } catch (error) {
+      return String(error.message);
+    }
+  };
+  const sent = [];
+  lib.setChromeStopsListener((linkId) => sent.push([linkId, lib.chromeStopList(linkId)]));
+  lib.loadChromeStops(stopsFile);
+  lib.keepChromeStopsFor("link-a", "session-one", [12, 14]);
+  lib.stopChromeDriver("link-a", 12, claude.key, true, "Claude Code");
+  // Codara owns the list and sends it on every change; the extension replaces its copy.
+  assert.deepEqual(sent.at(-1), ["link-a", [{ tabId: 12, key: claude.key, name: "Claude Code" }]]);
+  lib.chromeLinkDown("link-a", true);
+  assert.match(refused(12), /stopped Claude Code/, "still refused after the link drops and comes back");
+  assert.equal((fs.statSync(stopsFile).mode & 0o777).toString(8), "600");
+  assert.deepEqual(fs.readdirSync(path.dirname(stopsFile)), ["presence-stops.json"], "written aside and renamed, nothing left over");
+  lib.loadChromeStops(stopsFile);
+  assert.match(refused(12), /stopped Claude Code/, "still refused after Codara restarts");
+  assert.deepEqual([...lib.chromeStops("link-a")], [[12, [{ key: claude.key, name: "Claude Code" }]]]);
+  lib.keepChromeStopsFor("link-a", "session-one", [12, 14]);
+  assert.match(refused(12), /stopped/, "a tab still shared in the same browser session keeps its stop");
+  // Unshare then reshare: the stop ends, and the extension is sent the empty list.
+  lib.keepChromeStopsFor("link-a", "session-one", [14]);
+  assert.deepEqual(sent.at(-1), ["link-a", []]);
+  lib.keepChromeStopsFor("link-a", "session-one", [12, 14]);
+  assert.equal(refused(12), false);
+  // The same tab id in a new browser session is another tab: not refused.
+  lib.stopChromeDriver("link-a", 12, claude.key, true, "Claude Code");
+  lib.keepChromeStopsFor("link-a", "session-two", [12, 14]);
+  assert.equal(refused(12), false, "a reused tab id after a browser restart is not refused");
+  // Unpair takes the browser's stops; give back takes one.
+  lib.stopChromeDriver("link-a", 15, claude.key, true, "Claude Code");
+  lib.chromeLinkDown("link-a", false);
+  lib.loadChromeStops(stopsFile);
+  assert.equal(refused(15), false);
+  lib.stopChromeDriver("link-a", 16, claude.key, true, "Claude Code");
+  lib.stopChromeDriver("link-a", 16, claude.key, false);
+  lib.loadChromeStops(stopsFile);
+  assert.equal(refused(16), false);
+  // An unreadable file fails closed for the browsers paired then: kept aside,
+  // every agent refused on that browser's tabs until the user shares them
+  // again, across another restart; then it switches off.
+  lib.stopChromeDriver("link-a", 17, claude.key, true, "Claude Code");
+  fs.writeFileSync(stopsFile, '{"version":2,"stops":[{"linkId":"link-a","tab');
+  const warn = console.warn;
+  console.warn = () => {};
+  lib.loadChromeStops(stopsFile, ["link-a"]);
+  console.warn = warn;
+  assert.ok(fs.existsSync(`${stopsFile}.corrupt`));
+  assert.equal(lib.chromePausedTabs("link-a"), "all");
+  assert.match(refused(17, codex), /Shared tabs were paused after a problem reading saved stops/, "any agent, before the browser reported");
+  const later = (tabId) => {
+    try {
+      lib.assertChromeDriverAllowed({ tabId, linkId: "link-b" }, `chrome:link-b/${tabId}`, codex);
+      return false;
+    } catch (error) {
+      return String(error.message);
+    }
+  };
+  assert.equal(later(17), false, "a browser paired later is unaffected");
+  lib.keepChromeStopsFor("link-a", "session-two", [17, 18]);
+  assert.deepEqual(lib.chromePausedTabs("link-a"), [17, 18]);
+  assert.match(refused(18, codex), /share/);
+  lib.loadChromeStops(stopsFile, ["link-a"]);
+  assert.match(refused(18, codex), /paused/, "it survives a restart");
+  lib.keepChromeStopsFor("link-a", "session-two", [17]);
+  lib.keepChromeStopsFor("link-a", "session-two", [17, 18]);
+  assert.equal(refused(18, codex), false, "shared again: allowed");
+  assert.match(refused(17, codex), /paused/, "a tab never re-shared stays refused");
+  lib.keepChromeStopsFor("link-a", "session-two", []);
+  lib.keepChromeStopsFor("link-a", "session-two", [17]);
+  assert.deepEqual(lib.chromePausedTabs("link-a"), [], "none left: it switches off");
+  assert.equal(refused(17, codex), false);
+  lib.loadChromeStops(stopsFile, ["link-a"]);
+  assert.equal(refused(17, codex), false, "and stays off after a restart");
+  // With no paired browser there is nothing to pause.
+  fs.writeFileSync(stopsFile, "not json");
+  console.warn = () => {};
+  lib.loadChromeStops(stopsFile, []);
+  console.warn = warn;
+  assert.equal(refused(19, codex), false);
+  lib.setChromeStopsListener(null);
+  lib.loadChromeStops(path.join(path.dirname(stopsFile), "fresh.json"));
+  const presenceFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codara-presence-")), "presence.json");
+  lib.loadPresenceSettings(presenceFile);
+  assert.deepEqual(lib.presenceSettings(), { overlay: true, glow: true, at: 0 }, "on by default");
+  assert.equal(lib.adoptPresenceSettings({ glow: false, at: 10 }), true);
+  assert.equal(lib.adoptPresenceSettings({ glow: true, at: 10 }), false, "a tie keeps what Codara holds");
+  assert.equal(lib.adoptPresenceSettings({ overlay: false, at: 5 }), false, "an older change loses");
+  lib.loadPresenceSettings(presenceFile);
+  assert.deepEqual(lib.presenceSettings(), { overlay: true, glow: false, at: 10 }, "kept across restarts");
+
+  console.log("chrome link: origin and host checks, pairing over ECDH with code and Allow, a swapped key refused, bound tokens never sent, sealed frames with injected and replayed ones dropping the link, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair, stops from the page kept across reconnects and restarts, and presence settings");
   setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref();
 })().catch((error) => {
   console.error(error);
