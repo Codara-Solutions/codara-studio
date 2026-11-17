@@ -177,18 +177,9 @@ test("a browser tab zooms on its own and keeps its level across navigations", as
     await expect(level).toHaveText("125%");
 
     // A second tab on the same site.
-    const link = await app.evaluate(async ({ webContents }) => {
-      const guest = webContents.getAllWebContents().find((wc) => wc.getType() === "webview" && wc.getTitle() === "Zoom one");
-      return guest?.executeJavaScript("(() => { const r = document.getElementById('pop').getBoundingClientRect(); return { x: r.x + 20, y: r.y + 10 }; })()");
-    });
-    await app.evaluate(({ webContents }, point) => {
-      const guest = webContents.getAllWebContents().find((wc) => wc.getType() === "webview" && wc.getTitle() === "Zoom one");
-      if (!guest || !point) return;
-      // The page's CSS pixels are zoomed on screen.
-      const at = { x: Math.round(point.x * guest.getZoomFactor()), y: Math.round(point.y * guest.getZoomFactor()) };
-      guest.sendInputEvent({ type: "mouseDown", x: at.x, y: at.y, button: "left", clickCount: 1 });
-      guest.sendInputEvent({ type: "mouseUp", x: at.x, y: at.y, button: "left", clickCount: 1 });
-    }, link);
+    // An agent's click lands on the link at 125%: its native pointer input
+    // is scaled by the tab's zoom.
+    await request("preview.mouse", { selector: "#pop", action: "click" });
     // Chromium keeps one zoom per site, so the tab in use sets it.
     const browserTabs = page.locator('[role="tab"][data-tab-id]').filter({ hasText: /localhost/ });
     await expect(browserTabs).toHaveCount(2);

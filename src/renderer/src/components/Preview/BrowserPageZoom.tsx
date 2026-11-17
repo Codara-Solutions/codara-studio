@@ -13,11 +13,29 @@ import { stepZoom, zoomPercent, type ZoomAction } from "../zoom/zoom-math";
 // that changes. So the tab applies its level, on top of the window's zoom,
 // again after each navigation and window zoom, and whenever it is shown or
 // the pointer or focus comes into it: of two tabs on one site at different
-// levels, the one in use is right. Loaded on its own (BrowserPane and
-// HtmlPreview import it lazily), like the find bar.
+// levels, the one in use is right. Two such tabs on screen at once (docked
+// side by side) can only show one zoom, so zooming one sets the other's level
+// too and their chips agree. Loaded on its own (BrowserPane and HtmlPreview
+// import it lazily), like the find bar.
 
 const MIN = 0.25;
 const MAX = 5;
+
+interface Shown {
+  site: () => string | null;
+  adopt: (zoom: number) => void;
+}
+const onScreen = new Set<Shown>();
+
+/** Chromium's zoom key for a page: its host, or its scheme when it has none (file:). */
+function siteOf(webview: Electron.WebviewTag | null): string | null {
+  try {
+    const url = new URL(webview?.getURL() ?? "");
+    return url.hostname || url.protocol;
+  } catch {
+    return null;
+  }
+}
 
 export default function BrowserPageZoom({
   rootRef,
@@ -35,41 +53,69 @@ export default function BrowserPageZoom({
   const latest = useRef({ zoom, ready, shown });
   latest.current = { zoom, ready, shown };
 
+  const visible = useCallback(
+    () => latest.current.ready && latest.current.shown && isShown(rootRef.current),
+    [rootRef],
+  );
+
   const applyToPage = useCallback(() => {
     const webview = webviewRef.current;
-    // A hidden tab would take its site's zoom from the tab on screen.
-    if (!webview || !latest.current.ready || !latest.current.shown) return;
+    // A hidden tab (a background browser tab, an editor tab not in front)
+    // would take its site's zoom from the tab on screen.
+    if (!webview || !visible()) return;
     try {
       webview.setZoomFactor(window.spark.view.getZoomFactor() * latest.current.zoom);
     } catch {
       // The guest is between loads; the next navigation applies it.
     }
-  }, [webviewRef]);
+  }, [webviewRef, visible]);
 
   useEffect(() => {
     applyToPage();
   }, [ready, shown, zoom, applyToPage]);
 
   useEffect(() => {
+    const entry: Shown = { site: () => (visible() ? siteOf(webviewRef.current) : null), adopt: setZoom };
+    onScreen.add(entry);
+    return () => {
+      onScreen.delete(entry);
+    };
+  }, [webviewRef, visible]);
+
+  useEffect(() => {
     const webview = webviewRef.current;
     const root = rootRef.current;
     if (!webview || !root || !ready) return;
-    // The window's zoom changes its CSS size, so a resize covers it.
+    // The window's zoom changes its CSS size, so a resize covers it; a pane
+    // that comes back on screen (an editor tab brought to front) grows from
+    // nothing, which the observer sees.
     webview.addEventListener("did-navigate", applyToPage);
     window.addEventListener("resize", applyToPage);
+    const observer = new ResizeObserver(applyToPage);
+    observer.observe(root);
     root.addEventListener("pointerenter", applyToPage);
     root.addEventListener("focusin", applyToPage);
     return () => {
       webview.removeEventListener("did-navigate", applyToPage);
       window.removeEventListener("resize", applyToPage);
+      observer.disconnect();
       root.removeEventListener("pointerenter", applyToPage);
       root.removeEventListener("focusin", applyToPage);
     };
   }, [webviewRef, rootRef, ready, applyToPage]);
 
-  const act = useCallback((action: ZoomAction) => {
-    setZoom((current) => (action === "reset" ? 1 : stepZoom(current, action === "in" ? 1 : -1, MIN, MAX)));
-  }, []);
+  const act = useCallback(
+    (action: ZoomAction) => {
+      const current = latest.current.zoom;
+      const next = action === "reset" ? 1 : stepZoom(current, action === "in" ? 1 : -1, MIN, MAX);
+      latest.current.zoom = next;
+      setZoom(next);
+      const site = visible() ? siteOf(webviewRef.current) : null;
+      if (!site) return;
+      for (const other of onScreen) if (other.site() === site) other.adopt(next);
+    },
+    [visible, webviewRef],
+  );
 
   useEffect(
     () =>
