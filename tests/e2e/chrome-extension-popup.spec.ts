@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { chromium, type BrowserContext, type Worker } from "playwright";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -82,8 +82,26 @@ test("the popup offers one switch per tab, a reach that maps to the old switches
     const restricted = await popupFor(browserTab);
     await expect(restricted.locator("#tab-note")).toHaveText(/Chrome does not let extensions work on this page/);
     await expect(restricted.locator("#tab-note")).toContainText("Agents can use any normal website tab.");
-    for (const dead of ["#share-tab", "#tab-details", "#storage-row", "#tab-host"]) await expect(restricted.locator(dead)).toBeHidden();
+    for (const dead of ["#share-tab", "#tab-details", "#storage-row", "#storage-note", "#tab-host"]) await expect(restricted.locator(dead)).toBeHidden();
     await restricted.close();
+
+    // A local file: with "Allow access to file URLs" off the popup says how to
+    // turn it on and offers no switch; with it on, the file is a normal tab.
+    const file = join(root, "notes.html");
+    await writeFile(file, "<!doctype html><title>Notes</title><h1>Notes</h1>");
+    const filePage = await browser.newPage();
+    await filePage.goto(`file://${file}`);
+    const fileAccess = await worker.evaluate(() => chrome.extension.isAllowedFileSchemeAccess());
+    const fileView = await popupFor(await tabIdOf(worker, "notes.html"));
+    if (fileAccess) {
+      await expect(fileView.locator("#tab-note")).toBeHidden();
+      await expect(fileView.locator("#share-tab")).toBeVisible();
+    } else {
+      await expect(fileView.locator("#tab-note")).toContainText("Allow access to file URLs");
+      await expect(fileView.locator("#share-tab")).toBeHidden();
+    }
+    await fileView.close();
+    await filePage.close();
 
     // A website: one switch, the reach starts at "Tabs I pick" and nothing is
     // shared, opening tabs stays off as before the update.
@@ -103,6 +121,8 @@ test("the popup offers one switch per tab, a reach that maps to the old switches
     await expect.poll(async () => (await sharing(worker)).shareTabs).toEqual([webTab]);
     await expect(popup.locator("#shared-label")).toHaveText("Shared, 1 tab");
     await expect(popup.locator("#storage-row")).toBeVisible();
+    // The switch covers the browser's cookie and storage commands, not what the page's scripts can read.
+    await expect(popup.locator("#storage-note")).toContainText("Even when off, agents can read what this page's own scripts can");
 
     // "This window" is the old window switch; "Tabs I pick" turns it off and
     // leaves the tab shared one by one.
@@ -145,6 +165,37 @@ test("the popup offers one switch per tab, a reach that maps to the old switches
     await worker.evaluate((id) => (self as unknown as { codara: any }).codara.handlePopup({ type: "shareWindow", windowId: id, on: true }), otherWindow);
     await expect(popup.locator("#reach-note")).toContainText("Another window you shared stays shared.");
     await popup.locator("#stop-all").click();
+    // A tab switched on by hand in another window is named too.
+    const otherTab = await worker.evaluate((id) => chrome.tabs.query({ windowId: id }).then((tabs: { id: number }[]) => tabs[0].id), otherWindow);
+    await worker.evaluate((id) => (self as unknown as { codara: any }).codara.handlePopup({ type: "shareTab", tabId: id, on: true }), otherTab);
+    await popup.reload();
+    await expect(popup.locator("#reach-note")).toContainText("A tab you shared in another window stays shared.");
+    await popup.locator("#stop-all").click();
+    // A closed window no longer counts.
+    await worker.evaluate((id) => (self as unknown as { codara: any }).codara.handlePopup({ type: "shareWindow", windowId: id, on: true }), otherWindow);
+    await worker.evaluate((id) => chrome.windows.remove(id), otherWindow);
+    await popup.reload();
+    await expect(popup.locator("#reach-note")).toContainText("Other windows stay off.");
+
+    // While "Everything" asks, the other choices wait.
+    await popup.getByRole("radio", { name: "Everything" }).click();
+    await expect(popup.locator("#ask")).toBeVisible();
+    await popup.getByRole("radio", { name: "This window" }).click({ force: true });
+    expect((await sharing(worker)).shareWindows).toEqual([]);
+    await popup.locator("#ask-no").click();
+
+    // Narrowing the reach lets go of a tab agents were using.
+    await popup.getByRole("radio", { name: "This window" }).click();
+    await expect.poll(async () => (await sharing(worker)).shareWindows).toEqual([windowId]);
+    await worker.evaluate(async (id) => {
+      await chrome.debugger.attach({ tabId: id }, "1.3");
+      const state = (self as unknown as { codara: any }).codara.state();
+      state.attached = [...state.attached, id];
+    }, webTab);
+    await popup.getByRole("radio", { name: "Tabs I pick" }).click();
+    await expect.poll(() => worker.evaluate((id) => (self as unknown as { codara: any }).codara.state().attached.includes(id), webTab)).toBe(false);
+    // The extension's own debugger session is gone (Playwright keeps its own).
+    expect(await worker.evaluate((id) => chrome.debugger.sendCommand({ tabId: id }, "Runtime.evaluate", { expression: "1" }).then(() => "attached", (error: Error) => error.message), webTab)).toMatch(/not attached/i);
 
     // A user who had shared every tab before the update finds "Everything"
     // picked, with nothing added or lost.

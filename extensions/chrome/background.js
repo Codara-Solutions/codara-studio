@@ -482,6 +482,13 @@ chrome.tabGroups?.onRemoved.addListener(async (group) => {
   await ready;
   if (state.agentGroups.includes(group.id)) await save({ agentGroups: without(state.agentGroups, group.id) });
 });
+// A closed window's sharing goes with it: window ids are not reused within a
+// session, but the list should say what is really shared.
+chrome.windows.onRemoved.addListener(async (windowId) => {
+  await ready;
+  if (state.shareWindows.includes(windowId)) await save({ shareWindows: without(state.shareWindows, windowId) });
+});
+
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   await ready;
   const usage = { ...state.usage };
@@ -499,8 +506,9 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 
 // ── The popup and the options page ──────────────────────────────────────────
 
-function describeTab(tab) {
+function describeTab(tab, fileAccess = true) {
   const rule = blockingRule(tab.url, rules);
+  const url = tab.url ?? tab.pendingUrl;
   return {
     tabId: tab.id,
     windowId: tab.windowId,
@@ -508,7 +516,9 @@ function describeTab(tab) {
     title: tab.title ?? "",
     url: tab.url ?? tab.pendingUrl ?? "",
     shared: isTabShared(shareChoice(), tab),
-    restricted: isRestrictedUrl(tab.url ?? tab.pendingUrl),
+    // Why Chrome keeps the extension off this tab: its own pages, or a local
+    // file while "Allow access to file URLs" is off.
+    restricted: isRestrictedUrl(url) ? "browser" : isRestrictedUrl(url, { fileAccess }) ? "file" : false,
     blocked: rule?.raw ?? null,
     attached: state.attached.includes(tab.id),
     storage: state.storageTabs.includes(tab.id),
@@ -520,17 +530,23 @@ function describeTab(tab) {
 async function popupState(request) {
   const tabs = await chrome.tabs.query({});
   const current = typeof request.tabId === "number" ? tabs.find((tab) => tab.id === request.tabId) : null;
+  const fileAccess = await chrome.extension.isAllowedFileSchemeAccess().catch(() => false);
+  // Only open windows count; a closed window's id can stay in the list.
+  const open = new Set(tabs.map((tab) => tab.windowId));
+  const otherWindows = state.shareWindows.filter((id) => id !== request.windowId && open.has(id));
   return {
     status: link.status,
     paired: Boolean(state.token),
     shareAll: state.shareAll,
     windowShared: typeof request.windowId === "number" && state.shareWindows.includes(request.windowId),
     reach: reachOf(shareChoice(), request.windowId),
-    otherWindows: state.shareWindows.filter((id) => id !== request.windowId).length,
+    otherWindows: otherWindows.length,
+    // Tabs switched on one by one in other windows that are not shared whole.
+    otherTabs: tabs.filter((tab) => tab.windowId !== request.windowId && !otherWindows.includes(tab.windowId) && state.shareTabs.includes(tab.id) && isTabShared(shareChoice(), tab)).length,
     allowOpen: state.allowOpen,
     blockedSites: state.blockedSites,
-    current: current ? describeTab(current) : null,
-    shared: tabs.filter((tab) => isTabShared(shareChoice(), tab)).map(describeTab),
+    current: current ? describeTab(current, fileAccess) : null,
+    shared: tabs.filter((tab) => isTabShared(shareChoice(), tab)).map((tab) => describeTab(tab, fileAccess)),
   };
 }
 

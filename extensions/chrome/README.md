@@ -77,10 +77,11 @@ tools it uses for its own browser tabs.
 - Browser pages (`chrome://`, the extension stores, other extensions) are
   never usable.
 - Cookies and site storage (`Network.getCookies`, `DOMStorage.*`,
-  `IndexedDB.*`, `Fetch.*` and similar) need **Allow cookie and storage
-  access** for that tab, and reach only that tab's site: another site's
+  `IndexedDB.*`, `Fetch.*` and similar) need **Read and change cookies and
+  storage here** for that tab, and reach only that tab's site: another site's
   cookies or storage, or a blocked site's, are refused even with it.
-  Without it, cookie headers are removed from network events. Profile-wide
+  Without it, cookie headers are removed from network events; other request
+  headers (such as `Authorization`) and response bodies still reach agents. Profile-wide
   cookie reads, clearing browser data, closing tabs it did not open, loading
   other URLs with your cookies (`Network.loadNetworkResource`), redirecting
   downloads and every `Browser.*` and `Target.*` command that would reach
