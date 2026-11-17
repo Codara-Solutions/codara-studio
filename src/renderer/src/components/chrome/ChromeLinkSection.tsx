@@ -105,6 +105,11 @@ export default function ChromeLinkSection(): React.ReactElement | null {
                             <span className="chrome-tabs__title">{tab.blocked ? "Blocked site" : tab.title || tab.url}</span>
                             <span>{tab.attached ? "in use" : tab.storage ? "cookie tools on" : ""}</span>
                           </li>
+                          {tab.paused ? (
+                            <li className="chrome-tabs__stopped" role="status">
+                              <span className="chrome-tabs__title">Shared tabs were paused after a problem reading saved stops: share each tab again.</span>
+                            </li>
+                          ) : null}
                           {tab.stopped.map((agent) => (
                             <li key={`${tab.id}-${agent.key}`} className="chrome-tabs__stopped">
                               <span className="chrome-tabs__title">{`You stopped ${agent.name} here.`}</span>

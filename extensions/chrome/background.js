@@ -72,6 +72,8 @@ const SESSION_DEFAULTS = {
   stoppedAgents: {},
   // Stops and give backs Codara has not confirmed yet: [{ id, op, tabId, key, name }].
   pendingStops: [],
+  // Tabs Codara refuses after it could not read its saved stops: "all" or ids.
+  pausedTabs: [],
   // This browser session's id: stops never outlive it (tab ids are reused).
   browserSession: null,
 };
@@ -437,15 +439,18 @@ async function drawPresence(tabId) {
   if (!entry || !state.attached.includes(tabId)) return;
   const settings = presenceSettings(state.presence);
   const ttl = (entry.state === "stopped" ? PRESENCE_STOPPED_MS : PRESENCE_IDLE_MS) + 2_000;
+  // A capture or recording in flight: hidden before it is drawn.
+  if (capturing.has(tabId)) await inWorld(tabId, presenceCall("conceal", true));
   const shown = await inWorld(tabId, presenceCall("show", presenceView({ ...entry, glow: settings.glow }), ttl));
   if (shown === "new") await learnHostNode(tabId);
 }
 
 async function clearPresence(tabId, { draw = true } = {}) {
   const entry = presence.get(tabId);
-  // A recording still running: the page script's remove() resets its hidden flag.
-  if (screencasts.delete(tabId)) capturing.delete(tabId);
+  // A recording still running keeps its record until stopScreencast, so a
+  // pill drawn again before then stays out of its frames. Only a detach ends it.
   if (!draw) {
+    screencasts.delete(tabId);
     capturing.delete(tabId);
     hiddenNodes.delete(tabId);
   }
@@ -479,7 +484,8 @@ async function requestStop(op, tabId, key, name) {
 async function applyStops(message) {
   const copy = stopCopyFrom(message);
   const pendingStops = typeof message.acked === "string" ? pendingAfterAck(state.pendingStops, message.acked) : state.pendingStops;
-  await save({ stoppedAgents: copy, pendingStops });
+  const pausedTabs = message.paused === "all" ? "all" : Array.isArray(message.paused) ? message.paused.filter(Number.isInteger) : [];
+  await save({ stoppedAgents: copy, pendingStops, pausedTabs });
   for (const [tabId, entry] of presence) {
     const stopped = stoppedOn(tabId).some((agent) => agent.key === entry.key);
     if (stopped && entry.state === "working") {
@@ -879,6 +885,7 @@ function describeTab(tab, fileAccess = true) {
     openedByAgent: state.agentTabs.includes(tab.id),
     usage: state.usage[tab.id] ?? null,
     stoppedAgents: stoppedOn(tab.id),
+    paused: state.pausedTabs === "all" || (Array.isArray(state.pausedTabs) && state.pausedTabs.includes(tab.id)),
   };
 }
 

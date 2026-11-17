@@ -645,24 +645,48 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   lib.stopChromeDriver("link-a", 16, claude.key, false);
   lib.loadChromeStops(stopsFile);
   assert.equal(refused(16), false);
-  // An unreadable file fails closed: kept aside, every agent refused on that
-  // browser's tabs until the user shares them again, across another restart.
+  // An unreadable file fails closed for the browsers paired then: kept aside,
+  // every agent refused on that browser's tabs until the user shares them
+  // again, across another restart; then it switches off.
   lib.stopChromeDriver("link-a", 17, claude.key, true, "Claude Code");
   fs.writeFileSync(stopsFile, '{"version":2,"stops":[{"linkId":"link-a","tab');
   const warn = console.warn;
   console.warn = () => {};
-  lib.loadChromeStops(stopsFile);
+  lib.loadChromeStops(stopsFile, ["link-a"]);
   console.warn = warn;
   assert.ok(fs.existsSync(`${stopsFile}.corrupt`));
-  assert.match(refused(17, codex), /could not read its list of agents the user stopped/, "any agent, before the browser reported");
+  assert.equal(lib.chromePausedTabs("link-a"), "all");
+  assert.match(refused(17, codex), /Shared tabs were paused after a problem reading saved stops/, "any agent, before the browser reported");
+  const later = (tabId) => {
+    try {
+      lib.assertChromeDriverAllowed({ tabId, linkId: "link-b" }, `chrome:link-b/${tabId}`, codex);
+      return false;
+    } catch (error) {
+      return String(error.message);
+    }
+  };
+  assert.equal(later(17), false, "a browser paired later is unaffected");
   lib.keepChromeStopsFor("link-a", "session-two", [17, 18]);
-  assert.match(refused(18, codex), /until the user shares it again/);
-  lib.loadChromeStops(stopsFile);
-  assert.match(refused(18, codex), /could not read/, "the failsafe survives a restart");
+  assert.deepEqual(lib.chromePausedTabs("link-a"), [17, 18]);
+  assert.match(refused(18, codex), /share/);
+  lib.loadChromeStops(stopsFile, ["link-a"]);
+  assert.match(refused(18, codex), /paused/, "it survives a restart");
   lib.keepChromeStopsFor("link-a", "session-two", [17]);
   lib.keepChromeStopsFor("link-a", "session-two", [17, 18]);
   assert.equal(refused(18, codex), false, "shared again: allowed");
-  assert.match(refused(17, codex), /could not read/, "a tab never re-shared stays refused");
+  assert.match(refused(17, codex), /paused/, "a tab never re-shared stays refused");
+  lib.keepChromeStopsFor("link-a", "session-two", []);
+  lib.keepChromeStopsFor("link-a", "session-two", [17]);
+  assert.deepEqual(lib.chromePausedTabs("link-a"), [], "none left: it switches off");
+  assert.equal(refused(17, codex), false);
+  lib.loadChromeStops(stopsFile, ["link-a"]);
+  assert.equal(refused(17, codex), false, "and stays off after a restart");
+  // With no paired browser there is nothing to pause.
+  fs.writeFileSync(stopsFile, "not json");
+  console.warn = () => {};
+  lib.loadChromeStops(stopsFile, []);
+  console.warn = warn;
+  assert.equal(refused(19, codex), false);
   lib.setChromeStopsListener(null);
   lib.loadChromeStops(path.join(path.dirname(stopsFile), "fresh.json"));
   const presenceFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codara-presence-")), "presence.json");

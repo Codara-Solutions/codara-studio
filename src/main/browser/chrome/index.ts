@@ -31,7 +31,7 @@ import type { ChromeLink } from "./link";
 import { ChromeLinkServer } from "./link-server";
 import { applyKeepAgentsInChrome } from "./keep-agents-in-chrome";
 import { ChromeLinkStore } from "./link-store";
-import { adoptPresenceSettings, chromeLinkDown, chromeStopList, chromeStops, forgetChromeStops, keepChromeStopsFor, loadChromeStops, loadPresenceSettings, presenceSettings, setChromeStopsListener, stopChromeDriver } from "./presence";
+import { adoptPresenceSettings, chromeLinkDown, chromePausedTabs, chromeStopList, chromeStops, setChromeConnectedLinks, forgetChromeStops, keepChromeStopsFor, loadChromeStops, loadPresenceSettings, presenceSettings, setChromeStopsListener, stopChromeDriver } from "./presence";
 import { CHROME_LINK_PORTS } from "./protocol";
 import { setChromeLinkRuntime } from "./runtime";
 
@@ -139,6 +139,7 @@ export function chromeLinkState(): ChromeLinkState {
     browsers: (store?.list() ?? []).map((paired) => {
       const link = live.get(paired.linkId);
       const stopped = chromeStops(paired.linkId);
+      const paused = chromePausedTabs(paired.linkId);
       return {
         linkId: paired.linkId,
         browser: paired.browser,
@@ -160,6 +161,7 @@ export function chromeLinkState(): ChromeLinkState {
               blocked: tab.blocked,
               openedByAgent: tab.openedByAgent,
               stopped: stopped.get(tab.tabId) ?? [],
+              paused: paused === "all" || paused.includes(tab.tabId),
             }))
           : [],
       };
@@ -208,7 +210,7 @@ function onPresenceMessage(link: ChromeLink, message: Record<string, unknown>): 
 
 /** Codara owns the stop list; the extension replaces its copy with this. */
 function sendStops(link: ChromeLink, acked: string | null = null): void {
-  link.send({ type: "presence_stops", stops: chromeStopList(link.linkId), ...(acked ? { acked } : {}) });
+  link.send({ type: "presence_stops", stops: chromeStopList(link.linkId), paused: chromePausedTabs(link.linkId), ...(acked ? { acked } : {}) });
 }
 
 function broadcast(): void {
@@ -235,7 +237,8 @@ export function startChromeLink(): void {
   setChromeActivityFile(join(dir, "activity.jsonl"));
   setChromeAgentLabeler(agentLabel);
   loadPresenceSettings(join(dir, "presence.json"));
-  loadChromeStops(join(dir, "presence-stops.json"));
+  loadChromeStops(join(dir, "presence-stops.json"), store.list().map((paired) => paired.linkId));
+  setChromeConnectedLinks(() => server?.links().map((link) => link.linkId) ?? []);
   setChromeStopsListener((linkId) => {
     const link = server?.links().find((candidate) => candidate.linkId === linkId);
     if (link) sendStops(link);

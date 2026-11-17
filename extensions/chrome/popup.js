@@ -173,6 +173,7 @@ function renderTab(tab, connected) {
     $("tab-usage").title = usage.tool;
   }
   // Agents the user stopped from the page: the only place to give the tab back, besides Codara's Settings.
+  $("tab-paused").hidden = !(usable && tab.shared && tab.paused);
   const stopped = usable && Array.isArray(tab.stoppedAgents) ? tab.stoppedAgents : [];
   $("tab-stopped").hidden = stopped.length === 0;
   $("tab-stopped").replaceChildren(
