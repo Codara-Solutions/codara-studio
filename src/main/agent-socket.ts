@@ -2200,6 +2200,7 @@ async function handleSessionStart(
   if (role === "manager" && caller.run) {
     const modelRefusal = managerSessionModelRefusal(request.model, {
       messages: caller.run.humanMessages,
+      chatModel: caller.run.chatModel,
       disabled: disabledWorkerModels((await loadSettings().catch(() => null)) ?? {}),
     });
     if (modelRefusal) return errorResponse(id, ERR_INVALID_PARAMS, modelRefusal);

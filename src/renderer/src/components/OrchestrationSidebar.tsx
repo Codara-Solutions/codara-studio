@@ -179,6 +179,8 @@ export default function OrchestrationSidebar({
         title: runId ? undefined : deriveDraftChatTitle(message, workspace.name),
         initialUserNote: message,
         initialUserNoteClientMessageId: clientMessageId,
+        // Typed in the composer: only such a note can run a skill.
+        initialNoteTypedByUser: true,
         initialAttachments: attachments,
         coraProfileId: chatConfig?.profileId,
         chatBackend: chatConfig?.backend,

@@ -1,4 +1,5 @@
 import { promises as fs, createWriteStream, watch, type FSWatcher } from "node:fs";
+import { MAX_AUTOMATIC_DELIVERY_ATTEMPTS as SHARED_MAX_AUTOMATIC_DELIVERY_ATTEMPTS } from "../session-model-policy";
 import { randomBytes, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
@@ -1659,6 +1660,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       message: initialNote,
       attachments: input.initialAttachments,
       intent: "turn",
+      ...(input.initialNoteTypedByUser === true && input.initialUserNote?.trim() ? { typedByUser: true as const } : {}),
     });
     if (!planText && !fanOutDirective && !councilDirective) {
       scheduleInitialChatDecision(run.id, input);
@@ -4361,7 +4363,8 @@ function scheduleInitialManagerDecision(
 // driving turns on its own: the user resends it, presses Send now, or Resume.
 // Without the cap, a turn that fails the same way every time re-armed itself
 // back to back (one run made 1041 manager calls in 4 seconds).
-const MAX_AUTOMATIC_DELIVERY_ATTEMPTS = 2;
+// Shared with the manager's wait (session-model-policy.ts hasQueuedUserInput).
+const MAX_AUTOMATIC_DELIVERY_ATTEMPTS = SHARED_MAX_AUTOMATIC_DELIVERY_ATTEMPTS;
 
 function hasQueuedSteering(run: RunState, opts?: { explicit?: boolean }): boolean {
   return queuedManagerInputMessages(run).some(
@@ -12728,6 +12731,7 @@ export async function addRunMessage(
     backendTurnId: input.backendTurnId,
     conversationEpoch: messageEpoch,
     createdAt: new Date().toISOString(),
+    ...(input.typedByUser === true && input.author === "user" && input.kind === "note" ? { typedByUser: true as const } : {}),
   };
 
   let messageRecorded = false;
