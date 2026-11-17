@@ -2700,6 +2700,11 @@ export interface GitStatus {
   unstaged: GitFileChange[];
   hasConflicts: boolean;
   error?: string;
+  /**
+   * Where the workspace sits below the repository root, with a trailing
+   * slash ("src/"), or "" at the root. File paths are from the root.
+   */
+  prefix?: string;
 }
 
 /** Added/removed line counts for one changed file (git diff --numstat). */

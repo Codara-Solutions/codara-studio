@@ -75,6 +75,24 @@ test("paths outside a workspace opened below the repo root never fold", ({ group
   assert.deepEqual(rows(groupChanges(list)), ["lib/a.ts", "../one", "../two", "../up/x.ts", "../up/y.ts"]);
 });
 
+test("in a workspace opened below the root, only folders inside it fold", ({ groupChanges }) => {
+  const list = [
+    change("src/theme.ts"),
+    fresh("docs/a.md"),
+    fresh("docs/b.md"),
+    fresh("src/gen/x.ts"),
+    fresh("src/gen/y.ts"),
+  ];
+  assert.deepEqual(rows(groupChanges(list, "src/")), ["src/theme.ts", "src/gen/ (2)", "docs/a.md", "docs/b.md"]);
+  // At the root, the same docs folder folds.
+  assert.deepEqual(rows(groupChanges(list, "")), ["src/theme.ts", "docs/ (2)", "src/gen/ (2)"]);
+});
+
+test("the workspace folder itself never folds", ({ groupChanges }) => {
+  const list = [fresh("src/a.ts"), fresh("src/b.ts")];
+  assert.deepEqual(rows(groupChanges(list, "src/")), ["src/a.ts", "src/b.ts"]);
+});
+
 test("folder names with pattern characters fold like any other", ({ groupChanges }) => {
   const list = [fresh("[ab]/1.txt"), fresh("[ab]/2.txt"), fresh("a/unrelated")];
   assert.deepEqual(rows(groupChanges(list)), ["[ab]/ (2)", "a/unrelated"]);

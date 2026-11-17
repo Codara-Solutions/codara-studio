@@ -398,6 +398,16 @@ journey, an issue queue and a stash list pushed the files and the history apart.
   keeps its own row. The fold is computed in the renderer (`change-list.ts`); git
   still lists every file, so the diff view can open each one.
 - Staged Changes never folds: what is about to be committed shows file by file.
+- A folded folder acts on exactly the files its row shows. Discard arms a confirm
+  that names the count and the folder ("Delete 2 files in dist/?"); a double-click
+  or a click within 400 ms of arming does not confirm. Before deleting, the folder
+  is listed again; if a file appeared or went since the row was drawn, nothing is
+  deleted and the row is redrawn. Ignored files and nested repositories stay, and
+  a folder is removed only once empty.
+- Paths go to git as `:(top,literal)<path>`: names, never patterns, from the root.
+- A workspace opened below the repository root folds only folders inside itself;
+  changes elsewhere in the repository keep their own rows, marked "outside this
+  workspace".
 
 ## Worktrees in the rail (2026-10)
 

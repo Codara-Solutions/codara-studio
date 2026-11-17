@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { GitFileChange, GitFileDiffStat } from "@shared/types";
 import FileNodeIcon from "../file-icons/LazyFileNodeIcon";
 import { groupChanges } from "./change-list";
@@ -10,6 +10,8 @@ import "./source-control.css";
 interface Props {
   files: GitFileChange[];
   staged: boolean;
+  /** Where the workspace sits below the repository root ("src/"), or "". */
+  prefix: string;
   disabled: boolean;
   stats?: Record<string, GitFileDiffStat>;
   selectedPath: string | null;
@@ -20,8 +22,8 @@ interface Props {
   onDiscard: (file: GitFileChange) => void;
   onOpenFile?: (file: GitFileChange) => void;
   /**
-   * Stage or discard every new file under a folded folder at once. The folder
-   * holds no other change, so the host can act on the folder itself.
+   * Stage or discard every new file under a folded folder at once: exactly
+   * the files the row shows.
    */
   onStageFolder: (dir: string, files: GitFileChange[]) => void;
   onDiscardFolder: (dir: string, files: GitFileChange[]) => void;
@@ -36,6 +38,7 @@ const CHILD_INDENT = 38;
 export default function ChangeList({
   files,
   staged,
+  prefix,
   disabled,
   stats,
   selectedPath,
@@ -48,7 +51,7 @@ export default function ChangeList({
   onStageFolder,
   onDiscardFolder,
 }: Props): React.ReactElement {
-  const entries = useMemo(() => groupChanges(files), [files]);
+  const entries = useMemo(() => groupChanges(files, prefix), [files, prefix]);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
 
   // A folder that left the list (staged, discarded, committed) forgets that
@@ -82,6 +85,7 @@ export default function ChangeList({
       stat={stats?.[file.path]}
       indent={indent}
       folder={folder}
+      outside={Boolean(prefix) && !file.path.startsWith(prefix)}
     />
   );
 
@@ -95,6 +99,7 @@ export default function ChangeList({
             <FolderRow
               dir={entry.dir}
               count={entry.files.length}
+              deletable={entry.files.filter((file) => !file.path.endsWith("/")).length}
               open={unfolded}
               disabled={disabled}
               onToggle={() =>
@@ -123,6 +128,7 @@ export default function ChangeList({
 function FolderRow({
   dir,
   count,
+  deletable,
   open,
   disabled,
   onToggle,
@@ -131,6 +137,8 @@ function FolderRow({
 }: {
   dir: string;
   count: number;
+  /** Files a discard deletes: a nested repository inside is kept. */
+  deletable: number;
   open: boolean;
   disabled: boolean;
   onToggle: () => void;
@@ -141,7 +149,11 @@ function FolderRow({
   // Discarding deletes files git never had, so the folder's button asks for a
   // second click; leaving the row disarms it.
   const [armed, setArmed] = useState(false);
+  // The confirm sits where the Discard icon was, so the second click of a
+  // double-click, or a click right after arming, must not delete.
+  const armedAt = useRef(0);
   const { dir: parent, name } = splitPath(dir);
+  const files = `${deletable} file${deletable === 1 ? "" : "s"}`;
   return (
     <div
       role="button"
@@ -149,6 +161,7 @@ function FolderRow({
       aria-expanded={open}
       data-testid="change-folder"
       data-path={dir}
+      data-count={count}
       title={`${count} new files in ${dir}/ that git does not track yet. Click to ${open ? "fold them" : "list them"}`}
       onClick={onToggle}
       onKeyDown={(event) => {
@@ -193,20 +206,29 @@ function FolderRow({
           onClick={(e) => e.stopPropagation()}
           style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", gap: 1 }}
         >
-          {armed ? (
+          {deletable === 0 ? null : armed ? (
             <button
               type="button"
               className="scm-confirm"
-              title={`Delete the ${count} new files in ${dir}/. This cannot be undone`}
-              onClick={() => {
+              title={`Delete the ${files} in ${dir}/ that git does not track. This cannot be undone`}
+              onClick={(event) => {
+                if (event.detail > 1 || Date.now() - armedAt.current < 400) return;
                 setArmed(false);
                 onDiscard();
               }}
             >
-              Delete {count}?
+              Delete {files} in {name}/?
             </button>
           ) : (
-            <IconButton title={`Discard these ${count} new files`} danger size={20} onClick={() => setArmed(true)}>
+            <IconButton
+              title={`Discard these ${files}`}
+              danger
+              size={20}
+              onClick={() => {
+                armedAt.current = Date.now();
+                setArmed(true);
+              }}
+            >
               <UndoIcon />
             </IconButton>
           )}

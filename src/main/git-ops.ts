@@ -1,5 +1,6 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, rmdir, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { isRemotePath } from "@shared/remote";
 import type {
   GitDiff,
   GitDiffLine,
@@ -202,8 +203,13 @@ function emptyStatus(isRepo: boolean, error?: string): GitStatus {
 // Exported so the commit-message module can read parsed status without going
 // through the cache (it needs a point-in-time snapshot for the prompt).
 export async function computeGitStatus(cwd: string): Promise<GitStatus> {
+  // The prefix is where the workspace sits below the repository root ("" at
+  // the root, "src/" for a workspace opened at src). Status paths are from
+  // the root, so the panel needs it to tell the workspace's files apart.
+  let prefix = "";
   try {
-    await runGit(cwd, ["rev-parse", "--is-inside-work-tree"]);
+    const { stdout } = await runGit(cwd, ["rev-parse", "--is-inside-work-tree", "--show-prefix"]);
+    prefix = stdout.split("\n")[1]?.trim() ?? "";
   } catch (err) {
     const message = errorText(err);
     return isNotARepo(message) ? emptyStatus(false) : emptyStatus(false, message);
@@ -220,7 +226,7 @@ export async function computeGitStatus(cwd: string): Promise<GitStatus> {
       "--untracked-files=all",
       "-z",
     ]);
-    return parseStatus(stdout);
+    return { ...parseStatus(stdout), prefix };
   } catch (err) {
     return emptyStatus(true, errorText(err));
   }
@@ -479,9 +485,74 @@ export function exactPath(path: string): string {
   return `:(top,literal)${path}`;
 }
 
-export function stageFiles(cwd: string, paths: string[]): Promise<GitOpResult> {
-  if (paths.length === 0) return Promise.resolve({ ok: true });
-  return mutate(cwd, ["add", "--", ...paths.map(exactPath)]);
+// Paths per git call: a folded folder can hold thousands of files, past
+// what one command line takes on Windows.
+const PATHS_PER_CALL = 200;
+
+function chunks<T>(items: readonly T[]): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += PATHS_PER_CALL) out.push(items.slice(i, i + PATHS_PER_CALL));
+  return out;
+}
+
+export async function stageFiles(cwd: string, paths: string[]): Promise<GitOpResult> {
+  if (paths.length === 0) return { ok: true };
+  for (const part of chunks(paths)) {
+    const result = await mutate(cwd, ["add", "--", ...part.map(exactPath)]);
+    if (!result.ok) return result;
+  }
+  return { ok: true };
+}
+
+/**
+ * Deletes the new files of a folded folder, exactly the ones the panel showed.
+ * Git lists the folder's untracked files again first; if that list is not
+ * the one the row showed (an agent wrote a file since), nothing is deleted
+ * and the caller is told to look again. Ignored files and nested
+ * repositories stay, and a folder is removed only once it is empty.
+ */
+export async function discardNewFolder(cwd: string, dir: string, shown: string[]): Promise<GitOpResult> {
+  try {
+    const { stdout } = await runGit(cwd, [
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+      "--full-name",
+      "-z",
+      "--",
+      exactPath(`${dir}/`),
+    ]);
+    const now = stdout.split("\0").filter(Boolean).sort();
+    const expected = [...shown].sort();
+    if (now.length !== expected.length || now.some((path, i) => path !== expected[i])) {
+      invalidateGitCache(cwd);
+      return { ok: false, error: `${dir}/ changed since it was shown. Nothing was deleted: check it again.` };
+    }
+    // A "path/" entry is a nested repository: git clean keeps those.
+    const files = now.filter((path) => !path.endsWith("/"));
+    for (const part of chunks(files)) await runGit(cwd, ["clean", "-f", "--", ...part.map(exactPath)]);
+    if (!isRemotePath(cwd)) {
+      const root = (await runGit(cwd, ["rev-parse", "--show-toplevel"])).stdout.trim();
+      const dirs = new Set<string>();
+      for (const file of files) {
+        const parts = file.split("/");
+        for (let i = parts.length - 1; i > 0; i -= 1) {
+          const parent = parts.slice(0, i).join("/");
+          if (parent.length < dir.length) break;
+          dirs.add(parent);
+        }
+      }
+      // Deepest first; rmdir refuses a folder that still holds anything.
+      for (const folder of [...dirs].sort((a, b) => b.length - a.length)) {
+        await rmdir(join(root, folder)).catch(() => undefined);
+      }
+    }
+    invalidateGitCache(cwd);
+    return { ok: true };
+  } catch (err) {
+    invalidateGitCache(cwd);
+    return { ok: false, error: errorText(err) };
+  }
 }
 
 export function unstageFiles(cwd: string, paths: string[]): Promise<GitOpResult> {
