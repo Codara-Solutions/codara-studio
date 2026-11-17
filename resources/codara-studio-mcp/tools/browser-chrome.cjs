@@ -7,14 +7,14 @@
 
 module.exports = {
   order: 80,
-  budget: 550,
+  budget: 576,
   tools: [
     {
       name: "codara_preview_chrome",
       rpc: "preview.chrome",
       annotations: { openWorld: true },
       description:
-        "The user's own Chrome via the Codara extension: status (connection, shared chrome: tabs), open a URL in a grouped new tab, close a tab an agent opened or the user shared, or activate a shared tab.",
+        "The user's own Chrome via the Codara extension: status (connection, shared chrome: tabs), open a URL in a grouped new tab, close a tab an agent opened or the user shared, or activate a shared tab. All tools take chrome: tabIds.",
       inputSchema: {
         type: "object",
         required: ["action"],

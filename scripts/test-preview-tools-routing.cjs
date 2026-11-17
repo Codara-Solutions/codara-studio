@@ -92,6 +92,24 @@ async function loadPreviewTools(stubs) {
     tools.runPreviewTool("preview.click", { runId: "run-gone", selector: "#x" }, host),
     /workspace could not be resolved/,
   );
+  // Numbers typed as strings reach the handler as numbers, nested ones too;
+  // a name that is not a number is left for the handler to refuse.
+  const scopedBefore = scoped.length;
+  await tools.runPreviewTool("preview.resize", { callerPid: 7, width: "1280", height: " 800 " }, host);
+  assert.deepEqual([calls.at(-1).params.width, calls.at(-1).params.height], [1280, 800]);
+  await tools.runPreviewTool("preview.drag", { callerPid: 7, from: { x: "1.5", y: "2" }, to: { x: 3, y: "-4" }, steps: "6" }, host);
+  assert.deepEqual([calls.at(-1).params.from, calls.at(-1).params.to, calls.at(-1).params.steps], [{ x: 1.5, y: 2 }, { x: 3, y: -4 }, 6]);
+  await tools.runPreviewTool("preview.resize", { callerPid: 7, width: "wide", height: "1e3" }, host);
+  assert.deepEqual([calls.at(-1).params.width, calls.at(-1).params.height], ["wide", "1e3"]);
+  // evaluate reads expression as its code; click with only x, y names the tool that clicks a point.
+  await tools.runPreviewTool("preview.evaluate", { callerPid: 7, expression: "document.title" }, host);
+  assert.equal(calls.at(-1).params.code, "document.title");
+  assert.equal("expression" in calls.at(-1).params, false);
+  const clicks = calls.length;
+  await assert.rejects(tools.runPreviewTool("preview.click", { callerPid: 7, x: "170", y: "515" }, host), /To click at x, y use codara_preview_mouse/);
+  assert.equal(calls.length, clicks);
+  scoped.length = scopedBefore;
+
   const before = calls.length;
   await assert.rejects(tools.runPreviewTool("preview.nope", {}, host), /unknown method/);
   assert.equal(calls.length, before);

@@ -163,4 +163,13 @@ subscriptionSummary.consume({ type: "compaction_end", result: { usage: { input: 
 assert.equal(subscriptionSummary.result().usage.costUsd, 0);
 assert.equal(subscriptionSummary.result().usage.cacheWriteTokens, 3);
 
+// Pi's own cache warms (entry_appended, usage kind cache_warm) are billed
+// requests: they count in the call's tokens and cost, but not the gauge.
+const warmTurn = new PiTurnAccumulator(undefined, { captureCost: true });
+warmTurn.consume({ type: "message_end", message: { role: "assistant", id: "w", content: [{ type: "text", text: "ok" }], usage: { input: 10, output: 1, cacheRead: 100, cost: { total: 0.5 } } } });
+warmTurn.consume({ type: "entry_appended", entry: { type: "usage", kind: "cache_warm", usage: { input: 2, output: 1, cacheRead: 100, cost: { total: 0.025 } } } });
+warmTurn.consume({ type: "entry_appended", entry: { type: "custom", customType: "x", usage: { input: 99 } } });
+assert.deepEqual(warmTurn.result().usage, { inputTokens: 12, outputTokens: 2, cacheReadTokens: 200, cacheWriteTokens: 0, costUsd: 0.525 });
+assert.equal(warmTurn.result().contextTokens, 110, "a warm does not move the context gauge");
+
 console.log("pi-turn OpenRouter-cost capture: all assertions passed");

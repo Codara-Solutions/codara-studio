@@ -137,6 +137,24 @@ const test = (name, run) => tests.push({ name, run });
 
 // ── runs on its own ─────────────────────────────────────────────────────────
 
+test("cache warming defaults to streaming; a hand-set value wins", async () => {
+  const { SettingsManager } = await import("@earendil-works/pi-coding-agent");
+  const { useStreamingCacheWarming } = await import(pathToFileURL(join(ROOT, "cli", "harness", "cache-warming.mjs")).href);
+  const original = SettingsManager.prototype.getCacheWarmingMode;
+  try {
+    assert.equal(typeof original, "function", "Pi still reads cacheWarming");
+    useStreamingCacheWarming(SettingsManager);
+    const read = SettingsManager.prototype.getCacheWarmingMode;
+    assert.equal(read.call({ globalSettings: {} }), "streaming", "Pi's own default is idle; the CLI keeps streaming");
+    assert.equal(read.call(Object.assign(Object.create(SettingsManager.prototype), { globalSettings: { cacheWarming: "idle" } })), "idle");
+    assert.equal(read.call(Object.assign(Object.create(SettingsManager.prototype), { globalSettings: { cacheWarming: "off" } })), "off");
+    assert.throws(() => useStreamingCacheWarming(class {}), /no longer reads its cache warming/);
+  } finally {
+    SettingsManager.prototype.getCacheWarmingMode = original;
+  }
+  assert.match(readFileSync(join(ROOT, "cli", "harness", "main.mjs"), "utf8"), /useStreamingCacheWarming\(pi\.SettingsManager\);/);
+});
+
 test("never loads Electron", async () => {
   const world = makeWorld();
   const blocker = join(world.root, "no-electron.cjs");
@@ -685,22 +703,31 @@ const CHATGPT_HEADERS = {};
 const limits = () => import(pathToFileURL(join(ROOT, "cli", "harness", "limits.mjs")).href);
 const waitEvents = (stdout) => events(stdout).filter((line) => line.type === "limit_wait").map((line) => line.status);
 const inSeconds = (seconds) => Math.floor(Date.now() / 1000) + seconds;
+// Waits are timed between the stub's requests, never across a whole cora
+// process: its startup alone takes seconds on a busy CI runner, which makes a
+// lower bound pass without any wait and an upper bound fail without a bug.
+const limited = () => stub.requests.find((request) => /429$/.test(request.fault));
+const retryGap = () => {
+  const at = stub.requests.indexOf(limited());
+  assert.ok(at >= 0 && stub.requests[at + 1], "the limited request was not retried");
+  return stub.requests[at + 1].at - stub.requests[at].at;
+};
+const sinceLimited = () => Date.now() - limited().at;
 
 test("a short ChatGPT rate limit is waited out and retried", async () => {
   const cases = [
-    [{ code: "rate_limit_exceeded", message: "slow down", plan_type: "plus", resets_at: inSeconds(2) }, CHATGPT_HEADERS, 900],
+    [() => ({ code: "rate_limit_exceeded", message: "slow down", plan_type: "plus", resets_at: inSeconds(2) }), CHATGPT_HEADERS, 900],
     [{ code: "rate_limit_exceeded", message: "slow down" }, { "retry-after": "1" }, 900],
     [{ type: "tokens", message: "Rate limited" }, CHATGPT_HEADERS, 0],
   ];
   for (const [body, headers, waitedMs] of cases) {
     stub.reset();
     stub.control({ mode: "chatgpt429", count: 1, body, headers });
-    const started = Date.now();
     const result = await cora(makeWorld(), ["exec", "--model", "terra", "--json", "copy it"]);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(resultOf(result.stdout).retries, 1);
     assert.match(result.stderr, /rate limited/);
-    assert.ok(Date.now() - started >= waitedMs, "the retry did not wait for the reset");
+    assert.ok(retryGap() >= waitedMs, "the retry did not wait for the reset");
   }
 });
 
@@ -708,17 +735,19 @@ test("a rate limit's wait replaces the backoff, and happens only before a real r
   const body = { code: "rate_limit_exceeded", message: "slow down" };
   stub.control({ mode: "chatgpt429", count: 1, body, headers: { "retry-after": "2" } });
   const slowBackoff = makeWorld({ settings: { retry: { baseDelayMs: 3000 } } });
-  const started = Date.now();
   const retried = await cora(slowBackoff, ["exec", "--model", "terra", "--json", "copy it"]);
   assert.equal(retried.status, 0, retried.stderr);
-  assert.ok(Date.now() - started < 4500, "the wait and the backoff were added together");
+  // 2 s of retry-after alone; with the 3 s backoff on top it would be 5 s.
+  const gap = retryGap();
+  assert.ok(gap >= 1800, `the retry did not wait for retry-after (${gap} ms)`);
+  assert.ok(gap < 4500, `the wait and the backoff were added together (${gap} ms)`);
   stub.reset();
   stub.control({ mode: "chatgpt429", count: 9, body, headers: { "retry-after": "9" } });
   const noRetry = makeWorld({ settings: { retry: { enabled: false } } });
-  const stopped = Date.now();
   const failed = await cora(noRetry, ["exec", "--model", "terra", "--json", "copy it"]);
   assert.equal(failed.status, 1);
-  assert.ok(Date.now() - stopped < 4000, "waited with no retry left");
+  assert.equal(stub.requests.length, 1);
+  assert.ok(sinceLimited() < 4000, "waited with no retry left");
 });
 
 test("a limit describes only the latest ChatGPT request", async () => {
@@ -853,10 +882,9 @@ test("a Claude usage limit with the unified headers is waited out", async () => 
 
 test("a short Claude rate limit stays a retry, held back by its retry-after", async () => {
   stub.control({ mode: "anthropic429", count: 1, headers: { "retry-after": "2" } });
-  const started = Date.now();
   const result = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it"]);
   assert.equal(result.status, 0, result.stderr);
-  assert.ok(Date.now() - started >= 1800, "the retry did not wait");
+  assert.ok(retryGap() >= 1800, "the retry did not wait");
   assert.deepEqual(waitEvents(result.stdout), []);
   assert.equal(resultOf(result.stdout).retries, 1);
   assert.match(result.stderr, /Claude rate limited the request/);
@@ -902,12 +930,11 @@ test("with no known reset the run stops with the existing message and never poll
   for (const body of [{ code: "usage_limit_reached", message: "limit" }, { code: "usage_not_included", message: "limit", resets_at: inSeconds(2) }]) {
     stub.reset();
     stub.control({ mode: "chatgpt429", count: 9, body });
-    const started = Date.now();
     const result = await cora(makeWorld({ settings: WAIT_SETTINGS }), ["exec", "--model", "terra", "--json", "copy it"]);
     assert.equal(result.status, 1, result.stderr);
     assert.deepEqual(waitEvents(result.stdout), []);
     assert.equal(stub.requests.length, 1);
-    assert.ok(Date.now() - started < 2000);
+    assert.ok(sinceLimited() < 2000, "it waited after the limit");
   }
 });
 

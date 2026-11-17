@@ -1,3 +1,6 @@
+// test-runner: serial (drives the real macOS pasteboard through osascript,
+// whose calls have the app's 3 s limit: next to another suite on a slow
+// runner, osascript's own start outlasted it, PR 235's CI of 17 Nov)
 // Runtime round-trip test for the macOS branch of src/main/clipboard-files.ts.
 //
 // esbuild-bundles the REAL TS module (same pattern as
