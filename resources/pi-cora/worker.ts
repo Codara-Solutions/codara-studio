@@ -14,6 +14,7 @@ import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
 import { CORA_BROWSER_WORKFLOW, CORA_ENGINEERING_RULES, CORA_REPLY_LANGUAGE, coraProcessRule } from "./prompt";
 import { studioBrowserOnlyDecision } from "./studio-browser-policy";
+import { barePythonHint, pythonAvailability } from "./python-guard";
 import { toolPromptSnippet } from "./tool-families";
 import { createRepeatedCallGuard } from "./repeat-guard";
 import { activePeerCommsContext, registerWorkerPeerComms } from "./worker-peer-comms";
@@ -410,6 +411,7 @@ export default function coraPiWorkerExtension(pi: ExtensionAPI) {
   // Workers inherit fast mode from the same setting the manager reads.
   registerServiceTierPolicy(pi);
   pi.on("tool_call", (event) => studioBrowserOnlyDecision(event.toolName, event.input));
+  const python = pythonAvailability();
 
   pi.on("before_agent_start", async (event) => {
     const { systemPrompt } = event;
@@ -581,8 +583,11 @@ ${mcp?.promptSuffix() ?? ""}`,
       content: event.content,
       isError: event.isError,
     });
-    if (!outcome?.note) return undefined;
-    return { content: [...event.content, { type: "text" as const, text: outcome.note }] };
+    // A bare `python` on a machine that has only python3 fails every time;
+    // the failed call's output says how to fix it.
+    const hinted = barePythonHint(event, python);
+    if (!outcome?.note) return hinted;
+    return { content: [...(hinted?.content ?? event.content), { type: "text" as const, text: outcome.note }] };
   });
 
   if (!untrustedPullRequest) registerDeepSearch(pi);

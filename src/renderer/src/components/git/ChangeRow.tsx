@@ -1,13 +1,14 @@
 import React, { useState } from "react";
-import type { GitFileChange, GitFileDiffStat } from "@shared/types";
+import type { GitFileChange, GitFileDiffStat, GitFileStatus } from "@shared/types";
 import FileNodeIcon from "../file-icons/LazyFileNodeIcon";
+import { statusHint } from "./change-list";
 import {
   IconButton,
   MinusGlyph,
+  OpenFileIcon,
   PlusGlyph,
   UndoIcon,
   splitPath,
-  statusColor,
   statusGlyph,
   statusLabel,
 } from "./git-ui";
@@ -24,25 +25,116 @@ interface Props {
   onStage: (file: GitFileChange) => void;
   onUnstage: (file: GitFileChange) => void;
   onDiscard: (file: GitFileChange) => void;
+  /** Opens the file itself in the editor; absent where the host cannot. */
+  onOpenFile?: (file: GitFileChange) => void;
   /**
-   * +added/−removed counts for this row (Hermes-style). Optional — rows
-   * render without the column while stats load or when the backend has no
-   * entry for the path.
+   * +added/−removed counts for this row. Optional — rows render without the
+   * column while stats load or when the backend has no entry for the path.
    */
   stat?: GitFileDiffStat;
-  /**
-   * Left padding in px when the row sits inside the explorer-style ChangeTree.
-   * When set, the row shows only the file NAME — the tree's folder rows carry
-   * the location, so repeating the dir would be noise.
-   */
+  /** Left padding in px; rows inside an unfolded folder sit one step in. */
   indent?: number;
+  /** The dimmed folder after the name. Defaults to the file's own folder. */
+  folder?: string;
+  /** The file is in the repository but outside the workspace's folder. */
+  outside?: boolean;
 }
 
-// One file in a change section. The trailing slot shows the status glyph at
-// rest and swaps to the row's actions on hover — same width either way, so
-// hovering never reflows the row. `React.memo`'d: a status poll rebuilds the
-// file objects, so an untouched row keeps its old `file` reference and skips
-// the render.
+// The status letter's colour. Calm on purpose (DESIGN.md, "Source Control"):
+// an edit is the accent, a new file is grey, and only a deletion or a
+// conflict is red. Nothing here is yellow; yellow is kept for what needs you.
+export function letterStyle(status: GitFileStatus): React.CSSProperties {
+  switch (status) {
+    case "added":
+      return { color: "color-mix(in oklab, var(--ok) 85%, var(--muted))" };
+    case "untracked":
+      return { color: "var(--muted-2)", fontWeight: 500 };
+    case "deleted":
+    case "conflicted":
+      return { color: "var(--danger)" };
+    case "renamed":
+    case "typechange":
+      return { color: "var(--info)" };
+    case "modified":
+    default:
+      return { color: "var(--accent-text)" };
+  }
+}
+
+export function StatusLetter({ status }: { status: GitFileStatus }): React.ReactElement {
+  return (
+    <span
+      data-testid="change-letter"
+      title={statusHint(status)}
+      style={{
+        flex: "0 0 12px",
+        textAlign: "center",
+        fontFamily: "var(--font-mono)",
+        fontSize: 11,
+        fontWeight: 600,
+        ...letterStyle(status),
+      }}
+    >
+      {statusGlyph(status)}
+    </span>
+  );
+}
+
+export function DiffNumbers({ stat }: { stat?: GitFileDiffStat }): React.ReactElement | null {
+  if (!stat || stat.binary || (stat.additions === 0 && stat.deletions === 0)) return null;
+  return (
+    <span
+      aria-hidden
+      style={{
+        flex: "0 0 auto",
+        display: "inline-flex",
+        gap: 4,
+        fontFamily: "var(--font-mono)",
+        fontSize: 10.5,
+        fontVariantNumeric: "tabular-nums",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {stat.additions > 0 ? (
+        <span style={{ color: "color-mix(in oklab, var(--ok) 80%, var(--muted))" }}>+{stat.additions}</span>
+      ) : null}
+      {stat.deletions > 0 ? (
+        <span style={{ color: "color-mix(in oklab, var(--danger) 80%, var(--muted))" }}>−{stat.deletions}</span>
+      ) : null}
+    </span>
+  );
+}
+
+export const ROW_STYLE: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  height: 22,
+  paddingRight: 10,
+  cursor: "default",
+  minWidth: 0,
+  transition: "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+};
+
+// The folder takes only the room the name leaves (basis 0), so a long folder
+// is what truncates, never the file name first.
+export const FOLDER_TEXT_STYLE: React.CSSProperties = {
+  flex: "1 1 0",
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--muted-2)",
+  fontFamily: "var(--font-sans)",
+  fontSize: 11.5,
+};
+
+// One file in a change list, VS Code's way: name, its folder dimmed, the
+// line counts and the status letter. On hover the counts make way for Open,
+// Discard and Stage (Unstage on a staged row); the letter stays, and hovering
+// it says what it means. `React.memo`'d: a status poll rebuilds the file
+// objects, so an untouched row keeps its old `file` reference and skips the
+// render.
 const ChangeRow = React.memo(function ChangeRow({
   file,
   staged,
@@ -53,153 +145,89 @@ const ChangeRow = React.memo(function ChangeRow({
   onStage,
   onUnstage,
   onDiscard,
+  onOpenFile,
   stat,
-  indent,
+  indent = 22,
+  folder,
+  outside = false,
 }: Props) {
   const [hover, setHover] = useState(false);
   const { dir, name } = splitPath(file.path);
-  const color = statusColor(file.status);
-  // Working-tree rows carry stage + discard; staged rows carry only unstage.
-  const slotWidth = staged ? 24 : 46;
+  const ownFolder = folder ?? dir.replace(/\/$/, "");
+  // A workspace opened below the repository root still lists the rest of the
+  // repository's changes; those say so.
+  const shownFolder = outside ? `${ownFolder ? `${ownFolder} · ` : ""}outside this workspace` : ownFolder;
+  const actions = hover && !disabled;
 
   return (
     <div
+      data-testid="change-row"
+      data-path={file.path}
+      data-staged={staged || undefined}
       onClick={() => onOpenDiff(file)}
       onDoubleClick={() => onPinDiff(file)}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      title={`${statusLabel(file.status)}: ${file.path} (double-click to keep the tab open)`}
+      data-outside={outside || undefined}
+      title={`${statusLabel(file.status)}: ${file.oldPath ? `${file.oldPath} → ` : ""}${file.path}${outside ? ", outside this workspace" : ""} (double-click to keep the tab open)`}
       style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        height: 24,
-        padding: `0 8px 0 ${indent ?? 14}px`,
-        cursor: "default",
+        ...ROW_STYLE,
+        paddingLeft: indent,
         background: selected ? "var(--accent-soft)" : hover ? "var(--hover)" : "transparent",
         // Selected rows carry the app's active-row affordance: an accent edge
         // inset on the left so the marked row reads as state, not decoration.
         boxShadow: selected ? "inset 2px 0 0 var(--accent-edge)" : "none",
-        transition:
-          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       <FileNodeIcon name={name.replace(/\/$/, "")} isDir={name.endsWith("/")} size={14} />
-
       <span
         style={{
+          flex: "0 1 auto",
           minWidth: 0,
-          flex: 1,
-          display: "flex",
-          alignItems: "baseline",
-          gap: 5,
           overflow: "hidden",
+          textOverflow: "ellipsis",
           whiteSpace: "nowrap",
+          color: "var(--ink)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12.5,
+          textDecoration: file.status === "deleted" ? "line-through" : undefined,
+          textDecorationColor: "var(--muted-2)",
         }}
       >
-        <span
-          style={{
-            color: selected || hover ? "var(--ink)" : "var(--ink-dim)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 12,
-            flex: "0 1 auto",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            transition: "color var(--motion-fast) var(--ease-out)",
-          }}
-        >
-          {name}
-        </span>
-        {/* Flat lists carry the dir inline; in the tree the folder rows above
-            already say where the file lives. */}
-        {indent === undefined ? (
-          <span
-            style={{
-              color: "var(--muted-2)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 10,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              minWidth: 0,
-            }}
-          >
-            {dir}
-          </span>
-        ) : null}
+        {name}
       </span>
+      <span style={FOLDER_TEXT_STYLE}>{shownFolder}</span>
 
-      <span
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          flex: `0 0 auto`,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "flex-end",
-          gap: 2,
-          minWidth: slotWidth,
-        }}
-      >
-        {hover && !disabled ? (
-          staged ? (
+      {actions ? (
+        <span
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", gap: 1 }}
+        >
+          {onOpenFile && file.status !== "deleted" ? (
+            <IconButton title="Open file" onClick={() => onOpenFile(file)} size={20}>
+              <OpenFileIcon />
+            </IconButton>
+          ) : null}
+          {staged ? (
             <IconButton title="Unstage changes" onClick={() => onUnstage(file)} size={20}>
               <MinusGlyph />
             </IconButton>
           ) : (
             <>
-              <IconButton
-                title="Discard changes"
-                danger
-                size={20}
-                onClick={() => onDiscard(file)}
-              >
+              <IconButton title="Discard changes" danger size={20} onClick={() => onDiscard(file)}>
                 <UndoIcon />
               </IconButton>
               <IconButton title="Stage changes" onClick={() => onStage(file)} size={20}>
                 <PlusGlyph />
               </IconButton>
             </>
-          )
-        ) : (
-          <>
-            {/* Hermes-style per-file counts: green additions, red deletions,
-                tabular digits so columns align down the list. Binary files
-                and zero-count sides stay blank — the numbers only appear
-                when they say something. */}
-            {stat && !stat.binary && (stat.additions > 0 || stat.deletions > 0) ? (
-              <span
-                aria-hidden
-                style={{
-                  display: "inline-flex",
-                  gap: 5,
-                  marginRight: 6,
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 10,
-                  fontVariantNumeric: "tabular-nums",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {stat.additions > 0 ? (
-                  <span style={{ color: "var(--ok)" }}>+{stat.additions}</span>
-                ) : null}
-                {stat.deletions > 0 ? (
-                  <span style={{ color: "var(--danger)" }}>−{stat.deletions}</span>
-                ) : null}
-              </span>
-            ) : null}
-            <span
-              aria-hidden
-              style={{
-                fontFamily: "var(--font-mono)",
-                fontSize: 11,
-                fontWeight: 700,
-                color,
-              }}
-            >
-              {statusGlyph(file.status)}
-            </span>
-          </>
-        )}
-      </span>
+          )}
+        </span>
+      ) : (
+        <DiffNumbers stat={stat} />
+      )}
+      <StatusLetter status={file.status} />
     </div>
   );
 });
