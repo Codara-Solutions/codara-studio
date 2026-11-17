@@ -14,17 +14,46 @@ export function isTopTierModel(model: string): boolean {
   return TOP_TIER_WORD.test(model.replace(/[-_.@/]/g, " "));
 }
 
-/** Whether the user's own notes in this chat name the top tier. Synthetic
- *  notes (board, resume, compaction) and anything Cora wrote do not count. */
-export function userNamedTopTier(messages: readonly HumanRunMessage[]): boolean {
+/** A request for the top tier: "use fable", "run it on Mythos". */
+const TOP_TIER_REQUEST = /\b(?:use|using|run(?:\s+it)?(?:\s+on)?|with|on|switch(?:\s+it)?\s+to|try)\s+(?:claude[\s-]+)?(?:fable|mythos)\b/gi;
+const NEGATION_BEFORE = /\b(?:don'?t|do\s+not|never|not|no|without|avoid|stop)\b[^.!?\n]{0,20}$/i;
+
+/** The user's own words in a note: quoted lines and fenced blocks (a pasted
+ *  log, an excerpt) are left out. */
+function ownWords(text: string): string {
+  return text
+    .replace(/```[\s\S]*?(?:```|$)/g, " ")
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith(">"))
+    .join("\n");
+}
+
+/** Whether a note asks for the top tier, not merely names it. */
+export function asksForTopTier(text: string): boolean {
+  const words = ownWords(text);
+  for (const match of words.matchAll(TOP_TIER_REQUEST)) {
+    if (!NEGATION_BEFORE.test(words.slice(0, match.index))) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether the user asked for the top tier in this chat: a note they typed in
+ * the chat box or on the phone (typedByUser) that asks for it, or the chat's
+ * own model picked in the UI. A plan copied in, automation and workflow text,
+ * pause notes, chat.send from an agent, memory and Cora's replies never count.
+ */
+export function userNamedTopTier(messages: readonly HumanRunMessage[], chatModel?: string | null): boolean {
+  if (chatModel && isTopTierModel(chatModel)) return true;
   return messages.some(
     (message) =>
       message.author === "user" &&
       message.kind === "note" &&
+      message.typedByUser === true &&
       !message.boardNote &&
       !message.resumeNote &&
       !message.compaction &&
-      TOP_TIER_WORD.test(message.message),
+      asksForTopTier(message.message),
   );
 }
 
@@ -44,11 +73,11 @@ export function disabledWorkerModels(settings: { coraWorkerModels?: AppSettings[
  */
 export function managerSessionModelRefusal(
   model: string | null | undefined,
-  context: { messages: readonly HumanRunMessage[]; disabled: ReadonlySet<string> },
+  context: { messages: readonly HumanRunMessage[]; disabled: ReadonlySet<string>; chatModel?: string | null },
 ): string | null {
   const name = model?.trim() ?? "";
   if (!name) return null;
-  if (isTopTierModel(name) && !userNamedTopTier(context.messages)) {
+  if (isTopTierModel(name) && !userNamedTopTier(context.messages, context.chatModel)) {
     return `Session model ${name} is the top tier, used only when the user asks for it by name. Start the session on a standard model (omit model for Opus).`;
   }
   if (context.disabled.has(name.toLowerCase().split("@")[0])) {
@@ -57,12 +86,19 @@ export function managerSessionModelRefusal(
   return null;
 }
 
-/** Whether the user queued a message the manager has not received yet. */
+/** Automatic deliveries a queued message gets before only a user action
+ *  delivers it (run-store.ts MAX_AUTOMATIC_DELIVERY_ATTEMPTS). */
+export const MAX_AUTOMATIC_DELIVERY_ATTEMPTS = 2;
+
+/** Whether the user queued a message the manager has not received yet. One
+ *  stuck past its automatic deliveries does not count, or it would end every
+ *  wait after one chunk. */
 export function hasQueuedUserInput(messages: readonly HumanRunMessage[]): boolean {
   return messages.some(
     (message) =>
       message.author === "user" &&
       message.deliveryState === "queued" &&
+      (message.deliveryAttempts ?? 0) < MAX_AUTOMATIC_DELIVERY_ATTEMPTS &&
       !message.boardNote &&
       !message.resumeNote &&
       !message.compaction,
