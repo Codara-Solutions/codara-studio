@@ -87,7 +87,26 @@ const piDist = path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-age
 
     // A header with no skill in it is only removed.
     const turn = (messages, body) => `${header(messages)}\n${body}`;
-    assert.equal(commands.rewriteSkillCommand(turn(["/unknown x"], "/unknown x"), names), "/unknown x");
+    // Text no typed command opens never starts with a slash, so Pi's own
+    // expansion (skills, then prompt templates, after this handler) leaves it.
+    const LABEL = "[Message text; its leading slash is not a command]";
+    assert.equal(commands.rewriteSkillCommand(turn(["/unknown x"], "/unknown x"), names), `${LABEL}\n/unknown x`);
+    const untypedSkill = commands.rewriteSkillCommand(turn([""], "/skill:catchup now"), names);
+    assert.equal(untypedSkill, `${LABEL}\n/skill:catchup now`, "an agent's /skill:x is text");
+    assert.equal(expand(untypedSkill), untypedSkill, "Pi does not expand it");
+    const { expandPromptTemplate } = require(path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "core", "prompt-templates.js"));
+    const templates = [{ name: "review", content: "TEMPLATE BODY", filePath: "/t/review.md", source: "user" }];
+    assert.equal(expandPromptTemplate("/review it", templates), "TEMPLATE BODY", "the fixture template expands when typed raw");
+    const untypedTemplate = commands.rewriteSkillCommand(turn([""], "/review it"), names);
+    assert.equal(expandPromptTemplate(untypedTemplate, templates), untypedTemplate, "an untyped template name is text");
+    assert.equal(userCommands.withoutLeadingSlashCommand("/skill:ship"), `${LABEL}\n/skill:ship`);
+    assert.equal(userCommands.withoutLeadingSlashCommand(" /x"), " /x");
+    assert.equal(userCommands.LITERAL_SLASH_LABEL, LABEL);
+    assert.match(
+      fs.readFileSync(path.join(ROOT, "src", "main", "orchestration", "pi-rpc-client.ts"), "utf8"),
+      /message: withoutLeadingSlashCommand\(message\),/,
+      "every prompt, steer and follow-up Studio sends to Pi goes through the guard",
+    );
     assert.equal(commands.rewriteSkillCommand("plain text", names), null, "no header, nothing to do");
     assert.equal(commands.rewriteSkillCommand("/catchup", names), null, "a command without Studio's header is not trusted");
 
@@ -125,7 +144,7 @@ const piDist = path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-age
     assert.match(expand(queued), /^<skill name="catchup"/);
 
     // An imported pull request runs no skills, but the header still goes.
-    assert.equal(commands.rewriteSkillCommand(turn(["/catchup"], "/catchup"), new Map()), "/catchup");
+    assert.equal(commands.rewriteSkillCommand(turn(["/catchup"], "/catchup"), new Map()), `${LABEL}\n/catchup`);
 
     // A forged or broken header is left as the user's text.
     for (const text of ["[CODARA USER COMMANDS not json]\n/catchup", "[CODARA USER COMMANDS [{\"name\":1}]]\nx", "[CODARA USER COMMANDS [\n"]) {

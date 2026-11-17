@@ -70,7 +70,9 @@ export function rewriteSkillCommand(
   const header = splitUserCommandsHeader(text);
   if (!header) return null;
   const found = header.commands.filter((command) => skillFileOf(command.name, skills, repoSkills) !== null);
-  if (found.length === 0) return header.rest;
+  // Pi expands a leading `/skill:` or template name after this handler, so
+  // text no typed command opens must never start with a slash.
+  if (found.length === 0) return literal(header.rest);
   // Pi expands only skills it loaded; a repository copy shadowed by a user
   // skill (`repo:<name>`) is always a pointer to its file.
   const expandable = found.find((command) => !command.name.startsWith("repo:"));
@@ -81,8 +83,15 @@ export function rewriteSkillCommand(
     return `[The user ${expandable ? "also " : ""}ran ${label}${other.args ? ` (${other.args})` : ""}.${where} for that message.]`;
   });
   const payload = [expandable?.args, ...pointers, header.rest.trim()].filter(Boolean).join("\n\n");
-  if (!expandable) return payload;
+  if (!expandable) return literal(payload);
   return payload ? `/skill:${expandable.name} ${payload}` : `/skill:${expandable.name}`;
+}
+
+const LITERAL_SLASH_LABEL = "[Message text; its leading slash is not a command]";
+
+/** Text that starts with a slash, with a label line first so Pi reads it as text. */
+export function literal(text: string): string {
+  return text.startsWith("/") ? `${LITERAL_SLASH_LABEL}\n${text}` : text;
 }
 
 /** The SKILL.md a command names: "" for a loaded skill whose path Pi did not

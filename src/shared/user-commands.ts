@@ -9,6 +9,19 @@
 //
 // Pure, so the main process and the unit suite share it.
 
+/**
+ * Pi runs extension commands, skills (`/skill:<name>`) and prompt templates
+ * (`/<name>`) for any text that starts with a slash. Only a command the user
+ * typed may do that, and Cora's extension writes that form itself; any other
+ * text handed to Pi that starts with a slash gets this line first.
+ */
+export const LITERAL_SLASH_LABEL = "[Message text; its leading slash is not a command]";
+
+/** `text`, made safe to hand to Pi: never starts with a slash. */
+export function withoutLeadingSlashCommand(text: string): string {
+  return text.startsWith("/") ? `${LITERAL_SLASH_LABEL}\n${text}` : text;
+}
+
 /** The header line starts with this and ends with `]`; JSON sits between. */
 export const USER_COMMANDS_HEADER_PREFIX = "[CODARA USER COMMANDS ";
 
