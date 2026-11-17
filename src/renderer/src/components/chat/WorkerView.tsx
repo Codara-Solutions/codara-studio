@@ -51,7 +51,7 @@ export default function WorkerView({
   const workers = useMemo(() => openableWorkers(listChatWorkers(run)), [run]);
   const worker = workers.find((candidate) => candidate.id === workerId) ?? null;
   const attempt = worker ? workerAttempt(run, worker) : null;
-  const state = workerViewState(attempt);
+  const state = workerViewState(attempt, worker ?? undefined);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [showLog, setShowLog] = useState(false);
@@ -67,7 +67,7 @@ export default function WorkerView({
 
   const onKeyDown = (event: React.KeyboardEvent) => {
     // A menu or popover inside the view closes on its own Escape first.
-    if (event.key !== "Escape" || event.defaultPrevented || menuOpen) return;
+    if (event.key !== "Escape" || event.defaultPrevented || menuOpen || event.nativeEvent.isComposing) return;
     const target = event.target as HTMLElement | null;
     if (target?.closest('[role="menu"], [role="dialog"], [role="listbox"]')) return;
     event.preventDefault();
@@ -182,8 +182,12 @@ export default function WorkerView({
 function useFinishPing(run: RunState, workers: ChatWorker[], workerId: string): string | null {
   const seen = useRef<Map<string, WorkerViewState> | null>(null);
   const [ping, setPing] = useState<string | null>(null);
+  // A ping is about another worker: stepping to it (or anywhere) clears it.
   useEffect(() => {
-    const now = new Map(workers.map((worker) => [worker.id, workerViewState(workerAttempt(run, worker))]));
+    setPing(null);
+  }, [workerId]);
+  useEffect(() => {
+    const now = new Map(workers.map((worker) => [worker.id, workerViewState(workerAttempt(run, worker), worker)]));
     const before = seen.current;
     seen.current = now;
     if (!before) return;
@@ -231,11 +235,25 @@ function WorkerBar({
   menu: React.ReactNode;
 }) {
   const index = worker ? workers.findIndex((candidate) => candidate.id === worker.id) : -1;
+  const backRef = useRef<HTMLButtonElement | null>(null);
+  const previousRef = useRef<HTMLButtonElement | null>(null);
+  const nextRef = useRef<HTMLButtonElement | null>(null);
+  // An arrow that went disabled at either end drops focus to the page: keep
+  // it in the bar, on the other arrow, else on Back.
+  const step = (id: string, other: React.RefObject<HTMLButtonElement | null>) => {
+    onSelectWorker(id);
+    window.requestAnimationFrame(() => {
+      const active = document.activeElement as HTMLButtonElement | null;
+      if (active && active !== document.body && !active.disabled) return;
+      const target = other.current && !other.current.disabled ? other.current : backRef.current;
+      target?.focus();
+    });
+  };
   const previous = worker ? neighbourWorker(workers, worker.id, -1) : null;
   const next = worker ? neighbourWorker(workers, worker.id, 1) : null;
   return (
     <nav className="cora-worker-bar" aria-label="Worker">
-      <button type="button" className="cora-worker-bar__back" onClick={onBack} aria-label="Back to Main">
+      <button ref={backRef} type="button" className="cora-worker-bar__back" onClick={onBack} aria-label="Back to Main">
         <BarChevron direction="left" />
         Main
       </button>
@@ -262,11 +280,12 @@ function WorkerBar({
           Esc
         </span>
         <button
+          ref={previousRef}
           type="button"
           className="cora-worker-bar__icon"
           aria-label={previous ? `Previous worker: ${previous.title}` : "Previous worker"}
           disabled={!previous}
-          onClick={() => previous && onSelectWorker(previous.id)}
+          onClick={() => previous && step(previous.id, nextRef)}
         >
           <BarChevron direction="left" />
         </button>
@@ -274,11 +293,12 @@ function WorkerBar({
           {index >= 0 ? `${index + 1} of ${workers.length}` : ""}
         </span>
         <button
+          ref={nextRef}
           type="button"
           className="cora-worker-bar__icon"
           aria-label={next ? `Next worker: ${next.title}` : "Next worker"}
           disabled={!next}
-          onClick={() => next && onSelectWorker(next.id)}
+          onClick={() => next && step(next.id, previousRef)}
         >
           <BarChevron direction="right" />
         </button>
@@ -302,7 +322,15 @@ function WorkerMenu({
   onShowLog: () => void;
 }) {
   const anchorRef = useRef<HTMLButtonElement | null>(null);
-  const close = useCallback(() => onOpenChange(false), [onOpenChange]);
+  // The menu does not hand focus back when Escape or a click outside closes
+  // it; without this, focus would land on the page.
+  const close = useCallback(() => {
+    onOpenChange(false);
+    window.requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (!active || active === document.body || active.closest('[role="menu"]')) anchorRef.current?.focus();
+    });
+  }, [onOpenChange]);
   const pick = (action: () => void) => () => {
     close();
     anchorRef.current?.focus();
@@ -410,6 +438,8 @@ function WorkerComposer({
       await window.spark.orchestration.stopWorkerAttempt(runId, attemptId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      // A stop that took ends this composer; one that did not can be tried again.
       setStopping(false);
     }
   };
