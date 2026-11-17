@@ -30,6 +30,7 @@ import "@xyflow/react/dist/style.css";
 import { arrangeWhiteboard } from "@shared/whiteboard-layout";
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { isShown, registerFindTarget } from "../find/find-router";
+import { registerZoomTarget } from "../zoom/zoom-router";
 import { DocumentFindContext } from "../find/useFindSession";
 import type {
   CoraWhiteboard,
@@ -498,12 +499,28 @@ function WhiteboardCanvasInner({
     past: [],
     future: [],
   });
-  const { fitView, screenToFlowPosition, getViewport, setViewport } = useReactFlow();
+  const { fitView, screenToFlowPosition, getViewport, setViewport, zoomIn, zoomOut } = useReactFlow();
   const nodesInitialized = useNodesInitialized();
   const initiallyFramed = useRef(false);
   const findDocument = useContext(DocumentFindContext);
   const findDocumentRef = useRef(findDocument);
   findDocumentRef.current = findDocument;
+
+  // The zoom keys zoom the board while focus is in it; Ctrl+0 fits it, as the
+  // Fit button does.
+  useEffect(
+    () =>
+      registerZoomTarget({
+        root: () => rootRef.current,
+        eligible: () => isShown(rootRef.current),
+        zoom: (action) => {
+          if (action === "in") void zoomIn({ duration: 150 });
+          else if (action === "out") void zoomOut({ duration: 150 });
+          else void fitView({ padding: 0.18, duration: 300 });
+        },
+      }),
+    [zoomIn, zoomOut, fitView],
+  );
 
   // Ctrl+F on a board goes to its own "Find on board" field.
   useEffect(
