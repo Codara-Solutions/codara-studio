@@ -12,7 +12,9 @@
 /** The header line starts with this and ends with `]`; JSON sits between. */
 export const USER_COMMANDS_HEADER_PREFIX = "[CODARA USER COMMANDS ";
 
-const COMMAND_LINE = /^\/(?:skill:)?([A-Za-z0-9][A-Za-z0-9._-]*)(?:[ \t]+(.*))?$/;
+// `/skill:repo:<name>` names the repository's copy of a skill that a user
+// skill of the same name shadows (agent-sync.ts listPiSkills).
+const COMMAND_LINE = /^\/(?:skill:(repo:)?)?([A-Za-z0-9][A-Za-z0-9._-]*)(?:[ \t]+(.*))?$/;
 
 export interface UserCommand {
   name: string;
@@ -25,7 +27,7 @@ export interface UserCommand {
 export function userCommandOf(message: string): UserCommand | null {
   const first = message.trim().split("\n", 1)[0]?.trim() ?? "";
   const match = COMMAND_LINE.exec(first);
-  return match ? { name: match[1], args: match[2]?.trim() ?? "" } : null;
+  return match ? { name: `${match[1] ?? ""}${match[2]}`, args: match[3]?.trim() ?? "" } : null;
 }
 
 /** The header for a turn's messages, in order. Every Pi turn carries one,

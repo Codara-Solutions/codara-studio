@@ -415,10 +415,23 @@ export async function cleanupPiMcpBridgeConfig(plan: {
  *  `/<skill>` from a path such as `/home/...`. Empty when discovery fails. */
 export async function listCodaraPiSkillNames(cwd: string): Promise<Set<string>> {
   try {
-    const [{ listPiSkills }, settings] = await Promise.all([import("../agent-sync"), loadSettings()]);
-    return new Set(listPiSkills({ cwd, piAgentDir: codaraPiPaths().configDir, settings }).map((skill) => skill.name));
+    const [{ listPiSkillsWithShadows }, settings] = await Promise.all([import("../agent-sync"), loadSettings()]);
+    const found = listPiSkillsWithShadows({ cwd, piAgentDir: codaraPiPaths().configDir, settings });
+    return new Set([...found.skills.map((skill) => skill.name), ...found.shadowed.map((skill) => `repo:${skill.name}`)]);
   } catch {
     return new Set();
+  }
+}
+
+/** Repository skills a user skill of the same name shadows, as
+ *  {name: SKILL.md}, for `/skill:repo:<name>` (CODARA_PI_REPO_SKILLS). */
+async function shadowedRepoSkills(cwd: string, configDir: string): Promise<Record<string, string>> {
+  try {
+    const [{ listPiSkillsWithShadows }, settings] = await Promise.all([import("../agent-sync"), loadSettings()]);
+    const found = listPiSkillsWithShadows({ cwd, piAgentDir: configDir, settings });
+    return Object.fromEntries(found.shadowed.map((skill) => [skill.name, skill.skillFile]));
+  } catch {
+    return {};
   }
 }
 
@@ -754,6 +767,8 @@ export async function createCodaraPiLaunchPlan(
     if (!untrustedPullRequest) {
       const rulesPath = userAgentRulesPath();
       if (rulesPath) plan.env.CODARA_PI_USER_RULES_PATH = rulesPath;
+      const repoSkills = await shadowedRepoSkills(options.cwd, paths.configDir);
+      if (Object.keys(repoSkills).length > 0) plan.env.CODARA_PI_REPO_SKILLS = JSON.stringify(repoSkills);
     }
     return untrustedPullRequest
       ? attachUntrustedSocketCapability(plan, {

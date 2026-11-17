@@ -558,8 +558,11 @@ async function main() {
   const fsSource = (file) => require("node:fs").readFileSync(require("node:path").join(__dirname, "..", file), "utf8");
   check(
     "typedByUser is set only by the composer and the phone",
-    /addRunMessage\(\{ \.\.\.input, typedByUser: true \}\)/.test(fsSource("src/main/ipc.ts")) &&
-      /startAutopilot\(\{ \.\.\.input, initialNoteTypedByUser: true \}\)/.test(fsSource("src/main/ipc.ts")) &&
+    !/typedByUser: true/i.test(fsSource("src/main/ipc.ts")) &&
+      (fsSource("src/renderer/src/components/chat/ChatComposer.tsx").match(/typedByUser: true/g) ?? []).length === 2 &&
+      /initialNoteTypedByUser: true,/.test(fsSource("src/renderer/src/components/OrchestrationSidebar.tsx")) &&
+      !/TypedByUser/i.test(fsSource("src/renderer/src/routing/useSelectionRoutingApi.ts")) &&
+      !/TypedByUser/i.test(fsSource("src/renderer/src/App.tsx")) &&
       /typedByUser: true,/.test(fsSource("src/main/remote-access/production.ts")) &&
       /initialNoteTypedByUser: true,/.test(fsSource("src/main/remote-access/production.ts")) &&
       !/typedByUser/i.test(fsSource("src/main/agent-socket.ts")) &&

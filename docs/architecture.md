@@ -318,7 +318,10 @@ folders only; an `ssh://` workspace gets a clear error instead of a broken
 launch.
 
 **Rules and skills.** Skills reach Pi from Codara's, Claude's, Codex's and
-the repository's skill folders (`listPiSkillPaths` in `agent-sync.ts`). A
+the repository's skill folders (`listPiSkills` in `agent-sync.ts`). On a
+name clash the user's (or Codara's) skill loads; the repository's copy runs
+only as `/skill:repo:<name>`, and the chat notes which SKILL.md ran. Only a
+message typed in the composer or on the phone (`typedByUser`) runs a skill. A
 skill the user types as `/skill:<name>` or `/<name>` runs even when it is
 hidden from the model (`disable-model-invocation`): such a message skips the
 direct lane (`direct-execution.ts`). Studio lists the commands that open each

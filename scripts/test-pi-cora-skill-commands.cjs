@@ -97,6 +97,28 @@ const piDist = path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-age
     assert.match(expand(short), /^<skill name="catchup"[\s\S]*Say what changed[\s\S]*<\/skill>\n\nsince lunch\n\n\/catchup since lunch/);
     assert.match(expand(commands.rewriteSkillCommand(turn(["/skill:catchup"], "/skill:catchup"), names)), /^<skill name="catchup"/);
 
+    // A repository copy a user skill shadows runs only by its qualified name,
+    // as a pointer to its file; the plain name runs the user's skill.
+    assert.deepEqual(userCommands.userCommandOf("/skill:repo:ship now"), { name: "repo:ship", args: "now" });
+    assert.equal(userCommands.userCommandOf("/repo:ship"), null, "the qualified form needs /skill:");
+    const repo = commands.repoSkillsFromEnv(JSON.stringify({ ship: "/repo/.claude/skills/ship/SKILL.md", bad: 3 }));
+    assert.deepEqual([...repo], [["ship", "/repo/.claude/skills/ship/SKILL.md"]]);
+    assert.equal(commands.repoSkillsFromEnv("not json").size, 0);
+    assert.equal(
+      commands.rewriteSkillCommand(turn(["/skill:repo:ship now"], "/skill:repo:ship now"), names, repo),
+      "[The user ran the repository's skill ship (now). Read /repo/.claude/skills/ship/SKILL.md and follow it for that message.]\n\n/skill:repo:ship now",
+    );
+    assert.equal(commands.rewriteSkillCommand(turn(["/skill:repo:catchup"], "x"), names, repo), "x", "no shadowed copy, nothing runs");
+    assert.match(commands.rewriteSkillCommand(turn(["/ship"], "/ship"), names, repo), /^\/skill:ship/);
+    // What ran, for the chat note: the user's file for /ship, the repository's for the qualified name.
+    assert.deepEqual(commands.skillsRun(turn(["/ship", "/skill:repo:ship", "/nope"], "x"), names, repo), [
+      { name: "ship", path: "/skills/ship/SKILL.md" },
+      { name: "repo:ship", path: "/repo/.claude/skills/ship/SKILL.md" },
+    ]);
+    const indexText = fs.readFileSync(path.join(piCora, "index.ts"), "utf8");
+    assert.match(indexText, /if \(ran\.length > 0\) pi\.appendEntry\(SKILL_RAN_ENTRY, \{ skills: ran \}\);/);
+    assert.equal(commands.SKILL_RAN_ENTRY, "codara-skill-ran");
+
     // A later queued message's command runs; two commands both reach the model.
     const queued = commands.rewriteSkillCommand(turn(["also check the tests", "/catchup", "/ship now"], "The user sent the following queued messages..."), names);
     assert.match(queued, /^\/skill:catchup \[The user also ran the skill ship \(now\)\. Read \/skills\/ship\/SKILL\.md and follow it for that message\.\]\n\nThe user sent/);
@@ -116,7 +138,7 @@ const piDist = path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-age
     assert.equal(userCommands.USER_COMMANDS_HEADER_PREFIX, "[CODARA USER COMMANDS ");
     assert.match(fs.readFileSync(path.join(piCora, "skill-commands.ts"), "utf8"), /const HEADER_PREFIX = "\[CODARA USER COMMANDS ";/);
     const indexSource = fs.readFileSync(path.join(piCora, "index.ts"), "utf8");
-    assert.match(indexSource, /rewriteSkillCommand\(event\.text, skills\)/);
+    assert.match(indexSource, /rewriteSkillCommand\(event\.text, skills, repoSkills\)/);
     assert.match(indexSource, /loadUserRulesSection\(\)/);
 
     // The user's global rules ride the system prompt once, framed.

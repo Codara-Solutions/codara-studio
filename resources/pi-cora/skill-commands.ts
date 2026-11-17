@@ -65,17 +65,62 @@ export function splitUserCommandsHeader(text: string): { commands: UserCommand[]
 export function rewriteSkillCommand(
   text: string,
   skills: ReadonlyMap<string, string | undefined>,
+  repoSkills: ReadonlyMap<string, string> = new Map(),
 ): string | null {
   const header = splitUserCommandsHeader(text);
   if (!header) return null;
-  const found = header.commands.filter((command) => skills.has(command.name));
+  const found = header.commands.filter((command) => skillFileOf(command.name, skills, repoSkills) !== null);
   if (found.length === 0) return header.rest;
-  const [first, ...others] = found;
-  const pointers = others.map((other) => {
-    const path = skills.get(other.name);
+  // Pi expands only skills it loaded; a repository copy shadowed by a user
+  // skill (`repo:<name>`) is always a pointer to its file.
+  const expandable = found.find((command) => !command.name.startsWith("repo:"));
+  const pointers = found.filter((command) => command !== expandable).map((other) => {
+    const path = skillFileOf(other.name, skills, repoSkills);
     const where = path ? ` Read ${path} and follow it` : " Follow it";
-    return `[The user also ran the skill ${other.name}${other.args ? ` (${other.args})` : ""}.${where} for that message.]`;
+    const label = other.name.startsWith("repo:") ? `the repository's skill ${other.name.slice(5)}` : `the skill ${other.name}`;
+    return `[The user ${expandable ? "also " : ""}ran ${label}${other.args ? ` (${other.args})` : ""}.${where} for that message.]`;
   });
-  const payload = [first.args, ...pointers, header.rest.trim()].filter(Boolean).join("\n\n");
-  return payload ? `/skill:${first.name} ${payload}` : `/skill:${first.name}`;
+  const payload = [expandable?.args, ...pointers, header.rest.trim()].filter(Boolean).join("\n\n");
+  if (!expandable) return payload;
+  return payload ? `/skill:${expandable.name} ${payload}` : `/skill:${expandable.name}`;
 }
+
+/** The SKILL.md a command names: "" for a loaded skill whose path Pi did not
+ *  report, null when it names no skill. */
+function skillFileOf(
+  name: string,
+  skills: ReadonlyMap<string, string | undefined>,
+  repoSkills: ReadonlyMap<string, string>,
+): string | null {
+  if (name.startsWith("repo:")) return repoSkills.get(name.slice(5)) ?? null;
+  return skills.has(name) ? skills.get(name) ?? "" : null;
+}
+
+/** The skills a turn's header runs, with their files, for the chat note. */
+export function skillsRun(
+  text: string,
+  skills: ReadonlyMap<string, string | undefined>,
+  repoSkills: ReadonlyMap<string, string> = new Map(),
+): Array<{ name: string; path: string }> {
+  const header = splitUserCommandsHeader(text);
+  if (!header) return [];
+  return header.commands.flatMap((command) => {
+    const path = skillFileOf(command.name, skills, repoSkills);
+    return path === null ? [] : [{ name: command.name, path }];
+  });
+}
+
+/** CODARA_PI_REPO_SKILLS ({name: SKILL.md}) as a map; empty when unset or bad. */
+export function repoSkillsFromEnv(value: string | undefined): Map<string, string> {
+  if (!value) return new Map();
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+    return new Map(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  } catch {
+    return new Map();
+  }
+}
+
+/** The custom entry Studio turns into a chat note naming each skill file. */
+export const SKILL_RAN_ENTRY = "codara-skill-ran";

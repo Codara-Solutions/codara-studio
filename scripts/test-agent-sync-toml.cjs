@@ -513,14 +513,17 @@ async function main() {
       assert.equal(fs.existsSync(codaraSkill), false);
     });
     assert.ok(paths.includes(path.join(FAKE_HOME, ".claude", "skills", "b")), "a Claude skill reaches Cora");
-    // A repository skill and a user skill with the same name: the repository's
-    // copy is the one Pi loads, and so the one a typed /quick runs.
+    // A repository skill and a user skill with the same name: the user's copy
+    // is the one Pi loads, so a typed /quick runs it; the repository's is
+    // listed as shadowed, reachable only as /skill:repo:quick.
     const userQuick = path.join(FAKE_HOME, ".agents", "skills", "quick");
     fs.mkdirSync(userQuick, { recursive: true });
     fs.writeFileSync(path.join(userQuick, "SKILL.md"), "---\nname: quick\ndescription: User quick\n---\n");
-    const named = sync.listPiSkills({ cwd: FAKE_CWD, settings: settings() }).filter((skill) => skill.name === "quick");
-    assert.deepEqual(named.map((skill) => skill.location), [path.join(FAKE_CWD, ".pi", "skills", "quick.md")]);
+    const clash = sync.listPiSkillsWithShadows({ cwd: FAKE_CWD, settings: settings() });
+    assert.deepEqual(clash.skills.filter((skill) => skill.name === "quick").map((skill) => skill.location), [userQuick]);
+    assert.deepEqual(clash.shadowed, [{ name: "quick", skillFile: path.join(FAKE_CWD, ".pi", "skills", "quick.md") }]);
     fs.rmSync(userQuick, { recursive: true, force: true });
+    assert.deepEqual(sync.listPiSkillsWithShadows({ cwd: FAKE_CWD, settings: settings() }).shadowed, [], "no clash, nothing shadowed");
     assert.equal(paths.some((entry) => entry.includes("gamma")), false, "a switched-off skill stays off");
     assert.equal(paths.some((entry) => entry.includes(".system")), false, "Codex system skills stay Codex-only");
   });

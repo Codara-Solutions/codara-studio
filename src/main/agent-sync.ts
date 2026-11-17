@@ -400,26 +400,32 @@ export function listPiSkillPaths(input: {
 
 /**
  * The skills a Pi session loads, by name, in the order that wins a name
- * clash: the repository's own folders first, then Codara's, then the user's
- * CLI folders. So a repository skill named like a user skill is the one a
- * typed `/<name>` runs.
+ * clash: Codara's, then the user's own folders, then the repository's. A
+ * repository cannot replace a skill the user typed by name; its copy is
+ * listed in `shadowed` and reachable only as `/skill:repo:<name>`.
  */
 export function listPiSkills(input: {
   cwd?: string | null;
   piAgentDir?: string | null;
   settings: Pick<AppSettings, "agentDisabledSkillIds">;
 }): Array<{ name: string; location: string }> {
+  return listPiSkillsWithShadows(input).skills;
+}
+
+export function listPiSkillsWithShadows(input: {
+  cwd?: string | null;
+  piAgentDir?: string | null;
+  settings: Pick<AppSettings, "agentDisabledSkillIds">;
+}): {
+  skills: Array<{ name: string; location: string }>;
+  /** Repository skills named like a loaded user skill, with their SKILL.md. */
+  shadowed: Array<{ name: string; skillFile: string }>;
+} {
   const cwd = input.cwd?.trim() ?? "";
   const disabled = new Set(input.settings.agentDisabledSkillIds ?? []);
   // `piNative` roots also hold single-file skills (a root .md with skill
   // frontmatter), which Pi discovers there and nowhere else.
-  const roots: Array<{ path: string; piNative: boolean }> = [];
-  if (cwd) {
-    roots.push({ path: join(cwd, ".pi", "skills"), piNative: true });
-    for (const dir of ancestorsToRepoRoot(cwd)) roots.push({ path: join(dir, ".agents", "skills"), piNative: false });
-    roots.push({ path: join(cwd, ".claude", "skills"), piNative: false });
-    roots.push({ path: join(cwd, ".codex", "skills"), piNative: false });
-  }
+  const roots: Array<{ path: string; piNative: boolean; repo?: true }> = [];
   // Ahead of every other user root: a skill the user added in Codara wins a
   // name clash with a copy some CLI keeps.
   roots.push({ path: codaraSkillsDir(), piNative: false });
@@ -430,9 +436,16 @@ export function listPiSkills(input: {
     { path: join(claudeConfigDir(), "skills"), piNative: false },
     { path: join(defaultPersonalCodexHomeDir(), "skills"), piNative: false },
   );
+  if (cwd) {
+    roots.push({ path: join(cwd, ".pi", "skills"), piNative: true, repo: true });
+    for (const dir of ancestorsToRepoRoot(cwd)) roots.push({ path: join(dir, ".agents", "skills"), piNative: false, repo: true });
+    roots.push({ path: join(cwd, ".claude", "skills"), piNative: false, repo: true });
+    roots.push({ path: join(cwd, ".codex", "skills"), piNative: false, repo: true });
+  }
   const seenRoots = new Set<string>();
   const seenNames = new Set<string>();
   const out: Array<{ name: string; location: string }> = [];
+  const shadowed: Array<{ name: string; skillFile: string }> = [];
   for (const root of roots) {
     const rootKey = normalizePathForMatch(resolve(root.path));
     if (seenRoots.has(rootKey)) continue;
@@ -441,16 +454,20 @@ export function listPiSkills(input: {
     if (root.piNative) entries.push(...rootSkillFiles(root.path));
     for (const [name, location] of entries) {
       const key = sessionKey("skill", name);
-      if (seenNames.has(key)) continue;
+      if (seenNames.has(key)) {
+        const skillFile = location.endsWith(".md") ? location : findSkillFile(location);
+        if (root.repo && skillFile && out.some((skill) => skill.name === name)) shadowed.push({ name, skillFile });
+        continue;
+      }
       seenNames.add(key);
       if (disabled.has(key)) continue;
       // Codex's bundled system skills drive Codex-only tooling.
       if (normalizePathForMatch(location).includes(CODEX_SYSTEM_SKILL_ROOT)) continue;
       out.push({ name, location });
-      if (out.length >= MAX_PI_SKILLS) return out;
+      if (out.length >= MAX_PI_SKILLS) return { skills: out, shadowed };
     }
   }
-  return out;
+  return { skills: out, shadowed };
 }
 
 function rootSkillFiles(root: string): Array<[string, string]> {

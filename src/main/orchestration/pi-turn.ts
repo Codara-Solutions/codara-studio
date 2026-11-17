@@ -269,6 +269,22 @@ export class PiTurnAccumulator {
       return;
     }
 
+    if (event.type === "entry_appended") {
+      // The skill files a typed command ran (resources/pi-cora/skill-commands.ts).
+      const entry = asRecord(event.entry);
+      const skills = entry?.type === "custom" && entry.customType === "codara-skill-ran"
+        ? asRecord(entry.data)?.skills
+        : null;
+      if (Array.isArray(skills)) {
+        for (const skill of skills.map(asRecord)) {
+          if (typeof skill?.name !== "string") continue;
+          const path = typeof skill.path === "string" && skill.path ? ` from ${skill.path}` : "";
+          this.onStream?.({ kind: "system_note", message: `Ran the skill /${skill.name}${path}.` });
+        }
+      }
+      return;
+    }
+
     if (event.type === "compaction_start") {
       this.onStream?.({
         kind: "system_note",
