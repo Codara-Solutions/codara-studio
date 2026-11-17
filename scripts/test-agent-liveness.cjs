@@ -334,6 +334,7 @@ check("long-poll tool names match bare and mcp-prefixed forms", () => {
   assert.equal(isLongPollToolName("mcp__codara-studio__codara_wait_for_workers"), true);
   assert.equal(isLongPollToolName("codara_ask_user"), true);
   assert.equal(isLongPollToolName("codara_wait_for_automation"), true);
+  assert.equal(isLongPollToolName("codara_session_wait"), true);
   // A non-blocking tool must NOT hold the idle clock open.
   assert.equal(isLongPollToolName("codara_spawn_workers"), false);
   assert.equal(isLongPollToolName("bash"), false);

@@ -149,6 +149,11 @@ function rpcRaw(handshake, body, headers = {}) {
           Authorization: `Bearer ${handshake.token}`,
           ...headers,
         },
+        // A connection of its own for each call. Through Node's keep-alive
+        // agent a call could go out on a connection the app was closing,
+        // and CI then failed with ECONNRESET on a random call while the app
+        // ran on with nothing in its log. Nothing here tests connection reuse.
+        agent: false,
       },
       (res) => {
         let data = "";
@@ -156,7 +161,10 @@ function rpcRaw(handshake, body, headers = {}) {
         res.on("end", () => resolve({ status: res.statusCode, body: data }));
       },
     );
-    req.on("error", reject);
+    req.on("error", (error) => {
+      error.message = `${error.message} (during ${typeof body === "string" ? "a raw request" : body.method})`;
+      reject(error);
+    });
     req.end(payload);
   });
 }
@@ -351,6 +359,25 @@ async function main() {
     }
     check("handshake file written", Boolean(handshake && handshake.url && handshake.token));
     if (!handshake) throw new Error("no handshake — is out/ built?");
+    // The socket answers before the window has booted, and terminal and
+    // preview ops go through the renderer: one sent before React mounts is
+    // never heard and times out after 5 s. On a loaded CI runner the boot
+    // takes longer than the checks below take to reach the first such op.
+    const mainLog = path.join(HOME, "logs", "main.log");
+    const rendererReady = () => {
+      try {
+        return /\[boot\] renderer ready$/m.test(fs.readFileSync(mainLog, "utf8"));
+      } catch {
+        return false;
+      }
+    };
+    for (let waited = 0; !rendererReady(); waited += 250) {
+      if (app.exitCode !== null || app.signalCode !== null) throw new Error("Electron exited before its window booted");
+      // With the 60 s handshake wait this stays inside the runner's 180 s
+      // suite timeout, so this message, not a bare timeout, reports it.
+      if (waited >= 60_000) throw new Error("the window never booted (no 'renderer ready' in main.log after 60 s)");
+      await sleep(250);
+    }
 
     // Auth: wrong token → 401, no JSON-RPC processing.
     const bad = await rpcRaw(handshake, { jsonrpc: "2.0", id: 1, method: "preview.list", params: {} }, { Authorization: "Bearer wrong" });
@@ -2290,6 +2317,19 @@ async function main() {
       !/request too large/.test(bigWhiteboard.error?.message ?? "") && !bigWhiteboard.parseError,
       JSON.stringify(bigWhiteboard).slice(0, 200),
     );
+  } catch (error) {
+    // A reset connection alone does not say whether the app died or only
+    // dropped the socket; the home with its log is removed below.
+    console.error(
+      `  app at the failure: ${app.exitCode !== null || app.signalCode !== null ? `exited (code ${app.exitCode}, signal ${app.signalCode})` : "still running"}`,
+    );
+    try {
+      const log = fs.readFileSync(path.join(HOME, "logs", "main.log"), "utf8");
+      console.error(`  last lines of the app's main.log:\n${log.split("\n").slice(-40).join("\n")}`);
+    } catch {
+      console.error("  the app wrote no main.log");
+    }
+    throw error;
   } finally {
     // Launch the binary directly and await its exit: killing Electron's Node
     // CLI wrapper leaves the app writing into the directory being removed.

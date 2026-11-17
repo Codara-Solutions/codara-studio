@@ -7,7 +7,7 @@
 
 import { normalizeTabGroupName } from "../../../shared/tab-group-name";
 import { PreviewToolParamsError, type PreviewToolHost } from "../../preview-tools/types";
-import { parseTabRef } from "../tab-ref";
+import { formatTabRef, parseTabRef } from "../tab-ref";
 import { chromeAgentLabel, recordChromeActivity } from "./activity";
 import { chromeLinkRuntime } from "./runtime";
 
@@ -78,11 +78,17 @@ export async function chromeLinkTool(params: Record<string, unknown>, _method: s
     case "activate": {
       const ref = parseTabRef(params.tabId);
       if (ref?.kind !== "chrome") throw new PreviewToolParamsError(`${action} needs the tabId of a Chrome tab, such as chrome:123.`);
+      // A repeated close finds the tab gone, which is what it asked for; a
+      // tab that was never there, or is only unshared, is still an error.
+      if (action === "close" && backend.goneReason(ref) === "closed") return { ok: true, tabId: formatTabRef(ref), action, alreadyClosed: true };
       const { link, tab } = backend.locate(ref);
       await link.request(action, { tabId: tab.tabId });
+      if (action === "close") backend.noteClosed(link, tab.tabId);
       return { ok: true, tabId: backend.refFor(link, tab.tabId), action, ...(action === "close" ? { closed: true } : {}) };
     }
     default:
-      throw new PreviewToolParamsError(`Unknown action ${action}; use status, open, close or activate.`);
+      throw new PreviewToolParamsError(
+        `Unknown action ${action}; use status, open, close or activate. status lists the shared Chrome tabs, and codara_preview_list lists every tab.`,
+      );
   }
 }

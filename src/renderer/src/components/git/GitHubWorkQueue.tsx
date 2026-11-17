@@ -177,13 +177,15 @@ export default function GitHubWorkQueue({
     };
   }, [load, surface]);
 
-  // The single section header owns the spinner and count for the whole block.
+  // The Issues tab owns the count for the whole block: the rows this list
+  // shows, so the branch's own pull request (on its own tab) is not counted.
+  const shownCount =
+    status?.kind === "ready"
+      ? status.items.filter((item) => !isOmitted(item, omitPullRequest)).length
+      : null;
   useEffect(() => {
-    onSummary({
-      loading,
-      total: status?.kind === "ready" ? status.items.length : null,
-    });
-  }, [onSummary, loading, status]);
+    onSummary({ loading, total: shownCount });
+  }, [onSummary, loading, shownCount]);
 
   const open = useCallback(
     async (item: GitHubWorkQueueItem) => {
@@ -208,17 +210,7 @@ export default function GitHubWorkQueue({
   );
 
   const ready = status?.kind === "ready" ? status : null;
-  const items = ready
-    ? ready.items.filter(
-        (item) =>
-          !(
-            omitPullRequest &&
-            item.kind === "pull-request" &&
-            item.repository === omitPullRequest.repository &&
-            item.pullRequest.number === omitPullRequest.number
-          ),
-      )
-    : [];
+  const items = ready ? ready.items.filter((item) => !isOmitted(item, omitPullRequest)) : [];
   const partial = ready
     ? ready.errors.length > 0 ||
       ready.truncated.errorsOmitted > 0 ||
@@ -1084,5 +1076,17 @@ function QueueMessage({
     >
       {children}
     </div>
+  );
+}
+
+function isOmitted(
+  item: GitHubWorkQueueItem,
+  omit: { repository: string; number: number } | null,
+): boolean {
+  return Boolean(
+    omit &&
+      item.kind === "pull-request" &&
+      item.repository === omit.repository &&
+      item.pullRequest.number === omit.number,
   );
 }
