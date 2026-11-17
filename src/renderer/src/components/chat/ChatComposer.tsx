@@ -1624,6 +1624,12 @@ export default function ChatComposer({
               activity={workerActivity}
               steeringQueues={isActive}
             />
+          ) : workerActivity && (workerActivity.runPaused || isActive) ? (
+            // The rail counts the workers; this line still says what the
+            // composer does with what you type, as the full line's tail did.
+            <span className="composer-toolbar__hint composer-toolbar__hint--worker-tail">
+              {workerActivity.runPaused ? "Paused" : "Messages queue"}
+            </span>
           ) : (
             // Status only. Keyboard tips competed with the model pill for the
             // same row and truncated both; the placeholder and the Send

@@ -69,7 +69,7 @@ test("the agents rail lists a chat's workers, goes inside one and folds", async 
     await expect(strip.getByRole("button", { name: /^Read how the fold counts: / })).toHaveAttribute("data-state", "done");
     await expect(strip.getByRole("button", { name: /^Check the light theme: / })).toHaveAttribute("data-state", "failed");
     // The count lives on the rail now, not under the composer.
-    await expect(page.getByTestId("cora-panel")).not.toContainText("workers running");
+    await expect(page.locator(".composer-toolbar__hint--worker")).toHaveCount(0);
 
     // Hover: name, model, state, time and the step it is on.
     await toast.hover();
@@ -89,22 +89,26 @@ test("the agents rail lists a chat's workers, goes inside one and folds", async 
     await expect(list.locator('[data-rail-row][data-state="running"]').first()).toContainText("Run command · npm test");
     await expect(list.locator('[data-rail-row="main"]')).toBeFocused();
     await shot(page, join(shots, "rail-2-list.png"));
-    // Esc folds it and hands focus back to the strip.
+    // Esc folds it and hands focus back to where it was opened from.
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Escape");
     await expect(list).toHaveCount(0);
-    await expect(strip.locator('[data-rail-key="main"]')).toBeFocused();
+    await expect(strip.getByRole("button", { name: "Open the agents list" })).toBeFocused();
 
     // Keyboard: one tab stop, down to a worker, Enter goes inside.
     await expect(strip.locator('[tabindex="0"]')).toHaveCount(1);
+    await page.keyboard.press("Home");
+    await expect(strip.locator('[data-rail-key="main"]')).toBeFocused();
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
     await expect(toast).toBeFocused();
     await page.keyboard.press("Enter");
     const bar = page.getByRole("navigation", { name: "Worker" });
     await expect(bar).toContainText("Watch the toast count");
-    // Inside, the strip stays and marks the worker you are in.
+    // Inside, the strip stays and marks the worker you are in, beside the view.
     await expect(toast).toHaveAttribute("aria-current", "true");
+    const viewLeft = await page.locator("[data-worker-view]").evaluate((node) => node.getBoundingClientRect().left);
+    expect(viewLeft).toBeGreaterThanOrEqual(((await strip.boundingBox())?.x ?? 0) + 32);
     await expect(strip.locator('[data-rail-key="main"]')).not.toHaveAttribute("aria-current", "true");
     await strip.getByRole("button", { name: /^Check the empty list: / }).hover();
     await expect(tip).toContainText("Check the empty list");
@@ -122,9 +126,13 @@ test("the agents rail lists a chat's workers, goes inside one and folds", async 
     await strip.getByRole("button", { name: "Open the agents list" }).click();
     await list.locator('[data-rail-row]').filter({ hasText: "Check the empty list" }).click();
     await expect(bar).toContainText("Check the empty list");
-    await strip.locator('[data-rail-key="main"]').click();
+    // Cora's mark by keyboard: back to Main, and focus stays on the rail.
+    await strip.locator('[data-rail-key="main"]').focus();
+    await page.keyboard.press("Enter");
     await expect(bar).toHaveCount(0);
     await expect(strip.locator('[data-rail-key="main"]')).toHaveAttribute("aria-current", "true");
+    await page.waitForTimeout(100);
+    await expect(strip.locator('[data-rail-key="main"]')).toBeFocused();
 
     // A narrow pane: the strip keeps its 32 px and the list floats over the chat.
     await page.getByTestId("cora-panel").evaluate((panel) => {
@@ -146,6 +154,9 @@ test("the agents rail lists a chat's workers, goes inside one and folds", async 
 
     // Eight and more: running ones first, then "+N", which opens the list.
     await launchMore(page, seeded.runId, seeded.stepId, workspaceDir, 7);
+    await expect
+      .poll(() => attemptStatuses(page, seeded.runId), { timeout: 30_000 })
+      .toEqual({ done: 1, failed: 1, running: 9 });
     await expect(strip.getByRole("button", { name: /^\d+ more workers, open the list$/ })).toHaveText("+3", { timeout: 20_000 });
     const marks = strip.locator("[data-rail-key][data-state]");
     await expect(marks).toHaveCount(8);

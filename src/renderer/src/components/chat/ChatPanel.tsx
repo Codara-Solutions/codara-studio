@@ -168,12 +168,13 @@ export default function ChatPanel({
       window.removeEventListener("spark:prefill-composer", leave, true);
     };
   }, [inside, suspendGlobalEvents]);
-  const leaveWorker = useCallback(() => {
+  const leaveWorker = useCallback((keepFocus: boolean) => {
     const left = insideWorker;
     setInsideWorker(null);
     // Back where you came from: the row you opened, when it is still drawn.
+    // From the agents rail, focus stays on the rail.
     window.requestAnimationFrame(() => {
-      if (!left) return;
+      if (!left || keepFocus) return;
       const row = panelRef.current?.querySelector<HTMLElement>(`[data-worker-row="${CSS.escape(left)}"]`);
       row?.focus({ preventScroll: true });
     });
@@ -181,6 +182,11 @@ export default function ChatPanel({
   // The agents rail: on the chat's left edge whenever the chat has workers,
   // in Main and inside a worker alike.
   const hasWorkers = useMemo(() => (activeRun ? listChatWorkers(activeRun).length > 0 : false), [activeRun]);
+  // The bar's Back passes its click event: never read it as keepFocus.
+  const leaveBack = useCallback(() => leaveWorker(false), [leaveWorker]);
+  const leaveFromRail = useCallback(() => {
+    if (inside) leaveWorker(true);
+  }, [inside, leaveWorker]);
   const showRail = hasWorkers && chatView === "chat" && activeRun !== null && !isUnstartedChatRun(activeRun);
   const mountWhiteboard = whiteboardOpened || chatView === "whiteboard";
   useEffect(() => {
@@ -292,13 +298,15 @@ export default function ChatPanel({
             // never shifts sideways when the rail arrives.
             <Suspense fallback={<div aria-hidden style={{ flex: "0 0 32px" }} />}>
               <AgentsRail
+                // A run switch starts the rail fresh: no list or tooltip
+                // carried over from another chat.
+                key={activeRun.id}
                 run={activeRun}
                 insideId={inside ? insideWorker : null}
                 mainGlyph={<SparkMark size={11} />}
                 onOpenWorker={setInsideWorker}
-                onOpenMain={() => {
-                  if (inside) leaveWorker();
-                }}
+                onOpenMain={leaveFromRail}
+                suspended={suspendGlobalEvents === true}
               />
             </Suspense>
           )}
@@ -464,7 +472,7 @@ export default function ChatPanel({
               <WorkerView
                 run={activeRun}
                 workerId={insideWorker}
-                onBack={leaveWorker}
+                onBack={leaveBack}
                 onSelectWorker={setInsideWorker}
                 onOpenTerminal={onOpenBoardWorkerTerminal}
                 onAskCora={(text) => {
