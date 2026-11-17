@@ -33,12 +33,17 @@ Description:
 > form, click through a flow, take a screenshot, read the console and the
 > network log. You pair the extension with Codara once by comparing a code.
 > Agents see only the tabs you share from the popup, never the sites on your
-> blocked list (banks and password managers are preset), and need your
-> permission per tab before they can read cookies or site storage. While an
-> agent works in a tab, the page shows its pointer with its name and a Stop
-> button that takes the tab back from that agent. Every action is logged in
-> Codara with the agent that made it. The extension talks
-> only to Codara on this computer (127.0.0.1) and sends nothing anywhere else.
+> blocked list (banks and password managers are preset). On a shared tab,
+> agents can do what the page's own scripts can: read its local storage and
+> cookies that are not HttpOnly, and see its requests and responses,
+> including sign-in headers such as Authorization. A second switch per tab,
+> off by default, lets them read and change all of that site's cookies and
+> storage. While an agent works in a tab, the page shows its pointer with its
+> name and a Stop button that takes the tab back from that agent. Every
+> action is logged in Codara with the agent that made it. The extension
+> talks only to Codara on this computer (127.0.0.1) and sends nothing to any
+> other server; Codara hands what agents read to the agents you run, which
+> send it to their AI provider under your own account.
 
 ## Permission justifications
 
@@ -62,9 +67,16 @@ Description:
 - Single purpose: let the user's local Codara app drive the browser tabs the
   user shares.
 - Data handling: the extension relays page content of shared tabs to Codara
-  on the same computer over a loopback WebSocket. It does not collect, sell
-  or transmit data to any server of ours or of a third party. Cookies and
-  site storage are relayed only for tabs where the user turned that on.
+  on the same computer over a loopback WebSocket (encrypted after pairing;
+  the first hello is plain). The extension itself sends nothing to any
+  server of ours or of a third party; Codara passes what an agent asked for
+  to that agent, which sends it to its AI provider under the user's account.
+  Authentication data is handled on every shared tab: request headers such
+  as `Authorization`, response bodies, and what page scripts can read
+  (local storage, cookies that are not HttpOnly). Cookie headers, HttpOnly
+  cookies and the storage commands need the per-tab cookie switch. Contact:
+  info@codarasolutions.com. The paste-ready pack, with retention, is kept
+  outside the repository.
 - Data use certifications: not sold, not used for unrelated purposes, not
   used for creditworthiness.
 - Privacy policy URL: a section for the extension in the Codara privacy
