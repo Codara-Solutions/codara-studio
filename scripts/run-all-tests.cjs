@@ -286,7 +286,8 @@ async function runTests(
           ? "STOPPED (over the time budget)"
           : `FAIL${result.timedOut ? " (timeout)" : ""}`;
       console.log(serialMode ? status : `${file.padEnd(52)}${status}`);
-      if (wasStopped) failed.push({ file, out: `Stopped after ${Math.round(result.ms / 1000)}s: the run went over its time budget of ${budgetSeconds}s.` });
+      // Keep the suite's own output: a hang is found by the last case it printed.
+      if (wasStopped) failed.push({ file, out: `Stopped after ${Math.round(result.ms / 1000)}s: the run went over its time budget of ${budgetSeconds}s.\n${result.out}` });
       else if (!result.ok) failed.push({ file, out: result.out });
     });
     return done;

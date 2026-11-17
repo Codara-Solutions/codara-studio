@@ -27,7 +27,7 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runner-budget-"));
 const fixture = (name, body) => fs.writeFileSync(path.join(dir, name), body);
 fixture("test-quick.cjs", "process.exit(0);\n");
 fixture("test-also-quick.cjs", "setTimeout(() => process.exit(0), 50);\n");
-fixture("test-slow.cjs", "setTimeout(() => process.exit(0), 60_000);\n");
+fixture("test-slow.cjs", "console.log('ok - case before the hang');\nsetTimeout(() => process.exit(0), 60_000);\n");
 fixture("test-alone.cjs", "// test-runner: serial (fixture)\nprocess.exit(0);\n");
 const all = ["test-alone.cjs", "test-also-quick.cjs", "test-quick.cjs", "test-slow.cjs"];
 
@@ -71,6 +71,7 @@ const quietly = async (fn) => {
     assert.ok(Date.now() - t0 < 20_000, `took ${Date.now() - t0} ms; the slow suite was not stopped`);
     const byFile = new Map(failures.map((f) => [f.file, f.out]));
     assert.match(byFile.get("test-slow.cjs") ?? "", /time budget of 2s/);
+    assert.match(byFile.get("test-slow.cjs") ?? "", /ok - case before the hang/);
     const message = byFile.get("time budget") ?? "";
     assert.match(message, /CODARA_TEST_BUDGET_SECONDS/);
     assert.match(message, /1 running suite\(s\) were stopped and 1 never started \(test-alone\.cjs\)/);

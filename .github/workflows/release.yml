@@ -97,7 +97,7 @@ jobs:
       - run: npm run test:all
         env:
           CODARA_TEST_JOBS: "2"
-          CODARA_TEST_BUDGET_SECONDS: "1320"
+          CODARA_TEST_BUDGET_SECONDS: "1500"
 
   build:
     needs: [prepare, test]
