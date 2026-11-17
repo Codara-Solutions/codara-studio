@@ -96,6 +96,10 @@ function node(parent = null) {
       if (step.next !== null) level = step.next;
     }
     assert.equal(level, 1.5);
+    // The same pinch in two events lands on the same level.
+    let two = zoom.wheelStep(0, -Math.log(1.5) * 50, 1, 0.5, 3);
+    two = zoom.wheelStep(two.carry, -Math.log(1.5) * 50, two.next ?? 1, 0.5, 3);
+    assert.equal(two.next, 1.5);
     // A slight pinch zooms nothing yet, and a turn the other way starts over.
     assert.equal(zoom.wheelStep(0, -2, 1, 0.5, 3).next, null);
     assert.ok(zoom.wheelStep(0.05, 2, 1, 0.5, 3).carry < 0);
