@@ -30,6 +30,7 @@ import SourceControlTabs, { tabPanelProps, type SourceControlTab } from "./Sourc
 import SourceLanesList from "./lanes/SourceLanesList";
 import { useSourceLanes, type SourceLanesContext } from "./lanes/useSourceLanes";
 import { CommitHookFix, ConflictFixBanner } from "./fix/GitPanelFixes";
+import { useRailFold } from "../rail/railFolds";
 import type { SharedGitStatus } from "../../git/useSharedGitStatus";
 import {
   CommitIcon,
@@ -105,6 +106,9 @@ export default function GitPanel({
     workspace,
     { branch: status?.branch ?? null, visible: !collapsed && Boolean(status?.isRepo), version: gitVersion },
   );
+  // The same fold the active lane's row reads (SourceLanesList), so the
+  // commit box can leave a folded lane for the top of the list.
+  const ownLaneOpen = useRailFold(`lane-own:${workspace?.id ?? cwd}`, true);
   const laneActions = useMemo(
     () => ({
       onOpenWorkspace: onActivateWorkspace,
@@ -121,6 +125,7 @@ export default function GitPanel({
   const [commitFailure, setCommitFailure] = useState<{ output: string; message: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState("");
+  const [amend, setAmend] = useState(false);
   const [sections, setSections] = useState({ staged: false, changes: false, history: false });
   const [githubRefreshNonce, setGitHubRefreshNonce] = useState(0);
   const [tab, setTab] = useState<SourceControlTab>("changes");
@@ -160,6 +165,7 @@ export default function GitPanel({
     setReturnHighlightHash(null);
     savedScrollRef.current = null;
     setMessage("");
+    setAmend(false);
     setDiffStats(null);
     setSections({ staged: false, changes: false, history: false });
     changesScrollRef.current = null;
@@ -243,15 +249,20 @@ export default function GitPanel({
     },
     [cwd, runAction],
   );
-  const stageMany = useCallback(
-    (files: GitFileChange[]) => {
-      if (cwd) void runAction("stage", () => window.spark.git.stage(cwd, files.map((file) => file.path)));
+  // A folded folder holds only new files, so git is handed the folder itself:
+  // one short command line however many files it holds, and the folders a
+  // clean would leave empty go too.
+  const stageFolder = useCallback(
+    (dir: string) => {
+      if (cwd) void runAction("stage", () => window.spark.git.stage(cwd, [dir]));
     },
     [cwd, runAction],
   );
-  const discardMany = useCallback(
-    (files: GitFileChange[]) => {
-      if (cwd) void runAction("discard", () => window.spark.git.discard(cwd, files));
+  const discardFolder = useCallback(
+    (dir: string) => {
+      if (!cwd) return;
+      const folder: GitFileChange = { path: `${dir}/`, status: "untracked", staged: false, untracked: true };
+      void runAction("discard", () => window.spark.git.discard(cwd, [folder]));
     },
     [cwd, runAction],
   );
@@ -519,6 +530,8 @@ export default function GitPanel({
   // Tabs only make sense over a repository; a folder that is not one keeps
   // the single page that offers to initialize it.
   const showTabs = !collapsed && Boolean(cwd) && Boolean(status?.isRepo);
+  // A rejected commit's hook output and its Fix with agent sit with the error
+  // they explain, wherever the commit box is scrolled to.
   const notices =
     cwd && status?.isRepo ? (
       <>
@@ -532,7 +545,31 @@ export default function GitPanel({
             }}
           />
         )}
+        {commitFailure && opError === commitFailure.output ? (
+          <CommitHookFix cwd={cwd} output={commitFailure.output} commitMessage={commitFailure.message} />
+        ) : null}
       </>
+    ) : null;
+  const commitInLane = Boolean(lanes.own) && ownLaneOpen;
+  const commitBox =
+    cwd && status?.isRepo ? (
+      <CommitComposer
+        message={message}
+        onMessageChange={setMessage}
+        onCommit={(nextAmend) => void handleCommit(nextAmend)}
+        amend={amend}
+        onAmendChange={setAmend}
+        onGenerateMessage={() => void handleGenerateMessage()}
+        canCommit={canCommit}
+        canGenerateMessage={canGenerateMessage}
+        commitLabel={commitLabel}
+        stagedCount={stagedCount}
+        busy={busy}
+        branch={status.branch}
+        detached={status.detached}
+        onSplit={() => setSplitOpen(true)}
+        canSplit={status.staged.length + status.unstaged.length >= 2 && !status.hasConflicts}
+      />
     ) : null;
 
   return (
@@ -667,6 +704,11 @@ export default function GitPanel({
                 ) : !status.isRepo ? (
                   <NonRepoState busy={disabled} onInit={handleInit} />
                 ) : (
+                  <>
+                  {/* The box always commits the active checkout. Its place is
+                      under that lane's branch line; with the lane folded, or
+                      no lane to hold it, it keeps the top of the list. */}
+                  {commitInLane ? null : commitBox}
                   <SourceLanesList
                     lanes={lanes}
                     projectKey={workspace?.id ?? cwd}
@@ -699,28 +741,7 @@ export default function GitPanel({
                           }
                         />
 
-                        {commitFailure && opError === commitFailure.output ? (
-                          <CommitHookFix
-                            cwd={cwd}
-                            output={commitFailure.output}
-                            commitMessage={commitFailure.message}
-                          />
-                        ) : null}
-                        <CommitComposer
-                          message={message}
-                          onMessageChange={setMessage}
-                          onCommit={(amend) => void handleCommit(amend)}
-                          onGenerateMessage={() => void handleGenerateMessage()}
-                          canCommit={canCommit}
-                          canGenerateMessage={canGenerateMessage}
-                          commitLabel={commitLabel}
-                          stagedCount={stagedCount}
-                          busy={busy}
-                          branch={status.branch}
-                          detached={status.detached}
-                          onSplit={() => setSplitOpen(true)}
-                          canSplit={status.staged.length + status.unstaged.length >= 2 && !status.hasConflicts}
-                        />
+                        {commitInLane ? commitBox : null}
 
                         {stagedCount > 0 && (
                           <ChangeSection
@@ -752,8 +773,8 @@ export default function GitPanel({
                               onUnstage={unstageOne}
                               onDiscard={discardOne}
                               onOpenFile={onOpenFile ? openFile : undefined}
-                              onStageMany={stageMany}
-                              onDiscardMany={discardMany}
+                              onStageFolder={stageFolder}
+                              onDiscardFolder={discardFolder}
                             />
                           </ChangeSection>
                         )}
@@ -795,8 +816,8 @@ export default function GitPanel({
                               onUnstage={unstageOne}
                               onDiscard={discardOne}
                               onOpenFile={onOpenFile ? openFile : undefined}
-                              onStageMany={stageMany}
-                              onDiscardMany={discardMany}
+                              onStageFolder={stageFolder}
+                              onDiscardFolder={discardFolder}
                             />
                           </ChangeSection>
                         )}
@@ -819,6 +840,7 @@ export default function GitPanel({
                       </>
                     }
                   />
+                  </>
                 )}
               </div>
             </>

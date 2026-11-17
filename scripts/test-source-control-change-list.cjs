@@ -64,6 +64,17 @@ test("a folder that holds a tracked change is never folded as new", ({ groupChan
   assert.deepEqual(rows(groupChanges(list)), ["src/panel/list.ts", "src/fresh/ (2)", "src/panel/new-a.ts", "src/panel/new-b.ts"]);
 });
 
+test("the folder a file was renamed out of holds a change too", ({ groupChanges }) => {
+  const moved = { path: "lib/b.ts", oldPath: "src/b.ts", status: "renamed", staged: false, untracked: false };
+  const list = [moved, fresh("src/new-1.ts"), fresh("src/new-2.ts")];
+  assert.deepEqual(rows(groupChanges(list)), ["lib/b.ts", "src/new-1.ts", "src/new-2.ts"]);
+});
+
+test("a folder name that prefixes another is a different folder", ({ groupChanges }) => {
+  const list = [change("src2/x.ts"), fresh("src/a.ts"), fresh("src/b.ts")];
+  assert.deepEqual(rows(groupChanges(list)), ["src2/x.ts", "src/ (2)"]);
+});
+
 test("a lone new file in a new folder keeps its own row", ({ groupChanges }) => {
   assert.deepEqual(rows(groupChanges([fresh("docs/guide.md"), fresh("a.txt")])), ["docs/guide.md", "a.txt"]);
 });

@@ -5,6 +5,7 @@ import { groupChanges } from "./change-list";
 import ChangeRow, { FOLDER_TEXT_STYLE, ROW_STYLE, StatusLetter } from "./ChangeRow";
 import { IconButton, PlusGlyph, UndoIcon, splitPath } from "./git-ui";
 import { ChevronIcon } from "../icons";
+import "./source-control.css";
 
 interface Props {
   files: GitFileChange[];
@@ -18,9 +19,12 @@ interface Props {
   onUnstage: (file: GitFileChange) => void;
   onDiscard: (file: GitFileChange) => void;
   onOpenFile?: (file: GitFileChange) => void;
-  /** Stage or discard every new file under a folded folder at once. */
-  onStageMany: (files: GitFileChange[]) => void;
-  onDiscardMany: (files: GitFileChange[]) => void;
+  /**
+   * Stage or discard every new file under a folded folder at once. The folder
+   * holds no other change, so the host can act on the folder itself.
+   */
+  onStageFolder: (dir: string, files: GitFileChange[]) => void;
+  onDiscardFolder: (dir: string, files: GitFileChange[]) => void;
 }
 
 const ROW_INDENT = 22;
@@ -41,21 +45,26 @@ export default function ChangeList({
   onUnstage,
   onDiscard,
   onOpenFile,
-  onStageMany,
-  onDiscardMany,
+  onStageFolder,
+  onDiscardFolder,
 }: Props): React.ReactElement {
   const entries = useMemo(() => groupChanges(files), [files]);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
 
   // A folder that left the list (staged, discarded, committed) forgets that
-  // it was unfolded, so it comes back folded.
+  // it was unfolded, so it comes back folded. The folder holding the file
+  // whose diff is open unfolds, so the selected row is always on screen.
   useEffect(() => {
     setOpen((current) => {
       const present = new Set(entries.flatMap((entry) => (entry.kind === "folder" ? [entry.dir] : [])));
       const next = new Set([...current].filter((dir) => present.has(dir)));
-      return next.size === current.size ? current : next;
+      const holder = selectedPath
+        ? entries.find((entry) => entry.kind === "folder" && selectedPath.startsWith(`${entry.dir}/`))
+        : undefined;
+      if (holder?.kind === "folder") next.add(holder.dir);
+      return next.size === current.size && [...next].every((dir) => current.has(dir)) ? current : next;
     });
-  }, [entries]);
+  }, [entries, selectedPath]);
 
   const row = (file: GitFileChange, indent: number, folder?: string) => (
     <ChangeRow
@@ -96,8 +105,8 @@ export default function ChangeList({
                   return next;
                 })
               }
-              onStage={() => onStageMany(entry.files)}
-              onDiscard={() => onDiscardMany(entry.files)}
+              onStage={() => onStageFolder(entry.dir, entry.files)}
+              onDiscard={() => onDiscardFolder(entry.dir, entry.files)}
             />
             {unfolded
               ? entry.files.map((file) =>
@@ -129,6 +138,9 @@ function FolderRow({
   onDiscard: () => void;
 }): React.ReactElement {
   const [hover, setHover] = useState(false);
+  // Discarding deletes files git never had, so the folder's button asks for a
+  // second click; leaving the row disarms it.
+  const [armed, setArmed] = useState(false);
   const { dir: parent, name } = splitPath(dir);
   return (
     <div
@@ -140,13 +152,17 @@ function FolderRow({
       title={`${count} new files in ${dir}/ that git does not track yet. Click to ${open ? "fold them" : "list them"}`}
       onClick={onToggle}
       onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           onToggle();
         }
       }}
       onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseLeave={() => {
+        setHover(false);
+        setArmed(false);
+      }}
       style={{
         ...ROW_STYLE,
         paddingLeft: ROW_INDENT - 14,
@@ -177,9 +193,23 @@ function FolderRow({
           onClick={(e) => e.stopPropagation()}
           style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", gap: 1 }}
         >
-          <IconButton title={`Discard these ${count} new files`} danger size={20} onClick={onDiscard}>
-            <UndoIcon />
-          </IconButton>
+          {armed ? (
+            <button
+              type="button"
+              className="scm-confirm"
+              title={`Delete the ${count} new files in ${dir}/. This cannot be undone`}
+              onClick={() => {
+                setArmed(false);
+                onDiscard();
+              }}
+            >
+              Delete {count}?
+            </button>
+          ) : (
+            <IconButton title={`Discard these ${count} new files`} danger size={20} onClick={() => setArmed(true)}>
+              <UndoIcon />
+            </IconButton>
+          )}
           <IconButton title={`Stage these ${count} new files`} size={20} onClick={onStage}>
             <PlusGlyph />
           </IconButton>

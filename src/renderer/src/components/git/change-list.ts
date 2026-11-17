@@ -26,7 +26,10 @@ export function groupChanges(files: readonly GitFileChange[]): ChangeListEntry[]
   const tracked = files.filter((file) => !file.untracked);
   const untracked = files.filter((file) => file.untracked);
   // Counted once per folder: a dropped-in package can be thousands of files.
-  const holdsTracked = new Set(tracked.flatMap((file) => parentDirs(file.path)));
+  // A rename counts in both folders: the one it left holds a change too.
+  const holdsTracked = new Set(
+    tracked.flatMap((file) => [...parentDirs(file.path), ...(file.oldPath ? parentDirs(file.oldPath) : [])]),
+  );
   const newCount = new Map<string, number>();
   for (const file of untracked) {
     for (const dir of parentDirs(file.path)) newCount.set(dir, (newCount.get(dir) ?? 0) + 1);

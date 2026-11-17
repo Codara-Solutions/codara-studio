@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { _electron as electron, type ElectronApplication } from "playwright";
+import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { git, prepare, roomy, shots } from "./source-control-fixture";
@@ -26,6 +27,9 @@ test("Changes lists files compactly, folds new folders and acts on hover", async
     }
     await writeFile(join(repo, "vendor", "README.md"), "vendored\n");
     await writeFile(join(repo, "notes.tgz"), "tar\n");
+    await mkdir(join(repo, "dist"), { recursive: true });
+    await writeFile(join(repo, "dist", "app.js"), "built\n");
+    await writeFile(join(repo, "dist", "app.js.map"), "{}\n");
 
     app = await electron.launch({ args: ["."], env });
     const page = await app.firstWindow();
@@ -35,6 +39,7 @@ test("Changes lists files compactly, folds new folders and acts on hover", async
 
     await test.step("a new folder is one grey row with its file count", async () => {
       await expect(folder(page, "vendor")).toContainText("5 files", { timeout: 15_000 });
+      await expect(folder(page, "dist")).toContainText("2 files");
       await expect(row(page, "notes.tgz")).toBeVisible();
       await expect(row(page, "vendor/tui/a.js")).toHaveCount(0);
       await expect(folder(page, "vendor").getByTestId("change-letter")).toHaveAttribute(
@@ -95,7 +100,10 @@ test("Changes lists files compactly, folds new folders and acts on hover", async
       });
       await row(page, "src/panel/row.ts").dispatchEvent("mouseover");
       await row(page, "src/panel/row.ts").getByTitle("Open file").click();
-      await expect(page.locator(".spark-tab--active").filter({ hasText: "row.ts" })).toBeVisible({ timeout: 15_000 });
+      // The file itself, in an editor tab: not its diff.
+      await expect(
+        page.locator('.spark-tab--active:not([data-tab-id^="diff"])').filter({ hasText: "row.ts" }),
+      ).toBeVisible({ timeout: 15_000 });
     });
 
     await test.step("a folded folder stages all its new files at once", async () => {
@@ -103,6 +111,17 @@ test("Changes lists files compactly, folds new folders and acts on hover", async
       await folder(page, "vendor").getByTitle("Stage these 5 new files").click();
       await expect(folder(page, "vendor")).toHaveCount(0, { timeout: 15_000 });
       await expect.poll(() => git(repo, ["diff", "--cached", "--name-only"], env).split("\n").filter((p) => p.startsWith("vendor/")).length).toBe(5);
+    });
+
+    await test.step("discarding a folded folder asks for a second click, then deletes it", async () => {
+      await folder(page, "dist").dispatchEvent("mouseover");
+      await folder(page, "dist").getByTitle("Discard these 2 new files").click();
+      const confirm = folder(page, "dist").getByRole("button", { name: "Delete 2?" });
+      await expect(confirm).toBeVisible();
+      expect(existsSync(join(repo, "dist", "app.js"))).toBe(true);
+      await confirm.click();
+      await expect(folder(page, "dist")).toHaveCount(0, { timeout: 15_000 });
+      expect(existsSync(join(repo, "dist"))).toBe(false);
     });
   } finally {
     await app?.close().catch(() => undefined);
