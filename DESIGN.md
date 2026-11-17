@@ -117,6 +117,10 @@ pages) it still showed a share button that could never work.
 - A page no extension may touch, or a site on the blocked list, shows one
   line saying why and no switch, details or cookie row: never a control that
   cannot work.
+- The cookie switch never claims more than it does: one line under it says
+  that even when off, agents see site storage, non-HttpOnly cookies and the
+  tab's requests and responses, sign-in headers included. The switch gates
+  only cookie headers, HttpOnly cookies and the storage commands.
 - Keyboard: the reach is a radio group with one tab stop and arrow keys; the
   switches are native checkboxes with `role="switch"`; the 1 s refresh never
   rebuilds a list that did not change, so focus stays put.
