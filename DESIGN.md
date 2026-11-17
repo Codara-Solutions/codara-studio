@@ -82,6 +82,49 @@ cursors in Figma for the name tag beside the arrow.
 - The component lives in `components/Preview/agent-presence/` with its own
   CSS and store; BrowserPane only mounts it, so the toolbar can move freely.
 
+## The extension's popup (2026-11)
+
+**Chosen:** variant A, "Tidy", of four built for the owner (today's popup,
+A Tidy, B Live first, C One question). The options page with the mocks and
+their screenshots is archived as
+`Archive/2026-11-17-studio-browser-extension-options/` in the company code
+folder. One switch for this tab next to its title, a segmented **Agents may
+use** choice (Tabs I pick, This window, Everything) in place of the separate
+window and every-tab switches, the agent named by its name and colour with
+what it did last, and the shared tabs with Stop and Stop all.
+
+**Why:** the old popup had five switches, two copy buttons and a list of tab
+ids. Agents no longer need copied ids (`codara_preview_list` and
+`codara_preview_chrome` find shared tabs), the stop the user needs most sat at
+the bottom, and on pages Chrome keeps extensions off (the Web Store, browser
+pages) it still showed a share button that could never work.
+
+**Rules:**
+
+- The popup uses Studio's tokens (Codara Daylight when the browser is light,
+  Codara Classic when it is dark) copied into `popup.css`, and no colour of
+  its own. An agent's dot uses `--agent-<runtime>`, otherwise the accent.
+- Each reach is a view of the sharing state that already existed (every tab,
+  shared windows, tabs shared one by one, stopped tabs): picking one never
+  shares more than the switches it replaced, and what a user had before the
+  update reads back as the same reach. Narrowing from Everything keeps the
+  tabs the user stopped. `reachOf` and `reachPatch` in `lib/policy.js` hold
+  the mapping and its tests. Everything still asks first.
+- Under the choice, one line says what the reach includes. Opening new tabs
+  keeps its own switch and stays off until the user turns it on.
+- No tab ids in the main view. The id and its copy button sit under
+  **Details** for the current tab.
+- A page no extension may touch, or a site on the blocked list, shows one
+  line saying why and no switch, details or cookie row: never a control that
+  cannot work.
+- The cookie switch never claims more than it does: one line under it says
+  that even when off, agents see site storage, non-HttpOnly cookies and the
+  tab's requests and responses, sign-in headers included. The switch gates
+  only cookie headers, HttpOnly cookies and the storage commands.
+- Keyboard: the reach is a radio group with one tab stop and arrow keys; the
+  switches are native checkboxes with `role="switch"`; the 1 s refresh never
+  rebuilds a list that did not change, so focus stays put.
+
 ## Tab links and agent tab approvals (2026-10)
 
 **Chosen:** a link brings its tab on screen and marks it with a short accent
@@ -279,8 +322,9 @@ there a process that lost its parent stays in Other apps.
 
 ## Source Control (2026-11)
 
-**Chosen:** layout B, agent lanes, with layout A's small commit box docked at
-the bottom. One lane per checkout of the active project: line 1 is its branch
+**Chosen:** layout B, agent lanes, with layout A's small commit box (docked at
+the bottom until 2026-11-17; now at the top of the active lane, see "VS Code
+layout, one scroll" below). One lane per checkout of the active project: line 1 is its branch
 with the pull request mark, line 2 its most urgent agent's state word (or "No
 agent · from main") and its diff size since the base, the same two lines a
 worktree has in the rail. The checkout the window is on is a lane too, last, and
@@ -320,8 +364,8 @@ VS Code (the commit box as part of the source control view).
 - Failed checks are never a green tick: the journey's step reads failed, ✕ in
   `--danger`, with the same glyphs as `PullRequestMark`.
 - An SSH workspace shows only its own lane: every other lane would be a round trip.
-- The list and the commit box are separate columns of the panel, so the box never
-  covers a lane. A lane unfolded near the bottom scrolls its buttons into view.
+- The commit box scrolls with the list, so it never covers a lane. A lane unfolded
+  near the bottom scrolls its buttons into view.
 
 **Start an agent and review with an agent (2026-11):** New agent sits above the
 lanes: a task, Claude Code or Codex, the branch to start from, in a new worktree by
@@ -353,6 +397,37 @@ is built to remove: `lane-collisions.ts`, `git-lane-collisions.ts`,
 for SSH workspaces and on git older than 2.38. It runs with no click behind it, so it
 also stays out of any repository where a merge could start a program the repository
 configures: a custom merge driver, a partial clone, an initialized submodule.
+
+**VS Code layout, one scroll (2026-11-17):** Etienne picked option G, "closest to
+VS Code, one scroll", from three VS Code shaped mocks drawn at the rail's real width
+in Studio's tokens. A text tab strip sits at the top of the panel: Changes, Issues,
+Pull request, Stashes. Changes is the working view; the GitHub issue and pull request
+list moves to Issues, the four steps (commit, share for review, checks, merge) and
+the branch's pull request to Pull request, and the stash list to Stashes. Nothing is
+dropped, only moved. It lands as a stack: the tabs first, then the compact change
+lists with the commit box on top, then the history graph opened in place.
+
+**Why:** "easier on the eyes, easier to understand, to help you understand rather
+than making work from there." The panel had grown into one long column where a
+journey, an issue queue and a stash list pushed the files and the history apart.
+
+**Rules:**
+
+- Tabs are text with an accent rule under the selected one, counts as quiet text on
+  `--hover-strong`, never a coloured badge. On a rail under 300px the tabs tighten and
+  Pull request reads PR, so all four stay on screen.
+- Tab pages stay mounted while hidden. Issues and Pull request share one GitHub read,
+  so the Issues count is known before the tab is opened and switching tabs never costs
+  a `gh` run.
+- Arrow keys, Home and End move between tabs (WAI-ARIA tabs).
+- The commit box sits under the active checkout's branch line, before the files:
+  branch, message, Commit. With that lane folded, or no lane to hold it, the box
+  keeps the top of the list, so it is never gone. Commit is the panel's one
+  accent-filled button; its arrow holds Amend and Split, and the menu opens above
+  the arrow when it would not fit below. The message is one quiet line until it is
+  written in. The branch line says "in sync" or "not published" in a word.
+- A rejected commit's hook output and Fix with agent show with the error strip
+  under the tab strip, not beside the box, so they are in view wherever it is.
 
 ## Worktrees in the rail (2026-10)
 

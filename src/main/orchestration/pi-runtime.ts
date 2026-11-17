@@ -21,7 +21,7 @@ export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
  * library (credential storage, sign-in flows, the model catalog); Cora's
  * sessions run the Pi the user installed.
  */
-export const CODARA_PI_VERSION = "1.5.0";
+export const CODARA_PI_VERSION = "1.5.2";
 /**
  * The oldest installed Pi Cora runs on. Its RPC mode, command-line flags and
  * the extension events Cora's extensions use are unchanged through 1.5, apart
@@ -144,10 +144,10 @@ export interface PiManagerLaunchOptions {
   codaraHomeDir?: string;
   /**
    * The composer's fast-mode toggle (AppSettings.openAiFastMode), already
-   * narrowed to whether this provider and model can run fast. The bundled
-   * extension applies OpenAI's priority tier or Anthropic's `speed: "fast"`
-   * per request. Defaults to off so a missing setting can never silently buy
-   * the pricier mode.
+   * narrowed to whether this provider and model can run fast. Only Codex
+   * does: the bundled extension applies OpenAI's priority tier per request.
+   * Defaults to off so a missing setting can never silently buy the pricier
+   * mode.
    */
   fastMode?: boolean;
   /** AppSettings.coraAutoCompactPercent. null or absent is Auto. */
@@ -474,6 +474,15 @@ export const CODARA_PI_RETRY_SETTINGS = {
 } as const;
 
 /**
+ * Pi's "streaming" cache warming (its default before 1.5.1): idle between
+ * runs spends nothing; during an active run Pi re-sends the cached prompt
+ * only when it expects the warm to save more than it costs (a long tool
+ * call). Each warm is counted in the run's Costs (pi-turn.ts,
+ * pi-worker-usage.ts).
+ */
+export const CODARA_PI_CACHE_WARMING = "streaming";
+
+/**
  * Merge Codara's keys into the settings.json of an isolated Pi agent dir and
  * return the result, leaving every other key as it was. `shellPath` is set
  * only when one was resolved, so a path the user wrote by hand survives.
@@ -485,6 +494,12 @@ export function mergeCodaraPiAgentSettings(
   const base = isRecord(existing) ? { ...existing } : {};
   const retry = isRecord(base.retry) ? base.retry : {};
   base.retry = { ...retry, ...CODARA_PI_RETRY_SETTINGS };
+  // Pi 1.5.1 made "idle" the default: it also re-sends a cached prompt
+  // between runs, for up to 30 minutes. Cora's manager sits idle for minutes
+  // while workers run, and on OpenRouter each warm is a charge the user never
+  // asked for, so Codara keeps "streaming": nothing between runs, cost-aware
+  // warms only during a run.
+  if (typeof base.cacheWarming !== "string") base.cacheWarming = CODARA_PI_CACHE_WARMING;
   if (options.shellPath) base.shellPath = options.shellPath;
   return base;
 }
@@ -668,8 +683,9 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   // Fast-mode policy inputs. The extension's before_provider_request hook is
   // the only seam Pi 0.85.1 gives us for the request body, and it needs to
   // know which provider this process talks to and whether Settings enabled
-  // fast mode. OpenRouter never carries the flag: its upstream pricing for a
-  // fast tier is unknown to Codara.
+  // fast mode. Only a Codex process carries the flag: Claude always runs at
+  // standard speed, and OpenRouter's upstream pricing for a fast tier is
+  // unknown to Codara.
   env.CODARA_PI_PROVIDER = options.provider;
   // A Claude process asks Studio to renew its login (the bundled extension's
   // anthropic-refresh.ts), so it names the account it runs as. An imported-PR
@@ -677,7 +693,7 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   if (options.provider === "anthropic" && options.accountProfileId) {
     env.CODARA_PI_ACCOUNT_PROFILE_ID = options.accountProfileId;
   }
-  if (options.fastMode === true && options.provider !== "openrouter") {
+  if (options.fastMode === true && options.provider === "openai-codex") {
     env.CODARA_PI_FAST_MODE = "1";
   }
   // Both names or neither: a half-configured bridge would leave the extension

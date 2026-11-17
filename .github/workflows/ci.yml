@@ -56,7 +56,12 @@ jobs:
           # /proc/meminfo does not exist on macOS, so the memory guard never
           # holds a suite back; heavy suites still run one at a time.
           CODARA_TEST_JOBS: "2"
-          CODARA_TEST_BUDGET_SECONDS: "900"
+          # The pool takes 385 to 737 s (runs of 17 Nov); a slow runner on
+          # 17 Nov (run 44103067410, the worktree suites at about twice their
+          # usual time) needed more than 900. 1380 s still leaves the job's
+          # setup (about 3 min) inside its 30 min, so the budget, not the
+          # timeout, names the slow suites.
+          CODARA_TEST_BUDGET_SECONDS: "1380"
         run: npm run test:all
 
   test-serial:

@@ -203,7 +203,8 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await expect(prompt.getByLabel("Pairing code")).toHaveText(code);
     await prompt.getByRole("button", { name: "Allow" }).click();
     await expect(prompt).toHaveCount(0);
-    await expect(popup.locator("#status")).toHaveText(/Connected to Codara/);
+    await expect(popup.locator("#status-text")).toHaveText(/^Studio \d/);
+    await expect(popup.locator("#status")).toHaveAttribute("title", /Connected to Codara/);
 
     // The service worker loses its socket (suspended, or Codara restarted):
     // it reconnects on its own, both sides proving the pairing.
@@ -218,7 +219,9 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await expect(request("preview.snapshot", { tabId: `chrome:${accountTab}` })).rejects.toThrow(/is not shared with agents/);
 
     // The user shares the signed-in tab from the popup.
-    // One button shares the tab and copies the id the user hands an agent.
+    // The tab's id waits under Details: one button shares the tab and copies it.
+    await expect(popup.locator("#tab-id")).toBeHidden();
+    await popup.locator("#tab-details summary").click();
     await expect(popup.locator("#copy-id")).toHaveText("Share and copy id");
     await popup.locator("#copy-id").click();
     await expect(popup.locator("#share-tab")).toBeChecked();
@@ -227,18 +230,19 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
 
     // Sharing every tab asks inside the popup (a native confirm is clipped
     // by the popup's size); cancelling leaves it off.
-    await popup.locator("#share-all").check();
+    const everything = popup.getByRole("radio", { name: "Everything" });
+    await everything.click();
     await expect(popup.locator("#ask")).toBeVisible();
     await popup.locator("#ask-no").click();
     await expect(popup.locator("#ask")).toBeHidden();
-    await expect(popup.locator("#share-all")).not.toBeChecked();
-    // Allowing after the popup's 1 s refresh redrew the switch still turns it on.
-    await popup.locator("#share-all").check();
+    await expect(everything).toHaveAttribute("aria-checked", "false");
+    // Allowing after the popup's 1 s refresh redrew the choice still picks it.
+    await everything.click();
     await popup.waitForTimeout(1_500);
     await popup.locator("#ask-yes").click();
-    await expect(popup.locator("#share-all")).toBeChecked();
+    await expect(everything).toHaveAttribute("aria-checked", "true");
     await expect.poll(() => popup.evaluate(() => chrome.runtime.sendMessage({ type: "state" }).then((view: { shareAll: boolean }) => view.shareAll))).toBe(true);
-    await popup.locator("#share-all").uncheck();
+    await popup.getByRole("radio", { name: "Tabs I pick" }).click();
     await expect.poll(() => popup.evaluate(() => chrome.runtime.sendMessage({ type: "state" }).then((view: { shareAll: boolean }) => view.shareAll))).toBe(false);
     await expect.poll(async () => {
       const { tabs } = await request("preview.list");
@@ -328,12 +332,13 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     const state = await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.state());
     const tools = state.activity.filter((entry: { tab: string }) => entry.tab === tabId).map((entry: { tool: string }) => entry.tool);
     expect(tools).toEqual(expect.arrayContaining(["codara_preview_snapshot", "codara_preview_type", "codara_preview_click", "codara_preview_screenshot"]));
-    await expect(popup.locator("#tab-usage")).toContainText("codara_preview_screenshot");
+    await expect(popup.locator("#tab-usage")).toContainText("took a screenshot");
+    await expect(popup.locator("#tab-agent-name")).not.toBeEmpty();
 
     // Tabs in the user's browser: opening needs the popup's switch, and an
     // agent closes only tabs it opened or the user shared.
     expect(await request("preview.chrome", { action: "status" })).toMatchObject({ connected: true, browsers: [{ sharedTabs: 1, mayOpenTabs: false }] });
-    await expect(request("preview.chrome", { action: "open", url: `${origin}/opened` })).rejects.toThrow(/open new tabs/);
+    await expect(request("preview.chrome", { action: "open", url: `${origin}/opened` })).rejects.toThrow(/Open new tabs in a group/);
     await popup.locator("#allow-open").check();
     await expect.poll(async () => (await request("preview.chrome", { action: "status" })).browsers[0].mayOpenTabs).toBe(true);
     const opened = await request("preview.chrome", { action: "open", url: `${origin}/opened` });
@@ -402,7 +407,7 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     // Disconnect in Codara: the extension forgets its token and every tab is out of reach.
     const linkId = state.browsers[0].linkId;
     await codara.evaluate((id) => (window as unknown as { spark: any }).spark.chromeLink.disconnect(id), linkId);
-    await expect(popup.locator("#status")).toHaveText("Not connected");
+    await expect(popup.locator("#status-text")).toHaveText("Not connected");
     // Playwright does not hand over a restarted worker; the popup reaches the same extension APIs.
     expect(await popup.evaluate(() => chrome.storage.local.get({ token: null }).then((stored: { token: string | null }) => stored.token))).toBeNull();
     await expect(request("preview.snapshot", { tabId })).rejects.toThrow(/No Chrome browser is connected/);
