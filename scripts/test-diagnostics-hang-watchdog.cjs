@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 "use strict";
+// test-runner: serial (records a busy main loop's CPU share and pauses it
+// through the inspector within 400 ms; next to another suite on a loaded
+// runner the loop got 15% of a core and the pause missed its window, PR 242's
+// CI of 17 Nov. Both are what the watchdog reports, so they need a free core)
 
 // The freeze watchdog of the crash and freeze black box
 // (src/main/diagnostics/hang-*.ts).
