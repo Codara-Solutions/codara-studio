@@ -13,6 +13,9 @@
 //      never a pinned or working one.
 //   5. Undo puts a key back as it was, and an undone auto-settle stays put.
 //   6. Stored prefs are cleaned on load; merge asks first into main.
+//   7. Subagents: a background agent whose parent is on the board sits behind
+//      a count chip on the parent's row, not as a row; an orphan stays a row,
+//      and every section counts main agents only.
 //
 //   node scripts/test-agent-inbox.cjs
 
@@ -353,6 +356,63 @@ function testStoredAndMerge(I) {
   check("an unknown base asks first", I.mergeNeedsConfirmation(""));
 }
 
+function testSubagents(I) {
+  console.log("subagents");
+  const kid = (key, parentKey, overrides = {}) =>
+    card(key, { source: "background", workspaceId: `wt-${key}`, parentKey, ...overrides });
+  const working = { bucket: "working", status: "Working", tone: "info" };
+  const cards = [
+    card("pane:alone", { ...working, since: NOW - 3 * MIN }),
+    card("pane:one", { ...working, since: NOW - 18 * MIN }),
+    card("pane:three", { since: NOW - 40 * MIN }),
+    kid("worktree:a", "pane:one", { ...working, since: NOW - 4 * MIN }),
+    kid("worktree:b", "pane:three", { ...working, since: NOW - 9 * MIN }),
+    kid("worktree:c", "pane:three", { bucket: "needs-you", status: "Blocked", tone: "warn" }),
+    kid("worktree:d", "pane:three", { status: "In review" }),
+    kid("worktree:orphan", "pane:closed", { ...working, since: NOW - 7 * MIN }),
+  ];
+  const context = { now: NOW, pullRequests: {}, branches: { "wt-worktree:a": "feat/zoom-viewers" } };
+  const view = I.buildAgentInbox(model(cards), I.emptyAgentInboxPrefs(), context);
+  const rowOf = (key) => SECTIONS.flatMap((section) => view[section]).find((entry) => entry.key === key);
+  const placed = SECTIONS.flatMap((section) => keys(view[section]));
+  check("a subagent with its parent on the board is not a row", !placed.includes("worktree:a") && !placed.includes("worktree:b"), placed);
+  check("an orphan subagent (parent closed) stays a row", keys(view.working).includes("worktree:orphan"), keys(view.working));
+  check("a parent with no subagents has none", rowOf("pane:alone").subagents.length === 0);
+  check("a parent with one subagent carries it", JSON.stringify(keys(rowOf("pane:one").subagents)) === JSON.stringify(["worktree:a"]));
+  check("a parent with three carries all three, in board order", JSON.stringify(keys(rowOf("pane:three").subagents)) === JSON.stringify(["worktree:c", "worktree:b", "worktree:d"]), keys(rowOf("pane:three").subagents));
+  const a = rowOf("pane:one").subagents[0];
+  check("a subagent row has its title, time and branch", a.title === "title worktree:a" && a.time === "4m" && a.branch === "feat/zoom-viewers", a);
+  check("Working counts main agents only", view.working.length === 3, keys(view.working));
+  check("Needs you leaves out a blocked subagent behind its parent", view.needs.length === 0 && view.needsYou === 0);
+  check("Done holds the finished parent, not its subagent", JSON.stringify(keys(view.done)) === JSON.stringify(["pane:three"]));
+  check("total counts main agents only", view.total === 4, view.total);
+
+  check("no chip without subagents", I.agentInboxSubagentChip([]) === null);
+  const one = I.agentInboxSubagentChip(rowOf("pane:one").subagents);
+  check("one working subagent: '1 subagent' with a working dot", one.label === "1 subagent" && one.tone === "info", one);
+  const three = I.agentInboxSubagentChip(rowOf("pane:three").subagents);
+  check("three, one waiting: '3 subagents' with a warn dot", three.label === "3 subagents" && three.tone === "warn", three);
+  const quiet = I.agentInboxSubagentChip([rowOf("pane:three").subagents[2]]);
+  check("nothing running: no dot", quiet.tone === null, quiet);
+
+  const prefs = I.emptyAgentInboxPrefs();
+  prefs.settled["pane:one"] = { at: NOW };
+  prefs.settled["worktree:b"] = { at: NOW };
+  const later = I.buildAgentInbox(model(cards), prefs, context);
+  check("a subagent follows its settled parent", JSON.stringify(keys(later.settled[0].subagents)) === JSON.stringify(["worktree:a"]));
+  const three2 = [...later.done, ...later.working].find((entry) => entry.key === "pane:three");
+  check("settling a subagent itself does not move it off its parent", keys(three2.subagents).includes("worktree:b"));
+
+  const chained = I.buildAgentInbox(
+    model([card("pane:p", working), kid("worktree:x", "pane:p"), kid("worktree:y", "worktree:x"), kid("worktree:self", "worktree:self")]),
+    I.emptyAgentInboxPrefs(),
+    context,
+  );
+  const all = SECTIONS.flatMap((section) => chained[section]);
+  const listed = [...keys(all), ...all.flatMap((entry) => keys(entry.subagents))].sort();
+  check("no card is lost: one under a subagent, or under itself, stays a row", JSON.stringify(listed) === JSON.stringify(["pane:p", "worktree:self", "worktree:x", "worktree:y"]), listed);
+}
+
 function testPlainWords() {
   console.log("plain words");
   const files = [path.join(ROOT, "src", "shared", "agent-inbox.ts")];
@@ -370,6 +430,7 @@ async function main() {
   testAutoSettle(I);
   testUndo(I);
   testStoredAndMerge(I);
+  testSubagents(I);
   testPlainWords();
   console.log(`\n${pass} passed, ${fail} failed`);
   fs.rmSync(OUT_DIR, { recursive: true, force: true });

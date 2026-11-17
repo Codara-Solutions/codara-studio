@@ -170,6 +170,11 @@ export interface AgentBoardCard {
    * started, and that session's own target while it is on the board.
    */
   origin?: AgentWorkOrigin;
+  /**
+   * A background agent whose starting session is on the board: that card's
+   * key. The Agents tab lists it under that card, not as a row of its own.
+   */
+  parentKey?: string;
 }
 
 export interface AgentWorkOrigin {

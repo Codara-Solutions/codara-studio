@@ -266,6 +266,11 @@ export interface AgentInboxRow {
   mergeReady: boolean;
   snoozedUntil: number | null;
   settledAt: number | null;
+  /**
+   * Background agents this agent started, listed behind a chip on its row
+   * instead of as rows of their own; empty for most rows.
+   */
+  subagents: AgentInboxRow[];
 }
 
 export interface AgentInboxView {
@@ -278,6 +283,7 @@ export interface AgentInboxView {
   settled: AgentInboxRow[];
   /** Rows that wait on the user: the switch's badge and the Needs you count. */
   needsYou: number;
+  /** Main agents only: a subagent behind its parent's chip is not counted. */
   total: number;
 }
 
@@ -318,7 +324,50 @@ function row(card: AgentBoardCard, prefs: AgentInboxPrefs, context: AgentInboxCo
     mergeReady: isMergeReady(pr),
     snoozedUntil: prefs.snoozed[card.key]?.until ?? null,
     settledAt: prefs.settled[card.key]?.at ?? null,
+    subagents: [],
   };
+}
+
+/**
+ * The board split into the agents the user talks to and, by parent key, the
+ * background agents each one started. A subagent whose parent is not on the
+ * board (its session closed) stays a main agent, and so does one whose parent
+ * is itself listed under another card, so no card is ever lost.
+ */
+export function groupAgentInboxCards(model: AgentBoardModel): {
+  main: AgentBoardCard[];
+  children: Map<string, AgentBoardCard[]>;
+} {
+  const cards = allCards(model);
+  const roots = new Set(cards.filter((card) => !card.parentKey).map((card) => card.key));
+  const main: AgentBoardCard[] = [];
+  const children = new Map<string, AgentBoardCard[]>();
+  for (const card of cards) {
+    const parent = card.parentKey;
+    if (parent && parent !== card.key && roots.has(parent)) {
+      const list = children.get(parent);
+      if (list) list.push(card);
+      else children.set(parent, [card]);
+    } else {
+      main.push(card);
+    }
+  }
+  return { main, children };
+}
+
+export type AgentInboxChipTone = "warn" | "info" | null;
+
+/**
+ * The chip on a parent's row: "1 subagent", "3 subagents", with a dot in
+ * `--warn` while one waits on the user, else `--info` while one works, else
+ * none.
+ */
+export function agentInboxSubagentChip(subagents: readonly AgentInboxRow[]): { label: string; tone: AgentInboxChipTone } | null {
+  if (subagents.length === 0) return null;
+  const label = `${subagents.length} subagent${subagents.length === 1 ? "" : "s"}`;
+  if (subagents.some((entry) => entry.card.bucket === "needs-you")) return { label, tone: "warn" };
+  if (subagents.some((entry) => entry.card.bucket === "working")) return { label, tone: "info" };
+  return { label, tone: null };
 }
 
 /**
@@ -336,8 +385,13 @@ export function buildAgentInbox(
   const working: AgentInboxRow[] = [];
   const snoozed: AgentInboxRow[] = [];
   const settled: AgentInboxRow[] = [];
-  for (const card of allCards(model)) {
+  const { main, children } = groupAgentInboxCards(model);
+  for (const card of main) {
     const entry = row(card, prefs, context);
+    const kids = children.get(card.key);
+    // A subagent follows its parent to whichever section it is in; what the
+    // user decided about the subagent itself does not move it.
+    if (kids) entry.subagents = kids.map((kid) => row(kid, prefs, context));
     const snooze = prefs.snoozed[card.key];
     if (prefs.settled[card.key]) settled.push(entry);
     else if (snooze && context.now < snooze.until) snoozed.push(entry);
@@ -365,7 +419,7 @@ export function buildAgentInbox(
     snoozed,
     settled,
     needsYou: needs.length,
-    total: model.total,
+    total: main.length,
   };
 }
 

@@ -1,12 +1,13 @@
 import { memo, useEffect, useRef } from "react";
 import type { KeyboardEvent, MouseEvent } from "react";
-import { agentSnoozeWakeLabel, type AgentInboxRow as Row } from "@shared/agent-inbox";
+import { agentInboxSubagentChip, agentSnoozeWakeLabel, type AgentInboxRow as Row } from "@shared/agent-inbox";
 import { CodaraMark, RuntimeMark } from "../BrandMarks";
 import { WorkspaceIconGlyph } from "../workspace-icons";
 import { agentBrandColor } from "../../lib/agent-brand";
 import { usePullRequestDiff } from "./agentInboxActions";
 import {
   CheckIcon,
+  ChevronRightIcon,
   ClockIcon,
   DoneIcon,
   FailedIcon,
@@ -31,6 +32,9 @@ interface Props {
   focusable: boolean;
   merging: boolean;
   renaming: boolean;
+  /** Its subagents' list is open under it. */
+  subagentsOpen: boolean;
+  onToggleSubagents: (key: string) => void;
   onOpen: (row: Row) => void;
   onMenu: (row: Row, at: { x: number; y: number } | null) => void;
   onSnooze: (row: Row, anchor: HTMLElement) => void;
@@ -153,6 +157,53 @@ function RenameField({ row, onRename }: { row: Row; onRename: (row: Row, name: s
   );
 }
 
+// A subagent's dot: the status word's colour, muted once nothing is new.
+function subagentTone(row: Row): string {
+  if (row.status === "age") return "muted";
+  return row.status;
+}
+
+/**
+ * The background agents a row's agent started, as one quiet line each under
+ * it: a dot for its state, its title and its time, the branch on hover.
+ * Opening one goes where its own row used to.
+ */
+function SubagentList({
+  row,
+  focusable,
+  onOpen,
+}: {
+  row: Row;
+  focusable: boolean;
+  onOpen: (row: Row) => void;
+}) {
+  return (
+    <ul className="agent-inbox-row__subagents" id={`agent-subagents-${row.key}`} aria-label={`Subagents of ${row.title}`}>
+      {row.subagents.map((kid) => (
+        <li key={kid.key}>
+          <button
+            type="button"
+            className="agent-inbox-subagent"
+            data-agent-subagent={kid.key}
+            data-agent-status={kid.status}
+            tabIndex={focusable ? 0 : -1}
+            title={[kid.card.agentLabel, kid.branch].filter(Boolean).join(" \u00b7 ")}
+            aria-label={[kid.title, spokenStatus(kid, "inbox", 0), kid.branch ? `branch ${kid.branch}` : null]
+              .filter(Boolean)
+              .join(", ")}
+            onClick={() => onOpen(kid)}
+          >
+            <span className={`agent-inbox-subagent__dot is-${subagentTone(kid)}`} aria-hidden />
+            <span className="agent-inbox-subagent__title">{kid.title}</span>
+            {kid.branch && <span className="agent-inbox-subagent__branch">{kid.branch}</span>}
+            <span className="agent-inbox-subagent__time">{kid.time}</span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function spokenStatus(row: Row, shelf: AgentInboxShelf, now: number): string {
   if (shelf === "settled") return "settled";
   if (shelf === "snoozed" && row.snoozedUntil !== null) return `snoozed until ${agentSnoozeWakeLabel(row.snoozedUntil, now)}`;
@@ -169,6 +220,8 @@ function AgentInboxRowView({
   focusable,
   merging,
   renaming,
+  subagentsOpen,
+  onToggleSubagents,
   onOpen,
   onMenu,
   onSnooze,
@@ -178,6 +231,9 @@ function AgentInboxRowView({
   onFocusRow,
 }: Props) {
   const settled = shelf === "settled";
+  // A settled row is one line and out of the way: no chip.
+  const chip = settled ? null : agentInboxSubagentChip(row.subagents);
+  const kidsOpen = Boolean(chip) && subagentsOpen;
   const third = row.branch ?? row.card.tool ?? row.card.detail ?? row.card.message;
   const spoken = [
     row.title,
@@ -186,6 +242,7 @@ function AgentInboxRowView({
     row.pinned ? "pinned" : null,
     row.branch ? `branch ${row.branch}` : null,
     row.pullRequest ? `pull request ${row.pullRequest.number}` : null,
+    chip ? chip.label : null,
   ]
     .filter(Boolean)
     .join(", ");
@@ -211,6 +268,7 @@ function AgentInboxRowView({
         active ? "is-active" : "",
         row.read ? "is-read" : "",
         merging ? "is-merging" : "",
+        kidsOpen ? "is-subagents-open" : "",
       ]
         .filter(Boolean)
         .join(" ")}
@@ -221,52 +279,82 @@ function AgentInboxRowView({
       data-agent-workspace={row.card.workspaceId}
       onFocus={() => onFocusRow(row.key)}
     >
-      <button
-        type="button"
-        className="agent-inbox-row__open"
-        data-agent-card-open={row.key}
-        tabIndex={focusable ? 0 : -1}
-        aria-label={spoken}
-        aria-current={active ? "true" : undefined}
-        title={row.card.message ?? row.title}
-        onClick={() => onOpen(row)}
-        onContextMenu={onContextMenu}
-        onKeyDown={onKeyDown}
-      >
-        {settled ? (
-          <span className="agent-inbox-row__line is-one">
-            <span className="agent-inbox-row__tile" aria-hidden>
-              <WorkspaceIconGlyph icon={row.card.workspaceIcon ?? undefined} size={10} />
-            </span>
-            <span className="agent-inbox-row__title">{row.title}</span>
-            <PullRequestBits row={row} withDiff={false} />
-            <StatusSlot row={row} shelf={shelf} now={now} merging={merging} />
-          </span>
-        ) : (
-          <>
-            <span className="agent-inbox-row__line is-where">
+      <div className="agent-inbox-row__body">
+        <button
+          type="button"
+          className="agent-inbox-row__open"
+          data-agent-card-open={row.key}
+          tabIndex={focusable ? 0 : -1}
+          aria-label={spoken}
+          aria-current={active ? "true" : undefined}
+          title={row.card.message ?? row.title}
+          onClick={() => onOpen(row)}
+          onContextMenu={onContextMenu}
+          onKeyDown={onKeyDown}
+        >
+          {settled ? (
+            <span className="agent-inbox-row__line is-one">
               <span className="agent-inbox-row__tile" aria-hidden>
                 <WorkspaceIconGlyph icon={row.card.workspaceIcon ?? undefined} size={10} />
               </span>
-              <span className="agent-inbox-row__ws">{row.card.workspaceName}</span>
-              {row.pinned && (
-                <span className="agent-inbox-row__pin" title="Pinned" aria-hidden>
-                  <PinIcon size={10} />
-                </span>
-              )}
+              <span className="agent-inbox-row__title">{row.title}</span>
+              <PullRequestBits row={row} withDiff={false} />
               <StatusSlot row={row} shelf={shelf} now={now} merging={merging} />
             </span>
-            <span className="agent-inbox-row__line is-what">
-              {renaming ? <span className="agent-inbox-row__title is-renaming" /> : <span className="agent-inbox-row__title">{row.title}</span>}
+          ) : (
+            <>
+              <span className="agent-inbox-row__line is-where">
+                <span className="agent-inbox-row__tile" aria-hidden>
+                  <WorkspaceIconGlyph icon={row.card.workspaceIcon ?? undefined} size={10} />
+                </span>
+                <span className="agent-inbox-row__ws">{row.card.workspaceName}</span>
+                {row.pinned && (
+                  <span className="agent-inbox-row__pin" title="Pinned" aria-hidden>
+                    <PinIcon size={10} />
+                  </span>
+                )}
+                <StatusSlot row={row} shelf={shelf} now={now} merging={merging} />
+              </span>
+              <span className="agent-inbox-row__line is-what">
+                {renaming ? <span className="agent-inbox-row__title is-renaming" /> : <span className="agent-inbox-row__title">{row.title}</span>}
+              </span>
+              <span className="agent-inbox-row__line is-meta">
+                <span className="agent-inbox-row__branch">{third ?? ""}</span>
+                <PullRequestBits row={row} withDiff />
+                <AgentMark row={row} />
+                {chip && (
+                  // Holds the chip's place on the line; the chip itself is a
+                  // sibling of this button, since buttons cannot nest.
+                  <span className="agent-inbox-row__chip is-ghost" aria-hidden>
+                    {chip.tone && <span className="agent-inbox-row__chip-dot" />}
+                    {chip.label}
+                    <ChevronRightIcon size={12} />
+                  </span>
+                )}
+              </span>
+            </>
+          )}
+        </button>
+        {chip && (
+          <button
+            type="button"
+            className="agent-inbox-row__chip"
+            data-agent-subagents-chip={row.key}
+            tabIndex={focusable ? 0 : -1}
+            aria-expanded={kidsOpen}
+            aria-controls={kidsOpen ? `agent-subagents-${row.key}` : undefined}
+            aria-label={`${chip.label} of ${row.title}`}
+            onClick={() => onToggleSubagents(row.key)}
+          >
+            {chip.tone && <span className={`agent-inbox-row__chip-dot is-${chip.tone}`} aria-hidden />}
+            {chip.label}
+            <span className="agent-inbox-row__chip-chevron" aria-hidden>
+              <ChevronRightIcon size={12} />
             </span>
-            <span className="agent-inbox-row__line is-meta">
-              <span className="agent-inbox-row__branch">{third ?? ""}</span>
-              <PullRequestBits row={row} withDiff />
-              <AgentMark row={row} />
-            </span>
-          </>
+          </button>
         )}
-      </button>
+      </div>
+      {kidsOpen && <SubagentList row={row} focusable={focusable} onOpen={onOpen} />}
       {renaming && (
         <div className="agent-inbox-row__rename-wrap">
           <RenameField row={row} onRename={onRename} />

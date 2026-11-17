@@ -176,6 +176,7 @@ export function backgroundAgentCards(input: BackgroundAgentInput): AgentBoardCar
       target: { type: "workspace", workspaceId: worktree.workspaceId },
       reply: null,
       origin: { name: fromName, target: creatorCard?.target ?? null },
+      ...(creatorCard ? { parentKey: creatorCard.key } : {}),
     });
   }
   return out;

@@ -270,6 +270,26 @@ test("the Agents tab lists the background agent, and its settle survives a reloa
   assert.ok(prefs.settled["worktree:wt-cloud"], "a worktree key is a valid inbox key");
 });
 
+test("a card names its parent only while the starting session is on the board", ({ mod }) => {
+  const [found] = cards(mod, { worktrees: [worktree()] });
+  assert.equal(found.parentKey, "pane:p-coord");
+  const [lost] = cards(mod, { worktrees: [worktree()], cards: [] });
+  assert.equal(lost.parentKey, undefined, "an orphan has no parent to sit under");
+});
+
+test("the Agents tab lists the subagent behind its coordinator's chip, not as a row", ({ mod }) => {
+  const coord = creatorCard();
+  const model = mod.withBackgroundAgents(
+    { needsYou: [], working: [coord], done: [], total: 1 },
+    { now: NOW, worktrees: [worktree()], notes: {}, workspaces: WORKSPACES },
+  );
+  assert.equal(model.working.length, 2, "the board itself still has both cards");
+  const inbox = mod.buildAgentInbox(model, mod.emptyAgentInboxPrefs(), { now: NOW, pullRequests: {}, branches: {} });
+  assert.deepEqual(inbox.working.map((row) => row.key), ["pane:p-coord"]);
+  assert.deepEqual(inbox.working[0].subagents.map((row) => row.key), ["worktree:wt-cloud"]);
+  assert.equal(inbox.total, 1);
+});
+
 (async () => {
   const { mod, cleanup } = await load();
   let failed = 0;
