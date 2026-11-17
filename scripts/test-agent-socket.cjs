@@ -31,6 +31,7 @@ const ROOT = path.resolve(__dirname, "..");
 require("./virtual-display.cjs").keepTestAppOffDesktop();
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "cora-socket-test-"));
 const HANDSHAKE = path.join(HOME, "agent-socket.json");
+const READY_GATE = path.join(HOME, "ready-gate");
 const ACCOUNT_ACCESS_SECRET = "account-access-secret-must-never-leak";
 const ACCOUNT_REFRESH_SECRET = "account-refresh-secret-must-never-leak";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -342,6 +343,10 @@ async function main() {
       // checks below reach the path gates. An offer never uploads, so nothing
       // listens there.
       CODARA_SHARE_URL: "http://127.0.0.1:9",
+      // Main counts the window ready only once this file exists, so the early
+      // terminal.list below reaches it before the window is ready on any
+      // machine (index.ts, under test only).
+      CODARA_E2E_READY_GATE: READY_GATE,
     },
     stdio: "ignore",
   });
@@ -371,6 +376,42 @@ async function main() {
         return false;
       }
     };
+    // A client that lists before the window has booted is held until it is
+    // ready, then answered from the panes the window sent main before it said
+    // so (App.tsx): no round trip into a renderer at its busiest moment. The
+    // gate makes the order certain: the list is held, the window has mounted
+    // and sent its panes, and only then does main count it ready.
+    const mainLogText = () => {
+      try {
+        return fs.readFileSync(mainLog, "utf8");
+      } catch {
+        return "";
+      }
+    };
+    const until = async (what, test, ms) => {
+      for (const deadline = Date.now() + ms; !test(); await sleep(100)) {
+        if (app.exitCode !== null || app.signalCode !== null) throw new Error(`Electron exited while waiting for ${what}`);
+        if (Date.now() > deadline) throw new Error(`no ${what} in main.log after ${ms / 1000} s`);
+      }
+    };
+    const listStarted = Date.now();
+    const earlyCall = rpc(handshake, "terminal.list", {});
+    await until("held terminal.list", () => /\[terminal-bridge\] held list until the window is ready$/m.test(mainLogText()), 30_000);
+    await until("'renderer ready'", rendererReady, 60_000);
+    fs.writeFileSync(READY_GATE, "");
+    const early = await earlyCall;
+    check(
+      "terminal.list sent before the window booted is answered once it has",
+      Array.isArray(early.result?.panes),
+      `after ${Date.now() - listStarted} ms: ${JSON.stringify(early).slice(0, 180)}`,
+    );
+    await until("end of the held list", () => /\[terminal-bridge\] held list \d+ ms, /.test(mainLogText()), 5_000).catch(() => undefined);
+    const heldOutcome = (mainLogText().match(/\[terminal-bridge\] held list \d+ ms, (.+)$/m) || [])[1];
+    check(
+      "it is answered from main's copy of the panes, with no round trip into the renderer",
+      heldOutcome === "answered from main's copy",
+      `main.log: ${heldOutcome ?? "no line for the held list"}`,
+    );
     for (let waited = 0; !rendererReady(); waited += 250) {
       if (app.exitCode !== null || app.signalCode !== null) throw new Error("Electron exited before its window booted");
       // With the 60 s handshake wait this stays inside the runner's 180 s
