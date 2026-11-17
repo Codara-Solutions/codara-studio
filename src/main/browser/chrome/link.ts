@@ -20,6 +20,10 @@ type EventListener = (tabId: number, method: string, params: Record<string, unkn
 export class ChromeLink {
   readonly tabs = new Map<number, ChromeTabInfo>();
   allowOpen = false;
+  /** The browser's session id from its latest tab report: stops belong to one browser session. */
+  session: string | null = null;
+  /** Whether the browser sent its tab list on this connection yet. */
+  tabsReported = false;
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private readonly eventListeners = new Set<EventListener>();
@@ -89,6 +93,8 @@ export class ChromeLink {
         this.tabs.clear();
         for (const tab of sanitizeTabs(message.tabs)) this.tabs.set(tab.tabId, tab);
         this.allowOpen = message.allowOpen === true;
+        this.tabsReported = true;
+        this.session = typeof message.session === "string" && /^[\w-]{8,64}$/.test(message.session) ? message.session : null;
         for (const listener of this.tabsListeners) listener();
         return;
       }

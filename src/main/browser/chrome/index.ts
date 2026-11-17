@@ -31,7 +31,7 @@ import type { ChromeLink } from "./link";
 import { ChromeLinkServer } from "./link-server";
 import { applyKeepAgentsInChrome } from "./keep-agents-in-chrome";
 import { ChromeLinkStore } from "./link-store";
-import { adoptPresenceSettings, chromeLinkDown, chromeStops, forgetChromeStops, keepChromeStopsFor, loadChromeStops, loadPresenceSettings, presenceSettings, stopChromeDriver } from "./presence";
+import { adoptPresenceSettings, chromeLinkDown, chromeStopList, chromeStops, forgetChromeStops, keepChromeStopsFor, loadChromeStops, loadPresenceSettings, presenceSettings, setChromeStopsListener, stopChromeDriver } from "./presence";
 import { CHROME_LINK_PORTS } from "./protocol";
 import { setChromeLinkRuntime } from "./runtime";
 
@@ -187,12 +187,28 @@ function onPresenceMessage(link: ChromeLink, message: Record<string, unknown>): 
     }
     return;
   }
-  if (typeof message.tabId !== "number" || typeof message.key !== "string" || !message.key) return;
-  // Stop on the page refuses that agent's next calls on that tab only, until
-  // the user gives the tab back from the popup or Settings.
-  const name = typeof message.name === "string" ? message.name : undefined;
-  stopChromeDriver(link.linkId, message.tabId, message.key, message.type === "presence_stop", name);
+  if (message.type !== "presence_stop" && message.type !== "presence_allow") return;
+  const acked = typeof message.id === "string" && /^[\w-]{1,64}$/.test(message.id) ? message.id : null;
+  if (typeof message.tabId === "number" && typeof message.key === "string" && message.key) {
+    // Stop (on the page or in the popup) refuses that agent's next calls on
+    // that tab only, until the user gives the tab back from the popup or Settings.
+    // A tab that is no longer shared has nothing to stop. A Stop sent right
+    // after a reconnect comes before the tab list: kept, and the list that
+    // follows ends it if that tab is no longer shared.
+    const stop = message.type === "presence_stop";
+    const session = typeof message.session === "string" && /^[\w-]{8,64}$/.test(message.session) ? message.session : link.session;
+    if (!stop || !link.tabsReported || link.tabs.has(message.tabId)) {
+      stopChromeDriver(link.linkId, message.tabId, message.key, stop, typeof message.name === "string" ? message.name : undefined, session);
+    }
+  }
+  // The extension shows a stop only once Codara confirms it with its list.
+  sendStops(link, acked);
   broadcast();
+}
+
+/** Codara owns the stop list; the extension replaces its copy with this. */
+function sendStops(link: ChromeLink, acked: string | null = null): void {
+  link.send({ type: "presence_stops", stops: chromeStopList(link.linkId), ...(acked ? { acked } : {}) });
 }
 
 function broadcast(): void {
@@ -220,6 +236,11 @@ export function startChromeLink(): void {
   setChromeAgentLabeler(agentLabel);
   loadPresenceSettings(join(dir, "presence.json"));
   loadChromeStops(join(dir, "presence-stops.json"));
+  setChromeStopsListener((linkId) => {
+    const link = server?.links().find((candidate) => candidate.linkId === linkId);
+    if (link) sendStops(link);
+    broadcast();
+  });
   const linkServer = new ChromeLinkServer({ store, app: { name: "Codara", version: app.getVersion() }, ports: linkPorts() });
   const chromeBackend = new ChromeTargetBackend(linkServer);
   server = linkServer;
@@ -228,10 +249,11 @@ export function startChromeLink(): void {
   linkServer.onLinkUp((link) => {
     link.onTabs(() => {
       chromeBackend.syncTabs(link);
-      keepChromeStopsFor(link.linkId, link.tabs.keys());
+      keepChromeStopsFor(link.linkId, link.session, link.tabs.keys());
     });
     link.onMessage((message) => onPresenceMessage(link, message));
     link.send({ type: "presence_settings", ...presenceSettings() });
+    sendStops(link);
     unregisterBackend ??= registerBrowserBackend(chromeBackend);
     offerExtensionUpdate(link);
   });
@@ -293,9 +315,8 @@ export function registerChromeLinkIpc(handle: IpcHandle): void {
   // Give a tab back to an agent the user stopped there from the page.
   handle("chromeLink:giveBack", async (_event, linkId: unknown, tabId: unknown, key: unknown): Promise<boolean> => {
     if (typeof linkId !== "string" || typeof tabId !== "number" || typeof key !== "string") return false;
+    // The extension's copy follows from the list Codara sends (now, or when it reconnects).
     stopChromeDriver(linkId, tabId, key, false);
-    server?.links().find((link) => link.linkId === linkId)?.send({ type: "presence_allowed", tabId, key });
-    broadcast();
     return true;
   });
   // Reading the list also re-applies it, so a tool the user added since boot

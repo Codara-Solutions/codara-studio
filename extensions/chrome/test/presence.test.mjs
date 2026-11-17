@@ -8,12 +8,16 @@ import {
   holdsPresence,
   isPresenceNode,
   newerSettings,
+  pendingAfterAck,
   pointerOf,
   presenceCall,
   presenceClick,
   presenceSettings,
   presenceView,
   presenceWorldError,
+  stopCopyFrom,
+  stopPending,
+  stoppedAgentsOn,
   withoutPresenceNodes,
 } from "../lib/presence.js";
 
@@ -92,6 +96,24 @@ export function run() {
   assert.match(presenceWorldError("Runtime.getProperties", { executionContextId: 7 }, 7), /belongs/);
   assert.equal(presenceWorldError("Runtime.evaluate", { expression: "1" }, 7), null, "the page's own world is fine");
   assert.equal(presenceWorldError("Runtime.evaluate", { contextId: 7 }, null), null);
+  const world = { contextId: 7, uniqueIds: new Set(["u-7"]) };
+  assert.match(presenceWorldError("Runtime.evaluate", { expression: "1", uniqueContextId: "u-7" }, world), /belongs/, "by unique id too");
+  assert.match(presenceWorldError("DOM.resolveNode", { nodeId: 3, executionContextId: 7 }, world), /belongs/, "resolving a node into it");
+  assert.equal(presenceWorldError("DOM.resolveNode", { nodeId: 3, executionContextId: 2 }, world), null);
+  assert.equal(presenceWorldError("Runtime.evaluate", { uniqueContextId: "u-1" }, world), null);
+
+  // Stops: Codara's list replaces the extension's copy; nothing of the old copy survives.
+  const copy = stopCopyFrom({ stops: [{ tabId: 4, key: "pane:p1", name: "Claude Code" }, { tabId: 4, key: "bad key!" }, { tabId: "5", key: "pane:p2" }] });
+  assert.deepEqual(JSON.parse(JSON.stringify(copy)), { 4: [{ key: "pane:p1", name: "Claude Code" }] });
+  assert.deepEqual(stopCopyFrom({ stops: [] }), {}, "an empty list clears the copy (unshare then reshare)");
+  // Fail closed: a Stop Codara has not confirmed counts, and refuses the tab.
+  const pending = [{ id: "s1", op: "stop", tabId: 9, key: "pane:p3", name: "Codex" }, { id: "a1", op: "allow", tabId: 4, key: "pane:p1" }];
+  assert.deepEqual(stoppedAgentsOn(copy, pending, 9), [{ key: "pane:p3", name: "Codex", waiting: true }]);
+  assert.deepEqual(stoppedAgentsOn(copy, pending, 4), [{ key: "pane:p1", name: "Claude Code", waiting: true }], "a give back waits for Codara, still stopped");
+  assert.equal(stopPending(pending, 9), true);
+  assert.equal(stopPending(pending, 4), false, "a waiting give back does not block the tab");
+  assert.deepEqual(pendingAfterAck(pending, "s1").map((request) => request.id), ["a1"]);
+  assert.deepEqual(stoppedAgentsOn({}, [], 9), []);
 
   // Settings: both on by default, the newer change wins, a tie keeps what is held.
   assert.deepEqual(presenceSettings(undefined), { overlay: true, glow: true, at: 0 });
@@ -168,6 +190,11 @@ export function run() {
   assert.equal(host.isConnected, false, "a redraw while concealed stays out");
   assert.equal(api.conceal(false), true);
   assert.equal(host.isConnected, true);
+  // A recording that never ended does not keep the next overlay hidden.
+  api.conceal(true);
+  api.remove();
+  api.show(viewOf("d4"), 10_000);
+  assert.equal(host.isConnected, true, "remove() resets the hidden flag");
   api.remove();
 
   // DOM events never carry the overlay's host: by backend node id, or by style before it is known.

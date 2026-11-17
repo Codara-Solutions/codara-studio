@@ -385,8 +385,8 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await expect(account.locator("#note")).toBeFocused();
     const asAgent = (params: Record<string, unknown> = {}) => request("preview.snapshot", { tabId, ...params }).then(() => "allowed", (error) => String(error));
     await expect.poll(() => asAgent()).toMatch(/The user stopped .* from using browser tab chrome:\d+ and took it back/);
-    // The page offers no Undo: the pill has no button, and says where to give it back.
-    expect(await pillButton()).toBeNull();
+    // Once Codara confirms, the pill has no button (no Undo on the page) and says where to give it back.
+    await expect.poll(pillButton).toBeNull();
     // Another agent on the same tab is not stopped, and gets its own pill.
     expect(await asAgent({ callerPid: 999991 })).toBe("allowed");
     expect(await pillButton()).not.toBeNull();
@@ -400,6 +400,58 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await popup.locator("#tab-stopped button", { hasText: "Give back" }).click();
     await expect.poll(() => asAgent()).toBe("allowed");
     await expect(popup.locator("#tab-stopped")).toBeHidden();
+
+    // Codara owns the stop list; the extension's copy follows it.
+    const extension = () => worker.evaluate((id) => {
+      const state = (self as unknown as { codara: any }).codara.state();
+      return { stopped: (state.stoppedAgents[id] ?? []).length, pending: state.pendingStops.length };
+    }, accountTab);
+    const stopOnPage = async () => {
+      await request("preview.click", { tabId, selector: "h1" });
+      await expect.poll(pillButton, { timeout: 5_000 }).not.toBeNull();
+      const button = await pillButton();
+      await account.mouse.click(button!.x, button!.y);
+    };
+    // Unshare then reshare ends the stop on both sides: the agent works with its pointer again.
+    await stopOnPage();
+    await expect.poll(() => asAgent()).toMatch(/The user stopped/);
+    await expect.poll(extension).toEqual({ stopped: 1, pending: 0 });
+    await popup.reload();
+    await popup.locator("#share-tab").uncheck();
+    await expect.poll(extension).toEqual({ stopped: 0, pending: 0 });
+    await popup.locator("#share-tab").check();
+    await expect.poll(() => asAgent()).toBe("allowed");
+    await request("preview.click", { tabId, selector: "h1" });
+    await expect.poll(pillButton, { timeout: 5_000 }).not.toBeNull();
+    // Stop pressed while Codara cannot be reached: kept, the tab relays nothing,
+    // and Codara gets it first thing after the reconnect.
+    await worker.evaluate(() => {
+      const link = (self as unknown as { codara: any }).codara.link;
+      link.realSend = link.send;
+      link.send = () => false;
+    });
+    const button = await pillButton();
+    await account.mouse.click(button!.x, button!.y);
+    await expect.poll(extension).toEqual({ stopped: 0, pending: 1 });
+    await worker.evaluate(() => {
+      const link = (self as unknown as { codara: any }).codara.link;
+      link.send = link.realSend;
+      link.disconnect("idle");
+      void link.connect();
+    });
+    await expect.poll(extension, { timeout: 15_000 }).toEqual({ stopped: 1, pending: 0 });
+    await expect.poll(() => asAgent()).toMatch(/The user stopped/);
+    // Give back from Codara while the extension is away: its copy is replaced on reconnect.
+    await worker.evaluate(() => (self as unknown as { codara: any }).codara.link.disconnect("idle"));
+    const studioState = () => codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.state());
+    await expect.poll(async () => (await studioState()).browsers[0].connected).toBe(false);
+    const key = (await studioState()).browsers[0].linkId as string;
+    expect(await extension()).toEqual({ stopped: 1, pending: 0 });
+    const agentKey = await worker.evaluate((id) => (self as unknown as { codara: any }).codara.state().stoppedAgents[id][0].key as string, accountTab);
+    await codara.evaluate(([linkId, tab, agent]) => (window as unknown as { spark: any }).spark.chromeLink.giveBack(linkId, tab, agent), [key, accountTab, agentKey] as const);
+    await worker.evaluate(() => void (self as unknown as { codara: any }).codara.link.connect());
+    await expect.poll(extension, { timeout: 15_000 }).toEqual({ stopped: 0, pending: 0 });
+    await expect.poll(() => asAgent()).toBe("allowed");
 
     // A strict page (CSP without inline styles, Trusted Types) still gets a
     // styled pill, and a click by selector on a fixed link under the pill lands.
