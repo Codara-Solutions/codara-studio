@@ -277,18 +277,12 @@ export default function GitHubSection({
     return () => window.clearTimeout(timer);
   }, [busySignal, manualRefresh]);
   const ready = status?.kind === "ready" ? status : null;
-  // The queue count already includes this branch's PR; without a queue the
-  // only countable item is that PR itself.
-  const count = queue
-    ? queueSummary.total
-    : ready
-      ? ready.pullRequest
-        ? 1
-        : 0
-      : null;
+  // The queue reports the rows it shows, which leave out this branch's own
+  // PR (that one is on Pull request). Without a queue the tab lists nothing.
+  const issuesCount = queue ? queueSummary.total : null;
   useEffect(() => {
-    onQueueCount?.(count);
-  }, [count, onQueueCount]);
+    onQueueCount?.(issuesCount);
+  }, [issuesCount, onQueueCount]);
   const nothingOpen = Boolean(
     ready && !ready.pullRequest && queue && queueSummary.total === 0,
   );
@@ -446,6 +440,8 @@ export default function GitHubSection({
                   onSummary={handleQueueSummary}
                 />
               </div>
+            ) : view === "issues" ? (
+              <MutedText>Issues are listed for local workspaces only.</MutedText>
             ) : null}
           </>
         )}
@@ -1433,7 +1429,7 @@ function JourneyTimeline({
         title: dirty > 0 ? "Save your work" : "Work saved",
         detail:
           dirty > 0
-            ? `${dirty} file${dirty === 1 ? "" : "s"} changed. Commit them below`
+            ? `${dirty} file${dirty === 1 ? "" : "s"} changed. Commit them on the Changes tab`
             : `${ahead} commit${ahead === 1 ? "" : "s"} ready to share`,
       },
       {

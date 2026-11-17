@@ -160,8 +160,6 @@ export default function GitPanel({
     setDiffStats(null);
     setSections({ staged: false, changes: false, history: false });
     changesScrollRef.current = null;
-    setIssueCount(null);
-    setStashCount(0);
   }, [cwd]);
 
   const changeTab = useCallback(
@@ -498,6 +496,21 @@ export default function GitPanel({
   // Tabs only make sense over a repository; a folder that is not one keeps
   // the single page that offers to initialize it.
   const showTabs = !collapsed && Boolean(cwd) && Boolean(status?.isRepo);
+  const notices =
+    cwd && status?.isRepo ? (
+      <>
+        <ConflictFixBanner cwd={cwd} status={status} />
+        {displayError && (
+          <ErrorStrip
+            text={displayError}
+            onDismiss={() => {
+              setOpError(null);
+              setCommitFailure(null);
+            }}
+          />
+        )}
+      </>
+    ) : null;
 
   return (
     <div
@@ -552,6 +565,9 @@ export default function GitPanel({
             counts={{ changes: changeCount, issues: issueCount, stashes: stashCount }}
             onChange={changeTab}
           />
+          {/* A conflict or a failed git action shows on every tab: a stash
+              pop that conflicts happens on Stashes, not on Changes. */}
+          {tab !== "changes" ? notices : null}
           {/* Issues and Pull request share one GitHub block, so GitHub is read
               once for both. Like Stashes it stays mounted behind its tab, so
               the tab counts are known before a tab is opened. */}
@@ -760,16 +776,7 @@ export default function GitPanel({
             background: "var(--panel-2)",
           }}
         >
-          <ConflictFixBanner cwd={cwd} status={status} />
-          {displayError && (
-            <ErrorStrip
-              text={displayError}
-              onDismiss={() => {
-                setOpError(null);
-                setCommitFailure(null);
-              }}
-            />
-          )}
+          {notices}
           {commitFailure && opError === commitFailure.output ? (
             <CommitHookFix cwd={cwd} output={commitFailure.output} commitMessage={commitFailure.message} />
           ) : null}
