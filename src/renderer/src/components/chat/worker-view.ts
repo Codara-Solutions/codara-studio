@@ -16,7 +16,18 @@ export function workerAttempt(run: RunState, worker: ChatWorker): WorkerAttempt 
   return run.workerAttempts.find((attempt) => attempt.id === worker.attemptId) ?? null;
 }
 
-export function workerViewState(attempt: WorkerAttempt | null): WorkerViewState {
+/**
+ * The worker's state as the view shows it. Its newest attempt decides, except
+ * while another attempt is owed (a retry or a runtime fallback is queued): the
+ * worker is then waiting again, as its row in Main says, not failed.
+ */
+export function workerViewState(
+  attempt: WorkerAttempt | null,
+  worker?: Pick<ChatWorker, "status" | "pending">,
+): WorkerViewState {
+  if (worker && (worker.pending || worker.status === "queued" || worker.status === "retry_queued")) {
+    if (!attempt || !RUNNING_ATTEMPT.has(attempt.status)) return "queued";
+  }
   if (!attempt) return "queued";
   if (RUNNING_ATTEMPT.has(attempt.status)) return "running";
   if (attempt.status === "succeeded") return "done";
