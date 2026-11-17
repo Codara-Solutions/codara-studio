@@ -16,7 +16,8 @@ export function commandOnPath(name: string, env: NodeJS.ProcessEnv = process.env
   return dirs.some((dir) => suffixes.some((suffix) => existsSync(join(dir, `${name}${suffix}`))));
 }
 
-export const PYTHON3_HINT = "This machine has no `python` command, only `python3`. Run the same command with python3.";
+export const PYTHON3_HINT =
+  "This machine has no `python` command, only `python3`. Rerun only the python step with python3; anything before it in the same command already ran.";
 
 /** bash (`python: command not found`), dash (`python: not found`) and zsh
  *  (`command not found: python`), never python3 or python3.12. */
@@ -33,11 +34,14 @@ export function saysPythonMissing(content: ReadonlyArray<{ type?: unknown; text?
  * per Pi process by the caller.
  */
 export function barePythonHint<Part extends { type: string }>(
-  event: { toolName?: unknown; content: readonly Part[] },
+  event: { toolName?: unknown; isError?: unknown; content: readonly Part[] },
   available: { hasPython: boolean; hasPython3: boolean },
 ): { content: Array<Part | { type: "text"; text: string }> } | undefined {
   if (available.hasPython || !available.hasPython3) return undefined;
   if (String(event.toolName ?? "").toLowerCase() !== "bash") return undefined;
+  // Only a failed call: a successful one that printed the message (a log, a
+  // doc, an echo) did not fail for want of python.
+  if (event.isError !== true) return undefined;
   if (!saysPythonMissing(event.content as ReadonlyArray<{ type?: unknown; text?: unknown }>)) return undefined;
   return { content: [...event.content, { type: "text", text: PYTHON3_HINT }] };
 }
