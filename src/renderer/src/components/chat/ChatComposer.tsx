@@ -16,7 +16,7 @@ import { pathToFileUrl } from "../../lib/pathToFileUrl";
 import { unwrapIpcError } from "../../lib/ipc-error";
 import AnchoredMenu from "./composer/AnchoredMenu";
 import { DEFAULT_PI_COMPACT_AT_TOKENS } from "@shared/context-compaction";
-import { fastModeSupportFor } from "@shared/fast-mode";
+import { fastModeAvailableFor } from "@shared/fast-mode";
 import { useOpenAiFastMode } from "../../lib/useOpenAiFastMode";
 import {
   backendFailureRetryText,
@@ -1195,8 +1195,9 @@ export default function ChatComposer({
   // Fast mode remains a single GLOBAL setting even though its control lives
   // here: the flash button writes AppSettings.openAiFastMode, which the manager
   // and every worker read at launch, and there is no per-chat fast-mode state.
+  // Only Codex models run fast, so the button is not drawn for any other.
   const fastMode = useOpenAiFastMode();
-  const fastModeSupport = fastModeSupportFor(activeChatModelId);
+  const showFastMode = fastModeAvailableFor(activeChatModelId);
   const availableEfforts: AgentEffortLevel[] = effortsFor(activeChatModelOption);
   const visibleEffort: AgentEffortLevel = availableEfforts.includes(activeChatEffort)
     ? activeChatEffort
@@ -1607,11 +1608,9 @@ export default function ChatComposer({
               }}
               onManage={openProfileManager}
             />
-            <FastModeToggle
-              enabled={fastMode.enabled}
-              onToggle={fastMode.toggle}
-              unavailableReason={fastModeSupport.supported ? undefined : fastModeSupport.reason}
-            />
+            {showFastMode ? (
+              <FastModeToggle enabled={fastMode.enabled} onToggle={fastMode.toggle} />
+            ) : null}
           </div>
           {workerActivity ? (
             <WorkerActivityStatus

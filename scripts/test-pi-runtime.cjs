@@ -586,7 +586,7 @@ async function main() {
   // Fast mode: the extension needs the provider stamped, and the fast-mode
   // flag is stamped only when the caller resolved it on. The caller has
   // already narrowed it to the provider and model (resolveCodaraPiFastMode);
-  // the extension still checks the model on every request.
+  // the plan and the extension still refuse it for anything but Codex.
   const tierPlanFor = (provider, fastMode) =>
     runtime.buildPiManagerLaunchPlan({
       runtime: fakeRuntime,
@@ -650,10 +650,10 @@ async function main() {
       `${provider} must not carry a fast-mode stamp when the setting is off`,
     );
   }
-  // Setting on: OpenAI and Anthropic both get it, so a Claude Opus worker
-  // runs fast exactly like a GPT one. OpenRouter never does (checked above).
+  // Setting on: only Codex gets it. A Claude process runs at standard speed
+  // even if a caller passed fastMode, and OpenRouter never does (checked above).
   assert.equal(tierPlanFor("openai-codex", true).CODARA_PI_FAST_MODE, "1");
-  assert.equal(tierPlanFor("anthropic", true).CODARA_PI_FAST_MODE, "1");
+  assert.equal(tierPlanFor("anthropic", true).CODARA_PI_FAST_MODE, undefined);
   for (const absurd of ["0", "-5", "NaN", "later", "Infinity"]) {
     assert.equal(
       compactPlanFor(absurd),

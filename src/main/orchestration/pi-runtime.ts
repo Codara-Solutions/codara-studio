@@ -144,10 +144,10 @@ export interface PiManagerLaunchOptions {
   codaraHomeDir?: string;
   /**
    * The composer's fast-mode toggle (AppSettings.openAiFastMode), already
-   * narrowed to whether this provider and model can run fast. The bundled
-   * extension applies OpenAI's priority tier or Anthropic's `speed: "fast"`
-   * per request. Defaults to off so a missing setting can never silently buy
-   * the pricier mode.
+   * narrowed to whether this provider and model can run fast. Only Codex
+   * does: the bundled extension applies OpenAI's priority tier per request.
+   * Defaults to off so a missing setting can never silently buy the pricier
+   * mode.
    */
   fastMode?: boolean;
   /** AppSettings.coraAutoCompactPercent. null or absent is Auto. */
@@ -668,8 +668,9 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   // Fast-mode policy inputs. The extension's before_provider_request hook is
   // the only seam Pi 0.85.1 gives us for the request body, and it needs to
   // know which provider this process talks to and whether Settings enabled
-  // fast mode. OpenRouter never carries the flag: its upstream pricing for a
-  // fast tier is unknown to Codara.
+  // fast mode. Only a Codex process carries the flag: Claude always runs at
+  // standard speed, and OpenRouter's upstream pricing for a fast tier is
+  // unknown to Codara.
   env.CODARA_PI_PROVIDER = options.provider;
   // A Claude process asks Studio to renew its login (the bundled extension's
   // anthropic-refresh.ts), so it names the account it runs as. An imported-PR
@@ -677,7 +678,7 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   if (options.provider === "anthropic" && options.accountProfileId) {
     env.CODARA_PI_ACCOUNT_PROFILE_ID = options.accountProfileId;
   }
-  if (options.fastMode === true && options.provider !== "openrouter") {
+  if (options.fastMode === true && options.provider === "openai-codex") {
     env.CODARA_PI_FAST_MODE = "1";
   }
   // Both names or neither: a half-configured bridge would leave the extension

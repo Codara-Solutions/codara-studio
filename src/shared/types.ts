@@ -708,12 +708,11 @@ export interface AppSettings {
   // afterwards. Default off. Interactive / non-autopilot launches are
   // unaffected and stay byte-identical regardless of this flag.
   autopilotSandbox: boolean;
-  // Fast mode for every Cora session whose model has one: the manager and
-  // every worker it launches. OpenAI GPT models get the priority tier, Claude
-  // Opus 5.5 / Opus 5 / Opus 4.8 get `speed: "fast"` (billed as extra usage on
-  // a subscription). Off by default. The name predates Anthropic support and
-  // is kept so existing settings files carry over; src/shared/fast-mode.ts
-  // and resources/pi-cora/service-tier.ts own the policy.
+  // Fast mode for every Cora session on a Codex model: the manager and every
+  // Codex worker it launches get OpenAI's priority tier. Claude and every
+  // other model always run at standard speed. Off by default. The name is
+  // kept so existing settings files carry over; src/shared/fast-mode.ts and
+  // resources/pi-cora/service-tier.ts own the policy.
   openAiFastMode: boolean;
   // "Always verify edits with a worker". Off by default: Cora makes small,
   // low-risk edits herself. On restores the old rule that every project
