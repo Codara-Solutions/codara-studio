@@ -45,6 +45,7 @@ async function load() {
         `export { currentEmulation, resetEmulation } from "../emulation";`,
         `export { MARK_BASELINE_EXPRESSION } from "../wait";`,
         `export * from "./presence";`,
+        `export { chromeConnectProgress } from "@shared/chrome-link";`,
       ].join("\n"),
       resolveDir: path.join(ROOT, "src/main/browser/chrome"),
       loader: "ts",
@@ -608,7 +609,17 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   lib.loadPresenceSettings(presenceFile);
   assert.deepEqual(lib.presenceSettings(), { overlay: true, glow: false, at: 10 }, "kept across restarts");
 
-  console.log("chrome link: origin and host checks, pairing over ECDH with code and Allow, a swapped key refused, bound tokens never sent, sealed frames with injected and replayed ones dropping the link, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair, stops from the page and presence settings");
+  // Connecting a browser, step by step, from what Codara sees.
+  const tab = (id, blocked = false) => ({ id, blocked });
+  const browser = (tabs) => ({ tabs });
+  assert.deepEqual(lib.chromeConnectProgress({ browsers: [], pending: [] }), { step: "add", paired: 0, shared: 0 });
+  assert.equal(lib.chromeConnectProgress({ browsers: [], pending: [{}] }).step, "pair", "Connect pressed: the extension is there");
+  assert.deepEqual(lib.chromeConnectProgress({ browsers: [browser([])], pending: [] }), { step: "share", paired: 1, shared: 0 });
+  assert.equal(lib.chromeConnectProgress({ browsers: [browser([tab(1, true)])], pending: [] }).step, "share", "a blocked tab is not shared");
+  assert.deepEqual(lib.chromeConnectProgress({ browsers: [browser([tab(1)]), browser([tab(2), tab(3)])], pending: [] }), { step: "done", paired: 2, shared: 3 });
+  assert.equal(lib.chromeConnectProgress({ browsers: [browser([tab(1)])], pending: [{}] }).step, "pair", "a second browser asking comes first");
+
+  console.log("chrome link: origin and host checks, pairing over ECDH with code and Allow, a swapped key refused, bound tokens never sent, sealed frames with injected and replayed ones dropping the link, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair, stops from the page, presence settings and connect steps");
   setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref();
 })().catch((error) => {
   console.error(error);

@@ -80,6 +80,31 @@ cursors in Figma for the name tag beside the arrow.
 - The component lives in `components/Preview/agent-presence/` with its own
   CSS and store; BrowserPane only mounts it, so the toolbar can move freely.
 
+## Connecting a browser from Studio (2026-11)
+
+**Chosen:** variant I of two from the same options page (a guided card, one
+step at a time; a live checklist with both browsers side by side): a card in
+Settings > Browser and in the first-run guide's tools step (optional there)
+that shows only the current step, Add, Pair, Share a tab, and moves on by
+itself.
+
+**Why:** loading the extension meant reading four steps and then finding
+the pairing prompt somewhere else; nothing said which step you were on.
+
+**Rules:**
+
+- Each step ends on what Codara sees, never on a click in the card: a
+  pairing request (the extension was added and Connect was pressed), a
+  paired browser, a shared tab. Codara cannot see an extension that has not
+  pressed Connect, by design, so Add waits for that.
+- A pairing request always shows, even on a finished card, and the card asks
+  it itself: while a card is on screen the floating prompt stays away, so
+  there is one Allow.
+- How the extension gets in is one route value. Today it is the unpacked
+  folder; when the Chrome Web Store listing is live, the store route turns
+  Add into one "Add from Chrome Web Store" button and nothing else changes.
+- Firefox is one line ("Firefox: coming later") until its build exists.
+
 ## The extension's popup (2026-11)
 
 **Chosen:** variant A, "Tidy", of four built for the owner (today's popup,

@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 
 import type { ChromeLinkBrowserState } from "@shared/chrome-link";
-import { Disclosure, SettingRow, SettingsSection, ToggleRow } from "../settings/SettingsPrimitives";
+import { SettingRow, SettingsSection, ToggleRow } from "../settings/SettingsPrimitives";
+import ChromeConnectCard from "./ChromeConnectCard";
 import KeepAgentsInChromeRow from "./KeepAgentsInChromeRow";
 import { formatWhen, useChromeLink } from "./useChromeLink";
 import "./chrome-link.css";
@@ -17,15 +18,9 @@ function sharedCount(browser: ChromeLinkBrowserState): number {
  */
 export default function ChromeLinkSection(): React.ReactElement | null {
   const state = useChromeLink();
-  const [folder, setFolder] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [stepsOpen, setStepsOpen] = useState(false);
   if (!state) return null;
-  // The steps stay open until a browser is paired; after that they fold.
-  const showSteps = stepsOpen || state.browsers.length === 0;
 
-  const shownFolder = folder ?? state.extensionFolder;
   const run = async (action: () => Promise<unknown>) => {
     setError(null);
     try {
@@ -34,15 +29,6 @@ export default function ChromeLinkSection(): React.ReactElement | null {
       setError(failure instanceof Error ? failure.message : String(failure));
     }
   };
-  const copyFolder = () =>
-    run(async () => {
-      const path = await window.spark.chromeLink.prepareExtension();
-      setFolder(path);
-      await navigator.clipboard.writeText(path);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  const reveal = () => run(async () => setFolder(await window.spark.chromeLink.revealExtension()));
   const disconnect = (browser: ChromeLinkBrowserState) => run(() => window.spark.chromeLink.disconnect(browser.linkId));
 
   return (
@@ -77,66 +63,12 @@ export default function ChromeLinkSection(): React.ReactElement | null {
         }
       />
 
-      {state.pending.map((pairing) => (
-        <SettingRow
-          key={pairing.id}
-          anchor="Link status"
-          title={`${pairing.browser.name} wants to connect`}
-          desc={`Allow it only if the extension shows the code ${pairing.code}.`}
-          control={
-            <span className="st-button-pair">
-              <button type="button" className="spark-btn" onClick={() => void run(() => window.spark.chromeLink.deny(pairing.id))}>
-                Deny
-              </button>
-              <button type="button" className="spark-btn is-primary" onClick={() => void run(() => window.spark.chromeLink.approve(pairing.id))}>
-                Allow
-              </button>
-            </span>
-          }
-        />
-      ))}
-
       <SettingRow
         title="Connect a browser"
         stacked
-        desc="Load the extension folder in your browser, then pair it with Codara."
+        desc="Add the extension, pair it, share a tab. Each step moves on by itself when Codara sees it done."
       >
-        <div className="chrome-folder">
-          <span className="chrome-folder__path spark-mono" title={shownFolder}>
-            {shownFolder}
-          </span>
-          <button type="button" className="spark-btn" onClick={() => void copyFolder()}>
-            {copied ? "Copied" : "Copy path"}
-          </button>
-          <button type="button" className="spark-btn is-primary" onClick={() => void reveal()}>
-            Reveal folder
-          </button>
-        </div>
-        {error ? <div className="chrome-folder__path" role="alert">{error}</div> : null}
-        {state.browsers.length > 0 ? (
-          <Disclosure open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)}>
-            How to connect
-          </Disclosure>
-        ) : null}
-        {showSteps ? (
-          <ol className="chrome-steps">
-            <li>
-              <strong>Reveal the extension folder</strong> (or copy its path).
-            </li>
-            <li>
-              In your browser open <span className="spark-mono">chrome://extensions</span> (Edge:{" "}
-              <span className="spark-mono">edge://extensions</span>), turn on <strong>Developer mode</strong>, choose{" "}
-              <strong>Load unpacked</strong> and pick that folder.
-            </li>
-            <li>
-              Click the Codara icon in the toolbar and choose <strong>Connect to Codara</strong>.
-            </li>
-            <li>
-              Codara shows a code: <strong>Allow</strong> it when it matches the popup&apos;s. Then turn on{" "}
-              <strong>Let agents use this tab</strong> in the popup for each tab agents may use.
-            </li>
-          </ol>
-        ) : null}
+        <ChromeConnectCard state={state} />
       </SettingRow>
 
       <SettingRow
@@ -144,6 +76,7 @@ export default function ChromeLinkSection(): React.ReactElement | null {
         stacked
         desc={state.browsers.length === 0 ? "None yet. Follow the steps above to connect one." : "Disconnect forgets a browser. Its extension must connect again, with a new code."}
       >
+        {error ? <div className="chrome-folder__path" role="alert">{error}</div> : null}
         {state.browsers.length > 0 ? (
           <div className="st-list">
             {state.browsers.map((browser) => (

@@ -91,3 +91,23 @@ export interface SeparateBrowserTool {
   /** The config file it was found in. */
   source: string;
 }
+
+/** The steps of connecting a browser, in order (Settings > Browser and first run). */
+export type ChromeConnectStep = "add" | "pair" | "share" | "done";
+
+/**
+ * Where the user is in connecting a browser, from what Codara can see: an
+ * extension asking to pair (it was added and Connect was pressed), a paired
+ * browser, then a tab shared with agents. A pairing request always comes
+ * first, so a second browser's code shows even after the first is set up.
+ */
+export function chromeConnectProgress(state: Pick<ChromeLinkState, "browsers" | "pending">): {
+  step: ChromeConnectStep;
+  paired: number;
+  shared: number;
+} {
+  const paired = state.browsers.length;
+  const shared = state.browsers.reduce((sum, browser) => sum + browser.tabs.filter((tab) => !tab.blocked).length, 0);
+  const step: ChromeConnectStep = state.pending.length > 0 ? "pair" : paired === 0 ? "add" : shared === 0 ? "share" : "done";
+  return { step, paired, shared };
+}
