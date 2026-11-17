@@ -181,8 +181,9 @@ export default function ImagePreview({ src, alt, onError, toolbarAction, forceLo
             borderRadius: 3,
             boxShadow: "0 2px 18px rgba(0,0,0,0.35)",
             userSelect: "none",
-            // Zoomed far in, show the pixels rather than a blur.
-            imageRendering: zoom * (window.devicePixelRatio || 1) >= 2 ? "pixelated" : "auto",
+            // Zoomed far in, show the pixels rather than a blur. The zoom alone
+            // decides: on a HiDPI screen 100% must still look smooth.
+            imageRendering: zoom >= 2 ? "pixelated" : "auto",
             ...CHECKER_BG,
           }}
         />

@@ -217,6 +217,8 @@ test("images and PDFs zoom at the pointer and take the zoom keys while focused",
     await expect.poll(percent).toBe(fitted);
     await viewport.dblclick({ position: { x: box.width / 2, y: box.height / 2 } });
     await expect.poll(percent).toBe(100);
+    // Actual pixels are drawn smooth; only 200% and up shows hard pixels.
+    expect(await image.evaluate((el) => el.style.imageRendering)).toBe("auto");
 
     // Larger than the pane, Ctrl+wheel keeps the point under the pointer there.
     const pointer = { x: box.x + box.width * 0.3, y: box.y + box.height * 0.4 };
@@ -369,15 +371,15 @@ test("images and PDFs zoom at the pointer and take the zoom keys while focused",
     // The top pages draw again on the way back; let that finish first.
     await expect(pageAt(1).locator("canvas")).toBeVisible();
     await page.waitForTimeout(500);
-    const before = await drawCounts();
+    const drawsBefore = await drawCounts();
     await long.click({ position: { x: 30, y: 30 } });
     await page.keyboard.press("Control+=");
     await expect(level).toHaveText("110%");
-    await expect.poll(async () => (await drawCounts())[0]).toBeGreaterThan(before[0]);
+    await expect.poll(async () => (await drawCounts())[0]).toBeGreaterThan(drawsBefore[0]);
     // Let any other redraw land before counting.
     await page.waitForTimeout(800);
-    const after = await drawCounts();
-    const redrawn = after.flatMap((count, i) => (count > before[i] ? [i + 1] : []));
+    const drawsAfter = await drawCounts();
+    const redrawn = drawsAfter.flatMap((count, i) => (count > drawsBefore[i] ? [i + 1] : []));
     expect(redrawn.length).toBeGreaterThan(0);
     expect(Math.max(...redrawn)).toBeLessThanOrEqual(3);
   } finally {
