@@ -565,13 +565,66 @@ async function fetchRemoteBranch(
   branch: string,
 ): Promise<string | null> {
   try {
+    // In English, so a remote that no longer has the branch can be told
+    // from one that cannot be reached.
     await runGit(cwd, ["fetch", "--no-tags", "--end-of-options", remote, branch], {
       timeout: FETCH_TIMEOUT_MS,
+      env: { ...process.env, LC_ALL: "C" },
     });
     return null;
   } catch (err) {
     return cleanText(errorText(err), 300);
   }
+}
+
+interface TrackedRemoteBase {
+  remote: string;
+  branch: string;
+  /** Its remote-tracking ref, e.g. "refs/remotes/origin/main". */
+  trackingRef: string;
+}
+
+/**
+ * The full name of the ref a base resolves to the way git resolves it
+ * ("main" -> "refs/heads/main", "v1" -> "refs/tags/v1"); empty for a
+ * commit, an expression like main~2, or a name both a tag and a branch
+ * carry, which git refuses to pick for us.
+ */
+async function baseRefName(repoCwd: string, base: string): Promise<string> {
+  return readGitText(repoCwd, ["rev-parse", "--verify", "--quiet", "--symbolic-full-name", "--end-of-options", base]);
+}
+
+/**
+ * The remote branch a local branch ("refs/heads/main") stands for: its
+ * upstream when that is a branch on a remote, else, for the repository's
+ * default branch, that branch on origin. Null for a branch that tracks
+ * nothing or another local branch.
+ */
+async function trackedRemoteBase(repoCwd: string, localRef: string): Promise<TrackedRemoteBase | null> {
+  const [upstream = "", remote = "", remoteRef = ""] = (
+    await readGitText(repoCwd, [
+      "for-each-ref",
+      "--count=1",
+      "--format=%(upstream)%09%(upstream:remotename)%09%(upstream:remoteref)",
+      localRef,
+    ])
+  ).split("\t");
+  // The remote's name, not where its refspec puts the branch, tells a remote
+  // upstream from a local one (remote ".").
+  if (upstream.startsWith("refs/") && remote && remote !== "." && remoteRef.startsWith("refs/heads/")) {
+    return { remote, branch: remoteRef.slice("refs/heads/".length), trackingRef: upstream };
+  }
+  if (upstream) return null;
+  const branch = localRef.slice("refs/heads/".length);
+  if ((await resolveMergeDefaultBranch(repoCwd)) !== `origin/${branch}`) return null;
+  return { remote: "origin", branch, trackingRef: `refs/remotes/origin/${branch}` };
+}
+
+// Commits each side has that the other lacks.
+async function aheadBehind(cwd: string, local: string, remote: string): Promise<{ ahead: number; behind: number } | null> {
+  const out = await readGitText(cwd, ["rev-list", "--left-right", "--count", `${local}...${remote}`]);
+  const match = /^(\d+)\s+(\d+)$/.exec(out);
+  return match ? { ahead: Number(match[1]), behind: Number(match[2]) } : null;
 }
 
 async function hasCommit(cwd: string, oid: string): Promise<boolean> {
@@ -1270,7 +1323,9 @@ function createdResult(
   extra: {
     created: boolean;
     base?: string | null;
+    baseRef?: string | null;
     baseCommit?: string | null;
+    baseDrift?: { behind?: number; ahead?: number };
     fetch?: string;
     setupCommand: string | null;
     warnings: string[];
@@ -1304,7 +1359,10 @@ function createdResult(
     branch: copy.branch,
     mode: copy.mode ?? "fork",
     ...(extra.base ?? copy.baseBranch ? { base: extra.base ?? copy.baseBranch } : {}),
+    ...(extra.baseRef ? { baseRef: extra.baseRef } : {}),
     ...(extra.baseCommit ? { baseCommit: extra.baseCommit } : {}),
+    ...(extra.baseDrift?.behind ? { baseBehindRemote: extra.baseDrift.behind } : {}),
+    ...(extra.baseDrift?.ahead ? { baseAheadOfRemote: extra.baseDrift.ahead } : {}),
     ...(extra.fetch ? { fetch: extra.fetch } : {}),
     repoCwd: scope.repoCwd,
     sourceWorkspaceId: scope.parentWorkspace.id,
@@ -1584,9 +1642,13 @@ async function createAgentWorktreeInner(
   let baseName: string | null = null;
   let baseCommit: string | null = null;
   // Whether the base was refreshed from its remote first: "ok", "skipped"
-  // (a local base, a base of HEAD, or fetch:false) or "failed: <reason>", in
+  // (a base that tracks no remote branch, HEAD, or fetch:false) or "failed: <reason>", in
   // which case the base is the last fetched state of the remote branch.
   let fetchStatus = "skipped";
+  // The ref the worktree forked from: the base itself, or the remote branch
+  // a local base tracks, with what the local branch lacks or adds.
+  let baseRef: string | null = null;
+  const baseDrift: { behind?: number; ahead?: number } = {};
   if (!checkout) {
     const requested = typeof input.base === "string" ? input.base.trim() : "";
     if (requested.length > MAX_BASE) {
@@ -1606,6 +1668,7 @@ async function createAgentWorktreeInner(
         ...(fallback ? { retryWith: { base: fallback } } : {}),
       });
     }
+    baseRef = baseName;
   }
 
   let outcome: Record<string, unknown> | WorktreeRefusal;
@@ -1679,12 +1742,65 @@ async function createAgentWorktreeInner(
           takenPaths: rowPaths(state),
         });
       } else {
-        const remoteBase = baseName && baseName !== "HEAD" ? await splitRemoteRef(repoCwd, baseName) : null;
+        const fullName = baseName && baseName !== "HEAD" ? await baseRefName(repoCwd, baseName) : "";
+        // Only a base spelled as the branch: "@" or "@{-1}" name a commit
+        // through HEAD, which stays as it is like base "HEAD".
+        const localBranchBase =
+          fullName.startsWith("refs/heads/") && [baseName, `refs/${baseName}`, `refs/heads/${baseName}`].includes(fullName);
+        // A remote-tracking ref however spelled ("remotes/origin/main"); a
+        // local branch named like a remote one ("origin/x") is no remote base.
+        const trackingBase = fullName.startsWith("refs/remotes/");
+        const remoteBase = trackingBase
+          ? await splitRemoteRef(repoCwd, fullName.slice("refs/remotes/".length))
+          : baseName && baseName !== "HEAD" && !localBranchBase
+            ? await splitRemoteRef(repoCwd, baseName)
+            : null;
+        if (remoteBase && trackingBase) baseRef = `${remoteBase.remote}/${remoteBase.branch}`;
         if (remoteBase && input.fetch !== false) {
           const failure = await fetchRemoteBranch(repoCwd, remoteBase.remote, remoteBase.branch);
           fetchStatus = failure ? `failed: ${failure}` : "ok";
           if (failure) warnings.push(`fetch failed: ${failure}; forked from the last fetched ${baseName}`);
-          baseCommit = (await revParse(repoCwd, `${baseName}^{commit}`)) ?? baseCommit;
+          baseCommit = (await revParse(repoCwd, `${trackingBase ? fullName : baseName}^{commit}`)) ?? baseCommit;
+        }
+        // A local branch that tracks a remote one ("main") is often behind
+        // it: the main checkout is not pulled for the agent. Fork from the
+        // remote branch, freshly fetched or else as last fetched; fetch:false
+        // keeps the local branch as it is.
+        const tracked = localBranchBase && input.fetch !== false ? await trackedRemoteBase(repoCwd, fullName) : null;
+        if (tracked) {
+          const failure = await fetchRemoteBranch(repoCwd, tracked.remote, tracked.branch);
+          fetchStatus = failure ? `failed: ${failure}` : "ok";
+          // Deleted on the remote but not pruned here: its tracking ref is
+          // stale, and the local branch is all that is left of it.
+          const gone = failure !== null && /couldn't find remote ref/i.test(failure);
+          const remoteCommit = gone ? null : await revParse(repoCwd, `${tracked.trackingRef}^{commit}`);
+          const shortName = tracked.trackingRef.replace(/^refs\/(?:remotes\/|heads\/)?/, "");
+          // The short name, unless it resolves to another ref (a local branch
+          // "origin/x" next to the tracking ref): the review diff and the
+          // merge check read the recorded base by this name.
+          const remoteName = (await baseRefName(repoCwd, shortName)) === tracked.trackingRef ? shortName : tracked.trackingRef;
+          if (gone) {
+            warnings.push(
+              `${tracked.remote} no longer has the branch ${tracked.branch} that ${baseName} tracks, so forked from the local ${baseName}`,
+            );
+          } else if (remoteCommit) {
+            const drift = await aheadBehind(repoCwd, baseCommit!, remoteCommit);
+            if (failure) warnings.push(`fetch failed: ${failure}; forked from the last fetched ${remoteName}`);
+            if (drift?.behind) baseDrift.behind = drift.behind;
+            if (drift?.ahead) {
+              baseDrift.ahead = drift.ahead;
+              const commits = drift.ahead === 1 ? "1 commit" : `${drift.ahead} commits`;
+              warnings.push(
+                `the local ${baseName} has ${commits} ${remoteName} does not have; forked from ${remoteName} without them (pass fetch: false to fork from the local ${baseName})`,
+              );
+            }
+            baseCommit = remoteCommit;
+            baseRef = remoteName;
+          } else {
+            warnings.push(
+              `${failure ? `fetch failed: ${failure}; ` : ""}${remoteName} does not exist here, so forked from the local ${baseName}, which may be behind`,
+            );
+          }
         }
         created = await createCopyWorktree({
           repoCwd,
@@ -1719,7 +1835,9 @@ async function createAgentWorktreeInner(
         copyBranch: {
           repoCwd: repoKey,
           branch: created.branch,
-          ...(checkout ? {} : { baseBranch: baseName! }),
+          // The ref it forked from, so its review diff and merge check
+          // compare against origin/main and not a local main left behind.
+          ...(checkout ? {} : { baseBranch: baseRef ?? baseName! }),
           city: created.city,
           mode: created.mode,
           createdAt: deps.now().toISOString(),
@@ -1753,7 +1871,9 @@ async function createAgentWorktreeInner(
       return createdResult(workspace, current, {
         created: true,
         base: baseName,
+        baseRef,
         baseCommit,
+        baseDrift,
         fetch: fetchStatus,
         // With worktree setup the user's command runs there, with the
         // repository's own; the agent must not run it a second time.
@@ -1794,7 +1914,9 @@ async function createAgentWorktreeInner(
     outcome = createdResult(made, scope, {
       created: true,
       base: baseName,
+      baseRef,
       baseCommit,
+      baseDrift,
       fetch: fetchStatus,
       setupCommand: null,
       warnings,

@@ -524,6 +524,18 @@ section headers, the snooze presets and the undo notice in the footer).
   to the bottom; in use that list read as rows with no section (2026-11), so
   it became the Needs you and Done sections, open by default. Needs you's
   count is the switch's badge.
+- Main agents only (2026-11, option A of four): a background subagent whose
+  starting session is on the tab is no row of its own but a "1 subagent"
+  chip on that session's third line (a `--info` dot while one works,
+  `--warn` while one waits). The chip opens one muted line per subagent in
+  place: title and time, the branch on hover. An orphan (its session
+  closed) stays a normal row; every count is main agents only. A subagent
+  waiting on the user lifts its parent into Needs you (its count and the
+  tab's badge). Under a settled or snoozed parent it is its own Needs you
+  row instead, so the parent can be put away while it waits. A settled row
+  is one line with no chip; a subagent that starts or shows new work brings
+  its settled parent back. Etienne: "I
+  mostly want to see the main agents only, not the sub agents".
 
 ## Merged worktrees leave on their own (2026-11)
 
