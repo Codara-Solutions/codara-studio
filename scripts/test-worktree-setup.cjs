@@ -52,6 +52,23 @@ async function logShowing(svc, id, line) {
   }
 }
 
+// The pid a child wrote with `echo $$ > file`. The shell creates the file
+// before it writes the number, so on a busy runner the file can exist and
+// still be empty (PR 237's macOS pool read 0): wait for the number itself.
+async function pidWritten(file) {
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    let pid = 0;
+    try {
+      pid = Number(fs.readFileSync(file, "utf8").trim());
+    } catch {
+      /* not created yet */
+    }
+    if (pid > 0 || Date.now() > deadline) return pid;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 async function check(name, fn) {
   if (posixOnly && process.platform === "win32") {
     skipped += 1;
@@ -744,10 +761,8 @@ async function runSuite(m, scratch) {
     );
     const svc = makeService();
     const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
-    const pidFile = path.join(wt, "stubborn.pid");
-    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i += 1) await new Promise((r) => setTimeout(r, 50));
-    const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
-    assert.ok(pid > 0);
+    const pid = await pidWritten(path.join(wt, "stubborn.pid"));
+    assert.ok(pid > 0, "the stubborn child wrote its pid");
     const stopped = await svc.stop(started.id);
     assert.equal(stopped.state, "stopped");
     let alive = true;
@@ -770,8 +785,7 @@ async function runSuite(m, scratch) {
     );
     const svc = makeService();
     const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
-    const pidFile = path.join(wt, "stubborn.pid");
-    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i += 1) await new Promise((r) => setTimeout(r, 50));
+    assert.ok((await pidWritten(path.join(wt, "stubborn.pid"))) > 0, "the stubborn child wrote its pid");
     const t0 = Date.now();
     await svc.quiesce(started.id, 1_000);
     assert.ok(Date.now() - t0 < 2_000, `took ${Date.now() - t0} ms`);
