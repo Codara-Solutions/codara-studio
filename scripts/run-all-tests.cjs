@@ -31,6 +31,9 @@
 // CI splits one run across two machines and holds it to a time budget:
 // - CODARA_TEST_PART=pool runs every suite except the serial ones, and
 //   CODARA_TEST_PART=serial runs only those.
+// - CODARA_TEST_SHARD=k/n keeps every n-th suite of that part in name order,
+//   starting with the k-th, so n machines run all of it between them. Name
+//   order needs no shared timings, so every shard agrees on the split.
 // - CODARA_TEST_BUDGET_SECONDS stops the run once it has taken that long and
 //   fails it with a message naming what was stopped and what never started,
 //   so a slow suite fails here instead of hitting the job's timeout.
@@ -374,7 +377,7 @@ function slowestSuites(durations, count = 15) {
 function writeSummary(file, { tests, failed, slowest, wallSeconds, budgetSeconds, overBudget }) {
   const part = process.env.CODARA_TEST_PART?.trim();
   const lines = [
-    `### Unit suites${part ? ` (${part})` : ""}`,
+    `### Unit suites${part ? ` (${part}${process.env.CODARA_TEST_SHARD?.trim() ? ` ${process.env.CODARA_TEST_SHARD.trim()}` : ""})` : ""}`,
     "",
     `${tests.length} suites, ${failed.length === 0 ? "all passed" : `${failed.length} failed`}, in ${wallSeconds}s` +
       `${budgetSeconds > 0 ? ` (budget ${budgetSeconds}s${overBudget ? ", went over" : ""})` : ""}.`,
@@ -396,7 +399,23 @@ function selectPart(tests, part, dir = DIR) {
   return tests.filter((f) => (tagOf(f, dir) === "serial") === (part === "serial"));
 }
 
-module.exports = { listTests, runTests, jobsFromEnv, runDirBase, selectPart, budgetFromEnv };
+// "k/n" -> { index: k - 1, count: n }; null when unset; throws when malformed.
+function shardFromEnv(env = process.env) {
+  const raw = env.CODARA_TEST_SHARD?.trim();
+  if (!raw) return null;
+  const m = /^(\d+)\/(\d+)$/.exec(raw);
+  const k = m ? Number(m[1]) : 0;
+  const n = m ? Number(m[2]) : 0;
+  if (!m || n < 1 || k < 1 || k > n) throw new Error(`CODARA_TEST_SHARD must be "k/n" with 1 <= k <= n, not "${raw}".`);
+  return { index: k - 1, count: n };
+}
+
+function selectShard(tests, shard) {
+  if (!shard) return tests;
+  return [...tests].sort().filter((_, i) => i % shard.count === shard.index);
+}
+
+module.exports = { listTests, runTests, jobsFromEnv, runDirBase, selectPart, selectShard, shardFromEnv, budgetFromEnv };
 
 if (require.main === module) {
   const filter = process.argv[2] ? new RegExp(process.argv[2]) : null;
@@ -405,7 +424,14 @@ if (require.main === module) {
     console.error(`CODARA_TEST_PART must be "pool" or "serial", not "${part}".`);
     process.exit(2);
   }
-  runTests(selectPart(listTests(filter), part)).then(
+  let shard;
+  try {
+    shard = shardFromEnv();
+  } catch (error) {
+    console.error(error.message);
+    process.exit(2);
+  }
+  runTests(selectShard(selectPart(listTests(filter), part), shard)).then(
     (failed) => process.exit(failed.length > 0 ? 1 : 0),
     (error) => {
       console.error(error);

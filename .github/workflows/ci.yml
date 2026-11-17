@@ -6,12 +6,14 @@ name: CI
 # The unit suites took 22 minutes on one macOS runner: it has 3 cores, so the
 # runner's default pool (cores - 2, sized for a shared desktop) ran one suite
 # at a time, and the serial suites (test-cora-harness alone is over 4 minutes)
-# cannot share a machine. They are split across two macOS runners: the pool,
-# two at a time, next to the serial suites and the typechecks. Three at a time
-# saturated the 3 cores, ran no faster and pushed timing-sensitive suites past
-# their limits. Each half has a time budget that fails it with the slowest
-# suites named, long before the job timeout would cancel it. "test" is the
-# required check and only reports the two halves.
+# cannot share a machine. They are split across three macOS runners: the pool
+# in two shards next to the serial suites and the typechecks. Each shard runs
+# one suite at a time: two at a time on 3 cores kept producing a new
+# timing-sensitive failure every few runs (5 of 6 pool failures in the 30 runs
+# of 17 Nov), and three saturated the cores and ran no faster. Each part has a
+# time budget that fails it with the slowest suites named, long before the job
+# timeout would cancel it. "test" is the required check and only reports the
+# parts.
 
 on:
   push:
@@ -28,9 +30,14 @@ permissions:
 
 jobs:
   test-pool:
-    name: test (pool)
+    name: test (pool ${{ matrix.shard }}/2)
     runs-on: macos-latest
     timeout-minutes: 30
+    strategy:
+      # Both shards finish and report, so one failure does not hide the other.
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -48,19 +55,19 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: node_modules/.cache/codara-tests
-          key: codara-test-timings-${{ runner.os }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: codara-test-timings-${{ runner.os }}-${{ github.job }}-
-      - name: Unit suites, all but the serial ones
+          key: codara-test-timings-${{ runner.os }}-${{ github.job }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: codara-test-timings-${{ runner.os }}-${{ github.job }}-${{ matrix.shard }}-
+      - name: Unit suites, all but the serial ones, this shard
         env:
           CODARA_TEST_PART: pool
-          # /proc/meminfo does not exist on macOS, so the memory guard never
-          # holds a suite back; heavy suites still run one at a time.
-          CODARA_TEST_JOBS: "2"
-          # The pool takes 385 to 737 s (runs of 17 Nov); a slow runner on
-          # 17 Nov (run 44103067410, the worktree suites at about twice their
-          # usual time) needed more than 900. 1380 s still leaves the job's
-          # setup (about 3 min) inside its 30 min, so the budget, not the
-          # timeout, names the slow suites.
+          # Every other suite in name order (run-all-tests.cjs).
+          CODARA_TEST_SHARD: ${{ matrix.shard }}/2
+          # One suite at a time: nothing timing-sensitive shares the 3 cores.
+          CODARA_TEST_JOBS: "1"
+          # Each shard's suites took 603 and 640 s of suite time in the
+          # two-at-a-time pool of 17 Nov (run 44193042343), less alone. 1380 s
+          # still leaves the job's setup (about 3 min) inside its 30 min, so
+          # the budget, not the timeout, names the slow suites.
           CODARA_TEST_BUDGET_SECONDS: "1380"
         run: npm run test:all
 
@@ -102,6 +109,6 @@ jobs:
           POOL: ${{ needs.test-pool.result }}
           SERIAL: ${{ needs.test-serial.result }}
         run: |
-          echo "test (pool): $POOL"
+          echo "test (pool 1/2, pool 2/2): $POOL"
           echo "test (serial, typecheck): $SERIAL"
           [ "$POOL" = success ] && [ "$SERIAL" = success ]
