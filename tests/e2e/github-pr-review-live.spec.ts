@@ -54,9 +54,9 @@ test("a real PR opens as a review before any local copy or merge action", async 
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
 
-    const githubHeader = page.getByTitle("Show GitHub issues and pull requests");
-    await expect(githubHeader).toBeVisible({ timeout: 30_000 });
-    await githubHeader.click();
+    const issuesTab = page.getByRole("tablist", { name: "Source Control views" }).getByRole("tab", { name: /^Issues/ });
+    await expect(issuesTab).toBeVisible({ timeout: 30_000 });
+    await issuesTab.click();
 
     const readyRow = page.getByRole("button", {
       name: /Add an agent-friendly merge review checklist/,

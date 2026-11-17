@@ -8,8 +8,9 @@
 import * as linkClient from "./link-client.test.mjs";
 import * as packing from "./pack.test.mjs";
 import * as policy from "./policy.test.mjs";
+import * as presence from "./presence.test.mjs";
 
-const suites = [policy, packing, linkClient];
+const suites = [policy, presence, packing, linkClient];
 
 let failed = false;
 for (const suite of suites) {

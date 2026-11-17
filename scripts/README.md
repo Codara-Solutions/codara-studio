@@ -49,7 +49,9 @@ How `scripts/run-all-tests.cjs` works:
     production Vite build, about 2 GB) and `test-workflow-sandbox.cjs` (its
     heap-limit case grows QuickJS's WebAssembly memory to 2 GB) and
     `test-clipboard-files.cjs` (the real macOS pasteboard through
-    osascript, with the app's 3 s limit per call).
+    osascript, with the app's 3 s limit per call) and
+    `test-diagnostics-hang-watchdog.cjs` (a busy loop's CPU share, and an
+    inspector pause within 400 ms).
   - No suite starts while `MemAvailable` is below `CODARA_TEST_MIN_FREE_MB`
     (default 2048) and another suite is still running.
   - Each suite gets its own empty `TMPDIR`, removed when it finishes, so
@@ -257,7 +259,7 @@ calls.
 | `test-cora-harness` | The standalone `cora` CLI end to end: a real child process against the stub model in `cora-stub-model.mjs`, in a throwaway HOME, with non-loopback network blocked. Exit codes, retries, resume, token refresh rules, MCP, and the terminal interface. |
 | `test-pi-cora-extension`, `test-pi-cora-abandonable-wait`, `test-repeat-guard`, `test-deep-search`, `test-whiteboard-review-extension`, `test-whiteboard-quality` | The Pi extension in `resources/pi-cora/`. |
 | `test-pi-manager-compaction`, `test-pi-worker-compaction`, `test-pi-manager-compaction-integration.mjs`, `test-pi-worker-compaction-integration.mjs` | Context compaction for the manager and for workers, including the mid-turn pause and the summary recovery ladder. |
-| `test-pi-fast-mode-fallback-integration.mjs` (with the fast-mode block in `test-pi-cora-extension`) | Fast mode for the manager and workers: request shaping per provider and model, and the standard-speed fallback through a real offline Pi session. |
+| `test-pi-fast-mode-fallback-integration.mjs` (with the fast-mode block in `test-pi-cora-extension`) | Fast mode for the manager and workers, Codex only: request shaping per provider (Claude never runs fast), and the standard-speed fallback through a real offline Pi session. |
 | `test-compaction-ledger`, `test-conversation-compaction`, `test-autocompact-limits` | The durable ledger re-injected after each compaction, the run store's conversation cutover, and the owner's auto-compact limit per model and per launch (Pi, Codex, Claude). |
 | `test-compaction-eval.mjs` | Offline evaluation: replays 240-tool-call runs through a real Pi session with a lossy, a recorded real-style and a failing summarizer, and checks that facts survive 1, 3 and 6+ compactions within the limit. Variants cover a long opening request, a run that resumes after a conversation cutover, and a huge tool output the model must read before it is compacted. `--verbose` prints every compaction. |
 | `test-pi-worker-harness-gate`, `test-pi-worker-providers` | Which providers workers may run on. |

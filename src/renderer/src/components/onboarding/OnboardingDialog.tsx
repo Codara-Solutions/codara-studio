@@ -20,6 +20,8 @@ import {
 import "./onboarding.css";
 import { CodaraMark } from "../BrandMarks";
 import { OnboardingCoach } from "./OnboardingCoach";
+import ChromeConnectCard from "../chrome/ChromeConnectCard";
+import { useChromeLink } from "../chrome/useChromeLink";
 
 const Accounts = lazy(() =>
   import("../SettingsDialog").then((module) => ({
@@ -562,6 +564,7 @@ export default function OnboardingDialog({
                     )}
                   </div>
                 )}
+                <OnboardingBrowser />
                 <p className="onboarding-note">
                   A missing tool does not prevent you from exploring Studio.
                   Project-specific dependencies come later, when you open a
@@ -862,5 +865,21 @@ export default function OnboardingDialog({
         </div>
       </div>
     </div>
+  );
+}
+
+/** Optional: the user's own browser, with the same card as Settings > Browser. */
+function OnboardingBrowser(): React.ReactElement | null {
+  const state = useChromeLink();
+  if (!state?.enabled) return null;
+  return (
+    <section className="onboarding-browser" aria-labelledby="onboarding-browser-title">
+      <h3 id="onboarding-browser-title">Optional: your own browser</h3>
+      <p className="onboarding-note">
+        Let agents use tabs you share from your browser, with your sign-ins. You can also do this
+        later in Settings &gt; Browser.
+      </p>
+      <ChromeConnectCard state={state} />
+    </section>
   );
 }

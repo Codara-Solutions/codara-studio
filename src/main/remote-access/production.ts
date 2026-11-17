@@ -2086,6 +2086,7 @@ async function sendCoraMessageForRemote(input: {
         cwd: root,
         initialUserNote: message,
         initialUserNoteClientMessageId: clientMessageId,
+        initialNoteTypedByUser: true,
         chatBackend: "pi",
         ...(model ? { chatModel: model } : {}),
         ...(input.effort ? { chatEffort: input.effort as AgentEffortLevel } : {}),
@@ -2116,6 +2117,7 @@ async function sendCoraMessageForRemote(input: {
             kind: "note",
             message,
             clientMessageId,
+            typedByUser: true,
           });
     }
     // Commit the compact route before replying. A lost reply can now recover

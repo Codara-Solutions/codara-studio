@@ -11,6 +11,10 @@ interface Props {
   /** Bumped by the panel after any git mutation — re-read on change. */
   refreshKey?: number;
   disabled: boolean;
+  /** On its own tab the section always shows, with a line when there is nothing. */
+  alwaysShow?: boolean;
+  /** The number of stashes, for the Stashes tab label. */
+  onCount?: (count: number) => void;
 }
 
 // Stash list + "Stash changes" entry point for the Source Control panel.
@@ -27,6 +31,8 @@ export default function StashSection({
   onChanged,
   refreshKey,
   disabled,
+  alwaysShow = false,
+  onCount,
 }: Props): React.ReactElement | null {
   const [list, setList] = useState<GitStashList | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
@@ -94,9 +100,14 @@ export default function StashSection({
   const entries = list?.entries ?? [];
   const blocked = busy || disabled;
 
+  useEffect(() => {
+    onCount?.(entries.length);
+  }, [entries.length, onCount]);
+
   // Nothing to show: clean tree and no stashes. (A list-read error with no
   // changes is surfaced; otherwise stay invisible like the other sections.)
-  if (entries.length === 0 && !hasChanges && !error && !list?.error) return null;
+  const empty = entries.length === 0 && !hasChanges && !error && !list?.error;
+  if (empty && !alwaysShow) return null;
 
   return (
     <div>
@@ -216,6 +227,12 @@ export default function StashSection({
       {(error || list?.error) && (
         <StashError text={error ?? list?.error ?? ""} onDismiss={() => setError(null)} />
       )}
+
+      {alwaysShow && entries.length === 0 && !saving ? (
+        <div style={{ padding: "4px 14px 10px 26px", color: "var(--muted)", fontSize: 11, lineHeight: 1.5 }}>
+          No stashes. A stash puts your changes aside so you can come back to them later.
+        </div>
+      ) : null}
 
       {!collapsed && entries.length > 0 && (
         <div style={{ paddingBottom: 4 }}>

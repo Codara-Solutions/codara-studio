@@ -12,20 +12,24 @@
         margin: 0 auto;
         padding: 16px;
       }
+      h2 {
+        margin: 0;
+        font-size: 15px;
+      }
       textarea {
         width: 100%;
         min-height: 320px;
-        font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+        font: 12px/1.5 var(--font-mono);
         background: var(--bg);
         color: var(--ink);
-        border: 1px solid var(--line);
-        border-radius: 6px;
+        border: 1px solid var(--rule);
+        border-radius: var(--r-control);
         padding: 8px;
       }
     </style>
   </head>
   <body>
-    <section class="card">
+    <section class="sec">
       <h2>Blocked sites</h2>
       <p class="note">
         Agents never use a tab on these sites, even one you shared, and cannot open or navigate to them.
@@ -34,9 +38,9 @@
       </p>
       <textarea id="sites" spellcheck="false" aria-label="Blocked sites"></textarea>
       <div class="row">
-        <button id="reset" type="button">Restore the examples</button>
-        <span id="saved" class="note" hidden>Saved</span>
-        <button id="save" type="button" class="primary" style="width: auto">Save</button>
+        <button id="reset" type="button" class="btn">Restore the examples</button>
+        <span class="grow"><span id="saved" class="note" role="status" hidden>Saved</span></span>
+        <button id="save" type="button" class="btn pri">Save</button>
       </div>
     </section>
     <script type="module" src="options.js"></script>
