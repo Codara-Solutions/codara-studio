@@ -384,12 +384,13 @@ test("the composer offers fast mode only on a Codex model", async () => {
     const composer = page.locator(".composer-shell").last();
 
     await selectChatFromHistory(page, "Codex chat", "run-fast-codex");
+    await expect(composer).toContainText("GPT-5.6 Sol");
     await expect(page.locator(".composer-fast").last()).toBeVisible();
     await shot(composer, "fast-mode-codex.png");
 
     // Not a disabled switch with a reason: on Claude it is not drawn at all.
     await selectChatFromHistory(page, "Claude chat", "run-fast-claude");
-    await expect(composer).toBeVisible();
+    await expect(composer).toContainText("Claude Opus 5.5");
     await expect(page.locator(".composer-fast")).toHaveCount(0);
     await shot(composer, "fast-mode-claude.png");
   } finally {
