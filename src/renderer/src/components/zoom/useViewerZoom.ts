@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { isShown } from "../find/find-router";
 import { registerZoomTarget } from "./zoom-router";
-import { clampZoom, stepZoom, wheelPixels, wheelZoomFactor, type ZoomAction } from "./zoom-math";
+import { clampZoom, stepZoom, wheelPixels, wheelStep, wheelZoomFactor, type ZoomAction } from "./zoom-math";
 
 // One zoom behaviour for every file viewer: Ctrl+wheel and pinch zoom at the
 // pointer, Ctrl+= / Ctrl+- / Ctrl+0 while focus is inside the viewer (routed
@@ -39,14 +39,13 @@ export interface ViewerZoom {
   zoom: number;
   /** Showing at fitZoom, and following it. */
   fitted: boolean;
-  zoomTo: (next: number, anchor?: { x: number; y: number }) => void;
+  /** `snap` lets a level within 1% of fit fall back to fit (wheel and pinch). */
+  zoomTo: (next: number, anchor?: { x: number; y: number }, snap?: boolean) => void;
   fit: () => void;
   apply: (action: ZoomAction) => void;
   /** Handlers for ZoomControl; each leaves focus in the viewer. */
   controls: { zoom: number; onZoomOut: () => void; onZoomIn: () => void; onFit: () => void };
 }
-
-const STEP_PIXELS = 50;
 
 export function useViewerZoom({
   rootRef,
@@ -115,18 +114,19 @@ export function useViewerZoom({
   );
 
   const zoomTo = useCallback(
-    (next: number, point?: { x: number; y: number }) => {
+    (next: number, point?: { x: number; y: number }, snap = false) => {
       const { min, max, fitZoom } = latest.current;
       const clamped = clampZoom(next, min, max);
       if (Math.abs(clamped - requested.current) < 1e-4) return;
-      // Zooming back to the fit level snaps to fit, so it follows the pane
-      // again and a double-click toggles from there.
-      const fitted = Math.abs(clamped - fitZoom) <= fitZoom * 0.01;
-      requested.current = fitted ? fitZoom : clamped;
+      // Wheeling back to about the fit level snaps to fit, so it follows the
+      // pane again and a double-click toggles from there. `requested` keeps
+      // the exact level, so a slow pinch's small steps still add up.
+      const fitted = Math.abs(clamped - fitZoom) <= fitZoom * (snap ? 0.01 : 1e-4);
+      requested.current = clamped;
       // Pinned once per render: events later in the same frame still see
       // the old layout, and the first pin already holds the content point.
       if (!anchor.current) pin(point);
-      setState({ zoom: requested.current, fitted });
+      setState({ zoom: fitted ? fitZoom : clamped, fitted });
     },
     [pin],
   );
@@ -179,15 +179,13 @@ export function useViewerZoom({
       const point = { x: event.clientX - box.left, y: event.clientY - box.top };
       const pixels = wheelPixels(event.deltaY, event.deltaMode);
       if (latest.current.wheel === "smooth") {
-        zoomTo(requested.current * wheelZoomFactor(pixels), point);
+        zoomTo(requested.current * wheelZoomFactor(pixels), point, true);
         return;
       }
-      if (Math.sign(pixels) !== Math.sign(wheelCarry.current)) wheelCarry.current = 0;
-      wheelCarry.current += pixels;
-      if (Math.abs(wheelCarry.current) < STEP_PIXELS) return;
-      wheelCarry.current = 0;
       const { min, max } = latest.current;
-      zoomTo(stepZoom(requested.current, pixels < 0 ? 1 : -1, min, max), point);
+      const step = wheelStep(wheelCarry.current, pixels, requested.current, min, max);
+      wheelCarry.current = step.carry;
+      if (step.next !== null) zoomTo(step.next, point);
     };
     scroller.addEventListener("wheel", onWheel, { passive: false });
     return () => scroller.removeEventListener("wheel", onWheel);
