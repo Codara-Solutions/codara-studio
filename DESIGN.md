@@ -354,6 +354,29 @@ for SSH workspaces and on git older than 2.38. It runs with no click behind it, 
 also stays out of any repository where a merge could start a program the repository
 configures: a custom merge driver, a partial clone, an initialized submodule.
 
+**VS Code layout, one scroll (2026-11-17):** Etienne picked option G, "closest to
+VS Code, one scroll", from three VS Code shaped mocks drawn at the rail's real width
+in Studio's tokens. A text tab strip sits at the top of the panel: Changes, Issues,
+Pull request, Stashes. Changes is the working view; the GitHub issue and pull request
+list moves to Issues, the four steps (commit, share for review, checks, merge) and
+the branch's pull request to Pull request, and the stash list to Stashes. Nothing is
+dropped, only moved. It lands as a stack: the tabs first, then the compact change
+lists with the commit box on top, then the history graph opened in place.
+
+**Why:** "easier on the eyes, easier to understand, to help you understand rather
+than making work from there." The panel had grown into one long column where a
+journey, an issue queue and a stash list pushed the files and the history apart.
+
+**Rules:**
+
+- Tabs are text with an accent rule under the selected one, counts as quiet text on
+  `--hover-strong`, never a coloured badge. On a rail under 300px the tabs tighten and
+  Pull request reads PR, so all four stay on screen.
+- Tab pages stay mounted while hidden. Issues and Pull request share one GitHub read,
+  so the Issues count is known before the tab is opened and switching tabs never costs
+  a `gh` run.
+- Arrow keys, Home and End move between tabs (WAI-ARIA tabs).
+
 ## Worktrees in the rail (2026-10)
 
 **Chosen:** variant A, a tree, with variant B's folded merged group. A

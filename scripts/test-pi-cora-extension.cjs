@@ -1047,6 +1047,36 @@ const noInput = {};
   assert.equal(tier.ANTHROPIC_FAST_MODE_BETA, undefined);
   assert.equal(tier.anthropicModelSupportsFastMode, undefined);
 
+  // Pi 1.5.1 turned on Anthropic message threads. The hook still sees the
+  // whole request: pi-ai calls onPayload (before_provider_request) on the full
+  // params, and only then cuts a thread continue from them. And the hook keeps
+  // the threads beta while it adds or removes fast mode.
+  {
+    const piAi = fs.readFileSync(
+      path.join(__dirname, "..", "node_modules", "@earendil-works", "pi-ai", "dist", "api", "anthropic-messages.js"),
+      "utf8",
+    );
+    const hookAt = piAi.indexOf("await options?.onPayload?.(params, model)");
+    const threadAt = piAi.indexOf("prepareThreadRequest(model, threadSessionId, params)");
+    assert.ok(hookAt > 0 && threadAt > hookAt, "pi-ai shapes the full body through the hook before threading it");
+    const THREADS = "message-threads-2026-08-12";
+    assert.ok(piAi.includes(`"${THREADS}"`), "the threads beta name this check uses is pi-ai's");
+    const full = () => ({
+      model: "claude-opus-5",
+      system: [{ type: "text", text: "sys" }],
+      tools: [{ name: "bash" }],
+      messages: [{ role: "user", content: "a" }, { role: "assistant", content: "b" }, { role: "user", content: "c" }],
+      betas: [THREADS],
+    });
+    for (const fastMode of [true, false]) {
+      const shaped = apply(full(), "anthropic", fastMode);
+      assert.ok(shaped.betas.includes(THREADS), `fast mode ${fastMode} keeps the threads beta`);
+      assert.equal(shaped.betas.includes(BETA), fastMode);
+      assert.deepEqual(shaped.messages, full().messages, "the hook sees and keeps every message");
+      assert.deepEqual(shaped.system, full().system);
+    }
+  }
+
   // (a) Setting OFF: nothing fast-mode shaped on any request.
   for (const provider of ["openai-codex", "openai"]) {
     const body = apply({ model: "gpt-5.6-sol", input: [] }, provider, false);

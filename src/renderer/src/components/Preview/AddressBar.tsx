@@ -83,6 +83,8 @@ interface Props {
   onCopyTabId: (detail: "id" | "full") => void;
   /** The Record tool, rendered after Comment. */
   recordTool?: React.ReactNode;
+  /** The page's zoom, rendered after the address while the tab is zoomed. */
+  zoomTool?: React.ReactNode;
 }
 
 const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
@@ -108,6 +110,7 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
     onToggleFullScreen,
     onCopyTabId,
     recordTool,
+    zoomTool,
   },
   ref,
 ) {
@@ -341,6 +344,7 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
           </div>
         </div>
 
+        {zoomTool}
         <ToolButton
           icon={<InspectIcon size={13} />}
           label="Point"
