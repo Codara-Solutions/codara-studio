@@ -108,6 +108,9 @@ interface Props {
   // aimed at the visible chat composer. Run-scoped listeners (chat.usage
   // token accumulation) intentionally keep running so totals stay accurate.
   suspendGlobalEvents?: boolean;
+  // The chat's agents rail shows its workers: the "2 workers running" line
+  // then stays off, so the count lives in one place.
+  workersOnRail?: boolean;
   onStartChat: (
     message: string,
     clientMessageId: string,
@@ -203,6 +206,7 @@ export default function ChatComposer({
   disabled,
   lockedMode,
   suspendGlobalEvents,
+  workersOnRail,
   onStartChat,
   onForcePauseRun,
 }: Props) {
@@ -1615,7 +1619,7 @@ export default function ChatComposer({
               <FastModeToggle enabled={fastMode.enabled} onToggle={fastMode.toggle} />
             ) : null}
           </div>
-          {workerActivity ? (
+          {workerActivity && !workersOnRail ? (
             <WorkerActivityStatus
               activity={workerActivity}
               steeringQueues={isActive}

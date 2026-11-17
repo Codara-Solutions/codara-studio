@@ -13,7 +13,7 @@ import RunIdChip from "../RunIdChip";
 import ChatConversation from "./ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
 import CopyBranchWelcome from "./CopyBranchWelcome";
-import { describeRunStatus, statusToneColor } from "./timeline";
+import { describeRunStatus, listChatWorkers, statusToneColor } from "./timeline";
 import { retryableFailedCallId } from "./failed-turn";
 import WelcomeAutomations from "./WelcomeAutomations";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
@@ -31,6 +31,7 @@ const BoardView = lazy(() => import("../board/BoardView"));
 const CoraWhiteboardSurface = lazy(() => import("./CoraWhiteboard"));
 // Inside a worker: its own chat in place of Main's (option A, DESIGN.md).
 const WorkerView = lazy(() => import("./WorkerView"));
+const AgentsRail = lazy(() => import("./AgentsRail"));
 
 // Fallbacks for callers that don't thread the board callbacks (tests,
 // isolated mounts). Module-level so their identities are stable across
@@ -177,6 +178,10 @@ export default function ChatPanel({
       row?.focus({ preventScroll: true });
     });
   }, [insideWorker]);
+  // The agents rail: on the chat's left edge whenever the chat has workers,
+  // in Main and inside a worker alike.
+  const hasWorkers = useMemo(() => (activeRun ? listChatWorkers(activeRun).length > 0 : false), [activeRun]);
+  const showRail = hasWorkers && chatView === "chat" && activeRun !== null && !isUnstartedChatRun(activeRun);
   const mountWhiteboard = whiteboardOpened || chatView === "whiteboard";
   useEffect(() => {
     if (chatView === "whiteboard") setWhiteboardOpened(true);
@@ -281,7 +286,23 @@ export default function ChatPanel({
           {/* The conversation and its composer, with room for a worker view
               to cover both: Main keeps its exact layout underneath, so its
               scroll position is still where it was when you come back. */}
-          <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex" }}>
+          {showRail && activeRun && (
+            // Holds the strip's 32 px while its chunk loads, so the chat
+            // never shifts sideways when the rail arrives.
+            <Suspense fallback={<div aria-hidden style={{ flex: "0 0 32px" }} />}>
+              <AgentsRail
+                run={activeRun}
+                insideId={inside ? insideWorker : null}
+                mainGlyph={<SparkMark size={11} />}
+                onOpenWorker={setInsideWorker}
+                onOpenMain={() => {
+                  if (inside) leaveWorker();
+                }}
+              />
+            </Suspense>
+          )}
+          <div style={{ position: "relative", flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
           {activeRun ? (
             // Both views stack absolutely so each ALWAYS has real
             // dimensions, even when "hidden". xterm's fit-addon measures
@@ -433,6 +454,7 @@ export default function ChatPanel({
               // deleting another run from history). Only the draft/new-chat
               // path (run === null) truly requires a workspace to start.
               disabled={!workspace && !activeRun}
+              workersOnRail={showRail}
               onStartChat={onStartChat}
               onForcePauseRun={onForcePauseRun}
             />
@@ -457,6 +479,7 @@ export default function ChatPanel({
               />
             </Suspense>
           )}
+          </div>
           </div>
         </>
       )}
