@@ -156,7 +156,7 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
         >
           {Array.from({ length: doc.numPages }, (_, i) => (
             <PdfPage
-              key={`${i + 1}@${scale.toFixed(3)}`}
+              key={i + 1}
               doc={doc}
               pageNumber={i + 1}
               scale={scale}
@@ -174,7 +174,12 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
 
 // One page: a fixed-size placeholder that swaps in a rendered canvas, and
 // the text layer over it, when scrolled near the viewport
-// (IntersectionObserver, 600px lookahead).
+// (IntersectionObserver, 600px lookahead). A zoom resizes the page at once
+// (the last drawing stretched to fit) and redraws it once the zoom settles,
+// into a new canvas that replaces the old one when done, so the page being
+// read never goes blank and a burst of wheel steps costs one drawing.
+const REDRAW_DELAY_MS = 120;
+
 function PdfPage({
   doc,
   pageNumber,
@@ -191,10 +196,18 @@ function PdfPage({
   onTextLayer: (pageNumber: number, divs: HTMLElement[] | null) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasHostRef = useRef<HTMLDivElement>(null);
   const layerRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(pageNumber <= 2);
-  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
+  // The page's own size at scale 1, once known.
+  const [unit, setUnit] = useState<{ w: number; h: number } | null>(null);
+  const [drawScale, setDrawScale] = useState(scale);
+
+  useEffect(() => {
+    if (scale === drawScale) return;
+    const timer = window.setTimeout(() => setDrawScale(scale), REDRAW_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [scale, drawScale]);
 
   useEffect(() => {
     const el = hostRef.current;
@@ -212,30 +225,35 @@ function PdfPage({
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
-    let page: PDFPageProxy | null = null;
+    let renderTask: { cancel: () => void; promise: Promise<unknown> } | null = null;
     let textLayer: InstanceType<typeof pdfjs.TextLayer> | null = null;
     let reported = false;
     void (async () => {
       try {
-        page = await doc.getPage(pageNumber);
+        const page: PDFPageProxy = await doc.getPage(pageNumber);
         if (cancelled) return;
-        const viewport = page.getViewport({ scale });
-        setSize({ w: viewport.width, h: viewport.height });
-        const canvas = canvasRef.current;
-        if (!canvas) return;
+        const one = page.getViewport({ scale: 1 });
+        setUnit({ w: one.width, h: one.height });
+        const viewport = page.getViewport({ scale: drawScale });
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const canvas = document.createElement("canvas");
         canvas.width = Math.floor(viewport.width * dpr);
         canvas.height = Math.floor(viewport.height * dpr);
+        canvas.style.cssText = "width:100%;height:100%;display:block";
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
-        await page.render({
+        renderTask = page.render({
           canvasContext: ctx,
           canvas,
           viewport,
           transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
-        }).promise;
+        });
+        await renderTask.promise;
+        renderTask = null;
+        if (cancelled) return;
+        canvasHostRef.current?.replaceChildren(canvas);
         const layer = layerRef.current;
-        if (cancelled || !layer) return;
+        if (!layer) return;
         const content = await getTextContent(pageNumber);
         if (cancelled) return;
         layer.replaceChildren();
@@ -245,39 +263,40 @@ function PdfPage({
         reported = true;
         onTextLayer(pageNumber, textLayer.textDivs);
       } catch {
-        // Render races (scale change mid-render) throw RenderingCancelled;
-        // the replacement keyed instance takes over.
+        // A cancelled render throws RenderingCancelled; the next one takes over.
       }
     })();
     return () => {
       cancelled = true;
+      // Stops pdf.js drawing into a canvas nobody will show.
+      renderTask?.cancel();
       textLayer?.cancel();
       if (reported) onTextLayer(pageNumber, null);
     };
-  }, [visible, doc, pageNumber, scale, getTextContent, onTextLayer]);
+  }, [visible, doc, pageNumber, drawScale, getTextContent, onTextLayer]);
 
+  const box = unit ? { w: unit.w * scale, h: unit.h * scale } : placeholder;
   return (
     <div
       ref={hostRef}
       data-pdf-page={pageNumber}
       style={{
         position: "relative",
-        // The text layer sizes its runs from these (see pdf-text-layer.css).
+        // The text layer sizes its runs from these (see pdf-text-layer.css),
+        // so it follows the zoom before the page is redrawn.
         ["--total-scale-factor" as string]: scale,
         ["--scale-round-x" as string]: "1px",
         ["--scale-round-y" as string]: "1px",
         justifySelf: "center",
-        width: (size ?? placeholder).w,
-        height: (size ?? placeholder).h,
+        width: box.w,
+        height: box.h,
         background: "#fff",
         borderRadius: 2,
         boxShadow: "0 2px 14px rgba(0,0,0,0.4)",
         overflow: "hidden",
       }}
     >
-      {visible && (
-        <canvas ref={canvasRef} style={{ width: size?.w, height: size?.h, display: "block" }} />
-      )}
+      {visible && <div ref={canvasHostRef} style={{ position: "absolute", inset: 0 }} />}
       {visible && <div ref={layerRef} className="codara-pdf-text-layer" />}
     </div>
   );

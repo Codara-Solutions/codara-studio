@@ -96,6 +96,41 @@ test("pptx files open in the slide viewer instead of the binary banner", async (
     await page.locator('button[title="Zoom in"]').dispatchEvent("click");
     await expect.poll(widthAt, { timeout: 5_000 }).toBeGreaterThan(fitWidth);
     await expect(slides).toHaveCount(5);
+
+    // Ctrl+wheel over the slides zooms them too (the shared viewer zoom).
+    const level = page.getByTestId("viewer-zoom-level").filter({ visible: true });
+    const ctrlWheel = async (deltaY: number) => {
+      const box = (await slides.first().boundingBox())!;
+      await page.mouse.move(box.x + box.width / 2, box.y + 40);
+      await page.keyboard.down("Control");
+      await page.mouse.wheel(0, deltaY);
+      await page.keyboard.up("Control");
+    };
+    const before = await level.textContent();
+    await ctrlWheel(-100);
+    await expect(level).not.toHaveText(before ?? "");
+    // A pinch too small to show (it snaps back to fit) must not pull the view
+    // back to where it happened on the next zoom, after a scroll.
+    await page.getByTitle("Fit to width").filter({ visible: true }).click();
+    await expect(level).toHaveText("100%");
+    await ctrlWheel(-0.5);
+    await expect(level).toHaveText("100%");
+    const scrollTop = () =>
+      slides.first().evaluate((el) => {
+        let node = el.parentElement;
+        while (node && getComputedStyle(node).overflowY !== "auto") node = node.parentElement;
+        return node?.scrollTop ?? -1;
+      });
+    await slides.first().evaluate((el) => {
+      let node = el.parentElement;
+      while (node && getComputedStyle(node).overflowY !== "auto") node = node.parentElement;
+      node?.scrollTo(0, 900);
+    });
+    await expect.poll(scrollTop).toBeGreaterThan(800);
+    await page.keyboard.press("Control+=");
+    await expect(level).toHaveText("110%");
+    await page.waitForTimeout(100);
+    expect(await scrollTop()).toBeGreaterThan(800);
   } finally {
     await app?.close();
   }

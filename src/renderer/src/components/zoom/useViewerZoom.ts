@@ -32,6 +32,11 @@ export interface ViewerZoomOptions {
   fitZoom?: number;
   /** False until the scroller is mounted (still loading, an error). */
   enabled?: boolean;
+  /**
+   * false: the viewer keeps its own place across a zoom (a virtual list that
+   * remounts at the new row height and starts at the row it was on).
+   */
+  keepPoint?: boolean;
 }
 
 export interface ViewerZoom {
@@ -47,6 +52,8 @@ export interface ViewerZoom {
   controls: { zoom: number; onZoomOut: () => void; onZoomIn: () => void; onFit: () => void };
 }
 
+const IS_MAC = typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
+
 export function useViewerZoom({
   rootRef,
   scrollerRef,
@@ -56,6 +63,7 @@ export function useViewerZoom({
   wheel = "smooth",
   fitZoom = 1,
   enabled = true,
+  keepPoint = true,
 }: ViewerZoomOptions): ViewerZoom {
   const [state, setState] = useState({ zoom: fitZoom, fitted: true });
   const zoom = state.fitted ? fitZoom : state.zoom;
@@ -87,11 +95,17 @@ export function useViewerZoom({
     const point = anchor.current;
     anchor.current = null;
     const scroller = scrollerRef.current;
-    if (!point || !scroller || previous === zoom) return;
+    if (!point || !scroller || previous === zoom || !keepPoint) return;
     const box = contentBox(scroller);
     scroller.scrollLeft += box.left + point.fx * box.width - point.x;
     scroller.scrollTop += box.top + point.fy * box.height - point.y;
-  }, [zoom, scrollerRef, contentBox]);
+  }, [zoom, scrollerRef, contentBox, keepPoint]);
+
+  // A pin whose zoom never showed (a tiny pinch that snapped back to fit)
+  // must not move the view on a later zoom, after the user has scrolled.
+  useLayoutEffect(() => {
+    anchor.current = null;
+  });
 
   // Remembers which content point sits under `point` (the scroller's centre
   // by default) before the zoom changes the layout.
@@ -123,10 +137,12 @@ export function useViewerZoom({
       // the exact level, so a slow pinch's small steps still add up.
       const fitted = Math.abs(clamped - fitZoom) <= fitZoom * (snap ? 0.01 : 1e-4);
       requested.current = clamped;
+      const shown = fitted ? fitZoom : clamped;
       // Pinned once per render: events later in the same frame still see
       // the old layout, and the first pin already holds the content point.
-      if (!anchor.current) pin(point);
-      setState({ zoom: fitted ? fitZoom : clamped, fitted });
+      // Only a zoom that changes what shows is pinned.
+      if (!anchor.current && shown !== rendered.current) pin(point);
+      setState({ zoom: shown, fitted });
     },
     [pin],
   );
@@ -134,7 +150,8 @@ export function useViewerZoom({
   const fit = useCallback(() => {
     if (latest.current.fitted && requested.current === latest.current.fitZoom) return;
     requested.current = latest.current.fitZoom;
-    if (!anchor.current) pin();
+    wheelCarry.current = 0;
+    if (!anchor.current && rendered.current !== latest.current.fitZoom) pin();
     setState({ zoom: latest.current.fitZoom, fitted: true });
   }, [pin]);
 
@@ -143,6 +160,7 @@ export function useViewerZoom({
       const { min, max, fitted, fitZoom } = latest.current;
       // From the level on screen: a pinch can leave `requested` a hair off it.
       const from = fitted ? fitZoom : requested.current;
+      wheelCarry.current = 0;
       if (action === "reset") fit();
       else zoomTo(stepZoom(from, action === "in" ? 1 : -1, min, max));
     },
@@ -177,8 +195,10 @@ export function useViewerZoom({
     if (!enabled || !root) return;
     const onWheel = (event: WheelEvent) => {
       const scroller = scrollerRef.current;
-      if (!(event.ctrlKey || event.metaKey) || !scroller || !scroller.contains(event.target as Node)) return;
-      // Chromium would otherwise scroll, and a pinch must never reach the page zoom.
+      // Ctrl+wheel everywhere (a pinch arrives as one), Cmd+wheel on macOS.
+      if (!(event.ctrlKey || (IS_MAC && event.metaKey)) || !scroller || !scroller.contains(event.target as Node)) return;
+      // Chromium would otherwise scroll, and a pinch must never reach the
+      // page zoom; preventDefault needs the listener to be non-passive.
       event.preventDefault();
       const box = scroller.getBoundingClientRect();
       const point = { x: event.clientX - box.left, y: event.clientY - box.top };
