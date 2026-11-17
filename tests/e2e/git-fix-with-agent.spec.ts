@@ -91,7 +91,7 @@ test("Fix with agent hands checks, a hook failure, conflicts and reviews to agen
     // ── A commit the pre-commit hook rejected, to that agent's pane ─────────
     await writeFile(join(fixture.workspaceDir, "src", "widget.ts"), "const unused = 1;\n", "utf8");
     await sourceTab(/^Changes/).click();
-    const message = page.getByPlaceholder("Message  (Ctrl+Enter to commit)");
+    const message = page.getByRole("textbox", { name: "Commit message" });
     await expect(message).toBeVisible({ timeout: 15_000 });
     await message.fill("Add widget");
     // The box is always there; it can commit once the status poll sees the file.

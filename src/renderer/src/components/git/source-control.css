@@ -139,3 +139,28 @@
 .scm-tabpanel[hidden] {
   display: none;
 }
+
+/* The two halves of the Commit button. The panel's focus ring is an outer
+   shadow, which the button's rounded clip would cut off and which would be
+   accent on accent anyway, so focus shows as an inset ring in the ink the
+   button's label uses. */
+.scm-split-part:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px currentColor;
+}
+
+/* The second click that deletes a folded folder's new files. */
+.scm-confirm {
+  appearance: none;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in oklch, var(--danger) 45%, var(--rule-soft));
+  border-radius: 5px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: default;
+}
