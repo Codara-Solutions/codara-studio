@@ -82,6 +82,49 @@ cursors in Figma for the name tag beside the arrow.
 - The component lives in `components/Preview/agent-presence/` with its own
   CSS and store; BrowserPane only mounts it, so the toolbar can move freely.
 
+## The extension's popup (2026-11)
+
+**Chosen:** variant A, "Tidy", of four built for the owner (today's popup,
+A Tidy, B Live first, C One question). The options page with the mocks and
+their screenshots is archived as
+`Archive/2026-11-17-studio-browser-extension-options/` in the company code
+folder. One switch for this tab next to its title, a segmented **Agents may
+use** choice (Tabs I pick, This window, Everything) in place of the separate
+window and every-tab switches, the agent named by its name and colour with
+what it did last, and the shared tabs with Stop and Stop all.
+
+**Why:** the old popup had five switches, two copy buttons and a list of tab
+ids. Agents no longer need copied ids (`codara_preview_list` and
+`codara_preview_chrome` find shared tabs), the stop the user needs most sat at
+the bottom, and on pages Chrome keeps extensions off (the Web Store, browser
+pages) it still showed a share button that could never work.
+
+**Rules:**
+
+- The popup uses Studio's tokens (Codara Daylight when the browser is light,
+  Codara Classic when it is dark) copied into `popup.css`, and no colour of
+  its own. An agent's dot uses `--agent-<runtime>`, otherwise the accent.
+- Each reach is a view of the sharing state that already existed (every tab,
+  shared windows, tabs shared one by one, stopped tabs): picking one never
+  shares more than the switches it replaced, and what a user had before the
+  update reads back as the same reach. Narrowing from Everything keeps the
+  tabs the user stopped. `reachOf` and `reachPatch` in `lib/policy.js` hold
+  the mapping and its tests. Everything still asks first.
+- Under the choice, one line says what the reach includes. Opening new tabs
+  keeps its own switch and stays off until the user turns it on.
+- No tab ids in the main view. The id and its copy button sit under
+  **Details** for the current tab.
+- A page no extension may touch, or a site on the blocked list, shows one
+  line saying why and no switch, details or cookie row: never a control that
+  cannot work.
+- The cookie switch never claims more than it does: one line under it says
+  that even when off, agents see site storage, non-HttpOnly cookies and the
+  tab's requests and responses, sign-in headers included. The switch gates
+  only cookie headers, HttpOnly cookies and the storage commands.
+- Keyboard: the reach is a radio group with one tab stop and arrow keys; the
+  switches are native checkboxes with `role="switch"`; the 1 s refresh never
+  rebuilds a list that did not change, so focus stays put.
+
 ## Tab links and agent tab approvals (2026-10)
 
 **Chosen:** a link brings its tab on screen and marks it with a short accent
