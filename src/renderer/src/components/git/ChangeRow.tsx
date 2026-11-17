@@ -36,6 +36,8 @@ interface Props {
   indent?: number;
   /** The dimmed folder after the name. Defaults to the file's own folder. */
   folder?: string;
+  /** The file is in the repository but outside the workspace's folder. */
+  outside?: boolean;
 }
 
 // The status letter's colour. Calm on purpose (DESIGN.md, "Source Control"):
@@ -114,8 +116,10 @@ export const ROW_STYLE: React.CSSProperties = {
   transition: "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
 };
 
+// The folder takes only the room the name leaves (basis 0), so a long folder
+// is what truncates, never the file name first.
 export const FOLDER_TEXT_STYLE: React.CSSProperties = {
-  flex: "1 1 auto",
+  flex: "1 1 0",
   minWidth: 0,
   overflow: "hidden",
   textOverflow: "ellipsis",
@@ -145,10 +149,14 @@ const ChangeRow = React.memo(function ChangeRow({
   stat,
   indent = 22,
   folder,
+  outside = false,
 }: Props) {
   const [hover, setHover] = useState(false);
   const { dir, name } = splitPath(file.path);
-  const shownFolder = folder ?? dir.replace(/\/$/, "");
+  const ownFolder = folder ?? dir.replace(/\/$/, "");
+  // A workspace opened below the repository root still lists the rest of the
+  // repository's changes; those say so.
+  const shownFolder = outside ? `${ownFolder ? `${ownFolder} · ` : ""}outside this workspace` : ownFolder;
   const actions = hover && !disabled;
 
   return (
@@ -160,7 +168,8 @@ const ChangeRow = React.memo(function ChangeRow({
       onDoubleClick={() => onPinDiff(file)}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      title={`${statusLabel(file.status)}: ${file.oldPath ? `${file.oldPath} → ` : ""}${file.path} (double-click to keep the tab open)`}
+      data-outside={outside || undefined}
+      title={`${statusLabel(file.status)}: ${file.oldPath ? `${file.oldPath} → ` : ""}${file.path}${outside ? ", outside this workspace" : ""} (double-click to keep the tab open)`}
       style={{
         ...ROW_STYLE,
         paddingLeft: indent,

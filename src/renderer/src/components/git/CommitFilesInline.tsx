@@ -117,7 +117,7 @@ export default function CommitFilesInline({
       </div>
       {hidden > 0
         ? note(
-            <button type="button" className="scm-link" onClick={inspect}>
+            <button type="button" className="scm-link scm-link-line" onClick={inspect}>
               {hidden} more files · Open full view
             </button>,
           )
@@ -125,7 +125,7 @@ export default function CommitFilesInline({
       {note(
         <button
           type="button"
-          className="scm-link"
+          className="scm-link scm-link-line"
           title="Open the full view: message, author, every diff inline, arrow keys to step through commits"
           onClick={inspect}
         >

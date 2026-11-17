@@ -249,30 +249,41 @@ export default function GitPanel({
     },
     [cwd, runAction],
   );
-  // A folded folder holds only new files, so git is handed the folder itself:
-  // one short command line however many files it holds, and the folders a
-  // clean would leave empty go too.
+  // A folded folder acts on exactly the files its row shows. Discard asks
+  // main to list the folder again first and refuses if it changed since (an
+  // agent wrote into it), so it never deletes a file nobody saw.
   const stageFolder = useCallback(
-    (dir: string) => {
-      if (cwd) void runAction("stage", () => window.spark.git.stage(cwd, [dir]));
+    (_dir: string, files: GitFileChange[]) => {
+      if (cwd) void runAction("stage", () => window.spark.git.stage(cwd, files.map((file) => file.path)));
     },
     [cwd, runAction],
   );
   const discardFolder = useCallback(
-    (dir: string) => {
+    (dir: string, files: GitFileChange[]) => {
       if (!cwd) return;
-      const folder: GitFileChange = { path: `${dir}/`, status: "untracked", staged: false, untracked: true };
-      void runAction("discard", () => window.spark.git.discard(cwd, [folder]));
+      void runAction("discard", () =>
+        window.spark.git.discardFolder(
+          cwd,
+          dir,
+          files.map((file) => file.path),
+        ),
+      );
     },
     [cwd, runAction],
   );
+  const prefix = status?.prefix ?? "";
+  // Status paths are from the repository root; the workspace may sit below
+  // it, so the root is the workspace folder minus the prefix's folders.
   const openFile = useCallback(
     (file: GitFileChange) => {
       if (!cwd || !onOpenFile) return;
       const sep = cwd.includes("\\") ? "\\" : "/";
-      onOpenFile(cwd.replace(/[\\/]+$/, "") + sep + file.path.replace(/\//g, sep));
+      const up = prefix.split("/").filter(Boolean).length;
+      const parts = cwd.replace(/[\\/]+$/, "").split(/[\\/]/);
+      const root = parts.slice(0, parts.length - up).join(sep);
+      onOpenFile(root + sep + file.path.replace(/\//g, sep));
     },
-    [cwd, onOpenFile],
+    [cwd, onOpenFile, prefix],
   );
   const stageAll = useCallback(() => {
     if (cwd) void runAction("stageAll", () => window.spark.git.stageAll(cwd));
@@ -637,6 +648,7 @@ export default function GitPanel({
               gitStatus={status}
               view={tab === "pull-request" ? "pull-request" : "issues"}
               onQueueCount={setIssueCount}
+              onShowChanges={() => changeTab("changes")}
               refreshKey={gitVersion}
               userRefreshKey={githubRefreshNonce}
               queue={
@@ -762,6 +774,7 @@ export default function GitPanel({
                             <ChangeList
                               files={staged}
                               staged
+                              prefix={prefix}
                               disabled={disabled}
                               stats={diffStats?.staged}
                               selectedPath={
@@ -805,6 +818,7 @@ export default function GitPanel({
                             <ChangeList
                               files={unstaged}
                               staged={false}
+                              prefix={prefix}
                               disabled={disabled}
                               stats={diffStats?.unstaged}
                               selectedPath={

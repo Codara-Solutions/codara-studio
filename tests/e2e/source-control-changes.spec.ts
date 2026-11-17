@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { _electron as electron, type ElectronApplication } from "playwright";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { git, prepare, roomy, shots } from "./source-control-fixture";
 
@@ -113,12 +113,31 @@ test("Changes lists files compactly, folds new folders and acts on hover", async
       await expect.poll(() => git(repo, ["diff", "--cached", "--name-only"], env).split("\n").filter((p) => p.startsWith("vendor/")).length).toBe(5);
     });
 
-    await test.step("discarding a folded folder asks for a second click, then deletes it", async () => {
+    await test.step("a double-click on Discard does not delete: it only arms the confirm", async () => {
       await folder(page, "dist").dispatchEvent("mouseover");
-      await folder(page, "dist").getByTitle("Discard these 2 new files").click();
-      const confirm = folder(page, "dist").getByRole("button", { name: "Delete 2?" });
-      await expect(confirm).toBeVisible();
+      await folder(page, "dist").getByTitle("Discard these 2 files").dblclick();
+      await expect(folder(page, "dist").getByRole("button", { name: "Delete 2 files in dist/?" })).toBeVisible();
       expect(existsSync(join(repo, "dist", "app.js"))).toBe(true);
+    });
+
+    await test.step("a file written after the row was shown stops the delete", async () => {
+      // An agent writes into the folder between the render and the confirm.
+      await writeFile(join(repo, "dist", "late.js"), "late\n");
+      await page.waitForTimeout(450);
+      await folder(page, "dist").getByRole("button", { name: "Delete 2 files in dist/?" }).click();
+      await expect(page.getByText("dist/ changed since it was shown. Nothing was deleted: check it again.")).toBeVisible({
+        timeout: 15_000,
+      });
+      for (const name of ["app.js", "app.js.map", "late.js"]) expect(existsSync(join(repo, "dist", name)), name).toBe(true);
+      await expect(folder(page, "dist")).toHaveAttribute("data-count", "3", { timeout: 15_000 });
+    });
+
+    await test.step("confirmed on what it shows, the folder goes", async () => {
+      await page.mouse.move(0, 0);
+      await folder(page, "dist").dispatchEvent("mouseover");
+      await folder(page, "dist").getByTitle("Discard these 3 files").click();
+      const confirm = folder(page, "dist").getByRole("button", { name: "Delete 3 files in dist/?" });
+      await page.waitForTimeout(450);
       await confirm.click();
       await expect(folder(page, "dist")).toHaveCount(0, { timeout: 15_000 });
       expect(existsSync(join(repo, "dist"))).toBe(false);
@@ -131,6 +150,8 @@ test("Changes lists files compactly, folds new folders and acts on hover", async
 
 // Folder names are names, never patterns: a folded row's Stage and Discard
 // reach its own files and nothing else, whatever characters the name holds.
+// A discard keeps what git keeps: ignored files, a nested repository, and
+// the target of a symbolic link.
 test("a folded folder acts on its own files only, whatever its name", async () => {
   test.skip(process.platform === "win32", "the fake gh is a POSIX script, and these names are not valid there");
   test.setTimeout(180_000);
@@ -141,13 +162,23 @@ test("a folded folder acts on its own files only, whatever its name", async () =
     await mkdir(join(repo, path, ".."), { recursive: true });
     await writeFile(join(repo, path), `${path}\n`);
   };
+  const LONE = ["a/unrelated", "xstar/keep.txt", "aq/keep.txt", "-/keep.txt"];
   try {
     // Each folded folder sits next to a lone file its name would match as a pattern.
     for (const dir of ["[ab]", "*star", "?q", "-dash", ":colon"]) {
       await put(`${dir}/1.txt`);
       await put(`${dir}/2.txt`);
     }
-    for (const lone of ["a/unrelated", "xstar/keep.txt", "aq/keep.txt", "-/keep.txt"]) await put(lone);
+    for (const lone of LONE) await put(lone);
+    // A folder with a link out, an ignored log and a nested repository.
+    await put("mixed/1.txt");
+    await symlink(join(repo, "xstar", "keep.txt"), join(repo, "mixed", "link.txt"));
+    await put("mixed/debug.log");
+    await writeFile(join(repo, ".git", "info", "exclude"), "*.log\n");
+    await put("mixed/inner/README.md");
+    git(join(repo, "mixed", "inner"), ["init", "-q"], env);
+    git(join(repo, "mixed", "inner"), ["add", "-A"], env);
+    git(join(repo, "mixed", "inner"), ["commit", "-q", "-m", "inner"], env);
 
     app = await electron.launch({ args: ["."], env });
     const page = await app.firstWindow();
@@ -157,32 +188,49 @@ test("a folded folder acts on its own files only, whatever its name", async () =
 
     const untracked = () => git(repo, ["ls-files", "--others", "--exclude-standard"], env).split("\n").filter(Boolean).sort();
     const staged = () => git(repo, ["diff", "--cached", "--name-only"], env).split("\n").filter(Boolean).sort();
+    const discard = async (dir: string, label: string, title: string) => {
+      // Hover is dispatched, and the pointer is parked away afterwards: the
+      // next folder slides up under it once this one goes.
+      await page.mouse.move(0, 0);
+      await folder(page, dir).dispatchEvent("mouseover");
+      await folder(page, dir).getByTitle(title).click();
+      const confirm = folder(page, dir).getByRole("button", { name: label });
+      await expect(confirm).toBeVisible();
+      await page.waitForTimeout(450);
+      await confirm.click();
+      await page.mouse.move(0, 0);
+      await expect(folder(page, dir)).toHaveCount(0, { timeout: 15_000 });
+    };
 
     for (const dir of ["[ab]", "*star", "?q"]) {
       await test.step(`discarding "${dir}" deletes its 2 files and nothing else`, async () => {
-        await expect(folder(page, dir)).toContainText("2 files", { timeout: 15_000 });
-        await folder(page, dir).dispatchEvent("mouseover");
-        await folder(page, dir).getByTitle("Discard these 2 new files").click();
-        // The second click names what goes.
-        const confirm = folder(page, dir).getByRole("button", { name: "Delete 2?" });
-        await expect(confirm).toHaveAttribute("title", `Delete the 2 new files in ${dir}/. This cannot be undone`);
-        await confirm.click();
-        await expect(folder(page, dir)).toHaveCount(0, { timeout: 15_000 });
+        await expect(folder(page, dir)).toHaveAttribute("data-count", "2", { timeout: 15_000 });
+        await discard(dir, `Delete 2 files in ${dir}/?`, "Discard these 2 files");
         expect(existsSync(join(repo, dir))).toBe(false);
-        for (const lone of ["a/unrelated", "xstar/keep.txt", "aq/keep.txt", "-/keep.txt"]) {
-          expect(existsSync(join(repo, lone)), lone).toBe(true);
-        }
+        for (const lone of LONE) expect(existsSync(join(repo, lone)), lone).toBe(true);
       });
     }
 
+    await test.step("a link, an ignored file and a nested repository survive as git keeps them", async () => {
+      // Three entries (1.txt, the link, the nested repository); two are files.
+      await expect(folder(page, "mixed")).toHaveAttribute("data-count", "3");
+      await discard("mixed", "Delete 2 files in mixed/?", "Discard these 2 files");
+      expect(existsSync(join(repo, "mixed", "1.txt"))).toBe(false);
+      expect(existsSync(join(repo, "mixed", "link.txt"))).toBe(false);
+      expect(existsSync(join(repo, "xstar", "keep.txt")), "the link's target").toBe(true);
+      expect(existsSync(join(repo, "mixed", "debug.log")), "the ignored file").toBe(true);
+      expect(existsSync(join(repo, "mixed", "inner", ".git")), "the nested repository").toBe(true);
+    });
+
     await test.step('staging "-dash" and ":colon" stages their files and nothing else', async () => {
       for (const dir of ["-dash", ":colon"]) {
+        await page.mouse.move(0, 0);
         await folder(page, dir).dispatchEvent("mouseover");
         await folder(page, dir).getByTitle("Stage these 2 new files").click();
         await expect(folder(page, dir)).toHaveCount(0, { timeout: 15_000 });
       }
       expect(staged()).toEqual(["-dash/1.txt", "-dash/2.txt", ":colon/1.txt", ":colon/2.txt"].sort());
-      expect(untracked()).toEqual(["-/keep.txt", "a/unrelated", "aq/keep.txt", "xstar/keep.txt"].sort());
+      expect(untracked()).toEqual([...LONE, "mixed/inner/"].sort());
     });
   } finally {
     await app?.close().catch(() => undefined);
@@ -190,11 +238,11 @@ test("a folded folder acts on its own files only, whatever its name", async () =
   }
 });
 
-// A workspace opened below the repository root: files elsewhere in the repo
-// are listed by their path from the root (a status read can also give them
-// as "../…", which never folds; see the unit suite), and staging one of them
-// stages that file only, not the workspace's own edit.
-test("files outside a workspace opened below the repo root keep their own rows", async () => {
+// A workspace opened below the repository root (here at src/): status paths
+// are from the root, so only folders inside the workspace fold, files
+// elsewhere say they are outside it, staging one stages that file only, and
+// Open file opens the file from the root, not from the workspace folder.
+test("a workspace opened below the repo root folds only inside itself", async () => {
   test.skip(process.platform === "win32", "the fake gh is a POSIX script");
   test.setTimeout(180_000);
   const fixture = await prepare();
@@ -205,8 +253,13 @@ test("files outside a workspace opened below the repo root keep their own rows",
     const state = JSON.parse(await readFile(statePath, "utf8"));
     state.workspaces[0].cwd = join(repo, "src");
     await writeFile(statePath, JSON.stringify(state));
-    await writeFile(join(repo, "one.txt"), "one\n");
-    await writeFile(join(repo, "two.txt"), "two\n");
+    await writeFile(join(repo, "one.txt"), "outside-the-workspace-marker\n");
+    await mkdir(join(repo, "docs"), { recursive: true });
+    await writeFile(join(repo, "docs", "a.md"), "a\n");
+    await writeFile(join(repo, "docs", "b.md"), "b\n");
+    await mkdir(join(repo, "src", "gen"), { recursive: true });
+    await writeFile(join(repo, "src", "gen", "x.ts"), "x\n");
+    await writeFile(join(repo, "src", "gen", "y.ts"), "y\n");
     await writeFile(join(repo, "src", "theme.ts"), "export const theme = 4;\n");
 
     app = await electron.launch({ args: ["."], env });
@@ -215,17 +268,28 @@ test("files outside a workspace opened below the repo root keep their own rows",
     await expect(page.getByRole("tablist", { name: "Source Control views" })).toBeVisible({ timeout: 45_000 });
     await roomy(app, page);
 
-    await test.step("files outside the workspace are rows of their own", async () => {
-      await expect(row(page, "one.txt")).toBeVisible({ timeout: 15_000 });
-      await expect(row(page, "two.txt")).toBeVisible();
-      await expect(page.getByTestId("change-folder")).toHaveCount(0);
+    await test.step("folders outside the workspace never fold and say where they are", async () => {
+      await expect(folder(page, "src/gen")).toHaveAttribute("data-count", "2", { timeout: 15_000 });
+      await expect(folder(page, "docs")).toHaveCount(0);
+      await expect(row(page, "docs/a.md")).toHaveAttribute("data-outside", "true");
+      await expect(row(page, "docs/a.md")).toContainText("outside this workspace");
+      await expect(row(page, "src/theme.ts")).not.toHaveAttribute("data-outside", "true");
     });
 
-    await test.step("staging one of them stages that file only", async () => {
+    await test.step("staging a file outside stages that file only", async () => {
       await row(page, "one.txt").dispatchEvent("mouseover");
       await row(page, "one.txt").getByTitle("Stage changes").click();
       await expect.poll(() => git(repo, ["diff", "--cached", "--name-only"], env)).toBe("one.txt");
       expect(git(repo, ["diff", "--name-only"], env)).toBe("src/theme.ts");
+    });
+
+    await test.step("Open file opens the file from the repository root", async () => {
+      await page.mouse.move(0, 0);
+      const stagedOne = page.locator('[data-testid="change-row"][data-path="one.txt"][data-staged="true"]');
+      await expect(stagedOne).toBeVisible({ timeout: 15_000 });
+      await stagedOne.dispatchEvent("mouseover");
+      await stagedOne.getByTitle("Open file").click();
+      await expect(page.getByText("outside-the-workspace-marker").first()).toBeVisible({ timeout: 15_000 });
     });
   } finally {
     await app?.close().catch(() => undefined);

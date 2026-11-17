@@ -2558,6 +2558,14 @@ export function registerIpc(): void {
   );
 
   handle(
+    "git:discardFolder",
+    async (_e, input: { cwd: string; dir: string; files: string[] }): Promise<GitOpResult> => {
+      const { discardNewFolder } = await getGitOps();
+      return discardNewFolder(input.cwd, input.dir, input.files);
+    },
+  );
+
+  handle(
     "git:commit",
     async (
       _e,

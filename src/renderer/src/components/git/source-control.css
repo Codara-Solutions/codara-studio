@@ -87,6 +87,46 @@
   }
 }
 
+/* The narrowest rails (down to 196px): the counts step aside (each tab still
+   says its count to a screen reader and in its name), so all four stay on
+   screen. */
+@container (max-width: 260px) {
+  .scm-tab {
+    gap: 3px;
+    padding: 0 4px;
+  }
+
+  .scm-tab-count {
+    display: none;
+  }
+}
+
+/* Quiet text that acts, inside a sentence or under a list. */
+.scm-link {
+  appearance: none;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted-2);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, currentColor 40%, transparent);
+  text-underline-offset: 2px;
+  cursor: default;
+}
+
+.scm-link:hover {
+  color: var(--ink-dim);
+  text-decoration-color: currentColor;
+}
+
+.scm-link:focus-visible {
+  outline: none;
+  border-radius: 3px;
+  box-shadow: var(--focus-ring);
+}
+
 /* A tab's page. Changes keeps the panel's own scroller; the others scroll on
    their own so switching never drags one tab's scroll into another. */
 .scm-tabpanel {
@@ -134,27 +174,11 @@
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-/* Quiet text that acts: the footer of a commit opened in place. */
-.scm-link {
-  appearance: none;
-  min-width: 0;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--muted-2);
-  font: inherit;
+/* A .scm-link that is a whole line of its own (the footer of a commit
+   opened in place): it truncates, and shows its underline on hover only. */
+.scm-link-line {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  cursor: default;
-}
-.scm-link:hover {
-  color: var(--ink-dim);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-.scm-link:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: 3px;
+  text-decoration-color: transparent;
 }
