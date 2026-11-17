@@ -849,6 +849,9 @@ export default function GitPanel({
                           onRevert={handleRevert}
                           onUndoLastCommit={handleUndoLastCommit}
                           onOpenCommit={openCommitDetail}
+                          onOpenFileDiff={onOpenCommitDiffTab}
+                          onFetch={handleFetch}
+                          onRefresh={handleRefresh}
                           highlightHash={returnHighlightHash}
                         />
                       </>

@@ -123,6 +123,12 @@ test("the popup offers one switch per tab, a reach that maps to the old switches
     await expect(popup.locator("#storage-row")).toBeVisible();
     // The switch covers the browser's cookie and storage commands, not what the page's scripts can read.
     await expect(popup.locator("#storage-note")).toHaveText("Even when off, agents see site storage, non-HttpOnly cookies and requests, sign-in headers included.");
+    // Codara paused this tab after it could not read its saved stops: the popup says what to do.
+    await expect(popup.locator("#tab-paused")).toBeHidden();
+    await worker.evaluate((id) => ((self as unknown as { codara: any }).codara.state().pausedTabs = [id]), webTab);
+    await expect(popup.locator("#tab-paused")).toHaveText("Shared tabs were paused after a problem reading saved stops: share each tab again.");
+    await worker.evaluate(() => ((self as unknown as { codara: any }).codara.state().pausedTabs = []));
+    await expect(popup.locator("#tab-paused")).toBeHidden();
 
     // "This window" is the old window switch; "Tabs I pick" turns it off and
     // leaves the tab shared one by one.

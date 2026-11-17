@@ -172,6 +172,29 @@ function renderTab(tab, connected) {
     $("tab-usage").textContent = `${toolVerb(usage.tool)}, ${ago(usage.at)}`;
     $("tab-usage").title = usage.tool;
   }
+  // Agents the user stopped from the page: the only place to give the tab back, besides Codara's Settings.
+  $("tab-paused").hidden = !(usable && tab.shared && tab.paused);
+  const stopped = usable && Array.isArray(tab.stoppedAgents) ? tab.stoppedAgents : [];
+  $("tab-stopped").hidden = stopped.length === 0;
+  $("tab-stopped").replaceChildren(
+    ...stopped.map((agent) => {
+      const item = document.createElement("li");
+      item.className = "row";
+      const text = document.createElement("span");
+      text.className = "grow";
+      text.textContent = `You stopped ${agent.name} on this tab.`;
+      const back = document.createElement("button");
+      back.type = "button";
+      back.className = "btn";
+      // Codara owns the list: until it answers, the agent stays stopped.
+      back.textContent = agent.waiting ? "Waiting for Codara" : "Give back";
+      back.disabled = agent.waiting === true;
+      back.setAttribute("aria-label", agent.waiting ? `Waiting for Codara about ${agent.name}` : `Give this tab back to ${agent.name}`);
+      back.addEventListener("click", () => void act("giveBack", { tabId: tab.tabId, key: agent.key }));
+      item.append(text, back);
+      return item;
+    }),
+  );
   $("tab-details").hidden = !usable || !connected;
   $("copy-id").textContent = tab.shared ? "Copy tab id" : "Share and copy id";
   $("tab-id").textContent = tab.agentId;
@@ -205,6 +228,10 @@ function render() {
   $("reach").hidden = false;
   if (!pendingAnswer) renderReach(view.reach, view);
   $("allow-open").checked = view.allowOpen;
+  $("on-page").hidden = false;
+  $("presence-overlay").checked = view.presence.overlay;
+  $("presence-glow").checked = view.presence.overlay && view.presence.glow;
+  $("presence-glow").disabled = !view.presence.overlay;
 
   $("shared").hidden = view.shared.length === 0;
   $("shared-label").textContent = `Shared, ${view.shared.length} tab${view.shared.length === 1 ? "" : "s"}`;
@@ -274,6 +301,8 @@ async function start() {
     }
   });
   $("allow-open").addEventListener("change", (event) => void act("setAllowOpen", { on: event.target.checked }));
+  $("presence-overlay").addEventListener("change", (event) => void act("setPresence", { overlay: event.target.checked }));
+  $("presence-glow").addEventListener("change", (event) => void act("setPresence", { glow: event.target.checked }));
   $("stop-all").addEventListener("click", () => void act("stopAll"));
   $("copy-id").addEventListener("click", async (event) => {
     const button = event.currentTarget;
