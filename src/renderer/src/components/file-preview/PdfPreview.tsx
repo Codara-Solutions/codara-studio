@@ -67,7 +67,7 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
   const find = usePdfFind({ doc, hostRef: findHostRef, scrollerRef: containerRef, getTextContent });
   // 1 is the page width fitted to the pane; pdf.js repaints every page on a
   // change, so the wheel moves in steps.
-  const { zoom, apply, fit } = useViewerZoom({
+  const { zoom, controls } = useViewerZoom({
     rootRef,
     scrollerRef: containerRef,
     min: 0.5,
@@ -141,10 +141,7 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
           {doc.numPages} page{doc.numPages === 1 ? "" : "s"}
         </span>
         <ZoomControl
-          zoom={zoom}
-          onZoomOut={() => apply("out")}
-          onZoomIn={() => apply("in")}
-          onFit={fit}
+          {...controls}
           fitTitle="Fit width"
         />
         {toolbarAction}

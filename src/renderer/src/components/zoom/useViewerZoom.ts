@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { isShown } from "../find/find-router";
 import { registerZoomTarget } from "./zoom-router";
 import { clampZoom, stepZoom, wheelPixels, wheelZoomFactor, type ZoomAction } from "./zoom-math";
@@ -42,6 +42,8 @@ export interface ViewerZoom {
   zoomTo: (next: number, anchor?: { x: number; y: number }) => void;
   fit: () => void;
   apply: (action: ZoomAction) => void;
+  /** Handlers for ZoomControl; each leaves focus in the viewer. */
+  controls: { zoom: number; onZoomOut: () => void; onZoomIn: () => void; onFit: () => void };
 }
 
 const STEP_PIXELS = 50;
@@ -145,6 +147,17 @@ export function useViewerZoom({
     [fit, zoomTo],
   );
 
+  // A docked toolbar sits outside the viewer, and a click on it would take
+  // focus there, so the next zoom key would zoom the window instead.
+  const controls = useMemo(() => {
+    const thenFocus = (action: ZoomAction) => () => {
+      apply(action);
+      const root = rootRef.current;
+      if (root && !root.contains(document.activeElement)) scrollerRef.current?.focus({ preventScroll: true });
+    };
+    return { onZoomOut: thenFocus("out"), onZoomIn: thenFocus("in"), onFit: thenFocus("reset") };
+  }, [apply, rootRef, scrollerRef]);
+
   useEffect(
     () =>
       registerZoomTarget({
@@ -180,5 +193,5 @@ export function useViewerZoom({
     return () => scroller.removeEventListener("wheel", onWheel);
   }, [enabled, scrollerRef, zoomTo]);
 
-  return { zoom, fitted: state.fitted, zoomTo, fit, apply };
+  return { zoom, fitted: state.fitted, zoomTo, fit, apply, controls: { zoom, ...controls } };
 }

@@ -126,7 +126,7 @@ export default function PptxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
     setRecoverNonce((n) => n + 1);
   }, []);
 
-  const { zoom, apply, fit } = useViewerZoom({
+  const { zoom, controls } = useViewerZoom({
     rootRef,
     scrollerRef: scrollRef,
     contentRef: hostRef,
@@ -156,10 +156,7 @@ export default function PptxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
           {loading ? "Loading presentation…" : slideCount > 0 ? `${slideCount} slides` : ""}
         </span>
         <ZoomControl
-          zoom={zoom}
-          onZoomOut={() => apply("out")}
-          onZoomIn={() => apply("in")}
-          onFit={fit}
+          {...controls}
           fitLabel="Fit"
           fitTitle="Fit to width"
         />
