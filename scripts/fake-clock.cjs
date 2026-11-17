@@ -119,6 +119,11 @@ function installFakeClock({ start = Date.now() } = {}) {
       now = target;
       await settle();
     },
+    // The loop blocked for `ms`: time moves on and no timer fires. The next
+    // advance() then runs the overdue timers in due order, as Node does.
+    stall(ms) {
+      now += Math.max(0, Number(ms) || 0);
+    },
     uninstall() {
       Object.assign(globalThis, {
         setTimeout: real.setTimeout,

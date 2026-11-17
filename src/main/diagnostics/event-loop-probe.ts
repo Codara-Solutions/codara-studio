@@ -1,5 +1,5 @@
-// Measures how late the main event loop runs its callbacks (perf_hooks'
-// event-loop delay histogram), one window a minute. Shorter stalls than the
+// Measures how late the main event loop runs its callbacks, one window a
+// minute. Shorter stalls than the
 // freeze watchdog notices still make the app feel sticky: IPC replies,
 // terminal output and agent tool calls all queue behind them.
 //
@@ -8,9 +8,12 @@
 // and one summary an hour. The last hour of windows is kept in memory for
 // the diagnostics export.
 //
-// The histogram samples on a timer of its own, so its interval is a wake-up
-// rate of the main thread: 50 ms keeps it to 20 a second, and a delay is
-// still known to within 50 ms, plenty for stalls of 250 ms and more. A
+// A 50 ms timer records the time since its last tick, so its interval is a
+// wake-up rate of the main thread: 50 ms keeps it to 20 a second, and a delay
+// is still known to within 50 ms, plenty for stalls of 250 ms and more. It
+// keeps its last tick across windows: perf_hooks' monitorEventLoopDelay
+// forgets it on every reset(), so a stall that crossed a window boundary
+// showed in neither window. A
 // sticky app is only felt by someone using it, so sampling pauses while no
 // Codara window has focus (setEventLoopProbeSampling) and an idle app in the
 // background is not woken 20 times a second; the freeze watchdog keeps
@@ -19,7 +22,7 @@
 //   CODARA_EVENT_LOOP_WINDOW_MS=60000   window length (tests use less)
 //   CODARA_EVENT_LOOP_PROBE=0           no probe
 
-import { monitorEventLoopDelay } from "node:perf_hooks";
+import { createHistogram } from "node:perf_hooks";
 import type { EventLoopWindow } from "@shared/diagnostics";
 import { formatDuration } from "@shared/diagnostics";
 
@@ -119,14 +122,30 @@ export function startEventLoopProbe(
   const parsed = Number(env.CODARA_EVENT_LOOP_WINDOW_MS);
   const windowMs = Number.isFinite(parsed) && parsed >= 100 ? Math.round(parsed) : 60_000;
   const summaryEvery = Math.max(1, Math.round((60 * 60 * 1000) / windowMs));
-  let histogram: ReturnType<typeof monitorEventLoopDelay>;
+  let histogram: ReturnType<typeof createHistogram>;
   try {
-    histogram = monitorEventLoopDelay({ resolution: RESOLUTION_MS });
-    histogram.enable();
+    histogram = createHistogram();
   } catch {
     return false;
   }
-  stopHistogram = () => histogram.disable();
+  // Recorded in nanoseconds, the unit summarizeEventLoopWindow reads.
+  let lastTick = Date.now();
+  let sampler: NodeJS.Timeout | null = null;
+  const startSampler = (): void => {
+    lastTick = Date.now();
+    sampler = setInterval(() => {
+      const now = Date.now();
+      histogram.record(Math.max(1, Math.round((now - lastTick) * 1e6)));
+      lastTick = now;
+    }, RESOLUTION_MS);
+    sampler.unref();
+  };
+  const stopSampler = (): void => {
+    if (sampler) clearInterval(sampler);
+    sampler = null;
+  };
+  startSampler();
+  stopHistogram = stopSampler;
   let sampling = true;
   // Whether the histogram sampled at all in the current window.
   let sampledInWindow = true;
@@ -135,12 +154,10 @@ export function startEventLoopProbe(
     sampling = active;
     if (active) {
       sampledInWindow = true;
-      // Without this the first sample after enable() measures from the last
-      // one before disable(), which reports the time away as a stall.
-      histogram.reset();
-      histogram.enable();
+      // A fresh start, so the time away is not measured as a stall.
+      startSampler();
     } else {
-      histogram.disable();
+      stopSampler();
     }
   };
   const state = createEventLoopLogState();
