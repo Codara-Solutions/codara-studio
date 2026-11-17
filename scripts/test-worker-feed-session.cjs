@@ -210,6 +210,8 @@ async function main() {
   check("a message reaches the running worker", delivered.delivered === true && globalThis.__feedSteers?.[0] === "Keep the old export too.", JSON.stringify({ delivered, steers: globalThis.__feedSteers }));
   const escaped = await runStore.messageWorkerAttempt(runId, attemptId, "\u001b");
   check("a message of only control characters is not sent (a lone Esc would abort it)", escaped.delivered === false && globalThis.__feedSteers.length === 1);
+  const tooLong = await runStore.messageWorkerAttempt(runId, attemptId, "x".repeat(8_001)).then(() => null, (error) => error.message);
+  check("a message past 8,000 characters is refused", /at most 8000/.test(tooLong ?? ""), tooLong);
   const steered = await runStore.readWorkerAttemptFeed(runId, attemptId);
   check("the message shows in the worker's feed as the user's", steered.records.at(-1)?.k === "steer" && steered.records.at(-1).from === "user");
 

@@ -191,7 +191,7 @@ import { describeRunSettlement, isRunSettled, unresolvedWorkerTasks } from "./ru
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport, readWorkerReportWithProblem } from "./worker-report";
 import { createWorkerFeedWriter, liveWorkerFeedSnapshot, readWorkerFeedFile, type WorkerFeedWriter } from "./worker-feed";
-import { WORKER_FEED_FILE, type WorkerFeedSnapshot } from "@shared/worker-feed";
+import { WORKER_FEED_FILE, WORKER_FEED_LIMITS, type WorkerFeedSnapshot } from "@shared/worker-feed";
 import { evaluateWorkerSessionReuse } from "./worker-session-reuse";
 import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonomy";
 import {
@@ -1187,6 +1187,10 @@ export async function messageWorkerAttempt(
   // Control characters are keystrokes to a worker (a lone Esc aborts it).
   const message = text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "").trim();
   if (!message) return { delivered: false };
+  // Steering is re-sent after every compaction, so it stays short.
+  if (message.length > WORKER_FEED_LIMITS.steerChars) {
+    throw new Error(`A message to a worker is at most ${WORKER_FEED_LIMITS.steerChars} characters.`);
+  }
   const descriptor = activeWorkerInputDescriptor(attemptId);
   if (!descriptor || descriptor.capability !== "steer") return { delivered: false };
   return {
@@ -21602,13 +21606,6 @@ async function runPiWorkerSession({
   let unsubscribe: (() => void) | null = null;
   let interrupted = false;
   let reportInvalid = false;
-  // The chat's view of this worker: its tool calls, replies and the messages
-  // it was sent, as records. The pane and the log below keep their text copy.
-  const feed: WorkerFeedWriter = createWorkerFeedWriter({
-    runId: run.id,
-    attemptId,
-    path: join(paths.attemptDir, WORKER_FEED_FILE),
-  });
   const taskSteering: string[] = [];
   // The acceptance, verification and final-report sections live only in
   // prompt.md, so they are re-sent verbatim; a compaction summary that dropped
@@ -21746,6 +21743,14 @@ async function runPiWorkerSession({
     throw new Error("Pi worker was interrupted before it started: the run was stopped.");
   };
 
+  // The chat's view of this worker: its tool calls, replies and the messages
+  // it was sent, as records. The pane and the log keep their text copy.
+  // Created right before the try, whose finally closes it.
+  const feed: WorkerFeedWriter = createWorkerFeedWriter({
+    runId: run.id,
+    attemptId,
+    path: join(paths.attemptDir, WORKER_FEED_FILE),
+  });
   try {
     // Inside the try so a display failure (no default shell, PTY spawn error)
     // ends this attempt with a failure report instead of escaping to the cycle,
