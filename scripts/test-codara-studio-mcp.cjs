@@ -21,7 +21,7 @@ const SERVER = path.join(__dirname, "..", "resources", "codara-studio-mcp", "ser
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "codara-studio-mcp-"));
 fs.writeFileSync(
   path.join(HOME, "agent-socket.json"),
-  JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64) }),
+  JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64), shareAvailable: true }),
 );
 
 // The browser tools ship from the modules in resources/codara-studio-mcp/tools/
@@ -316,6 +316,23 @@ function sortedEqual(actual, expected, label) {
     assert.match(studio.init.instructions, /codara_terminal_run/, "initialize carries shared tool guidance");
     assert.match(studio.init.instructions, /codara_notify_user/);
     assert.match(studio.init.instructions, /codara_share_offer.*only shows the user a Share prompt/, "a terminal agent learns the share offer is a prompt, not an upload");
+    // A Codara with no share service (src/main/share/availability.ts) says
+    // so in its handshake: the offer and its guidance are left out, and so
+    // they are when no Codara answers at all.
+    for (const [label, handshake] of [
+      ["sharing off", { url: "http://127.0.0.1:1", token: "f".repeat(64), shareAvailable: false }],
+      ["an older handshake", { url: "http://127.0.0.1:1", token: "f".repeat(64) }],
+      ["no handshake", null],
+    ]) {
+      const offHome = fs.mkdtempSync(path.join(os.tmpdir(), "codara-studio-mcp-share-off-"));
+      if (handshake) fs.writeFileSync(path.join(offHome, "agent-socket.json"), JSON.stringify(handshake));
+      for (const mode of [undefined, "execute"]) {
+        const off = await listTools(mode, { SPARK_HOME_DIR: offHome, ...(mode ? RUN : {}) });
+        assert.ok(!off.tools.includes("codara_share_offer"), `${label} (${mode || "studio"}): codara_share_offer is not listed`);
+        assert.doesNotMatch(off.init.instructions, /codara_share_offer/, `${label} (${mode || "studio"}): no sharing guidance`);
+      }
+      fs.rmSync(offHome, { recursive: true, force: true });
+    }
     assert.match(studio.init.instructions, /"open X".*codara_open_file/, "a terminal agent learns to open a file the user names in Codara's editor");
     assert.match(studio.init.instructions, /codara_worktree_remove/, "a terminal agent learns the worktree lifecycle");
     assert.match(studio.init.instructions, /Linked folders are shared with the main checkout/);

@@ -1,4 +1,5 @@
-// test-runner: heavy (boots Electron several times)
+// test-runner: serial (boots Electron several times, and Chromium's exit on a
+// loaded macOS runner can outlast CHROMIUM_SHUTDOWN_MS: issue #204)
 // test-runner: timeout=600
 // The built app's exits that nobody confirms, end to end (npm run build
 // first). Each launch gets a throwaway Codara home, HOME and Chromium

@@ -7,7 +7,7 @@
 
 import { promises as fsp } from "node:fs";
 import path from "node:path";
-import { SHARE_MAX_PAGE_BYTES, shareableKind } from "../../shared/share";
+import { SHARE_MAX_PAGE_BYTES, shareableKind, type ShareStatus } from "../../shared/share";
 import { isSecretFileOnDisk } from "../secret-file-check";
 
 // One prompt per caller every few seconds: an agent in a loop must not be
@@ -17,11 +17,13 @@ const MAX_TRACKED_CALLERS = 256;
 
 export type ShareOfferCheck =
   | { ok: true; path: string }
-  | { ok: false; reason: "invalid" | "not_shareable" | "missing" | "too_large" | "not_allowed" | "rate_limited"; message: string };
+  | { ok: false; reason: "unavailable" | "invalid" | "not_shareable" | "missing" | "too_large" | "not_allowed" | "rate_limited"; message: string };
 
 export interface ShareOfferDeps {
   /** The fs sandbox read gate. Throws when the renderer could not read this path. */
   assertReadable: (absolute: string) => Promise<void>;
+  /** Whether this build has a share service (availability.ts). Absent means available. */
+  status?: () => ShareStatus;
   now?: () => number;
 }
 
@@ -31,6 +33,14 @@ export class ShareOfferGate {
   constructor(private readonly deps: ShareOfferDeps) {}
 
   async check(rawPath: unknown, callerKey: string): Promise<ShareOfferCheck> {
+    const status = this.deps.status?.();
+    if (status && !status.available) {
+      return {
+        ok: false,
+        reason: "unavailable",
+        message: `${status.message ?? "Share as link is not available."} Do not offer to share; tell the user where the file is instead.`,
+      };
+    }
     if (typeof rawPath !== "string" || rawPath.length === 0 || rawPath.length > 4096 || rawPath.includes("\0")) {
       return { ok: false, reason: "invalid", message: "path must be an absolute file path" };
     }
