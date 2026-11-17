@@ -14,7 +14,7 @@ import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
 import { CORA_BROWSER_WORKFLOW, CORA_ENGINEERING_RULES, CORA_REPLY_LANGUAGE, coraProcessRule } from "./prompt";
 import { studioBrowserOnlyDecision } from "./studio-browser-policy";
-import { barePythonDecision, pythonAvailability } from "./python-guard";
+import { barePythonHint, pythonAvailability } from "./python-guard";
 import { toolPromptSnippet } from "./tool-families";
 import { createRepeatedCallGuard } from "./repeat-guard";
 import { activePeerCommsContext, registerWorkerPeerComms } from "./worker-peer-comms";
@@ -410,9 +410,9 @@ export default function coraPiWorkerExtension(pi: ExtensionAPI) {
   registerContextCompaction(pi);
   // Workers inherit fast mode from the same setting the manager reads.
   registerServiceTierPolicy(pi);
+  pi.on("tool_call", (event) => studioBrowserOnlyDecision(event.toolName, event.input));
   const python = pythonAvailability();
-  pi.on("tool_call", (event) => studioBrowserOnlyDecision(event.toolName, event.input) ??
-    barePythonDecision(event.toolName, event.input, python));
+  pi.on("tool_result", (event) => barePythonHint(event, python));
 
   pi.on("before_agent_start", async (event) => {
     const { systemPrompt } = event;
