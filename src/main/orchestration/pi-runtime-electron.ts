@@ -24,7 +24,7 @@ import {
   configuredOpenRouterCoraModels,
   hasVerifiedOpenRouterKey,
 } from "../openrouter-config";
-import { coraWorkerModelAvailability } from "./worker-model-availability";
+import { coraWorkerModelAvailability, routeCoraModel } from "./worker-model-availability";
 import { forgetResolvedBinary, resolveBinary } from "../binary-resolver";
 import { getEnrichedEnv } from "../path-reconstruction";
 import { writeFileAtomic } from "../fs-atomic";
@@ -193,6 +193,16 @@ export async function resolveCodaraPiExecutionAccount(
     },
     selection,
   );
+}
+
+/** The model id a Cora manager turn launches: the picked model on the first
+ *  route in Settings' order that carries it now (cora-routes.ts). */
+export async function resolveCodaraCoraRouteModel(model: string): Promise<string> {
+  try {
+    return await routeCoraModel(model, await loadSettings());
+  } catch {
+    return model;
+  }
 }
 
 export async function resolveCodaraOpenRouterApiKey(model: string): Promise<string> {

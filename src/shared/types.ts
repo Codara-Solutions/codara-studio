@@ -725,6 +725,11 @@ export interface AppSettings {
   // per launch to the manager, Pi workers and the Claude/Codex terminals Cora
   // opens. Optional for the same reason as coraAlwaysVerifyEdits.
   coraAutoCompactPercent?: number | null;
+  // The order in which Cora (manager and Pi workers) tries the ways to reach
+  // a model: a provider sign-in, then an OpenRouter key, then Subcloud by
+  // default (src/shared/cora-routes.ts). A route with nothing configured is
+  // skipped. Optional for the same reason as coraAlwaysVerifyEdits.
+  coraRouteOrder?: Array<"subscription" | "openrouter" | "subcloud">;
 }
 
 export interface OpenRouterValidationInput {

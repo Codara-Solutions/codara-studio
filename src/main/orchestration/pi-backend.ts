@@ -1,4 +1,5 @@
 import { subscriptionForModelId } from "../../shared/agent-families";
+import { CLAUDE_PI_LOGIN_BILLING_NOTE, coraRouteLabel } from "../../shared/cora-routes";
 import type {
   ChatMode,
   CoraExecutionPolicy,
@@ -13,6 +14,7 @@ import {
   cleanupPiMcpBridgeConfig,
   createCodaraPiLaunchPlan,
   markUserPiRuntimeFailed,
+  resolveCodaraCoraRouteModel,
   resolveCodaraOpenRouterApiKey,
   resolveCodaraPiExecutionAccount,
   resolveCodaraPiFastMode,
@@ -569,7 +571,8 @@ async function ensureSession(
   evictIdleSessions(runId);
   onStream?.({
     kind: "system_note",
-    message: `Cora Pi session ready · ${provider}/${model} · ${thinking} thinking · ${executionPolicy} chat mode`,
+    message: `Cora Pi session ready · ${model} via ${coraRouteLabel(model)} · ${thinking} thinking · ${executionPolicy} chat mode` +
+      (provider === "anthropic" ? `. ${CLAUDE_PI_LOGIN_BILLING_NOTE}` : ""),
   });
   return session;
 }
@@ -627,10 +630,16 @@ const EMPTY_FINAL_REPROMPT = [
 ].join(" ");
 
 async function requestPiDecision(
-  input: ManagerRequestInput,
+  pickedInput: ManagerRequestInput,
   onStream?: ChatStreamHandler,
 ): Promise<ManagerCallResult> {
   const startedAt = Date.now();
+  // The turn runs, and its SparkCall records, the id of the route that
+  // carries the picked model, so the run shows which route it used.
+  const routedModel = await resolveCodaraCoraRouteModel(pickedInput.chat.model);
+  const input: ManagerRequestInput = routedModel === pickedInput.chat.model
+    ? pickedInput
+    : { ...pickedInput, chat: { ...pickedInput.chat, model: routedModel } };
   const runId = input.run.id;
   let session: PiBackendSession | undefined;
   let turn: PiTurnAccumulator | undefined;

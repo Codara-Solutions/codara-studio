@@ -332,7 +332,8 @@ import {
   runtimeForWorkerModelId,
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
-import { coraWorkerModelAvailability } from "./worker-model-availability";
+import { coraWorkerModelAvailability, routeCoraModel } from "./worker-model-availability";
+import { coraRouteLabel } from "@shared/cora-routes";
 import { shouldResumeForUserMessage } from "./user-message-resume";
 import {
   captureWorkerDiff,
@@ -14932,7 +14933,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
         .then((diagnostics) => new Set<string>(diagnostics.filter(runtimeAssignable).map((item) => item.kind)))
         .catch(() => undefined)
     : undefined;
-  const piWorkerModel = isPiWorker
+  const plannedPiWorkerModel = isPiWorker
     ? piModelForWorker(
         task,
         isAutomationRun,
@@ -14941,6 +14942,11 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
         usableWorkerRuntimes,
       )
     : undefined;
+  // The same model on the first route in Settings' order that carries it
+  // now; attempt.model records that id, so the run shows the route it used.
+  const piWorkerModel = plannedPiWorkerModel && workerSettings
+    ? await routeCoraModel(plannedPiWorkerModel, workerSettings).catch(() => plannedPiWorkerModel)
+    : plannedPiWorkerModel;
   // Keep the attempt's runtime in step with the provider the model launches
   // on, so labels and session reuse never contradict the session.
   const launchRuntime: WorkerRuntime = isPiWorker
@@ -21535,7 +21541,7 @@ async function runPiWorkerSession({
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
   const provider = piProviderForWorker(task, model);
   const thinking = piThinkingForWorker(task);
-  const modelLabel = model;
+  const modelLabel = `${model} via ${coraRouteLabel(model)}`;
 
   let client: PiRpcClient | null = null;
   let unsubscribe: (() => void) | null = null;

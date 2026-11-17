@@ -21,6 +21,7 @@ import { removeWorkspaceFromAppState } from "./workspace-state-edits";
 import { UNREADABLE_STATE } from "./worktree-folders";
 import { normalizeWorkspaceColor } from "@shared/workspace-colors";
 import { normalizeAutoCompactPercent } from "@shared/context-compaction";
+import { DEFAULT_CORA_ROUTE_ORDER, normalizeCoraRouteOrder } from "@shared/cora-routes";
 import { ALLOWED_WORKER_MODELS, DEFAULT_CORA_WORKER_MODELS } from "@shared/worker-model-roster";
 
 const STATE_FILE = "spark-state.json";
@@ -65,6 +66,7 @@ const EMPTY_SETTINGS: Omit<AppSettings, "terminalScrollbackLineLimit"> = {
   openAiFastMode: false,
   coraAlwaysVerifyEdits: false,
   coraAutoCompactPercent: null,
+  coraRouteOrder: [...DEFAULT_CORA_ROUTE_ORDER],
 };
 
 // The OpenRouter key is stored encrypted by the operating system (Electron
@@ -418,6 +420,7 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     openAiFastMode: settings.openAiFastMode === true,
     coraAlwaysVerifyEdits: settings.coraAlwaysVerifyEdits === true,
     coraAutoCompactPercent: normalizeAutoCompactPercent(settings.coraAutoCompactPercent),
+    coraRouteOrder: normalizeCoraRouteOrder(settings.coraRouteOrder),
   };
 }
 

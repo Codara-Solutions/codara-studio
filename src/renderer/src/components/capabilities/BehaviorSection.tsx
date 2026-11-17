@@ -4,6 +4,7 @@ import {
   autoCompactLimitTokens,
   normalizeAutoCompactPercent,
 } from "@shared/context-compaction";
+import { CLAUDE_PI_LOGIN_BILLING_NOTE, normalizeCoraRouteOrder, type CoraRoute } from "@shared/cora-routes";
 import {
   ToggleRow,
   sectionStyle,
@@ -64,6 +65,62 @@ function AutoCompactRow({
   );
 }
 
+const ROUTE_LABELS: Record<CoraRoute, string> = {
+  subscription: "your sign-ins",
+  openrouter: "OpenRouter",
+  subcloud: "Subcloud",
+};
+
+// The orders worth offering: the first route is the one that matters most.
+const ROUTE_ORDER_CHOICES: CoraRoute[][] = [
+  ["subscription", "openrouter", "subcloud"],
+  ["openrouter", "subscription", "subcloud"],
+  ["subcloud", "subscription", "openrouter"],
+];
+
+function routeOrderLabel(order: readonly CoraRoute[]): string {
+  return order.map((route) => ROUTE_LABELS[route]).join(", then ");
+}
+
+function RouteOrderRow({
+  value,
+  onChange,
+}: {
+  value: CoraRoute[];
+  onChange: (next: CoraRoute[]) => void;
+}) {
+  const current = value.join(",");
+  const choices = ROUTE_ORDER_CHOICES.some((order) => order.join(",") === current)
+    ? ROUTE_ORDER_CHOICES
+    : [value, ...ROUTE_ORDER_CHOICES];
+  return (
+    <div style={toggleRowStyle}>
+      <span style={{ minWidth: 0 }}>
+        <span id="route-order-title" style={toggleTitleStyle}>How Cora reaches models</span>
+        <span style={toggleDetailStyle}>
+          Cora and her workers use the first of these that can carry the model you picked: your Claude, ChatGPT or
+          xAI sign-in, an OpenRouter key with that model verified, or Subcloud once it is set up. A route with
+          nothing set up is skipped. The Costs tab of each run shows the route, account and tokens it used.{" "}
+          {CLAUDE_PI_LOGIN_BILLING_NOTE}
+        </span>
+      </span>
+      <select
+        className="spark-input"
+        aria-labelledby="route-order-title"
+        value={current}
+        onChange={(event) => onChange(normalizeCoraRouteOrder(event.target.value.split(",")))}
+        style={{ width: "auto", minWidth: 120 }}
+      >
+        {choices.map((order) => (
+          <option key={order.join(",")} value={order.join(",")}>
+            {routeOrderLabel(order)}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 // Global switches about how agents are briefed and what Codara keeps
 // installed. The settings keys stay as they are (the phone reads them under
 // the same names); only the wording here is plain language.
@@ -99,6 +156,12 @@ export default function BehaviorSection({
                 ? "Cora and her workers compact automatically."
                 : `Cora and her workers compact at ${coraAutoCompactPercent}% of the context window.`,
             )
+          }
+        />
+        <RouteOrderRow
+          value={normalizeCoraRouteOrder(view.coraRouteOrder)}
+          onChange={(coraRouteOrder) =>
+            onChange({ coraRouteOrder }, `Cora now tries ${routeOrderLabel(coraRouteOrder)}.`)
           }
         />
         <ToggleRow
