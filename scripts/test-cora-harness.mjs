@@ -698,7 +698,7 @@ const sinceLimited = () => Date.now() - limited().at;
 
 test("a short ChatGPT rate limit is waited out and retried", async () => {
   const cases = [
-    [{ code: "rate_limit_exceeded", message: "slow down", plan_type: "plus", resets_at: inSeconds(2) }, CHATGPT_HEADERS, 900],
+    [() => ({ code: "rate_limit_exceeded", message: "slow down", plan_type: "plus", resets_at: inSeconds(2) }), CHATGPT_HEADERS, 900],
     [{ code: "rate_limit_exceeded", message: "slow down" }, { "retry-after": "1" }, 900],
     [{ type: "tokens", message: "Rate limited" }, CHATGPT_HEADERS, 0],
   ];

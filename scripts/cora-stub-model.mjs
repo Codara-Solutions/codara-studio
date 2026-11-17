@@ -345,7 +345,9 @@ async function handleModel(req, res, flavour) {
   }
   if (fault === "chatgpt429") {
     res.writeHead(429, { "content-type": "application/json", ...control.headers });
-    return res.end(JSON.stringify({ error: control.body }));
+    // A function body is built per request, so a reset time can count from
+    // the request instead of from before a slow cora startup.
+    return res.end(JSON.stringify({ error: typeof control.body === "function" ? control.body() : control.body }));
   }
   if (fault === "anthropic429") {
     return jsonError(res, 429, "rate_limit_error", "This request would exceed your account's rate limit.", control.headers ?? {});
