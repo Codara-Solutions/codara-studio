@@ -211,6 +211,47 @@ test("Source Control keeps issues, the pull request steps and stashes on their o
       await ownLane.getByRole("button", { expanded: false }).first().click();
       await expect(ownLane.getByTestId("commit-box")).toBeVisible();
     });
+
+    await test.step("from a focused box, the arrow opens its menu and Commit commits", async () => {
+      await writeFile(join(fixture.repo, "README.md"), "# widgets\n\nMore notes.\n");
+      // Main keeps a status read for 2 s; refresh until the edit shows.
+      await expect(async () => {
+        await page.getByTitle("Refresh", { exact: true }).click();
+        await expect(tab(page, "Changes")).toHaveAccessibleName("Changes, 1", { timeout: 2_000 });
+      }).toPass({ timeout: 20_000 });
+      const box = page.getByTestId("commit-box");
+      const message = box.getByRole("textbox", { name: "Commit message" });
+      const arrow = box.getByRole("button", { name: "More commit options" });
+      // The arrow's place inside the box: it moves if the message folds or
+      // unfolds (the panel itself may scroll to bring the arrow into view).
+      const offset = async () => (await arrow.boundingBox())!.y - (await box.boundingBox())!.y;
+      await message.click();
+      await expect(box).toHaveAttribute("data-writing", "true");
+      const before = await offset();
+      // Focus leaving the message for the arrow must not fold the box, or
+      // the arrow jumps between press and release and the click misses.
+      await arrow.click();
+      await expect(page.getByRole("menuitemcheckbox", { name: "Amend last commit" })).toBeVisible();
+      expect(await offset()).toBe(before);
+      await expect(box).toHaveAttribute("data-writing", "true");
+      // Unfocused and empty, the box is one line again, and its arrow still
+      // opens the menu without the box growing under the pointer.
+      await page.keyboard.press("Escape");
+      await tab(page, "Changes").focus();
+      await expect(box).not.toHaveAttribute("data-writing", "true");
+      const resting = await offset();
+      await arrow.click();
+      await expect(page.getByRole("menuitemcheckbox", { name: "Amend last commit" })).toBeVisible();
+      expect(await offset()).toBe(resting);
+      await page.getByRole("menuitemcheckbox", { name: "Amend last commit" }).click();
+      const commit = box.getByRole("button", { name: /^Commit All/ });
+      await expect(commit).toBeVisible({ timeout: 15_000 });
+      await message.fill("docs: more notes");
+      await commit.click();
+      await expect.poll(() => git(fixture.repo, ["log", "-1", "--format=%s"], fixture.env), { timeout: 15_000 }).toBe(
+        "docs: more notes",
+      );
+    });
   } finally {
     await app?.close().catch(() => undefined);
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);

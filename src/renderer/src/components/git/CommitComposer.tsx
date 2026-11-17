@@ -78,6 +78,13 @@ export default function CommitComposer({
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [moreOpen, setMoreOpen] = useState(false);
   const [focused, setFocused] = useState(false);
+  // Focus that left the message for the box's own buttons (Commit, its
+  // arrow). The box stays as tall as it was until focus leaves the box:
+  // folding it on the message's blur would move the buttons between press
+  // and release, and the click would miss. Focusing a button of a folded
+  // box does not unfold it, for the same reason.
+  const [held, setHeld] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState(false);
   // Fixed to the window: the panel scrolls, so it would clip a menu inside it.
   const [menuAnchor, setMenuAnchor] = useState<{ right: number; top?: number; bottom?: number }>({ right: 0, top: 0 });
@@ -89,7 +96,12 @@ export default function CommitComposer({
 
   // One quiet line at rest; while it is written in it grows with its
   // content, between two and roughly six lines.
-  const writing = focused || message.length > 0;
+  const writing = focused || held || message.length > 0;
+  // A menu item that closes the menu takes focus with it, without a blur
+  // the box would see; let go of the height once focus is no longer inside.
+  useEffect(() => {
+    if (!moreOpen && held && !boxRef.current?.contains(document.activeElement)) setHeld(false);
+  }, [moreOpen, held]);
   useEffect(() => {
     const ta = taRef.current;
     if (!ta) return;
@@ -101,6 +113,12 @@ export default function CommitComposer({
     ta.style.height = `${Math.min(Math.max(ta.scrollHeight, 46), 132)}px`;
   }, [message, writing]);
   const ready = canCommit && !anyBusy;
+  // A press on Commit or its arrow leaves focus in the message, so the box
+  // keeps its height between press and release and the click lands. The
+  // buttons still take focus from the keyboard.
+  const keepMessageFocus = (event: React.MouseEvent): void => {
+    if (document.activeElement === taRef.current) event.preventDefault();
+  };
 
   useEffect(() => {
     if (!moreOpen) return;
@@ -143,7 +161,13 @@ export default function CommitComposer({
 
   return (
     <div
+      ref={boxRef}
       data-testid="commit-box"
+      data-writing={writing ? "true" : undefined}
+      onBlur={(event) => {
+        const next = event.relatedTarget as Node | null;
+        if (!next || !event.currentTarget.contains(next)) setHeld(false);
+      }}
       style={{
         position: "relative",
         display: "flex",
@@ -188,7 +212,13 @@ export default function CommitComposer({
           }
         }}
         onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
+        onBlur={(event) => {
+          setFocused(false);
+          const next = event.relatedTarget as Node | null;
+          if (next && boxRef.current?.contains(next)) {
+            setHeld(true);
+          }
+        }}
         placeholder={
           branch && !detached ? `Message (Ctrl+Enter to commit on "${branch}")` : "Message (Ctrl+Enter to commit)"
         }
@@ -252,6 +282,7 @@ export default function CommitComposer({
           type="button"
           disabled={!ready}
           className="scm-split-part"
+          onMouseDown={keepMessageFocus}
           onClick={() => {
             onCommit(amend);
             onAmendChange(false);
@@ -303,6 +334,7 @@ export default function CommitComposer({
           disabled={anyBusy}
           aria-haspopup="menu"
           className="scm-split-part"
+          onMouseDown={keepMessageFocus}
           onClick={() => setMoreOpen((open) => !open)}
           style={{
             appearance: "none",
