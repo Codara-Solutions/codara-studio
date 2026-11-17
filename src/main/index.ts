@@ -1589,12 +1589,32 @@ app.whenReady().then(async () => {
   });
   if (!ok) console.warn("[main] failed to register global automations shortcut");
 
-  // Every guest: popups open in Codara's own tabs, and chord keys reach the
-  // app's shortcuts (browser/guest-chords.ts).
+  // Every guest: popups open in Codara's own tabs, chord keys reach the
+  // app's shortcuts (browser/guest-chords.ts), and Ctrl+wheel reaches its tab.
   app.on("web-contents-created", (_e, contents) => {
     if (contents.getType() !== "webview") return;
     routeGuestPopups(contents, () => contents.hostWebContents);
     forwardGuestChords(contents);
+    // Ctrl+wheel and pinch in a page: Electron only reports them, and the
+    // tab applies its own zoom (renderer Preview/BrowserPageZoom.tsx).
+    // Electron reports one wheel event twice in the same task, so a task's
+    // reports count once.
+    let wheelZoom: "in" | "out" | null = null;
+    let lastWheelZoom = { at: 0, direction: "in" as "in" | "out" };
+    contents.on("zoom-changed", (_event, direction) => {
+      // One wheel event is reported twice in a task; a touchpad pinch sends
+      // dozens a second, each a whole 10% step, so at most one step per
+      // 60 ms in one direction reaches the tab (a turn back always does).
+      const now = Date.now();
+      if (wheelZoom || (direction === lastWheelZoom.direction && now - lastWheelZoom.at < 60)) return;
+      lastWheelZoom = { at: now, direction };
+      wheelZoom = direction;
+      setImmediate(() => {
+        const host = contents.isDestroyed() ? null : contents.hostWebContents;
+        if (host && !host.isDestroyed()) host.send("webview:wheel-zoom", { webContentsId: contents.id, direction: wheelZoom });
+        wheelZoom = null;
+      });
+    });
   });
 
   // Start the four-channel notifier subscription to run-store events. The
