@@ -61,26 +61,30 @@ export function publishWorkerFeedUpdate(update: WorkerFeedUpdate): void {
   }
 }
 
+// Non-blocking, so a FIFO the worker left at the feed's path cannot hold a
+// file-system thread; only a regular file is then read.
+const READ_SAFE = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
+
 /** A finished attempt's feed from disk; null when it never kept one. */
 export async function readWorkerFeedFile(path: string): Promise<WorkerFeedRecord[] | null> {
-  let size: number;
+  let handle: FileHandle;
   try {
-    size = (await fs.stat(path)).size;
+    handle = await fs.open(path, READ_SAFE);
   } catch {
     return null;
   }
-  // The writer keeps the file under its cap; anything far past it was not
-  // written by this code, so only its tail is read.
-  const limit = WORKER_FEED_LIMITS.maxBytes * 2;
-  if (size <= limit) return parseWorkerFeed(await fs.readFile(path, "utf8"));
-  const handle = await fs.open(path, "r");
   try {
-    const buffer = Buffer.alloc(limit);
-    await handle.read(buffer, 0, limit, size - limit);
-    const text = buffer.toString("utf8");
-    return parseWorkerFeed(text.slice(text.indexOf("\n") + 1));
+    const stat = await handle.stat();
+    if (!stat.isFile()) return null;
+    // The writer keeps the file near its cap; anything far past it was not
+    // written by this code, so only its tail is read.
+    const length = Math.min(stat.size, WORKER_FEED_LIMITS.maxBytes * 2);
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, stat.size - length);
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
+    return parseWorkerFeed(length < stat.size ? text.slice(text.indexOf("\n") + 1) : text);
   } finally {
-    await handle.close();
+    await handle.close().catch(() => undefined);
   }
 }
 
@@ -107,7 +111,6 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
   let partial: { id: string; text: string } | null = null;
   let partialTimer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
-  let rewriteFailed = false;
   // Null when the file could not be created: the feed then lives in memory only.
   let file: FileHandle | null = null;
   // A relaunch of the same attempt starts a new session, so it starts a new
@@ -145,15 +148,22 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
       try {
         next = await fs.open(temp, CREATE_FRESH, 0o600);
         await next.writeFile(text, "utf8");
-        await fs.rename(temp, path);
+        // Closed first: Windows refuses to replace a file that is still open.
         await file?.close().catch(() => undefined);
+        file = null;
+        await fs.rename(temp, path);
         file = next;
-        rewriteFailed = false;
       } catch {
-        // The old, longer file is still there; the next append rewrites again.
-        rewriteFailed = true;
+        // Appends go on into the old, longer file; the next time the feed
+        // outgrows its cap tries the rewrite again. Reopened without creating
+        // or following anything, so a path the worker replaced is left alone.
         await next?.close().catch(() => undefined);
         await fs.rm(temp, { force: true }).catch(() => undefined);
+        if (!file) {
+          file = await fs
+            .open(path, constants.O_WRONLY | constants.O_APPEND | (constants.O_NOFOLLOW ?? 0))
+            .catch(() => null);
+        }
       }
     });
     send({ reset: true });
@@ -189,10 +199,6 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
     bytes += size;
     if (bytes > maxBytes) {
       compact();
-      return;
-    }
-    if (rewriteFailed) {
-      rewrite();
       return;
     }
     enqueue(async () => {
@@ -252,7 +258,7 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
       if (!partial) partial = { id: nextId(), text: "" };
       // Past the cap the rest of the message only reaches the terminal log.
       if (partial.text.length >= WORKER_FEED_LIMITS.textChars) return;
-      partial.text += delta;
+      partial.text = clipText(partial.text + delta, WORKER_FEED_LIMITS.textChars);
       if (partialIntervalMs <= 0) {
         flushPartial();
       } else if (!partialTimer) {

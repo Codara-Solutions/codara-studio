@@ -232,6 +232,18 @@ async function main() {
     );
   }
 
+  if (process.platform !== "win32") {
+    const fifo = path.join(dir, "fifo.jsonl");
+    const made = require("node:child_process").spawnSync("mkfifo", [fifo]).status === 0;
+    if (made) {
+      const read = await Promise.race([
+        main.readWorkerFeedFile(fifo),
+        new Promise((resolve) => setTimeout(() => resolve("hung"), 5_000)),
+      ]);
+      check("a FIFO at the feed's path reads as no feed instead of hanging", read === null, String(read));
+    }
+  }
+
   fs.rmSync(dir, { recursive: true, force: true });
   if (failures > 0) {
     console.log(`\n${failures} check(s) failed`);
