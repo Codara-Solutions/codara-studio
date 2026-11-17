@@ -3460,6 +3460,51 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   outline: none;
   box-shadow: var(--focus-ring);
 }
+
+/* A worker row in a step card is one button: it goes inside the worker. The
+   "Open" affordance shows on hover and keyboard focus. */
+.cora-step-worker-open {
+  appearance: none;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  min-width: 0;
+  margin: 0 -6px;
+  padding: 1px 6px;
+  width: calc(100% + 12px);
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+.cora-step-worker-open:hover {
+  background: var(--hover);
+}
+.cora-step-worker-open:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-step-worker-open__go {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--muted);
+  font: 500 11px/1 var(--font-sans);
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.cora-step-worker-open:hover .cora-step-worker-open__go,
+.cora-step-worker-open:focus-visible .cora-step-worker-open__go {
+  opacity: 1;
+}
 .cora-worker-diff-file {
   background: transparent;
   transition:
