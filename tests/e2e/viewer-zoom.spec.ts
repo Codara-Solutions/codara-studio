@@ -146,6 +146,7 @@ test("images and PDFs zoom at the pointer and take the zoom keys while focused",
   await mkdir(home, { recursive: true });
   await mkdir(cwd, { recursive: true });
   await writeFile(join(cwd, "photo.png"), tilesPng(2000, 1200));
+  await writeFile(join(cwd, "second.png"), tilesPng(1600, 1000));
   await writeFile(
     join(cwd, "report.pdf"),
     textPdf([
@@ -268,6 +269,22 @@ test("images and PDFs zoom at the pointer and take the zoom keys while focused",
     await page.keyboard.press("Control+0");
     await expect.poll(() => windowWidth(page)).toBe(baseWidth);
 
+    // Another image opened in the same preview tab starts at fit, not at
+    // this one's zoom.
+    await viewport.click({ position: { x: 5, y: 5 } });
+    await page.keyboard.press("Control+=");
+    await page.keyboard.press("Control+=");
+    await expect.poll(percent).toBeGreaterThan(fitted);
+    await open("second.png");
+    await expect(page.getByText("1600 × 1000")).toBeVisible();
+    const img = image;
+    const fits = () =>
+      img.evaluate((el) => {
+        const pane = el.parentElement!;
+        return el.getBoundingClientRect().width <= pane.clientWidth && pane.scrollLeft === 0;
+      });
+    await expect.poll(fits).toBe(true);
+
     // ── PDF: 100% is the page width fitted to the pane.
     await open("report.pdf");
     const pdf = page.locator(".codara-find-scroller:visible").filter({ has: page.locator("[data-pdf-page]") });
@@ -318,6 +335,15 @@ test("images and PDFs zoom at the pointer and take the zoom keys while focused",
     await page.keyboard.press("Escape");
     await expect(bar).toHaveCount(0);
     expect(await windowWidth(page)).toBe(baseWidth);
+
+    // With focus outside every viewer the keys zoom the window, and the PDF
+    // keeps its own 100%.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("Control+=");
+    await expect.poll(() => windowWidth(page)).toBeLessThan(baseWidth);
+    await expect(level).toHaveText("100%");
+    await page.keyboard.press("Control+0");
+    await expect.poll(() => windowWidth(page)).toBe(baseWidth);
   } finally {
     await app.close();
   }

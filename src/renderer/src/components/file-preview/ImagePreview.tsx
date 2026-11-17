@@ -46,7 +46,9 @@ export default function ImagePreview({ src, alt, onError, toolbarAction, forceLo
     return () => ro.disconnect();
   }, []);
 
-  useEffect(() => setNatural(null), [src]);
+  // A new file mounts a new viewer (FilePreview keys it on the path). The
+  // same file changed on disk keeps its size, zoom and scroll until the new
+  // image has loaded.
 
   const fitZoom =
     natural && viewport.w > 0
@@ -66,12 +68,17 @@ export default function ImagePreview({ src, alt, onError, toolbarAction, forceLo
   const pannable =
     natural !== null && (natural.w * zoom + PADDING * 2 > viewport.w + 1 || natural.h * zoom + PADDING * 2 > viewport.h + 1);
 
+  // A press on a scrollbar drags or pages the scrollbar, not the image.
+  const onScrollbar = (event: { clientX: number; clientY: number }) => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return false;
+    const box = scroller.getBoundingClientRect();
+    return event.clientX - box.left >= scroller.clientWidth || event.clientY - box.top >= scroller.clientHeight;
+  };
+
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     const scroller = scrollerRef.current;
-    if (!pannable || !scroller || event.button !== 0) return;
-    // A press on a scrollbar drags the scrollbar, not the image.
-    const box = scroller.getBoundingClientRect();
-    if (event.clientX - box.left >= scroller.clientWidth || event.clientY - box.top >= scroller.clientHeight) return;
+    if (!pannable || !scroller || event.button !== 0 || onScrollbar(event)) return;
     drag.current = { x: event.clientX, y: event.clientY, left: scroller.scrollLeft, top: scroller.scrollTop };
     scroller.setPointerCapture(event.pointerId);
     setDragging(true);
@@ -80,25 +87,31 @@ export default function ImagePreview({ src, alt, onError, toolbarAction, forceLo
     const scroller = scrollerRef.current;
     const start = drag.current;
     if (!scroller || !start) return;
+    // The button came up where no pointerup reached us.
+    if ((event.buttons & 1) === 0) {
+      endDrag(event);
+      return;
+    }
     scroller.scrollLeft = start.left - (event.clientX - start.x);
     scroller.scrollTop = start.top - (event.clientY - start.y);
   };
-  const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+  function endDrag(event: React.PointerEvent<HTMLDivElement>) {
     if (!drag.current) return;
     drag.current = null;
-    scrollerRef.current?.releasePointerCapture(event.pointerId);
+    const scroller = scrollerRef.current;
+    if (scroller?.hasPointerCapture(event.pointerId)) scroller.releasePointerCapture(event.pointerId);
     setDragging(false);
-  };
+  }
 
   const onDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
     const scroller = scrollerRef.current;
-    if (!scroller || !natural) return;
+    if (!scroller || !natural || onScrollbar(event)) return;
     if (!fitted) {
       fit();
       return;
     }
     const box = scroller.getBoundingClientRect();
-    // Exactly 100%, even when fit is 99.5%. A small image already shows at
+    // Exactly 100% (one image pixel per CSS pixel), even when fit is 99.5%. A small image already shows at
     // 100% when fitted, so there double-click doubles it instead of doing nothing.
     zoomTo(safeFit >= 0.999 ? 2 : 1, { x: event.clientX - box.left, y: event.clientY - box.top });
   };
@@ -118,19 +131,22 @@ export default function ImagePreview({ src, alt, onError, toolbarAction, forceLo
         </span>
         <ZoomControl
           {...controls}
-          fitTitle="Fit to view (double-click the image toggles 100%)"
+          fitTitle="Fit to view (double-click the image toggles 100%, one image pixel per CSS pixel)"
         />
         {toolbarAction}
       </DockablePaneBar>
       <div
         ref={scrollerRef}
         data-image-viewport
-        // Focusable so a click inside sends the zoom keys to this image.
-        tabIndex={-1}
+        // Focusable (by click or Tab) so the zoom keys go to this image.
+        tabIndex={0}
+        role="group"
+        aria-label={`Image ${alt}`}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
+        onLostPointerCapture={endDrag}
         onDoubleClick={onDoubleClick}
         style={{
           flex: 1,
@@ -144,7 +160,6 @@ export default function ImagePreview({ src, alt, onError, toolbarAction, forceLo
       >
         <img
           ref={imageRef}
-          key={src}
           src={src}
           alt={alt}
           draggable={false}
@@ -166,6 +181,8 @@ export default function ImagePreview({ src, alt, onError, toolbarAction, forceLo
             borderRadius: 3,
             boxShadow: "0 2px 18px rgba(0,0,0,0.35)",
             userSelect: "none",
+            // Zoomed far in, show the pixels rather than a blur.
+            imageRendering: zoom * (window.devicePixelRatio || 1) >= 2 ? "pixelated" : "auto",
             ...CHECKER_BG,
           }}
         />

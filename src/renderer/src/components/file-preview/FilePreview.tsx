@@ -229,6 +229,9 @@ export default function FilePreview({
         ) : (
           <Suspense fallback={null}>
             <ImagePreview
+              // A new file starts at fit, not at the last image's zoom and
+              // scroll (the preview tab is reused for the next file).
+              key={path}
               src={src}
               alt={path}
               onError={() => {
