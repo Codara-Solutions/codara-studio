@@ -93,7 +93,11 @@ export default function WorkerChat({
               // received, standing rules included, one click away.
               <>
                 <div className="cora-worker-brief__task" data-worker-brief-task>
-                  <CollapsibleUserText id={`worker-brief:${attemptId}`} text={taskBrief.text} findCurrent={false} />
+                  <CollapsibleUserText
+                    id={`worker-brief:${attemptId}`}
+                    text={`${taskBrief.title}\n\n${taskBrief.text}`}
+                    findCurrent={false}
+                  />
                 </div>
                 <button
                   type="button"
