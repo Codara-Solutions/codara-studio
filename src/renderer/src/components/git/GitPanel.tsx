@@ -637,6 +637,7 @@ export default function GitPanel({
               gitStatus={status}
               view={tab === "pull-request" ? "pull-request" : "issues"}
               onQueueCount={setIssueCount}
+              onShowChanges={() => changeTab("changes")}
               refreshKey={gitVersion}
               userRefreshKey={githubRefreshNonce}
               queue={

@@ -15,6 +15,10 @@ test("Source Control keeps issues, the pull request steps and stashes on their o
   let app: ElectronApplication | null = null;
   try {
     await writeFile(join(fixture.repo, "README.md"), "# widgets\n\nNotes.\n");
+    // Enough loose new files for the Changes tab to scroll.
+    for (let i = 1; i <= 30; i += 1) {
+      await writeFile(join(fixture.repo, `note-${String(i).padStart(2, "0")}.md`), `${i}\n`);
+    }
     app = await electron.launch({ args: ["."], env: fixture.env });
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
@@ -24,7 +28,7 @@ test("Source Control keeps issues, the pull request steps and stashes on their o
 
     await test.step("Changes is the first tab and holds the files and the commit box", async () => {
       await expect(tab(page, "Changes")).toHaveAttribute("aria-selected", "true");
-      await expect(tab(page, "Changes")).toHaveAccessibleName("Changes, 1", { timeout: 15_000 });
+      await expect(tab(page, "Changes")).toHaveAccessibleName("Changes, 31", { timeout: 15_000 });
       await expect(page.getByTitle(/README\.md/).first()).toBeVisible();
       await expect(page.getByTestId("commit-box")).toBeVisible();
       await expect(page.getByTestId("git-sync-note")).toHaveText(/in sync/);
@@ -32,9 +36,44 @@ test("Source Control keeps issues, the pull request steps and stashes on their o
       await expect(page.getByRole("list", { name: "Review journey" })).toBeHidden();
     });
 
+    await test.step("all four tabs stay on screen on the narrowest rails", async () => {
+      for (const width of [240, 196]) {
+        const fits = await tabs.evaluate((strip, w) => {
+          const el = strip as HTMLElement;
+          el.style.width = `${w}px`;
+          el.style.flex = "none";
+          const right = el.getBoundingClientRect().right;
+          const last = el.lastElementChild!.getBoundingClientRect().right;
+          return { overflow: el.scrollWidth - el.clientWidth, past: last - right };
+        }, width);
+        expect(fits.overflow, `strip at ${width}px`).toBeLessThanOrEqual(0);
+        expect(fits.past, `Stashes at ${width}px`).toBeLessThanOrEqual(0.5);
+      }
+      await tabs.evaluate((strip) => {
+        (strip as HTMLElement).style.width = "";
+        (strip as HTMLElement).style.flex = "";
+      });
+    });
+
+    await test.step("Changes keeps its scroll across a trip to another tab", async () => {
+      const scroller = page.locator("#source-control-tabpanel-changes");
+      await expect(page.getByTitle(/note-30\.md/).first()).toBeAttached({ timeout: 15_000 });
+      const room = await scroller.evaluate((el) => el.scrollHeight - el.clientHeight);
+      expect(room).toBeGreaterThan(100);
+      await scroller.evaluate((el) => {
+        el.scrollTop = 100;
+      });
+      await tab(page, "Issues").click();
+      await expect(scroller).toBeHidden();
+      await tab(page, "Changes").click();
+      await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBe(100);
+    });
+
     await test.step("Issues lists the repository's open issues, counted on its tab", async () => {
       await expect(tab(page, "Issues")).toHaveAccessibleName("Issues, 2", { timeout: 30_000 });
       await tab(page, "Issues").click();
+      // The Changes list is not on this tab.
+      await expect(page.getByTitle(/README\.md/).first()).toBeHidden();
       await expect(tab(page, "Issues")).toHaveAttribute("aria-selected", "true");
       await expect(page.getByText("Rows jump when a file is staged")).toBeVisible();
       await expect(page.getByText("Explain what U means in the change list")).toBeVisible();
@@ -47,8 +86,13 @@ test("Source Control keeps issues, the pull request steps and stashes on their o
       const journey = page.getByRole("list", { name: "Review journey" });
       await expect(journey).toBeVisible({ timeout: 30_000 });
       await expect(journey.getByRole("listitem")).toHaveCount(4);
+      await expect(page.getByTitle(/README\.md/).first()).toBeHidden();
       await expect(page.getByText("Rows jump when a file is staged")).toBeHidden();
       await shots(page, "pull-request");
+      // The journey's first step sends you to the files.
+      await journey.getByRole("button", { name: "Commit them on the Changes tab" }).click();
+      await expect(tab(page, "Changes")).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByTitle(/README\.md/).first()).toBeVisible();
     });
 
     await test.step("Stashes saves and lists a stash", async () => {
