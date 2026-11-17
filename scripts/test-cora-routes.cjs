@@ -73,6 +73,17 @@ assert.deepEqual(
   routes.chooseCoraRoute("claude-opus-5", ["openrouter", "subscription", "subcloud"], both),
   { route: "openrouter", model: "anthropic/claude-opus-5" },
 );
+// Pi's catalog widens what an OpenRouter id may move onto.
+const catalog = { subscriptions: new Set(["openai-codex"]), openRouterModels: new Set(["openai/gpt-6.1-sol"]) };
+assert.deepEqual(routes.chooseCoraRoute("openai/gpt-6.1-sol", order, catalog), { route: "openrouter", model: "openai/gpt-6.1-sol" });
+assert.deepEqual(
+  routes.chooseCoraRoute("openai/gpt-6.1-sol", order, { ...catalog, nativeModels: new Set(["gpt-6.1-sol"]) }),
+  { route: "subscription", model: "gpt-6.1-sol" },
+);
+// The effort an OpenRouter id drops is read back for the thinking level.
+assert.equal(routes.effortOfModelId("gpt-5.6-sol@low"), "low");
+assert.equal(routes.effortOfModelId("openai/gpt-5.6-sol"), undefined);
+assert.equal(routes.effortOfModelId(undefined), undefined);
 // Subcloud carries nothing until it exists.
 assert.equal(routes.chooseCoraRoute("claude-opus-5", ["subcloud"], both), null);
 
@@ -110,7 +121,15 @@ assert.ok(runStore.indexOf("run = await pinImplicitPiManagerAccount(run, routedM
 assert.ok(
   runStore.indexOf("chatConfig = await freezeManagerExecutionAccount({ ...resolveChatBackendConfig(run), model: routedModel });") > routedAt,
 );
-assert.doesNotMatch(read("src/main/orchestration/pi-backend.ts"), /resolveCodaraCoraRouteModel/, "no await between a cancel and the launch");
+assert.doesNotMatch(read("src/main/orchestration/pi-backend.ts"), /resolveCodaraCoraRouteModel/);
+// A Stop or Cancel during those reads ends the turn before it is prepared.
+const recheckAt = runStore.indexOf("const stopping = forcePauseWindowClosed(run.id);", routedAt);
+assert.ok(recheckAt > routedAt && recheckAt < runStore.indexOf("const preparedTurn = await prepareManagerTurn(run, sparkCall);", routedAt));
+assert.match(runStore.slice(recheckAt, recheckAt + 700), /latest\.status === "cancelled"[\s\S]*return latest \?\? null;/);
+// The earlier family rewrite counts routes too, and a dropped effort becomes thinking.
+assert.match(runStore, /for \(const kind of await routableWorkerRuntimes\(\)\) availableKinds\.add\(kind\);/);
+assert.match(runStore, /piThinkingLevel\(effortOfModelId\(plannedPiWorkerModel\)\)/);
+assert.match(runStore, /const thinking = thinkingOverride \?\? piThinkingForWorker\(task\);/);
 assert.match(read("src/main/orchestration/pi-backend.ts"), /provider === "anthropic" \? `\. \$\{CLAUDE_PI_LOGIN_BILLING_NOTE\}`/);
 assert.match(runStore, /routeCoraModel\(plannedPiWorkerModel, routeSettings\)/);
 assert.match(runStore, /const workerSettings = isAutomationRun \? null : routeSettings;/, "automation workers are routed too");

@@ -7,7 +7,7 @@ export interface ToolBlockDecision {
   reason: string;
 }
 
-export function shellCommand(input: unknown): string | null {
+function shellCommand(input: unknown): string | null {
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
   const record = input as Record<string, unknown>;
   for (const key of ["command", "cmd"]) {
@@ -19,7 +19,7 @@ export function shellCommand(input: unknown): string | null {
 
 // Separators inside quotes belong to an argument (a commit message, an echo),
 // so they must not start a new command segment that the anchored checks see.
-export function splitShellSegments(command: string): string[] {
+function splitShellSegments(command: string): string[] {
   const segments: string[] = [];
   let current = "";
   let quote: "'" | '"' | null = null;

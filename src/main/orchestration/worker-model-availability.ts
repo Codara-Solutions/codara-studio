@@ -4,7 +4,7 @@ import {
   normalizeCoraRouteOrder,
   type CoraRouteAvailability,
 } from "@shared/cora-routes";
-import { partitionWorkerModelsByAccount } from "@shared/worker-model-roster";
+import { ALLOWED_WORKER_MODELS, partitionWorkerModelsByAccount } from "@shared/worker-model-roster";
 import { availableCoraWorkerModels, configuredOpenRouterCoraModels } from "../openrouter-config";
 
 export interface CoraWorkerModelAvailability {
@@ -31,11 +31,27 @@ async function usableSubscriptions(): Promise<Set<PiSubscriptionProvider> | null
   }
 }
 
+/** Native ids in Pi's bundled catalog plus the worker roster, or undefined
+ *  when the catalog cannot be read (the roster alone is used then). */
+async function nativeCatalogModels(): Promise<Set<string> | undefined> {
+  try {
+    const { inspectPiModelCatalog } = await import("./pi-model-catalog");
+    const models = await inspectPiModelCatalog();
+    return new Set([...ALLOWED_WORKER_MODELS, ...models.map((model) => model.id)]);
+  } catch {
+    return undefined;
+  }
+}
+
 /** What each Cora route can carry right now. */
 export async function coraRouteAvailability(settings: AppSettings): Promise<CoraRouteAvailability | null> {
-  const subscriptions = await usableSubscriptions();
+  const [subscriptions, nativeModels] = await Promise.all([usableSubscriptions(), nativeCatalogModels()]);
   if (!subscriptions) return null;
-  return { subscriptions, openRouterModels: new Set(configuredOpenRouterCoraModels(settings)) };
+  return {
+    subscriptions,
+    openRouterModels: new Set(configuredOpenRouterCoraModels(settings)),
+    ...(nativeModels ? { nativeModels } : {}),
+  };
 }
 
 /**

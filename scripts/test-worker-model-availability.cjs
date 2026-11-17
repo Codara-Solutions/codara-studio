@@ -29,6 +29,11 @@ const harness = {
     }));
     build.onResolve({ filter: /pi-account-auth-store$/ }, () => ({ path: "auth-store", namespace: "stub" }));
     build.onResolve({ filter: /\/agent-runtimes$/ }, () => ({ path: "agent-runtimes", namespace: "stub" }));
+    build.onResolve({ filter: /\/pi-model-catalog$/ }, () => ({ path: "pi-model-catalog", namespace: "stub" }));
+    build.onLoad({ filter: /^pi-model-catalog$/, namespace: "stub" }, () => ({
+      loader: "js",
+      contents: "export async function inspectPiModelCatalog() { return []; }",
+    }));
     build.onLoad({ filter: /^auth-store$/, namespace: "stub" }, () => ({
       loader: "js",
       contents: `
