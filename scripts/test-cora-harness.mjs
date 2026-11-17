@@ -137,6 +137,24 @@ const test = (name, run) => tests.push({ name, run });
 
 // ── runs on its own ─────────────────────────────────────────────────────────
 
+test("cache warming defaults to streaming; a hand-set value wins", async () => {
+  const { SettingsManager } = await import("@earendil-works/pi-coding-agent");
+  const { useStreamingCacheWarming } = await import(pathToFileURL(join(ROOT, "cli", "harness", "cache-warming.mjs")).href);
+  const original = SettingsManager.prototype.getCacheWarmingMode;
+  try {
+    assert.equal(typeof original, "function", "Pi still reads cacheWarming");
+    useStreamingCacheWarming(SettingsManager);
+    const read = SettingsManager.prototype.getCacheWarmingMode;
+    assert.equal(read.call({ globalSettings: {} }), "streaming", "Pi's own default is idle; the CLI keeps streaming");
+    assert.equal(read.call(Object.assign(Object.create(SettingsManager.prototype), { globalSettings: { cacheWarming: "idle" } })), "idle");
+    assert.equal(read.call(Object.assign(Object.create(SettingsManager.prototype), { globalSettings: { cacheWarming: "off" } })), "off");
+    assert.throws(() => useStreamingCacheWarming(class {}), /no longer reads its cache warming/);
+  } finally {
+    SettingsManager.prototype.getCacheWarmingMode = original;
+  }
+  assert.match(readFileSync(join(ROOT, "cli", "harness", "main.mjs"), "utf8"), /useStreamingCacheWarming\(pi\.SettingsManager\);/);
+});
+
 test("never loads Electron", async () => {
   const world = makeWorld();
   const blocker = join(world.root, "no-electron.cjs");
