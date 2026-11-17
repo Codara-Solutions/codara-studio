@@ -16,8 +16,10 @@ tools it uses for its own browser tabs.
 3. Click the Codara icon in the toolbar and choose **Connect to Codara**. The
    popup and Codara show the same six-digit code; press **Allow** in Codara
    only when they match.
-4. In the popup, turn on **Let agents use this tab** for each tab agents may
-   use. The popup shows the tab's id (`chrome:<tabId>`) with a copy button.
+4. In the popup, turn on the switch next to the tab's title for each tab
+   agents may use, or pick how far sharing reaches under **Agents may use**.
+   Agents find shared tabs on their own; the tab's id (`chrome:<tabId>`) and
+   its copy button are under **Details**.
 
 ## How it connects
 
@@ -59,10 +61,26 @@ tools it uses for its own browser tabs.
   and the tab's badge reads `AI` (`ON` when shared but idle). Cancel on that
   bar stops sharing every tab.
 
+## The agent on the page
+
+While an agent works in a shared tab, the page shows a pointer in its colour
+with its name, a thin glow around the page and an "<agent> working" pill with
+**Stop**, which takes that tab back from that agent only, until you give it
+back from the popup (or Settings > Browser in Codara). It is drawn through the
+debugger session in an isolated world, out of the agent's screenshots,
+snapshots and recordings, and never takes your clicks or typing. The page
+itself can notice and remove it, but cannot read it or press Stop for you; if
+a dialog or fullscreen video covers it, use **Stop** in the popup. **On the page** in the popup, or Settings > Browser in Codara, turns
+the glow or the whole overlay off.
+
 ## What agents can and cannot do
 
-- Only tabs you shared: this tab, every tab in this window, or every tab in
-  the browser (asks for confirmation). Stop one tab or all from the popup.
+- Only tabs you shared. **Agents may use** picks how far: **Tabs I pick**
+  (the ones you switch on), **This window** (every tab in it, also new ones)
+  or **Everything** (every tab in the browser; asks for confirmation). Stop
+  one tab or all from the popup. Chrome keeps every extension off its own
+  pages and the Chrome Web Store; the popup says so there instead of
+  offering a switch.
 - Never a site on the blocked list (Options, or **Blocked sites** in the
   popup). It starts with examples for banks, payment services, password
   managers and account sign-in pages; one host per line, `*.` for
@@ -71,10 +89,11 @@ tools it uses for its own browser tabs.
 - Browser pages (`chrome://`, the extension stores, other extensions) are
   never usable.
 - Cookies and site storage (`Network.getCookies`, `DOMStorage.*`,
-  `IndexedDB.*`, `Fetch.*` and similar) need **Allow cookie and storage
-  access** for that tab, and reach only that tab's site: another site's
+  `IndexedDB.*`, `Fetch.*` and similar) need **Read and change cookies and
+  storage here** for that tab, and reach only that tab's site: another site's
   cookies or storage, or a blocked site's, are refused even with it.
-  Without it, cookie headers are removed from network events. Profile-wide
+  Without it, cookie headers are removed from network events; other request
+  headers (such as `Authorization`) and response bodies still reach agents. Profile-wide
   cookie reads, clearing browser data, closing tabs it did not open, loading
   other URLs with your cookies (`Network.loadNetworkResource`), redirecting
   downloads and every `Browser.*` and `Target.*` command that would reach
