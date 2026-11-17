@@ -22,9 +22,9 @@ timestamps, so the same sources always give the same bytes. Bump `version` in
   browser tabs you share, with your signed-in sessions.
 - Category: Developer Tools
 - Language: English
-- Icons: `icons/icon-128.png` (store icon). Screenshots (1280x800) of the
-  popup with a shared tab and of Codara's pairing prompt are taken from the
-  running app at release time.
+- Icons: `icons/icon-128.png` (store icon). Screenshots (1280x800, up to
+  five) are taken headless at release time: the agent's pointer and Stop on
+  a page, the popup light and dark, and Codara's connect card.
 
 Description:
 
@@ -34,8 +34,10 @@ Description:
 > network log. You pair the extension with Codara once by comparing a code.
 > Agents see only the tabs you share from the popup, never the sites on your
 > blocked list (banks and password managers are preset), and need your
-> permission per tab before they can read cookies or site storage. Every
-> action is logged in Codara with the agent that made it. The extension talks
+> permission per tab before they can read cookies or site storage. While an
+> agent works in a tab, the page shows its pointer with its name and a Stop
+> button that takes the tab back from that agent. Every action is logged in
+> Codara with the agent that made it. The extension talks
 > only to Codara on this computer (127.0.0.1) and sends nothing anywhere else.
 
 ## Permission justifications
@@ -65,7 +67,10 @@ Description:
   site storage are relayed only for tabs where the user turned that on.
 - Data use certifications: not sold, not used for unrelated purposes, not
   used for creditworthiness.
-- Privacy policy URL: the Codara privacy policy (to be linked at publication).
+- Privacy policy URL: a section for the extension in the Codara privacy
+  policy (the Cloud one does not cover it), published before submitting.
+- Remote code: no. Page scripts an agent asks for run in the shared tab
+  through the DevTools protocol, never in the extension.
 
 ## Edge Add-ons
 
