@@ -77,7 +77,7 @@ assert.match(
 const addRunMessage = functionBody(runStore, "export async function addRunMessage(");
 assert.match(
   addRunMessage,
-  /followUpNeedsManager\(input\.message\) \|\| \(await loadSettings\(\)\)\.coraAlwaysVerifyEdits === true/,
+  /followUpNeedsManager\(\s*input\.message,[\s\S]{0,200}?\) \|\| \(await loadSettings\(\)\)\.coraAlwaysVerifyEdits === true/,
   "with the setting on, every follow-up in a finished direct chat escalates",
 );
 assert.match(addRunMessage, /draft\.executionMode = "managed"/);
