@@ -10,6 +10,7 @@
 // fire, it picks the backend from `run.chatBackend` (defaulting to Pi
 // for legacy / unset chats) and calls one of the methods below.
 
+import { userCommandsHeader } from "../../shared/user-commands";
 import type {
   AgentEffortLevel,
   ChatBackendKind,
@@ -471,7 +472,12 @@ export function buildManagerTurnPrompt(
   inputMessages: HumanRunMessage[],
   opts?: ManagerTurnPromptOptions,
 ): string {
-  return appendSubscriptionHeadroom(
+  // Pi's manager extension strips this line and runs the skills it names
+  // (src/shared/user-commands.ts); it goes first, before any user text.
+  const commands = (run.chatBackend ?? "pi") === "pi"
+    ? userCommandsHeader(inputMessages.map((message) => message.message))
+    : "";
+  const prompt = appendSubscriptionHeadroom(
     appendCoraMemory(
       appendPriorRuns(
         appendRunState(buildManagerTurnInput(run, inputMessages, opts), opts?.runState),
@@ -481,6 +487,7 @@ export function buildManagerTurnPrompt(
     ),
     opts?.subscriptionHeadroom,
   );
+  return commands ? `${commands}\n${prompt}` : prompt;
 }
 
 export interface ManagerTurnPromptOptions {

@@ -1,29 +1,24 @@
 // User-invoked skills in Cora. Pi expands `/skill:<name> args` into the
 // skill's instructions only when the prompt text starts with it, and it does
 // so for every loaded skill, including one marked disable-model-invocation
-// (hidden from the model's list, meant to run only when the user asks). A
-// Cora turn's text is not always the user's words alone: queued messages get
-// a numbered header, a Send now or a redelivery gets a label line, and a
-// fresh session gets a replay before the new input. This moves the user's
-// command to the front so Pi sees it, and accepts the short `/<name>` form
-// Claude Code users type.
+// (hidden from the model's list, meant to run only when the user asks).
+//
+// A Cora turn's text is Studio's framing around the user's messages, and a
+// message may quote that framing, so the text cannot be trusted to say where
+// a message starts. Studio lists the commands that open a message in one
+// header line at the very start of the turn (src/shared/user-commands.ts);
+// this strips it and puts the first command that names a skill in front, in
+// the form Pi expands. Each further skill gets a pointer to its file.
 //
 // Pure, so scripts/test-pi-cora-skill-commands.cjs can load it outside Pi.
 
-// Studio's own wrappers (agent-backend.ts: buildManagerTurnPrompt,
-// renderBundledManagerInput). Only these exact lines, in these positions,
-// are skipped; any other text is the user's.
-const REPLAY_START = "[CORA CONVERSATION REPLAY";
-const REPLAY_END = "[END CORA CONVERSATION REPLAY]\n\n\n\n[NEW USER INPUT FOR THIS TURN]\n\n";
-const SEND_NOW_LINE =
-  "[The user stopped your previous reply to send this now. What that reply already did stands, and workers it started keep running.]";
-const REDELIVERED_LINE =
-  "[Already received; your previous reply was interrupted. Do not redo work already started]";
-const QUEUED_HEADER =
-  "The user sent the following queued messages in this order. Treat all of them as input for this manager turn:";
-const QUEUED_SECTION =
-  /^\d+\. \[(?:User turn|Queued message|Linked answer|Already received; your previous reply was interrupted\. Do not redo work already started)\]$/;
-const COMMAND_LINE = /^\/(skill:)?([A-Za-z0-9][A-Za-z0-9._-]*)(?:[ \t]+(.*))?$/;
+/** Same as USER_COMMANDS_HEADER_PREFIX in src/shared/user-commands.ts. */
+const HEADER_PREFIX = "[CODARA USER COMMANDS ";
+
+interface UserCommand {
+  name: string;
+  args: string;
+}
 
 /** Skill names from Pi's command list (`skill:<name>` entries), each with
  *  its SKILL.md path when Pi reports one. */
@@ -40,59 +35,47 @@ export function skillNamesFromCommands(
   return names;
 }
 
-/** Indexes of the lines that open one of the user's messages. */
-function messageFirstLines(lines: readonly string[]): number[] {
-  let index = 0;
-  if (lines[index] === SEND_NOW_LINE) index += 1;
-  if (lines[index] !== QUEUED_HEADER) {
-    if (lines[index] === REDELIVERED_LINE) index += 1;
-    return [index];
+/** Studio's command header and the turn text after it, or null. */
+export function splitUserCommandsHeader(text: string): { commands: UserCommand[]; rest: string } | null {
+  if (typeof text !== "string" || !text.startsWith(HEADER_PREFIX)) return null;
+  const newline = text.indexOf("\n");
+  const line = newline < 0 ? text : text.slice(0, newline);
+  if (!line.endsWith("]")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line.slice(HEADER_PREFIX.length, -1));
+  } catch {
+    return null;
   }
-  const firsts: number[] = [];
-  for (let at = index + 1; at < lines.length - 1; at += 1) {
-    if (QUEUED_SECTION.test(lines[at])) firsts.push(at + 1);
+  if (!Array.isArray(parsed)) return null;
+  const commands: UserCommand[] = [];
+  for (const item of parsed) {
+    const { name, args } = (item ?? {}) as { name?: unknown; args?: unknown };
+    if (typeof name !== "string" || typeof args !== "string") return null;
+    commands.push({ name, args });
   }
-  return firsts;
+  return { commands, rest: newline < 0 ? "" : text.slice(newline + 1) };
 }
 
 /**
- * The turn text with the user's skill command first, in the form Pi expands,
- * or null when no message of this turn starts with a known skill command.
- * Only the first line of each of the user's messages counts, as in Claude
- * Code: a slash later in a message, or in a replayed earlier turn, is text.
- * When queued messages hold several commands, the first runs through Pi and
- * each other one is replaced by a pointer to its skill file.
+ * The turn text without Studio's header and with the first skill command in
+ * front, or null when the text carries no header. With `skills` empty (an
+ * imported pull request) the header is only removed.
  */
 export function rewriteSkillCommand(
   text: string,
   skills: ReadonlyMap<string, string | undefined>,
 ): string | null {
-  if (skills.size === 0) return null;
-  let inputStart = 0;
-  if (text.startsWith(REPLAY_START)) {
-    const end = text.lastIndexOf(REPLAY_END);
-    if (end < 0) return null;
-    inputStart = end + REPLAY_END.length;
-  }
-  const lines = text.slice(inputStart).split("\n");
-  const found: Array<{ index: number; name: string; args: string }> = [];
-  for (const index of messageFirstLines(lines)) {
-    const match = COMMAND_LINE.exec(lines[index]?.trim() ?? "");
-    if (match && skills.has(match[2])) found.push({ index, name: match[2], args: match[3]?.trim() ?? "" });
-  }
-  if (found.length === 0) return null;
+  const header = splitUserCommandsHeader(text);
+  if (!header) return null;
+  const found = header.commands.filter((command) => skills.has(command.name));
+  if (found.length === 0) return header.rest;
   const [first, ...others] = found;
-  const rest = [...lines];
-  for (const other of others) {
+  const pointers = others.map((other) => {
     const path = skills.get(other.name);
-    const pointer = path
-      ? `[The user ran the skill ${other.name} here. Read ${path} and follow it for this message.]`
-      : `[The user ran the skill ${other.name} here; follow it for this message.]`;
-    rest[other.index] = other.args ? `${pointer}\n${other.args}` : pointer;
-  }
-  rest.splice(first.index, 1);
-  const context = [text.slice(0, inputStart), ...rest].join("\n").trim();
-  const payload = [first.args, context].filter(Boolean).join("\n\n");
-  const rewritten = payload ? `/skill:${first.name} ${payload}` : `/skill:${first.name}`;
-  return rewritten === text ? null : rewritten;
+    const where = path ? ` Read ${path} and follow it` : " Follow it";
+    return `[The user also ran the skill ${other.name}${other.args ? ` (${other.args})` : ""}.${where} for that message.]`;
+  });
+  const payload = [first.args, ...pointers, header.rest.trim()].filter(Boolean).join("\n\n");
+  return payload ? `/skill:${first.name} ${payload}` : `/skill:${first.name}`;
 }

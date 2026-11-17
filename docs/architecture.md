@@ -321,8 +321,11 @@ launch.
 the repository's skill folders (`listPiSkillPaths` in `agent-sync.ts`). A
 skill the user types as `/skill:<name>` or `/<name>` runs even when it is
 hidden from the model (`disable-model-invocation`): such a message skips the
-direct lane (`direct-execution.ts`) and the manager extension moves the
-command to the front of the turn's text, where Pi expands it
+direct lane (`direct-execution.ts`). Studio lists the commands that open each
+of the turn's messages in one header line at the very start of the turn
+(`src/shared/user-commands.ts`), since quoted framing inside a message could
+otherwise pass for a message start; the manager extension strips the header
+and puts the first skill in front, where Pi expands it
 (`resources/pi-cora/skill-commands.ts`). The user's global agent rules
 (`~/.claude/CLAUDE.md`, else `~/.codex/AGENTS.md`; `user-agent-rules.ts`)
 ride the manager's system prompt (`resources/pi-cora/user-rules.ts`), read

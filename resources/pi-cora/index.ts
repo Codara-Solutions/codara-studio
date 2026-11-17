@@ -178,13 +178,13 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
   const whiteboardReview = createWhiteboardReviewGuard();
   pi.on("input", () => { whiteboardReview.reset(); });
   // A skill the user types runs even when it is hidden from the model
-  // (disable-model-invocation), wherever Studio framed the turn's text.
-  if (!untrustedPullRequest) {
-    pi.on("input", (event) => {
-      const text = rewriteSkillCommand(event.text, skillNamesFromCommands(pi.getCommands()));
-      return text === null ? undefined : { action: "transform" as const, text };
-    });
-  }
+  // (disable-model-invocation). Studio's command header is always removed;
+  // an imported pull request runs no skills.
+  pi.on("input", (event) => {
+    const skills = untrustedPullRequest ? new Map<string, string | undefined>() : skillNamesFromCommands(pi.getCommands());
+    const text = rewriteSkillCommand(event.text, skills);
+    return text === null ? undefined : { action: "transform" as const, text };
+  });
   // Read once per process: a file that changed mid-chat would rewrite the
   // cached system prompt on every turn.
   const userRules = untrustedPullRequest ? "" : loadUserRulesSection();
