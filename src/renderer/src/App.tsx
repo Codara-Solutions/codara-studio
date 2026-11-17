@@ -1220,6 +1220,17 @@ export default function App() {
     [handleRunSnapshot],
   );
 
+  // "Show in Runs" from inside a Cora worker: the chat's own run, on its
+  // Runs tab.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const runId = (event as CustomEvent<{ runId?: unknown }>).detail?.runId;
+      if (typeof runId === "string") handleSelectRun(runId, undefined, { focus: "runs" });
+    };
+    window.addEventListener("spark:show-run-in-runs", handler);
+    return () => window.removeEventListener("spark:show-run-in-runs", handler);
+  }, [handleSelectRun]);
+
   // Cross-workspace run selection used by the global RunSwitcher and the
   // focus-after-away digest. Queue the requested surface before switching so
   // the old workspace's tab store remains untouched. The replay effect below
