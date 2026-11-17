@@ -144,7 +144,9 @@ test("Source Control keeps issues, the pull request steps and stashes on their o
       await expect(tab(page, "Changes")).toHaveAttribute("aria-selected", "true");
       await expect(tab(page, "Changes")).toHaveAccessibleName("Changes, 1", { timeout: 15_000 });
       await expect(page.getByTitle(/README\.md/).first()).toBeVisible();
-      await expect(page.getByTestId("commit-dock")).toBeVisible();
+      await expect(page.getByTestId("commit-box")).toBeVisible();
+      await expect(page.getByTestId("git-sync-note")).toHaveText(/in sync/);
+      await shots(page, "changes");
       await expect(page.getByRole("list", { name: "Review journey" })).toBeHidden();
     });
 
@@ -154,7 +156,7 @@ test("Source Control keeps issues, the pull request steps and stashes on their o
       await expect(tab(page, "Issues")).toHaveAttribute("aria-selected", "true");
       await expect(page.getByText("Rows jump when a file is staged")).toBeVisible();
       await expect(page.getByText("Explain what U means in the change list")).toBeVisible();
-      await expect(page.getByTestId("commit-dock")).toHaveCount(0);
+      await expect(page.getByTestId("commit-box")).toBeHidden();
       await shots(page, "issues");
     });
 
@@ -186,6 +188,17 @@ test("Source Control keeps issues, the pull request steps and stashes on their o
       await expect(page.getByText("No changes, working tree clean.")).toBeVisible({ timeout: 15_000 });
       await page.keyboard.press("ArrowLeft");
       await expect(tab(page, "Stashes")).toHaveAttribute("aria-selected", "true");
+    });
+
+    await test.step("a chosen amend survives a trip to another tab", async () => {
+      await tab(page, "Changes").click();
+      const box = page.getByTestId("commit-box");
+      await box.getByRole("button", { name: "More commit options" }).click();
+      await page.getByRole("menuitemcheckbox", { name: "Amend last commit" }).click();
+      await expect(box.getByRole("button", { name: "Amend Last Commit" })).toBeVisible();
+      await tab(page, "Issues").click();
+      await tab(page, "Changes").click();
+      await expect(box.getByRole("button", { name: "Amend Last Commit" })).toBeVisible();
     });
   } finally {
     await app?.close().catch(() => undefined);

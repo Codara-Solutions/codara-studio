@@ -48,9 +48,9 @@ const ELLIPSIS: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-// The commit box docked at the bottom of Source Control: the message, with its
-// generate button inside, and Commit. Amend and Split wait in the small menu.
-// The Commit button is the panel's one accent-tinted primary action.
+// The commit box at the top of Source Control's Changes tab, VS Code's way:
+// the message, with its generate button inside, and one Commit button whose
+// arrow holds Amend and Split. Commit is the panel's one accent-filled action.
 export default function CommitComposer({
   message,
   onMessageChange,
@@ -69,21 +69,30 @@ export default function CommitComposer({
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [amend, setAmend] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
-  // Fixed to the window: the dock scrolls, so it would clip a menu inside it.
-  const [menuAnchor, setMenuAnchor] = useState({ right: 0, bottom: 0 });
+  const [focused, setFocused] = useState(false);
+  const [hover, setHover] = useState(false);
+  // Fixed to the window: the panel scrolls, so it would clip a menu inside it.
+  const [menuAnchor, setMenuAnchor] = useState({ right: 0, top: 0 });
   const moreRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const anyBusy = busy !== null;
   const committing = busy === "commit";
   const generatingMessage = busy === "generateMessage";
 
-  // Grow the textarea with its content, between two and roughly six lines.
+  // One quiet line at rest; while it is written in it grows with its
+  // content, between two and roughly six lines.
+  const writing = focused || message.length > 0;
   useEffect(() => {
     const ta = taRef.current;
     if (!ta) return;
+    if (!writing) {
+      ta.style.height = "30px";
+      return;
+    }
     ta.style.height = "auto";
     ta.style.height = `${Math.min(Math.max(ta.scrollHeight, 46), 132)}px`;
-  }, [message]);
+  }, [message, writing]);
+  const ready = canCommit && !anyBusy;
 
   useEffect(() => {
     if (!moreOpen) return;
@@ -110,7 +119,7 @@ export default function CommitComposer({
         display: "flex",
         flexDirection: "column",
         gap: 6,
-        padding: "7px 8px 8px",
+        padding: "0 8px 8px",
       }}
     >
       {detached && (
@@ -148,37 +157,38 @@ export default function CommitComposer({
             setAmend(false);
           }
         }}
-        onFocus={(e) => {
-          e.currentTarget.style.borderColor = "var(--accent-edge)";
-          e.currentTarget.style.boxShadow = "var(--focus-ring)";
-        }}
-        onBlur={(e) => {
-          e.currentTarget.style.borderColor = "var(--rule)";
-          e.currentTarget.style.boxShadow = "var(--well)";
-        }}
-        placeholder="Message  (Ctrl+Enter to commit)"
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        placeholder={
+          branch && !detached ? `Message (Ctrl+Enter to commit on "${branch}")` : "Message (Ctrl+Enter to commit)"
+        }
+        aria-label="Commit message"
         spellCheck={false}
         style={{
           appearance: "none",
+          display: "block",
           resize: "none",
           width: "100%",
-          minHeight: 46,
-          padding: "7px 30px 7px 9px",
-          background: "var(--bg)",
-          border: "1px solid var(--rule)",
-          borderRadius: 7,
-          boxShadow: "var(--well)",
+          height: 30,
+          minHeight: 30,
+          padding: writing ? "6px 30px 6px 9px" : "0 30px 0 9px",
+          lineHeight: writing ? 1.45 : "28px",
+          overflow: writing ? "auto" : "hidden",
+          whiteSpace: writing ? "pre-wrap" : "nowrap",
+          background: writing ? "var(--panel-2)" : "transparent",
+          border: `1px solid ${focused ? "var(--accent-edge)" : writing ? "var(--rule)" : "var(--rule-soft)"}`,
+          borderRadius: "var(--radius-control)",
+          boxShadow: focused ? "var(--focus-ring)" : "none",
           color: "var(--ink)",
           fontFamily: "var(--font-sans)",
           fontSize: 12,
-          lineHeight: 1.45,
           outline: "none",
           transition:
             "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
         }}
       />
 
-        <span style={{ position: "absolute", top: 4, right: 4 }}>
+        <span style={{ position: "absolute", top: 3, right: 3 }}>
           <IconButton
             title="Draft a commit message with your configured model"
             disabled={!canGenerateMessage || anyBusy}
@@ -190,23 +200,30 @@ export default function CommitComposer({
         </span>
       </div>
 
-      <div style={{ display: "flex", alignItems: "stretch", gap: 6 }}>
+      <div
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        style={{
+          display: "flex",
+          alignItems: "stretch",
+          height: 26,
+          borderRadius: "var(--radius-control)",
+          overflow: "hidden",
+          background: ready
+            ? hover
+              ? "color-mix(in oklab, var(--accent) 88%, var(--accent-ink))"
+              : "var(--accent)"
+            : "color-mix(in oklab, var(--ink) 6%, var(--panel))",
+          color: ready ? "var(--accent-ink)" : "var(--muted)",
+          transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        }}
+      >
         <button
           type="button"
-          disabled={!canCommit || anyBusy}
+          disabled={!ready}
           onClick={() => {
             onCommit(amend);
             setAmend(false);
-          }}
-          onMouseEnter={(e) => {
-            if (canCommit && !anyBusy) {
-              e.currentTarget.style.background =
-                "color-mix(in oklch, var(--accent) 26%, transparent)";
-            }
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background =
-              canCommit && !anyBusy ? "var(--accent-soft)" : "transparent";
           }}
           style={{
             appearance: "none",
@@ -214,25 +231,16 @@ export default function CommitComposer({
             alignItems: "center",
             justifyContent: "center",
             gap: 6,
-            height: 30,
             flex: "1 1 0",
             minWidth: 0,
             padding: "0 10px",
-            borderRadius: 7,
+            border: "none",
+            background: "transparent",
+            color: "inherit",
             cursor: "default",
             fontFamily: "var(--font-sans)",
             fontSize: 12,
-            fontWeight: 700,
-            letterSpacing: "0.01em",
-            border:
-              canCommit && !anyBusy
-                ? "1px solid var(--accent-edge)"
-                : "1px solid var(--rule)",
-            background: canCommit && !anyBusy ? "var(--accent-soft)" : "transparent",
-            color: canCommit && !anyBusy ? "var(--ink)" : "var(--muted-2)",
-            boxShadow: canCommit && !anyBusy ? "var(--lift-hi)" : "none",
-            transition:
-              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+            fontWeight: 500,
           }}
         >
           {committing ? <Spinner /> : <CommitIcon />}
@@ -240,15 +248,14 @@ export default function CommitComposer({
           {stagedCount > 0 && (
             <span
               style={{
-                fontFamily: "var(--font-mono)",
-                fontSize: 10,
-                fontWeight: 700,
+                fontSize: 10.5,
+                fontWeight: 600,
                 fontVariantNumeric: "tabular-nums",
-                padding: "1px 6px",
-                borderRadius: 999,
+                padding: "0 5px",
+                borderRadius: 8,
+                lineHeight: "15px",
                 flexShrink: 0,
-                background: "color-mix(in oklab, var(--ink) 12%, transparent)",
-                color: "var(--ink-dim)",
+                background: "color-mix(in oklab, currentColor 14%, transparent)",
               }}
             >
               {stagedCount}
@@ -265,25 +272,27 @@ export default function CommitComposer({
           disabled={anyBusy}
           onClick={() => {
             const box = moreRef.current?.getBoundingClientRect();
-            if (box) setMenuAnchor({ right: window.innerWidth - box.right, bottom: window.innerHeight - box.top + 4 });
+            if (box) setMenuAnchor({ right: window.innerWidth - box.right, top: box.bottom + 4 });
             setMoreOpen((open) => !open);
           }}
           style={{
             appearance: "none",
-            flex: "0 0 30px",
-            height: 30,
+            flex: "0 0 28px",
+            display: "grid",
+            placeItems: "center",
             padding: 0,
-            borderRadius: 7,
+            border: "none",
+            borderLeft: ready
+              ? "1px solid color-mix(in oklab, var(--accent-ink) 25%, transparent)"
+              : "1px solid var(--rule-soft)",
+            background: amend ? "color-mix(in oklab, currentColor 14%, transparent)" : "transparent",
+            color: "inherit",
             cursor: "default",
-            fontFamily: "var(--font-sans)",
-            fontSize: 13,
+            fontSize: 11,
             lineHeight: 1,
-            border: amend ? "1px solid var(--accent-edge)" : "1px solid var(--rule)",
-            background: amend ? "var(--accent-soft)" : "transparent",
-            color: anyBusy ? "var(--muted-2)" : "var(--ink-dim)",
           }}
         >
-          ⋯
+          ▾
         </button>
       </div>
 
@@ -293,7 +302,7 @@ export default function CommitComposer({
           role="menu"
           aria-label="Commit options"
           className="spark-menu"
-          style={{ position: "fixed", right: menuAnchor.right, bottom: menuAnchor.bottom, zIndex: 200 }}
+          style={{ position: "fixed", right: menuAnchor.right, top: menuAnchor.top, zIndex: 200 }}
         >
           <button
             type="button"
@@ -441,5 +450,58 @@ function SyncButton({
         </span>
       ) : null}
     </button>
+  );
+}
+
+/**
+ * The branch's sync state in a word, beside its name: "in sync" when there is
+ * nothing to pull or push, "not published" when the remote has no copy yet.
+ * Counts to pull or push already ride on the branch and on Pull and Push.
+ */
+export function GitSyncNote({
+  upstream,
+  ahead,
+  behind,
+  detached,
+}: {
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  detached: boolean;
+}): React.ReactElement | null {
+  if (detached) return null;
+  const style: React.CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 3,
+    // Gives way before the branch name does on a narrow rail.
+    flex: "0 20 auto",
+    minWidth: 0,
+    overflow: "hidden",
+    fontFamily: "var(--font-sans)",
+    fontSize: 11.5,
+    fontWeight: 400,
+    color: "var(--muted)",
+    whiteSpace: "nowrap",
+  };
+  if (!upstream) {
+    return (
+      <span data-testid="git-sync-note" title="This branch is only on this computer. Push publishes it" style={style}>
+        not published
+      </span>
+    );
+  }
+  if (ahead > 0 || behind > 0) return null;
+  return (
+    <span
+      data-testid="git-sync-note"
+      title={`Nothing to pull or push: matches ${upstream} as of the last fetch`}
+      style={style}
+    >
+      <span aria-hidden style={{ color: "color-mix(in oklab, var(--ok) 80%, var(--muted))" }}>
+        ✓
+      </span>
+      in sync
+    </span>
   );
 }
