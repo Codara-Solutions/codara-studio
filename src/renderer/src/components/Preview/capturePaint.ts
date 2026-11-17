@@ -73,3 +73,44 @@ export async function withPreviewCapturePaint<T>(element: HTMLElement, capture: 
     hold.release();
   }
 }
+
+const FRAME_TIMEOUT_MS = 4_000;
+const TIMED_OUT = "capture timed out";
+
+/**
+ * One frame of the guest as a PNG data URL. A background tab can miss a
+ * frame while its paint is held, and can hand back an empty one: each gets
+ * one more try before the call fails with what to do next.
+ */
+export async function captureFrameDataUrl(
+  capture: () => Promise<{ getSize?: () => { width: number; height: number }; toDataURL?: () => string } | undefined>,
+  timeoutMs = FRAME_TIMEOUT_MS,
+): Promise<string> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let img;
+    try {
+      img = await Promise.race([
+        capture(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(TIMED_OUT)), timeoutMs);
+        }),
+      ]);
+    } catch (err) {
+      const timedOut = (err as Error)?.message === TIMED_OUT;
+      if (timedOut && attempt === 0) continue;
+      throw new Error(
+        timedOut
+          ? `The tab did not paint a frame within ${Math.round((2 * timeoutMs) / 1000)} s (it is in the background or busy). Call codara_preview_screenshot once more, or read the page with codara_preview_snapshot, which needs no paint.`
+          : `preview screenshot failed: ${(err as Error)?.message || String(err)}`,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+    const size = img?.getSize?.();
+    const dataUrl = size?.width && size?.height ? img?.toDataURL?.() : "";
+    if (dataUrl && dataUrl.length > 256) return dataUrl;
+    if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  throw new Error("preview screenshot unavailable: the browser returned an empty frame. Check navigation with codara_preview_snapshot before retrying.");
+}
