@@ -188,3 +188,65 @@ test("the connect card walks from Add to Pair to Share a tab on what Codara sees
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("with the link off, or no free port, the card says why instead of showing the steps", async () => {
+  test.setTimeout(120_000);
+  const root = await mkdtemp(join(tmpdir(), "codara-connect-off-"));
+  // The only port Codara may use is taken by something else.
+  const busy = createNetServer();
+  await new Promise<void>((done) => busy.listen(0, "127.0.0.1", done));
+  const busyPort = (busy.address() as { port: number }).port;
+  const cases: { name: string; env: Record<string, string>; text: RegExp }[] = [
+    { name: "off", env: { CODARA_CHROME_LINK: "0" }, text: /turned off for this Codara/ },
+    { name: "busy", env: { CODARA_CHROME_LINK: "1", CODARA_CHROME_LINK_PORTS: String(busyPort) }, text: /./ },
+  ];
+  try {
+    for (const item of cases) {
+      const userDataDir = join(root, item.name);
+      await mkdir(userDataDir, { recursive: true });
+      const app = await electron.launch({
+        args: ["."],
+        env: {
+          ...process.env,
+          SPARK_USER_DATA_DIR: userDataDir, CODARA_HOME_DIR: userDataDir, SPARK_HOME_DIR: userDataDir,
+          SPARK_SKIP_LEGACY_MIGRATION: "1", SPARK_NO_SHELL_INTEGRATION: "1", SPARK_ALLOW_MULTI: "1",
+          HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: join(root, "claude"), CODEX_HOME: join(root, "codex"),
+          ...item.env,
+        },
+      });
+      try {
+        const codara: Page = await app.firstWindow();
+        await codara.setViewportSize({ width: 1360, height: 900 });
+        const guide = codara.getByRole("dialog", { name: /Your next idea/ });
+        await expect(guide).toBeVisible({ timeout: 30_000 });
+        // First run leaves the browser out when the link is off; Settings > Browser says why.
+        await codara.getByRole("button", { name: "Let's get started" }).click();
+        if (item.name === "off") await expect(codara.locator(".onboarding-browser")).toHaveCount(0);
+        await codara.getByRole("button", { name: "Finish later" }).click();
+        await expect(guide).toBeHidden();
+        const settings = codara.getByRole("dialog", { name: "Settings" });
+        await expect(async () => {
+          await codara.getByTitle("Settings").first().click({ force: true });
+          await expect(settings).toBeVisible({ timeout: 2_000 });
+        }).toPass({ timeout: 20_000 });
+        await settings.getByRole("button", { name: "Browser", exact: true }).click();
+        const card = settings.locator("[data-chrome-connect]");
+        await expect(card).toHaveAttribute("data-chrome-connect", "off");
+        await expect(card.getByRole("alert")).toHaveText(item.text);
+        await expect(card.getByRole("alert")).not.toBeEmpty();
+        await expect(card.getByRole("list", { name: "Steps" })).toHaveCount(0);
+        await expect(card.getByRole("button", { name: "Reveal folder" })).toHaveCount(0);
+        if (item.name === "busy") {
+          const state = await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.state());
+          expect(state.port).toBeNull();
+          if (state.error) await expect(card.getByRole("alert")).toHaveText(state.error);
+        }
+      } finally {
+        await app.close().catch(() => undefined);
+      }
+    }
+  } finally {
+    await new Promise((done) => busy.close(done));
+    await rm(root, { recursive: true, force: true });
+  }
+});
