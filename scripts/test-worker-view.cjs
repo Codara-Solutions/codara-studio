@@ -134,11 +134,11 @@ function run(view) {
   const fold = view.foldFinishedWorker(rows);
   const kept = fold.kept.flatMap((row) => (row.kind === "turn" ? row.blocks.map((b) => b.id) : [row.id]));
   check(
-    "the fold keeps the failed call, the error and the last reply",
-    kept.join() === "tool:4,note:5,text:8",
+    "the fold keeps the message sent, the failed call, the error and the last reply",
+    kept.join() === "steer:3,tool:4,note:5,text:8",
     kept.join(),
   );
-  check("the fold counts what it hides", fold.hidden === 5, String(fold.hidden));
+  check("the fold counts what it hides", fold.hidden === 4, String(fold.hidden));
   const talkOnly = view.workerRows([{ kind: "text", id: "text:1", at, text: "Nothing to do." }]);
   check("nothing folds without a tool call", view.foldFinishedWorker(talkOnly).hidden === 0);
 

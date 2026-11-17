@@ -140,8 +140,9 @@ export function workerStepCount(rows: readonly WorkerRow[]): number {
 
 /**
  * A finished worker's work folds behind "Worked for", the way a settled Cora
- * turn does: what stays is its last reply and anything that failed, since a
- * failure must never need a click to be seen. Nothing folds without a tool call.
+ * turn does: what stays is its last reply, the messages it was sent (a user's
+ * words never fold, as in Main) and anything that failed, since a failure must
+ * never need a click to be seen. Nothing folds without a tool call.
  */
 export function foldFinishedWorker(rows: readonly WorkerRow[]): { hidden: number; kept: WorkerRow[] } {
   if (workerStepCount(rows) === 0) return { hidden: 0, kept: [...rows] };
@@ -160,6 +161,10 @@ export function foldFinishedWorker(rows: readonly WorkerRow[]): { hidden: number
   const kept: WorkerRow[] = [];
   let hidden = 0;
   rows.forEach((row, rowIndex) => {
+    if (row.kind === "message") {
+      kept.push(row);
+      return;
+    }
     if (row.kind !== "turn") {
       hidden += 1;
       return;
