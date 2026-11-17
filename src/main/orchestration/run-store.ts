@@ -333,7 +333,7 @@ import {
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
 import { coraWorkerModelAvailability, routeCoraModel } from "./worker-model-availability";
-import { coraRouteLabel, effortOfModelId } from "@shared/cora-routes";
+import { coraRouteLabel, effortOfModelId, workerFamilyOfModelId } from "@shared/cora-routes";
 import { shouldResumeForUserMessage } from "./user-message-resume";
 import {
   captureWorkerDiff,
@@ -9117,7 +9117,8 @@ async function finalizeCouncil(
 async function routableWorkerRuntimes(): Promise<Set<string>> {
   try {
     const { connected } = await coraWorkerModelAvailability(await loadSettings());
-    const kinds = connected.map((id) => runtimeForWorkerModelId(id));
+    // OpenRouter ids count for their vendor's family (`openai/...` is codex).
+    const kinds = connected.map((id) => workerFamilyOfModelId(id));
     return new Set(kinds.filter((kind): kind is "claude" | "codex" | "grok" => kind !== undefined));
   } catch {
     return new Set();

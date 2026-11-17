@@ -84,6 +84,13 @@ assert.deepEqual(
 assert.equal(routes.effortOfModelId("gpt-5.6-sol@low"), "low");
 assert.equal(routes.effortOfModelId("openai/gpt-5.6-sol"), undefined);
 assert.equal(routes.effortOfModelId(undefined), undefined);
+// A worker family counts on any route, so an OpenRouter-only GPT worker
+// keeps its GPT assignment.
+assert.equal(routes.workerFamilyOfModelId("openai/gpt-5.6-sol"), "codex");
+assert.equal(routes.workerFamilyOfModelId("anthropic/claude-opus-5"), "claude");
+assert.equal(routes.workerFamilyOfModelId("x-ai/grok-4.6"), "grok");
+assert.equal(routes.workerFamilyOfModelId("gpt-5.6-sol@low"), "codex");
+assert.equal(routes.workerFamilyOfModelId("moonshotai/kimi-k2"), undefined);
 // Subcloud carries nothing until it exists.
 assert.equal(routes.chooseCoraRoute("claude-opus-5", ["subcloud"], both), null);
 
@@ -128,6 +135,7 @@ assert.ok(recheckAt > routedAt && recheckAt < runStore.indexOf("const preparedTu
 assert.match(runStore.slice(recheckAt, recheckAt + 700), /latest\.status === "cancelled"[\s\S]*return latest \?\? null;/);
 // The earlier family rewrite counts routes too, and a dropped effort becomes thinking.
 assert.match(runStore, /for \(const kind of await routableWorkerRuntimes\(\)\) availableKinds\.add\(kind\);/);
+assert.match(runStore, /const kinds = connected\.map\(\(id\) => workerFamilyOfModelId\(id\)\);/);
 assert.match(runStore, /piThinkingLevel\(effortOfModelId\(plannedPiWorkerModel\)\)/);
 assert.match(runStore, /const thinking = thinkingOverride \?\? piThinkingForWorker\(task\);/);
 assert.match(read("src/main/orchestration/pi-backend.ts"), /provider === "anthropic" \? `\. \$\{CLAUDE_PI_LOGIN_BILLING_NOTE\}`/);
