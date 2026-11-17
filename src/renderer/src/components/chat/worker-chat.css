@@ -1,0 +1,124 @@
+/* A worker's own chat (WorkerChat.tsx), inside the worker view. Rows reuse
+   the main chat's classes; this only lays out the column, the brief and
+   message headers, the report and the raw output. */
+
+.cora-worker-view__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 16px 24px;
+}
+.cora-worker-view__column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cora-worker-view__muted,
+.cora-worker-view__note {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.cora-worker-view__note {
+  margin: 0;
+}
+
+.cora-worker-brief,
+.cora-worker-message {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+.cora-worker-brief__head {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.cora-worker-brief__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.cora-worker-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cora-worker-report,
+.cora-worker-log {
+  padding: 12px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-surface, 10px);
+  background: var(--panel-2);
+}
+.cora-worker-report__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 12.5px;
+}
+.cora-worker-report__head [data-status] {
+  color: var(--muted);
+  font-weight: 400;
+}
+.cora-worker-report__label {
+  margin: 10px 0 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.cora-worker-report__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+  color: var(--ink-dim);
+}
+.cora-worker-report__list li + li {
+  margin-top: 3px;
+}
+.cora-worker-report__list code,
+.cora-worker-log pre {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.cora-worker-report__check[data-result="passed"] {
+  color: var(--ok);
+}
+.cora-worker-report__check[data-result="failed"] {
+  color: var(--danger);
+}
+.cora-worker-log pre {
+  max-height: 360px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink-dim);
+}
+.cora-worker-log__hide {
+  appearance: none;
+  margin-left: auto;
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--muted);
+  font: 500 11.5px/1.4 var(--font-sans);
+  cursor: default;
+}
+.cora-worker-log__hide:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-worker-log__hide:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
