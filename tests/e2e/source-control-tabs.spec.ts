@@ -200,6 +200,17 @@ test("Source Control keeps issues, the pull request steps and stashes on their o
       await tab(page, "Changes").click();
       await expect(box.getByRole("button", { name: "Amend Last Commit" })).toBeVisible();
     });
+
+    await test.step("folding the active lane moves the commit box to the top, amend and all", async () => {
+      const ownLane = page.locator('[data-testid="source-lane"][data-own="true"]');
+      await ownLane.getByRole("button", { expanded: true }).first().click();
+      const box = page.getByTestId("commit-box");
+      await expect(box).toBeVisible();
+      await expect(ownLane.getByTestId("commit-box")).toHaveCount(0);
+      await expect(box.getByRole("button", { name: "Amend Last Commit" })).toBeVisible();
+      await ownLane.getByRole("button", { expanded: false }).first().click();
+      await expect(ownLane.getByTestId("commit-box")).toBeVisible();
+    });
   } finally {
     await app?.close().catch(() => undefined);
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);

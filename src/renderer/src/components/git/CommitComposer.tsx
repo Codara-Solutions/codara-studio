@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   CommitIcon,
   IconButton,
@@ -9,12 +9,19 @@ import {
   SplitCommitsIcon,
   SyncIcon,
 } from "./git-ui";
+import "./source-control.css";
 
 interface Props {
   message: string;
   onMessageChange: (value: string) => void;
   /** Commits the message; `amend` rewrites the last commit instead of adding one. */
   onCommit: (amend: boolean) => void;
+  /**
+   * Whether the next commit amends the last one. Held by the panel, so the
+   * choice survives the box moving between the lane and the top of the list.
+   */
+  amend: boolean;
+  onAmendChange: (amend: boolean) => void;
   onGenerateMessage: () => void;
   canCommit: boolean;
   canGenerateMessage: boolean;
@@ -55,6 +62,8 @@ export default function CommitComposer({
   message,
   onMessageChange,
   onCommit,
+  amend,
+  onAmendChange,
   onGenerateMessage,
   canCommit,
   canGenerateMessage,
@@ -67,12 +76,11 @@ export default function CommitComposer({
   canSplit,
 }: CommitBoxProps): React.ReactElement {
   const taRef = useRef<HTMLTextAreaElement>(null);
-  const [amend, setAmend] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [focused, setFocused] = useState(false);
   const [hover, setHover] = useState(false);
   // Fixed to the window: the panel scrolls, so it would clip a menu inside it.
-  const [menuAnchor, setMenuAnchor] = useState({ right: 0, top: 0 });
+  const [menuAnchor, setMenuAnchor] = useState<{ right: number; top?: number; bottom?: number }>({ right: 0, top: 0 });
   const moreRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const anyBusy = busy !== null;
@@ -103,12 +111,34 @@ export default function CommitComposer({
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") setMoreOpen(false);
     };
+    // The menu is fixed to the window; once the list scrolls or the window
+    // resizes it would float away from its arrow, so it closes instead.
+    const close = () => setMoreOpen(false);
     window.addEventListener("mousedown", onPointer);
     window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
     return () => {
       window.removeEventListener("mousedown", onPointer);
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
     };
+  }, [moreOpen]);
+
+  // The menu opens under its arrow, or above it when the box sits near the
+  // bottom of the window and the items would land off screen.
+  useLayoutEffect(() => {
+    if (!moreOpen) return;
+    const box = moreRef.current?.getBoundingClientRect();
+    const height = menuRef.current?.offsetHeight ?? 0;
+    if (!box) return;
+    const right = window.innerWidth - box.right;
+    if (box.bottom + 4 + height > window.innerHeight - 8 && box.top - 4 - height >= 8) {
+      setMenuAnchor({ right, bottom: window.innerHeight - box.top + 4 });
+    } else {
+      setMenuAnchor({ right, top: box.bottom + 4 });
+    }
   }, [moreOpen]);
 
   return (
@@ -154,7 +184,7 @@ export default function CommitComposer({
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && canCommit && !anyBusy) {
             e.preventDefault();
             onCommit(amend);
-            setAmend(false);
+            onAmendChange(false);
           }
         }}
         onFocus={() => setFocused(true)}
@@ -221,9 +251,10 @@ export default function CommitComposer({
         <button
           type="button"
           disabled={!ready}
+          className="scm-split-part"
           onClick={() => {
             onCommit(amend);
-            setAmend(false);
+            onAmendChange(false);
           }}
           style={{
             appearance: "none",
@@ -270,11 +301,9 @@ export default function CommitComposer({
           aria-expanded={moreOpen}
           title="Amend the last commit, or split the changes into several commits"
           disabled={anyBusy}
-          onClick={() => {
-            const box = moreRef.current?.getBoundingClientRect();
-            if (box) setMenuAnchor({ right: window.innerWidth - box.right, top: box.bottom + 4 });
-            setMoreOpen((open) => !open);
-          }}
+          aria-haspopup="menu"
+          className="scm-split-part"
+          onClick={() => setMoreOpen((open) => !open)}
           style={{
             appearance: "none",
             flex: "0 0 28px",
@@ -286,7 +315,8 @@ export default function CommitComposer({
               ? "1px solid color-mix(in oklab, var(--accent-ink) 25%, transparent)"
               : "1px solid var(--rule-soft)",
             background: amend ? "color-mix(in oklab, currentColor 14%, transparent)" : "transparent",
-            color: "inherit",
+            // Without a message Commit greys out, but the menu still works.
+            color: ready || anyBusy ? "inherit" : "var(--ink-dim)",
             cursor: "default",
             fontSize: 11,
             lineHeight: 1,
@@ -302,7 +332,7 @@ export default function CommitComposer({
           role="menu"
           aria-label="Commit options"
           className="spark-menu"
-          style={{ position: "fixed", right: menuAnchor.right, top: menuAnchor.top, zIndex: 200 }}
+          style={{ position: "fixed", ...menuAnchor, zIndex: 200 }}
         >
           <button
             type="button"
@@ -310,7 +340,7 @@ export default function CommitComposer({
             aria-checked={amend}
             className={amend ? "spark-menu-item is-active" : "spark-menu-item"}
             onClick={() => {
-              setAmend(!amend);
+              onAmendChange(!amend);
               setMoreOpen(false);
             }}
           >
