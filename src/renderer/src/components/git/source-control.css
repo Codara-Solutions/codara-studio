@@ -124,3 +124,33 @@
   white-space: nowrap;
   cursor: default;
 }
+
+/* A file row inside a commit opened in place. */
+.scm-row:hover {
+  background: var(--hover);
+}
+
+/* Quiet text that acts: the footer of a commit opened in place. */
+.scm-link {
+  appearance: none;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted-2);
+  font: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+.scm-link:hover {
+  color: var(--ink-dim);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.scm-link:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 3px;
+}

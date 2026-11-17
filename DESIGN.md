@@ -398,6 +398,15 @@ journey, an issue queue and a stash list pushed the files and the history apart.
   keeps its own row. The fold is computed in the renderer (`change-list.ts`); git
   still lists every file, so the diff view can open each one.
 - Staged Changes never folds: what is about to be committed shows file by file.
+- The History graph is open by default and is the last thing on the Changes tab,
+  so it takes whatever room the lists leave. Its header holds Fetch and Read the
+  history again, on hover like the other sections.
+- A commit click opens its files in place under its row, as the same compact rows
+  (name, dimmed folder, counts, letter), and the lanes running past it carry on
+  down the side. One commit is open at a time; a second click folds it. A file
+  opens its diff in that commit as a tab (double-click keeps the tab). The full
+  inspector (message, inline diffs, arrow keys) is "Open full view" under the
+  files and View Changes in the row's menu.
 
 ## Worktrees in the rail (2026-10)
 

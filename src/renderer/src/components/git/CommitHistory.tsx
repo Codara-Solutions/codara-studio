@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { GitLogRow } from "@shared/types";
 import ChangeSection from "./ChangeSection";
+import CommitFilesInline from "./CommitFilesInline";
 import CommitMenu from "./CommitMenu";
-import { shortenRelative } from "./git-ui";
+import { PullIcon, RefreshIcon, shortenRelative } from "./git-ui";
 
 interface Props {
   /** Repo cwd — for the inspection agent to fetch commit detail / file diffs. */
@@ -15,8 +16,13 @@ interface Props {
   onCheckout: (ref: string) => void;
   onRevert: (hash: string) => void;
   onUndoLastCommit: () => void;
-  /** Open a commit in the inspection view (built by the inspection agent). */
+  /** Open a commit in the full inspection view (its menu's View Changes). */
   onOpenCommit: (hash: string) => void;
+  /** Open a file's diff within a commit as a tab (a file of an opened row). */
+  onOpenFileDiff: (path: string, hash: string, options?: { pin?: boolean }) => void;
+  /** The graph header's actions: fetch from the remote, read history again. */
+  onFetch: () => void;
+  onRefresh: () => void;
   /** The commit just returned from — its row flashes once, then fades. */
   highlightHash: string | null;
 }
@@ -76,9 +82,10 @@ interface CommitGraphViewModel {
 }
 
 // The commit history: a VS Code-style parent-hash lane graph plus per-commit
-// metadata. Left-clicking a commit opens it in the inspector; right-click opens
+// metadata. Left-clicking a commit opens its files in place; right-click opens
 // a "safe time-travel" context menu.
 export default function CommitHistory({
+  cwd,
   rows,
   loading,
   collapsed,
@@ -88,9 +95,18 @@ export default function CommitHistory({
   onRevert,
   onUndoLastCommit,
   onOpenCommit,
+  onOpenFileDiff,
+  onFetch,
+  onRefresh,
   highlightHash,
 }: Props): React.ReactElement {
   const [menu, setMenu] = useState<MenuState | null>(null);
+  // The commit opened in place: a click shows its files under its row,
+  // VS Code's way, instead of swapping the whole panel for the inspector.
+  const [openHash, setOpenHash] = useState<string | null>(null);
+  const toggleOpen = React.useCallback((hash: string) => {
+    setOpenHash((current) => (current === hash ? null : hash));
+  }, []);
   const commitCount = rows.filter((r) => r.hash).length;
   // Keep view-model identity stable across renders when `rows` itself didn't
   // change — GitPanel's shallow-compare keeps `rows` stable for no-op polls,
@@ -130,6 +146,10 @@ export default function CommitHistory({
         collapsed={collapsed}
         onToggle={onToggle}
         disabled={disabled}
+        actions={[
+          { key: "fetch", title: "Fetch from the remote", icon: <PullIcon />, onClick: onFetch },
+          { key: "refresh", title: "Read the history again", icon: <RefreshIcon />, onClick: onRefresh },
+        ]}
       >
         {loading && rows.length === 0 ? (
           <Hint text="Reading history…" />
@@ -137,15 +157,33 @@ export default function CommitHistory({
           <Hint text="No commits yet." />
         ) : (
           <div style={{ padding: "1px 6px 2px 0" }}>
-            {graphRows.map((viewModel, index) => (
-              <CommitRowView
-                key={viewModel.row.hash ?? `connector-${index}`}
-                viewModel={viewModel}
-                highlighted={Boolean(viewModel.row.hash) && viewModel.row.hash === highlightHash}
-                onOpen={onOpenCommit}
-                onOpenMenu={openMenu}
-              />
-            ))}
+            {graphRows.map((viewModel, index) => {
+              const hash = viewModel.row.hash;
+              const isOpen = Boolean(hash) && hash === openHash;
+              return (
+                <React.Fragment key={hash ?? `connector-${index}`}>
+                  <CommitRowView
+                    viewModel={viewModel}
+                    highlighted={Boolean(hash) && hash === highlightHash}
+                    open={isOpen}
+                    onOpen={toggleOpen}
+                    onOpenMenu={openMenu}
+                  />
+                  {isOpen && hash ? (
+                    <div style={{ position: "relative" }}>
+                      <LanesThrough viewModel={viewModel} />
+                      <CommitFilesInline
+                        cwd={cwd}
+                        hash={hash}
+                        indent={LANE_W * (viewModel.laneSpan + 1) + 8}
+                        onOpenFileDiff={onOpenFileDiff}
+                        onInspect={onOpenCommit}
+                      />
+                    </div>
+                  ) : null}
+                </React.Fragment>
+              );
+            })}
           </div>
         )}
       </ChangeSection>
@@ -168,16 +206,19 @@ export default function CommitHistory({
 
 // One history row. `React.memo`'d on `viewModel` — a status poll that leaves
 // history untouched hands back the same row objects (and so the same view
-// model), so the rows skip re-rendering. Left-click opens the commit in the
-// inspector; right-click opens the context menu.
+// model), so the rows skip re-rendering. Left-click opens its files under it (the
+// full inspector is in the menu); right-click opens the context menu.
 const CommitRowView = React.memo(function CommitRowView({
   viewModel,
   highlighted,
+  open: isOpen,
   onOpen,
   onOpenMenu,
 }: {
   viewModel: CommitGraphViewModel;
   highlighted: boolean;
+  /** Its files are showing under it. */
+  open: boolean;
   onOpen: (hash: string) => void;
   onOpenMenu: (row: GitLogRow, x: number, y: number) => void;
 }) {
@@ -200,8 +241,11 @@ const CommitRowView = React.memo(function CommitRowView({
     };
   }, [highlighted]);
 
-  const restingBackground =
-    isCommit && hover ? "color-mix(in oklab, var(--ink) 4%, transparent)" : "transparent";
+  const restingBackground = isOpen
+    ? "var(--hover)"
+    : isCommit && hover
+      ? "color-mix(in oklab, var(--ink) 4%, transparent)"
+      : "transparent";
 
   const open = (e: React.MouseEvent): void => {
     if (!isCommit || !row.hash) return;
@@ -219,13 +263,24 @@ const CommitRowView = React.memo(function CommitRowView({
   return (
     <div
       data-commit-hash={row.hash || undefined}
+      data-testid={isCommit ? "commit-row" : undefined}
+      role={isCommit ? "button" : undefined}
+      tabIndex={isCommit ? 0 : undefined}
+      aria-expanded={isCommit ? isOpen : undefined}
+      onKeyDown={(event) => {
+        if (!isCommit || !row.hash || event.target !== event.currentTarget) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen(row.hash);
+        }
+      }}
       onClick={open}
       onContextMenu={contextMenu}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       title={
         isCommit
-          ? `${row.shortHash}  ·  ${row.author ?? ""}  ·  ${row.relativeDate ?? ""}\n${row.subject ?? ""}\nClick to inspect · right-click for actions`
+          ? `${row.shortHash}  ·  ${row.author ?? ""}  ·  ${row.relativeDate ?? ""}\n${row.subject ?? ""}\nClick to show its files · right-click for actions`
           : undefined
       }
       style={{
@@ -703,6 +758,31 @@ function RefBadge({ refName }: { refName: string }): React.ReactElement {
     >
       {label}
     </span>
+  );
+}
+
+// The lanes that run past a commit opened in place, drawn down the side of
+// its file list so the graph reads as one line across the gap.
+function LanesThrough({ viewModel }: { viewModel: CommitGraphViewModel }): React.ReactElement {
+  return (
+    <>
+      {viewModel.outputLanes.map((slot, index) =>
+        slot ? (
+          <span
+            key={index}
+            aria-hidden
+            style={{
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              left: LANE_W * (index + 1) - STROKE_W / 2,
+              width: STROKE_W,
+              background: railColor(slot.color),
+            }}
+          />
+        ) : null,
+      )}
+    </>
   );
 }
 
