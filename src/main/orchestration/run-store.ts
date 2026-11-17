@@ -14979,11 +14979,18 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
 
   const promptText = await readWorkerPromptForLaunch(paths);
   const fakeWorkflowWorker = Boolean(task.workflowCall) && process.env.CODARA_WORKFLOW_FAKE_WORKERS === "1";
+  // The worker view e2e's stand-in for a Pi worker (CODARA_FAKE_PI_WORKERS=1),
+  // never for a workflow call: see runFakePiWorkerSession.
+  const fakePiWorker =
+    !task.workflowCall &&
+    process.env.CODARA_FAKE_PI_WORKERS === "1" &&
+    (task.runtimePreference === "claude" || task.runtimePreference === "codex" || task.runtimePreference === "grok");
   // Direct chats keep the user's exact model selection. Managed workers use
   // the enabled roster; automation workers keep their validated model hints.
   // All three paths run on Pi. Shell/manual keep the plain pty escape hatch.
   const isPiWorker =
     !fakeWorkflowWorker &&
+    !fakePiWorker &&
     (task.runtimePreference === "claude" ||
       task.runtimePreference === "codex" ||
       task.runtimePreference === "grok");
@@ -15019,6 +15026,8 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   if (workerLaunchAborted(attempt.id)) return run;
   const command = fakeWorkflowWorker
     ? "fake workflow worker"
+    : fakePiWorker
+      ? "fake Pi worker"
     : isPiWorker
       ? `Pi harness (${launchRuntime}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
       : "pwsh (manual)";
@@ -15170,6 +15179,8 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   try {
     result = fakeWorkflowWorker
       ? await runFakeWorkflowWorkerSession({ run, task, attemptId: attempt.id, paths, command })
+      : fakePiWorker
+      ? await runFakePiWorkerSession({ run, task, attemptId: attempt.id, paths, command })
       : isPiWorker
       ? await runPiWorkerSession({
           run,
@@ -21562,6 +21573,88 @@ async function runFakeWorkflowWorkerSession({
     return { exitCode: 0, inputTokens: tokens, outputTokens: Math.round(tokens / 10) };
   } finally {
     activeWorkerProcesses.delete(attemptId);
+  }
+}
+
+// Test seam for the Cora worker view e2e (CODARA_FAKE_PI_WORKERS=1): stands in
+// for a Pi worker's session so a spec can go inside a running worker, message
+// it and stop it without a subscription. It writes a short scripted feed,
+// answers each message, and finishes after FAKE_DELAY_MS=<n> (default 300 ms,
+// at most 15 minutes) with a report naming one changed file and one check.
+async function runFakePiWorkerSession({
+  run,
+  task,
+  attemptId,
+  paths,
+  command,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attemptId: string;
+  paths: WorkerArtifactPaths;
+  command: string;
+}): Promise<{ exitCode: number; error?: string }> {
+  const delay = Math.min(15 * 60_000, Number(/FAKE_DELAY_MS=(\d+)/.exec(task.description)?.[1] ?? 300));
+  if (!(await markAttemptRunning(run.id, task.id, attemptId, new Date().toISOString()))) {
+    return { exitCode: 1, error: "Fake Pi worker was cancelled before it started." };
+  }
+  const feed = createWorkerFeedWriter({ runId: run.id, attemptId, path: join(paths.attemptDir, WORKER_FEED_FILE) });
+  let killed = false;
+  let wake: () => void = () => undefined;
+  try {
+    activeWorkerProcesses.set(attemptId, {
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId,
+      command,
+      processGenerationId: randomUUID(),
+      inputCapability: "steer",
+      write: (text) => {
+        feed.steer(text, "user");
+        feed.textDelta(`Noted: ${text}`);
+        feed.endMessage();
+      },
+      kill: () => {
+        killed = true;
+        wake();
+      },
+    });
+    feed.tool("fake-read", "read", { path: "README.md" });
+    feed.result("fake-read", "# Project\n\nA compact fixture.\n", false);
+    feed.textDelta("The readme names the project. Checking that the tests pass before changing anything.");
+    feed.endMessage();
+    feed.tool("fake-test", "bash", { command: "npm test" });
+    feed.result("fake-test", "12 passing", false);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, delay);
+      wake = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    if (killed) return { exitCode: 1, error: "Fake Pi worker was stopped." };
+    feed.tool("fake-edit", "edit", { path: "src/example.ts", oldText: "count", newText: "total" });
+    feed.result("fake-edit", "Edited src/example.ts", false);
+    feed.textDelta(`Done: ${task.title}. One file changed and the tests pass.`);
+    feed.endMessage();
+    const report = {
+      status: "complete",
+      summary: `Fake report for: ${task.title}`,
+      files_changed: [{ path: "src/example.ts", reason: "Renamed the counter." }],
+      commands_run: [{ command: "npm test", exit_code: 0, summary: "12 passing" }],
+      tests: [{ command: "npm test", result: "passed" }],
+      proof: [],
+      risks: [],
+      followups: [],
+      handoff: [],
+    };
+    await fs.writeFile(paths.finalReportJson, JSON.stringify(report, null, 2), "utf8");
+    await fs.appendFile(paths.stdoutLog, `fake Pi worker: ${report.summary}\n`, "utf8").catch(() => undefined);
+    return { exitCode: 0 };
+  } finally {
+    activeWorkerProcesses.delete(attemptId);
+    await feed.close().catch(() => undefined);
   }
 }
 
