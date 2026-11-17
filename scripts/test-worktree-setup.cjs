@@ -38,13 +38,12 @@ let skipped = 0;
 // (echo, test, sleep). The Windows paths (junctions, cmd, taskkill) are not
 // exercised here, so Windows runs only the parsing and matching checks.
 let posixOnly = false;
-// The log file as it stands once it shows `line`. The service writes its log
-// through a stream, so a status that says "succeeded" (or a question waiting
-// for the user) can be read before the stream has put its last lines on disk
-// (PR 237's macOS pool, 17 Nov: no "Setup finished" yet). The in-memory tail
-// that agents get has them at once; the file follows. Waits at most 10 s.
-const FINISHED_LINE = /\n(Setup finished|Setup failed|Setup stopped)\b/;
-async function logShowing(svc, id, line = FINISHED_LINE) {
+// The log file once it shows `line`, for a setup waiting for the user: its
+// log stream is still open, so what it wrote can reach the file a moment
+// after the question is asked. A finished setup's log needs no wait: the
+// service announces the end only once the file holds its last line.
+// Waits at most 10 s.
+async function logShowing(svc, id, line) {
   const deadline = Date.now() + 10_000;
   for (;;) {
     const text = (await svc.readLog(id, 0)).text;
@@ -587,7 +586,7 @@ async function runSuite(m, scratch) {
     assert.deepEqual(done.linked, ["node_modules"]);
     assert.ok(done.copiedCount >= 3);
     assert.equal(fs.readFileSync(path.join(wt, "user-ran.txt"), "utf8"), "user\n");
-    const log = { text: await logShowing(svc, first.id) };
+    const log = await svc.readLog(first.id, 0);
     assert.match(log.text, new RegExp(`root=${repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.match(log.text, /branch=wt-service/);
     assert.match(log.text, /Setup finished/);
@@ -610,6 +609,30 @@ async function runSuite(m, scratch) {
     assert.equal(fs.existsSync(path.join(repo, "node_modules/pkg/index.js")), true);
     await links.restoreWorktreeLinks(wt, released);
     assert.equal(fs.lstatSync(path.join(wt, "node_modules")).isSymbolicLink(), true);
+  });
+
+  await check("finished is announced only once the log file holds the last line", async () => {
+    // Every write to the log reaches the disk 300 ms late, as on a loaded
+    // machine: the end must still not be announced before "Setup finished".
+    const wt = addWorktree("wt-slow-log");
+    const realCreateWriteStream = fs.createWriteStream;
+    fs.createWriteStream = (...args) => {
+      const stream = realCreateWriteStream(...args);
+      const write = stream._write.bind(stream);
+      stream._write = (chunk, encoding, callback) => setTimeout(() => write(chunk, encoding, callback), 300);
+      stream._writev = undefined;
+      return stream;
+    };
+    try {
+      const svc = makeService();
+      const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", runCommands: false });
+      const done = await svc.waitFor(started.id, 20_000);
+      assert.equal(done.state, "succeeded");
+      // The file itself, as the log dialog reads it once on "finished".
+      assert.match(fs.readFileSync(done.logPath, "utf8"), /\nSetup finished\b/);
+    } finally {
+      fs.createWriteStream = realCreateWriteStream;
+    }
   });
 
   await check("tells unchanged copies apart from edited ones", async () => {
@@ -644,7 +667,7 @@ async function runSuite(m, scratch) {
     assert.equal(done.exitCode, 3);
     assert.match(done.error, /exited with code 3/);
     assert.deepEqual(done.commands.map((c) => c.state), ["failed", "skipped"]);
-    const log = await logShowing(svc, started.id);
+    const log = (await svc.readLog(started.id)).text;
     assert.match(log, /^before$/m);
     assert.doesNotMatch(log, /^never$/m);
     // Run again after fixing the file.
@@ -652,7 +675,7 @@ async function runSuite(m, scratch) {
     const again = await svc.rerun(started.id, { userCommand: null });
     const second = await svc.waitFor(again.id, 20_000);
     assert.equal(second.state, "succeeded");
-    const secondLog = await logShowing(svc, again.id);
+    const secondLog = (await svc.readLog(again.id)).text;
     assert.match(secondLog, /fixed/);
     // What the first run put there is expected, not listed as skipped.
     assert.ok(done.copiedCount > 0);
@@ -690,7 +713,7 @@ async function runSuite(m, scratch) {
     const done = await svc.waitFor(started.id, 20_000);
     assert.equal(done.state, "succeeded");
     assert.ok(Date.now() - t0 < 6_000, `took ${Date.now() - t0} ms`);
-    assert.match(await logShowing(svc, started.id), /^started$/m);
+    assert.match((await svc.readLog(started.id)).text, /^started$/m);
   });
 
   await check("a link planted in the setup folder is replaced, never written through", async () => {
@@ -710,7 +733,7 @@ async function runSuite(m, scratch) {
       assert.equal(fs.lstatSync(path.join(setupDir, name)).isSymbolicLink(), false, name);
     }
     assert.equal(fs.statSync(path.join(setupDir, "setup.log")).mode & 0o777, 0o600);
-    assert.match(await logShowing(svc, started.id), /^planted-check$/m);
+    assert.match((await svc.readLog(started.id)).text, /^planted-check$/m);
   });
 
   await check("stop also ends a child that ignores SIGTERM before it returns", async () => {
@@ -766,7 +789,7 @@ async function runSuite(m, scratch) {
     const done = await svc.waitFor(started.id, 20_000);
     assert.equal(done.state, "succeeded", done.error);
     assert.ok(Date.now() - t0 < 3_000, `took ${Date.now() - t0} ms`);
-    const log = await logShowing(svc, started.id);
+    const log = (await svc.readLog(started.id)).text;
     assert.match(log, /^started$/m);
     assert.match(log, /still running/);
   });

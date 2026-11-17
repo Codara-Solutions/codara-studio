@@ -62,11 +62,15 @@ async function main() {
   // and its time is printed; the checks below still run under the app's 3 s.
   const warmStarted = Date.now();
   try {
-    execFileSync("osascript", ["-e", 'use framework "AppKit"', "-e", "return 1"], { timeout: 30_000, stdio: "ignore" });
+    execFileSync(
+      "osascript",
+      ["-e", 'use framework "AppKit"', "-e", "return (current application's NSPasteboard's generalPasteboard()'s changeCount()) as integer"],
+      { timeout: 30_000, stdio: "ignore" },
+    );
   } catch {
     /* the checks below report a pasteboard that does not work */
   }
-  console.log(`osascript with AppKit, first run: ${Date.now() - warmStarted} ms`);
+  console.log(`osascript with AppKit and the pasteboard, first run: ${Date.now() - warmStarted} ms`);
 
   // Real, existing files under the repo — exact absolute paths must round-trip.
   const p1 = path.join(ROOT, "package.json");

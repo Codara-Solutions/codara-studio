@@ -181,28 +181,32 @@ async function main() {
     /Unknown Pi RPC request option/,
   );
   let descendantPid = 0;
+  let descendantGone = false;
   let unrelated;
-  if (process.platform !== "win32") {
-    unrelated = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
-      detached: true,
-      stdio: "ignore",
-    });
-    unrelated.unref();
-    const descendant = await client.request({ type: "spawn_descendant" });
-    descendantPid = descendant.pid;
-    assert.equal(alive(descendantPid), true, "fixture descendant should be running before stop");
-  }
   try {
+    if (process.platform !== "win32") {
+      unrelated = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
+        detached: true,
+        stdio: "ignore",
+      });
+      unrelated.unref();
+      const descendant = await client.request({ type: "spawn_descendant" });
+      descendantPid = descendant.pid;
+      assert.equal(alive(descendantPid), true, "fixture descendant should be running before stop");
+    }
     await client.stop();
     if (process.platform !== "win32") {
       await waitFor(() => !alive(descendantPid), HANG_GUARD_MS, "detached Pi tool descendant teardown");
+      descendantGone = true;
       assert.equal(alive(unrelated.pid), true, "stopping Pi must not touch an unrelated process");
     }
   } finally {
-    // Both are detached and the descendant ignores SIGTERM: when the check
-    // above fails they would run on for good, holding the checkout busy.
-    for (const pid of [unrelated?.pid, descendantPid]) {
-      if (pid) try { process.kill(pid, "SIGKILL"); } catch {}
+    // Both are detached and the descendant ignores SIGTERM: when a check
+    // above fails they would run on for good, holding the checkout busy. A
+    // descendant seen gone is left alone: its pid may be someone else's now.
+    unrelated?.kill("SIGKILL");
+    if (descendantPid && !descendantGone && alive(descendantPid)) {
+      try { process.kill(descendantPid, "SIGKILL"); } catch {}
     }
   }
   assert.equal(client.state().phase, "stopped");

@@ -183,9 +183,10 @@ function testAutoOpenIgnoresLinkTarget() {
 // by any of the suites running beside this one, and a connect to a closed
 // ephemeral port can pick that same port as its source and connect to itself,
 // so the "dead port" check below saw a live one on a busy runner.
+// test-remote-port-forward picks from 20000-29999, so this stays below it.
 async function listenOutsideEphemeralRange(server) {
   for (let attempt = 0; attempt < 50; attempt += 1) {
-    const port = 20_000 + Math.floor(Math.random() * 10_000);
+    const port = 10_000 + Math.floor(Math.random() * 10_000);
     const listening = await new Promise((resolve) => {
       server.once("error", () => resolve(false));
       server.listen(port, "127.0.0.1", () => resolve(true));
@@ -193,7 +194,7 @@ async function listenOutsideEphemeralRange(server) {
     server.removeAllListeners("error");
     if (listening) return port;
   }
-  throw new Error("no free port between 20000 and 29999");
+  throw new Error("no free port between 10000 and 19999");
 }
 
 async function testLivenessProbe(isLoopbackPreviewServerUp) {
