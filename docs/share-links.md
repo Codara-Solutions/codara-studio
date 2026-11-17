@@ -84,6 +84,14 @@ working until they expire, but this computer can no longer manage them.
 
 ## Service address
 
-Studio talks to the production share service by default. For tests and local
-development, `CODARA_SHARE_URL` points it at another instance: an `https`
-address, or `http` on a loopback address only.
+The production share service is `https://share.codarasolutions.com`
+(`DEFAULT_SHARE_BASE_URL` in `src/main/share/availability.ts`). For tests and
+local development, `CODARA_SHARE_URL` points Studio at another instance: an
+`https` address, or `http` on a loopback address only.
+
+Share as link stays off until that service is online. While
+`SHARE_SERVICE_LIVE` in the same file is `false` and `CODARA_SHARE_URL` is not
+set, the editor shows no Share button, Settings, Shared pages says sharing is
+not available yet, and `codara_share_offer` answers `offered: false` with
+reason `unavailable`. Set it to `true` only once the host resolves and
+`GET /health` answers `{"ok":true}`.

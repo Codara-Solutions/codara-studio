@@ -19,12 +19,13 @@ import {
   type ShareExpiryDays,
 } from "../../shared/share";
 
-// TODO(owner): confirm the production domain at deploy time. This is a
-// placeholder until the codara-share service is deployed next to the relay.
-export const DEFAULT_SHARE_BASE_URL = "https://share.codarasolutions.com";
-
-// Tests and staging point Studio at another instance with this variable.
-export const SHARE_URL_ENV = "CODARA_SHARE_URL";
+export {
+  DEFAULT_SHARE_BASE_URL,
+  SHARE_SERVICE_LIVE,
+  SHARE_URL_ENV,
+  shareBaseUrl,
+  shareServiceStatus,
+} from "./availability";
 
 const AUTH_DOMAIN = "codara-share-auth-v1";
 const NONCE_BYTES = 24;
@@ -48,27 +49,6 @@ export interface RemotePage {
   size: number;
   createdAt: number;
   expiresAt: number;
-}
-
-// The service base URL: the constant, or the env override. An override must
-// be https, except plain http on a loopback address for local instances.
-export function shareBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
-  const raw = (env[SHARE_URL_ENV] ?? "").trim();
-  if (!raw) return DEFAULT_SHARE_BASE_URL;
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error(`${SHARE_URL_ENV} is not a valid URL.`);
-  }
-  const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
-    throw new Error(`${SHARE_URL_ENV} must use https (plain http only on a loopback address).`);
-  }
-  if (url.search || url.hash || url.username || url.password) {
-    throw new Error(`${SHARE_URL_ENV} must be a plain base URL.`);
-  }
-  return url.toString().replace(/\/+$/, "");
 }
 
 export function bodySha256(body: Buffer | undefined): string {

@@ -24,7 +24,7 @@ npm run dev     # starts the app with hot reload
 ```
 
 CI tests every pull request into `main` and every push to it on macOS
-(`ci.yml`: typechecks, build, every unit suite) and on Linux, headless under
+(`ci.yml`: typechecks, build, every unit suite, split across two runners) and on Linux, headless under
 Xvfb (`ci-linux.yml`: build, every unit suite and an e2e smoke set).
 `budgets.yml` checks bundle sizes and reports startup time and memory on the
 same events. The app also packages for Windows (`npm run package:win`), but CI
