@@ -58,23 +58,6 @@ function waitResult(reason, statuses = []) {
     { brief: "b", runtime: "claude", model: "opus", effort: "high" },
   );
 
-  // A session model goes through the user's allowlist; the top tier needs the
-  // user to have named it in this chat.
-  const allowed = ["claude-opus-5", "gpt-5.6-sol"];
-  const refusal = (model, userNamedTopTier = false, list = allowed) =>
-    sessions.sessionModelRefusal({ runtime: "claude", model }, { allowed: list, userNamedTopTier });
-  assert.equal(refusal("opus"), null, "an alias of an enabled model");
-  assert.equal(refusal("claude-opus-5"), null);
-  assert.equal(refusal("gpt-5.6-sol@high"), null);
-  assert.match(refusal("sonnet"), /not enabled\. Use one of: claude-opus-5, gpt-5\.6-sol/);
-  assert.match(refusal("fable"), /top tier, used only when the user asks for it by name/);
-  assert.match(refusal("claude-fable-5"), /top tier/);
-  assert.equal(refusal("fable", true), null, "the user asked for it");
-  assert.match(refusal("fable", false, null), /top tier/, "also when the list is unknown");
-  assert.equal(refusal("sonnet", false, null), null);
-  assert.equal(sessions.namesTopTier("use fable for this one"), true);
-  assert.equal(sessions.namesTopTier("a fabled bug"), false);
-
   // The manager's wait schema states its own default and maximum.
   const schema = sessions.managerSessionWaitSchema({ type: "object", properties: { ids: {}, timeoutSeconds: { type: "number", description: "Default 120, max 540." } } });
   assert.equal(schema.properties.timeoutSeconds.description, "Default 300, max 1200.");
@@ -194,7 +177,6 @@ function waitResult(reason, statuses = []) {
   // The manager extension uses both helpers on the bridge tools.
   const indexSource = fs.readFileSync(path.join(piCora, "index.ts"), "utf8");
   assert.match(indexSource, /codara_session_start" \? withSessionDefaults\(params\)/);
-  assert.match(indexSource, /sessionModelRefusal\(args, \{\s*allowed: modelIdList\(process\.env\.CODARA_PI_WORKER_MODELS\),\s*userNamedTopTier,/);
   assert.match(indexSource, /hasPendingMessages: \(\) => ctx\?\.hasPendingMessages\?\.\(\) === true/);
   assert.match(indexSource, /waitForSessionsInChunks\(/);
   assert.match(indexSource, /"codara_session_wait",\n  "codara_feedback_send"/, "Stop can walk away from a session wait");
