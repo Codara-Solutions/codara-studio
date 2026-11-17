@@ -368,7 +368,9 @@ async function main() {
     };
     for (let waited = 0; !rendererReady(); waited += 250) {
       if (app.exitCode !== null || app.signalCode !== null) throw new Error("Electron exited before its window booted");
-      if (waited >= 120_000) throw new Error("the window never booted (no 'renderer ready' in main.log after 120 s)");
+      // With the 60 s handshake wait this stays inside the runner's 180 s
+      // suite timeout, so this message, not a bare timeout, reports it.
+      if (waited >= 60_000) throw new Error("the window never booted (no 'renderer ready' in main.log after 60 s)");
       await sleep(250);
     }
 

@@ -398,7 +398,7 @@ export function startStubModel() {
       client.on("message", () => {
         socketRequests += 1;
         takeFault();
-        client.send(JSON.stringify({ type: "error", status: 429, error: control.body }));
+        client.send(JSON.stringify({ type: "error", status: 429, error: typeof control.body === "function" ? control.body() : control.body }));
       });
     });
   });

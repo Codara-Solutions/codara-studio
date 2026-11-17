@@ -224,7 +224,10 @@ async function main() {
   // Wait for the second turn to settle on its own question, not only to
   // start: a note sent while it still runs is queued behind that question and
   // never starts a third turn, which is what failed on busy CI runners.
-  await waitFor(() => prompts.length >= 2 && Boolean(readRun().blockedOn) && readRun().blockedOn.questionMessageId !== question.id);
+  check(
+    "turn 2 settled on its own question",
+    await waitFor(() => prompts.length >= 2 && Boolean(readRun().blockedOn) && readRun().blockedOn.questionMessageId !== question.id),
+  );
 
   check("the turn that delivers the note sees the key", prompts[0]?.includes(KEY), prompts[0]?.slice(-400));
   check("the turn that delivers the answer sees the password", prompts[1]?.includes(PASSWORD), prompts[1]?.slice(-400));

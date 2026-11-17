@@ -278,13 +278,19 @@ async function main() {
     // the window timer fire together often enough to fail CI. So start the
     // stall just after a boundary: the histogram's 50 ms timer is due before
     // the 120 ms sleep, and the next boundary is still 180 ms away.
+    // A boundary is a new last window; its length stops growing at the cap.
+    const lastWindowAt = () => probe.recentEventLoopWindows().at(-1)?.t ?? null;
     for (let attempt = 0; ; attempt += 1) {
       assert.ok(attempt < 20, "never found a quiet start inside a window");
-      const seen = probe.recentEventLoopWindows().length;
-      while (probe.recentEventLoopWindows().length === seen) await sleep(5);
-      const boundary = Date.now();
+      const seen = lastWindowAt();
+      const deadline = Date.now() + 5_000;
+      while (lastWindowAt() === seen) {
+        assert.ok(Date.now() < deadline, "the probe recorded no window for 5 s");
+        await sleep(5);
+      }
+      const boundary = lastWindowAt();
       await sleep(120);
-      if (probe.recentEventLoopWindows().length === seen + 1 && Date.now() - boundary < 200) break;
+      if (lastWindowAt() === boundary && Date.now() - boundary < 200) break;
     }
     const end = Date.now() + 1_200;
     while (Date.now() < end) {

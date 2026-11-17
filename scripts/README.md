@@ -97,8 +97,11 @@ to run. A suite that passes alone can fail there. Rules:
   `test-diagnostics-records.cjs` waits for a window boundary before it stalls
   the loop.
 - Listen on port 0 and write under `os.tmpdir()` (the runner gives each
-  suite its own); `test-pool-safe-suites.cjs` fails on a fixed port or a
-  literal `/tmp` path.
+  suite its own). `test-pool-safe-suites.cjs` reads every suite and the
+  helper modules it loads from `scripts/`, and fails on `listen()` with a
+  number or a constant set to one, and on a write call whose path starts
+  with a literal `/tmp` (directly or through `path.join` or
+  `path.resolve`). It cannot see a path built any other way.
 - To reproduce CI, slow the suite, not the machine: on Linux
   `CODARA_TEST_JOBS=2 systemd-run --user --scope -p CPUQuota=100% npm test -- <regex>`
   runs the matching suites two at a time on one core.
