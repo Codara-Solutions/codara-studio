@@ -606,8 +606,9 @@ async function trackedRemoteBase(repoCwd: string, localRef: string): Promise<Tra
       localRef,
     ])
   ).split("\t");
-  // A remote's fetch refspec may put its branches outside refs/remotes/.
-  if (upstream.startsWith("refs/") && !upstream.startsWith("refs/heads/") && remote && remote !== "." && remoteRef.startsWith("refs/heads/")) {
+  // The remote's name, not where its refspec puts the branch, tells a remote
+  // upstream from a local one (remote ".").
+  if (upstream.startsWith("refs/") && remote && remote !== "." && remoteRef.startsWith("refs/heads/")) {
     return { remote, branch: remoteRef.slice("refs/heads/".length), trackingRef: upstream };
   }
   if (upstream) return null;
@@ -1739,7 +1740,10 @@ async function createAgentWorktreeInner(
         });
       } else {
         const fullName = baseName && baseName !== "HEAD" ? await baseRefName(repoCwd, baseName) : "";
-        const localBranchBase = fullName.startsWith("refs/heads/");
+        // Only a base spelled as the branch: "@" or "@{-1}" name a commit
+        // through HEAD, which stays as it is like base "HEAD".
+        const localBranchBase =
+          fullName.startsWith("refs/heads/") && (baseName === fullName || `refs/heads/${baseName}` === fullName);
         // A local branch named like a remote one ("origin/x") is no remote base.
         const remoteBase =
           baseName && baseName !== "HEAD" && !localBranchBase ? await splitRemoteRef(repoCwd, baseName) : null;
@@ -1758,7 +1762,7 @@ async function createAgentWorktreeInner(
           const failure = await fetchRemoteBranch(repoCwd, tracked.remote, tracked.branch);
           fetchStatus = failure ? `failed: ${failure}` : "ok";
           const remoteCommit = await revParse(repoCwd, `${tracked.trackingRef}^{commit}`);
-          const remoteName = tracked.trackingRef.replace(/^refs\/(?:remotes\/)?/, "");
+          const remoteName = tracked.trackingRef.replace(/^refs\/(?:remotes\/|heads\/)?/, "");
           if (remoteCommit) {
             const drift = await aheadBehind(repoCwd, baseCommit!, remoteCommit);
             if (failure) warnings.push(`fetch failed: ${failure}; forked from the last fetched ${remoteName}`);

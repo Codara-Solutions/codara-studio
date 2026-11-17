@@ -251,6 +251,12 @@ async function main() {
       assert.equal(named.baseRef, "origin/main");
       assert.equal(named.fetch, "ok");
 
+      git(repo, ["fetch", "-q", "origin"]);
+      assert.notEqual(git(repo, ["rev-parse", "main"]), git(repo, ["rev-parse", "origin/main"]));
+      const fromAt = await create({ branch: "fix/at", base: "@" });
+      assert.equal(headOf(fromAt), localMain, "@ is HEAD's commit, never its branch's remote");
+      assert.equal(fromAt.fetch, "skipped");
+
       const tagged = git(repo, ["rev-parse", "origin/main~1"]);
       git(repo, ["tag", "main", tagged]);
       try {
@@ -275,6 +281,18 @@ async function main() {
       assert.equal(headOf(made), remoteMain);
       assert.equal(made.baseRef, "vendor/main");
       assert.equal(made.fetch, "ok");
+
+      // Even a refspec that writes into refs/heads/ is a remote's branch.
+      git(repo, ["config", "--replace-all", "remote.vendor.fetch", "+refs/heads/*:refs/heads/mirror/*"]);
+      git(repo, ["fetch", "-q", "vendor"]);
+      git(repo, ["branch", "-q", "mirrored", localMain]);
+      git(repo, ["config", "branch.mirrored.remote", "vendor"]);
+      git(repo, ["config", "branch.mirrored.merge", "refs/heads/main"]);
+      remoteMain = pushMain(1);
+      const mirrored = await create({ branch: "fix/mirrored", base: "mirrored" });
+      assert.equal(headOf(mirrored), remoteMain);
+      assert.equal(mirrored.baseRef, "mirror/main");
+      assert.equal(mirrored.fetch, "ok");
     });
 
     await check("checkout:true is unchanged", async () => {
