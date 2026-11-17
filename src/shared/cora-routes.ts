@@ -48,11 +48,18 @@ export function routeOfModelId(model: string | undefined | null): CoraRoute | nu
   return subscriptionForModelId(id) ? "subscription" : null;
 }
 
-/** Native ids a sign-in is known to serve. An OpenRouter id moves onto a
- *  sign-in only when its native spelling is one of these: OpenRouter spells
- *  some models differently (`claude-sonnet-4.5` against `claude-sonnet-4-5`)
- *  and lists models a subscription does not offer. */
+/** Native ids a sign-in is known to serve when Pi's catalog is not at hand.
+ *  An OpenRouter id moves onto a sign-in only when its native spelling is a
+ *  known native id: OpenRouter spells some models differently
+ *  (`claude-sonnet-4.5` against `claude-sonnet-4-5`) and lists models a
+ *  subscription does not offer. */
 const NATIVE_ROUTABLE_MODELS: ReadonlySet<string> = new Set(ALLOWED_WORKER_MODELS);
+
+/** The `@effort` of a native id such as `gpt-5.6-sol@low`, or undefined. */
+export function effortOfModelId(model: string | undefined | null): string | undefined {
+  const at = model?.indexOf("@") ?? -1;
+  return at >= 0 ? model!.slice(at + 1).trim() || undefined : undefined;
+}
 
 /** `gpt-5.6-sol@high` as its model id and its effort suffix. */
 function splitEffort(model: string): { base: string; effort: string } {
@@ -63,7 +70,10 @@ function splitEffort(model: string): { base: string; effort: string } {
 /** The same model spelled for each route that can carry it. A native
  *  `@effort` suffix stays on the native spelling only; OpenRouter gets the
  *  effort through Pi's thinking option instead. */
-export function routeSpellings(model: string): Partial<Record<CoraRoute, string>> {
+export function routeSpellings(
+  model: string,
+  nativeModels: ReadonlySet<string> = NATIVE_ROUTABLE_MODELS,
+): Partial<Record<CoraRoute, string>> {
   const { base, effort } = splitEffort(model.trim());
   const route = routeOfModelId(base);
   if (route === "subscription") {
@@ -74,7 +84,7 @@ export function routeSpellings(model: string): Partial<Record<CoraRoute, string>
     for (const [provider, prefix] of Object.entries(OPENROUTER_PREFIX) as Array<[PiSubscriptionProvider, string]>) {
       if (!base.startsWith(prefix)) continue;
       const native = base.slice(prefix.length);
-      if (subscriptionForModelId(native) === provider && NATIVE_ROUTABLE_MODELS.has(native)) {
+      if (subscriptionForModelId(native) === provider && nativeModels.has(native)) {
         return { subscription: native, openrouter: base };
       }
     }
@@ -88,6 +98,9 @@ export interface CoraRouteAvailability {
   subscriptions: ReadonlySet<PiSubscriptionProvider>;
   /** OpenRouter ids verified for Cora (Settings > API and model). */
   openRouterModels: ReadonlySet<string>;
+  /** Native ids the sign-ins serve (Pi's catalog); the worker roster when
+   *  absent. */
+  nativeModels?: ReadonlySet<string>;
 }
 
 export interface CoraRouteChoice {
@@ -106,7 +119,7 @@ export function chooseCoraRoute(
   order: readonly CoraRoute[],
   availability: CoraRouteAvailability,
 ): CoraRouteChoice | null {
-  const spellings = routeSpellings(model);
+  const spellings = routeSpellings(model, availability.nativeModels);
   for (const route of order) {
     const id = spellings[route];
     if (!id) continue;
