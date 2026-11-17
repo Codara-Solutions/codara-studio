@@ -122,7 +122,7 @@ test("the popup offers one switch per tab, a reach that maps to the old switches
     await expect(popup.locator("#shared-label")).toHaveText("Shared, 1 tab");
     await expect(popup.locator("#storage-row")).toBeVisible();
     // The switch covers the browser's cookie and storage commands, not what the page's scripts can read.
-    await expect(popup.locator("#storage-note")).toContainText("Even when off, agents can read what this page's own scripts can");
+    await expect(popup.locator("#storage-note")).toHaveText("Even when off, agents see site storage, non-HttpOnly cookies and requests, sign-in headers included.");
 
     // "This window" is the old window switch; "Tabs I pick" turns it off and
     // leaves the tab shared one by one.
