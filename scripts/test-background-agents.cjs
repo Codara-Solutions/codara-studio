@@ -26,7 +26,7 @@ async function load() {
       `export * from ${JSON.stringify(path.join(ROOT, "src", "shared", "background-agents.ts"))};`,
       `export { buildAgentLines } from ${JSON.stringify(path.join(ROOT, "src", "shared", "agent-status.ts"))};`,
       `export { buildRailFamily } from ${JSON.stringify(path.join(ROOT, "src", "shared", "rail-tree.ts"))};`,
-      `export { buildAgentInbox, emptyAgentInboxPrefs, parseAgentInboxPrefs } from ${JSON.stringify(path.join(ROOT, "src", "shared", "agent-inbox.ts"))};`,
+      `export { buildAgentInbox, emptyAgentInboxPrefs, parseAgentInboxPrefs, reconcileAgentInbox } from ${JSON.stringify(path.join(ROOT, "src", "shared", "agent-inbox.ts"))};`,
     ].join("\n"),
   );
   const outfile = path.join(temp, "background-agents.cjs");
@@ -268,6 +268,52 @@ test("the Agents tab lists the background agent, and its settle survives a reloa
   assert.ok(rows.includes("worktree:wt-cloud"), "the row is in the inbox view");
   const prefs = mod.parseAgentInboxPrefs({ settled: { "worktree:wt-cloud": { at: NOW } } }, NOW);
   assert.ok(prefs.settled["worktree:wt-cloud"], "a worktree key is a valid inbox key");
+});
+
+test("a card names its parent only while the starting session is on the board", ({ mod }) => {
+  const [found] = cards(mod, { worktrees: [worktree()] });
+  assert.equal(found.parentKey, "pane:p-coord");
+  const [lost] = cards(mod, { worktrees: [worktree()], cards: [] });
+  assert.equal(lost.parentKey, undefined, "an orphan has no parent to sit under");
+});
+
+test("the Agents tab lists the subagent behind its coordinator's chip, not as a row", ({ mod }) => {
+  const coord = creatorCard();
+  const model = mod.withBackgroundAgents(
+    { needsYou: [], working: [coord], done: [], total: 1 },
+    { now: NOW, worktrees: [worktree()], notes: {}, workspaces: WORKSPACES },
+  );
+  assert.equal(model.working.length, 2, "the board itself still has both cards");
+  const inbox = mod.buildAgentInbox(model, mod.emptyAgentInboxPrefs(), { now: NOW, pullRequests: {}, branches: {} });
+  assert.deepEqual(inbox.working.map((row) => row.key), ["pane:p-coord"]);
+  assert.deepEqual(inbox.working[0].subagents.map((row) => row.key), ["worktree:wt-cloud"]);
+  assert.equal(inbox.total, 1);
+});
+
+test("a subagent that writes a note after its coordinator was settled brings the coordinator back", ({ mod }) => {
+  const coord = creatorCard();
+  const settledAt = NOW - 10 * MIN;
+  const build = (noteAt) =>
+    mod.withBackgroundAgents(
+      { needsYou: [], working: [coord], done: [], total: 1 },
+      {
+        now: NOW,
+        worktrees: [worktree({ createdAt: NOW - 50 * MIN })],
+        notes: note("Back on it", { status: "in_progress", updatedAt: noteAt }),
+        workspaces: WORKSPACES,
+      },
+    );
+  const prefs = mod.emptyAgentInboxPrefs();
+  prefs.settled["pane:p-coord"] = { at: settledAt };
+  // The coordinator itself started before the settle: only the subagent moved.
+  const fresh = build(NOW - MIN);
+  const kid = fresh.working.find((card) => card.key === "worktree:wt-cloud");
+  assert.equal(kid.since, NOW - 50 * MIN, "its timer still counts from the start of its work");
+  assert.equal(kid.parentKey, "pane:p-coord");
+  const woken = mod.reconcileAgentInbox(fresh, prefs, { now: NOW, pullRequests: {} });
+  assert.equal(woken.prefs.settled["pane:p-coord"], undefined, "a fresh note wakes the settled coordinator");
+  const quiet = mod.reconcileAgentInbox(build(NOW - 20 * MIN), prefs, { now: NOW, pullRequests: {} });
+  assert.ok(quiet.prefs.settled["pane:p-coord"], "a note from before the settle does not");
 });
 
 (async () => {
