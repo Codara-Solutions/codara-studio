@@ -38,6 +38,18 @@ async function main() {
     logLevel: "silent",
   });
   const aw = require(outFile);
+  const reviewOut = path.join(cacheDir, `spark-agent-worktree-base-review-${process.pid}.cjs`);
+  await esbuild.build({
+    entryPoints: [path.join(__dirname, "..", "src", "main", "review", "review-diff.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile: reviewOut,
+    alias: { "@shared": path.join(__dirname, "..", "src", "shared") },
+    external: ["electron", "ssh2", "cpu-features"],
+    logLevel: "silent",
+  });
+  const review = require(reviewOut);
 
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-agent-wt-base-")));
   const home = path.join(scratch, "home");
@@ -113,6 +125,9 @@ async function main() {
     };
     const agent = { role: "studio", client: "claude-code", paneId: "pane-1" };
     const create = async (input) => {
+      // Only the newest row is read; dropping the rest keeps the suite under
+      // the 20 agent worktrees a repository may have.
+      h.state.workspaces = h.state.workspaces.filter((workspace) => workspace.id === "ws-repo");
       const made = await aw.createAgentWorktree(agent, input, deps);
       assert.equal(made.ok, true, JSON.stringify(made));
       return made;
@@ -134,6 +149,13 @@ async function main() {
       assert.equal(made.baseAheadOfRemote, undefined);
       assert.equal(made.warnings, undefined, JSON.stringify(made.warnings));
       assert.equal(git(repo, ["rev-parse", "main"]), localMain, "the local main is left alone");
+      const stored = h.state.workspaces.find((workspace) => workspace.id === made.workspaceId).copyBranch.baseBranch;
+      assert.equal(stored, "origin/main", "the recorded base is the ref it forked from");
+      // The review panel diffs against the recorded base: none of origin's
+      // commits may show as the agent's own.
+      const diff = await review.getReviewDiff({ cwd: made.path, mode: "base" }, { workspaceBase: async () => stored });
+      assert.equal(diff.base, "origin/main");
+      assert.deepEqual(diff.files.map((file) => file.path), []);
     });
 
     await check("base main without an upstream still means origin's default branch", async () => {
@@ -273,6 +295,30 @@ async function main() {
       }
     });
 
+    await check("a remote-tracking base is fetched however it is spelled", async () => {
+      for (const [name, spelled] of [["fix/remotes-name", "remotes/origin/main"], ["fix/full-remote", "refs/remotes/origin/main"]]) {
+        remoteMain = pushMain(1);
+        const made = await create({ branch: name, base: spelled });
+        assert.equal(headOf(made), remoteMain, spelled);
+        assert.equal(made.baseRef, "origin/main");
+        assert.equal(made.fetch, "ok");
+        assert.equal(h.state.workspaces.find((workspace) => workspace.id === made.workspaceId).copyBranch.baseBranch, "origin/main");
+      }
+    });
+
+    await check("an upstream deleted on the remote, not pruned here, leaves the local branch", async () => {
+      git(other, ["push", "-q", "origin", "main:refs/heads/short-lived"]);
+      git(repo, ["fetch", "-q", "origin"]);
+      git(repo, ["branch", "-q", "--track", "short-lived", "origin/short-lived"]);
+      git(repo, ["branch", "-q", "-f", "short-lived", localMain]);
+      git(repo, ["branch", "-q", "--set-upstream-to", "origin/short-lived", "short-lived"]);
+      git(other, ["push", "-q", "origin", "--delete", "short-lived"]);
+      const made = await create({ branch: "fix/gone-upstream", base: "short-lived" });
+      assert.equal(headOf(made), localMain, "the stale origin/short-lived is not used");
+      assert.equal(made.baseRef, "short-lived");
+      assert.ok(made.warnings.some((w) => /origin no longer has the branch short-lived/.test(w)), JSON.stringify(made.warnings));
+    });
+
     await check("an upstream kept outside refs/remotes is still fetched", async () => {
       git(repo, ["remote", "add", "vendor", origin]);
       git(repo, ["config", "--replace-all", "remote.vendor.fetch", "+refs/heads/*:refs/vendor/*"]);
@@ -309,6 +355,7 @@ async function main() {
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
     fs.rmSync(outFile, { force: true });
+    fs.rmSync(reviewOut, { force: true });
   }
   console.log(`agent-worktree-base: ${passed} checks passed`);
 }

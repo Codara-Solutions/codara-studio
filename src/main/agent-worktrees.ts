@@ -565,8 +565,11 @@ async function fetchRemoteBranch(
   branch: string,
 ): Promise<string | null> {
   try {
+    // In English, so a remote that no longer has the branch can be told
+    // from one that cannot be reached.
     await runGit(cwd, ["fetch", "--no-tags", "--end-of-options", remote, branch], {
       timeout: FETCH_TIMEOUT_MS,
+      env: { ...process.env, LC_ALL: "C" },
     });
     return null;
   } catch (err) {
@@ -1744,14 +1747,20 @@ async function createAgentWorktreeInner(
         // through HEAD, which stays as it is like base "HEAD".
         const localBranchBase =
           fullName.startsWith("refs/heads/") && [baseName, `refs/${baseName}`, `refs/heads/${baseName}`].includes(fullName);
-        // A local branch named like a remote one ("origin/x") is no remote base.
-        const remoteBase =
-          baseName && baseName !== "HEAD" && !localBranchBase ? await splitRemoteRef(repoCwd, baseName) : null;
+        // A remote-tracking ref however spelled ("remotes/origin/main"); a
+        // local branch named like a remote one ("origin/x") is no remote base.
+        const trackingBase = fullName.startsWith("refs/remotes/");
+        const remoteBase = trackingBase
+          ? await splitRemoteRef(repoCwd, fullName.slice("refs/remotes/".length))
+          : baseName && baseName !== "HEAD" && !localBranchBase
+            ? await splitRemoteRef(repoCwd, baseName)
+            : null;
+        if (remoteBase && trackingBase) baseRef = `${remoteBase.remote}/${remoteBase.branch}`;
         if (remoteBase && input.fetch !== false) {
           const failure = await fetchRemoteBranch(repoCwd, remoteBase.remote, remoteBase.branch);
           fetchStatus = failure ? `failed: ${failure}` : "ok";
           if (failure) warnings.push(`fetch failed: ${failure}; forked from the last fetched ${baseName}`);
-          baseCommit = (await revParse(repoCwd, `${baseName}^{commit}`)) ?? baseCommit;
+          baseCommit = (await revParse(repoCwd, `${trackingBase ? fullName : baseName}^{commit}`)) ?? baseCommit;
         }
         // A local branch that tracks a remote one ("main") is often behind
         // it: the main checkout is not pulled for the agent. Fork from the
@@ -1761,9 +1770,20 @@ async function createAgentWorktreeInner(
         if (tracked) {
           const failure = await fetchRemoteBranch(repoCwd, tracked.remote, tracked.branch);
           fetchStatus = failure ? `failed: ${failure}` : "ok";
-          const remoteCommit = await revParse(repoCwd, `${tracked.trackingRef}^{commit}`);
-          const remoteName = tracked.trackingRef.replace(/^refs\/(?:remotes\/|heads\/)?/, "");
-          if (remoteCommit) {
+          // Deleted on the remote but not pruned here: its tracking ref is
+          // stale, and the local branch is all that is left of it.
+          const gone = failure !== null && /couldn't find remote ref/i.test(failure);
+          const remoteCommit = gone ? null : await revParse(repoCwd, `${tracked.trackingRef}^{commit}`);
+          const shortName = tracked.trackingRef.replace(/^refs\/(?:remotes\/|heads\/)?/, "");
+          // The short name, unless it resolves to another ref (a local branch
+          // "origin/x" next to the tracking ref): the review diff and the
+          // merge check read the recorded base by this name.
+          const remoteName = (await baseRefName(repoCwd, shortName)) === tracked.trackingRef ? shortName : tracked.trackingRef;
+          if (gone) {
+            warnings.push(
+              `${tracked.remote} no longer has the branch ${tracked.branch} that ${baseName} tracks, so forked from the local ${baseName}`,
+            );
+          } else if (remoteCommit) {
             const drift = await aheadBehind(repoCwd, baseCommit!, remoteCommit);
             if (failure) warnings.push(`fetch failed: ${failure}; forked from the last fetched ${remoteName}`);
             if (drift?.behind) baseDrift.behind = drift.behind;
@@ -1815,7 +1835,9 @@ async function createAgentWorktreeInner(
         copyBranch: {
           repoCwd: repoKey,
           branch: created.branch,
-          ...(checkout ? {} : { baseBranch: baseName! }),
+          // The ref it forked from, so its review diff and merge check
+          // compare against origin/main and not a local main left behind.
+          ...(checkout ? {} : { baseBranch: baseRef ?? baseName! }),
           city: created.city,
           mode: created.mode,
           createdAt: deps.now().toISOString(),

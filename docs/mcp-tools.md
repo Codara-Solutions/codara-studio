@@ -1394,7 +1394,10 @@ pulled. When the local branch lacks commits the remote has, the result
 carries `baseBehindRemote` (how many); when it has commits the remote lacks,
 `baseAheadOfRemote` and a warning, since the worktree starts without them.
 Offline, it forks from the last fetched `origin/main` with a warning, and
-from the local branch only when that remote branch was never fetched.
+from the local branch only when that remote branch was never fetched or the
+remote no longer has it. `baseRef` is what Codara records as the worktree's
+base, so the Review panel's diff and the merge check before removal compare
+against it, not against the local branch.
 `fetch: false` forks from the base as it is here: a local branch at its own
 commit, a remote-tracking ref at its last fetched commit. `HEAD`, tags,
 commits and branches that track nothing are used as they are.
