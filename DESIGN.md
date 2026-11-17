@@ -428,6 +428,29 @@ journey, an issue queue and a stash list pushed the files and the history apart.
   written in. The branch line says "in sync" or "not published" in a word.
 - A rejected commit's hook output and Fix with agent show with the error strip
   under the tab strip, not beside the box, so they are in view wherever it is.
+- Staged Changes and Changes are flat lists, one 22px row per file: the name in ink,
+  its folder dimmed after it, the line counts, the status letter. Hover trades the
+  counts for Open, Discard and Stage (Unstage when staged); the letter stays, and
+  hovering it says what it means ("U: new file git does not track yet").
+- Status letters are calm: an edit is the accent, a new file grey, only a deletion or
+  a conflict red. Nothing in the lists is yellow; yellow is kept for what needs you.
+- New files git does not track yet, two or more under a folder that holds no other
+  change, fold into one grey row for the shallowest such folder with "N files". It
+  unfolds in place, and its hover stages or discards all of them (discard asks for a
+  second click, since it deletes files git never had). A lone new file
+  keeps its own row. The fold is computed in the renderer (`change-list.ts`); git
+  still lists every file, so the diff view can open each one.
+- Staged Changes never folds: what is about to be committed shows file by file.
+- A folded folder acts on exactly the files its row shows. Discard arms a confirm
+  that names the count and the folder ("Delete 2 files in dist/?"); a double-click
+  or a click within 400 ms of arming does not confirm. Before deleting, the folder
+  is listed again; if a file appeared or went since the row was drawn, nothing is
+  deleted and the row is redrawn. Ignored files and nested repositories stay, and
+  a folder is removed only once empty.
+- Paths go to git as `:(top,literal)<path>`: names, never patterns, from the root.
+- A workspace opened below the repository root folds only folders inside itself;
+  changes elsewhere in the repository keep their own rows, marked "outside this
+  workspace".
 
 ## Worktrees in the rail (2026-10)
 
