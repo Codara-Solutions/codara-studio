@@ -2897,7 +2897,8 @@ export function registerIpc(): void {
   handle("orchestration:startAutopilot", async (_e, input: StartAutopilotInput): Promise<RunState> => {
     assertLocalWorkspace(input.cwd, "Automations and autopilot");
     const { startAutopilot } = await getRunStore();
-    return startAutopilot(input);
+    // The composer's first message of a chat; see HumanRunMessage.typedByUser.
+    return startAutopilot({ ...input, initialNoteTypedByUser: true });
   });
 
 
@@ -2922,7 +2923,8 @@ export function registerIpc(): void {
 
   handle("orchestration:addRunMessage", async (_e, input: AddRunMessageInput): Promise<RunState> => {
     const { addRunMessage } = await getRunStore();
-    return addRunMessage(input);
+    // The composer: the one place, with the phone, where the user types.
+    return addRunMessage({ ...input, typedByUser: true });
   });
 
   handle(

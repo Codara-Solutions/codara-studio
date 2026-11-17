@@ -18,14 +18,21 @@ try {
     true,
     "bounded work in a small workspace uses the direct lane",
   );
+  const skillNames = new Set(["ceo", "verify", "ketchup"]);
   for (const prompt of ["/ceo", "/skill:verify the parser", "/ketchup"]) {
     assert.equal(
-      await shouldUseDirectExecution({ cwd: root, prompt }),
+      await shouldUseDirectExecution({ cwd: root, prompt, skillNames }),
       false,
       `${prompt} runs a skill, which only the manager expands`,
     );
-    assert.equal(followUpNeedsManager(prompt), true, `${prompt} as a follow-up goes to the manager`);
+    assert.equal(followUpNeedsManager(prompt, skillNames), true, `${prompt} as a follow-up goes to the manager`);
   }
+  // A leading path or an unknown name is not a skill: the direct lane keeps it.
+  for (const prompt of ["/home/me/app/src/index.ts has a typo, fix it", "/tmp/build.log shows the failure", "/unknown do it"]) {
+    assert.equal(await shouldUseDirectExecution({ cwd: root, prompt, skillNames }), true, prompt);
+    assert.equal(followUpNeedsManager(prompt, skillNames), false, prompt);
+  }
+  assert.equal(followUpNeedsManager("/ceo"), false, "no skill list means no skill to run");
   assert.equal(followUpNeedsManager("fix src/app.ts"), false);
   assert.equal(isConversationalRequest("hello!"), true);
   assert.equal(isConversationalRequest("what is your favorite food?"), true);

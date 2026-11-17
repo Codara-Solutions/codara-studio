@@ -132,6 +132,27 @@ const piDist = path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-age
     assert.equal(rules.userRulesSection("x", "   "), "");
     const long = rules.userRulesSection("x", "a".repeat(rules.USER_RULES_MAX_CHARS + 10));
     assert.match(long, /\[cut at 40000 characters\]/);
+    // A huge file (or a link to one) is read only up to its first bytes.
+    const huge = path.join(tmp, "huge.md");
+    const fd = fs.openSync(huge, "w");
+    fs.writeSync(fd, "# Rules\n");
+    fs.ftruncateSync(fd, 512 * 1024 * 1024);
+    fs.closeSync(fd);
+    const hugeLink = path.join(tmp, "huge-link.md");
+    fs.symlinkSync(huge, hugeLink);
+    const realRead = fs.readFileSync;
+    fs.readFileSync = () => { throw new Error("the whole file must not be read"); };
+    let hugeSection;
+    try {
+      const started = Date.now();
+      hugeSection = rules.loadUserRulesSection({ CODARA_PI_USER_RULES_PATH: hugeLink });
+      assert.ok(Date.now() - started < 2000, "a huge rules file does not stall the start");
+    } finally {
+      fs.readFileSync = realRead;
+    }
+    assert.match(hugeSection, /^User's global agent rules/);
+    assert.match(hugeSection, /\[cut at 40000 characters\]\n<\/user-rules>$/);
+    fs.rmSync(huge);
 
     // Studio finds the file: Claude Code's first, then Codex's, files only.
     const esbuild = require("esbuild");

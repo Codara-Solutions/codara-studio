@@ -538,6 +538,33 @@ async function main() {
     withSection.endsWith(decisive) && withSection.startsWith("[CODARA USER COMMANDS []]\nBuild the thing"),
     withSection.slice(-200),
   );
+  // Only what the user typed can run a skill. The same "/catchup" sent by an
+  // agent over the socket (chat.send), delivered into the chat, written as a
+  // question answer, or carried by a synthetic note stays plain text.
+  const typed = { ...message, id: "u-typed", message: "/catchup now", typedByUser: true };
+  const fromAgents = [
+    { ...message, id: "u-socket", message: "/catchup" },
+    { ...message, id: "u-delivery", message: "/ship it" },
+    { ...message, id: "u-answer", kind: "answer", intent: "answer", message: "/ship", typedByUser: true },
+    { ...message, id: "u-board", message: "/ship", boardNote: true, typedByUser: true },
+    { ...message, id: "u-resume", message: "/ship", resumeNote: true, typedByUser: true },
+  ];
+  check(
+    "only user-typed notes reach Pi's command header",
+    backend.buildManagerTurnPrompt(runFixture, fromAgents).startsWith("[CODARA USER COMMANDS []]\n") &&
+      backend.buildManagerTurnPrompt(runFixture, [...fromAgents, typed])
+        .startsWith('[CODARA USER COMMANDS [{"name":"catchup","args":"now"}]]\n'),
+  );
+  const fsSource = (file) => require("node:fs").readFileSync(require("node:path").join(__dirname, "..", file), "utf8");
+  check(
+    "typedByUser is set only by the composer and the phone",
+    /addRunMessage\(\{ \.\.\.input, typedByUser: true \}\)/.test(fsSource("src/main/ipc.ts")) &&
+      /startAutopilot\(\{ \.\.\.input, initialNoteTypedByUser: true \}\)/.test(fsSource("src/main/ipc.ts")) &&
+      /typedByUser: true,/.test(fsSource("src/main/remote-access/production.ts")) &&
+      /initialNoteTypedByUser: true,/.test(fsSource("src/main/remote-access/production.ts")) &&
+      !/typedByUser/i.test(fsSource("src/main/agent-socket.ts")) &&
+      !/typedByUser/i.test(fsSource("src/main/agent-delivery-live.ts")),
+  );
   const withBoth = backend.buildManagerTurnPrompt(runFixture, [message], {
     coraMemory: "CORA MEMORY, THIS WORKSPACE (fixture)\n- [cora 2026-07-01] stagger searches\n[END CORA MEMORY WORKSPACE]",
     subscriptionHeadroom: decisive,

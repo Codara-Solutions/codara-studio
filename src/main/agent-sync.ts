@@ -395,6 +395,20 @@ export function listPiSkillPaths(input: {
   piAgentDir?: string | null;
   settings: Pick<AppSettings, "agentDisabledSkillIds">;
 }): string[] {
+  return listPiSkills(input).map((skill) => skill.location);
+}
+
+/**
+ * The skills a Pi session loads, by name, in the order that wins a name
+ * clash: the repository's own folders first, then Codara's, then the user's
+ * CLI folders. So a repository skill named like a user skill is the one a
+ * typed `/<name>` runs.
+ */
+export function listPiSkills(input: {
+  cwd?: string | null;
+  piAgentDir?: string | null;
+  settings: Pick<AppSettings, "agentDisabledSkillIds">;
+}): Array<{ name: string; location: string }> {
   const cwd = input.cwd?.trim() ?? "";
   const disabled = new Set(input.settings.agentDisabledSkillIds ?? []);
   // `piNative` roots also hold single-file skills (a root .md with skill
@@ -418,7 +432,7 @@ export function listPiSkillPaths(input: {
   );
   const seenRoots = new Set<string>();
   const seenNames = new Set<string>();
-  const out: string[] = [];
+  const out: Array<{ name: string; location: string }> = [];
   for (const root of roots) {
     const rootKey = normalizePathForMatch(resolve(root.path));
     if (seenRoots.has(rootKey)) continue;
@@ -432,7 +446,7 @@ export function listPiSkillPaths(input: {
       if (disabled.has(key)) continue;
       // Codex's bundled system skills drive Codex-only tooling.
       if (normalizePathForMatch(location).includes(CODEX_SYSTEM_SKILL_ROOT)) continue;
-      out.push(location);
+      out.push({ name, location });
       if (out.length >= MAX_PI_SKILLS) return out;
     }
   }

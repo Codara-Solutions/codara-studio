@@ -474,8 +474,11 @@ export function buildManagerTurnPrompt(
 ): string {
   // Pi's manager extension strips this line and runs the skills it names
   // (src/shared/user-commands.ts); it goes first, before any user text.
+  // Only what the user typed (typedByUser): an agent's chat.send, a delivery,
+  // an answer whose option text the model wrote, or a synthetic note never
+  // runs a skill.
   const commands = (run.chatBackend ?? "pi") === "pi"
-    ? userCommandsHeader(inputMessages.map((message) => message.message))
+    ? userCommandsHeader(inputMessages.map((message) => (userTypedCommandSource(message) ? message.message : "")))
     : "";
   const prompt = appendSubscriptionHeadroom(
     appendCoraMemory(
@@ -488,6 +491,18 @@ export function buildManagerTurnPrompt(
     opts?.subscriptionHeadroom,
   );
   return commands ? `${commands}\n${prompt}` : prompt;
+}
+
+/** Whether a message may run a skill by starting with a slash command. */
+export function userTypedCommandSource(message: HumanRunMessage): boolean {
+  return (
+    message.typedByUser === true &&
+    message.author === "user" &&
+    message.kind === "note" &&
+    !message.boardNote &&
+    !message.resumeNote &&
+    !message.compaction
+  );
 }
 
 export interface ManagerTurnPromptOptions {

@@ -377,6 +377,7 @@ import { createRunRuntimeShutdown } from "./run-runtime-shutdown";
 import {
   cleanupPiMcpBridgeConfig,
   createCodaraPiWorkerLaunchPlan,
+  listCodaraPiSkillNames,
   resolveCodaraPiExecutionAccount,
 } from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
@@ -1519,6 +1520,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       hasAttachments: Boolean(input.initialAttachments?.length),
       hasFanOut: Boolean(input.fanOut),
       hasCouncil: Boolean(input.council),
+      ...(input.initialUserNote?.trim().startsWith("/") ? { skillNames: await listCodaraPiSkillNames(input.cwd) } : {}),
     }));
   // A direct Cora turn is implemented as one worker, which may only run a model
   // the user left enabled in the worker roster and has an account for. With
@@ -1657,6 +1659,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       message: initialNote,
       attachments: input.initialAttachments,
       intent: "turn",
+      ...(input.initialNoteTypedByUser === true && input.initialUserNote?.trim() ? { typedByUser: true as const } : {}),
     });
     if (!planText && !fanOutDirective && !councilDirective) {
       scheduleInitialChatDecision(run.id, input);
@@ -12580,7 +12583,12 @@ export async function addRunMessage(
     input.author === "user" &&
     input.kind === "note" &&
     isTerminalRunStatus(run.status) &&
-    (followUpNeedsManager(input.message) || (await loadSettings()).coraAlwaysVerifyEdits === true)
+    (followUpNeedsManager(
+      input.message,
+      input.message.trim().startsWith("/") && workspaceCwdFromRun(run)
+        ? await listCodaraPiSkillNames(workspaceCwdFromRun(run)!)
+        : undefined,
+    ) || (await loadSettings()).coraAlwaysVerifyEdits === true)
   ) {
     run = await commitRunChange(run, {
       type: "run.escalated_to_manager",
@@ -12726,6 +12734,7 @@ export async function addRunMessage(
     backendTurnId: input.backendTurnId,
     conversationEpoch: messageEpoch,
     createdAt: new Date().toISOString(),
+    ...(input.typedByUser === true && input.author === "user" && input.kind === "note" ? { typedByUser: true as const } : {}),
   };
 
   let messageRecorded = false;

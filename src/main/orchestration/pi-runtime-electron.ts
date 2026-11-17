@@ -411,6 +411,17 @@ export async function cleanupPiMcpBridgeConfig(plan: {
   }
 }
 
+/** Names of the skills Cora's Pi loads in `cwd`, for telling a typed
+ *  `/<skill>` from a path such as `/home/...`. Empty when discovery fails. */
+export async function listCodaraPiSkillNames(cwd: string): Promise<Set<string>> {
+  try {
+    const [{ listPiSkills }, settings] = await Promise.all([import("../agent-sync"), loadSettings()]);
+    return new Set(listPiSkills({ cwd, piAgentDir: codaraPiPaths().configDir, settings }).map((skill) => skill.name));
+  } catch {
+    return new Set();
+  }
+}
+
 /**
  * The skill folders a trusted Pi session loads. Undefined keeps Pi's own
  * discovery, so a discovery failure never costs a session its skills.

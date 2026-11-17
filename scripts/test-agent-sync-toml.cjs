@@ -513,6 +513,14 @@ async function main() {
       assert.equal(fs.existsSync(codaraSkill), false);
     });
     assert.ok(paths.includes(path.join(FAKE_HOME, ".claude", "skills", "b")), "a Claude skill reaches Cora");
+    // A repository skill and a user skill with the same name: the repository's
+    // copy is the one Pi loads, and so the one a typed /quick runs.
+    const userQuick = path.join(FAKE_HOME, ".agents", "skills", "quick");
+    fs.mkdirSync(userQuick, { recursive: true });
+    fs.writeFileSync(path.join(userQuick, "SKILL.md"), "---\nname: quick\ndescription: User quick\n---\n");
+    const named = sync.listPiSkills({ cwd: FAKE_CWD, settings: settings() }).filter((skill) => skill.name === "quick");
+    assert.deepEqual(named.map((skill) => skill.location), [path.join(FAKE_CWD, ".pi", "skills", "quick.md")]);
+    fs.rmSync(userQuick, { recursive: true, force: true });
     assert.equal(paths.some((entry) => entry.includes("gamma")), false, "a switched-off skill stays off");
     assert.equal(paths.some((entry) => entry.includes(".system")), false, "Codex system skills stay Codex-only");
   });

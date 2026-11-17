@@ -1,4 +1,5 @@
 import type { ChatMode, CoraExecutionStrategy } from "@shared/types";
+import { userCommandOf } from "../../shared/user-commands";
 
 const MANAGED_REQUEST =
   /\b(?:all (?:failures|lint errors|tests|type errors|typecheck errors)|architecture|architectural|audit (?:the )?(?:entire|whole)|background task|deep research|everything|investigate (?:the )?(?:entire|whole)|long[- ]running|migration|multi[- ]agent|parallel(?:ize|ise| work| agents?)|plan mode|refactor (?:the )?(?:app|application|codebase|project|repository)|repository[- ]wide|research the web|search the web|whole (?:app|application|codebase|project|repository)|work across (?:the )?(?:app|codebase|project|repository))\b/i;
@@ -10,9 +11,14 @@ const MANAGED_REQUEST =
 const STUDIO_SURFACE_REQUEST =
   /\b(?:whiteboard|kanban|board|automations?|loom|schedul(?:e|ed|ing)|cron(?:tab|job)?|recurring|nightly|hourly|every (?:day|night|hour|morning|evening|week|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d+\s*(?:min(?:ute)?s?|hours?|days?)))\b/i;
 
-// A slash command (`/ceo`, `/skill:verify`) runs a skill, and only the
-// manager's Pi session expands skills the user invokes.
-const SLASH_COMMAND = /^\/[A-Za-z0-9]/;
+// A slash command naming a loaded skill (`/ceo`, `/skill:verify`) runs it, and
+// only the manager's Pi session expands skills the user invokes. The same
+// first-line rule as the manager's header (user-commands.ts), so a message
+// that starts with a path such as `/home/...` stays on the direct lane.
+function runsSkill(text: string, skillNames: ReadonlySet<string> | undefined): boolean {
+  const command = userCommandOf(text);
+  return Boolean(command && skillNames?.has(command.name));
+}
 
 const SOCIAL_REQUEST = /^(?:(?:hi|hello|hey|yo|sup|what(?:'s| is) up|good (?:morning|afternoon|evening)|how are you)(?:\s+(?:cora|there))?[!?.\s]*|(?:thanks|thank you|sounds good|okay|ok|cool|nice|great)[!?.\s]*|what(?:'s| is) your (?:favorite|favourite)\b[^\n]{0,120}|who are you[!?.\s]*|tell me (?:a|another) joke[!?.\s]*)$/i;
 
@@ -21,9 +27,9 @@ const SOCIAL_REQUEST = /^(?:(?:hi|hello|hey|yo|sup|what(?:'s| is) up|good (?:mor
  * broad or parallel work, or a Studio surface it has no write tools for. The
  * chat then continues with the manager instead of another direct pass.
  */
-export function followUpNeedsManager(prompt: string): boolean {
+export function followUpNeedsManager(prompt: string, skillNames?: ReadonlySet<string>): boolean {
   const text = prompt.trim();
-  return text.length > 4_000 || SLASH_COMMAND.test(text) || MANAGED_REQUEST.test(text) || STUDIO_SURFACE_REQUEST.test(text);
+  return text.length > 4_000 || runsSkill(text, skillNames) || MANAGED_REQUEST.test(text) || STUDIO_SURFACE_REQUEST.test(text);
 }
 
 export function isConversationalRequest(prompt: string): boolean {
@@ -39,6 +45,8 @@ export interface DirectExecutionDecisionInput {
   hasAttachments?: boolean;
   hasFanOut?: boolean;
   hasCouncil?: boolean;
+  /** Skills Cora's Pi loads here (listCodaraPiSkillNames). */
+  skillNames?: ReadonlySet<string>;
 }
 
 /**
@@ -70,7 +78,7 @@ export async function shouldUseDirectExecution(
 
   const prompt = input.prompt.trim();
   if (isConversationalRequest(prompt)) return false;
-  if (prompt.length > 4_000 || SLASH_COMMAND.test(prompt) || MANAGED_REQUEST.test(prompt)) return false;
+  if (prompt.length > 4_000 || runsSkill(prompt, input.skillNames) || MANAGED_REQUEST.test(prompt)) return false;
   if (STUDIO_SURFACE_REQUEST.test(prompt)) return false;
   return true;
 }
