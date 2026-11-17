@@ -15,7 +15,7 @@ import { basename, join } from "node:path";
 
 import { MIN_COMPACT_AT_TOKENS, PI_BUILTIN_COMPACT_HEADROOM_TOKENS } from "@shared/context-compaction";
 import { contextWindowForModel } from "@shared/context-window";
-import { fastModeSupportFor } from "@shared/fast-mode";
+import { fastModeAvailableFor } from "@shared/fast-mode";
 import { DEFAULT_LOOM_WORKER_MODEL } from "@shared/model-catalog";
 import type { AgentEffortLevel, RunState } from "@shared/types";
 import {
@@ -1166,7 +1166,7 @@ async function defaultModelPolicy(): Promise<WorkflowModelPolicy> {
     defaultModel: availability.connected[0] ?? enabled[0] ?? DEFAULT_LOOM_WORKER_MODEL,
     defaultEffort,
     connected: (model) => catalog === null || isConnected(model),
-    fastMode: (model) => fast && fastModeSupportFor(model).supported,
+    fastMode: (model) => fast && fastModeAvailableFor(model),
     check: (model) => {
       if (catalog === null || isConnected(model)) return null;
       if (disconnected.has(model)) return `model ${model} has no connected account`;

@@ -413,8 +413,9 @@ there a process that lost its parent stays in Other apps.
 
 ## Source Control (2026-11)
 
-**Chosen:** layout B, agent lanes, with layout A's small commit box docked at
-the bottom. One lane per checkout of the active project: line 1 is its branch
+**Chosen:** layout B, agent lanes, with layout A's small commit box (docked at
+the bottom until 2026-11-17; now at the top of the active lane, see "VS Code
+layout, one scroll" below). One lane per checkout of the active project: line 1 is its branch
 with the pull request mark, line 2 its most urgent agent's state word (or "No
 agent · from main") and its diff size since the base, the same two lines a
 worktree has in the rail. The checkout the window is on is a lane too, last, and
@@ -454,8 +455,8 @@ VS Code (the commit box as part of the source control view).
 - Failed checks are never a green tick: the journey's step reads failed, ✕ in
   `--danger`, with the same glyphs as `PullRequestMark`.
 - An SSH workspace shows only its own lane: every other lane would be a round trip.
-- The list and the commit box are separate columns of the panel, so the box never
-  covers a lane. A lane unfolded near the bottom scrolls its buttons into view.
+- The commit box scrolls with the list, so it never covers a lane. A lane unfolded
+  near the bottom scrolls its buttons into view.
 
 **Start an agent and review with an agent (2026-11):** New agent sits above the
 lanes: a task, Claude Code or Codex, the branch to start from, in a new worktree by
@@ -510,6 +511,37 @@ journey, an issue queue and a stash list pushed the files and the history apart.
   so the Issues count is known before the tab is opened and switching tabs never costs
   a `gh` run.
 - Arrow keys, Home and End move between tabs (WAI-ARIA tabs).
+- The commit box sits under the active checkout's branch line, before the files:
+  branch, message, Commit. With that lane folded, or no lane to hold it, the box
+  keeps the top of the list, so it is never gone. Commit is the panel's one
+  accent-filled button; its arrow holds Amend and Split, and the menu opens above
+  the arrow when it would not fit below. The message is one quiet line until it is
+  written in. The branch line says "in sync" or "not published" in a word.
+- A rejected commit's hook output and Fix with agent show with the error strip
+  under the tab strip, not beside the box, so they are in view wherever it is.
+- Staged Changes and Changes are flat lists, one 22px row per file: the name in ink,
+  its folder dimmed after it, the line counts, the status letter. Hover trades the
+  counts for Open, Discard and Stage (Unstage when staged); the letter stays, and
+  hovering it says what it means ("U: new file git does not track yet").
+- Status letters are calm: an edit is the accent, a new file grey, only a deletion or
+  a conflict red. Nothing in the lists is yellow; yellow is kept for what needs you.
+- New files git does not track yet, two or more under a folder that holds no other
+  change, fold into one grey row for the shallowest such folder with "N files". It
+  unfolds in place, and its hover stages or discards all of them (discard asks for a
+  second click, since it deletes files git never had). A lone new file
+  keeps its own row. The fold is computed in the renderer (`change-list.ts`); git
+  still lists every file, so the diff view can open each one.
+- Staged Changes never folds: what is about to be committed shows file by file.
+- A folded folder acts on exactly the files its row shows. Discard arms a confirm
+  that names the count and the folder ("Delete 2 files in dist/?"); a double-click
+  or a click within 400 ms of arming does not confirm. Before deleting, the folder
+  is listed again; if a file appeared or went since the row was drawn, nothing is
+  deleted and the row is redrawn. Ignored files and nested repositories stay, and
+  a folder is removed only once empty.
+- Paths go to git as `:(top,literal)<path>`: names, never patterns, from the root.
+- A workspace opened below the repository root folds only folders inside itself;
+  changes elsewhere in the repository keep their own rows, marked "outside this
+  workspace".
 
 ## Worktrees in the rail (2026-10)
 
