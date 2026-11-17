@@ -15,6 +15,7 @@ import {
   type WebContents,
 } from "electron";
 import { flushMainLog, logMain } from "./file-log";
+import { markRendererNotReady, markRendererReady } from "./renderer-readiness";
 import { errorBoundaryLogEntry } from "@shared/error-boundary";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -514,6 +515,9 @@ let bootGaveUp = false;
 // than once; only the first one for the current WebContents load may flush
 // cleanup retries or print a boot line.
 let rendererReadyForCurrentLoad = false;
+// Terminal and preview ops wait on this instead of sending into a window that
+// cannot hear them yet (renderer-readiness.ts).
+markRendererNotReady();
 ipcMain.on("app:renderer-ready", (e) => {
   // Same gate as the health pong: only the trusted main frame may disarm the
   // boot watchdog. App.tsx sends this after React mounts, which only happens
@@ -523,6 +527,7 @@ ipcMain.on("app:renderer-ready", (e) => {
   if (!isTrustedOnSender(e, "app:renderer-ready")) return;
   if (rendererReadyForCurrentLoad) return;
   rendererReadyForCurrentLoad = true;
+  markRendererReady();
   if (bootWatchdog) {
     clearTimeout(bootWatchdog);
     bootWatchdog = null;
@@ -1081,6 +1086,7 @@ function createWindow(): void {
   // reload/destroy, so don't fight it.
   windowForEvents.webContents.on("render-process-gone", (_e, details) => {
     clearUnresponsiveRecoveryTimer(windowForEvents.webContents);
+    markRendererNotReady();
     logMain("crash", `renderer process gone: ${details.reason} (exitCode ${details.exitCode})`);
     if (details.reason === "clean-exit") return;
     recoverRenderer(`render-process-gone:${details.reason}`);
@@ -1130,6 +1136,7 @@ function createWindow(): void {
   windowForEvents.webContents.on("did-start-navigation", (details) => {
     if (!details.isMainFrame || details.isSameDocument) return;
     rendererReadyForCurrentLoad = false;
+    markRendererNotReady();
     armBootWatchdog();
     // Pane overlays are document state with no restore path.
     closeAllPaneOverlays();

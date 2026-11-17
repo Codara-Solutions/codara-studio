@@ -29,6 +29,7 @@
 import { BrowserWindow, ipcMain } from "electron";
 import { randomBytes } from "node:crypto";
 import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
+import { isRendererReady, RENDERER_STARTING_MESSAGE, whenRendererReady } from "./renderer-readiness";
 
 // "create" mints a renderer-owned terminal tab, "destroy" closes it by id,
 // and "resize" keeps a phone-owned xterm grid in lockstep with its PTY. The
@@ -155,20 +156,25 @@ export async function requestTerminalOp<T = unknown>(
   params: TerminalOpParams = {},
   opts?: { timeoutMs?: number; onLate?: (result: T) => void },
 ): Promise<T> {
-  const win = pickTargetWindow();
+  let win = pickTargetWindow();
   if (!win) {
     throw new Error(
       "No Codara window is open. Open Codara before calling terminal.create.",
     );
   }
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const started = Date.now();
+  // Until React has mounted, nothing in the renderer hears the request.
+  if (!isRendererReady() && !(await whenRendererReady(timeoutMs))) throw new Error(RENDERER_STARTING_MESSAGE);
+  win = pickTargetWindow() ?? win;
   if (win.webContents.isDestroyed() || win.webContents.isLoading()) {
     // wait briefly for the renderer to be ready
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
   }
 
   const reqId = randomBytes(8).toString("hex");
-  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const request: BridgeRequest = { reqId, op, params };
+  const target = win;
 
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -180,14 +186,14 @@ export async function requestTerminalOp<T = unknown>(
         late.set(reqId, { onLate: (result) => onLate(result as T), timer: lateTimer });
       }
       reject(new Error(`terminal op '${op}' timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
+    }, Math.max(0, timeoutMs - (Date.now() - started)));
     pending.set(reqId, {
       resolve: (value) => resolve(value as T),
       reject,
       timer,
     });
     try {
-      win.webContents.send(REQUEST_CHANNEL, request);
+      target.webContents.send(REQUEST_CHANNEL, request);
     } catch (err) {
       pending.delete(reqId);
       clearTimeout(timer);

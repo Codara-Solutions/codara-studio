@@ -26,6 +26,7 @@
 import { BrowserWindow, ipcMain, type WebContents } from "electron";
 import { randomBytes } from "node:crypto";
 import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
+import { isRendererReady, RENDERER_STARTING_MESSAGE, whenRendererReady } from "./renderer-readiness";
 
 export type PreviewOpName =
   | "whiteboard_inspect"
@@ -132,16 +133,20 @@ export async function requestPreviewOp<T = unknown>(
   // timeout. did-finish-load happens after the renderer module (and its bridge
   // registration) has evaluated, so it is the durable readiness boundary.
   await waitForRendererLoad(win.webContents);
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const started = Date.now();
+  // Loaded is not mounted: the tabs and registries the ops act on exist only
+  // once React has mounted.
+  if (!isRendererReady() && !(await whenRendererReady(timeoutMs))) throw new Error(RENDERER_STARTING_MESSAGE);
 
   const reqId = randomBytes(8).toString("hex");
-  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const request: BridgeRequest = { reqId, op, params };
 
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(reqId);
       reject(new Error(`preview op '${op}' timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
+    }, Math.max(0, timeoutMs - (Date.now() - started)));
     pending.set(reqId, {
       resolve: (value) => resolve(value as T),
       reject,
