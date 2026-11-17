@@ -287,6 +287,11 @@ test("images and PDFs zoom at the pointer and take the zoom keys while focused",
     await expect(level).toHaveText("110%");
     await page.getByRole("button", { name: "Zoom in" }).filter({ visible: true }).click();
     await expect(level).toHaveText("125%");
+    // The zoom keys still reach the PDF after a click on its toolbar.
+    await page.keyboard.press("Control+-");
+    await expect(level).toHaveText("110%");
+    await page.keyboard.press("Control+=");
+    await expect(level).toHaveText("125%");
     expect(await windowWidth(page)).toBe(baseWidth);
     await expect(firstPage.locator("canvas")).toBeVisible();
     await shoot(page, "pdf-zoomed", size);

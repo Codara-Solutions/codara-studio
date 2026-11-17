@@ -71,7 +71,7 @@ export default function DocxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
     };
   }, [path, mtimeMs]);
 
-  const { zoom, apply, fit } = useViewerZoom({
+  const { zoom, controls } = useViewerZoom({
     rootRef,
     scrollerRef: scrollRef,
     contentRef: hostRef,
@@ -96,10 +96,7 @@ export default function DocxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
       <DockablePaneBar forceLocal={forceLocalToolbar}>
         {loading && <span style={{ marginRight: "auto", whiteSpace: "nowrap" }}>Loading document…</span>}
         <ZoomControl
-          zoom={zoom}
-          onZoomOut={() => apply("out")}
-          onZoomIn={() => apply("in")}
-          onFit={fit}
+          {...controls}
           fitLabel="100%"
           fitTitle="Reset zoom"
         />
