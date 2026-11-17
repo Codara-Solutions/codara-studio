@@ -34,6 +34,17 @@ function accountSite(request: IncomingMessage, response: ServerResponse): void {
     response.end(JSON.stringify({ saved: url.searchParams.get("note") }));
     return;
   }
+  if (url.pathname === "/strict") {
+    // A strict page: no inline styles or scripts, Trusted Types, and a fixed
+    // link at the bottom centre, where the agent's pill sits.
+    response.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Security-Policy": "default-src 'none'; style-src 'nonce-n0nce'; require-trusted-types-for 'script'",
+    });
+    response.end(`<!doctype html><title>Strict</title><style nonce="n0nce">#fixed{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);width:320px;height:40px;display:block;background:#ddd}</style>
+      <h1>Strict page</h1><a id="fixed" href="#clicked">Fixed link</a>`);
+    return;
+  }
   response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
   if (url.pathname === "/account") {
     response.end(signedIn
@@ -344,7 +355,7 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     expect(await agentShot()).toBe(shown.agent);
     expect((await account.screenshot()).equals(shown.user)).toBe(false);
     // Back on: it survives a reload, and Stop on the pill refuses this agent
-    // on this tab until the user presses Undo.
+    // on this tab until the user gives it back from the popup.
     await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.setPresence({ overlay: true }));
     await expect.poll(() => worker.evaluate(() => (self as unknown as { codara: any }).codara.state().presence.overlay)).toBe(true);
     await request("preview.click", { tabId, selector: "h1" });
@@ -362,18 +373,53 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
       const host: any = html.children.find((node: any) => node.shadowRoots?.[0]?.shadowRootType === "closed");
       expect(host.attributes[host.attributes.indexOf("style") + 1]).toContain("z-index: 2147483647 !important");
       const find = (node: any): any => node.nodeName === "BUTTON" && node.attributes?.includes("tabindex") ? node : [...(node.children ?? []), ...(node.shadowRoots ?? [])].map(find).find(Boolean);
-      const { model } = await page.send("DOM.getBoxModel", { backendNodeId: find(root).backendNodeId });
+      const button = find(root);
+      const box = button ? await page.send("DOM.getBoxModel", { backendNodeId: button.backendNodeId }).catch(() => null) : null;
       await page.detach();
-      return { x: (model.content[0] + model.content[2]) / 2, y: (model.content[1] + model.content[5]) / 2 };
+      const content = box?.model.content;
+      return content ? { x: (content[0] + content[2]) / 2, y: (content[1] + content[5]) / 2 } : null;
     };
     const stop = await pillButton();
-    await account.mouse.click(stop.x, stop.y);
+    await account.mouse.click(stop!.x, stop!.y);
     // Pressing Stop leaves the user's focus where it was.
     await expect(account.locator("#note")).toBeFocused();
-    await expect.poll(() => request("preview.snapshot", { tabId }).then(() => "allowed", (error) => String(error))).toMatch(/The user stopped .* from using browser tab chrome:\d+ and took it back/);
-    const undo = await pillButton();
-    await account.mouse.click(undo.x, undo.y);
-    await expect.poll(() => request("preview.snapshot", { tabId }).then(() => "allowed", (error) => String(error))).toBe("allowed");
+    const asAgent = (params: Record<string, unknown> = {}) => request("preview.snapshot", { tabId, ...params }).then(() => "allowed", (error) => String(error));
+    await expect.poll(() => asAgent()).toMatch(/The user stopped .* from using browser tab chrome:\d+ and took it back/);
+    // The page offers no Undo: the pill has no button, and says where to give it back.
+    expect(await pillButton()).toBeNull();
+    // Another agent on the same tab is not stopped, and gets its own pill.
+    expect(await asAgent({ callerPid: 999991 })).toBe("allowed");
+    expect(await pillButton()).not.toBeNull();
+    // The stop survives the link dropping and coming back.
+    await worker.evaluate(() => (self as unknown as { codara: any }).codara.link.socket?.close());
+    await expect.poll(async () => (await request("preview.chrome", { action: "status" })).connected, { timeout: 15_000 }).toBe(true);
+    expect(await asAgent()).toMatch(/The user stopped/);
+    // Give back lives in the popup (and Settings > Browser).
+    await popup.reload();
+    await expect(popup.locator("#tab-stopped")).toContainText("You stopped");
+    await popup.locator("#tab-stopped button", { hasText: "Give back" }).click();
+    await expect.poll(() => asAgent()).toBe("allowed");
+    await expect(popup.locator("#tab-stopped")).toBeHidden();
+
+    // A strict page (CSP without inline styles, Trusted Types) still gets a
+    // styled pill, and a click by selector on a fixed link under the pill lands.
+    await request("preview.navigate", { tabId, url: `${origin}/strict` });
+    await request("preview.snapshot", { tabId });
+    await expect.poll(overlays, { timeout: 5_000 }).toBe(1);
+    const pill = await pillButton();
+    const viewport = account.viewportSize()!;
+    expect(pill!.y).toBeGreaterThan(viewport.height - 60);
+    expect(Math.abs(pill!.x - viewport.width / 2)).toBeLessThan(120);
+    await request("preview.click", { tabId, selector: "#fixed" });
+    await expect.poll(() => account.evaluate(() => location.hash)).toBe("#clicked");
+    // A full-page capture leaves it out too.
+    const full = await request("preview.screenshot", { tabId, format: "png", fullPage: true });
+    expect(String(full.dataUrl ?? "").length).toBeGreaterThan(100);
+    await expect.poll(overlays).toBe(1);
+    // The overlay's own world is not the agent's.
+    const frameId = (await request("preview.cdp", { tabId, method: "Page.getFrameTree" })).result?.frameTree?.frame?.id ?? "main";
+    expect(await request("preview.cdp", { tabId, method: "Page.createIsolatedWorld", params: { frameId, worldName: "codara-presence" } }).then(() => "allowed", (error) => String(error))).toMatch(/reserved by the Codara extension|not available on a tab of your own browser/);
+    await request("preview.navigate", { tabId, url: `${origin}/account` });
     await agentShot();
 
     // Codara logs who did what, and the popup names the agent.

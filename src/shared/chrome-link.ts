@@ -11,6 +11,8 @@ export interface ChromeLinkTabState {
   storage: boolean;
   blocked: boolean;
   openedByAgent: boolean;
+  /** Agents the user stopped on this tab from the page; "Give back" lets them in again. */
+  stopped: { key: string; name: string }[];
 }
 
 export interface ChromeLinkBrowserState {

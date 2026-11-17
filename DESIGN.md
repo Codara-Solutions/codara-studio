@@ -138,18 +138,35 @@ stops sharing every tab.
 - Drawn through the debugger session the extension already holds: an
   isolated world (`Page.createIsolatedWorld`), a closed shadow root hung off
   `<html>` (outside `<body>`, where the snapshot reads) and `aria-hidden`.
-  No new permission, no content script, page CSP does not apply.
+  No new permission, no content script. Styles go through a constructed
+  sheet (`adoptedStyleSheets`), which a page's `style-src` cannot block. The
+  overlay's world name and execution context are refused to agents.
 - It never takes the user's input: `pointer-events: none` everywhere except
-  the pill, whose events stop in the shadow root. The pill lets the agent's
-  own clicks through while its input is in flight, so an agent cannot press
-  Stop on itself. Stop is mouse only (out of the page's tab order); the
+  the pill, whose events stop in the shadow root. The pill lets clicks
+  through while the agent's input or script runs (at most two seconds), so an
+  agent cannot press Stop on itself and a selector click on a fixed element
+  under the pill still lands. Stop is mouse only (out of the page's tab order); the
   popup is the keyboard path.
 - Never in what the agent reads: screenshots, DOM and accessibility captures
-  take the overlay out for the call and put it back. Nothing in it reads the
-  page; the only thing that leaves it is the user's Stop or Undo.
+  take the overlay out for the call and put it back, and a screencast keeps
+  it out until it stops. Forwarded DOM events leave out the host (tracked by
+  its backend node id) and its subtree. Nothing in it reads the page; the
+  only thing that leaves it is the user's Stop.
+- It does not hide from the page. A page's scripts can notice the host
+  element and remove it; they cannot read the agent's name, its colour or
+  press Stop for the user (closed shadow root, trusted clicks only).
 - Stop refuses that agent's next calls on that tab only, with the same
-  message as on a Codara tab, and offers Undo for six seconds. Other agents
-  and other tabs are unaffected.
+  message as on a Codara tab. The pill then says "Stopped <agent>. Give it
+  back from the Codara popup." and has no button: the page never offers
+  Undo, so the spot that said Stop cannot take it back, and a page cannot
+  lure a click into it. Give back lives in the popup and in Settings >
+  Browser. The stop is kept in Codara (`chrome-link/presence-stops.json`)
+  across reconnects and restarts, and ends only on give back, when the tab
+  closes or stops being shared, or when the browser is unpaired. Other
+  agents and other tabs are unaffected.
+- A modal dialog or fullscreen element covers the pill, and a page that
+  removes the host takes Stop with it until the next call; the popup's Stop
+  is the fallback that always works. Printing leaves the overlay out.
 - It shows only on attached, shared tabs, goes away eight seconds after the
   agent's last call, is drawn again after a navigation, and removes itself
   if the debugger session ends without a goodbye.

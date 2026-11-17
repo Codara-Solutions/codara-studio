@@ -13,6 +13,8 @@ export const chromeLinkApi = {
   deny: (id: string): Promise<boolean> => ipcRenderer.invoke("chromeLink:deny", id),
   /** Forget a paired browser; its token stops working. */
   disconnect: (linkId: string): Promise<boolean> => ipcRenderer.invoke("chromeLink:disconnect", linkId),
+  /** Let an agent the user stopped from the page use that tab again. */
+  giveBack: (linkId: string, tabId: number, key: string): Promise<boolean> => ipcRenderer.invoke("chromeLink:giveBack", linkId, tabId, key),
   /**
    * The browser tools in the user's Claude Code and Codex configs that open a
    * separate Chrome; "Keep agents in your Chrome" turns them off in Codara.

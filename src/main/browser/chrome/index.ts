@@ -31,7 +31,7 @@ import type { ChromeLink } from "./link";
 import { ChromeLinkServer } from "./link-server";
 import { applyKeepAgentsInChrome } from "./keep-agents-in-chrome";
 import { ChromeLinkStore } from "./link-store";
-import { adoptPresenceSettings, forgetChromeStops, loadPresenceSettings, presenceSettings, stopChromeDriver } from "./presence";
+import { adoptPresenceSettings, chromeLinkDown, chromeStops, forgetChromeStops, keepChromeStopsFor, loadChromeStops, loadPresenceSettings, presenceSettings, stopChromeDriver } from "./presence";
 import { CHROME_LINK_PORTS } from "./protocol";
 import { setChromeLinkRuntime } from "./runtime";
 
@@ -138,6 +138,7 @@ export function chromeLinkState(): ChromeLinkState {
     shippedExtensionVersion: shippedExtensionVersion(),
     browsers: (store?.list() ?? []).map((paired) => {
       const link = live.get(paired.linkId);
+      const stopped = chromeStops(paired.linkId);
       return {
         linkId: paired.linkId,
         browser: paired.browser,
@@ -158,6 +159,7 @@ export function chromeLinkState(): ChromeLinkState {
               storage: tab.storage,
               blocked: tab.blocked,
               openedByAgent: tab.openedByAgent,
+              stopped: stopped.get(tab.tabId) ?? [],
             }))
           : [],
       };
@@ -186,8 +188,11 @@ function onPresenceMessage(link: ChromeLink, message: Record<string, unknown>): 
     return;
   }
   if (typeof message.tabId !== "number" || typeof message.key !== "string" || !message.key) return;
-  // Stop on the page refuses that agent's next calls on that tab only.
-  stopChromeDriver(link.linkId, message.tabId, message.key, message.type === "presence_stop");
+  // Stop on the page refuses that agent's next calls on that tab only, until
+  // the user gives the tab back from the popup or Settings.
+  const name = typeof message.name === "string" ? message.name : undefined;
+  stopChromeDriver(link.linkId, message.tabId, message.key, message.type === "presence_stop", name);
+  broadcast();
 }
 
 function broadcast(): void {
@@ -214,13 +219,17 @@ export function startChromeLink(): void {
   setChromeActivityFile(join(dir, "activity.jsonl"));
   setChromeAgentLabeler(agentLabel);
   loadPresenceSettings(join(dir, "presence.json"));
+  loadChromeStops(join(dir, "presence-stops.json"));
   const linkServer = new ChromeLinkServer({ store, app: { name: "Codara", version: app.getVersion() }, ports: linkPorts() });
   const chromeBackend = new ChromeTargetBackend(linkServer);
   server = linkServer;
   backend = chromeBackend;
   setChromeLinkRuntime({ server: linkServer, backend: chromeBackend });
   linkServer.onLinkUp((link) => {
-    link.onTabs(() => chromeBackend.syncTabs(link));
+    link.onTabs(() => {
+      chromeBackend.syncTabs(link);
+      keepChromeStopsFor(link.linkId, link.tabs.keys());
+    });
     link.onMessage((message) => onPresenceMessage(link, message));
     link.send({ type: "presence_settings", ...presenceSettings() });
     unregisterBackend ??= registerBrowserBackend(chromeBackend);
@@ -228,7 +237,7 @@ export function startChromeLink(): void {
   });
   linkServer.onLinkDown((link) => {
     chromeBackend.forgetLink(link);
-    forgetChromeStops(link.linkId);
+    chromeLinkDown(link.linkId, Boolean(store?.list().some((paired) => paired.linkId === link.linkId)));
     if (linkServer.links().length === 0) {
       unregisterBackend?.();
       unregisterBackend = null;
@@ -276,9 +285,19 @@ export function registerChromeLinkIpc(handle: IpcHandle): void {
   handle("chromeLink:state", async (): Promise<ChromeLinkState> => chromeLinkState());
   handle("chromeLink:approve", async (_event, id: unknown): Promise<boolean> => (typeof id === "string" ? server?.approve(id) ?? false : false));
   handle("chromeLink:deny", async (_event, id: unknown): Promise<boolean> => (typeof id === "string" ? server?.deny(id) ?? false : false));
-  handle("chromeLink:disconnect", async (_event, linkId: unknown): Promise<boolean> =>
-    typeof linkId === "string" ? server?.unpair(linkId) ?? false : false,
-  );
+  handle("chromeLink:disconnect", async (_event, linkId: unknown): Promise<boolean> => {
+    if (typeof linkId !== "string") return false;
+    forgetChromeStops(linkId);
+    return server?.unpair(linkId) ?? false;
+  });
+  // Give a tab back to an agent the user stopped there from the page.
+  handle("chromeLink:giveBack", async (_event, linkId: unknown, tabId: unknown, key: unknown): Promise<boolean> => {
+    if (typeof linkId !== "string" || typeof tabId !== "number" || typeof key !== "string") return false;
+    stopChromeDriver(linkId, tabId, key, false);
+    server?.links().find((link) => link.linkId === linkId)?.send({ type: "presence_allowed", tabId, key });
+    broadcast();
+    return true;
+  });
   // Reading the list also re-applies it, so a tool the user added since boot
   // is off for the next session once Settings shows it.
   handle("chromeLink:separateBrowserTools", async (): Promise<SeparateBrowserTool[]> => applyKeepAgentsInChrome());

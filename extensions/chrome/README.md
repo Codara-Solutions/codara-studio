@@ -65,10 +65,12 @@ tools it uses for its own browser tabs.
 
 While an agent works in a shared tab, the page shows a pointer in its colour
 with its name, a thin glow around the page and an "<agent> working" pill with
-**Stop**, which takes that tab back from that agent only (Undo for six
-seconds). It is drawn through the debugger session in an isolated world, out
-of the agent's screenshots and snapshots, and never takes your clicks or
-typing. **On the page** in the popup, or Settings > Browser in Codara, turns
+**Stop**, which takes that tab back from that agent only, until you give it
+back from the popup (or Settings > Browser in Codara). It is drawn through the
+debugger session in an isolated world, out of the agent's screenshots,
+snapshots and recordings, and never takes your clicks or typing. The page
+itself can notice and remove it, but cannot read it or press Stop for you; if
+a dialog or fullscreen video covers it, use **Stop** in the popup. **On the page** in the popup, or Settings > Browser in Codara, turns
 the glow or the whole overlay off.
 
 ## What agents can and cannot do

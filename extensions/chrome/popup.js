@@ -172,6 +172,26 @@ function renderTab(tab, connected) {
     $("tab-usage").textContent = `${toolVerb(usage.tool)}, ${ago(usage.at)}`;
     $("tab-usage").title = usage.tool;
   }
+  // Agents the user stopped from the page: the only place to give the tab back, besides Codara's Settings.
+  const stopped = usable && Array.isArray(tab.stoppedAgents) ? tab.stoppedAgents : [];
+  $("tab-stopped").hidden = stopped.length === 0;
+  $("tab-stopped").replaceChildren(
+    ...stopped.map((agent) => {
+      const item = document.createElement("li");
+      item.className = "row";
+      const text = document.createElement("span");
+      text.className = "grow";
+      text.textContent = `You stopped ${agent.name} on this tab.`;
+      const back = document.createElement("button");
+      back.type = "button";
+      back.className = "btn";
+      back.textContent = "Give back";
+      back.setAttribute("aria-label", `Give this tab back to ${agent.name}`);
+      back.addEventListener("click", () => void act("giveBack", { tabId: tab.tabId, key: agent.key }));
+      item.append(text, back);
+      return item;
+    }),
+  );
   $("tab-details").hidden = !usable || !connected;
   $("copy-id").textContent = tab.shared ? "Copy tab id" : "Share and copy id";
   $("tab-id").textContent = tab.agentId;
