@@ -53,7 +53,7 @@ test("Ctrl+M and Ctrl+N steer the chat's model and thinking effort, and the shif
     // Keep pressing: the list wraps, so the original label comes back rather
     // than the cycle dead-ending on the last row.
     let wrapped = false;
-    for (let i = 0; i < 12 && !wrapped; i += 1) {
+    for (let i = 0; i < 16 && !wrapped; i += 1) {
       await page.keyboard.press(modKey("m"));
       await page.waitForTimeout(250);
       wrapped = ((await modelLabel.textContent())?.trim() ?? "") === firstModel;
@@ -153,8 +153,8 @@ test("OpenAI picker leads with GPT-6.2 Sol and Astra and keeps Sol, Terra, and L
     const trigger = page.locator(".composer-model-thinking-trigger").first();
     const menu = page.locator(".composer-model-thinking-menu");
     const openai = menu.locator(".composer-model-group").filter({ hasText: "OpenAI" });
-    // The newest generation leads; 6.1 Sol and 6 Astra stay in Edit list.
-    const labels = ["GPT-6.2 Sol", "GPT-6.2 Astra", "GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna"];
+    // The two newest generations lead; 6 Astra stays in Edit list.
+    const labels = ["GPT-6.2 Sol", "GPT-6.2 Astra", "GPT-6.1 Sol", "GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna"];
     await trigger.click();
     await expect(openai.getByRole("option")).toHaveText(labels.map((label) => new RegExp(label)));
     await page.screenshot({ path: testInfo.outputPath("cora-chat-picker-openai.png") });
@@ -170,8 +170,7 @@ test("OpenAI picker leads with GPT-6.2 Sol and Astra and keeps Sol, Terra, and L
     }
     await trigger.click();
     await menu.getByRole("button", { name: "Edit list" }).click();
-    await expect(openai.getByRole("option").filter({ hasText: "GPT-6.1 Sol" })).toBeVisible();
-    await expect(openai.getByRole("option").filter({ hasText: "GPT-6 Astra" })).toBeVisible();
+    await expect(openai.getByRole("option").filter({ hasText: "GPT-6 Astra" })).toHaveAttribute("aria-selected", "false");
     await page.screenshot({ path: testInfo.outputPath("cora-chat-picker-edit-list.png") });
     await menu.getByRole("button", { name: "Done" }).click();
     await page.keyboard.press("Escape");
@@ -180,9 +179,10 @@ test("OpenAI picker leads with GPT-6.2 Sol and Astra and keeps Sol, Terra, and L
       ipcMain.removeHandler("pi-models:catalog");
       ipcMain.handle("pi-models:catalog", () => []);
     });
+    const offline = labels.filter((label) => label !== "GPT-6.1 Sol");
     await trigger.click();
-    await expect(openai.getByRole("option")).toHaveCount(labels.length);
-    for (const label of labels) {
+    await expect(openai.getByRole("option")).toHaveCount(offline.length);
+    for (const label of offline) {
       await expect(openai.getByRole("option").filter({ hasText: label })).toBeVisible();
     }
   } finally {

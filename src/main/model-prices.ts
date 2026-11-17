@@ -69,7 +69,9 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   "anthropic/claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
 
   // Standard short-context (<= 272K input) rates, 30-minute cache writes,
-  // verified 2026-11-17:
+  // verified 2026-11-17. Above 272K input OpenAI bills the whole request at 2x
+  // input and cache, 1.5x output; this table has no tiers, so Sol's 272K-500K
+  // requests are estimated low.
   // https://developers.openai.com/api/docs/models/gpt-6.2-sol
   // https://developers.openai.com/api/docs/pricing
   "openai/gpt-6.2-sol": { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },

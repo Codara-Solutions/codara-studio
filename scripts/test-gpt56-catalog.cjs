@@ -195,8 +195,9 @@ async function main() {
       "gpt-6.2-sol,gpt-6.2-astra,gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,claude-fable-5,claude-opus-5,claude-sonnet-5,grok-4.6",
   );
   check(
-    "sorting never moves the default off Sol",
-    composer.defaultChatModel(dressedGroups)?.id === "gpt-5.6-sol",
+    "GPT-6.2 leading the list does not move the default off GPT-5.6 Sol",
+    composer.defaultChatModel(dressedGroups)?.id === "gpt-5.6-sol" &&
+      dressed.models[gpt62.length]?.id === "gpt-5.6-sol",
   );
   check(
     "Fable leads the Anthropic group",
@@ -255,8 +256,8 @@ async function main() {
   for (const live of [astraCatalog, [...astraCatalog].reverse()]) {
     const openai = composer.buildVisibleGroups({ piCatalog: live })[0].models;
     check(
-      "GPT-6.2 leads Sol, Terra, and Luna; the older 6 Astra and retired rows leave the lineup",
-      openai.map(model => model.id).join(",") === [...gpt62, ...ids].join(","),
+      "GPT-6.2 leads, 6.1 Sol stays, then Sol, Terra, and Luna; 6 Astra and retired rows leave the lineup",
+      openai.map(model => model.id).join(",") === [...gpt62, "gpt-6.1-sol", ...ids].join(","),
     );
     const every = composer.buildVisibleGroups({ piCatalog: live, allGenerations: true })[0].models;
     check(
