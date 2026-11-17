@@ -662,6 +662,43 @@ keeps Studio's own control order. Worker rows stay separate timeline items. The
 composer uses `--panel`, so in the light themes it stays warm rather than near
 white.
 
+## Cora worker view (2026-11)
+
+**Chosen:** A, "Go inside". Clicking a worker in Cora swaps the whole
+conversation for that worker's own chat, the way Claude Code shows a subagent.
+Etienne picked A on 17 Nov 2026 ("I like A") from four mock-ups of the same
+chat: A go inside, B a side list of workers beside Main, C Main and the worker
+side by side, D the worker's steps expanded in place under its row. What he
+asked for: see what message a worker got and what it does, in a view that
+replaces the main agent's and looks the same.
+
+**References:** Claude Code's subagent view; the Cora chat above, whose rows
+the worker view reuses.
+
+**Rules it implies:**
+
+- A worker's view reuses the chat's own components: its steps are drawn by the
+  same rows as Cora's turns, fold by the same rules, and its brief and the
+  messages sent to it are user bubbles. A worker never gets a renderer of its
+  own.
+- The terminal is a fallback behind a menu ("Raw terminal output", for output
+  the chat can't draw), never a primary button in Cora. Runs and terminal
+  agents outside Cora keep their terminals.
+- Main stays mounted underneath while you are inside a worker, so Back or Esc
+  returns to exactly where you were, and focus goes back to the row you opened.
+- One slim bar says where you are: Main, the worker, its model, its state and
+  its time. It is a navigation landmark; the arrows step through the chat's
+  workers. Esc leaves only when nothing inside the view (a menu, a popover)
+  wants it first.
+- A worker row in a step card is one button. "Open" shows on hover and focus,
+  not all the time.
+- A running worker's composer steers that worker only and says so. A finished
+  worker takes no messages: a follow-up goes through Cora.
+- Another worker ending while you are inside changes a status in the bar. It is
+  never a toast.
+- Colour means state, as in the chat: running, done and failed use the status
+  tokens; nothing else in the bar is tinted.
+
 ## Automations (2026-11)
 
 **Chosen:** variant A, inbox and run history, from four variants built with the
