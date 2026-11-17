@@ -38,6 +38,21 @@ let skipped = 0;
 // (echo, test, sleep). The Windows paths (junctions, cmd, taskkill) are not
 // exercised here, so Windows runs only the parsing and matching checks.
 let posixOnly = false;
+// The log file as it stands once it shows `line`. The service writes its log
+// through a stream, so a status that says "succeeded" (or a question waiting
+// for the user) can be read before the stream has put its last lines on disk
+// (PR 237's macOS pool, 17 Nov: no "Setup finished" yet). The in-memory tail
+// that agents get has them at once; the file follows. Waits at most 10 s.
+const FINISHED_LINE = /\n(Setup finished|Setup failed|Setup stopped)\b/;
+async function logShowing(svc, id, line = FINISHED_LINE) {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const text = (await svc.readLog(id, 0)).text;
+    if (line.test(text) || Date.now() > deadline) return text;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 async function check(name, fn) {
   if (posixOnly && process.platform === "win32") {
     skipped += 1;
@@ -572,7 +587,7 @@ async function runSuite(m, scratch) {
     assert.deepEqual(done.linked, ["node_modules"]);
     assert.ok(done.copiedCount >= 3);
     assert.equal(fs.readFileSync(path.join(wt, "user-ran.txt"), "utf8"), "user\n");
-    const log = await svc.readLog(first.id, 0);
+    const log = { text: await logShowing(svc, first.id) };
     assert.match(log.text, new RegExp(`root=${repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.match(log.text, /branch=wt-service/);
     assert.match(log.text, /Setup finished/);
@@ -629,7 +644,7 @@ async function runSuite(m, scratch) {
     assert.equal(done.exitCode, 3);
     assert.match(done.error, /exited with code 3/);
     assert.deepEqual(done.commands.map((c) => c.state), ["failed", "skipped"]);
-    const log = (await svc.readLog(started.id)).text;
+    const log = await logShowing(svc, started.id);
     assert.match(log, /^before$/m);
     assert.doesNotMatch(log, /^never$/m);
     // Run again after fixing the file.
@@ -637,7 +652,7 @@ async function runSuite(m, scratch) {
     const again = await svc.rerun(started.id, { userCommand: null });
     const second = await svc.waitFor(again.id, 20_000);
     assert.equal(second.state, "succeeded");
-    const secondLog = (await svc.readLog(again.id)).text;
+    const secondLog = await logShowing(svc, again.id);
     assert.match(secondLog, /fixed/);
     // What the first run put there is expected, not listed as skipped.
     assert.ok(done.copiedCount > 0);
@@ -675,7 +690,7 @@ async function runSuite(m, scratch) {
     const done = await svc.waitFor(started.id, 20_000);
     assert.equal(done.state, "succeeded");
     assert.ok(Date.now() - t0 < 6_000, `took ${Date.now() - t0} ms`);
-    assert.match((await svc.readLog(started.id)).text, /^started$/m);
+    assert.match(await logShowing(svc, started.id), /^started$/m);
   });
 
   await check("a link planted in the setup folder is replaced, never written through", async () => {
@@ -695,7 +710,7 @@ async function runSuite(m, scratch) {
       assert.equal(fs.lstatSync(path.join(setupDir, name)).isSymbolicLink(), false, name);
     }
     assert.equal(fs.statSync(path.join(setupDir, "setup.log")).mode & 0o777, 0o600);
-    assert.match((await svc.readLog(started.id)).text, /^planted-check$/m);
+    assert.match(await logShowing(svc, started.id), /^planted-check$/m);
   });
 
   await check("stop also ends a child that ignores SIGTERM before it returns", async () => {
@@ -751,7 +766,7 @@ async function runSuite(m, scratch) {
     const done = await svc.waitFor(started.id, 20_000);
     assert.equal(done.state, "succeeded", done.error);
     assert.ok(Date.now() - t0 < 3_000, `took ${Date.now() - t0} ms`);
-    const log = (await svc.readLog(started.id)).text;
+    const log = await logShowing(svc, started.id);
     assert.match(log, /^started$/m);
     assert.match(log, /still running/);
   });
@@ -881,7 +896,7 @@ async function runSuite(m, scratch) {
       await new Promise((r) => setTimeout(r, 200));
       assert.equal(fs.existsSync(path.join(wt, "ran.txt")), false);
       assert.equal(fs.existsSync(path.join(wt, "user.txt")), false, "your command waits with it");
-      const log = (await svc.readLog(started.id)).text;
+      const log = await logShowing(svc, started.id, /^\$ echo gate > ran\.txt$/m);
       assert.match(log, /are new or changed for gate, so nothing has run/);
       assert.match(log, /^\$ echo gate > ran\.txt$/m);
       const summary = service.agentSetupSummary(prepared, "");
@@ -1070,7 +1085,7 @@ async function runSuite(m, scratch) {
       assert.deepEqual(started.approval, { fingerprint: withTerminals, repoName: "gate" }, "an added terminal asks again");
       assert.equal((await svc.whenPrepared(started.id)).state, "awaiting-approval");
       assert.equal(fs.existsSync(path.join(started.worktreePath, "ran.txt")), false);
-      assert.match((await svc.readLog(started.id)).text, /^terminal dev: echo dev > dev\.txt$/m);
+      assert.match(await logShowing(svc, started.id, /^terminal dev: echo dev > dev\.txt$/m), /^terminal dev: echo dev > dev\.txt$/m);
       const preview = await files.previewWorktreeSetup(gate, null, process.platform, false, store);
       assert.equal(preview.repoCommandFingerprint, withTerminals, "the dialog approves the same thing");
       await svc.approve(started.id, { fingerprint: withTerminals, always: true });
