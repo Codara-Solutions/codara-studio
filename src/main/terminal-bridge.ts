@@ -29,6 +29,7 @@
 import { BrowserWindow, ipcMain } from "electron";
 import { randomBytes } from "node:crypto";
 import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
+import { holdUntilRendererReady, isRendererReady, isStartingUp, onRendererNotReady, RENDERER_HOLD_MS } from "./renderer-readiness";
 
 // "create" mints a renderer-owned terminal tab, "destroy" closes it by id,
 // and "resize" keeps a phone-owned xterm grid in lockstep with its PTY. The
@@ -101,6 +102,8 @@ let listenerRegistered = false;
 export function registerTerminalBridge(): void {
   if (listenerRegistered) return;
   listenerRegistered = true;
+  // A new document or a dead renderer has none of the panes it listed.
+  onRendererNotReady(forgetInventory);
   ipcMain.on(RESPONSE_CHANNEL, (event, payload: BridgeResponse) => {
     // Gate the sender like preview-bridge:response. Only the trusted main
     // frame's terminalRpc legitimately answers a tab-create/destroy request; a
@@ -108,6 +111,14 @@ export function registerTerminalBridge(): void {
     // The real renderer always answers from the committed, allowlisted document.
     if (!isTrustedOnSender(event, RESPONSE_CHANNEL)) return;
     if (!payload || typeof payload.reqId !== "string") return;
+    // A create or destroy that timed out may still have been carried out:
+    // only now has the renderer answered it.
+    const lateMutation = lateMutations.get(payload.reqId);
+    if (lateMutation) {
+      lateMutations.delete(payload.reqId);
+      clearTimeout(lateMutation.expiry);
+      unansweredMutations.delete(lateMutation.token);
+    }
     const entry = pending.get(payload.reqId);
     if (!entry) {
       const gaveUp = late.get(payload.reqId);
@@ -131,8 +142,11 @@ export function registerTerminalBridge(): void {
       entry.reject(new Error(payload.error || "terminal op failed"));
     }
   });
-  ipcMain.on(INVENTORY_CHANNEL, (event) => {
+  ipcMain.on(INVENTORY_CHANNEL, (event, payload?: unknown) => {
     if (!isTrustedOnSender(event, INVENTORY_CHANNEL)) return;
+    // A renderer that sends the inventory with the ping keeps main's copy
+    // current; listeners hear only changes to what a phone shows.
+    if (payload !== undefined && !acceptInventory(payload)) return;
     for (const listener of inventoryListeners) {
       try {
         listener();
@@ -150,29 +164,90 @@ export function onStudioTerminalInventoryChanged(
   return () => inventoryListeners.delete(listener);
 }
 
+// Ops held for a starting window are rare (boot and reloads) and worth a line
+// in main.log (index.ts): when one was held, and whether it then went to the
+// window or was answered from main's copy of the panes.
+export type HeldTerminalOpEvent =
+  | { op: TerminalOpName; phase: "held" }
+  | { op: TerminalOpName; phase: "sent" | "copy" | "failed"; heldMs: number };
+const heldListeners = new Set<(event: HeldTerminalOpEvent) => void>();
+
+export function onHeldTerminalOp(listener: (event: HeldTerminalOpEvent) => void): () => void {
+  heldListeners.add(listener);
+  return () => heldListeners.delete(listener);
+}
+
+function reportHeld(event: HeldTerminalOpEvent): void {
+  for (const listener of heldListeners) {
+    try {
+      listener(event);
+    } catch (err) {
+      console.error("[terminal-bridge] held-op listener failed:", err);
+    }
+  }
+}
+
 export async function requestTerminalOp<T = unknown>(
   op: TerminalOpName,
   params: TerminalOpParams = {},
-  opts?: { timeoutMs?: number; onLate?: (result: T) => void },
+  opts?: {
+    timeoutMs?: number;
+    onLate?: (result: T) => void;
+    signal?: AbortSignal;
+    // The hold for a starting window comes out of timeoutMs instead of
+    // preceding it, for a caller with one deadline for the whole call.
+    holdWithinTimeout?: boolean;
+  },
 ): Promise<T> {
-  const win = pickTargetWindow();
-  if (!win) {
-    throw new Error(
-      "No Codara window is open. Open Codara before calling terminal.create.",
-    );
+  const noWindow = () => new Error("No Codara window is open. Open Codara before calling terminal.create.");
+  // While the app starts, the window may not exist yet: that is held like a
+  // window that has not mounted. Once it has been created, none means closed.
+  let win = pickTargetWindow();
+  if (!win && !isStartingUp()) throw noWindow();
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  let opTimeoutMs = timeoutMs;
+  // Until React has mounted, nothing in the renderer hears the request. The
+  // hold has its own limit, and the op's timeout starts once it is over.
+  let heldSince: number | null = null;
+  if (!isRendererReady()) {
+    heldSince = Date.now();
+    reportHeld({ op, phase: "held" });
+    try {
+      await holdUntilRendererReady(opts?.signal, opts?.holdWithinTimeout ? Math.min(RENDERER_HOLD_MS, timeoutMs) : RENDERER_HOLD_MS);
+    } catch (error) {
+      reportHeld({ op, phase: "failed", heldMs: Date.now() - heldSince });
+      throw error;
+    }
+    if (opts?.holdWithinTimeout) opTimeoutMs = Math.max(0, timeoutMs - (Date.now() - heldSince));
+    win = pickTargetWindow() ?? win;
   }
+  if (!win) throw noWindow();
+  // A window that has just got ready sent its panes first (App.tsx), so a
+  // list held for it needs no round trip into the renderer at its busiest.
+  if (op === "list") {
+    const cached = cachedStudioTerminalInventory();
+    if (cached) {
+      if (heldSince !== null) reportHeld({ op, phase: "copy", heldMs: Date.now() - heldSince });
+      return cached as T;
+    }
+  }
+  if (heldSince !== null) reportHeld({ op, phase: "sent", heldMs: Date.now() - heldSince });
   if (win.webContents.isDestroyed() || win.webContents.isLoading()) {
     // wait briefly for the renderer to be ready
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
   }
 
   const reqId = randomBytes(8).toString("hex");
-  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const request: BridgeRequest = { reqId, op, params };
+  const target = win;
+  const mutation = MUTATING_OPS.has(op) ? beginMutation() : null;
 
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(reqId);
+      // The renderer may still carry it out: the copy stays unused until it
+      // answers and its next inventory arrives.
+      mutation?.timedOut(reqId);
       const onLate = opts?.onLate;
       if (onLate) {
         const lateTimer = setTimeout(() => late.delete(reqId), LATE_WINDOW_MS);
@@ -180,20 +255,109 @@ export async function requestTerminalOp<T = unknown>(
         late.set(reqId, { onLate: (result) => onLate(result as T), timer: lateTimer });
       }
       reject(new Error(`terminal op '${op}' timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
+    }, opTimeoutMs);
     pending.set(reqId, {
-      resolve: (value) => resolve(value as T),
-      reject,
+      resolve: (value) => {
+        mutation?.answered();
+        resolve(value as T);
+      },
+      reject: (error) => {
+        mutation?.answered();
+        reject(error);
+      },
       timer,
     });
     try {
-      win.webContents.send(REQUEST_CHANNEL, request);
+      target.webContents.send(REQUEST_CHANNEL, request);
     } catch (err) {
       pending.delete(reqId);
       clearTimeout(timer);
+      mutation?.answered();
       reject(err instanceof Error ? err : new Error(String(err)));
     }
   });
+}
+
+// ── The panes' inventory, kept in main ──────────────────────────────────────
+// The renderer sends its shareable panes with every change, and before it
+// tells main it is ready (App.tsx), so terminal.list and the ownership checks
+// built on it answer from here without a round trip into a renderer that may
+// be busy for seconds on a loaded machine. The copy is only trusted while it
+// can be as current as a round trip would be: while the window is ready, and
+// not from the moment main sends a create, destroy, group or tab action until
+// the renderer has answered every one of them (a timed-out one included, up
+// to LATE_WINDOW_MS) and then sent its panes again. Until then callers fall
+// back to the round trip.
+const MUTATING_OPS: ReadonlySet<TerminalOpName> = new Set(["create", "destroy", "group", "tabAct"]);
+const MAX_INVENTORY_ENTRIES = 5_000;
+export interface StudioTerminalInventoryEntry {
+  paneId: string;
+  tabId: string;
+  workspaceId: string;
+  [key: string]: unknown;
+}
+let inventory: StudioTerminalInventoryEntry[] | null = null;
+let phoneFingerprint: string | null = null;
+// Mutations the renderer has not answered yet; timed-out ones stay until a
+// late answer arrives (lateMutations, by request id) or LATE_WINDOW_MS ends.
+const unansweredMutations = new Set<symbol>();
+const lateMutations = new Map<string, { token: symbol; expiry: NodeJS.Timeout }>();
+let awaitingInventoryAfterMutation = false;
+
+function isInventoryEntry(value: unknown): value is StudioTerminalInventoryEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Record<string, unknown>;
+  return typeof entry.paneId === "string" && typeof entry.tabId === "string" && typeof entry.workspaceId === "string";
+}
+
+/** Stores a pushed inventory; true when what a phone shows changed. */
+function acceptInventory(payload: unknown): boolean {
+  if (!Array.isArray(payload) || payload.length > MAX_INVENTORY_ENTRIES || !payload.every(isInventoryEntry)) return false;
+  inventory = payload;
+  if (unansweredMutations.size === 0) awaitingInventoryAfterMutation = false;
+  const fingerprint = JSON.stringify(
+    payload.map((entry) => [entry.paneId, entry.tabId, entry.workspaceId, entry.title ?? null, entry.profile ?? null]),
+  );
+  const changed = fingerprint !== phoneFingerprint;
+  phoneFingerprint = fingerprint;
+  return changed;
+}
+
+// A new document or a dead renderer: its panes are gone, and so are the
+// answers it still owed.
+function forgetInventory(): void {
+  inventory = null;
+  phoneFingerprint = null;
+  unansweredMutations.clear();
+  for (const { expiry } of lateMutations.values()) clearTimeout(expiry);
+  lateMutations.clear();
+  awaitingInventoryAfterMutation = false;
+}
+
+function beginMutation(): { answered: () => void; timedOut: (reqId: string) => void } {
+  const token = Symbol("terminal mutation");
+  unansweredMutations.add(token);
+  awaitingInventoryAfterMutation = true;
+  return {
+    answered: () => {
+      unansweredMutations.delete(token);
+    },
+    timedOut: (reqId) => {
+      if (!unansweredMutations.has(token)) return;
+      const expiry = setTimeout(() => {
+        lateMutations.delete(reqId);
+        unansweredMutations.delete(token);
+      }, LATE_WINDOW_MS);
+      expiry.unref?.();
+      lateMutations.set(reqId, { token, expiry });
+    },
+  };
+}
+
+/** The renderer's panes as it last sent them, or null when a round trip is needed. */
+export function cachedStudioTerminalInventory(): StudioTerminalInventoryEntry[] | null {
+  if (!isRendererReady() || !inventory || unansweredMutations.size > 0 || awaitingInventoryAfterMutation) return null;
+  return inventory.map((entry) => ({ ...entry }));
 }
 
 // The app window first: only its renderer answers these requests, and a
