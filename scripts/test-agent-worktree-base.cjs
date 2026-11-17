@@ -236,6 +236,47 @@ async function main() {
       assert.equal(fromDefault.baseRef, "origin/main");
     });
 
+    await check("a base is classified by the ref git resolves it to", async () => {
+      remoteMain = pushMain(1);
+      const full = await create({ branch: "fix/full-name", base: "refs/heads/main" });
+      assert.equal(headOf(full), remoteMain, "refs/heads/main is the local main, so origin/main is fetched");
+      assert.equal(full.baseRef, "origin/main");
+      assert.equal(full.base, "refs/heads/main");
+
+      git(repo, ["branch", "-q", "origin/local-base", localMain]);
+      git(repo, ["branch", "-q", "--set-upstream-to", "refs/remotes/origin/main", "origin/local-base"]);
+      remoteMain = pushMain(1);
+      const named = await create({ branch: "fix/remote-like-name", base: "origin/local-base" });
+      assert.equal(headOf(named), remoteMain, "a local branch named like a remote one follows its upstream");
+      assert.equal(named.baseRef, "origin/main");
+      assert.equal(named.fetch, "ok");
+
+      const tagged = git(repo, ["rev-parse", "origin/main~1"]);
+      git(repo, ["tag", "main", tagged]);
+      try {
+        const fromTag = await create({ branch: "fix/tag-main", base: "main" });
+        assert.equal(headOf(fromTag), tagged, "git picks the tag main, and so does the worktree");
+        assert.equal(fromTag.baseRef, "main");
+        assert.equal(fromTag.fetch, "skipped");
+      } finally {
+        git(repo, ["tag", "-d", "main"]);
+      }
+    });
+
+    await check("an upstream kept outside refs/remotes is still fetched", async () => {
+      git(repo, ["remote", "add", "vendor", origin]);
+      git(repo, ["config", "--replace-all", "remote.vendor.fetch", "+refs/heads/*:refs/vendor/*"]);
+      git(repo, ["fetch", "-q", "vendor"]);
+      git(repo, ["branch", "-q", "vend", localMain]);
+      git(repo, ["config", "branch.vend.remote", "vendor"]);
+      git(repo, ["config", "branch.vend.merge", "refs/heads/main"]);
+      remoteMain = pushMain(1);
+      const made = await create({ branch: "fix/vendor", base: "vend" });
+      assert.equal(headOf(made), remoteMain);
+      assert.equal(made.baseRef, "vendor/main");
+      assert.equal(made.fetch, "ok");
+    });
+
     await check("checkout:true is unchanged", async () => {
       git(repo, ["branch", "-q", "feat/existing", localMain]);
       const made = await create({ branch: "feat/existing", checkout: true });
