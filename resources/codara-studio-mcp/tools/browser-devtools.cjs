@@ -5,14 +5,14 @@
 
 module.exports = {
   order: 40,
-  budget: 3070,
+  budget: 3105,
   tools: [
     {
       name: "codara_preview_console",
       rpc: "preview.console",
       annotations: { readOnly: true },
       description:
-        "Read the tab's console messages and uncaught errors since it opened (up to 500). Filter by level; clear=true resets.",
+        "Read the tab's console messages and uncaught errors since it opened. Filter by level; clear=true resets.",
       inputSchema: {
         type: "object",
         properties: {
@@ -75,7 +75,7 @@ module.exports = {
       name: "codara_preview_storage",
       rpc: "preview.storage",
       description:
-        "Read or change the tab origin's storage. get (default) lists every area; set writes name=value in area cookies, local or session; clear empties area (default all) or one name. fresh opens url in a new logged-out tab with a temporary session and returns its tabId; discard closes it and wipes its data. Secrets are redacted unless redact=false.",
+        "Read or change the tab origin's storage. get (default) lists every area; set writes name=value in area cookies, local or session; clear empties area (default all) or one name. fresh opens url in a new logged-out tab with a temporary session and returns its tabId; discard closes it and wipes its data. Secrets are redacted unless redact=false. chrome: tabs: get; set/clear local, session.",
       inputSchema: {
         type: "object",
         properties: {
