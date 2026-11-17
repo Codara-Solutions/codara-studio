@@ -53,7 +53,7 @@ export default function ImagePreview({ src, alt, onError, toolbarAction, forceLo
       ? Math.min(1, (viewport.w - PADDING * 2) / natural.w, (viewport.h - PADDING * 2) / natural.h)
       : 1;
   const safeFit = Math.max(0.01, fitZoom);
-  const { zoom, fitted, zoomTo, fit, apply } = useViewerZoom({
+  const { zoom, fitted, zoomTo, fit, controls } = useViewerZoom({
     rootRef,
     scrollerRef,
     contentRef: imageRef,
@@ -98,7 +98,8 @@ export default function ImagePreview({ src, alt, onError, toolbarAction, forceLo
       return;
     }
     const box = scroller.getBoundingClientRect();
-    // A small image already shows at 100% when fitted; double-click then doubles it.
+    // Exactly 100%, even when fit is 99.5%. A small image already shows at
+    // 100% when fitted, so there double-click doubles it instead of doing nothing.
     zoomTo(safeFit >= 0.999 ? 2 : 1, { x: event.clientX - box.left, y: event.clientY - box.top });
   };
 
@@ -116,10 +117,7 @@ export default function ImagePreview({ src, alt, onError, toolbarAction, forceLo
           {natural ? `${natural.w} × ${natural.h}` : ""}
         </span>
         <ZoomControl
-          zoom={zoom}
-          onZoomOut={() => apply("out")}
-          onZoomIn={() => apply("in")}
-          onFit={fit}
+          {...controls}
           fitTitle="Fit to view (double-click the image toggles 100%)"
         />
         {toolbarAction}
