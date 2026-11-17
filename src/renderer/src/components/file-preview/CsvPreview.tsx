@@ -14,6 +14,9 @@ import { registerZoomTarget } from "../zoom/zoom-router";
 import { wheelPixels } from "../zoom/zoom-math";
 import "./csv.css";
 
+// Cmd+wheel zooms on macOS only, as in the other viewers (useViewerZoom).
+const IS_MAC = typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
+
 interface ViewSettings {
   delimiter: CsvDelimiter;
   header: boolean;
@@ -231,7 +234,7 @@ export default function CsvPreview({ path, text, onChange, dirty, onSave }: {
     });
     let carry = 0;
     const onWheel = (event: WheelEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) return;
+      if (!(event.ctrlKey || (IS_MAC && event.metaKey))) return;
       event.preventDefault();
       const pixels = wheelPixels(event.deltaY, event.deltaMode);
       carry = Math.sign(pixels) === Math.sign(carry) ? carry + pixels : pixels;
