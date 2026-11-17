@@ -468,14 +468,25 @@ async function mutate(
   }
 }
 
+// Paths handed to git by the panel are names, never patterns, and they are
+// the status read's paths, which git gives from the repository root:
+// - `literal`: a folder named "[ab]" or a file named "*.ts" matches only
+//   itself (`--` ends options; it does not turn off pathspec magic, and a
+//   name starting with ":" would otherwise be read as magic too);
+// - `top`: the path is taken from the root, so a workspace opened in a
+//   folder below it stages, unstages and discards the file the row shows.
+export function exactPath(path: string): string {
+  return `:(top,literal)${path}`;
+}
+
 export function stageFiles(cwd: string, paths: string[]): Promise<GitOpResult> {
   if (paths.length === 0) return Promise.resolve({ ok: true });
-  return mutate(cwd, ["add", "--", ...paths]);
+  return mutate(cwd, ["add", "--", ...paths.map(exactPath)]);
 }
 
 export function unstageFiles(cwd: string, paths: string[]): Promise<GitOpResult> {
   if (paths.length === 0) return Promise.resolve({ ok: true });
-  return mutate(cwd, ["reset", "-q", "HEAD", "--", ...paths]);
+  return mutate(cwd, ["reset", "-q", "HEAD", "--", ...paths.map(exactPath)]);
 }
 
 export function stageAll(cwd: string): Promise<GitOpResult> {
@@ -497,10 +508,10 @@ export async function discardChanges(
   const tracked = files.filter((f) => !f.untracked).map((f) => f.path);
   const untracked = files.filter((f) => f.untracked).map((f) => f.path);
   try {
-    if (tracked.length > 0) await runGit(cwd, ["checkout", "--", ...tracked]);
+    if (tracked.length > 0) await runGit(cwd, ["checkout", "--", ...tracked.map(exactPath)]);
     // `-d` so an untracked directory entry (git reports these as "dir/") is
     // actually removed; plain `clean -f` silently skips directories.
-    if (untracked.length > 0) await runGit(cwd, ["clean", "-fd", "--", ...untracked]);
+    if (untracked.length > 0) await runGit(cwd, ["clean", "-fd", "--", ...untracked.map(exactPath)]);
     invalidateGitCache(cwd);
     return { ok: true };
   } catch (err) {

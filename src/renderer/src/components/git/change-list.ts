@@ -8,6 +8,13 @@ export type ChangeListEntry =
   /** New files under one folder that holds nothing git tracks as changed. */
   | { kind: "folder"; dir: string; files: GitFileChange[] };
 
+// A workspace opened below the repository root sees the rest of the repo as
+// "../…". Those paths never fold: a ".." row would act on folders the
+// workspace does not show, and on changes listed apart from it.
+function outsideWorkspace(dir: string): boolean {
+  return dir === ".." || dir.startsWith("../");
+}
+
 function parentDirs(path: string): string[] {
   const parts = path.replace(/\/+$/, "").split("/");
   const dirs: string[] = [];
@@ -39,7 +46,8 @@ export function groupChanges(files: readonly GitFileChange[]): ChangeListEntry[]
   const loose: GitFileChange[] = [];
   for (const file of untracked) {
     const dir = parentDirs(file.path).find(
-      (candidate) => !holdsTracked.has(candidate) && (newCount.get(candidate) ?? 0) >= 2,
+      (candidate) =>
+        !outsideWorkspace(candidate) && !holdsTracked.has(candidate) && (newCount.get(candidate) ?? 0) >= 2,
     );
     if (dir === undefined) {
       loose.push(file);
