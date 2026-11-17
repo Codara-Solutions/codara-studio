@@ -1,5 +1,5 @@
 import {
-  forwardRef, useDeferredValue, useEffect, useId, useMemo, useRef, useState,
+  forwardRef, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState,
   type CSSProperties, type KeyboardEvent, type ReactNode,
 } from "react";
 import { TableVirtuoso, type TableComponents, type TableVirtuosoHandle } from "react-virtuoso";
@@ -9,6 +9,9 @@ import {
 } from "./csv";
 import FindBar from "../find/FindBar";
 import { useGridFind, type GridSource } from "../find/useGridFind";
+import { isShown } from "../find/find-router";
+import { registerZoomTarget } from "../zoom/zoom-router";
+import { wheelPixels } from "../zoom/zoom-math";
 import "./csv.css";
 
 interface ViewSettings {
@@ -200,6 +203,48 @@ export default function CsvPreview({ path, text, onChange, dirty, onSave }: {
     setSettings((current) => ({ ...current, [key]: value }));
   };
   const closeSettings = () => { setSettingsOpen(false); settingsButtonRef.current?.focus(); };
+
+  // A new text size remounts the rows, focused cell included. Focus goes back
+  // to the table before the next key, so a second Ctrl+= still reaches it.
+  const zoomFocus = useRef(false);
+  useLayoutEffect(() => {
+    if (!zoomFocus.current) return;
+    zoomFocus.current = false;
+    if (!viewRef.current?.contains(document.activeElement)) gridRef.current?.focus({ preventScroll: true });
+  }, [settings.fontSize]);
+
+  // The table's zoom is its Text size setting (11 to 16 px): the zoom keys
+  // while focus is in the table, and Ctrl+wheel or pinch over it, step it.
+  useEffect(() => {
+    const view = viewRef.current;
+    const grid = gridRef.current;
+    if (!view || !grid) return;
+    const setFontSize = (next: (size: number) => number) => {
+      zoomFocus.current = view.contains(document.activeElement);
+      setSettings((current) => ({ ...current, fontSize: Math.min(16, Math.max(11, next(current.fontSize))) }));
+    };
+    const step = (delta: number) => setFontSize((size) => size + delta);
+    const off = registerZoomTarget({
+      root: () => viewRef.current,
+      eligible: () => isShown(viewRef.current),
+      zoom: (action) => (action === "reset" ? setFontSize(() => defaults.fontSize) : step(action === "in" ? 1 : -1)),
+    });
+    let carry = 0;
+    const onWheel = (event: WheelEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      event.preventDefault();
+      const pixels = wheelPixels(event.deltaY, event.deltaMode);
+      carry = Math.sign(pixels) === Math.sign(carry) ? carry + pixels : pixels;
+      if (Math.abs(carry) < 50) return;
+      carry = 0;
+      step(pixels < 0 ? 1 : -1);
+    };
+    grid.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      off();
+      grid.removeEventListener("wheel", onWheel);
+    };
+  }, []);
   const cellClass = (column: number) => settings.freeze && column === firstVisible ? " csv-frozen" : "";
   const applyEdit = (): boolean => {
     if (!edit) return true;

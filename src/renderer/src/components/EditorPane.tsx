@@ -159,6 +159,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   // Data and visual documents open in preview; markdown opens in the editor.
   // Mode is intentionally not persisted, so reopening restores that default.
   const [viewMode, setViewMode] = useState<ViewMode>(toggleKind || isCsv ? "preview" : "edit");
+  // The Markdown preview puts its zoom row here, in the toolbar above it.
+  const [zoomSlot, setZoomSlot] = useState<HTMLElement | null>(null);
   useEffect(() => {
     setViewMode(toggleKind || isCsv ? "preview" : "edit");
   }, [path, toggleKind, isCsv]);
@@ -593,6 +595,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             }
             forceLocalToolbar={fullscreen}
             table={isCsv}
+            zoomSlotRef={isMarkdown && viewMode === "preview" ? setZoomSlot : undefined}
           />
         )}
         {previewOnly && secretKnown && (
@@ -663,7 +666,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         )}
         {doc.status === "ready" && isMarkdown && secretKnown && viewMode === "preview" && (
           <Suspense fallback={null}>
-            <MarkdownPreview text={doc.content} basePath={path} />
+            <MarkdownPreview text={doc.content} basePath={path} zoomSlot={zoomSlot} />
           </Suspense>
         )}
         {doc.status === "ready" && isCsv && secretKnown && (
@@ -936,6 +939,7 @@ function MarkdownToolbar({
   shareAction,
   forceLocalToolbar,
   table = false,
+  zoomSlotRef,
 }: {
   mode: ViewMode;
   copied: boolean;
@@ -945,9 +949,11 @@ function MarkdownToolbar({
   shareAction?: React.ReactNode;
   forceLocalToolbar?: boolean;
   table?: boolean;
+  zoomSlotRef?: (el: HTMLElement | null) => void;
 }) {
   return (
     <DockablePaneBar style={{ gap: 8 }} forceLocal={forceLocalToolbar}>
+      {zoomSlotRef && <span ref={zoomSlotRef} style={{ display: "inline-flex", alignItems: "center", gap: 6 }} />}
       {!table && (
         <button
           type="button"

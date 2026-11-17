@@ -4,6 +4,8 @@ import { TableVirtuoso, type TableComponents, type TableVirtuosoHandle } from "r
 import { DockablePaneBar } from "../../tabs/dockChromeSlot";
 import FindBar from "../find/FindBar";
 import { useGridFind, type GridSource } from "../find/useGridFind";
+import { useViewerZoom } from "../zoom/useViewerZoom";
+import ZoomControl from "../zoom/ZoomControl";
 
 interface Props {
   path: string;
@@ -117,6 +119,17 @@ export default function SpreadsheetPreview({
     label: "Find in spreadsheet",
   });
 
+  // The grid is virtualized at a fixed row height, so zoom scales the cells'
+  // sizes and text rather than the rendered rows.
+  const { zoom, controls } = useViewerZoom({
+    rootRef,
+    scrollerRef,
+    min: 0.5,
+    max: 3,
+    enabled: !loading && !error && !!sheet,
+  });
+  const cells = useMemo(() => scaledCells(zoom), [zoom]);
+
   return (
     <div ref={rootRef} style={hostStyle} onKeyDown={find.onKeyDown}>
       <DockablePaneBar forceLocal={forceLocalToolbar}>
@@ -157,6 +170,7 @@ export default function SpreadsheetPreview({
             </span>
           )
         )}
+        <ZoomControl {...controls} fitLabel="100%" fitTitle="Reset zoom" />
         {toolbarAction}
       </DockablePaneBar>
 
@@ -183,15 +197,15 @@ export default function SpreadsheetPreview({
               key={activeSheet}
               data={sheet.rows}
               components={tableComponents}
-              fixedItemHeight={31}
+              fixedItemHeight={cells.rowHeight}
               fixedHeaderContent={() => (
                 <tr>
                   <th
-                    style={{ ...headerCell, ...rowNumberCell, top: 0, zIndex: 3 }}
+                    style={{ ...cells.header, ...cells.rowNumber, top: 0, zIndex: 3 }}
                     aria-label="Row number"
                   />
                   {columnIndexes.map((column) => (
-                    <th key={column} style={headerCell}>
+                    <th key={column} style={cells.header}>
                       {columnLabel(column)}
                     </th>
                   ))}
@@ -199,13 +213,13 @@ export default function SpreadsheetPreview({
               )}
               itemContent={(rowIndex, row) => (
                 <>
-                  <th scope="row" style={rowNumberCell}>
+                  <th scope="row" style={cells.rowNumber}>
                     {rowIndex + 1}
                   </th>
                   {columnIndexes.map((column) => {
                     const display = formatCell(row[column]);
                     return (
-                      <td key={column} data-cell={`${rowIndex}:${column}`} style={dataCell} title={display}>
+                      <td key={column} data-cell={`${rowIndex}:${column}`} style={cells.data} title={display}>
                         {display}
                       </td>
                     );
@@ -385,3 +399,22 @@ const dataCell: React.CSSProperties = {
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
 };
+
+function scaledCells(zoom: number) {
+  // Whole pixels, so every row is exactly the height the list was told.
+  const px = (value: number) => Math.round(value * zoom);
+  const scale = (style: React.CSSProperties): React.CSSProperties => {
+    const out: React.CSSProperties = { ...style };
+    for (const key of ["width", "minWidth", "maxWidth", "height", "fontSize"] as const) {
+      const value = style[key];
+      if (typeof value === "number") out[key] = px(value);
+    }
+    return out;
+  };
+  return {
+    rowHeight: px(31),
+    header: scale(headerCell),
+    rowNumber: scale(rowNumberCell),
+    data: { ...scale(dataCell), lineHeight: `${px(31) - 1}px` },
+  };
+}
