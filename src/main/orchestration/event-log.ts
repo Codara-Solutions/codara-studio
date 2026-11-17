@@ -262,13 +262,20 @@ export function broadcastLiveEvent(input: AppendEventInput): void {
  * cannot drop the tail of a stream.
  */
 export async function flushBufferedEvents(runId?: string): Promise<void> {
-  const runIds = runId ? [runId] : [...pendingBuffers.keys()];
+  // A flush timer that already took the buffer is writing it in the run's
+  // append queue, so draining what is still buffered is not enough: wait for
+  // the queue as it stands now as well (in-flight writes and this drain, not
+  // appends that come later).
+  const runIds = runId ? [runId] : [...new Set([...pendingBuffers.keys(), ...runAppendQueues.keys()])];
   await Promise.all(
-    runIds.map((id) =>
-      drainBuffer(id).catch((err) => {
+    runIds.map((id) => {
+      const drained = drainBuffer(id).catch((err) => {
         console.warn(`[spark] flushing buffered events for run ${id} failed:`, err);
-      }),
-    ),
+      });
+      // Its own failure was reported where it was appended.
+      const queued = (runAppendQueues.get(id) ?? Promise.resolve()).catch(() => undefined);
+      return Promise.all([drained, queued]);
+    }),
   );
 }
 
