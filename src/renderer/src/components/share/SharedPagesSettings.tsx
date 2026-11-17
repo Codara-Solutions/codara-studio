@@ -81,7 +81,11 @@ export default function SharedPagesSettings() {
       description="Pages you shared as a link from this computer. Anyone with a link can open its page until it expires or you delete it."
       plain
     >
-      {list?.offline ? (
+      {list?.unavailable ? (
+        <InlineMessage tone="warn" role="status">
+          {list.error ?? "Share as link is not available yet."}
+        </InlineMessage>
+      ) : list?.offline ? (
         <InlineMessage tone="warn" role="status">
           Could not reach the share service, so this is the list saved on this computer.
         </InlineMessage>
@@ -91,7 +95,7 @@ export default function SharedPagesSettings() {
           {error}
         </InlineMessage>
       ) : null}
-      {list === null ? null : list.pages.length === 0 ? (
+      {list === null ? null : list.unavailable && list.pages.length === 0 ? null : list.pages.length === 0 ? (
         <SettingsCard>
           <EmptyState
             icon={<LinkIcon size={20} />}
@@ -126,13 +130,15 @@ export default function SharedPagesSettings() {
               {!list.offline ? (
                 <ExpiryMenu disabled={busyId === page.id} onPick={(days) => void extend(page, days)} />
               ) : null}
-              <ConfirmButton
-                confirmLabel="Delete link"
-                disabled={busyId === page.id}
-                onConfirm={() => void remove(page)}
-              >
-                Delete
-              </ConfirmButton>
+              {!list.unavailable ? (
+                <ConfirmButton
+                  confirmLabel="Delete link"
+                  disabled={busyId === page.id}
+                  onConfirm={() => void remove(page)}
+                >
+                  Delete
+                </ConfirmButton>
+              ) : null}
             </div>
           ))}
         </div>

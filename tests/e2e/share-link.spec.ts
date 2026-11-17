@@ -251,3 +251,86 @@ test("a page is shared from the editor, served sealed, managed in Settings, and 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// Issue #187: a build whose share service is not online (SHARE_SERVICE_LIVE
+// off, no CODARA_SHARE_URL) must not offer an action that can only fail.
+test("without a share service, Share as link is not offered anywhere", async () => {
+  test.setTimeout(120_000);
+  const { SHARE_SERVICE_LIVE } = await import("../../src/main/share/availability");
+  test.skip(SHARE_SERVICE_LIVE, "the share service is live in this build");
+
+  const root = await mkdtemp(join(tmpdir(), "codara-share-off-"));
+  const home = join(root, "home");
+  const workspaceDir = join(root, "workspace");
+  await mkdir(home, { recursive: true });
+  await mkdir(workspaceDir, { recursive: true });
+  await writeFile(join(workspaceDir, "report.md"), "# Quarterly report\n", "utf8");
+  await writeFile(
+    join(home, "spark-state.json"),
+    JSON.stringify({
+      workspaces: [{ id: "ws-share-off", name: "share-off", cwd: workspaceDir, color: "#42D6C7", workers: [] }],
+      activeWorkspaceId: "ws-share-off",
+    }),
+    "utf8",
+  );
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && key !== "CODARA_SHARE_URL") env[key] = value;
+  }
+
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...env,
+        SPARK_USER_DATA_DIR: home,
+        CODARA_HOME_DIR: home,
+        SPARK_HOME_DIR: home,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
+        SPARK_NO_SHELL_INTEGRATION: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.waitForLoadState("domcontentloaded");
+
+    const reportPath = join(workspaceDir, "report.md");
+    const fileRow = page.locator(`[data-fs-path="${reportPath.replace(/\\/g, "\\\\")}"]`);
+    await expect(fileRow).toBeVisible({ timeout: 20_000 });
+    await fileRow.dispatchEvent("click");
+    await expect(page.getByRole("tab", { name: "report.md" })).toBeVisible();
+    // The toolbar the Share button sits in is up: Copy source, Preview, Edit.
+    await expect(page.getByRole("group", { name: "File view mode" })).toBeVisible({ timeout: 20_000 });
+    expect(await page.evaluate(() => window.spark.share.status())).toMatchObject({ available: false });
+    await expect(page.getByRole("button", { name: "Share as link" })).toHaveCount(0);
+
+    await page.evaluate(() =>
+      window.dispatchEvent(new CustomEvent("spark:open-settings", { detail: { section: "shared-pages" } })),
+    );
+    await expect(page.getByText("Share as link is not available yet")).toBeVisible({ timeout: 15_000 });
+    await page.keyboard.press("Escape");
+
+    const handshakeFile = join(home, "agent-socket.json");
+    await expect
+      .poll(async () => (await readFile(handshakeFile, "utf8").catch(() => "")).length > 0, { timeout: 20_000 })
+      .toBe(true);
+    const { url, token } = JSON.parse(await readFile(handshakeFile, "utf8")) as { url: string; token: string };
+    const response = await fetch(`${url}/rpc`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "share.offer",
+        params: { path: reportPath, callerPid: process.pid },
+      }),
+    });
+    const answer = (await response.json()) as { result?: { offered?: boolean; reason?: string } };
+    expect(answer.result).toMatchObject({ offered: false, reason: "unavailable" });
+    await expect(page.getByRole("dialog", { name: "Share as link" })).toHaveCount(0);
+  } finally {
+    await app?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

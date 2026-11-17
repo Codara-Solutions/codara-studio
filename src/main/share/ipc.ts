@@ -16,6 +16,7 @@ import { logMain } from "../file-log";
 import { assertAllowedReadPathResolved } from "../fs-sandbox";
 import type { IpcHandle } from "../ipc";
 import { readShareAsset } from "./assets";
+import { shareServiceStatus } from "./availability";
 import { fetchShareRemote } from "./remote";
 import type { ShareService } from "./service";
 
@@ -50,6 +51,7 @@ function idOf(value: unknown): string {
 
 /** Register this area's channels with the trusted-sender `handle`. */
 export function registerShareIpc(handle: IpcHandle): void {
+  handle("share:status", () => shareServiceStatus());
   handle("share:create", async (_event, input: unknown) => {
     const raw = (input ?? {}) as Partial<ShareCreateInput>;
     return (await shareService()).create({

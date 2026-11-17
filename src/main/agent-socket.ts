@@ -86,6 +86,7 @@ import { defaultShell } from "./shells";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { loadSettings, loadState, saveState, updateState } from "./storage";
 import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
+import { shareServiceStatus } from "./share/availability";
 import { ShareOfferGate } from "./share/offer";
 import {
   createAgentWorktree,
@@ -1471,7 +1472,10 @@ async function handleAgentNotify(
   return successResponse(id, { published: true });
 }
 
-const shareOfferGate = new ShareOfferGate({ assertReadable: assertAllowedReadPathResolved });
+const shareOfferGate = new ShareOfferGate({
+  assertReadable: assertAllowedReadPathResolved,
+  status: () => shareServiceStatus(),
+});
 
 // An agent asks Studio to offer sharing a page it wrote. This only shows the
 // user the Share prompt for that file; nothing is uploaded unless they click
