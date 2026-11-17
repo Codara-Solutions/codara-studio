@@ -489,10 +489,29 @@ export function exactPath(path: string): string {
 // what one command line takes on Windows.
 const PATHS_PER_CALL = 200;
 
-function chunks<T>(items: readonly T[]): T[][] {
+function chunks<T>(items: readonly T[], size = PATHS_PER_CALL): T[][] {
   const out: T[][] = [];
-  for (let i = 0; i < items.length; i += PATHS_PER_CALL) out.push(items.slice(i, i + PATHS_PER_CALL));
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
+}
+
+// One listed file and nothing under it: if the file became a folder after it
+// was listed, the exclude keeps whatever is inside that folder.
+function onlyThisFile(path: string): string[] {
+  return [exactPath(path), `:(top,literal,exclude)${path}/`];
+}
+
+async function listNew(cwd: string, dir: string): Promise<string[]> {
+  const { stdout } = await runGit(cwd, [
+    "ls-files",
+    "--others",
+    "--exclude-standard",
+    "--full-name",
+    "-z",
+    "--",
+    exactPath(`${dir}/`),
+  ]);
+  return stdout.split("\0").filter(Boolean);
 }
 
 export async function stageFiles(cwd: string, paths: string[]): Promise<GitOpResult> {
@@ -513,16 +532,7 @@ export async function stageFiles(cwd: string, paths: string[]): Promise<GitOpRes
  */
 export async function discardNewFolder(cwd: string, dir: string, shown: string[]): Promise<GitOpResult> {
   try {
-    const { stdout } = await runGit(cwd, [
-      "ls-files",
-      "--others",
-      "--exclude-standard",
-      "--full-name",
-      "-z",
-      "--",
-      exactPath(`${dir}/`),
-    ]);
-    const now = stdout.split("\0").filter(Boolean).sort();
+    const now = (await listNew(cwd, dir)).sort();
     const expected = [...shown].sort();
     if (now.length !== expected.length || now.some((path, i) => path !== expected[i])) {
       invalidateGitCache(cwd);
@@ -530,7 +540,23 @@ export async function discardNewFolder(cwd: string, dir: string, shown: string[]
     }
     // A "path/" entry is a nested repository: git clean keeps those.
     const files = now.filter((path) => !path.endsWith("/"));
-    for (const part of chunks(files)) await runGit(cwd, ["clean", "-f", "--", ...part.map(exactPath)]);
+    let deleted = 0;
+    for (const part of chunks(files, PATHS_PER_CALL / 2)) {
+      try {
+        const { stdout } = await runGit(cwd, ["clean", "-f", "--", ...part.flatMap(onlyThisFile)]);
+        deleted += stdout.split("\n").filter((line) => line.startsWith("Removing ")).length;
+      } catch (err) {
+        invalidateGitCache(cwd);
+        return {
+          ok: false,
+          error: `${errorText(err)} (${deleted} of the ${files.length} files in ${dir}/ were already deleted)`,
+        };
+      }
+    }
+    // A listed file that turned into a folder meanwhile was kept, with what
+    // it holds; say which.
+    const left = await listNew(cwd, dir);
+    const kept = files.filter((path) => left.some((other) => other === path || other.startsWith(`${path}/`)));
     if (!isRemotePath(cwd)) {
       const root = (await runGit(cwd, ["rev-parse", "--show-toplevel"])).stdout.trim();
       const dirs = new Set<string>();
@@ -548,6 +574,12 @@ export async function discardNewFolder(cwd: string, dir: string, shown: string[]
       }
     }
     invalidateGitCache(cwd);
+    if (kept.length > 0) {
+      return {
+        ok: false,
+        error: `Deleted ${files.length - kept.length} of ${files.length} files in ${dir}/. Kept ${kept.join(", ")}: it changed while deleting.`,
+      };
+    }
     return { ok: true };
   } catch (err) {
     invalidateGitCache(cwd);
