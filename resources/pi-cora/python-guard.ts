@@ -19,9 +19,11 @@ export function commandOnPath(name: string, env: NodeJS.ProcessEnv = process.env
 export const PYTHON3_HINT =
   "This machine has no `python` command, only `python3`. Rerun only the python step with python3; anything before it in the same command already ran.";
 
-/** bash (`python: command not found`), dash (`python: not found`) and zsh
- *  (`command not found: python`), never python3 or python3.12. */
-const MISSING_PYTHON = /(?:^|[\s:])python: (?:command )?not found\b|command not found: python(?![\w.])/m;
+/** bash (`python: command not found`), dash (`python: not found`), zsh
+ *  (`command not found: python`) and env (`env: 'python': No such file or
+ *  directory`), never python3 or python3.12. */
+const MISSING_PYTHON =
+  /(?:^|[\s:])python: (?:command )?not found\b|command not found: python(?![\w.])|env: '?python'?: No such file or directory/m;
 
 /** Whether a shell tool's output says a bare `python` was not found. */
 export function saysPythonMissing(content: ReadonlyArray<{ type?: unknown; text?: unknown }>): boolean {

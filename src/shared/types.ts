@@ -726,9 +726,10 @@ export interface AppSettings {
   // opens. Optional for the same reason as coraAlwaysVerifyEdits.
   coraAutoCompactPercent?: number | null;
   // The order in which Cora (manager and Pi workers) tries the ways to reach
-  // a model: a provider sign-in, then an OpenRouter key, then Subcloud by
-  // default (src/shared/cora-routes.ts). A route with nothing configured is
-  // skipped. Optional for the same reason as coraAlwaysVerifyEdits.
+  // a model: a provider sign-in, an OpenRouter key, Subcloud
+  // (src/shared/cora-routes.ts). A route never set up is skipped; a sign-in
+  // that expired or hit its limit is not handed on. Unset (the default, also
+  // after an upgrade) launches every model as picked.
   coraRouteOrder?: Array<"subscription" | "openrouter" | "subcloud">;
 }
 

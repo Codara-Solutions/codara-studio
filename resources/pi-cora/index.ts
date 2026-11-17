@@ -16,8 +16,9 @@ import { rewriteSkillCommand, skillNamesFromCommands } from "./skill-commands";
 import { loadUserRulesSection } from "./user-rules";
 import {
   MANAGER_SESSION_WAIT_DESCRIPTION,
-  SESSION_WAIT_MANAGER_DEFAULT_SECONDS,
-  SESSION_WAIT_MANAGER_MAX_SECONDS,
+  managerSessionWaitSchema,
+  namesTopTier,
+  sessionModelRefusal,
   waitForSessionsInChunks,
   withSessionDefaults,
 } from "./session-tools";
@@ -147,23 +148,6 @@ function workerModelContract(
   return `\n\nWorker model availability:\n- You may spawn workers only on these exact model ids: ${ids.join(", ")}.\n- Set modelHint to one of these ids. This user allowlist overrides cross-provider and tier preferences.${waiting}`;
 }
 
-// The bridge's schema states Studio's per-call ceiling; the manager's wait
-// loops past it (session-tools.ts), so its schema states the manager's own.
-function managerSessionWaitSchema(schema: Record<string, unknown>): Record<string, unknown> {
-  const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
-  if (!properties?.timeoutSeconds) return schema;
-  return {
-    ...schema,
-    properties: {
-      ...properties,
-      timeoutSeconds: {
-        ...properties.timeoutSeconds,
-        description: `Default ${SESSION_WAIT_MANAGER_DEFAULT_SECONDS}, max ${SESSION_WAIT_MANAGER_MAX_SECONDS}.`,
-      },
-    },
-  };
-}
-
 function bridgeErrorMessage(result: BridgeToolResult, fallback: string): string {
   const texts = (result.content ?? [])
     .map((block) => block.type === "text" && typeof block.text === "string" ? block.text.trim() : "")
@@ -188,6 +172,9 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
   // Read once per process: a file that changed mid-chat would rewrite the
   // cached system prompt on every turn.
   const userRules = untrustedPullRequest ? "" : loadUserRulesSection();
+  // A session on the top tier starts only after the user named it here.
+  let userNamedTopTier = false;
+  pi.on("input", (event) => { if (namesTopTier(event.text)) userNamedTopTier = true; });
   pi.on("agent_end", (event) => {
     const last = event.messages.at(-1) as { stopReason?: string } | undefined;
     if (last?.stopReason === "aborted" || last?.stopReason === "error") return;
@@ -264,23 +251,27 @@ ${mcp?.promptSuffix() ?? ""}${userRules ? `\n\n${userRules}` : ""}`,
         ? {}
         : { promptSnippet: toolPromptSnippet(description) }),
       parameters: (sessionWait ? managerSessionWaitSchema(tool.inputSchema) : tool.inputSchema) as never,
-      async execute(_toolCallId, params, signal) {
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
         if (tool.name === "codara_complete") {
           const reason = whiteboardReview.completionBlock();
           if (reason) throw new Error(reason);
         }
         const abandonable = ABANDONABLE_BRIDGE_TOOLS.has(tool.name) ? signal : undefined;
+        const args = tool.name === "codara_session_start" ? withSessionDefaults(params) : params;
+        if (tool.name === "codara_session_start") {
+          const refusal = sessionModelRefusal(args, {
+            allowed: modelIdList(process.env.CODARA_PI_WORKER_MODELS),
+            userNamedTopTier,
+          });
+          if (refusal) throw new Error(refusal);
+        }
         const result = sessionWait
           ? await waitForSessionsInChunks(
-              (args, chunkSignal) => bridge.callToolByName(tool.name, args, chunkSignal),
+              (chunkArgs, chunkSignal) => bridge.callToolByName(tool.name, chunkArgs, chunkSignal),
               params,
-              { signal: abandonable },
+              { signal: abandonable, hasPendingMessages: () => ctx?.hasPendingMessages?.() === true },
             )
-          : await bridge.callToolByName(
-              tool.name,
-              tool.name === "codara_session_start" ? withSessionDefaults(params) : params,
-              abandonable,
-            );
+          : await bridge.callToolByName(tool.name, args, abandonable);
         // Pi's extension contract represents a failed tool by rejecting the
         // execute promise; an `isError` property on the returned result is not
         // consumed by Pi. Translate MCP failures explicitly so the model and

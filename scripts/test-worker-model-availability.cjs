@@ -111,6 +111,40 @@ async function main() {
   assert.ok(none.disconnected.length > 0, "the waiting models are reported so Cora can explain");
   console.log("PASS no connected account leaves no launchable model and names the waiting ones");
 
+  // Route order (cora-routes.ts), with a verified OpenRouter key for GPT.
+  const openRouter = await load("src/main/openrouter-config.ts");
+  const key = "test-key-not-real";
+  const orModels = ["openai/gpt-5.6-sol"];
+  const keyed = {
+    openRouterApiKey: key,
+    openRouterCoraModels: orModels,
+    openRouterVerifiedKeyHash: openRouter.openRouterConfigurationHash(key, orModels),
+  };
+  const ordered = { ...keyed, coraRouteOrder: ["subscription", "openrouter", "subcloud"] };
+
+  // Never set up: OpenRouter carries the model.
+  harnessState.statuses = [{ provider: "anthropic", connected: true, expired: false }];
+  assert.equal(await availability.routeCoraModel("gpt-5.6-sol", ordered), "openai/gpt-5.6-sol");
+  assert.ok((await availability.coraWorkerModelAvailability(ordered)).connected.includes("gpt-5.6-sol"));
+  // Set up but expired, or signed out: no silent move to the paid key; the
+  // launch fails and says to sign in again.
+  for (const broken of [
+    { provider: "openai-codex", connected: true, expired: true, canRefresh: false },
+    { provider: "openai-codex", connected: false, expired: false },
+  ]) {
+    harnessState.statuses = [{ provider: "anthropic", connected: true, expired: false }, broken];
+    assert.equal(await availability.routeCoraModel("gpt-5.6-sol", ordered), "gpt-5.6-sol", JSON.stringify(broken));
+    const split = await availability.coraWorkerModelAvailability(ordered);
+    assert.ok(split.disconnected.includes("gpt-5.6-sol") && !split.connected.includes("gpt-5.6-sol"));
+  }
+  // No order chosen (every existing user after the upgrade, and automations
+  // until the user picks one): models launch as picked.
+  harnessState.statuses = [{ provider: "anthropic", connected: true, expired: false }];
+  assert.equal(await availability.routeCoraModel("gpt-5.6-sol", keyed), "gpt-5.6-sol");
+  assert.equal(await availability.routeCoraModel("anthropic/claude-opus-5", { ...keyed, openRouterCoraModels: ["anthropic/claude-opus-5"] }), "anthropic/claude-opus-5");
+  assert.ok(!(await availability.coraWorkerModelAvailability(keyed)).connected.includes("gpt-5.6-sol"));
+  console.log("PASS routes: a broken sign-in is not swapped for a paid key, and no order means as picked");
+
   harnessState.fail = true;
   const unreadable = await availability.coraWorkerModelAvailability(settings);
   assert.ok(unreadable.connected.length >= 3 && unreadable.disconnected.length === 0);
