@@ -170,6 +170,16 @@ export interface AgentBoardCard {
    * started, and that session's own target while it is on the board.
    */
   origin?: AgentWorkOrigin;
+  /**
+   * A background agent whose starting session is on the board: that card's
+   * key. The Agents tab lists it under that card, not as a row of its own.
+   */
+  parentKey?: string;
+  /**
+   * A background agent's last sign of work (a note, a commit, its creation),
+   * which `since` does not track while it keeps working.
+   */
+  activeAt?: number;
 }
 
 export interface AgentWorkOrigin {
