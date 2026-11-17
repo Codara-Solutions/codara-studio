@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 // Legacy build required: the modern build assumes Uint8Array.prototype.toHex
 // (Chromium 140+), but Electron 32 ships Chromium 128 — every document load
 // died with "a.toHex is not a function" while computing the fingerprint.
@@ -140,10 +140,7 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
         <span style={{ fontFamily: "var(--font-mono)", marginRight: "auto", whiteSpace: "nowrap" }}>
           {doc.numPages} page{doc.numPages === 1 ? "" : "s"}
         </span>
-        <ZoomControl
-          {...controls}
-          fitTitle="Fit width"
-        />
+        <ZoomControl {...controls} fitTitle="Fit width" />
         {toolbarAction}
       </DockablePaneBar>
       <div ref={findHostRef} className="codara-find-host" onKeyDown={find.onKeyDown}>
@@ -154,17 +151,21 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
           tabIndex={-1}
           style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "16px 24px", display: "grid", gap: 16 }}
         >
-          {Array.from({ length: doc.numPages }, (_, i) => (
-            <PdfPage
-              key={i + 1}
-              doc={doc}
-              pageNumber={i + 1}
-              scale={scale}
-              placeholder={{ w: baseSize!.w * scale, h: baseSize!.h * scale }}
-              getTextContent={getTextContent}
-              onTextLayer={find.onTextLayer}
-            />
-          ))}
+          {/* Pages wait for the pane's width, so the first pages are not
+              drawn once at a guessed size and again right after. */}
+          {containerWidth > 0 &&
+            Array.from({ length: doc.numPages }, (_, i) => (
+              <PdfPage
+                key={i + 1}
+                doc={doc}
+                pageNumber={i + 1}
+                scale={scale}
+                placeholder={{ w: baseSize!.w * scale, h: baseSize!.h * scale }}
+                scrollerRef={containerRef}
+                getTextContent={getTextContent}
+                onTextLayer={find.onTextLayer}
+              />
+            ))}
         </div>
         {find.bar && <FindBar {...find.bar} />}
       </div>
@@ -172,19 +173,24 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
   );
 }
 
-// One page: a fixed-size placeholder that swaps in a rendered canvas, and
-// the text layer over it, when scrolled near the viewport
-// (IntersectionObserver, 600px lookahead). A zoom resizes the page at once
-// (the last drawing stretched to fit) and redraws it once the zoom settles,
-// into a new canvas that replaces the old one when done, so the page being
-// read never goes blank and a burst of wheel steps costs one drawing.
+// One page: a fixed-size placeholder that holds a drawn canvas, and the text
+// layer over it, only while the page is near the viewport
+// (IntersectionObserver on the scroller, 600px lookahead). A page that moves
+// far off screen lets its canvas and text layer go, so a long document keeps
+// only a few pages in memory. A zoom resizes every page at once (the last
+// drawing stretched to fit) and redraws only the pages near the viewport once
+// the zoom settles, into a new canvas that replaces the old one when done, so
+// the page being read never goes blank and a burst of wheel steps costs one
+// drawing per page on screen.
 const REDRAW_DELAY_MS = 120;
+const LOOKAHEAD = "600px";
 
 function PdfPage({
   doc,
   pageNumber,
   scale,
   placeholder,
+  scrollerRef,
   getTextContent,
   onTextLayer,
 }: {
@@ -192,16 +198,25 @@ function PdfPage({
   pageNumber: number;
   scale: number;
   placeholder: { w: number; h: number };
+  scrollerRef: RefObject<HTMLDivElement | null>;
   getTextContent: (pageNumber: number) => Promise<PdfTextContent>;
   onTextLayer: (pageNumber: number, divs: HTMLElement[] | null) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const layerRef = useRef<HTMLDivElement>(null);
-  const [visible, setVisible] = useState(pageNumber <= 2);
+  const [near, setNear] = useState(pageNumber <= 2);
   // The page's own size at scale 1, once known.
   const [unit, setUnit] = useState<{ w: number; h: number } | null>(null);
   const [drawScale, setDrawScale] = useState(scale);
+  // What the canvas on screen was drawn from; null when there is none.
+  const drawn = useRef<{ doc: PDFDocumentProxy; scale: number } | null>(null);
+  const draws = useRef(0);
+  // Whether find holds this page's text layer. Kept across redraws, so a
+  // redraw replaces the layer find sees instead of dropping it first.
+  const reported = useRef(false);
+  const textSource = useRef({ getTextContent, onTextLayer });
+  textSource.current = { getTextContent, onTextLayer };
 
   useEffect(() => {
     if (scale === drawScale) return;
@@ -211,23 +226,48 @@ function PdfPage({
 
   useEffect(() => {
     const el = hostRef.current;
-    if (!el || visible) return;
+    if (!el) return;
+    // The scroller is the root so the lookahead applies to it: with the
+    // window as root its clipping would ignore the margin.
     const io = new IntersectionObserver(
       (entries) => {
-        if (entries.some((e) => e.isIntersecting)) setVisible(true);
+        const last = entries[entries.length - 1];
+        if (last) setNear(last.isIntersecting);
       },
-      { root: null, rootMargin: "600px" },
+      { root: scrollerRef.current, rootMargin: LOOKAHEAD },
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [visible]);
+  }, [scrollerRef]);
+
+  useEffect(
+    () => () => {
+      if (reported.current) textSource.current.onTextLayer(pageNumber, null);
+      reported.current = false;
+    },
+    [pageNumber],
+  );
 
   useEffect(() => {
-    if (!visible) return;
+    if (!near) {
+      // Far off screen: free the canvas memory now rather than at garbage
+      // collection, and drop the text layer (find reads text without it).
+      const old = canvasHostRef.current?.firstElementChild;
+      if (old instanceof HTMLCanvasElement) {
+        old.width = 0;
+        old.height = 0;
+      }
+      canvasHostRef.current?.replaceChildren();
+      layerRef.current?.replaceChildren();
+      if (reported.current) textSource.current.onTextLayer(pageNumber, null);
+      reported.current = false;
+      drawn.current = null;
+      return;
+    }
+    if (drawn.current?.doc === doc && drawn.current.scale === drawScale) return;
     let cancelled = false;
     let renderTask: { cancel: () => void; promise: Promise<unknown> } | null = null;
     let textLayer: InstanceType<typeof pdfjs.TextLayer> | null = null;
-    let reported = false;
     void (async () => {
       try {
         const page: PDFPageProxy = await doc.getPage(pageNumber);
@@ -251,17 +291,28 @@ function PdfPage({
         await renderTask.promise;
         renderTask = null;
         if (cancelled) return;
+        const old = canvasHostRef.current?.firstElementChild;
         canvasHostRef.current?.replaceChildren(canvas);
+        if (old instanceof HTMLCanvasElement) {
+          old.width = 0;
+          old.height = 0;
+        }
+        drawn.current = { doc, scale: drawScale };
+        draws.current += 1;
+        // Lets tests check that a zoom redraws only the pages on screen.
+        if (hostRef.current) hostRef.current.dataset.pdfDraws = String(draws.current);
         const layer = layerRef.current;
         if (!layer) return;
-        const content = await getTextContent(pageNumber);
+        const content = await textSource.current.getTextContent(pageNumber);
         if (cancelled) return;
+        if (reported.current) textSource.current.onTextLayer(pageNumber, null);
+        reported.current = false;
         layer.replaceChildren();
         textLayer = new pdfjs.TextLayer({ textContentSource: content, container: layer, viewport });
         await textLayer.render();
         if (cancelled) return;
-        reported = true;
-        onTextLayer(pageNumber, textLayer.textDivs);
+        reported.current = true;
+        textSource.current.onTextLayer(pageNumber, textLayer.textDivs);
       } catch {
         // A cancelled render throws RenderingCancelled; the next one takes over.
       }
@@ -271,9 +322,8 @@ function PdfPage({
       // Stops pdf.js drawing into a canvas nobody will show.
       renderTask?.cancel();
       textLayer?.cancel();
-      if (reported) onTextLayer(pageNumber, null);
     };
-  }, [visible, doc, pageNumber, drawScale, getTextContent, onTextLayer]);
+  }, [near, doc, pageNumber, drawScale]);
 
   const box = unit ? { w: unit.w * scale, h: unit.h * scale } : placeholder;
   return (
@@ -296,8 +346,8 @@ function PdfPage({
         overflow: "hidden",
       }}
     >
-      {visible && <div ref={canvasHostRef} style={{ position: "absolute", inset: 0 }} />}
-      {visible && <div ref={layerRef} className="codara-pdf-text-layer" />}
+      <div ref={canvasHostRef} style={{ position: "absolute", inset: 0 }} />
+      <div ref={layerRef} className="codara-pdf-text-layer" />
     </div>
   );
 }
