@@ -11,6 +11,14 @@ import { registerServiceTierPolicy } from "./service-tier";
 import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
 import { studioBrowserOnlyDecision } from "./studio-browser-policy";
+import { barePythonDecision, pythonAvailability } from "./python-guard";
+import {
+  MANAGER_SESSION_WAIT_DESCRIPTION,
+  SESSION_WAIT_MANAGER_DEFAULT_SECONDS,
+  SESSION_WAIT_MANAGER_MAX_SECONDS,
+  waitForSessionsInChunks,
+  withSessionDefaults,
+} from "./session-tools";
 import { createWhiteboardReviewGuard } from "./whiteboard-review-policy";
 import {
   buildCoraPiSystemPrompt,
@@ -60,6 +68,7 @@ const ABANDONABLE_BRIDGE_TOOLS = new Set([
   "codara_wait_for_workers",
   "codara_wait_for_automation",
   "codara_workflow_wait",
+  "codara_session_wait",
   "codara_feedback_send",
 ]);
 const UNTRUSTED_PULL_REQUEST_POLICY = "untrusted-pull-request";
@@ -136,6 +145,23 @@ function workerModelContract(
   return `\n\nWorker model availability:\n- You may spawn workers only on these exact model ids: ${ids.join(", ")}.\n- Set modelHint to one of these ids. This user allowlist overrides cross-provider and tier preferences.${waiting}`;
 }
 
+// The bridge's schema states Studio's per-call ceiling; the manager's wait
+// loops past it (session-tools.ts), so its schema states the manager's own.
+function managerSessionWaitSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
+  if (!properties?.timeoutSeconds) return schema;
+  return {
+    ...schema,
+    properties: {
+      ...properties,
+      timeoutSeconds: {
+        ...properties.timeoutSeconds,
+        description: `Default ${SESSION_WAIT_MANAGER_DEFAULT_SECONDS}, max ${SESSION_WAIT_MANAGER_MAX_SECONDS}.`,
+      },
+    },
+  };
+}
+
 function bridgeErrorMessage(result: BridgeToolResult, fallback: string): string {
   const texts = (result.content ?? [])
     .map((block) => block.type === "text" && typeof block.text === "string" ? block.text.trim() : "")
@@ -169,7 +195,10 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
   registerServiceTierPolicy(pi);
   // Browser automation is confined to Codara's own Browser webview. The
   // native shell must not become a side door into Safari/Chrome/Edge.
-  pi.on("tool_call", (event) => studioBrowserOnlyDecision(event.toolName, event.input));
+  // A bare `python` on a machine that has only python3 fails every time.
+  const python = pythonAvailability();
+  pi.on("tool_call", (event) => studioBrowserOnlyDecision(event.toolName, event.input) ??
+    barePythonDecision(event.toolName, event.input, python));
 
   pi.on("before_agent_start", async (event) => {
     const untrustedContract = untrustedPullRequest
@@ -209,26 +238,35 @@ ${mcp?.promptSuffix() ?? ""}`,
     if (untrustedPullRequest && !UNTRUSTED_MANAGER_BRIDGE_TOOLS.has(tool.name)) continue;
     const family = studioToolFamily(tool.name);
     if (family) familyTools.set(family, [...(familyTools.get(family) ?? []), tool]);
+    const sessionWait = tool.name === "codara_session_wait";
+    const description = sessionWait ? MANAGER_SESSION_WAIT_DESCRIPTION : tool.description;
     pi.registerTool({
       name: tool.name,
       label: tool.name.replace(/^codara_/, "Codara · ").replaceAll("_", " "),
-      description: tool.description,
+      description,
       // A deferred family tool carries no snippet: Pi lists snippets in the
       // system prompt, and activating a family must not rewrite that prompt.
       ...(family && !alwaysActiveFamilies.has(family)
         ? {}
-        : { promptSnippet: toolPromptSnippet(tool.description) }),
-      parameters: tool.inputSchema as never,
+        : { promptSnippet: toolPromptSnippet(description) }),
+      parameters: (sessionWait ? managerSessionWaitSchema(tool.inputSchema) : tool.inputSchema) as never,
       async execute(_toolCallId, params, signal) {
         if (tool.name === "codara_complete") {
           const reason = whiteboardReview.completionBlock();
           if (reason) throw new Error(reason);
         }
-        const result = await bridge.callToolByName(
-          tool.name,
-          params,
-          ABANDONABLE_BRIDGE_TOOLS.has(tool.name) ? signal : undefined,
-        );
+        const abandonable = ABANDONABLE_BRIDGE_TOOLS.has(tool.name) ? signal : undefined;
+        const result = sessionWait
+          ? await waitForSessionsInChunks(
+              (args, chunkSignal) => bridge.callToolByName(tool.name, args, chunkSignal),
+              params,
+              { signal: abandonable },
+            )
+          : await bridge.callToolByName(
+              tool.name,
+              tool.name === "codara_session_start" ? withSessionDefaults(params) : params,
+              abandonable,
+            );
         // Pi's extension contract represents a failed tool by rejecting the
         // execute promise; an `isError` property on the returned result is not
         // consumed by Pi. Translate MCP failures explicitly so the model and
