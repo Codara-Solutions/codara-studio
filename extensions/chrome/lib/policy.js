@@ -90,10 +90,12 @@ export function isBlockedUrl(url, rules) {
 }
 
 /** Browser pages, other extensions and the extension stores, which no agent may drive. */
-export function isRestrictedUrl(url) {
+export function isRestrictedUrl(url, { fileAccess = true } = {}) {
   const text = String(url ?? "");
   if (!text) return false;
   if (RESTRICTED_SCHEMES.test(text)) return true;
+  // Local files need "Allow access to file URLs" on the extension's details page.
+  if (/^file:/i.test(text)) return fileAccess === false;
   if (/^about:/i.test(text)) return !/^about:blank$/i.test(text);
   const parsed = parseUrl(text);
   if (!parsed) return false;
@@ -471,4 +473,18 @@ export function carriedSession(carry, now) {
   if (!carry || typeof carry !== "object" || !carry.session || typeof carry.session !== "object") return null;
   const age = now - Number(carry.at);
   return age >= 0 && age < RELOAD_CARRY_MS ? carry.session : null;
+}
+
+/**
+ * What the reach note adds about other windows, from what is shared there:
+ * windows shared from their own popup and tabs switched on one by one keep
+ * their choice, so the note never promises less access than there is.
+ */
+export function otherWindowsText({ otherWindows = 0, otherTabs = 0 } = {}) {
+  const parts = [];
+  if (otherWindows === 1) parts.push("Another window you shared stays shared.");
+  else if (otherWindows > 1) parts.push(`${otherWindows} other windows you shared stay shared.`);
+  if (otherTabs === 1) parts.push("A tab you shared in another window stays shared.");
+  else if (otherTabs > 1) parts.push(`${otherTabs} tabs you shared in other windows stay shared.`);
+  return parts.length ? parts.join(" ") : "Other windows stay off.";
 }

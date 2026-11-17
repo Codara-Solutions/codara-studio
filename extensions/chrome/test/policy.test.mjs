@@ -19,6 +19,7 @@ import {
   isRestrictedUrl,
   isTabShared,
   openedTabAnswer,
+  otherWindowsText,
   parseBlockedSites,
   redactCdpEvent,
   REACH_TEXT,
@@ -57,6 +58,10 @@ export function run() {
   for (const url of ["about:blank", "https://chrome.google.com/other", "http://127.0.0.1:3000/", "file:///tmp/x.html", ""]) {
     assert.equal(isRestrictedUrl(url), false, url);
   }
+  // Local files are off until "Allow access to file URLs" is on.
+  assert.equal(isRestrictedUrl("file:///tmp/x.html", { fileAccess: false }), true);
+  assert.equal(isRestrictedUrl("file:///tmp/x.html", { fileAccess: true }), false);
+  assert.equal(isRestrictedUrl("https://a.b/", { fileAccess: false }), false);
 
   assert.equal(cdpPermission("Runtime.evaluate"), "allow");
   assert.equal(cdpPermission("Input.dispatchMouseEvent"), "allow");
@@ -198,5 +203,13 @@ export function run() {
   assert.equal(agentColorVar("claude"), "var(--agent-claude)");
   assert.equal(agentColorVar("aider"), "var(--accent)", "an agent without a colour of its own uses the accent");
   assert.equal(agentColorVar("x);background:url(y"), "var(--accent)");
+  // The reach note counts what stays shared elsewhere: whole windows and
+  // tabs switched on one by one.
+  assert.equal(otherWindowsText({}), "Other windows stay off.");
+  assert.equal(otherWindowsText({ otherWindows: 1 }), "Another window you shared stays shared.");
+  assert.equal(otherWindowsText({ otherWindows: 3 }), "3 other windows you shared stay shared.");
+  assert.equal(otherWindowsText({ otherTabs: 1 }), "A tab you shared in another window stays shared.");
+  assert.equal(otherWindowsText({ otherWindows: 1, otherTabs: 2 }), "Another window you shared stays shared. 2 tabs you shared in other windows stay shared.");
+
   return "policy: popup reach maps to the stored switches, toolbar button names the driving agent, blocked sites, browser pages, protocol permissions, cookie redaction, sharing, agent tab groups, closing tabs and self-updates";
 }

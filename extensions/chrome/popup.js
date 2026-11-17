@@ -3,7 +3,7 @@
 // shared tabs with their Stop, and which agent used this tab last. All state
 // lives in the service worker; this page only asks it and redraws.
 
-import { REACH_TEXT, REACHES, agentColorVar, parseBlockedSites, toolVerb } from "./lib/policy.js";
+import { REACH_TEXT, REACHES, agentColorVar, otherWindowsText, parseBlockedSites, toolVerb } from "./lib/policy.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -20,6 +20,8 @@ const STATUS_TEXT = {
 
 const RESTRICTED_TEXT =
   "Chrome does not let extensions work on this page (Chrome Web Store and browser pages). Agents can use any normal website tab.";
+const FILE_TEXT =
+  'Chrome keeps extensions off local files until you turn on "Allow access to file URLs" for Codara (chrome://extensions, Details). Agents can use any normal website tab.';
 
 let current = null;
 let view = null;
@@ -127,18 +129,17 @@ function renderShared(list) {
   }
 }
 
-function renderReach(reach, otherWindows = 0) {
+function renderReach(reach, others = {}) {
   for (const button of $("reach-choice").querySelectorAll("[data-reach]")) {
     const on = button.dataset.reach === reach;
     button.setAttribute("aria-checked", String(on));
     // One tab stop for the group; the arrow keys move inside it.
     button.tabIndex = on ? 0 : -1;
   }
-  // Windows shared from their own popup keep their choice; say so, or the
-  // line would promise less access than there is.
-  const others =
-    reach === "all" ? "" : otherWindows ? ` ${otherWindows === 1 ? "Another window you shared stays" : `${otherWindows} other windows you shared stay`} shared.` : " Other windows stay off.";
-  $("reach-note").textContent = `${REACH_TEXT[reach].includes}${others} Blocked sites and browser pages stay off.`;
+  // Windows and tabs shared elsewhere keep their choice; say so, or the line
+  // would promise less access than there is.
+  const elsewhere = reach === "all" ? "" : ` ${otherWindowsText(others)}`;
+  $("reach-note").textContent = `${REACH_TEXT[reach].includes}${elsewhere} Blocked sites and browser pages stay off.`;
 }
 
 function renderTab(tab, connected) {
@@ -151,7 +152,9 @@ function renderTab(tab, connected) {
   $("tab-host").textContent = hostOf(tab.url);
   $("tab-host").hidden = !usable;
   $("tab-fav").textContent = initials(tab);
-  const note = tab.restricted
+  const note = tab.restricted === "file"
+    ? FILE_TEXT
+    : tab.restricted
     ? RESTRICTED_TEXT
     : tab.blocked
       ? `This site is on your blocked list (${tab.blocked}), so agents cannot use it. Change the list under Blocked sites.`
@@ -173,6 +176,7 @@ function renderTab(tab, connected) {
   $("copy-id").textContent = tab.shared ? "Copy tab id" : "Share and copy id";
   $("tab-id").textContent = tab.agentId;
   $("storage-row").hidden = !usable || !tab.shared;
+  $("storage-note").hidden = $("storage-row").hidden;
   $("share-storage").checked = tab.storage;
 }
 
@@ -199,7 +203,7 @@ function render() {
   renderTab(view.current, connected);
 
   $("reach").hidden = false;
-  if (!pendingAnswer) renderReach(view.reach, view.otherWindows);
+  if (!pendingAnswer) renderReach(view.reach, view);
   $("allow-open").checked = view.allowOpen;
   $("on-page").hidden = false;
   $("presence-overlay").checked = view.presence.overlay;
@@ -229,13 +233,14 @@ async function act(type, extra = {}) {
 }
 
 async function pickReach(reach) {
-  if (!view || reach === view.reach) return;
+  // While "Everything" asks, the other segments wait for the answer.
+  if (!view || reach === view.reach || pendingAnswer) return;
   if (reach === "all") {
     // The segment shows the choice while the question is open.
     renderReach("all");
     const yes = await ask("Let agents use every tab in this browser, including ones you open later? Sites on your blocked list stay off.", "Share every tab");
     if (!yes) {
-      renderReach(view.reach, view.otherWindows);
+      renderReach(view.reach, view);
       return;
     }
   }
