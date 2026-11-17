@@ -64,6 +64,15 @@ function run(view) {
   }
   check("succeeded reads as done", view.workerViewState(attempt("succeeded")) === "done");
   check("cancelled reads as stopped", view.workerViewState(attempt("cancelled")) === "stopped");
+  check(
+    "a failed attempt with a retry owed reads as queued, as its row does",
+    view.workerViewState(attempt("failed"), { status: "retry_queued" }) === "queued" &&
+      view.workerViewState(attempt("cancelled"), { status: "running", pending: { number: 2 } }) === "queued",
+  );
+  check(
+    "a retry already running reads as running",
+    view.workerViewState(attempt("running"), { status: "running", pending: { number: 2 } }) === "running",
+  );
   check("timed out reads as failed", view.workerViewState(attempt("timed_out")) === "failed");
   check("a running agent worker can be messaged", view.canMessageWorker(attempt("running", "codex")));
   check("a launching worker cannot yet", !view.canMessageWorker(attempt("launching")));

@@ -47,7 +47,9 @@ export default function WorkerChat({
   const feed = useWorkerFeed(run.id, attemptId);
   const rows = useMemo(() => workerRows(foldWorkerFeed(feed)), [feed]);
   const running = state === "running" || state === "queued";
-  const fold = useMemo(() => (running ? null : foldFinishedWorker(rows)), [running, rows]);
+  // Only a worker that finished well folds, as a Cora turn does: a failed or
+  // stopped one stays open, since that is when its steps matter.
+  const fold = useMemo(() => (state === "done" ? foldFinishedWorker(rows) : null), [state, rows]);
   const [foldOpen, setFoldOpen] = useState(false);
   const report = useRunReports(run).get(attemptId) ?? null;
   const attempt = run.workerAttempts.find((candidate) => candidate.id === attemptId) ?? null;
@@ -59,7 +61,7 @@ export default function WorkerChat({
   useLayoutEffect(() => {
     const scroller = scrollRef.current;
     if (scroller && pinned.current) scroller.scrollTop = scroller.scrollHeight;
-  }, [rows, feed.partial, brief]);
+  }, [rows, feed.partial, brief, report]);
 
   const shown: WorkerRow[] = fold && !foldOpen && fold.hidden > 0 ? fold.kept : rows;
   const lastTurn = [...shown].reverse().find((row) => row.kind === "turn");
@@ -115,6 +117,11 @@ export default function WorkerChat({
           </p>
         )}
         {feed.error && <p className="cora-worker-view__note">The steps could not be read: {feed.error}</p>}
+        {state === "failed" && attempt?.error && (
+          <div role="alert" className="cora-worker-chat__error">
+            {attempt.error}
+          </div>
+        )}
 
         {report && <WorkerReportView report={report} />}
 
@@ -164,8 +171,8 @@ function WorkerReportView({ report }: { report: WorkerReport }) {
         <>
           <div className="cora-worker-report__label">Changed files</div>
           <ul className="cora-worker-report__list">
-            {report.filesChanged.map((file) => (
-              <li key={file.path}>
+            {report.filesChanged.map((file, index) => (
+              <li key={`${file.path}:${index}`}>
                 <code>{file.path}</code>
                 {file.reason ? <span> · {file.reason}</span> : null}
               </li>

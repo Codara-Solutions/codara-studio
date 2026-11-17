@@ -51,17 +51,27 @@ export function useWorkerFeed(runId: string, attemptId: string | null): WorkerFe
         .then((snapshot) => {
           if (disposed || mine !== generation) return;
           reading = false;
-          const buffered = pending;
+          // Pushed during the read: their records may be newer than the
+          // snapshot, their streaming text is not.
+          const buffered = pending.map(({ partial: _older, ...rest }) => rest);
           pending = [];
-          setState(() =>
-            buffered.reduce<WorkerFeedState>(apply, { ...snapshot, loaded: true, error: null }),
-          );
+          setState((current) => {
+            // A feed that never reached disk (its file could not be made)
+            // reads back empty once the session ends: keep what was streamed.
+            const base: WorkerFeedState =
+              !snapshot.available && current.records.length > 0
+                ? { ...current, live: snapshot.live, partial: null, loaded: true, error: null }
+                : { ...snapshot, loaded: true, error: null };
+            return buffered.reduce<WorkerFeedState>(apply, base);
+          });
         })
         .catch((error: unknown) => {
           if (disposed || mine !== generation) return;
           reading = false;
+          const buffered = pending;
+          pending = [];
           setState((current) => ({
-            ...current,
+            ...buffered.reduce<WorkerFeedState>(apply, current),
             loaded: true,
             error: error instanceof Error ? error.message : String(error),
           }));

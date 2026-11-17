@@ -122,3 +122,13 @@
   outline: none;
   box-shadow: var(--focus-ring);
 }
+/* Why the worker failed, when the reason never reached its steps (a timeout,
+   a crash). The chat's error row: a soft danger tint, no border. */
+.cora-worker-chat__error {
+  padding: 8px 10px;
+  border-radius: var(--radius-surface, 10px);
+  background: color-mix(in oklch, var(--danger) 8%, transparent);
+  color: var(--danger);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
