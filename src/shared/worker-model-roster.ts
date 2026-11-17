@@ -10,7 +10,7 @@
 // This module imports only @shared/model-catalog, so it stays free of
 // electron/pty/node dependencies and bundles into either process.
 
-import { normalizeCodexModelId } from "@shared/model-catalog";
+import { normalizeCodexModelId } from "./model-catalog";
 
 // The model a Claude worker launches on when its task carries NO modelHint.
 // Any explicit hint — including Fable 5 (`claude-fable-5`), Anthropic's top,
