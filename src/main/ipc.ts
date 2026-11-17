@@ -41,6 +41,7 @@ import { createMachinesService, readLocalStats } from "./remote/machines";
 import type { MachinesSnapshot } from "@shared/machines";
 import { isRemotePath } from "@shared/remote";
 import type { LaneChanges } from "@shared/source-lanes";
+import type { WorkerFeedSnapshot } from "@shared/worker-feed";
 import { MUTE_KEY_PATTERN } from "@shared/notify-center";
 import type { UsageSummaryInput } from "@shared/usage-analytics";
 import type {
@@ -2849,6 +2850,37 @@ export function registerIpc(): void {
       }
       const { readWorkerAttemptLog } = await getRunStore();
       return readWorkerAttemptLog(input.runId, input.attemptId);
+    },
+  );
+
+  handle(
+    "orchestration:readWorkerFeed",
+    async (_e, input: { runId: string; attemptId: string }): Promise<WorkerFeedSnapshot> => {
+      if (!input || typeof input.runId !== "string" || typeof input.attemptId !== "string") {
+        throw new Error("Invalid worker feed request.");
+      }
+      const { readWorkerAttemptFeed } = await getRunStore();
+      return readWorkerAttemptFeed(input.runId, input.attemptId);
+    },
+  );
+
+  handle(
+    "orchestration:messageWorker",
+    async (
+      _e,
+      input: { runId: string; attemptId: string; text: string },
+    ): Promise<{ delivered: boolean }> => {
+      if (
+        !input ||
+        typeof input.runId !== "string" ||
+        typeof input.attemptId !== "string" ||
+        typeof input.text !== "string" ||
+        input.text.length > 64_000
+      ) {
+        throw new Error("Invalid worker message.");
+      }
+      const { messageWorkerAttempt } = await getRunStore();
+      return messageWorkerAttempt(input.runId, input.attemptId, input.text);
     },
   );
 

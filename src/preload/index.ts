@@ -69,6 +69,7 @@ import { crossWorkspaceApi } from "./areas/cross-workspace";
 import { tabActionsApi } from "./areas/tab-actions";
 import { feedbackApi } from "./areas/feedback";
 import { worktreeSetupApi } from "./areas/worktree-setup";
+import { workerFeedApi } from "./areas/worker-feed";
 import { portsApi } from "./areas/ports";
 import { shareApi } from "./areas/share";
 import type {
@@ -1924,6 +1925,7 @@ const api = {
   diagnostics: diagnosticsApi,
   agentHibernation: agentHibernationApi,
   worktreeSetup: worktreeSetupApi,
+  workerFeed: workerFeedApi,
   share: shareApi,
   chromeLink: chromeLinkApi,
   keepAwake: keepAwakeApi,
