@@ -31,7 +31,7 @@
 
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
-const net = require("node:net");
+const { unusedPort } = require("./unused-port.cjs");
 const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
@@ -71,15 +71,6 @@ async function until(test, timeoutMs, stepMs = 200) {
   return Boolean(await test());
 }
 
-function closedPort() {
-  return new Promise((resolve) => {
-    const server = net.createServer();
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
-  });
-}
 
 const homes = [];
 function freshHome(label) {
@@ -188,7 +179,7 @@ function rpc(handshake, method, params) {
 async function devLauncherDies() {
   console.log("dev launcher dies");
   const home = freshHome("parent");
-  const env = appEnv(home, { SPARK_ALLOW_MULTI: "1", SPARK_E2E_BACKGROUND: "1", ELECTRON_RENDERER_URL: `http://127.0.0.1:${await closedPort()}/` });
+  const env = appEnv(home, { SPARK_ALLOW_MULTI: "1", SPARK_E2E_BACKGROUND: "1", ELECTRON_RENDERER_URL: `http://127.0.0.1:${await unusedPort()}/` });
   // Stands in for electron-vite: spawns Electron, reports its pid, and stays.
   const launcherScript = `
     const { spawn } = require("node:child_process");
@@ -272,7 +263,7 @@ async function sigtermWithLiveWork() {
 async function newLaunchReplacesBrokenInstance() {
   console.log("a new launch replaces a broken instance");
   const home = freshHome("handoff");
-  const env = appEnv(home, { SPARK_E2E_BACKGROUND: "1", ELECTRON_RENDERER_URL: `http://127.0.0.1:${await closedPort()}/` });
+  const env = appEnv(home, { SPARK_E2E_BACKGROUND: "1", ELECTRON_RENDERER_URL: `http://127.0.0.1:${await unusedPort()}/` });
   const first = launchApp(env);
   const broken = await until(() => /renderer failed to boot/.test(mainLog(home)), 60_000);
   check("the first instance cannot load its window", broken, mainLog(home).slice(-600));

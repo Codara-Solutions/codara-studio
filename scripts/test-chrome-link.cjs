@@ -13,6 +13,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const net = require("node:net");
+const { unusedPort } = require("./unused-port.cjs");
 const os = require("node:os");
 const path = require("node:path");
 const esbuild = require("esbuild");
@@ -75,15 +76,6 @@ async function until(check, label, timeoutMs = 5000) {
   throw new Error(`timed out waiting for ${label}`);
 }
 
-function freePort() {
-  return new Promise((resolve) => {
-    const server = net.createServer();
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
-  });
-}
 
 /**
  * A fake extension: records what Codara sends and answers requests with
@@ -190,7 +182,7 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   // Who may connect.
   const blocker = net.createServer();
   const busy = await new Promise((resolve) => blocker.listen(0, "127.0.0.1", () => resolve(blocker.address().port)));
-  const port = await freePort();
+  const port = await unusedPort(new Set([busy]));
   const store = new lib.ChromeLinkStore(storeFile);
   const server = new lib.ChromeLinkServer({ store, app: { name: "Codara", version: "9.0.0" }, ports: [busy, port], pairingTimeoutMs: 400, helloTimeoutMs: 300 });
   assert.equal(await server.start(), port, "a busy port is skipped");

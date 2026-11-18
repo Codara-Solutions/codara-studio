@@ -33,7 +33,7 @@ const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
-const net = require("node:net");
+const { unusedPort } = require("./unused-port.cjs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
@@ -120,16 +120,6 @@ async function check(name, fn) {
   console.log(`PASS ${name}`);
 }
 
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
-  });
-}
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -351,7 +341,7 @@ async function main() {
   try {
     const store = lib.createServerStore();
     const { keeper, stopped, logWrites, owners } = keeperWith(lib, store, sessions);
-    const port = await freePort();
+    const port = await unusedPort();
     const command = `exec node ${JSON.stringify(FIXTURE)} ${port}`;
     let first;
 
@@ -379,7 +369,7 @@ async function main() {
     });
 
     await check("a value typed before the command is passed to it but never saved", async () => {
-      const inlinePort = await freePort();
+      const inlinePort = await unusedPort();
       const typed = await keeper.start({ workspaceId: "ws-1", command: `SECRET_TOKEN=inline-s3cret exec node ${JSON.stringify(FIXTURE)} ${inlinePort}` });
       assert.equal(typed.ready, true);
       assert.equal(typed.server.command, `exec node ${JSON.stringify(FIXTURE)} ${inlinePort}`);
@@ -445,8 +435,9 @@ async function main() {
         keeper.start({ workspaceId: "ws-1", id: "api", command: "exec node -e 0", port }),
         (error) => error instanceof lib.ServerConflictError && /server "web" of this workspace/.test(error.message),
       );
-      const held = await freePort();
-      await new Promise((resolve) => external.listen(held, "127.0.0.1", resolve));
+      // Bound on port 0 and held, so nothing else can take it first.
+      await new Promise((resolve) => external.listen(0, "127.0.0.1", resolve));
+      const held = external.address().port;
       await assert.rejects(
         keeper.start({ workspaceId: "ws-1", id: "api", command: "exec node -e 0", port: held }),
         (error) => error instanceof lib.ServerConflictError && /Port \d+ is already in use/.test(error.message),
@@ -468,7 +459,7 @@ async function main() {
     });
 
     await check("never two copies when two callers start the same server at once", async () => {
-      const racePort = await freePort();
+      const racePort = await unusedPort();
       const raceCommand = `exec node ${JSON.stringify(FIXTURE)} ${racePort}`;
       const before = sessions.sessions.size;
       const results = await Promise.all([
@@ -496,7 +487,7 @@ async function main() {
     });
 
     await check("long output goes to a file under the workspace data folder", async () => {
-      const floodPort = await freePort();
+      const floodPort = await unusedPort();
       const flood = await keeper.start({ workspaceId: "ws-1", id: "flood", command: `exec node ${JSON.stringify(FIXTURE)} ${floodPort} flood`, port: floodPort });
       assert.equal(flood.ready, true);
       const logs = await keeper.logs("ws-1", "flood");
