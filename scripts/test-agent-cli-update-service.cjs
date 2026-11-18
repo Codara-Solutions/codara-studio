@@ -145,7 +145,8 @@ function world(overrides = {}) {
     exists: async (file) => (overrides.exists ? overrides.exists(file) : true),
     pi: async () => ({ version: "1.5.3", pinnedVersion: "1.5.2", source: "user" }),
     autoUpdate: () => auto,
-    loadState: async () => overrides.state ?? { failed: {}, notOffered: {} },
+    // The file on disk: what was saved last, else the starting state.
+    loadState: async () => JSON.parse(JSON.stringify(saved ?? overrides.state ?? { failed: {}, notOffered: {} })),
     saveState: async (state) => {
       saved = JSON.parse(JSON.stringify(state));
     },
@@ -906,6 +907,39 @@ async function crashSafety(m) {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  }
+
+  // Under the lock the file is read again: what another Codara wrote since
+  // this one read it is kept, not overwritten.
+  {
+    let disk = { failed: {}, notOffered: {} };
+    const w = world({ auto: false });
+    w.deps.loadState = async () => JSON.parse(JSON.stringify(disk));
+    w.deps.saveState = async (state) => {
+      disk = JSON.parse(JSON.stringify(state));
+    };
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    disk.failed.codex = "0.171.0";
+    disk.broken = { codex: "0.171.0" };
+    await service.update("claude");
+    assert.equal(tool(service.snapshot(), "claude").phase, "updated");
+    assert.deepEqual(disk.failed, { codex: "0.171.0" }, "another window's failed version survives");
+    assert.deepEqual(disk.broken, { codex: "0.171.0" });
+
+    // A record another window cleared is not recovered.
+    const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    let second = { failed: {}, notOffered: {}, inProgress: record };
+    const w2 = world({ auto: false, tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } } });
+    let reads = 0;
+    w2.deps.loadState = async () => (reads++ === 0 ? second : { failed: {}, notOffered: {} });
+    w2.deps.saveState = async (state) => {
+      second = state;
+    };
+    const recovering = m.createAgentCliUpdateService(w2.deps);
+    await recovering.start();
+    assert.equal(w2.commands.length, 0, "the record was gone from disk under the lock");
+    recovering.stop();
   }
 
   // The service writes the installer's pid into the lock as it starts.

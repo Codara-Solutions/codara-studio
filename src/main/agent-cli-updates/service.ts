@@ -154,19 +154,34 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
 
   const entry = (tool: UpdatableAgentCliToolId): ToolEntry => entries.get(tool)!;
 
+  function adopt(state: PersistedUpdateState): void {
+    persisted = {
+      failed: { ...state.failed },
+      notOffered: { ...state.notOffered },
+      broken: { ...state.broken },
+      ...(state.inProgress ? { inProgress: { ...state.inProgress } } : {}),
+    };
+  }
+
   function ensureLoaded(): Promise<void> {
     loaded ??= deps
       .loadState()
-      .then((state) => {
-        persisted = {
-          failed: { ...state.failed },
-          notOffered: { ...state.notOffered },
-          broken: { ...state.broken },
-          ...(state.inProgress ? { inProgress: { ...state.inProgress } } : {}),
-        };
-      })
+      .then(adopt)
       .catch((error) => deps.log(`could not read the saved update state: ${(error as Error).message}`));
     return loaded;
+  }
+
+  /**
+   * Under the lock, the file is what counts: another Codara may have
+   * written it since this one read it, and the next save writes it whole.
+   */
+  async function reloadUnderLock(): Promise<void> {
+    await saving;
+    const state = await deps.loadState().catch((error) => {
+      deps.log(`could not read the saved update state: ${(error as Error).message}`);
+      return null;
+    });
+    if (state) adopt(state);
   }
 
   let saving: Promise<void> = Promise.resolve();
@@ -412,6 +427,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       current.liveSessions = 0;
       current.generation += 1;
       heldLock = lock;
+      await reloadUnderLock();
       try {
         await performUpdate(tool, origin);
       } catch (error) {
@@ -602,8 +618,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
    */
   async function recoverInterrupted(): Promise<void> {
     await ensureLoaded();
-    const record = persisted.inProgress;
-    if (!record) return;
+    if (!persisted.inProgress) return;
     const lock = deps.lock ? await deps.lock().catch(() => null) : NO_LOCK;
     // Another Codara, or the installer the last run left behind, holds the
     // lock: the update is still running. Look again later.
@@ -615,6 +630,13 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       return;
     }
     heldLock = lock;
+    await reloadUnderLock();
+    const record = persisted.inProgress;
+    if (!record) {
+      heldLock = null;
+      await lock.release().catch(() => undefined);
+      return;
+    }
     const valid =
       UPDATABLE_TOOLS.includes(record.tool) &&
       PLAIN_VERSION.test(record.fromVersion) &&
