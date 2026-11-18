@@ -6,7 +6,7 @@
 // the list from the hello and refuses every other command before it is sent.
 // No browser.* here, so the tests run it in Node.
 
-import { isRestrictedUrl, isTabShared, parseBlockedSites } from "./policy.js";
+import { blockingRule, isRestrictedUrl, isTabShared, parseBlockedSites } from "./policy.js";
 
 // Firefox's extensions.webextensions.restrictedDomains: no extension may
 // script these, so a shared tab there would give agents nothing.
@@ -62,14 +62,39 @@ function asciiHost(host) {
     .join(".");
 }
 
-/** A path as tab URLs spell it: "/privé" is "/priv%C3%A9". */
+/**
+ * One spelling per path: percent escapes in upper case, and escapes of
+ * letters, digits and -._~ decoded (RFC 3986 says they mean the same).
+ * Escaped separators (%2F) stay escaped.
+ */
+function canonicalEscapes(path) {
+  return path.replace(/%[0-9a-f]{2}/gi, (escape) => {
+    const char = String.fromCharCode(parseInt(escape.slice(1), 16));
+    return /[A-Za-z0-9\-._~]/.test(char) ? char : escape.toUpperCase();
+  });
+}
+
+/** A path as tab URLs spell it, canonical: "/privé" and "/priv%c3%a9" are "/priv%C3%A9". */
 function urlPath(path) {
   if (!path) return path;
   try {
-    return new URL(`http://host.invalid${path.startsWith("/") ? "" : "/"}${path}`).pathname.replace(/\/+$/, "");
+    return canonicalEscapes(new URL(`http://host.invalid${path.startsWith("/") ? "" : "/"}${path}`).pathname).replace(/\/+$/, "");
   } catch {
     return path;
   }
+}
+
+/** The blocked-site rule a tab URL falls under (rules from parseFirefoxBlockedSites), its path read canonically. */
+export function firefoxBlockingRule(url, rules) {
+  let canonical = url;
+  try {
+    const parsed = new URL(String(url ?? ""));
+    parsed.pathname = canonicalEscapes(parsed.pathname);
+    canonical = parsed.href;
+  } catch {
+    // Not a URL: blockingRule refuses to match it too.
+  }
+  return blockingRule(canonical, rules);
 }
 
 /**

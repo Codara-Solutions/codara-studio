@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 
 // lib/firefox.js imports Chrome's policy.js, so it runs from the assembled folder.
 export async function run(assembled) {
-  const { CDP_METHODS, browserIdentity, isDomainToggle, isFirefoxRestrictedUrl, isShareable, parseFirefoxBlockedSites, stopNeedsMark, unsupportedMethodError } = await import(pathToFileURL(join(assembled, "lib", "firefox.js")).href);
+  const { CDP_METHODS, browserIdentity, isDomainToggle, isFirefoxRestrictedUrl, isShareable, firefoxBlockingRule, parseFirefoxBlockedSites, stopNeedsMark, unsupportedMethodError } = await import(pathToFileURL(join(assembled, "lib", "firefox.js")).href);
   for (const url of [
     "about:preferences",
     "about:blank",
@@ -28,9 +28,14 @@ export async function run(assembled) {
   }
 
   // Blocked sites match the host as tab URLs spell it, written either way.
-  const { blockingRule } = await import(pathToFileURL(join(assembled, "lib", "policy.js")).href);
+  const blockingRule = firefoxBlockingRule;
   const rules = parseFirefoxBlockedSites("bücher.example/privé\nbücher.example\n*.bänk.example/login\nxn--caf-dma.example\nplain.example\ndotted.example.");
   assert.equal(blockingRule("https://xn--bcher-kva.example/priv%C3%A9/x", rules)?.raw, "bücher.example/privé");
+  // Any spelling of the same path: lower-case escapes, escaped letters.
+  assert.equal(blockingRule("https://xn--bcher-kva.example/priv%c3%a9", rules)?.raw, "bücher.example/privé");
+  assert.equal(blockingRule("https://xn--bcher-kva.example/%70riv%C3%A9", rules)?.raw, "bücher.example/privé");
+  assert.equal(parseFirefoxBlockedSites("site.example/a%2fb")[0].path, "/a%2Fb", "an escaped separator stays escaped");
+  assert.equal(blockingRule("https://site.example/a/b", parseFirefoxBlockedSites("site.example/a%2Fb")), null);
   assert.equal(blockingRule("https://dotted.example/", rules)?.raw, "dotted.example.");
   assert.equal(blockingRule("https://dotted.example./", rules)?.raw, "dotted.example.");
   assert.equal(blockingRule("https://xn--bcher-kva.example/", rules)?.raw, "bücher.example");

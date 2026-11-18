@@ -20,6 +20,7 @@ import {
   browserIdentity,
   isDomainToggle,
   isFirefoxRestrictedUrl,
+  firefoxBlockingRule,
   isShareable,
   parseFirefoxBlockedSites,
   stopNeedsMark,
@@ -32,7 +33,6 @@ import {
   USAGE_ACTIVE_MS,
   agentTabId,
   badgeTitle,
-  blockingRule,
   childSessionError,
   reachOf,
   reachPatch,
@@ -63,8 +63,11 @@ const ALARM = "codara-link";
 // A third of Firefox's default 30 s idle timeout.
 const KEEP_AWAKE_MS = 10_000;
 const PORT_PROBE_TIMEOUT_MS = 1_500;
+const PAIRING_AWAKE_MS = 150_000;
 
 let state = null;
+// The user pressed Connect and no Disconnect since (this page's lifetime only).
+let pairingWanted = false;
 let rules = parseFirefoxBlockedSites(DEFAULT_BLOCKED_SITES);
 const ready = load();
 
@@ -117,7 +120,16 @@ const link = new LinkClient({
     await ready;
     return state.token && state.linkId ? { token: state.token, linkId: state.linkId } : null;
   },
-  savePairing: (token, linkId) => save({ token, linkId }),
+  // A pairing is kept only while the user's Connect is the latest thing they
+  // asked for: one finishing after Disconnect is dropped and closed.
+  savePairing: async (token, linkId) => {
+    if (!pairingWanted) {
+      link.disconnect("idle");
+      throw new Error("Disconnected in the meantime.");
+    }
+    pairingWanted = false;
+    await save({ token, linkId });
+  },
   clearPairing: () => save({ token: null, linkId: null }),
   onRequest: handleRequest,
   onMessage: handleMessage,
@@ -158,9 +170,19 @@ const link = new LinkClient({
 // A call that goes through the browser's parent process resets the event
 // page's idle timer; socket traffic alone does not.
 let awakeTimer = null;
+let pairingAwakeTimer = null;
 function keepAwake(on) {
   clearInterval(awakeTimer);
+  clearTimeout(pairingAwakeTimer);
   awakeTimer = on ? setInterval(() => void browser.runtime.getPlatformInfo().catch(() => {}), KEEP_AWAKE_MS) : null;
+}
+
+/** Awake for Codara's approval window (two minutes) and a little more, unless connected by then. */
+function keepAwakeWhilePairing() {
+  keepAwake(true);
+  pairingAwakeTimer = setTimeout(() => {
+    if (!link.connected) keepAwake(false);
+  }, PAIRING_AWAKE_MS);
 }
 
 // ── Requests from Codara ────────────────────────────────────────────────────
@@ -169,16 +191,23 @@ async function usableTab(tabId) {
   const tab = await chrome.tabs.get(Number(tabId)).catch(() => null);
   if (!tab) throw new Error(`${agentTabId(tabId)} is closed.`);
   if (!shared(tab)) throw new Error(`${agentTabId(tab.id)} is not shared with agents. Share it from the Codara extension popup first.`);
-  const rule = blockingRule(tab.url, rules);
+  const rule = firefoxBlockingRule(tab.url, rules);
   if (rule) throw new Error(`${agentTabId(tab.id)} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`);
   return tab;
 }
 
+/** Throws once the user disconnected: nothing from the old link acts after that. */
+function stillPaired() {
+  if (!state.token || !link.connected) throw new Error("This browser is no longer paired with Codara.");
+}
+
 async function handleRequest(request) {
   await ready;
+  stillPaired();
   switch (request.type) {
     case "attach": {
       const tab = await usableTab(request.tabId);
+      stillPaired();
       if (!state.attached.includes(tab.id)) {
         await save({ attached: withValue(state.attached, tab.id) });
         void refresh();
@@ -195,6 +224,7 @@ async function handleRequest(request) {
       throw new Error("Opening and closing tabs is not available in Firefox yet. The user opens or closes the tab, and shares it from the Codara extension popup.");
     case "activate": {
       const tab = await usableTab(request.tabId);
+      stillPaired();
       await chrome.tabs.update(tab.id, { active: true });
       return {};
     }
@@ -229,6 +259,9 @@ function usageOf(message) {
 }
 
 function handleMessage(message) {
+  // Settings and usage only from the sealed session of the paired Codara,
+  // never from whatever answers while a pairing waits for approval.
+  if (message.type !== "revoked" && !(link.connected && link.socket?.sealer && state?.token)) return;
   if (message.type === "usage" && typeof message.tabId === "number") {
     const tabId = message.tabId;
     void save({ usage: { ...state.usage, [tabId]: usageOf(message) } }).then(() => {
@@ -269,7 +302,7 @@ async function detachAll() {
 async function enforceSharing() {
   for (const tabId of [...state.attached]) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (!tab || !shared(tab) || blockingRule(tab.url, rules)) {
+    if (!tab || !shared(tab) || firefoxBlockingRule(tab.url, rules)) {
       await detachTab(tabId);
       if (tab) link.send({ type: "detached", tabId, reason: "unshared" });
     }
@@ -285,9 +318,11 @@ async function reportTabs() {
   await ready;
   if (!link.connected || !state.token) return;
   const list = [];
-  for (const tab of await chrome.tabs.query({})) {
+  const tabs = await chrome.tabs.query({});
+  if (!link.connected || !state.token) return;
+  for (const tab of tabs) {
     if (!shared(tab)) continue;
-    const blocked = blockingRule(tab.url, rules) !== null;
+    const blocked = firefoxBlockingRule(tab.url, rules) !== null;
     list.push({
       tabId: tab.id,
       windowId: tab.windowId,
@@ -305,7 +340,7 @@ async function reportTabs() {
 }
 
 async function updateBadge(tab) {
-  const usable = shared(tab) && !blockingRule(tab.url, rules);
+  const usable = shared(tab) && !firefoxBlockingRule(tab.url, rules);
   const attached = state.attached.includes(tab.id);
   const text = !usable ? "" : attached ? "AI" : "ON";
   await chrome.action.setBadgeText({ tabId: tab.id, text }).catch(() => {});
@@ -339,7 +374,7 @@ chrome.tabs.onDetached.addListener(scheduleRefresh);
 chrome.tabs.onUpdated.addListener(async (tabId, change) => {
   if (change.url !== undefined) {
     await ready;
-    if (state.attached.includes(tabId) && (blockingRule(change.url, rules) || isFirefoxRestrictedUrl(change.url))) {
+    if (state.attached.includes(tabId) && (firefoxBlockingRule(change.url, rules) || isFirefoxRestrictedUrl(change.url))) {
       await detachTab(tabId);
       link.send({ type: "detached", tabId, reason: "blocked_site" });
     }
@@ -368,7 +403,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 // ── The popup and the options page ──────────────────────────────────────────
 
 function describeTab(tab) {
-  const rule = blockingRule(tab.url, rules);
+  const rule = firefoxBlockingRule(tab.url, rules);
   return {
     tabId: tab.id,
     windowId: tab.windowId,
@@ -429,9 +464,13 @@ async function handlePopup(request) {
       if (request.opened === true) void link.wake();
       return popupState(request);
     case "connect":
+      pairingWanted = true;
+      // Firefox would unload the page while the user approves in Codara.
+      keepAwakeWhilePairing();
       await link.connect({ pair: true });
       return popupState(request);
     case "unpair": {
+      pairingWanted = false;
       // Closing waits for the sealed unpair frame to leave, so Codara forgets this browser too.
       const socket = link.socket;
       link.send({ type: "unpair" });

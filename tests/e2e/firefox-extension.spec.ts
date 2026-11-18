@@ -68,27 +68,8 @@ test("the Firefox extension pairs, shares a tab with agents and says plainly wha
   const root = await mkdtemp(join(tmpdir(), "codara-firefox-ext-"));
   const userDataDir = join(root, "home");
   const workspaceDir = join(root, "workspace");
-  await mkdir(userDataDir);
-  await mkdir(workspaceDir);
-  await writeFile(join(userDataDir, "spark-state.json"), JSON.stringify({
-    activeWorkspaceId: "ws-firefox",
-    workspaces: [{ id: "ws-firefox", name: "Firefox link", cwd: workspaceDir, color: "#42D6C7", workers: [] }],
-  }));
-  // The extension as Firefox loads it: Firefox's own files with the ones it shares with Chrome.
-  const extension = join(root, "extension");
-  execFileSync(process.execPath, [ASSEMBLE, "--out", extension]);
   const server = createServer(site);
-  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
-  const sitePort = (server.address() as { port: number }).port;
-  const origin = `http://127.0.0.1:${sitePort}`;
-  const linkPort = await freePort();
-
-  const app = await electron.launch({ args: ["."], env: {
-    ...process.env,
-    CODARA_HOME_DIR: userDataDir, SPARK_HOME_DIR: userDataDir, SPARK_USER_DATA_DIR: userDataDir,
-    SPARK_SKIP_LEGACY_MIGRATION: "1", SPARK_NO_SHELL_INTEGRATION: "1", SPARK_ALLOW_MULTI: "1",
-    CODARA_CHROME_LINK: "1", CODARA_CHROME_LINK_PORTS: String(linkPort),
-  } });
+  let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
   let firefox: HeadlessFirefox | null = null;
   const request = async (method: string, params: Record<string, unknown> = {}) => {
     const response = await rpcRaw({ home: userDataDir }, method, params, { timeoutMs: 20_000 });
@@ -96,6 +77,29 @@ test("the Firefox extension pairs, shares a tab with agents and says plainly wha
     return response.result;
   };
   try {
+    await mkdir(userDataDir);
+    await mkdir(workspaceDir);
+    await writeFile(join(userDataDir, "spark-state.json"), JSON.stringify({
+      activeWorkspaceId: "ws-firefox",
+      workspaces: [{ id: "ws-firefox", name: "Firefox link", cwd: workspaceDir, color: "#42D6C7", workers: [] }],
+    }));
+    // The extension as Firefox loads it: Firefox's own files with the ones it shares with Chrome.
+    const extension = join(root, "extension");
+    execFileSync(process.execPath, [ASSEMBLE, "--out", extension]);
+    await new Promise<void>((done, fail) => {
+      server.once("error", fail);
+      server.listen(0, "127.0.0.1", () => done());
+    });
+    const sitePort = (server.address() as { port: number }).port;
+    const origin = `http://127.0.0.1:${sitePort}`;
+    const linkPort = await freePort();
+
+    app = await electron.launch({ args: ["."], env: {
+      ...process.env,
+      CODARA_HOME_DIR: userDataDir, SPARK_HOME_DIR: userDataDir, SPARK_USER_DATA_DIR: userDataDir,
+      SPARK_SKIP_LEGACY_MIGRATION: "1", SPARK_NO_SHELL_INTEGRATION: "1", SPARK_ALLOW_MULTI: "1",
+      CODARA_CHROME_LINK: "1", CODARA_CHROME_LINK_PORTS: String(linkPort),
+    } });
     const codara: Page = await app.firstWindow();
     await codara.waitForLoadState("domcontentloaded");
     await expect.poll(async () => request("app.info").then(() => true).catch(() => false)).toBe(true);
@@ -199,8 +203,8 @@ test("the Firefox extension pairs, shares a tab with agents and says plainly wha
     await expect.poll(async () => (await linkState(codara)).browsers.length, { timeout: 15_000 }).toBe(0);
   } finally {
     await firefox?.close().catch(() => undefined);
-    await app.close();
-    await new Promise((done) => server.close(done));
+    await app?.close().catch(() => undefined);
+    if (server.listening) await new Promise((done) => server.close(done));
     await rm(root, { recursive: true, force: true });
   }
 });
