@@ -2953,6 +2953,10 @@ function worktreeDeps(): AgentWorktreeDeps {
         github.listPullRequestsForCommit
           ? github.listPullRequestsForCommit(cwd, sha)
           : Promise.reject(new Error("GitHub CLI unavailable")),
+      listPullRequestStatesForHead: (cwd, branch, repository) =>
+        github.listPullRequestStatesForHead
+          ? github.listPullRequestStatesForHead(cwd, branch, repository)
+          : Promise.reject(new Error("GitHub CLI unavailable")),
     },
     sendAgentEvent: (event: AgentWorktreeEvent) => {
       for (const window of BrowserWindow.getAllWindows()) {

@@ -94,6 +94,8 @@ export interface RemoveOptions {
   requireKnownUsage?: boolean;
   /** As in CheckContext.makerElsewhereOk. */
   makerElsewhereOk?: boolean;
+  /** As in CheckContext.askerPane. */
+  askerPane?: string;
   /** Runs under the lock after the last check, right before anything changes: a reason stops the removal. */
   beforeRemove?: () => Promise<string | null>;
   forgetSize?: (id: string) => void;
@@ -160,13 +162,13 @@ function validTarget(target: unknown): target is WorktreeCleanupTarget {
   );
 }
 
-type UseOptions = Pick<RemoveOptions, "allowInUse" | "requireKnownUsage" | "makerElsewhereOk">;
+type UseOptions = Pick<RemoveOptions, "allowInUse" | "requireKnownUsage" | "makerElsewhereOk" | "askerPane">;
 
 async function contextFor(
   deps: WorktreeCleanupDeps,
   repo: RepoContext,
   paths: string[],
-  { allowInUse, requireKnownUsage, makerElsewhereOk }: UseOptions,
+  { allowInUse, requireKnownUsage, makerElsewhereOk, askerPane }: UseOptions,
 ): Promise<CheckContext> {
   const reals = await Promise.all(paths.map((path) => canonicalPath(path)));
   return {
@@ -175,6 +177,7 @@ async function contextFor(
     ...(allowInUse ? { allowInUse } : {}),
     ...(requireKnownUsage ? { requireKnownUsage } : {}),
     ...(makerElsewhereOk ? { makerElsewhereOk } : {}),
+    ...(askerPane ? { askerPane } : {}),
     usage: await usageContext(deps, reals),
     linked: await linkWorkspaces(repo),
     keptIgnored: new Map(),
