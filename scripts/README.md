@@ -80,6 +80,10 @@ How `scripts/run-all-tests.cjs` works:
   before loading the bundle and call `await clock.advance(ms)` where the
   suite would sleep. `test-terminal-agent-notify.cjs` is the example; it
   went from 157 s to under a second.
+- Never pick a port with `listen(0)`, close it, and hand the number on: the
+  OS may give it to an outgoing connection before anything binds it. Start a
+  server you own on port 0 and read its port; for a child process or a port
+  list, use `unusedPort()` from `scripts/unused-port.cjs`.
 
 ### Pool-safe suites
 
