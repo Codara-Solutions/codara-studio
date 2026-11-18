@@ -985,6 +985,54 @@ async function crashSafety(m) {
     assert.ok(Number.isInteger(started) && started > 0, "the runner reports the pid");
   }
 
+  // Another tool's update gets the lock before the recovery retry is due:
+  // the earlier update is finished first, not overwritten.
+  {
+    const record = {
+      tool: "codex",
+      fromVersion: "0.170.0",
+      fromRealPath: "/home/u/.codex/packages/standalone/releases/0.170.0/bin/codex",
+      fromBinaryPath: "/home/u/.local/bin/codex",
+      toVersion: "0.171.0",
+    };
+    const w = world({
+      auto: false,
+      state: { failed: {}, notOffered: {}, inProgress: record },
+      tools: { codex: { version: null, realPath: "/home/u/.codex/packages/standalone/releases/0.171.0/bin/codex", plan: nativePlan("codex") } },
+      onRun: (command, tools) => {
+        const [id] = command.display.split(" ");
+        if (id === "codex") tools.codex = { ...tools.codex, version: command.args[1], realPath: record.fromRealPath };
+        else tools[id] = { ...tools[id], version: w.latest[id], realPath: `${tools[id].realPath}-new` };
+        return "ok";
+      },
+    });
+    let held = true;
+    w.deps.lock = async () => (held ? null : { release: async () => {}, installerStarted: async () => {} });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.equal(w.commands.length, 0, "the installer the last run left still holds the lock");
+    held = false;
+    await service.update("claude");
+    await service.settled();
+    const codex = tool(service.snapshot(), "codex");
+    assert.equal(codex.phase, "rolled-back", `the Codex update cut short is finished first: ${codex.message}`);
+    assert.equal(w.commands[0].display.split(" ")[0], "codex");
+    assert.equal(tool(service.snapshot(), "claude").phase, "updated");
+    assert.equal(w.saved.inProgress, undefined);
+    service.stop();
+
+    // A record whose tool cannot be found is kept, and other updates wait for it.
+    const w2 = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: record } });
+    delete w2.tools.codex;
+    const service2 = m.createAgentCliUpdateService(w2.deps);
+    await service2.start();
+    await service2.update("claude");
+    assert.equal(w2.commands.length, 0, "no update writes over the record");
+    assert.ok(w2.saved === null || w2.saved.inProgress?.tool === "codex", "the Codex record survives");
+    assert.match(tool(service2.snapshot(), "claude").message, /the Codex update Codara was running when it closed is not finished yet/);
+    service2.stop();
+  }
+
   // A held lock at start: recovery is tried again later, not given up.
   {
     const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };

@@ -436,8 +436,23 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       current.liveSessions = 0;
       current.generation += 1;
       heldLock = lock;
-      await reloadUnderLock();
       try {
+        await reloadUnderLock();
+        // An update cut short earlier (a retry not yet due, or a tool that
+        // could not be found) is finished first, under this same lock.
+        const recovered = await recoverUnderLock();
+        if (persisted.inProgress) {
+          const other = AGENT_CLI_LABELS[persisted.inProgress.tool];
+          set(tool, {
+            pending: origin,
+            phase: "waiting",
+            message: `Waiting: the ${other} update Codara was running when it closed is not finished yet.`,
+          });
+          scheduleWaitingPoll();
+          return;
+        }
+        // That was this tool: its outcome is what the user sees now.
+        if (recovered === tool) return;
         await performUpdate(tool, origin);
       } catch (error) {
         set(tool, { phase: "failed", message: `The update stopped: ${(error as Error).message.slice(0, 300)}` });
@@ -644,13 +659,24 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       return;
     }
     heldLock = lock;
-    await reloadUnderLock();
-    const record = persisted.inProgress;
-    if (!record) {
+    try {
+      await reloadUnderLock();
+      await recoverUnderLock();
+    } finally {
       heldLock = null;
       await lock.release().catch(() => undefined);
-      return;
     }
+  }
+
+  /**
+   * The recovery itself, with the lock held and the state just read. Also
+   * run before any update under the lock: the record holds one update, and
+   * the next update's record would otherwise replace an unrecovered one.
+   * Returns the tool it was about.
+   */
+  async function recoverUnderLock(): Promise<UpdatableAgentCliToolId | null> {
+    const record = persisted.inProgress;
+    if (!record) return null;
     const valid =
       UPDATABLE_TOOLS.includes(record.tool) &&
       PLAIN_VERSION.test(record.fromVersion) &&
@@ -659,9 +685,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       deps.log("the saved update record is not valid; dropped, nothing run");
       delete persisted.inProgress;
       await save();
-      heldLock = null;
-      await lock.release().catch(() => undefined);
-      return;
+      return null;
     }
     const { tool } = record;
     const label = AGENT_CLI_LABELS[tool];
@@ -678,14 +702,14 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
         // Cut off after the launcher went, or not readable right now: the
         // record stays for the next start, and the user can act meanwhile.
         set(tool, { phase: "failed", message: `${lead}${label} cannot be found now. ${reinstall()}` });
-        return;
+        return tool;
       }
       entry(tool).installed = now;
       if (now.version) {
         delete persisted.inProgress;
         await save();
         deps.log(`${tool}: the last update was cut short; ${now.version} is what is there now`);
-        return;
+        return tool;
       }
       delete persisted.inProgress;
       if (record.toVersion) {
@@ -698,14 +722,13 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       if (now.binaryPath !== record.fromBinaryPath || !previous || (native && previous !== record.fromRealPath)) {
         deps.log(`${tool}: the saved update record does not match the install; nothing run`);
         set(tool, { phase: "failed", message: `${lead}${label} ${failedVersion} fails its version check. ${reinstall()}` });
-        return;
+        return tool;
       }
       entry(tool).generation += 1;
       await rollBack(tool, { version: record.fromVersion, realPath: previous, binaryPath: now.binaryPath, plan: now.plan }, now, failedVersion, lead);
+      return tool;
     } finally {
       deps.toolBusy?.(tool, false);
-      heldLock = null;
-      await lock.release().catch(() => undefined);
     }
   }
 
