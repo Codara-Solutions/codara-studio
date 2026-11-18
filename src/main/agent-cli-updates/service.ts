@@ -35,7 +35,7 @@ import {
 import type { InstalledTool } from "./inspect";
 import type { CliCommand } from "./install-plan";
 import { VENDOR_UPDATER_OFF } from "./launch-guard";
-import { reinstallCommand } from "./reinstall";
+import { PLAIN_VERSION, nativeBuildPath, reinstallCommand } from "./reinstall";
 
 export const UPDATABLE_TOOLS: readonly UpdatableAgentCliToolId[] = ["claude", "codex", "grok"];
 export const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -577,36 +577,68 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
   /**
    * An update the last run started and never finished (Codara quit or
    * crashed while its installer ran): a tool that now fails its version
-   * check is rolled back; one that works is left as it is.
+   * check is rolled back; one that works is left as it is. The record comes
+   * from disk, so nothing in it is run as it stands: the previous build is
+   * derived from what is installed now and must match the record, or
+   * nothing runs and the user gets the vendor's installer command.
    */
   async function recoverInterrupted(): Promise<void> {
     await ensureLoaded();
     const record = persisted.inProgress;
-    if (!record || !UPDATABLE_TOOLS.includes(record.tool)) return;
+    if (!record) return;
     const release = deps.lock ? await deps.lock().catch(() => null) : async () => {};
     // Another Codara holds the lock: the update is still running there.
     if (!release) return;
+    const valid =
+      UPDATABLE_TOOLS.includes(record.tool) &&
+      PLAIN_VERSION.test(record.fromVersion) &&
+      (record.toVersion === null || PLAIN_VERSION.test(record.toVersion));
+    if (!valid) {
+      deps.log("the saved update record is not valid; dropped, nothing run");
+      delete persisted.inProgress;
+      await save();
+      await release().catch(() => undefined);
+      return;
+    }
     const { tool } = record;
+    const label = AGENT_CLI_LABELS[tool];
+    const lead = "Codara closed during the last update. ";
+    const failedVersion = record.toVersion ?? "the new version";
+    const reinstall = () => {
+      const command = reinstallCommand(tool, record.fromVersion, platform);
+      return command ? `Put ${record.fromVersion} back with: ${command}` : `Reinstall ${label} ${record.fromVersion} with its installer.`;
+    };
     deps.toolBusy?.(tool, true);
     try {
       const now = await deps.inspect(tool).catch(() => null);
-      delete persisted.inProgress;
-      if (!now || now.version) {
-        await save();
-        if (now) entry(tool).installed = now;
-        deps.log(`${tool}: the last update was cut short; ${now?.version ?? "the tool"} is what is there now`);
+      if (!now) {
+        // Cut off after the launcher went, or not readable right now: the
+        // record stays for the next start, and the user can act meanwhile.
+        set(tool, { phase: "failed", message: `${lead}${label} cannot be found now. ${reinstall()}` });
         return;
       }
-      if (record.toVersion) persisted.failed[tool] = record.toVersion;
+      entry(tool).installed = now;
+      if (now.version) {
+        delete persisted.inProgress;
+        await save();
+        deps.log(`${tool}: the last update was cut short; ${now.version} is what is there now`);
+        return;
+      }
+      delete persisted.inProgress;
+      if (record.toVersion) {
+        persisted.failed[tool] = record.toVersion;
+        persisted.broken[tool] = record.toVersion;
+      }
       await save();
+      const native = now.plan.method === "native";
+      const previous = native ? nativeBuildPath(tool, now.realPath, record.fromVersion) : now.realPath;
+      if (now.binaryPath !== record.fromBinaryPath || !previous || (native && previous !== record.fromRealPath)) {
+        deps.log(`${tool}: the saved update record does not match the install; nothing run`);
+        set(tool, { phase: "failed", message: `${lead}${label} ${failedVersion} fails its version check. ${reinstall()}` });
+        return;
+      }
       entry(tool).generation += 1;
-      await rollBack(
-        tool,
-        { version: record.fromVersion, realPath: record.fromRealPath, binaryPath: record.fromBinaryPath, plan: now.plan },
-        now,
-        record.toVersion ?? "the new version",
-        "Codara closed during the last update. ",
-      );
+      await rollBack(tool, { version: record.fromVersion, realPath: previous, binaryPath: now.binaryPath, plan: now.plan }, now, failedVersion, lead);
     } finally {
       deps.toolBusy?.(tool, false);
       await release().catch(() => undefined);

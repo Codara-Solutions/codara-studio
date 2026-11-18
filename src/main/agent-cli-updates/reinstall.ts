@@ -9,8 +9,28 @@
 
 import type { UpdatableAgentCliToolId } from "@shared/agent-cli-updates";
 
+/** A version as tools publish it; nothing else reaches a command line or a path. */
+export const PLAIN_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
+/**
+ * Where the native installer keeps one version, beside the build now
+ * installed: the version is the only part that changes. Null when the
+ * install is not in that layout.
+ */
+const BUILD_LAYOUTS: Record<UpdatableAgentCliToolId, RegExp> = {
+  claude: /^(.*[\\/]\.local[\\/]share[\\/]claude[\\/]versions[\\/])([^\\/]+)()$/i,
+  codex: /^(.*[\\/]packages[\\/]standalone[\\/]releases[\\/])([^\\/]+?)((?:-(?:x86_64|aarch64|arm64|i686)-[^\\/]+)?[\\/](?:bin[\\/])?codex(?:\.exe)?)$/i,
+  grok: /^(.*[\\/]\.grok[\\/]downloads[\\/]grok-)([^\\/]+?)((?:-(?:linux|darwin|macos|windows|win32)[^\\/]*)?)$/i,
+};
+
+export function nativeBuildPath(tool: UpdatableAgentCliToolId, installedRealPath: string, version: string): string | null {
+  if (!PLAIN_VERSION.test(version)) return null;
+  const match = BUILD_LAYOUTS[tool].exec(installedRealPath);
+  return match ? `${match[1]}${version}${match[3]}` : null;
+}
+
 export function reinstallCommand(tool: UpdatableAgentCliToolId, version: string, platform: NodeJS.Platform): string | null {
-  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) return null;
+  if (!PLAIN_VERSION.test(version)) return null;
   const windows = platform === "win32";
   switch (tool) {
     case "claude":

@@ -28,7 +28,7 @@ async function main() {
         'export * from "./src/main/agent-cli-updates/launch-guard";',
         'export { relinkLauncher } from "./src/main/agent-cli-updates/relink";',
         'export { acquireUpdateLock } from "./src/main/agent-cli-updates/update-lock";',
-        'export { reinstallCommand } from "./src/main/agent-cli-updates/reinstall";',
+        'export { reinstallCommand, nativeBuildPath } from "./src/main/agent-cli-updates/reinstall";',
         'export { commandRunsAgent } from "./src/main/agent-hibernation-census";',
       ].join("\n"),
       resolveDir: root,
@@ -760,6 +760,62 @@ async function crashSafety(m) {
     assert.deepEqual([w.commands[0].executable, ...w.commands[0].args], ["/home/u/.local/share/claude/versions/2.1.325", "install", "2.1.325", "--force"]);
     assert.equal(w.saved.inProgress, undefined);
     assert.deepEqual(w.saved.failed, { claude: "2.1.327" });
+    service.stop();
+  }
+
+  // A record from disk is never run as it stands: a tampered or stale one
+  // runs nothing, and the user gets the vendor's installer command.
+  {
+    const good = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const tampered = [
+      ["another program as the previous build", { ...good, fromRealPath: "/tmp/evil" }],
+      ["another launcher to relink", { ...good, fromBinaryPath: "/home/u/.bashrc" }],
+      ["a quote for cmd.exe", { ...good, fromVersion: '2.1.325" & calc & "' }],
+      ["a path in the version", { ...good, fromVersion: "../../../../tmp/evil" }],
+      ["a bad target version", { ...good, toVersion: "x; rm -rf ~" }],
+      ["an unknown tool", { ...good, tool: "sh" }],
+    ];
+    for (const [name, record] of tampered) {
+      const w = world({
+        auto: false,
+        state: { failed: {}, notOffered: {}, inProgress: record },
+        tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
+      });
+      const relinked = [];
+      w.deps.relink = async (link, target) => relinked.push([link, target]);
+      const service = m.createAgentCliUpdateService(w.deps);
+      await service.start();
+      assert.equal(w.commands.length, 0, `${name}: nothing runs`);
+      assert.deepEqual(relinked, [], `${name}: nothing is relinked`);
+      assert.equal(w.saved?.inProgress, undefined, `${name}: the record is dropped`);
+      service.stop();
+    }
+    const w = world({
+      auto: false,
+      state: { failed: {}, notOffered: {}, inProgress: { ...good, fromRealPath: "/tmp/evil" } },
+      tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
+    });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.match(tool(service.snapshot(), "claude").message, /Put 2\.1\.325 back with: curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash -s 2\.1\.325/);
+    service.stop();
+    assert.equal(m.nativeBuildPath("codex", "/h/.codex/packages/standalone/releases/0.171.0-x86_64-unknown-linux-musl/bin/codex", "0.170.0"), "/h/.codex/packages/standalone/releases/0.170.0-x86_64-unknown-linux-musl/bin/codex");
+    assert.equal(m.nativeBuildPath("claude", "/h/.local/share/claude/versions/2.1.327", "2.1.325"), "/h/.local/share/claude/versions/2.1.325");
+    assert.equal(m.nativeBuildPath("claude", "/h/.local/share/claude/versions/2.1.327", "../x"), null);
+    assert.equal(m.nativeBuildPath("claude", "/opt/claude", "2.1.325"), null);
+  }
+
+  // Cut off after the installer removed the launcher (or the tool cannot be
+  // read right now): the record stays for the next start and the user is told.
+  {
+    const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const w = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: record } });
+    delete w.tools.claude;
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.equal(w.commands.length, 0);
+    assert.ok(w.saved === null || w.saved.inProgress, "the record is kept");
+    assert.match(tool(service.snapshot(), "claude").message, /^Codara closed during the last update\. Claude Code cannot be found now\. Put 2\.1\.325 back with:/);
     service.stop();
   }
 
