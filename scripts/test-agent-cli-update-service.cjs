@@ -919,6 +919,13 @@ async function crashSafety(m) {
       assert.ok(late, "stale once older than the longest update");
       await late.release();
 
+      // Dated in the future (the clock was set back after a crash): stale.
+      const ahead = await m.acquireUpdateLock(file, opts(111, { now: () => t0 + 60 * 60 * 1000 }));
+      assert.ok(ahead);
+      const behind = await m.acquireUpdateLock(file, opts(222, { now: () => t0 }));
+      assert.ok(behind, "a lock from the future is not held forever");
+      await behind.release();
+
       // Another machine's lock (a shared home folder): its pids mean nothing here.
       const there = await m.acquireUpdateLock(file, opts(111, { host: "there" }));
       assert.ok(there);

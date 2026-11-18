@@ -139,7 +139,9 @@ export async function acquireUpdateLock(file: string, options: UpdateLockOptions
       if (mtime !== null && now() - mtime < 10_000) return null;
     } else {
       const age = now() - (content.since ?? mtime ?? 0);
-      if (age < LOCK_MAX_HOLD_MS) {
+      // Dated ahead of now: the clock was set back since it was written, so
+      // its age says nothing and it would never expire.
+      if (age > -60_000 && age < LOCK_MAX_HOLD_MS) {
         // Another machine's lock (a home folder shared over the network): its pids mean nothing here.
         if (content.host !== null && content.host !== host) return null;
         if (content.pid !== pid && alive(content.pid)) return null;
