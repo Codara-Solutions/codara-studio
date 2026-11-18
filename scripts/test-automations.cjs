@@ -338,12 +338,20 @@ async function main() {
     fs.rmSync(dark, { recursive: true, force: true });
   }
 
-  // 3) Per-second cron fires.
+  // 3) Per-second cron fires. A fixed 1.6 s window left 0.6 s past the first
+  // second boundary, and one Linux CI run at the pool's busiest start missed
+  // it once. Wait for the launch instead; four seconds is four slots, so a
+  // schedule that drops its fires still fails, and says what it recorded.
   resetFired();
-  await sched.createJob({ name: "cr", trigger: { kind: "cron", expr: "* * * * * *" }, input: fakeInput });
+  const cronJob = await sched.createJob({ name: "cr", trigger: { kind: "cron", expr: "* * * * * *" }, input: fakeInput });
   sched.stopScheduler();
+  const cronStarted = Date.now();
   await sched.startScheduler();
-  await sleep(1600);
+  while (calls().fired.length < 1 && Date.now() - cronStarted < 4_000) await sleep(20);
+  if (calls().fired.length < 1) {
+    const seen = await sched.getJob(cronJob.id);
+    console.log("  cron job after 4 s:", JSON.stringify({ state: seen?.state, skips: seen?.skips, scheduleCheckedAt: seen?.scheduleCheckedAt, now: new Date().toISOString() }));
+  }
   assert.ok(calls().fired.length >= 1, "per-second cron trigger should have launched an iteration");
   console.log("  PASS cron trigger fired");
   passed++;
