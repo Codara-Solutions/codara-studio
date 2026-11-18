@@ -108,6 +108,9 @@ interface Props {
   // aimed at the visible chat composer. Run-scoped listeners (chat.usage
   // token accumulation) intentionally keep running so totals stay accurate.
   suspendGlobalEvents?: boolean;
+  // The chat's agents rail shows its workers: the "2 workers running" line
+  // then stays off, so the count lives in one place.
+  workersOnRail?: boolean;
   onStartChat: (
     message: string,
     clientMessageId: string,
@@ -203,6 +206,7 @@ export default function ChatComposer({
   disabled,
   lockedMode,
   suspendGlobalEvents,
+  workersOnRail,
   onStartChat,
   onForcePauseRun,
 }: Props) {
@@ -1615,11 +1619,17 @@ export default function ChatComposer({
               <FastModeToggle enabled={fastMode.enabled} onToggle={fastMode.toggle} />
             ) : null}
           </div>
-          {workerActivity ? (
+          {workerActivity && !workersOnRail ? (
             <WorkerActivityStatus
               activity={workerActivity}
               steeringQueues={isActive}
             />
+          ) : workerActivity && (workerActivity.runPaused || isActive) ? (
+            // The rail counts the workers; this line still says what the
+            // composer does with what you type, as the full line's tail did.
+            <span className="composer-toolbar__hint composer-toolbar__hint--worker-tail">
+              {workerActivity.runPaused ? "Paused" : "Messages queue"}
+            </span>
           ) : (
             // Status only. Keyboard tips competed with the model pill for the
             // same row and truncated both; the placeholder and the Send
