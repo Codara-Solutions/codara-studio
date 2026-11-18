@@ -153,7 +153,10 @@ const harnessPlugin = {
             "export async function startDirectWorkerRun(input){ const n = ++globalThis.__SPARK_TEST.launches; const id = 'run-' + n; globalThis.__SPARK_TEST.fired.push({ title: input.title, prompt: input.prompt, engine: input.engine, automationId: input.automationId }); globalThis.__SPARK_TEST[id] = { id, status: 'running', humanMessages: [], workerAttempts: [] }; return globalThis.__SPARK_TEST[id]; }\n" +
             "export async function addDirectIteration(input){ return { id: input.runId, status: 'running', humanMessages: [], workerAttempts: [] }; }\n" +
             "export async function failWorkerAttempt(){ return null; }\n" +
-            "export async function getRun(id){ return globalThis.__SPARK_TEST[id] ?? { id, status: 'running', humanMessages: [], workerAttempts: [] }; }\n" +
+            // __HOLD_GETRUN_PAST_SECOND blocks the next read (no CPU) until just past
+            // the next second boundary: a scheduler start whose loop re-attach
+            // is slow, so a cron slot passes before its timer callback can run.
+            "export async function getRun(id){ if (globalThis.__HOLD_GETRUN_PAST_SECOND) { globalThis.__HOLD_GETRUN_PAST_SECOND = false; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000 - (Date.now() % 1000) + 30); } return globalThis.__SPARK_TEST[id] ?? { id, status: 'running', humanMessages: [], workerAttempts: [] }; }\n" +
             "export async function forcePauseRun(id){ return { id, status: 'cancelled', humanMessages: [] }; }\n",
           loader: "js",
         };
@@ -338,13 +341,24 @@ async function main() {
     fs.rmSync(dark, { recursive: true, force: true });
   }
 
-  // 3) Per-second cron fires.
+  // 3) Per-second cron fires on the first slot after the scheduler starts.
+  // The start is held (in the loop re-attach) until just past a second
+  // boundary: that slot passed while the timer was armed, so it is the
+  // timer's to fire, not the start's catch-up to skip as missed.
   resetFired();
-  await sched.createJob({ name: "cr", trigger: { kind: "cron", expr: "* * * * * *" }, input: fakeInput });
+  const cronJob = await sched.createJob({ name: "cr", trigger: { kind: "cron", expr: "* * * * * *" }, input: fakeInput });
   sched.stopScheduler();
+  globalThis.__HOLD_GETRUN_PAST_SECOND = true;
+  const cronStarted = Date.now();
   await sched.startScheduler();
-  await sleep(1600);
-  assert.ok(calls().fired.length >= 1, "per-second cron trigger should have launched an iteration");
+  const heldThrough = globalThis.__HOLD_GETRUN_PAST_SECOND === false;
+  const firstSlot = Math.floor(cronStarted / 1000) * 1000 + 1000;
+  while (calls().fired.length < 1 && Date.now() < firstSlot + 600) await sleep(10);
+  const cronSeen = await sched.getJob(cronJob.id);
+  const cronDetail = { heldThrough, firstSlot: new Date(firstSlot).toISOString(), now: new Date().toISOString(), state: cronSeen?.state, skips: cronSeen?.skips };
+  assert.ok(heldThrough, "the start read a held run, so it crossed a second boundary");
+  assert.ok(calls().fired.length >= 1, `per-second cron trigger should have launched an iteration for its first slot: ${JSON.stringify(cronDetail)}`);
+  assert.ok(!(cronSeen?.skips ?? []).some((skip) => skip.reason === "missed"), `a slot that passed while the timer was armed is not missed: ${JSON.stringify(cronDetail)}`);
   console.log("  PASS cron trigger fired");
   passed++;
 

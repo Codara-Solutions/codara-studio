@@ -867,7 +867,8 @@ export async function catchUpScheduledJobs(reason: "start" | "wake", nowMs: numb
   } catch {
     return;
   }
-  const settled: string[] = [];
+  // jobId -> the time its schedule was settled up to by this check.
+  const settled = new Map<string, number>();
   await Promise.all(
     jobs
       .filter((j) => j.enabled && triggerHasSchedule(j.trigger))
@@ -883,15 +884,20 @@ export async function catchUpScheduledJobs(reason: "start" | "wake", nowMs: numb
           // machine wakes; restart it from now so its next fire is a full
           // interval after this check.
           if (reason === "wake" && job.trigger.kind === "interval") armJob(job);
+          // At start the timer was armed before this check, and a slot after
+          // that is the timer's to fire: a slow start (loops re-attaching)
+          // must not record it as missed while Codara was closed, nor settle
+          // it so the timer's own fire finds it done.
+          const upTo = reason === "start" ? Math.min(nowMs, armedAt.get(job.id) ?? nowMs) : nowMs;
           const since = missedBaselineMs(job, scheduleCheckpoint.get(job.id), nowMs);
-          const slots = scheduledSlotsBetween(job.trigger, since, nowMs);
-          scheduleCheckpoint.set(job.id, Math.max(nowMs, scheduleCheckpoint.get(job.id) ?? 0));
-          settled.push(job.id);
+          const slots = scheduledSlotsBetween(job.trigger, since, upTo);
+          scheduleCheckpoint.set(job.id, Math.max(upTo, scheduleCheckpoint.get(job.id) ?? 0));
+          settled.set(job.id, upTo);
           if (!slots) return;
           // A time that passed moments before the wake is on time, exactly as
           // when croner's own late fire notices it first (classifyTick). The
           // verdict must not depend on which of the two runs first.
-          if (reason === "wake" && nowMs - slots.latestMs <= LATE_FIRE_TOLERANCE_MS) {
+          if (reason === "wake" && upTo - slots.latestMs <= LATE_FIRE_TOLERANCE_MS) {
             void startIterationViaDriver(job.id, { source: "trigger" });
             return;
           }
@@ -899,15 +905,16 @@ export async function catchUpScheduledJobs(reason: "start" | "wake", nowMs: numb
         }),
       ),
   );
-  if (settled.length === 0) return;
+  if (settled.size === 0) return;
   // One write for every checked job.
-  const iso = new Date(nowMs).toISOString();
-  const ids = new Set(settled);
   const current = cache ?? (await loadJobs());
   await persist(
-    current.map((job) =>
-      ids.has(job.id) && !((parseMs(job.scheduleCheckedAt) ?? 0) >= nowMs) ? { ...job, scheduleCheckedAt: iso } : job,
-    ),
+    current.map((job) => {
+      const upTo = settled.get(job.id);
+      return upTo !== undefined && !((parseMs(job.scheduleCheckedAt) ?? 0) >= upTo)
+        ? { ...job, scheduleCheckedAt: new Date(upTo).toISOString() }
+        : job;
+    }),
   ).catch(() => undefined);
 }
 
