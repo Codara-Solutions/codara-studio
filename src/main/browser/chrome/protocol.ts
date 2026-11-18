@@ -29,9 +29,10 @@
 // After that the extension reports the tabs the user shared ("tabs"),
 // relays chrome.debugger events ("cdp_event", "detached") and answers
 // Codara's requests ({id, type, ...} -> {id, result} | {id, error}). Codara
-// tells it which agent used a tab ("usage"), can revoke the pairing, and asks
-// an extension older than the one it ships to reload itself ({type:"reload",
-// version}) when its hello listed the "reload" feature.
+// tells it which agent used a tab ("usage"), can revoke the pairing, and,
+// once the user pressed Update extension in Settings, asks an extension older
+// than the one it ships to reload itself ({type:"reload", version}) when its
+// hello listed the "reload" feature.
 //
 // Firefox has no debugger for extensions: its extension (extensions/firefox/)
 // answers "cdp" itself for the commands its hello lists in

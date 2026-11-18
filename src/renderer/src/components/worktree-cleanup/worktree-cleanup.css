@@ -1,15 +1,27 @@
-/* The worktree cleanup screen (WorktreeCleanupDialog.tsx). A modal over the
-   window: the dim is the shared .spark-scrim and the surface the shared
-   floating glass (.spark-glass--strong.spark-overlay-surface), so it follows
-   the glass setting and every theme through tokens only. */
+/* The worktree cleanup screen (WorktreeCleanupDialog.tsx) and an agent's
+   removal request (WorktreeCleanupApproval.tsx). Modals over the window: the
+   dim is the shared .spark-scrim and the surface the shared floating glass
+   (.spark-glass--strong.spark-overlay-surface), so they follow the glass
+   setting and every theme through tokens only. The scrim is a sibling under
+   the surface, as in Settings, never its parent: the scrim's fade-in makes
+   it a backdrop root, and a surface inside it frosted only the empty scrim,
+   so the terminal behind showed through sharp
+   (test-dialog-glass-surface.cjs). */
 
-.wtc-scrim {
+.wtc-layer {
+  position: absolute;
+  inset: 0;
   display: grid;
   place-items: center;
   z-index: 1200;
 }
+.wtc-layer > .spark-scrim {
+  z-index: 0;
+}
 
 .wtc-dialog {
+  position: relative;
+  z-index: 1;
   width: min(980px, calc(100vw - 48px));
   height: min(720px, calc(100vh - 72px));
   border-radius: 10px;
@@ -567,6 +579,15 @@
 .wtc-dialog--approval .wtc-review-toggle input {
   margin: 0;
   flex: none;
+}
+/* A row that cannot be removed reads as such before anyone reaches for it. */
+.wtc-dialog--approval .wtc-review-item.is-blocked .wtc-review-head > input {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.wtc-dialog--approval .wtc-review-item.is-blocked .wtc-review-head > label {
+  cursor: default;
+  color: var(--ink-dim);
 }
 
 /* ── Footer ───────────────────────────────────────────────────────────────── */

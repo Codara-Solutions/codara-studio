@@ -10,9 +10,9 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 
 // An agent asks to remove worktrees through codara_worktree_cleanup: the scan
 // recommends, and the removal opens Codara's approval dialog naming the agent.
-// Only the safe worktree starts ticked, the one with unsaved changes cannot be
-// ticked, an unticked one stays, and closing the dialog declines. Nothing is
-// removed before the user presses Remove.
+// Nothing starts ticked, the one with unsaved changes cannot be ticked, an
+// unticked one stays, and closing the dialog declines. Nothing is removed
+// before the user presses Remove, which names how many go.
 
 function git(cwd: string, args: string[], env: NodeJS.ProcessEnv): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", env }).trim();
@@ -113,20 +113,21 @@ test("an agent's cleanup request removes only what the user approves", async ({}
     await expect(dialog).toBeVisible({ timeout: 60_000 });
     await expect(dialog.getByText("claude-code asks to remove 4 worktrees")).toBeVisible();
     const item = (path: string) => dialog.locator(`li[data-worktree-path="${path}"]`);
-    await expect(item(merged).getByRole("checkbox", { name: "Remove feature/merged" })).toBeChecked();
-    await expect(item(done).getByRole("checkbox", { name: "Remove feature/done" })).toBeChecked();
+    await expect(item(merged).getByRole("checkbox", { name: "Remove feature/merged" })).not.toBeChecked();
+    await expect(item(done).getByRole("checkbox", { name: "Remove feature/done" })).not.toBeChecked();
+    await expect(dialog.getByRole("button", { name: "Remove", exact: true })).toBeDisabled();
     await expect(item(dirty).getByRole("checkbox", { name: "Remove feature/dirty" })).toBeDisabled();
     await expect(item(dirty).getByText(/unsaved changes/)).toBeVisible();
     await expect(item(idea).getByRole("checkbox", { name: "Remove feature/idea" })).not.toBeChecked();
     await expect(item(merged).getByText("safe to remove", { exact: true })).toBeVisible();
     await expect(item(merged).getByText(/The remote branch stays\. The repository has no remote\./)).toBeVisible();
-    await expect(dialog.getByRole("button", { name: "Remove 2 worktrees" })).toBeEnabled();
+    await item(merged).getByRole("checkbox", { name: "Remove feature/merged" }).check();
+    await expect(dialog.getByRole("button", { name: "Remove 1 worktree" })).toBeEnabled();
     expect(existsSync(merged)).toBe(true);
     await page.waitForTimeout(400);
     await page.screenshot({ path: process.env.CODARA_WT_CLEANUP_SHOT ?? testInfo.outputPath("approval-dialog.png") });
 
-    // The user leaves one of the safe ones out.
-    await item(done).getByRole("checkbox", { name: "Remove feature/done" }).uncheck();
+    // The user leaves the other safe one out.
     await dialog.getByRole("button", { name: "Remove 1 worktree" }).click();
     const result = await removal;
     expect(result.status).toBe("done");
