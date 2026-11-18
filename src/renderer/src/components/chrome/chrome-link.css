@@ -89,10 +89,9 @@
 
 /* An older extension in a paired browser: what runs, what Update does, and the button. Wraps, never cut off. */
 .chrome-update {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 12px;
+  display: grid;
+  justify-items: start;
+  gap: 6px;
   margin-top: 2px;
   font-size: 12px;
   line-height: 1.5;
@@ -101,7 +100,6 @@
 
 .chrome-update__text {
   display: grid;
-  flex: 1 1 260px;
   min-width: 0;
   gap: 2px;
   overflow-wrap: anywhere;
@@ -109,10 +107,6 @@
 
 .chrome-update__desc {
   color: var(--ink-dim);
-}
-
-.chrome-update .spark-btn {
-  flex: none;
 }
 
 .chrome-tabs {
