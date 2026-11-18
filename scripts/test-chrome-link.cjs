@@ -632,6 +632,34 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   fs.rmSync(copy, { recursive: true });
   assert.equal(lib.ensureExtensionFolder(shipped, copy), true, "a missing copy is made");
   assert.equal(lib.extensionManifestVersion(copy), "1.1.0");
+  // A copy that fails part way (a file it cannot read, a full disk) leaves
+  // the folder the browser loaded exactly as it was, and nothing beside it.
+  const filesOf = (dir) => Object.fromEntries(fs.readdirSync(dir, { recursive: true }).sort().map((rel) => {
+    const full = path.join(dir, String(rel));
+    return [String(rel), fs.statSync(full).isDirectory() ? "dir" : fs.readFileSync(full, "utf8")];
+  }));
+  const loaded = filesOf(copy);
+  const newer = fs.mkdtempSync(path.join(os.tmpdir(), "codara-ext-newer-"));
+  fs.writeFileSync(path.join(newer, "manifest.json"), JSON.stringify({ version: "1.2.0" }));
+  fs.writeFileSync(path.join(newer, "a.js"), "export const a = 3;");
+  fs.writeFileSync(path.join(newer, "z.js"), "unreadable");
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    fs.chmodSync(path.join(newer, "z.js"), 0o000);
+    assert.throws(() => lib.syncExtensionFolder(newer, copy), "the copy fails part way");
+    assert.deepEqual(filesOf(copy), loaded, "the loaded folder is byte-identical after a failed copy");
+    assert.deepEqual(fs.readdirSync(path.dirname(copy)), ["chrome-extension"], "no half copy left beside it");
+    fs.chmodSync(path.join(newer, "z.js"), 0o644);
+  }
+  assert.equal(lib.syncExtensionFolder(newer, copy), true);
+  assert.equal(lib.extensionManifestVersion(copy), "1.2.0");
+  assert.deepEqual(fs.readdirSync(path.dirname(copy)), ["chrome-extension"], "the swap leaves nothing beside it");
+  // Codara stopped between the two renames of a swap: the next attempt puts the old folder back first.
+  fs.renameSync(copy, `${copy}.old`);
+  fs.mkdirSync(`${copy}.new`);
+  fs.writeFileSync(path.join(`${copy}.new`, "manifest.json"), "{");
+  assert.equal(lib.ensureExtensionFolder(newer, copy), false, "the interrupted swap's old folder is back");
+  assert.equal(lib.extensionManifestVersion(copy), "1.2.0");
+  assert.deepEqual(fs.readdirSync(path.dirname(copy)), ["chrome-extension"], "leftovers of the interrupted swap are gone");
   assert.deepEqual(lib.sanitizeExtensionFeatures(["reload", "reload", "Bad Feature", 3, "x".repeat(40)]), ["reload"]);
   assert.deepEqual(lib.sanitizeExtensionFeatures("reload"), []);
 

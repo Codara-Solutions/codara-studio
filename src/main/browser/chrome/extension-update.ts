@@ -11,7 +11,7 @@
 // Nothing here touches a file outside the two folders it is given.
 
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { cpSync, existsSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 /** What the store zip leaves out (extensions/chrome/build/pack.mjs DEV_FILES); the copy leaves out the same. */
@@ -57,19 +57,60 @@ export function extensionManifestVersion(dir: string): string | null {
   }
 }
 
-/** Copy `source` over `target` when forced, missing or different. True when it copied. */
+/**
+ * Codara stopped in the middle of a swap: the old folder is put back if the
+ * new one never took its place, then whatever is left beside it goes.
+ */
+function finishInterruptedSwap(target: string): void {
+  const old = `${target}.old`;
+  if (!existsSync(target) && existsSync(old)) renameSync(old, target);
+  rmSync(old, { recursive: true, force: true });
+  rmSync(`${target}.new`, { recursive: true, force: true });
+}
+
+/**
+ * Copy `source` over `target` when forced, missing or different. True when
+ * it copied. The browser may have `target` loaded, so it is never left half
+ * written: the copy goes to a folder beside it, is checked against `source`,
+ * and only then takes its place by rename. A copy that fails leaves `target`
+ * as it was.
+ */
 export function syncExtensionFolder(source: string, target: string, force = false): boolean {
+  finishInterruptedSwap(target);
   if (!force && existsSync(target) && extensionContentHash(target) === extensionContentHash(source)) return false;
-  rmSync(target, { recursive: true, force: true });
-  cpSync(source, target, {
-    recursive: true,
-    filter: (path) => !isDevFile(path.slice(source.length).replace(/^[\\/]+/, "")),
-  });
+  const staged = `${target}.new`;
+  const old = `${target}.old`;
+  try {
+    cpSync(source, staged, {
+      recursive: true,
+      filter: (path) => !isDevFile(path.slice(source.length).replace(/^[\\/]+/, "")),
+    });
+    const copied = extensionContentHash(staged);
+    if (!copied || copied !== extensionContentHash(source)) throw new Error("The copied extension does not match the one Codara ships.");
+  } catch (error) {
+    rmSync(staged, { recursive: true, force: true });
+    throw error;
+  }
+  let moved = false;
+  try {
+    if (existsSync(target)) {
+      renameSync(target, old);
+      moved = true;
+    }
+    renameSync(staged, target);
+  } catch (error) {
+    // Windows refuses to rename a folder with an open file in it: the loaded folder stays.
+    if (moved) renameSync(old, target);
+    rmSync(staged, { recursive: true, force: true });
+    throw error;
+  }
+  rmSync(old, { recursive: true, force: true });
   return true;
 }
 
 /** The first copy, for a first install: only when `target` holds no readable extension. True when it copied. */
 export function ensureExtensionFolder(source: string, target: string): boolean {
+  finishInterruptedSwap(target);
   if (extensionManifestVersion(target)) return false;
   return syncExtensionFolder(source, target, true);
 }
