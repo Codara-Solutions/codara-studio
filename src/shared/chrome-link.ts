@@ -35,6 +35,8 @@ export interface ChromeLinkBrowserState {
    * current or not connected.
    */
   extensionUpdate: "available" | "updating" | "manual" | "elsewhere" | null;
+  /** The connected extension can reload itself when asked; before 1.1.0 the user reloads it in the browser. */
+  extensionReloads: boolean;
   allowOpen: boolean;
   tabs: ChromeLinkTabState[];
 }

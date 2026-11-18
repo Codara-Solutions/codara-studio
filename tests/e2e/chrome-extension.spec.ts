@@ -663,7 +663,7 @@ for (const theme of ["codara-daylight", "codara-classic"] as const) {
       const row = settings.locator('[data-setting-anchor="Paired browsers"]');
       const notice = row.locator('[data-chrome-extension-update="available"]');
       await expect(notice).toContainText(`This browser runs extension 1.0.0, Codara ships ${manifest.version}.`);
-      await expect(notice).toContainText(`Update extension copies ${manifest.version} into Codara's extension folder and restarts the extension in this browser`);
+      await expect(notice).toContainText(`Update extension copies ${manifest.version} into Codara's extension folder, which every browser that loaded it uses, and restarts the extension in this browser`);
       expect(await notice.textContent()).not.toMatch(/[\u2013\u2014]/);
       for (const width of UPDATE_WIDTHS) {
         await codara.setViewportSize({ width, height: 860 });
@@ -679,7 +679,8 @@ for (const theme of ["codara-daylight", "codara-classic"] as const) {
       await expect.poll(folderVersion).toBe(manifest.version);
       await gone;
       // Chromium 156 leaves an extension loaded over the protocol disabled
-      // after it reloads itself (issue 240), so the test stops at the reload.
+      // after it reloads itself (codara-studio issue 240), so the test stops at
+      // the reload; extensions/chrome/test covers what survives it.
     } finally {
       await browser?.close().catch(() => undefined);
       await app.close();

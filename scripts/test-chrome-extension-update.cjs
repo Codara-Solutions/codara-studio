@@ -155,9 +155,9 @@ function extension(port, id, version, features) {
   process.env.CODARA_CHROME_LINK_PORTS = String(port);
   const lib = await load();
 
-  // The extension's id from Chrome's own algorithm: a known Linux example
-  // and the Windows form (UTF-16, drive letter in upper case).
-  assert.match(lib.unpackedExtensionId("/x"), /^[a-p]{32}$/);
+  // The extension's id from Chrome's own algorithm: Chromium's id_util test
+  // vector for "test", and the Windows form (UTF-16, drive letter in upper case).
+  assert.equal(lib.unpackedExtensionId("test", "linux"), "jpignaibiiemhngfjkcpokkamffknabf");
   assert.equal(lib.unpackedExtensionId("c:\\Codara\\chrome-extension", "win32"), lib.unpackedExtensionId("C:\\Codara\\chrome-extension", "win32"), "the drive letter is upper-cased");
   assert.notEqual(lib.unpackedExtensionId("C:\\Codara", "win32"), lib.unpackedExtensionId("C:\\Codara", "linux"), "Windows hashes UTF-16");
 
@@ -198,9 +198,10 @@ function extension(port, id, version, features) {
   await wait(300);
   assert.equal(ext.received.filter((message) => message.type === "reload").length, 0, "no reload is sent without the user's yes");
   assert.deepEqual(snapshot(folder), before, "connecting changes nothing on disk");
-  let browserState = lib.chromeLinkState().browsers[0];
+  const browserState = lib.chromeLinkState().browsers[0];
   assert.equal(browserState.extensionUpdate, "available", "Settings offers Update extension");
   assert.equal(browserState.extensionVersion, "1.0.0");
+  assert.equal(browserState.extensionReloads, true, "its hello said it can reload itself");
   assert.equal(lib.chromeLinkState().shippedExtensionVersion, shipped);
 
   // The user presses Update extension: the folder gets the shipped files and
@@ -238,7 +239,7 @@ function extension(port, id, version, features) {
   const refusal = new Promise((resolve) => old.on("message", (raw) => resolve(JSON.parse(String(raw)))));
   await new Promise((resolve) => old.on("open", resolve));
   old.send(JSON.stringify({ type: "hello", protocol: 1, browser: { name: "Brave", version: "1" }, extension: { id: extensionId, version: "0.9.0" } }));
-  assert.match((await refusal).message, /update the Codara extension from Codara's Settings > Browser/);
+  assert.match((await refusal).message, /update the Codara extension \(Codara's Settings > Browser says how\)/);
   const incompatible = await until(() => lib.chromeLinkState().incompatible[0], "the refused extension");
   assert.deepEqual(incompatible, { extensionId, version: "0.9.0", browser: { name: "Brave", version: "1" }, update: "extension", fromCodaraFolder: true, copied: false });
   assert.equal(lib.extensionManifestVersion(folder), "0.9.0", "a refused extension changes nothing by itself");

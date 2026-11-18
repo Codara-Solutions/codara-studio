@@ -333,7 +333,7 @@ export class ChromeLinkServer {
       this.noteRefused(extensionId, message, protocol);
       this.refuse(ws, {
         type: "error",
-        message: `This Codara speaks link protocol ${CHROME_LINK_PROTOCOL}; update ${protocol > CHROME_LINK_PROTOCOL ? "Codara" : "the Codara extension from Codara's Settings > Browser"}.`,
+        message: `This Codara speaks link protocol ${CHROME_LINK_PROTOCOL}; update ${protocol > CHROME_LINK_PROTOCOL ? "Codara" : "the Codara extension (Codara's Settings > Browser says how)"}.`,
       });
       return;
     }

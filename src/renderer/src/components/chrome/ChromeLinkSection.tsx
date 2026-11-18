@@ -35,7 +35,11 @@ function ExtensionUpdateNotice({
         <div className="chrome-update" data-chrome-extension-update="available">
           <div className="chrome-update__text">
             <span>{versions}</span>
-            <span className="chrome-update__desc">{`Update extension copies ${shipped} into Codara's extension folder and restarts the extension in this browser, keeping your shared tabs; until you do, ${running} keeps working.`}</span>
+            <span className="chrome-update__desc">
+              {browser.extensionReloads
+                ? `Update extension copies ${shipped} into Codara's extension folder, which every browser that loaded it uses, and restarts the extension in this browser; until you do, ${running} keeps working.`
+                : `Update extension copies ${shipped} into Codara's extension folder, which every browser that loaded it uses; then press the reload button on Codara in chrome://extensions. Until you do, ${running} keeps working.`}
+            </span>
           </div>
           <button type="button" className="spark-btn is-primary" disabled={busy} onClick={onUpdate}>
             Update extension

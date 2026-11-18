@@ -121,11 +121,12 @@ let folderIds: { folder: string; ids: Set<string> } | null = null;
 function fromCodaraFolder(extensionId: string): boolean {
   const folder = extensionFolder();
   if (folderIds?.folder !== folder) {
-    let real = folder;
+    let real: string;
     try {
       real = realpathSync.native(folder);
     } catch {
-      // Not copied yet.
+      // Not copied yet: its resolved path is unknown, so nothing is kept for later.
+      return unpackedExtensionIds([folder]).has(extensionId);
     }
     const linked = LEGACY_DIR_NAMES.map((name) => join(homedir(), name, "chrome-extension")).filter((candidate) => {
       try {
@@ -231,6 +232,7 @@ export function chromeLinkState(): ChromeLinkState {
         connected: Boolean(link),
         extensionVersion: link?.extensionVersion || null,
         extensionUpdate: updateStateOf(link),
+        extensionReloads: link?.extensionFeatures.includes("reload") ?? false,
         allowOpen: link?.allowOpen ?? false,
         tabs: link
           ? [...link.tabs.values()].map((tab) => ({
