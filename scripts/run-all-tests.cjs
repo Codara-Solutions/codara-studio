@@ -28,7 +28,7 @@
 // slow test from starting last. They live in
 // node_modules/.cache/codara-tests/timings.json.
 //
-// CI splits one run across two machines and holds it to a time budget:
+// CI splits one run across several machines and holds it to a time budget:
 // - CODARA_TEST_PART=pool runs every suite except the serial ones, and
 //   CODARA_TEST_PART=serial runs only those.
 // - CODARA_TEST_SHARD=k/n gives each suite of that part to one of n shards
