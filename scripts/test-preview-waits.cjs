@@ -121,6 +121,16 @@ function verdicts() {
   const busy = checkWait(idle, activity({ inFlight: new Map([["1", { url: "http://x/api", at: 1 }]]) }), probe(), now, now);
   assert.deepEqual(busy.waiting, ["1 request in flight (http://x/api)"]);
   assert.deepEqual(checkWait(idle, activity({ lastNetworkAt: now - 100 }), probe(), now, now).waiting, ["the network was busy less than 500 ms ago"]);
+  // A page too busy to answer a read: its main frame's loading events still
+  // say it has loaded, so what keeps the network busy is what gets named.
+  const loaded = { loadingStartedAt: 90_000, loadingStoppedAt: 91_000 };
+  const unanswered = checkWait(idle, activity({ ...loaded, inFlight: new Map([["1", { url: "http://x/api", at: 1 }]]) }), null, now, now);
+  assert.deepEqual(unanswered.waiting, ["1 request in flight (http://x/api)"]);
+  assert.equal(unanswered.unread, undefined, "the verdict did not need the page read");
+  assert.equal(checkWait(idle, activity(loaded), null, now, now).ok, true, "loaded and idle without a page read");
+  const neverLoaded = checkWait(load, activity(), null, now, now);
+  assert.deepEqual(neverLoaded.waiting, ["document.readyState is unknown"]);
+  assert.equal(neverLoaded.unread, true);
 
   const hmr = normalizeWaitRequest({ hmr: true });
   assert.deepEqual(checkWait(hmr, activity(), probe(), now, now).waiting, ["no hot update or reload seen yet"]);
@@ -272,6 +282,13 @@ async function inChromium() {
     await sleep(100);
     const stillBusy = await wait({ load: "networkidle", timeoutMs: 300 });
     assert.match(stillBusy.error, /^Timed out after 300 ms waiting for networkidle\. Seen: 1 request in flight \(http:\/\/127\.0\.0\.1:\d+\/delay\?ms=3000\)\.$/);
+    // The same wait on a page too busy to answer a read (a slow CI runner):
+    // it still names the request and still ends near its own timeout.
+    await target.evaluate("setTimeout(() => { const t = Date.now(); while (Date.now() - t < 1000); }, 0)");
+    await sleep(50);
+    const frozen = await wait({ load: "networkidle", timeoutMs: 300 });
+    assert.match(frozen.error, /^Timed out after 300 ms waiting for networkidle\. Seen: 1 request in flight \(http:\/\/127\.0\.0\.1:\d+\/delay\?ms=3000\)\.$/);
+    assert.ok(frozen.waitedMs < 300 + 250, `a busy page does not stretch the wait (${frozen.waitedMs} ms)`);
     // An open EventSource never ends, and does not count.
     await navigate(target, server.url("/stream"));
     const streaming = await wait({ load: "networkidle", timeoutMs: 3000 });

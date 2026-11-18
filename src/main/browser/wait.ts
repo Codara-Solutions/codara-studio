@@ -281,6 +281,8 @@ export interface Verdict {
   waiting: string[];
   /** A condition that can no longer be met (the dev server reported an error). */
   failure?: string;
+  /** An unmet condition needed a page read, and there was none. */
+  unread?: boolean;
 }
 
 /** Decide whether the conditions hold; pure, for tests. */
@@ -292,13 +294,17 @@ export function checkWait(
   startedAt: number,
 ): Verdict {
   const waiting: string[] = [];
+  let unread = false;
   const since = activity.lastActionAt || startedAt;
   if (request.navigation && !activity.navigations.some((nav) => nav.at >= since)) {
     waiting.push(activity.lastActionAt ? "no navigation since your last action" : "no navigation since the wait started");
   }
   if (request.url) {
     const href = probe?.href ?? activity.navigations.at(-1)?.url ?? "";
-    if (!matchUrl(request.url, href)) waiting.push(`url is ${href || "unknown"}`);
+    if (!matchUrl(request.url, href)) {
+      waiting.push(`url is ${href || "unknown"}`);
+      if (!href) unread = true;
+    }
   }
   if (request.load) {
     // A request no load followed within a few seconds was abandoned, whatever
@@ -308,11 +314,16 @@ export function checkWait(
     const pendingNavigation = requested || activity.loadingStartedAt > activity.loadingStoppedAt;
     const actedAt = lastAgentActivityAt(activity);
     const settling = actedAt > 0 && now - actedAt < ACTION_SETTLE_MS;
-    const ready = probe?.readyState ?? "unknown";
+    // A page too busy to answer a read has still finished loading when the
+    // main frame's loading stopped after it last started (and no navigation
+    // is pending): readyState only goes back with a new document.
+    const loadedByEvents = activity.loadingStartedAt > 0 && activity.loadingStoppedAt >= activity.loadingStartedAt;
+    const ready = probe?.readyState ?? (loadedByEvents ? "complete" : "unknown");
     if (pendingNavigation) waiting.push("a navigation is still loading");
     else if (settling) waiting.push("the last action just happened");
     else if (request.load === "domcontentloaded" ? ready === "loading" || ready === "unknown" : ready !== "complete") {
       waiting.push(`document.readyState is ${ready}`);
+      if (ready === "unknown") unread = true;
     } else if (request.load === "networkidle") {
       const busy = activity.inFlight.size;
       if (busy > 0) {
@@ -362,7 +373,10 @@ export function checkWait(
   }
   if (request.selector) {
     const sel = probe?.selector;
-    if (!sel) waiting.push(`could not read the page to check ${request.selector}`);
+    if (!sel) {
+      waiting.push(`could not read the page to check ${request.selector}`);
+      unread = true;
+    }
     else if (!sel.matched) {
       const old = sel.count - sel.fresh;
       const detail = sel.count === 0
@@ -377,8 +391,9 @@ export function checkWait(
   }
   if (request.stableMs && (!probe || probe.quietMs < request.stableMs)) {
     waiting.push(`the DOM changed ${probe ? `${probe.quietMs} ms` : "too recently"} ago`);
+    if (!probe) unread = true;
   }
-  return { ok: waiting.length === 0 && !failure, waiting, ...(failure ? { failure } : {}) };
+  return { ok: waiting.length === 0 && !failure, waiting, ...(failure ? { failure } : {}), ...(unread ? { unread } : {}) };
 }
 
 function describeConditions(request: WaitRequest): string {
@@ -417,7 +432,10 @@ export async function waitForPage(target: BrowserTarget, request: WaitRequest): 
   let probeError: string | null = null;
   for (;;) {
     try {
-      probe = await bounded(target.evaluate<PageProbe>(expression), PROBE_TIMEOUT_MS);
+      // A read never runs past the wait's own deadline (by more than a tick):
+      // a page too busy to answer must not turn a 300 ms wait into 1.5 s.
+      const readMs = Math.min(PROBE_TIMEOUT_MS, Math.max(TICK_MS, deadline - Date.now()));
+      probe = await bounded(target.evaluate<PageProbe>(expression), readMs);
       probeError = null;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -446,7 +464,7 @@ export async function waitForPage(target: BrowserTarget, request: WaitRequest): 
       };
     }
     if (now >= deadline) {
-      const seen = verdict.waiting.join("; ") + (probeError && !probe ? `; last page read failed: ${probeError}` : "");
+      const seen = verdict.waiting.join("; ") + (probeError && !probe && verdict.unread ? `; last page read failed: ${probeError}` : "");
       return {
         ok: false,
         error: `Timed out after ${request.timeoutMs} ms waiting for ${describeConditions(request)}. Seen: ${seen}.`,
