@@ -60,8 +60,9 @@ jobs:
           # One suite at a time: nothing timing-sensitive shares the 3 cores.
           CODARA_TEST_JOBS: "1"
           # About 650 s of suite time per shard one at a time (run
-          # 44202611290: 1302 s for the whole pool). 1380 s still leaves the job's setup (about 3 min) inside its 30 min, so
-          # the budget, not the timeout, names the slow suites.
+          # 44202611290: 1302 s for the whole pool). 1380 s still leaves the
+          # job's setup (about 3 min) inside its 30 min, so the budget, not
+          # the timeout, names the slow suites.
           CODARA_TEST_BUDGET_SECONDS: "1380"
         run: npm run test:all
 

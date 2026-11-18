@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // CI runs the macOS pool on two machines, one suite at a time on each
 // (CODARA_TEST_SHARD=1/2 and 2/2). Between them the shards must run every
-// suite exactly once, agree on the split without sharing any state, keep the
-// known slow suites apart, and refuse a malformed setting instead of silently
+// suite exactly once, agree on the split without sharing any state, balance the
+// known slow suites' seconds, and refuse a malformed setting instead of silently
 // running nothing.
 //
 //   node scripts/test-run-all-tests-shard.cjs

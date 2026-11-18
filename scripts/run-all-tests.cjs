@@ -31,10 +31,10 @@
 // CI splits one run across two machines and holds it to a time budget:
 // - CODARA_TEST_PART=pool runs every suite except the serial ones, and
 //   CODARA_TEST_PART=serial runs only those.
-// - CODARA_TEST_SHARD=k/n keeps every n-th suite of that part, starting with
-//   the k-th, so n machines run all of it between them. The slow suites in
-//   SLOW_POOL_SUITES are dealt first by their listed seconds, then the rest in
-//   name order. The split uses only what is committed, so every shard agrees.
+// - CODARA_TEST_SHARD=k/n gives each suite of that part to one of n shards
+//   and keeps the k-th, so n machines run all of it between them. The slow
+//   suites in SLOW_POOL_SUITES are dealt first by their listed seconds, then
+//   the rest in name order. The split uses only what is committed, so every shard agrees.
 // - CODARA_TEST_BUDGET_SECONDS stops the run once it has taken that long and
 //   fails it with a message naming what was stopped and what never started,
 //   so a slow suite fails here instead of hitting the job's timeout.
