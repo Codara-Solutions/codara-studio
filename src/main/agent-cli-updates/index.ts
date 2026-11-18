@@ -3,7 +3,7 @@
 // get none (launch-gate.ts).
 
 import { constants as fsConstants, promises as fs } from "node:fs";
-import { join, posix, win32 } from "node:path";
+import { join } from "node:path";
 
 import { BrowserWindow } from "electron";
 
@@ -22,8 +22,7 @@ import { agentCliUpdatesAllowed } from "./launch-gate";
 import { holdVendorUpdates, launchesStarting, setToolBusy } from "./launch-guard";
 import { relinkLauncher } from "./relink";
 import { liveToolSessions } from "./live-sessions";
-import { createAgentCliUpdateService, type AgentCliUpdateService, type PersistedUpdateState, type UpdateInProgress } from "./service";
-import { PLAIN_VERSION } from "./reinstall";
+import { createAgentCliUpdateService, inProgressFrom, type AgentCliUpdateService, type PersistedUpdateState } from "./service";
 import { acquireUpdateLock } from "./update-lock";
 
 const STATE_FILE = "agent-cli-updates.json";
@@ -56,40 +55,16 @@ async function readState(): Promise<PersistedUpdateState> {
           ([tool, version]) => ["claude", "codex", "grok"].includes(tool) && typeof version === "string",
         ),
       );
+    const inProgress = inProgressFrom(parsed.inProgress);
     return {
       failed: versions(parsed.failed),
       notOffered: versions(parsed.notOffered),
       broken: versions(parsed.broken),
-      ...inProgressFrom(parsed.inProgress),
+      ...(inProgress ? { inProgress } : {}),
     };
   } catch {
     return { failed: {}, notOffered: {} };
   }
-}
-
-/** The saved record, only when every field is what Codara writes; the service checks it again. */
-function inProgressFrom(value: unknown): { inProgress?: UpdateInProgress } {
-  const record = (typeof value === "object" && value ? value : {}) as Record<string, unknown>;
-  const text = (key: string) => (typeof record[key] === "string" ? (record[key] as string) : null);
-  const path = (key: string) => {
-    const found = text(key);
-    return found && found.length < 4096 && !found.includes("\0") && (posix.isAbsolute(found) || win32.isAbsolute(found)) ? found : null;
-  };
-  const version = (key: string) => {
-    const found = text(key);
-    return found && PLAIN_VERSION.test(found) ? found : null;
-  };
-  const tool = text("tool");
-  const fromVersion = version("fromVersion");
-  const fromRealPath = path("fromRealPath");
-  const fromBinaryPath = path("fromBinaryPath");
-  const toVersion = version("toVersion");
-  if (record.toVersion != null && !toVersion) return {};
-  if (!tool || !["claude", "codex", "grok"].includes(tool) || !fromVersion || !fromRealPath || !fromBinaryPath) return {};
-  const savedAt = typeof record.savedAt === "number" && Number.isFinite(record.savedAt) && record.savedAt > 0 ? record.savedAt : undefined;
-  return {
-    inProgress: { tool: tool as UpdateInProgress["tool"], fromVersion, fromRealPath, fromBinaryPath, toVersion, ...(savedAt ? { savedAt } : {}) },
-  };
 }
 
 async function claudeChannel() {
