@@ -24,6 +24,7 @@ import {
 } from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
 import { resolveBinary } from "./binary-resolver";
+import { LAUNCH_SETTLE_MS, beginToolLaunch, vendorUpdaterEnv } from "./agent-cli-updates/launch-guard";
 import { getHookRpcEnvSafe } from "./hook-rpc";
 import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
@@ -647,6 +648,12 @@ export async function spawn(
   // critical section we re-check sessions, so queued callers attach to the
   // process the winner created instead of spawning another one.
   return serializeSessionSpawn(opts.id, async () => {
+    // A new local agent launch is refused while Codara swaps that tool's
+    // build, and counts as a session until its process can be seen.
+    const launching = !isRemotePath(opts.cwd) && !sessions.has(opts.id)
+      ? parseManualAgentStartupCommand(opts.startupCommand)?.runtime
+      : undefined;
+    const endLaunch = launching ? beginToolLaunch(launching) : null;
     pendingSpawns.add(opts.id);
     if (!isRemotePath(opts.cwd) && (opts.nativeCodexProfileId !== undefined ||
         parseManualAgentStartupCommand(opts.startupCommand)?.runtime === "codex")) {
@@ -657,6 +664,7 @@ export async function spawn(
     } finally {
       pendingSpawns.delete(opts.id);
       pendingCodexSpawns.delete(opts.id);
+      if (endLaunch) setTimeout(endLaunch, LAUNCH_SETTLE_MS).unref?.();
     }
   });
 }
@@ -1369,6 +1377,8 @@ function doSpawn(
   // cache is warmed in src/main/index.ts; on a cold call we just see the
   // process.env PATH fallback, which is no worse than today.
   injectEnrichedPath(env);
+  // After a roll back, the tool's own updater stays off until a newer version is out.
+  Object.assign(env, vendorUpdaterEnv());
   // After the PATH above: the enriched PATH keeps the process's own entries,
   // AppRun's mount among them. See env-sanitize.ts.
   sanitizeAppImageChildEnv(env);

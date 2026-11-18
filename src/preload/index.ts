@@ -51,6 +51,7 @@ import { chromeLinkApi } from "./areas/chrome-link";
 import { keepAwakeApi } from "./areas/keep-awake";
 import { gpuDrawingApi } from "./areas/gpu-drawing";
 import { devUpdateApi } from "./areas/dev-update";
+import { agentCliUpdatesApi } from "./areas/agent-cli-updates";
 import { gitFixApi } from "./areas/git-fix";
 import { diagnosticsApi } from "./areas/diagnostics";
 import { pointApi } from "./areas/point";
@@ -1935,6 +1936,7 @@ const api = {
   keepAwake: keepAwakeApi,
   gpuDrawing: gpuDrawingApi,
   devUpdate: devUpdateApi,
+  agentCliUpdates: agentCliUpdatesApi,
   capture: captureApi,
   point: pointApi,
   workspaceStatus: workspaceStatusApi,

@@ -7,6 +7,7 @@ import { promises as fsp } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import * as pty from "./pty-manager";
+import { toolUpdating } from "./agent-cli-updates/launch-guard";
 import { codaraHome } from "./codara-home";
 import { paneIdleMs } from "./agent-hibernation";
 import { worktreeArchiveRoot } from "./worktree-cleanup/archive";
@@ -1945,6 +1946,9 @@ async function createTerminal(
       return errorResponse(id, ERR_FORBIDDEN, error instanceof Error ? error.message : String(error));
     }
   }
+  // Before a pane exists: the launch's own refusal would only reach the pane.
+  const updating = toolUpdating(command);
+  if (updating) return errorResponse(id, ERR_TERMINAL_SPAWN, updating);
   const callerPane =
     !run && callerPaneId
       ? (await listStudioTerminals(deadline).catch(() => [])).find((entry) => entry.paneId === callerPaneId)
@@ -2554,6 +2558,7 @@ const paneOpener = createPaneOpener({
   kill: (paneId) => pty.killImmediate(paneId),
   isDirectory: async (path) => (await fsp.stat(path).catch(() => null))?.isDirectory() === true,
   requestTerminalOp: (op, opParams) => requestTerminalOp(op, opParams),
+  toolUpdating,
 });
 
 /** The window's document is being replaced: end every pane overlay it showed. */

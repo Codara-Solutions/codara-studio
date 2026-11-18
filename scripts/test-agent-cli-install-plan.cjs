@@ -244,6 +244,15 @@ async function run(m) {
     });
     assert.equal(p.method, "manual", "a % in the npm folder is not passed through cmd.exe");
   }
+  // The same holds for every command run through cmd.exe, the version check too.
+  for (const bad of ["C:\\Users\\a%PATH%b\\npm\\codex.cmd", 'C:\\Users\\a"b\\npm\\codex.cmd', "C:\\Users\\a\nb\\codex.cmd"]) {
+    assert.throws(() => m.spawnableCommand({ executable: bad, args: ["--version"], display: "codex --version" }, "win32", {}), /through cmd\.exe/, bad);
+  }
+  assert.throws(
+    () => m.spawnableCommand({ executable: "C:\\npm\\npm.cmd", args: ["install", "-g", "--prefix", "C:\\a%b", "x"], display: "npm" }, "win32", {}),
+    /through cmd\.exe/,
+  );
+  assert.equal(m.spawnableCommand({ executable: "/home/a%b/codex", args: [], display: "codex" }, "linux").executable, "/home/a%b/codex", "no cmd.exe, no limit");
   // A Homebrew formula built on Node keeps an npm tree inside the Cellar: Homebrew's.
   {
     const p = await plan({
@@ -256,6 +265,47 @@ async function run(m) {
     assert.equal(p.method, "manual");
     assert.equal(p.source, "Homebrew");
     assert.equal(p.manualCommand, "brew upgrade codex");
+  }
+  // A Node installed by pnpm or Scoop keeps real npm globals: npm's.
+  {
+    const prefix = "/home/u/.local/share/pnpm/nodejs/22.11.0";
+    const p = await plan({
+      tool: "codex",
+      platform: "linux",
+      binaryPath: `${prefix}/bin/codex`,
+      realPath: `${prefix}/lib/node_modules/@openai/codex/bin/codex.js`,
+      npmOnPath: "/usr/bin/npm",
+    });
+    assert.equal(p.method, "npm", "npm globals of a pnpm-managed Node");
+    assert.equal(p.update.args[3], prefix);
+    const scoopPrefix = "C:\\Users\\u\\scoop\\persist\\nodejs\\bin";
+    const scoop = await plan({
+      tool: "codex",
+      platform: "win32",
+      binaryPath: `${scoopPrefix}\\codex.cmd`,
+      realPath: `${scoopPrefix}\\node_modules\\@openai\\codex\\bin\\codex.js`,
+      npmOnPath: "C:\\Users\\u\\scoop\\apps\\nodejs\\current\\npm.cmd",
+    });
+    assert.equal(scoop.method, "npm", "npm globals of a Scoop-managed Node");
+    const lts = await plan({
+      tool: "codex",
+      platform: "win32",
+      binaryPath: "C:\\Users\\u\\scoop\\apps\\nodejs-lts\\current\\bin\\codex.cmd",
+      realPath: "C:\\Users\\u\\scoop\\apps\\nodejs-lts\\current\\bin\\node_modules\\@openai\\codex\\bin\\codex.js",
+      npmOnPath: "C:\\Users\\u\\scoop\\apps\\nodejs-lts\\current\\npm.cmd",
+    });
+    assert.equal(lts.method, "npm", "npm globals of Scoop's nodejs-lts");
+  }
+  // Volta keeps an npm tree per package image: Volta's.
+  {
+    const p = await plan({
+      tool: "codex",
+      platform: "linux",
+      binaryPath: "/home/u/.volta/bin/codex",
+      realPath: "/home/u/.volta/tools/image/packages/@openai/codex/lib/node_modules/@openai/codex/bin/codex.js",
+      npmOnPath: "/usr/bin/npm",
+    });
+    assert.equal(p.source, "Volta");
   }
   // The npm folder is cut from the path as written, whatever its letters.
   {

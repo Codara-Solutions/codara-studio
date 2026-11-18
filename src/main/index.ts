@@ -1719,6 +1719,12 @@ app.whenReady().then(async () => {
       .catch((err) => logMain("dev-update", `failed to start: ${String(err)}`));
   }
 
+  // Keep Claude Code, Codex and Grok up to date (agent-cli-updates/). Off for
+  // test launches, so a suite never updates the machine's own tools.
+  void import("./agent-cli-updates")
+    .then((m) => m.startAgentCliUpdates((line) => logMain("agent-cli-updates", line)))
+    .catch((err) => logMain("agent-cli-updates", `failed to start: ${String(err)}`));
+
   // Agent session search: the local index of agent transcripts. Its first
   // pass waits out the launch and runs on its own low-priority thread.
   void import("./session-search/service")
