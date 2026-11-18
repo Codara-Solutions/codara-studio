@@ -208,6 +208,10 @@ export function spawnableCommand(
   env: NodeJS.ProcessEnv = process.env,
 ): CliCommand & { verbatim: boolean } {
   if (platform === "win32" && /\.(?:cmd|bat)$/i.test(command.executable)) {
+    // cmd.exe expands % and ends a quoted part at ", whatever the quoting.
+    if ([command.executable, ...command.args].some((part) => /[%"\r\n]/.test(part))) {
+      throw new Error(`Codara does not run ${command.display} through cmd.exe: its path holds %, " or a line break.`);
+    }
     const quoted = [command.executable, ...command.args].map((part) => `"${part}"`).join(" ");
     // Never a cmd.exe found on PATH or in the working folder.
     const shell = env.ComSpec || win32.join(env.SystemRoot || "C:\\Windows", "System32", "cmd.exe");

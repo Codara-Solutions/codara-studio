@@ -244,6 +244,15 @@ async function run(m) {
     });
     assert.equal(p.method, "manual", "a % in the npm folder is not passed through cmd.exe");
   }
+  // The same holds for every command run through cmd.exe, the version check too.
+  for (const bad of ["C:\\Users\\a%PATH%b\\npm\\codex.cmd", 'C:\\Users\\a"b\\npm\\codex.cmd', "C:\\Users\\a\nb\\codex.cmd"]) {
+    assert.throws(() => m.spawnableCommand({ executable: bad, args: ["--version"], display: "codex --version" }, "win32", {}), /through cmd\.exe/, bad);
+  }
+  assert.throws(
+    () => m.spawnableCommand({ executable: "C:\\npm\\npm.cmd", args: ["install", "-g", "--prefix", "C:\\a%b", "x"], display: "npm" }, "win32", {}),
+    /through cmd\.exe/,
+  );
+  assert.equal(m.spawnableCommand({ executable: "/home/a%b/codex", args: [], display: "codex" }, "linux").executable, "/home/a%b/codex", "no cmd.exe, no limit");
   // A Homebrew formula built on Node keeps an npm tree inside the Cellar: Homebrew's.
   {
     const p = await plan({
