@@ -68,8 +68,10 @@ export interface UpdateServiceDependencies {
   schedule: (task: () => void, delayMs: number) => () => void;
   now: () => number;
   log: (line: string) => void;
-  /** The tool is being swapped: Codara holds its launches (launch-guard.ts). */
+  /** The tool is being swapped: Codara refuses its launches (launch-guard.ts). */
   toolBusy?: (tool: UpdatableAgentCliToolId, busy: boolean) => void;
+  /** Launches that began and may not have a process yet; they count as sessions. */
+  launchesStarting?: (tool: UpdatableAgentCliToolId) => number;
   /** Tools whose own updater stays off in Codara's terminals. */
   holdVendorUpdates?: (tools: UpdatableAgentCliToolId[]) => void;
   /** Points a launcher link at another build (Claude's native layout, POSIX). */
@@ -280,7 +282,8 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
 
   /** Counts the tool's sessions; puts the update back to waiting and returns false when any run. */
   async function noSessions(tool: UpdatableAgentCliToolId, origin: "manual" | "auto"): Promise<boolean> {
-    const live = await deps.liveSessions(tool).catch(() => null);
+    const running = await deps.liveSessions(tool).catch(() => null);
+    const live = running === null ? null : running + (deps.launchesStarting?.(tool) ?? 0);
     unreadableRounds = live === null ? unreadableRounds + 1 : 0;
     if (live === 0) return true;
     const current = entry(tool);
@@ -369,9 +372,13 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       set(tool, { installed: before, phase: "failed", message: before ? `Run: ${before.plan.manualCommand}` : `${label} is not installed.` });
       return;
     }
-    // A session may have started since the first count.
-    if (!(await noSessions(tool, origin))) return;
+    // Launches are refused from here on; one that began earlier, or a
+    // session started since the first count, sends the update back to waiting.
     deps.toolBusy?.(tool, true);
+    if (!(await noSessions(tool, origin))) {
+      deps.toolBusy?.(tool, false);
+      return;
+    }
     deps.log(`${tool}: updating ${before.version ?? "(unknown)"} with ${before.plan.update.display}`);
     let updateError: string | null = null;
     try {

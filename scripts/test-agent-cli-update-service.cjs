@@ -459,6 +459,44 @@ async function fakeService(m) {
     assert.ok(calls >= 2, "counted again before the installer");
   }
 
+  // The tool is marked busy before that second count, so no launch slips in
+  // between the count and the installer; it is cleared when the update waits.
+  {
+    const events = [];
+    let calls = 0;
+    const w = world({
+      auto: false,
+      live: () => {
+        events.push("count");
+        return calls++ === 0 ? 0 : 1;
+      },
+    });
+    w.deps.toolBusy = (id, isBusy) => events.push(`${id}:${isBusy}`);
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    events.length = 0;
+    calls = 0;
+    await service.update("claude");
+    await service.settled();
+    assert.deepEqual(events.slice(0, 3), ["count", "claude:true", "count"], "busy before the second count");
+    assert.equal(events.at(-1), "claude:false", "cleared when the update goes back to waiting");
+    assert.equal(tool(service.snapshot(), "claude").phase, "waiting");
+  }
+
+  // A launch that began but has no process yet counts as a session.
+  {
+    const w = world({ auto: false });
+    let starting = 0;
+    w.deps.launchesStarting = () => starting;
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    starting = 1;
+    await service.update("claude");
+    await service.settled();
+    assert.equal(w.commands.length, 0, "the installer waits for the launch");
+    assert.match(tool(service.snapshot(), "claude").message, /a Claude Code session is running/);
+  }
+
   // While a tool is swapped, Codara does not start it (launch-guard.ts).
   {
     const w = world({ auto: false });

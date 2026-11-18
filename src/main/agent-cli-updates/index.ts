@@ -19,7 +19,7 @@ import { inspectInstalledTool, type InspectDependencies } from "./inspect";
 import { spawnableCommand } from "./install-plan";
 import { claudeChannelFromSettings, fetchLatestVersion } from "./latest-version";
 import { agentCliUpdatesAllowed } from "./launch-gate";
-import { holdVendorUpdates, setToolBusy } from "./launch-guard";
+import { holdVendorUpdates, launchesStarting, setToolBusy } from "./launch-guard";
 import { relinkLauncher } from "./relink";
 import { liveToolSessions } from "./live-sessions";
 import { createAgentCliUpdateService, type AgentCliUpdateService, type PersistedUpdateState } from "./service";
@@ -100,6 +100,7 @@ function createService(log: (line: string) => void): AgentCliUpdateService {
     now: () => Date.now(),
     log,
     toolBusy: setToolBusy,
+    launchesStarting,
     holdVendorUpdates,
     relink: relinkLauncher,
     platform: process.platform,
