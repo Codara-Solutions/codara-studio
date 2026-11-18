@@ -176,6 +176,25 @@ async function main() {
     !source.includes("if (!isDir) onRowElement"),
     "the old files-only row registration must not come back",
   );
+  // Rows keep the registry current through their ref callbacks. A cached tree
+  // mounts its rows in the same commit as the cwd reset effect, so a clear in
+  // that effect forgot every on-screen row and the marquee selected nothing.
+  // tests/e2e/file-tree-marquee.spec.ts drives the real drag.
+  assert.ok(
+    !source.includes("rowElementsRef.current.clear()"),
+    "the row registry is never cleared wholesale",
+  );
+  // Virtuoso's List style holds the padding that stands in for the rows
+  // outside the rendered window; overriding it kept a long tree from
+  // scrolling past its first screens.
+  assert.ok(
+    !/paddingTop:\s*2,\s*paddingBottom:\s*8/.test(source),
+    "the Virtuoso List padding is not overridden",
+  );
+  assert.ok(
+    /const LIST_COMPONENTS = \{ Header: VirtuosoHeader, Footer: VirtuosoFooter \};/.test(source),
+    "the list's top and bottom space comes from Header and Footer",
+  );
   // A selected folder row must PAINT selected.
   assert.ok(
     source.includes("selected={selectedFilePaths.has(row.node.entry.path)}"),
