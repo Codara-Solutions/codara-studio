@@ -66,8 +66,32 @@ const PORT_PROBE_TIMEOUT_MS = 1_500;
 const PAIRING_AWAKE_MS = 150_000;
 
 let state = null;
+// Every socket is stamped with the generation it was opened in; Connect and
+// Disconnect start a new one. Work is done and reported only for the current
+// link's own socket, sealed, of the current generation, while paired: nothing
+// started on an older socket acts after the user's latest choice.
+let generation = 0;
 // The user pressed Connect and no Disconnect since (this page's lifetime only).
 let pairingWanted = false;
+
+class StampedWebSocket extends WebSocket {
+  constructor(...args) {
+    super(...args);
+    this.generation = generation;
+  }
+}
+
+/** Send only on the live session (see liveSocket); the unpair frame is the one exception. */
+function sendLive(message) {
+  if (liveSocket()) link.send(message);
+}
+
+/** The link's socket, when it is the sealed, paired session of the current generation; else null. */
+function liveSocket() {
+  const socket = link.socket;
+  if (!socket || !socket.sealer || socket.generation !== generation || !link.connected || !state?.token) return null;
+  return socket;
+}
 let rules = parseFirefoxBlockedSites(DEFAULT_BLOCKED_SITES);
 const ready = load();
 
@@ -107,7 +131,7 @@ function shareChoice() {
 const shared = (tab) => isShareable(shareChoice(), tab);
 
 const link = new LinkClient({
-  WebSocket,
+  WebSocket: StampedWebSocket,
   ports: async () => {
     await ready;
     return Array.isArray(state.ports) && state.ports.length ? state.ports : DEFAULT_PORTS;
@@ -123,7 +147,7 @@ const link = new LinkClient({
   // A pairing is kept only while the user's Connect is the latest thing they
   // asked for: one finishing after Disconnect is dropped and closed.
   savePairing: async (token, linkId) => {
-    if (!pairingWanted) {
+    if (!pairingWanted || link.socket?.generation !== generation) {
       link.disconnect("idle");
       throw new Error("Disconnected in the meantime.");
     }
@@ -152,14 +176,15 @@ const link = new LinkClient({
   },
   saveScan: (scan) => save({ linkScan: scan }),
   onConnected: () => {
-    // A reconnect that was under way when the user pressed Disconnect.
-    if (!state?.token) {
+    // A reconnect that was under way when the user pressed Disconnect, or a
+    // session that is not sealed: neither may carry anything.
+    if (!liveSocket()) {
       link.disconnect("idle");
       return;
     }
     keepAwake(true);
     void reportTabs();
-    void ready.then(() => link.send({ type: "presence_settings", ...presenceSettings(state.presence) }));
+    void ready.then(() => sendLive({ type: "presence_settings", ...presenceSettings(state.presence) }));
   },
   onDisconnected: () => {
     keepAwake(false);
@@ -196,18 +221,19 @@ async function usableTab(tabId) {
   return tab;
 }
 
-/** Throws once the user disconnected: nothing from the old link acts after that. */
-function stillPaired() {
-  if (!state.token || !link.connected) throw new Error("This browser is no longer paired with Codara.");
+/** Throws unless the socket a request came on is still the live one (see liveSocket). */
+function stillLive(socket) {
+  if (!socket || liveSocket() !== socket) throw new Error("This browser is no longer paired with Codara on this connection.");
 }
 
 async function handleRequest(request) {
+  const socket = link.socket;
   await ready;
-  stillPaired();
+  stillLive(socket);
   switch (request.type) {
     case "attach": {
       const tab = await usableTab(request.tabId);
-      stillPaired();
+      stillLive(socket);
       if (!state.attached.includes(tab.id)) {
         await save({ attached: withValue(state.attached, tab.id) });
         void refresh();
@@ -224,7 +250,7 @@ async function handleRequest(request) {
       throw new Error("Opening and closing tabs is not available in Firefox yet. The user opens or closes the tab, and shares it from the Codara extension popup.");
     case "activate": {
       const tab = await usableTab(request.tabId);
-      stillPaired();
+      stillLive(socket);
       await chrome.tabs.update(tab.id, { active: true });
       return {};
     }
@@ -261,7 +287,7 @@ function usageOf(message) {
 function handleMessage(message) {
   // Settings and usage only from the sealed session of the paired Codara,
   // never from whatever answers while a pairing waits for approval.
-  if (message.type !== "revoked" && !(link.connected && link.socket?.sealer && state?.token)) return;
+  if (message.type !== "revoked" && !liveSocket()) return;
   if (message.type === "usage" && typeof message.tabId === "number") {
     const tabId = message.tabId;
     void save({ usage: { ...state.usage, [tabId]: usageOf(message) } }).then(() => {
@@ -278,7 +304,7 @@ function handleMessage(message) {
       const mine = presenceSettings(state.presence);
       const next = newerSettings(mine, message);
       if (next.at !== mine.at) await save({ presence: next });
-      else if (mine.at > presenceSettings(message).at) link.send({ type: "presence_settings", ...mine });
+      else if (mine.at > presenceSettings(message).at) sendLive({ type: "presence_settings", ...mine });
     });
   } else if (message.type === "revoked") {
     void detachAll();
@@ -304,7 +330,7 @@ async function enforceSharing() {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab || !shared(tab) || firefoxBlockingRule(tab.url, rules)) {
       await detachTab(tabId);
-      if (tab) link.send({ type: "detached", tabId, reason: "unshared" });
+      if (tab) sendLive({ type: "detached", tabId, reason: "unshared" });
     }
   }
 }
@@ -316,10 +342,11 @@ let reportTimer = null;
 /** Tell Codara which tabs agents may use. Unshared tabs are never sent, and a blocked one only as blocked. */
 async function reportTabs() {
   await ready;
-  if (!link.connected || !state.token) return;
+  const socket = liveSocket();
+  if (!socket) return;
   const list = [];
   const tabs = await chrome.tabs.query({});
-  if (!link.connected || !state.token) return;
+  if (liveSocket() !== socket) return;
   for (const tab of tabs) {
     if (!shared(tab)) continue;
     const blocked = firefoxBlockingRule(tab.url, rules) !== null;
@@ -376,7 +403,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, change) => {
     await ready;
     if (state.attached.includes(tabId) && (firefoxBlockingRule(change.url, rules) || isFirefoxRestrictedUrl(change.url))) {
       await detachTab(tabId);
-      link.send({ type: "detached", tabId, reason: "blocked_site" });
+      sendLive({ type: "detached", tabId, reason: "blocked_site" });
     }
   }
   if (change.url !== undefined || change.title !== undefined || change.status !== undefined) scheduleRefresh();
@@ -465,12 +492,14 @@ async function handlePopup(request) {
       return popupState(request);
     case "connect":
       pairingWanted = true;
+      generation += 1;
       // Firefox would unload the page while the user approves in Codara.
       keepAwakeWhilePairing();
       await link.connect({ pair: true });
       return popupState(request);
     case "unpair": {
       pairingWanted = false;
+      generation += 1;
       // Closing waits for the sealed unpair frame to leave, so Codara forgets this browser too.
       const socket = link.socket;
       link.send({ type: "unpair" });
@@ -513,7 +542,7 @@ async function handlePopup(request) {
         at: Math.max(Date.now(), mine.at + 1),
       };
       await save({ presence: next });
-      link.send({ type: "presence_settings", ...next });
+      sendLive({ type: "presence_settings", ...next });
       break;
     }
     case "setBlockedSites":

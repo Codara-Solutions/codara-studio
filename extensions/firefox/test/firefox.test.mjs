@@ -37,6 +37,11 @@ export async function run(assembled) {
   assert.equal(parseFirefoxBlockedSites("site.example/a%2fb")[0].path, "/a%2Fb", "an escaped separator stays escaped");
   assert.equal(blockingRule("https://site.example/a/b", parseFirefoxBlockedSites("site.example/a%2Fb")), null);
   assert.equal(blockingRule("https://dotted.example/", rules)?.raw, "dotted.example.");
+  // Hosts as the URL parser reads them: IPv4 shorthand, other full stops.
+  const parsed = parseFirefoxBlockedSites("127.1/private\nbücher.example\u3002/privé\n*.wild\uff0ebücher.example");
+  assert.equal(blockingRule("http://127.0.0.1/private/x", parsed)?.raw, "127.1/private");
+  assert.equal(blockingRule("https://xn--bcher-kva.example/priv%C3%A9", parsed)?.raw, "bücher.example\u3002/privé");
+  assert.equal(blockingRule("https://a.wild.xn--bcher-kva.example/", parsed)?.raw, "*.wild\uff0ebücher.example");
   assert.equal(blockingRule("https://dotted.example./", rules)?.raw, "dotted.example.");
   assert.equal(blockingRule("https://xn--bcher-kva.example/", rules)?.raw, "bücher.example");
   assert.equal(blockingRule("https://shop.xn--bcher-kva.example/x", rules)?.raw, "bücher.example");

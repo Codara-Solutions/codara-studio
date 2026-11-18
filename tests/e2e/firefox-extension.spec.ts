@@ -47,8 +47,9 @@ function site(request: IncomingMessage, response: ServerResponse): void {
 }
 
 function freePort(): Promise<number> {
-  return new Promise((done) => {
+  return new Promise((done, fail) => {
     const server = createNetServer();
+    server.once("error", fail);
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address() as { port: number };
       server.close(() => done(port));

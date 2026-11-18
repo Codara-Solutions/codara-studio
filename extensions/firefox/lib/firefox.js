@@ -46,19 +46,26 @@ export function isShareable(share, tab) {
   return isTabShared(share, tab);
 }
 
-/** A host as the browser spells it in tab URLs: punycode for non-ASCII labels; "*" labels kept. */
-function asciiHost(host) {
-  if (/^[\x00-\x7f]*$/.test(host)) return host;
-  return host
+/** A hostname as the URL parser spells it ("127.1" is "127.0.0.1", "bücher" is "xn--bcher-kva"), or null. */
+function parsedHost(host) {
+  try {
+    return new URL(`http://${host}/`).hostname.replace(/\.$/, "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A rule's host as the browser spells it in tab URLs, without a trailing
+ * dot. Wildcard labels stay as written; the other labels are read by the URL
+ * parser like the browser reads them.
+ */
+function canonicalHost(host) {
+  const dotted = host.replace(/[\u3002\uff0e\uff61]/g, ".").replace(/\.$/, "");
+  if (!dotted.includes("*")) return parsedHost(dotted) ?? dotted;
+  return dotted
     .split(".")
-    .map((label) => {
-      if (/^[\x00-\x7f]*$/.test(label) || label.includes("*")) return label;
-      try {
-        return new URL(`http://${label}.invalid/`).hostname.slice(0, -".invalid".length);
-      } catch {
-        return label;
-      }
-    })
+    .map((label) => (label.includes("*") ? label : parsedHost(label) ?? label))
     .join(".");
 }
 
@@ -103,7 +110,7 @@ export function firefoxBlockingRule(url, rules) {
  * https://xn--bcher-kva.example/priv%C3%A9.
  */
 export function parseFirefoxBlockedSites(text) {
-  return parseBlockedSites(text).map((rule) => ({ ...rule, host: asciiHost(rule.host.replace(/\.$/, "")), path: urlPath(rule.path) }));
+  return parseBlockedSites(text).map((rule) => ({ ...rule, host: canonicalHost(rule.host), path: urlPath(rule.path) }));
 }
 
 /**
