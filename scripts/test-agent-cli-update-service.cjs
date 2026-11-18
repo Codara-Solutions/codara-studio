@@ -741,6 +741,22 @@ async function crashSafety(m) {
     assert.equal(states.at(-1).inProgress, undefined, "and cleared once the update is over");
   }
 
+  // The record cannot be written: the installer does not start.
+  {
+    const w = world({ auto: false });
+    w.deps.saveState = async () => {
+      throw new Error("disk full");
+    };
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.update("claude");
+    assert.equal(w.commands.length, 0, "no installer without its record on disk");
+    const claude = tool(service.snapshot(), "claude");
+    assert.equal(claude.phase, "failed");
+    assert.match(claude.message, /could not save its note of the update \(disk full\), so it did not start it/);
+    assert.deepEqual(w.busyCalls.at(-1), "claude:false");
+  }
+
   // The next start finds the record and a broken tool: it rolls back.
   {
     const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };

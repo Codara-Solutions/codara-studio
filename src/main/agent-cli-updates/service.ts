@@ -195,6 +195,14 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     return saving;
   }
 
+  /** A save the caller depends on: it fails when the file could not be written. */
+  async function saveOrThrow(): Promise<void> {
+    await saving;
+    const write = deps.saveState(JSON.parse(JSON.stringify(persisted)) as PersistedUpdateState);
+    saving = write.catch(() => undefined);
+    await write;
+  }
+
   function updateAvailable(tool: UpdatableAgentCliToolId): boolean {
     const { installed, latest } = entry(tool);
     if (!installed?.version || !latest) return false;
@@ -464,7 +472,12 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     // finished by the next start (recoverInterrupted).
     if (before.version) {
       persisted.inProgress = { tool, fromVersion: before.version, fromRealPath: before.realPath, fromBinaryPath: before.binaryPath, toVersion: target };
-      await save();
+      try {
+        await saveOrThrow();
+      } catch (error) {
+        delete persisted.inProgress;
+        throw new Error(`Codara could not save its note of the update (${(error as Error).message}), so it did not start it.`);
+      }
     }
     try {
       await afterRecord(tool, before, before.plan.update, target);
