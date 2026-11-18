@@ -100,7 +100,7 @@ export function summarizeTraceFile(input: TraceSummaryInput): TraceSummary {
   const SCRIPTING = new Set(["EvaluateScript", "FunctionCall", "TimerFire", "EventDispatch", "FireAnimationFrame", "FireIdleCallback", "RunMicrotasks", "v8.compile", "v8.compileModule", "v8.evaluateModule", "v8.produceCache", "v8.produceModuleCache", "V8.CompileCode", "V8.Execute", "v8.run", "v8.callFunction", "XHRReadyStateChange", "XHRLoad", "MajorGC", "MinorGC", "BlinkGC.AtomicPhase", "GCEvent", "CppGC.IncrementalSweep", "ThreadState::performIdleLazySweep", "v8.parseOnBackground", "V8.ParseFunction", "ProfileCall"]);
   const RENDERING = new Set(["UpdateLayoutTree", "Layout", "RecalculateStyles", "ScheduleStyleRecalculation", "InvalidateLayout", "HitTest", "PrePaint", "Layerize", "IntersectionObserverController::computeIntersections", "ComputeIntersections", "UpdateLayer", "UpdateLayerTree", "ScrollLayer"]);
   const PAINTING = new Set(["Paint", "PaintImage", "PaintSetup", "Decode Image", "Decode LazyPixelRef", "ResizeImage", "CompositeLayers", "Commit", "Rasterize", "RasterTask", "ImageDecodeTask"]);
-  const LOADING = new Set(["ParseHTML", "ParseAuthorStyleSheet", "ResourceSendRequest", "ResourceReceiveResponse", "ResourceReceivedData", "ResourceFinish"]);
+  const LOADING = new Set(["DocumentLoader::CommitNavigation", "ParseHTML", "ParseAuthorStyleSheet", "ResourceSendRequest", "ResourceReceiveResponse", "ResourceReceivedData", "ResourceFinish"]);
   const SCRIPT_ROOTS = new Set(["EvaluateScript", "FunctionCall", "v8.compileModule", "v8.evaluateModule", "TimerFire", "EventDispatch", "FireAnimationFrame", "RunMicrotasks"]);
   const category = (name: string) => (SCRIPTING.has(name) || /GC/.test(name) ? "scripting" : RENDERING.has(name) ? "rendering" : PAINTING.has(name) ? "painting" : LOADING.has(name) ? "loading" : "other");
   const scriptLabel = (event: TraceEvent) => {
@@ -167,7 +167,9 @@ export function summarizeTraceFile(input: TraceSummaryInput): TraceSummary {
     marks.cls = Math.round(shifts.reduce((sum, event) => sum + Number((event.args?.data as { weighted_score_delta?: number } | undefined)?.weighted_score_delta ?? 0), 0) * 1000) / 1000;
   }
 
-  const longTasks = tasks.filter((task) => (task.event.dur ?? 0) >= 50_000);
+  // In a traced load, what ran before its navigation started belongs to the
+  // page being replaced (and to the call that reloads it), not to the load.
+  const longTasks = tasks.filter((task) => (task.event.dur ?? 0) >= 50_000 && (!navigations.length || task.event.ts >= origin));
   const causeOf = (task: { event: TraceEvent; children: TraceEvent[] }) => {
     const byLength = [...task.children].sort((a, b) => (b.dur ?? 0) - (a.dur ?? 0));
     // A script that took most of the task is its cause even inside ParseHTML.
