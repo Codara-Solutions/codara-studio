@@ -178,10 +178,28 @@ function testAutoOpenIgnoresLinkTarget() {
   console.log("PASS auto-open stays a background Codara tab whatever the link setting");
 }
 
+// A port below every system's ephemeral range (Linux 32768-60999, macOS and
+// Windows 49152-65535). Once closed, a port from listen(0) can be taken again
+// by any of the suites running beside this one, and a connect to a closed
+// ephemeral port can pick that same port as its source and connect to itself,
+// so the "dead port" check below saw a live one on a busy runner.
+// test-remote-port-forward picks from 20000-29999, so this stays below it.
+async function listenOutsideEphemeralRange(server) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const port = 10_000 + Math.floor(Math.random() * 10_000);
+    const listening = await new Promise((resolve) => {
+      server.once("error", () => resolve(false));
+      server.listen(port, "127.0.0.1", () => resolve(true));
+    });
+    server.removeAllListeners("error");
+    if (listening) return port;
+  }
+  throw new Error("no free port between 10000 and 19999");
+}
+
 async function testLivenessProbe(isLoopbackPreviewServerUp) {
   const server = net.createServer((socket) => socket.end());
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address();
+  const port = await listenOutsideEphemeralRange(server);
 
   assert.equal(
     await isLoopbackPreviewServerUp(`http://127.0.0.1:${port}/`),
