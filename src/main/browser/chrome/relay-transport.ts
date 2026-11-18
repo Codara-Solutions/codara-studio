@@ -50,8 +50,9 @@ export function chromeRelayTransport(link: ChromeLink, tabId: number): ChromeRel
       attached = false;
       void link.request("detach", { tabId }).catch(() => {});
     },
-    // A command the extension does not answer is refused here with the
-    // reason, before it costs a round trip.
+    // A command the extension does not answer is refused with the reason,
+    // before attaching (CdpSession asks refuses first) or a round trip.
+    refuses: (method) => (link.answers(method) ? null : unsupportedCdpError(method, link.browser.name)),
     send: (method, params) =>
       link.answers(method)
         ? link.request("cdp", { tabId, method, params: params ?? {} })

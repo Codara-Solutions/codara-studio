@@ -31,6 +31,7 @@ async function load() {
         `export * from "./chrome-target";`,
         `export * from "./protocol";`,
         `export { registerBrowserBackend, resolveBrowserTarget } from "../targets";`,
+        `export { cdpPreviewTools } from "../../preview-tools/cdp";`,
       ].join("\n"),
       resolveDir: path.join(ROOT, "src/main/browser/chrome"),
       loader: "ts",
@@ -41,6 +42,18 @@ async function load() {
     format: "cjs",
     external: ["electron", "ws"],
     alias: { "@shared": path.join(ROOT, "src/shared") },
+    // tab.cdp resolves its tab the way the preview tools do, without the app around them.
+    plugins: [{
+      name: "core",
+      setup(build) {
+        build.onResolve({ filter: /^\.\/core$/ }, (args) => (args.importer.endsWith(path.join("preview-tools", "cdp.ts")) ? { path: "core", namespace: "stub" } : undefined));
+        build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
+          contents: `import { resolveBrowserTarget } from "../browser/targets"; export const requireTarget = (params: Record<string, unknown>) => resolveBrowserTarget({ tabId: String(params.tabId) });`,
+          loader: "ts",
+          resolveDir: path.join(ROOT, "src/main/preview-tools"),
+        }));
+      },
+    }],
   });
   const mod = { exports: {} };
   new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
@@ -98,6 +111,7 @@ function firefoxClient(LinkClient, port, { uuid = UUID, capabilities = { cdp: ["
     },
     onRequest: async (request) => {
       requests.push(request);
+      if (request.type === "attach" && request.tabId === 6) throw new Error("Firefox refused to attach.");
       return request.type === "cdp" && request.method === "Runtime.evaluate" ? { result: { value: 42 } } : {};
     },
   });
@@ -157,6 +171,24 @@ function firefoxClient(LinkClient, port, { uuid = UUID, capabilities = { cdp: ["
   await until(() => firefox.requests.some((request) => request.type === "cdp" && request.method === "Runtime.enable"), "the recorders' domains");
   assert.deepEqual(firefox.requests[0], { id: firefox.requests[0].id, type: "attach", tabId: 5 }, "the tab is attached on first use");
   assert.ok(!firefox.requests.some((request) => request.method === "Runtime.evaluate" || request.method === "Tracing.start"), "a refused command never reaches the extension");
+
+  // A command the extension cannot answer gets that reason even on a tab the
+  // extension would not attach, through every door: a session command, a
+  // domain the recorders hold, and tab.cdp's enable and disable, which the
+  // tool otherwise answers itself.
+  firefox.client.send({ type: "tabs", allowOpen: false, tabs: [5, 6].map((tabId) => ({ tabId, windowId: 1, url: `https://mail.example/${tabId}`, title: "Mail", active: tabId === 5, attached: false, blocked: false, storage: false, openedByAgent: false })) });
+  await until(() => link.tabs.size === 2, "the second tab");
+  const refusing = await lib.resolveBrowserTarget({ tabId: "chrome:6" });
+  await until(() => firefox.requests.some((request) => request.type === "attach" && request.tabId === 6), "the refused attach");
+  await until(() => refusing.session.unavailableReason, "the attach error");
+  await assert.rejects(refusing.evaluate("1"), /Runtime\.evaluate is not available in Firefox/);
+  await assert.rejects(refusing.session.enable("DOM"), /DOM\.enable is not available in Firefox/);
+  const cdpTool = (tabId, method) => lib.cdpPreviewTools["preview.cdp"].run({ tabId, method, params: {}, callerPaneId: "pane-a", workspaceId: "ws-1" }, "preview.cdp", {});
+  for (const tabId of ["chrome:5", "chrome:6"]) {
+    await assert.rejects(cdpTool(tabId, "DOM.enable"), /DOM\.enable is not available in Firefox/, tabId);
+    await assert.rejects(cdpTool(tabId, "DOM.disable"), /DOM\.disable is not available in Firefox/, tabId);
+  }
+  assert.ok(!firefox.requests.some((request) => request.method?.startsWith("DOM.")), "no DOM command reached the extension");
 
   // A later connection proves the pairing both ways, from the same profile only.
   firefox.client.disconnect("idle");

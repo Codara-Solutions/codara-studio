@@ -334,6 +334,9 @@ export class ChromeLinkServer {
     const version = typeof extension.version === "string" ? extension.version.slice(0, 24) : "";
     const features = sanitizeExtensionFeatures(extension.features);
     // Only Firefox's extension may narrow what it answers; a Chromium one relays every command.
+    // The list, like the rest of the hello, is not authenticated and is no
+    // security boundary: it only lets Codara give the reason early. The
+    // extension answers nothing it does not implement, listed or not.
     const identity: ExtensionIdentity = { kind, cdpMethods: kind === "firefox" ? sanitizeCdpCapabilities(extension.capabilities) ?? new Set() : null };
     const linkId = typeof message.linkId === "string" ? message.linkId : "";
     const clientNonce = typeof message.nonce === "string" && LINK_NONCE.test(message.nonce) ? message.nonce : "";
