@@ -183,11 +183,15 @@ async function npmPlan(input: InstallProbeInput, prefix: string): Promise<Instal
 
 export async function detectInstallPlan(input: InstallProbeInput): Promise<InstallPlan> {
   const real = slashes(input.realPath);
-  // Before npm: a Homebrew formula on Node keeps an npm tree in its Cellar.
+  // A Homebrew formula on Node keeps an npm tree in its Cellar, and Volta an
+  // npm tree per package: those are theirs. A Node that pnpm or Scoop
+  // installed has its own npm, and its globals are npm's.
   const other = otherManager(input.tool, real);
-  if (other) return other;
+  const managedNode = /\/(?:\.?pnpm|scoop\/(?:apps|persist))\/nodejs\//i.test(real);
+  if (other && !managedNode) return other;
   const prefix = await npmPrefix(input, real);
   if (prefix) return npmPlan(input, prefix);
+  if (other) return other;
   // A plain file at ~/.local/bin/claude is the installer's copy only on
   // Windows; elsewhere it is the user's own wrapper.
   const windowsClaude = input.tool === "claude" && input.platform === "win32" && /\/\.local\/bin\/claude\.exe$/i.test(real);

@@ -266,6 +266,39 @@ async function run(m) {
     assert.equal(p.source, "Homebrew");
     assert.equal(p.manualCommand, "brew upgrade codex");
   }
+  // A Node installed by pnpm or Scoop keeps real npm globals: npm's.
+  {
+    const prefix = "/home/u/.local/share/pnpm/nodejs/22.11.0";
+    const p = await plan({
+      tool: "codex",
+      platform: "linux",
+      binaryPath: `${prefix}/bin/codex`,
+      realPath: `${prefix}/lib/node_modules/@openai/codex/bin/codex.js`,
+      npmOnPath: "/usr/bin/npm",
+    });
+    assert.equal(p.method, "npm", "npm globals of a pnpm-managed Node");
+    assert.equal(p.update.args[3], prefix);
+    const scoopPrefix = "C:\\Users\\u\\scoop\\persist\\nodejs\\bin";
+    const scoop = await plan({
+      tool: "codex",
+      platform: "win32",
+      binaryPath: `${scoopPrefix}\\codex.cmd`,
+      realPath: `${scoopPrefix}\\node_modules\\@openai\\codex\\bin\\codex.js`,
+      npmOnPath: "C:\\Users\\u\\scoop\\apps\\nodejs\\current\\npm.cmd",
+    });
+    assert.equal(scoop.method, "npm", "npm globals of a Scoop-managed Node");
+  }
+  // Volta keeps an npm tree per package image: Volta's.
+  {
+    const p = await plan({
+      tool: "codex",
+      platform: "linux",
+      binaryPath: "/home/u/.volta/bin/codex",
+      realPath: "/home/u/.volta/tools/image/packages/@openai/codex/lib/node_modules/@openai/codex/bin/codex.js",
+      npmOnPath: "/usr/bin/npm",
+    });
+    assert.equal(p.source, "Volta");
+  }
   // The npm folder is cut from the path as written, whatever its letters.
   {
     const prefix = "/home/\u0130sa/.npm-global";
