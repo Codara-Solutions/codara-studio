@@ -720,21 +720,22 @@ async function launchGuard(m) {
   assert.deepEqual(m.vendorUpdaterEnv(), {});
   // A launch while the tool is swapped is refused at once: pane openers give
   // up after seconds, so a held launch would start late and unseen.
-  const end = m.beginToolLaunch("claude", "Claude Code");
+  const end = m.beginToolLaunch("claude");
   assert.equal(m.launchesStarting("claude"), 1, "a launch counts before its process exists");
   end();
   end();
   assert.equal(m.launchesStarting("claude"), 0, "ending twice ends once");
-  m.setToolBusy("claude", true);
-  assert.throws(() => m.beginToolLaunch("claude", "Claude Code"), /Claude Code is updating\. Try again in a few minutes\./);
+  m.setToolBusy("claude", true, "Claude Code");
+  assert.throws(() => m.beginToolLaunch("claude"), /Claude Code is updating\. Try again in a few minutes\./);
   assert.equal(m.launchesStarting("claude"), 0);
-  m.beginToolLaunch("codex", "Codex")();
+  m.beginToolLaunch("codex")();
   m.setToolBusy("claude", false);
-  m.beginToolLaunch("claude", "Claude Code")();
+  m.beginToolLaunch("claude")();
   // The terminal launcher takes that path before any wait, profile or spawn.
   const pty = fs.readFileSync(path.join(__dirname, "..", "src", "main", "pty-manager.ts"), "utf8");
   assert.ok(!/waitUntilToolIdle/.test(pty), "no launch is held for minutes");
-  const begin = pty.indexOf("beginToolLaunch(launching");
+  const begin = pty.indexOf("beginToolLaunch(launching)");
+  assert.ok(!/from "@shared\/agent-cli-updates"/.test(pty), "the terminal launcher's tests bundle it with stubs for @shared/remote only");
   assert.ok(begin > 0 && begin < pty.indexOf("return await spawnWithSessionLock(opts)"), "refused before the launch starts");
   assert.match(pty, /setTimeout\(endLaunch, LAUNCH_SETTLE_MS\)/, "counted until its command had time to start");
   assert.equal(m.reinstallCommand("codex", "0.169.0", "linux"), "curl -fsSL https://chatgpt.com/codex/install.sh | sh -s -- --release 0.169.0");
