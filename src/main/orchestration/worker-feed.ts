@@ -4,12 +4,18 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { BrowserWindow } from "electron";
 
+import { redactPastedSecrets } from "./pasted-secrets";
+
 import {
+  WORKER_ACTIVITY_CHANNEL,
   WORKER_FEED_LIMITS,
   boundToolInput,
   boundToolOutput,
   clipText,
   parseWorkerFeed,
+  workerActivityTarget,
+  type WorkerActivity,
+  type WorkerActivityStep,
   type WorkerFeedRecord,
   type WorkerFeedSnapshot,
   type WorkerFeedUpdate,
@@ -42,6 +48,8 @@ export interface WorkerFeedWriterOptions {
   attemptId: string;
   path: string;
   publish?: (update: WorkerFeedUpdate) => void;
+  /** Where activity changes go; the renderer's windows by default. */
+  publishActivity?: (activity: WorkerActivity) => void;
   maxBytes?: number;
   /** How often a streaming message is pushed at most. 0 pushes every delta. */
   partialIntervalMs?: number;
@@ -59,6 +67,25 @@ export function publishWorkerFeedUpdate(update: WorkerFeedUpdate): void {
     if (win.isDestroyed() || win.webContents.isDestroyed()) continue;
     win.webContents.send(WORKER_FEED_CHANNEL, update);
   }
+}
+
+// What each live worker is doing now, for the chat's agents rail: one small
+// entry per live feed, read once when a chat opens and pushed on each change.
+// The rail never reads feeds, so a chat with ten workers costs ten of these
+// and no subscription per worker.
+const liveActivity = new Map<string, WorkerActivity>();
+let activitySeq = 0;
+
+export function publishWorkerActivity(activity: WorkerActivity): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) continue;
+    win.webContents.send(WORKER_ACTIVITY_CHANNEL, activity);
+  }
+}
+
+/** The live workers' current steps in one run. */
+export function readWorkerActivity(runId: string): WorkerActivity[] {
+  return [...liveActivity.values()].filter((activity) => activity.runId === runId);
 }
 
 // Non-blocking, so a FIFO the worker left at the feed's path cannot hold a
@@ -97,6 +124,7 @@ const CREATE_FRESH =
 export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): WorkerFeedWriter {
   const { runId, attemptId, path } = options;
   const publish = options.publish ?? publishWorkerFeedUpdate;
+  const publishActivity = options.publishActivity ?? publishWorkerActivity;
   const maxBytes = options.maxBytes ?? WORKER_FEED_LIMITS.maxBytes;
   const partialIntervalMs = options.partialIntervalMs ?? 120;
   const now = options.now ?? (() => new Date());
@@ -138,6 +166,34 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
     }
   };
   const nextId = () => `${session}-${(sequence += 1).toString(36)}`;
+  let step: WorkerActivityStep | null = null;
+  let activityAt = "";
+  let shown: WorkerActivity | null = null;
+  // Set once close() starts: nothing after that is a step any more.
+  let closing = false;
+  const openCalls = new Map<string, WorkerActivityStep>();
+  // Only a change is pushed: a tool call, a reply starting, the turn going
+  // back to thinking, or the end. Text deltas never are.
+  const setStep = (next: WorkerActivityStep | null) => {
+    if (activityAt && JSON.stringify(next) === JSON.stringify(step)) return;
+    step = next;
+    activityAt = now().toISOString();
+    const activity: WorkerActivity = { runId, attemptId, seq: (activitySeq += 1), at: activityAt, step };
+    // A relaunch of the attempt has its own writer: ending this one never
+    // drops the entry the newer one set, nor tells the renderer it ended.
+    if (!step && liveActivity.has(attemptId) && liveActivity.get(attemptId) !== shown) {
+      shown = null;
+      return;
+    }
+    if (step) liveActivity.set(attemptId, activity);
+    else if (liveActivity.get(attemptId) === shown) liveActivity.delete(attemptId);
+    shown = step ? activity : null;
+    try {
+      publishActivity(activity);
+    } catch {
+      // A renderer going away must not end the worker's session.
+    }
+  };
   const at = () => now().toISOString();
 
   const rewrite = () => {
@@ -223,6 +279,7 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
     const message = partial;
     partial = null;
     if (!message) return;
+    if (!closing) setStep([...openCalls.values()].pop() ?? { kind: "thinking" });
     if (message.text.trim()) {
       append({ k: "text", id: message.id, at: at(), text: clipText(message.text, WORKER_FEED_LIMITS.textChars) });
     }
@@ -241,6 +298,21 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
         name: typeof name === "string" && name ? clipText(name, 200) : "tool",
         ...(bounded !== undefined ? { input: bounded } : {}),
       });
+      if (closing) return;
+      const found = workerActivityTarget(input);
+      const target = found ? redactPastedSecrets(runId, found) : undefined;
+      const toolStep: WorkerActivityStep = {
+        kind: "tool",
+        tool: typeof name === "string" && name ? clipText(name, 200) : "tool",
+        ...(target ? { target } : {}),
+      };
+      // Calls can overlap: the rail shows the newest one still open, and
+      // goes back to thinking only once none is.
+      if (typeof call === "string" && call) {
+        openCalls.delete(call);
+        openCalls.set(call, toolStep);
+      }
+      setStep(toolStep);
     },
     result(call, output, isError) {
       if (typeof call !== "string" || !call) return;
@@ -252,10 +324,17 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
         output: boundToolOutput(output),
         ...(isError ? { error: true as const } : {}),
       });
+      if (closing) return;
+      openCalls.delete(call);
+      const stillOpen = [...openCalls.values()].pop();
+      setStep(stillOpen ?? { kind: "thinking" });
     },
     textDelta(delta) {
       if (closed || !delta) return;
-      if (!partial) partial = { id: nextId(), text: "" };
+      if (!partial) {
+        partial = { id: nextId(), text: "" };
+        if (!closing) setStep({ kind: "reply" });
+      }
       // Past the cap the rest of the message only reaches the terminal log.
       if (partial.text.length >= WORKER_FEED_LIMITS.textChars) return;
       partial.text = clipText(partial.text + delta, WORKER_FEED_LIMITS.textChars);
@@ -287,6 +366,7 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
     },
     async close() {
       if (closed) return;
+      closing = true;
       endMessage();
       closed = true;
       // Readers keep the live copy until the file holds everything in it.
@@ -294,10 +374,12 @@ export function createWorkerFeedWriter(options: WorkerFeedWriterOptions): Worker
       await file?.close().catch(() => undefined);
       file = null;
       if (liveFeeds.get(attemptId) === writer) liveFeeds.delete(attemptId);
+      setStep(null);
       send({ ended: true });
     },
   };
   liveFeeds.set(attemptId, writer);
   send({ reset: true });
+  setStep({ kind: "starting" });
   return writer;
 }
