@@ -63,7 +63,8 @@ Measured on Firefox 158.0 and on ESR 153.7.0 (Linux, headless) on 18
 November 2026 with a spike extension and a fake Codara: every measured row
 below gave the same result on both. The end-to-end spec
 (`tests/e2e/firefox-extension.spec.ts`) checks the rows marked *e2e* on
-every pull request, on the current Firefox and on ESR 153 (CI (Linux)).
+every pull request, on the current Firefox and on ESR 153 (CI (Linux)); it
+also passed locally on Firefox 158.0, 160.0.1 and ESR 153.7.0.
 "Not yet" rows come in the next pull requests of this stack; until then Codara refuses them with the reason.
 
 | Capability | Status | How, and what was measured |

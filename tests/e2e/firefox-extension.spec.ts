@@ -109,14 +109,15 @@ test("the Firefox extension pairs, shares a tab with agents and says plainly wha
     await firefox.open(`${origin}/account`);
     await firefox.open(`${origin}/elsewhere`);
     await firefox.open(`http://localhost:${sitePort}/bank`);
-    const popup = await firefox.open(POPUP);
+    let popup = await firefox.openExtensionPage(POPUP);
     const tabIdOf = (part: string) => firefox!.evaluate<number>(popup, `browser.tabs.query({}).then((tabs) => tabs.find((tab) => (tab.url ?? "").includes(${JSON.stringify(part)}))?.id ?? null)`);
     const accountTab = await tabIdOf("/account");
     const elsewhereTab = await tabIdOf("/elsewhere");
     expect(accountTab).toBeGreaterThan(0);
     // The test Codara's port, and localhost on the blocked list.
     await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "state" }).then(({ blockedSites }) => browser.storage.local.set({ ports: [${linkPort}], blockedSites: blockedSites + "\\nlocalhost" }))`);
-    await firefox.navigate(popup, `${POPUP}?tab=${accountTab}`);
+    await firefox.closeTab(popup);
+    popup = await firefox.openExtensionPage(`${POPUP}?tab=${accountTab}`);
     const text = (selector: string) => firefox!.evaluate<string>(popup, `document.querySelector(${JSON.stringify(selector)})?.textContent ?? ""`);
     const click = (selector: string) => firefox!.evaluate(popup, `document.querySelector(${JSON.stringify(selector)}).click()`);
 
@@ -164,17 +165,23 @@ test("the Firefox extension pairs, shares a tab with agents and says plainly wha
     // drops). Without the keep-alive this check fails.
     const seen = async () => (await linkState(codara)).browsers[0]?.lastSeenAt;
     const before = await seen();
-    await firefox.navigate(popup, "about:blank");
+    await firefox.closeTab(popup);
     await codara.waitForTimeout(40_000);
     expect(await linkState(codara).then((state) => state.browsers[0])).toMatchObject({ connected: true, lastSeenAt: before });
-    await firefox.navigate(popup, `${POPUP}?tab=${accountTab}`);
+    popup = await firefox.openExtensionPage(`${POPUP}?tab=${accountTab}`);
 
-    // Everything: every tab but the blocked one and the extension's own page is listed (the start tab too).
+    // Everything: every tab but the blocked one and Firefox's and the extension's own pages is listed.
+    const everything = (await firefox.evaluate<{ id: number; url: string }[]>(popup, "browser.tabs.query({}).then((tabs) => tabs.map(({ id, url }) => ({ id, url })))"))
+      // Never Firefox's own pages (the start tab is about:home since Firefox 160), the extension's or a blocked site.
+      .filter((tab) => (tab.url === "about:blank" || !/^(about|moz-extension):/.test(tab.url)) && !tab.url.includes("localhost"))
+      .map((tab) => `chrome:${tab.id}`)
+      .sort();
+    expect(everything).toEqual(expect.arrayContaining([`chrome:${accountTab}`, `chrome:${elsewhereTab}`]));
     await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "setReach", reach: "all", tabId: ${accountTab} })`);
     await expect.poll(async () => {
       const { tabs } = await request("preview.list");
       return tabs.filter((tab: { kind?: string }) => tab.kind === "chrome").map((tab: { id: string }) => tab.id).sort();
-    }, { timeout: 15_000 }).toEqual([`chrome:${await tabIdOf("about:blank")}`, `chrome:${accountTab}`, `chrome:${elsewhereTab}`].sort());
+    }, { timeout: 15_000 }).toEqual(everything);
     const listed = JSON.stringify(await request("preview.list"));
     expect(listed).not.toContain("localhost");
     expect(listed).not.toContain("moz-extension");

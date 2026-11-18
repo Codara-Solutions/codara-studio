@@ -36,6 +36,9 @@ export interface HeadlessFirefox {
   install(dir: string): Promise<void>;
   /** A new tab on url, loaded; its browsing context id. */
   open(url: string): Promise<string>;
+  /** A new tab on one of the extension's own pages, loaded; its browsing context id. */
+  openExtensionPage(url: string): Promise<string>;
+  closeTab(context: string): Promise<void>;
   navigate(context: string, url: string): Promise<void>;
   /** An expression's value in a tab or an extension page. */
   evaluate<T = any>(context: string, expression: string): Promise<T>;
@@ -68,7 +71,9 @@ export async function launchFirefox(binary: { path: string; version: number }, {
   writeFileSync(join(profile, "user.js"), Object.entries(all).map(([key, value]) => `user_pref(${JSON.stringify(key)}, ${JSON.stringify(value)});`).join("\n"));
   const child: ChildProcess = spawn(binary.path, ["--headless", "--no-remote", "--profile", profile, "--remote-debugging-port", "0", "--remote-allow-system-access", "about:blank"], {
     stdio: ["ignore", "ignore", "pipe"],
-    env: { ...process.env, MOZ_HEADLESS: "1" },
+    // System access (the flag before Firefox 160, the variable since) lets
+    // the test read the extension's pages and open them from the browser window.
+    env: { ...process.env, MOZ_HEADLESS: "1", MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: "1" },
   });
   let stderr = "";
   const url = await new Promise<string>((resolve, reject) => {
@@ -118,6 +123,31 @@ export async function launchFirefox(binary: { path: string; version: number }, {
       const { context } = await call<{ context: string }>("browsingContext.create", { type: "tab" });
       await firefox.navigate(context, target);
       return context;
+    },
+    // Firefox 160 refuses a WebDriver navigation to moz-extension:// pages, so
+    // the browser window opens the tab itself, as a click in the toolbar would.
+    async openExtensionPage(target) {
+      const contentTabs = async () => (await call<{ contexts: { context: string; url: string }[] }>("browsingContext.getTree", { maxDepth: 0 })).contexts;
+      const before = new Set((await contentTabs()).map((tab) => tab.context));
+      const { contexts } = await call<{ contexts: { context: string }[] }>("browsingContext.getTree", { maxDepth: 0, "moz:scope": "chrome" });
+      await call("script.evaluate", {
+        expression: `gBrowser.selectedTab = gBrowser.addTab(${JSON.stringify(target)}, { triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() }); true`,
+        target: { context: contexts[0].context },
+        awaitPromise: false,
+      });
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        const opened = (await contentTabs()).find((tab) => !before.has(tab.context) && tab.url === target);
+        if (opened) {
+          const ready = await firefox.evaluate(opened.context, "document.readyState").catch(() => null);
+          if (ready === "complete") return opened.context;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      throw new Error(`${target} did not open`);
+    },
+    async closeTab(context) {
+      await call("browsingContext.close", { context });
     },
     async navigate(context, target) {
       await call("browsingContext.navigate", { context, url: target, wait: "complete" });
