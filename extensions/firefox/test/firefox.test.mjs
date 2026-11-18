@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 
 // lib/firefox.js imports Chrome's policy.js, so it runs from the assembled folder.
 export async function run(assembled) {
-  const { CDP_METHODS, browserIdentity, isDomainToggle, isFirefoxRestrictedUrl, isShareable, parseFirefoxBlockedSites, unsupportedMethodError } = await import(pathToFileURL(join(assembled, "lib", "firefox.js")).href);
+  const { CDP_METHODS, browserIdentity, isDomainToggle, isFirefoxRestrictedUrl, isShareable, parseFirefoxBlockedSites, stopNeedsMark, unsupportedMethodError } = await import(pathToFileURL(join(assembled, "lib", "firefox.js")).href);
   for (const url of [
     "about:preferences",
     "about:blank",
@@ -19,6 +19,7 @@ export async function run(assembled) {
     "https://addons.mozilla.org/en-US/firefox/",
     "https://accounts.firefox.com/signin",
     "https://support.mozilla.org/",
+    "https://support.mozilla.org./",
   ]) {
     assert.equal(isFirefoxRestrictedUrl(url), true, url);
   }
@@ -28,7 +29,10 @@ export async function run(assembled) {
 
   // Blocked sites match the host as tab URLs spell it, written either way.
   const { blockingRule } = await import(pathToFileURL(join(assembled, "lib", "policy.js")).href);
-  const rules = parseFirefoxBlockedSites("bücher.example\n*.bänk.example/login\nxn--caf-dma.example\nplain.example");
+  const rules = parseFirefoxBlockedSites("bücher.example/privé\nbücher.example\n*.bänk.example/login\nxn--caf-dma.example\nplain.example\ndotted.example.");
+  assert.equal(blockingRule("https://xn--bcher-kva.example/priv%C3%A9/x", rules)?.raw, "bücher.example/privé");
+  assert.equal(blockingRule("https://dotted.example/", rules)?.raw, "dotted.example.");
+  assert.equal(blockingRule("https://dotted.example./", rules)?.raw, "dotted.example.");
   assert.equal(blockingRule("https://xn--bcher-kva.example/", rules)?.raw, "bücher.example");
   assert.equal(blockingRule("https://shop.xn--bcher-kva.example/x", rules)?.raw, "bücher.example");
   assert.equal(blockingRule("https://www.xn--bnk-qla.example/login/2fa", rules)?.raw, "*.bänk.example/login");
@@ -44,6 +48,13 @@ export async function run(assembled) {
   assert.equal(isShareable(share, { id: 9, windowId: 1, url: "https://example.com/" }), false, "a stopped tab stays off");
   assert.equal(isShareable({ all: false, windows: [], tabs: [4], stopped: [] }, { id: 4, windowId: 1, url: "https://example.com/" }), true);
   assert.equal(isShareable(share, null), false);
+  // Stop under This window or Everything is marked whatever the tab shows, a browser page included.
+  for (const url of ["https://example.com/", "about:addons", "https://addons.mozilla.org/"]) {
+    assert.equal(stopNeedsMark({ all: true, windows: [], tabs: [] }, { id: 5, windowId: 1, url }), true, url);
+    assert.equal(stopNeedsMark({ all: false, windows: [1], tabs: [] }, { id: 5, windowId: 1, url }), true, url);
+  }
+  assert.equal(stopNeedsMark({ all: false, windows: [2], tabs: [5] }, { id: 5, windowId: 1, url: "https://example.com/" }), false, "a tab shared on its own just leaves the list");
+  assert.equal(stopNeedsMark({ all: true, windows: [], tabs: [] }, null), false);
 
   assert.ok(CDP_METHODS.includes("Runtime.enable") && CDP_METHODS.includes("Network.disable"), "the recorders' domains start");
   assert.ok(CDP_METHODS.every((method) => /^[A-Z][A-Za-z]+\.[a-z][A-Za-z]+$/.test(method)), "every listed name is a protocol command");

@@ -34,7 +34,7 @@ export function isFirefoxRestrictedUrl(url) {
   if (!text) return false;
   if (FIREFOX_SCHEMES.test(text) || isRestrictedUrl(text)) return true;
   try {
-    return RESTRICTED_HOSTS.has(new URL(text).hostname.toLowerCase());
+    return RESTRICTED_HOSTS.has(new URL(text).hostname.toLowerCase().replace(/\.$/, ""));
   } catch {
     return false;
   }
@@ -62,9 +62,32 @@ function asciiHost(host) {
     .join(".");
 }
 
-/** The blocked-site rules, with each host in the form tab URLs use, so "bücher.example" blocks xn--bcher-kva.example. */
+/** A path as tab URLs spell it: "/privé" is "/priv%C3%A9". */
+function urlPath(path) {
+  if (!path) return path;
+  try {
+    return new URL(`http://host.invalid${path.startsWith("/") ? "" : "/"}${path}`).pathname.replace(/\/+$/, "");
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * The blocked-site rules in the form tab URLs use: punycode hosts without a
+ * trailing dot and percent-encoded paths, so "bücher.example/privé" blocks
+ * https://xn--bcher-kva.example/priv%C3%A9.
+ */
 export function parseFirefoxBlockedSites(text) {
-  return parseBlockedSites(text).map((rule) => ({ ...rule, host: asciiHost(rule.host) }));
+  return parseBlockedSites(text).map((rule) => ({ ...rule, host: asciiHost(rule.host.replace(/\.$/, "")), path: urlPath(rule.path) }));
+}
+
+/**
+ * Whether turning a tab off must also mark it stopped: This window or
+ * Everything still covers it. Decided by window alone, whatever page the tab
+ * shows, so a tab stopped on a browser page stays off when it leaves it.
+ */
+export function stopNeedsMark(share, tab) {
+  return Boolean(tab) && (share.all === true || (Array.isArray(share.windows) && share.windows.includes(tab.windowId)));
 }
 
 // The domains whose enable and disable Codara's recorders send on attach.

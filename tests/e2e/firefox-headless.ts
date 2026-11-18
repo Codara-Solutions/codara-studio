@@ -76,10 +76,18 @@ export async function launchFirefox(binary: { path: string; version: number }, {
     env: { ...process.env, MOZ_HEADLESS: "1", MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: "1" },
   });
   let stderr = "";
-  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  // A Firefox that could not start at all reports an error and no exit.
+  let spawnError: Error | null = null;
+  const exited = new Promise<void>((resolve) => {
+    child.once("exit", () => resolve());
+    child.once("error", (error) => {
+      spawnError = error;
+      resolve();
+    });
+  });
   // Stops Firefox and removes its profile, also when it never finished starting.
   const stop = async () => {
-    if (child.exitCode === null && child.signalCode === null) {
+    if (child.pid !== undefined && !spawnError && child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
       const killer = setTimeout(() => child.kill("SIGKILL"), 5_000);
       await exited;
@@ -107,7 +115,7 @@ export async function launchFirefox(binary: { path: string; version: number }, {
       });
       void exited.then(() => {
         clearTimeout(timer);
-        reject(new Error(`Firefox exited (${child.exitCode}): ${stderr.slice(-1000)}`));
+        reject(spawnError ?? new Error(`Firefox exited (${child.exitCode}): ${stderr.slice(-1000)}`));
       });
     });
     const socket = new WebSocket(`${url}/session`);

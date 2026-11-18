@@ -15,7 +15,16 @@
 // picks up where it left off.
 
 import { LinkClient } from "./lib/link-client.js";
-import { CDP_METHODS, browserIdentity, isDomainToggle, isFirefoxRestrictedUrl, isShareable, parseFirefoxBlockedSites, unsupportedMethodError } from "./lib/firefox.js";
+import {
+  CDP_METHODS,
+  browserIdentity,
+  isDomainToggle,
+  isFirefoxRestrictedUrl,
+  isShareable,
+  parseFirefoxBlockedSites,
+  stopNeedsMark,
+  unsupportedMethodError,
+} from "./lib/firefox.js";
 import {
   DEFAULT_BLOCKED_SITES,
   DEFAULT_PORTS,
@@ -25,7 +34,6 @@ import {
   badgeTitle,
   blockingRule,
   childSessionError,
-  isTabShared,
   reachOf,
   reachPatch,
 } from "./lib/policy.js";
@@ -132,6 +140,11 @@ const link = new LinkClient({
   },
   saveScan: (scan) => save({ linkScan: scan }),
   onConnected: () => {
+    // A reconnect that was under way when the user pressed Disconnect.
+    if (!state?.token) {
+      link.disconnect("idle");
+      return;
+    }
     keepAwake(true);
     void reportTabs();
     void ready.then(() => link.send({ type: "presence_settings", ...presenceSettings(state.presence) }));
@@ -270,7 +283,7 @@ let reportTimer = null;
 /** Tell Codara which tabs agents may use. Unshared tabs are never sent, and a blocked one only as blocked. */
 async function reportTabs() {
   await ready;
-  if (!link.connected) return;
+  if (!link.connected || !state.token) return;
   const list = [];
   for (const tab of await chrome.tabs.query({})) {
     if (!shared(tab)) continue;
@@ -401,8 +414,7 @@ async function setTabShared(tabId, on) {
     return;
   }
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  // Recorded whatever page the tab shows now, so it stays stopped after it leaves a browser page.
-  const stillShared = tab && isTabShared({ ...shareChoice(), tabs: without(state.shareTabs, tabId) }, tab);
+  const stillShared = stopNeedsMark(shareChoice(), tab);
   await save({
     shareTabs: without(state.shareTabs, tabId),
     storageTabs: without(state.storageTabs, tabId),
