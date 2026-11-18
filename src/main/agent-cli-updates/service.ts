@@ -427,14 +427,16 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     set(tool, { phase: "rolling-back", message: `${label} ${failedVersion} failed its version check. Putting ${before.version} back…` });
     const restoredMessage = `${label} ${failedVersion} failed its version check, so Codara put ${before.version} back. ${afterRollBackNote(tool, failedVersion)}`;
     const previousOnDisk = before.realPath !== after?.realPath && (await deps.exists(before.realPath).catch(() => false));
-    // The new build replaced the previous one in place: running it would run
-    // the broken build. Only the vendor's installer can bring it back.
-    if (before.plan.method === "native" && after && after.realPath === before.realPath) {
+    // A native roll back runs the previous build. When that build was
+    // replaced in place or is gone, only the broken one is left to run, so
+    // nothing runs: the vendor's installer brings the previous version back.
+    if (before.plan.method === "native" && !previousOnDisk) {
       const command = reinstallCommand(tool, before.version, platform);
+      const where = after && after.realPath === before.realPath ? "replaced" : "removed";
       set(tool, {
         installed: after,
         phase: "failed",
-        message: `${label} ${failedVersion} failed its version check and replaced ${before.version} on disk. ${
+        message: `${label} ${failedVersion} failed its version check and ${where} ${before.version} on disk. ${
           command ? `Put ${before.version} back with: ${command}` : `Reinstall ${label} ${before.version} with its installer.`
         }`,
       });
@@ -454,8 +456,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
         deps.log(`${tool}: relinking to ${before.version} failed: ${(error as Error).message}`);
       }
     }
-    const previousBinary = previousOnDisk ? before.realPath : before.binaryPath;
-    const rollback = before.plan.rollback(before.version, previousBinary);
+    const rollback = before.plan.rollback(before.version, before.plan.method === "native" ? before.realPath : before.binaryPath);
     deps.log(`${tool}: rolling back to ${before.version} with ${rollback.display}`);
     let rollbackError: string | null = null;
     try {

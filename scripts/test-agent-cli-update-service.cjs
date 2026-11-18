@@ -333,7 +333,8 @@ async function fakeService(m) {
     assert.deepEqual(w.saved.failed, {}, "a good update clears the failed version");
   }
 
-  // The previous build is gone from disk: the launcher runs the roll back.
+  // The previous build is gone from disk: the launcher now runs the broken
+  // build, so nothing runs and the vendor's installer command is shown.
   {
     const w = world({
       exists: () => false,
@@ -346,8 +347,10 @@ async function fakeService(m) {
     const service = m.createAgentCliUpdateService(w.deps);
     await service.check();
     await service.settled();
-    assert.equal(w.commands[1].executable, "/home/u/.local/bin/claude");
-    assert.equal(tool(service.snapshot(), "claude").phase, "rolled-back");
+    assert.equal(w.commands.length, 1, "only the update ran; the broken build never runs");
+    const claude = tool(service.snapshot(), "claude");
+    assert.equal(claude.phase, "failed");
+    assert.match(claude.message, /removed 2\.1\.325 on disk\. Put 2\.1\.325 back with: curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash -s 2\.1\.325/);
   }
 
   // The roll back fails too: the user gets the exact command.
