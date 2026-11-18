@@ -20,10 +20,15 @@ export const chromeLinkApi = {
    * separate Chrome; "Keep agents in your Chrome" turns them off in Codara.
    */
   separateBrowserTools: (): Promise<SeparateBrowserTool[]> => ipcRenderer.invoke("chromeLink:separateBrowserTools"),
-  /** Copy the extension into Codara's home and return the folder for Load unpacked. */
+  /** The folder for Load unpacked, copied into Codara's home the first time. */
   prepareExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:prepareExtension"),
   /** The same, and open the folder in the file manager. */
   revealExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:revealExtension"),
+  /**
+   * The user pressed Update extension: copy the extension Codara ships into
+   * its folder, and ask that connected browser's extension to reload itself.
+   */
+  updateExtension: (which: { linkId: string } | { extensionId: string }): Promise<void> => ipcRenderer.invoke("chromeLink:updateExtension", which),
   /** The agent's pointer and Stop pill, and the page-edge glow, on tabs of the user's browser. */
   setPresence: (patch: { overlay?: boolean; glow?: boolean }): Promise<ChromePresenceSettings> => ipcRenderer.invoke("chromeLink:setPresence", patch),
   onChanged: subscribe<ChromeLinkState>("chromeLink:changed"),
