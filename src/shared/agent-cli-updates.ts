@@ -87,13 +87,18 @@ const VERSION_RE = /(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/;
 // and a warning may name a path such as node-versions/v22.23.3.
 const NOISE_LINE_RE = /^\s*(?:warn(?:ing)?|error|npm (?:warn|notice)|\(node:\d+\))\b/i;
 
-/** The first x.y.z[-pre] in a version check's output ("2.1.327 (Claude Code)", "codex-cli 0.169.0"). */
+// A version check's own line: the version first, or after one word (the
+// tool's name), then the end or a space. A version inside a path or a
+// sentence ("new version 1.0.90 available") is not the tool's.
+const VERSION_LINE_RE = /^\s*(?:[\w.@/-]+\s+)?v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?=\s|$)/;
+
+/** The tool's version from its version check ("2.1.327 (Claude Code)", "codex-cli 0.169.0"). */
 export function parseCliVersion(output: string | null | undefined): string | null {
   if (!output) return null;
   for (const line of output.split(/\r?\n/)) {
     if (NOISE_LINE_RE.test(line)) continue;
-    const match = VERSION_RE.exec(line);
-    if (match) return match[0];
+    const match = VERSION_LINE_RE.exec(line);
+    if (match) return match[1];
   }
   return null;
 }
