@@ -598,8 +598,8 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   };
   assert.equal((await lib.click(clickTarget, { selector: "#go" })).change, 'Now on "a.example/done" (title "Done").');
   assert.equal((await lib.type(clickTarget, { selector: "#pw", text: "abc" })).change, 'The field now holds "•••".');
-  // Keeping the loaded extension current: the copy follows any changed
-  // file, and a connected extension older than it reloads or is shown.
+  // The copy Update extension makes: it follows any changed file, never the
+  // development files. scripts/test-chrome-extension-update.cjs covers when.
   const shipped = fs.mkdtempSync(path.join(os.tmpdir(), "codara-ext-src-"));
   const copy = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codara-ext-home-")), "chrome-extension");
   fs.writeFileSync(path.join(shipped, "manifest.json"), JSON.stringify({ version: "1.1.0" }));
@@ -625,12 +625,41 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   assert.equal(lib.compareExtensionVersions("1.0.0", "1.1.0"), -1);
   assert.equal(lib.compareExtensionVersions("1.10.0", "1.9.0"), 1);
   assert.equal(lib.compareExtensionVersions("1.1", "1.1.0"), 0);
-  assert.equal(lib.extensionUpdateAction("1.1.0", ["reload"], "1.1.0", false), "none", "current");
-  assert.equal(lib.extensionUpdateAction("1.2.0", [], "1.1.0", false), "none", "newer than shipped");
-  assert.equal(lib.extensionUpdateAction("1.0.0", [], null, false), "none", "nothing shipped to compare");
-  assert.equal(lib.extensionUpdateAction("1.0.0", ["reload"], "1.1.0", false), "reload");
-  assert.equal(lib.extensionUpdateAction("1.0.0", ["reload"], "1.1.0", true), "manual", "a reload that did not help");
-  assert.equal(lib.extensionUpdateAction("1.0.0", [], "1.1.0", false), "manual", "too old to reload itself");
+  // The first copy is made only where none is: an older copy stays until the user updates it.
+  fs.writeFileSync(path.join(copy, "manifest.json"), JSON.stringify({ version: "1.0.0" }));
+  assert.equal(lib.ensureExtensionFolder(shipped, copy), false, "an existing copy is left alone");
+  assert.equal(lib.extensionManifestVersion(copy), "1.0.0");
+  fs.rmSync(copy, { recursive: true });
+  assert.equal(lib.ensureExtensionFolder(shipped, copy), true, "a missing copy is made");
+  assert.equal(lib.extensionManifestVersion(copy), "1.1.0");
+  // A copy that fails part way (a file it cannot read, a full disk) leaves
+  // the folder the browser loaded exactly as it was, and nothing beside it.
+  const filesOf = (dir) => Object.fromEntries(fs.readdirSync(dir, { recursive: true }).sort().map((rel) => {
+    const full = path.join(dir, String(rel));
+    return [String(rel), fs.statSync(full).isDirectory() ? "dir" : fs.readFileSync(full, "utf8")];
+  }));
+  const loaded = filesOf(copy);
+  const newer = fs.mkdtempSync(path.join(os.tmpdir(), "codara-ext-newer-"));
+  fs.writeFileSync(path.join(newer, "manifest.json"), JSON.stringify({ version: "1.2.0" }));
+  fs.writeFileSync(path.join(newer, "a.js"), "export const a = 3;");
+  fs.writeFileSync(path.join(newer, "z.js"), "unreadable");
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    fs.chmodSync(path.join(newer, "z.js"), 0o000);
+    assert.throws(() => lib.syncExtensionFolder(newer, copy), "the copy fails part way");
+    assert.deepEqual(filesOf(copy), loaded, "the loaded folder is byte-identical after a failed copy");
+    assert.deepEqual(fs.readdirSync(path.dirname(copy)), ["chrome-extension"], "no half copy left beside it");
+    fs.chmodSync(path.join(newer, "z.js"), 0o644);
+  }
+  assert.equal(lib.syncExtensionFolder(newer, copy), true);
+  assert.equal(lib.extensionManifestVersion(copy), "1.2.0");
+  assert.deepEqual(fs.readdirSync(path.dirname(copy)), ["chrome-extension"], "the swap leaves nothing beside it");
+  // Codara stopped between the two renames of a swap: the next attempt puts the old folder back first.
+  fs.renameSync(copy, `${copy}.old`);
+  fs.mkdirSync(`${copy}.new`);
+  fs.writeFileSync(path.join(`${copy}.new`, "manifest.json"), "{");
+  assert.equal(lib.ensureExtensionFolder(newer, copy), false, "the interrupted swap's old folder is back");
+  assert.equal(lib.extensionManifestVersion(copy), "1.2.0");
+  assert.deepEqual(fs.readdirSync(path.dirname(copy)), ["chrome-extension"], "leftovers of the interrupted swap are gone");
   assert.deepEqual(lib.sanitizeExtensionFeatures(["reload", "reload", "Bad Feature", 3, "x".repeat(40)]), ["reload"]);
   assert.deepEqual(lib.sanitizeExtensionFeatures("reload"), []);
 

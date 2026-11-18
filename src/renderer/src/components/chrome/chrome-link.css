@@ -87,6 +87,28 @@
   color: var(--ink-dim);
 }
 
+/* An older extension in a paired browser: what runs, what Update does, and the button. Wraps, never cut off. */
+.chrome-update {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.chrome-update__text {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.chrome-update__desc {
+  color: var(--ink-dim);
+}
+
 .chrome-tabs {
   margin: 4px 0 0;
   padding: 0;

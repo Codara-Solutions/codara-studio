@@ -10,7 +10,8 @@ tools it uses for its own browser tabs.
 
 1. In Codara open Settings > Browser > Chrome extension and press
    **Reveal folder** (or **Copy path**). Codara copies the extension into
-   `<Codara home>/chrome-extension` and keeps that copy current.
+   `<Codara home>/chrome-extension` the first time, and later only when you
+   press **Update extension** (see Updates).
 2. Open `chrome://extensions` (Edge: `edge://extensions`), turn on
    **Developer mode**, choose **Load unpacked** and pick that folder.
 3. Click the Codara icon in the toolbar and choose **Connect to Codara**. The
@@ -121,14 +122,24 @@ the glow or the whole overlay off.
 
 ## Updates
 
-Codara keeps its copy of the extension (the folder you loaded) the same as
-the one it ships: it copies it again whenever a file differs. When this
-extension connects with an older version than that copy, Codara asks it,
-over the sealed session only, to reload itself (`chrome.runtime.reload()`).
-What you shared and the pairing are kept across the reload, and a reload
-that did not bring the new version is not tried again for 30 minutes.
-Versions before 1.1.0 cannot reload themselves: Settings > Browser then
-says to press the reload button on Codara in `chrome://extensions` once.
+Codara never changes this extension by itself. It copies the extension into
+`<Codara home>/chrome-extension` the first time you press **Reveal folder**
+(or **Copy path**), and leaves that copy alone after that, also when a newer
+Codara ships a newer extension. Settings > Browser then shows, for each
+connected browser, the version it runs and the one Codara ships, with an
+**Update extension** button. Only that button copies the new files into the
+folder and asks that browser's extension, over the sealed session, to reload
+itself (`chrome.runtime.reload()`). What you shared and the pairing are kept
+across the reload, and a reload that did not bring the new version is not
+tried again for 30 minutes. Until you press it, the version you run keeps
+working. An extension that is too old to connect at all (another link
+protocol) is listed there too, with the same button; you then press the
+reload button on Codara in `chrome://extensions`.
+
+An extension installed from the Chrome Web Store, or loaded from a folder
+other than Codara's, is never updated or reloaded by Codara: Chrome updates
+a store install by itself. Codara tells them apart by the extension id,
+which for an unpacked extension Chrome derives from the folder's path.
 
 ## Development
 
