@@ -45,6 +45,8 @@ interface Command {
   executable: string;
   args: string[];
   display: string;
+  /** Added to the enriched environment. */
+  env?: Record<string, string>;
 }
 interface SetupDependencies {
   platform: NodeJS.Platform;
@@ -66,7 +68,7 @@ export async function runSetupCommand(
   return new Promise((resolve, reject) => {
     const child = spawn(command.executable, command.args, {
       cwd: homedir(),
-      env,
+      env: command.env ? { ...env, ...command.env } : env,
       windowsHide: true,
       // cmd.exe needs its quoted command intact; Node's argv escaping is for executables.
       windowsVerbatimArguments: process.platform === "win32" && command.executable === "cmd.exe",

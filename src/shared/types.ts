@@ -1368,6 +1368,10 @@ export interface AppPreferences {
   // and keeps the process alive so main-process timers (automations / loops)
   // keep firing instead of quitting. Quit explicitly from the tray menu.
   keepRunningInBackground?: boolean;
+  // When true (default), Codara updates Claude Code, Codex and Grok by
+  // itself once a newer version is out, only while none of that tool's
+  // sessions run (src/main/agent-cli-updates/). Pi is never updated.
+  agentCliAutoUpdate?: boolean;
   // Opt-in (default off): draw with the graphics card on native Wayland,
   // where Codara otherwise draws on the CPU. Read before app ready, so it
   // applies at the next start; CODARA_WAYLAND_HARDWARE_ACCELERATION wins over
@@ -1655,6 +1659,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   glassRefraction: 100,
   glassChroma: 100,
   keepRunningInBackground: true,
+  agentCliAutoUpdate: true,
   waylandHardwareAcceleration: false,
   claudeFollowsActiveAccount: true,
   keepAwakeMode: "agents",

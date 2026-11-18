@@ -287,6 +287,10 @@ function normalize(
       typeof src.keepRunningInBackground === "boolean"
         ? src.keepRunningInBackground
         : DEFAULT_PREFERENCES.keepRunningInBackground,
+    agentCliAutoUpdate:
+      typeof src.agentCliAutoUpdate === "boolean"
+        ? src.agentCliAutoUpdate
+        : DEFAULT_PREFERENCES.agentCliAutoUpdate,
     // Opt-in: only a stored true draws with the graphics card on native Wayland.
     waylandHardwareAcceleration: src.waylandHardwareAcceleration === true,
     claudeFollowsActiveAccount:

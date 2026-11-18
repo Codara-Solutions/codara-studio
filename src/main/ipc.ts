@@ -3452,6 +3452,12 @@ export function registerIpc(): void {
   registerKeepAwakeIpc(handle);
   // Drawing with the graphics card: Settings, General, Window.
   registerGpuDrawingIpc(handle);
+  // Agent CLI updates (agent-cli-updates/): Settings and the worker picker.
+  const agentCliUpdates = () => import("./agent-cli-updates");
+  handle("agentCliUpdates:status", async () => (await agentCliUpdates()).agentCliUpdatesStatus());
+  handle("agentCliUpdates:check", async () => (await agentCliUpdates()).checkAgentCliUpdates());
+  handle("agentCliUpdates:update", async (_event, tool: unknown) => (await agentCliUpdates()).updateAgentCli(tool));
+  handle("agentCliUpdates:cancel", async (_event, tool: unknown) => (await agentCliUpdates()).cancelAgentCliUpdate(tool));
   // The status bar's dev-build update line (dev-update-hint.ts); null when not running.
   handle("devUpdate:status", async () => (app.isPackaged ? null : (await import("./dev-update-hint")).devUpdateStatus()));
 
