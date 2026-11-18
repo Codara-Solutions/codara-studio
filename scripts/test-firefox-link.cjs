@@ -98,6 +98,7 @@ function firefoxClient(LinkClient, port, { uuid = UUID, capabilities = { cdp: ["
     },
     onRequest: async (request) => {
       requests.push(request);
+      if (request.type === "attach" && request.tabId === 6) throw new Error("Firefox refused to attach.");
       return request.type === "cdp" && request.method === "Runtime.evaluate" ? { result: { value: 42 } } : {};
     },
   });
@@ -157,6 +158,14 @@ function firefoxClient(LinkClient, port, { uuid = UUID, capabilities = { cdp: ["
   await until(() => firefox.requests.some((request) => request.type === "cdp" && request.method === "Runtime.enable"), "the recorders' domains");
   assert.deepEqual(firefox.requests[0], { id: firefox.requests[0].id, type: "attach", tabId: 5 }, "the tab is attached on first use");
   assert.ok(!firefox.requests.some((request) => request.method === "Runtime.evaluate" || request.method === "Tracing.start"), "a refused command never reaches the extension");
+
+  // Refused before attaching: a tab the extension will not attach still gets
+  // the reason, not the attach error.
+  firefox.client.send({ type: "tabs", allowOpen: false, tabs: [5, 6].map((tabId) => ({ tabId, windowId: 1, url: `https://mail.example/${tabId}`, title: "Mail", active: tabId === 5, attached: false, blocked: false, storage: false, openedByAgent: false })) });
+  await until(() => link.tabs.size === 2, "the second tab");
+  const refusing = await lib.resolveBrowserTarget({ tabId: "chrome:6" });
+  await assert.rejects(refusing.evaluate("1"), /Runtime\.evaluate is not available in Firefox/);
+  assert.ok(!firefox.requests.some((request) => request.type === "attach" && request.tabId === 6), "nothing asked of the extension for a command it cannot answer");
 
   // A later connection proves the pairing both ways, from the same profile only.
   firefox.client.disconnect("idle");
