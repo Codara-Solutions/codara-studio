@@ -18,8 +18,8 @@ async function until(check, label, timeoutMs = 3000) {
   throw new Error(`timed out waiting for ${label}`);
 }
 
-/** Hold the next call of a WebCrypto step until the test releases it. */
-function hold(name) {
+/** Hold the next call of a WebCrypto step (that `matches`) until the test releases it. */
+function hold(name, matches = () => true) {
   const subtle = globalThis.crypto.subtle;
   const real = subtle[name];
   let reached;
@@ -27,6 +27,7 @@ function hold(name) {
   const gate = { reached: new Promise((resolve) => (reached = resolve)), release: () => release() };
   const released = new Promise((resolve) => (release = resolve));
   subtle[name] = async (...args) => {
+    if (!matches(args)) return real.apply(subtle, args);
     delete subtle[name];
     reached();
     await released;
@@ -37,15 +38,43 @@ function hold(name) {
 }
 
 /**
+ * The browser's session key: in a handshake Codara imports its AES key
+ * before it answers "welcome", and the browser imports its own after.
+ */
+function browserSessionKey() {
+  let seen = 0;
+  return (args) => args[2] === "AES-GCM" && ++seen === 2;
+}
+
+/** Hold the store's next `key` step (beforeSave, beforeClear, beforeScanSave). */
+function holdStore(store, key) {
+  let reached;
+  let release;
+  const gate = { reached: new Promise((resolve) => (reached = resolve)), release: () => release() };
+  const released = new Promise((resolve) => (release = resolve));
+  store[key] = async () => {
+    store[key] = null;
+    reached();
+    await released;
+  };
+  return gate;
+}
+
+async function step(store, key) {
+  if (store[key]) await store[key]();
+}
+
+/**
  * A Codara on a fake socket: answers hellos with a challenge (when it knows
  * the token) or a pairing (when asked), and seals what it sends once the
  * session starts. `answer: false` leaves hellos for the test to answer;
  * `allow: false` leaves a pairing waiting for the user's Allow.
  */
 function fakeCodara() {
-  const codara = { known: null, answer: true, allow: true, sockets: [] };
+  const codara = { known: null, answer: true, allow: true, down: false, ports: [43117], sockets: [] };
   class FakeSocket {
     constructor(url) {
+      if (codara.down) throw new Error("connection refused");
       this.url = url;
       this.readyState = 0;
       this.frames = [];
@@ -99,15 +128,18 @@ function fakeCodara() {
         const { ecdh, key, commit } = this.codaraPairing;
         assert.equal(await pairCommitment(message.key), commit);
         if (!codara.allow) return;
-        this.token = await pairedToken(ecdh.computeSecret(message.key, "hex", "hex"), message.key, key);
-        codara.known = this.token;
+        const token = await pairedToken(ecdh.computeSecret(message.key, "hex", "hex"), message.key, key);
+        // Codara's own key work is done before it answers, so the only
+        // WebCrypto calls after the answer are the browser's.
+        this.codaraSealer = await sessionSealer(await sha256Hex(token), message.key, key, "codara");
+        this.token = token;
+        codara.known = token;
         this.deliver({ type: "paired", linkId: "chrome-ab12" });
-        this.codaraSealer = await sessionSealer(await sha256Hex(this.token), message.key, key, "codara");
       } else if (message.type === "auth") {
         const { secret, nonce, theirs } = this.codaraChallenge;
         assert.equal(message.proof, await linkProof(secret, "browser", nonce, theirs));
-        this.deliver({ type: "welcome", protocol: 2, linkId: "chrome-ab12", app: { name: "Codara", version: "9.9.9" } });
         this.codaraSealer = await sessionSealer(secret, theirs, nonce, "codara");
+        this.deliver({ type: "welcome", protocol: 2, linkId: "chrome-ab12", app: { name: "Codara", version: "9.9.9" } });
       }
     }
 
@@ -135,20 +167,22 @@ function fakeCodara() {
 function makeClient(codara, store, onRequest = async () => ({})) {
   return new LinkClient({
     WebSocket: codara.WebSocket,
-    ports: async () => [43117],
+    ports: async () => codara.ports,
     hello: async () => ({ browser: { name: "Chromium", version: "141" }, extension: { id: "a".repeat(32), version: "1.4.1" } }),
     loadPairing: async () => (store.token ? { token: store.token, linkId: "chrome-ab12" } : null),
     savePairing: async (token) => {
+      await step(store, "beforeSave");
       store.token = token;
       store.saves.push(token);
     },
     clearPairing: async () => {
+      await step(store, "beforeClear");
       store.token = null;
       store.clears += 1;
     },
     onRequest,
     loadScan: async () => null,
-    saveScan: async () => {},
+    saveScan: async () => step(store, "beforeScanSave"),
   });
 }
 
@@ -226,7 +260,9 @@ export async function run() {
     });
     let reachedRequest;
     const requested = new Promise((resolve) => (reachedRequest = resolve));
-    const client = makeClient(codara, store, async () => {
+    let link = null;
+    const client = makeClient(codara, store, async (request, asking) => {
+      link = asking;
       reachedRequest();
       await asked;
       return { stale: true };
@@ -236,9 +272,12 @@ export async function run() {
     const first = codara.last();
     await first.sealed({ id: 1, type: "cdp", tabId: 5, method: "Runtime.evaluate", params: {} });
     await requested;
+    assert.equal(link.live(), true, "the handler is told its link is in use");
     client.disconnect();
+    assert.equal(link.live(), false, "and that it is not, once it closed");
     await client.connect();
     await until(() => client.status.state === "connected", "the second link");
+    assert.equal(link.live(), false, "a later link is not the one that asked");
     const second = codara.last();
     const heard = second.frames.length;
     answer();
@@ -312,6 +351,8 @@ export async function run() {
     await socket.sealed({ type: "revoked" });
     await open.reached;
     socket.hangUp();
+    await wait(20);
+    assert.equal(client.status.state, "connected", "the close waits for the frame before it");
     open.release();
     await until(() => client.status.state !== "connected", "the revocation");
     await wait(20);
@@ -320,5 +361,110 @@ export async function run() {
     client.disconnect();
   }
 
-  return "link races: a cancelled pairing saves no token, an old revocation never erases a new pairing, an old answer never goes out on a new link, an unsealed revocation keeps the saved pairing, a search cancelled mid-hello adopts nothing, and a close never overtakes the revocation before it";
+  // 7. A handshake that resumes after its probe timed out adopts nothing:
+  // the next port's Codara stays the link.
+  {
+    const codara = fakeCodara();
+    const store = newStore();
+    await paired(codara, store);
+    codara.ports = [43117, 43118];
+    const client = makeClient(codara, store);
+    const setup = hold("importKey", browserSessionKey());
+    void client.connect();
+    await setup.reached;
+    const slow = codara.last();
+    await until(() => client.status.state === "connected", "the next port's link", 5000);
+    const next = codara.last();
+    assert.notEqual(next, slow);
+    setup.release();
+    await wait(30);
+    assert.equal(client.socket, next, "the late handshake did not take the link");
+    assert.equal(client.status.state, "connected");
+    assert.equal(next.readyState, 1);
+    client.disconnect();
+  }
+
+  // 8. Codara closes while the browser still sets up the session: the link
+  // never shows connected on a closed socket.
+  {
+    const codara = fakeCodara();
+    const store = newStore();
+    await paired(codara, store);
+    const client = makeClient(codara, store);
+    const setup = hold("importKey", browserSessionKey());
+    void client.connect();
+    await setup.reached;
+    codara.last().hangUp();
+    setup.release();
+    await wait(30);
+    assert.ok(client.socket === null || client.socket.readyState === 1, "no link on a closed socket");
+    client.disconnect();
+  }
+
+  // 9. Pairing again, cancelled while the new token was being saved: the
+  // pairing saved before comes back.
+  {
+    const codara = fakeCodara();
+    const store = newStore();
+    const before = await paired(codara, store);
+    codara.known = null;
+    const client = makeClient(codara, store);
+    const saving = holdStore(store, "beforeSave");
+    void client.connect({ pair: true });
+    await saving.reached;
+    client.disconnect();
+    saving.release();
+    await wait(30);
+    assert.equal(store.token, before, "the earlier pairing is kept");
+  }
+
+  // 10. A revocation's clear still pending while the user paired again:
+  // it clears only the pairing it revoked, never the new one.
+  {
+    const codara = fakeCodara();
+    const store = newStore();
+    await paired(codara, store);
+    const client = makeClient(codara, store);
+    await client.connect();
+    await until(() => client.status.state === "connected", "the proven link");
+    const clearing = holdStore(store, "beforeClear");
+    await codara.last().sealed({ type: "revoked" });
+    await clearing.reached;
+    client.disconnect();
+    codara.known = null;
+    void client.connect({ pair: true });
+    await until(() => codara.last().token, "the new pairing on Codara's side");
+    await wait(30);
+    clearing.release();
+    await until(() => client.status.state === "connected", "the new pairing");
+    await wait(20);
+    assert.equal(store.token, codara.last().token, "the new pairing is saved and kept");
+    assert.equal(client.status.state, "connected");
+    client.disconnect();
+  }
+
+  // 11. A lost link's retry, still saving its scan when a newer search set
+  // its own retry, leaves that newer retry alone.
+  {
+    const codara = fakeCodara();
+    const store = newStore();
+    await paired(codara, store);
+    const client = makeClient(codara, store);
+    await client.connect();
+    await until(() => client.status.state === "connected", "the proven link");
+    const scanSave = holdStore(store, "beforeScanSave");
+    codara.last().hangUp();
+    await scanSave.reached;
+    codara.down = true;
+    await client.connect();
+    assert.equal(client.status.state, "offline");
+    const retry = client.reconnectTimer;
+    assert.ok(retry, "the newer search set a retry");
+    scanSave.release();
+    await wait(30);
+    assert.equal(client.reconnectTimer, retry, "the lost link's retry did not replace or clear it");
+    client.disconnect();
+  }
+
+  return "link races: a cancelled pairing saves no token, an old revocation never erases a new pairing, an old answer never goes out on a new link, an unsealed revocation keeps the saved pairing, a search cancelled mid-hello adopts nothing, a close never overtakes the frame before it, a timed-out handshake adopts nothing, a cancelled re-pairing keeps the earlier pairing, a revocation clears only its own pairing, and an old retry never clears a newer one";
 }

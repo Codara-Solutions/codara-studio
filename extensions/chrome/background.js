@@ -217,11 +217,19 @@ async function usableTab(tabId) {
   return tab;
 }
 
-async function handleRequest(request) {
+// Codara's link closed, or another took its place, while the request
+// waited: nothing it asked for happens to a tab.
+function stillAsked(link) {
+  if (link && !link.live()) throw new Error("Codara's link to this browser closed before this ran.");
+}
+
+async function handleRequest(request, link) {
   await ready;
+  stillAsked(link);
   switch (request.type) {
     case "attach": {
       const tab = await usableTab(request.tabId);
+      stillAsked(link);
       if (!state.attached.includes(tab.id)) {
         await chrome.debugger.attach({ tabId: tab.id }, "1.3");
         await save({ attached: withValue(state.attached, tab.id) });
@@ -234,7 +242,7 @@ async function handleRequest(request) {
       await detachTab(Number(request.tabId));
       return {};
     case "cdp":
-      return relayCommand(request);
+      return relayCommand(request, link);
     case "open":
       return openTab(request);
     case "close": {
@@ -243,12 +251,15 @@ async function handleRequest(request) {
       if (!tab) throw new Error(`${agentTabId(tabId)} is closed.`);
       const refused = closeTabError(tab, shareChoice(), state.agentTabs, rules);
       if (refused) throw new Error(refused);
+      stillAsked(link);
       await detachTab(tab.id);
+      stillAsked(link);
       await chrome.tabs.remove(tab.id);
       return {};
     }
     case "activate": {
       const tab = await usableTab(request.tabId);
+      stillAsked(link);
       await chrome.tabs.update(tab.id, { active: true });
       return {};
     }
@@ -257,7 +268,7 @@ async function handleRequest(request) {
   }
 }
 
-async function relayCommand(request) {
+async function relayCommand(request, link) {
   const child = childSessionError(request);
   if (child) throw new Error(child);
   const tab = await usableTab(request.tabId);
@@ -286,7 +297,10 @@ async function relayCommand(request) {
   }
   const reserved = presenceWorldError(method, request.params, hiddenFor(tab.id));
   if (reserved) throw new Error(reserved);
-  const send = async () => (await chrome.debugger.sendCommand({ tabId: tab.id }, method, request.params ?? {})) ?? {};
+  const send = async () => {
+    stillAsked(link);
+    return (await chrome.debugger.sendCommand({ tabId: tab.id }, method, request.params ?? {})) ?? {};
+  };
   // Always: a recording's end brings the overlay back even if it went quiet meanwhile.
   if (method === "Page.stopScreencast") return stopScreencast(tab.id, send);
   if (!presence.has(tab.id)) return send();

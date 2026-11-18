@@ -34,7 +34,7 @@ export class LinkClient {
    * @param {() => Promise<{ token: string, linkId: string } | null>} deps.loadPairing
    * @param {(token: string, linkId: string) => Promise<void>} deps.savePairing
    * @param {() => Promise<void>} deps.clearPairing
-   * @param {(request: object) => Promise<unknown>} deps.onRequest
+   * @param {(request: object, link: { live: () => boolean }) => Promise<unknown>} deps.onRequest  `live()`: the asking link is still the one in use
    * @param {(message: object) => void} [deps.onMessage]
    * @param {(message: object) => void} [deps.onReload]  Codara ships a newer extension
    * @param {(status: object) => void} [deps.onStatus]
@@ -54,6 +54,8 @@ export class LinkClient {
     this.attempt = 0;
     this.lastPong = 0;
     this.epoch = 0;
+    // Pairing storage, one write at a time (pairingStore).
+    this.storing = Promise.resolve();
     // lastPort: where Codara last answered. misses and retryAt: the offline
     // backoff; recovering: the misses count from a lost link.
     this.scan = null;
@@ -246,6 +248,9 @@ export class LinkClient {
         finish("cancelled");
         return true;
       };
+      // Past this attempt's end (timed out, closed, refused or cancelled), a
+      // handshake that resumes never sends or adopts anything.
+      const gone = () => settled || cancelled();
       try {
         socket = new this.deps.WebSocket(`ws://127.0.0.1:${port}${LINK_PATH}`);
         socket.epoch = epoch;
@@ -257,20 +262,18 @@ export class LinkClient {
         opened = true;
         const hello = await this.deps.hello();
         const commit = keys ? { pairCommit: await pairCommitment((await keys).key) } : {};
-        if (cancelled()) return;
+        if (gone()) return;
         socket.send(JSON.stringify({ type: "hello", protocol: PROTOCOL, ...hello, ...(pairing ? { linkId: pairing.linkId, nonce } : {}), pair: pair === true, ...commit }));
       };
-      socket.onerror = () => finish(opened ? "next" : "closed");
-      // Frames that arrived before the close are acted on first: Codara
-      // sends "revoked" and closes at once.
+      // Frames that arrived before an error or close are acted on first:
+      // Codara sends "revoked" (or "welcome") and may close right after.
       let frames = Promise.resolve();
-      socket.onclose = () => {
-        if (!settled) finish(opened ? "next" : "closed");
-        else
-          void frames.then(() => {
-            if (this.socket === socket) this.lost();
-          });
-      };
+      socket.onerror = () => void frames.then(() => finish(opened ? "next" : "closed"));
+      socket.onclose = () =>
+        void frames.then(() => {
+          if (!settled) finish(opened ? "next" : "closed");
+          else if (this.socket === socket) this.lost();
+        });
       // Once adopted, the socket speaks only while it is the link in use;
       // before that, only while its search is not cancelled.
       const over = () => (settled ? !this.current(socket) : cancelled());
@@ -294,7 +297,7 @@ export class LinkClient {
           // whatever else sits on the port gets nothing it could replay.
           const secret = await sha256Hex(pairing.token);
           const expected = await linkProof(secret, "codara", nonce, String(message.nonce ?? ""));
-          if (settled || cancelled()) return;
+          if (gone()) return;
           if (message.proof !== expected) {
             socket.close();
             finish("unknown");
@@ -303,7 +306,7 @@ export class LinkClient {
           proven = true;
           session = { secret, first: nonce, second: String(message.nonce) };
           const proof = await linkProof(secret, "browser", String(message.nonce), nonce);
-          if (cancelled()) return;
+          if (gone()) return;
           socket.send(JSON.stringify({ type: "auth", proof }));
           return;
         }
@@ -344,13 +347,19 @@ export class LinkClient {
             // Revealed only now, after Codara sent its key: a relay had to
             // pick its keys before it could see this one.
             const own = await keys;
-            if (cancelled()) return;
+            if (gone()) return;
             socket.pairing = { privateKey: own.privateKey, extensionKey: own.key, codaraKey };
             socket.send(JSON.stringify({ type: "pair_key", key: own.key }));
             message = { type: "pairing", code: await pairingCode(own.key, codaraKey) };
           }
-          if (message.type === "welcome") socket.sealer = await sessionSealer(session.secret, session.first, session.second);
-          if (cancelled()) return;
+          if (message.type === "welcome") {
+            const sealer = await sessionSealer(session.secret, session.first, session.second);
+            if (gone()) return;
+            socket.sealer = sealer;
+            // The pairing this session proved: the only one its revocation may clear.
+            socket.credential = pairing.token;
+          }
+          if (gone()) return;
           this.adopt(socket, port);
           finish(message.type === "welcome" || message.type === "pairing" ? "ok" : "stop");
         }
@@ -407,12 +416,21 @@ export class LinkClient {
         if (!this.current(socket)) return;
         socket.pairing = null;
         socket.sealer = sealer;
-        await this.deps.savePairing(token, message.linkId);
-        if (!this.current(socket)) {
-          // Cancelled while saving: take back this token, and only this one.
-          if ((await this.deps.loadPairing())?.token === token) await this.deps.clearPairing();
-          return;
-        }
+        socket.credential = token;
+        const kept = await this.pairingStore(async () => {
+          if (!this.current(socket)) return false;
+          const previous = await this.deps.loadPairing();
+          await this.deps.savePairing(token, message.linkId);
+          if (this.current(socket)) return true;
+          // Cancelled while saving: the pairing stored before comes back,
+          // as long as this write is still the one stored.
+          if ((await this.deps.loadPairing())?.token === token) {
+            if (previous) await this.deps.savePairing(previous.token, previous.linkId);
+            else await this.deps.clearPairing();
+          }
+          return false;
+        });
+        if (!kept || !this.current(socket)) return;
         this.attempt = 0;
         this.setStatus({ state: "connected", code: null, linkId: message.linkId ?? null, app: message.app ?? null, error: null });
         this.deps.onConnected?.();
@@ -432,7 +450,14 @@ export class LinkClient {
           this.setStatus({ error: "The connection to Codara was interrupted. Press Connect to try again." });
           return;
         }
-        await this.deps.clearPairing();
+        {
+          // Only the pairing this session proved is forgotten: a newer one
+          // saved meanwhile stays.
+          const credential = socket.credential;
+          await this.pairingStore(async () => {
+            if (credential && (await this.deps.loadPairing())?.token === credential) await this.deps.clearPairing();
+          });
+        }
         if (!this.current(socket)) return;
         this.disconnect("unpaired");
         this.setStatus({ error: message.type === "revoked" ? "Codara disconnected this browser." : "Codara no longer knows this browser. Connect again." });
@@ -460,8 +485,10 @@ export class LinkClient {
       }
       // The answer goes back on the link that asked, or nowhere: a later
       // link numbers its requests from 1 again.
+      // `live` tells the handler, after any await of its own, whether this
+      // link is still the one in use before it acts on a tab.
       try {
-        const result = await this.deps.onRequest(message);
+        const result = await this.deps.onRequest(message, { live: () => this.current(socket) });
         this.sendOn(socket, { id: message.id, result: result ?? {} });
       } catch (error) {
         this.sendOn(socket, { id: message.id, error: { message: error instanceof Error ? error.message : String(error) } });
@@ -469,6 +496,13 @@ export class LinkClient {
       return;
     }
     this.deps.onMessage?.(message);
+  }
+
+  /** Pairing storage, one write at a time: what a write checked still holds when it lands. */
+  pairingStore(work) {
+    const done = this.storing.then(work);
+    this.storing = done.catch(() => {});
+    return done;
   }
 
   lost() {
@@ -498,6 +532,8 @@ export class LinkClient {
   }
 
   async scheduleReconnect(epoch = this.epoch) {
+    // A connection that is over must not touch the timer a newer one set.
+    if (epoch !== this.epoch) return;
     this.clearReconnect();
     if (!(await this.deps.loadPairing()) || epoch !== this.epoch) return;
     const delay = RECONNECT_DELAYS_MS[Math.min(this.attempt, RECONNECT_DELAYS_MS.length - 1)];
@@ -512,6 +548,7 @@ export class LinkClient {
     const ladder = scan.recovering ? [...RECONNECT_DELAYS_MS.slice(0, -1), ...OFFLINE_DELAYS_MS] : OFFLINE_DELAYS_MS;
     const delay = ladder[Math.min(scan.misses, ladder.length - 1)];
     await this.updateScan({ misses: scan.misses + 1, retryAt: this.now() + delay });
+    if (epoch !== this.epoch) return;
     this.clearReconnect();
     if (!(await this.deps.loadPairing()) || epoch !== this.epoch) return;
     this.scheduleAt(delay);
