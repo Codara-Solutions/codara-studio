@@ -475,6 +475,11 @@ shared and blocked tabs, the relayed protocol, the activity log and
 `codara_preview_chrome`, unpairing). The real extension in Playwright's
 Chromium is `tests/e2e/chrome-extension.spec.ts`.
 
+The Firefox extension's link: `test-firefox-link` (Codara's side:
+`moz-extension://` origins and nothing shaped like one, pairing bound to the
+profile's extension uuid, only the protocol commands the extension's hello
+lists relayed and every other refused with the reason before it is sent).
+
 ### Security boundaries and packaging
 
 `test-ipc-gate-default`, `test-trusted-sender`, `test-fs-sandbox`,
