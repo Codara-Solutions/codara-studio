@@ -179,6 +179,8 @@ export interface AgentWorktreeAuditEntry {
   proof?: string | null;
   blockers?: string[];
   recoveryRef?: string | null;
+  /** The reason a removal needed no merge: its maker gave the branch up. */
+  givenUp?: { pr: number; remoteCommit: string } | null;
   /** What the user was told, when a press ended before the removal. */
   message?: string | null;
 }
@@ -3473,6 +3475,7 @@ export async function removeAgentWorktree(
     tip: verdict.tip,
     target: verdict.target,
     proof: verdict.proof ?? null,
+    givenUp: verdict.givenUp ? { pr: verdict.givenUp.pullRequest.number, remoteCommit: verdict.givenUp.remoteCommit } : null,
     blockers: verdict.blockers,
   };
   if (input.dryRun) {
@@ -4125,6 +4128,7 @@ export function createWorktreeAuditLog(
       proof: entry.proof ?? null,
       blockers: entry.blockers ?? [],
       recoveryRef: entry.recoveryRef ?? null,
+      ...(entry.givenUp ? { givenUp: { pr: entry.givenUp.pr, remoteCommit: entry.givenUp.remoteCommit } } : {}),
       ...(entry.message ? { message: cleanText(entry.message, 300) } : {}),
     });
     const write = chain.then(async () => {

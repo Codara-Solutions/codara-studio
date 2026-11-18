@@ -156,6 +156,15 @@ async function main() {
       assert.equal(h.state.workspaces.some((workspace) => workspace.id === wt.workspaceId), false, "its rail row is gone");
       assert.equal(h.events.at(-1).kind, "removed");
       assert.equal(h.events.at(-1).pullRequest, undefined, "a closed pull request is not reported as merged");
+      const audit = fs
+        .readFileSync(path.join(home, "logs", "worktree-audit.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line))
+        .filter((line) => line.workspaceId === wt.workspaceId && line.outcome === "removed");
+      assert.equal(audit.length, 1);
+      assert.equal(audit[0].proof, null);
+      assert.deepEqual(audit[0].givenUp, { pr: result.givenUp.closedPullRequest.number, remoteCommit: wt.tip }, "the audit names why no dialog was needed");
     });
 
     await check("another agent's given-up worktree still needs the user", async () => {
