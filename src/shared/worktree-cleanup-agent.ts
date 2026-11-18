@@ -260,8 +260,6 @@ export interface WorktreeCleanupApprovalItem {
   reason: string;
   /** Null when the user may tick it; otherwise why it can never be removed here. */
   blocked: string | null;
-  /** Ticked when the dialog opens: only a safe item is. */
-  preselected: boolean;
   /** Ignored files the removal deletes, listed so the user sees them before ticking. */
   ignored: string[];
   /** Commits a removal leaves only on the branch (which stays) or a recovery ref. */

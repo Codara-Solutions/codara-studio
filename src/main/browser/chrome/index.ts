@@ -6,14 +6,16 @@
 // Nothing here writes into a browser profile or any configuration outside
 // Codara's own home: the pairings and the activity log live in
 // <codara home>/chrome-link/, and the extension the user loads is a copy in
-// <codara home>/chrome-extension/, so its path survives app updates.
+// <codara home>/chrome-extension/, so its path survives app updates. That copy
+// changes only when the user asks (extension-update.ts).
 
 import { app, BrowserWindow, shell } from "electron";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import type { ChromeLinkState, ChromePresenceSettings, SeparateBrowserTool } from "../../../shared/chrome-link";
-import { codaraHome } from "../../codara-home";
+import type { ChromeLinkIncompatibleExtension, ChromeLinkState, ChromePresenceSettings, SeparateBrowserTool } from "../../../shared/chrome-link";
+import { codaraHome, LEGACY_DIR_NAMES } from "../../codara-home";
 import type { IpcHandle } from "../../ipc";
 import { paneAgentRuntime } from "../../pane-agent-runtime";
 import { runtimeDisplayName } from "../agent-driver";
@@ -26,13 +28,20 @@ import {
   setChromeUsageSink,
 } from "./activity";
 import { ChromeTargetBackend } from "./chrome-target";
-import { extensionManifestVersion, extensionUpdateAction, syncExtensionFolder } from "./extension-update";
+import {
+  ensureExtensionFolder,
+  extensionManifestVersion,
+  extensionUpdateState,
+  syncExtensionFolder,
+  unpackedExtensionIds,
+  type ExtensionUpdateAsk,
+} from "./extension-update";
 import type { ChromeLink } from "./link";
 import { ChromeLinkServer } from "./link-server";
 import { applyKeepAgentsInChrome } from "./keep-agents-in-chrome";
 import { ChromeLinkStore } from "./link-store";
 import { adoptPresenceSettings, chromeLinkDown, chromePausedTabs, chromeStopList, chromeStops, setChromeConnectedLinks, forgetChromeStops, keepChromeStopsFor, loadChromeStops, loadPresenceSettings, presenceSettings, setChromeStopsListener, stopChromeDriver } from "./presence";
-import { CHROME_LINK_PORTS } from "./protocol";
+import { CHROME_LINK_PORTS, CHROME_LINK_PROTOCOL } from "./protocol";
 import { setChromeLinkRuntime } from "./runtime";
 
 let server: ChromeLinkServer | null = null;
@@ -40,10 +49,15 @@ let store: ChromeLinkStore | null = null;
 let backend: ChromeTargetBackend | null = null;
 let unregisterBackend: (() => void) | null = null;
 let broadcastTimer: ReturnType<typeof setTimeout> | null = null;
-// The reloads asked for in this run, by link: the version asked for and when.
-const reloadAsks = new Map<string, { version: string; at: number }>();
+// The updates the user asked for in this run, by link: the version and when.
+// A reload is sent only from here, never because a browser connected.
+const reloadAsks = new Map<string, ExtensionUpdateAsk>();
+// Protocol-refused extensions whose folder the user already updated.
+const copiedFor = new Set<string>();
 // How long a reload may take before Settings tells the user to do it.
 const RELOAD_GRACE_MS = 15_000;
+// How long Settings lists an extension refused for its protocol; it retries every 30 s.
+const REFUSED_SHOWN_MS = 5 * 60_000;
 
 /** "Codex in pane 3f2a" for the activity log and the extension's popup. */
 function agentLabel(params: Record<string, unknown>): string {
@@ -79,13 +93,67 @@ export function extensionFolder(): string {
   return join(codaraHome(), "chrome-extension");
 }
 
-/** Copy the extension Codara ships into its own home, where Load unpacked points, unless the copy already matches it. */
-export function prepareExtensionFolder(force = false): string {
+function shippedExtensionDir(): string {
   const source = bundledExtensionDir();
-  const target = extensionFolder();
   if (!source) throw new Error("This Codara build does not include the browser extension.");
-  syncExtensionFolder(source, target, force);
+  return source;
+}
+
+// The version in Codara's folder, read once and again after Codara copies into it.
+let folderVersionCache: string | null | undefined;
+
+function folderVersion(): string | null {
+  if (folderVersionCache === undefined) folderVersionCache = extensionManifestVersion(extensionFolder());
+  return folderVersionCache;
+}
+
+/** The folder for Load unpacked, copied there the first time only: a copy the user already loaded changes only through Update extension. */
+export function prepareExtensionFolder(): string {
+  const target = extensionFolder();
+  try {
+    ensureExtensionFolder(shippedExtensionDir(), target);
+  } finally {
+    folderVersionCache = undefined;
+  }
   return target;
+}
+
+/** The user pressed Update extension: the folder gets the files this Codara ships. */
+function refreshExtensionFolder(): void {
+  try {
+    syncExtensionFolder(shippedExtensionDir(), extensionFolder());
+  } finally {
+    folderVersionCache = undefined;
+  }
+}
+
+let folderIds: { folder: string; ids: Set<string> } | null = null;
+
+/**
+ * Whether Chrome loaded this extension from Codara's folder, by the id an
+ * unpacked load of that folder gets. A home moved by an older Codara left a
+ * link at its old path, and Chrome keeps the path it was given.
+ */
+function fromCodaraFolder(extensionId: string): boolean {
+  const folder = extensionFolder();
+  if (folderIds?.folder !== folder) {
+    let real: string;
+    try {
+      real = realpathSync.native(folder);
+    } catch {
+      // Not copied yet: its resolved path is unknown, so nothing is kept for later.
+      return unpackedExtensionIds([folder]).has(extensionId);
+    }
+    const linked = LEGACY_DIR_NAMES.map((name) => join(homedir(), name, "chrome-extension")).filter((candidate) => {
+      try {
+        return candidate !== folder && realpathSync.native(candidate) === real;
+      } catch {
+        return false;
+      }
+    });
+    folderIds = { folder, ids: unpackedExtensionIds([folder, ...linked]) };
+  }
+  return folderIds.ids.has(extensionId);
 }
 
 let shippedVersion: string | null | undefined;
@@ -99,31 +167,64 @@ function shippedExtensionVersion(): string | null {
   return shippedVersion;
 }
 
-function updateAction(link: ChromeLink): "none" | "reload" | "manual" {
-  // The Chrome extension's version says nothing about Firefox's.
-  if (link.extensionKind === "firefox") return "none";
-  const shipped = shippedExtensionVersion();
-  return extensionUpdateAction(link.extensionVersion, link.extensionFeatures, shipped, reloadAsks.get(link.linkId)?.version === shipped);
-}
-
 /** What Settings says about a connected extension older than the one Codara ships. */
-function extensionUpdateState(link: ChromeLink | undefined): "updating" | "manual" | null {
-  if (!link) return null;
-  const action = updateAction(link);
-  if (action === "none") return null;
-  const asked = reloadAsks.get(link.linkId);
-  if (action === "reload" || (asked && Date.now() - asked.at < RELOAD_GRACE_MS)) return "updating";
-  return "manual";
+function updateStateOf(link: ChromeLink | undefined): ChromeLinkState["browsers"][number]["extensionUpdate"] {
+  // The Chrome extension's version says nothing about Firefox's.
+  if (!link || link.extensionKind === "firefox") return null;
+  return extensionUpdateState({
+    running: link.extensionVersion,
+    features: link.extensionFeatures,
+    shipped: shippedExtensionVersion(),
+    fromCodaraFolder: fromCodaraFolder(link.extensionId),
+    asked: reloadAsks.get(link.linkId),
+    folderVersion: folderVersion(),
+    now: Date.now(),
+    graceMs: RELOAD_GRACE_MS,
+  });
 }
 
-/** Ask a connected extension older than the copy on disk to reload itself, once per version in this run. */
-function offerExtensionUpdate(link: ChromeLink): void {
+function incompatibleExtensions(): ChromeLinkIncompatibleExtension[] {
+  return (server?.refusedExtensions(REFUSED_SHOWN_MS) ?? []).map((refused) => ({
+    extensionId: refused.extensionId,
+    version: refused.version,
+    browser: refused.browser,
+    update: refused.protocol > CHROME_LINK_PROTOCOL ? "codara" : "extension",
+    fromCodaraFolder: fromCodaraFolder(refused.extensionId),
+    copied: copiedFor.has(refused.extensionId),
+  }));
+}
+
+/**
+ * The user pressed Update extension, or Reload extension. For a connected
+ * browser: the folder gets the new files (unless it already holds them) and
+ * that browser's extension, only that one, is asked to reload itself.
+ * For an extension refused for its protocol: the folder gets the new files
+ * and Settings says to press reload in the browser.
+ */
+function updateExtension(which: { linkId?: unknown; extensionId?: unknown }): void {
   const shipped = shippedExtensionVersion();
-  if (!shipped || updateAction(link) !== "reload") return;
-  reloadAsks.set(link.linkId, { version: shipped, at: Date.now() });
-  link.send({ type: "reload", version: shipped });
-  // Settings says "updating" until the extension is back or the grace ends.
-  setTimeout(broadcast, RELOAD_GRACE_MS + 100).unref?.();
+  if (!shipped) throw new Error("This Codara build does not include the browser extension.");
+  if (typeof which.linkId === "string") {
+    const link = server?.link(which.linkId);
+    if (!link) throw new Error("That browser is not connected. Open it, then press Update extension again.");
+    const state = updateStateOf(link);
+    if (state === null) return;
+    if (state === "elsewhere") throw new Error("This extension was not loaded from Codara's folder, so Codara does not update it.");
+    // "reload": another browser's Update already put the new version in the shared folder.
+    if (state !== "reload") refreshExtensionFolder();
+    reloadAsks.set(link.linkId, { version: shipped, at: Date.now() });
+    if (link.extensionFeatures.includes("reload")) link.send({ type: "reload", version: shipped });
+    // Settings says "updating" until the extension is back or the grace ends.
+    setTimeout(broadcast, RELOAD_GRACE_MS + 100).unref?.();
+    broadcast();
+    return;
+  }
+  const refused = incompatibleExtensions().find((entry) => entry.extensionId === which.extensionId);
+  if (!refused) throw new Error("That extension is no longer trying to connect.");
+  if (refused.update !== "extension" || !refused.fromCodaraFolder) throw new Error("Codara cannot update this extension from here.");
+  refreshExtensionFolder();
+  copiedFor.add(refused.extensionId);
+  broadcast();
 }
 
 export function chromeLinkState(): ChromeLinkState {
@@ -150,7 +251,8 @@ export function chromeLinkState(): ChromeLinkState {
         lastSeenAt: paired.lastSeenAt,
         connected: Boolean(link),
         extensionVersion: link?.extensionVersion || null,
-        extensionUpdate: extensionUpdateState(link),
+        extensionUpdate: updateStateOf(link),
+        extensionReloads: link?.extensionFeatures.includes("reload") ?? false,
         allowOpen: link?.allowOpen ?? false,
         tabs: link
           ? [...link.tabs.values()].map((tab) => ({
@@ -168,6 +270,7 @@ export function chromeLinkState(): ChromeLinkState {
           : [],
       };
     }),
+    incompatible: incompatibleExtensions(),
     pending: server?.pendingPairings().map(({ id, code, browser, extensionId, expiresAt }) => ({ id, code, browser, extensionId, expiresAt })) ?? [],
     activity: recentChromeActivity(50),
     presence: presenceSettings(),
@@ -260,7 +363,6 @@ export function startChromeLink(): void {
     link.send({ type: "presence_settings", ...presenceSettings() });
     sendStops(link);
     unregisterBackend ??= registerBrowserBackend(chromeBackend);
-    offerExtensionUpdate(link);
   });
   linkServer.onLinkDown((link) => {
     chromeBackend.forgetLink(link);
@@ -290,14 +392,6 @@ export function startChromeLink(): void {
       ...(driver ? { key: driver.key, name: driver.name, runtime: driver.runtime } : {}),
     });
   });
-  try {
-    // Keep a copy the user already loaded current with this Codara: any
-    // changed file, not only a new version. The extension reloads itself
-    // when it connects (offerExtensionUpdate).
-    if (existsSync(extensionFolder())) prepareExtensionFolder();
-  } catch (error) {
-    console.warn("[chrome-link] could not refresh the extension folder:", error);
-  }
   void linkServer.start().then((port) => {
     if (port === null) console.warn(`[chrome-link] ${linkServer.error}`);
   });
@@ -341,11 +435,15 @@ export function registerChromeLinkIpc(handle: IpcHandle): void {
     }
     return presenceSettings();
   });
-  handle("chromeLink:prepareExtension", async (): Promise<string> => prepareExtensionFolder(true));
+  handle("chromeLink:prepareExtension", async (): Promise<string> => prepareExtensionFolder());
   handle("chromeLink:revealExtension", async (): Promise<string> => {
-    const folder = prepareExtensionFolder(true);
+    const folder = prepareExtensionFolder();
     const failure = await shell.openPath(folder);
     if (failure) shell.showItemInFolder(join(folder, "manifest.json"));
     return folder;
+  });
+  handle("chromeLink:updateExtension", async (_event, which: unknown): Promise<void> => {
+    if (!which || typeof which !== "object") throw new Error("Which extension to update is missing.");
+    updateExtension(which as { linkId?: unknown; extensionId?: unknown });
   });
 }
