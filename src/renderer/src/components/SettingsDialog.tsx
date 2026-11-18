@@ -51,6 +51,7 @@ import {
 import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/theme-context";
 import { usePreferences } from "../preferences/usePreferences";
+import { AgentToolsSection } from "./agent-cli-updates/AgentToolsSection";
 import SessionSearchSettings from "./session-search/SessionSearchSettings";
 import { useFeatureTipsSetting } from "./feature-tips/useFeatureTipsSetting";
 import KeybindingsSection, { ChordChips } from "../shortcuts/KeybindingsSection";
@@ -208,6 +209,8 @@ interface SettingsDialogProps {
   defaultShell: ShellInfo | null;
   workspaceCwd?: string | null;
   initialTab?: SettingsTab;
+  /** A row or section to scroll to once the tab has rendered it. */
+  initialAnchor?: string;
   onClose: () => void;
   onSave: (settings: AppSettings) => Promise<void>;
   // Click "Open" on a row in the Runs tab. Caller is expected to switch
@@ -226,6 +229,7 @@ export default function SettingsDialog({
   defaultShell,
   workspaceCwd,
   initialTab = "general",
+  initialAnchor,
   onClose,
   onSave,
   onOpenRun,
@@ -248,7 +252,9 @@ export default function SettingsDialog({
   const contentRef = useRef<HTMLDivElement>(null);
   // A search result picked on another page: scrolled to once that page has
   // rendered the row carrying this anchor.
-  const [pendingTarget, setPendingTarget] = useState<SearchTarget | null>(null);
+  const [pendingTarget, setPendingTarget] = useState<SearchTarget | null>(
+    initialAnchor ? { anchor: initialAnchor, fallbacks: [], focus: false } : null,
+  );
 
   useEffect(() => {
     setActiveResult(0);
@@ -2947,6 +2953,8 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
   return (
     <>
       <AccountsSettings />
+
+      <AgentToolsSection />
 
       <LaunchArgsSection />
 
