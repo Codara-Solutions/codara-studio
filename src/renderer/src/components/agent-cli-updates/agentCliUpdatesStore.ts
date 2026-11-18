@@ -6,12 +6,19 @@ import { useSyncExternalStore } from "react";
 
 import type { AgentCliToolId, AgentCliToolStatus, AgentCliUpdatesSnapshot } from "@shared/agent-cli-updates";
 
+import { changedAgentCliTools } from "./agent-cli-text";
+
 let snapshot: AgentCliUpdatesSnapshot | null = null;
 const listeners = new Set<() => void>();
 let started = false;
 
 function publish(next: AgentCliUpdatesSnapshot | null): void {
   if (!next) return;
+  // A refusal stops being news once the tool moved on (an automatic update ran).
+  for (const id of changedAgentCliTools(snapshot, next)) {
+    const request = requests.get(id);
+    if (request?.error && !request.pending) requests.set(id, IDLE_REQUEST);
+  }
   snapshot = next;
   for (const listener of listeners) listener();
 }

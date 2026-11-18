@@ -109,9 +109,12 @@ for (const theme of ["codara-daylight", "codara-classic"] as const) {
       });
       // A double click is one request: the button is disabled from the first
       // click while main has not answered yet (it is still counting sessions).
-      const update = row("Claude Code").getByRole("button", { name: "Update" });
+      const update = row("Claude Code").locator("button.is-primary");
+      await expect(update).toHaveText("Update");
       await update.dblclick();
       await expect(update).toBeDisabled();
+      // Not a silent disabled button: it says it is queued.
+      await expect(update).toHaveText("Queued");
       await fake((c) => c.releaseCount());
       await expect(row("Claude Code")).toContainText("Updating…");
       await expect(row("Claude Code")).toContainText("Updating to 2.1.328");

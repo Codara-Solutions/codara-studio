@@ -65,6 +65,19 @@ function run(m) {
   assert.equal(refused.title, "Agent tool updates are off in this launch.", "a refused request shows its reason on the mark");
   assert.equal(refused.action, "settings");
 
+  // Asked for while another tool updates: "Queued", not a silent disabled mark.
+  const queued = m.agentCliMark(status(), null, true);
+  assert.equal(queued.label, "Queued");
+  assert.equal(queued.action, null);
+  assert.equal(m.agentCliMark(status({ phase: "updating" }), null, true).label, "Updating", "once it runs, it says so");
+
+  // A refusal is dropped once the tool moved on.
+  const snap = (tools) => ({ autoUpdate: true, checking: false, lastCheckedAt: "x", checkError: null, tools });
+  const before = snap([status(), status({ id: "codex", label: "Codex" })]);
+  assert.deepEqual(m.changedAgentCliTools(before, snap([status({ phase: "updated", version: "2.1.327" }), status({ id: "codex", label: "Codex" })])), ["claude"]);
+  assert.deepEqual(m.changedAgentCliTools(before, before), []);
+  assert.deepEqual(m.changedAgentCliTools(null, before), ["claude", "codex"]);
+
   // Pi: the pinned version, or both when they differ.
   const pi = (version) => status({ id: "pi", label: "Pi", version, pinnedVersion: "1.5.2", updateAvailable: false, canUpdate: false, installMethod: "pinned" });
   assert.equal(m.agentCliMark(pi("1.5.2")).label, "Pinned 1.5.2");

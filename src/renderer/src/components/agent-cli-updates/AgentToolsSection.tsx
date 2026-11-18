@@ -120,7 +120,7 @@ function AgentToolRow({ tool, versionLine }: { tool: AgentCliToolStatus; version
         disabled={pending}
         onClick={() => void requestAgentCliUpdate(tool.id)}
       >
-        {tool.phase === "failed" || tool.phase === "rolled-back" ? "Try again" : "Update"}
+        {pending && !working ? "Queued" : tool.phase === "failed" || tool.phase === "rolled-back" ? "Try again" : "Update"}
       </button>
     );
   }

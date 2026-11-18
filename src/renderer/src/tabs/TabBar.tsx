@@ -2253,7 +2253,7 @@ function PickerItem({
 // version. Anything that needs reading opens Settings at Agent tools.
 function AgentCliMark({ id, onOpenSettings }: { id: AgentCliToolId; onOpenSettings: () => void }) {
   const request = useAgentCliRequest(id);
-  const mark = agentCliMark(useAgentCliTool(id), request.error);
+  const mark = agentCliMark(useAgentCliTool(id), request.error, request.pending);
   if (!mark) return null;
   const openSettings = () => {
     onOpenSettings();
