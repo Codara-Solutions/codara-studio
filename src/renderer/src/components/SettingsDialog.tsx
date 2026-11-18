@@ -165,12 +165,13 @@ function friendlyModelLabel(id: string): string {
 }
 
 // Within a vendor group, order by tier like the Cora picker: premium and
-// flagship first, fast tiers last. Unrecognized ids sort after the known
-// lineup, still selectable.
+// flagship first, fast tiers last, the newest version first within a tier.
+// Unrecognized ids sort after the known lineup, still selectable.
 const COMMIT_MODEL_TIER_RANK: Array<{ match: RegExp; rank: number }> = [
   { match: /fable/i, rank: 0 },
   { match: /-sol$/i, rank: 0 },
   { match: /opus/i, rank: 1 },
+  { match: /-astra$/i, rank: 1 },
   { match: /^grok-/i, rank: 1 },
   { match: /-terra$/i, rank: 2 },
   { match: /sonnet/i, rank: 2 },
@@ -182,12 +183,22 @@ function commitModelRank(id: string): number {
   return COMMIT_MODEL_TIER_RANK.find(({ match }) => match.test(id))?.rank ?? 9;
 }
 
+function newerModelFirst(a: string, b: string): number {
+  const va = (a.match(/\d+/g) ?? []).map(Number);
+  const vb = (b.match(/\d+/g) ?? []).map(Number);
+  for (let index = 0; index < Math.max(va.length, vb.length); index += 1) {
+    const diff = (vb[index] ?? -1) - (va[index] ?? -1);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 const COMMIT_MESSAGE_NATIVE_MODELS: { id: string; label: string; group: string }[] =
   AGENT_FAMILY_IDS.flatMap((familyId) => {
     const vendor = AGENT_FAMILIES[familyId].vendorLabel;
     return ALLOWED_WORKER_MODELS.filter((id) => familyForModelId(id) === familyId)
       .slice()
-      .sort((a, b) => commitModelRank(a) - commitModelRank(b) || a.localeCompare(b))
+      .sort((a, b) => commitModelRank(a) - commitModelRank(b) || newerModelFirst(a, b) || a.localeCompare(b))
       .map((id) => ({ id, label: friendlyModelLabel(id), group: vendor }));
   });
 

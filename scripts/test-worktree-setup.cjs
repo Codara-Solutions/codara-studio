@@ -38,6 +38,37 @@ let skipped = 0;
 // (echo, test, sleep). The Windows paths (junctions, cmd, taskkill) are not
 // exercised here, so Windows runs only the parsing and matching checks.
 let posixOnly = false;
+// The log file once it shows `line`, for a setup waiting for the user: its
+// log stream is still open, so what it wrote can reach the file a moment
+// after the question is asked. A finished setup's log needs no wait: the
+// service announces the end only once the file holds its last line.
+// Waits at most 10 s.
+async function logShowing(svc, id, line) {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const text = (await svc.readLog(id, 0)).text;
+    if (line.test(text) || Date.now() > deadline) return text;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+// The pid a child wrote with `echo $$ > file`. The shell creates the file
+// before it writes the number, so on a busy runner the file can exist and
+// still be empty (PR 237's macOS pool read 0): wait for the number itself.
+async function pidWritten(file) {
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    let pid = 0;
+    try {
+      pid = Number(fs.readFileSync(file, "utf8").trim());
+    } catch {
+      /* not created yet */
+    }
+    if (pid > 0 || Date.now() > deadline) return pid;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 async function check(name, fn) {
   if (posixOnly && process.platform === "win32") {
     skipped += 1;
@@ -597,6 +628,30 @@ async function runSuite(m, scratch) {
     assert.equal(fs.lstatSync(path.join(wt, "node_modules")).isSymbolicLink(), true);
   });
 
+  await check("finished is announced only once the log file holds the last line", async () => {
+    // Every write to the log reaches the disk 300 ms late, as on a loaded
+    // machine: the end must still not be announced before "Setup finished".
+    const wt = addWorktree("wt-slow-log");
+    const realCreateWriteStream = fs.createWriteStream;
+    fs.createWriteStream = (...args) => {
+      const stream = realCreateWriteStream(...args);
+      const write = stream._write.bind(stream);
+      stream._write = (chunk, encoding, callback) => setTimeout(() => write(chunk, encoding, callback), 300);
+      stream._writev = undefined;
+      return stream;
+    };
+    try {
+      const svc = makeService();
+      const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", runCommands: false });
+      const done = await svc.waitFor(started.id, 20_000);
+      assert.equal(done.state, "succeeded");
+      // The file itself, as the log dialog reads it once on "finished".
+      assert.match(fs.readFileSync(done.logPath, "utf8"), /\nSetup finished\b/);
+    } finally {
+      fs.createWriteStream = realCreateWriteStream;
+    }
+  });
+
   await check("tells unchanged copies apart from edited ones", async () => {
     const wt = addWorktree("wt-regenerable");
     const svc = makeService();
@@ -706,10 +761,8 @@ async function runSuite(m, scratch) {
     );
     const svc = makeService();
     const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
-    const pidFile = path.join(wt, "stubborn.pid");
-    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i += 1) await new Promise((r) => setTimeout(r, 50));
-    const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
-    assert.ok(pid > 0);
+    const pid = await pidWritten(path.join(wt, "stubborn.pid"));
+    assert.ok(pid > 0, "the stubborn child wrote its pid");
     const stopped = await svc.stop(started.id);
     assert.equal(stopped.state, "stopped");
     let alive = true;
@@ -732,8 +785,7 @@ async function runSuite(m, scratch) {
     );
     const svc = makeService();
     const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
-    const pidFile = path.join(wt, "stubborn.pid");
-    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i += 1) await new Promise((r) => setTimeout(r, 50));
+    assert.ok((await pidWritten(path.join(wt, "stubborn.pid"))) > 0, "the stubborn child wrote its pid");
     const t0 = Date.now();
     await svc.quiesce(started.id, 1_000);
     assert.ok(Date.now() - t0 < 2_000, `took ${Date.now() - t0} ms`);
@@ -881,7 +933,7 @@ async function runSuite(m, scratch) {
       await new Promise((r) => setTimeout(r, 200));
       assert.equal(fs.existsSync(path.join(wt, "ran.txt")), false);
       assert.equal(fs.existsSync(path.join(wt, "user.txt")), false, "your command waits with it");
-      const log = (await svc.readLog(started.id)).text;
+      const log = await logShowing(svc, started.id, /^\$ echo gate > ran\.txt$/m);
       assert.match(log, /are new or changed for gate, so nothing has run/);
       assert.match(log, /^\$ echo gate > ran\.txt$/m);
       const summary = service.agentSetupSummary(prepared, "");
@@ -1070,7 +1122,7 @@ async function runSuite(m, scratch) {
       assert.deepEqual(started.approval, { fingerprint: withTerminals, repoName: "gate" }, "an added terminal asks again");
       assert.equal((await svc.whenPrepared(started.id)).state, "awaiting-approval");
       assert.equal(fs.existsSync(path.join(started.worktreePath, "ran.txt")), false);
-      assert.match((await svc.readLog(started.id)).text, /^terminal dev: echo dev > dev\.txt$/m);
+      assert.match(await logShowing(svc, started.id, /^terminal dev: echo dev > dev\.txt$/m), /^terminal dev: echo dev > dev\.txt$/m);
       const preview = await files.previewWorktreeSetup(gate, null, process.platform, false, store);
       assert.equal(preview.repoCommandFingerprint, withTerminals, "the dialog approves the same thing");
       await svc.approve(started.id, { fingerprint: withTerminals, always: true });

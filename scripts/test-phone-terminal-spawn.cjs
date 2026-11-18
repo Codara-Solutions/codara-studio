@@ -200,7 +200,7 @@ async function main() {
     );
     check(
       "the inventory ping is optional-called so a stale preload cannot unmount App",
-      appSource.includes("notifyInventoryChanged?.()"),
+      appSource.includes("notifyInventoryChanged?.(inventory)"),
     );
     const productionSource = fs.readFileSync(
       path.join(ROOT, "src", "main", "remote-access", "production.ts"),

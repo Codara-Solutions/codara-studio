@@ -9,6 +9,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createWriteStream, existsSync, promises as fsp, renameSync, rmSync, writeFileSync, type WriteStream } from "node:fs";
 import { join } from "node:path";
+import { finished as streamFinished } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import {
   isWorktreeSetupFinished,
@@ -120,6 +121,8 @@ interface Run {
   setupDir: string;
   logFile: string;
   log: WriteStream | null;
+  // Set when finish() closes the log; settles once its last lines are on disk.
+  logClosed?: Promise<void>;
   logBytes: number;
   tail: string;
   child: ChildProcess | null;
@@ -599,6 +602,8 @@ export class WorktreeSetupService {
   async readLog(id: string, from = 0, maxBytes = 256 * 1024): Promise<WorktreeSetupLogChunk | null> {
     const status = await this.get(id);
     if (!status) return null;
+    // A setup that is finishing: its last lines are still in the stream.
+    await this.runs.get(id)?.logClosed;
     const setupDir = await setupDirFor(status.worktreePath);
     if (!setupDir) return null;
     const file = join(setupDir, SETUP_LOG_FILE);
@@ -1123,11 +1128,27 @@ export class WorktreeSetupService {
     const word = state === "succeeded" ? "Setup finished" : state === "stopped" ? "Setup stopped" : "Setup failed";
     this.writeLog(run, `\n${word}${error ? `: ${error}` : ""}, ${stamp(this.now())}\n`);
     this.persist(run);
-    run.log?.end();
+    // Announce the end only once the log file holds its last line: a reader
+    // told "finished" reads the file once (the log dialog, an agent's
+    // readLog), and the stream used to still hold "Setup finished" then.
+    const log = run.log;
     run.log = null;
-    this.emit(run);
-    run.markPrepared();
-    run.markFinished();
+    const announce = (): void => {
+      this.emit(run);
+      run.markPrepared();
+      run.markFinished();
+    };
+    if (!log) {
+      announce();
+      return;
+    }
+    run.logClosed = new Promise<void>((resolveClosed) => {
+      // finished() also settles on a stream error, so a failed write cannot
+      // keep the setup from ever being announced finished.
+      streamFinished(log, () => resolveClosed());
+    });
+    log.end();
+    void run.logClosed.then(announce);
   }
 
   private emit(run: Run): void {
