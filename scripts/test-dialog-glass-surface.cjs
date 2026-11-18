@@ -196,9 +196,20 @@ async function main() {
       ]) {
         const label = `${theme.mode} ${viewport.width}`;
         const page = await browser.newPage({ viewport });
+        // Glass follows prefers-reduced-transparency, and a macOS runner can
+        // report reduce. Pin the default so every runner judges the glass.
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send("Emulation.setEmulatedMedia", {
+          features: [{ name: "prefers-reduced-transparency", value: process.env.CODARA_GLASS_TRANSPARENCY || "no-preference" }],
+        });
         const errors = [];
         page.on("pageerror", (error) => errors.push(error.message));
         await page.goto("file://" + path.join(directory, "index.html"));
+        assert.equal(
+          await page.evaluate(() => matchMedia("(prefers-reduced-transparency: reduce)").matches),
+          (process.env.CODARA_GLASS_TRANSPARENCY || "no-preference") === "reduce",
+          `${label}: the transparency preference was not pinned`,
+        );
         await page.evaluate(
           ({ theme, text }) => {
             document.documentElement.dataset.theme = theme.id;
