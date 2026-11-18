@@ -763,7 +763,9 @@ async function realBinaries(m) {
 // previous build's own installer does.
 async function realBinariesOnce(m, withRelink) {
   process.env.SHELL = "/bin/sh";
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "agent-cli-updates-"));
+  // Real path: macOS's temp folder is a link (/var -> /private/var), and the
+  // service reads every path through its links.
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agent-cli-updates-")));
   try {
     const versions = path.join(home, ".local", "share", "claude", "versions");
     const bin = path.join(home, ".local", "bin");
