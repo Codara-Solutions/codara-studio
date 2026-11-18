@@ -6,11 +6,12 @@
 // tests/e2e/chrome-extension.spec.ts.
 
 import * as linkClient from "./link-client.test.mjs";
+import * as linkRaces from "./link-races.test.mjs";
 import * as packing from "./pack.test.mjs";
 import * as policy from "./policy.test.mjs";
 import * as presence from "./presence.test.mjs";
 
-const suites = [policy, presence, packing, linkClient];
+const suites = [policy, presence, packing, linkClient, linkRaces];
 
 let failed = false;
 for (const suite of suites) {
