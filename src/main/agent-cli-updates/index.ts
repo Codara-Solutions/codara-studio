@@ -86,7 +86,10 @@ function inProgressFrom(value: unknown): { inProgress?: UpdateInProgress } {
   const toVersion = version("toVersion");
   if (record.toVersion != null && !toVersion) return {};
   if (!tool || !["claude", "codex", "grok"].includes(tool) || !fromVersion || !fromRealPath || !fromBinaryPath) return {};
-  return { inProgress: { tool: tool as UpdateInProgress["tool"], fromVersion, fromRealPath, fromBinaryPath, toVersion } };
+  const savedAt = typeof record.savedAt === "number" && Number.isFinite(record.savedAt) && record.savedAt > 0 ? record.savedAt : undefined;
+  return {
+    inProgress: { tool: tool as UpdateInProgress["tool"], fromVersion, fromRealPath, fromBinaryPath, toVersion, ...(savedAt ? { savedAt } : {}) },
+  };
 }
 
 async function claudeChannel() {

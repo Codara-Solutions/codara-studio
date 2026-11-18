@@ -51,7 +51,12 @@ export interface UpdateInProgress {
   fromRealPath: string;
   fromBinaryPath: string;
   toVersion: string | null;
+  /** When it was written, in ms. */
+  savedAt?: number;
 }
+
+/** A record whose tool cannot be found is shown at each start for this long, then dropped. */
+export const MISSING_TOOL_RECORD_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface PersistedUpdateState {
   /** Versions whose update failed or was rolled back, per tool. */
@@ -357,7 +362,8 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
   /** Counts the tool's sessions; puts the update back to waiting and returns false when any run. */
   async function noSessions(tool: UpdatableAgentCliToolId, origin: "manual" | "auto"): Promise<boolean> {
     const running = await deps.liveSessions(tool).catch(() => null);
-    const live = running === null ? null : running + (deps.launchesStarting?.(tool) ?? 0);
+    // A launch whose process already runs is in both counts.
+    const live = running === null ? null : Math.max(running, deps.launchesStarting?.(tool) ?? 0);
     unreadableRounds = live === null ? unreadableRounds + 1 : 0;
     if (live === 0) return true;
     const current = entry(tool);
@@ -435,8 +441,23 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       current.liveSessions = 0;
       current.generation += 1;
       heldLock = lock;
-      await reloadUnderLock();
       try {
+        await reloadUnderLock();
+        // An update cut short earlier (a retry not yet due, or a tool that
+        // could not be found) is finished first, under this same lock.
+        const recovered = await recoverUnderLock();
+        if (persisted.inProgress) {
+          const other = AGENT_CLI_LABELS[persisted.inProgress.tool];
+          set(tool, {
+            pending: origin,
+            phase: "waiting",
+            message: `Waiting: the ${other} update Codara was running when it closed is not finished yet.`,
+          });
+          scheduleWaitingPoll();
+          return;
+        }
+        // That was this tool: its outcome is what the user sees now.
+        if (recovered === tool) return;
         await performUpdate(tool, origin);
       } catch (error) {
         set(tool, { phase: "failed", message: `The update stopped: ${(error as Error).message.slice(0, 300)}` });
@@ -471,7 +492,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     // On disk before the installer starts: a quit or crash from here on is
     // finished by the next start (recoverInterrupted).
     if (before.version) {
-      persisted.inProgress = { tool, fromVersion: before.version, fromRealPath: before.realPath, fromBinaryPath: before.binaryPath, toVersion: target };
+      persisted.inProgress = { tool, fromVersion: before.version, fromRealPath: before.realPath, fromBinaryPath: before.binaryPath, toVersion: target, savedAt: deps.now() };
       try {
         await saveOrThrow();
       } catch (error) {
@@ -489,12 +510,23 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     }
   }
 
-  /** An installer, its pid written into the lock as soon as it runs. */
-  function runInstaller(command: CliCommand): Promise<string> {
+  /**
+   * An installer, its pid written into the lock as soon as it runs. That
+   * write is awaited before returning: finishing after the lock's release,
+   * it would put the lock back.
+   */
+  async function runInstaller(command: CliCommand): Promise<string> {
     const lock = heldLock;
-    return deps.run(command, UPDATE_TIMEOUT_MS, (pid) => {
-      void lock?.installerStarted(pid).catch((error) => deps.log(`could not note the installer in the update lock: ${(error as Error).message}`));
-    });
+    let noting: Promise<void> = Promise.resolve();
+    try {
+      return await deps.run(command, UPDATE_TIMEOUT_MS, (pid) => {
+        noting = (lock?.installerStarted(pid) ?? Promise.resolve()).catch((error) =>
+          deps.log(`could not note the installer in the update lock: ${(error as Error).message}`),
+        );
+      });
+    } finally {
+      await noting;
+    }
   }
 
   /** Runs the installer, checks the new build, and rolls back when it fails. */
@@ -643,13 +675,24 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       return;
     }
     heldLock = lock;
-    await reloadUnderLock();
-    const record = persisted.inProgress;
-    if (!record) {
+    try {
+      await reloadUnderLock();
+      await recoverUnderLock();
+    } finally {
       heldLock = null;
       await lock.release().catch(() => undefined);
-      return;
     }
+  }
+
+  /**
+   * The recovery itself, with the lock held and the state just read. Also
+   * run before any update under the lock: the record holds one update, and
+   * the next update's record would otherwise replace an unrecovered one.
+   * Returns the tool it was about.
+   */
+  async function recoverUnderLock(): Promise<UpdatableAgentCliToolId | null> {
+    const record = persisted.inProgress;
+    if (!record) return null;
     const valid =
       UPDATABLE_TOOLS.includes(record.tool) &&
       PLAIN_VERSION.test(record.fromVersion) &&
@@ -658,9 +701,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       deps.log("the saved update record is not valid; dropped, nothing run");
       delete persisted.inProgress;
       await save();
-      heldLock = null;
-      await lock.release().catch(() => undefined);
-      return;
+      return null;
     }
     const { tool } = record;
     const label = AGENT_CLI_LABELS[tool];
@@ -676,15 +717,25 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       if (!now) {
         // Cut off after the launcher went, or not readable right now: the
         // record stays for the next start, and the user can act meanwhile.
+        // A tool removed on purpose would keep it forever: after a week it
+        // is shown this last time and dropped.
         set(tool, { phase: "failed", message: `${lead}${label} cannot be found now. ${reinstall()}` });
-        return;
+        if (record.savedAt === undefined) {
+          persisted.inProgress = { ...record, savedAt: deps.now() };
+          await save();
+        } else if (Math.abs(deps.now() - record.savedAt) > MISSING_TOOL_RECORD_MS) {
+          deps.log(`${tool}: not found for a week since the update was cut short; its record is dropped`);
+          delete persisted.inProgress;
+          await save();
+        }
+        return tool;
       }
       entry(tool).installed = now;
       if (now.version) {
         delete persisted.inProgress;
         await save();
         deps.log(`${tool}: the last update was cut short; ${now.version} is what is there now`);
-        return;
+        return tool;
       }
       delete persisted.inProgress;
       if (record.toVersion) {
@@ -697,14 +748,13 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       if (now.binaryPath !== record.fromBinaryPath || !previous || (native && previous !== record.fromRealPath)) {
         deps.log(`${tool}: the saved update record does not match the install; nothing run`);
         set(tool, { phase: "failed", message: `${lead}${label} ${failedVersion} fails its version check. ${reinstall()}` });
-        return;
+        return tool;
       }
       entry(tool).generation += 1;
       await rollBack(tool, { version: record.fromVersion, realPath: previous, binaryPath: now.binaryPath, plan: now.plan }, now, failedVersion, lead);
+      return tool;
     } finally {
       deps.toolBusy?.(tool, false);
-      heldLock = null;
-      await lock.release().catch(() => undefined);
     }
   }
 

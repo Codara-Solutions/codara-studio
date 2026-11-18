@@ -4,11 +4,11 @@
 // and the installer's pid once one runs. It is held while the owner lives or
 // its installer still runs: an installer outlives a Codara that quit or
 // crashed, and the next start must not inspect, or roll back, a tool that is
-// still being written. Past the longest an update can take it is stale
-// whatever the pids say, as a pid can be reused after a reboot.
+// still being written. A lock from an earlier boot is stale past the
+// longest an update can take, as its pids may have been reused since.
 
 import { promises as fs } from "node:fs";
-import { hostname } from "node:os";
+import { hostname, uptime } from "node:os";
 
 import { UPDATE_TIMEOUT_MS, type UpdateLock } from "./service";
 
@@ -19,6 +19,8 @@ export interface UpdateLockOptions {
   pid?: number;
   host?: string;
   now?: () => number;
+  /** When this machine started, in ms; a lock from another boot holds no live process. */
+  boot?: number;
   /** Whether a process runs; EPERM still means it does. */
   alive?: (pid: number) => boolean;
   /** Whether the installer, or any process of its group, still runs. */
@@ -30,6 +32,7 @@ interface LockContent {
   host: string | null;
   since: number | null;
   installer: number | null;
+  boot: number | null;
 }
 
 function processAlive(pid: number): boolean {
@@ -60,6 +63,7 @@ function parse(text: string | null): LockContent | null {
       host: typeof raw.host === "string" ? raw.host : null,
       since: Number.isFinite(since) ? since : null,
       installer: Number.isInteger(installer) && installer > 0 ? installer : null,
+      boot: typeof raw.boot === "number" && Number.isFinite(raw.boot) ? raw.boot : null,
     };
   } catch {
     return null;
@@ -104,10 +108,11 @@ export async function acquireUpdateLock(file: string, options: UpdateLockOptions
   const alive = options.alive ?? processAlive;
   const installerAlive = options.installerAlive ?? groupAlive;
   const since = new Date(now()).toISOString();
+  const boot = options.boot ?? Math.round(Date.now() - uptime() * 1000);
   const write = async (target: string, installer: number | null) => {
     const handle = await fs.open(target, "wx");
     try {
-      await handle.writeFile(JSON.stringify({ pid, host, since, ...(installer ? { installer } : {}) }));
+      await handle.writeFile(JSON.stringify({ pid, host, since, boot, ...(installer ? { installer } : {}) }));
     } finally {
       await handle.close();
     }
@@ -139,7 +144,13 @@ export async function acquireUpdateLock(file: string, options: UpdateLockOptions
       if (mtime !== null && now() - mtime < 10_000) return null;
     } else {
       const age = now() - (content.since ?? mtime ?? 0);
-      if (age < LOCK_MAX_HOLD_MS) {
+      // Within the boot that wrote it, the pids are trusted whatever the
+      // age: the installer's timeout lives in the Codara that started it, so
+      // after a crash a stuck installer may run past any expiry. From another
+      // boot its pids may be reused, so age decides. Dated ahead of now, the
+      // clock was set back since it was written and its age says nothing.
+      const sameBoot = content.boot !== null && Math.abs(content.boot - boot) < 60_000;
+      if (sameBoot || (age > -60_000 && age < LOCK_MAX_HOLD_MS)) {
         // Another machine's lock (a home folder shared over the network): its pids mean nothing here.
         if (content.host !== null && content.host !== host) return null;
         if (content.pid !== pid && alive(content.pid)) return null;
