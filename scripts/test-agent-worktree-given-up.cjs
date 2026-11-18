@@ -83,6 +83,10 @@ async function main() {
       },
       prefs: { agentWorktreesEnabled: true, agentsMayRemoveUserWorktrees: false, agentWorktreeRegenerableIgnoredByRepo: {} },
       paneWorkspace: { "pane-maker": "ws-repo", "pane-other": "ws-repo" },
+      runs: new Map([
+        ["run-maker", { id: "run-maker", workspaceId: "ws-repo", status: "running" }],
+        ["run-other", { id: "run-other", workspaceId: "ws-repo", status: "running" }],
+      ]),
       // The repository each lookup named.
       asked: [],
       // GitHub's pull requests by head branch, any state.
@@ -99,7 +103,7 @@ async function main() {
       loadPreferences: async () => h.prefs,
       publishState: () => undefined,
       invalidateGitCache: () => undefined,
-      getRun: async () => null,
+      getRun: async (id) => h.runs.get(id) ?? null,
       listRuns: async () => [],
       paneWorkspaceId: async (paneId) => h.paneWorkspace[paneId] ?? null,
       // No tab is open: the maker's own tab is the caller's, judged as such.
@@ -137,8 +141,8 @@ async function main() {
     });
 
     // A worktree the maker made, with work pushed and its pull request closed.
-    const givenUp = async (branch, { push = true, closed = true } = {}) => {
-      const made = await aw.createAgentWorktree(maker, { branch }, deps);
+    const givenUp = async (branch, { push = true, closed = true, by = maker } = {}) => {
+      const made = await aw.createAgentWorktree(by, { branch }, deps);
       assert.equal(made.ok, true, JSON.stringify(made));
       const tip = commitFile(made.path, `${branch.replace(/\W/g, "-")}.txt`, "work\n", `work on ${branch}`);
       if (push) git(made.path, ["push", "-q", "-u", "origin", branch]);
@@ -174,6 +178,28 @@ async function main() {
       assert.equal(audit.length, 1);
       assert.equal(audit[0].proof, null);
       assert.deepEqual(audit[0].givenUp, { pr: result.givenUp.closedPullRequest.number, remoteCommit: wt.tip }, "the audit names why no dialog was needed");
+    });
+
+    await check("a Cora run removes the worktree it made and gave up; another run may not", async () => {
+      const run = { role: "manager", client: "cora", runId: "run-maker" };
+      const wt = await givenUp("agent/run-made", { by: run });
+      const refused = await aw.removeAgentWorktree({ role: "manager", client: "cora", runId: "run-other" }, { workspaceId: wt.workspaceId }, deps);
+      assert.equal(refused.ok, false, JSON.stringify(refused));
+      assert.ok(fs.existsSync(wt.path));
+      const result = await aw.removeAgentWorktree(run, { workspaceId: wt.workspaceId }, deps);
+      assert.equal(result.removed, true, JSON.stringify(result));
+      assert.equal(git(repo, ["rev-parse", "refs/heads/agent/run-made"]), wt.tip);
+    });
+
+    await check("a worktree its maker switched to another branch is never taken for given up", async () => {
+      const wt = await givenUp("agent/before-switch");
+      git(wt.path, ["switch", "-q", "-c", "agent/after-switch"]);
+      const tip = commitFile(wt.path, "switched.txt", "s\n", "on the switched branch");
+      git(wt.path, ["push", "-q", "-u", "origin", "agent/after-switch"]);
+      h.headPulls.set("agent/after-switch", [pull(80, "agent/after-switch", tip, "closed")]);
+      const refused = await aw.removeAgentWorktree(maker, { workspaceId: wt.workspaceId }, deps);
+      assert.equal(refused.code, "WORKTREE_NOT_MERGED", JSON.stringify(refused));
+      assert.ok(fs.existsSync(wt.path));
     });
 
     await check("an origin that is not on GitHub keeps it", async () => {
