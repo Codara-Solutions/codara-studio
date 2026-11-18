@@ -51,6 +51,7 @@ import {
 import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/theme-context";
 import { usePreferences } from "../preferences/usePreferences";
+import { AgentToolsSection } from "./agent-cli-updates/AgentToolsSection";
 import SessionSearchSettings from "./session-search/SessionSearchSettings";
 import { useFeatureTipsSetting } from "./feature-tips/useFeatureTipsSetting";
 import KeybindingsSection, { ChordChips } from "../shortcuts/KeybindingsSection";
@@ -2947,6 +2948,8 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
   return (
     <>
       <AccountsSettings />
+
+      <AgentToolsSection />
 
       <LaunchArgsSection />
 

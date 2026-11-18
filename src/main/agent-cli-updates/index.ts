@@ -70,7 +70,7 @@ function broadcast(snapshot: AgentCliUpdatesSnapshot): void {
   }
 }
 
-function createService(log: (line: string) => void): AgentCliUpdateService {
+function createService(log: (line: string) => void, fake: Awaited<ReturnType<typeof fakeDependencies>> | null): AgentCliUpdateService {
   return createAgentCliUpdateService({
     inspect: (tool) => inspectInstalledTool(tool, inspectDeps),
     latest: async (tool, method) =>
@@ -97,19 +97,42 @@ function createService(log: (line: string) => void): AgentCliUpdateService {
     },
     now: () => Date.now(),
     log,
+    ...fake,
   });
+}
+
+// The e2e suite's scripted tools (fake.ts); never outside a test launch.
+function fakeDependencies() {
+  return import("./fake").then((m) => m.createFakeDependencies());
+}
+
+function fakeRequested(env: NodeJS.ProcessEnv): boolean {
+  return env.CODARA_FAKE_AGENT_CLI_UPDATES === "1" && env.SPARK_E2E_BACKGROUND !== undefined;
 }
 
 /** Start checking (after the launch settles) and updating. No-op for test launches. */
 export function startAgentCliUpdates(log: (line: string) => void): void {
-  if (service || !agentCliUpdatesAllowed(process.env, defaultCodaraHome())) return;
-  const started = createService(log);
+  if (service) return;
+  if (fakeRequested(process.env)) {
+    void fakeDependencies().then((fake) => {
+      service = createService(log, fake);
+      watchSwitch(service);
+      void service.start();
+    });
+    return;
+  }
+  if (!agentCliUpdatesAllowed(process.env, defaultCodaraHome())) return;
+  const started = createService(log, null);
   service = started;
-  onPreferenceChange((key) => {
-    if (key === "agentCliAutoUpdate") started.autoUpdateChanged();
-  });
+  watchSwitch(started);
   const timer = setTimeout(() => void started.start(), FIRST_CHECK_DELAY_MS);
   timer.unref?.();
+}
+
+function watchSwitch(target: AgentCliUpdateService): void {
+  onPreferenceChange((key) => {
+    if (key === "agentCliAutoUpdate") target.autoUpdateChanged();
+  });
 }
 
 // The IPC surface (ipc.ts loads this module on first use): null in a launch

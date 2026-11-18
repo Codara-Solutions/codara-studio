@@ -65,6 +65,7 @@ export const PREFERENCE_TOGGLES = {
   machinesEnabled: defaultOn("machinesEnabled"),
   keepAgentsInYourChrome: defaultOn("keepAgentsInYourChrome"),
   usageForecast: defaultOn("usageForecast"),
+  agentCliAutoUpdate: defaultOn("agentCliAutoUpdate"),
 } satisfies Record<string, PreferenceToggle>;
 
 export type PreferenceToggleId = keyof typeof PREFERENCE_TOGGLES;

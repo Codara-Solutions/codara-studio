@@ -97,7 +97,9 @@ check("every search result points at something the page renders", () => {
   const feedbackAdmin = read(...components, "feedback", "FeedbackAdminTokenRow.tsx");
   const machines = read(...components, "machines", "MachinesSettings.tsx");
   const crossWorkspace = read(...components, "cross-workspace", "CrossWorkspaceTerminalsSetting.tsx");
-  const rendered = [dialog, remote, behavior, chromeLink, keepInChrome, launchArgs, keepAwake, quickCommands, keybindings, sessionSearch, savedOutput, gpuDrawing, feedbackAdmin, machines, crossWorkspace].join("\n");
+  const agentTools = read(...components, "agent-cli-updates", "AgentToolsSection.tsx");
+  const agentToolLabels = read("src", "shared", "agent-cli-updates.ts");
+  const rendered = [dialog, remote, behavior, chromeLink, keepInChrome, launchArgs, keepAwake, quickCommands, keybindings, sessionSearch, savedOutput, gpuDrawing, feedbackAdmin, machines, crossWorkspace, agentTools].join("\n");
   const cards = read(...components, "AccountCards.tsx");
   const families = read("src", "shared", "agent-families.ts");
   for (const [, tab, title] of entries) {
@@ -112,8 +114,13 @@ check("every search result points at something the page renders", () => {
     const isCapabilityPage = tab === "capabilities" && new RegExp(`: "${title}",`).test(index);
     // Startup flag rows are drawn from RUNTIME_ROWS.
     const isLaunchRow = tab === "agents" && new RegExp(`runtime: "[a-z]+", title: "${title}"`).test(launchArgs);
+    // Agent tool rows anchor on AGENT_CLI_LABELS.
+    const isAgentTool =
+      tab === "agents" &&
+      /anchor=\{tool\.label\}/.test(agentTools) &&
+      new RegExp(`^  [a-z]+: "${title}",$`, "m").test(agentToolLabels);
     assert.ok(
-      asTitle.test(rendered) || isTabTitle || isProvider || isCapabilityPage || isLaunchRow,
+      asTitle.test(rendered) || isTabTitle || isProvider || isCapabilityPage || isLaunchRow || isAgentTool,
       `${tab} › ${title} is not rendered`,
     );
   }

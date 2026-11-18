@@ -1040,3 +1040,25 @@ app's own segmented control, inputs and buttons; no new tokens.
   status and text, then Keep and Delete (`is-danger`). The admin token is
   one password field in About, Feedback with Save and Remove; the window
   only ever shows whether a token is set and where from.
+
+## Agent tool updates (2026-11)
+
+**Chosen:** no new tokens or components. The worker picker's Claude, Codex
+and Grok rows carry one small `spark-badge` at the right; Settings ›
+Accounts › Agent tools has the switch and one `SettingRow` per tool, with
+the existing `InlineMessage` for anything that happened.
+
+**Rules:**
+
+- Picker marks: Update (accent; updates on click when Codara can, else opens
+  Agent tools with the command), Updating or Restoring (muted, no action),
+  Waiting (muted), Rolled back (warn), Update failed (danger). Pi always
+  shows Pinned and its version, never a button. No mark when up to date.
+- A mark is its own button beside the row's button, never inside it.
+- A Settings row: the name with an Update available or Pinned badge, then
+  the version and how it was installed, then one status line. A tool Codara
+  cannot update (Homebrew, WinGet, a folder that needs administrator rights)
+  shows the exact command in `st-callout__code`, no button.
+- Messages are one sentence that says what happened and what is true now
+  ("Claude Code 2.1.328 failed its version check, so Codara put 2.1.327
+  back."), warn for a roll back, danger only when the tool may be broken.
