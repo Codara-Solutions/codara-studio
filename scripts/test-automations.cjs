@@ -524,21 +524,23 @@ async function main() {
   // An unreadable scheduler.json must never be overwritten blind: the next
   // save rewrites the file from the in-memory list. Each case loads a fresh
   // module instance (the job cache and home dir are per instance).
+  const bundleScheduler = (outfile) =>
+    esbuild.build({
+      entryPoints: [SCHEDULER_TS],
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      outfile,
+      logLevel: "silent",
+      resolveExtensions: [".ts", ".js", ".cjs", ".mjs", ".json"],
+      plugins: [harnessPlugin],
+    });
   const freshScheduler = async (seed) => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "spark-auto-home-"));
     if (seed !== undefined) fs.writeFileSync(path.join(home, "scheduler.json"), seed);
     process.env.SPARK_HOME_DIR = home;
     const file = path.join(home, "scheduler.bundle.cjs");
-    await esbuild.build({
-      entryPoints: [SCHEDULER_TS],
-      bundle: true,
-      platform: "node",
-      format: "cjs",
-      outfile: file,
-      logLevel: "silent",
-      resolveExtensions: [".ts", ".js", ".cjs", ".mjs", ".json"],
-      plugins: [harnessPlugin],
-    });
+    await bundleScheduler(file);
     return { home, sched: require(file) };
   };
   const asideCopies = (home) => fs.readdirSync(home).filter((name) => name.startsWith("scheduler.json.corrupt-"));
@@ -556,14 +558,18 @@ async function main() {
       input: fakeInput,
       state: { status: "running", iteration: 1, currentRunId: "run-held" },
     };
-    const { sched: s4 } = await freshScheduler(JSON.stringify({ jobs: [holder] }));
+    const { home: home4, sched: s4 } = await freshScheduler(JSON.stringify({ jobs: [holder] }));
+    // A second module instance on the same home folder is a real restart: it
+    // knows only what the first one saved. Bundled before the clock is faked.
+    const restartFile = path.join(home4, "scheduler-restart.bundle.cjs");
+    await bundleScheduler(restartFile);
     const everySecond = { kind: "cron", expr: "* * * * * *" };
     const firedFor = (id) => calls().fired.filter((e) => e.automationId === id).length;
     const waitForFire = async (id) => {
       for (let i = 0; i < 400 && firedFor(id) < 1; i++) await realSleep(5);
     };
     const settle = () => realSleep(100);
-    const missed = async (id) => ((await s4.getJob(id))?.skips ?? []).filter((skip) => skip.reason === "missed");
+    const missed = async (id, s = s4) => ((await s.getJob(id))?.skips ?? []).filter((skip) => skip.reason === "missed");
     const BASE = 1_800_000_000_000; // a whole second
     mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: BASE + 400 });
     try {
@@ -580,8 +586,18 @@ async function main() {
       await waitForFire(late.id);
       assert.strictEqual(firedFor(late.id), 1, "the slot that came due during the save should run, late");
       s4.stopScheduler();
+      const restarted = require(restartFile);
+      // Read before its start check, which saves a checkpoint of its own. The
+      // run's lastRunAt also covers the slot; the checkpoint must on its own.
+      const saved = await restarted.getJob(late.id);
+      assert.ok(
+        Date.parse(saved?.scheduleCheckedAt ?? "") >= BASE + 1_000,
+        `the saved schedule checkpoint covers the slot that ran late: ${saved?.scheduleCheckedAt}`,
+      );
+      await restarted.startScheduler();
+      assert.deepStrictEqual(await missed(late.id, restarted), [], "after a restart, a slot that came due during the save is not missed");
+      restarted.stopScheduler();
       await s4.startScheduler();
-      assert.deepStrictEqual(await missed(late.id), [], "a slot that came due during the save is not missed");
       await s4.setEnabled(late.id, false);
       console.log("  PASS cron slot due during the save runs late, not missed");
       passed++;
