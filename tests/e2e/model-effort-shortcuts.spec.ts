@@ -53,7 +53,7 @@ test("Ctrl+M and Ctrl+N steer the chat's model and thinking effort, and the shif
     // Keep pressing: the list wraps, so the original label comes back rather
     // than the cycle dead-ending on the last row.
     let wrapped = false;
-    for (let i = 0; i < 12 && !wrapped; i += 1) {
+    for (let i = 0; i < 16 && !wrapped; i += 1) {
       await page.keyboard.press(modKey("m"));
       await page.waitForTimeout(250);
       wrapped = ((await modelLabel.textContent())?.trim() ?? "") === firstModel;
@@ -122,7 +122,7 @@ test("Ctrl+M and Ctrl+N steer the chat's model and thinking effort, and the shif
   }
 });
 
-test("OpenAI picker keeps Sol, Terra, and Luna alongside Astra", async () => {
+test("OpenAI picker leads with GPT-6.2 Sol and Astra and keeps Sol, Terra, and Luna", async ({}, testInfo) => {
   test.setTimeout(60_000);
   const fixture = await prepareFixture();
   const app = await electron.launch({ args: ["."], env: {
@@ -141,6 +141,9 @@ test("OpenAI picker keeps Sol, Terra, and Luna alongside Astra", async () => {
     await app.evaluate(({ ipcMain }) => {
       ipcMain.removeHandler("pi-models:catalog");
       ipcMain.handle("pi-models:catalog", () => [
+        { id: "gpt-6.2-sol", label: "GPT-6.2 Sol", provider: "openai-codex", reasoning: true },
+        { id: "gpt-6.2-astra", label: "GPT-6.2 Astra", provider: "openai-codex", reasoning: true },
+        { id: "gpt-6.1-sol", label: "GPT-6.1 Sol", provider: "openai-codex", reasoning: true },
         { id: "gpt-6-astra", label: "GPT-6 Astra", provider: "openai-codex", reasoning: true },
         { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "openai-codex", reasoning: true },
       ]);
@@ -150,23 +153,36 @@ test("OpenAI picker keeps Sol, Terra, and Luna alongside Astra", async () => {
     const trigger = page.locator(".composer-model-thinking-trigger").first();
     const menu = page.locator(".composer-model-thinking-menu");
     const openai = menu.locator(".composer-model-group").filter({ hasText: "OpenAI" });
-    const labels = ["GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna", "GPT-6 Astra"];
+    // The two newest generations lead; 6 Astra stays in Edit list.
+    const labels = ["GPT-6.2 Sol", "GPT-6.2 Astra", "GPT-6.1 Sol", "GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna"];
+    await trigger.click();
+    await expect(openai.getByRole("option")).toHaveText(labels.map((label) => new RegExp(label)));
+    await page.screenshot({ path: testInfo.outputPath("cora-chat-picker-openai.png") });
+    await page.keyboard.press("Escape");
     for (const label of labels) {
       await trigger.click();
-      await expect(openai.getByRole("option")).toHaveCount(4);
+      await expect(openai.getByRole("option")).toHaveCount(labels.length);
       await openai.getByRole("option").filter({ hasText: label }).click();
       await expect(menu.getByText("Choose thinking depth")).toBeVisible();
       await menu.getByRole("option", { name: /^High/ }).click();
       await expect(menu).toBeHidden();
       await expect(trigger.locator(".composer-pill-label")).toHaveText(label);
     }
+    await trigger.click();
+    await menu.getByRole("button", { name: "Edit list" }).click();
+    await expect(openai.getByRole("option").filter({ hasText: "GPT-6 Astra" })).toHaveAttribute("aria-selected", "false");
+    await page.screenshot({ path: testInfo.outputPath("cora-chat-picker-edit-list.png") });
+    await menu.getByRole("button", { name: "Done" }).click();
+    await page.keyboard.press("Escape");
+    // Offline the curated rows still offer GPT-6.2.
     await app.evaluate(({ ipcMain }) => {
       ipcMain.removeHandler("pi-models:catalog");
       ipcMain.handle("pi-models:catalog", () => []);
     });
+    const offline = labels.filter((label) => label !== "GPT-6.1 Sol");
     await trigger.click();
-    await expect(openai.getByRole("option")).toHaveCount(3);
-    for (const label of labels.slice(0, 3)) {
+    await expect(openai.getByRole("option")).toHaveCount(offline.length);
+    for (const label of offline) {
       await expect(openai.getByRole("option").filter({ hasText: label })).toBeVisible();
     }
   } finally {

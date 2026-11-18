@@ -24,7 +24,8 @@ import { listProcessesWithCommands, processChain, processChainIn, processStartMs
 import { latestSessionStart } from "./agent-session-registry";
 import { CallerPaneResolver } from "./caller-pane";
 import { processCwds } from "./pi-session-tracker";
-import { requestTerminalOp } from "./terminal-bridge";
+import { cachedStudioTerminalInventory, requestTerminalOp } from "./terminal-bridge";
+import { createDeadline, createOpOptions, lookupOptions, type CreateDeadline } from "./terminal-create-deadline";
 import { windowHoldsFolder } from "./window-held";
 import {
   cleanTerminalText,
@@ -327,10 +328,6 @@ const TERMINAL_SPAWN_WAIT_MS = 10_000;
 // enough for a bad-cwd shell to have exited (chdir failure is near-instant),
 // short enough not to add noticeable latency to a healthy create.
 const TERMINAL_SPAWN_SETTLE_MS = 750;
-// Under the MCP server's 60 s timeout for terminal.create. With a worktree
-// the server waits longer (TERMINAL_WORKTREE_TIMEOUT_MS) and the worktree's
-// own time is not counted against this.
-const CROSS_WORKSPACE_CREATE_BUDGET_MS = 55_000;
 // A burst of creates from one agent shares one process listing.
 const CALLER_PROCESS_LIST_MAX_AGE_MS = 2_000;
 // Cap on chat.append message length. Big enough for a verifier verdict
@@ -1265,15 +1262,26 @@ function paneAgentSession(paneId: string | null, agentStartedMs: number | null):
 const CALLER_PLACEMENT_CACHE_MS = 5_000;
 const callerPlacementCache = new Map<string, { at: number; placement: CallerPlacement | null }>();
 
-async function listStudioTerminals(): Promise<StudioTerminalListing[]> {
-  const inventory = await requestTerminalOp<StudioTerminalListing[]>("list", {}, { timeoutMs: 5_000 });
+// within: a caller with one deadline (terminal.create) gives the lookup what is
+// left of it, a hold for a starting window included.
+async function listStudioTerminals(within?: CreateDeadline): Promise<StudioTerminalListing[]> {
+  // The copy the renderer keeps main up to date with, when it is as current
+  // as a round trip would be: a busy renderer (seconds on a loaded machine)
+  // made this 5 s round trip time out.
+  const cached = cachedStudioTerminalInventory();
+  if (cached) return cached as unknown as StudioTerminalListing[];
+  const inventory = await requestTerminalOp<StudioTerminalListing[]>(
+    "list",
+    {},
+    within ? lookupOptions(within) : { timeoutMs: 5_000 },
+  );
   return Array.isArray(inventory) ? inventory : [];
 }
 
-async function paneWorkspaceId(paneId: string): Promise<string | null> {
+async function paneWorkspaceId(paneId: string, within?: CreateDeadline): Promise<string | null> {
   const watched = terminalPanePlacement(paneId);
   if (watched) return watched.workspaceId;
-  const listed = (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === paneId);
+  const listed = (await listStudioTerminals(within).catch(() => [])).find((entry) => entry.paneId === paneId);
   return listed?.workspaceId ?? null;
 }
 
@@ -1662,6 +1670,8 @@ async function authorizeWorkspaceTarget(input: {
   callerPaneId: string | null;
   action: CrossWorkspaceAction;
   precheck?: (target: Workspace) => Promise<string | null>;
+  // The caller's deadline, for looking up its pane's workspace.
+  within?: CreateDeadline;
 }): Promise<({ ok: true } & CrossWorkspaceTarget) | { ok: false; response: JsonRpcResponse }> {
   const { id, run, callerPaneId, res } = input;
   const fail = (code: number, message: string) => ({ ok: false as const, response: errorResponse(id, code, message) });
@@ -1677,7 +1687,7 @@ async function authorizeWorkspaceTarget(input: {
   const callerWorkspaceId = run
     ? (run.workspaceId ?? null)
     : callerPaneId
-      ? await paneWorkspaceId(callerPaneId)
+      ? await paneWorkspaceId(callerPaneId, input.within)
       : null;
   const caller = state.workspaces.find((workspace) => workspace.id === callerWorkspaceId) ?? null;
   if (caller?.id === target.id || userSessionStarts.has(input.params)) {
@@ -1789,7 +1799,8 @@ async function createTerminal(
   made: TerminalWorktreeMade,
   launch?: TerminalLaunch,
 ): Promise<JsonRpcResponse> {
-  const startedAt = Date.now();
+  // One deadline for the whole call (terminal-create-deadline.ts).
+  const deadline = createDeadline(TERMINAL_SPAWN_WAIT_MS + TERMINAL_SPAWN_SETTLE_MS);
   let cwd = stringParam(params, "cwd");
   if (params.workspace !== undefined && params.workspace !== null && typeof params.workspace !== "string") {
     return errorResponse(id, ERR_INVALID_PARAMS, "workspace must be a workspace id or an absolute folder path");
@@ -1877,6 +1888,7 @@ async function createTerminal(
       callerPaneId,
       action: "terminal",
       precheck: cwd ? (target) => crossWorkspaceCwdRefusal(cwd!, target) : undefined,
+      within: deadline,
     });
     if (!placed.ok) return placed.response;
     const target = placed.target;
@@ -1890,7 +1902,6 @@ async function createTerminal(
   // The worktree is made in the target workspace's repository, under the
   // same approval as the terminal, and the terminal opens in it.
   let worktree: Record<string, unknown> | null = null;
-  let worktreeMs = 0;
   if (worktreeRequest) {
     const worktreeStartedAt = Date.now();
     try {
@@ -1915,7 +1926,7 @@ async function createTerminal(
         return errorResponse(id, ERR_INTERNAL, "the worktree was made without a workspace");
       }
       worktree = created;
-      worktreeMs = Date.now() - worktreeStartedAt;
+      deadline.exclude(Date.now() - worktreeStartedAt);
       workspaceId = created.workspaceId;
       workspaceCwd = created.path;
       cwd = created.path;
@@ -1936,9 +1947,16 @@ async function createTerminal(
   }
   const callerPane =
     !run && callerPaneId
-      ? (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === callerPaneId)
+      ? (await listStudioTerminals(deadline).catch(() => [])).find((entry) => entry.paneId === callerPaneId)
       : undefined;
   const agentOwner = openingAgentOwner(run, workspaceId, callerPane, agentCaller.sessionId ?? null, rawRetention === "service");
+  // A create held while the window starts is dropped when its caller goes
+  // away, so it cannot leave a tab nobody drives.
+  const callerGone = new AbortController();
+  const onCallerGone = (): void => {
+    if (!res.writableFinished) callerGone.abort();
+  };
+  res.once("close", onCallerGone);
   try {
     const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string; group?: string }>(
       "create",
@@ -1954,16 +1972,9 @@ async function createTerminal(
         ...(agentOwner ? { agentOwner } : {}),
       },
       {
-        // Waiting for the user took part of the MCP server's 60 s budget; keep
-        // the whole call inside it, spawn wait included.
-        ...(crossWorkspace
-          ? {
-              timeoutMs: Math.max(
-                5_000,
-                CROSS_WORKSPACE_CREATE_BUDGET_MS - (Date.now() - startedAt - worktreeMs) - TERMINAL_SPAWN_WAIT_MS - TERMINAL_SPAWN_SETTLE_MS,
-              ),
-            }
-          : {}),
+        signal: callerGone.signal,
+        // One deadline for the call (terminal-create-deadline.ts).
+        ...createOpOptions(deadline, Boolean(crossWorkspace)),
         // A tab added after this call gave up sits in a worktree that the
         // failed call rolls back: nobody would drive it, so close it.
         ...(worktree?.created
@@ -1974,7 +1985,7 @@ async function createTerminal(
             }
           : {}),
       },
-    );
+    ).finally(() => res.off("close", onCallerGone));
     // The renderer resolves as soon as the tab is added to state, but the PTY
     // spawns a beat later when TerminalPane mounts and calls pty:spawn. Wait for
     // the session to come online so the returned paneId is immediately usable by
