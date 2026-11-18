@@ -25,7 +25,6 @@ import {
 import { injectEnrichedPath } from "./path-reconstruction";
 import { resolveBinary } from "./binary-resolver";
 import { LAUNCH_SETTLE_MS, beginToolLaunch, vendorUpdaterEnv } from "./agent-cli-updates/launch-guard";
-import { AGENT_CLI_LABELS } from "@shared/agent-cli-updates";
 import { getHookRpcEnvSafe } from "./hook-rpc";
 import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
@@ -654,7 +653,7 @@ export async function spawn(
     const launching = !isRemotePath(opts.cwd) && !sessions.has(opts.id)
       ? parseManualAgentStartupCommand(opts.startupCommand)?.runtime
       : undefined;
-    const endLaunch = launching ? beginToolLaunch(launching, AGENT_CLI_LABELS[launching]) : null;
+    const endLaunch = launching ? beginToolLaunch(launching) : null;
     pendingSpawns.add(opts.id);
     if (!isRemotePath(opts.cwd) && (opts.nativeCodexProfileId !== undefined ||
         parseManualAgentStartupCommand(opts.startupCommand)?.runtime === "codex")) {

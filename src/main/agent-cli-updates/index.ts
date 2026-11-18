@@ -7,7 +7,7 @@ import { join, posix, win32 } from "node:path";
 
 import { BrowserWindow } from "electron";
 
-import type { AgentCliUpdatesSnapshot } from "@shared/agent-cli-updates";
+import { AGENT_CLI_LABELS, type AgentCliUpdatesSnapshot } from "@shared/agent-cli-updates";
 
 import { forgetResolvedBinary, resolveBinary } from "../binary-resolver";
 import { codaraHome, defaultCodaraHome } from "../codara-home";
@@ -129,7 +129,7 @@ function createService(log: (line: string) => void): AgentCliUpdateService {
     },
     now: () => Date.now(),
     log,
-    toolBusy: setToolBusy,
+    toolBusy: (tool, isBusy) => setToolBusy(tool, isBusy, AGENT_CLI_LABELS[tool]),
     launchesStarting,
     holdVendorUpdates,
     relink: relinkLauncher,
