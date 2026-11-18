@@ -505,12 +505,23 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     }
   }
 
-  /** An installer, its pid written into the lock as soon as it runs. */
-  function runInstaller(command: CliCommand): Promise<string> {
+  /**
+   * An installer, its pid written into the lock as soon as it runs. That
+   * write is awaited before returning: finishing after the lock's release,
+   * it would put the lock back.
+   */
+  async function runInstaller(command: CliCommand): Promise<string> {
     const lock = heldLock;
-    return deps.run(command, UPDATE_TIMEOUT_MS, (pid) => {
-      void lock?.installerStarted(pid).catch((error) => deps.log(`could not note the installer in the update lock: ${(error as Error).message}`));
-    });
+    let noting: Promise<void> = Promise.resolve();
+    try {
+      return await deps.run(command, UPDATE_TIMEOUT_MS, (pid) => {
+        noting = (lock?.installerStarted(pid) ?? Promise.resolve()).catch((error) =>
+          deps.log(`could not note the installer in the update lock: ${(error as Error).message}`),
+        );
+      });
+    } finally {
+      await noting;
+    }
   }
 
   /** Runs the installer, checks the new build, and rolls back when it fails. */

@@ -984,7 +984,16 @@ async function crashSafety(m) {
   {
     const w = world({ auto: false });
     const noted = [];
-    w.deps.lock = async () => ({ release: async () => {}, installerStarted: async (pid) => noted.push(pid) });
+    const order = [];
+    w.deps.lock = async () => ({
+      release: async () => order.push("release"),
+      // The rename finishes after the installer has exited.
+      installerStarted: async (pid) => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        noted.push(pid);
+        order.push("noted");
+      },
+    });
     const run = w.deps.run;
     w.deps.run = async (command, timeoutMs, onStart) => {
       onStart?.(4242);
@@ -993,7 +1002,9 @@ async function crashSafety(m) {
     const service = m.createAgentCliUpdateService(w.deps);
     await service.check();
     await service.update("claude");
+    await service.settled();
     assert.deepEqual(noted, [4242]);
+    assert.deepEqual(order, ["noted", "release"], "the lock is released only after the installer was noted in it");
   }
 
   // The real runner reports the installer's pid.
