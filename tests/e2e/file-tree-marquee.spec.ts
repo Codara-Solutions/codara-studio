@@ -12,7 +12,7 @@ import { join } from "node:path";
 // rows, Virtuoso above it), with the list scrolled, and at a zoom other than
 // 100%.
 
-const NOTE_COUNT = 30;
+const NOTE_COUNT = 60;
 const BIG_COUNT = 260;
 
 interface SparkView {
@@ -28,6 +28,18 @@ async function scrollExplorerToBottom(page: Page): Promise<void> {
   const box = await list.boundingBox();
   if (!box) throw new Error("no Explorer list");
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() =>
+          Array.from(document.querySelectorAll<HTMLElement>("[data-fs-row-count] *")).some((el) => {
+            const overflow = getComputedStyle(el).overflowY;
+            return (overflow === "auto" || overflow === "scroll") && el.scrollHeight > el.clientHeight;
+          }),
+        ),
+      { message: "the Explorer list is taller than its box, so it can scroll" },
+    )
+    .toBe(true);
   await page.mouse.wheel(0, 100_000);
   // Wheel scrolling lands over several frames; measure rows only once the
   // list's scroller rests at its end.

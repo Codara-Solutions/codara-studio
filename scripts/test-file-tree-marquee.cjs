@@ -181,7 +181,7 @@ async function main() {
   // that effect forgot every on-screen row and the marquee selected nothing.
   // tests/e2e/file-tree-marquee.spec.ts drives the real drag.
   assert.ok(
-    !source.includes("rowElementsRef.current.clear()"),
+    !/rowElementsRef\.current\s*(=[^=]|\.clear\()/.test(source),
     "the row registry is never cleared wholesale",
   );
   // Virtuoso's List style holds the padding that stands in for the rows
