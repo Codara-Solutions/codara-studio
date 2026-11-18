@@ -529,32 +529,31 @@ export class LinkClient {
     const socket = this.socket;
     if (farewell) this.send(farewell);
     const flushed = socket?.outbox;
-    this.epoch += 1;
-    const epoch = this.epoch;
-    this.connecting = null;
-    this.clearReconnect();
-    // Queued before anything awaits: a reconnect meanwhile (the alarm, the
-    // old link dropping) reads no pairing.
+    // The old socket leaves the client now, still open so the farewell can
+    // leave: its drop, frames and pings no longer reach the client, and
+    // nothing later in here touches a link, status or timer started since.
+    if (socket) {
+      this.socket = null;
+      socket.onclose = null;
+      this.deps.onDisconnected?.();
+    }
+    this.disconnect("idle");
+    // Queued before anything awaits: a reconnect meanwhile (the alarm, a
+    // Connect pressed again) reads no pairing.
     const cleared = this.pairingStore(() => this.deps.clearPairing());
     if (flushed) {
       let timer;
       await Promise.race([flushed, new Promise((resolve) => (timer = setTimeout(resolve, FAREWELL_TIMEOUT_MS)))]);
       clearTimeout(timer);
     }
-    // Nothing started since (the old link may have dropped meanwhile):
-    // stop. A search or link the user started since stays; only the old
-    // socket closes.
-    if (this.epoch === epoch || (!this.socket && !this.connecting)) this.disconnect("idle");
-    else if (socket && socket !== this.socket) {
-      socket.onclose = null;
-      try {
-        socket.close();
-      } catch {
-        /* already closed */
-      }
+    try {
+      socket?.close();
+    } catch {
+      /* already closed */
     }
     await cleared;
   }
+
 
   lost() {
     if (!this.socket) return;

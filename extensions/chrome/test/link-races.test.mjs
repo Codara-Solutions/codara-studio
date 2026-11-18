@@ -71,7 +71,7 @@ async function step(store, key) {
  * `allow: false` leaves a pairing waiting for the user's Allow.
  */
 function fakeCodara() {
-  const codara = { known: null, answer: true, allow: true, down: false, ports: [43117], sockets: [] };
+  const codara = { known: null, answer: true, allow: true, deny: false, down: false, ports: [43117], sockets: [] };
   class FakeSocket {
     constructor(url) {
       if (codara.down) throw new Error("connection refused");
@@ -145,7 +145,9 @@ function fakeCodara() {
 
     async answerHello() {
       const message = this.hello;
-      if (message.linkId && message.nonce && codara.known) {
+      if (codara.deny) {
+        this.deliver({ type: "denied", message: "The user declined." });
+      } else if (message.linkId && message.nonce && codara.known) {
         const secret = await sha256Hex(codara.known);
         const nonce = "c".repeat(32);
         this.codaraChallenge = { secret, nonce, theirs: message.nonce };
@@ -583,5 +585,38 @@ export async function run() {
     client.disconnect();
   }
 
-  return "link races: a cancelled pairing saves no token, an old revocation never erases a new pairing, an old answer never goes out on a new link, an unsealed revocation keeps the saved pairing, a search cancelled mid-hello adopts nothing, a close never overtakes the frame before it, a timed-out handshake adopts nothing, a cancelled re-pairing keeps the earlier pairing, a revocation clears only its own pairing, an old retry never clears a newer one, a reconnect never reads a save that may be taken back, Disconnect keeps no approval in flight, lets nothing reconnect with the token it forgets and never cancels a Connect pressed after it, and a proven Codara's revocation counts past the probe deadline";
+  // 17. Disconnect, then Connect again before Disconnect's last step: the
+  // new attempt's result and its reconnect timer are untouched.
+  for (const outcome of ["denied", "dropped"]) {
+    const codara = fakeCodara();
+    const store = newStore();
+    await paired(codara, store);
+    const client = makeClient(codara, store);
+    await client.connect();
+    await until(() => client.status.state === "connected", "the proven link");
+    const sealing = hold("encrypt");
+    const forgetting = client.forget({ type: "unpair" });
+    await sealing.reached;
+    codara.known = null;
+    codara.deny = outcome === "denied";
+    await client.connect({ pair: true });
+    let timer = null;
+    if (outcome === "denied") {
+      await until(() => client.status.state === "denied", "the declined pairing");
+    } else {
+      await until(() => client.status.state === "connected", "the new link");
+      codara.last().hangUp();
+      await until(() => client.reconnectTimer, "the new link's reconnect timer");
+      timer = client.reconnectTimer;
+    }
+    const status = { ...client.status };
+    sealing.release();
+    await forgetting;
+    await wait(20);
+    assert.deepEqual(client.status, status, `the ${outcome} attempt's status stays`);
+    assert.equal(client.reconnectTimer, timer, `and its reconnect timer`);
+    client.disconnect();
+  }
+
+  return "link races: a cancelled pairing saves no token, an old revocation never erases a new pairing, an old answer never goes out on a new link, an unsealed revocation keeps the saved pairing, a search cancelled mid-hello adopts nothing, a close never overtakes the frame before it, a timed-out handshake adopts nothing, a cancelled re-pairing keeps the earlier pairing, a revocation clears only its own pairing, an old retry never clears a newer one, a reconnect never reads a save that may be taken back, Disconnect keeps no approval in flight, lets nothing reconnect with the token it forgets and never touches a Connect pressed after it, and a proven Codara's revocation counts past the probe deadline";
 }
