@@ -90,7 +90,7 @@ async function main() {
   // ── the worker roster ──
   // The recommended tier mapping stays small, while the picker/launch boundary
   // also offers the providers' current opt-in models.
-  eq("roster exposes eight native worker choices", ALLOWED_WORKER_MODELS.length, 8);
+  eq("roster exposes ten native worker choices", ALLOWED_WORKER_MODELS.length, 10);
   for (const id of [
     "claude-opus-5",
     "claude-fable-5",
@@ -98,6 +98,8 @@ async function main() {
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
     "gpt-6-astra",
     "grok-4.6",
   ]) {
@@ -107,6 +109,15 @@ async function main() {
   eq("claude premium tier is Fable", rosterModelFor("claude", "premium"), "claude-fable-5");
   eq("codex tier default remains Sol", rosterModelFor("codex", "premium"), "gpt-5.6-sol");
   check("Astra is allowed as an opt-in model", ALLOWED_WORKER_MODELS.includes("gpt-6-astra"));
+  for (const id of ["gpt-6.2-sol", "gpt-6.2-astra"]) {
+    check(`${id} is an opt-in model, not enabled by default`, !Object.values(WORKER_MODEL_ROSTER).flatMap(Object.values).includes(id));
+    eq(`${id} survives opt-in coercion`, coerceWorkerModelToRoster("codex", id), id);
+  }
+  check(
+    "GPT-6.2 sits above the older GPT opt-ins",
+    ALLOWED_WORKER_MODELS.indexOf("gpt-6.2-sol") < ALLOWED_WORKER_MODELS.indexOf("gpt-6.2-astra") &&
+      ALLOWED_WORKER_MODELS.indexOf("gpt-6.2-astra") < ALLOWED_WORKER_MODELS.indexOf("gpt-6-astra"),
+  );
   check(
     "Astra is not enabled by default",
     !Object.values(WORKER_MODEL_ROSTER).flatMap(Object.values).includes("gpt-6-astra"),
