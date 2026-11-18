@@ -293,7 +293,8 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
   /** Counts the tool's sessions; puts the update back to waiting and returns false when any run. */
   async function noSessions(tool: UpdatableAgentCliToolId, origin: "manual" | "auto"): Promise<boolean> {
     const running = await deps.liveSessions(tool).catch(() => null);
-    const live = running === null ? null : running + (deps.launchesStarting?.(tool) ?? 0);
+    // A launch whose process already runs is in both counts.
+    const live = running === null ? null : Math.max(running, deps.launchesStarting?.(tool) ?? 0);
     unreadableRounds = live === null ? unreadableRounds + 1 : 0;
     if (live === 0) return true;
     const current = entry(tool);

@@ -287,6 +287,14 @@ async function run(m) {
       npmOnPath: "C:\\Users\\u\\scoop\\apps\\nodejs\\current\\npm.cmd",
     });
     assert.equal(scoop.method, "npm", "npm globals of a Scoop-managed Node");
+    const lts = await plan({
+      tool: "codex",
+      platform: "win32",
+      binaryPath: "C:\\Users\\u\\scoop\\apps\\nodejs-lts\\current\\bin\\codex.cmd",
+      realPath: "C:\\Users\\u\\scoop\\apps\\nodejs-lts\\current\\bin\\node_modules\\@openai\\codex\\bin\\codex.js",
+      npmOnPath: "C:\\Users\\u\\scoop\\apps\\nodejs-lts\\current\\npm.cmd",
+    });
+    assert.equal(lts.method, "npm", "npm globals of Scoop's nodejs-lts");
   }
   // Volta keeps an npm tree per package image: Volta's.
   {
