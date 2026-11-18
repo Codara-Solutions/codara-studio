@@ -99,16 +99,32 @@ function shippedExtensionDir(): string {
   return source;
 }
 
+// The version in Codara's folder, read once and again after Codara copies into it.
+let folderVersionCache: string | null | undefined;
+
+function folderVersion(): string | null {
+  if (folderVersionCache === undefined) folderVersionCache = extensionManifestVersion(extensionFolder());
+  return folderVersionCache;
+}
+
 /** The folder for Load unpacked, copied there the first time only: a copy the user already loaded changes only through Update extension. */
 export function prepareExtensionFolder(): string {
   const target = extensionFolder();
-  ensureExtensionFolder(shippedExtensionDir(), target);
+  try {
+    ensureExtensionFolder(shippedExtensionDir(), target);
+  } finally {
+    folderVersionCache = undefined;
+  }
   return target;
 }
 
 /** The user pressed Update extension: the folder gets the files this Codara ships. */
 function refreshExtensionFolder(): void {
-  syncExtensionFolder(shippedExtensionDir(), extensionFolder());
+  try {
+    syncExtensionFolder(shippedExtensionDir(), extensionFolder());
+  } finally {
+    folderVersionCache = undefined;
+  }
 }
 
 let folderIds: { folder: string; ids: Set<string> } | null = null;
@@ -160,6 +176,7 @@ function updateStateOf(link: ChromeLink | undefined): ChromeLinkState["browsers"
     shipped: shippedExtensionVersion(),
     fromCodaraFolder: fromCodaraFolder(link.extensionId),
     asked: reloadAsks.get(link.linkId),
+    folderVersion: folderVersion(),
     now: Date.now(),
     graceMs: RELOAD_GRACE_MS,
   });
@@ -177,8 +194,9 @@ function incompatibleExtensions(): ChromeLinkIncompatibleExtension[] {
 }
 
 /**
- * The user pressed Update extension. For a connected browser: the folder
- * gets the new files and that browser's extension is asked to reload itself.
+ * The user pressed Update extension, or Reload extension. For a connected
+ * browser: the folder gets the new files (unless it already holds them) and
+ * that browser's extension, only that one, is asked to reload itself.
  * For an extension refused for its protocol: the folder gets the new files
  * and Settings says to press reload in the browser.
  */
@@ -191,7 +209,8 @@ function updateExtension(which: { linkId?: unknown; extensionId?: unknown }): vo
     const state = updateStateOf(link);
     if (state === null) return;
     if (state === "elsewhere") throw new Error("This extension was not loaded from Codara's folder, so Codara does not update it.");
-    refreshExtensionFolder();
+    // "reload": another browser's Update already put the new version in the shared folder.
+    if (state !== "reload") refreshExtensionFolder();
     reloadAsks.set(link.linkId, { version: shipped, at: Date.now() });
     if (link.extensionFeatures.includes("reload")) link.send({ type: "reload", version: shipped });
     // Settings says "updating" until the extension is back or the grace ends.

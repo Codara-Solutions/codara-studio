@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 
-import type { ChromeLinkBrowserState, ChromeLinkIncompatibleExtension } from "@shared/chrome-link";
+import { extensionUpdateNotice, NOT_FROM_CODARA_FOLDER, type ChromeLinkBrowserState, type ChromeLinkIncompatibleExtension } from "@shared/chrome-link";
 import { SettingRow, SettingsSection, ToggleRow } from "../settings/SettingsPrimitives";
 import ChromeConnectCard from "./ChromeConnectCard";
 import KeepAgentsInChromeRow from "./KeepAgentsInChromeRow";
@@ -27,50 +27,21 @@ function ExtensionUpdateNotice({
   busy: boolean;
   onUpdate: () => void;
 }): React.ReactElement | null {
-  const running = browser.extensionVersion ?? "an older version";
-  const versions = `This browser runs extension ${running}, Codara ships ${shipped}.`;
-  switch (browser.extensionUpdate) {
-    case "available":
-      return (
-        <div className="chrome-update" data-chrome-extension-update="available">
-          <div className="chrome-update__text">
-            <span>{versions}</span>
-            <span className="chrome-update__desc">
-              {browser.extensionReloads
-                ? `Update extension copies ${shipped} into Codara's extension folder, which every browser that loaded it uses, and restarts the extension in this browser; until you do, ${running} keeps working.`
-                : `Update extension copies ${shipped} into Codara's extension folder, which every browser that loaded it uses; then press the reload button on Codara in chrome://extensions. Until you do, ${running} keeps working.`}
-            </span>
-          </div>
-          <button type="button" className="spark-btn is-primary" disabled={busy} onClick={onUpdate}>
-            Update extension
-          </button>
-        </div>
-      );
-    case "updating":
-      return (
-        <div className="chrome-update" role="status" data-chrome-extension-update="updating">
-          <span className="chrome-update__text">{`Updating the extension to ${shipped}.`}</span>
-        </div>
-      );
-    case "manual":
-      return (
-        <div className="chrome-update" role="status" data-chrome-extension-update="manual">
-          <span className="chrome-update__text">
-            {`Codara's extension folder holds ${shipped}, but this browser still runs ${running}. Open chrome://extensions and press the reload button on Codara.`}
-          </span>
-        </div>
-      );
-    case "elsewhere":
-      return (
-        <div className="chrome-update" data-chrome-extension-update="elsewhere">
-          <span className="chrome-update__text">
-            {`${versions} This browser did not load it from Codara's folder, so Codara leaves it alone: Chrome updates an extension from the Chrome Web Store by itself.`}
-          </span>
-        </div>
-      );
-    default:
-      return null;
-  }
+  const notice = extensionUpdateNotice(browser, shipped);
+  if (!notice) return null;
+  return (
+    <div className="chrome-update" role={notice.action ? undefined : "status"} data-chrome-extension-update={browser.extensionUpdate ?? undefined}>
+      <div className="chrome-update__text">
+        <span>{notice.status}</span>
+        {notice.detail ? <span className="chrome-update__desc">{notice.detail}</span> : null}
+      </div>
+      {notice.action ? (
+        <button type="button" className="spark-btn is-primary" disabled={busy} onClick={onUpdate}>
+          {notice.action === "update" ? "Update extension" : "Reload extension"}
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 /** An extension that tried to connect and speaks another link protocol than this Codara. */
@@ -93,7 +64,7 @@ function IncompatibleNotice({
         ? `Codara's extension folder now holds ${shipped}. Open chrome://extensions in ${extension.browser.name} and press the reload button on Codara to connect.`
         : extension.fromCodaraFolder
           ? `${who} is too old for this Codara, so it cannot connect. Update extension copies ${shipped} into Codara's extension folder; then press the reload button on Codara in chrome://extensions.`
-          : `${who} is too old for this Codara, so it cannot connect. It was not loaded from Codara's folder: update it where you installed it (Chrome updates an extension from the Chrome Web Store by itself).`;
+          : `${who} is too old for this Codara, so it cannot connect. It was not loaded from Codara's folder: ${NOT_FROM_CODARA_FOLDER}`;
   const canUpdate = extension.update === "extension" && extension.fromCodaraFolder && !extension.copied;
   return (
     <div className="chrome-update" role="alert" data-chrome-incompatible={extension.extensionId}>

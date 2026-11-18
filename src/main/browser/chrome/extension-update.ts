@@ -182,6 +182,9 @@ export interface ExtensionUpdateAsk {
  * - "manual": the user pressed it, the folder holds the new version, and the
  *   extension did not come back with it (or cannot reload itself): the user
  *   presses reload in the browser's extensions page.
+ * - "reload": the folder already holds the new version (another browser's
+ *   Update put it there), so this browser runs its old worker against new
+ *   files: Reload extension asks it to reload, without copying again.
  * - "elsewhere": Chrome did not load it from Codara's folder (the Chrome Web
  *   Store, or a folder of the user's own): Codara never touches it.
  */
@@ -191,12 +194,15 @@ export function extensionUpdateState(options: {
   shipped: string | null;
   fromCodaraFolder: boolean;
   asked: ExtensionUpdateAsk | undefined;
+  /** The version in Codara's folder now. */
+  folderVersion: string | null;
   now: number;
   graceMs: number;
-}): "available" | "updating" | "manual" | "elsewhere" | null {
-  const { running, features, shipped, fromCodaraFolder, asked, now, graceMs } = options;
+}): "available" | "reload" | "updating" | "manual" | "elsewhere" | null {
+  const { running, features, shipped, fromCodaraFolder, asked, folderVersion, now, graceMs } = options;
   if (!shipped || !running || compareExtensionVersions(running, shipped) >= 0) return null;
   if (!fromCodaraFolder) return "elsewhere";
-  if (asked?.version !== shipped) return "available";
-  return features.includes("reload") && now - asked.at < graceMs ? "updating" : "manual";
+  if (asked?.version === shipped) return features.includes("reload") && now - asked.at < graceMs ? "updating" : "manual";
+  if (folderVersion === shipped) return features.includes("reload") ? "reload" : "manual";
+  return "available";
 }

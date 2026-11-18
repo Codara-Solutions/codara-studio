@@ -29,16 +29,64 @@ export interface ChromeLinkBrowserState {
    * The connected extension is older than the one Codara ships. Codara
    * changes it only after the user presses Update extension: "available"
    * until then, "updating" while it reloads itself after that, "manual" when
-   * the user has to press reload in the browser's extensions page.
-   * "elsewhere": the browser did not load it from Codara's folder (the Chrome
-   * Web Store updates its own), so Codara leaves it alone. Null when it is
-   * current or not connected.
+   * the user has to press reload in the browser's extensions page. "reload":
+   * the folder already holds the new version (another browser's Update put it
+   * there) and this browser still runs the old one: Reload extension asks it
+   * to reload, nothing is copied. "elsewhere": the browser did not load it
+   * from Codara's folder (the Chrome Web Store, or a folder Codara does not
+   * manage), so Codara leaves it alone. Null when it is current or not
+   * connected.
    */
-  extensionUpdate: "available" | "updating" | "manual" | "elsewhere" | null;
+  extensionUpdate: "available" | "reload" | "updating" | "manual" | "elsewhere" | null;
   /** The connected extension can reload itself when asked; before 1.1.0 the user reloads it in the browser. */
   extensionReloads: boolean;
   allowOpen: boolean;
   tabs: ChromeLinkTabState[];
+}
+
+/** Where an extension Codara does not manage gets its updates, in one sentence. */
+export const NOT_FROM_CODARA_FOLDER =
+  "if it came from the Chrome Web Store, Chrome updates it by itself; if you loaded it from another folder, update that folder, then press the reload button on Codara in chrome://extensions.";
+
+/**
+ * What Settings > Browser says about a connected extension older than the
+ * one Codara ships: a status line, an optional line of detail, and the one
+ * button it offers ("update" copies and reloads, "reload" only reloads).
+ */
+export function extensionUpdateNotice(
+  browser: Pick<ChromeLinkBrowserState, "extensionUpdate" | "extensionVersion" | "extensionReloads">,
+  shipped: string,
+): { status: string; detail: string | null; action: "update" | "reload" | null } | null {
+  const running = browser.extensionVersion ?? "an older version";
+  const versions = `This browser runs extension ${running}, Codara ships ${shipped}.`;
+  switch (browser.extensionUpdate) {
+    case "available":
+      return {
+        status: versions,
+        detail: browser.extensionReloads
+          ? `Update extension copies ${shipped} into Codara's extension folder, which every browser that loaded it uses, and restarts the extension in this browser; until you do, ${running} keeps working.`
+          : `Update extension copies ${shipped} into Codara's extension folder, which every browser that loaded it uses; then press the reload button on Codara in chrome://extensions. Until you do, ${running} keeps working.`,
+        action: "update",
+      };
+    case "reload":
+      return {
+        status: `Codara's extension folder now holds ${shipped}: reload the extension in this browser.`,
+        detail: `This browser still runs ${running}. Reload extension restarts it with the new files, keeping the folder as it is.`,
+        action: "reload",
+      };
+    case "updating":
+      return { status: `Updating the extension to ${shipped}.`, detail: null, action: null };
+    case "manual":
+      return {
+        status: `Codara's extension folder holds ${shipped}, but this browser still runs ${running}. Open chrome://extensions and press the reload button on Codara.`,
+        detail: null,
+        action: null,
+      };
+    case "elsewhere":
+      return { status: `${versions} This browser did not load it from Codara's folder: ${NOT_FROM_CODARA_FOLDER}`, detail: null, action: null };
+    default:
+      return null;
+  }
 }
 
 export interface ChromeLinkPairing {

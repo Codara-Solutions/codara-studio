@@ -47,6 +47,7 @@ async function load() {
         `export * from "./index";`,
         `export * from "./extension-update";`,
         `export { app as fakeApp } from "electron";`,
+        `export { extensionUpdateNotice } from "@shared/chrome-link";`,
       ].join("\n"),
       resolveDir: path.join(ROOT, "src/main/browser/chrome"),
       loader: "ts",
@@ -204,6 +205,16 @@ function extension(port, id, version, features) {
   assert.equal(browserState.extensionReloads, true, "its hello said it can reload itself");
   assert.equal(lib.chromeLinkState().shippedExtensionVersion, shipped);
 
+  // A second browser (say Edge) loaded the same folder: same path, same id.
+  const edge = extension(port, extensionId, "1.0.0", ["reload"]);
+  await edge.pair();
+  const edgePending = await until(() => lib.chromeLinkState().pending[0], "the second browser's pairing request");
+  await ipc("chromeLink:approve", edgePending.id);
+  await edge.next("paired");
+  const edgeLinkId = await until(() => lib.chromeLinkState().browsers.find((browser) => browser.connected && browser.linkId !== linkId)?.linkId, "the second browser");
+  const stateOf = (id) => lib.chromeLinkState().browsers.find((browser) => browser.linkId === id);
+  assert.equal(stateOf(edgeLinkId).extensionUpdate, "available");
+
   // The user presses Update extension: the folder gets the shipped files and
   // this browser's extension is asked to reload for that version.
   await ipc("chromeLink:updateExtension", { linkId });
@@ -211,7 +222,19 @@ function extension(port, id, version, features) {
   assert.deepEqual(reload, { type: "reload", version: shipped });
   assert.equal(lib.extensionManifestVersion(folder), shipped, "Update copied the new version into the folder");
   assert.equal(lib.extensionContentHash(folder), lib.extensionContentHash(SHIPPED), "the same files Codara ships");
-  assert.equal(lib.chromeLinkState().browsers[0].extensionUpdate, "updating");
+  assert.equal(stateOf(linkId).extensionUpdate, "updating");
+
+  // The other browser on that folder now runs its old worker against the new
+  // files: it is told so and offered a reload of its own, without a second copy.
+  await wait(200);
+  assert.equal(edge.received.filter((message) => message.type === "reload").length, 0, "the other browser is not reloaded by the first one's yes");
+  assert.equal(stateOf(edgeLinkId).extensionUpdate, "reload");
+  const folderInode = fs.statSync(folder).ino;
+  await ipc("chromeLink:updateExtension", { linkId: edgeLinkId });
+  assert.deepEqual(await edge.next("reload"), { type: "reload", version: shipped });
+  assert.equal(fs.statSync(folder).ino, folderInode, "Reload extension copies nothing again");
+  assert.equal(ext.received.filter((message) => message.type === "reload").length, 1, "the first browser is not asked twice");
+  assert.equal(stateOf(edgeLinkId).extensionUpdate, "updating");
 
   // An extension Chrome did not load from Codara's folder (the Chrome Web
   // Store, or the user's own folder) is never updated from Codara.
@@ -263,13 +286,35 @@ function extension(port, id, version, features) {
   assert.equal(lib.extensionUpdateState(at({ version: "1.1.0", at: 800 })), "manual", "a reload that did not bring the new version");
   assert.equal(lib.extensionUpdateState({ ...at({ version: "1.1.0", at: 950 }), features: [] }), "manual", "too old to reload itself");
   assert.equal(lib.extensionUpdateState(at({ version: "1.0.5", at: 950 })), "available", "a yes for an earlier version is not a yes for this one");
+  assert.equal(lib.extensionUpdateState({ ...at(undefined), folderVersion: "1.1.0" }), "reload", "another browser's Update filled the shared folder");
+  assert.equal(lib.extensionUpdateState({ ...at(undefined), folderVersion: "1.1.0", features: [] }), "manual", "and this one cannot reload itself");
+  assert.equal(lib.extensionUpdateState({ ...at(undefined), folderVersion: "1.1.0", fromCodaraFolder: false }), "elsewhere");
+
+  // What Settings says, in plain words.
+  const notice = (extensionUpdate, extensionReloads = true) => lib.extensionUpdateNotice({ extensionUpdate, extensionVersion: "1.0.0", extensionReloads }, "1.4.0");
+  assert.equal(notice(null), null);
+  assert.deepEqual(notice("reload"), {
+    status: "Codara's extension folder now holds 1.4.0: reload the extension in this browser.",
+    detail: "This browser still runs 1.0.0. Reload extension restarts it with the new files, keeping the folder as it is.",
+    action: "reload",
+  });
+  assert.equal(notice("available").action, "update");
+  assert.match(notice("available", false).detail, /press the reload button on Codara in chrome:\/\/extensions/);
+  const elsewhere = notice("elsewhere");
+  assert.equal(elsewhere.action, null, "no button for an extension Codara does not manage");
+  assert.match(elsewhere.status, /if it came from the Chrome Web Store, Chrome updates it by itself; if you loaded it from another folder, update that folder, then press the reload button on Codara in chrome:\/\/extensions\./);
+  for (const state of ["available", "reload", "updating", "manual", "elsewhere"]) {
+    const { status, detail } = notice(state);
+    assert.doesNotMatch(`${status} ${detail ?? ""}`, /[\u2013\u2014]/);
+  }
 
   ext.close();
+  edge.close();
   store.close();
   old.close();
   lib.fakeApp.__quit();
   fs.rmSync(home, { recursive: true, force: true });
-  console.log("chrome extension update: starting leaves the folder alone, connecting sends no reload, Update extension copies and asks that browser only, store installs and other folders are left alone, older protocols say so, the first Reveal copies");
+  console.log("chrome extension update: starting leaves the folder alone, connecting sends no reload, Update extension copies and asks that browser only, another browser on the folder gets Reload without a second copy, store installs and other folders are left alone, older protocols say so, the first Reveal copies");
   setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref();
 })().catch((error) => {
   console.error(error);

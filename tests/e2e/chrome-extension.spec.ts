@@ -672,12 +672,50 @@ for (const theme of ["codara-daylight", "codara-classic"] as const) {
       }
       await codara.setViewportSize({ width: 1280, height: 860 });
 
-      // Update extension: the folder gets the shipped version and the
-      // extension is asked to reload (its worker goes away).
-      const gone = new Promise<void>((done) => worker.once("close", () => done()));
-      await notice.getByRole("button", { name: "Update extension" }).click();
-      await expect.poll(folderVersion).toBe(manifest.version);
-      await gone;
+      // A second browser loaded the same folder (same path, same id) and paired too.
+      const second = await chromium.launchPersistentContext(join(root, "chromium-2"), {
+        executablePath: executablePath ?? undefined,
+        headless: true,
+        ignoreDefaultArgs: ["--disable-extensions"],
+        args: ["--enable-unsafe-extension-debugging"],
+      });
+      try {
+        const secondCdp = await second.browser()!.newBrowserCDPSession();
+        expect(((await secondCdp.send("Extensions.loadUnpacked" as any, { path: folder })) as { id: string }).id).toBe(extensionId);
+        const secondWorker = second.serviceWorkers().find(ours) ?? (await second.waitForEvent("serviceworker", { predicate: ours, timeout: 15_000 }));
+        await secondWorker.evaluate(async (port) => chrome.storage.local.set({ ports: [port] }), linkPort);
+        const secondPopup = await second.newPage();
+        await secondPopup.goto(`chrome-extension://${extensionId}/popup.html`);
+        await secondPopup.locator("#connect-button").click();
+        await expect(secondPopup.locator("#pairing-code")).toHaveText(/^\d{3} \d{3}$/, { timeout: 10_000 });
+        await codara.getByRole("button", { name: "Allow" }).first().click();
+        await expect.poll(async () => (await linkState(codara)).browsers.filter((entry: { connected: boolean }) => entry.connected).length, { timeout: 15_000 }).toBe(2);
+        const firstLink = state.browsers[0].linkId as string;
+        const secondLink = ((await linkState(codara)).browsers as { linkId: string }[]).find((entry) => entry.linkId !== firstLink)!.linkId;
+
+        // Update extension in the first browser's row: the folder gets the
+        // shipped version and that extension is asked to reload (its worker goes away).
+        const gone = new Promise<void>((done) => worker.once("close", () => done()));
+        await row.locator(`[data-chrome-link="${firstLink}"]`).getByRole("button", { name: "Update extension" }).click();
+        await expect.poll(folderVersion).toBe(manifest.version);
+        await gone;
+
+        // The second browser was not touched, and its row says the folder changed under it.
+        expect(second.serviceWorkers().filter(ours)).toEqual([secondWorker]);
+        const reloadNotice = row.locator(`[data-chrome-link="${secondLink}"] [data-chrome-extension-update="reload"]`);
+        await expect(reloadNotice).toContainText(`Codara's extension folder now holds ${manifest.version}: reload the extension in this browser.`);
+        for (const width of UPDATE_WIDTHS) {
+          await codara.setViewportSize({ width, height: 860 });
+          await row.evaluate((el) => el.scrollIntoView({ block: "start" }));
+          await row.screenshot({ path: join(shots, `extension-reload-${width}-${theme}.png`), animations: "disabled" });
+        }
+        await codara.setViewportSize({ width: 1280, height: 860 });
+        const secondGone = new Promise<void>((done) => secondWorker.once("close", () => done()));
+        await reloadNotice.getByRole("button", { name: "Reload extension" }).click();
+        await secondGone;
+      } finally {
+        await second.close().catch(() => undefined);
+      }
       // Chromium 156 leaves an extension loaded over the protocol disabled
       // after it reloads itself (codara-studio issue 240), so the test stops at
       // the reload; extensions/chrome/test covers what survives it.
