@@ -47,9 +47,10 @@ function groupAlive(pid: number): boolean {
   return processAlive(pid);
 }
 
-async function read(file: string): Promise<LockContent | null> {
+function parse(text: string | null): LockContent | null {
+  if (text === null) return null;
   try {
-    const raw = JSON.parse(await fs.readFile(file, "utf8")) as Record<string, unknown>;
+    const raw = JSON.parse(text) as Record<string, unknown>;
     const pid = Number(raw.pid);
     if (!Number.isInteger(pid) || pid <= 0) return null;
     const installer = Number(raw.installer);
@@ -62,6 +63,36 @@ async function read(file: string): Promise<LockContent | null> {
     };
   } catch {
     return null;
+  }
+}
+
+const readText = (file: string) => fs.readFile(file, "utf8").catch(() => null);
+const read = async (file: string) => parse(await readText(file));
+
+/**
+ * Removes a stale lock, one Codara at a time: the remover holds a guard file
+ * created exclusively and checks, under it, that the lock is still the one
+ * it judged stale. Nobody else removes a lock without the guard, and a new
+ * lock can only be created where there is none, so the checked lock cannot
+ * change before it is removed. False when another Codara is taking it over.
+ */
+async function takeOver(file: string, seen: string | null): Promise<boolean> {
+  const guard = `${file}.takeover`;
+  try {
+    await (await fs.open(guard, "wx")).close();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // Left by a Codara that stopped in the middle of a takeover.
+    const age = await fs.stat(guard).then((stat) => Date.now() - stat.mtimeMs, () => 0);
+    if (age > 10_000) await fs.rm(guard, { force: true });
+    return false;
+  }
+  try {
+    if ((await readText(file)) !== seen) return false;
+    await fs.rm(file, { force: true });
+    return true;
+  } finally {
+    await fs.rm(guard, { force: true });
   }
 }
 
@@ -81,7 +112,7 @@ export async function acquireUpdateLock(file: string, options: UpdateLockOptions
       await handle.close();
     }
   };
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       await write(file, null);
       const owned = async () => (await read(file))?.pid === pid;
@@ -100,7 +131,8 @@ export async function acquireUpdateLock(file: string, options: UpdateLockOptions
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
-    const content = await read(file);
+    const seen = await readText(file);
+    const content = parse(seen);
     const mtime = await fs.stat(file).then((stat) => stat.mtimeMs, () => null);
     if (content === null) {
       // A lock being written has no pid yet: held for a moment.
@@ -114,7 +146,7 @@ export async function acquireUpdateLock(file: string, options: UpdateLockOptions
         if (content.installer !== null && installerAlive(content.installer)) return null;
       }
     }
-    await fs.rm(file, { force: true });
+    if (!(await takeOver(file, seen))) return null;
   }
   return null;
 }

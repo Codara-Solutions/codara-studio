@@ -877,6 +877,18 @@ async function crashSafety(m) {
       assert.ok(after, "taken over once the installer is gone too");
       await after.release();
 
+      // Codaras taking over the same stale lock at once: exactly one gets it.
+      for (let round = 0; round < 25; round += 1) {
+        fs.writeFileSync(file, JSON.stringify({ pid: 111, host: "here", since: new Date().toISOString() }));
+        const pids = [201, 202, 203, 204, 205, 206];
+        const got = await Promise.all(pids.map((pid) => m.acquireUpdateLock(file, opts(pid, { alive: (other) => other !== 111 }))));
+        const owners = got.filter(Boolean);
+        assert.equal(owners.length, 1, `round ${round}: ${owners.length} holders`);
+        assert.ok(pids.includes(JSON.parse(fs.readFileSync(file, "utf8")).pid), "the lock on disk is the winner's");
+        await owners[0].release();
+        assert.deepEqual(fs.readdirSync(dir), [], "nothing left aside");
+      }
+
       // A pid reused after a reboot keeps nothing forever.
       const t0 = Date.parse("2026-11-18T12:00:00Z");
       const old = await m.acquireUpdateLock(file, opts(111, { now: () => t0 }));
