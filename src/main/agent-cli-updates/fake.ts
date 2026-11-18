@@ -8,7 +8,7 @@
 import type { UpdatableAgentCliToolId } from "@shared/agent-cli-updates";
 
 import { detectInstallPlan } from "./install-plan";
-import type { UpdateServiceDependencies } from "./service";
+import type { PersistedUpdateState, UpdateServiceDependencies } from "./service";
 
 interface FakeTool {
   version: string | null;
@@ -34,6 +34,7 @@ export function createFakeDependencies(): Pick<
   UpdateServiceDependencies,
   "inspect" | "latest" | "run" | "liveSessions" | "exists" | "pi" | "loadState" | "saveState" | "relink" | "lock"
 > {
+  let saved: PersistedUpdateState = { failed: {}, notOffered: {} };
   let releaseHeld: (() => void) | null = null;
   let releaseCounting: (() => void) | null = null;
   const controls: AgentCliFakeControls = {
@@ -114,10 +115,13 @@ export function createFakeDependencies(): Pick<
     },
     exists: async () => true,
     pi: async () => ({ version: "1.5.2", pinnedVersion: "1.5.2", source: "bundled" }),
-    loadState: async () => ({ failed: {}, notOffered: {} }),
-    saveState: async () => {},
+    // Kept in memory, read back under the lock as a file would be.
+    loadState: async () => structuredClone(saved),
+    saveState: async (state) => {
+      saved = structuredClone(state);
+    },
     // Nothing on disk is touched: no relinking, no lock file.
     relink: undefined,
-    lock: async () => async () => {},
+    lock: async () => ({ release: async () => {}, installerStarted: async () => {} }),
   };
 }
