@@ -860,6 +860,83 @@ keeps Studio's own control order. Worker rows stay separate timeline items. The
 composer uses `--panel`, so in the light themes it stays warm rather than near
 white.
 
+## Cora worker view (2026-11)
+
+**Chosen:** A, "Go inside". Clicking a worker in Cora swaps the whole
+conversation for that worker's own chat, the way Claude Code shows a subagent.
+Etienne picked A on 2026-11-17 ("I like A") from four mock-ups of the same
+chat: A go inside, B a side list of workers beside Main, C Main and the worker
+side by side, D the worker's steps expanded in place under its row. What he
+asked for: see what message a worker got and what it does, in a view that
+replaces the main agent's and looks the same.
+
+**References:** Claude Code's subagent view; the Cora chat above, whose rows
+the worker view reuses.
+
+**Rules it implies:**
+
+- A worker's view reuses the chat's own components: its steps are drawn by the
+  same rows as Cora's turns and fold the same way (only a worker that finished
+  well folds, and failures stay in sight). Its brief and the messages sent to
+  it are user bubbles and never fold. A worker never gets a renderer of its
+  own.
+- The terminal is a fallback behind a menu ("Raw terminal output", for output
+  the chat can't draw), never a primary button in Cora's chat. The board, Runs
+  and terminal agents outside the chat keep their terminals.
+- Main stays mounted underneath while you are inside a worker, so Back or Esc
+  returns to exactly where you were, and focus goes back to the row you opened.
+- One slim bar says where you are: Main, the worker, its model, its state and
+  its time. It is a navigation landmark; the arrows step through the chat's
+  workers. Esc leaves only when nothing inside the view (a menu, a popover)
+  wants it first.
+- A worker row in a step card is one button. "Open" shows on hover and focus,
+  not all the time.
+- A running worker's composer steers that worker only and says so. A finished
+  worker takes no messages: a follow-up goes through Cora.
+- Another worker ending while you are inside changes a status in the bar. It is
+  never a toast.
+- Colour means state, as in the chat: running, done and failed use the status
+  tokens; nothing else in the bar is tinted.
+
+## Cora agents rail (2026-11)
+
+**Chosen:** option 2, "Collapsible agents rail". Etienne picked it on
+2026-11-17 ("the number 2") after asking to "see the sub agents listed that are
+running in cora". He chose it from three mock-ups of the same chat: 1 an agents
+chip in the header, 2 the rail, 3 a line of running workers above the composer.
+It is a 32 px strip on the chat's left edge, with Cora on top and one mark per
+worker. It folds open into the full list over the chat.
+
+**Why:** every worker's state shows at once, in Main and inside a worker,
+without opening anything. A mark carries no name, so hover and the list say the
+rest.
+
+**Rules it implies:**
+
+- The strip shows only when the chat has workers, and it never grows: it is
+  32 px in every pane. The opened list and the tooltips float over the chat and
+  never push it aside.
+- A mark's shape carries the state, not only its colour: the chat's own
+  activity icons (spinner running, check done, the failed glyph failed, hollow
+  queued). The worker you are in, or Main, is the filled mark with a bar at
+  the edge.
+- Hover or keyboard focus shows the name, model, state, time and current step,
+  or the reason for a failed worker. Hover never moves focus. A click goes
+  inside the worker, and Cora's mark goes back to Main.
+- The list is grouped by step, like the step card. Running rows add the step
+  they are on, failed rows add their reason, and Main's row reads "waiting on
+  N".
+- Past eight workers, the running ones come first, then "+N", which opens the
+  list. The worker you are in always keeps its mark.
+- The strip is one tab stop. Up and down move between marks, Enter goes
+  inside, right opens the list, and Esc folds it and stops there, so it never
+  also leaves the worker.
+- The count of workers lives on the rail only: the composer drops its "N
+  workers running" line while the rail shows.
+- What a worker is doing now comes from a short summary the main process keeps
+  for each live worker and pushes when it changes. The rail never reads a
+  worker's feed.
+
 ## Automations (2026-11)
 
 **Chosen:** variant A, inbox and run history, from four variants built with the

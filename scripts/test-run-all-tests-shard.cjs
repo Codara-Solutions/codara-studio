@@ -1,12 +1,15 @@
 #!/usr/bin/env node
-// CI runs the macOS pool on two machines, one suite at a time on each
-// (CODARA_TEST_SHARD=1/2 and 2/2). Between them the shards must run every
+// CI runs the macOS pool on three machines, one suite at a time on each
+// (CODARA_TEST_SHARD=1/3 to 3/3). Between them the shards must run every
 // suite exactly once, agree on the split without sharing any state, balance the
 // known slow suites' seconds, and refuse a malformed setting instead of silently
 // running nothing.
 //
 //   node scripts/test-run-all-tests-shard.cjs
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const yaml = require("js-yaml");
 const { selectShard, shardFromEnv, listTests, selectPart, SLOW_POOL_SUITES } = require("./run-all-tests.cjs");
 
 let failed = 0;
@@ -69,13 +72,17 @@ check("every listed slow suite is a pool suite of this repo", () => {
   }
 });
 
-check("the two CI shards get about the same listed seconds", () => {
+check("CI's shards get about the same listed seconds", () => {
+  // As many shards as the workflow's matrix runs, so the two cannot drift.
+  const ci = yaml.load(fs.readFileSync(path.join(__dirname, "..", ".github", "workflows", "ci.yml"), "utf8"));
+  const count = ci.jobs["test-pool"].strategy.matrix.shard.length;
   const pool = selectPart(listTests(null), "pool");
-  const seconds = [0, 1].map((index) =>
-    selectShard(pool, { index, count: 2 }).reduce((sum, f) => sum + (SLOW_POOL_SUITES[f] || 0), 0),
+  const seconds = Array.from({ length: count }, (_, index) =>
+    selectShard(pool, { index, count }).reduce((sum, f) => sum + (SLOW_POOL_SUITES[f] || 0), 0),
   );
-  const total = seconds[0] + seconds[1];
-  assert.ok(Math.abs(seconds[0] - seconds[1]) <= total * 0.1, `listed seconds per shard: ${seconds}`);
+  const total = seconds.reduce((a, b) => a + b, 0);
+  // Within a fifth of one shard's fair share, whatever the shard count.
+  assert.ok(Math.max(...seconds) - Math.min(...seconds) <= (total / count) * 0.2, `listed seconds per shard: ${seconds}`);
 });
 
 if (failed > 0) process.exit(1);
