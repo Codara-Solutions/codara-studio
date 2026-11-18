@@ -149,6 +149,10 @@ async function main() {
   const gpt = cw.contextWindowForModel("gpt-5.2-codex").tokens;
   check("gpt-5 fallback window is 400k", gpt === 400_000, String(gpt));
   check("gpt-5: 321k/400k triggers", 321_000 / gpt >= RATIO);
+  for (const [model, tokens] of [["gpt-6.2-sol", 500_000], ["gpt-6.2-astra@high", 272_000]]) {
+    const window = cw.contextWindowForModel(model);
+    check(`${model} uses its Codex window`, window.tokens === tokens && window.source === "known", String(window.tokens));
+  }
   const unknown = cw.contextWindowForModel("mystery-model").tokens;
   check("unknown model falls back to 128k", unknown === 128_000, String(unknown));
   check("unknown: 103k/128k triggers", 103_000 / unknown >= RATIO);

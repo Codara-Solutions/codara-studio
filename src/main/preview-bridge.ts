@@ -26,6 +26,7 @@
 import { BrowserWindow, ipcMain, type WebContents } from "electron";
 import { randomBytes } from "node:crypto";
 import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
+import { holdUntilRendererReady, isRendererReady, isStartingUp } from "./renderer-readiness";
 
 export type PreviewOpName =
   | "whiteboard_inspect"
@@ -119,11 +120,16 @@ export async function requestPreviewOp<T = unknown>(
   params: PreviewOpParams = {},
   opts?: { timeoutMs?: number },
 ): Promise<T> {
-  const win = pickTargetWindow();
+  const noWindow = () =>
+    new Error("No Codara window is open. Open Codara and a preview tab before calling preview tools.");
+  let win = pickTargetWindow();
   if (!win) {
-    throw new Error(
-      "No Codara window is open. Open Codara and a preview tab before calling preview tools.",
-    );
+    // While the app starts, the window may not exist yet: hold for it. Once it
+    // has been created, none means closed, and the op fails at once.
+    if (!isStartingUp()) throw noWindow();
+    await holdUntilRendererReady();
+    win = pickTargetWindow();
+    if (!win) throw noWindow();
   }
   if (win.webContents.isDestroyed()) throw new Error("The Codara window closed before the preview request could start.");
   // The agent-socket handshake is written before the renderer bundle has
@@ -132,6 +138,10 @@ export async function requestPreviewOp<T = unknown>(
   // timeout. did-finish-load happens after the renderer module (and its bridge
   // registration) has evaluated, so it is the durable readiness boundary.
   await waitForRendererLoad(win.webContents);
+  // Loaded is not mounted: the tabs and registries the ops act on exist only
+  // once React has mounted. The hold has its own limit, and the op's timeout
+  // starts once it is over.
+  if (!isRendererReady()) await holdUntilRendererReady();
 
   const reqId = randomBytes(8).toString("hex");
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
