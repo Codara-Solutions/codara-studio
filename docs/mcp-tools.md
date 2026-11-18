@@ -1434,10 +1434,7 @@ shows, so it can recommend what to remove and ask you.
   which agent asks and lists each worktree with its repository, branch, size,
   recommendation and reason. Only the safe ones start ticked. A worktree with
   unsaved changes or something running in it cannot be ticked; you remove
-  those yourself from the screen. The asking agent's own tab, working from
-  another folder, does not count as something running in a worktree it made;
-  a worktree it gave up (pushed, pull request closed) it can also remove
-  itself with `codara_worktree_remove`, without asking. A separate, unticked choice per worktree
+  those yourself from the screen. A separate, unticked choice per worktree
   also deletes its branch on the remote with your own git sign-in (`git push
   --delete` with a lease on the commit the dialog showed), offered only when
   a merged pull request covers that branch's remote tip, no open pull request
@@ -1453,6 +1450,11 @@ can be removed once you tick it, since the dialog listed those files; a
 branch with commits that are not merged always stays. Read-only and edit-only
 Pi workers may scan but not remove, and imported pull-request runs do not get
 the tool.
+
+The asking agent's own tab, working from another folder, does not count as
+something running in a worktree it made. A worktree it gave up (pushed, its
+pull request closed) it can also remove itself with `codara_worktree_remove`,
+without asking.
 
 ## Whiteboard and board
 
