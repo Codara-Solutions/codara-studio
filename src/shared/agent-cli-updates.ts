@@ -83,11 +83,19 @@ export interface AgentCliUpdatesSnapshot {
 
 const VERSION_RE = /(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/;
 
+// Lines a version check can print before its version: Codex warns on stderr,
+// and a warning may name a path such as node-versions/v22.23.3.
+const NOISE_LINE_RE = /^\s*(?:warn(?:ing)?|error|npm (?:warn|notice)|\(node:\d+\))\b/i;
+
 /** The first x.y.z[-pre] in a version check's output ("2.1.327 (Claude Code)", "codex-cli 0.169.0"). */
 export function parseCliVersion(output: string | null | undefined): string | null {
   if (!output) return null;
-  const match = VERSION_RE.exec(output);
-  return match ? match[0] : null;
+  for (const line of output.split(/\r?\n/)) {
+    if (NOISE_LINE_RE.test(line)) continue;
+    const match = VERSION_RE.exec(line);
+    if (match) return match[0];
+  }
+  return null;
 }
 
 /**

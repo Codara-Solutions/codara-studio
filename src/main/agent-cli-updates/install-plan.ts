@@ -66,11 +66,12 @@ const VENDOR_UPDATE: Record<UpdatableAgentCliToolId, string> = {
 // slashes. Claude keeps each version as one file under versions/ (POSIX links
 // ~/.local/bin/claude to it; Windows copies claude.exe into ~/.local/bin).
 // Codex links its launcher into packages/standalone/releases/<version>-<target>.
-// Grok links ~/.grok/bin/grok to grok-<version> beside it.
+// Grok links ~/.grok/bin/grok to downloads/grok-<version>-<platform> (older
+// installers: to grok-<version> beside it).
 const NATIVE_LAYOUTS: Record<UpdatableAgentCliToolId, RegExp> = {
   claude: /\/\.local\/(?:share\/claude\/versions\/[^/]+|bin\/claude(?:\.exe)?)$/i,
   codex: /\/packages\/standalone\/releases\/[^/]+\/(?:bin\/)?codex(?:\.exe)?$/i,
-  grok: /\/\.grok\/bin\/grok(?:-\d[\w.-]*)?(?:\.exe)?$/i,
+  grok: /\/\.grok\/(?:bin|downloads)\/grok(?:-[\w.-]+)?(?:\.exe)?$/i,
 };
 
 function slashes(path: string): string {
@@ -93,7 +94,9 @@ function nativePlan(tool: UpdatableAgentCliToolId, launcher: string): InstallPla
     display: [tool, ...args].join(" "),
   });
   const rollback: Record<UpdatableAgentCliToolId, (version: string, binary: string) => CliCommand> = {
-    claude: (version, binary) => run(binary, ["install", version]),
+    // Without --force Claude's installer reports success and keeps the
+    // newer build selected.
+    claude: (version, binary) => run(binary, ["install", version, "--force"]),
     // `codex update` runs Codex's own installer, which takes the release to
     // install from CODEX_RELEASE.
     codex: (version, binary) => ({ ...run(binary, ["update"], { CODEX_RELEASE: version }), display: `CODEX_RELEASE=${version} codex update` }),

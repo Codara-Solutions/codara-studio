@@ -44,6 +44,12 @@ async function run(m) {
   assert.equal(m.parseCliVersion("grok 1.0.46"), "1.0.46");
   assert.equal(m.parseCliVersion("v0.171.0-alpha.13"), "0.171.0-alpha.13");
   assert.equal(m.parseCliVersion("command not found"), null);
+  assert.equal(
+    m.parseCliVersion("WARNING: could not create PATH aliases under /home/u/.local/share/fnm/node-versions/v22.23.3\ncodex-cli 0.170.0"),
+    "0.170.0",
+    "a warning printed before the version is skipped",
+  );
+  assert.equal(m.parseCliVersion("grok 1.0.89 (28be5bb1bf65) [stable]"), "1.0.89");
   assert.equal(m.parseCliVersion(""), null);
   assert.equal(m.compareCliVersions("0.170.0", "0.169.0"), 1);
   assert.equal(m.compareCliVersions("0.169.0", "0.170.0"), -1);
@@ -77,7 +83,7 @@ async function run(m) {
     assert.deepEqual([p.update.executable, ...p.update.args], ["/home/u/.local/bin/claude", "update"]);
     assert.equal(p.manualCommand, "claude update");
     const back = p.rollback("2.1.326", "/home/u/.local/share/claude/versions/2.1.326");
-    assert.deepEqual([back.executable, ...back.args], ["/home/u/.local/share/claude/versions/2.1.326", "install", "2.1.326"],
+    assert.deepEqual([back.executable, ...back.args], ["/home/u/.local/share/claude/versions/2.1.326", "install", "2.1.326", "--force"],
       "the previous build re-installs itself, so a broken new build never runs the roll back");
   }
   // Claude's native installer on Windows copies claude.exe into .local\bin.
@@ -116,7 +122,17 @@ async function run(m) {
     });
     assert.equal(p.method, "native", "the Windows standalone layout is the same with backslashes");
   }
-  // Grok's installer: ~/.grok/bin/grok links to grok-<version>.
+  // Grok's installer: ~/.grok/bin/grok links to downloads/grok-<version>-<platform>,
+  // or, from older installers, to grok-<version> beside it.
+  {
+    const p = await plan({
+      tool: "grok",
+      platform: "linux",
+      binaryPath: "/home/u/.grok/bin/grok",
+      realPath: "/home/u/.grok/downloads/grok-1.0.89-linux-x86_64",
+    });
+    assert.equal(p.method, "native");
+  }
   {
     const p = await plan({
       tool: "grok",
