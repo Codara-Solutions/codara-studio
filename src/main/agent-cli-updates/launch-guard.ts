@@ -23,7 +23,8 @@ export const VENDOR_UPDATER_OFF: Readonly<Record<string, Readonly<Record<string,
 export const LAUNCH_SETTLE_MS = 30_000;
 
 let held: readonly string[] = [];
-const busy = new Set<string>();
+/** Tools being swapped, with the name the refusal uses. */
+const busy = new Map<string, string>();
 const starting = new Map<string, number>();
 
 /** Tools whose own updater stays off in the terminals Codara opens. */
@@ -36,14 +37,14 @@ export function vendorUpdaterEnv(): Record<string, string> {
   return Object.assign({}, ...held.map((tool) => VENDOR_UPDATER_OFF[tool] ?? {}));
 }
 
-export function setToolBusy(tool: string, isBusy: boolean): void {
-  if (isBusy) busy.add(tool);
+export function setToolBusy(tool: string, isBusy: boolean, label = tool): void {
+  if (isBusy) busy.set(tool, label);
   else busy.delete(tool);
 }
 
 /** Tools being swapped right now (the quit prompt names them). */
 export function busyTools(): string[] {
-  return [...busy];
+  return [...busy.keys()];
 }
 
 /**
@@ -52,8 +53,9 @@ export function busyTools(): string[] {
  * would only start late, unseen, or in the middle of a roll back. Returns
  * the call that ends the launch; until then the update counts it as a session.
  */
-export function beginToolLaunch(tool: string, label: string): () => void {
-  if (busy.has(tool)) throw new Error(`${label} is updating. Try again in a few minutes.`);
+export function beginToolLaunch(tool: string): () => void {
+  const updating = busy.get(tool);
+  if (updating !== undefined) throw new Error(`${updating} is updating. Try again in a few minutes.`);
   starting.set(tool, (starting.get(tool) ?? 0) + 1);
   let ended = false;
   return () => {
