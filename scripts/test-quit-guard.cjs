@@ -158,7 +158,7 @@ async function main() {
     check("an agent tool update is live work", qg.hasLiveWork(live));
     const quit = qg.quitPromptText(live, { restartingForUpdate: false, resumesTerminalAgents: false, keepsTerminalOutput: true });
     check("the quit prompt names the update", quit.message === "Still working: the Claude Code update.", quit.message);
-    check("and says what happens to it", /previous version is put back if the new one does not work/.test(quit.detail), quit.detail);
+    check("and says what happens to it", /puts the previous one back where it can, or tells you how/.test(quit.detail) && !/previous version is put back/.test(quit.detail), quit.detail);
   }
   {
     const live = qg.collectLiveWork({ chats: 1, automations: 0, workers: 1 }, [agent("claude", "api")]);
