@@ -21606,6 +21606,8 @@ async function runFakeWorkflowWorkerSession({
 // it and stop it without a subscription. It writes a short scripted feed,
 // answers each message, and finishes after FAKE_DELAY_MS=<n> (default 300 ms,
 // at most 15 minutes) with a report naming one changed file and one check.
+// Its test run stays open while it waits, as a long one would; FAKE_FAIL
+// makes it fail there instead, with a short reason.
 async function runFakePiWorkerSession({
   run,
   task,
@@ -21650,7 +21652,6 @@ async function runFakePiWorkerSession({
     feed.textDelta("The readme names the project. Checking that the tests pass before changing anything.");
     feed.endMessage();
     feed.tool("fake-test", "bash", { command: "npm test" });
-    feed.result("fake-test", "12 passing", false);
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, delay);
       wake = () => {
@@ -21659,6 +21660,11 @@ async function runFakePiWorkerSession({
       };
     });
     if (killed) return { exitCode: 1, error: "Fake Pi worker was stopped." };
+    if (/FAKE_FAIL/.test(task.description)) {
+      feed.result("fake-test", "typecheck, 2 errors", true);
+      return { exitCode: 1, error: "typecheck, 2 errors" };
+    }
+    feed.result("fake-test", "12 passing", false);
     feed.tool("fake-edit", "edit", { path: "src/example.ts", oldText: "count", newText: "total" });
     feed.result("fake-edit", "Edited src/example.ts", false);
     feed.textDelta(`Done: ${task.title}. One file changed and the tests pass.`);
