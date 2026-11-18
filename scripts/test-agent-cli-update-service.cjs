@@ -1084,6 +1084,21 @@ async function crashSafety(m) {
     assert.match(tool(service2.snapshot(), "codex").message, /Codex cannot be found now/);
     service2.stop();
 
+    // The clicked tool's own record, and the tool works: the click updates it.
+    const ownRecord = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const w3 = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { claude: ownRecord } } });
+    let held3 = true;
+    w3.deps.lock = async () => (held3 ? null : { release: async () => {}, installerStarted: async () => {} });
+    const service3 = m.createAgentCliUpdateService(w3.deps);
+    await service3.start();
+    await service3.check();
+    held3 = false;
+    await service3.update("claude");
+    await service3.settled();
+    assert.equal(tool(service3.snapshot(), "claude").phase, "updated", "a click whose own record turns out fine still updates");
+    assert.equal(w3.saved.inProgress, undefined);
+    service3.stop();
+
     // The file: one validated record per tool; a file from before holds one.
     const single = { ...record };
     assert.deepEqual(m.inProgressFrom(single), { codex: single }, "a single old record is read as its tool's");

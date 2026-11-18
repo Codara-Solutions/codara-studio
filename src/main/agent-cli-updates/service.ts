@@ -492,8 +492,10 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
         // Updates cut short earlier (a retry not yet due, or a tool that
         // could not be found) are finished first, under this same lock.
         const recovered = await recoverUnderLock();
-        // This tool's own: what recovery found is what the user sees now.
-        if (recovered[tool] !== undefined) return;
+        // This tool's own: what recovery did, or that the tool is missing,
+        // is what the user sees now. One that still works is updated.
+        const own = recovered[tool];
+        if (own !== undefined && own !== "working") return;
         await performUpdate(tool, origin);
       } catch (error) {
         set(tool, { phase: "failed", message: `The update stopped: ${(error as Error).message.slice(0, 300)}` });
