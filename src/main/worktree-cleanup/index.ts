@@ -409,7 +409,7 @@ export async function runAgentWorktreeCleanup(
   const tool = await import("./agent-tool");
   const agentDependencies = await agentDeps();
   if (call.action === "scan") {
-    return tool.scanForAgent(agentDependencies, { checkMerge: call.checkMerge, staleDays: call.staleDays });
+    return tool.scanForAgent(agentDependencies, { checkMerge: call.checkMerge, staleDays: call.staleDays }, call.caller);
   }
   let finish!: (result: WorktreeCleanupAgentResult) => void;
   const finished = new Promise<WorktreeCleanupAgentResult>((resolve) => {

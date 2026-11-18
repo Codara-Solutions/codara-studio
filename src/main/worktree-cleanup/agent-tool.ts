@@ -21,7 +21,7 @@ import {
 import { cleanText, type WorktreeCaller } from "../agent-worktrees";
 import { NETWORK_TIMEOUT_MS, errorText, readGitText, runGit } from "../git-exec";
 import { isAncestor } from "../git-worktrees";
-import { agentTabText, canonicalPath, pathKey, type RepoPullRequests, type WorktreeCleanupDeps } from "./inspect";
+import { agentTabText, canonicalPath, countsAsUse, pathKey, type RepoPullRequests, type WorktreeCleanupDeps } from "./inspect";
 import { checkCleanupTargets, removeCleanupWorktrees } from "./remove";
 import { scanWorktreeCleanup } from "./scan";
 
@@ -276,7 +276,9 @@ interface Collected {
 
 async function collect(
   deps: AgentCleanupDeps,
-  options: { checkMerge: boolean; staleDays: number; only?: ReadonlySet<string> },
+  // askerPane: the asking agent's pane. Its own tab, as the maker working
+  // from another folder, does not hold what it asks about (countsAsUse).
+  options: { checkMerge: boolean; staleDays: number; only?: ReadonlySet<string>; askerPane?: string },
 ): Promise<Collected> {
   const state = await deps.cleanup.loadState();
   const notCovered = state.workspaces
@@ -289,7 +291,14 @@ async function collect(
   const cleanupDeps: WorktreeCleanupDeps =
     options.checkMerge && deps.freshPullRequests ? { ...deps.cleanup, pullRequests: deps.freshPullRequests } : deps.cleanup;
   const { scan } = await scanWorktreeCleanup(cleanupDeps, { sizeOf: deps.sizeOf });
-  const rows = scan.rows.filter((row) => !row.isMain && (!options.only || options.only.has(pathKey(row.id)) || options.only.has(pathKey(row.path))));
+  const uses = { ...(options.askerPane ? { askerPane: options.askerPane } : {}) };
+  const rows = scan.rows
+    .filter((row) => !row.isMain && (!options.only || options.only.has(pathKey(row.id)) || options.only.has(pathKey(row.path))))
+    .map((row) => {
+      const next: WorktreeCleanupRow = { ...row, inUse: row.inUse.filter((use) => countsAsUse(use, uses)) };
+      if (next.makerOpen && !countsAsUse(next.makerOpen, uses)) delete next.makerOpen;
+      return next;
+    });
 
   const unsized = rows.filter((row) => {
     if (row.missing) return false;
@@ -301,6 +310,7 @@ async function collect(
   const checks = await checkCleanupTargets(
     deps.cleanup,
     rows.map((row) => ({ repoRoot: row.repoRoot, path: row.path })),
+    uses,
   ).catch(() => [] as WorktreeRemovalCheck[]);
   const checkOf = new Map(checks.map((check) => [`${pathKey(check.repoRoot)}\0${pathKey(check.path)}`, check]));
 
@@ -393,10 +403,11 @@ function scanItem(facts: AgentWorktreeFacts, now: number): Record<string, unknow
 export async function scanForAgent(
   deps: AgentCleanupDeps,
   input: { checkMerge?: boolean; staleDays?: number },
+  caller?: WorktreeCaller,
 ): Promise<Record<string, unknown>> {
   const checkMerge = input.checkMerge === true;
   const staleDays = Math.max(1, Math.min(365, Math.floor(input.staleDays ?? DEFAULT_ADVICE_STALE_DAYS)));
-  const collected = await collect(deps, { checkMerge, staleDays });
+  const collected = await collect(deps, { checkMerge, staleDays, ...(caller?.paneId ? { askerPane: caller.paneId } : {}) });
   const now = deps.cleanup.now().getTime();
   const sorted = sortByAdvice(
     collected.facts.map((facts) => ({ facts, advice: facts.advice, sizeBytes: sizeBytesOf(facts), path: facts.row.path })),
@@ -496,7 +507,8 @@ export async function removeForAgent(
     keys.set(pathKey(await canonicalPath(item.path)), entry);
   }
   const staleDays = Math.max(1, Math.min(365, Math.floor(input.staleDays ?? DEFAULT_ADVICE_STALE_DAYS)));
-  const collected = await collect(deps, { checkMerge: true, staleDays, only: new Set(keys.keys()) });
+  const askerPane = context.caller.paneId;
+  const collected = await collect(deps, { checkMerge: true, staleDays, only: new Set(keys.keys()), ...(askerPane ? { askerPane } : {}) });
   const found = new Set<string>();
   const items: Array<{ facts: AgentWorktreeFacts; item: WorktreeCleanupApprovalItem }> = [];
   for (const facts of sortByAdvice(
@@ -571,7 +583,12 @@ export async function removeForAgent(
       }),
       deleteMergedBranches: answer.deleteMergedBranches === true,
     },
-    { sizeOf: deps.sizeOf, ...(deps.forgetSize ? { forgetSize: deps.forgetSize } : {}), caller: context.caller },
+    {
+      sizeOf: deps.sizeOf,
+      ...(deps.forgetSize ? { forgetSize: deps.forgetSize } : {}),
+      caller: context.caller,
+      ...(askerPane ? { askerPane } : {}),
+    },
   );
 
   const removed: WorktreeCleanupAgentResult["removed"] = [];

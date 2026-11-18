@@ -1321,6 +1321,33 @@ async function main() {
       assert.ok(await github.repositoryCacheKey(repo), "back to plain: cached again");
     }
 
+    {
+      // Every pull request of a head branch with its state, for telling a
+      // given-up branch apart. One that could be open but does not say so
+      // fails the whole list rather than going missing.
+      const entry = (number, state) => ({
+        number,
+        url: `https://github.com/codara/studio/pull/${number}`,
+        headRefName: "agent/x",
+        headRefOid: "a".repeat(40),
+        baseRefName: "main",
+        isCrossRepository: false,
+        mergeCommit: null,
+        ...(state ? { state } : {}),
+      });
+      const { adapter, calls } = fakeAdapter(github, [
+        { stdout: JSON.stringify([entry(4, "CLOSED"), entry(5, "MERGED"), entry(6, "OPEN")]), stderr: "" },
+        { stdout: JSON.stringify([entry(4, "CLOSED"), entry(6)]), stderr: "" },
+        { stdout: JSON.stringify([entry(4, "CLOSED"), { ...entry(6, "OPEN"), headRefOid: "not-a-sha" }]), stderr: "" },
+      ]);
+      const listed = await adapter.listPullRequestStatesForHead("/repo", "agent/x");
+      assert.deepEqual(listed.map((pr) => [pr.number, pr.state]), [[4, "closed"], [5, "merged"], [6, "open"]]);
+      assert.deepEqual(calls[0].args.slice(0, 8), ["pr", "list", "--state", "all", "--head", "agent/x", "--limit", "20"]);
+      assert.match(calls[0].args.at(-1), /,state$/);
+      await rejectsCode(adapter.listPullRequestStatesForHead("/repo", "agent/x"), "invalid-response");
+      await rejectsCode(adapter.listPullRequestStatesForHead("/repo", "agent/x"), "invalid-response");
+    }
+
     console.log("All GitHub CLI adapter checks passed.");
   } finally {
     rmSync(temp, { recursive: true, force: true });

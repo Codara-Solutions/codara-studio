@@ -246,6 +246,8 @@ async function main() {
       heads: null,
       headsCalls: 0,
       deleted: [],
+      // Open agent tabs: pane id to the folder their shell is in.
+      openPanes: new Map(),
       now: new Date(Date.now() + 40 * DAY),
     };
     const remoteHeads = () =>
@@ -264,7 +266,7 @@ async function main() {
       publishState: () => undefined,
       invalidateGitCache: () => undefined,
       listRuns: async () => [],
-      sessionCwd: () => null,
+      sessionCwd: (paneId) => h.openPanes.get(paneId) ?? null,
       sessionsUnderCwd: () => [],
       listRendererTerminals: async () => [],
       processesUnderCwds: async (dirs) => new Map(dirs.map((dir) => [dir, h.processes.get(dir) ?? []])),
@@ -459,6 +461,63 @@ async function main() {
       assert.ok(git(origin, ["branch", "--list", "feature/moved"]));
       assert.equal(git(repo, ["branch", "--list", "feature/merged"]), "", "the merged local branch went too");
       assert.ok(result.removed.find((entry) => entry.path === merged).recoveryRef);
+    });
+    await check("the asking agent's own tab elsewhere does not hold a worktree it made; another agent's request still sees it", async () => {
+      h.heads = null;
+      const mine = add("mine", "feature/mine");
+      commitFile(mine, "mine.txt", "x\n", "given up work");
+      git(mine, ["push", "-q", "-u", "origin", "feature/mine"]);
+      h.state.workspaces.push({
+        id: "ws-mine",
+        name: "mine",
+        cwd: mine,
+        color: "#123456",
+        workers: [],
+        copyBranch: {
+          repoCwd: repo,
+          branch: "feature/mine",
+          city: "mine",
+          mode: "fork",
+          createdAt: new Date().toISOString(),
+          createdBy: { kind: "agent", client: "claude-code", paneId: "pane-maker" },
+        },
+      });
+      // Its maker's tab is open, its shell in another folder.
+      h.openPanes.set("pane-maker", scratch);
+      const own = { caller: { role: "studio", client: "claude-code", paneId: "pane-maker" }, agent: { client: "claude-code", workspaceName: "repo" } };
+      const other = { caller: { role: "studio", client: "codex", paneId: "pane-other" }, agent: { client: "codex", workspaceName: "repo" } };
+      const scanned = async (caller) =>
+        (await tool.scanForAgent(deps, { checkMerge: true }, caller)).worktrees.find((entry) => entry.path === mine);
+      assert.deepEqual((await scanned(own.caller)).inUse, [], "its own tab is not a use");
+      assert.match((await scanned(other.caller)).inUse.join(" "), /which made it/);
+      assert.match((await scanned(undefined)).inUse.join(" "), /which made it/);
+
+      const before = asked.length;
+      const refused = await tool.removeForAgent(deps, { items: [{ path: mine }] }, other, asker(null));
+      assert.equal(refused.status, "nothing-to-remove");
+      assert.match(refused.skipped[0].reason, /In use: the agent in .*which made it/);
+      assert.equal(asked.length, before, "another agent's request is refused before the user is asked");
+      assert.ok(fs.existsSync(mine));
+
+      const result = await tool.removeForAgent(
+        deps,
+        { items: [{ path: mine }] },
+        own,
+        asker((request) => {
+          assert.equal(request.items[0].blocked, null, "the maker's own request may be ticked");
+          return {
+            id: "z",
+            approved: true,
+            items: request.items.map((entry) => ({ repoRoot: entry.repoRoot, path: entry.path, remove: true, deleteRemoteBranch: false })),
+            deleteMergedBranches: true,
+          };
+        }),
+      );
+      assert.equal(asked.length, before + 1, "the maker's request still goes through the user's dialog");
+      assert.deepEqual(result.removed.map((entry) => entry.path), [mine], JSON.stringify(result.skipped));
+      assert.equal(fs.existsSync(mine), false);
+      assert.ok(git(repo, ["branch", "--list", "feature/mine"]), "a branch that is not merged stays");
+      h.openPanes.delete("pane-maker");
     });
     await check("without a remote, no remote branch is offered", async () => {
       git(repo, ["remote", "remove", "origin"]);

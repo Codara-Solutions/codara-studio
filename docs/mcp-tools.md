@@ -1290,7 +1290,13 @@ the `blockers` and a `hint`:
   worktree's own branch, its pushed copy (under its own name or its
   upstream's, unless that is its base or the default branch) or a commit
   id, also when it is `origin/HEAD` or `HEAD` and the remote's HEAD names
-  one of those;
+  one of those. Or, when the agent asking made the worktree (from its own
+  terminal or Cora run) and gave the work up: the branch on origin holds the
+  exact last commit, read from the remote during the check, and GitHub's
+  last pull request from it was closed without merging, with none open. The
+  local branch then stays, beside its copy on origin, and the result names
+  the closed pull request under `givenUp`. Nobody else's worktree, and no
+  commit that is only local, is ever removed this way;
 - it has no uncommitted or untracked files (edits hidden by
   `assume-unchanged` or `skip-worktree` count), no merge or rebase in
   progress, and no ignored files beyond build output and caches
@@ -1343,7 +1349,7 @@ The `code` is the first blocker; `blockers` lists them all, and a dry run or
 | `WORKTREE_SUBMODULES` | A submodule or committed nested repository is checked out. | Ask you. |
 | `WORKTREE_NESTED_REPOSITORY` | Another checkout or worktree sits inside it (`details.nestedRepositories`). | Move or remove it first, or ask you. |
 | `WORKTREE_NESTED_SCAN_INCOMPLETE` | The search for nested checkouts could not finish (`details.unscannedFolder`). | Delete that folder if it only holds build output or dependencies, then retry; otherwise ask you. |
-| `WORKTREE_NOT_MERGED` | The last commit is not merged into the target. `details.pushed` says whether origin has it under the branch's name or its upstream's; `details.upstream` names an upstream of another name, with `gone` when the remote deleted it. | Push and merge it, or ask you to delete it from the rail. |
+| `WORKTREE_NOT_MERGED` | The last commit is not merged into the target, and the worktree is not the asking agent's own given-up work (pushed, its last pull request closed unmerged). `details.pushed` says whether origin has it under the branch's name or its upstream's; `details.upstream` names an upstream of another name, with `gone` when the remote deleted it. | Push and merge it, or ask you to delete it from the rail. |
 | `WORKTREE_TARGET_NOT_FOUND` | The merge target does not exist or cannot be a target. | Pass `target`, the branch it was merged into. |
 | `WORKTREE_RUNNING_PANES` | Terminals are open in it. | Close your own with `codara_terminal_close`; otherwise wait or ask you. |
 | `WORKTREE_ACTIVE_RUNS` | Active Cora runs work in it. | Wait for them to finish, or ask you. |
@@ -1428,7 +1434,10 @@ shows, so it can recommend what to remove and ask you.
   which agent asks and lists each worktree with its repository, branch, size,
   recommendation and reason. Only the safe ones start ticked. A worktree with
   unsaved changes or something running in it cannot be ticked; you remove
-  those yourself from the screen. A separate, unticked choice per worktree
+  those yourself from the screen. The asking agent's own tab, working from
+  another folder, does not count as something running in a worktree it made;
+  a worktree it gave up (pushed, pull request closed) it can also remove
+  itself with `codara_worktree_remove`, without asking. A separate, unticked choice per worktree
   also deletes its branch on the remote with your own git sign-in (`git push
   --delete` with a lease on the commit the dialog showed), offered only when
   a merged pull request covers that branch's remote tip, no open pull request

@@ -521,6 +521,7 @@ async function agentTabUse(
     label: inside ? `the agent in ${agentTabText(named)}, which works in it` : `the agent in ${agentTabText(named)}, which made it`,
     tab: named,
     ...(inside ? {} : { elsewhere: true as const }),
+    ...(owner.paneId ? { paneId: owner.paneId } : {}),
   };
 }
 
@@ -538,14 +539,18 @@ export function heldByMaker(use: WorktreeInUse, finished: boolean): boolean {
 
 /**
  * Whether a use counts at all for this caller: kinds it accepts (the
- * workspace's own idle shells for the rail), and the maker's tab in another
- * folder for a caller that judges unfinished work itself (makerElsewhereOk).
+ * workspace's own idle shells for the rail), the maker's tab in another
+ * folder for a caller that judges unfinished work itself (makerElsewhereOk),
+ * and the asking agent's own tab in another folder (askerPane): asking to
+ * remove what it made, it is not using it. Its tab with its folder or shell
+ * inside still is.
  */
 export function countsAsUse(
   use: WorktreeInUse,
-  options: { allowInUse?: ReadonlySet<WorktreeInUseKind>; makerElsewhereOk?: boolean },
+  options: { allowInUse?: ReadonlySet<WorktreeInUseKind>; makerElsewhereOk?: boolean; askerPane?: string },
 ): boolean {
   if (options.allowInUse?.has(use.kind)) return false;
+  if (use.kind === "agent" && use.elsewhere && options.askerPane && use.paneId === options.askerPane) return false;
   return !(options.makerElsewhereOk && use.kind === "agent" && use.elsewhere);
 }
 
@@ -835,6 +840,9 @@ export interface CheckContext {
   // up takes only merged, committed work). The agent's tab with its folder
   // or shell inside still is.
   makerElsewhereOk?: boolean;
+  // The pane of the agent asking for the removal (codara_worktree_cleanup):
+  // its own tab, as the maker in another folder, is not a use (countsAsUse).
+  askerPane?: string;
   // Filled by checkRemoval: every kept ignored entry of a worktree (not only
   // the listed first few), by pathKey of its real path, for the archive.
   keptIgnored?: Map<string, string[]>;
