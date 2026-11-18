@@ -1,0 +1,24 @@
+{
+  "files": [
+    "icons/icon-16.png",
+    "icons/icon-32.png",
+    "icons/icon-48.png",
+    "icons/icon-128.png",
+    "lib/link-client.js",
+    "lib/policy.js",
+    "lib/presence.js",
+    "options.html",
+    "options.js",
+    "popup.css",
+    "popup.html",
+    "popup.js"
+  ],
+  "patches": {
+    "popup.js": [
+      {
+        "find": "Chrome does not let extensions work on this page (Chrome Web Store and browser pages). Agents can use any normal website tab.",
+        "replace": "Firefox does not let extensions work on this page (browser pages, local files and Mozilla's add-on and account sites). Agents can use any normal website tab."
+      }
+    ]
+  }
+}

@@ -70,6 +70,22 @@ jobs:
           tests/e2e/share-link.spec.ts
           tests/e2e/file-tree-marquee.spec.ts
           tests/e2e/agent-cli-updates.spec.ts
+      # The Firefox extension's e2e on the current Firefox and on ESR 153, the
+      # oldest it supports. Mozilla's own builds, unpacked: no snap, so the
+      # throwaway profile in /tmp is the one Firefox opens.
+      - name: Firefox, the current release and ESR 153
+        run: |
+          mkdir -p "$RUNNER_TEMP/firefox-release" "$RUNNER_TEMP/firefox-esr"
+          curl -sfL "https://download.mozilla.org/?product=firefox-latest-ssl&os=linux64&lang=en-US" | tar -xJ -C "$RUNNER_TEMP/firefox-release"
+          curl -sfL "https://download-installer.cdn.mozilla.net/pub/firefox/releases/153.7.0esr/linux-x86_64/en-US/firefox-153.7.0esr.tar.xz" | tar -xJ -C "$RUNNER_TEMP/firefox-esr"
+          "$RUNNER_TEMP/firefox-release/firefox/firefox" --version
+          "$RUNNER_TEMP/firefox-esr/firefox/firefox" --version
+      - name: E2E, the Firefox extension on both
+        env:
+          CODARA_E2E_REQUIRE_FIREFOX: "1"
+        run: |
+          CODARA_E2E_FIREFOX="$RUNNER_TEMP/firefox-release/firefox/firefox" npx playwright test tests/e2e/firefox-extension.spec.ts
+          CODARA_E2E_FIREFOX="$RUNNER_TEMP/firefox-esr/firefox/firefox" npx playwright test tests/e2e/firefox-extension.spec.ts
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:

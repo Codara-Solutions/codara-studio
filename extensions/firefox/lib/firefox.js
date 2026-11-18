@@ -1,0 +1,72 @@
+// What differs in Firefox, kept out of the shared Chrome files so the Chrome
+// extension ships exactly what it did: which pages Firefox keeps every
+// extension off, and which DevTools protocol commands this extension answers.
+// Firefox has no debugger API for extensions, so the extension answers
+// Codara's "cdp" requests itself for the commands listed here; Codara reads
+// the list from the hello and refuses every other command before it is sent.
+// No browser.* here, so the tests run it in Node.
+
+import { isRestrictedUrl, isTabShared } from "./policy.js";
+
+// Firefox's extensions.webextensions.restrictedDomains: no extension may
+// script these, so a shared tab there would give agents nothing.
+const RESTRICTED_HOSTS = new Set([
+  "accounts-static.cdn.mozilla.net",
+  "accounts.firefox.com",
+  "addons.cdn.mozilla.net",
+  "addons.mozilla.org",
+  "api.accounts.firefox.com",
+  "content.cdn.mozilla.net",
+  "discovery.addons.mozilla.org",
+  "install.mozilla.org",
+  "oauth.accounts.firefox.com",
+  "profile.accounts.firefox.com",
+  "support.mozilla.org",
+  "sync.services.mozilla.com",
+]);
+const FIREFOX_SCHEMES = /^(moz-extension|resource|about|file|data|blob|javascript|jar|view-source|chrome):/i;
+
+/** Browser pages, local files, other extensions and Mozilla's own sites, which no agent may drive in Firefox. */
+export function isFirefoxRestrictedUrl(url) {
+  const text = String(url ?? "");
+  if (!text) return false;
+  if (/^about:blank$/i.test(text)) return false;
+  if (FIREFOX_SCHEMES.test(text) || isRestrictedUrl(text)) return true;
+  try {
+    return RESTRICTED_HOSTS.has(new URL(text).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/** Whether agents may use a tab: shared, and on a page Firefox lets extensions reach. */
+export function isShareable(share, tab) {
+  if (!tab || isFirefoxRestrictedUrl(tab.url ?? tab.pendingUrl)) return false;
+  return isTabShared(share, tab);
+}
+
+// The domains whose enable and disable Codara's recorders send on attach.
+// They are answered so the session starts, and events in DevTools format
+// follow for what the extension records.
+const DOMAINS = ["Log", "Network", "Page", "Runtime"];
+
+/** The DevTools protocol commands this extension answers, as listed in its hello. */
+export const CDP_METHODS = Object.freeze(DOMAINS.flatMap((domain) => [`${domain}.disable`, `${domain}.enable`]));
+
+/** Whether a command is one the extension answers without doing anything. */
+export function isDomainToggle(method) {
+  const [domain, verb] = String(method ?? "").split(".");
+  return DOMAINS.includes(domain) && (verb === "enable" || verb === "disable");
+}
+
+/** The refusal for a command this extension does not answer. */
+export function unsupportedMethodError(method) {
+  return `${method} is not available in Firefox: Firefox gives extensions no debugger, and the Codara extension for Firefox cannot do it another way.`;
+}
+
+/** The browser's name and version for the hello, from runtime.getBrowserInfo(). */
+export function browserIdentity(info) {
+  const name = typeof info?.name === "string" && info.name ? info.name : "Firefox";
+  const version = typeof info?.version === "string" ? info.version : "";
+  return { name, version };
+}
