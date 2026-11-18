@@ -100,6 +100,8 @@ function shippedExtensionVersion(): string | null {
 }
 
 function updateAction(link: ChromeLink): "none" | "reload" | "manual" {
+  // The Chrome extension's version says nothing about Firefox's.
+  if (link.extensionKind === "firefox") return "none";
   const shipped = shippedExtensionVersion();
   return extensionUpdateAction(link.extensionVersion, link.extensionFeatures, shipped, reloadAsks.get(link.linkId)?.version === shipped);
 }

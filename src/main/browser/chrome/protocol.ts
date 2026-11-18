@@ -32,14 +32,32 @@
 // tells it which agent used a tab ("usage"), can revoke the pairing, and asks
 // an extension older than the one it ships to reload itself ({type:"reload",
 // version}) when its hello listed the "reload" feature.
+//
+// Firefox has no debugger for extensions: its extension (extensions/firefox/)
+// answers "cdp" itself for the commands its hello lists in
+// extension.capabilities.cdp, and Codara refuses every other one before it
+// is sent. A Chromium extension lists none and relays every command.
 
 import { createCipheriv, createDecipheriv, createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 export const CHROME_LINK_PROTOCOL = 2;
 export const CHROME_LINK_PORTS: readonly number[] = [47615, 47616, 47617, 47618, 47619];
 export const CHROME_LINK_PATH = "/codara-chrome";
-/** chrome-extension://<32 letters a-p>; Edge, Brave and the other Chromium browsers send the same. */
-export const EXTENSION_ORIGIN = /^chrome-extension:\/\/([a-p]{32})$/;
+/**
+ * chrome-extension://<32 letters a-p>; Edge, Brave and the other Chromium
+ * browsers send the same. Firefox sends moz-extension://<uuid>, a uuid drawn
+ * per browser profile, so a pairing binds to the one seen when it was made.
+ */
+export const EXTENSION_ORIGIN = /^(?:chrome-extension:\/\/([a-p]{32})|moz-extension:\/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))$/;
+
+export type ExtensionKind = "chromium" | "firefox";
+
+/** The extension id and kind an upgrade's Origin names, or null for anything else. */
+export function extensionOrigin(origin: unknown): { id: string; kind: ExtensionKind } | null {
+  const match = EXTENSION_ORIGIN.exec(String(origin ?? ""));
+  if (!match) return null;
+  return match[1] ? { id: match[1], kind: "chromium" } : { id: match[2], kind: "firefox" };
+}
 export const LOOPBACK_HOST = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/i;
 
 export interface ChromeBrowserInfo {
@@ -67,7 +85,7 @@ export interface ExtensionHello {
   type: "hello";
   protocol: number;
   browser: ChromeBrowserInfo;
-  extension: { id: string; version: string; features?: string[] };
+  extension: { id: string; version: string; features?: string[]; capabilities?: { cdp?: string[] } };
   linkId?: string;
   nonce?: string;
   pair?: boolean;
@@ -183,6 +201,23 @@ export function sanitizeBrowserInfo(value: unknown): ChromeBrowserInfo {
 export function sanitizeExtensionFeatures(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.filter((item): item is string => typeof item === "string" && /^[a-z][a-z0-9-]{0,23}$/.test(item)))].slice(0, 16);
+}
+
+const CDP_METHOD = /^[A-Z][A-Za-z]{0,39}\.[a-z][A-Za-z]{0,79}$/;
+
+/**
+ * The DevTools protocol commands an extension's hello says it answers, or
+ * null when it lists none (a Chromium extension relays every command).
+ */
+export function sanitizeCdpCapabilities(value: unknown): ReadonlySet<string> | null {
+  const capabilities = value && typeof value === "object" ? (value as { cdp?: unknown }) : null;
+  if (!capabilities || !Array.isArray(capabilities.cdp)) return null;
+  return new Set(capabilities.cdp.filter((item): item is string => typeof item === "string" && CDP_METHOD.test(item)).slice(0, 500));
+}
+
+/** The refusal for a command the connected extension does not answer. */
+export function unsupportedCdpError(method: string, browserName: string): string {
+  return `${method} is not available in ${browserName || "this browser"}: its Codara extension cannot do it (browsers other than Chrome give extensions no debugger).`;
 }
 
 export function sanitizeTabs(value: unknown): ChromeTabInfo[] {
