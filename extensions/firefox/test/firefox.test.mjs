@@ -4,9 +4,11 @@ import { pathToFileURL } from "node:url";
 
 // lib/firefox.js imports Chrome's policy.js, so it runs from the assembled folder.
 export async function run(assembled) {
-  const { CDP_METHODS, browserIdentity, isDomainToggle, isFirefoxRestrictedUrl, isShareable, unsupportedMethodError } = await import(pathToFileURL(join(assembled, "lib", "firefox.js")).href);
+  const { CDP_METHODS, browserIdentity, isDomainToggle, isFirefoxRestrictedUrl, isShareable, parseFirefoxBlockedSites, unsupportedMethodError } = await import(pathToFileURL(join(assembled, "lib", "firefox.js")).href);
   for (const url of [
     "about:preferences",
+    "about:blank",
+    "about:home",
     "about:addons",
     "moz-extension://0d0d0d0d-1111-4222-8333-444444444444/popup.html",
     "resource://gre/modules/x.js",
@@ -20,9 +22,20 @@ export async function run(assembled) {
   ]) {
     assert.equal(isFirefoxRestrictedUrl(url), true, url);
   }
-  for (const url of ["about:blank", "https://example.com/", "http://127.0.0.1:8080/x", "https://mozilla.org/", "https://evil.example/?u=addons.mozilla.org", ""]) {
+  for (const url of ["https://example.com/", "http://127.0.0.1:8080/x", "https://mozilla.org/", "https://evil.example/?u=addons.mozilla.org", ""]) {
     assert.equal(isFirefoxRestrictedUrl(url), false, url);
   }
+
+  // Blocked sites match the host as tab URLs spell it, written either way.
+  const { blockingRule } = await import(pathToFileURL(join(assembled, "lib", "policy.js")).href);
+  const rules = parseFirefoxBlockedSites("bücher.example\n*.bänk.example/login\nxn--caf-dma.example\nplain.example");
+  assert.equal(blockingRule("https://xn--bcher-kva.example/", rules)?.raw, "bücher.example");
+  assert.equal(blockingRule("https://shop.xn--bcher-kva.example/x", rules)?.raw, "bücher.example");
+  assert.equal(blockingRule("https://www.xn--bnk-qla.example/login/2fa", rules)?.raw, "*.bänk.example/login");
+  assert.equal(blockingRule("https://www.xn--bnk-qla.example/news", rules), null);
+  assert.equal(blockingRule("https://xn--caf-dma.example/", rules)?.raw, "xn--caf-dma.example");
+  assert.equal(blockingRule("https://plain.example/", rules)?.raw, "plain.example");
+  assert.equal(blockingRule("https://example.com/", rules), null);
 
   const share = { all: true, windows: [], tabs: [], stopped: [9] };
   assert.equal(isShareable(share, { id: 1, windowId: 1, url: "https://example.com/" }), true);

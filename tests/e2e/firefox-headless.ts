@@ -76,119 +76,141 @@ export async function launchFirefox(binary: { path: string; version: number }, {
     env: { ...process.env, MOZ_HEADLESS: "1", MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: "1" },
   });
   let stderr = "";
-  const url = await new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Firefox did not start its BiDi server: ${stderr.slice(-1000)}`)), 60_000);
-    child.stderr?.on("data", (chunk) => {
-      stderr += chunk;
-      const match = /WebDriver BiDi listening on (ws:\/\/\S+)/.exec(stderr);
-      if (match) {
-        clearTimeout(timer);
-        resolve(match[1]);
-      }
-    });
-    child.once("exit", (code) => {
-      clearTimeout(timer);
-      reject(new Error(`Firefox exited (${code}): ${stderr.slice(-1000)}`));
-    });
-  });
-  const socket = new WebSocket(`${url}/session`);
-  await new Promise((resolve, reject) => {
-    socket.once("open", resolve);
-    socket.once("error", reject);
-  });
-  let nextId = 1;
-  const waiting = new Map<number, (message: any) => void>();
-  socket.on("message", (data) => {
-    const message = JSON.parse(String(data));
-    const waiter = typeof message.id === "number" ? waiting.get(message.id) : undefined;
-    if (!waiter) return;
-    waiting.delete(message.id);
-    waiter(message);
-  });
-  const call = <T = any>(method: string, params: Record<string, unknown> = {}): Promise<T> =>
-    new Promise((resolve, reject) => {
-      const id = nextId++;
-      waiting.set(id, (message) => (message.type === "error" ? reject(new Error(`${method}: ${message.error}: ${message.message}`)) : resolve(message.result)));
-      socket.send(JSON.stringify({ id, method, params }));
-    });
-  await call("session.new", { capabilities: {} });
-  const firefox: HeadlessFirefox = {
-    pid: child.pid,
-    version: binary.version,
-    call,
-    async install(dir) {
-      await call("webExtension.install", { extensionData: { type: "path", path: dir } });
-    },
-    async open(target) {
-      const { context } = await call<{ context: string }>("browsingContext.create", { type: "tab" });
-      await firefox.navigate(context, target);
-      return context;
-    },
-    // Firefox 160 refuses a WebDriver navigation to moz-extension:// pages, so
-    // the browser window opens the tab itself, as a click in the toolbar would.
-    async openExtensionPage(target) {
-      const contentTabs = async () => (await call<{ contexts: { context: string; url: string }[] }>("browsingContext.getTree", { maxDepth: 0 })).contexts;
-      const before = new Set((await contentTabs()).map((tab) => tab.context));
-      const { contexts } = await call<{ contexts: { context: string }[] }>("browsingContext.getTree", { maxDepth: 0, "moz:scope": "chrome" });
-      await call("script.evaluate", {
-        expression: `gBrowser.selectedTab = gBrowser.addTab(${JSON.stringify(target)}, { triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() }); true`,
-        target: { context: contexts[0].context },
-        awaitPromise: false,
-      });
-      const deadline = Date.now() + 15_000;
-      while (Date.now() < deadline) {
-        const opened = (await contentTabs()).find((tab) => !before.has(tab.context) && tab.url === target);
-        if (opened) {
-          const ready = await firefox.evaluate(opened.context, "document.readyState").catch(() => null);
-          if (ready === "complete") return opened.context;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      throw new Error(`${target} did not open`);
-    },
-    async closeTab(context) {
-      await call("browsingContext.close", { context });
-    },
-    async navigate(context, target) {
-      await call("browsingContext.navigate", { context, url: target, wait: "complete" });
-    },
-    async evaluate(context, expression) {
-      const answer = await call<{ type: string; result?: any; exceptionDetails?: { text?: string } }>("script.evaluate", {
-        expression,
-        target: { context },
-        awaitPromise: true,
-        resultOwnership: "none",
-        serializationOptions: { maxObjectDepth: 6 },
-      });
-      if (answer.type === "exception") throw new Error(answer.exceptionDetails?.text ?? "the page threw");
-      return deserialize(answer.result) as any;
-    },
-    async screenshot(context) {
-      const { data } = await call<{ data: string }>("browsingContext.captureScreenshot", { context });
-      return Buffer.from(data, "base64");
-    },
-    async close() {
-      try {
-        await call("browser.close").catch(() => {});
-        socket.close();
-      } finally {
-        if (child.exitCode === null && child.signalCode === null) {
-          await new Promise((resolve) => {
-            const timer = setTimeout(() => {
-              child.kill("SIGKILL");
-              resolve(null);
-            }, 5_000);
-            child.once("exit", () => {
-              clearTimeout(timer);
-              resolve(null);
-            });
-          });
-        }
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  // Stops Firefox and removes its profile, also when it never finished starting.
+  const stop = async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      const killer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+      await exited;
+      clearTimeout(killer);
+    }
+    rmSync(root, { recursive: true, force: true });
   };
-  return firefox;
+  try {
+    return await connect();
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+
+  async function connect(): Promise<HeadlessFirefox> {
+    const url = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Firefox did not start its BiDi server: ${stderr.slice(-1000)}`)), 60_000);
+      child.stderr?.on("data", (chunk) => {
+        stderr += chunk;
+        const match = /WebDriver BiDi listening on (ws:\/\/\S+)/.exec(stderr);
+        if (match) {
+          clearTimeout(timer);
+          resolve(match[1]);
+        }
+      });
+      void exited.then(() => {
+        clearTimeout(timer);
+        reject(new Error(`Firefox exited (${child.exitCode}): ${stderr.slice(-1000)}`));
+      });
+    });
+    const socket = new WebSocket(`${url}/session`);
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    let nextId = 1;
+    const waiting = new Map<number, (message: any) => void>();
+    // A lost connection fails every command still waiting, instead of hanging the test.
+    socket.on("close", () => {
+      for (const waiter of waiting.values()) waiter({ type: "error", error: "connection closed", message: "Firefox's WebDriver BiDi connection closed" });
+      waiting.clear();
+    });
+    socket.on("message", (data) => {
+      const message = JSON.parse(String(data));
+      const waiter = typeof message.id === "number" ? waiting.get(message.id) : undefined;
+      if (!waiter) return;
+      waiting.delete(message.id);
+      waiter(message);
+    });
+    const call = <T = any>(method: string, params: Record<string, unknown> = {}): Promise<T> =>
+      new Promise((resolve, reject) => {
+        const id = nextId++;
+        const timer = setTimeout(() => {
+          waiting.delete(id);
+          reject(new Error(`${method}: no answer from Firefox in 60 s`));
+        }, 60_000);
+        waiting.set(id, (message) => {
+          clearTimeout(timer);
+          if (message.type === "error") reject(new Error(`${method}: ${message.error}: ${message.message}`));
+          else resolve(message.result);
+        });
+        if (socket.readyState !== WebSocket.OPEN) waiting.get(id)!({ type: "error", error: "connection closed", message: "Firefox's WebDriver BiDi connection is not open" });
+        else socket.send(JSON.stringify({ id, method, params }));
+      });
+    await call("session.new", { capabilities: {} });
+    const firefox: HeadlessFirefox = {
+      pid: child.pid,
+      version: binary.version,
+      call,
+      async install(dir) {
+        await call("webExtension.install", { extensionData: { type: "path", path: dir } });
+      },
+      async open(target) {
+        const { context } = await call<{ context: string }>("browsingContext.create", { type: "tab" });
+        await firefox.navigate(context, target);
+        return context;
+      },
+      // Firefox 160 refuses a WebDriver navigation to moz-extension:// pages, so
+      // the browser window opens the tab itself, as a click in the toolbar would.
+      async openExtensionPage(target) {
+        const contentTabs = async () => (await call<{ contexts: { context: string; url: string }[] }>("browsingContext.getTree", { maxDepth: 0 })).contexts;
+        const before = new Set((await contentTabs()).map((tab) => tab.context));
+        const { contexts } = await call<{ contexts: { context: string }[] }>("browsingContext.getTree", { maxDepth: 0, "moz:scope": "chrome" });
+        await call("script.evaluate", {
+          expression: `gBrowser.selectedTab = gBrowser.addTab(${JSON.stringify(target)}, { triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() }); true`,
+          target: { context: contexts[0].context },
+          awaitPromise: false,
+        });
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline) {
+          const opened = (await contentTabs()).find((tab) => !before.has(tab.context) && tab.url === target);
+          if (opened) {
+            const ready = await firefox.evaluate(opened.context, "document.readyState").catch(() => null);
+            if (ready === "complete") return opened.context;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        throw new Error(`${target} did not open`);
+      },
+      async closeTab(context) {
+        await call("browsingContext.close", { context });
+      },
+      async navigate(context, target) {
+        await call("browsingContext.navigate", { context, url: target, wait: "complete" });
+      },
+      async evaluate(context, expression) {
+        const answer = await call<{ type: string; result?: any; exceptionDetails?: { text?: string } }>("script.evaluate", {
+          expression,
+          target: { context },
+          awaitPromise: true,
+          resultOwnership: "none",
+          serializationOptions: { maxObjectDepth: 6 },
+        });
+        if (answer.type === "exception") throw new Error(answer.exceptionDetails?.text ?? "the page threw");
+        return deserialize(answer.result) as any;
+      },
+      async screenshot(context) {
+        const { data } = await call<{ data: string }>("browsingContext.captureScreenshot", { context });
+        return Buffer.from(data, "base64");
+      },
+      async close() {
+        try {
+          await Promise.race([call("browser.close").catch(() => {}), new Promise((resolve) => setTimeout(resolve, 10_000))]);
+          socket.close();
+        } finally {
+          await stop();
+        }
+      },
+    };
+    return firefox;
+  }
 }
 
 /** A BiDi remote value as plain JSON. */

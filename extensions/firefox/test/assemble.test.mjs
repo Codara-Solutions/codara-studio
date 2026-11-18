@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -67,6 +67,25 @@ export function run() {
     writeFileSync(join(precious, "notes.txt"), "keep");
     assert.throws(() => assemble(precious, { firefoxDir, chromeDir }), /not an assembled extension/);
     assert.equal(readFileSync(join(precious, "notes.txt"), "utf8"), "keep");
+    // A folder that only looks like an extension is not replaced either.
+    writeFileSync(join(precious, "manifest.json"), "{}");
+    assert.throws(() => assemble(precious, { firefoxDir, chromeDir }), /not an assembled extension/);
+    assert.equal(readFileSync(join(precious, "notes.txt"), "utf8"), "keep");
+    // Never into or over the sources, also through a symlink.
+    const chromeBefore = readFileSync(join(chromeDir, "popup.js"));
+    for (const [where, message] of [
+      [chromeDir, /holds the extension's sources/],
+      [scratch, /holds the extension's sources/],
+      [join(chromeDir, "build"), /inside the extension's sources/],
+      [join(firefoxDir, "lib"), /inside the extension's sources/],
+    ]) {
+      assert.throws(() => assemble(where, { firefoxDir, chromeDir }), message, where);
+    }
+    symlinkSync(chromeDir, join(scratch, "alias"));
+    assert.throws(() => assemble(join(scratch, "alias"), { firefoxDir, chromeDir }), /holds the extension's sources/);
+    assert.throws(() => assemble(join(scratch, "alias", "out"), { firefoxDir, chromeDir }), /inside the extension's sources/);
+    assert.deepEqual(readFileSync(join(chromeDir, "popup.js")), chromeBefore, "the Chrome folder is untouched");
+    assemble(join(firefoxDir, "dist", "extension"), { firefoxDir, chromeDir });
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

@@ -15,7 +15,7 @@
 // picks up where it left off.
 
 import { LinkClient } from "./lib/link-client.js";
-import { CDP_METHODS, browserIdentity, isDomainToggle, isFirefoxRestrictedUrl, isShareable, unsupportedMethodError } from "./lib/firefox.js";
+import { CDP_METHODS, browserIdentity, isDomainToggle, isFirefoxRestrictedUrl, isShareable, parseFirefoxBlockedSites, unsupportedMethodError } from "./lib/firefox.js";
 import {
   DEFAULT_BLOCKED_SITES,
   DEFAULT_PORTS,
@@ -25,7 +25,7 @@ import {
   badgeTitle,
   blockingRule,
   childSessionError,
-  parseBlockedSites,
+  isTabShared,
   reachOf,
   reachPatch,
 } from "./lib/policy.js";
@@ -57,7 +57,7 @@ const KEEP_AWAKE_MS = 10_000;
 const PORT_PROBE_TIMEOUT_MS = 1_500;
 
 let state = null;
-let rules = parseBlockedSites(DEFAULT_BLOCKED_SITES);
+let rules = parseFirefoxBlockedSites(DEFAULT_BLOCKED_SITES);
 const ready = load();
 
 async function load() {
@@ -65,7 +65,7 @@ async function load() {
   // Nothing is attached to a page that just started: attaching is only a
   // mark here, and Codara drops its sessions with the socket the old page held.
   state = { ...SESSION_DEFAULTS, ...session, ...LOCAL_DEFAULTS, ...local, attached: [] };
-  rules = parseBlockedSites(state.blockedSites);
+  rules = parseFirefoxBlockedSites(state.blockedSites);
   if (typeof state.browserSession !== "string") state.browserSession = crypto.randomUUID();
   await chrome.storage.session.set({ attached: [], browserSession: state.browserSession });
 }
@@ -79,7 +79,7 @@ async function save(patch) {
     if (key in SESSION_DEFAULTS) session[key] = value;
     else if (key in LOCAL_DEFAULTS) local[key] = value;
   }
-  if ("blockedSites" in patch) rules = parseBlockedSites(state.blockedSites);
+  if ("blockedSites" in patch) rules = parseFirefoxBlockedSites(state.blockedSites);
   await Promise.all([
     Object.keys(session).length ? chrome.storage.session.set(session) : null,
     Object.keys(local).length ? chrome.storage.local.set(local) : null,
@@ -287,7 +287,8 @@ async function reportTabs() {
       openedByAgent: state.agentTabs.includes(tab.id),
     });
   }
-  link.send({ type: "tabs", tabs: list, allowOpen: state.allowOpen, session: state.browserSession });
+  // Opening tabs is not in Firefox yet, so Codara picks another browser for it.
+  link.send({ type: "tabs", tabs: list, allowOpen: false, session: state.browserSession });
 }
 
 async function updateBadge(tab) {
@@ -386,7 +387,7 @@ async function popupState(request) {
     reach: reachOf(shareChoice(), request.windowId),
     otherWindows: otherWindows.length,
     otherTabs: tabs.filter((tab) => tab.windowId !== request.windowId && !otherWindows.includes(tab.windowId) && state.shareTabs.includes(tab.id) && shared(tab)).length,
-    allowOpen: state.allowOpen,
+    allowOpen: false,
     presence: presenceSettings(state.presence),
     blockedSites: state.blockedSites,
     current: current ? describeTab(current) : null,
@@ -400,7 +401,8 @@ async function setTabShared(tabId, on) {
     return;
   }
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  const stillShared = tab && isShareable({ ...shareChoice(), tabs: without(state.shareTabs, tabId) }, tab);
+  // Recorded whatever page the tab shows now, so it stays stopped after it leaves a browser page.
+  const stillShared = tab && isTabShared({ ...shareChoice(), tabs: without(state.shareTabs, tabId) }, tab);
   await save({
     shareTabs: without(state.shareTabs, tabId),
     storageTabs: without(state.storageTabs, tabId),
@@ -417,12 +419,16 @@ async function handlePopup(request) {
     case "connect":
       await link.connect({ pair: true });
       return popupState(request);
-    case "unpair":
+    case "unpair": {
+      // Closing waits for the sealed unpair frame to leave, so Codara forgets this browser too.
+      const socket = link.socket;
       link.send({ type: "unpair" });
       await save({ token: null, linkId: null });
+      await socket?.outbox?.catch(() => {});
       link.disconnect("idle");
       await detachAll();
       break;
+    }
     case "shareTab":
       await setTabShared(Number(request.tabId), request.on === true);
       if (request.on === true) void link.wake();
@@ -470,10 +476,24 @@ async function handlePopup(request) {
   return popupState(request);
 }
 
+const OWN_PAGES = ["popup.html", "options.html"].map((page) => chrome.runtime.getURL(page));
+
+/** The popup or the options page of this extension, never a script of it running in a web page. */
+function fromOwnPage(sender) {
+  if (sender.id !== chrome.runtime.id || typeof sender.url !== "string") return false;
+  const page = sender.url.split(/[?#]/)[0];
+  return OWN_PAGES.includes(page);
+}
+
+// One action at a time, in the order the user made them: a Stop all is never
+// undone by an Everything that was still reading the tabs.
+let popupQueue = Promise.resolve();
+
 chrome.runtime.onMessage.addListener((request, sender, respond) => {
-  // Only this extension's own pages (the popup and the options page) steer it.
-  if (sender.id !== chrome.runtime.id || !request || typeof request.type !== "string") return false;
-  handlePopup(request).then(respond, (error) => respond({ error: error instanceof Error ? error.message : String(error) }));
+  if (!fromOwnPage(sender) || !request || typeof request.type !== "string") return false;
+  const run = popupQueue.then(() => handlePopup(request));
+  popupQueue = run.catch(() => {});
+  run.then(respond, (error) => respond({ error: error instanceof Error ? error.message : String(error) }));
   return true;
 });
 
@@ -485,7 +505,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   for (const key of ["ports", "blockedSites", "allowOpen"]) {
     if (key in changes) state[key] = changes[key].newValue ?? LOCAL_DEFAULTS[key];
   }
-  if ("blockedSites" in changes) rules = parseBlockedSites(state.blockedSites);
+  if ("blockedSites" in changes) rules = parseFirefoxBlockedSites(state.blockedSites);
   if ("ports" in changes && !link.connected) void link.wake();
 });
 

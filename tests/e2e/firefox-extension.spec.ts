@@ -170,25 +170,33 @@ test("the Firefox extension pairs, shares a tab with agents and says plainly wha
     expect(await linkState(codara).then((state) => state.browsers[0])).toMatchObject({ connected: true, lastSeenAt: before });
     popup = await firefox.openExtensionPage(`${POPUP}?tab=${accountTab}`);
 
-    // Everything: every tab but the blocked one and Firefox's and the extension's own pages is listed.
-    const everything = (await firefox.evaluate<{ id: number; url: string }[]>(popup, "browser.tabs.query({}).then((tabs) => tabs.map(({ id, url }) => ({ id, url })))"))
-      // Never Firefox's own pages (the start tab is about:home since Firefox 160), the extension's or a blocked site.
-      .filter((tab) => (tab.url === "about:blank" || !/^(about|moz-extension):/.test(tab.url)) && !tab.url.includes("localhost"))
-      .map((tab) => `chrome:${tab.id}`)
-      .sort();
-    expect(everything).toEqual(expect.arrayContaining([`chrome:${accountTab}`, `chrome:${elsewhereTab}`]));
-    await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "setReach", reach: "all", tabId: ${accountTab} })`);
-    await expect.poll(async () => {
+    // This window, then Everything. Codara's lists show only shared, usable
+    // tabs: never Firefox's own pages (the start tab is about:home since
+    // Firefox 160), the extension's, an about:blank, or the blocked site.
+    const { context: secondWindow } = await firefox.call<{ context: string }>("browsingContext.create", { type: "window" });
+    await firefox.navigate(secondWindow, `${origin}/other-window`);
+    await firefox.open("about:blank");
+    const otherWindowTab = await tabIdOf("/other-window");
+    const blockedTab = await tabIdOf("localhost");
+    const windowId = await firefox.evaluate<number>(popup, `browser.tabs.get(${accountTab}).then((tab) => tab.windowId)`);
+    expect(await firefox.evaluate<number>(popup, `browser.tabs.get(${otherWindowTab}).then((tab) => tab.windowId)`)).not.toBe(windowId);
+    const chromeTabs = async () => {
       const { tabs } = await request("preview.list");
       return tabs.filter((tab: { kind?: string }) => tab.kind === "chrome").map((tab: { id: string }) => tab.id).sort();
-    }, { timeout: 15_000 }).toEqual(everything);
-    const listed = JSON.stringify(await request("preview.list"));
-    expect(listed).not.toContain("localhost");
-    expect(listed).not.toContain("moz-extension");
+    };
+    await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "setReach", reach: "window", tabId: ${accountTab}, windowId: ${windowId} })`);
+    await expect.poll(chromeTabs, { timeout: 15_000 }).toEqual([`chrome:${accountTab}`, `chrome:${elsewhereTab}`].sort());
+    await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "setReach", reach: "all", tabId: ${accountTab}, windowId: ${windowId} })`);
+    await expect.poll(chromeTabs, { timeout: 15_000 }).toEqual([`chrome:${accountTab}`, `chrome:${elsewhereTab}`, `chrome:${otherWindowTab}`].sort());
+    // What the extension sent: the blocked tab only as blocked, with no address or title.
+    const received = (await linkState(codara)).browsers[0].tabs as { id: string; url: string; title: string; blocked: boolean }[];
+    expect(received.find((tab) => tab.id === `chrome:${blockedTab}`)).toMatchObject({ blocked: true, url: "", title: "" });
+    expect(received.map((tab) => tab.id).sort()).toEqual([`chrome:${accountTab}`, `chrome:${blockedTab}`, `chrome:${elsewhereTab}`, `chrome:${otherWindowTab}`].sort());
+    expect(JSON.stringify(received)).not.toMatch(/localhost|Page bank|moz-extension|about:/);
 
-    // Disconnect in the popup: Codara forgets this browser.
+    // Disconnect in the popup: Codara forgets this browser, pairing and all.
     await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "unpair" })`);
-    await expect.poll(async () => (await linkState(codara)).browsers.filter((browser: { connected: boolean }) => browser.connected).length, { timeout: 15_000 }).toBe(0);
+    await expect.poll(async () => (await linkState(codara)).browsers.length, { timeout: 15_000 }).toBe(0);
   } finally {
     await firefox?.close().catch(() => undefined);
     await app.close();

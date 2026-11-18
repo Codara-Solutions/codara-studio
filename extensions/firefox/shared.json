@@ -19,6 +19,12 @@
         "find": "Chrome does not let extensions work on this page (Chrome Web Store and browser pages). Agents can use any normal website tab.",
         "replace": "Firefox does not let extensions work on this page (browser pages, local files and Mozilla's add-on and account sites). Agents can use any normal website tab."
       }
+    ],
+    "popup.html": [
+      {
+        "find": "<label class=\"row\">\n        <span class=\"grow\">Open new tabs in a group</span>",
+        "replace": "<label class=\"row\" style=\"display: none\">\n        <span class=\"grow\">Open new tabs in a group</span>"
+      }
     ]
   }
 }

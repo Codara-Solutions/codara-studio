@@ -6,7 +6,7 @@
 // the list from the hello and refuses every other command before it is sent.
 // No browser.* here, so the tests run it in Node.
 
-import { isRestrictedUrl, isTabShared } from "./policy.js";
+import { isRestrictedUrl, isTabShared, parseBlockedSites } from "./policy.js";
 
 // Firefox's extensions.webextensions.restrictedDomains: no extension may
 // script these, so a shared tab there would give agents nothing.
@@ -24,13 +24,14 @@ const RESTRICTED_HOSTS = new Set([
   "support.mozilla.org",
   "sync.services.mozilla.com",
 ]);
+// about:blank too: a page can open one, write into it and title it, and it
+// carries that page's origin, so it is no safer than the page.
 const FIREFOX_SCHEMES = /^(moz-extension|resource|about|file|data|blob|javascript|jar|view-source|chrome):/i;
 
 /** Browser pages, local files, other extensions and Mozilla's own sites, which no agent may drive in Firefox. */
 export function isFirefoxRestrictedUrl(url) {
   const text = String(url ?? "");
   if (!text) return false;
-  if (/^about:blank$/i.test(text)) return false;
   if (FIREFOX_SCHEMES.test(text) || isRestrictedUrl(text)) return true;
   try {
     return RESTRICTED_HOSTS.has(new URL(text).hostname.toLowerCase());
@@ -43,6 +44,27 @@ export function isFirefoxRestrictedUrl(url) {
 export function isShareable(share, tab) {
   if (!tab || isFirefoxRestrictedUrl(tab.url ?? tab.pendingUrl)) return false;
   return isTabShared(share, tab);
+}
+
+/** A host as the browser spells it in tab URLs: punycode for non-ASCII labels; "*" labels kept. */
+function asciiHost(host) {
+  if (/^[\x00-\x7f]*$/.test(host)) return host;
+  return host
+    .split(".")
+    .map((label) => {
+      if (/^[\x00-\x7f]*$/.test(label) || label.includes("*")) return label;
+      try {
+        return new URL(`http://${label}.invalid/`).hostname.slice(0, -".invalid".length);
+      } catch {
+        return label;
+      }
+    })
+    .join(".");
+}
+
+/** The blocked-site rules, with each host in the form tab URLs use, so "bücher.example" blocks xn--bcher-kva.example. */
+export function parseFirefoxBlockedSites(text) {
+  return parseBlockedSites(text).map((rule) => ({ ...rule, host: asciiHost(rule.host) }));
 }
 
 // The domains whose enable and disable Codara's recorders send on attach.
