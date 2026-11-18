@@ -1112,7 +1112,7 @@ const MessageTurn = React.memo(function MessageTurn({
   );
 });
 
-function formatMessageTime(iso: string): string {
+export function formatMessageTime(iso: string): string {
   const time = new Date(iso);
   if (!Number.isFinite(time.getTime())) return "";
   return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(time);
@@ -1726,13 +1726,13 @@ function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
   );
 }
 
-type ActivityIconState = "running" | "done" | "failed" | "dot" | "hollow";
+export type ActivityIconState = "running" | "done" | "failed" | "dot" | "hollow";
 
 // The one status slot every activity row leads with (tool calls, steps,
 // workers, manager stages), so state reads down a single left edge and the
 // chevron stays the only thing on the right. `color` tints dots and checks;
 // running and failed keep their fixed tones.
-function ActivityIcon({
+export function ActivityIcon({
   state,
   color,
   title,
@@ -2819,7 +2819,7 @@ function useRememberedOpen(key: string): [boolean, (open: boolean) => void] {
 
 // A long message folds to a fading excerpt, as T3 Code's does, so it cannot push
 // the reply off screen. Find opens the one it lands on.
-function CollapsibleUserText({
+export function CollapsibleUserText({
   id,
   text,
   findCurrent,
@@ -2854,7 +2854,7 @@ function CollapsibleUserText({
   );
 }
 
-function ChevronGlyph({ open }: { open: boolean }) {
+export function ChevronGlyph({ open }: { open: boolean }) {
   return (
     <svg
       className={`cora-turn-chevron${open ? " is-open" : ""}`}
@@ -2871,7 +2871,7 @@ function ChevronGlyph({ open }: { open: boolean }) {
 
 // The one segment renderer both the live and the settled turn share, so a
 // turn finishing never changes what its prose and tool rows look like.
-function TurnSegments({ segments, live = false }: { segments: LiveTurnSegment[]; live?: boolean }) {
+export function TurnSegments({ segments, live = false }: { segments: LiveTurnSegment[]; live?: boolean }) {
   const groups: Array<LiveTurnSegment | LiveTurnSegment[]> = [];
   for (const segment of segments) {
     const previous = groups[groups.length - 1];
@@ -2925,14 +2925,14 @@ function TurnSegments({ segments, live = false }: { segments: LiveTurnSegment[];
   );
 }
 
-type LiveTurnSegment =
+export type LiveTurnSegment =
   | { kind: "text"; id: string; text: string }
   | { kind: "tool"; id: string; call: Extract<ExecutionBlock, { kind: "tool" }> }
   | { kind: "error"; id: string; message: string };
 
 // Preserve provider order exactly. Every tool row remains visible while the
 // turn is live, matching the CLI transcript instead of hiding earlier work.
-function liveTurnSegments(blocks: ExecutionBlock[]): LiveTurnSegment[] {
+export function liveTurnSegments(blocks: ExecutionBlock[]): LiveTurnSegment[] {
   const segments: LiveTurnSegment[] = [];
   for (const block of blocks) {
     if (block.kind === "note") continue;
@@ -3996,7 +3996,7 @@ const SCROLL_STYLE: React.CSSProperties = {
 // can span 2K+ pixels, but prose should not: keeping one centered column makes
 // user turns, Cora responses, and activity rows feel like one conversation
 // instead of unrelated panels pinned to opposite edges.
-const CONVERSATION_COLUMN_STYLE: React.CSSProperties = {
+export const CONVERSATION_COLUMN_STYLE: React.CSSProperties = {
   width: "100%",
   maxWidth: 768,
   margin: "0 auto",
@@ -4033,7 +4033,7 @@ const DELIVERY_CHIP_STYLE: React.CSSProperties = {
   fontWeight: 500,
 };
 
-const USER_BUBBLE_STYLE: React.CSSProperties = {
+export const USER_BUBBLE_STYLE: React.CSSProperties = {
   maxWidth: "80%",
   boxSizing: "border-box",
   background: "var(--panel-2)",
