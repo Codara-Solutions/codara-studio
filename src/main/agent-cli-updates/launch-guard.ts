@@ -41,6 +41,11 @@ export function setToolBusy(tool: string, isBusy: boolean): void {
   }
 }
 
+/** Tools being swapped right now (the quit prompt names them). */
+export function busyTools(): string[] {
+  return [...busy.keys()];
+}
+
 /** Resolves once the tool is not being updated, or after `maxMs`. True when it had to wait. */
 export async function waitUntilToolIdle(tool: string, maxMs: number): Promise<boolean> {
   const current = busy.get(tool);

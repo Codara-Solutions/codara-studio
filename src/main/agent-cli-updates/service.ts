@@ -17,6 +17,11 @@
 //   is out, the tool's own updater stays off in the terminals Codara opens.
 // - A broken new build never runs: the roll back uses the previous build, or
 //   relinks to it, or shows the vendor's installer command for it.
+// - An update cut short (Codara quit or crashed) is finished on the next
+//   start: a record saved before the installer runs says what was there, and
+//   a tool that then fails its version check is rolled back.
+// - Only one Codara on the machine updates at a time (the update lock); the
+//   lock also keeps a second window from "recovering" an update in progress.
 
 import {
   AGENT_CLI_LABELS,
@@ -39,12 +44,26 @@ export const WAITING_POLL_MS = 2 * 60 * 1000;
 export const MAX_WAITING_POLL_MS = 30 * 60 * 1000;
 export const UPDATE_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** What was installed when an update started, saved before its installer runs. */
+export interface UpdateInProgress {
+  tool: UpdatableAgentCliToolId;
+  fromVersion: string;
+  fromRealPath: string;
+  fromBinaryPath: string;
+  toVersion: string | null;
+}
+
 export interface PersistedUpdateState {
   /** Versions whose update failed or was rolled back, per tool. */
   failed: Partial<Record<UpdatableAgentCliToolId, string>>;
   /** Newer versions the installer itself said it does not offer yet. */
   notOffered: Partial<Record<UpdatableAgentCliToolId, string>>;
+  /** An update whose installer ran and did not finish in this record's lifetime. */
+  inProgress?: UpdateInProgress;
 }
+
+/** Releases the update lock. */
+export type ReleaseLock = () => Promise<void>;
 
 export interface PiVersionInfo {
   version: string | null;
@@ -75,6 +94,8 @@ export interface UpdateServiceDependencies {
   /** Points a launcher link at another build (Claude's native layout, POSIX). */
   relink?: (link: string, target: string) => Promise<void>;
   platform?: NodeJS.Platform;
+  /** The machine-wide update lock; null while another Codara holds it. */
+  lock?: () => Promise<ReleaseLock | null>;
 }
 
 interface ToolEntry {
@@ -122,14 +143,25 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     loaded ??= deps
       .loadState()
       .then((state) => {
-        persisted = { failed: { ...state.failed }, notOffered: { ...state.notOffered } };
+        persisted = {
+          failed: { ...state.failed },
+          notOffered: { ...state.notOffered },
+          ...(state.inProgress ? { inProgress: { ...state.inProgress } } : {}),
+        };
       })
       .catch((error) => deps.log(`could not read the saved update state: ${(error as Error).message}`));
     return loaded;
   }
 
-  function save(): void {
-    void deps.saveState(persisted).catch((error) => deps.log(`could not save the update state: ${(error as Error).message}`));
+  let saving: Promise<void> = Promise.resolve();
+
+  /** Saves in order, so an older write never lands after a newer one. */
+  function save(): Promise<void> {
+    const state = JSON.parse(JSON.stringify(persisted)) as PersistedUpdateState;
+    saving = saving
+      .then(() => deps.saveState(state))
+      .catch((error) => deps.log(`could not save the update state: ${(error as Error).message}`));
+    return saving;
   }
 
   function updateAvailable(tool: UpdatableAgentCliToolId): boolean {
@@ -344,6 +376,16 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
         return;
       }
       if (!(await noSessions(tool, origin))) return;
+      const release = deps.lock ? await deps.lock().catch(() => null) : async () => {};
+      if (!release) {
+        set(tool, {
+          pending: current.pending === "manual" ? "manual" : origin,
+          phase: "waiting",
+          message: "Waiting: another Codara window is updating an agent tool.",
+        });
+        scheduleWaitingPoll();
+        return;
+      }
       current.pending = null;
       current.liveSessions = 0;
       current.generation += 1;
@@ -353,6 +395,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
         set(tool, { phase: "failed", message: `The update stopped: ${(error as Error).message.slice(0, 300)}` });
       } finally {
         deps.toolBusy?.(tool, false);
+        await release().catch((error) => deps.log(`could not release the update lock: ${(error as Error).message}`));
       }
     });
     queue = run.catch((error) => deps.log(`${tool}: update failed: ${(error as Error).message}`));
@@ -373,9 +416,28 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     if (!(await noSessions(tool, origin))) return;
     deps.toolBusy?.(tool, true);
     deps.log(`${tool}: updating ${before.version ?? "(unknown)"} with ${before.plan.update.display}`);
+    // On disk before the installer starts: a quit or crash from here on is
+    // finished by the next start (recoverInterrupted).
+    if (before.version) {
+      persisted.inProgress = { tool, fromVersion: before.version, fromRealPath: before.realPath, fromBinaryPath: before.binaryPath, toVersion: target };
+      await save();
+    }
+    try {
+      await afterRecord(tool, before, before.plan.update, target);
+    } finally {
+      if (persisted.inProgress?.tool === tool) {
+        delete persisted.inProgress;
+        await save();
+      }
+    }
+  }
+
+  /** Runs the installer, checks the new build, and rolls back when it fails. */
+  async function afterRecord(tool: UpdatableAgentCliToolId, before: InstalledTool, update: CliCommand, target: string | null): Promise<void> {
+    const label = AGENT_CLI_LABELS[tool];
     let updateError: string | null = null;
     try {
-      await deps.run(before.plan.update, UPDATE_TIMEOUT_MS);
+      await deps.run(update, UPDATE_TIMEOUT_MS);
     } catch (error) {
       updateError = (error as Error).message.trim().split(/\r?\n/).slice(-3).join(" ").slice(0, 300);
     }
@@ -406,9 +468,8 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     }
 
     // The new build failed its version check: put the previous one back.
-    const failedVersion = target ?? "the new version";
     if (target) persisted.failed[tool] = target;
-    save();
+    void save();
     if (!before.version || !before.plan.rollback) {
       set(tool, {
         installed: after,
@@ -417,8 +478,30 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       });
       return;
     }
-    set(tool, { phase: "rolling-back", message: `${label} ${failedVersion} failed its version check. Putting ${before.version} back…` });
-    const restoredMessage = `${label} ${failedVersion} failed its version check, so Codara put ${before.version} back. ${afterRollBackNote(tool, failedVersion)}`;
+    await rollBack(tool, { version: before.version, realPath: before.realPath, binaryPath: before.binaryPath, plan: before.plan }, after, target ?? "the new version", "");
+  }
+
+  interface PreviousBuild {
+    version: string;
+    realPath: string;
+    binaryPath: string;
+    plan: InstalledTool["plan"];
+  }
+
+  async function rollBack(
+    tool: UpdatableAgentCliToolId,
+    before: PreviousBuild,
+    after: InstalledTool | null,
+    failedVersion: string,
+    lead: string,
+  ): Promise<void> {
+    const label = AGENT_CLI_LABELS[tool];
+    if (!before.plan.rollback) {
+      set(tool, { installed: after, phase: "failed", message: `${lead}${label} ${failedVersion} fails its version check. Run: ${before.plan.manualCommand}` });
+      return;
+    }
+    set(tool, { phase: "rolling-back", message: `${lead}${label} ${failedVersion} failed its version check. Putting ${before.version} back…` });
+    const restoredMessage = `${lead}${label} ${failedVersion} failed its version check, so Codara put ${before.version} back. ${afterRollBackNote(tool, failedVersion)}`;
     const previousOnDisk = before.realPath !== after?.realPath && (await deps.exists(before.realPath).catch(() => false));
     // The new build replaced the previous one in place: running it would run
     // the broken build. Only the vendor's installer can bring it back.
@@ -427,7 +510,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       set(tool, {
         installed: after,
         phase: "failed",
-        message: `${label} ${failedVersion} failed its version check and replaced ${before.version} on disk. ${
+        message: `${lead}${label} ${failedVersion} failed its version check and replaced ${before.version} on disk. ${
           command ? `Put ${before.version} back with: ${command}` : `Reinstall ${label} ${before.version} with its installer.`
         }`,
       });
@@ -464,8 +547,47 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     }
     set(tool, {
       phase: "failed",
-      message: `${label} ${failedVersion} failed its version check and putting ${before.version} back did not work${rollbackError ? ` (${rollbackError})` : ""}. Run: ${rollback.display}`,
+      message: `${lead}${label} ${failedVersion} failed its version check and putting ${before.version} back did not work${rollbackError ? ` (${rollbackError})` : ""}. Run: ${rollback.display}`,
     });
+  }
+
+  /**
+   * An update the last run started and never finished (Codara quit or
+   * crashed while its installer ran): a tool that now fails its version
+   * check is rolled back; one that works is left as it is.
+   */
+  async function recoverInterrupted(): Promise<void> {
+    await ensureLoaded();
+    const record = persisted.inProgress;
+    if (!record || !UPDATABLE_TOOLS.includes(record.tool)) return;
+    const release = deps.lock ? await deps.lock().catch(() => null) : async () => {};
+    // Another Codara holds the lock: the update is still running there.
+    if (!release) return;
+    const { tool } = record;
+    deps.toolBusy?.(tool, true);
+    try {
+      const now = await deps.inspect(tool).catch(() => null);
+      delete persisted.inProgress;
+      if (!now || now.version) {
+        await save();
+        if (now) entry(tool).installed = now;
+        deps.log(`${tool}: the last update was cut short; ${now?.version ?? "the tool"} is what is there now`);
+        return;
+      }
+      if (record.toVersion) persisted.failed[tool] = record.toVersion;
+      await save();
+      entry(tool).generation += 1;
+      await rollBack(
+        tool,
+        { version: record.fromVersion, realPath: record.fromRealPath, binaryPath: record.fromBinaryPath, plan: now.plan },
+        now,
+        record.toVersion ?? "the new version",
+        "Codara closed during the last update. ",
+      );
+    } finally {
+      deps.toolBusy?.(tool, false);
+      await release().catch(() => undefined);
+    }
   }
 
   /** What keeps the bad version away now, in one sentence. */
@@ -534,7 +656,13 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     start(): Promise<AgentCliUpdatesSnapshot> {
       stopped = false;
       scheduleDailyCheck();
-      return check();
+      const recovered = queue.then(recoverInterrupted).catch((error) => deps.log(`recovering the last update failed: ${(error as Error).message}`));
+      queue = recovered;
+      return recovered.then(check);
+    },
+    /** An update or roll back is running (the quit prompt asks first). */
+    busy(): boolean {
+      return UPDATABLE_TOOLS.some((tool) => IN_PROGRESS.includes(entry(tool).phase));
     },
     stop(): void {
       stopped = true;
