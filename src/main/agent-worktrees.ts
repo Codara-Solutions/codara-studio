@@ -49,12 +49,13 @@ import {
   removeWorkspaceFromAppState,
   rollbackCreatedWorktree,
 } from "./workspace-state-edits";
-import type { GitHubMergedPullRequest } from "./github-cli";
+import type { GitHubHeadPullRequest, GitHubMergedPullRequest } from "./github-cli";
 import { PROTECTED_REMOTE_BRANCHES } from "@shared/worktree-cleanup-agent";
 import { isKeptBranch } from "./worktree-cleanup/kept-branches";
 import { archiveIgnoredFiles } from "./worktree-cleanup/archive";
 import { mountRefusal } from "./worktree-cleanup/mounts";
 import { proveByMergedHead, proveByMergedPullRequestStack } from "./merged-pull-request-stack";
+import { parseGitHubRemoteUrl } from "./github-ci-watch";
 
 // Agent-managed worktrees: the logic behind the worktree.create/list/remove
 // agent-socket methods and the codara_worktree_* MCP tools.
@@ -179,6 +180,8 @@ export interface AgentWorktreeAuditEntry {
   proof?: string | null;
   blockers?: string[];
   recoveryRef?: string | null;
+  /** The reason a removal needed no merge: its maker gave the branch up. */
+  givenUp?: { pr: number; remoteCommit: string } | null;
   /** What the user was told, when a press ended before the removal. */
   message?: string | null;
 }
@@ -208,6 +211,9 @@ export interface AgentWorktreeDeps {
     listMergedPullRequests(cwd: string, limit: number): Promise<GitHubMergedPullRequest[]>;
     // Merged pull requests that hold this commit. Absent: none are looked up.
     listPullRequestsForCommit?(cwd: string, sha: string): Promise<GitHubMergedPullRequest[]>;
+    // Every pull request with this head, in any state. Absent: no branch is
+    // ever taken for given up (RemovalVerdict.givenUp).
+    listPullRequestStatesForHead?(cwd: string, branch: string, repository: string): Promise<GitHubHeadPullRequest[]>;
   };
   sendAgentEvent(event: AgentWorktreeEvent): void;
   audit(entry: AgentWorktreeAuditEntry): Promise<void>;
@@ -1951,7 +1957,7 @@ interface VerifyOptions {
   discardIgnoredFiles?: boolean;
   // Locked re-check: reuse the target commit and pull-request proof found
   // outside the lock instead of fetching or asking GitHub again.
-  pinned?: { targetCommit: string; pullRequestTip?: string };
+  pinned?: { targetCommit: string; pullRequestTip?: string; givenUp?: NonNullable<RemovalVerdict["givenUp"]> };
 }
 
 /** How long the tab of the agent that made a worktree must be quiet before it stops holding finished work. */
@@ -1999,6 +2005,11 @@ export interface RemovalVerdict {
   proof?: MergeProof;
   pullRequest?: { number: number; url: string };
   mergeStatus: "merged" | "unmerged" | "unknown" | "unchecked";
+  // Not merged, but given up by the agent that made it and asks to remove
+  // it: its pull request was closed without merging, none is open, and the
+  // remote branch holds the exact tip, so every commit lives on there (and
+  // in the recovery ref). Its branch is never deleted.
+  givenUp?: { pullRequest: { number: number; url: string }; remoteBranch: string; remoteCommit: string; tip: string };
   blockers: WorktreeCode[];
   details: Record<string, unknown>;
   warnings: string[];
@@ -2272,6 +2283,11 @@ export async function verifyRemovable(
   // it holds no more when its shell is in another folder or it has been
   // quiet for MAKER_IDLE_MS (judged at the end, with the merge and the usage).
   let ownerPane: string | null = null;
+  // The agent asking is the one that made it: from its own tab, or its own
+  // Cora run. Only it may count its closed pull request as given up.
+  const callerMadeIt =
+    createdBy?.kind === "agent" &&
+    ((Boolean(createdBy.paneId) && createdBy.paneId === caller.paneId) || (Boolean(createdBy.runId) && createdBy.runId === caller.runId));
   if (createdBy?.paneId && createdBy.paneId !== caller.paneId && (await paneIsOpen(ctx, createdBy.paneId))) {
     block("WORKTREE_OWNED_BY_LIVE_AGENT");
     ownerPane = createdBy.paneId;
@@ -2459,7 +2475,7 @@ export async function verifyRemovable(
   if (!verdict.tip || verdict.tip !== verdict.head) {
     block("WORKTREE_BRANCH_MISMATCH");
   }
-  if (verdict.tip) await proveMerged(ctx, verdict, options, switched ?? undefined);
+  if (verdict.tip) await proveMerged(ctx, verdict, options, switched ?? undefined, callerMadeIt && !switched);
   if (switched) {
     // The branch checked out instead must be merged itself; the recorded
     // branch is kept unless its own tip is merged as well.
@@ -2589,6 +2605,8 @@ async function proveMerged(
   // The branch whose tip is judged: the recorded one, or the one the
   // worktree has checked out instead.
   ownBranch?: string,
+  // Its maker asks: a branch it gave up may count (proveGivenUp).
+  makerAsks = false,
 ): Promise<void> {
   const { scope, deps } = ctx;
   const repo = scope.repoCwd;
@@ -2851,8 +2869,68 @@ async function proveMerged(
     verdict.details.github = ghError;
   } else {
     verdict.mergeStatus = "unmerged";
+    const givenUp = makerAsks ? await proveGivenUp(ctx, tip, branch, upstream, options) : null;
+    if (givenUp) {
+      verdict.givenUp = givenUp;
+      return;
+    }
   }
   block("WORKTREE_NOT_MERGED");
+}
+
+// A branch its maker gave up: the remote has a branch of that name whose tip
+// holds this exact tip (asked of the remote, not a tracking ref), and
+// GitHub's last pull request from it, in origin's repository, was closed
+// without merging, with none open, and its head is this tip or behind it (a
+// branch name reused after an old closed pull request is not given up).
+// Under the lock both are asked again and must give the same answer, so a
+// pull request reopened or a force-push while the removal waited refuses.
+async function proveGivenUp(
+  ctx: VerifyContext,
+  tip: string,
+  branch: string,
+  upstream: string | null,
+  options: VerifyOptions,
+): Promise<RemovalVerdict["givenUp"] | null> {
+  const pinned = options.pinned;
+  if (pinned && pinned.givenUp?.tip !== tip) return null;
+  const lookup = ctx.deps.github.listPullRequestStatesForHead;
+  if (!options.checkMerge || !(options.fetch || pinned) || !lookup) return null;
+  const repo = ctx.scope.repoCwd;
+  const repository = await originGitHubRepository(repo);
+  if (!repository) return null;
+  for (const name of [...new Set([branch, upstream].filter((entry): entry is string => Boolean(entry)))]) {
+    const remote = pinned ? await remoteCommitNow(repo, `origin/${name}`) : await targetNow(ctx, `origin/${name}`);
+    if (!remote || remote.remote !== "origin" || !(await isAncestor(repo, tip, remote.commit))) continue;
+    const pulls = (await lookup(repo, name, repository).catch(() => null))?.filter((pr) => pr.headRefName === name && !pr.isCrossRepository);
+    if (!pulls?.length || pulls.some((pr) => pr.state === "open")) return null;
+    const last = pulls.reduce((latest, pr) => (pr.number > latest.number ? pr : latest));
+    if (last.state !== "closed" || !(await isAncestor(repo, last.headRefOid, tip))) return null;
+    const found = {
+      pullRequest: { number: last.number, url: last.url },
+      remoteBranch: `origin/${name}`,
+      remoteCommit: remote.commit,
+      tip,
+    };
+    if (
+      pinned &&
+      (found.pullRequest.number !== pinned.givenUp!.pullRequest.number ||
+        found.remoteBranch !== pinned.givenUp!.remoteBranch ||
+        found.remoteCommit !== pinned.givenUp!.remoteCommit)
+    ) {
+      return null;
+    }
+    return found;
+  }
+  return null;
+}
+
+// origin's GitHub repository as gh's --repo takes it (HOST/OWNER/NAME), from
+// its configured URL; null when origin is missing or not on GitHub.
+async function originGitHubRepository(repo: string): Promise<string | null> {
+  const url = await readGitText(repo, ["config", "--get", "remote.origin.url"]).catch(() => "");
+  const parsed = url ? parseGitHubRemoteUrl(url) : null;
+  return parsed ? `${parsed.host}/${parsed.repository}` : null;
 }
 
 const ONLY_CACHES_MAX_ENTRIES = 5_000;
@@ -2941,7 +3019,8 @@ function callerHomeId(ctx: VerifyContext): string {
 
 function verdictItem(ctx: VerifyContext, verdict: RemovalVerdict): Record<string, unknown> {
   const copy = verdict.workspace.copyBranch!;
-  const removable = verdict.blockers.length === 0 && (verdict.alreadyRemoved || verdict.mergeStatus === "merged");
+  const removable =
+    verdict.blockers.length === 0 && (verdict.alreadyRemoved || verdict.mergeStatus === "merged" || Boolean(verdict.givenUp));
   return {
     workspaceId: verdict.workspace.id,
     name: verdict.workspace.name,
@@ -2961,6 +3040,9 @@ function verdictItem(ctx: VerifyContext, verdict: RemovalVerdict): Record<string
       ...(verdict.proof ? { proof: verdict.proof } : {}),
       ...(verdict.target ? { target: verdict.target } : {}),
       ...(verdict.pullRequest ? { pullRequest: verdict.pullRequest } : {}),
+      ...(verdict.givenUp
+        ? { givenUp: { closedPullRequest: verdict.givenUp.pullRequest, remoteBranch: verdict.givenUp.remoteBranch } }
+        : {}),
     },
     removable,
     blockers: verdict.blockers,
@@ -3417,6 +3499,7 @@ export async function removeAgentWorktree(
     tip: verdict.tip,
     target: verdict.target,
     proof: verdict.proof ?? null,
+    givenUp: verdict.givenUp ? { pr: verdict.givenUp.pullRequest.number, remoteCommit: verdict.givenUp.remoteCommit } : null,
     blockers: verdict.blockers,
   };
   if (input.dryRun) {
@@ -3610,9 +3693,10 @@ async function removeLocked(
       pinned: {
         targetCommit: verdict.targetCommit!,
         ...(verdict.proof === "pull-request" ? { pullRequestTip: verdict.tip! } : {}),
+        ...(verdict.givenUp ? { givenUp: verdict.givenUp } : {}),
       },
     });
-    if (again.blockers.length || again.tip !== verdict.tip || !again.proof) {
+    if (again.blockers.length || again.tip !== verdict.tip || !(again.proof || (verdict.givenUp && again.givenUp))) {
       return refusal("WORKTREE_CHANGED", undefined, {
         workspaceId: workspace.id,
         ...(again.blockers.length ? { blockers: again.blockers } : {}),
@@ -3702,6 +3786,9 @@ async function removeLocked(
     const currentTip = await revParse(repo, `refs/heads/${ownBranch}`);
     if (!currentTip) {
       branchKept = verdict.alreadyRemoved ? null : "BRANCH_MISSING";
+    } else if (verdict.givenUp) {
+      // Not merged: the branch stays, beside its copy on the remote.
+      branchKept = "NOT_MERGED";
     } else if (!verdict.alreadyRemoved && currentTip !== verdict.tip) {
       branchKept = "BRANCH_MOVED";
     } else {
@@ -3818,6 +3905,9 @@ async function removeLocked(
     ...(verdict.proof ? { proof: verdict.proof } : {}),
     ...(verdict.target ? { target: verdict.target } : {}),
     ...(verdict.pullRequest ? { pullRequest: verdict.pullRequest } : {}),
+    ...(verdict.givenUp
+      ? { givenUp: { closedPullRequest: verdict.givenUp.pullRequest, remoteBranch: verdict.givenUp.remoteBranch } }
+      : {}),
     ...(recoveryRef ? { recoveryRef } : {}),
     ...(recoverWith ? { recoverWith } : {}),
     ...(archived ? { archived } : {}),
@@ -4062,6 +4152,7 @@ export function createWorktreeAuditLog(
       proof: entry.proof ?? null,
       blockers: entry.blockers ?? [],
       recoveryRef: entry.recoveryRef ?? null,
+      ...(entry.givenUp ? { givenUp: { pr: entry.givenUp.pr, remoteCommit: entry.givenUp.remoteCommit } } : {}),
       ...(entry.message ? { message: cleanText(entry.message, 300) } : {}),
     });
     const write = chain.then(async () => {
