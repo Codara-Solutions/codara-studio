@@ -71,7 +71,6 @@ async function until(test, timeoutMs, stepMs = 200) {
   return Boolean(await test());
 }
 
-
 const homes = [];
 function freshHome(label) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), `app-exit-${label}-`));

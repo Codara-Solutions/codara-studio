@@ -29,6 +29,8 @@ export const WAIT_LOAD_DEFAULT_MS = 15_000;
 export const WAIT_MAX_MS = 50_000;
 const TICK_MS = 100;
 const PROBE_TIMEOUT_MS = 1_500;
+// The shortest a page read may take, even when the wait's time is nearly up.
+const MIN_READ_MS = 250;
 const NETWORK_IDLE_MS = 500;
 /** A click that navigates starts loading a moment after it returns. */
 const ACTION_SETTLE_MS = 250;
@@ -314,9 +316,11 @@ export function checkWait(
     const pendingNavigation = requested || activity.loadingStartedAt > activity.loadingStoppedAt;
     const actedAt = lastAgentActivityAt(activity);
     const settling = actedAt > 0 && now - actedAt < ACTION_SETTLE_MS;
-    // A page too busy to answer a read has still finished loading when the
-    // main frame's loading stopped after it last started (and no navigation
-    // is pending): readyState only goes back with a new document.
+    // With no page read (a page too busy to answer), the main frame's loading
+    // events still tell whether it loaded, so what else holds the wait (a
+    // request in flight) can be named. They only describe: without a read a
+    // load wait never passes, since a busy page may be about to navigate.
+    const before = waiting.length;
     const loadedByEvents = activity.loadingStartedAt > 0 && activity.loadingStoppedAt >= activity.loadingStartedAt;
     const ready = probe?.readyState ?? (loadedByEvents ? "complete" : "unknown");
     if (pendingNavigation) waiting.push("a navigation is still loading");
@@ -330,6 +334,10 @@ export function checkWait(
         const urls = [...activity.inFlight.values()].slice(0, 3).map((request) => request.url.slice(0, 120));
         waiting.push(`${busy} request${busy === 1 ? "" : "s"} in flight (${urls.join(", ")})`);
       } else if (now - activity.lastNetworkAt < NETWORK_IDLE_MS) waiting.push("the network was busy less than 500 ms ago");
+    }
+    if (!probe && waiting.length === before) {
+      waiting.push("document.readyState is unknown");
+      unread = true;
     }
   }
   let failure: string | undefined;
@@ -432,9 +440,9 @@ export async function waitForPage(target: BrowserTarget, request: WaitRequest): 
   let probeError: string | null = null;
   for (;;) {
     try {
-      // A read never runs past the wait's own deadline (by more than a tick):
+      // A read never runs past the wait's own deadline (by more than MIN_READ_MS):
       // a page too busy to answer must not turn a 300 ms wait into 1.5 s.
-      const readMs = Math.min(PROBE_TIMEOUT_MS, Math.max(TICK_MS, deadline - Date.now()));
+      const readMs = Math.min(PROBE_TIMEOUT_MS, Math.max(MIN_READ_MS, deadline - Date.now()));
       probe = await bounded(target.evaluate<PageProbe>(expression), readMs);
       probeError = null;
     } catch (error) {

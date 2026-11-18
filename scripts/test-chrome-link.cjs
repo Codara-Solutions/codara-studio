@@ -76,7 +76,6 @@ async function until(check, label, timeoutMs = 5000) {
   throw new Error(`timed out waiting for ${label}`);
 }
 
-
 /**
  * A fake extension: records what Codara sends and answers requests with
  * `answer`. It speaks the sealed wire protocol with the extension's own

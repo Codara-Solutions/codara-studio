@@ -5,7 +5,9 @@
 // connection before the server binds it (EADDRINUSE, or a dead URL that
 // suddenly answers). These ports sit below every ephemeral range (Linux starts
 // at 32768, macOS and Windows at 49152), so only another test picking in the
-// same range could take one, and the probe skips a port in use.
+// same range could take one, and the probe skips a port in use. It probes
+// 127.0.0.1 only, and a machine whose ephemeral range was widened below 30000
+// would bring the overlap back.
 //
 //   const { unusedPort } = require("./unused-port.cjs");
 //   const port = await unusedPort();            // nothing listens there

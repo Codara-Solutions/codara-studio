@@ -438,7 +438,6 @@ async function devServer(body) {
   return { server, port: server.address().port };
 }
 
-/** A port in [20000, 30000) that nothing on this machine holds right now. */
 function get(port, urlPath = "/") {
   return new Promise((resolve, reject) => {
     const req = http.get({ host: "127.0.0.1", port, path: urlPath, agent: false }, (res) => {

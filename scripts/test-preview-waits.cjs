@@ -127,7 +127,9 @@ function verdicts() {
   const unanswered = checkWait(idle, activity({ ...loaded, inFlight: new Map([["1", { url: "http://x/api", at: 1 }]]) }), null, now, now);
   assert.deepEqual(unanswered.waiting, ["1 request in flight (http://x/api)"]);
   assert.equal(unanswered.unread, undefined, "the verdict did not need the page read");
-  assert.equal(checkWait(idle, activity(loaded), null, now, now).ok, true, "loaded and idle without a page read");
+  const idleUnread = checkWait(idle, activity(loaded), null, now, now);
+  assert.deepEqual(idleUnread.waiting, ["document.readyState is unknown"], "a load wait never passes without a page read");
+  assert.equal(idleUnread.unread, true);
   const neverLoaded = checkWait(load, activity(), null, now, now);
   assert.deepEqual(neverLoaded.waiting, ["document.readyState is unknown"]);
   assert.equal(neverLoaded.unread, true);
