@@ -170,9 +170,11 @@ function makeClient(codara, store, onRequest = async () => ({})) {
     ports: async () => codara.ports,
     hello: async () => ({ browser: { name: "Chromium", version: "141" }, extension: { id: "a".repeat(32), version: "1.4.1" } }),
     loadPairing: async () => (store.token ? { token: store.token, linkId: "chrome-ab12" } : null),
+    // Like the extension's save(): the value is in memory at once, the
+    // write lands later.
     savePairing: async (token) => {
-      await step(store, "beforeSave");
       store.token = token;
+      await step(store, "beforeSave");
       store.saves.push(token);
     },
     clearPairing: async () => {
@@ -361,25 +363,26 @@ export async function run() {
     client.disconnect();
   }
 
-  // 7. A handshake that resumes after its probe timed out adopts nothing:
-  // the next port's Codara stays the link.
+  // 7. A pairing offer whose handshake resumes after its probe timed out
+  // adopts nothing: the next port's Codara stays the link.
   {
     const codara = fakeCodara();
-    const store = newStore();
-    await paired(codara, store);
+    codara.allow = false;
     codara.ports = [43117, 43118];
+    const store = newStore();
     const client = makeClient(codara, store);
-    const setup = hold("importKey", browserSessionKey());
-    void client.connect();
+    // The browser's digests: its key commitment, then the pairing code.
+    let digests = 0;
+    const setup = hold("digest", () => ++digests === 2);
+    void client.connect({ pair: true });
     await setup.reached;
     const slow = codara.last();
-    await until(() => client.status.state === "connected", "the next port's link", 5000);
+    await until(() => client.status.state === "pairing" && codara.last() !== slow, "the next port's pairing", 5000);
     const next = codara.last();
-    assert.notEqual(next, slow);
     setup.release();
     await wait(30);
     assert.equal(client.socket, next, "the late handshake did not take the link");
-    assert.equal(client.status.state, "connected");
+    assert.equal(client.status.state, "pairing");
     assert.equal(next.readyState, 1);
     client.disconnect();
   }
@@ -433,7 +436,6 @@ export async function run() {
     client.disconnect();
     codara.known = null;
     void client.connect({ pair: true });
-    await until(() => codara.last().token, "the new pairing on Codara's side");
     await wait(30);
     clearing.release();
     await until(() => client.status.state === "connected", "the new pairing");
@@ -466,5 +468,68 @@ export async function run() {
     client.disconnect();
   }
 
-  return "link races: a cancelled pairing saves no token, an old revocation never erases a new pairing, an old answer never goes out on a new link, an unsealed revocation keeps the saved pairing, a search cancelled mid-hello adopts nothing, a close never overtakes the frame before it, a timed-out handshake adopts nothing, a cancelled re-pairing keeps the earlier pairing, a revocation clears only its own pairing, and an old retry never clears a newer one";
+  // 12. Pairing again, cancelled while saving: a reconnect meanwhile reads
+  // the pairing only after the save was taken back, never the new token.
+  {
+    const codara = fakeCodara();
+    const store = newStore();
+    const before = await paired(codara, store);
+    codara.known = null;
+    const client = makeClient(codara, store);
+    const saving = holdStore(store, "beforeSave");
+    void client.connect({ pair: true });
+    await saving.reached;
+    client.disconnect();
+    const reconnecting = client.connect();
+    await wait(30);
+    saving.release();
+    await reconnecting;
+    await wait(30);
+    assert.equal(store.token, before, "the earlier pairing is back");
+    assert.notEqual(client.status.state, "connected", "and the cancelled token never authenticated a link");
+    client.disconnect();
+  }
+
+  // 13. Disconnect in the popup while a re-pairing is being saved: the
+  // pairing is forgotten, the approval is not kept, nothing reconnects.
+  {
+    const codara = fakeCodara();
+    const store = newStore();
+    await paired(codara, store);
+    codara.known = null;
+    const client = makeClient(codara, store);
+    const saving = holdStore(store, "beforeSave");
+    void client.connect({ pair: true });
+    await saving.reached;
+    const forgetting = client.forget({ type: "unpair" });
+    saving.release();
+    await forgetting;
+    await wait(30);
+    assert.equal(store.token, null, "Disconnect forgot every pairing");
+    assert.equal(client.status.state, "idle");
+    assert.equal(client.reconnectTimer, null, "and nothing reconnects");
+  }
+
+  // 14. Codara proves the pairing, then revokes and closes while the browser
+  // still sets up the session, past the probe's deadline: the revocation
+  // still counts.
+  {
+    const codara = fakeCodara();
+    const store = newStore();
+    await paired(codara, store);
+    const client = makeClient(codara, store);
+    const setup = hold("importKey", browserSessionKey());
+    void client.connect();
+    await setup.reached;
+    const socket = codara.last();
+    await socket.sealed({ type: "revoked" });
+    socket.hangUp();
+    await wait(1700);
+    setup.release();
+    await until(() => client.status.state === "unpaired", "the revocation", 3000);
+    assert.equal(store.token, null, "the revoked pairing is forgotten");
+    client.disconnect();
+  }
+
+  return "link races: a cancelled pairing saves no token, an old revocation never erases a new pairing, an old answer never goes out on a new link, an unsealed revocation keeps the saved pairing, a search cancelled mid-hello adopts nothing, a close never overtakes the frame before it, a timed-out handshake adopts nothing, a cancelled re-pairing keeps the earlier pairing, a revocation clears only its own pairing, an old retry never clears a newer one, a reconnect never reads a save that may be taken back, Disconnect keeps no approval in flight, and a proven Codara's revocation counts past the probe deadline";
 }

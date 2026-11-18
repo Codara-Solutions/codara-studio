@@ -18,6 +18,8 @@ const PROBE_TIMEOUT_MS = 1500;
 const PING_INTERVAL_MS = 20_000;
 // Two missed pongs: the socket is dead even though it never closed.
 const PONG_DEADLINE_MS = 2 * PING_INTERVAL_MS + 5_000;
+// How long Disconnect waits for its last frame to leave.
+const FAREWELL_TIMEOUT_MS = 1_000;
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 // While no Codara answers on any port. A lost link climbs the quick
 // RECONNECT_DELAYS_MS first, since Codara restarting for an update is the
@@ -129,7 +131,7 @@ export class LinkClient {
     const epoch = this.epoch;
     const stale = () => epoch !== this.epoch;
     this.clearReconnect();
-    const pairing = await this.deps.loadPairing();
+    const pairing = await this.readPairing();
     if (stale()) return this.status;
     if (!pairing && !pair) {
       this.setStatus({ state: "idle", code: null, error: null });
@@ -229,14 +231,18 @@ export class LinkClient {
         clearTimeout(timer);
         resolve(outcome);
       };
-      const timer = setTimeout(() => {
+      const expire = () => {
+        if (settled) return;
         try {
           socket?.close();
         } catch {
           /* already closed */
         }
         finish(opened ? "next" : "closed");
-      }, PROBE_TIMEOUT_MS);
+      };
+      // A Codara that proved the pairing gets the frames it sent before the
+      // deadline read first: a "revoked" among them still counts.
+      const timer = setTimeout(() => (proven ? void frames.then(expire) : expire()), PROBE_TIMEOUT_MS);
       // Disconnect pressed, or another search started, while this one waited.
       const cancelled = () => {
         if (epoch === this.epoch) return false;
@@ -420,6 +426,7 @@ export class LinkClient {
         const kept = await this.pairingStore(async () => {
           if (!this.current(socket)) return false;
           const previous = await this.deps.loadPairing();
+          if (!this.current(socket)) return false;
           await this.deps.savePairing(token, message.linkId);
           if (this.current(socket)) return true;
           // Cancelled while saving: the pairing stored before comes back,
@@ -498,11 +505,40 @@ export class LinkClient {
     this.deps.onMessage?.(message);
   }
 
-  /** Pairing storage, one write at a time: what a write checked still holds when it lands. */
+  /**
+   * Pairing storage, one step at a time: what a write checked still holds
+   * when it lands, and a read never sees a token whose save may yet be
+   * taken back. Work inside calls the deps directly, never this again.
+   */
   pairingStore(work) {
     const done = this.storing.then(work);
     this.storing = done.catch(() => {});
     return done;
+  }
+
+  readPairing() {
+    return this.pairingStore(() => this.deps.loadPairing());
+  }
+
+  /**
+   * The user's Disconnect: from this moment nothing in flight is kept (a
+   * pairing Codara approves now is not saved), `farewell` leaves before the
+   * link closes, then the pairing is forgotten, after any write before it.
+   */
+  async forget(farewell) {
+    const socket = this.socket;
+    if (farewell) this.send(farewell);
+    const flushed = socket?.outbox;
+    this.epoch += 1;
+    this.connecting = null;
+    this.clearReconnect();
+    if (flushed) {
+      let timer;
+      await Promise.race([flushed, new Promise((resolve) => (timer = setTimeout(resolve, FAREWELL_TIMEOUT_MS)))]);
+      clearTimeout(timer);
+    }
+    if (!this.socket || this.socket === socket) this.disconnect("idle");
+    await this.pairingStore(() => this.deps.clearPairing());
   }
 
   lost() {
@@ -535,7 +571,7 @@ export class LinkClient {
     // A connection that is over must not touch the timer a newer one set.
     if (epoch !== this.epoch) return;
     this.clearReconnect();
-    if (!(await this.deps.loadPairing()) || epoch !== this.epoch) return;
+    if (!(await this.readPairing()) || epoch !== this.epoch) return;
     const delay = RECONNECT_DELAYS_MS[Math.min(this.attempt, RECONNECT_DELAYS_MS.length - 1)];
     this.attempt += 1;
     this.scheduleAt(delay);
@@ -550,7 +586,7 @@ export class LinkClient {
     await this.updateScan({ misses: scan.misses + 1, retryAt: this.now() + delay });
     if (epoch !== this.epoch) return;
     this.clearReconnect();
-    if (!(await this.deps.loadPairing()) || epoch !== this.epoch) return;
+    if (!(await this.readPairing()) || epoch !== this.epoch) return;
     this.scheduleAt(delay);
   }
 

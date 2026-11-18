@@ -244,7 +244,7 @@ async function handleRequest(request, link) {
     case "cdp":
       return relayCommand(request, link);
     case "open":
-      return openTab(request);
+      return openTab(request, link);
     case "close": {
       const tabId = Number(request.tabId);
       const tab = await chrome.tabs.get(tabId).catch(() => null);
@@ -572,7 +572,7 @@ async function setPresence(settings) {
   }
 }
 
-async function openTab(request) {
+async function openTab(request, link) {
   if (!state.allowOpen) {
     throw new Error('Opening tabs is off. The user can turn on "Open new tabs in a group" in the Codara extension popup.');
   }
@@ -582,7 +582,7 @@ async function openTab(request) {
   if (rule) throw new Error(`${url} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`);
   const tab = await chrome.tabs.create({ url, active: request.active === true });
   await save({ shareTabs: withValue(state.shareTabs, tab.id), agentTabs: withValue(state.agentTabs, tab.id) });
-  const group = await groupOpenedTab(tab, request.group);
+  const group = await groupOpenedTab(tab, request.group, link);
   const deadline = Date.now() + OPEN_LOAD_TIMEOUT_MS;
   let current = tab;
   while (current && current.status !== "complete" && Date.now() < deadline) {
@@ -598,11 +598,14 @@ async function openTab(request) {
 // Puts a tab an agent just opened in the agent's named group in its window,
 // joining one the extension made with that title. Only that new tab moves, so
 // no tab the user shared is ever grouped. A failure leaves it ungrouped.
-async function groupOpenedTab(tab, requested) {
+async function groupOpenedTab(tab, requested, link) {
   const title = agentGroupTitle(requested);
   if (!title || !chrome.tabGroups) return null;
   try {
     const groups = await chrome.tabGroups.query({ windowId: tab.windowId });
+    // The link that asked closed meanwhile: the tab stays where it opened.
+    // (A group once made is still named: it is one step with its making.)
+    if (link && !link.live()) return null;
     const existing = agentGroupFor(groups, state.agentGroups, title);
     if (existing) {
       await chrome.tabs.group({ groupId: existing.id, tabIds: [tab.id] });
@@ -951,9 +954,9 @@ async function handlePopup(request) {
       await link.connect({ pair: true });
       return popupState(request);
     case "unpair":
-      link.send({ type: "unpair" });
-      await save({ token: null, linkId: null });
-      link.disconnect("idle");
+      // Ends the link at once, so a pairing Codara approves meanwhile is
+      // not kept; the token is cleared after any pairing write in flight.
+      await link.forget({ type: "unpair" });
       await detachAll();
       break;
     case "shareTab":
