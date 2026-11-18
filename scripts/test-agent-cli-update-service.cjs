@@ -402,16 +402,37 @@ async function fakeService(m) {
     assert.equal(w.commands.length, 1, "no update loop");
   }
 
-  // A saved failed version from an earlier launch is respected, and its
-  // tool's own updater is held off from launch, before the first check.
+  // A saved failed version from an earlier launch is respected, and a
+  // version that broke keeps its tool's own updater off from launch.
   {
-    const w = world({ state: { failed: { claude: "2.1.327" }, notOffered: {} } });
+    const w = world({ state: { failed: { claude: "2.1.327" }, notOffered: {}, broken: { claude: "2.1.327" } } });
     const service = m.createAgentCliUpdateService(w.deps);
     await service.prime();
     assert.deepEqual(w.held.at(-1), ["claude"]);
     await service.check();
     await service.settled();
     assert.equal(w.commands.length, 0);
+    assert.deepEqual(w.held.at(-1), ["claude"]);
+    // The user got that version another way, and it works: the hold lifts.
+    w.tools.claude = { ...w.tools.claude, version: "2.1.327" };
+    await service.check();
+    assert.deepEqual(w.held.at(-1), [], "installed at or above the broken version");
+  }
+
+  // An installer that errored (network down) rolled nothing back: the
+  // tool's own updater stays on.
+  {
+    const w = world({
+      onRun: () => {
+        throw new Error("network down");
+      },
+    });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.settled();
+    assert.equal(tool(service.snapshot(), "claude").phase, "failed");
+    assert.deepEqual(w.saved.failed, { claude: "2.1.327" }, "not tried again by itself");
+    assert.deepEqual(w.held.at(-1), [], "no updater held off without a broken build");
   }
 
   // One update at a time, across tools.

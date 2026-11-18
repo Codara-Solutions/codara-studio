@@ -44,6 +44,11 @@ export interface PersistedUpdateState {
   failed: Partial<Record<UpdatableAgentCliToolId, string>>;
   /** Newer versions the installer itself said it does not offer yet. */
   notOffered: Partial<Record<UpdatableAgentCliToolId, string>>;
+  /**
+   * Versions that were installed and failed their version check. Only these
+   * keep the tool's own updater off; an installer that merely errored does not.
+   */
+  broken?: Partial<Record<UpdatableAgentCliToolId, string>>;
 }
 
 export interface PiVersionInfo {
@@ -106,7 +111,7 @@ function sessions(count: number, label: string): string {
 export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
   const entries = new Map<UpdatableAgentCliToolId, ToolEntry>(UPDATABLE_TOOLS.map((tool) => [tool, emptyEntry()]));
   let pi: PiVersionInfo | null = null;
-  let persisted: PersistedUpdateState = { failed: {}, notOffered: {} };
+  let persisted: Required<PersistedUpdateState> = { failed: {}, notOffered: {}, broken: {} };
   let loaded: Promise<void> | null = null;
   let checking: Promise<AgentCliUpdatesSnapshot> | null = null;
   let lastCheckedAt: string | null = null;
@@ -124,7 +129,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     loaded ??= deps
       .loadState()
       .then((state) => {
-        persisted = { failed: { ...state.failed }, notOffered: { ...state.notOffered } };
+        persisted = { failed: { ...state.failed }, notOffered: { ...state.notOffered }, broken: { ...state.broken } };
       })
       .catch((error) => deps.log(`could not read the saved update state: ${(error as Error).message}`));
     return loaded;
@@ -193,12 +198,17 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     };
   }
 
-  /** Tools rolled back from the newest version they were offered. */
+  /**
+   * Tools whose newest offered version failed its version check, while the
+   * installed one is older: their own updater would install it again.
+   */
   function heldTools(): UpdatableAgentCliToolId[] {
     return UPDATABLE_TOOLS.filter((tool) => {
-      const failed = persisted.failed[tool];
-      const latest = entry(tool).latest;
-      return failed !== undefined && !(latest && isNewerCliVersion(latest, failed));
+      const broken = persisted.broken[tool];
+      if (broken === undefined) return false;
+      const { latest, installed } = entry(tool);
+      if (latest && isNewerCliVersion(latest, broken)) return false;
+      return !(installed?.version && compareCliVersions(installed.version, broken) >= 0);
     });
   }
 
@@ -406,6 +416,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       }
       delete persisted.failed[tool];
       delete persisted.notOffered[tool];
+      delete persisted.broken[tool];
       save();
       set(tool, { phase: "updated", message: `Updated from ${before.version ?? "an unknown version"} to ${after.version}.` });
       deps.log(`${tool}: updated to ${after.version}`);
@@ -414,7 +425,10 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
 
     // The new build failed its version check: put the previous one back.
     const failedVersion = target ?? "the new version";
-    if (target) persisted.failed[tool] = target;
+    if (target) {
+      persisted.failed[tool] = target;
+      persisted.broken[tool] = target;
+    }
     save();
     if (!before.version || !before.plan.rollback) {
       set(tool, {

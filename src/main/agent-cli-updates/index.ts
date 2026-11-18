@@ -53,7 +53,7 @@ async function readState(): Promise<PersistedUpdateState> {
           ([tool, version]) => ["claude", "codex", "grok"].includes(tool) && typeof version === "string",
         ),
       );
-    return { failed: versions(parsed.failed), notOffered: versions(parsed.notOffered) };
+    return { failed: versions(parsed.failed), notOffered: versions(parsed.notOffered), broken: versions(parsed.broken) };
   } catch {
     return { failed: {}, notOffered: {} };
   }
