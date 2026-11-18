@@ -81,7 +81,8 @@ check("CI's shards get about the same listed seconds", () => {
     selectShard(pool, { index, count }).reduce((sum, f) => sum + (SLOW_POOL_SUITES[f] || 0), 0),
   );
   const total = seconds.reduce((a, b) => a + b, 0);
-  assert.ok(Math.max(...seconds) - Math.min(...seconds) <= total * 0.1, `listed seconds per shard: ${seconds}`);
+  // Within a fifth of one shard's fair share, whatever the shard count.
+  assert.ok(Math.max(...seconds) - Math.min(...seconds) <= (total / count) * 0.2, `listed seconds per shard: ${seconds}`);
 });
 
 if (failed > 0) process.exit(1);
