@@ -229,6 +229,14 @@ test("direct main pushes run release checks before the next nightly", () => {
   assert.deepEqual(parts.sort(), ["pool", "serial"]);
   const runs = gate.needs.flatMap((name) => halves[name].steps.map((step) => step.run));
   for (const check of ["node", "web", "e2e", "pi-cora"]) assert.ok(runs.includes(`npm run typecheck:${check}`), check);
+  // The pool runs in shards, one suite at a time, and the shards cover it all.
+  const pool = halves["test-pool"];
+  const shards = pool.strategy.matrix.shard;
+  const poolEnv = pool.steps.find((step) => step.run === "npm run test:all").env;
+  assert.equal(poolEnv.CODARA_TEST_JOBS, "1");
+  assert.equal(poolEnv.CODARA_TEST_SHARD, "${{ matrix.shard }}/${{ strategy.job-total }}");
+  assert.deepEqual(shards, Array.from({ length: shards.length }, (_, i) => i + 1));
+  assert.equal(pool.strategy["fail-fast"], false);
 });
 
 // budgets.yml and ci-linux.yml kept filtering on the retired Cora branch for a
