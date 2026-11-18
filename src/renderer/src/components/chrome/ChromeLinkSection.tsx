@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 
-import type { ChromeLinkBrowserState } from "@shared/chrome-link";
+import { extensionUpdateNotice, NOT_FROM_CODARA_FOLDER, type ChromeLinkBrowserState, type ChromeLinkIncompatibleExtension } from "@shared/chrome-link";
 import { SettingRow, SettingsSection, ToggleRow } from "../settings/SettingsPrimitives";
 import ChromeConnectCard from "./ChromeConnectCard";
 import KeepAgentsInChromeRow from "./KeepAgentsInChromeRow";
@@ -12,6 +12,73 @@ function sharedCount(browser: ChromeLinkBrowserState): number {
 }
 
 /**
+ * A connected extension older than the one Codara ships. Codara changes it
+ * only when the user presses Update extension here; until then it keeps
+ * working as it is.
+ */
+function ExtensionUpdateNotice({
+  browser,
+  shipped,
+  busy,
+  onUpdate,
+}: {
+  browser: ChromeLinkBrowserState;
+  shipped: string;
+  busy: boolean;
+  onUpdate: () => void;
+}): React.ReactElement | null {
+  const notice = extensionUpdateNotice(browser, shipped);
+  if (!notice) return null;
+  return (
+    <div className="chrome-update" role={notice.action ? undefined : "status"} data-chrome-extension-update={browser.extensionUpdate ?? undefined}>
+      <div className="chrome-update__text">
+        <span>{notice.status}</span>
+        {notice.detail ? <span className="chrome-update__desc">{notice.detail}</span> : null}
+      </div>
+      {notice.action ? (
+        <button type="button" className="spark-btn is-primary" disabled={busy} onClick={onUpdate}>
+          {notice.action === "update" ? "Update extension" : "Reload extension"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/** An extension that tried to connect and speaks another link protocol than this Codara. */
+function IncompatibleNotice({
+  extension,
+  shipped,
+  busy,
+  onUpdate,
+}: {
+  extension: ChromeLinkIncompatibleExtension;
+  shipped: string;
+  busy: boolean;
+  onUpdate: () => void;
+}): React.ReactElement {
+  const who = `${extension.browser.name}'s Codara extension ${extension.version}`.trim();
+  const text =
+    extension.update === "codara"
+      ? `${who} is newer than this Codara understands, so it cannot connect. Update Codara to use it.`
+      : extension.copied
+        ? `Codara's extension folder now holds ${shipped}. Open chrome://extensions in ${extension.browser.name} and press the reload button on Codara to connect.`
+        : extension.fromCodaraFolder
+          ? `${who} is too old for this Codara, so it cannot connect. Update extension copies ${shipped} into Codara's extension folder; then press the reload button on Codara in chrome://extensions.`
+          : `${who} is too old for this Codara, so it cannot connect. It was not loaded from Codara's folder: ${NOT_FROM_CODARA_FOLDER}`;
+  const canUpdate = extension.update === "extension" && extension.fromCodaraFolder && !extension.copied;
+  return (
+    <div className="chrome-update" role="alert" data-chrome-incompatible={extension.extensionId}>
+      <span className="chrome-update__text">{text}</span>
+      {canUpdate ? (
+        <button type="button" className="spark-btn is-primary" disabled={busy} onClick={onUpdate}>
+          Update extension
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * Settings > Browser > Chrome extension: how to install the extension in
  * Chrome, Edge, Brave or another Chromium browser, the browsers paired with
  * Codara and the tabs they share, and what agents did there.
@@ -19,6 +86,7 @@ function sharedCount(browser: ChromeLinkBrowserState): number {
 export default function ChromeLinkSection(): React.ReactElement | null {
   const state = useChromeLink();
   const [error, setError] = useState<string | null>(null);
+  const [updating, setUpdating] = useState(false);
   if (!state) return null;
 
   const run = async (action: () => Promise<unknown>) => {
@@ -29,6 +97,16 @@ export default function ChromeLinkSection(): React.ReactElement | null {
       setError(failure instanceof Error ? failure.message : String(failure));
     }
   };
+  const update = (which: { linkId: string } | { extensionId: string }) =>
+    run(async () => {
+      setUpdating(true);
+      try {
+        await window.spark.chromeLink.updateExtension(which);
+      } finally {
+        setUpdating(false);
+      }
+    });
+  const shipped = state.shippedExtensionVersion ?? "a newer version";
   const disconnect = (browser: ChromeLinkBrowserState) => run(() => window.spark.chromeLink.disconnect(browser.linkId));
 
   return (
@@ -77,6 +155,15 @@ export default function ChromeLinkSection(): React.ReactElement | null {
         desc={state.browsers.length === 0 ? "None yet. Follow the steps above to connect one." : "Disconnect forgets a browser. Its extension must connect again, with a new code."}
       >
         {error ? <div className="chrome-folder__path" role="alert">{error}</div> : null}
+        {state.incompatible.map((extension) => (
+          <IncompatibleNotice
+            key={extension.extensionId}
+            extension={extension}
+            shipped={shipped}
+            busy={updating}
+            onUpdate={() => void update({ extensionId: extension.extensionId })}
+          />
+        ))}
         {state.browsers.length > 0 ? (
           <div className="st-list">
             {state.browsers.map((browser) => (
@@ -89,13 +176,12 @@ export default function ChromeLinkSection(): React.ReactElement | null {
                   <div className="st-device__meta">
                     {`${sharedCount(browser)} shared tab${sharedCount(browser) === 1 ? "" : "s"}, paired ${formatWhen(browser.pairedAt)}, last seen ${browser.connected ? "now" : formatWhen(browser.lastSeenAt)}`}
                   </div>
-                  {browser.extensionUpdate ? (
-                    <div className="st-device__meta" role="status" data-chrome-extension-update={browser.extensionUpdate}>
-                      {browser.extensionUpdate === "updating"
-                        ? `Updating the extension to ${state.shippedExtensionVersion ?? "the latest version"}.`
-                        : `This browser runs extension ${browser.extensionVersion ?? "an older version"}, Codara ships ${state.shippedExtensionVersion ?? "a newer one"}. Update the extension: open chrome://extensions and press the reload button on Codara.`}
-                    </div>
-                  ) : null}
+                  <ExtensionUpdateNotice
+                    browser={browser}
+                    shipped={shipped}
+                    busy={updating}
+                    onUpdate={() => void update({ linkId: browser.linkId })}
+                  />
                   {browser.tabs.length > 0 ? (
                     <ul className="chrome-tabs">
                       {browser.tabs.map((tab) => (
