@@ -139,8 +139,13 @@ export class CdpSession {
     return !this.disposed && this.transport.isAttached();
   }
 
+  /** Why this session will never send method, or null (see CdpTransport.refuses). */
+  refuses(method: string): string | null {
+    return this.transport.refuses?.(method) ?? null;
+  }
+
   async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
-    const refused = this.transport.refuses?.(method);
+    const refused = this.refuses(method);
     if (refused) throw new Error(refused);
     await this.ensureAttached();
     return (await this.transport.send(method, params)) as T;
@@ -152,6 +157,8 @@ export class CdpSession {
    * and returns the release.
    */
   async enable(domain: string, params?: Record<string, unknown>): Promise<() => Promise<void>> {
+    const refused = this.refuses(`${domain}.enable`);
+    if (refused) throw new Error(refused);
     const state = this.domains.get(domain) ?? { count: 0, enabled: null };
     if (!this.domains.has(domain)) this.domains.set(domain, state);
     state.count += 1;
