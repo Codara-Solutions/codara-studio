@@ -90,10 +90,10 @@ const WorkerWaitContext = React.createContext<
   ((taskIds: string[]) => string | null) | null
 >(null);
 
-// Focuses a worker's terminal pane; false when it has no open pane. A context
-// for the same reason as WorkerWaitContext: worker rows sit inside memoized
-// step cards.
-const WorkerTerminalContext = React.createContext<((workerTaskId: string) => boolean) | null>(null);
+// Goes inside a worker: the panel swaps this conversation for the worker's own
+// chat. Takes the row's logical worker id. A context for the same reason as
+// WorkerWaitContext: worker rows sit inside memoized step cards.
+const WorkerOpenContext = React.createContext<((workerId: string) => void) | null>(null);
 
 // The standalone worker rows folded into step cards (see foldStepWorkers),
 // keyed by logical worker id. A context for the same reason as above.
@@ -102,13 +102,14 @@ const StepWorkerRowsContext = React.createContext<Map<string, ToolItem>>(new Map
 export default function ChatConversation({
   run,
   cwd = null,
-  onOpenWorkerTerminal,
+  onOpenWorker,
   findRequest = 0,
 }: {
   run: RunState;
   /** Workspace that relative file links in Cora's answers resolve against. */
   cwd?: string | null;
-  onOpenWorkerTerminal?: (workerTaskId: string) => boolean;
+  /** Clicking a worker row in a step card goes inside that worker. */
+  onOpenWorker?: (workerId: string) => void;
   /** Bumped by the panel's find chord; each change opens and focuses find. */
   findRequest?: number;
 }) {
@@ -346,7 +347,7 @@ export default function ChatConversation({
 
   return (
     <WorkerWaitContext.Provider value={summarizeWait}>
-      <WorkerTerminalContext.Provider value={onOpenWorkerTerminal ?? null}>
+      <WorkerOpenContext.Provider value={onOpenWorker ?? null}>
       <StepWorkerRowsContext.Provider value={stepWorkerRows}>
       <MarkdownWorkspaceContext.Provider value={cwd || null}>
       <div
@@ -545,7 +546,7 @@ export default function ChatConversation({
       </div>
       </MarkdownWorkspaceContext.Provider>
       </StepWorkerRowsContext.Provider>
-      </WorkerTerminalContext.Provider>
+      </WorkerOpenContext.Provider>
     </WorkerWaitContext.Provider>
   );
 }
@@ -3247,16 +3248,24 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
   ].filter(Boolean).join(" · ");
   const diff = worker.diff;
   const hasDiff = Boolean(diff && diff.fileCount > 0);
-  const openWorkerTerminal = React.useContext(WorkerTerminalContext);
-  // "Closed" holds only for the task and runtime state it was observed on: a
-  // retry or a runtime fallback opens a new pane, and a row the virtualizer
-  // keeps mounted must offer it again rather than stay disabled.
-  const terminalKey = `${worker.taskId ?? ""}:${worker.runtimeState ?? ""}`;
-  const [closedTerminalKey, setClosedTerminalKey] = useState<string | null>(null);
-  const terminalClosed = closedTerminalKey === terminalKey;
-  const hasLiveAttempt =
-    worker.runtimeState !== undefined || worker.status === "claimed" || worker.status === "running";
-  const canOpenTerminal = Boolean(openWorkerTerminal && worker.taskId && hasLiveAttempt);
+  const openWorker = React.useContext(WorkerOpenContext);
+  // A worker that has not launched yet has nothing to go inside: no brief on
+  // disk, no steps.
+  const canOpen = Boolean(openWorker && worker.attemptId);
+  const rowContent = (
+    <>
+      <ActivityIcon state={iconState} color={iconState === "done" ? "var(--ok)" : color} />
+      <span style={{ ...TOOL_TITLE_STYLE, fontWeight: 500 }}>{worker.title}</span>
+      <span style={TOOL_INLINE_DETAIL_STYLE}>{detail}</span>
+      {hasDiff && diff && (
+        <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span>{diff.fileCount} {diff.fileCount === 1 ? "file" : "files"}</span>
+          <span style={{ color: "var(--ok)" }}>+{diff.additions}</span>
+          <span style={{ color: "var(--danger)" }}>−{diff.deletions}</span>
+        </span>
+      )}
+    </>
+  );
   return (
     <div
       style={{
@@ -3265,43 +3274,38 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
         minWidth: 0,
       }}
     >
-      <div
-        title={`${worker.title}: ${worker.status}${titleSuffix}`}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          minHeight: 26,
-          minWidth: 0,
-          padding: "1px 0",
-        }}
-      >
-        <ActivityIcon state={iconState} color={iconState === "done" ? "var(--ok)" : color} />
-        <span style={{ ...TOOL_TITLE_STYLE, fontWeight: 500 }}>{worker.title}</span>
-        <span style={TOOL_INLINE_DETAIL_STYLE}>{detail}</span>
-        {hasDiff && diff && (
-          <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
-            <span>{diff.fileCount} {diff.fileCount === 1 ? "file" : "files"}</span>
-            <span style={{ color: "var(--ok)" }}>+{diff.additions}</span>
-            <span style={{ color: "var(--danger)" }}>−{diff.deletions}</span>
+      {canOpen ? (
+        <button
+          type="button"
+          className="cora-step-worker-open"
+          data-worker-row={worker.id}
+          title={`${worker.title}: ${worker.status}${titleSuffix}`}
+          aria-label={detail ? `Open ${worker.title}, ${detail}` : `Open ${worker.title}`}
+          onClick={() => openWorker?.(worker.id)}
+        >
+          {rowContent}
+          <span className="cora-step-worker-open__go" aria-hidden>
+            Open
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+              <path d="m6 3.5 4.5 4.5L6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
           </span>
-        )}
-        {canOpenTerminal && (
-          <button
-            type="button"
-            className="cora-worker-terminal"
-            disabled={terminalClosed}
-            title={terminalClosed ? "This worker's terminal is closed" : "Open this worker's terminal"}
-            onClick={() => {
-              if (!worker.taskId || !openWorkerTerminal) return;
-              if (!openWorkerTerminal(worker.taskId)) setClosedTerminalKey(terminalKey);
-            }}
-          >
-            <TerminalGlyph />
-            <span>{terminalClosed ? "Terminal closed" : "Open terminal"}</span>
-          </button>
-        )}
-      </div>
+        </button>
+      ) : (
+        <div
+          title={`${worker.title}: ${worker.status}${titleSuffix}`}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            minHeight: 26,
+            minWidth: 0,
+            padding: "1px 0",
+          }}
+        >
+          {rowContent}
+        </div>
+      )}
       {failure && <div className="cora-step-worker__failure">{failure}</div>}
       {hasDiff && diff && (
         <div
@@ -3354,15 +3358,6 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
         </div>
       )}
     </div>
-  );
-}
-
-function TerminalGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" stroke="currentColor" strokeWidth="1.25" />
-      <path d="m4.75 6.25 2 1.75-2 1.75M8.5 10h2.75" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
   );
 }
 
