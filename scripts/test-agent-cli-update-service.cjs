@@ -335,7 +335,8 @@ async function fakeService(m) {
     assert.deepEqual(w.saved.failed, {}, "a good update clears the failed version");
   }
 
-  // The previous build is gone from disk: the launcher runs the roll back.
+  // The previous build is gone from disk: the launcher now runs the broken
+  // build, so nothing runs and the vendor's installer command is shown.
   {
     const w = world({
       exists: () => false,
@@ -348,8 +349,10 @@ async function fakeService(m) {
     const service = m.createAgentCliUpdateService(w.deps);
     await service.check();
     await service.settled();
-    assert.equal(w.commands[1].executable, "/home/u/.local/bin/claude");
-    assert.equal(tool(service.snapshot(), "claude").phase, "rolled-back");
+    assert.equal(w.commands.length, 1, "only the update ran; the broken build never runs");
+    const claude = tool(service.snapshot(), "claude");
+    assert.equal(claude.phase, "failed");
+    assert.match(claude.message, /removed 2\.1\.325 on disk\. Put 2\.1\.325 back with: curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash -s 2\.1\.325/);
   }
 
   // The roll back fails too: the user gets the exact command.
@@ -401,16 +404,37 @@ async function fakeService(m) {
     assert.equal(w.commands.length, 1, "no update loop");
   }
 
-  // A saved failed version from an earlier launch is respected, and its
-  // tool's own updater is held off from launch, before the first check.
+  // A saved failed version from an earlier launch is respected, and a
+  // version that broke keeps its tool's own updater off from launch.
   {
-    const w = world({ state: { failed: { claude: "2.1.327" }, notOffered: {} } });
+    const w = world({ state: { failed: { claude: "2.1.327" }, notOffered: {}, broken: { claude: "2.1.327" } } });
     const service = m.createAgentCliUpdateService(w.deps);
     await service.prime();
     assert.deepEqual(w.held.at(-1), ["claude"]);
     await service.check();
     await service.settled();
     assert.equal(w.commands.length, 0);
+    assert.deepEqual(w.held.at(-1), ["claude"]);
+    // The user got that version another way, and it works: the hold lifts.
+    w.tools.claude = { ...w.tools.claude, version: "2.1.327" };
+    await service.check();
+    assert.deepEqual(w.held.at(-1), [], "installed at or above the broken version");
+  }
+
+  // An installer that errored (network down) rolled nothing back: the
+  // tool's own updater stays on.
+  {
+    const w = world({
+      onRun: () => {
+        throw new Error("network down");
+      },
+    });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.settled();
+    assert.equal(tool(service.snapshot(), "claude").phase, "failed");
+    assert.deepEqual(w.saved.failed, { claude: "2.1.327" }, "not tried again by itself");
+    assert.deepEqual(w.held.at(-1), [], "no updater held off without a broken build");
   }
 
   // One update at a time, across tools.
@@ -459,6 +483,44 @@ async function fakeService(m) {
     assert.equal(claude.phase, "waiting", "a session that started meanwhile holds the update");
     assert.equal(w.commands.length, 0);
     assert.ok(calls >= 2, "counted again before the installer");
+  }
+
+  // The tool is marked busy before that second count, so no launch slips in
+  // between the count and the installer; it is cleared when the update waits.
+  {
+    const events = [];
+    let calls = 0;
+    const w = world({
+      auto: false,
+      live: () => {
+        events.push("count");
+        return calls++ === 0 ? 0 : 1;
+      },
+    });
+    w.deps.toolBusy = (id, isBusy) => events.push(`${id}:${isBusy}`);
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    events.length = 0;
+    calls = 0;
+    await service.update("claude");
+    await service.settled();
+    assert.deepEqual(events.slice(0, 3), ["count", "claude:true", "count"], "busy before the second count");
+    assert.equal(events.at(-1), "claude:false", "cleared when the update goes back to waiting");
+    assert.equal(tool(service.snapshot(), "claude").phase, "waiting");
+  }
+
+  // A launch that began but has no process yet counts as a session.
+  {
+    const w = world({ auto: false });
+    let starting = 0;
+    w.deps.launchesStarting = () => starting;
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    starting = 1;
+    await service.update("claude");
+    await service.settled();
+    assert.equal(w.commands.length, 0, "the installer waits for the launch");
+    assert.match(tool(service.snapshot(), "claude").message, /a Claude Code session is running/);
   }
 
   // While a tool is swapped, Codara does not start it (launch-guard.ts).
@@ -760,20 +822,25 @@ async function launchGuard(m) {
   assert.deepEqual(m.vendorUpdaterEnv(), { DISABLE_AUTOUPDATER: "1", GROK_DISABLE_AUTOUPDATER: "1" });
   m.holdVendorUpdates([]);
   assert.deepEqual(m.vendorUpdaterEnv(), {});
-  assert.equal(await m.waitUntilToolIdle("claude", 1000), false, "nothing to wait for");
+  // A launch while the tool is swapped is refused at once: pane openers give
+  // up after seconds, so a held launch would start late and unseen.
+  const end = m.beginToolLaunch("claude", "Claude Code");
+  assert.equal(m.launchesStarting("claude"), 1, "a launch counts before its process exists");
+  end();
+  end();
+  assert.equal(m.launchesStarting("claude"), 0, "ending twice ends once");
   m.setToolBusy("claude", true);
-  let done = false;
-  const waiting = m.waitUntilToolIdle("claude", 60_000).then((waited) => {
-    done = waited;
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(done, false, "a launch waits while the tool is swapped");
+  assert.throws(() => m.beginToolLaunch("claude", "Claude Code"), /Claude Code is updating\. Try again in a few minutes\./);
+  assert.equal(m.launchesStarting("claude"), 0);
+  m.beginToolLaunch("codex", "Codex")();
   m.setToolBusy("claude", false);
-  await waiting;
-  assert.equal(done, true);
-  m.setToolBusy("codex", true);
-  assert.equal(await m.waitUntilToolIdle("codex", 5), true, "bounded");
-  m.setToolBusy("codex", false);
+  m.beginToolLaunch("claude", "Claude Code")();
+  // The terminal launcher takes that path before any wait, profile or spawn.
+  const pty = fs.readFileSync(path.join(__dirname, "..", "src", "main", "pty-manager.ts"), "utf8");
+  assert.ok(!/waitUntilToolIdle/.test(pty), "no launch is held for minutes");
+  const begin = pty.indexOf("beginToolLaunch(launching");
+  assert.ok(begin > 0 && begin < pty.indexOf("return await spawnWithSessionLock(opts)"), "refused before the launch starts");
+  assert.match(pty, /setTimeout\(endLaunch, LAUNCH_SETTLE_MS\)/, "counted until its command had time to start");
   assert.equal(m.reinstallCommand("codex", "0.169.0", "linux"), "curl -fsSL https://chatgpt.com/codex/install.sh | sh -s -- --release 0.169.0");
   assert.equal(m.reinstallCommand("grok", "1.0.46", "win32"), null);
   assert.equal(m.reinstallCommand("claude", "2.1.325; rm -rf ~", "linux"), null, "only a plain version reaches a command line");

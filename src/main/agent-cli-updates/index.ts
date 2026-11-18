@@ -19,7 +19,7 @@ import { inspectInstalledTool, type InspectDependencies } from "./inspect";
 import { spawnableCommand } from "./install-plan";
 import { claudeChannelFromSettings, fetchLatestVersion } from "./latest-version";
 import { agentCliUpdatesAllowed } from "./launch-gate";
-import { holdVendorUpdates, setToolBusy } from "./launch-guard";
+import { holdVendorUpdates, launchesStarting, setToolBusy } from "./launch-guard";
 import { relinkLauncher } from "./relink";
 import { liveToolSessions } from "./live-sessions";
 import { createAgentCliUpdateService, type AgentCliUpdateService, type PersistedUpdateState, type UpdateInProgress } from "./service";
@@ -55,7 +55,12 @@ async function readState(): Promise<PersistedUpdateState> {
           ([tool, version]) => ["claude", "codex", "grok"].includes(tool) && typeof version === "string",
         ),
       );
-    return { failed: versions(parsed.failed), notOffered: versions(parsed.notOffered), ...inProgressFrom(parsed.inProgress) };
+    return {
+      failed: versions(parsed.failed),
+      notOffered: versions(parsed.notOffered),
+      broken: versions(parsed.broken),
+      ...inProgressFrom(parsed.inProgress),
+    };
   } catch {
     return { failed: {}, notOffered: {} };
   }
@@ -115,6 +120,7 @@ function createService(log: (line: string) => void): AgentCliUpdateService {
     now: () => Date.now(),
     log,
     toolBusy: setToolBusy,
+    launchesStarting,
     holdVendorUpdates,
     relink: relinkLauncher,
     platform: process.platform,

@@ -60,6 +60,11 @@ export interface PersistedUpdateState {
   notOffered: Partial<Record<UpdatableAgentCliToolId, string>>;
   /** An update whose installer ran and did not finish in this record's lifetime. */
   inProgress?: UpdateInProgress;
+  /**
+   * Versions that were installed and failed their version check. Only these
+   * keep the tool's own updater off; an installer that merely errored does not.
+   */
+  broken?: Partial<Record<UpdatableAgentCliToolId, string>>;
 }
 
 /** Releases the update lock. */
@@ -87,8 +92,10 @@ export interface UpdateServiceDependencies {
   schedule: (task: () => void, delayMs: number) => () => void;
   now: () => number;
   log: (line: string) => void;
-  /** The tool is being swapped: Codara holds its launches (launch-guard.ts). */
+  /** The tool is being swapped: Codara refuses its launches (launch-guard.ts). */
   toolBusy?: (tool: UpdatableAgentCliToolId, busy: boolean) => void;
+  /** Launches that began and may not have a process yet; they count as sessions. */
+  launchesStarting?: (tool: UpdatableAgentCliToolId) => number;
   /** Tools whose own updater stays off in Codara's terminals. */
   holdVendorUpdates?: (tools: UpdatableAgentCliToolId[]) => void;
   /** Points a launcher link at another build (Claude's native layout, POSIX). */
@@ -125,7 +132,7 @@ function sessions(count: number, label: string): string {
 export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
   const entries = new Map<UpdatableAgentCliToolId, ToolEntry>(UPDATABLE_TOOLS.map((tool) => [tool, emptyEntry()]));
   let pi: PiVersionInfo | null = null;
-  let persisted: PersistedUpdateState = { failed: {}, notOffered: {} };
+  let persisted: PersistedUpdateState & { broken: NonNullable<PersistedUpdateState["broken"]> } = { failed: {}, notOffered: {}, broken: {} };
   let loaded: Promise<void> | null = null;
   let checking: Promise<AgentCliUpdatesSnapshot> | null = null;
   let lastCheckedAt: string | null = null;
@@ -146,6 +153,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
         persisted = {
           failed: { ...state.failed },
           notOffered: { ...state.notOffered },
+          broken: { ...state.broken },
           ...(state.inProgress ? { inProgress: { ...state.inProgress } } : {}),
         };
       })
@@ -223,12 +231,17 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     };
   }
 
-  /** Tools rolled back from the newest version they were offered. */
+  /**
+   * Tools whose newest offered version failed its version check, while the
+   * installed one is older: their own updater would install it again.
+   */
   function heldTools(): UpdatableAgentCliToolId[] {
     return UPDATABLE_TOOLS.filter((tool) => {
-      const failed = persisted.failed[tool];
-      const latest = entry(tool).latest;
-      return failed !== undefined && !(latest && isNewerCliVersion(latest, failed));
+      const broken = persisted.broken[tool];
+      if (broken === undefined) return false;
+      const { latest, installed } = entry(tool);
+      if (latest && isNewerCliVersion(latest, broken)) return false;
+      return !(installed?.version && compareCliVersions(installed.version, broken) >= 0);
     });
   }
 
@@ -312,7 +325,8 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
 
   /** Counts the tool's sessions; puts the update back to waiting and returns false when any run. */
   async function noSessions(tool: UpdatableAgentCliToolId, origin: "manual" | "auto"): Promise<boolean> {
-    const live = await deps.liveSessions(tool).catch(() => null);
+    const running = await deps.liveSessions(tool).catch(() => null);
+    const live = running === null ? null : running + (deps.launchesStarting?.(tool) ?? 0);
     unreadableRounds = live === null ? unreadableRounds + 1 : 0;
     if (live === 0) return true;
     const current = entry(tool);
@@ -412,9 +426,13 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       set(tool, { installed: before, phase: "failed", message: before ? `Run: ${before.plan.manualCommand}` : `${label} is not installed.` });
       return;
     }
-    // A session may have started since the first count.
-    if (!(await noSessions(tool, origin))) return;
+    // Launches are refused from here on; one that began earlier, or a
+    // session started since the first count, sends the update back to waiting.
     deps.toolBusy?.(tool, true);
+    if (!(await noSessions(tool, origin))) {
+      deps.toolBusy?.(tool, false);
+      return;
+    }
     deps.log(`${tool}: updating ${before.version ?? "(unknown)"} with ${before.plan.update.display}`);
     // On disk before the installer starts: a quit or crash from here on is
     // finished by the next start (recoverInterrupted).
@@ -461,6 +479,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       }
       delete persisted.failed[tool];
       delete persisted.notOffered[tool];
+      delete persisted.broken[tool];
       save();
       set(tool, { phase: "updated", message: `Updated from ${before.version ?? "an unknown version"} to ${after.version}.` });
       deps.log(`${tool}: updated to ${after.version}`);
@@ -468,7 +487,10 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     }
 
     // The new build failed its version check: put the previous one back.
-    if (target) persisted.failed[tool] = target;
+    if (target) {
+      persisted.failed[tool] = target;
+      persisted.broken[tool] = target;
+    }
     void save();
     if (!before.version || !before.plan.rollback) {
       set(tool, {
@@ -503,14 +525,16 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     set(tool, { phase: "rolling-back", message: `${lead}${label} ${failedVersion} failed its version check. Putting ${before.version} back…` });
     const restoredMessage = `${lead}${label} ${failedVersion} failed its version check, so Codara put ${before.version} back. ${afterRollBackNote(tool, failedVersion)}`;
     const previousOnDisk = before.realPath !== after?.realPath && (await deps.exists(before.realPath).catch(() => false));
-    // The new build replaced the previous one in place: running it would run
-    // the broken build. Only the vendor's installer can bring it back.
-    if (before.plan.method === "native" && after && after.realPath === before.realPath) {
+    // A native roll back runs the previous build. When that build was
+    // replaced in place or is gone, only the broken one is left to run, so
+    // nothing runs: the vendor's installer brings the previous version back.
+    if (before.plan.method === "native" && !previousOnDisk) {
       const command = reinstallCommand(tool, before.version, platform);
+      const where = after && after.realPath === before.realPath ? "replaced" : "removed";
       set(tool, {
         installed: after,
         phase: "failed",
-        message: `${lead}${label} ${failedVersion} failed its version check and replaced ${before.version} on disk. ${
+        message: `${lead}${label} ${failedVersion} failed its version check and ${where} ${before.version} on disk. ${
           command ? `Put ${before.version} back with: ${command}` : `Reinstall ${label} ${before.version} with its installer.`
         }`,
       });
@@ -530,8 +554,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
         deps.log(`${tool}: relinking to ${before.version} failed: ${(error as Error).message}`);
       }
     }
-    const previousBinary = previousOnDisk ? before.realPath : before.binaryPath;
-    const rollback = before.plan.rollback(before.version, previousBinary);
+    const rollback = before.plan.rollback(before.version, before.plan.method === "native" ? before.realPath : before.binaryPath);
     deps.log(`${tool}: rolling back to ${before.version} with ${rollback.display}`);
     let rollbackError: string | null = null;
     try {
