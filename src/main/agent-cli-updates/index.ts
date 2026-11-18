@@ -19,6 +19,8 @@ import { inspectInstalledTool, type InspectDependencies } from "./inspect";
 import { spawnableCommand } from "./install-plan";
 import { claudeChannelFromSettings, fetchLatestVersion } from "./latest-version";
 import { agentCliUpdatesAllowed } from "./launch-gate";
+import { holdVendorUpdates, setToolBusy } from "./launch-guard";
+import { relinkLauncher } from "./relink";
 import { liveToolSessions } from "./live-sessions";
 import { createAgentCliUpdateService, type AgentCliUpdateService, type PersistedUpdateState } from "./service";
 
@@ -97,6 +99,10 @@ function createService(log: (line: string) => void): AgentCliUpdateService {
     },
     now: () => Date.now(),
     log,
+    toolBusy: setToolBusy,
+    holdVendorUpdates,
+    relink: relinkLauncher,
+    platform: process.platform,
   });
 }
 
@@ -108,6 +114,7 @@ export function startAgentCliUpdates(log: (line: string) => void): void {
   onPreferenceChange((key) => {
     if (key === "agentCliAutoUpdate") started.autoUpdateChanged();
   });
+  void started.prime();
   const timer = setTimeout(() => void started.start(), FIRST_CHECK_DELAY_MS);
   timer.unref?.();
 }

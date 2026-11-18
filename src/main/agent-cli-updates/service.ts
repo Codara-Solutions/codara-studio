@@ -7,11 +7,16 @@
 //
 // Invariants:
 // - A tool is never updated while a session of it runs. An unreadable process
-//   list counts as a running session. The update waits and is retried.
+//   list counts as a running session. The update waits and is retried. The
+//   count is taken again right before the installer runs, and Codara does not
+//   start the tool while it is being swapped (launch-guard.ts).
 // - One update runs at a time, across all tools.
 // - Pi is never updated: it stays on the version Codara is tested with.
 // - A version whose update failed or was rolled back is not tried again
-//   automatically; the Update button still offers it.
+//   automatically; the Update button still offers it. Until a newer version
+//   is out, the tool's own updater stays off in the terminals Codara opens.
+// - A broken new build never runs: the roll back uses the previous build, or
+//   relinks to it, or shows the vendor's installer command for it.
 
 import {
   AGENT_CLI_LABELS,
@@ -24,10 +29,14 @@ import {
 
 import type { InstalledTool } from "./inspect";
 import type { CliCommand } from "./install-plan";
+import { VENDOR_UPDATER_OFF } from "./launch-guard";
+import { reinstallCommand } from "./reinstall";
 
 export const UPDATABLE_TOOLS: readonly UpdatableAgentCliToolId[] = ["claude", "codex", "grok"];
 export const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const WAITING_POLL_MS = 2 * 60 * 1000;
+/** The longest wait between retries while the process list cannot be read. */
+export const MAX_WAITING_POLL_MS = 30 * 60 * 1000;
 export const UPDATE_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface PersistedUpdateState {
@@ -59,6 +68,13 @@ export interface UpdateServiceDependencies {
   schedule: (task: () => void, delayMs: number) => () => void;
   now: () => number;
   log: (line: string) => void;
+  /** The tool is being swapped: Codara holds its launches (launch-guard.ts). */
+  toolBusy?: (tool: UpdatableAgentCliToolId, busy: boolean) => void;
+  /** Tools whose own updater stays off in Codara's terminals. */
+  holdVendorUpdates?: (tools: UpdatableAgentCliToolId[]) => void;
+  /** Points a launcher link at another build (Claude's native layout, POSIX). */
+  relink?: (link: string, target: string) => Promise<void>;
+  platform?: NodeJS.Platform;
 }
 
 interface ToolEntry {
@@ -69,11 +85,17 @@ interface ToolEntry {
   liveSessions: number;
   /** "manual" survives the switch being turned off; "auto" does not. */
   pending: "manual" | "auto" | null;
+  /** A request is in the queue, and who asked; a click outranks the switch. */
+  queued: "manual" | "auto" | null;
+  /** Bumped when an update starts, so a check begun earlier keeps its old reading to itself. */
+  generation: number;
 }
 
 function emptyEntry(): ToolEntry {
-  return { installed: null, latest: null, phase: "idle", message: null, liveSessions: 0, pending: null };
+  return { installed: null, latest: null, phase: "idle", message: null, liveSessions: 0, pending: null, queued: null, generation: 0 };
 }
+
+const IN_PROGRESS: readonly AgentCliToolStatus["phase"][] = ["updating", "verifying", "rolling-back"];
 
 function sessions(count: number, label: string): string {
   return count === 1 ? `a ${label} session is running` : `${count} ${label} sessions are running`;
@@ -91,6 +113,8 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
   let cancelWaitingPoll: (() => void) | null = null;
   let cancelDailyCheck: (() => void) | null = null;
   let stopped = false;
+  let unreadableRounds = 0;
+  const platform = deps.platform ?? process.platform;
 
   const entry = (tool: UpdatableAgentCliToolId): ToolEntry => entries.get(tool)!;
 
@@ -167,8 +191,19 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     };
   }
 
+  /** Tools rolled back from the newest version they were offered. */
+  function heldTools(): UpdatableAgentCliToolId[] {
+    return UPDATABLE_TOOLS.filter((tool) => {
+      const failed = persisted.failed[tool];
+      const latest = entry(tool).latest;
+      return failed !== undefined && !(latest && isNewerCliVersion(latest, failed));
+    });
+  }
+
   function emit(): void {
-    if (!stopped) deps.emit(snapshot());
+    if (stopped) return;
+    deps.holdVendorUpdates?.(heldTools());
+    deps.emit(snapshot());
   }
 
   function set(tool: UpdatableAgentCliToolId, patch: Partial<ToolEntry>): void {
@@ -177,14 +212,18 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
   }
 
   async function readTool(tool: UpdatableAgentCliToolId): Promise<string | null> {
+    const generation = entry(tool).generation;
     const installed = await deps.inspect(tool).catch((error) => {
       deps.log(`${tool}: inspect failed: ${(error as Error).message}`);
       return null;
     });
+    // An update started meanwhile has the newer reading.
+    if (entry(tool).generation !== generation) return null;
     entry(tool).installed = installed;
     if (!installed) return null;
     try {
-      entry(tool).latest = await deps.latest(tool, installed.plan.method);
+      const latest = await deps.latest(tool, installed.plan.method);
+      if (entry(tool).generation === generation) entry(tool).latest = latest;
       return null;
     } catch (error) {
       return `${AGENT_CLI_LABELS[tool]}: ${(error as Error).message}`;
@@ -197,7 +236,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     checking = (async () => {
       await ensureLoaded();
       emit();
-      const busy = new Set(UPDATABLE_TOOLS.filter((tool) => ["updating", "verifying", "rolling-back"].includes(entry(tool).phase)));
+      const busy = new Set(UPDATABLE_TOOLS.filter((tool) => IN_PROGRESS.includes(entry(tool).phase)));
       const errors = await Promise.all(UPDATABLE_TOOLS.filter((tool) => !busy.has(tool)).map(readTool));
       pi = await deps.pi().catch(() => pi);
       checkError = errors.filter(Boolean).join(" ") || null;
@@ -224,17 +263,38 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       const current = entry(tool);
       if (!updateAvailable(tool) || !current.installed?.plan.update) continue;
       if (persisted.failed[tool] === current.latest) continue;
-      if (current.pending || ["updating", "verifying", "rolling-back"].includes(current.phase)) continue;
+      if (current.pending || current.queued || IN_PROGRESS.includes(current.phase)) continue;
       void requestUpdate(tool, "auto");
     }
   }
 
   function scheduleWaitingPoll(): void {
     if (cancelWaitingPoll || stopped) return;
+    // A process list that keeps failing (Windows without WMI) is asked less often.
+    const delay = Math.min(WAITING_POLL_MS * 2 ** Math.max(0, unreadableRounds - 1), MAX_WAITING_POLL_MS);
     cancelWaitingPoll = deps.schedule(() => {
       cancelWaitingPoll = null;
       void pollWaiting();
-    }, WAITING_POLL_MS);
+    }, delay);
+  }
+
+  /** Counts the tool's sessions; puts the update back to waiting and returns false when any run. */
+  async function noSessions(tool: UpdatableAgentCliToolId, origin: "manual" | "auto"): Promise<boolean> {
+    const live = await deps.liveSessions(tool).catch(() => null);
+    unreadableRounds = live === null ? unreadableRounds + 1 : 0;
+    if (live === 0) return true;
+    const current = entry(tool);
+    set(tool, {
+      pending: current.pending === "manual" ? "manual" : origin,
+      phase: "waiting",
+      liveSessions: live ?? 0,
+      message:
+        live === null
+          ? `Waiting: Codara cannot tell whether ${AGENT_CLI_LABELS[tool]} is running right now.`
+          : `Waiting: ${sessions(live, AGENT_CLI_LABELS[tool])}. It updates once they end.`,
+    });
+    scheduleWaitingPoll();
+    return false;
   }
 
   /** Retry every update that is waiting for sessions to end. */
@@ -250,9 +310,19 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
    * once the update finished or is waiting.
    */
   function requestUpdate(tool: UpdatableAgentCliToolId, origin: "manual" | "auto"): Promise<void> {
+    // A second click, or a request for a tool already queued or updating, is the same request.
+    const queued = entry(tool);
+    if (queued.queued || IN_PROGRESS.includes(queued.phase)) {
+      if (origin === "manual") queued.queued = queued.queued ? "manual" : null;
+      if (origin === "manual" && queued.pending) queued.pending = "manual";
+      return queue;
+    }
+    queued.queued = origin;
     const run = queue.then(async () => {
-      if (stopped) return;
       const current = entry(tool);
+      origin = current.queued ?? origin;
+      current.queued = null;
+      if (stopped) return;
       if (origin === "auto" && !deps.autoUpdate()) {
         if (current.pending === "auto") set(tool, { pending: null, phase: "idle", message: null, liveSessions: 0 });
         return;
@@ -267,33 +337,29 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
         });
         return;
       }
-      const live = await deps.liveSessions(tool).catch(() => null);
-      if (live === null || live > 0) {
-        set(tool, {
-          pending: current.pending === "manual" ? "manual" : origin,
-          phase: "waiting",
-          liveSessions: live ?? 0,
-          message:
-            live === null
-              ? `Waiting: Codara cannot tell whether ${AGENT_CLI_LABELS[tool]} is running right now.`
-              : `Waiting: ${sessions(live, AGENT_CLI_LABELS[tool])}. It updates once they end.`,
-        });
-        scheduleWaitingPoll();
+      // Up to date by its turn (an earlier request did it): nothing to do.
+      if (!updateAvailable(tool)) {
+        if (current.phase === "waiting") set(tool, { pending: null, phase: "idle", message: null, liveSessions: 0 });
+        else current.pending = null;
         return;
       }
+      if (!(await noSessions(tool, origin))) return;
       current.pending = null;
       current.liveSessions = 0;
+      current.generation += 1;
       try {
-        await performUpdate(tool);
+        await performUpdate(tool, origin);
       } catch (error) {
         set(tool, { phase: "failed", message: `The update stopped: ${(error as Error).message.slice(0, 300)}` });
+      } finally {
+        deps.toolBusy?.(tool, false);
       }
     });
     queue = run.catch((error) => deps.log(`${tool}: update failed: ${(error as Error).message}`));
     return queue;
   }
 
-  async function performUpdate(tool: UpdatableAgentCliToolId): Promise<void> {
+  async function performUpdate(tool: UpdatableAgentCliToolId, origin: "manual" | "auto"): Promise<void> {
     const label = AGENT_CLI_LABELS[tool];
     const target = entry(tool).latest;
     set(tool, { phase: "updating", message: target ? `Updating to ${target}…` : "Updating…" });
@@ -303,6 +369,9 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       set(tool, { installed: before, phase: "failed", message: before ? `Run: ${before.plan.manualCommand}` : `${label} is not installed.` });
       return;
     }
+    // A session may have started since the first count.
+    if (!(await noSessions(tool, origin))) return;
+    deps.toolBusy?.(tool, true);
     deps.log(`${tool}: updating ${before.version ?? "(unknown)"} with ${before.plan.update.display}`);
     let updateError: string | null = null;
     try {
@@ -349,7 +418,36 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       return;
     }
     set(tool, { phase: "rolling-back", message: `${label} ${failedVersion} failed its version check. Putting ${before.version} back…` });
-    const previousBinary = (await deps.exists(before.realPath).catch(() => false)) ? before.realPath : before.binaryPath;
+    const restoredMessage = `${label} ${failedVersion} failed its version check, so Codara put ${before.version} back. ${afterRollBackNote(tool, failedVersion)}`;
+    const previousOnDisk = before.realPath !== after?.realPath && (await deps.exists(before.realPath).catch(() => false));
+    // The new build replaced the previous one in place: running it would run
+    // the broken build. Only the vendor's installer can bring it back.
+    if (before.plan.method === "native" && after && after.realPath === before.realPath) {
+      const command = reinstallCommand(tool, before.version, platform);
+      set(tool, {
+        installed: after,
+        phase: "failed",
+        message: `${label} ${failedVersion} failed its version check and replaced ${before.version} on disk. ${
+          command ? `Put ${before.version} back with: ${command}` : `Reinstall ${label} ${before.version} with its installer.`
+        }`,
+      });
+      return;
+    }
+    // Claude's native launcher is a link to versions/<v>: point it back, no network.
+    if (tool === "claude" && before.plan.method === "native" && platform !== "win32" && deps.relink && previousOnDisk && before.binaryPath !== before.realPath) {
+      try {
+        await deps.relink(before.binaryPath, before.realPath);
+        const relinked = await deps.inspect(tool).catch(() => null);
+        if (relinked?.version === before.version) {
+          entry(tool).installed = relinked;
+          set(tool, { phase: "rolled-back", message: restoredMessage });
+          return;
+        }
+      } catch (error) {
+        deps.log(`${tool}: relinking to ${before.version} failed: ${(error as Error).message}`);
+      }
+    }
+    const previousBinary = previousOnDisk ? before.realPath : before.binaryPath;
     const rollback = before.plan.rollback(before.version, previousBinary);
     deps.log(`${tool}: rolling back to ${before.version} with ${rollback.display}`);
     let rollbackError: string | null = null;
@@ -361,16 +459,21 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     const restored = await deps.inspect(tool).catch(() => null);
     entry(tool).installed = restored;
     if (restored?.version === before.version) {
-      set(tool, {
-        phase: "rolled-back",
-        message: `${label} ${failedVersion} failed its version check, so Codara put ${before.version} back.`,
-      });
+      set(tool, { phase: "rolled-back", message: restoredMessage });
       return;
     }
     set(tool, {
       phase: "failed",
       message: `${label} ${failedVersion} failed its version check and putting ${before.version} back did not work${rollbackError ? ` (${rollbackError})` : ""}. Run: ${rollback.display}`,
     });
+  }
+
+  /** What keeps the bad version away now, in one sentence. */
+  function afterRollBackNote(tool: UpdatableAgentCliToolId, failedVersion: string): string {
+    if (VENDOR_UPDATER_OFF[tool]) {
+      return `Its own updater stays off in the terminals Codara opens until a newer version is out.`;
+    }
+    return `${AGENT_CLI_LABELS[tool]} has no switch for its own updater: if it offers ${failedVersion} when it starts, say no.`;
   }
 
   function scheduleDailyCheck(): void {
@@ -421,6 +524,11 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
         }
       }
       emit();
+    },
+    /** Reads the saved state, so terminals opened before the first check keep a held updater off. */
+    async prime(): Promise<void> {
+      await ensureLoaded();
+      if (!stopped) deps.holdVendorUpdates?.(heldTools());
     },
     /** Check now, then every day. */
     start(): Promise<AgentCliUpdatesSnapshot> {

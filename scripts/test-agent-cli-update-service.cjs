@@ -25,6 +25,10 @@ async function main() {
         'export { inspectInstalledTool } from "./src/main/agent-cli-updates/inspect";',
         'export { spawnableCommand } from "./src/main/agent-cli-updates/install-plan";',
         'export { runSetupCommand } from "./src/main/onboarding";',
+        'export * from "./src/main/agent-cli-updates/launch-guard";',
+        'export { relinkLauncher } from "./src/main/agent-cli-updates/relink";',
+        'export { reinstallCommand } from "./src/main/agent-cli-updates/reinstall";',
+        'export { commandRunsAgent } from "./src/main/agent-hibernation-census";',
       ].join("\n"),
       resolveDir: root,
     },
@@ -41,6 +45,7 @@ async function main() {
     launchGate(m);
     await fakeService(m);
     await liveSessionCount(m);
+    await launchGuard(m);
     await realBinaries(m);
   } finally {
     fs.rmSync(outfile, { force: true });
@@ -92,6 +97,8 @@ function world(overrides = {}) {
   const scheduled = [];
   const emitted = [];
   const logs = [];
+  const busyCalls = [];
+  const held = [];
   let saved = null;
   let live = overrides.live ?? (() => 0);
   let auto = overrides.auto ?? true;
@@ -150,6 +157,10 @@ function world(overrides = {}) {
     },
     now: () => Date.parse("2026-11-18T12:00:00Z"),
     log: (line) => logs.push(line),
+    toolBusy: (id, isBusy) => busyCalls.push(`${id}:${isBusy}`),
+    holdVendorUpdates: (tools) => held.push([...tools]),
+    platform: overrides.platform ?? "linux",
+    ...(overrides.relink ? { relink: overrides.relink } : {}),
   };
   return {
     deps,
@@ -165,6 +176,8 @@ function world(overrides = {}) {
     get maxRunning() {
       return maxRunning;
     },
+    busyCalls,
+    held,
     setLive(fn) {
       live = fn;
     },
@@ -325,7 +338,7 @@ async function fakeService(m) {
     const w = world({
       exists: () => false,
       onRun: (command, tools) => {
-        if (command.args[0] === "update") tools.claude = { ...tools.claude, version: null };
+        if (command.args[0] === "update") tools.claude = { ...tools.claude, version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327" };
         if (command.args[0] === "install") tools.claude = { ...tools.claude, version: command.args[1] };
         return "ok";
       },
@@ -341,7 +354,7 @@ async function fakeService(m) {
   {
     const w = world({
       onRun: (command, tools) => {
-        if (command.args[0] === "update") tools.claude = { ...tools.claude, version: null };
+        if (command.args[0] === "update") tools.claude = { ...tools.claude, version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327" };
         if (command.args[0] === "install") throw new Error("network down");
         return "ok";
       },
@@ -386,10 +399,13 @@ async function fakeService(m) {
     assert.equal(w.commands.length, 1, "no update loop");
   }
 
-  // A saved failed version from an earlier launch is respected.
+  // A saved failed version from an earlier launch is respected, and its
+  // tool's own updater is held off from launch, before the first check.
   {
     const w = world({ state: { failed: { claude: "2.1.327" }, notOffered: {} } });
     const service = m.createAgentCliUpdateService(w.deps);
+    await service.prime();
+    assert.deepEqual(w.held.at(-1), ["claude"]);
     await service.check();
     await service.settled();
     assert.equal(w.commands.length, 0);
@@ -428,6 +444,161 @@ async function fakeService(m) {
     assert.match(tool(service.snapshot(), "grok").message, /Grok is not installed/);
   }
 
+  // Sessions are counted again right before the installer runs: one that
+  // started after the first count holds the update back.
+  {
+    let calls = 0;
+    const w = world({ auto: false, live: () => (calls++ === 0 ? 0 : 1) });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.update("claude");
+    await service.settled();
+    const claude = tool(service.snapshot(), "claude");
+    assert.equal(claude.phase, "waiting", "a session that started meanwhile holds the update");
+    assert.equal(w.commands.length, 0);
+    assert.ok(calls >= 2, "counted again before the installer");
+  }
+
+  // While a tool is swapped, Codara does not start it (launch-guard.ts).
+  {
+    const w = world({ auto: false });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.update("claude");
+    assert.deepEqual(w.busyCalls, ["claude:true", "claude:false"]);
+  }
+
+  // A double click, or a manual request for a tool already queued, runs once;
+  // a request whose tool is up to date by its turn does nothing.
+  {
+    const w = world({ auto: false });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await Promise.all([service.update("claude"), service.update("claude"), service.update("claude")]);
+    await service.settled();
+    assert.equal(w.commands.length, 1, "one update for three clicks");
+    await service.update("claude");
+    assert.equal(w.commands.length, 1, "nothing to do once it is up to date");
+    assert.equal(tool(service.snapshot(), "claude").phase, "updated");
+  }
+
+  // A check that started before an update finished never writes its old
+  // reading over the new one.
+  {
+    const w = world({ auto: false });
+    const inspect = w.deps.inspect;
+    let hold = null;
+    w.deps.inspect = async (id) => {
+      const reading = await inspect(id);
+      if (id === "claude" && hold) await hold;
+      return reading;
+    };
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    let release;
+    hold = new Promise((resolve) => (release = resolve));
+    const second = service.check();
+    await new Promise((resolve) => setImmediate(resolve));
+    hold = null;
+    await service.update("claude");
+    assert.equal(tool(service.snapshot(), "claude").version, "2.1.327");
+    release();
+    await second;
+    assert.equal(tool(service.snapshot(), "claude").version, "2.1.327", "the finished update's reading stays");
+  }
+
+  // A process list that never reads backs off instead of polling every two minutes.
+  {
+    const w = world({ live: () => null });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.settled();
+    const delays = [];
+    for (let round = 0; round < 6; round += 1) {
+      const poll = w.scheduled.filter((entry) => !entry.cancelled && entry.delayMs !== m.CHECK_INTERVAL_MS).at(-1);
+      delays.push(poll.delayMs);
+      poll.cancelled = true;
+      poll.task();
+      await service.settled();
+    }
+    assert.equal(delays[0], m.WAITING_POLL_MS);
+    assert.ok(delays[1] > delays[0] && delays[2] > delays[1], `the wait grows: ${delays.join(", ")}`);
+    assert.ok(delays.at(-1) <= 30 * 60 * 1000, "up to half an hour");
+  }
+
+  // After a roll back the tool's own updater stays off in Codara's terminals
+  // until a newer version is out; Codex, which has no such switch, says so.
+  {
+    const w = world({
+      latest: { codex: "0.171.0" },
+      onRun: (command, tools) => {
+        const id = ["claude", "codex", "grok"].find((name) => command.display.includes(`${name} `));
+        if (command.args[0] === "update" && !command.env) tools[id] = { ...tools[id], version: null, realPath: `${tools[id].realPath}-new` };
+        else tools[id] = { ...tools[id], version: command.args[1] ?? command.env.CODEX_RELEASE };
+        return "ok";
+      },
+    });
+    w.tools.codex.plan = {
+      ...nativePlan("codex"),
+      rollback: (version, binary) => ({ executable: binary, args: ["update"], env: { CODEX_RELEASE: version }, display: `CODEX_RELEASE=${version} codex update` }),
+    };
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.settled();
+    assert.equal(tool(service.snapshot(), "claude").phase, "rolled-back");
+    assert.match(tool(service.snapshot(), "claude").message, /own updater stays off in the terminals Codara opens until a newer version is out/);
+    assert.equal(tool(service.snapshot(), "codex").phase, "rolled-back");
+    assert.match(tool(service.snapshot(), "codex").message, /Codex has no switch for its own updater/);
+    assert.deepEqual(w.held.at(-1), ["claude", "codex"]);
+    w.latest.claude = "2.1.328";
+    w.setAuto(false);
+    await service.check();
+    assert.deepEqual(w.held.at(-1), ["codex"], "a newer version lifts the hold");
+  }
+
+  // No earlier build on disk (Claude on Windows copies claude.exe over
+  // itself): the broken build never runs; the vendor's installer command for
+  // the previous version is shown.
+  {
+    const w = world({
+      platform: "win32",
+      onRun: (command, tools) => {
+        tools.claude = { ...tools.claude, version: null };
+        return "ok";
+      },
+    });
+    w.tools.claude.realPath = "C:\\Users\\u\\.local\\bin\\claude.exe";
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.settled();
+    const claude = tool(service.snapshot(), "claude");
+    assert.equal(w.commands.length, 1, "the broken build did not run a roll back");
+    assert.equal(claude.phase, "failed");
+    assert.match(claude.message, /irm https:\/\/claude\.ai\/install\.ps1\)\)\) 2\.1\.325/);
+  }
+
+  // Claude's native install on Linux and macOS: the launcher is pointed back
+  // at the previous build still on disk, with no network.
+  {
+    const relinked = [];
+    const w = world({
+      relink: async (link, target) => {
+        relinked.push([link, target]);
+        w.tools.claude = { ...w.tools.claude, version: "2.1.325", realPath: target };
+      },
+      onRun: (command, tools) => {
+        tools.claude = { ...tools.claude, version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327" };
+        return "ok";
+      },
+    });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.settled();
+    assert.deepEqual(relinked, [["/home/u/.local/bin/claude", "/home/u/.local/share/claude/versions/2.1.325"]]);
+    assert.equal(w.commands.length, 1, "no installer run for the roll back");
+    assert.equal(tool(service.snapshot(), "claude").phase, "rolled-back");
+  }
+
   // start() checks now and schedules the daily check; stop() cancels it.
   {
     const w = world({ auto: false });
@@ -454,6 +625,54 @@ async function liveSessionCount(m) {
   const runsClaude = (command) => /(^|\/)claude(\s|$)/.test(command);
   assert.equal(m.countToolSessions(processes, runsClaude, 99), 2, "a session's own children count once; Codara itself is left out");
   assert.equal(m.countToolSessions(processes, () => false, 99), 0);
+
+  // The real matcher on the command lines each install method really shows.
+  const real = [
+    // Claude from npm: node runs the package's launcher link.
+    { pid: 100, parentPid: 1, startMs: 0, command: "node /home/u/.npm-global/bin/claude --resume" },
+    // Claude's native build: the versions/ file itself.
+    { pid: 110, parentPid: 1, startMs: 0, command: "/home/u/.local/share/claude/versions/2.1.325 --dangerously-skip-permissions" },
+    // Codex from npm: node runs codex.js, which starts the native binary.
+    { pid: 120, parentPid: 1, startMs: 0, command: "node /home/u/.npm-global/lib/node_modules/@openai/codex/bin/codex.js" },
+    { pid: 121, parentPid: 120, startMs: 0, command: "/home/u/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex" },
+    // Codex's standalone install.
+    { pid: 130, parentPid: 1, startMs: 0, command: "/home/u/.codex/packages/standalone/releases/0.170.0-x86_64-unknown-linux-musl/bin/codex --yolo" },
+    // Grok's native build.
+    { pid: 140, parentPid: 1, startMs: 0, command: "/home/u/.grok/downloads/grok-1.0.89-linux-x86_64" },
+    // An installer: not a session. Two Codara windows are kept apart by the
+    // update lock, not by the session count.
+    { pid: 150, parentPid: 1, startMs: 0, command: "/usr/bin/node /usr/lib/node_modules/npm/bin/npm-cli.js install -g --prefix /home/u/.npm-global @openai/codex@latest" },
+  ];
+  const count = (id) => m.countToolSessions(real, (command) => m.commandRunsAgent(command, id), 99);
+  assert.equal(count("claude"), 2, "npm and native Claude");
+  assert.equal(count("codex"), 2, "npm Codex once with its native child, plus the standalone one");
+  assert.equal(count("grok"), 1, "native Grok");
+}
+
+// ── What the terminal launcher reads ───────────────────────────────────────
+
+async function launchGuard(m) {
+  m.holdVendorUpdates(["claude", "codex", "grok"]);
+  assert.deepEqual(m.vendorUpdaterEnv(), { DISABLE_AUTOUPDATER: "1", GROK_DISABLE_AUTOUPDATER: "1" });
+  m.holdVendorUpdates([]);
+  assert.deepEqual(m.vendorUpdaterEnv(), {});
+  assert.equal(await m.waitUntilToolIdle("claude", 1000), false, "nothing to wait for");
+  m.setToolBusy("claude", true);
+  let done = false;
+  const waiting = m.waitUntilToolIdle("claude", 60_000).then((waited) => {
+    done = waited;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(done, false, "a launch waits while the tool is swapped");
+  m.setToolBusy("claude", false);
+  await waiting;
+  assert.equal(done, true);
+  m.setToolBusy("codex", true);
+  assert.equal(await m.waitUntilToolIdle("codex", 5), true, "bounded");
+  m.setToolBusy("codex", false);
+  assert.equal(m.reinstallCommand("codex", "0.169.0", "linux"), "curl -fsSL https://chatgpt.com/codex/install.sh | sh -s -- --release 0.169.0");
+  assert.equal(m.reinstallCommand("grok", "1.0.46", "win32"), null);
+  assert.equal(m.reinstallCommand("claude", "2.1.325; rm -rf ~", "linux"), null, "only a plain version reaches a command line");
 }
 
 // ── Real fake binaries through the real runner ─────────────────────────────
@@ -468,6 +687,13 @@ async function realBinaries(m) {
     console.log("SKIP real-binary roll back: the fake native layout uses POSIX links");
     return;
   }
+  await realBinariesOnce(m, false);
+  await realBinariesOnce(m, true);
+}
+
+// withRelink: Codara points the launcher back itself (offline); without it the
+// previous build's own installer does.
+async function realBinariesOnce(m, withRelink) {
   process.env.SHELL = "/bin/sh";
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "agent-cli-updates-"));
   try {
@@ -517,6 +743,7 @@ esac`;
       run: (command, timeoutMs) => m.runSetupCommand(m.spawnableCommand(command, process.platform), timeoutMs),
       liveSessions: async () => 0,
       exists: inspectDeps.exists,
+      ...(withRelink ? { relink: m.relinkLauncher } : {}),
       pi: async () => ({ version: null, pinnedVersion: "1.5.2", source: null }),
       autoUpdate: () => true,
       loadState: async () => ({ failed: {}, notOffered: {} }),
@@ -536,7 +763,12 @@ esac`;
     assert.equal(fs.realpathSync(launcher), path.join(versions, "1.0.0"), "the launcher points at the previous build again");
     const calls = fs.readFileSync(log, "utf8").trim().split("\n");
     assert.ok(calls.includes(`${launcher} update`) || calls.some((line) => line.endsWith("/1.0.0 update")), calls.join("\n"));
-    assert.ok(calls.includes(`${path.join(versions, "1.0.0")} install 1.0.0 --force`), "the previous build ran the roll back:\n" + calls.join("\n"));
+    if (withRelink) {
+      assert.ok(!calls.some((line) => line.includes(" install ")), "no installer ran:\n" + calls.join("\n"));
+      assert.ok(fs.lstatSync(launcher).isSymbolicLink(), "the launcher is still a link");
+    } else {
+      assert.ok(calls.includes(`${path.join(versions, "1.0.0")} install 1.0.0 --force`), "the previous build ran the roll back:\n" + calls.join("\n"));
+    }
     assert.ok(!calls.some((line) => line.startsWith(`${path.join(versions, "2.0.0")} install`)), "the broken build never ran its own roll back");
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
