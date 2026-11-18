@@ -21,6 +21,10 @@ const SHARED_DIR = path.join(ROOT, "src", "shared");
 const SCHEDULER_TS = path.join(ROOT, "src", "main", "orchestration", "scheduler.ts");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Captured before any mock.timers.enable() replaces the global, so the
+// fake-clock checks can still wait for the scheduler's async work in real time.
+const realSetTimeout = setTimeout;
+const realSleep = (ms) => new Promise((r) => realSetTimeout(r, ms));
 
 // Stub the three modules scheduler.ts dynamically imports, plus resolve the
 // @shared/* path alias to the real source.
@@ -107,7 +111,11 @@ const harnessPlugin = {
       if (args.path === "fs-atomic") {
         return {
           // require("fs"): "node:fs" is interposed by the readdir-failure stub.
-          contents: "const fs = require('fs');\nexport async function writeFileAtomic(p, c){ fs.writeFileSync(p, c); }\n",
+          // __BEFORE_WRITE runs once before the next write: a save that takes
+          // a while, on the fake clock.
+          contents:
+            "const fs = require('fs');\n" +
+            "export async function writeFileAtomic(p, c){ const hook = globalThis.__BEFORE_WRITE; if (hook) { globalThis.__BEFORE_WRITE = null; hook(); } fs.writeFileSync(p, c); }\n",
           loader: "js",
         };
       }
@@ -153,10 +161,10 @@ const harnessPlugin = {
             "export async function startDirectWorkerRun(input){ const n = ++globalThis.__SPARK_TEST.launches; const id = 'run-' + n; globalThis.__SPARK_TEST.fired.push({ title: input.title, prompt: input.prompt, engine: input.engine, automationId: input.automationId }); globalThis.__SPARK_TEST[id] = { id, status: 'running', humanMessages: [], workerAttempts: [] }; return globalThis.__SPARK_TEST[id]; }\n" +
             "export async function addDirectIteration(input){ return { id: input.runId, status: 'running', humanMessages: [], workerAttempts: [] }; }\n" +
             "export async function failWorkerAttempt(){ return null; }\n" +
-            // __HOLD_GETRUN_PAST_SECOND blocks the next read (no CPU) until just past
-            // the next second boundary: a scheduler start whose loop re-attach
-            // is slow, so a cron slot passes before its timer callback can run.
-            "export async function getRun(id){ if (globalThis.__HOLD_GETRUN_PAST_SECOND) { globalThis.__HOLD_GETRUN_PAST_SECOND = false; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000 - (Date.now() % 1000) + 30); } return globalThis.__SPARK_TEST[id] ?? { id, status: 'running', humanMessages: [], workerAttempts: [] }; }\n" +
+            // __ON_GETRUN runs once inside the next read: a scheduler start
+            // whose loop re-attach is slow, so the fake clock moves past a cron
+            // slot before its timer callback can run.
+            "export async function getRun(id){ const hook = globalThis.__ON_GETRUN; if (hook) { globalThis.__ON_GETRUN = null; hook(); } return globalThis.__SPARK_TEST[id] ?? { id, status: 'running', humanMessages: [], workerAttempts: [] }; }\n" +
             "export async function forcePauseRun(id){ return { id, status: 'cancelled', humanMessages: [] }; }\n",
           loader: "js",
         };
@@ -341,37 +349,7 @@ async function main() {
     fs.rmSync(dark, { recursive: true, force: true });
   }
 
-  // 3) Per-second cron fires on the first slot after the scheduler starts.
-  // The start is held (in the loop re-attach) until just past a second
-  // boundary: that slot passed while the timer was armed, so it is the
-  // timer's to fire, not the start's catch-up to skip as missed.
-  resetFired();
-  const cronJob = await sched.createJob({ name: "cr", trigger: { kind: "cron", expr: "* * * * * *" }, input: fakeInput });
-  sched.stopScheduler();
-  globalThis.__HOLD_GETRUN_PAST_SECOND = true;
-  const cronStarted = Date.now();
-  await sched.startScheduler();
-  const heldThrough = globalThis.__HOLD_GETRUN_PAST_SECOND === false;
-  const firstSlot = Math.floor(cronStarted / 1000) * 1000 + 1000;
-  while (calls().fired.length < 1 && Date.now() < firstSlot + 600) await sleep(10);
-  const cronSeen = await sched.getJob(cronJob.id);
-  const cronDetail = { heldThrough, firstSlot: new Date(firstSlot).toISOString(), now: new Date().toISOString(), state: cronSeen?.state, skips: cronSeen?.skips };
-  assert.ok(heldThrough, "the start read a held run, so it crossed a second boundary");
-  assert.ok(calls().fired.length >= 1, `per-second cron trigger should have launched an iteration for its first slot: ${JSON.stringify(cronDetail)}`);
-  assert.ok(!(cronSeen?.skips ?? []).some((skip) => skip.reason === "missed"), `a slot that passed while the timer was armed is not missed: ${JSON.stringify(cronDetail)}`);
-  console.log("  PASS cron trigger fired");
-  passed++;
-
-  // 4) Disabling a job disarms it (no further fires). All other jobs are holding
-  // on a never-completing run, so a clean window means the disarm worked.
-  const jobs = await sched.listJobs();
-  const cron = jobs.find((j) => j.name === "cr");
-  await sched.setEnabled(cron.id, false);
-  resetFired();
-  await sleep(1500);
-  assert.strictEqual(calls().fired.length, 0, "disabled cron (and held loops) should not fire");
-  console.log("  PASS disabling a job disarms it");
-  passed++;
+  // (Cron triggers, 3 and 4, run on a fake clock in their own scheduler below.)
 
   // 5) Worker config round-trips through create + update, with the Pi
   //    migration applied on every write: a legacy engine field is dropped and
@@ -546,24 +524,122 @@ async function main() {
   // An unreadable scheduler.json must never be overwritten blind: the next
   // save rewrites the file from the in-memory list. Each case loads a fresh
   // module instance (the job cache and home dir are per instance).
+  const bundleScheduler = (outfile) =>
+    esbuild.build({
+      entryPoints: [SCHEDULER_TS],
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      outfile,
+      logLevel: "silent",
+      resolveExtensions: [".ts", ".js", ".cjs", ".mjs", ".json"],
+      plugins: [harnessPlugin],
+    });
   const freshScheduler = async (seed) => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "spark-auto-home-"));
     if (seed !== undefined) fs.writeFileSync(path.join(home, "scheduler.json"), seed);
     process.env.SPARK_HOME_DIR = home;
     const file = path.join(home, "scheduler.bundle.cjs");
-    await esbuild.build({
-      entryPoints: [SCHEDULER_TS],
-      bundle: true,
-      platform: "node",
-      format: "cjs",
-      outfile: file,
-      logLevel: "silent",
-      resolveExtensions: [".ts", ".js", ".cjs", ".mjs", ".json"],
-      plugins: [harnessPlugin],
-    });
+    await bundleScheduler(file);
     return { home, sched: require(file) };
   };
   const asideCopies = (home) => fs.readdirSync(home).filter((name) => name.startsWith("scheduler.json.corrupt-"));
+
+  // 3) Per-second cron triggers on a fake clock: node:test's mock timers drive
+  // Date and croner's timers alike, so where a second boundary falls is set
+  // here, not by how busy the machine is. A seeded loop that is mid-run gives
+  // the start a run to re-attach, which is where a slow start is simulated.
+  {
+    const { mock } = require("node:test");
+    const holder = {
+      id: "job-holder",
+      name: "holder",
+      trigger: { kind: "manual" },
+      input: fakeInput,
+      state: { status: "running", iteration: 1, currentRunId: "run-held" },
+    };
+    const { home: home4, sched: s4 } = await freshScheduler(JSON.stringify({ jobs: [holder] }));
+    // A second module instance on the same home folder is a real restart: it
+    // knows only what the first one saved. Bundled before the clock is faked.
+    const restartFile = path.join(home4, "scheduler-restart.bundle.cjs");
+    await bundleScheduler(restartFile);
+    const everySecond = { kind: "cron", expr: "* * * * * *" };
+    const firedFor = (id) => calls().fired.filter((e) => e.automationId === id).length;
+    const waitForFire = async (id) => {
+      for (let i = 0; i < 400 && firedFor(id) < 1; i++) await realSleep(5);
+    };
+    const settle = () => realSleep(100);
+    const missed = async (id, s = s4) => ((await s.getJob(id))?.skips ?? []).filter((skip) => skip.reason === "missed");
+    const BASE = 1_800_000_000_000; // a whole second
+    mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: BASE + 400 });
+    try {
+      await s4.startScheduler();
+
+      // 3a) A slot that comes due while a new automation is being saved, so
+      // after its creation stamp but before its timer exists, is due now: it
+      // runs late, and a later start does not call it missed while closed.
+      resetFired();
+      mock.timers.setTime(BASE + 990);
+      globalThis.__BEFORE_WRITE = () => mock.timers.setTime(BASE + 1_020);
+      const late = await s4.createJob({ name: "cr-late", trigger: everySecond, input: fakeInput });
+      assert.strictEqual(globalThis.__BEFORE_WRITE, null, "the save crossed the second boundary");
+      await waitForFire(late.id);
+      assert.strictEqual(firedFor(late.id), 1, "the slot that came due during the save should run, late");
+      s4.stopScheduler();
+      const restarted = require(restartFile);
+      // Read before its start check, which saves a checkpoint of its own. The
+      // run's lastRunAt also covers the slot; the checkpoint must on its own.
+      const saved = await restarted.getJob(late.id);
+      assert.ok(
+        Date.parse(saved?.scheduleCheckedAt ?? "") >= BASE + 1_000,
+        `the saved schedule checkpoint covers the slot that ran late: ${saved?.scheduleCheckedAt}`,
+      );
+      await restarted.startScheduler();
+      assert.deepStrictEqual(await missed(late.id, restarted), [], "after a restart, a slot that came due during the save is not missed");
+      restarted.stopScheduler();
+      await s4.startScheduler();
+      await s4.setEnabled(late.id, false);
+      console.log("  PASS cron slot due during the save runs late, not missed");
+      passed++;
+
+      // 3b) The start is held (in the loop re-attach) until just past a second
+      // boundary: that slot passed while the timer was armed, so it is the
+      // timer's to fire, not the start's catch-up to skip as missed.
+      mock.timers.setTime(BASE + 5_400);
+      resetFired();
+      const cronJob = await s4.createJob({ name: "cr", trigger: everySecond, input: fakeInput });
+      s4.stopScheduler();
+      let held = false;
+      globalThis.__ON_GETRUN = () => {
+        held = true;
+        mock.timers.setTime(BASE + 6_030);
+      };
+      await s4.startScheduler();
+      assert.ok(held, "the start read a held run, so it crossed a second boundary");
+      mock.timers.tick(0); // the start is done; the timer runs, 30 ms late
+      await waitForFire(cronJob.id);
+      assert.strictEqual(firedFor(cronJob.id), 1, "per-second cron should launch an iteration for its first slot");
+      assert.deepStrictEqual(await missed(cronJob.id), [], "a slot that passed while the timer was armed is not missed");
+      console.log("  PASS cron trigger fired");
+      passed++;
+
+      // 4) Disabling a job disarms it: three more slots pass with no fire.
+      await s4.setEnabled(cronJob.id, false);
+      resetFired();
+      for (let i = 0; i < 3; i++) {
+        mock.timers.tick(1_000);
+        await settle();
+      }
+      assert.strictEqual(calls().fired.length, 0, "a disabled cron should not fire");
+      console.log("  PASS disabling a job disarms it");
+      passed++;
+    } finally {
+      s4.stopScheduler();
+      globalThis.__BEFORE_WRITE = null;
+      globalThis.__ON_GETRUN = null;
+      mock.timers.reset();
+    }
+  }
   {
     const garbled = '{"jobs": [{"id": "job-keep", "name": "nightly"'; // cut off mid-sync
     const { home, sched: s2 } = await freshScheduler(garbled);

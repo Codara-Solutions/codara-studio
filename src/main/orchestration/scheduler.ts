@@ -29,6 +29,7 @@ import {
   LATE_FIRE_TOLERANCE_MS,
   classifyTick,
   decideMissed,
+  latestCronSlot,
   missedBaselineMs,
   scheduledSlotsBetween,
   type ScheduledSlots,
@@ -465,7 +466,7 @@ export async function createJob(input: CreateScheduledJobInput): Promise<Schedul
   // (or the loadJobs await) would otherwise be dropped. Same in updateJob,
   // deleteJob and setEnabled, as in patchJob.
   await persist([...(cache ?? (await loadJobs())), job]);
-  armJob(job);
+  armJob(job, parseMs(job.createdAt));
   void emitUpdated();
   return job;
 }
@@ -501,7 +502,7 @@ export async function updateJob(input: UpdateScheduledJobInput): Promise<Schedul
   });
   await persist(jobs.map((job) => (job.id === input.id ? updated : job)));
   // Re-arm so a changed trigger schedule takes effect now.
-  if (updated.enabled) armJob(updated);
+  if (updated.enabled) armJob(updated, input.trigger !== undefined ? parseMs(updated.scheduleCheckedAt) : undefined);
   else disarmJob(updated.id);
   void emitUpdated();
   return updated;
@@ -712,7 +713,7 @@ export async function setEnabled(id: string, enabled: boolean): Promise<Schedule
         { ...target, enabled, scheduleCheckedAt: settleScheduleNow(id), githubTrigger: undefined }
       : { ...target, enabled };
   await persist(jobs.map((job) => (job.id === id ? updated : job)));
-  if (enabled) armJob(updated);
+  if (enabled) armJob(updated, target.enabled ? undefined : parseMs(updated.scheduleCheckedAt));
   else disarmJob(id);
   void emitUpdated();
   return updated;
@@ -941,7 +942,12 @@ function intervalTicks(everyMs: number): { tickMs: number; ticks: number } {
   return { tickMs: Math.floor(whole / ticks), ticks };
 }
 
-function armJob(job: ScheduledJob): void {
+/** liveSince: when the schedule went live in this session (the job was
+ *  created, its trigger changed, or it was turned on). The save in between
+ *  can take a while, and croner only fires times after its own creation, so a
+ *  cron time between the two came due while Codara ran: it fires now, late.
+ *  Dropped, a later start or wake check would call it missed while closed. */
+function armJob(job: ScheduledJob, liveSince?: number): void {
   // Always disarm first so re-arming (toggle/edit) never leaks a timer.
   disarmJob(job.id);
   if (!job.enabled) return;
@@ -952,8 +958,13 @@ function armJob(job: ScheduledJob): void {
         const cron = new Cron(trigger.expr, trigger.tz ? { timezone: trigger.tz } : {}, () => {
           onScheduledFire(job.id);
         });
-        armedAt.set(job.id, Date.now());
+        const now = Date.now();
+        // classifyTick reads arming as settling, so the late fire below would
+        // find its own time settled if this were the later moment.
+        armedAt.set(job.id, liveSince !== undefined && liveSince < now ? liveSince : now);
         armed.set(job.id, () => cron.stop());
+        const dueSlot = liveSince !== undefined ? latestCronSlot(trigger, now) : null;
+        if (dueSlot !== null && liveSince !== undefined && dueSlot > liveSince) onScheduledFire(job.id);
         break;
       }
       case "interval": {
