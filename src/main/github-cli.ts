@@ -245,8 +245,9 @@ export interface GitHubCliAdapter {
   listMergedPullRequests?(cwd: string, limit?: number): Promise<GitHubMergedPullRequest[]>;
   // The most recent pull requests closed without merging.
   listClosedPullRequests?(cwd: string, limit?: number): Promise<GitHubMergedPullRequest[]>;
-  // Every pull request whose head is `branch`, open, closed or merged.
-  listPullRequestStatesForHead?(cwd: string, branch: string): Promise<GitHubHeadPullRequest[]>;
+  // Every pull request whose head is `branch` in `repository`
+  // ([HOST/]OWNER/NAME), open, closed or merged.
+  listPullRequestStatesForHead?(cwd: string, branch: string, repository: string): Promise<GitHubHeadPullRequest[]>;
   createPullRequest?(input: {
     cwd: string;
     title: string;
@@ -854,8 +855,12 @@ export function createGitHubCliAdapter(
       return parseMergedPullRequests(stdout).filter((pr) => !merged.has(pr.number));
     },
 
-    async listPullRequestStatesForHead(cwd: string, branch: string): Promise<GitHubHeadPullRequest[]> {
+    async listPullRequestStatesForHead(cwd: string, branch: string, repository: string): Promise<GitHubHeadPullRequest[]> {
       const head = boundedBranch(branch, "head branch");
+      // Named, never resolved: gh would prefer a remote called upstream.
+      if (typeof repository !== "string" || !/^(?:[a-z0-9.-]{1,253}\/)?[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(repository)) {
+        throw new GitHubCliError("command-failed", "The GitHub repository is invalid.");
+      }
       const stdout = await runRead(cwd, [
         "pr",
         "list",
@@ -863,6 +868,8 @@ export function createGitHubCliAdapter(
         "all",
         "--head",
         head,
+        "--repo",
+        repository,
         "--limit",
         "20",
         "--json",

@@ -1293,10 +1293,13 @@ the `blockers` and a `hint`:
   one of those. Or, when the agent asking made the worktree (from its own
   terminal or Cora run) and gave the work up: the branch on origin holds the
   exact last commit, read from the remote during the check, and GitHub's
-  last pull request from it was closed without merging, with none open. The
-  local branch then stays, beside its copy on origin, and the result names
-  the closed pull request under `givenUp`. Nobody else's worktree, and no
-  commit that is only local, is ever removed this way;
+  last pull request from it, in origin's repository, was closed without
+  merging, with none open, and its head is that commit or behind it. Both
+  are asked again just before the removal and must not have changed. The
+  local branch then stays, beside its copy on origin, the result names the
+  closed pull request under `givenUp`, and so does the audit log. Nobody
+  else's worktree, and no commit that is only local, is ever removed this
+  way;
 - it has no uncommitted or untracked files (edits hidden by
   `assume-unchanged` or `skip-worktree` count), no merge or rebase in
   progress, and no ignored files beyond build output and caches

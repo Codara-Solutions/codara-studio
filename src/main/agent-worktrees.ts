@@ -55,6 +55,7 @@ import { isKeptBranch } from "./worktree-cleanup/kept-branches";
 import { archiveIgnoredFiles } from "./worktree-cleanup/archive";
 import { mountRefusal } from "./worktree-cleanup/mounts";
 import { proveByMergedHead, proveByMergedPullRequestStack } from "./merged-pull-request-stack";
+import { parseGitHubRemoteUrl } from "./github-ci-watch";
 
 // Agent-managed worktrees: the logic behind the worktree.create/list/remove
 // agent-socket methods and the codara_worktree_* MCP tools.
@@ -212,7 +213,7 @@ export interface AgentWorktreeDeps {
     listPullRequestsForCommit?(cwd: string, sha: string): Promise<GitHubMergedPullRequest[]>;
     // Every pull request with this head, in any state. Absent: no branch is
     // ever taken for given up (RemovalVerdict.givenUp).
-    listPullRequestStatesForHead?(cwd: string, branch: string): Promise<GitHubHeadPullRequest[]>;
+    listPullRequestStatesForHead?(cwd: string, branch: string, repository: string): Promise<GitHubHeadPullRequest[]>;
   };
   sendAgentEvent(event: AgentWorktreeEvent): void;
   audit(entry: AgentWorktreeAuditEntry): Promise<void>;
@@ -2879,8 +2880,11 @@ async function proveMerged(
 
 // A branch its maker gave up: the remote has a branch of that name whose tip
 // holds this exact tip (asked of the remote, not a tracking ref), and
-// GitHub's last pull request from it was closed without merging, with none
-// open. Under the lock the answer found before it stands for the same tip.
+// GitHub's last pull request from it, in origin's repository, was closed
+// without merging, with none open, and its head is this tip or behind it (a
+// branch name reused after an old closed pull request is not given up).
+// Under the lock both are asked again and must give the same answer, so a
+// pull request reopened or a force-push while the removal waited refuses.
 async function proveGivenUp(
   ctx: VerifyContext,
   tip: string,
@@ -2888,25 +2892,45 @@ async function proveGivenUp(
   upstream: string | null,
   options: VerifyOptions,
 ): Promise<RemovalVerdict["givenUp"] | null> {
-  if (options.pinned) return options.pinned.givenUp?.tip === tip ? options.pinned.givenUp : null;
+  const pinned = options.pinned;
+  if (pinned && pinned.givenUp?.tip !== tip) return null;
   const lookup = ctx.deps.github.listPullRequestStatesForHead;
-  if (!options.checkMerge || !options.fetch || !lookup) return null;
+  if (!options.checkMerge || !(options.fetch || pinned) || !lookup) return null;
   const repo = ctx.scope.repoCwd;
+  const repository = await originGitHubRepository(repo);
+  if (!repository) return null;
   for (const name of [...new Set([branch, upstream].filter((entry): entry is string => Boolean(entry)))]) {
-    const remote = await targetNow(ctx, `origin/${name}`);
+    const remote = pinned ? await remoteCommitNow(repo, `origin/${name}`) : await targetNow(ctx, `origin/${name}`);
     if (!remote || remote.remote !== "origin" || !(await isAncestor(repo, tip, remote.commit))) continue;
-    const pulls = (await lookup(repo, name).catch(() => null))?.filter((pr) => pr.headRefName === name && !pr.isCrossRepository);
+    const pulls = (await lookup(repo, name, repository).catch(() => null))?.filter((pr) => pr.headRefName === name && !pr.isCrossRepository);
     if (!pulls?.length || pulls.some((pr) => pr.state === "open")) return null;
     const last = pulls.reduce((latest, pr) => (pr.number > latest.number ? pr : latest));
-    if (last.state !== "closed") return null;
-    return {
+    if (last.state !== "closed" || !(await isAncestor(repo, last.headRefOid, tip))) return null;
+    const found = {
       pullRequest: { number: last.number, url: last.url },
       remoteBranch: `origin/${name}`,
       remoteCommit: remote.commit,
       tip,
     };
+    if (
+      pinned &&
+      (found.pullRequest.number !== pinned.givenUp!.pullRequest.number ||
+        found.remoteBranch !== pinned.givenUp!.remoteBranch ||
+        found.remoteCommit !== pinned.givenUp!.remoteCommit)
+    ) {
+      return null;
+    }
+    return found;
   }
   return null;
+}
+
+// origin's GitHub repository as gh's --repo takes it (HOST/OWNER/NAME), from
+// its configured URL; null when origin is missing or not on GitHub.
+async function originGitHubRepository(repo: string): Promise<string | null> {
+  const url = await readGitText(repo, ["config", "--get", "remote.origin.url"]).catch(() => "");
+  const parsed = url ? parseGitHubRemoteUrl(url) : null;
+  return parsed ? `${parsed.host}/${parsed.repository}` : null;
 }
 
 const ONLY_CACHES_MAX_ENTRIES = 5_000;

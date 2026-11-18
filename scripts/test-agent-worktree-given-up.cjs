@@ -4,7 +4,10 @@
 // idle), with no dialog, keeping the branch and a recovery ref. Anything
 // else stays the user's call: another agent's worktree, a dirty tree, a
 // commit that exists only here, an open pull request, a deleted remote
-// branch, or a GitHub that cannot be asked.
+// branch, an old closed pull request of a reused name, a GitHub that cannot
+// be asked, or any of these changing while the removal waits for the lock.
+// origin's URL is a GitHub one that git rewrites to a local bare repository,
+// so GitHub is never contacted.
 //
 //   node scripts/test-agent-worktree-given-up.cjs
 const assert = require("node:assert/strict");
@@ -65,7 +68,9 @@ async function main() {
     execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
     execFileSync("git", ["init", "-q", "-b", "main", repo]);
     commitFile(repo, "README.md", "# test\n", "init");
-    git(repo, ["remote", "add", "origin", origin]);
+    const GITHUB_URL = "https://github.com/acme/widgets.git";
+    git(repo, ["config", `url.${origin}.insteadOf`, GITHUB_URL]);
+    git(repo, ["remote", "add", "origin", GITHUB_URL]);
     git(repo, ["push", "-q", "-u", "origin", "main"]);
     git(repo, ["remote", "set-head", "origin", "main"]);
 
@@ -78,6 +83,8 @@ async function main() {
       },
       prefs: { agentWorktreesEnabled: true, agentsMayRemoveUserWorktrees: false, agentWorktreeRegenerableIgnoredByRepo: {} },
       paneWorkspace: { "pane-maker": "ws-repo", "pane-other": "ws-repo" },
+      // The repository each lookup named.
+      asked: [],
       // GitHub's pull requests by head branch, any state.
       headPulls: new Map(),
       headPullsError: null,
@@ -105,7 +112,8 @@ async function main() {
         listPullRequestsForHead: async () => [],
         listMergedPullRequests: async () => [],
         listPullRequestsForCommit: async () => [],
-        listPullRequestStatesForHead: async (_cwd, branch) => {
+        listPullRequestStatesForHead: async (_cwd, branch, repository) => {
+          h.asked.push(repository);
           if (h.headPullsError) throw h.headPullsError;
           return h.headPulls.get(branch) ?? [];
         },
@@ -156,6 +164,7 @@ async function main() {
       assert.equal(h.state.workspaces.some((workspace) => workspace.id === wt.workspaceId), false, "its rail row is gone");
       assert.equal(h.events.at(-1).kind, "removed");
       assert.equal(h.events.at(-1).pullRequest, undefined, "a closed pull request is not reported as merged");
+      assert.equal(h.asked.at(-1), "github.com/acme/widgets", "GitHub is asked about origin's repository by name");
       const audit = fs
         .readFileSync(path.join(home, "logs", "worktree-audit.jsonl"), "utf8")
         .trim()
@@ -165,6 +174,27 @@ async function main() {
       assert.equal(audit.length, 1);
       assert.equal(audit[0].proof, null);
       assert.deepEqual(audit[0].givenUp, { pr: result.givenUp.closedPullRequest.number, remoteCommit: wt.tip }, "the audit names why no dialog was needed");
+    });
+
+    await check("an origin that is not on GitHub keeps it", async () => {
+      const wt = await givenUp("agent/not-github");
+      git(repo, ["remote", "set-url", "origin", origin]);
+      try {
+        assert.equal((await aw.removeAgentWorktree(maker, { workspaceId: wt.workspaceId }, deps)).code, "WORKTREE_NOT_MERGED");
+      } finally {
+        git(repo, ["remote", "set-url", "origin", GITHUB_URL]);
+      }
+      assert.ok(fs.existsSync(wt.path));
+    });
+
+    await check("an old closed pull request of a reused branch name does not count", async () => {
+      const wt = await givenUp("agent/reused");
+      // The name is reused for new work: the old pull request's head is not in it.
+      git(wt.path, ["reset", "-q", "--hard", "HEAD~1"]);
+      commitFile(wt.path, "fresh.txt", "fresh\n", "new work under the old name");
+      git(wt.path, ["push", "-q", "-f", "origin", "agent/reused"]);
+      assert.equal((await aw.removeAgentWorktree(maker, { workspaceId: wt.workspaceId }, deps)).code, "WORKTREE_NOT_MERGED");
+      assert.ok(fs.existsSync(wt.path));
     });
 
     await check("another agent's given-up worktree still needs the user", async () => {
@@ -230,6 +260,34 @@ async function main() {
         h.headPullsError = null;
       }
       assert.ok(fs.existsSync(wt.path));
+    });
+
+    await check("a pull request reopened, or a push, while the removal waits keeps it", async () => {
+      const reopened = await givenUp("agent/reopened-late");
+      deps.afterVerify = async () => {
+        h.headPulls.get("agent/reopened-late")[0].state = "open";
+      };
+      try {
+        const refused = await aw.removeAgentWorktree(maker, { workspaceId: reopened.workspaceId }, deps);
+        assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
+      } finally {
+        delete deps.afterVerify;
+      }
+      assert.ok(fs.existsSync(reopened.path));
+      const pushed = await givenUp("agent/pushed-late");
+      deps.afterVerify = async () => {
+        // Someone else pushes on top: the tip is still in it, but the branch moved.
+        const tree = git(repo, ["rev-parse", `${pushed.tip}^{tree}`]);
+        const child = execFileSync("git", ["-C", repo, "commit-tree", tree, "-p", pushed.tip, "-m", "pushed elsewhere"], { encoding: "utf8" }).trim();
+        git(repo, ["push", "-q", "origin", `${child}:refs/heads/agent/pushed-late`]);
+      };
+      try {
+        const refused = await aw.removeAgentWorktree(maker, { workspaceId: pushed.workspaceId }, deps);
+        assert.equal(refused.code, "WORKTREE_CHANGED", JSON.stringify(refused));
+      } finally {
+        delete deps.afterVerify;
+      }
+      assert.ok(fs.existsSync(pushed.path));
     });
 
     await check("a commit made between the check and the removal keeps it", async () => {

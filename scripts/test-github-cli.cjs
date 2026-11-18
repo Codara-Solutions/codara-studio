@@ -1340,12 +1340,17 @@ async function main() {
         { stdout: JSON.stringify([entry(4, "CLOSED"), entry(6)]), stderr: "" },
         { stdout: JSON.stringify([entry(4, "CLOSED"), { ...entry(6, "OPEN"), headRefOid: "not-a-sha" }]), stderr: "" },
       ]);
-      const listed = await adapter.listPullRequestStatesForHead("/repo", "agent/x");
+      const listed = await adapter.listPullRequestStatesForHead("/repo", "agent/x", "github.com/codara/studio");
       assert.deepEqual(listed.map((pr) => [pr.number, pr.state]), [[4, "closed"], [5, "merged"], [6, "open"]]);
-      assert.deepEqual(calls[0].args.slice(0, 8), ["pr", "list", "--state", "all", "--head", "agent/x", "--limit", "20"]);
+      assert.deepEqual(calls[0].args.slice(0, 10), ["pr", "list", "--state", "all", "--head", "agent/x", "--repo", "github.com/codara/studio", "--limit", "20"]);
       assert.match(calls[0].args.at(-1), /,state$/);
-      await rejectsCode(adapter.listPullRequestStatesForHead("/repo", "agent/x"), "invalid-response");
-      await rejectsCode(adapter.listPullRequestStatesForHead("/repo", "agent/x"), "invalid-response");
+      await rejectsCode(adapter.listPullRequestStatesForHead("/repo", "agent/x", "codara/studio"), "invalid-response");
+      await rejectsCode(adapter.listPullRequestStatesForHead("/repo", "agent/x", "codara/studio"), "invalid-response");
+      // The repository is always named, never left for gh to pick.
+      for (const repository of [undefined, "", "studio", "a/b/c/d", "--repo=x/y", "codara/studio; rm"]) {
+        await rejectsCode(adapter.listPullRequestStatesForHead("/repo", "agent/x", repository), "command-failed");
+      }
+      assert.equal(calls.length, 3, "a bad repository never reaches gh");
     }
 
     console.log("All GitHub CLI adapter checks passed.");
