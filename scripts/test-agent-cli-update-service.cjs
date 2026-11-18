@@ -522,6 +522,10 @@ async function fakeService(m) {
     await service.settled();
     assert.equal(w.commands.length, 0, "the installer waits for the launch");
     assert.match(tool(service.snapshot(), "claude").message, /a Claude Code session is running/);
+    // Its process now runs too: still one session, not two.
+    w.setLive(() => 1);
+    await service.pollWaiting();
+    assert.match(tool(service.snapshot(), "claude").message, /a Claude Code session is running/, "a launch is not counted twice");
   }
 
   // While a tool is swapped, Codara does not start it (launch-guard.ts).

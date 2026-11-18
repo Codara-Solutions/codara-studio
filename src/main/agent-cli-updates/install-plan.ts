@@ -187,7 +187,7 @@ export async function detectInstallPlan(input: InstallProbeInput): Promise<Insta
   // npm tree per package: those are theirs. A Node that pnpm or Scoop
   // installed has its own npm, and its globals are npm's.
   const other = otherManager(input.tool, real);
-  const managedNode = /\/(?:\.?pnpm|scoop\/(?:apps|persist))\/nodejs\//i.test(real);
+  const managedNode = /\/(?:\.?pnpm|scoop\/(?:apps|persist))\/nodejs(?:-lts)?\//i.test(real);
   if (other && !managedNode) return other;
   const prefix = await npmPrefix(input, real);
   if (prefix) return npmPlan(input, prefix);

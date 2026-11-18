@@ -3667,7 +3667,8 @@ export function useTerminalSession({
         if (!disposed) {
           onAgentStateRef.current?.({ runtime: null, running: false, exitConfirmed: true });
         }
-        consumeBootResume();
+        // A tool being updated refused it: the resume stays for the next mount.
+        if (!/ is updating\. Try again in a few minutes\./.test((err as Error).message)) consumeBootResume();
         return;
       }
 

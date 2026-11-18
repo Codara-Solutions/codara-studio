@@ -2,7 +2,9 @@
 // which tool is being swapped right now, so Codara does not start it
 // half-installed, and which tools' own updaters stay off after a roll back,
 // so the version Codara put back is not replaced again at the next start.
-// Kept tiny and free of imports: pty-manager loads it at startup.
+// Kept tiny (one import, the startup parser): pty-manager loads it at startup.
+
+import { parseManualAgentStartupCommand } from "../manual-agent-startup";
 
 /**
  * The switch each vendor documents for its own updater. Claude Code reads
@@ -55,7 +57,7 @@ export function busyTools(): string[] {
  */
 export function beginToolLaunch(tool: string): () => void {
   const updating = busy.get(tool);
-  if (updating !== undefined) throw new Error(`${updating} is updating. Try again in a few minutes.`);
+  if (updating !== undefined) throw new Error(updatingMessage(updating));
   starting.set(tool, (starting.get(tool) ?? 0) + 1);
   let ended = false;
   return () => {
@@ -65,6 +67,22 @@ export function beginToolLaunch(tool: string): () => void {
     if (left > 0) starting.set(tool, left);
     else starting.delete(tool);
   };
+}
+
+function updatingMessage(label: string): string {
+  return `${label} is updating. Try again in a few minutes.`;
+}
+
+/**
+ * The refusal for a terminal whose startup command launches a tool being
+ * swapped, or null. Callers that open panes ask before the pane exists: the
+ * launch's own refusal reaches only the pane, and they would wait out their
+ * spawn timeout and report a bad folder.
+ */
+export function toolUpdating(command: string | null | undefined): string | null {
+  const runtime = parseManualAgentStartupCommand(command)?.runtime;
+  const label = runtime ? busy.get(runtime) : undefined;
+  return label === undefined ? null : updatingMessage(label);
 }
 
 /** Launches of the tool that have begun and may not have a process yet. */
