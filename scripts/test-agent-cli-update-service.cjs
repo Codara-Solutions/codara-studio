@@ -1025,6 +1025,7 @@ async function launchGuard(m) {
   m.setToolBusy("claude", true);
   assert.throws(() => m.beginToolLaunch("claude", "Claude Code"), /Claude Code is updating\. Try again in a few minutes\./);
   assert.equal(m.launchesStarting("claude"), 0);
+  assert.deepEqual(m.busyTools(), ["claude"], "the quit prompt sees the tool being swapped");
   m.beginToolLaunch("codex", "Codex")();
   m.setToolBusy("claude", false);
   m.beginToolLaunch("claude", "Claude Code")();

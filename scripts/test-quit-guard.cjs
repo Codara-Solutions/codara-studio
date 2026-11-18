@@ -289,6 +289,15 @@ async function main() {
     check("a probe failing on the first ask restarts as with nothing live", fresh.gate.request() === "started");
   }
 
+  // ── the quit prompt reads the tools being updated ─────────────────
+  {
+    const index = fs.readFileSync(path.join(ROOT, "src", "main", "index.ts"), "utf8");
+    const start = index.indexOf("function currentLiveWork(): LiveWork {");
+    const body = index.slice(start, index.indexOf("\n}\n", start));
+    check("main's live work includes the agent tool updates", /collectLiveWork\([\s\S]*busyTools\(\)\.map\(/.test(body), body);
+    check("from the launch guard the update service marks", /import \{ busyTools \} from "\.\/agent-cli-updates\/launch-guard";/.test(index));
+  }
+
   // ── a quit that proceeds ends the wait ──────────────────────────────
   {
     // Quitting while the update restart waits: cleanup stops the agents, and
