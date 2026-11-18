@@ -51,7 +51,12 @@ export interface UpdateInProgress {
   fromRealPath: string;
   fromBinaryPath: string;
   toVersion: string | null;
+  /** When it was written, in ms. */
+  savedAt?: number;
 }
+
+/** A record whose tool cannot be found is shown at each start for this long, then dropped. */
+export const MISSING_TOOL_RECORD_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface PersistedUpdateState {
   /** Versions whose update failed or was rolled back, per tool. */
@@ -487,7 +492,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     // On disk before the installer starts: a quit or crash from here on is
     // finished by the next start (recoverInterrupted).
     if (before.version) {
-      persisted.inProgress = { tool, fromVersion: before.version, fromRealPath: before.realPath, fromBinaryPath: before.binaryPath, toVersion: target };
+      persisted.inProgress = { tool, fromVersion: before.version, fromRealPath: before.realPath, fromBinaryPath: before.binaryPath, toVersion: target, savedAt: deps.now() };
       try {
         await saveOrThrow();
       } catch (error) {
@@ -712,7 +717,17 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       if (!now) {
         // Cut off after the launcher went, or not readable right now: the
         // record stays for the next start, and the user can act meanwhile.
+        // A tool removed on purpose would keep it forever: after a week it
+        // is shown this last time and dropped.
         set(tool, { phase: "failed", message: `${lead}${label} cannot be found now. ${reinstall()}` });
+        if (record.savedAt === undefined) {
+          persisted.inProgress = { ...record, savedAt: deps.now() };
+          await save();
+        } else if (Math.abs(deps.now() - record.savedAt) > MISSING_TOOL_RECORD_MS) {
+          deps.log(`${tool}: not found for a week since the update was cut short; its record is dropped`);
+          delete persisted.inProgress;
+          await save();
+        }
         return tool;
       }
       entry(tool).installed = now;

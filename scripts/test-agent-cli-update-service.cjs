@@ -741,6 +741,7 @@ async function crashSafety(m) {
       fromRealPath: "/home/u/.local/share/claude/versions/2.1.325",
       fromBinaryPath: "/home/u/.local/bin/claude",
       toVersion: "2.1.327",
+      savedAt: Date.parse("2026-11-18T12:00:00Z"),
     }, "the record is saved before the installer starts");
     assert.equal(states.at(-1).inProgress, undefined, "and cleared once the update is over");
   }
@@ -837,7 +838,17 @@ async function crashSafety(m) {
     assert.equal(w.commands.length, 0);
     assert.ok(w.saved === null || w.saved.inProgress, "the record is kept");
     assert.match(tool(service.snapshot(), "claude").message, /^Codara closed during the last update\. Claude Code cannot be found now\. Put 2\.1\.325 back with:/);
+    assert.equal(w.saved.inProgress.savedAt, w.deps.now(), "an unstamped record is stamped so it can expire");
     service.stop();
+
+    // Removed on purpose: after a week the message is shown a last time and the record goes.
+    const later = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { ...record, savedAt: w.deps.now() - m.MISSING_TOOL_RECORD_MS - 1 } } });
+    delete later.tools.claude;
+    const laterService = m.createAgentCliUpdateService(later.deps);
+    await laterService.start();
+    assert.match(tool(laterService.snapshot(), "claude").message, /cannot be found now/);
+    assert.equal(later.saved.inProgress, undefined, "a week-old record of a missing tool is dropped");
+    laterService.stop();
   }
 
   // The record but a tool that works: nothing is run, the record goes.
