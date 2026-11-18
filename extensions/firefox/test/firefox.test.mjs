@@ -42,6 +42,10 @@ export async function run(assembled) {
   assert.equal(blockingRule("http://127.0.0.1/private/x", parsed)?.raw, "127.1/private");
   assert.equal(blockingRule("https://xn--bcher-kva.example/priv%C3%A9", parsed)?.raw, "bücher.example\u3002/privé");
   assert.equal(blockingRule("https://a.wild.xn--bcher-kva.example/", parsed)?.raw, "*.wild\uff0ebücher.example");
+  // Numeric labels in a wildcard rule stay labels.
+  const numeric = parseFirefoxBlockedSites("*.123.example\n127.0.0.*");
+  assert.equal(blockingRule("https://x.123.example/", numeric)?.raw, "*.123.example");
+  assert.equal(blockingRule("http://127.0.0.1:8080/", numeric)?.raw, "127.0.0.*");
   assert.equal(blockingRule("https://dotted.example./", rules)?.raw, "dotted.example.");
   assert.equal(blockingRule("https://xn--bcher-kva.example/", rules)?.raw, "bücher.example");
   assert.equal(blockingRule("https://shop.xn--bcher-kva.example/x", rules)?.raw, "bücher.example");

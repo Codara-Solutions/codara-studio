@@ -63,9 +63,11 @@ function parsedHost(host) {
 function canonicalHost(host) {
   const dotted = host.replace(/[\u3002\uff0e\uff61]/g, ".").replace(/\.$/, "");
   if (!dotted.includes("*")) return parsedHost(dotted) ?? dotted;
+  // Label by label, each inside a dummy domain so "127" stays a label and
+  // is not read as an IPv4 address.
   return dotted
     .split(".")
-    .map((label) => (label.includes("*") ? label : parsedHost(label) ?? label))
+    .map((label) => (label.includes("*") ? label : parsedHost(`${label}.invalid`)?.slice(0, -".invalid".length) ?? label))
     .join(".");
 }
 
