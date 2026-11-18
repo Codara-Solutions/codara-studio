@@ -119,7 +119,7 @@ async function loadModule(relativePath) {
 
 async function main() {
   const fast = await loadModule("src/shared/fast-mode.ts");
-  for (const model of ["gpt-5.6-sol", "gpt-5.6-terra", "GPT-5.6-Luna", " gpt-5.6-sol "]) {
+  for (const model of ["gpt-5.6-sol", "gpt-5.6-terra", "GPT-5.6-Luna", " gpt-5.6-sol ", "gpt-6.2-sol", "gpt-6.2-astra"]) {
     assert.equal(fast.fastModeAvailableFor(model), true, `${model} offers fast mode`);
   }
   for (const model of [

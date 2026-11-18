@@ -57,8 +57,9 @@ export function userNamedTopTier(messages: readonly HumanRunMessage[], chatModel
   );
 }
 
-/** Native worker ids the user switched off in Settings. Empty while the
- *  roster was never customized. */
+/** Native roster ids not switched on in Worker models: ones the user turned
+ *  off and opt-ins never turned on. Empty while the roster was never
+ *  customized. */
 export function disabledWorkerModels(settings: { coraWorkerModels?: AppSettings["coraWorkerModels"] }): Set<string> {
   if (!Array.isArray(settings.coraWorkerModels)) return new Set();
   const enabled = new Set(settings.coraWorkerModels.map((id) => id.trim().toLowerCase().split("@")[0]));
@@ -81,7 +82,7 @@ export function managerSessionModelRefusal(
     return `Session model ${name} is the top tier, used only when the user asks for it by name. Start the session on a standard model (omit model for Opus).`;
   }
   if (context.disabled.has(name.toLowerCase().split("@")[0])) {
-    return `Session model ${name} is switched off in Settings. Omit model, or use a model the user left on.`;
+    return `Session model ${name} is not switched on in Capability Center, Worker models. Omit model, or use a model the user switched on.`;
   }
   return null;
 }

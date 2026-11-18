@@ -13,6 +13,12 @@ const KNOWN_CONTEXT_WINDOWS: Array<[RegExp, number]> = [
   [/claude-fable/i, 1_000_000],
   [/claude-(opus|sonnet|haiku)/i, 200_000],
   [/anthropic\/claude/i, 200_000],
+  // Codara runs GPT-6.2 through Codex on the ChatGPT subscription, where
+  // OpenAI's Codex model list serves 500K for Sol and 272K for Astra (the API
+  // pages list 1.05M, a window the Codex route does not offer), as does the
+  // pi.dev catalog Pi reads: https://pi.dev/api/models/providers/openai-codex
+  [/gpt-6\.2-sol/i, 500_000],
+  [/gpt-6\.2-astra/i, 272_000],
   [/gpt-5/i, 400_000],
   [/openai\/gpt-5/i, 400_000],
   [/gpt-4\.1/i, 1_000_000],
