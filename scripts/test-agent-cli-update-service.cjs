@@ -27,7 +27,7 @@ async function main() {
         'export { runSetupCommand } from "./src/main/onboarding";',
         'export * from "./src/main/agent-cli-updates/launch-guard";',
         'export { relinkLauncher } from "./src/main/agent-cli-updates/relink";',
-        'export { acquireUpdateLock, LOCK_MAX_HOLD_MS } from "./src/main/agent-cli-updates/update-lock";',
+        'export { acquireUpdateLock, LOCK_MAX_HOLD_MS, SAME_BOOT_MAX_HOLD_MS } from "./src/main/agent-cli-updates/update-lock";',
         'export { reinstallCommand, nativeBuildPath } from "./src/main/agent-cli-updates/reinstall";',
         'export { commandRunsAgent } from "./src/main/agent-hibernation-census";',
       ].join("\n"),
@@ -729,7 +729,7 @@ async function crashSafety(m) {
     const run = w.deps.run;
     let recordAtRun = null;
     w.deps.run = async (command) => {
-      recordAtRun = states.at(-1)?.inProgress ?? null;
+      recordAtRun = states.at(-1)?.inProgress?.claude ?? null;
       return run(command);
     };
     const service = m.createAgentCliUpdateService(w.deps);
@@ -767,7 +767,7 @@ async function crashSafety(m) {
     const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
     const w = world({
       auto: false,
-      state: { failed: {}, notOffered: {}, inProgress: record },
+      state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } },
       tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
       onRun: (command, tools) => {
         tools.claude = { ...tools.claude, version: command.args[1], realPath: "/home/u/.local/share/claude/versions/2.1.325" };
@@ -800,7 +800,7 @@ async function crashSafety(m) {
     for (const [name, record] of tampered) {
       const w = world({
         auto: false,
-        state: { failed: {}, notOffered: {}, inProgress: record },
+        state: { failed: {}, notOffered: {}, inProgress: { claude: record } },
         tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
       });
       const relinked = [];
@@ -814,7 +814,7 @@ async function crashSafety(m) {
     }
     const w = world({
       auto: false,
-      state: { failed: {}, notOffered: {}, inProgress: { ...good, fromRealPath: "/tmp/evil" } },
+      state: { failed: {}, notOffered: {}, inProgress: { claude: { ...good, fromRealPath: "/tmp/evil" } } },
       tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
     });
     const service = m.createAgentCliUpdateService(w.deps);
@@ -831,18 +831,18 @@ async function crashSafety(m) {
   // read right now): the record stays for the next start and the user is told.
   {
     const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
-    const w = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: record } });
+    const w = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } } });
     delete w.tools.claude;
     const service = m.createAgentCliUpdateService(w.deps);
     await service.start();
     assert.equal(w.commands.length, 0);
-    assert.ok(w.saved === null || w.saved.inProgress, "the record is kept");
+    assert.ok(w.saved === null || w.saved.inProgress?.claude, "the record is kept");
     assert.match(tool(service.snapshot(), "claude").message, /^Codara closed during the last update\. Claude Code cannot be found now\. Put 2\.1\.325 back with:/);
-    assert.equal(w.saved.inProgress.savedAt, w.deps.now(), "an unstamped record is stamped so it can expire");
+    assert.equal(w.saved.inProgress.claude.savedAt, w.deps.now(), "an unstamped record is stamped so it can expire");
     service.stop();
 
     // Removed on purpose: after a week the message is shown a last time and the record goes.
-    const later = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { ...record, savedAt: w.deps.now() - m.MISSING_TOOL_RECORD_MS - 1 } } });
+    const later = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { claude: { ...record, savedAt: w.deps.now() - m.MISSING_TOOL_RECORD_MS - 1 } } } });
     delete later.tools.claude;
     const laterService = m.createAgentCliUpdateService(later.deps);
     await laterService.start();
@@ -854,7 +854,7 @@ async function crashSafety(m) {
   // The record but a tool that works: nothing is run, the record goes.
   {
     const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/x/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
-    const w = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: record } });
+    const w = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } } });
     const service = m.createAgentCliUpdateService(w.deps);
     await service.start();
     assert.equal(w.commands.length, 0);
@@ -868,7 +868,7 @@ async function crashSafety(m) {
     const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/x/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
     const w = world({
       auto: false,
-      state: { failed: {}, notOffered: {}, inProgress: record },
+      state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } },
       tools: { claude: { version: null, realPath: "/x/2.1.327", plan: nativePlan("claude") } },
     });
     w.deps.lock = async () => null;
@@ -941,6 +941,15 @@ async function crashSafety(m) {
       assert.ok(ended, "taken over once that installer is gone");
       await ended.release();
 
+      // Same boot, but a pid reused by an unrelated process: held only up to
+      // the same-boot limit, not for as long as that process lives.
+      fs.writeFileSync(file, JSON.stringify({ pid: 111, host: "here", since: new Date(t0).toISOString(), boot: boot0, installer: 333 }));
+      const reused = { boot: boot0, alive: () => true, installerAlive: () => true };
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { ...reused, now: () => t0 + m.SAME_BOOT_MAX_HOLD_MS - 60_000 })), null);
+      const freed = await m.acquireUpdateLock(file, opts(222, { ...reused, now: () => t0 + m.SAME_BOOT_MAX_HOLD_MS + 1000 }));
+      assert.ok(freed, "a same-boot lock has a time limit too");
+      await freed.release();
+
       // Dated in the future (the clock was set back after a crash): stale.
       const ahead = await m.acquireUpdateLock(file, opts(111, { now: () => t0 + 60 * 60 * 1000, boot: boot0 }));
       assert.ok(ahead);
@@ -978,7 +987,7 @@ async function crashSafety(m) {
 
     // A record another window cleared is not recovered.
     const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
-    let second = { failed: {}, notOffered: {}, inProgress: record };
+    let second = { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } };
     const w2 = world({ auto: false, tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } } });
     let reads = 0;
     w2.deps.loadState = async () => (reads++ === 0 ? second : { failed: {}, notOffered: {} });
@@ -1037,7 +1046,7 @@ async function crashSafety(m) {
     };
     const w = world({
       auto: false,
-      state: { failed: {}, notOffered: {}, inProgress: record },
+      state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } },
       tools: { codex: { version: null, realPath: "/home/u/.codex/packages/standalone/releases/0.171.0/bin/codex", plan: nativePlan("codex") } },
       onRun: (command, tools) => {
         const [id] = command.display.split(" ");
@@ -1061,16 +1070,41 @@ async function crashSafety(m) {
     assert.equal(w.saved.inProgress, undefined);
     service.stop();
 
-    // A record whose tool cannot be found is kept, and other updates wait for it.
-    const w2 = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: record } });
+    // A record whose tool cannot be found is kept, and holds up no other tool.
+    const w2 = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } } });
     delete w2.tools.codex;
     const service2 = m.createAgentCliUpdateService(w2.deps);
     await service2.start();
+    await service2.check();
     await service2.update("claude");
-    assert.equal(w2.commands.length, 0, "no update writes over the record");
-    assert.ok(w2.saved === null || w2.saved.inProgress?.tool === "codex", "the Codex record survives");
-    assert.match(tool(service2.snapshot(), "claude").message, /the Codex update Codara was running when it closed is not finished yet/);
+    await service2.settled();
+    assert.equal(tool(service2.snapshot(), "claude").phase, "updated", "Claude updates while Codex is missing");
+    assert.equal(w2.saved.inProgress?.codex?.fromVersion, "0.170.0", "the Codex record survives");
+    assert.equal(w2.saved.inProgress?.claude, undefined, "and Claude's own record is cleared");
+    assert.match(tool(service2.snapshot(), "codex").message, /Codex cannot be found now/);
     service2.stop();
+
+    // The clicked tool's own record, and the tool works: the click updates it.
+    const ownRecord = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const w3 = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { claude: ownRecord } } });
+    let held3 = true;
+    w3.deps.lock = async () => (held3 ? null : { release: async () => {}, installerStarted: async () => {} });
+    const service3 = m.createAgentCliUpdateService(w3.deps);
+    await service3.start();
+    await service3.check();
+    held3 = false;
+    await service3.update("claude");
+    await service3.settled();
+    assert.equal(tool(service3.snapshot(), "claude").phase, "updated", "a click whose own record turns out fine still updates");
+    assert.equal(w3.saved.inProgress, undefined);
+    service3.stop();
+
+    // The file: one validated record per tool; a file from before holds one.
+    const single = { ...record };
+    assert.deepEqual(m.inProgressFrom(single), { codex: single }, "a single old record is read as its tool's");
+    assert.deepEqual(m.inProgressFrom({ codex: single, claude: { ...single } }), { codex: single }, "a record under another tool's key is dropped");
+    assert.deepEqual(m.inProgressFrom({ codex: { ...single, fromRealPath: "relative/codex" } }), undefined);
+    assert.equal(m.inProgressFrom({ grok: null, codex: "x" }), undefined);
   }
 
   // A held lock at start: recovery is tried again later, not given up.
@@ -1078,7 +1112,7 @@ async function crashSafety(m) {
     const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
     const w = world({
       auto: false,
-      state: { failed: {}, notOffered: {}, inProgress: record },
+      state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } },
       tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
       onRun: (command, tools) => {
         tools.claude = { ...tools.claude, version: command.args[1], realPath: "/home/u/.local/share/claude/versions/2.1.325" };
