@@ -82,24 +82,23 @@ const ROW_LOADING_STYLE: React.CSSProperties = {
   color: "var(--muted)",
 };
 
-// Virtuoso's inner list element. We give it the 2px-top / 8px-bottom padding
-// the plain `overflow: auto` scroll container used to have, so virtualizing
-// the list does not change the tree's vertical spacing. `forwardRef` is
-// required: Virtuoso attaches a ref to whatever component is passed here.
+// The 2px-top / 8px-bottom space the plain `overflow: auto` scroll container
+// has, so virtualizing the list does not change the tree's vertical spacing.
+// It is a Header and Footer, which Virtuoso measures, not padding on its List:
+// Virtuoso's List style carries the padding that stands in for the rows above
+// and below the rendered window, and overriding it pinned the scroll height
+// to the rendered rows, so a long tree could never scroll to its end.
 // Defined once at module scope so the `components` prop identity is stable
 // (a fresh object there would otherwise remount the scroller every render).
-const VirtuosoList = React.forwardRef<
-  HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement>
->(function VirtuosoList({ style, children, ...rest }, ref) {
-  return (
-    <div ref={ref} style={{ ...style, paddingTop: 2, paddingBottom: 8 }} {...rest}>
-      {children}
-    </div>
-  );
-});
+function VirtuosoHeader() {
+  return <div style={{ height: 2 }} />;
+}
 
-const LIST_COMPONENTS = { List: VirtuosoList };
+function VirtuosoFooter() {
+  return <div style={{ height: 8 }} />;
+}
+
+const LIST_COMPONENTS = { Header: VirtuosoHeader, Footer: VirtuosoFooter };
 
 function normalizePath(path: string): string {
   // fs.watch on Windows can produce mixed separators; normalize for set lookups.
@@ -433,7 +432,10 @@ export default function FileTree({
     setSelectionAnchorPath(null);
     setSelectionRect(null);
     marqueeSelectionRef.current = null;
-    rowElementsRef.current.clear();
+    // `rowElementsRef` is left alone: rows add and remove themselves through
+    // their ref callbacks. A cached tree mounts its rows in the same commit as
+    // this effect, after their refs ran, so clearing here would forget every
+    // on-screen row and the marquee would select nothing.
     void (async () => {
       if (next.loaded) {
         // Paint the retained tree now; reconcile it in the background. The
