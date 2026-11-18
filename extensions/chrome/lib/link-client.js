@@ -532,13 +532,25 @@ export class LinkClient {
     this.epoch += 1;
     this.connecting = null;
     this.clearReconnect();
+    // Queued before anything awaits: a reconnect meanwhile (the alarm, the
+    // old link dropping) reads no pairing.
+    const cleared = this.pairingStore(() => this.deps.clearPairing());
     if (flushed) {
       let timer;
       await Promise.race([flushed, new Promise((resolve) => (timer = setTimeout(resolve, FAREWELL_TIMEOUT_MS)))]);
       clearTimeout(timer);
     }
     if (!this.socket || this.socket === socket) this.disconnect("idle");
-    await this.pairingStore(() => this.deps.clearPairing());
+    else if (socket) {
+      // A link the user started since stays; only the old socket closes.
+      socket.onclose = null;
+      try {
+        socket.close();
+      } catch {
+        /* already closed */
+      }
+    }
+    await cleared;
   }
 
   lost() {

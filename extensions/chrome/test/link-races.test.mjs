@@ -531,5 +531,30 @@ export async function run() {
     client.disconnect();
   }
 
-  return "link races: a cancelled pairing saves no token, an old revocation never erases a new pairing, an old answer never goes out on a new link, an unsealed revocation keeps the saved pairing, a search cancelled mid-hello adopts nothing, a close never overtakes the frame before it, a timed-out handshake adopts nothing, a cancelled re-pairing keeps the earlier pairing, a revocation clears only its own pairing, an old retry never clears a newer one, a reconnect never reads a save that may be taken back, Disconnect keeps no approval in flight, and a proven Codara's revocation counts past the probe deadline";
+  // 15. Disconnect while its "unpair" is still being sealed, the old link
+  // drops and the alarm looks for Codara: nothing reconnects with the token
+  // Disconnect is forgetting.
+  {
+    const codara = fakeCodara();
+    const store = newStore();
+    await paired(codara, store);
+    const client = makeClient(codara, store);
+    await client.connect();
+    await until(() => client.status.state === "connected", "the proven link");
+    const old = codara.last();
+    const sealing = hold("encrypt");
+    const forgetting = client.forget({ type: "unpair" });
+    await sealing.reached;
+    old.hangUp();
+    await wait(10);
+    await client.connect();
+    sealing.release();
+    await forgetting;
+    await wait(30);
+    assert.equal(store.token, null);
+    assert.equal(client.socket, null, "no link was made with the forgotten token");
+    assert.equal(client.status.state, "idle");
+  }
+
+  return "link races: a cancelled pairing saves no token, an old revocation never erases a new pairing, an old answer never goes out on a new link, an unsealed revocation keeps the saved pairing, a search cancelled mid-hello adopts nothing, a close never overtakes the frame before it, a timed-out handshake adopts nothing, a cancelled re-pairing keeps the earlier pairing, a revocation clears only its own pairing, an old retry never clears a newer one, a reconnect never reads a save that may be taken back, Disconnect keeps no approval in flight and lets nothing reconnect with the token it forgets, and a proven Codara's revocation counts past the probe deadline";
 }
