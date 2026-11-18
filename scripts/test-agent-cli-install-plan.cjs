@@ -50,6 +50,16 @@ async function run(m) {
     "a warning printed before the version is skipped",
   );
   assert.equal(m.parseCliVersion("grok 1.0.89 (28be5bb1bf65) [stable]"), "1.0.89");
+  assert.equal(
+    m.parseCliVersion("/home/u/.local/share/fnm/node-versions/v22.23.3/bin/node: using it\ncodex-cli 0.170.0"),
+    "0.170.0",
+    "a version inside a path is not the tool's version",
+  );
+  assert.equal(
+    m.parseCliVersion("Update available: new version 1.0.90 available\ngrok 1.0.46"),
+    "1.0.46",
+    "a version mentioned in a sentence is not the tool's version",
+  );
   assert.equal(m.parseCliVersion(""), null);
   assert.equal(m.compareCliVersions("0.170.0", "0.169.0"), 1);
   assert.equal(m.compareCliVersions("0.169.0", "0.170.0"), -1);
@@ -198,7 +208,7 @@ async function run(m) {
     assert.equal(p.update.executable, "C:\\Program Files\\nodejs\\npm.cmd");
     assert.deepEqual(p.update.args, ["install", "-g", "--prefix", prefix, "@openai/codex@latest"]);
     const spawnable = m.spawnableCommand(p.update, "win32");
-    assert.equal(spawnable.executable, "cmd.exe");
+    assert.match(spawnable.executable, /cmd\.exe$/i);
     assert.equal(spawnable.verbatim, true);
     assert.deepEqual(spawnable.args.slice(0, 3), ["/d", "/s", "/c"]);
     assert.equal(
@@ -207,6 +217,58 @@ async function run(m) {
       "a path with spaces stays one argument through cmd.exe",
     );
     assert.equal(m.spawnableCommand(p.update, "linux").executable, "C:\\Program Files\\nodejs\\npm.cmd");
+  }
+  // A plain file at ~/.local/bin/claude on Linux or macOS is the user's own
+  // wrapper: the native installer links it into versions/.
+  for (const platform of ["linux", "darwin"]) {
+    const p = await plan({ tool: "claude", platform, binaryPath: "/home/u/.local/bin/claude", realPath: "/home/u/.local/bin/claude" });
+    assert.equal(p.method, "manual", `${platform}: a plain ~/.local/bin/claude is not the native installer`);
+  }
+  // cmd.exe comes from ComSpec, else from the Windows folder, never from PATH.
+  {
+    const shim = { executable: "C:\\Users\\u\\AppData\\Roaming\\npm\\npm.cmd", args: ["-v"], display: "npm -v" };
+    assert.equal(m.spawnableCommand(shim, "win32", { ComSpec: "D:\\Win\\system32\\cmd.exe" }).executable, "D:\\Win\\system32\\cmd.exe");
+    assert.equal(m.spawnableCommand(shim, "win32", { SystemRoot: "C:\\Windows" }).executable, "C:\\Windows\\System32\\cmd.exe");
+    assert.equal(m.spawnableCommand(shim, "win32", {}).executable, "C:\\Windows\\System32\\cmd.exe");
+  }
+  // cmd.exe would expand % and break on quotes: such a folder gets the command only.
+  {
+    const prefix = "C:\\Users\\a%PATH%b\\AppData\\Roaming\\npm";
+    const p = await plan({
+      tool: "codex",
+      platform: "win32",
+      binaryPath: `${prefix}\\codex.cmd`,
+      realPath: `${prefix}\\codex.cmd`,
+      npmOnPath: "C:\\Program Files\\nodejs\\npm.cmd",
+      exists: async (file) => file === `${prefix}\\node_modules\\@openai\\codex\\package.json`,
+    });
+    assert.equal(p.method, "manual", "a % in the npm folder is not passed through cmd.exe");
+  }
+  // A Homebrew formula built on Node keeps an npm tree inside the Cellar: Homebrew's.
+  {
+    const p = await plan({
+      tool: "codex",
+      platform: "darwin",
+      binaryPath: "/opt/homebrew/bin/codex",
+      realPath: "/opt/homebrew/Cellar/codex/0.169.0/libexec/lib/node_modules/@openai/codex/bin/codex.js",
+      npmOnPath: "/opt/homebrew/bin/npm",
+    });
+    assert.equal(p.method, "manual");
+    assert.equal(p.source, "Homebrew");
+    assert.equal(p.manualCommand, "brew upgrade codex");
+  }
+  // The npm folder is cut from the path as written, whatever its letters.
+  {
+    const prefix = "/home/\u0130sa/.npm-global";
+    const p = await plan({
+      tool: "codex",
+      platform: "linux",
+      binaryPath: `${prefix}/bin/codex`,
+      realPath: `${prefix}/lib/node_modules/@openai/codex/bin/codex.js`,
+      npmOnPath: "/usr/bin/npm",
+    });
+    assert.equal(p.method, "npm");
+    assert.equal(p.update.args[3], prefix);
   }
   // Other package managers and unknown layouts: the command only.
   const manualCases = [
@@ -236,6 +298,11 @@ async function run(m) {
     "https://storage.googleapis.com/grok-build-public-artifacts/cli/stable",
   ]);
   assert.deepEqual(m.latestVersionUrls({ tool: "grok", method: "npm" }), ["https://registry.npmjs.org/@xai-official/grok/latest"]);
+  assert.deepEqual(
+    m.latestVersionUrls({ tool: "grok", method: "manual" }),
+    ["https://registry.npmjs.org/@xai-official/grok/latest"],
+    "only Grok's own installer follows its channel file",
+  );
   for (const urls of [
     m.latestVersionUrls({ tool: "claude", method: "manual" }),
     m.latestVersionUrls({ tool: "codex", method: "native" }),
@@ -279,6 +346,12 @@ async function run(m) {
       "https://registry.npmjs.org/@anthropic-ai/claude-code/latest": { ok: true, status: 200, text: "{not json" },
     })),
     /Could not read the newest version/,
+  );
+  assert.equal(await m.readLimitedText(new Response("1.0.89\n"), 64 * 1024), "1.0.89\n");
+  await assert.rejects(
+    m.readLimitedText(new Response("x".repeat(70 * 1024)), 64 * 1024),
+    /more than 64 KB/,
+    "a lookup answer is read up to a limit",
   );
   assert.equal(m.claudeChannelFromSettings(JSON.stringify({ autoUpdatesChannel: "stable" })), "stable");
   assert.equal(m.claudeChannelFromSettings(JSON.stringify({ autoUpdatesChannel: "latest" })), "latest");
@@ -330,7 +403,8 @@ async function run(m) {
   }
   {
     const command = m.versionCheckCommand("C:\\Users\\u\\AppData\\Roaming\\npm\\claude.cmd", "win32");
-    assert.equal(command.executable, "cmd.exe", "a Windows npm shim runs its version check through cmd.exe");
+    assert.match(command.executable, /cmd\.exe$/i, "a Windows npm shim runs its version check through cmd.exe");
+    assert.equal(command.verbatim, true);
   }
 
   console.log("agent CLI install plan: ok");

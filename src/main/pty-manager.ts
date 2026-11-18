@@ -24,6 +24,7 @@ import {
 } from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
 import { resolveBinary } from "./binary-resolver";
+import { vendorUpdaterEnv, waitUntilToolIdle } from "./agent-cli-updates/launch-guard";
 import { getHookRpcEnvSafe } from "./hook-rpc";
 import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
@@ -792,6 +793,10 @@ async function spawnWithSessionLock(
   let preparedOpts = opts;
   let resolvedStartup = opts.startupCommand;
   if (parsedStartup) {
+    // Never start a tool while Codara swaps its build (agent-cli-updates/).
+    if (await waitUntilToolIdle(parsedStartup.runtime, 10 * 60 * 1000)) {
+      logMain("pty", `${parsedStartup.runtime} launch waited for its update`);
+    }
     const binary = await resolveBinary(parsedStartup.runtime);
     if (!binary) {
       throw new Error(`Cannot find ${parsedStartup.runtime}. Install its CLI, restart Codara, and try again.`);
@@ -1369,6 +1374,8 @@ function doSpawn(
   // cache is warmed in src/main/index.ts; on a cold call we just see the
   // process.env PATH fallback, which is no worse than today.
   injectEnrichedPath(env);
+  // After a roll back, the tool's own updater stays off until a newer version is out.
+  Object.assign(env, vendorUpdaterEnv());
   // After the PATH above: the enriched PATH keeps the process's own entries,
   // AppRun's mount among them. See env-sanitize.ts.
   sanitizeAppImageChildEnv(env);

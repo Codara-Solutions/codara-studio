@@ -19,10 +19,14 @@ import { inspectInstalledTool, type InspectDependencies } from "./inspect";
 import { spawnableCommand } from "./install-plan";
 import { claudeChannelFromSettings, fetchLatestVersion } from "./latest-version";
 import { agentCliUpdatesAllowed } from "./launch-gate";
+import { holdVendorUpdates, setToolBusy } from "./launch-guard";
+import { relinkLauncher } from "./relink";
 import { liveToolSessions } from "./live-sessions";
-import { createAgentCliUpdateService, type AgentCliUpdateService, type PersistedUpdateState } from "./service";
+import { createAgentCliUpdateService, type AgentCliUpdateService, type PersistedUpdateState, type UpdateInProgress } from "./service";
+import { acquireUpdateLock } from "./update-lock";
 
 const STATE_FILE = "agent-cli-updates.json";
+const LOCK_FILE = "agent-cli-update.lock";
 /** The first check waits out the launch's own work. */
 const FIRST_CHECK_DELAY_MS = 20_000;
 export const AGENT_CLI_UPDATES_CHANGED = "agentCliUpdates:changed";
@@ -51,10 +55,23 @@ async function readState(): Promise<PersistedUpdateState> {
           ([tool, version]) => ["claude", "codex", "grok"].includes(tool) && typeof version === "string",
         ),
       );
-    return { failed: versions(parsed.failed), notOffered: versions(parsed.notOffered) };
+    return { failed: versions(parsed.failed), notOffered: versions(parsed.notOffered), ...inProgressFrom(parsed.inProgress) };
   } catch {
     return { failed: {}, notOffered: {} };
   }
+}
+
+function inProgressFrom(value: unknown): { inProgress?: UpdateInProgress } {
+  const record = (typeof value === "object" && value ? value : {}) as Record<string, unknown>;
+  const text = (key: string) => (typeof record[key] === "string" ? (record[key] as string) : null);
+  const tool = text("tool");
+  const fromVersion = text("fromVersion");
+  const fromRealPath = text("fromRealPath");
+  const fromBinaryPath = text("fromBinaryPath");
+  if (!tool || !["claude", "codex", "grok"].includes(tool) || !fromVersion || !fromRealPath || !fromBinaryPath) return {};
+  return {
+    inProgress: { tool: tool as UpdateInProgress["tool"], fromVersion, fromRealPath, fromBinaryPath, toVersion: text("toVersion") },
+  };
 }
 
 async function claudeChannel() {
@@ -97,6 +114,14 @@ function createService(log: (line: string) => void, fake: Awaited<ReturnType<typ
     },
     now: () => Date.now(),
     log,
+    toolBusy: setToolBusy,
+    holdVendorUpdates,
+    relink: relinkLauncher,
+    platform: process.platform,
+    lock: async () => {
+      await fs.mkdir(codaraHome(), { recursive: true });
+      return acquireUpdateLock(join(codaraHome(), LOCK_FILE));
+    },
     ...fake,
   });
 }
@@ -125,6 +150,7 @@ export function startAgentCliUpdates(log: (line: string) => void): void {
   const started = createService(log, null);
   service = started;
   watchSwitch(started);
+  void started.prime();
   const timer = setTimeout(() => void started.start(), FIRST_CHECK_DELAY_MS);
   timer.unref?.();
 }

@@ -153,6 +153,14 @@ async function main() {
 
   // ── the quit prompt ──────────────────────────────────────────────────
   {
+    // An agent tool update in flight: a quit would cut its installer off.
+    const live = qg.collectLiveWork(null, [], ["Claude Code"]);
+    check("an agent tool update is live work", qg.hasLiveWork(live));
+    const quit = qg.quitPromptText(live, { restartingForUpdate: false, resumesTerminalAgents: false, keepsTerminalOutput: true });
+    check("the quit prompt names the update", quit.message === "Still working: the Claude Code update.", quit.message);
+    check("and says what happens to it", /previous version is put back if the new one does not work/.test(quit.detail), quit.detail);
+  }
+  {
     const live = qg.collectLiveWork({ chats: 1, automations: 0, workers: 1 }, [agent("claude", "api")]);
     const quit = qg.quitPromptText(live, { restartingForUpdate: false, resumesTerminalAgents: true, keepsTerminalOutput: true });
     check("the quit prompt names what is working", quit.message === "Still working: Claude Code in api and Cora in 1 chat.", quit.message);

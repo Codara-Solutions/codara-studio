@@ -15,6 +15,8 @@ export interface CoraLiveWork {
 
 export interface LiveWork extends CoraLiveWork {
   terminalAgents: TerminalAgentMidTurn[];
+  /** Agent tools Codara is updating right now ("Claude Code"). */
+  toolUpdates?: string[];
 }
 
 export const NO_LIVE_WORK: LiveWork = Object.freeze({
@@ -27,19 +29,21 @@ export const NO_LIVE_WORK: LiveWork = Object.freeze({
 export function collectLiveWork(
   cora: CoraLiveWork | null | undefined,
   terminalAgents: readonly TerminalAgentMidTurn[] | null | undefined,
+  toolUpdates: readonly string[] = [],
 ): LiveWork {
   return {
     chats: cora?.chats ?? 0,
     automations: cora?.automations ?? 0,
     workers: cora?.workers ?? 0,
     terminalAgents: [...(terminalAgents ?? [])],
+    ...(toolUpdates.length > 0 ? { toolUpdates: [...toolUpdates] } : {}),
   };
 }
 
 // Workers always belong to a counted chat or automation run, so they never
 // decide on their own.
 export function hasLiveWork(live: LiveWork): boolean {
-  return live.chats + live.automations > 0 || live.terminalAgents.length > 0;
+  return live.chats + live.automations > 0 || live.terminalAgents.length > 0 || (live.toolUpdates?.length ?? 0) > 0;
 }
 
 const RUNTIME_LABELS: Record<TerminalAgentMidTurn["runtime"], string> = {
@@ -90,6 +94,7 @@ export function liveWorkItems(live: LiveWork): string[] {
   const items = terminalItems;
   if (live.chats > 0) items.push(`Cora in ${plural(live.chats, "chat")}`);
   if (live.automations > 0) items.push(plural(live.automations, "automation"));
+  for (const tool of live.toolUpdates ?? []) items.push(`the ${tool} update`);
   return items;
 }
 
@@ -116,7 +121,8 @@ export interface QuitPromptText {
 
 export function quitPromptText(live: LiveWork, options: QuitPromptOptions): QuitPromptText {
   const items = liveWorkItems(live);
-  const total = live.terminalAgents.length + live.chats + live.automations;
+  const updates = live.toolUpdates?.length ?? 0;
+  const total = live.terminalAgents.length + live.chats + live.automations + updates;
   const action = options.restartingForUpdate ? "Restarting to update" : "Quitting";
   const parts = [`${action} stops ${total === 1 ? "it" : "them"} now.`];
   if (live.terminalAgents.length > 0) {
@@ -132,6 +138,9 @@ export function quitPromptText(live: LiveWork, options: QuitPromptOptions): Quit
           "To have terminal agents resume by themselves, turn on \"Resume running agent sessions when Codara reopens\" in Settings, Sessions.",
       );
     }
+  }
+  if (updates > 0) {
+    parts.push("An update cut short is checked when Codara reopens, and the previous version is put back if the new one does not work.");
   }
   if (live.chats + live.automations > 0) {
     parts.push(
