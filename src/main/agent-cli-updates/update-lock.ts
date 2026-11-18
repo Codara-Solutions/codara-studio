@@ -4,8 +4,10 @@
 // and the installer's pid once one runs. It is held while the owner lives or
 // its installer still runs: an installer outlives a Codara that quit or
 // crashed, and the next start must not inspect, or roll back, a tool that is
-// still being written. A lock from an earlier boot is stale past the
-// longest an update can take, as its pids may have been reused since.
+// still being written. Since pids are reused, every lock also has an age
+// limit: the longest an update can take for one from an earlier boot, and
+// longer within the boot that wrote it, where a stuck installer may outlive
+// the Codara that would have stopped it.
 
 import { promises as fs } from "node:fs";
 import { hostname, uptime } from "node:os";
@@ -14,6 +16,8 @@ import { UPDATE_TIMEOUT_MS, type UpdateLock } from "./service";
 
 /** An update and its roll back, each bounded by UPDATE_TIMEOUT_MS, plus margin. */
 export const LOCK_MAX_HOLD_MS = 2 * UPDATE_TIMEOUT_MS + 5 * 60 * 1000;
+/** Within the boot that wrote it: well past a stuck installer's run, short of a reused pid's days. */
+export const SAME_BOOT_MAX_HOLD_MS = 2 * 60 * 60 * 1000;
 
 export interface UpdateLockOptions {
   pid?: number;
@@ -144,13 +148,16 @@ export async function acquireUpdateLock(file: string, options: UpdateLockOptions
       if (mtime !== null && now() - mtime < 10_000) return null;
     } else {
       const age = now() - (content.since ?? mtime ?? 0);
-      // Within the boot that wrote it, the pids are trusted whatever the
-      // age: the installer's timeout lives in the Codara that started it, so
-      // after a crash a stuck installer may run past any expiry. From another
-      // boot its pids may be reused, so age decides. Dated ahead of now, the
-      // clock was set back since it was written and its age says nothing.
+      // Within the boot that wrote it the pids are trusted for longer: the
+      // installer's timeout lives in the Codara that started it, so after a
+      // crash a stuck installer may run past LOCK_MAX_HOLD_MS. Not forever:
+      // a reused pid (Windows reuses them within minutes, and Fast Startup
+      // keeps one boot across shut downs) would hold it for as long as an
+      // unrelated process lives. Dated ahead of now, the clock was set back
+      // since it was written and its age says nothing.
       const sameBoot = content.boot !== null && Math.abs(content.boot - boot) < 60_000;
-      if (sameBoot || (age > -60_000 && age < LOCK_MAX_HOLD_MS)) {
+      const limit = sameBoot ? SAME_BOOT_MAX_HOLD_MS : LOCK_MAX_HOLD_MS;
+      if (age > -60_000 && age < limit) {
         // Another machine's lock (a home folder shared over the network): its pids mean nothing here.
         if (content.host !== null && content.host !== host) return null;
         if (content.pid !== pid && alive(content.pid)) return null;

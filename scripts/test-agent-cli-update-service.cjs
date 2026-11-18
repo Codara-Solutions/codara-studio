@@ -27,7 +27,7 @@ async function main() {
         'export { runSetupCommand } from "./src/main/onboarding";',
         'export * from "./src/main/agent-cli-updates/launch-guard";',
         'export { relinkLauncher } from "./src/main/agent-cli-updates/relink";',
-        'export { acquireUpdateLock, LOCK_MAX_HOLD_MS } from "./src/main/agent-cli-updates/update-lock";',
+        'export { acquireUpdateLock, LOCK_MAX_HOLD_MS, SAME_BOOT_MAX_HOLD_MS } from "./src/main/agent-cli-updates/update-lock";',
         'export { reinstallCommand, nativeBuildPath } from "./src/main/agent-cli-updates/reinstall";',
         'export { commandRunsAgent } from "./src/main/agent-hibernation-census";',
       ].join("\n"),
@@ -940,6 +940,15 @@ async function crashSafety(m) {
       const ended = await m.acquireUpdateLock(file, opts(222, stuck));
       assert.ok(ended, "taken over once that installer is gone");
       await ended.release();
+
+      // Same boot, but a pid reused by an unrelated process: held only up to
+      // the same-boot limit, not for as long as that process lives.
+      fs.writeFileSync(file, JSON.stringify({ pid: 111, host: "here", since: new Date(t0).toISOString(), boot: boot0, installer: 333 }));
+      const reused = { boot: boot0, alive: () => true, installerAlive: () => true };
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { ...reused, now: () => t0 + m.SAME_BOOT_MAX_HOLD_MS - 60_000 })), null);
+      const freed = await m.acquireUpdateLock(file, opts(222, { ...reused, now: () => t0 + m.SAME_BOOT_MAX_HOLD_MS + 1000 }));
+      assert.ok(freed, "a same-boot lock has a time limit too");
+      await freed.release();
 
       // Dated in the future (the clock was set back after a crash): stale.
       const ahead = await m.acquireUpdateLock(file, opts(111, { now: () => t0 + 60 * 60 * 1000, boot: boot0 }));
