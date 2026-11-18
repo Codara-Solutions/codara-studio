@@ -140,7 +140,7 @@ export function quitPromptText(live: LiveWork, options: QuitPromptOptions): Quit
     }
   }
   if (updates > 0) {
-    parts.push("An update cut short is checked when Codara reopens, and the previous version is put back if the new one does not work.");
+    parts.push("An update cut short is checked when Codara reopens: if the new version does not work, Codara puts the previous one back where it can, or tells you how.");
   }
   if (live.chats + live.automations > 0) {
     parts.push(

@@ -24,7 +24,8 @@ import {
 } from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
 import { resolveBinary } from "./binary-resolver";
-import { vendorUpdaterEnv, waitUntilToolIdle } from "./agent-cli-updates/launch-guard";
+import { LAUNCH_SETTLE_MS, beginToolLaunch, vendorUpdaterEnv } from "./agent-cli-updates/launch-guard";
+import { AGENT_CLI_LABELS } from "@shared/agent-cli-updates";
 import { getHookRpcEnvSafe } from "./hook-rpc";
 import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
@@ -648,6 +649,12 @@ export async function spawn(
   // critical section we re-check sessions, so queued callers attach to the
   // process the winner created instead of spawning another one.
   return serializeSessionSpawn(opts.id, async () => {
+    // A new local agent launch is refused while Codara swaps that tool's
+    // build, and counts as a session until its process can be seen.
+    const launching = !isRemotePath(opts.cwd) && !sessions.has(opts.id)
+      ? parseManualAgentStartupCommand(opts.startupCommand)?.runtime
+      : undefined;
+    const endLaunch = launching ? beginToolLaunch(launching, AGENT_CLI_LABELS[launching]) : null;
     pendingSpawns.add(opts.id);
     if (!isRemotePath(opts.cwd) && (opts.nativeCodexProfileId !== undefined ||
         parseManualAgentStartupCommand(opts.startupCommand)?.runtime === "codex")) {
@@ -658,6 +665,7 @@ export async function spawn(
     } finally {
       pendingSpawns.delete(opts.id);
       pendingCodexSpawns.delete(opts.id);
+      if (endLaunch) setTimeout(endLaunch, LAUNCH_SETTLE_MS).unref?.();
     }
   });
 }
@@ -793,10 +801,6 @@ async function spawnWithSessionLock(
   let preparedOpts = opts;
   let resolvedStartup = opts.startupCommand;
   if (parsedStartup) {
-    // Never start a tool while Codara swaps its build (agent-cli-updates/).
-    if (await waitUntilToolIdle(parsedStartup.runtime, 10 * 60 * 1000)) {
-      logMain("pty", `${parsedStartup.runtime} launch waited for its update`);
-    }
     const binary = await resolveBinary(parsedStartup.runtime);
     if (!binary) {
       throw new Error(`Cannot find ${parsedStartup.runtime}. Install its CLI, restart Codara, and try again.`);

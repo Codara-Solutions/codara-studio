@@ -16,8 +16,15 @@ export const VENDOR_UPDATER_OFF: Readonly<Record<string, Readonly<Record<string,
   grok: { GROK_DISABLE_AUTOUPDATER: "1" },
 };
 
+/**
+ * How long a launch still counts after its terminal opened: the shell may
+ * type the tool's command a moment later, before any process of it exists.
+ */
+export const LAUNCH_SETTLE_MS = 30_000;
+
 let held: readonly string[] = [];
-const busy = new Map<string, { done: Promise<void>; finish: () => void }>();
+const busy = new Set<string>();
+const starting = new Map<string, number>();
 
 /** Tools whose own updater stays off in the terminals Codara opens. */
 export function holdVendorUpdates(tools: readonly string[]): void {
@@ -30,28 +37,35 @@ export function vendorUpdaterEnv(): Record<string, string> {
 }
 
 export function setToolBusy(tool: string, isBusy: boolean): void {
-  const current = busy.get(tool);
-  if (isBusy && !current) {
-    let finish = () => {};
-    const done = new Promise<void>((resolve) => (finish = resolve));
-    busy.set(tool, { done, finish });
-  } else if (!isBusy && current) {
-    busy.delete(tool);
-    current.finish();
-  }
+  if (isBusy) busy.add(tool);
+  else busy.delete(tool);
 }
 
 /** Tools being swapped right now (the quit prompt names them). */
 export function busyTools(): string[] {
-  return [...busy.keys()];
+  return [...busy];
 }
 
-/** Resolves once the tool is not being updated, or after `maxMs`. True when it had to wait. */
-export async function waitUntilToolIdle(tool: string, maxMs: number): Promise<boolean> {
-  const current = busy.get(tool);
-  if (!current) return false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([current.done, new Promise<void>((resolve) => (timer = setTimeout(resolve, maxMs)))]);
-  clearTimeout(timer);
-  return true;
+/**
+ * A launch of the tool starts. Refused at once while the tool is being
+ * swapped: callers that open panes give up after seconds, so a held launch
+ * would only start late, unseen, or in the middle of a roll back. Returns
+ * the call that ends the launch; until then the update counts it as a session.
+ */
+export function beginToolLaunch(tool: string, label: string): () => void {
+  if (busy.has(tool)) throw new Error(`${label} is updating. Try again in a few minutes.`);
+  starting.set(tool, (starting.get(tool) ?? 0) + 1);
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    const left = (starting.get(tool) ?? 1) - 1;
+    if (left > 0) starting.set(tool, left);
+    else starting.delete(tool);
+  };
+}
+
+/** Launches of the tool that have begun and may not have a process yet. */
+export function launchesStarting(tool: string): number {
+  return starting.get(tool) ?? 0;
 }

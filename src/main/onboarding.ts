@@ -65,6 +65,7 @@ export async function runSetupCommand(
   command: Command,
   timeout: number,
   onOutput?: (output: string) => void,
+  onStart?: (pid: number) => void,
 ): Promise<string> {
   const env = await getEnrichedEnv();
   return new Promise((resolve, reject) => {
@@ -77,6 +78,7 @@ export async function runSetupCommand(
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
+    if (child.pid) onStart?.(child.pid);
     let output = "";
     let timedOut = false;
     const append = (chunk: Buffer) => {

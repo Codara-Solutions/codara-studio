@@ -27,8 +27,8 @@ async function main() {
         'export { runSetupCommand } from "./src/main/onboarding";',
         'export * from "./src/main/agent-cli-updates/launch-guard";',
         'export { relinkLauncher } from "./src/main/agent-cli-updates/relink";',
-        'export { acquireUpdateLock } from "./src/main/agent-cli-updates/update-lock";',
-        'export { reinstallCommand } from "./src/main/agent-cli-updates/reinstall";',
+        'export { acquireUpdateLock, LOCK_MAX_HOLD_MS } from "./src/main/agent-cli-updates/update-lock";',
+        'export { reinstallCommand, nativeBuildPath } from "./src/main/agent-cli-updates/reinstall";',
         'export { commandRunsAgent } from "./src/main/agent-hibernation-census";',
       ].join("\n"),
       resolveDir: root,
@@ -145,7 +145,8 @@ function world(overrides = {}) {
     exists: async (file) => (overrides.exists ? overrides.exists(file) : true),
     pi: async () => ({ version: "1.5.3", pinnedVersion: "1.5.2", source: "user" }),
     autoUpdate: () => auto,
-    loadState: async () => overrides.state ?? { failed: {}, notOffered: {} },
+    // The file on disk: what was saved last, else the starting state.
+    loadState: async () => JSON.parse(JSON.stringify(saved ?? overrides.state ?? { failed: {}, notOffered: {} })),
     saveState: async (state) => {
       saved = JSON.parse(JSON.stringify(state));
     },
@@ -335,7 +336,8 @@ async function fakeService(m) {
     assert.deepEqual(w.saved.failed, {}, "a good update clears the failed version");
   }
 
-  // The previous build is gone from disk: the launcher runs the roll back.
+  // The previous build is gone from disk: the launcher now runs the broken
+  // build, so nothing runs and the vendor's installer command is shown.
   {
     const w = world({
       exists: () => false,
@@ -348,8 +350,10 @@ async function fakeService(m) {
     const service = m.createAgentCliUpdateService(w.deps);
     await service.check();
     await service.settled();
-    assert.equal(w.commands[1].executable, "/home/u/.local/bin/claude");
-    assert.equal(tool(service.snapshot(), "claude").phase, "rolled-back");
+    assert.equal(w.commands.length, 1, "only the update ran; the broken build never runs");
+    const claude = tool(service.snapshot(), "claude");
+    assert.equal(claude.phase, "failed");
+    assert.match(claude.message, /removed 2\.1\.325 on disk\. Put 2\.1\.325 back with: curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash -s 2\.1\.325/);
   }
 
   // The roll back fails too: the user gets the exact command.
@@ -401,16 +405,37 @@ async function fakeService(m) {
     assert.equal(w.commands.length, 1, "no update loop");
   }
 
-  // A saved failed version from an earlier launch is respected, and its
-  // tool's own updater is held off from launch, before the first check.
+  // A saved failed version from an earlier launch is respected, and a
+  // version that broke keeps its tool's own updater off from launch.
   {
-    const w = world({ state: { failed: { claude: "2.1.327" }, notOffered: {} } });
+    const w = world({ state: { failed: { claude: "2.1.327" }, notOffered: {}, broken: { claude: "2.1.327" } } });
     const service = m.createAgentCliUpdateService(w.deps);
     await service.prime();
     assert.deepEqual(w.held.at(-1), ["claude"]);
     await service.check();
     await service.settled();
     assert.equal(w.commands.length, 0);
+    assert.deepEqual(w.held.at(-1), ["claude"]);
+    // The user got that version another way, and it works: the hold lifts.
+    w.tools.claude = { ...w.tools.claude, version: "2.1.327" };
+    await service.check();
+    assert.deepEqual(w.held.at(-1), [], "installed at or above the broken version");
+  }
+
+  // An installer that errored (network down) rolled nothing back: the
+  // tool's own updater stays on.
+  {
+    const w = world({
+      onRun: () => {
+        throw new Error("network down");
+      },
+    });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.settled();
+    assert.equal(tool(service.snapshot(), "claude").phase, "failed");
+    assert.deepEqual(w.saved.failed, { claude: "2.1.327" }, "not tried again by itself");
+    assert.deepEqual(w.held.at(-1), [], "no updater held off without a broken build");
   }
 
   // One update at a time, across tools.
@@ -459,6 +484,44 @@ async function fakeService(m) {
     assert.equal(claude.phase, "waiting", "a session that started meanwhile holds the update");
     assert.equal(w.commands.length, 0);
     assert.ok(calls >= 2, "counted again before the installer");
+  }
+
+  // The tool is marked busy before that second count, so no launch slips in
+  // between the count and the installer; it is cleared when the update waits.
+  {
+    const events = [];
+    let calls = 0;
+    const w = world({
+      auto: false,
+      live: () => {
+        events.push("count");
+        return calls++ === 0 ? 0 : 1;
+      },
+    });
+    w.deps.toolBusy = (id, isBusy) => events.push(`${id}:${isBusy}`);
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    events.length = 0;
+    calls = 0;
+    await service.update("claude");
+    await service.settled();
+    assert.deepEqual(events.slice(0, 3), ["count", "claude:true", "count"], "busy before the second count");
+    assert.equal(events.at(-1), "claude:false", "cleared when the update goes back to waiting");
+    assert.equal(tool(service.snapshot(), "claude").phase, "waiting");
+  }
+
+  // A launch that began but has no process yet counts as a session.
+  {
+    const w = world({ auto: false });
+    let starting = 0;
+    w.deps.launchesStarting = () => starting;
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    starting = 1;
+    await service.update("claude");
+    await service.settled();
+    assert.equal(w.commands.length, 0, "the installer waits for the launch");
+    assert.match(tool(service.snapshot(), "claude").message, /a Claude Code session is running/);
   }
 
   // While a tool is swapped, Codara does not start it (launch-guard.ts).
@@ -678,6 +741,22 @@ async function crashSafety(m) {
     assert.equal(states.at(-1).inProgress, undefined, "and cleared once the update is over");
   }
 
+  // The record cannot be written: the installer does not start.
+  {
+    const w = world({ auto: false });
+    w.deps.saveState = async () => {
+      throw new Error("disk full");
+    };
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.update("claude");
+    assert.equal(w.commands.length, 0, "no installer without its record on disk");
+    const claude = tool(service.snapshot(), "claude");
+    assert.equal(claude.phase, "failed");
+    assert.match(claude.message, /could not save its note of the update \(disk full\), so it did not start it/);
+    assert.deepEqual(w.busyCalls.at(-1), "claude:false");
+  }
+
   // The next start finds the record and a broken tool: it rolls back.
   {
     const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
@@ -698,6 +777,62 @@ async function crashSafety(m) {
     assert.deepEqual([w.commands[0].executable, ...w.commands[0].args], ["/home/u/.local/share/claude/versions/2.1.325", "install", "2.1.325", "--force"]);
     assert.equal(w.saved.inProgress, undefined);
     assert.deepEqual(w.saved.failed, { claude: "2.1.327" });
+    service.stop();
+  }
+
+  // A record from disk is never run as it stands: a tampered or stale one
+  // runs nothing, and the user gets the vendor's installer command.
+  {
+    const good = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const tampered = [
+      ["another program as the previous build", { ...good, fromRealPath: "/tmp/evil" }],
+      ["another launcher to relink", { ...good, fromBinaryPath: "/home/u/.bashrc" }],
+      ["a quote for cmd.exe", { ...good, fromVersion: '2.1.325" & calc & "' }],
+      ["a path in the version", { ...good, fromVersion: "../../../../tmp/evil" }],
+      ["a bad target version", { ...good, toVersion: "x; rm -rf ~" }],
+      ["an unknown tool", { ...good, tool: "sh" }],
+    ];
+    for (const [name, record] of tampered) {
+      const w = world({
+        auto: false,
+        state: { failed: {}, notOffered: {}, inProgress: record },
+        tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
+      });
+      const relinked = [];
+      w.deps.relink = async (link, target) => relinked.push([link, target]);
+      const service = m.createAgentCliUpdateService(w.deps);
+      await service.start();
+      assert.equal(w.commands.length, 0, `${name}: nothing runs`);
+      assert.deepEqual(relinked, [], `${name}: nothing is relinked`);
+      assert.equal(w.saved?.inProgress, undefined, `${name}: the record is dropped`);
+      service.stop();
+    }
+    const w = world({
+      auto: false,
+      state: { failed: {}, notOffered: {}, inProgress: { ...good, fromRealPath: "/tmp/evil" } },
+      tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
+    });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.match(tool(service.snapshot(), "claude").message, /Put 2\.1\.325 back with: curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash -s 2\.1\.325/);
+    service.stop();
+    assert.equal(m.nativeBuildPath("codex", "/h/.codex/packages/standalone/releases/0.171.0-x86_64-unknown-linux-musl/bin/codex", "0.170.0"), "/h/.codex/packages/standalone/releases/0.170.0-x86_64-unknown-linux-musl/bin/codex");
+    assert.equal(m.nativeBuildPath("claude", "/h/.local/share/claude/versions/2.1.327", "2.1.325"), "/h/.local/share/claude/versions/2.1.325");
+    assert.equal(m.nativeBuildPath("claude", "/h/.local/share/claude/versions/2.1.327", "../x"), null);
+    assert.equal(m.nativeBuildPath("claude", "/opt/claude", "2.1.325"), null);
+  }
+
+  // Cut off after the installer removed the launcher (or the tool cannot be
+  // read right now): the record stays for the next start and the user is told.
+  {
+    const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const w = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: record } });
+    delete w.tools.claude;
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.equal(w.commands.length, 0);
+    assert.ok(w.saved === null || w.saved.inProgress, "the record is kept");
+    assert.match(tool(service.snapshot(), "claude").message, /^Codara closed during the last update\. Claude Code cannot be found now\. Put 2\.1\.325 back with:/);
     service.stop();
   }
 
@@ -738,18 +873,138 @@ async function crashSafety(m) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-cli-lock-"));
     try {
       const file = path.join(dir, "agent-cli-update.lock");
-      const first = await m.acquireUpdateLock(file, { pid: 111, alive: () => true });
+      const opts = (pid, over = {}) => ({ pid, host: "here", alive: () => true, installerAlive: () => false, ...over });
+      const first = await m.acquireUpdateLock(file, opts(111));
       assert.ok(first);
-      assert.equal(await m.acquireUpdateLock(file, { pid: 222, alive: () => true }), null, "held by a live Codara");
-      const stale = await m.acquireUpdateLock(file, { pid: 222, alive: (pid) => pid !== 111 });
+      assert.equal(await m.acquireUpdateLock(file, opts(222)), null, "held by a live Codara");
+      const stale = await m.acquireUpdateLock(file, opts(222, { alive: (pid) => pid !== 111 }));
       assert.ok(stale, "a dead owner's lock is taken over");
-      await first();
+      await first.release();
       assert.ok(fs.existsSync(file), "a former owner does not remove the new owner's lock");
-      await stale();
+      await stale.release();
       assert.ok(!fs.existsSync(file));
+
+      // The installer outlives its Codara: the lock stays held while it runs.
+      const owner = await m.acquireUpdateLock(file, opts(111));
+      await owner.installerStarted(4242);
+      assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).installer, 4242);
+      const ownerDead = { alive: (pid) => pid !== 111 };
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { ...ownerDead, installerAlive: (pid) => pid === 4242 })), null, "held while the installer runs");
+      const after = await m.acquireUpdateLock(file, opts(222, { ...ownerDead, installerAlive: () => false }));
+      assert.ok(after, "taken over once the installer is gone too");
+      await after.release();
+
+      // Codaras taking over the same stale lock at once: exactly one gets it.
+      for (let round = 0; round < 25; round += 1) {
+        fs.writeFileSync(file, JSON.stringify({ pid: 111, host: "here", since: new Date().toISOString() }));
+        const pids = [201, 202, 203, 204, 205, 206];
+        const got = await Promise.all(pids.map((pid) => m.acquireUpdateLock(file, opts(pid, { alive: (other) => other !== 111 }))));
+        const owners = got.filter(Boolean);
+        assert.equal(owners.length, 1, `round ${round}: ${owners.length} holders`);
+        assert.ok(pids.includes(JSON.parse(fs.readFileSync(file, "utf8")).pid), "the lock on disk is the winner's");
+        await owners[0].release();
+        assert.deepEqual(fs.readdirSync(dir), [], "nothing left aside");
+      }
+
+      // A pid reused after a reboot keeps nothing forever.
+      const t0 = Date.parse("2026-11-18T12:00:00Z");
+      const old = await m.acquireUpdateLock(file, opts(111, { now: () => t0 }));
+      assert.ok(old);
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { now: () => t0 + 10 * 60 * 1000 })), null);
+      const late = await m.acquireUpdateLock(file, opts(222, { now: () => t0 + m.LOCK_MAX_HOLD_MS + 1000 }));
+      assert.ok(late, "stale once older than the longest update");
+      await late.release();
+
+      // Another machine's lock (a shared home folder): its pids mean nothing here.
+      const there = await m.acquireUpdateLock(file, opts(111, { host: "there" }));
+      assert.ok(there);
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { alive: () => false })), null, "not taken over from another host");
+      fs.rmSync(file, { force: true });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  }
+
+  // Under the lock the file is read again: what another Codara wrote since
+  // this one read it is kept, not overwritten.
+  {
+    let disk = { failed: {}, notOffered: {} };
+    const w = world({ auto: false });
+    w.deps.loadState = async () => JSON.parse(JSON.stringify(disk));
+    w.deps.saveState = async (state) => {
+      disk = JSON.parse(JSON.stringify(state));
+    };
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    disk.failed.codex = "0.171.0";
+    disk.broken = { codex: "0.171.0" };
+    await service.update("claude");
+    assert.equal(tool(service.snapshot(), "claude").phase, "updated");
+    assert.deepEqual(disk.failed, { codex: "0.171.0" }, "another window's failed version survives");
+    assert.deepEqual(disk.broken, { codex: "0.171.0" });
+
+    // A record another window cleared is not recovered.
+    const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    let second = { failed: {}, notOffered: {}, inProgress: record };
+    const w2 = world({ auto: false, tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } } });
+    let reads = 0;
+    w2.deps.loadState = async () => (reads++ === 0 ? second : { failed: {}, notOffered: {} });
+    w2.deps.saveState = async (state) => {
+      second = state;
+    };
+    const recovering = m.createAgentCliUpdateService(w2.deps);
+    await recovering.start();
+    assert.equal(w2.commands.length, 0, "the record was gone from disk under the lock");
+    recovering.stop();
+  }
+
+  // The service writes the installer's pid into the lock as it starts.
+  {
+    const w = world({ auto: false });
+    const noted = [];
+    w.deps.lock = async () => ({ release: async () => {}, installerStarted: async (pid) => noted.push(pid) });
+    const run = w.deps.run;
+    w.deps.run = async (command, timeoutMs, onStart) => {
+      onStart?.(4242);
+      return run(command, timeoutMs);
+    };
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.update("claude");
+    assert.deepEqual(noted, [4242]);
+  }
+
+  // The real runner reports the installer's pid.
+  if (process.platform !== "win32") {
+    let started = null;
+    await m.runSetupCommand({ executable: "/bin/sh", args: ["-c", "exit 0"] }, 5000, undefined, (pid) => (started = pid));
+    assert.ok(Number.isInteger(started) && started > 0, "the runner reports the pid");
+  }
+
+  // A held lock at start: recovery is tried again later, not given up.
+  {
+    const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const w = world({
+      auto: false,
+      state: { failed: {}, notOffered: {}, inProgress: record },
+      tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
+      onRun: (command, tools) => {
+        tools.claude = { ...tools.claude, version: command.args[1], realPath: "/home/u/.local/share/claude/versions/2.1.325" };
+        return "ok";
+      },
+    });
+    let held = true;
+    w.deps.lock = async () => (held ? null : { release: async () => {}, installerStarted: async () => {} });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.equal(w.commands.length, 0);
+    const retry = w.scheduled.find((entry) => entry.delayMs === m.WAITING_POLL_MS && !entry.cancelled);
+    assert.ok(retry, "recovery is tried again later");
+    held = false;
+    retry.task();
+    await service.settled();
+    assert.equal(tool(service.snapshot(), "claude").phase, "rolled-back");
+    service.stop();
   }
 }
 
@@ -760,20 +1015,26 @@ async function launchGuard(m) {
   assert.deepEqual(m.vendorUpdaterEnv(), { DISABLE_AUTOUPDATER: "1", GROK_DISABLE_AUTOUPDATER: "1" });
   m.holdVendorUpdates([]);
   assert.deepEqual(m.vendorUpdaterEnv(), {});
-  assert.equal(await m.waitUntilToolIdle("claude", 1000), false, "nothing to wait for");
+  // A launch while the tool is swapped is refused at once: pane openers give
+  // up after seconds, so a held launch would start late and unseen.
+  const end = m.beginToolLaunch("claude", "Claude Code");
+  assert.equal(m.launchesStarting("claude"), 1, "a launch counts before its process exists");
+  end();
+  end();
+  assert.equal(m.launchesStarting("claude"), 0, "ending twice ends once");
   m.setToolBusy("claude", true);
-  let done = false;
-  const waiting = m.waitUntilToolIdle("claude", 60_000).then((waited) => {
-    done = waited;
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(done, false, "a launch waits while the tool is swapped");
+  assert.throws(() => m.beginToolLaunch("claude", "Claude Code"), /Claude Code is updating\. Try again in a few minutes\./);
+  assert.equal(m.launchesStarting("claude"), 0);
+  assert.deepEqual(m.busyTools(), ["claude"], "the quit prompt sees the tool being swapped");
+  m.beginToolLaunch("codex", "Codex")();
   m.setToolBusy("claude", false);
-  await waiting;
-  assert.equal(done, true);
-  m.setToolBusy("codex", true);
-  assert.equal(await m.waitUntilToolIdle("codex", 5), true, "bounded");
-  m.setToolBusy("codex", false);
+  m.beginToolLaunch("claude", "Claude Code")();
+  // The terminal launcher takes that path before any wait, profile or spawn.
+  const pty = fs.readFileSync(path.join(__dirname, "..", "src", "main", "pty-manager.ts"), "utf8");
+  assert.ok(!/waitUntilToolIdle/.test(pty), "no launch is held for minutes");
+  const begin = pty.indexOf("beginToolLaunch(launching");
+  assert.ok(begin > 0 && begin < pty.indexOf("return await spawnWithSessionLock(opts)"), "refused before the launch starts");
+  assert.match(pty, /setTimeout\(endLaunch, LAUNCH_SETTLE_MS\)/, "counted until its command had time to start");
   assert.equal(m.reinstallCommand("codex", "0.169.0", "linux"), "curl -fsSL https://chatgpt.com/codex/install.sh | sh -s -- --release 0.169.0");
   assert.equal(m.reinstallCommand("grok", "1.0.46", "win32"), null);
   assert.equal(m.reinstallCommand("claude", "2.1.325; rm -rf ~", "linux"), null, "only a plain version reaches a command line");
