@@ -68,7 +68,7 @@ const ROOT = path.join(__dirname, "..");
       assert.equal(policy.managerSessionModelRefusal(model, { messages: noise, disabled }), null, String(model));
     }
     // An exact id the user switched off stays off.
-    assert.match(policy.managerSessionModelRefusal("claude-opus-5", { messages: noise, disabled }), /switched off in Settings/);
+    assert.match(policy.managerSessionModelRefusal("claude-opus-5", { messages: noise, disabled }), /not switched on in Capability Center, Worker models/);
     assert.equal(policy.disabledWorkerModels({}).size, 0, "an untouched roster switches nothing off");
 
     // Queued user input, for the manager's wait.
