@@ -9,6 +9,8 @@ import { parseCliVersion, type UpdatableAgentCliToolId } from "@shared/agent-cli
 import { NPM_PACKAGES } from "./install-plan";
 
 const FETCH_TIMEOUT_MS = 15_000;
+/** A version answer is a few hundred bytes; npm's "latest" document a few KB. */
+const MAX_ANSWER_BYTES = 64 * 1024;
 
 /** Claude Code's update channel (its `autoUpdatesChannel` setting). */
 export type ClaudeUpdateChannel = "latest" | "stable";
@@ -32,8 +34,8 @@ function registryUrl(pkg: string, tag: string): string {
 
 /** The URLs to try in order; the first that answers with a version wins. */
 export function latestVersionUrls(lookup: LatestLookup): string[] {
-  // Grok's native installer reads its stable channel file; npm installs follow npm.
-  if (lookup.tool === "grok" && lookup.method !== "npm") return [...GROK_CHANNEL_URLS];
+  // Grok's native installer reads its stable channel file; every other install follows npm.
+  if (lookup.tool === "grok" && lookup.method === "native") return [...GROK_CHANNEL_URLS];
   const tag = lookup.tool === "claude" && lookup.claudeChannel === "stable" ? "stable" : "latest";
   return [registryUrl(NPM_PACKAGES[lookup.tool], tag)];
 }
@@ -59,8 +61,27 @@ export const defaultFetchText: FetchText = async (url) => {
     credentials: "omit",
     headers: { accept: "application/json, text/plain" },
   });
-  return { ok: response.ok, status: response.status, text: await response.text() };
+  return { ok: response.ok, status: response.status, text: await readLimitedText(response, MAX_ANSWER_BYTES) };
 };
+
+/** The body as text, refused past `maxBytes` without reading the rest. */
+export async function readLimitedText(response: Response, maxBytes: number): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error(`answered with more than ${Math.round(maxBytes / 1024)} KB`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
 
 export async function fetchLatestVersion(
   lookup: LatestLookup,

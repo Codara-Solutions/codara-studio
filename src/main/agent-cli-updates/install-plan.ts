@@ -69,7 +69,7 @@ const VENDOR_UPDATE: Record<UpdatableAgentCliToolId, string> = {
 // Grok links ~/.grok/bin/grok to downloads/grok-<version>-<platform> (older
 // installers: to grok-<version> beside it).
 const NATIVE_LAYOUTS: Record<UpdatableAgentCliToolId, RegExp> = {
-  claude: /\/\.local\/(?:share\/claude\/versions\/[^/]+|bin\/claude(?:\.exe)?)$/i,
+  claude: /\/\.local\/share\/claude\/versions\/[^/]+$/i,
   codex: /\/packages\/standalone\/releases\/[^/]+\/(?:bin\/)?codex(?:\.exe)?$/i,
   grok: /\/\.grok\/(?:bin|downloads)\/grok(?:-[\w.-]+)?(?:\.exe)?$/i,
 };
@@ -138,12 +138,11 @@ function otherManager(tool: UpdatableAgentCliToolId, real: string): InstallPlan 
 async function npmPrefix(input: InstallProbeInput, real: string): Promise<string | null> {
   const pkg = NPM_PACKAGES[input.tool];
   const path = input.platform === "win32" ? win32 : posix;
-  const marker = `/lib/node_modules/${pkg}/`.toLowerCase();
-  const index = real.toLowerCase().indexOf(marker);
-  if (index > 0) return path.normalize(input.realPath.slice(0, index));
-  const winMarker = `/node_modules/${pkg}/`.toLowerCase();
-  const winIndex = real.toLowerCase().indexOf(winMarker);
-  if (input.platform === "win32" && winIndex > 0) return path.normalize(input.realPath.slice(0, winIndex));
+  const escaped = pkg.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  const index = new RegExp(`/lib/node_modules/${escaped}/`, "i").exec(real)?.index ?? -1;
+  if (index > 0) return path.normalize(real.slice(0, index));
+  const winIndex = new RegExp(`/node_modules/${escaped}/`, "i").exec(real)?.index ?? -1;
+  if (input.platform === "win32" && winIndex > 0) return path.normalize(real.slice(0, winIndex));
   if (input.platform === "win32") {
     const dir = win32.dirname(input.binaryPath);
     if (await input.exists(win32.join(dir, "node_modules", ...pkg.split("/"), "package.json"))) return dir;
@@ -166,6 +165,8 @@ async function npmPlan(input: InstallProbeInput, prefix: string): Promise<Instal
   const besidePrefix = win ? path.join(prefix, "npm.cmd") : path.join(prefix, "bin", "npm");
   const npm = (await input.exists(besidePrefix)) ? besidePrefix : input.npmOnPath;
   if (!npm) return manual("npm", manualCommand);
+  // cmd.exe expands % and ends a quoted part at ", whatever the quoting.
+  if (win && [npm, prefix].some((part) => /[%"\r\n]/.test(part))) return manual("npm", manualCommand);
   const install = (spec: string): CliCommand => ({
     executable: npm,
     args: ["install", "-g", "--prefix", prefix, spec],
@@ -182,11 +183,15 @@ async function npmPlan(input: InstallProbeInput, prefix: string): Promise<Instal
 
 export async function detectInstallPlan(input: InstallProbeInput): Promise<InstallPlan> {
   const real = slashes(input.realPath);
-  const prefix = await npmPrefix(input, real);
-  if (prefix) return npmPlan(input, prefix);
+  // Before npm: a Homebrew formula on Node keeps an npm tree in its Cellar.
   const other = otherManager(input.tool, real);
   if (other) return other;
-  if (NATIVE_LAYOUTS[input.tool].test(real)) {
+  const prefix = await npmPrefix(input, real);
+  if (prefix) return npmPlan(input, prefix);
+  // A plain file at ~/.local/bin/claude is the installer's copy only on
+  // Windows; elsewhere it is the user's own wrapper.
+  const windowsClaude = input.tool === "claude" && input.platform === "win32" && /\/\.local\/bin\/claude\.exe$/i.test(real);
+  if (windowsClaude || NATIVE_LAYOUTS[input.tool].test(real)) {
     return nativePlan(input.tool, input.binaryPath);
   }
   return manual("unknown", VENDOR_UPDATE[input.tool]);
@@ -197,10 +202,16 @@ export async function detectInstallPlan(input: InstallProbeInput): Promise<Insta
  * through cmd.exe with the whole command quoted once, as the onboarding
  * installer does.
  */
-export function spawnableCommand(command: CliCommand, platform: NodeJS.Platform): CliCommand & { verbatim: boolean } {
+export function spawnableCommand(
+  command: CliCommand,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv = process.env,
+): CliCommand & { verbatim: boolean } {
   if (platform === "win32" && /\.(?:cmd|bat)$/i.test(command.executable)) {
     const quoted = [command.executable, ...command.args].map((part) => `"${part}"`).join(" ");
-    return { ...command, executable: "cmd.exe", args: ["/d", "/s", "/c", `"${quoted}"`], verbatim: true };
+    // Never a cmd.exe found on PATH or in the working folder.
+    const shell = env.ComSpec || win32.join(env.SystemRoot || "C:\\Windows", "System32", "cmd.exe");
+    return { ...command, executable: shell, args: ["/d", "/s", "/c", `"${quoted}"`], verbatim: true };
   }
   return { ...command, verbatim: false };
 }
