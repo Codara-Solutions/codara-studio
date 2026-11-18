@@ -26,11 +26,15 @@ export interface ChromeLinkBrowserState {
   connected: boolean;
   extensionVersion: string | null;
   /**
-   * The connected extension is older than the one Codara ships: "updating"
-   * while it reloads itself, "manual" when the user has to reload it in the
-   * browser's extensions page. Null when it is current or not connected.
+   * The connected extension is older than the one Codara ships. Codara
+   * changes it only after the user presses Update extension: "available"
+   * until then, "updating" while it reloads itself after that, "manual" when
+   * the user has to press reload in the browser's extensions page.
+   * "elsewhere": the browser did not load it from Codara's folder (the Chrome
+   * Web Store updates its own), so Codara leaves it alone. Null when it is
+   * current or not connected.
    */
-  extensionUpdate: "updating" | "manual" | null;
+  extensionUpdate: "available" | "updating" | "manual" | "elsewhere" | null;
   allowOpen: boolean;
   tabs: ChromeLinkTabState[];
 }
@@ -41,6 +45,17 @@ export interface ChromeLinkPairing {
   browser: { name: string; version: string };
   extensionId: string;
   expiresAt: string;
+}
+
+export interface ChromeLinkIncompatibleExtension {
+  extensionId: string;
+  version: string;
+  browser: { name: string; version: string };
+  update: "extension" | "codara";
+  /** Loaded from Codara's folder, so Update extension can copy the new version there. */
+  fromCodaraFolder: boolean;
+  /** The user pressed Update extension: the folder holds the new version, the browser still has to reload it. */
+  copied: boolean;
 }
 
 export interface ChromeLinkActivity {
@@ -75,6 +90,12 @@ export interface ChromeLinkState {
   /** The version of the extension in that folder, as this Codara ships it. */
   shippedExtensionVersion: string | null;
   browsers: ChromeLinkBrowserState[];
+  /**
+   * Extensions that tried to connect lately and speak another link protocol,
+   * so they cannot connect until one side is updated. "extension": it is the
+   * older one; "codara": this Codara is.
+   */
+  incompatible: ChromeLinkIncompatibleExtension[];
   pending: ChromeLinkPairing[];
   activity: ChromeLinkActivity[];
   presence: ChromePresenceSettings;

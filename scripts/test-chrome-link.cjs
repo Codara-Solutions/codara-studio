@@ -598,8 +598,8 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   };
   assert.equal((await lib.click(clickTarget, { selector: "#go" })).change, 'Now on "a.example/done" (title "Done").');
   assert.equal((await lib.type(clickTarget, { selector: "#pw", text: "abc" })).change, 'The field now holds "•••".');
-  // Keeping the loaded extension current: the copy follows any changed
-  // file, and a connected extension older than it reloads or is shown.
+  // The copy Update extension makes: it follows any changed file, never the
+  // development files. scripts/test-chrome-extension-update.cjs covers when.
   const shipped = fs.mkdtempSync(path.join(os.tmpdir(), "codara-ext-src-"));
   const copy = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codara-ext-home-")), "chrome-extension");
   fs.writeFileSync(path.join(shipped, "manifest.json"), JSON.stringify({ version: "1.1.0" }));
@@ -625,12 +625,13 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   assert.equal(lib.compareExtensionVersions("1.0.0", "1.1.0"), -1);
   assert.equal(lib.compareExtensionVersions("1.10.0", "1.9.0"), 1);
   assert.equal(lib.compareExtensionVersions("1.1", "1.1.0"), 0);
-  assert.equal(lib.extensionUpdateAction("1.1.0", ["reload"], "1.1.0", false), "none", "current");
-  assert.equal(lib.extensionUpdateAction("1.2.0", [], "1.1.0", false), "none", "newer than shipped");
-  assert.equal(lib.extensionUpdateAction("1.0.0", [], null, false), "none", "nothing shipped to compare");
-  assert.equal(lib.extensionUpdateAction("1.0.0", ["reload"], "1.1.0", false), "reload");
-  assert.equal(lib.extensionUpdateAction("1.0.0", ["reload"], "1.1.0", true), "manual", "a reload that did not help");
-  assert.equal(lib.extensionUpdateAction("1.0.0", [], "1.1.0", false), "manual", "too old to reload itself");
+  // The first copy is made only where none is: an older copy stays until the user updates it.
+  fs.writeFileSync(path.join(copy, "manifest.json"), JSON.stringify({ version: "1.0.0" }));
+  assert.equal(lib.ensureExtensionFolder(shipped, copy), false, "an existing copy is left alone");
+  assert.equal(lib.extensionManifestVersion(copy), "1.0.0");
+  fs.rmSync(copy, { recursive: true });
+  assert.equal(lib.ensureExtensionFolder(shipped, copy), true, "a missing copy is made");
+  assert.equal(lib.extensionManifestVersion(copy), "1.1.0");
   assert.deepEqual(lib.sanitizeExtensionFeatures(["reload", "reload", "Bad Feature", 3, "x".repeat(40)]), ["reload"]);
   assert.deepEqual(lib.sanitizeExtensionFeatures("reload"), []);
 

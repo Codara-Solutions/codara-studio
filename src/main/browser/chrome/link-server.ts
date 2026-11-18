@@ -67,6 +67,16 @@ interface PairingEntry {
 }
 
 const MAX_PENDING_PAIRINGS = 3;
+const MAX_REFUSED_EXTENSIONS = 3;
+
+/** An extension refused because it speaks another link protocol than this Codara. */
+export interface RefusedExtension {
+  extensionId: string;
+  version: string;
+  protocol: number;
+  browser: ChromeBrowserInfo;
+  at: number;
+}
 
 export class ChromeLinkServer {
   port: number | null = null;
@@ -75,6 +85,7 @@ export class ChromeLinkServer {
   private readonly wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 * 1024 });
   private readonly live = new Map<string, ChromeLink>();
   private readonly pairings = new Map<string, PairingEntry>();
+  private readonly refused = new Map<string, RefusedExtension>();
   private readonly alive = new WeakMap<WebSocket, boolean>();
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private readonly changeListeners = new Set<() => void>();
@@ -136,6 +147,11 @@ export class ChromeLinkServer {
 
   link(linkId: string): ChromeLink | null {
     return this.live.get(linkId) ?? null;
+  }
+
+  /** Extensions refused for their protocol in the last `withinMs`, newest first. */
+  refusedExtensions(withinMs: number, now = Date.now()): RefusedExtension[] {
+    return [...this.refused.values()].filter((entry) => now - entry.at < withinMs).sort((a, b) => b.at - a.at).map((entry) => ({ ...entry }));
   }
 
   pendingPairings(): PendingPairing[] {
@@ -313,9 +329,11 @@ export class ChromeLinkServer {
     expectAuth: (handler: (answer: Record<string, unknown>) => void) => void,
   ): void {
     if (message.protocol !== CHROME_LINK_PROTOCOL) {
+      const protocol = Number(message.protocol) || 0;
+      this.noteRefused(extensionId, message, protocol);
       this.refuse(ws, {
         type: "error",
-        message: `This Codara speaks link protocol ${CHROME_LINK_PROTOCOL}; update ${Number(message.protocol) > CHROME_LINK_PROTOCOL ? "Codara" : "the Codara extension (Reload it in your browser's extensions page)"}.`,
+        message: `This Codara speaks link protocol ${CHROME_LINK_PROTOCOL}; update ${protocol > CHROME_LINK_PROTOCOL ? "Codara" : "the Codara extension from Codara's Settings > Browser"}.`,
       });
       return;
     }
@@ -425,6 +443,7 @@ export class ChromeLinkServer {
     // The same browser reconnected (its service worker restarted): the new
     // socket replaces the old one.
     if (previous) this.drop(previous, 4002, "replaced");
+    this.refused.delete(extensionId);
     const link = new ChromeLink(linkId, browser, extensionId, version, ws, sealer, features);
     this.live.set(linkId, link);
     link.onTabs(() => this.emitChange());
@@ -441,6 +460,17 @@ export class ChromeLinkServer {
     this.options.store.touch(link.linkId);
     for (const listener of this.downListeners) listener(link);
     this.emitChange();
+  }
+
+  /** Settings says which extension cannot connect and what to update; the extension retries, so only a change is announced. */
+  private noteRefused(extensionId: string, message: Record<string, unknown>, protocol: number): void {
+    const extension = message.extension && typeof message.extension === "object" ? (message.extension as Record<string, unknown>) : {};
+    const version = typeof extension.version === "string" ? extension.version.slice(0, 24) : "";
+    const known = this.refused.get(extensionId);
+    this.refused.delete(extensionId);
+    this.refused.set(extensionId, { extensionId, version, protocol, browser: sanitizeBrowserInfo(message.browser), at: Date.now() });
+    while (this.refused.size > MAX_REFUSED_EXTENSIONS) this.refused.delete(this.refused.keys().next().value!);
+    if (!known || known.version !== version || known.protocol !== protocol) this.emitChange();
   }
 
   private refuse(ws: WebSocket, message: Record<string, unknown>): void {
