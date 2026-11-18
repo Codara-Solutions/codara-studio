@@ -455,12 +455,13 @@ export default function WorktreeCleanupDialog({
         : null;
 
   return (
-    <div
-      className="spark-scrim wtc-scrim"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !removing) onClose();
-      }}
-    >
+    <div className="wtc-layer">
+      <div
+        className="spark-scrim"
+        onMouseDown={() => {
+          if (!removing) onClose();
+        }}
+      />
       <div
         ref={dialogRef}
         role="dialog"

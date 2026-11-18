@@ -1435,7 +1435,8 @@ shows, so it can recommend what to remove and ask you.
   listed under `notCovered`: their worktrees live on the remote host.
 - `action: "remove"` with `paths` opens an approval dialog in Codara that says
   which agent asks and lists each worktree with its repository, branch, size,
-  recommendation and reason. Only the safe ones start ticked. A worktree with
+  recommendation and reason. Nothing starts ticked, and Remove names how many
+  go. A worktree with
   unsaved changes or something running in it cannot be ticked; you remove
   those yourself from the screen. A separate, unticked choice per worktree
   also deletes its branch on the remote with your own git sign-in (`git push
