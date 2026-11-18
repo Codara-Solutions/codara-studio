@@ -130,12 +130,13 @@ export default function WorktreeSetupLogDialog({
   const name = status ? setupName(status) : "worktree";
 
   return createPortal(
-    <div
-      className="spark-scrim wts-scrim"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
+    <div className="wts-layer">
+      <div
+        className="spark-scrim"
+        onMouseDown={() => {
+          onClose();
+        }}
+      />
       <div
         ref={ref}
         role="dialog"

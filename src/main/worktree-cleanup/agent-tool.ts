@@ -463,7 +463,6 @@ function approvalItem(facts: AgentWorktreeFacts, suggestedRemote: boolean): Work
     advice: facts.advice,
     reason: facts.reason,
     blocked,
-    preselected: blocked === null && facts.advice === "safe",
     ignored: check?.localWork?.ignored ?? [],
     unmergedCommits: check?.unmerged?.ahead ?? 0,
     remote: {

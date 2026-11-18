@@ -380,16 +380,15 @@ async function main() {
       assert.equal(request.agent.client, "claude-code");
       assert.equal(request.agent.workspaceName, "repo");
       const byPath = new Map(request.items.map((entry) => [entry.path, entry]));
-      assert.equal(byPath.get(merged).preselected, true);
+      // Nothing starts ticked: the dialog has no per-item default to send.
+      for (const entry of request.items) assert.equal("preselected" in entry, false);
       assert.equal(byPath.get(merged).blocked, null);
       assert.equal(byPath.get(merged).remote.offered, true);
-      assert.equal(byPath.get(envfile).preselected, false, "review items start unticked");
       assert.equal(byPath.get(envfile).blocked, null);
       assert.deepEqual(byPath.get(envfile).ignored, [".env.local"]);
       assert.match(byPath.get(dirty).blocked, /unsaved changes/);
       assert.match(byPath.get(busy).blocked, /In use/);
       assert.equal(byPath.get(openpr).blocked, null, "an open pull request may still be ticked explicitly");
-      assert.equal(byPath.get(openpr).preselected, false);
       assert.equal(byPath.get(openpr).remote.offered, false);
     });
     await check("unticked items stay, unsaved and busy ones are never removed, and an unoffered remote is never deleted", async () => {
