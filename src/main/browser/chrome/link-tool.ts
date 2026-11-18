@@ -46,7 +46,7 @@ export async function chromeLinkTool(params: Record<string, unknown>, _method: s
       if (links.length === 0) throw new Error("No browser is connected to Codara.");
       const link = links.find((candidate) => candidate.allowOpen);
       if (!link) {
-        throw new Error('The user has not let agents open tabs. They can turn on "Let agents open new tabs" in the Codara extension popup, or share an existing tab.');
+        throw new Error('The user has not let agents open tabs. They can turn on "Open new tabs in a group" in the Codara extension popup, or share an existing tab.');
       }
       const group = normalizeTabGroupName(params.group) || (await workspaceGroup(params, host));
       const opened = await link.request<{ tabId: number; url?: string; title?: string; blocked?: boolean; group?: string }>(

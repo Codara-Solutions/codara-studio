@@ -49,7 +49,9 @@ How `scripts/run-all-tests.cjs` works:
     production Vite build, about 2 GB) and `test-workflow-sandbox.cjs` (its
     heap-limit case grows QuickJS's WebAssembly memory to 2 GB) and
     `test-clipboard-files.cjs` (the real macOS pasteboard through
-    osascript, with the app's 3 s limit per call).
+    osascript, with the app's 3 s limit per call) and
+    `test-diagnostics-hang-watchdog.cjs` (a busy loop's CPU share, and an
+    inspector pause within 400 ms).
   - No suite starts while `MemAvailable` is below `CODARA_TEST_MIN_FREE_MB`
     (default 2048) and another suite is still running.
   - Each suite gets its own empty `TMPDIR`, removed when it finishes, so
@@ -59,8 +61,10 @@ How `scripts/run-all-tests.cjs` works:
   - Durations are kept in `node_modules/.cache/codara-tests/timings.json`,
     and the next run starts the longest suites first.
   - `CODARA_TEST_PART=pool` runs every suite except the serial ones, and
-    `CODARA_TEST_PART=serial` only those. CI runs the two parts on two
-    machines at once.
+    `CODARA_TEST_PART=serial` only those. CI runs them on three machines at
+    once: the pool in two shards (`CODARA_TEST_SHARD=1/2` and `2/2`: the
+    slow suites listed in `SLOW_POOL_SUITES` balanced by their seconds, the
+    rest in name order), the serial suites on the third.
   - `CODARA_TEST_BUDGET_SECONDS=900` stops the run once it has taken that
     long and fails it, naming the suites it stopped and the ones that never
     started. CI sets one so a slow suite fails with that message instead of
@@ -146,12 +150,13 @@ Most suites need only `npm install`. These are the exceptions:
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
 
 CI (`.github/workflows/ci.yml`, macOS, pull requests into `main` and pushes
-to it) runs on two machines at once. `test (pool)` runs `npm run build`, `npx
-playwright install chromium`, then `npm run test:all` with
-`CODARA_TEST_PART=pool` two suites at a time; `test (serial, typecheck)`
-runs the four typechecks and the build, then the serial suites. Each has a time budget
-(`CODARA_TEST_BUDGET_SECONDS`), and the required `test` check passes only
-when both do. `.github/workflows/ci-linux.yml` runs the
+to it) runs on three machines at once. `test (pool 1/2)` and `test (pool 2/2)`
+each run `npm run build`, `npx playwright install chromium`, then
+`npm run test:all` with `CODARA_TEST_PART=pool`, `CODARA_TEST_SHARD=1/2` or
+`2/2` (half the pool each, balanced by `SLOW_POOL_SUITES`) and one suite at a time;
+`test (serial, typecheck)` runs the four typechecks and the build, then the
+serial suites. Each has a time budget (`CODARA_TEST_BUDGET_SECONDS`), and the
+required `test` check passes only when all three do. `.github/workflows/ci-linux.yml` runs the
 same on Linux under Xvfb for pull requests into `main` and pushes to it,
 without the typechecks (they do not depend on the platform), then a smoke set
 of Playwright specs (listed in the workflow). On your machine, run the same
@@ -244,6 +249,8 @@ calls.
 | Suites | Covers |
 |---|---|
 | `test-worker-*` (access, cleanup-safety, diff, independence, model-hint, pane-harness-gate, prompt-budget, session-memory-options, session-reuse, sessions; `test-worker-terminal-controls` belongs to remote access) | Worker prompts, tool access, sessions, diffs, and the pane a worker runs in. |
+| `test-worker-feed`, `test-worker-feed-session` | A worker's own conversation as records (`src/shared/worker-feed.ts`, `worker-feed.ts`): bounds, the cap, the file read back after a restart, and the real run-store writing it from a scripted Pi session, with a message sent to the running worker. |
+| `test-worker-view` | Going inside a Cora worker (`components/chat/worker-view.ts`): its state, its feed as chat rows, what folds once it finished, and the bar's arrows. |
 | `test-spawn-batch-guard`, `test-parallel-wave`, `test-autopilot-wave`, `test-peer-comms-opt-in`, `test-verifier-scoping`, `test-direct-worker` | How workers are batched and scheduled (`src/shared/parallel-wave.ts`, `autopilot-wave.ts`), and verifiers. |
 | `test-agent-sessions` | Sessions one agent starts for another (`agent-sessions.ts`, `src/shared/agent-sessions.ts`): statuses, the live cap, waits, the launch command, and a brief passed whole through real bash, sh and zsh. |
 | `test-agent-terminal-cleanup`, `test-agent-terminal-lifecycle`, `test-agent-terminal-placement` | Terminals that agents open (`agent-terminal-registry.ts`, `agent-terminal-lifecycle.ts`). |
@@ -256,7 +263,7 @@ calls.
 | `test-cora-harness` | The standalone `cora` CLI end to end: a real child process against the stub model in `cora-stub-model.mjs`, in a throwaway HOME, with non-loopback network blocked. Exit codes, retries, resume, token refresh rules, MCP, and the terminal interface. |
 | `test-pi-cora-extension`, `test-pi-cora-abandonable-wait`, `test-repeat-guard`, `test-deep-search`, `test-whiteboard-review-extension`, `test-whiteboard-quality` | The Pi extension in `resources/pi-cora/`. |
 | `test-pi-manager-compaction`, `test-pi-worker-compaction`, `test-pi-manager-compaction-integration.mjs`, `test-pi-worker-compaction-integration.mjs` | Context compaction for the manager and for workers, including the mid-turn pause and the summary recovery ladder. |
-| `test-pi-fast-mode-fallback-integration.mjs` (with the fast-mode block in `test-pi-cora-extension`) | Fast mode for the manager and workers: request shaping per provider and model, and the standard-speed fallback through a real offline Pi session. |
+| `test-pi-fast-mode-fallback-integration.mjs` (with the fast-mode block in `test-pi-cora-extension`) | Fast mode for the manager and workers, Codex only: request shaping per provider (Claude never runs fast), and the standard-speed fallback through a real offline Pi session. |
 | `test-compaction-ledger`, `test-conversation-compaction`, `test-autocompact-limits` | The durable ledger re-injected after each compaction, the run store's conversation cutover, and the owner's auto-compact limit per model and per launch (Pi, Codex, Claude). |
 | `test-compaction-eval.mjs` | Offline evaluation: replays 240-tool-call runs through a real Pi session with a lossy, a recorded real-style and a failing summarizer, and checks that facts survive 1, 3 and 6+ compactions within the limit. Variants cover a long opening request, a run that resumes after a conversation cutover, and a huge tool output the model must read before it is compacted. `--verbose` prints every compaction. |
 | `test-pi-worker-harness-gate`, `test-pi-worker-providers` | Which providers workers may run on. |

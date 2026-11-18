@@ -69,6 +69,7 @@ import { crossWorkspaceApi } from "./areas/cross-workspace";
 import { tabActionsApi } from "./areas/tab-actions";
 import { feedbackApi } from "./areas/feedback";
 import { worktreeSetupApi } from "./areas/worktree-setup";
+import { workerFeedApi } from "./areas/worker-feed";
 import { portsApi } from "./areas/ports";
 import { shareApi } from "./areas/share";
 import type {
@@ -924,6 +925,9 @@ const api = {
       ipcRenderer.invoke("git:unstageAll", cwd),
     discard: (cwd: string, files: GitFileChange[]): Promise<GitOpResult> =>
       ipcRenderer.invoke("git:discard", { cwd, files }),
+    /** Deletes a folded folder's new files, only if they are still exactly `files`. */
+    discardFolder: (cwd: string, dir: string, files: string[]): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:discardFolder", { cwd, dir, files }),
     commit: (cwd: string, message: string, amend?: boolean): Promise<GitOpResult> =>
       ipcRenderer.invoke("git:commit", { cwd, message, amend }),
     generateCommitMessage: (cwd: string): Promise<GitCommitMessageResult> =>
@@ -1793,11 +1797,12 @@ const api = {
     sendResponse: (response: { reqId: string; ok: boolean; result?: unknown; error?: string }): void => {
       ipcRenderer.send("terminal-bridge:response", response);
     },
-    // Content-free ping from App.tsx whenever the set of shareable Studio
-    // terminals changes (opened, closed, retitled). Main relays it to the
-    // remote-access service so paired phones can re-list without polling.
-    notifyInventoryChanged: (): void => {
-      ipcRenderer.send("terminal-bridge:inventory-changed");
+    // From App.tsx whenever the shareable Studio terminals change (opened,
+    // closed, retitled, moved, regrouped), with the panes themselves: main
+    // answers terminal.list from them and relays a ping to the remote-access
+    // service so paired phones can re-list without polling.
+    notifyInventoryChanged: (inventory?: unknown[]): void => {
+      ipcRenderer.send("terminal-bridge:inventory-changed", inventory);
     },
   },
   updater: {
@@ -1924,6 +1929,7 @@ const api = {
   diagnostics: diagnosticsApi,
   agentHibernation: agentHibernationApi,
   worktreeSetup: worktreeSetupApi,
+  workerFeed: workerFeedApi,
   share: shareApi,
   chromeLink: chromeLinkApi,
   keepAwake: keepAwakeApi,

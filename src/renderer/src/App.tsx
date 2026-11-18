@@ -1220,6 +1220,17 @@ export default function App() {
     [handleRunSnapshot],
   );
 
+  // "Show in Runs" from inside a Cora worker: the chat's own run, on its
+  // Runs tab.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const runId = (event as CustomEvent<{ runId?: unknown }>).detail?.runId;
+      if (typeof runId === "string") handleSelectRun(runId, undefined, { focus: "runs" });
+    };
+    window.addEventListener("spark:show-run-in-runs", handler);
+    return () => window.removeEventListener("spark:show-run-in-runs", handler);
+  }, [handleSelectRun]);
+
   // Cross-workspace run selection used by the global RunSwitcher and the
   // focus-after-away digest. Queue the requested surface before switching so
   // the old workspace's tab store remains untouched. The replay effect below
@@ -2354,15 +2365,6 @@ export default function App() {
       }
     });
     return () => off?.();
-  }, []);
-
-  // Boot handshake for main's renderer watchdog: React is mounted, the boot
-  // splash is gone. If a loaded page never sends this, main escalates recovery
-  // instead of leaving the user staring at the breathing-square splash.
-  useEffect(() => {
-    if (rendererReadySignaled) return;
-    rendererReadySignaled = true;
-    window.spark.app.signalReady?.();
   }, []);
 
   // Theme the UI with the workspace's exact identity color. The frame lets
@@ -5821,24 +5823,19 @@ export default function App() {
     };
     setListShareableStudioTerminalsFn(listShareableTerminals);
     setListDeliverablePanesFn(() => deliverablePanes(workspaceLayouts()));
-    // Push-notify main when the phone-visible inventory changes. Main owns
-    // debouncing and fan-out; this stays a bare ping so a burst of tab
-    // operations costs a string compare per commit, nothing more.
-    const fingerprint = JSON.stringify(
-      listShareableTerminals().map((entry) => [
-        entry.paneId,
-        entry.tabId,
-        entry.workspaceId,
-        entry.title ?? null,
-        entry.profile,
-      ]),
-    );
+    // Send main the inventory whenever any of it changes: main answers
+    // terminal.list and its ownership checks from this copy, so they need no
+    // round trip into a renderer that may be busy, and tells paired phones
+    // when what they show changed. A burst of tab operations costs a string
+    // compare per commit and one message per change.
+    const inventory = listShareableTerminals();
+    const fingerprint = JSON.stringify(inventory);
     if (fingerprint !== sharedTerminalFingerprintRef.current) {
       sharedTerminalFingerprintRef.current = fingerprint;
       // Optional-called: in dev the renderer can be hot-updated ahead of its
       // preload, and throwing here unmounts App — which unregisters every
       // bridge adapter and kills phone/MCP terminal creation with it.
-      window.spark?.terminalBridge?.notifyInventoryChanged?.();
+      window.spark?.terminalBridge?.notifyInventoryChanged?.(inventory);
     }
     setCreateAgentTerminalFn((input) => {
       if (input.workspaceId && !validWorkspaceIds.has(input.workspaceId)) {
@@ -5942,6 +5939,19 @@ export default function App() {
       setCloseAgentTerminalFn(null);
     };
   }, [tabs, activeWorkspace?.cwd, activeWorkspace?.id, home, validWorkspaceIds]);
+
+  // Boot handshake for main's renderer watchdog: React is mounted, the boot
+  // splash is gone. If a loaded page never sends this, main escalates recovery
+  // instead of leaving the user staring at the breathing-square splash.
+  // Declared after the effect above, so on the first commit the pane list
+  // reaches main before this does: once main counts the window ready, its copy
+  // of the panes exists and terminal.list needs no round trip into the
+  // renderer at its busiest moment.
+  useEffect(() => {
+    if (rendererReadySignaled) return;
+    rendererReadySignaled = true;
+    window.spark.app.signalReady?.();
+  }, []);
 
   // A user may close or move a bridge-created pane before main later sends its
   // destroy notification. Keep the process-lifetime placement registry aligned

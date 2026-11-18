@@ -88,6 +88,33 @@ async function main() {
     assert.deepEqual(sends.map(([c]) => c), ["orchestration:events-batch", "orchestration:event"]);
   });
 
+  // The flush timer takes the buffer and starts writing it. A flush called while
+  // that write is still in flight (a turn ending, the app quitting) found the
+  // buffer empty and returned before the tail was on disk. The timer is fired
+  // by hand here so the write is certainly in flight when the flush is called.
+  for (const scope of ["one run", "every run"]) {
+    await test(`a flush of ${scope} waits for a timer flush that is already writing`, async () => {
+      const log = await load();
+      const runId = `in-flight-${scope.replace(" ", "-")}`;
+      const timers = [];
+      const realSetTimeout = globalThis.setTimeout;
+      globalThis.setTimeout = (fn) => {
+        timers.push(fn);
+        return realSetTimeout(() => undefined, 0);
+      };
+      try {
+        log.appendBufferedEvent(input(runId, "chat.assistant_block"));
+      } finally {
+        globalThis.setTimeout = realSetTimeout;
+      }
+      assert.equal(timers.length, 1, "one flush timer armed");
+      timers[0]();
+      await log.flushBufferedEvents(scope === "one run" ? runId : undefined);
+      assert.equal(fs.existsSync(log.eventsPath(runId)), true, "the tail is on disk when the flush returns");
+      assert.deepEqual(readJournal(log, runId).map((e) => e.type), ["chat.assistant_block"]);
+    });
+  }
+
   await test("emission order survives an interleaved buffered/direct sequence", async () => {
     const log = await load();
     const expected = [];
