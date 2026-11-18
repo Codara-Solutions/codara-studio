@@ -22,9 +22,11 @@ import { agentCliUpdatesAllowed } from "./launch-gate";
 import { holdVendorUpdates, launchesStarting, setToolBusy } from "./launch-guard";
 import { relinkLauncher } from "./relink";
 import { liveToolSessions } from "./live-sessions";
-import { createAgentCliUpdateService, type AgentCliUpdateService, type PersistedUpdateState } from "./service";
+import { createAgentCliUpdateService, inProgressFrom, type AgentCliUpdateService, type PersistedUpdateState } from "./service";
+import { acquireUpdateLock } from "./update-lock";
 
 const STATE_FILE = "agent-cli-updates.json";
+const LOCK_FILE = "agent-cli-update.lock";
 /** The first check waits out the launch's own work. */
 const FIRST_CHECK_DELAY_MS = 20_000;
 export const AGENT_CLI_UPDATES_CHANGED = "agentCliUpdates:changed";
@@ -53,7 +55,13 @@ async function readState(): Promise<PersistedUpdateState> {
           ([tool, version]) => ["claude", "codex", "grok"].includes(tool) && typeof version === "string",
         ),
       );
-    return { failed: versions(parsed.failed), notOffered: versions(parsed.notOffered), broken: versions(parsed.broken) };
+    const inProgress = inProgressFrom(parsed.inProgress);
+    return {
+      failed: versions(parsed.failed),
+      notOffered: versions(parsed.notOffered),
+      broken: versions(parsed.broken),
+      ...(inProgress ? { inProgress } : {}),
+    };
   } catch {
     return { failed: {}, notOffered: {} };
   }
@@ -77,7 +85,7 @@ function createService(log: (line: string) => void): AgentCliUpdateService {
     inspect: (tool) => inspectInstalledTool(tool, inspectDeps),
     latest: async (tool, method) =>
       fetchLatestVersion({ tool, method, ...(tool === "claude" ? { claudeChannel: await claudeChannel() } : {}) }),
-    run: (command, timeoutMs) => runSetupCommand(spawnableCommand(command, process.platform), timeoutMs),
+    run: (command, timeoutMs, onStart) => runSetupCommand(spawnableCommand(command, process.platform), timeoutMs, undefined, onStart),
     liveSessions: liveToolSessions,
     exists: inspectDeps.exists,
     pi: async () => {
@@ -104,6 +112,10 @@ function createService(log: (line: string) => void): AgentCliUpdateService {
     holdVendorUpdates,
     relink: relinkLauncher,
     platform: process.platform,
+    lock: async () => {
+      await fs.mkdir(codaraHome(), { recursive: true });
+      return acquireUpdateLock(join(codaraHome(), LOCK_FILE));
+    },
   });
 }
 

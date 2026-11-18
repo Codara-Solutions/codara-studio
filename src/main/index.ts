@@ -86,6 +86,8 @@ import {
   terminalAgentsMidTurn,
 } from "./terminal-agent-notify";
 import { collectLiveWork, hasLiveWork, quitPromptText, type LiveWork } from "./quit-guard";
+import { busyTools } from "./agent-cli-updates/launch-guard";
+import { AGENT_CLI_LABELS } from "@shared/agent-cli-updates";
 import {
   acquireLockAfterHandoff,
   HANDOFF_HOLDER_EXIT_WAIT_MS,
@@ -1938,7 +1940,11 @@ let quitWithLiveWorkConfirmed = false;
 // middle of a turn. Memory-only, so before-quit and the update restart gate
 // can ask synchronously; run-store is only consulted once it has loaded.
 function currentLiveWork(): LiveWork {
-  return collectLiveWork(runStoreMod?.liveWorkForQuit(), terminalAgentsMidTurn());
+  return collectLiveWork(
+    runStoreMod?.liveWorkForQuit(),
+    terminalAgentsMidTurn(),
+    busyTools().map((tool) => AGENT_CLI_LABELS[tool as keyof typeof AGENT_CLI_LABELS] ?? tool),
+  );
 }
 
 function describeLiveWork(live: LiveWork): string {

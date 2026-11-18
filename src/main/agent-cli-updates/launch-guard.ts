@@ -44,6 +44,11 @@ export function setToolBusy(tool: string, isBusy: boolean, label = tool): void {
   else busy.delete(tool);
 }
 
+/** Tools being swapped right now (the quit prompt names them). */
+export function busyTools(): string[] {
+  return [...busy.keys()];
+}
+
 /**
  * A launch of the tool starts. Refused at once while the tool is being
  * swapped: callers that open panes give up after seconds, so a held launch

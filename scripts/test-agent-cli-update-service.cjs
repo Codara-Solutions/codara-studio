@@ -27,7 +27,8 @@ async function main() {
         'export { runSetupCommand } from "./src/main/onboarding";',
         'export * from "./src/main/agent-cli-updates/launch-guard";',
         'export { relinkLauncher } from "./src/main/agent-cli-updates/relink";',
-        'export { reinstallCommand } from "./src/main/agent-cli-updates/reinstall";',
+        'export { acquireUpdateLock, LOCK_MAX_HOLD_MS, SAME_BOOT_MAX_HOLD_MS } from "./src/main/agent-cli-updates/update-lock";',
+        'export { reinstallCommand, nativeBuildPath } from "./src/main/agent-cli-updates/reinstall";',
         'export { commandRunsAgent } from "./src/main/agent-hibernation-census";',
       ].join("\n"),
       resolveDir: root,
@@ -46,6 +47,7 @@ async function main() {
     await fakeService(m);
     await liveSessionCount(m);
     await launchGuard(m);
+    await crashSafety(m);
     await realBinaries(m);
   } finally {
     fs.rmSync(outfile, { force: true });
@@ -143,7 +145,8 @@ function world(overrides = {}) {
     exists: async (file) => (overrides.exists ? overrides.exists(file) : true),
     pi: async () => ({ version: "1.5.3", pinnedVersion: "1.5.2", source: "user" }),
     autoUpdate: () => auto,
-    loadState: async () => overrides.state ?? { failed: {}, notOffered: {} },
+    // The file on disk: what was saved last, else the starting state.
+    loadState: async () => JSON.parse(JSON.stringify(saved ?? overrides.state ?? { failed: {}, notOffered: {} })),
     saveState: async (state) => {
       saved = JSON.parse(JSON.stringify(state));
     },
@@ -715,6 +718,422 @@ async function liveSessionCount(m) {
   assert.equal(count("grok"), 1, "native Grok");
 }
 
+// ── An update cut short, and two Codara windows ──────────────────────────
+
+async function crashSafety(m) {
+  // Before the installer runs, what is there is on disk; afterwards it is gone.
+  {
+    const w = world({ auto: false });
+    const states = [];
+    w.deps.saveState = async (state) => states.push(JSON.parse(JSON.stringify(state)));
+    const run = w.deps.run;
+    let recordAtRun = null;
+    w.deps.run = async (command) => {
+      recordAtRun = states.at(-1)?.inProgress?.claude ?? null;
+      return run(command);
+    };
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.update("claude");
+    assert.deepEqual(recordAtRun, {
+      tool: "claude",
+      fromVersion: "2.1.325",
+      fromRealPath: "/home/u/.local/share/claude/versions/2.1.325",
+      fromBinaryPath: "/home/u/.local/bin/claude",
+      toVersion: "2.1.327",
+      savedAt: Date.parse("2026-11-18T12:00:00Z"),
+    }, "the record is saved before the installer starts");
+    assert.equal(states.at(-1).inProgress, undefined, "and cleared once the update is over");
+  }
+
+  // The record cannot be written: the installer does not start.
+  {
+    const w = world({ auto: false });
+    w.deps.saveState = async () => {
+      throw new Error("disk full");
+    };
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.update("claude");
+    assert.equal(w.commands.length, 0, "no installer without its record on disk");
+    const claude = tool(service.snapshot(), "claude");
+    assert.equal(claude.phase, "failed");
+    assert.match(claude.message, /could not save its note of the update \(disk full\), so it did not start it/);
+    assert.deepEqual(w.busyCalls.at(-1), "claude:false");
+  }
+
+  // The next start finds the record and a broken tool: it rolls back.
+  {
+    const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const w = world({
+      auto: false,
+      state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } },
+      tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
+      onRun: (command, tools) => {
+        tools.claude = { ...tools.claude, version: command.args[1], realPath: "/home/u/.local/share/claude/versions/2.1.325" };
+        return "ok";
+      },
+    });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    const claude = tool(service.snapshot(), "claude");
+    assert.equal(claude.phase, "rolled-back", claude.message);
+    assert.match(claude.message, /^Codara closed during the last update\. Claude Code 2\.1\.327 failed its version check, so Codara put 2\.1\.325 back/);
+    assert.deepEqual([w.commands[0].executable, ...w.commands[0].args], ["/home/u/.local/share/claude/versions/2.1.325", "install", "2.1.325", "--force"]);
+    assert.equal(w.saved.inProgress, undefined);
+    assert.deepEqual(w.saved.failed, { claude: "2.1.327" });
+    service.stop();
+  }
+
+  // A record from disk is never run as it stands: a tampered or stale one
+  // runs nothing, and the user gets the vendor's installer command.
+  {
+    const good = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const tampered = [
+      ["another program as the previous build", { ...good, fromRealPath: "/tmp/evil" }],
+      ["another launcher to relink", { ...good, fromBinaryPath: "/home/u/.bashrc" }],
+      ["a quote for cmd.exe", { ...good, fromVersion: '2.1.325" & calc & "' }],
+      ["a path in the version", { ...good, fromVersion: "../../../../tmp/evil" }],
+      ["a bad target version", { ...good, toVersion: "x; rm -rf ~" }],
+      ["an unknown tool", { ...good, tool: "sh" }],
+    ];
+    for (const [name, record] of tampered) {
+      const w = world({
+        auto: false,
+        state: { failed: {}, notOffered: {}, inProgress: { claude: record } },
+        tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
+      });
+      const relinked = [];
+      w.deps.relink = async (link, target) => relinked.push([link, target]);
+      const service = m.createAgentCliUpdateService(w.deps);
+      await service.start();
+      assert.equal(w.commands.length, 0, `${name}: nothing runs`);
+      assert.deepEqual(relinked, [], `${name}: nothing is relinked`);
+      assert.equal(w.saved?.inProgress, undefined, `${name}: the record is dropped`);
+      service.stop();
+    }
+    const w = world({
+      auto: false,
+      state: { failed: {}, notOffered: {}, inProgress: { claude: { ...good, fromRealPath: "/tmp/evil" } } },
+      tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
+    });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.match(tool(service.snapshot(), "claude").message, /Put 2\.1\.325 back with: curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash -s 2\.1\.325/);
+    service.stop();
+    assert.equal(m.nativeBuildPath("codex", "/h/.codex/packages/standalone/releases/0.171.0-x86_64-unknown-linux-musl/bin/codex", "0.170.0"), "/h/.codex/packages/standalone/releases/0.170.0-x86_64-unknown-linux-musl/bin/codex");
+    assert.equal(m.nativeBuildPath("claude", "/h/.local/share/claude/versions/2.1.327", "2.1.325"), "/h/.local/share/claude/versions/2.1.325");
+    assert.equal(m.nativeBuildPath("claude", "/h/.local/share/claude/versions/2.1.327", "../x"), null);
+    assert.equal(m.nativeBuildPath("claude", "/opt/claude", "2.1.325"), null);
+  }
+
+  // Cut off after the installer removed the launcher (or the tool cannot be
+  // read right now): the record stays for the next start and the user is told.
+  {
+    const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const w = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } } });
+    delete w.tools.claude;
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.equal(w.commands.length, 0);
+    assert.ok(w.saved === null || w.saved.inProgress?.claude, "the record is kept");
+    assert.match(tool(service.snapshot(), "claude").message, /^Codara closed during the last update\. Claude Code cannot be found now\. Put 2\.1\.325 back with:/);
+    assert.equal(w.saved.inProgress.claude.savedAt, w.deps.now(), "an unstamped record is stamped so it can expire");
+    service.stop();
+
+    // Removed on purpose: after a week the message is shown a last time and the record goes.
+    const later = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { claude: { ...record, savedAt: w.deps.now() - m.MISSING_TOOL_RECORD_MS - 1 } } } });
+    delete later.tools.claude;
+    const laterService = m.createAgentCliUpdateService(later.deps);
+    await laterService.start();
+    assert.match(tool(laterService.snapshot(), "claude").message, /cannot be found now/);
+    assert.equal(later.saved.inProgress, undefined, "a week-old record of a missing tool is dropped");
+    laterService.stop();
+  }
+
+  // The record but a tool that works: nothing is run, the record goes.
+  {
+    const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/x/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const w = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } } });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.equal(w.commands.length, 0);
+    assert.equal(w.saved.inProgress, undefined);
+    service.stop();
+  }
+
+  // Another Codara holds the lock: its update is still running, so this one
+  // neither recovers it nor starts its own.
+  {
+    const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/x/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const w = world({
+      auto: false,
+      state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } },
+      tools: { claude: { version: null, realPath: "/x/2.1.327", plan: nativePlan("claude") } },
+    });
+    w.deps.lock = async () => null;
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.equal(w.commands.length, 0, "no recovery under another window's lock");
+    w.tools.claude = { ...w.tools.claude, version: "2.1.325" };
+    await service.check();
+    await service.update("claude");
+    assert.equal(w.commands.length, 0);
+    assert.match(tool(service.snapshot(), "claude").message, /another Codara window is updating/);
+    service.stop();
+  }
+
+  // The lock file: exclusive, released by its owner, taken over when stale.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-cli-lock-"));
+    try {
+      const file = path.join(dir, "agent-cli-update.lock");
+      const opts = (pid, over = {}) => ({ pid, host: "here", alive: () => true, installerAlive: () => false, ...over });
+      const first = await m.acquireUpdateLock(file, opts(111));
+      assert.ok(first);
+      assert.equal(await m.acquireUpdateLock(file, opts(222)), null, "held by a live Codara");
+      const stale = await m.acquireUpdateLock(file, opts(222, { alive: (pid) => pid !== 111 }));
+      assert.ok(stale, "a dead owner's lock is taken over");
+      await first.release();
+      assert.ok(fs.existsSync(file), "a former owner does not remove the new owner's lock");
+      await stale.release();
+      assert.ok(!fs.existsSync(file));
+
+      // The installer outlives its Codara: the lock stays held while it runs.
+      const owner = await m.acquireUpdateLock(file, opts(111));
+      await owner.installerStarted(4242);
+      assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).installer, 4242);
+      const ownerDead = { alive: (pid) => pid !== 111 };
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { ...ownerDead, installerAlive: (pid) => pid === 4242 })), null, "held while the installer runs");
+      const after = await m.acquireUpdateLock(file, opts(222, { ...ownerDead, installerAlive: () => false }));
+      assert.ok(after, "taken over once the installer is gone too");
+      await after.release();
+
+      // Codaras taking over the same stale lock at once: exactly one gets it.
+      for (let round = 0; round < 25; round += 1) {
+        fs.writeFileSync(file, JSON.stringify({ pid: 111, host: "here", since: new Date().toISOString() }));
+        const pids = [201, 202, 203, 204, 205, 206];
+        const got = await Promise.all(pids.map((pid) => m.acquireUpdateLock(file, opts(pid, { alive: (other) => other !== 111 }))));
+        const owners = got.filter(Boolean);
+        assert.equal(owners.length, 1, `round ${round}: ${owners.length} holders`);
+        assert.ok(pids.includes(JSON.parse(fs.readFileSync(file, "utf8")).pid), "the lock on disk is the winner's");
+        await owners[0].release();
+        assert.deepEqual(fs.readdirSync(dir), [], "nothing left aside");
+      }
+
+      // A pid reused after a reboot keeps nothing forever.
+      const t0 = Date.parse("2026-11-18T12:00:00Z");
+      const boot0 = t0 - 3_600_000;
+      const boot1 = t0 + 3_600_000;
+      const old = await m.acquireUpdateLock(file, opts(111, { now: () => t0, boot: boot0 }));
+      assert.ok(old);
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { now: () => t0 + 10 * 60 * 1000, boot: boot1 })), null);
+      const late = await m.acquireUpdateLock(file, opts(222, { now: () => t0 + m.LOCK_MAX_HOLD_MS + 1000, boot: boot1 }));
+      assert.ok(late, "stale once older than the longest update");
+      await late.release();
+
+      // Same boot: a stuck installer left by a crashed Codara still holds it
+      // past the expiry, so no rollback starts next to it.
+      fs.writeFileSync(file, JSON.stringify({ pid: 111, host: "here", since: new Date(t0).toISOString(), boot: boot0, installer: 333 }));
+      const stuck = { now: () => t0 + m.LOCK_MAX_HOLD_MS + 60_000, boot: boot0, alive: (pid) => pid !== 111 };
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { ...stuck, installerAlive: (pid) => pid === 333 })), null, "a live installer of this boot holds it");
+      const ended = await m.acquireUpdateLock(file, opts(222, stuck));
+      assert.ok(ended, "taken over once that installer is gone");
+      await ended.release();
+
+      // Same boot, but a pid reused by an unrelated process: held only up to
+      // the same-boot limit, not for as long as that process lives.
+      fs.writeFileSync(file, JSON.stringify({ pid: 111, host: "here", since: new Date(t0).toISOString(), boot: boot0, installer: 333 }));
+      const reused = { boot: boot0, alive: () => true, installerAlive: () => true };
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { ...reused, now: () => t0 + m.SAME_BOOT_MAX_HOLD_MS - 60_000 })), null);
+      const freed = await m.acquireUpdateLock(file, opts(222, { ...reused, now: () => t0 + m.SAME_BOOT_MAX_HOLD_MS + 1000 }));
+      assert.ok(freed, "a same-boot lock has a time limit too");
+      await freed.release();
+
+      // Dated in the future (the clock was set back after a crash): stale.
+      const ahead = await m.acquireUpdateLock(file, opts(111, { now: () => t0 + 60 * 60 * 1000, boot: boot0 }));
+      assert.ok(ahead);
+      const behind = await m.acquireUpdateLock(file, opts(222, { now: () => t0, boot: boot1 }));
+      assert.ok(behind, "a lock from the future is not held forever");
+      await behind.release();
+
+      // Another machine's lock (a shared home folder): its pids mean nothing here.
+      const there = await m.acquireUpdateLock(file, opts(111, { host: "there" }));
+      assert.ok(there);
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { alive: () => false })), null, "not taken over from another host");
+      fs.rmSync(file, { force: true });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // Under the lock the file is read again: what another Codara wrote since
+  // this one read it is kept, not overwritten.
+  {
+    let disk = { failed: {}, notOffered: {} };
+    const w = world({ auto: false });
+    w.deps.loadState = async () => JSON.parse(JSON.stringify(disk));
+    w.deps.saveState = async (state) => {
+      disk = JSON.parse(JSON.stringify(state));
+    };
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    disk.failed.codex = "0.171.0";
+    disk.broken = { codex: "0.171.0" };
+    await service.update("claude");
+    assert.equal(tool(service.snapshot(), "claude").phase, "updated");
+    assert.deepEqual(disk.failed, { codex: "0.171.0" }, "another window's failed version survives");
+    assert.deepEqual(disk.broken, { codex: "0.171.0" });
+
+    // A record another window cleared is not recovered.
+    const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    let second = { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } };
+    const w2 = world({ auto: false, tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } } });
+    let reads = 0;
+    w2.deps.loadState = async () => (reads++ === 0 ? second : { failed: {}, notOffered: {} });
+    w2.deps.saveState = async (state) => {
+      second = state;
+    };
+    const recovering = m.createAgentCliUpdateService(w2.deps);
+    await recovering.start();
+    assert.equal(w2.commands.length, 0, "the record was gone from disk under the lock");
+    recovering.stop();
+  }
+
+  // The service writes the installer's pid into the lock as it starts.
+  {
+    const w = world({ auto: false });
+    const noted = [];
+    const order = [];
+    w.deps.lock = async () => ({
+      release: async () => order.push("release"),
+      // The rename finishes after the installer has exited.
+      installerStarted: async (pid) => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        noted.push(pid);
+        order.push("noted");
+      },
+    });
+    const run = w.deps.run;
+    w.deps.run = async (command, timeoutMs, onStart) => {
+      onStart?.(4242);
+      return run(command, timeoutMs);
+    };
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.update("claude");
+    await service.settled();
+    assert.deepEqual(noted, [4242]);
+    assert.deepEqual(order, ["noted", "release"], "the lock is released only after the installer was noted in it");
+  }
+
+  // The real runner reports the installer's pid.
+  if (process.platform !== "win32") {
+    let started = null;
+    await m.runSetupCommand({ executable: "/bin/sh", args: ["-c", "exit 0"] }, 5000, undefined, (pid) => (started = pid));
+    assert.ok(Number.isInteger(started) && started > 0, "the runner reports the pid");
+  }
+
+  // Another tool's update gets the lock before the recovery retry is due:
+  // the earlier update is finished first, not overwritten.
+  {
+    const record = {
+      tool: "codex",
+      fromVersion: "0.170.0",
+      fromRealPath: "/home/u/.codex/packages/standalone/releases/0.170.0/bin/codex",
+      fromBinaryPath: "/home/u/.local/bin/codex",
+      toVersion: "0.171.0",
+    };
+    const w = world({
+      auto: false,
+      state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } },
+      tools: { codex: { version: null, realPath: "/home/u/.codex/packages/standalone/releases/0.171.0/bin/codex", plan: nativePlan("codex") } },
+      onRun: (command, tools) => {
+        const [id] = command.display.split(" ");
+        if (id === "codex") tools.codex = { ...tools.codex, version: command.args[1], realPath: record.fromRealPath };
+        else tools[id] = { ...tools[id], version: w.latest[id], realPath: `${tools[id].realPath}-new` };
+        return "ok";
+      },
+    });
+    let held = true;
+    w.deps.lock = async () => (held ? null : { release: async () => {}, installerStarted: async () => {} });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.equal(w.commands.length, 0, "the installer the last run left still holds the lock");
+    held = false;
+    await service.update("claude");
+    await service.settled();
+    const codex = tool(service.snapshot(), "codex");
+    assert.equal(codex.phase, "rolled-back", `the Codex update cut short is finished first: ${codex.message}`);
+    assert.equal(w.commands[0].display.split(" ")[0], "codex");
+    assert.equal(tool(service.snapshot(), "claude").phase, "updated");
+    assert.equal(w.saved.inProgress, undefined);
+    service.stop();
+
+    // A record whose tool cannot be found is kept, and holds up no other tool.
+    const w2 = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } } });
+    delete w2.tools.codex;
+    const service2 = m.createAgentCliUpdateService(w2.deps);
+    await service2.start();
+    await service2.check();
+    await service2.update("claude");
+    await service2.settled();
+    assert.equal(tool(service2.snapshot(), "claude").phase, "updated", "Claude updates while Codex is missing");
+    assert.equal(w2.saved.inProgress?.codex?.fromVersion, "0.170.0", "the Codex record survives");
+    assert.equal(w2.saved.inProgress?.claude, undefined, "and Claude's own record is cleared");
+    assert.match(tool(service2.snapshot(), "codex").message, /Codex cannot be found now/);
+    service2.stop();
+
+    // The clicked tool's own record, and the tool works: the click updates it.
+    const ownRecord = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const w3 = world({ auto: false, state: { failed: {}, notOffered: {}, inProgress: { claude: ownRecord } } });
+    let held3 = true;
+    w3.deps.lock = async () => (held3 ? null : { release: async () => {}, installerStarted: async () => {} });
+    const service3 = m.createAgentCliUpdateService(w3.deps);
+    await service3.start();
+    await service3.check();
+    held3 = false;
+    await service3.update("claude");
+    await service3.settled();
+    assert.equal(tool(service3.snapshot(), "claude").phase, "updated", "a click whose own record turns out fine still updates");
+    assert.equal(w3.saved.inProgress, undefined);
+    service3.stop();
+
+    // The file: one validated record per tool; a file from before holds one.
+    const single = { ...record };
+    assert.deepEqual(m.inProgressFrom(single), { codex: single }, "a single old record is read as its tool's");
+    assert.deepEqual(m.inProgressFrom({ codex: single, claude: { ...single } }), { codex: single }, "a record under another tool's key is dropped");
+    assert.deepEqual(m.inProgressFrom({ codex: { ...single, fromRealPath: "relative/codex" } }), undefined);
+    assert.equal(m.inProgressFrom({ grok: null, codex: "x" }), undefined);
+  }
+
+  // A held lock at start: recovery is tried again later, not given up.
+  {
+    const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const w = world({
+      auto: false,
+      state: { failed: {}, notOffered: {}, inProgress: { [record.tool]: record } },
+      tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
+      onRun: (command, tools) => {
+        tools.claude = { ...tools.claude, version: command.args[1], realPath: "/home/u/.local/share/claude/versions/2.1.325" };
+        return "ok";
+      },
+    });
+    let held = true;
+    w.deps.lock = async () => (held ? null : { release: async () => {}, installerStarted: async () => {} });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.equal(w.commands.length, 0);
+    const retry = w.scheduled.find((entry) => entry.delayMs === m.WAITING_POLL_MS && !entry.cancelled);
+    assert.ok(retry, "recovery is tried again later");
+    held = false;
+    retry.task();
+    await service.settled();
+    assert.equal(tool(service.snapshot(), "claude").phase, "rolled-back");
+    service.stop();
+  }
+}
+
 // ── What the terminal launcher reads ───────────────────────────────────────
 
 async function launchGuard(m) {
@@ -732,6 +1151,7 @@ async function launchGuard(m) {
   m.setToolBusy("claude", true, "Claude Code");
   assert.throws(() => m.beginToolLaunch("claude"), /Claude Code is updating\. Try again in a few minutes\./);
   assert.equal(m.launchesStarting("claude"), 0);
+  assert.deepEqual(m.busyTools(), ["claude"], "the quit prompt sees the tool being swapped");
   m.beginToolLaunch("codex")();
   m.setToolBusy("claude", false);
   m.beginToolLaunch("claude")();
