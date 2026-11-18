@@ -31,9 +31,10 @@
 // CI splits one run across two machines and holds it to a time budget:
 // - CODARA_TEST_PART=pool runs every suite except the serial ones, and
 //   CODARA_TEST_PART=serial runs only those.
-// - CODARA_TEST_SHARD=k/n keeps every n-th suite of that part in name order,
-//   starting with the k-th, so n machines run all of it between them. Name
-//   order needs no shared timings, so every shard agrees on the split.
+// - CODARA_TEST_SHARD=k/n keeps every n-th suite of that part, starting with
+//   the k-th, so n machines run all of it between them. The slow suites in
+//   SLOW_POOL_SUITES are dealt first by their listed seconds, then the rest in
+//   name order. The split uses only what is committed, so every shard agrees.
 // - CODARA_TEST_BUDGET_SECONDS stops the run once it has taken that long and
 //   fails it with a message naming what was stopped and what never started,
 //   so a slow suite fails here instead of hitting the job's timeout.
@@ -410,12 +411,61 @@ function shardFromEnv(env = process.env) {
   return { index: k - 1, count: n };
 }
 
-function selectShard(tests, shard) {
+// The pool suites that take 15 s or more when run one at a time on a macOS
+// runner, slowest first, with those seconds (CI run 44202611290). Together
+// they are about half the pool's time, so they decide the balance; the
+// hundreds of short suites left do not, whichever way they fall.
+// test-run-all-tests-shard.cjs fails when one of them is renamed or removed.
+const SLOW_POOL_SUITES = {
+  "test-agent-worktrees.cjs": 187,
+  "test-agent-worktree-differential.cjs": 81,
+  "test-worktree-auto-merged.cjs": 80,
+  "test-worktree-rail-cleanup.cjs": 69,
+  "test-worktree-auto-archive.cjs": 55,
+  "test-worktree-stacked-merge.cjs": 51,
+  "test-agent-worktree-contracts.cjs": 36,
+  "test-agent-socket.cjs": 36,
+  "test-worktree-setup.cjs": 30,
+  "test-worktree-cleanup.cjs": 28,
+  "test-cos-verify-gate.cjs": 24,
+  "test-agent-worktree-base.cjs": 23,
+  "test-git-read-pacing.cjs": 20,
+  "test-worktree-cleanup-agent.cjs": 17,
+  "test-preview-waits.cjs": 17,
+  "test-remote-access-hostile.mjs": 16,
+};
+
+// Each listed slow suite, in the order listed, goes to the shard with the
+// fewest listed seconds so far. The rest follow in name order, one to each
+// shard in turn, starting with the lightest.
+function selectShard(tests, shard, slow = SLOW_POOL_SUITES) {
   if (!shard) return tests;
-  return [...tests].sort().filter((_, i) => i % shard.count === shard.index);
+  const load = new Array(shard.count).fill(0);
+  const lightest = () => load.indexOf(Math.min(...load));
+  const owner = new Map();
+  for (const [name, seconds] of Object.entries(slow)) {
+    if (!tests.includes(name)) continue;
+    const k = lightest();
+    owner.set(name, k);
+    load[k] += seconds;
+  }
+  const start = lightest();
+  const rest = tests.filter((f) => !owner.has(f)).sort();
+  rest.forEach((f, i) => owner.set(f, (start + i) % shard.count));
+  return [...owner].filter(([, k]) => k === shard.index).map(([f]) => f).sort();
 }
 
-module.exports = { listTests, runTests, jobsFromEnv, runDirBase, selectPart, selectShard, shardFromEnv, budgetFromEnv };
+module.exports = {
+  listTests,
+  runTests,
+  jobsFromEnv,
+  runDirBase,
+  selectPart,
+  selectShard,
+  shardFromEnv,
+  budgetFromEnv,
+  SLOW_POOL_SUITES,
+};
 
 if (require.main === module) {
   const filter = process.argv[2] ? new RegExp(process.argv[2]) : null;

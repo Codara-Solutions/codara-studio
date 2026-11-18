@@ -54,13 +54,13 @@ jobs:
       - name: Unit suites, all but the serial ones, this shard
         env:
           CODARA_TEST_PART: pool
-          # Every other suite in name order (run-all-tests.cjs).
+          # Half the pool: the slow suites listed in run-all-tests.cjs
+          # (SLOW_POOL_SUITES) balanced by their seconds, the rest by name.
           CODARA_TEST_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
           # One suite at a time: nothing timing-sensitive shares the 3 cores.
           CODARA_TEST_JOBS: "1"
-          # Each shard's suites took 603 and 640 s of suite time in the
-          # two-at-a-time pool of 17 Nov (run 44193042343), less alone. 1380 s
-          # still leaves the job's setup (about 3 min) inside its 30 min, so
+          # About 650 s of suite time per shard one at a time (run
+          # 44202611290: 1302 s for the whole pool). 1380 s still leaves the job's setup (about 3 min) inside its 30 min, so
           # the budget, not the timeout, names the slow suites.
           CODARA_TEST_BUDGET_SECONDS: "1380"
         run: npm run test:all

@@ -62,8 +62,9 @@ How `scripts/run-all-tests.cjs` works:
     and the next run starts the longest suites first.
   - `CODARA_TEST_PART=pool` runs every suite except the serial ones, and
     `CODARA_TEST_PART=serial` only those. CI runs them on three machines at
-    once: the pool in two shards (`CODARA_TEST_SHARD=1/2` and `2/2`, every
-    other suite in name order), the serial suites on the third.
+    once: the pool in two shards (`CODARA_TEST_SHARD=1/2` and `2/2`: the
+    slow suites listed in `SLOW_POOL_SUITES` balanced by their seconds, the
+    rest in name order), the serial suites on the third.
   - `CODARA_TEST_BUDGET_SECONDS=900` stops the run once it has taken that
     long and fails it, naming the suites it stopped and the ones that never
     started. CI sets one so a slow suite fails with that message instead of
@@ -152,7 +153,7 @@ CI (`.github/workflows/ci.yml`, macOS, pull requests into `main` and pushes
 to it) runs on three machines at once. `test (pool 1/2)` and `test (pool 2/2)`
 each run `npm run build`, `npx playwright install chromium`, then
 `npm run test:all` with `CODARA_TEST_PART=pool`, `CODARA_TEST_SHARD=1/2` or
-`2/2` (every other pool suite in name order) and one suite at a time;
+`2/2` (half the pool each, balanced by `SLOW_POOL_SUITES`) and one suite at a time;
 `test (serial, typecheck)` runs the four typechecks and the build, then the
 serial suites. Each has a time budget (`CODARA_TEST_BUDGET_SECONDS`), and the
 required `test` check passes only when all three do. `.github/workflows/ci-linux.yml` runs the
