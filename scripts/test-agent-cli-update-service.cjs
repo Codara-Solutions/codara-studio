@@ -912,17 +912,28 @@ async function crashSafety(m) {
 
       // A pid reused after a reboot keeps nothing forever.
       const t0 = Date.parse("2026-11-18T12:00:00Z");
-      const old = await m.acquireUpdateLock(file, opts(111, { now: () => t0 }));
+      const boot0 = t0 - 3_600_000;
+      const boot1 = t0 + 3_600_000;
+      const old = await m.acquireUpdateLock(file, opts(111, { now: () => t0, boot: boot0 }));
       assert.ok(old);
-      assert.equal(await m.acquireUpdateLock(file, opts(222, { now: () => t0 + 10 * 60 * 1000 })), null);
-      const late = await m.acquireUpdateLock(file, opts(222, { now: () => t0 + m.LOCK_MAX_HOLD_MS + 1000 }));
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { now: () => t0 + 10 * 60 * 1000, boot: boot1 })), null);
+      const late = await m.acquireUpdateLock(file, opts(222, { now: () => t0 + m.LOCK_MAX_HOLD_MS + 1000, boot: boot1 }));
       assert.ok(late, "stale once older than the longest update");
       await late.release();
 
+      // Same boot: a stuck installer left by a crashed Codara still holds it
+      // past the expiry, so no rollback starts next to it.
+      fs.writeFileSync(file, JSON.stringify({ pid: 111, host: "here", since: new Date(t0).toISOString(), boot: boot0, installer: 333 }));
+      const stuck = { now: () => t0 + m.LOCK_MAX_HOLD_MS + 60_000, boot: boot0, alive: (pid) => pid !== 111 };
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { ...stuck, installerAlive: (pid) => pid === 333 })), null, "a live installer of this boot holds it");
+      const ended = await m.acquireUpdateLock(file, opts(222, stuck));
+      assert.ok(ended, "taken over once that installer is gone");
+      await ended.release();
+
       // Dated in the future (the clock was set back after a crash): stale.
-      const ahead = await m.acquireUpdateLock(file, opts(111, { now: () => t0 + 60 * 60 * 1000 }));
+      const ahead = await m.acquireUpdateLock(file, opts(111, { now: () => t0 + 60 * 60 * 1000, boot: boot0 }));
       assert.ok(ahead);
-      const behind = await m.acquireUpdateLock(file, opts(222, { now: () => t0 }));
+      const behind = await m.acquireUpdateLock(file, opts(222, { now: () => t0, boot: boot1 }));
       assert.ok(behind, "a lock from the future is not held forever");
       await behind.release();
 
