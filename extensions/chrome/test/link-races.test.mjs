@@ -556,5 +556,32 @@ export async function run() {
     assert.equal(client.status.state, "idle");
   }
 
-  return "link races: a cancelled pairing saves no token, an old revocation never erases a new pairing, an old answer never goes out on a new link, an unsealed revocation keeps the saved pairing, a search cancelled mid-hello adopts nothing, a close never overtakes the frame before it, a timed-out handshake adopts nothing, a cancelled re-pairing keeps the earlier pairing, a revocation clears only its own pairing, an old retry never clears a newer one, a reconnect never reads a save that may be taken back, Disconnect keeps no approval in flight and lets nothing reconnect with the token it forgets, and a proven Codara's revocation counts past the probe deadline";
+  // 16. Disconnect, the old link drops while "unpair" leaves, and the user
+  // presses Connect again: the end of Disconnect does not cancel that search.
+  {
+    const codara = fakeCodara();
+    const store = newStore();
+    await paired(codara, store);
+    const client = makeClient(codara, store);
+    await client.connect();
+    await until(() => client.status.state === "connected", "the proven link");
+    const old = codara.last();
+    const sealing = hold("encrypt");
+    const forgetting = client.forget({ type: "unpair" });
+    await sealing.reached;
+    old.hangUp();
+    await wait(10);
+    codara.answer = false;
+    codara.allow = false;
+    void client.connect({ pair: true });
+    await until(() => codara.last() !== old && codara.last().hello, "the new hello");
+    sealing.release();
+    await forgetting;
+    await codara.last().answerHello();
+    await until(() => client.status.state === "pairing", "the new pairing code");
+    assert.equal(store.token, null, "and the old pairing is forgotten");
+    client.disconnect();
+  }
+
+  return "link races: a cancelled pairing saves no token, an old revocation never erases a new pairing, an old answer never goes out on a new link, an unsealed revocation keeps the saved pairing, a search cancelled mid-hello adopts nothing, a close never overtakes the frame before it, a timed-out handshake adopts nothing, a cancelled re-pairing keeps the earlier pairing, a revocation clears only its own pairing, an old retry never clears a newer one, a reconnect never reads a save that may be taken back, Disconnect keeps no approval in flight, lets nothing reconnect with the token it forgets and never cancels a Connect pressed after it, and a proven Codara's revocation counts past the probe deadline";
 }

@@ -530,6 +530,7 @@ export class LinkClient {
     if (farewell) this.send(farewell);
     const flushed = socket?.outbox;
     this.epoch += 1;
+    const epoch = this.epoch;
     this.connecting = null;
     this.clearReconnect();
     // Queued before anything awaits: a reconnect meanwhile (the alarm, the
@@ -540,9 +541,11 @@ export class LinkClient {
       await Promise.race([flushed, new Promise((resolve) => (timer = setTimeout(resolve, FAREWELL_TIMEOUT_MS)))]);
       clearTimeout(timer);
     }
-    if (!this.socket || this.socket === socket) this.disconnect("idle");
-    else if (socket) {
-      // A link the user started since stays; only the old socket closes.
+    // Nothing started since (the old link may have dropped meanwhile):
+    // stop. A search or link the user started since stays; only the old
+    // socket closes.
+    if (this.epoch === epoch || (!this.socket && !this.connecting)) this.disconnect("idle");
+    else if (socket && socket !== this.socket) {
       socket.onclose = null;
       try {
         socket.close();

@@ -227,11 +227,9 @@ async function handleRequest(request, link) {
   await ready;
   stillAsked(link);
   switch (request.type) {
-    case "attach": {
-      const tab = await usableTab(request.tabId);
-      await attachFor(tab.id, link);
+    case "attach":
+      await attachFor(request.tabId, link);
       return {};
-    }
     case "detach":
       await detachTab(Number(request.tabId));
       return {};
@@ -266,12 +264,16 @@ async function handleRequest(request, link) {
 // go again, and a newer link's attach on that tab waits until it has.
 const attaching = new Map();
 
-async function attachFor(tabId, link) {
+async function attachFor(requestedTabId, link) {
+  const tabId = (await usableTab(requestedTabId)).id;
   const before = attaching.get(tabId);
   const attach = (async () => {
     await before;
-    stillAsked(link);
+    // Checked again after the wait: the user may have unshared the tab, or
+    // blocked its site, meanwhile.
+    await usableTab(tabId);
     if (state.attached.includes(tabId)) return;
+    stillAsked(link);
     await chrome.debugger.attach({ tabId }, "1.3");
     if (link && !link.live()) {
       await chrome.debugger.detach({ tabId }).catch(() => {});
@@ -620,6 +622,16 @@ async function openTab(request, link) {
 // Puts a tab an agent just opened in the agent's named group in its window,
 // joining one the extension made with that title. Only that new tab moves, so
 // no tab the user shared is ever grouped. A failure leaves it ungrouped.
+// The link that asked closed while the tab joined `groupId`: the tab leaves
+// it again if it is still there (Chrome removes a group left empty), and
+// the group is not recorded as the agents'.
+async function leftIfStale(link, tabId, groupId) {
+  if (!link || link.live()) return false;
+  const now = await chrome.tabs.get(tabId).catch(() => null);
+  if (now?.groupId === groupId) await chrome.tabs.ungroup(tabId).catch(() => {});
+  return true;
+}
+
 async function groupOpenedTab(tab, requested, link) {
   const title = agentGroupTitle(requested);
   if (!title || !chrome.tabGroups) return null;
@@ -630,16 +642,13 @@ async function groupOpenedTab(tab, requested, link) {
     const existing = agentGroupFor(groups, state.agentGroups, title);
     if (existing) {
       await chrome.tabs.group({ groupId: existing.id, tabIds: [tab.id] });
+      if (await leftIfStale(link, tab.id, existing.id)) return null;
       return existing.title;
     }
     const groupId = await chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId: tab.windowId } });
-    if (link && !link.live()) {
-      // The link closed while the group was made: the tab leaves it, and
-      // Chrome removes the empty group.
-      await chrome.tabs.ungroup(tab.id).catch(() => {});
-      return null;
-    }
+    if (await leftIfStale(link, tab.id, groupId)) return null;
     await chrome.tabGroups.update(groupId, { title });
+    if (await leftIfStale(link, tab.id, groupId)) return null;
     await save({ agentGroups: withValue(state.agentGroups, groupId) });
     return title;
   } catch {
