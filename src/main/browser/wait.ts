@@ -29,6 +29,8 @@ export const WAIT_LOAD_DEFAULT_MS = 15_000;
 export const WAIT_MAX_MS = 50_000;
 const TICK_MS = 100;
 const PROBE_TIMEOUT_MS = 1_500;
+// The shortest a page read may take, even when the wait's time is nearly up.
+const MIN_READ_MS = 250;
 const NETWORK_IDLE_MS = 500;
 /** A click that navigates starts loading a moment after it returns. */
 const ACTION_SETTLE_MS = 250;
@@ -281,6 +283,8 @@ export interface Verdict {
   waiting: string[];
   /** A condition that can no longer be met (the dev server reported an error). */
   failure?: string;
+  /** An unmet condition needed a page read, and there was none. */
+  unread?: boolean;
 }
 
 /** Decide whether the conditions hold; pure, for tests. */
@@ -292,13 +296,17 @@ export function checkWait(
   startedAt: number,
 ): Verdict {
   const waiting: string[] = [];
+  let unread = false;
   const since = activity.lastActionAt || startedAt;
   if (request.navigation && !activity.navigations.some((nav) => nav.at >= since)) {
     waiting.push(activity.lastActionAt ? "no navigation since your last action" : "no navigation since the wait started");
   }
   if (request.url) {
     const href = probe?.href ?? activity.navigations.at(-1)?.url ?? "";
-    if (!matchUrl(request.url, href)) waiting.push(`url is ${href || "unknown"}`);
+    if (!matchUrl(request.url, href)) {
+      waiting.push(`url is ${href || "unknown"}`);
+      if (!href) unread = true;
+    }
   }
   if (request.load) {
     // A request no load followed within a few seconds was abandoned, whatever
@@ -308,17 +316,28 @@ export function checkWait(
     const pendingNavigation = requested || activity.loadingStartedAt > activity.loadingStoppedAt;
     const actedAt = lastAgentActivityAt(activity);
     const settling = actedAt > 0 && now - actedAt < ACTION_SETTLE_MS;
-    const ready = probe?.readyState ?? "unknown";
+    // With no page read (a page too busy to answer), the main frame's loading
+    // events still tell whether it loaded, so what else holds the wait (a
+    // request in flight) can be named. They only describe: without a read a
+    // load wait never passes, since a busy page may be about to navigate.
+    const before = waiting.length;
+    const loadedByEvents = activity.loadingStartedAt > 0 && activity.loadingStoppedAt >= activity.loadingStartedAt;
+    const ready = probe?.readyState ?? (loadedByEvents ? "complete" : "unknown");
     if (pendingNavigation) waiting.push("a navigation is still loading");
     else if (settling) waiting.push("the last action just happened");
     else if (request.load === "domcontentloaded" ? ready === "loading" || ready === "unknown" : ready !== "complete") {
       waiting.push(`document.readyState is ${ready}`);
+      if (ready === "unknown") unread = true;
     } else if (request.load === "networkidle") {
       const busy = activity.inFlight.size;
       if (busy > 0) {
         const urls = [...activity.inFlight.values()].slice(0, 3).map((request) => request.url.slice(0, 120));
         waiting.push(`${busy} request${busy === 1 ? "" : "s"} in flight (${urls.join(", ")})`);
       } else if (now - activity.lastNetworkAt < NETWORK_IDLE_MS) waiting.push("the network was busy less than 500 ms ago");
+    }
+    if (!probe && waiting.length === before) {
+      waiting.push("document.readyState is unknown");
+      unread = true;
     }
   }
   let failure: string | undefined;
@@ -362,7 +381,10 @@ export function checkWait(
   }
   if (request.selector) {
     const sel = probe?.selector;
-    if (!sel) waiting.push(`could not read the page to check ${request.selector}`);
+    if (!sel) {
+      waiting.push(`could not read the page to check ${request.selector}`);
+      unread = true;
+    }
     else if (!sel.matched) {
       const old = sel.count - sel.fresh;
       const detail = sel.count === 0
@@ -377,8 +399,9 @@ export function checkWait(
   }
   if (request.stableMs && (!probe || probe.quietMs < request.stableMs)) {
     waiting.push(`the DOM changed ${probe ? `${probe.quietMs} ms` : "too recently"} ago`);
+    if (!probe) unread = true;
   }
-  return { ok: waiting.length === 0 && !failure, waiting, ...(failure ? { failure } : {}) };
+  return { ok: waiting.length === 0 && !failure, waiting, ...(failure ? { failure } : {}), ...(unread ? { unread } : {}) };
 }
 
 function describeConditions(request: WaitRequest): string {
@@ -417,7 +440,10 @@ export async function waitForPage(target: BrowserTarget, request: WaitRequest): 
   let probeError: string | null = null;
   for (;;) {
     try {
-      probe = await bounded(target.evaluate<PageProbe>(expression), PROBE_TIMEOUT_MS);
+      // A read never runs past the wait's own deadline (by more than MIN_READ_MS):
+      // a page too busy to answer must not turn a 300 ms wait into 1.5 s.
+      const readMs = Math.min(PROBE_TIMEOUT_MS, Math.max(MIN_READ_MS, deadline - Date.now()));
+      probe = await bounded(target.evaluate<PageProbe>(expression), readMs);
       probeError = null;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -446,7 +472,7 @@ export async function waitForPage(target: BrowserTarget, request: WaitRequest): 
       };
     }
     if (now >= deadline) {
-      const seen = verdict.waiting.join("; ") + (probeError && !probe ? `; last page read failed: ${probeError}` : "");
+      const seen = verdict.waiting.join("; ") + (probeError && !probe && verdict.unread ? `; last page read failed: ${probeError}` : "");
       return {
         ok: false,
         error: `Timed out after ${request.timeoutMs} ms waiting for ${describeConditions(request)}. Seen: ${seen}.`,

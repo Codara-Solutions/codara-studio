@@ -28,6 +28,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
+const { unusedPort } = require("./unused-port.cjs");
 const os = require("node:os");
 const path = require("node:path");
 const esbuild = require("esbuild");
@@ -437,21 +438,6 @@ async function devServer(body) {
   return { server, port: server.address().port };
 }
 
-/** A port in [20000, 30000) that nothing on this machine holds right now. */
-async function freePortInRange(avoid = new Set()) {
-  for (let i = 0; i < 200; i += 1) {
-    const port = 20_000 + Math.floor(Math.random() * 10_000);
-    if (avoid.has(port)) continue;
-    const probe = net.createServer();
-    const free = await new Promise((resolve) => {
-      probe.once("error", () => resolve(false));
-      probe.listen({ host: "127.0.0.1", port, exclusive: true }, () => probe.close(() => resolve(true)));
-    });
-    if (free) return port;
-  }
-  throw new Error("no free port in range");
-}
-
 function get(port, urlPath = "/") {
   return new Promise((resolve, reject) => {
     const req = http.get({ host: "127.0.0.1", port, path: urlPath, agent: false }, (res) => {
@@ -516,7 +502,7 @@ async function testLifecycle() {
 
   // A server already running when the host connects is offered, not forwarded.
   const early = await devServer("early");
-  const earlyRemote = await freePortInRange();
+  const earlyRemote = await unusedPort();
   remote.ports.set(earlyRemote, early.port);
   await (await conn.getConnection("box")).ensure();
   await waitFor("the first listing", async () => (await snapshot()).listing === "ss");
@@ -529,7 +515,7 @@ async function testLifecycle() {
 
   // A server that starts afterwards is forwarded to the same local port and announced.
   const vite = await devServer("vite");
-  const viteRemote = await freePortInRange(new Set([earlyRemote]));
+  const viteRemote = await unusedPort(new Set([earlyRemote]));
   remote.ports.set(viteRemote, vite.port);
   const viteForward = await pollUntil("the new port to be forwarded", () => forwardOf(viteRemote));
   assert.equal(viteForward.source, "listening");
@@ -547,7 +533,7 @@ async function testLifecycle() {
   ok("a port that starts listening is forwarded on the same number, announced once, and serves HTTP");
 
   // A local port already taken moves the forward to a nearby one.
-  const busyRemote = await freePortInRange(new Set([earlyRemote, viteRemote]));
+  const busyRemote = await unusedPort(new Set([earlyRemote, viteRemote]));
   const blocker = await listen(net.createServer(), busyRemote);
   const api2 = await devServer("api");
   remote.ports.set(busyRemote, api2.port);
@@ -560,8 +546,8 @@ async function testLifecycle() {
 
   // A URL printed in a remote terminal (an agent's codara_terminal_create pane is one).
   const web = await devServer("web");
-  const webRemote = await freePortInRange(new Set([earlyRemote, viteRemote, busyRemote]));
-  const deadRemote = await freePortInRange(new Set([earlyRemote, viteRemote, busyRemote, webRemote]));
+  const webRemote = await unusedPort(new Set([earlyRemote, viteRemote, busyRemote]));
+  const deadRemote = await unusedPort(new Set([earlyRemote, viteRemote, busyRemote, webRemote]));
   harness.sessions = [
     { id: "pane-agent", cwd: "ssh://box/home/codara/app" },
     { id: "pane-local", cwd: TMP },
@@ -621,7 +607,7 @@ async function testLifecycle() {
 
   // codara_preview_navigate: localhost:<remote port> opens the forwarded local port.
   const preview = await devServer("preview");
-  const previewRemote = await freePortInRange(new Set([earlyRemote, viteRemote, busyRemote, webRemote, deadRemote]));
+  const previewRemote = await unusedPort(new Set([earlyRemote, viteRemote, busyRemote, webRemote, deadRemote]));
   remote.hidden.add(previewRemote);
   remote.ports.set(previewRemote, preview.port);
   const resolved = await api.resolveRemotePreviewUrl("ws-remote", `http://localhost:${previewRemote}/app?x=1`);
