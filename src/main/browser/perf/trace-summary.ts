@@ -8,6 +8,12 @@ export interface TraceSummaryInput {
   /** The tab's main frame id; its renderer's main thread is the one summarized. */
   frameId: string | null;
   maxBytes: number;
+  /**
+   * A traced load: what ran before its first navigation belongs to the page
+   * being replaced and to the call that reloads it, so the main thread,
+   * scripts and long tasks start there. An interaction trace keeps it all.
+   */
+  fromNavigation?: boolean;
 }
 
 export interface TraceLongTask {
@@ -117,6 +123,19 @@ export function summarizeTraceFile(input: TraceSummaryInput): TraceSummary {
     return [fn && `${fn}()`, url].filter(Boolean).join(" ") || event.name;
   };
 
+  // The main frame's navigations, oldest first.
+  const navigations = events.filter((event) => event.name === "navigationStart" && (event.args?.frame === input.frameId || event.args?.data?.frame === input.frameId)).sort((a, b) => a.ts - b.ts);
+  // A slice that starts before the cut drops with everything inside it.
+  const cut = input.fromNavigation && navigations.length ? navigations[0].ts : -Infinity;
+  let droppedUntil = -Infinity;
+  const counted = slices.filter((event) => {
+    if (event.ts < cut) {
+      droppedUntil = Math.max(droppedUntil, event.ts + (event.dur ?? 0));
+      return false;
+    }
+    return event.ts >= droppedUntil;
+  });
+
   const time = { scripting: 0, rendering: 0, painting: 0, loading: 0, other: 0 };
   const scripts = new Map<string, number>();
   const tasks: Array<{ event: TraceEvent; children: TraceEvent[] }> = [];
@@ -128,7 +147,7 @@ export function summarizeTraceFile(input: TraceSummaryInput): TraceSummary {
       time[category(frame.event.name) as keyof typeof time] += self;
     }
   };
-  for (const event of slices) {
+  for (const event of counted) {
     closeUntil(event.ts);
     const parent = stack[stack.length - 1];
     if (parent) parent.childTime += event.dur ?? 0;
@@ -149,7 +168,6 @@ export function summarizeTraceFile(input: TraceSummaryInput): TraceSummary {
   // Times are relative to the main frame's last navigation in the trace, or the trace start.
   let origin = start;
   const marks: TraceSummary["marks"] = {};
-  const navigations = events.filter((event) => event.name === "navigationStart" && (event.args?.frame === input.frameId || event.args?.data?.frame === input.frameId)).sort((a, b) => a.ts - b.ts);
   if (navigations.length) origin = navigations[navigations.length - 1].ts;
   const ms = (us: number) => Math.round(us / 100) / 10;
   const ofFrame = (event: TraceEvent) => (event.args?.frame ?? event.args?.data?.frame) === input.frameId && event.ts >= origin;
@@ -167,9 +185,7 @@ export function summarizeTraceFile(input: TraceSummaryInput): TraceSummary {
     marks.cls = Math.round(shifts.reduce((sum, event) => sum + Number((event.args?.data as { weighted_score_delta?: number } | undefined)?.weighted_score_delta ?? 0), 0) * 1000) / 1000;
   }
 
-  // In a traced load, what ran before its navigation started belongs to the
-  // page being replaced (and to the call that reloads it), not to the load.
-  const longTasks = tasks.filter((task) => (task.event.dur ?? 0) >= 50_000 && (!navigations.length || task.event.ts >= origin));
+  const longTasks = tasks.filter((task) => (task.event.dur ?? 0) >= 50_000);
   const causeOf = (task: { event: TraceEvent; children: TraceEvent[] }) => {
     const byLength = [...task.children].sort((a, b) => (b.dur ?? 0) - (a.dur ?? 0));
     // A script that took most of the task is its cause even inside ParseHTML.

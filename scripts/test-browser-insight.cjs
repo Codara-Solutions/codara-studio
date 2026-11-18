@@ -299,13 +299,20 @@ async function summaries(lib) {
 
     const reloadFile = path.join(dir, "reload.json");
     writeReloadTrace(reloadFile);
-    const reload = lib.summarizeTraceFile({ path: reloadFile, frameId: "F1", maxBytes: 1 << 30 });
+    const reload = lib.summarizeTraceFile({ path: reloadFile, frameId: "F1", maxBytes: 1 << 30, fromNavigation: true });
     assert.deepEqual(
       reload.longTasks.longest.map((task) => task.cause),
       ["DocumentLoader::CommitNavigation", "script /perf"],
       "the reload call before the navigation is not a long task of the load, and a commit is not its tiny event",
     );
     assert.equal(reload.longTasks.count, 2);
+    assert.deepEqual(reload.topScripts.map((row) => row.script), ["script /perf", "visibilitychange handler"], "nor one of its scripts");
+    assert.equal(reload.mainThread.busyMs, 270, "nor main-thread time");
+    // An interaction trace keeps what ran before a navigation: the click
+    // that submitted a form is the point of it.
+    const interaction = lib.summarizeTraceFile({ path: reloadFile, frameId: "F1", maxBytes: 1 << 30 });
+    assert.equal(interaction.longTasks.count, 3);
+    assert.equal(interaction.longTasks.longest[0].cause, "script");
 
     await assert.rejects(lib.runInWorker(() => { for (;;) { /* spin */ } }, null, { timeoutMs: 300 }), /longer than/);
     await assert.rejects(lib.runInWorker(() => { throw new Error("boom"); }, null, { timeoutMs: 5_000 }), /boom/);
