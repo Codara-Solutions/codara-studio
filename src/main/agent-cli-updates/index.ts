@@ -107,7 +107,7 @@ function createService(log: (line: string) => void): AgentCliUpdateService {
     inspect: (tool) => inspectInstalledTool(tool, inspectDeps),
     latest: async (tool, method) =>
       fetchLatestVersion({ tool, method, ...(tool === "claude" ? { claudeChannel: await claudeChannel() } : {}) }),
-    run: (command, timeoutMs) => runSetupCommand(spawnableCommand(command, process.platform), timeoutMs),
+    run: (command, timeoutMs, onStart) => runSetupCommand(spawnableCommand(command, process.platform), timeoutMs, undefined, onStart),
     liveSessions: liveToolSessions,
     exists: inspectDeps.exists,
     pi: async () => {

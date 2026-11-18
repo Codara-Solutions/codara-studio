@@ -67,8 +67,14 @@ export interface PersistedUpdateState {
   broken?: Partial<Record<UpdatableAgentCliToolId, string>>;
 }
 
-/** Releases the update lock. */
-export type ReleaseLock = () => Promise<void>;
+/** The machine-wide update lock, held by this Codara. */
+export interface UpdateLock {
+  release: () => Promise<void>;
+  /** The installer's pid: the lock stays held while it runs, even after Codara quits. */
+  installerStarted: (pid: number) => Promise<void>;
+}
+
+const NO_LOCK: UpdateLock = { release: async () => {}, installerStarted: async () => {} };
 
 export interface PiVersionInfo {
   version: string | null;
@@ -80,7 +86,7 @@ export interface UpdateServiceDependencies {
   /** Re-resolves the binary (no cached answer) and reads its version and install method. */
   inspect: (tool: UpdatableAgentCliToolId) => Promise<InstalledTool | null>;
   latest: (tool: UpdatableAgentCliToolId, method: InstalledTool["plan"]["method"]) => Promise<string>;
-  run: (command: CliCommand, timeoutMs: number) => Promise<string>;
+  run: (command: CliCommand, timeoutMs: number, onStart?: (pid: number) => void) => Promise<string>;
   /** Running sessions of the tool; null when the process list cannot be read. */
   liveSessions: (tool: UpdatableAgentCliToolId) => Promise<number | null>;
   exists: (path: string) => Promise<boolean>;
@@ -102,7 +108,7 @@ export interface UpdateServiceDependencies {
   relink?: (link: string, target: string) => Promise<void>;
   platform?: NodeJS.Platform;
   /** The machine-wide update lock; null while another Codara holds it. */
-  lock?: () => Promise<ReleaseLock | null>;
+  lock?: () => Promise<UpdateLock | null>;
 }
 
 interface ToolEntry {
@@ -141,6 +147,8 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
   let cancelWaitingPoll: (() => void) | null = null;
   let cancelDailyCheck: (() => void) | null = null;
   let stopped = false;
+  let heldLock: UpdateLock | null = null;
+  let cancelRecoveryRetry: (() => void) | null = null;
   let unreadableRounds = 0;
   const platform = deps.platform ?? process.platform;
 
@@ -390,8 +398,8 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
         return;
       }
       if (!(await noSessions(tool, origin))) return;
-      const release = deps.lock ? await deps.lock().catch(() => null) : async () => {};
-      if (!release) {
+      const lock = deps.lock ? await deps.lock().catch(() => null) : NO_LOCK;
+      if (!lock) {
         set(tool, {
           pending: current.pending === "manual" ? "manual" : origin,
           phase: "waiting",
@@ -403,13 +411,15 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       current.pending = null;
       current.liveSessions = 0;
       current.generation += 1;
+      heldLock = lock;
       try {
         await performUpdate(tool, origin);
       } catch (error) {
         set(tool, { phase: "failed", message: `The update stopped: ${(error as Error).message.slice(0, 300)}` });
       } finally {
         deps.toolBusy?.(tool, false);
-        await release().catch((error) => deps.log(`could not release the update lock: ${(error as Error).message}`));
+        heldLock = null;
+        await lock.release().catch((error) => deps.log(`could not release the update lock: ${(error as Error).message}`));
       }
     });
     queue = run.catch((error) => deps.log(`${tool}: update failed: ${(error as Error).message}`));
@@ -450,12 +460,20 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     }
   }
 
+  /** An installer, its pid written into the lock as soon as it runs. */
+  function runInstaller(command: CliCommand): Promise<string> {
+    const lock = heldLock;
+    return deps.run(command, UPDATE_TIMEOUT_MS, (pid) => {
+      void lock?.installerStarted(pid).catch((error) => deps.log(`could not note the installer in the update lock: ${(error as Error).message}`));
+    });
+  }
+
   /** Runs the installer, checks the new build, and rolls back when it fails. */
   async function afterRecord(tool: UpdatableAgentCliToolId, before: InstalledTool, update: CliCommand, target: string | null): Promise<void> {
     const label = AGENT_CLI_LABELS[tool];
     let updateError: string | null = null;
     try {
-      await deps.run(update, UPDATE_TIMEOUT_MS);
+      await runInstaller(update);
     } catch (error) {
       updateError = (error as Error).message.trim().split(/\r?\n/).slice(-3).join(" ").slice(0, 300);
     }
@@ -558,7 +576,7 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     deps.log(`${tool}: rolling back to ${before.version} with ${rollback.display}`);
     let rollbackError: string | null = null;
     try {
-      await deps.run(rollback, UPDATE_TIMEOUT_MS);
+      await runInstaller(rollback);
     } catch (error) {
       rollbackError = (error as Error).message.trim().split(/\r?\n/).slice(-2).join(" ").slice(0, 200);
     }
@@ -586,9 +604,17 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
     await ensureLoaded();
     const record = persisted.inProgress;
     if (!record) return;
-    const release = deps.lock ? await deps.lock().catch(() => null) : async () => {};
-    // Another Codara holds the lock: the update is still running there.
-    if (!release) return;
+    const lock = deps.lock ? await deps.lock().catch(() => null) : NO_LOCK;
+    // Another Codara, or the installer the last run left behind, holds the
+    // lock: the update is still running. Look again later.
+    if (!lock) {
+      cancelRecoveryRetry ??= deps.schedule(() => {
+        cancelRecoveryRetry = null;
+        queue = queue.then(recoverInterrupted).catch((error) => deps.log(`recovering the last update failed: ${(error as Error).message}`));
+      }, WAITING_POLL_MS);
+      return;
+    }
+    heldLock = lock;
     const valid =
       UPDATABLE_TOOLS.includes(record.tool) &&
       PLAIN_VERSION.test(record.fromVersion) &&
@@ -597,7 +623,8 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       deps.log("the saved update record is not valid; dropped, nothing run");
       delete persisted.inProgress;
       await save();
-      await release().catch(() => undefined);
+      heldLock = null;
+      await lock.release().catch(() => undefined);
       return;
     }
     const { tool } = record;
@@ -641,7 +668,8 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       await rollBack(tool, { version: record.fromVersion, realPath: previous, binaryPath: now.binaryPath, plan: now.plan }, now, failedVersion, lead);
     } finally {
       deps.toolBusy?.(tool, false);
-      await release().catch(() => undefined);
+      heldLock = null;
+      await lock.release().catch(() => undefined);
     }
   }
 
@@ -723,8 +751,10 @@ export function createAgentCliUpdateService(deps: UpdateServiceDependencies) {
       stopped = true;
       cancelWaitingPoll?.();
       cancelDailyCheck?.();
+      cancelRecoveryRetry?.();
       cancelWaitingPoll = null;
       cancelDailyCheck = null;
+      cancelRecoveryRetry = null;
     },
   };
 }

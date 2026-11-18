@@ -27,7 +27,7 @@ async function main() {
         'export { runSetupCommand } from "./src/main/onboarding";',
         'export * from "./src/main/agent-cli-updates/launch-guard";',
         'export { relinkLauncher } from "./src/main/agent-cli-updates/relink";',
-        'export { acquireUpdateLock } from "./src/main/agent-cli-updates/update-lock";',
+        'export { acquireUpdateLock, LOCK_MAX_HOLD_MS } from "./src/main/agent-cli-updates/update-lock";',
         'export { reinstallCommand, nativeBuildPath } from "./src/main/agent-cli-updates/reinstall";',
         'export { commandRunsAgent } from "./src/main/agent-hibernation-census";',
       ].join("\n"),
@@ -856,18 +856,93 @@ async function crashSafety(m) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-cli-lock-"));
     try {
       const file = path.join(dir, "agent-cli-update.lock");
-      const first = await m.acquireUpdateLock(file, { pid: 111, alive: () => true });
+      const opts = (pid, over = {}) => ({ pid, host: "here", alive: () => true, installerAlive: () => false, ...over });
+      const first = await m.acquireUpdateLock(file, opts(111));
       assert.ok(first);
-      assert.equal(await m.acquireUpdateLock(file, { pid: 222, alive: () => true }), null, "held by a live Codara");
-      const stale = await m.acquireUpdateLock(file, { pid: 222, alive: (pid) => pid !== 111 });
+      assert.equal(await m.acquireUpdateLock(file, opts(222)), null, "held by a live Codara");
+      const stale = await m.acquireUpdateLock(file, opts(222, { alive: (pid) => pid !== 111 }));
       assert.ok(stale, "a dead owner's lock is taken over");
-      await first();
+      await first.release();
       assert.ok(fs.existsSync(file), "a former owner does not remove the new owner's lock");
-      await stale();
+      await stale.release();
       assert.ok(!fs.existsSync(file));
+
+      // The installer outlives its Codara: the lock stays held while it runs.
+      const owner = await m.acquireUpdateLock(file, opts(111));
+      await owner.installerStarted(4242);
+      assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).installer, 4242);
+      const ownerDead = { alive: (pid) => pid !== 111 };
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { ...ownerDead, installerAlive: (pid) => pid === 4242 })), null, "held while the installer runs");
+      const after = await m.acquireUpdateLock(file, opts(222, { ...ownerDead, installerAlive: () => false }));
+      assert.ok(after, "taken over once the installer is gone too");
+      await after.release();
+
+      // A pid reused after a reboot keeps nothing forever.
+      const t0 = Date.parse("2026-11-18T12:00:00Z");
+      const old = await m.acquireUpdateLock(file, opts(111, { now: () => t0 }));
+      assert.ok(old);
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { now: () => t0 + 10 * 60 * 1000 })), null);
+      const late = await m.acquireUpdateLock(file, opts(222, { now: () => t0 + m.LOCK_MAX_HOLD_MS + 1000 }));
+      assert.ok(late, "stale once older than the longest update");
+      await late.release();
+
+      // Another machine's lock (a shared home folder): its pids mean nothing here.
+      const there = await m.acquireUpdateLock(file, opts(111, { host: "there" }));
+      assert.ok(there);
+      assert.equal(await m.acquireUpdateLock(file, opts(222, { alive: () => false })), null, "not taken over from another host");
+      fs.rmSync(file, { force: true });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  }
+
+  // The service writes the installer's pid into the lock as it starts.
+  {
+    const w = world({ auto: false });
+    const noted = [];
+    w.deps.lock = async () => ({ release: async () => {}, installerStarted: async (pid) => noted.push(pid) });
+    const run = w.deps.run;
+    w.deps.run = async (command, timeoutMs, onStart) => {
+      onStart?.(4242);
+      return run(command, timeoutMs);
+    };
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.check();
+    await service.update("claude");
+    assert.deepEqual(noted, [4242]);
+  }
+
+  // The real runner reports the installer's pid.
+  if (process.platform !== "win32") {
+    let started = null;
+    await m.runSetupCommand({ executable: "/bin/sh", args: ["-c", "exit 0"] }, 5000, undefined, (pid) => (started = pid));
+    assert.ok(Number.isInteger(started) && started > 0, "the runner reports the pid");
+  }
+
+  // A held lock at start: recovery is tried again later, not given up.
+  {
+    const record = { tool: "claude", fromVersion: "2.1.325", fromRealPath: "/home/u/.local/share/claude/versions/2.1.325", fromBinaryPath: "/home/u/.local/bin/claude", toVersion: "2.1.327" };
+    const w = world({
+      auto: false,
+      state: { failed: {}, notOffered: {}, inProgress: record },
+      tools: { claude: { version: null, realPath: "/home/u/.local/share/claude/versions/2.1.327", plan: nativePlan("claude") } },
+      onRun: (command, tools) => {
+        tools.claude = { ...tools.claude, version: command.args[1], realPath: "/home/u/.local/share/claude/versions/2.1.325" };
+        return "ok";
+      },
+    });
+    let held = true;
+    w.deps.lock = async () => (held ? null : { release: async () => {}, installerStarted: async () => {} });
+    const service = m.createAgentCliUpdateService(w.deps);
+    await service.start();
+    assert.equal(w.commands.length, 0);
+    const retry = w.scheduled.find((entry) => entry.delayMs === m.WAITING_POLL_MS && !entry.cancelled);
+    assert.ok(retry, "recovery is tried again later");
+    held = false;
+    retry.task();
+    await service.settled();
+    assert.equal(tool(service.snapshot(), "claude").phase, "rolled-back");
+    service.stop();
   }
 }
 
