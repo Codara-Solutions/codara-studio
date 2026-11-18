@@ -5,11 +5,12 @@ import type { AgentCliToolStatus } from "@shared/agent-cli-updates";
 import { usePreferences } from "../../preferences/usePreferences";
 import { InlineMessage, SettingRow, SettingsSection, ToggleRow } from "../settings/SettingsPrimitives";
 import { bindToggle } from "../settings/setting-toggles";
+import { UPDATE_IN_PROGRESS, agentCliVersionLine } from "./agent-cli-text";
 import {
-  UPDATE_IN_PROGRESS,
   cancelAgentCliUpdate,
   checkAgentCliUpdates,
   requestAgentCliUpdate,
+  useAgentCliRequest,
   useAgentCliUpdates,
 } from "./agentCliUpdatesStore";
 
@@ -46,7 +47,7 @@ export function AgentToolsSection() {
         {...bindToggle("agentCliAutoUpdate", preferences, setPreference)}
       />
       {snapshot.tools.map((tool) => (
-        <AgentToolRow key={tool.id} tool={tool} />
+        <AgentToolRow key={tool.id} tool={tool} versionLine={agentCliVersionLine(tool, snapshot)} />
       ))}
       {snapshot.checkError ? (
         <div className="st-row">
@@ -59,14 +60,6 @@ export function AgentToolsSection() {
   );
 }
 
-function versionLine(tool: AgentCliToolStatus): string {
-  if (!tool.installed) return "Not installed.";
-  const parts = [tool.version ? `v${tool.version}` : "Version unknown"];
-  if (tool.id === "pi") parts.push(`pinned to ${tool.pinnedVersion}`);
-  if (tool.installSource) parts.push(tool.installSource);
-  return parts.join(" · ");
-}
-
 function statusTone(tool: AgentCliToolStatus): "danger" | "warn" | "info" | "ok" | "muted" | null {
   if (tool.phase === "failed") return "danger";
   if (tool.phase === "rolled-back") return "warn";
@@ -75,8 +68,8 @@ function statusTone(tool: AgentCliToolStatus): "danger" | "warn" | "info" | "ok"
   return tool.message ? "muted" : null;
 }
 
-function AgentToolRow({ tool }: { tool: AgentCliToolStatus }) {
-  const [error, setError] = useState<string | null>(null);
+function AgentToolRow({ tool, versionLine }: { tool: AgentCliToolStatus; versionLine: string }) {
+  const { pending, error } = useAgentCliRequest(tool.id);
   const working = UPDATE_IN_PROGRESS.has(tool.phase);
   const pi = tool.id === "pi";
   const title = (
@@ -88,14 +81,14 @@ function AgentToolRow({ tool }: { tool: AgentCliToolStatus }) {
   );
   const status = pi
     ? "Codara keeps Pi on the version it is tested with and never updates it."
-    : tool.updateAvailable && tool.phase !== "updated"
+    : tool.updateAvailable
       ? `Version ${tool.latestVersion} is out.`
       : tool.installed && tool.latestVersion && tool.phase === "idle" && !tool.message
         ? "Up to date."
         : null;
   const desc = (
     <>
-      <span className="agent-tool-row__line agent-tool-row__version">{versionLine(tool)}</span>
+      <span className="agent-tool-row__line agent-tool-row__version">{versionLine}</span>
       {status ? <span className="agent-tool-row__line">{status}</span> : null}
       {tool.updateAvailable && !tool.canUpdate && tool.manualCommand ? (
         <span className="agent-tool-row__manual">
@@ -124,10 +117,8 @@ function AgentToolRow({ tool }: { tool: AgentCliToolStatus }) {
       <button
         type="button"
         className="spark-btn is-primary"
-        onClick={() => {
-          setError(null);
-          void requestAgentCliUpdate(tool.id).then(setError);
-        }}
+        disabled={pending}
+        onClick={() => void requestAgentCliUpdate(tool.id)}
       >
         {tool.phase === "failed" || tool.phase === "rolled-back" ? "Try again" : "Update"}
       </button>

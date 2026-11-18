@@ -271,7 +271,10 @@ async function main() {
     for (const row of launchArgsRows()) rendered.agents.add(row.name);
     // The Agent tools section names one row per tool from AGENT_CLI_LABELS.
     for (const row of renderedRows(read(AGENT_TOOLS_SECTION))) rendered.agents.add(row.name);
-    for (const label of ["Claude Code", "Codex", "Grok", "Pi"]) rendered.agents.add(label);
+    const labels = read(path.join(ROOT, "src", "shared", "agent-cli-updates.ts"));
+    const toolLabels = [...labels.matchAll(/^  [a-z]+: "([^"]+)",$/gm)].map((match) => match[1]);
+    assert.ok(toolLabels.includes("Claude Code") && toolLabels.includes("Pi"), "AGENT_CLI_LABELS read");
+    for (const label of toolLabels) rendered.agents.add(label);
     rendered["quick-commands"] = new Set(renderedRows(read(QUICK_COMMANDS_PAGE)).map((row) => row.name));
     rendered.capabilities = new Set([
       ...renderedRows(read(path.join(COMPONENTS, "capabilities", "BehaviorSection.tsx"))).map((row) => row.name),

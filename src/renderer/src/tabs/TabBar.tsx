@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentCliToolId } from "@shared/agent-cli-updates";
-import { agentCliMark, requestAgentCliUpdate, useAgentCliTool } from "../components/agent-cli-updates/agentCliUpdatesStore";
+import { agentCliMark, requestAgentCliUpdate, useAgentCliRequest, useAgentCliTool } from "../components/agent-cli-updates/agentCliUpdatesStore";
 import type { ChatTab, Tab, TabGroup, TabGroupColor, TabId, TerminalTab } from "./types";
 import { buildDockIndex, canDockTab, isDockLeaf } from "./dock";
 import { CloseIcon, FileIcon, GlobeIcon, HistoryIcon, PhoneIcon, PlusIcon } from "../components/icons";
@@ -2252,8 +2252,13 @@ function PickerItem({
 // newer version can be installed, the update's progress, or Pi's pinned
 // version. Anything that needs reading opens Settings at Agent tools.
 function AgentCliMark({ id, onOpenSettings }: { id: AgentCliToolId; onOpenSettings: () => void }) {
-  const mark = agentCliMark(useAgentCliTool(id));
+  const request = useAgentCliRequest(id);
+  const mark = agentCliMark(useAgentCliTool(id), request.error);
   if (!mark) return null;
+  const openSettings = () => {
+    onOpenSettings();
+    window.dispatchEvent(new CustomEvent("spark:open-settings", { detail: { section: "agents", anchor: "Agent tools" } }));
+  };
   const className = `spark-badge agent-cli-mark${mark.tone === "muted" ? "" : ` is-${mark.tone}`}`;
   if (!mark.action) {
     return (
@@ -2267,15 +2272,17 @@ function AgentCliMark({ id, onOpenSettings }: { id: AgentCliToolId; onOpenSettin
       type="button"
       className={className}
       title={mark.title}
-      aria-label={mark.title}
+      disabled={request.pending}
       data-testid={`agent-cli-mark-${id}`}
       onClick={() => {
-        if (mark.action === "update") {
-          void requestAgentCliUpdate(id);
+        if (mark.action !== "update") {
+          openSettings();
           return;
         }
-        onOpenSettings();
-        window.dispatchEvent(new CustomEvent("spark:open-settings", { detail: { section: "agents" } }));
+        // A refusal opens Settings at Agent tools, where it is explained.
+        void requestAgentCliUpdate(id).then((error) => {
+          if (error) openSettings();
+        });
       }}
     >
       {mark.label}

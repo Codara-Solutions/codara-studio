@@ -18,6 +18,8 @@ type FakeControls = {
   failNext: string[];
   hold: boolean;
   release: () => void;
+  holdCount: boolean;
+  releaseCount: () => void;
 };
 
 const WIDTHS = [720, 1280] as const;
@@ -97,18 +99,24 @@ for (const theme of ["codara-daylight", "codara-classic"] as const) {
       await expect(row("Grok")).toContainText("brew upgrade grok");
       await expect(row("Grok").getByRole("button")).toHaveCount(0);
       await capture(page, section, shots, theme, "2-update-available");
-      await capturePicker(page, shots, theme, "2-update-available");
+      await capturePicker(page, shots, theme, "2-update-available", { claude: "Update", codex: null, grok: "Update" });
 
       // 3. Updating: the update is held mid-way.
       await fake((c) => {
         c.hold = true;
+        c.holdCount = true;
         c.failNext = ["claude"];
       });
-      await row("Claude Code").getByRole("button", { name: "Update" }).click();
+      // A double click is one request: the button is disabled from the first
+      // click while main has not answered yet (it is still counting sessions).
+      const update = row("Claude Code").getByRole("button", { name: "Update" });
+      await update.dblclick();
+      await expect(update).toBeDisabled();
+      await fake((c) => c.releaseCount());
       await expect(row("Claude Code")).toContainText("Updating…");
       await expect(row("Claude Code")).toContainText("Updating to 2.1.328");
       await capture(page, section, shots, theme, "3-updating");
-      await capturePicker(page, shots, theme, "3-updating");
+      await capturePicker(page, shots, theme, "3-updating", { claude: "Updating", codex: null, grok: "Update" });
 
       // 4. The new build fails its version check: 2.1.327 is put back.
       await fake((c) => {
@@ -120,15 +128,49 @@ for (const theme of ["codara-daylight", "codara-classic"] as const) {
       await expect(row("Claude Code").getByRole("button", { name: "Try again" })).toBeVisible();
       expect(await fake((c) => c.tools.claude.version)).toBe("2.1.327");
       await capture(page, section, shots, theme, "4-rolled-back");
-      await capturePicker(page, shots, theme, "4-rolled-back");
+      await capturePicker(page, shots, theme, "4-rolled-back", { claude: "Rolled back", codex: null, grok: "Update" });
 
-      // 5. The switch on, a Codex session running: Codex waits, Grok is never run.
+      // The rolled-back mark opens Settings at Agent tools, where it is explained.
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+      await openPicker(page);
+      await page.getByTestId("agent-cli-mark-claude").click();
+      await expect(dialog).toBeVisible();
+      await expect(section).toBeInViewport();
+
+      // The picker's Update mark updates: Codex goes to Updating, then has no mark.
       await fake((c) => {
         c.latest.codex = "0.171.0";
-        c.live.codex = 2;
+        c.hold = true;
       });
       await section.getByRole("button", { name: "Check now" }).click();
       await expect(row("Codex")).toContainText("Version 0.171.0 is out.");
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+      await openPicker(page);
+      await expect(page.getByTestId("agent-cli-mark-codex")).toHaveText("Update");
+      await page.getByTestId("agent-cli-mark-codex").click();
+      await expect(page.getByTestId("agent-cli-mark-codex")).toHaveText("Updating");
+      await fake((c) => {
+        c.hold = false;
+        c.release();
+      });
+      await expect(page.getByTestId("agent-cli-mark-codex")).toHaveCount(0);
+      await page.getByRole("button", { name: "New tab" }).first().click();
+      await expect(page.locator(".spark-tabbar-picker")).toBeHidden();
+      await page.getByTitle("Settings").first().click({ force: true });
+      await expect(dialog).toBeVisible();
+      await dialog.locator("nav").getByRole("button", { name: "Accounts", exact: true }).click();
+      await section.scrollIntoViewIfNeeded();
+      await expect(row("Codex")).toContainText("Updated from 0.170.0 to 0.171.0.");
+
+      // 5. The switch on, a Codex session running: Codex waits, Grok is never run.
+      await fake((c) => {
+        c.latest.codex = "0.172.0";
+        c.live.codex = 2;
+      });
+      await section.getByRole("button", { name: "Check now" }).click();
+      await expect(row("Codex")).toContainText("Version 0.172.0 is out.");
       await section.getByRole("switch", { name: "Update automatically" }).click();
       await expect(row("Codex")).toContainText("Waiting: 2 Codex sessions are running. It updates once they end.");
       await expect(row("Codex").getByRole("button", { name: "Cancel" })).toBeVisible();
@@ -151,9 +193,17 @@ async function capture(page: Page, section: ReturnType<Page["locator"]>, dir: st
   await page.setViewportSize({ width: 1280, height: 860 });
 }
 
+async function openPicker(page: Page) {
+  const picker = page.locator(".spark-tabbar-picker");
+  await page.getByRole("button", { name: "New tab" }).first().click();
+  await expect(picker).toBeVisible();
+}
+
+type Marks = Partial<Record<"claude" | "codex" | "grok", string | null>>;
+
 // The new-tab picker's Workers list, with its marks. Settings closes first so
 // the picker is reachable, then reopens on the same page.
-async function capturePicker(page: Page, dir: string, theme: string, name: string) {
+async function capturePicker(page: Page, dir: string, theme: string, name: string, marks: Marks) {
   const dialog = page.getByRole("dialog", { name: "Settings" });
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
@@ -163,6 +213,10 @@ async function capturePicker(page: Page, dir: string, theme: string, name: strin
     const picker = page.locator(".spark-tabbar-picker");
     await expect(picker).toBeVisible();
     await expect(page.getByTestId("agent-cli-mark-pi")).toHaveText("Pinned 1.5.2");
+    for (const [id, text] of Object.entries(marks)) {
+      if (text === null) await expect(page.getByTestId(`agent-cli-mark-${id}`)).toHaveCount(0);
+      else await expect(page.getByTestId(`agent-cli-mark-${id}`)).toHaveText(text);
+    }
     await picker.screenshot({ path: join(dir, `${name}-picker-${width}-${theme}.png`), animations: "disabled" });
     await page.getByRole("button", { name: "New tab" }).first().click();
     await expect(picker).toBeHidden();

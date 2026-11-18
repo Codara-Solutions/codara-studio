@@ -40,13 +40,32 @@ export function useAgentCliTool(id: AgentCliToolId): AgentCliToolStatus | null {
   return useAgentCliUpdates()?.tools.find((tool) => tool.id === id) ?? null;
 }
 
+// Requests in flight from this window, and the last refusal per tool: a
+// button or mark stays disabled from the click until main answers.
+const requests = new Map<AgentCliToolId, { pending: boolean; error: string | null }>();
+const IDLE_REQUEST = { pending: false, error: null } as const;
+
+function setRequest(id: AgentCliToolId, state: { pending: boolean; error: string | null }): void {
+  requests.set(id, state);
+  for (const listener of listeners) listener();
+}
+
+export function useAgentCliRequest(id: AgentCliToolId): { pending: boolean; error: string | null } {
+  return useSyncExternalStore(subscribe, () => requests.get(id) ?? IDLE_REQUEST);
+}
+
 /** Update now, or as soon as the tool's sessions end. Resolves with an error message, or null. */
 export async function requestAgentCliUpdate(id: AgentCliToolId): Promise<string | null> {
+  if (requests.get(id)?.pending) return null;
+  setRequest(id, { pending: true, error: null });
   try {
     publish(await window.spark.agentCliUpdates.update(id));
+    setRequest(id, { pending: false, error: null });
     return null;
   } catch (error) {
-    return error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "") : String(error);
+    const message = error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "") : String(error);
+    setRequest(id, { pending: false, error: message });
+    return message;
   }
 }
 
@@ -58,28 +77,4 @@ export async function checkAgentCliUpdates(): Promise<void> {
   publish(await window.spark.agentCliUpdates.check().catch(() => null));
 }
 
-export const UPDATE_IN_PROGRESS: ReadonlySet<AgentCliToolStatus["phase"]> = new Set(["updating", "verifying", "rolling-back"]);
-
-/** The mark a worker row carries, or null when there is nothing to say. */
-export function agentCliMark(tool: AgentCliToolStatus | null): {
-  label: string;
-  tone: "accent" | "muted" | "warn" | "danger";
-  title: string;
-  action: "update" | "settings" | null;
-} | null {
-  if (!tool || !tool.installed) return null;
-  if (tool.id === "pi") {
-    return tool.version ? { label: `Pinned ${tool.version}`, tone: "muted", title: `Pi ${tool.version}. Codara keeps Pi on the version it is tested with (${tool.pinnedVersion}).`, action: null } : null;
-  }
-  if (UPDATE_IN_PROGRESS.has(tool.phase)) {
-    return { label: tool.phase === "rolling-back" ? "Restoring" : "Updating", tone: "muted", title: tool.message ?? "Updating…", action: null };
-  }
-  if (tool.phase === "waiting") return { label: "Waiting", tone: "muted", title: tool.message ?? "Waiting for sessions to end.", action: "settings" };
-  if (tool.phase === "rolled-back") return { label: "Rolled back", tone: "warn", title: tool.message ?? "", action: "settings" };
-  if (tool.phase === "failed") return { label: "Update failed", tone: "danger", title: tool.message ?? "", action: "settings" };
-  if (!tool.updateAvailable) return null;
-  const title = `${tool.label} ${tool.latestVersion} is out (you have ${tool.version}).`;
-  return tool.canUpdate
-    ? { label: "Update", tone: "accent", title: `${title} Update now.`, action: "update" }
-    : { label: "Update", tone: "accent", title: `${title} Run: ${tool.manualCommand}`, action: "settings" };
-}
+export { UPDATE_IN_PROGRESS, agentCliMark, agentCliVersionLine } from "./agent-cli-text";

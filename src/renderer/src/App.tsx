@@ -647,6 +647,7 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab | undefined>(undefined);
+  const [settingsInitialAnchor, setSettingsInitialAnchor] = useState<string | undefined>(undefined);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [onboardingProgress, setOnboardingProgress] = useState<OnboardingProgress>({ version: 1, step: "welcome", dismissed: false });
   const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
@@ -2384,8 +2385,10 @@ export default function App() {
   // dialog so users only see one settings UI.
   useEffect(() => {
     const handler = (event: Event) => {
-      const section = (event as CustomEvent<{ section?: unknown } | undefined>).detail?.section;
+      const detail = (event as CustomEvent<{ section?: unknown; anchor?: unknown } | undefined>).detail;
+      const section = detail?.section;
       setSettingsInitialTab(isSettingsTab(section) ? section : undefined);
+      setSettingsInitialAnchor(isSettingsTab(section) && typeof detail?.anchor === "string" ? detail.anchor : undefined);
       void loadSettingsDialog();
       setSettingsOpen(true);
     };
@@ -3435,6 +3438,7 @@ export default function App() {
 
   const handleOpenSettings = useCallback(() => {
     setSettingsInitialTab(undefined);
+    setSettingsInitialAnchor(undefined);
     void loadSettingsDialog();
     setSettingsOpen(true);
   }, []);
@@ -7307,8 +7311,9 @@ export default function App() {
             <SettingsDialog
               // A section request while the dialog is open (a chat's "Open
               // accounts") must land on that tab, so the tab keys the mount.
-              key={settingsInitialTab ?? "general"}
+              key={`${settingsInitialTab ?? "general"}:${settingsInitialAnchor ?? ""}`}
               initialTab={settingsInitialTab}
+              initialAnchor={settingsInitialAnchor}
               settings={settings}
               shells={shells}
               defaultShell={defaultShell}

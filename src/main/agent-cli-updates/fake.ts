@@ -25,10 +25,17 @@ export interface AgentCliFakeControls {
   /** While true, an update waits in "updating" until release(). */
   hold: boolean;
   release: () => void;
+  /** While true, counting sessions waits until releaseCount(): main has not answered yet. */
+  holdCount: boolean;
+  releaseCount: () => void;
 }
 
-export function createFakeDependencies(): Pick<UpdateServiceDependencies, "inspect" | "latest" | "run" | "liveSessions" | "exists" | "pi" | "loadState" | "saveState"> {
+export function createFakeDependencies(): Pick<
+  UpdateServiceDependencies,
+  "inspect" | "latest" | "run" | "liveSessions" | "exists" | "pi" | "loadState" | "saveState" | "relink" | "lock"
+> {
   let releaseHeld: (() => void) | null = null;
+  let releaseCounting: (() => void) | null = null;
   const controls: AgentCliFakeControls = {
     tools: {
       claude: { version: "2.1.327", realPath: "/home/user/.local/share/claude/versions/2.1.327" },
@@ -42,6 +49,12 @@ export function createFakeDependencies(): Pick<UpdateServiceDependencies, "inspe
     release: () => {
       releaseHeld?.();
       releaseHeld = null;
+    },
+    holdCount: false,
+    releaseCount: () => {
+      controls.holdCount = false;
+      releaseCounting?.();
+      releaseCounting = null;
     },
   };
   (globalThis as { __codaraAgentCliFake?: AgentCliFakeControls }).__codaraAgentCliFake = controls;
@@ -83,20 +96,28 @@ export function createFakeDependencies(): Pick<UpdateServiceDependencies, "inspe
         command.env?.CODEX_RELEASE ??
         (command.args[0] === "install" ? command.args[1] : undefined) ??
         (command.args.includes("--version") ? command.args[command.args.indexOf("--version") + 1] : undefined);
+      // Like the real installers, each version is its own build on disk.
+      const buildOf = (version: string) => fake.realPath.replace(/\d+\.\d+\.\d+(?:-[\w.]+)?/, version);
       if (pinned) {
-        const version = pinned;
-        controls.tools[tool] = { ...fake, version };
-        return `installed ${version}`;
+        controls.tools[tool] = { realPath: buildOf(pinned), version: pinned };
+        return `installed ${pinned}`;
       }
       const broken = controls.failNext.includes(tool);
       controls.failNext = controls.failNext.filter((id) => id !== tool);
-      controls.tools[tool] = { ...fake, version: broken ? null : controls.latest[tool] ?? fake.version };
+      const next = controls.latest[tool] ?? fake.version ?? "0.0.0";
+      controls.tools[tool] = { realPath: buildOf(next), version: broken ? null : next };
       return "updated";
     },
-    liveSessions: async (tool) => controls.live[tool] ?? 0,
+    liveSessions: async (tool) => {
+      if (controls.holdCount) await new Promise<void>((resolve) => (releaseCounting = resolve));
+      return controls.live[tool] ?? 0;
+    },
     exists: async () => true,
     pi: async () => ({ version: "1.5.2", pinnedVersion: "1.5.2", source: "bundled" }),
     loadState: async () => ({ failed: {}, notOffered: {} }),
     saveState: async () => {},
+    // Nothing on disk is touched: no relinking, no lock file.
+    relink: undefined,
+    lock: async () => async () => {},
   };
 }
