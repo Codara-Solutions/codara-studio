@@ -34,8 +34,6 @@ export interface HeadlessFirefox {
   call<T = any>(method: string, params?: Record<string, unknown>): Promise<T>;
   /** Install a folder as a temporary add-on. */
   install(dir: string): Promise<void>;
-  /** Removes an installed add-on, as a Firefox restart removes a temporary one. */
-  uninstall(id: string): Promise<void>;
   /** A new tab on url, loaded; its browsing context id. */
   open(url: string): Promise<string>;
   /** A new tab on one of the extension's own pages, loaded; its browsing context id. */
@@ -56,10 +54,13 @@ export interface HeadlessFirefox {
   close(): Promise<void>;
 }
 
-export async function launchFirefox(binary: { path: string; version: number }, { prefs = {} }: { prefs?: Record<string, unknown> } = {}): Promise<HeadlessFirefox> {
+export async function launchFirefox(
+  binary: { path: string; version: number },
+  { prefs = {}, profileDir }: { prefs?: Record<string, unknown>; /** A profile kept on disk across launches, as a real restart keeps it; the caller removes it. */ profileDir?: string } = {},
+): Promise<HeadlessFirefox> {
   const root = mkdtempSync(join(tmpdir(), "codara-firefox-"));
-  const profile = join(root, "profile");
-  mkdirSync(profile);
+  const profile = profileDir ?? join(root, "profile");
+  mkdirSync(profile, { recursive: true });
   const all: Record<string, unknown> = {
     "extensions.webextensions.uuids": JSON.stringify({ [FIREFOX_EXTENSION_ID]: FIREFOX_EXTENSION_UUID }),
     // permissions.request still needs a click in the extension's page; this only skips the doorhanger.
@@ -179,9 +180,6 @@ export async function launchFirefox(binary: { path: string; version: number }, {
       },
       async install(dir) {
         await call("webExtension.install", { extensionData: { type: "path", path: dir } });
-      },
-      async uninstall(id) {
-        await call("webExtension.uninstall", { extension: id });
       },
       async open(target) {
         const { context } = await call<{ context: string }>("browsingContext.create", { type: "tab" });
