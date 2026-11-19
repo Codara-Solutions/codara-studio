@@ -37,6 +37,7 @@ import {
   accessRows,
   captureOptions,
   compileCheck,
+  documentAddress,
   expressionAnswer,
   expressionScript,
   frameFailed,
@@ -45,6 +46,7 @@ import {
   screenshotAnswer,
   statementsAnswer,
   statementsScript,
+  unansweredAsks,
 } from "./lib/page-tools.js";
 import {
   DEFAULT_BLOCKED_SITES,
@@ -299,12 +301,10 @@ async function answerCommand(request, socket) {
     case "Runtime.evaluate":
       return evaluateInPage(tab.id, params, socket);
     case "Page.getLayoutMetrics": {
-      const now = await stillUsable(tab.id, socket);
-      const loads = navigations.get(now.id) ?? 0;
-      // Measured only in the document checked here, and answered only if the tab is still there.
-      const [frame] = await withSiteError(now, () => chrome.scripting.executeScript({ target: { tabId: now.id }, func: measureLayout, args: [now.url] }));
+      const page = await pinDocument(tab.id, socket);
+      const [frame] = await inDocument(page, () => chrome.scripting.executeScript({ target: page.target, func: measureLayout }));
       const metrics = layoutMetrics(frame?.result);
-      await stillOnPage(now, loads, socket);
+      await stillUsable(tab.id, socket);
       return metrics;
     }
     case "Page.captureScreenshot": {
@@ -337,12 +337,27 @@ async function stillOnPage(before, loads, socket) {
   if (after.url !== before.url || (navigations.get(before.id) ?? 0) !== loads) throw new Error(MOVED_ERROR);
 }
 
-/** Firefox's own refusal (the tab moved to a site not allowed) as the same plain error. */
-async function withSiteError(tab, work) {
+/**
+ * The document the tab shows, if it is the page just checked (shared, not
+ * blocked): every script for one request is bound to it by its id, so
+ * Firefox itself refuses to run one in any other document, a reload of the
+ * same address included. Read in the extension's own world.
+ */
+async function pinDocument(tabId, socket) {
+  const tab = await stillUsable(tabId, socket);
+  const [frame] = await inDocument({ tab }, () => chrome.scripting.executeScript({ target: { tabId: tab.id }, func: documentAddress }));
+  if (typeof frame?.documentId !== "string" || frame.result !== tab.url) throw new Error(MOVED_ERROR);
+  return { tab, target: { tabId: tab.id, documentIds: [frame.documentId] } };
+}
+
+/** Firefox's own refusals as plain errors: the tab moved to a site not allowed, or left the pinned document. */
+async function inDocument({ tab }, work) {
   try {
     return await work();
   } catch (error) {
-    if (/missing host permission/i.test(String(error?.message))) throw new Error(accessError("site", tab.url, wasAsked("site", tab.url)));
+    const message = String(error?.message);
+    if (/missing host permission/i.test(message)) throw new Error(accessError("site", tab.url, wasAsked("site", tab.url)));
+    if (/invalid documentid/i.test(message)) throw new Error(MOVED_ERROR);
     throw error;
   }
 }
@@ -360,34 +375,29 @@ async function evaluateInPage(tabId, params, socket) {
   }
   const expression = String(params.expression ?? "");
   const awaitPromise = params.awaitPromise === true;
-  // Each script runs only in the document checked right before (see
-  // expressionScript), and its answer leaves only while the tab is still
-  // shared and allowed: the agent's own code may navigate it, so not
-  // necessarily on the same page.
-  // One page for the whole request: a fallback never runs on a page the tab went to after the first try.
-  let checkedUrl = null;
-  const run = async (script) => {
-    const tab = await stillUsable(tabId, socket);
-    checkedUrl ??= tab.url;
-    if (tab.url !== checkedUrl) throw new Error(MOVED_ERROR);
+  // Every script of the request runs in the one document pinned here, and
+  // its answer leaves only while the tab is still shared and allowed (the
+  // agent's own code may navigate it, so not necessarily on the same page).
+  const page = await pinDocument(tabId, socket);
+  const run = async (code) => {
+    await stillUsable(tabId, socket);
     // Firefox removes the API when the user takes the permission back.
-    if (!chrome.userScripts) throw new Error(accessError("scripts", tab.url, wasAsked("scripts", tab.url)));
-    const code = script(checkedUrl);
-    const [frame] = await withSiteError(tab, () => chrome.userScripts.execute({ js: [{ code }], target: { tabId: tab.id }, world: "MAIN", injectImmediately: true }));
+    if (!chrome.userScripts) throw new Error(accessError("scripts", page.tab.url, wasAsked("scripts", page.tab.url)));
+    const [frame] = await inDocument(page, () => chrome.userScripts.execute({ js: [{ code }], target: page.target, world: "MAIN", injectImmediately: true }));
     await stillUsable(tabId, socket);
     if (!frame) throw new Error(`${agentTabId(tabId)} has no page to run the script in.`);
     return frame;
   };
-  const first = await run((url) => expressionScript(expression, { awaitPromise, url }));
+  const first = await run(expressionScript(expression, { awaitPromise }));
   if (!frameFailed(first)) return expressionAnswer(first.result);
-  if (!frameFailed(await run(() => compileCheck(expression, { awaitPromise })))) {
+  if (!frameFailed(await run(compileCheck(expression, { awaitPromise })))) {
     throw new Error("The page did not finish the script; it may have navigated away. Nothing was run twice.");
   }
-  if (frameFailed(await run(() => compileCheck(expression, { asScript: true })))) return SYNTAX_ERROR;
-  const strict = frameFailed(await run(() => compileCheck(expression, { asScript: true, strictProbe: true })));
+  if (frameFailed(await run(compileCheck(expression, { asScript: true })))) return SYNTAX_ERROR;
+  const strict = frameFailed(await run(compileCheck(expression, { asScript: true, strictProbe: true })));
   const marker = `__codaraThrown${crypto.randomUUID().replaceAll("-", "")}`;
   try {
-    return statementsAnswer(await run((url) => statementsScript(expression, marker, { url, strict })), marker);
+    return statementsAnswer(await run(statementsScript(expression, marker, { strict })), marker);
   } catch (error) {
     // The last statement's value cannot leave the page (a DOM node, a function).
     if (/non-structured-clonable/i.test(String(error?.message))) return { result: { type: "object", value: {} } };
@@ -430,12 +440,7 @@ const ASK_KEY = /^(?:scripts|allSites|site:https?:\/\/[^/\s]+\/\*)$/;
 /** Forget the asks Firefox has granted since, so only a no is remembered. */
 async function forgetGrantedAsks() {
   await ready;
-  const kept = {};
-  for (const [key, at] of Object.entries(state.asked ?? {})) {
-    const request = key === "scripts" ? accessRequest("scripts") : key === "allSites" ? accessRequest("allSites") : { origins: [key.slice("site:".length)] };
-    if (!(await chrome.permissions.contains(request).catch(() => false))) kept[key] = at;
-  }
-  await save({ asked: kept });
+  await save({ asked: unansweredAsks(state.asked, await chrome.permissions.getAll().catch(() => ({}))) });
 }
 
 // In line with the popup's actions, so a grant never overtakes the ask it answers.

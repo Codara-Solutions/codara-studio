@@ -54,6 +54,16 @@ export function accessKey(need, url) {
   return need === "site" ? `site:${sitePattern(url) ?? ""}` : need;
 }
 
+/**
+ * The questions still unanswered by a yes, from permissions.getAll(): only
+ * that very permission answers one, so all sites granted later does not
+ * undo a no to one site (it would count again if all sites went).
+ */
+export function unansweredAsks(asked, { permissions = [], origins = [] } = {}) {
+  const yes = (key) => (key === "scripts" ? permissions.includes("userScripts") : key === "allSites" ? origins.includes("<all_urls>") : origins.includes(key.slice("site:".length)));
+  return Object.fromEntries(Object.entries(asked ?? {}).filter(([key]) => !yes(key)));
+}
+
 /** The tool error when a need is not granted; `asked` when the user was asked and did not allow it. */
 export function accessError(need, url, asked) {
   const host = hostOf(url);
@@ -155,23 +165,20 @@ export function describeThrown(error) {
 /** The tool error when the tab left the page that was checked before anything ran there. */
 export const MOVED_ERROR = "The tab went to another page while the agent's command was on its way; it was not answered. Read the tab again and retry.";
 
-// Run first in the page, in the same script as the agent's code: the code
-// runs only in the document the extension checked (shared, not blocked).
-// `location` cannot be shadowed by a page's own declarations, and `===`
-// calls nothing the page could have replaced (a #hash change made in
-// between reads as another page too, which only asks for a retry).
-const inDocument = (url) => `location.href === ${JSON.stringify(String(url ?? ""))}`;
+/** Reads the document's address, in the extension's own world (a page cannot change what it returns). */
+export function documentAddress() {
+  return location.href;
+}
 
 /**
  * The code that evaluates an expression in the page and returns
- * { value }, { thrown } or { moved }. Nothing in it can fail before the
- * expression runs, so an error from Firefox for it means it did not compile.
+ * { value } or { thrown }. Nothing in it can fail before the expression
+ * runs, so an error from Firefox for it means it did not compile.
  */
-export function expressionScript(expression, { awaitPromise = false, url = "" } = {}) {
+export function expressionScript(expression, { awaitPromise = false } = {}) {
   return [
     // Names the expression cannot mean: it sees the page's globals, not these.
     `(${awaitPromise ? "async " : ""}() => {`,
-    `  if (!(${inDocument(url)})) return { moved: true };`,
     `  const __codaraEncode = ${encodeValue.toString()};`,
     `  const __codaraDescribe = ${describeThrown.toString()};`,
     "  try {",
@@ -196,14 +203,13 @@ export function compileCheck(code, { asScript = false, awaitPromise = false, str
   return `void ${awaitPromise ? "async " : ""}function () {${body}};`;
 }
 
-/** Statements whose last value is the result, as Runtime.evaluate allows; a throw, or another page, comes back under `marker`. */
-export function statementsScript(code, marker, { url = "", strict = false } = {}) {
+/** Statements whose last value is the result, as Runtime.evaluate allows; a throw comes back under `marker`. */
+export function statementsScript(code, marker, { strict = false } = {}) {
   const key = JSON.stringify(marker);
   return [
     // Their "use strict" stays the script's directive, outside the try block.
     strict ? '"use strict";' : "",
-    `if (!(${inDocument(url)})) ({ ${key}: { moved: true } });`,
-    `else try {\n${code}\n} catch (__codaraError) { ({ ${key}: { thrown: (${describeThrown.toString()})(__codaraError) } }) }`,
+    `try {\n${code}\n} catch (__codaraError) { ({ ${key}: { thrown: (${describeThrown.toString()})(__codaraError) } }) }`,
   ].join("\n");
 }
 
@@ -215,7 +221,6 @@ const plainObject = (value) => value !== null && typeof value === "object" && !A
 
 /** Runtime.evaluate's answer from an expressionScript run's value. */
 export function expressionAnswer(out) {
-  if (plainObject(out) && out.moved === true) throw new Error(MOVED_ERROR);
   if (plainObject(out) && plainObject(out.thrown)) return exception(out.thrown);
   if (plainObject(out) && plainObject(out.value)) return { result: out.value };
   throw new Error("The page gave no answer to the script.");
@@ -232,10 +237,7 @@ export function statementsAnswer(frame, marker) {
     return exception({ type: "string", value: "Firefox did not report this script's error (a rejected promise or a syntax error). Write the code as one expression, such as (() => { ... })(), to see it." });
   }
   const value = frame?.result;
-  if (plainObject(value) && plainObject(value[marker])) {
-    if (value[marker].moved === true) throw new Error(MOVED_ERROR);
-    if (plainObject(value[marker].thrown)) return exception(value[marker].thrown);
-  }
+  if (plainObject(value) && plainObject(value[marker]) && plainObject(value[marker].thrown)) return exception(value[marker].thrown);
   return { result: encodeValue(value) };
 }
 
@@ -250,6 +252,9 @@ export const SYNTAX_ERROR = exception({
 
 /** tabs.captureTab options for Page.captureScreenshot's parameters. */
 export function captureOptions(params = {}) {
+  if (params?.format !== undefined && params.format !== "png" && params.format !== "jpeg") {
+    throw new Error(`Firefox captures tabs as PNG or JPEG only, not ${String(params.format).slice(0, 20)}.`);
+  }
   const format = params?.format === "jpeg" ? "jpeg" : "png";
   const options = { format };
   if (format === "jpeg" && Number.isFinite(params.quality)) options.quality = Math.min(100, Math.max(0, Math.round(params.quality)));
@@ -270,9 +275,8 @@ export function screenshotAnswer(dataUrl) {
   return { data: match[1] };
 }
 
-/** Runs in the page's isolated world through scripting.executeScript; measures only, and only the expected document. */
-export function measureLayout(expected) {
-  if (location.href !== expected) return { moved: true };
+/** Runs in the page's isolated world through scripting.executeScript; measures only. */
+export function measureLayout() {
   const root = document.documentElement;
   const body = document.body;
   const view = window.visualViewport;
@@ -291,7 +295,6 @@ export function measureLayout(expected) {
 /** Page.getLayoutMetrics's answer from measureLayout: the css* fields in CSS pixels, the others in device pixels. */
 export function layoutMetrics(measured) {
   if (!plainObject(measured)) throw new Error("The page did not report its size.");
-  if (measured.moved === true) throw new Error(MOVED_ERROR);
   const n = (value) => (Number.isFinite(value) ? value : 0);
   const dpr = n(measured.dpr) || 1;
   const visual = measured.visual ?? { offsetX: 0, offsetY: 0, pageX: n(measured.scrollX), pageY: n(measured.scrollY), width: n(measured.clientWidth), height: n(measured.clientHeight), scale: 1 };

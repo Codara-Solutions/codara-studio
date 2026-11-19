@@ -23,8 +23,8 @@ async function execute(code, globals) {
 
 export async function run(assembled) {
   const tools = await import(pathToFileURL(join(assembled, "lib", "page-tools.js")).href);
-  const { expressionScript, expressionAnswer, compileCheck, statementsScript, statementsAnswer, frameFailed, SYNTAX_ERROR, MOVED_ERROR } = tools;
-  const evaluate = async (expression, options = {}, globals = {}) => expressionAnswer((await execute(expressionScript(expression, { url: PAGE, ...options }), globals)).result);
+  const { expressionScript, expressionAnswer, compileCheck, statementsScript, statementsAnswer, frameFailed, SYNTAX_ERROR } = tools;
+  const evaluate = async (expression, options = {}, globals = {}) => expressionAnswer((await execute(expressionScript(expression, options), globals)).result);
 
   // Values come back as Runtime.evaluate gives them with returnByValue.
   assert.deepEqual(await evaluate("document.title", {}, { document: { title: "Strict" } }), { result: { type: "string", value: "Strict" } });
@@ -54,22 +54,6 @@ export async function run(assembled) {
   assert.throws(() => expressionAnswer(undefined), /no answer/);
   assert.throws(() => expressionAnswer({ value: "forged" }), /no answer/);
 
-  // The code runs only in the document that was checked: not on another
-  // page the tab went to meanwhile, even one that replaced String methods.
-  const ran = { count: 0 };
-  await assert.rejects(evaluate("count += 1", {}, { ran, count: 0, location: { href: "https://blocked.example/" } }), (error) => error.message === MOVED_ERROR);
-  await assert.rejects(evaluate("count += 1", { awaitPromise: true }, { location: { href: "https://a.example/account" } }), (error) => error.message === MOVED_ERROR);
-  const forging = 'String.prototype.split = () => ["https://a.example/account?x=1"]; String.prototype.startsWith = () => true;';
-  for (const script of [expressionScript("count += 1", { url: PAGE }), statementsScript("count += 1", "m", { url: PAGE })]) {
-    const page = { count: 0, location: { href: "https://blocked.example/" } };
-    vm.runInNewContext(`${forging}\n${script}`, page);
-    assert.equal(page.count, 0, "a page's own String methods do not open the guard");
-  }
-  assert.deepEqual(await evaluate("1", { url: `${PAGE}#top` }, { location: { href: `${PAGE}#top` } }), { result: { type: "number", value: 1 } });
-  const elsewhere = { effects: 0, location: { href: "https://blocked.example/" } };
-  await assert.rejects(async () => statementsAnswer(await execute(statementsScript("effects += 1; effects", "m", { url: PAGE }), elsewhere), "m"), (error) => error.message === MOVED_ERROR);
-  assert.equal(elsewhere.effects, 0, "nothing ran on the other page");
-
   // Statements: only a compile error makes the wrapper fail, and the check compiles without running.
   const effects = { ran: 0 };
   assert.equal(frameFailed(await execute(expressionScript("var x = 1; x"), effects)), true);
@@ -82,8 +66,8 @@ export async function run(assembled) {
   assert.equal(frameFailed(await execute(compileCheck("1 +", { asScript: true }))), true);
 
   const marker = "__codaraThrownTest";
-  assert.deepEqual(statementsAnswer(await execute(statementsScript("var a = 41; a + 1", marker, { url: PAGE })), marker), { result: { type: "number", value: 42 } });
-  const statementThrow = statementsAnswer(await execute(statementsScript("var a = 1;\nnull.x", marker, { url: PAGE })), marker);
+  assert.deepEqual(statementsAnswer(await execute(statementsScript("var a = 41; a + 1", marker)), marker), { result: { type: "number", value: 42 } });
+  const statementThrow = statementsAnswer(await execute(statementsScript("var a = 1;\nnull.x", marker)), marker);
   assert.match(statementThrow.exceptionDetails.exception.description, /^TypeError: /);
   assert.match(statementsAnswer({ error: null }, marker).exceptionDetails.exception.value, /did not report/);
   assert.equal(SYNTAX_ERROR.exceptionDetails.exception.className, "SyntaxError");
@@ -96,7 +80,7 @@ export async function run(assembled) {
   assert.equal(frameFailed(await execute(compileCheck('"use strict"; var let = 1;', { asScript: true }))), true);
   // And then holds when they run: no page global from a typo.
   const sloppy = {};
-  const strict = statementsAnswer(await execute(statementsScript("/* setup */ 'use strict'\nundeclaredName = 1;", marker, { url: PAGE, strict: true }), sloppy), marker);
+  const strict = statementsAnswer(await execute(statementsScript("/* setup */ 'use strict'\nundeclaredName = 1;", marker, { strict: true }), sloppy), marker);
   assert.match(strict.exceptionDetails.exception.description, /^ReferenceError/);
   assert.equal("undeclaredName" in sloppy, false);
   assert.equal(frameFailed({ frameId: 0, result: null }), false);
@@ -108,7 +92,13 @@ export async function run(assembled) {
   return "page tools: evaluate's wrapper and answers, compile checks run nothing, permissions and their errors, screenshots and layout";
 }
 
-function permissions({ PAGE_METHODS, accessNeeds, sitePattern, accessRequest, accessKey, accessError, accessRows }) {
+function permissions({ PAGE_METHODS, accessNeeds, sitePattern, accessRequest, accessKey, accessError, accessRows, unansweredAsks }) {
+  // A no is forgotten only when that very permission is granted.
+  const asked = { "site:https://a.example/*": 1, scripts: 2, allSites: 3 };
+  assert.deepEqual(unansweredAsks(asked, { permissions: [], origins: ["<all_urls>"] }), { "site:https://a.example/*": 1, scripts: 2 });
+  assert.deepEqual(unansweredAsks(asked, { permissions: ["userScripts"], origins: ["https://a.example/*"] }), { allSites: 3 });
+  assert.deepEqual(unansweredAsks(undefined, {}), {});
+
   assert.deepEqual([...PAGE_METHODS].sort(), ["Page.captureScreenshot", "Page.getLayoutMetrics", "Runtime.evaluate"]);
   assert.deepEqual(accessNeeds("Runtime.evaluate"), ["site", "scripts"]);
   assert.deepEqual(accessNeeds("Page.getLayoutMetrics"), ["site"]);
@@ -160,7 +150,7 @@ function permissions({ PAGE_METHODS, accessNeeds, sitePattern, accessRequest, ac
 function screenshots({ captureOptions, screenshotAnswer, measureLayout, layoutMetrics }) {
   assert.deepEqual(captureOptions({ format: "png" }), { format: "png" });
   assert.deepEqual(captureOptions(undefined), { format: "png" });
-  assert.deepEqual(captureOptions({ format: "webp" }), { format: "png" });
+  assert.throws(() => captureOptions({ format: "webp" }), /PNG or JPEG only, not webp/);
   assert.deepEqual(captureOptions({ format: "jpeg", quality: 140 }), { format: "jpeg", quality: 100 });
   assert.deepEqual(
     captureOptions({ format: "png", captureBeyondViewport: true, clip: { x: 0, y: 0, width: 800, height: 3000, scale: 1 } }),
@@ -181,8 +171,7 @@ function screenshots({ captureOptions, screenshotAnswer, measureLayout, layoutMe
     scrollY: 400,
     devicePixelRatio: 2,
   };
-  const measured = vm.runInNewContext(`(${measureLayout.toString()})(${JSON.stringify(PAGE)})`, { ...page, location: { href: PAGE } });
-  assert.throws(() => layoutMetrics(vm.runInNewContext(`(${measureLayout.toString()})(${JSON.stringify(PAGE)})`, { ...page, location: { href: "https://blocked.example/" } })), /went to another page/);
+  const measured = vm.runInNewContext(`(${measureLayout.toString()})()`, page);
   const metrics = layoutMetrics(measured);
   assert.deepEqual(metrics.cssContentSize, { x: 0, y: 0, width: 1350, height: 3029 });
   assert.deepEqual(metrics.cssLayoutViewport, { pageX: 0, pageY: 400, clientWidth: 1350, clientHeight: 680 });
