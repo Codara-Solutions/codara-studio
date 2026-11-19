@@ -22,8 +22,8 @@ import {
   answersNavigation,
   frameTree,
   freshPage,
-  isSameDocument,
   navigateAnswer,
+  navigationPlan,
   navigateUrl,
   pageEvents,
 } from "./lib/navigation.js";
@@ -380,14 +380,16 @@ async function navigateTab(tabId, params, socket) {
     const url = navigateUrl(params, now.id, checks);
     if (Date.now() >= deadline) throw new Error(NAVIGATE_TIMEOUT_ERROR);
     const page = pageOf(now.id, now.url);
-    const sameDocument = isSameDocument(now.url, url);
-    // On Firefox's error page a #fragment stays on the error page (answered as the failed load it is).
-    if (sameDocument && now.url === url) return navigateAnswer(now.id, true, page.showsError ? "failed" : "moved", null);
+    const plan = navigationPlan(page, now.url, url);
+    // A #fragment of Firefox's error page stays the error page: the failed load it is.
+    if (plan === "error") return navigateAnswer(now.id, true, "failed", null);
+    if (plan === "there") return navigateAnswer(now.id, true, "moved", null);
+    const sameDocument = plan === "fragment";
     // The id the next document gets, also when it commits after the answer.
     const { nextLoaderId } = page;
     const waiter = waitForNavigation(now.id, { sameDocument, url, started: false }, deadline);
     try {
-      await untilDeadline(chrome.tabs.update(now.id, { url }), deadline);
+      await untilDeadline(plan === "reload" ? chrome.tabs.reload(now.id) : chrome.tabs.update(now.id, { url }), deadline);
     } catch (error) {
       waiter.done(null);
       throw error;

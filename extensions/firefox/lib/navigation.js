@@ -54,6 +54,21 @@ export function navigateUrl(params, tabId, { isRestricted, blockingRule }) {
   return parsed.href;
 }
 
+/**
+ * How navigate goes from the tab's address to another: "load" a new
+ * document; "fragment", a #fragment of the loaded page; "there", already
+ * at that address of a page seen loading; "reload", that address of a
+ * page not seen loading (loaded again, so the answer says what it is);
+ * "error", any #fragment of Firefox's error page, which stays the error
+ * page (measured), so never a success.
+ */
+export function navigationPlan(page, from, to) {
+  if (!isSameDocument(from, to)) return "load";
+  if (page.showsError) return "error";
+  if (from !== to) return "fragment";
+  return page.known ? "there" : "reload";
+}
+
 /** Whether going from one address to another only moves to a #fragment of the same document, as Firefox and Chrome do it. */
 export function isSameDocument(from, to) {
   try {
@@ -171,11 +186,12 @@ export function frameTree(tabId, url, loaderId) {
  * A tab's page as the extension tracks it: the document's loader id, the
  * one its next document will get (so a navigation can name it before it
  * commits), its address once known, whether a load is under way and has
- * not committed yet, whether the last load ended without a commit, and
- * whether the tab shows Firefox's error page.
+ * not committed yet, whether the last load ended without a commit,
+ * whether the tab shows Firefox's error page (until a new page commits),
+ * and whether the extension saw what the tab shows load (or fail).
  */
 export function freshPage(newId, url = null) {
-  return { loaderId: newId(), nextLoaderId: newId(), url, loading: false, awaitingCommit: false, aborted: false, showsError: false };
+  return { loaderId: newId(), nextLoaderId: newId(), url, loading: false, awaitingCommit: false, aborted: false, showsError: false, known: false };
 }
 
 /**
@@ -188,7 +204,7 @@ export function pageEvents(change, tab, page, newId, now) {
   const frameId = mainFrameId(tab.id);
   const timestamp = now / 1000;
   const events = [];
-  let { loaderId, nextLoaderId, url, loading, awaitingCommit, aborted, showsError } = page;
+  let { loaderId, nextLoaderId, url, loading, awaitingCommit, aborted, showsError, known } = page;
   const kind = changeKind(change, page);
   const stop = () => {
     if (loading) events.push(["Page.frameStoppedLoading", { frameId }]);
@@ -201,7 +217,6 @@ export function pageEvents(change, tab, page, newId, now) {
       loading = true;
       awaitingCommit = true;
       aborted = false;
-      showsError = false;
       break;
     case "commit":
       awaitingCommit = false;
@@ -209,6 +224,7 @@ export function pageEvents(change, tab, page, newId, now) {
       nextLoaderId = newId();
       url = change.url;
       showsError = false;
+      known = true;
       events.push(["Page.frameNavigated", { frame: frameOf(tab.id, change.url, loaderId), type: "Navigation" }]);
       break;
     case "moved":
@@ -222,6 +238,7 @@ export function pageEvents(change, tab, page, newId, now) {
       url = change.url;
       aborted = false;
       showsError = true;
+      known = true;
       stop();
       break;
     case "loaded":
@@ -231,5 +248,5 @@ export function pageEvents(change, tab, page, newId, now) {
       stop();
       break;
   }
-  return { events, page: { loaderId, nextLoaderId, url, loading, awaitingCommit, aborted, showsError }, kind };
+  return { events, page: { loaderId, nextLoaderId, url, loading, awaitingCommit, aborted, showsError, known }, kind };
 }

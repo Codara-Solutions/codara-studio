@@ -97,7 +97,7 @@ export async function run(assembled) {
     return { page, sent, kinds };
   };
   const start = freshPage(newId);
-  assert.deepEqual(start, { loaderId: "L1", nextLoaderId: "L2", url: null, loading: false, awaitingCommit: false, aborted: false, showsError: false });
+  assert.deepEqual(start, { loaderId: "L1", nextLoaderId: "L2", url: null, loading: false, awaitingCommit: false, aborted: false, showsError: false, known: false });
   const loaded = replay(LOAD, start);
   assert.deepEqual(loaded.kinds, ["started", null, null, "commit", null, "loaded"]);
   assert.deepEqual(loaded.sent, [
@@ -126,7 +126,20 @@ export async function run(assembled) {
   assert.deepEqual([onErrorPage.kinds, onErrorPage.sent, onErrorPage.page.showsError], [["failed"], [], true]);
   assert.equal(answersNavigation("failed", { status: "complete", url: "https://nope.invalid/#retry" }, { sameDocument: true, url: "https://nope.invalid/#retry" }), true);
   assert.deepEqual(navigateAnswer(7, true, "failed", "L2"), { frameId, errorText: NAVIGATE_ERROR });
-  assert.equal(replay([{ status: "loading" }], failed.page).page.showsError, false);
+  // It stays on until a new page commits: a load on its way does not make the error page a page.
+  assert.equal(replay([{ status: "loading" }], failed.page).page.showsError, true);
+  assert.equal(replay([{ status: "loading" }, { status: "loading", url: "https://a.example/b" }], failed.page).page.showsError, false);
+  // How navigate goes there: the same #fragment address on an error page never answers success, and
+  // "already there" only for a page seen loading.
+  const { navigationPlan } = nav;
+  assert.equal(navigationPlan(failed.page, "https://nope.invalid/#x", "https://nope.invalid/#x"), "error");
+  assert.equal(navigationPlan(replay([{ status: "loading" }], failed.page).page, "https://nope.invalid/#x", "https://nope.invalid/#x"), "error");
+  assert.equal(navigationPlan(failed.page, "https://nope.invalid/", "https://nope.invalid/#y"), "error");
+  assert.equal(navigationPlan(failed.page, "https://nope.invalid/", "https://nope.invalid/"), "load");
+  assert.equal(navigationPlan(loaded.page, "https://a.example/b#x", "https://a.example/b#x"), "there");
+  assert.equal(navigationPlan(loaded.page, "https://a.example/b", "https://a.example/b#x"), "fragment");
+  assert.equal(navigationPlan(loaded.page, "https://a.example/b", "https://a.example/c"), "load");
+  assert.equal(navigationPlan(freshPage(newId), "https://a.example/b#x", "https://a.example/b#x"), "reload", "a page not seen loading is loaded again");
   assert.equal(loaded.page.showsError, false);
   // An error page Firefox shows without starting a load (a port it refuses), on another site: still no page.
   const refused = replay([{ title: "127.0.0.1:1/x" }, { status: "complete", url: "http://127.0.0.1:1/x" }], loaded.page);
