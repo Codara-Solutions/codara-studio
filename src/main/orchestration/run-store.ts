@@ -7401,6 +7401,29 @@ async function askManagerBackendUnderTurnLock(
     });
   };
 
+  // A Stop that landed while the prompt was prepared already settled this
+  // call and requeued its input; dispatching now would start a fresh session
+  // the Stop never disposes. Wait for a Stop in progress to commit, then
+  // re-decide on what it left. A Stop after this point reaches the turn
+  // through the backend's session disposal.
+  {
+    const stopping = forcePauseWindowClosed(run.id);
+    if (stopping) await stopping;
+    const latest = await getRun(run.id);
+    const stillLive = latest?.sparkCalls.some(
+      (call) => call.id === callId && call.status === "started" && !call.completedAt,
+    );
+    // Stop and Cancel both settle every live call, and Stop moves the epoch;
+    // the run's status alone says nothing (a follow-up on a finished chat
+    // runs with the run still complete).
+    if (!latest || !stillLive || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
+      acceptingStreamEvents = false;
+      // The prepared prompt never reached a session: its memory goes again.
+      releaseCoraMemoryInjection(run.id);
+      return latest ?? null;
+    }
+  }
+
   const callStartedMs = Date.now();
   // Set once the provider had this turn's prompt or the backend answered.
   // Only an error before that is a runtime that failed to start; one after it
