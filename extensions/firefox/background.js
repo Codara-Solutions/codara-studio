@@ -635,7 +635,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
   if (events.length && state && pageEventTabs.has(tabId) && state.attached.includes(tabId) && shared(tab) && !firefoxBlockingRule(tab.url, rules)) {
     for (const [method, params] of events) sendLive({ type: "cdp_event", tabId, method, params });
   }
-  if (kind === "commit" || kind === "moved") for (const done of [...(addressWaiters.get(tabId) ?? [])]) done(kind);
+  // A route change of the page still loading (status "loading") is not navigate's answer; Firefox's error page is.
+  if (kind === "commit" || (kind === "moved" && change.status !== "loading")) for (const done of [...(addressWaiters.get(tabId) ?? [])]) done(kind);
   if (change.url !== undefined) {
     await ready;
     if (state.attached.includes(tabId) && (firefoxBlockingRule(change.url, rules) || isFirefoxRestrictedUrl(change.url))) {
