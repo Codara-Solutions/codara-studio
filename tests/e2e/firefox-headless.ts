@@ -34,6 +34,8 @@ export interface HeadlessFirefox {
   call<T = any>(method: string, params?: Record<string, unknown>): Promise<T>;
   /** Install a folder as a temporary add-on. */
   install(dir: string): Promise<void>;
+  /** Removes an installed add-on, as a Firefox restart removes a temporary one. */
+  uninstall(id: string): Promise<void>;
   /** A new tab on url, loaded; its browsing context id. */
   open(url: string): Promise<string>;
   /** A new tab on one of the extension's own pages, loaded; its browsing context id. */
@@ -177,6 +179,9 @@ export async function launchFirefox(binary: { path: string; version: number }, {
       },
       async install(dir) {
         await call("webExtension.install", { extensionData: { type: "path", path: dir } });
+      },
+      async uninstall(id) {
+        await call("webExtension.uninstall", { extension: id });
       },
       async open(target) {
         const { context } = await call<{ context: string }>("browsingContext.create", { type: "tab" });
