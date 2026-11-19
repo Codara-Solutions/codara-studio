@@ -3,7 +3,7 @@
 
 import type { WebSocket } from "ws";
 
-import { sanitizeTabs, type ChromeBrowserInfo, type ChromeRequestType, type ChromeTabInfo, type LinkSealer } from "./protocol";
+import { sanitizeTabs, type ChromeBrowserInfo, type ChromeRequestType, type ChromeTabInfo, type ExtensionKind, type LinkSealer } from "./protocol";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -20,12 +20,17 @@ type EventListener = (tabId: number, method: string, params: Record<string, unkn
 export class ChromeLink {
   readonly tabs = new Map<number, ChromeTabInfo>();
   allowOpen = false;
+  /** The browser's session id from its latest tab report: stops belong to one browser session. */
+  session: string | null = null;
+  /** Whether the browser sent its tab list on this connection yet. */
+  tabsReported = false;
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private readonly eventListeners = new Set<EventListener>();
   private readonly detachListeners = new Set<(tabId: number, reason: string) => void>();
   private readonly tabsListeners = new Set<() => void>();
   private readonly closeListeners = new Set<() => void>();
+  private readonly messageListeners = new Set<(message: Record<string, unknown>) => void>();
   private closed = false;
 
   constructor(
@@ -37,7 +42,15 @@ export class ChromeLink {
     private readonly sealer: LinkSealer,
     /** What the extension's hello said it can do, such as "reload". */
     readonly extensionFeatures: readonly string[] = [],
+    readonly extensionKind: ExtensionKind = "chromium",
+    /** The protocol commands the extension answers; null means it relays every one. */
+    readonly cdpMethods: ReadonlySet<string> | null = null,
   ) {}
+
+  /** Whether the extension answers this DevTools protocol command. */
+  answers(method: string): boolean {
+    return this.cdpMethods === null || this.cdpMethods.has(method);
+  }
 
   get isOpen(): boolean {
     return !this.closed;
@@ -88,6 +101,8 @@ export class ChromeLink {
         this.tabs.clear();
         for (const tab of sanitizeTabs(message.tabs)) this.tabs.set(tab.tabId, tab);
         this.allowOpen = message.allowOpen === true;
+        this.tabsReported = true;
+        this.session = typeof message.session === "string" && /^[\w-]{8,64}$/.test(message.session) ? message.session : null;
         for (const listener of this.tabsListeners) listener();
         return;
       }
@@ -110,8 +125,17 @@ export class ChromeLink {
         this.send({ type: "pong" });
         return;
       default:
+        // The extension's own notices (presence_settings, presence_stop, presence_allow).
+        if (typeof message.type === "string" && message.type.startsWith("presence_")) {
+          for (const listener of this.messageListeners) listener(message);
+        }
         return;
     }
+  }
+
+  onMessage(listener: (message: Record<string, unknown>) => void): () => void {
+    this.messageListeners.add(listener);
+    return () => this.messageListeners.delete(listener);
   }
 
   onEvent(listener: EventListener): () => void {

@@ -22,6 +22,8 @@ const COMPONENTS = path.join(ROOT, "src", "renderer", "src", "components");
 const read = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
 // The Quick commands page lives with the rest of the feature.
 const QUICK_COMMANDS_PAGE = path.join(ROOT, "src", "renderer", "src", "quick-commands", "QuickCommandsSettings.tsx");
+// Settings › Accounts › Agent tools lives with the update feature.
+const AGENT_TOOLS_SECTION = path.join(ROOT, "src", "renderer", "src", "components", "agent-cli-updates", "AgentToolsSection.tsx");
 // The Keybindings page body, with its reset row, lives with the shortcuts.
 const KEYBINDINGS_PAGE = path.join(ROOT, "src", "renderer", "src", "shortcuts", "KeybindingsSection.tsx");
 
@@ -215,6 +217,9 @@ async function main() {
     for (const row of renderedRows(read(path.join(COMPONENTS, "session-search", "SessionSearchSettings.tsx")))) {
       if (!findable("sessions", row.name)) missing.push(`sessions › ${row.name} (SessionSearchSettings.tsx)`);
     }
+    for (const row of renderedRows(read(AGENT_TOOLS_SECTION))) {
+      if (!findable("agents", row.name)) missing.push(`agents › ${row.name} (AgentToolsSection.tsx)`);
+    }
     for (const row of launchArgsRows()) {
       if (!findable("agents", row.name)) missing.push(`agents › ${row.name} (LaunchArgsSection.tsx)`);
     }
@@ -264,6 +269,12 @@ async function main() {
     );
     for (const row of renderedRows(read(path.join(COMPONENTS, "cross-workspace", "CrossWorkspaceTerminalsSetting.tsx")))) rendered.agents.add(row.name);
     for (const row of launchArgsRows()) rendered.agents.add(row.name);
+    // The Agent tools section names one row per tool from AGENT_CLI_LABELS.
+    for (const row of renderedRows(read(AGENT_TOOLS_SECTION))) rendered.agents.add(row.name);
+    const labels = read(path.join(ROOT, "src", "shared", "agent-cli-updates.ts"));
+    const toolLabels = [...labels.matchAll(/^  [a-z]+: "([^"]+)",$/gm)].map((match) => match[1]);
+    assert.ok(toolLabels.includes("Claude Code") && toolLabels.includes("Pi"), "AGENT_CLI_LABELS read");
+    for (const label of toolLabels) rendered.agents.add(label);
     rendered["quick-commands"] = new Set(renderedRows(read(QUICK_COMMANDS_PAGE)).map((row) => row.name));
     rendered.capabilities = new Set([
       ...renderedRows(read(path.join(COMPONENTS, "capabilities", "BehaviorSection.tsx"))).map((row) => row.name),
@@ -349,7 +360,8 @@ async function main() {
     // The Machines page binds its switch in its own file.
     const dialog =
       read(path.join(COMPONENTS, "SettingsDialog.tsx")) +
-      read(path.join(COMPONENTS, "machines", "MachinesSettings.tsx"));
+      read(path.join(COMPONENTS, "machines", "MachinesSettings.tsx")) +
+      read(AGENT_TOOLS_SECTION);
     for (const entry of entries.filter((item) => item.toggle)) {
       if (entry.toggle === "fastMode") {
         assert.match(dialog, /function FastModeRow\(\)[\s\S]*?useOpenAiFastMode\(\)[\s\S]*?title="Fast mode"/);

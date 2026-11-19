@@ -76,9 +76,10 @@ async function main() {
   );
 
   const groups = composer.buildVisibleGroups({});
+  const gpt62 = ["gpt-6.2-sol", "gpt-6.2-astra"];
   check(
-    "the offline picker includes every supported OpenAI variant",
-    groups[0].models.map(model => model.id).join(",") === ids.join(","),
+    "the offline picker includes GPT-6.2 and every supported OpenAI variant",
+    groups[0].models.map(model => model.id).join(",") === [...gpt62, ...ids].join(","),
   );
   // Cora runs on Pi only. The Claude Code / Codex CLI groups chose a manager
   // HARNESS, not a model, and are gone; what remains is one backend split into
@@ -107,9 +108,10 @@ async function main() {
     groups[0].models.every((model) => model.id.startsWith("gpt-")) &&
       groups[1].models.every((model) => model.id.startsWith("claude-")),
   );
+  check("GPT-6.2 Sol leads the OpenAI group", groups[0].models[0]?.id === "gpt-6.2-sol");
   check(
-    "the default chat model is still Sol",
-    groups[0].models[0]?.id === "gpt-5.6-sol",
+    "the default chat model is still GPT-5.6 Sol",
+    composer.defaultChatModel(groups)?.id === "gpt-5.6-sol",
   );
 
   // ── The default follows connected accounts ──
@@ -190,11 +192,12 @@ async function main() {
   check(
     `Pi rows sort by tier, not catalog order (got ${dressed.models.map((m) => m.id).join(",")})`,
     dressed.models.map((model) => model.id).join(",") ===
-      "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,claude-fable-5,claude-opus-5,claude-sonnet-5,grok-4.6",
+      "gpt-6.2-sol,gpt-6.2-astra,gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,claude-fable-5,claude-opus-5,claude-sonnet-5,grok-4.6",
   );
   check(
-    "sorting never moves the default off Sol",
-    dressed.models[0]?.id === "gpt-5.6-sol",
+    "GPT-6.2 leading the list does not move the default off GPT-5.6 Sol",
+    composer.defaultChatModel(dressedGroups)?.id === "gpt-5.6-sol" &&
+      dressed.models[gpt62.length]?.id === "gpt-5.6-sol",
   );
   check(
     "Fable leads the Anthropic group",
@@ -244,6 +247,8 @@ async function main() {
 
   const astraCatalog = [
     { id: "gpt-6-astra", label: "GPT-6 Astra", provider: "openai-codex" },
+    { id: "gpt-6.1-sol", label: "GPT-6.1 Sol", provider: "openai-codex" },
+    { id: "gpt-6.2-sol", label: "GPT-6.2 Sol", provider: "openai-codex" },
     ...piCatalog,
     { id: "gpt-5.5", label: "GPT-5.5", provider: "openai-codex" },
     { id: "gpt-5.3-codex-spark", label: "GPT-5.3 Codex Spark", provider: "openai-codex" },
@@ -251,8 +256,14 @@ async function main() {
   for (const live of [astraCatalog, [...astraCatalog].reverse()]) {
     const openai = composer.buildVisibleGroups({ piCatalog: live })[0].models;
     check(
-      "Astra leads Sol, Terra, and Luna without duplicate or retired rows",
-      openai.map(model => model.id).join(",") === ["gpt-6-astra", ...ids].join(","),
+      "GPT-6.2 leads, 6.1 Sol stays, then Sol, Terra, and Luna; 6 Astra and retired rows leave the lineup",
+      openai.map(model => model.id).join(",") === [...gpt62, "gpt-6.1-sol", ...ids].join(","),
+    );
+    const every = composer.buildVisibleGroups({ piCatalog: live, allGenerations: true })[0].models;
+    check(
+      "the full list puts GPT-6.2 Sol, then 6.2 Astra, above 6.1 Sol and 6 Astra",
+      every.slice(0, 4).map(model => model.id).join(",") ===
+        "gpt-6.2-sol,gpt-6.2-astra,gpt-6.1-sol,gpt-6-astra",
     );
     check(
       "Astra ordering does not change the no-preference default",
@@ -280,6 +291,13 @@ async function main() {
       prices.MODEL_PRICES["openai/gpt-5.6-sol"].output === 30 &&
       prices.MODEL_PRICES["openai/gpt-5.6-terra"].input === 2.5 &&
       prices.MODEL_PRICES["openai/gpt-5.6-luna"].output === 6,
+  );
+  check(
+    "published GPT-6.2 short-context rates are present",
+    JSON.stringify(prices.MODEL_PRICES["openai/gpt-6.2-sol"]) ===
+      JSON.stringify({ input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }) &&
+      JSON.stringify(prices.MODEL_PRICES["openai/gpt-6.2-astra"]) ===
+        JSON.stringify({ input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 }),
   );
 
   console.log(`\nAll ${pass} GPT-5.6 catalog checks passed.`);

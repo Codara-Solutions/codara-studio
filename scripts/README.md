@@ -44,9 +44,14 @@ How `scripts/run-all-tests.cjs` works:
     instead of 180.
   - A file with a `// test-runner: serial (why)` line runs after the pool,
     with nothing else running. Today that is `test-cora-harness.mjs` (its
-    timing checks), `test-renderer-chunks.mjs` (a
+    timing checks), `test-app-exit-electron.cjs` (Chromium's exit time on a
+    loaded macOS runner), `test-renderer-chunks.mjs` (a
     production Vite build, about 2 GB) and `test-workflow-sandbox.cjs` (its
-    heap-limit case grows QuickJS's WebAssembly memory to 2 GB).
+    heap-limit case grows QuickJS's WebAssembly memory to 2 GB) and
+    `test-clipboard-files.cjs` (the real macOS pasteboard through
+    osascript, with the app's 3 s limit per call) and
+    `test-diagnostics-hang-watchdog.cjs` (a busy loop's CPU share, and an
+    inspector pause within 400 ms).
   - No suite starts while `MemAvailable` is below `CODARA_TEST_MIN_FREE_MB`
     (default 2048) and another suite is still running.
   - Each suite gets its own empty `TMPDIR`, removed when it finishes, so
@@ -55,16 +60,61 @@ How `scripts/run-all-tests.cjs` works:
     without a name unique to the suite.
   - Durations are kept in `node_modules/.cache/codara-tests/timings.json`,
     and the next run starts the longest suites first.
+  - `CODARA_TEST_PART=pool` runs every suite except the serial ones, and
+    `CODARA_TEST_PART=serial` only those. CI runs them on four machines at
+    once: the pool in three shards (`CODARA_TEST_SHARD=1/3` to `3/3`: the
+    slow suites listed in `SLOW_POOL_SUITES` balanced by their seconds, the
+    rest in name order), the serial suites on the fourth.
+  - `CODARA_TEST_BUDGET_SECONDS=900` stops the run once it has taken that
+    long and fails it, naming the suites it stopped and the ones that never
+    started. CI sets one so a slow suite fails with that message instead of
+    hitting the job timeout.
 - The whole run peaks at about 2.5 GB, almost all of it from the two serial
   suites. Keep a new suite well under that, or tag it.
 - The runner prints `ok` or `FAIL` for each file as it finishes, then a pass
-  count, then the last 6000 characters of each failure's output, in name
-  order. It exits with code 1 if any file failed.
+  count, the 15 slowest suites, then the last 6000 characters of each
+  failure's output, in name order. It exits with code 1 if any file failed.
+  On GitHub Actions it also writes the slowest suites to the job summary.
 - Never wait on real time in a suite. Code that runs on timers (quiet
   windows, sweeps, retries) can run on `scripts/fake-clock.cjs`: install it
   before loading the bundle and call `await clock.advance(ms)` where the
   suite would sleep. `test-terminal-agent-notify.cjs` is the example; it
   went from 157 s to under a second.
+- Never pick a port with `listen(0)`, close it, and hand the number on: the
+  OS may give it to an outgoing connection before anything binds it. Start a
+  server you own on port 0 and read its port; for a child process or a port
+  list, use `unusedPort()` from `scripts/unused-port.cjs`.
+
+### Pool-safe suites
+
+CI runs the pool two suites at a time on a 3-core macOS runner, so every
+suite gets less CPU than on your machine, and how much less changes from run
+to run. A suite that passes alone can fail there. Rules:
+
+- Wait for a state, not for a time. Poll for the file, the message or the
+  run status the next step needs; a deadline on that poll only bounds a hang,
+  so make it generous (20 s), never tight. Waiting until "something started"
+  is not waiting until it settled: `test-run-message-scrub.cjs` sent its next
+  message while the previous turn was still running, and it was queued.
+- Time a wait between two events the code under test causes (two requests
+  to a stub, a request and the exit), never across a whole child process:
+  Node's startup alone takes seconds on a busy runner, which fails an upper
+  bound and lets a lower bound pass with no wait at all.
+  `test-cora-harness.mjs` times retries by the stub's request times
+  (`stub.requests[i].at`).
+- A fixed sleep does not order your code against a timer in the code under
+  test: on a busy CPU both come due in the same turn of the loop.
+  `test-diagnostics-records.cjs` waits for a window boundary before it stalls
+  the loop.
+- Listen on port 0 and write under `os.tmpdir()` (the runner gives each
+  suite its own). `test-pool-safe-suites.cjs` reads every suite and the
+  helper modules it loads from `scripts/`, and fails on `listen()` with a
+  number or a constant set to one, and on a write call whose path starts
+  with a literal `/tmp` (directly or through `path.join` or
+  `path.resolve`). It cannot see a path built any other way.
+- To reproduce CI, slow the suite, not the machine: on Linux
+  `CODARA_TEST_JOBS=2 systemd-run --user --scope -p CPUQuota=100% npm test -- <regex>`
+  runs the matching suites two at a time on one core.
 
 The Playwright specs are separate. They live in `tests/e2e/`:
 
@@ -99,14 +149,18 @@ Most suites need only `npm install`. These are the exceptions:
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
 | `dbus-daemon`, `libnotify4`, `python3-gi`, Xvfb (Linux) | `test-notify-linux-click.cjs` | Runs a private bus with a fake notification server. Prints SKIP without them, and fails on CI. |
 | Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-browser-devtools.cjs`, `test-browser-cdp-access.cjs`, `test-browser-insight.cjs`, `test-browser-capture-chromium.cjs`, `test-preview-waits.cjs`, `test-preview-dialogs.cjs`, `test-preview-find-outline.cjs`, `test-preview-console-filter.cjs`, `test-studio-csp.cjs`, `test-browser-code.cjs`, `test-git-read-pacing.cjs` | Install it with `npx playwright install chromium`. Without it they print SKIP for the real-page checks. |
-| Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-agent-worktree-differential.cjs`, `test-worktree-cleanup.cjs`, `test-worktree-cleanup-agent.cjs`, `test-worktree-setup.cjs`, `test-git-auto-fetch-git.cjs`, `test-dev-update-hint.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-review-diff.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs`, `test-git-checkout-remote.cjs`, `test-rail-discovery-reads.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
+| Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-agent-worktree-base.cjs`, `test-agent-worktree-differential.cjs`, `test-worktree-cleanup.cjs`, `test-worktree-cleanup-agent.cjs`, `test-worktree-setup.cjs`, `test-git-auto-fetch-git.cjs`, `test-dev-update-hint.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-review-diff.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs`, `test-git-checkout-remote.cjs`, `test-rail-discovery-reads.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
 
 CI (`.github/workflows/ci.yml`, macOS, pull requests into `main` and pushes
-to it) runs the
-four typechecks, then `npm run build`, then `npx playwright install
-chromium`, then `npm run test:all`. `.github/workflows/ci-linux.yml` runs the
+to it) runs on four machines at once. `test (pool 1/3)` to `test (pool 3/3)`
+each run `npm run build`, `npx playwright install chromium`, then
+`npm run test:all` with `CODARA_TEST_PART=pool`, `CODARA_TEST_SHARD=1/3` to
+`3/3` (a third of the pool each, balanced by `SLOW_POOL_SUITES`) and one suite at a time;
+`test (serial, typecheck)` runs the four typechecks and the build, then the
+serial suites. Each has a time budget (`CODARA_TEST_BUDGET_SECONDS`), and the
+required `test` check passes only when all four do. `.github/workflows/ci-linux.yml` runs the
 same on Linux under Xvfb for pull requests into `main` and pushes to it,
 without the typechecks (they do not depend on the platform), then a smoke set
 of Playwright specs (listed in the workflow). On your machine, run the same
@@ -199,6 +253,9 @@ calls.
 | Suites | Covers |
 |---|---|
 | `test-worker-*` (access, cleanup-safety, diff, independence, model-hint, pane-harness-gate, prompt-budget, session-memory-options, session-reuse, sessions; `test-worker-terminal-controls` belongs to remote access) | Worker prompts, tool access, sessions, diffs, and the pane a worker runs in. |
+| `test-worker-feed`, `test-worker-feed-session` | A worker's own conversation as records (`src/shared/worker-feed.ts`, `worker-feed.ts`): bounds, the cap, the file read back after a restart, and the real run-store writing it from a scripted Pi session, with a message sent to the running worker. |
+| `test-worker-activity` | What each live Cora worker is doing now, for the agents rail: the feed writer pushes only changes (`main/orchestration/worker-feed.ts`), the renderer keeps the newer copy (`lib/useWorkerActivity.ts`), and the rail's marks, "+N", groups and labels (`components/chat/agents-rail.ts`). |
+| `test-worker-view` | Going inside a Cora worker (`components/chat/worker-view.ts`): its state, its feed as chat rows, what folds once it finished, and the bar's arrows. |
 | `test-spawn-batch-guard`, `test-parallel-wave`, `test-autopilot-wave`, `test-peer-comms-opt-in`, `test-verifier-scoping`, `test-direct-worker` | How workers are batched and scheduled (`src/shared/parallel-wave.ts`, `autopilot-wave.ts`), and verifiers. |
 | `test-agent-sessions` | Sessions one agent starts for another (`agent-sessions.ts`, `src/shared/agent-sessions.ts`): statuses, the live cap, waits, the launch command, and a brief passed whole through real bash, sh and zsh. |
 | `test-agent-terminal-cleanup`, `test-agent-terminal-lifecycle`, `test-agent-terminal-placement` | Terminals that agents open (`agent-terminal-registry.ts`, `agent-terminal-lifecycle.ts`). |
@@ -211,7 +268,7 @@ calls.
 | `test-cora-harness` | The standalone `cora` CLI end to end: a real child process against the stub model in `cora-stub-model.mjs`, in a throwaway HOME, with non-loopback network blocked. Exit codes, retries, resume, token refresh rules, MCP, and the terminal interface. |
 | `test-pi-cora-extension`, `test-pi-cora-abandonable-wait`, `test-repeat-guard`, `test-deep-search`, `test-whiteboard-review-extension`, `test-whiteboard-quality` | The Pi extension in `resources/pi-cora/`. |
 | `test-pi-manager-compaction`, `test-pi-worker-compaction`, `test-pi-manager-compaction-integration.mjs`, `test-pi-worker-compaction-integration.mjs` | Context compaction for the manager and for workers, including the mid-turn pause and the summary recovery ladder. |
-| `test-pi-fast-mode-fallback-integration.mjs` (with the fast-mode block in `test-pi-cora-extension`) | Fast mode for the manager and workers: request shaping per provider and model, and the standard-speed fallback through a real offline Pi session. |
+| `test-pi-fast-mode-fallback-integration.mjs` (with the fast-mode block in `test-pi-cora-extension`) | Fast mode for the manager and workers, Codex only: request shaping per provider (Claude never runs fast), and the standard-speed fallback through a real offline Pi session. |
 | `test-compaction-ledger`, `test-conversation-compaction`, `test-autocompact-limits` | The durable ledger re-injected after each compaction, the run store's conversation cutover, and the owner's auto-compact limit per model and per launch (Pi, Codex, Claude). |
 | `test-compaction-eval.mjs` | Offline evaluation: replays 240-tool-call runs through a real Pi session with a lossy, a recorded real-style and a failing summarizer, and checks that facts survive 1, 3 and 6+ compactions within the limit. Variants cover a long opening request, a run that resumes after a conversation cutover, and a huge tool output the model must read before it is compacted. `--verbose` prints every compaction. |
 | `test-pi-worker-harness-gate`, `test-pi-worker-providers` | Which providers workers may run on. |
@@ -418,6 +475,17 @@ shared and blocked tabs, the relayed protocol, the activity log and
 `codara_preview_chrome`, unpairing). The real extension in Playwright's
 Chromium is `tests/e2e/chrome-extension.spec.ts`.
 
+The Firefox extension: `test-firefox-extension` (its tests in
+`extensions/firefox/test/`: the pages Firefox keeps extensions off, the
+protocol commands its hello lists, the manifest, and the assembly that takes
+the shared files from `extensions/chrome` unchanged but for checked patches)
+and `test-firefox-link` (Codara's side: `moz-extension://` origins and
+nothing shaped like one, pairing bound to the profile's extension uuid, only
+the protocol commands the extension's hello lists relayed and every other
+refused with the reason before it is sent). The real extension in a headless
+Firefox is `tests/e2e/firefox-extension.spec.ts`, which CI (Linux) runs on
+the current Firefox and on ESR 153.
+
 ### Security boundaries and packaging
 
 `test-ipc-gate-default`, `test-trusted-sender`, `test-fs-sandbox`,
@@ -512,7 +580,10 @@ runs it end to end with a scripted `gh`),
 tricks it tries), `test-agent-worktrees` (worktrees agents create and remove
 through the MCP tools: merge proofs, every refusal, recovery refs, the audit
 log, the repository lock and the process scan, against throwaway
-repositories with a fake git config), `test-agent-worktree-differential`
+repositories with a fake git config), `test-agent-worktree-base` (which
+commit a new worktree forks from: a local `main` behind origin, an upstream,
+offline, `fetch: false`, and `HEAD`, the default and `checkout` unchanged),
+`test-agent-worktree-differential`
 (each removal scenario against the merge proofs as they were before the
 proof through another branch name's pull request: nothing removable now
 that was kept then, except through that proof), `test-agent-worktrees-docs` (every

@@ -23,8 +23,9 @@ interface Props {
   children: React.ReactNode;
 }
 
-// A collapsible change group — the "Staged Changes" / "Changes" headers. The
-// header reuses the rail's uppercase eyebrow + count language.
+// A collapsible group: "Staged Changes", "Changes", the history graph. VS
+// Code's section header in Studio's tokens: a small uppercase title, the
+// group's actions on hover and its size as a quiet pill.
 export default function ChangeSection({
   title,
   count,
@@ -46,8 +47,8 @@ export default function ChangeSection({
           display: "flex",
           alignItems: "center",
           gap: 4,
-          height: 26,
-          padding: "0 8px 0 8px",
+          height: 24,
+          padding: "0 10px 0 8px",
           cursor: "default",
           background: hover ? "var(--hover)" : "transparent",
           transition: "background var(--motion-fast) var(--ease-out)",
@@ -57,11 +58,11 @@ export default function ChangeSection({
         <span
           style={{
             fontFamily: "var(--font-sans)",
-            fontSize: 10,
-            letterSpacing: "0.12em",
-            fontWeight: 800,
+            fontSize: 11,
+            letterSpacing: "0.05em",
+            fontWeight: 600,
             textTransform: "uppercase",
-            color: "var(--muted)",
+            color: "var(--ink-dim)",
           }}
         >
           {title}
@@ -87,15 +88,21 @@ export default function ChangeSection({
         )}
         <span
           style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
+            minWidth: 18,
+            height: 16,
+            padding: "0 5px",
+            borderRadius: 8,
+            background: "var(--hover-strong)",
+            color: "var(--ink-dim)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10.5,
+            fontWeight: 500,
             fontVariantNumeric: "tabular-nums",
-            color: "var(--muted-2)",
-            minWidth: 16,
-            textAlign: "right",
+            lineHeight: "16px",
+            textAlign: "center",
           }}
         >
-          {String(count).padStart(2, "0")}
+          {count}
         </span>
       </div>
       {!collapsed && <div style={{ paddingBottom: 4 }}>{children}</div>}

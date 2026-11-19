@@ -344,6 +344,8 @@ const SCALAR_FIELDS = [
   "since",
   "unseen",
   "sleeping",
+  "parentKey",
+  "activeAt",
 ] as const satisfies readonly (keyof AgentBoardCard)[];
 
 function sameCard(a: AgentBoardCard, b: AgentBoardCard): boolean {

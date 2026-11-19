@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { AgentCliToolId } from "@shared/agent-cli-updates";
+import { agentCliMark, requestAgentCliUpdate, useAgentCliRequest, useAgentCliTool } from "../components/agent-cli-updates/agentCliUpdatesStore";
 import type { ChatTab, Tab, TabGroup, TabGroupColor, TabId, TerminalTab } from "./types";
 import { buildDockIndex, canDockTab, isDockLeaf } from "./dock";
 import { CloseIcon, FileIcon, GlobeIcon, HistoryIcon, PhoneIcon, PlusIcon } from "../components/icons";
@@ -1086,6 +1088,7 @@ function TabBar({
               label="Claude worker"
               glyph={<RuntimeGlyph runtime="claude" />}
               accent="claude"
+              trailing={<AgentCliMark id="claude" onOpenSettings={() => setPickerOpen(false)} />}
               onClick={() => {
                 setPickerOpen(false);
                 onNewClaudeWorker();
@@ -1095,6 +1098,7 @@ function TabBar({
               label="Codex worker"
               glyph={<RuntimeGlyph runtime="codex" />}
               accent="codex"
+              trailing={<AgentCliMark id="codex" onOpenSettings={() => setPickerOpen(false)} />}
               onClick={() => {
                 setPickerOpen(false);
                 onNewCodexWorker();
@@ -1104,6 +1108,7 @@ function TabBar({
               label="Grok worker"
               glyph={<RuntimeGlyph runtime="grok" />}
               accent="grok"
+              trailing={<AgentCliMark id="grok" onOpenSettings={() => setPickerOpen(false)} />}
               onClick={() => {
                 setPickerOpen(false);
                 onNewGrokWorker();
@@ -1113,6 +1118,7 @@ function TabBar({
               label="Pi worker"
               glyph={<RuntimeGlyph runtime="pi" />}
               accent="pi"
+              trailing={<AgentCliMark id="pi" onOpenSettings={() => setPickerOpen(false)} />}
               onClick={() => {
                 setPickerOpen(false);
                 onNewPiWorker();
@@ -2157,10 +2163,13 @@ function PickerItem({
   accent = "shell",
   primary = false,
   danger = false,
+  trailing,
   onClick,
 }: {
   label: string;
   hint?: string;
+  /** A control beside the row (its own button, so never nested in the row's). */
+  trailing?: React.ReactNode;
   // A tab group's color dot, for the rows that name a group.
   swatch?: TabGroupColor;
   danger?: boolean;
@@ -2173,12 +2182,14 @@ function PickerItem({
   onClick: () => void;
 }) {
   const tone = glyph ? pickerItemTone(accent) : null;
-  return (
+  const row = (
     <button
       type="button"
       onClick={onClick}
       style={{
         appearance: "none",
+        flex: 1,
+        minWidth: 0,
         width: "100%",
         textAlign: "left",
         background: "transparent",
@@ -2193,8 +2204,8 @@ function PickerItem({
         alignItems: "center",
         gap: 10,
       }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--hover-strong)")}
-      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+      onMouseEnter={trailing ? undefined : (e) => (e.currentTarget.style.background = "var(--hover-strong)")}
+      onMouseLeave={trailing ? undefined : (e) => (e.currentTarget.style.background = "transparent")}
     >
       {tone && (
         <span
@@ -2222,6 +2233,59 @@ function PickerItem({
           {hint}
         </span>
       )}
+    </button>
+  );
+  if (!trailing) return row;
+  return (
+    <div
+      style={{ display: "flex", alignItems: "center", paddingRight: 10 }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--hover-strong)")}
+      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+    >
+      {row}
+      {trailing}
+    </div>
+  );
+}
+
+// The worker row's update mark (agent-cli-updates/): an Update button when a
+// newer version can be installed, the update's progress, or Pi's pinned
+// version. Anything that needs reading opens Settings at Agent tools.
+function AgentCliMark({ id, onOpenSettings }: { id: AgentCliToolId; onOpenSettings: () => void }) {
+  const request = useAgentCliRequest(id);
+  const mark = agentCliMark(useAgentCliTool(id), request.error, request.pending);
+  if (!mark) return null;
+  const openSettings = () => {
+    onOpenSettings();
+    window.dispatchEvent(new CustomEvent("spark:open-settings", { detail: { section: "agents", anchor: "Agent tools" } }));
+  };
+  const className = `spark-badge agent-cli-mark${mark.tone === "muted" ? "" : ` is-${mark.tone}`}`;
+  if (!mark.action) {
+    return (
+      <span className={className} title={mark.title} data-testid={`agent-cli-mark-${id}`}>
+        {mark.label}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className={className}
+      title={mark.title}
+      disabled={request.pending}
+      data-testid={`agent-cli-mark-${id}`}
+      onClick={() => {
+        if (mark.action !== "update") {
+          openSettings();
+          return;
+        }
+        // A refusal opens Settings at Agent tools, where it is explained.
+        void requestAgentCliUpdate(id).then((error) => {
+          if (error) openSettings();
+        });
+      }}
+    >
+      {mark.label}
     </button>
   );
 }

@@ -18,12 +18,12 @@ import {
   CHROME_LINK_PATH,
   CHROME_LINK_PORTS,
   CHROME_LINK_PROTOCOL,
-  EXTENSION_ORIGIN,
   LINK_COMMIT,
   LINK_NONCE,
   LINK_PUBLIC_KEY,
   LOOPBACK_HOST,
   LinkSealer,
+  extensionOrigin,
   linkIdFor,
   linkProof,
   linkSessionKey,
@@ -32,8 +32,10 @@ import {
   pairingCode,
   proofMatches,
   sanitizeBrowserInfo,
+  sanitizeCdpCapabilities,
   sanitizeExtensionFeatures,
   type ChromeBrowserInfo,
+  type ExtensionKind,
 } from "./protocol";
 
 export interface PendingPairing {
@@ -60,13 +62,30 @@ interface PairingEntry {
   timer: ReturnType<typeof setTimeout>;
   version: string;
   features: string[];
+  extension: ExtensionIdentity;
   /** Derived on both sides from the ECDH exchange; never sent. */
   token: string;
   sessionKey: Buffer;
   adopt(link: ChromeLink): void;
 }
 
+/** Who connected and what its hello said it can do. */
+interface ExtensionIdentity {
+  kind: ExtensionKind;
+  cdpMethods: ReadonlySet<string> | null;
+}
+
 const MAX_PENDING_PAIRINGS = 3;
+const MAX_REFUSED_EXTENSIONS = 3;
+
+/** An extension refused because it speaks another link protocol than this Codara. */
+export interface RefusedExtension {
+  extensionId: string;
+  version: string;
+  protocol: number;
+  browser: ChromeBrowserInfo;
+  at: number;
+}
 
 export class ChromeLinkServer {
   port: number | null = null;
@@ -75,6 +94,7 @@ export class ChromeLinkServer {
   private readonly wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 * 1024 });
   private readonly live = new Map<string, ChromeLink>();
   private readonly pairings = new Map<string, PairingEntry>();
+  private readonly refused = new Map<string, RefusedExtension>();
   private readonly alive = new WeakMap<WebSocket, boolean>();
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private readonly changeListeners = new Set<() => void>();
@@ -138,6 +158,11 @@ export class ChromeLinkServer {
     return this.live.get(linkId) ?? null;
   }
 
+  /** Extensions refused for their protocol in the last `withinMs`, newest first. */
+  refusedExtensions(withinMs: number, now = Date.now()): RefusedExtension[] {
+    return [...this.refused.values()].filter((entry) => now - entry.at < withinMs).sort((a, b) => b.at - a.at).map((entry) => ({ ...entry }));
+  }
+
   pendingPairings(): PendingPairing[] {
     return [...this.pairings.values()].map((entry) => ({ ...entry.pending }));
   }
@@ -159,7 +184,7 @@ export class ChromeLinkServer {
       lastSeenAt: now,
     });
     entry.socket.send(JSON.stringify({ type: "paired", linkId, app: this.options.app }));
-    entry.adopt(this.open(entry.socket, linkId, entry.pending.browser, entry.pending.extensionId, entry.version, new LinkSealer(entry.sessionKey, "codara"), entry.features));
+    entry.adopt(this.open(entry.socket, linkId, entry.pending.browser, entry.pending.extensionId, entry.version, new LinkSealer(entry.sessionKey, "codara"), entry.features, entry.extension));
     this.emitChange();
     return true;
   }
@@ -220,13 +245,12 @@ export class ChromeLinkServer {
     }
     if (path !== CHROME_LINK_PATH) return refuse(404);
     if (!LOOPBACK_HOST.test(String(req.headers.host ?? ""))) return refuse(403);
-    const origin = EXTENSION_ORIGIN.exec(String(req.headers.origin ?? ""));
+    const origin = extensionOrigin(req.headers.origin);
     if (!origin) return refuse(403);
-    const extensionId = origin[1];
-    this.wss.handleUpgrade(req, socket, head, (ws) => this.accept(ws, extensionId));
+    this.wss.handleUpgrade(req, socket, head, (ws) => this.accept(ws, origin.id, origin.kind));
   }
 
-  private accept(ws: WebSocket, extensionId: string): void {
+  private accept(ws: WebSocket, extensionId: string, kind: ExtensionKind): void {
     let link: ChromeLink | null = null;
     let greeted = false;
     let onAuth: ((answer: Record<string, unknown>) => void) | null = null;
@@ -281,6 +305,7 @@ export class ChromeLinkServer {
       this.hello(
         ws,
         extensionId,
+        kind,
         message,
         (adopted) => {
           link = adopted;
@@ -308,14 +333,17 @@ export class ChromeLinkServer {
   private hello(
     ws: WebSocket,
     extensionId: string,
+    kind: ExtensionKind,
     message: Record<string, unknown>,
     adopt: (link: ChromeLink) => void,
     expectAuth: (handler: (answer: Record<string, unknown>) => void) => void,
   ): void {
     if (message.protocol !== CHROME_LINK_PROTOCOL) {
+      const protocol = Number(message.protocol) || 0;
+      this.noteRefused(extensionId, message, protocol);
       this.refuse(ws, {
         type: "error",
-        message: `This Codara speaks link protocol ${CHROME_LINK_PROTOCOL}; update ${Number(message.protocol) > CHROME_LINK_PROTOCOL ? "Codara" : "the Codara extension (Reload it in your browser's extensions page)"}.`,
+        message: `This Codara speaks link protocol ${CHROME_LINK_PROTOCOL}; update ${protocol > CHROME_LINK_PROTOCOL ? "Codara" : "the Codara extension (Codara's Settings > Browser says how)"}.`,
       });
       return;
     }
@@ -323,6 +351,11 @@ export class ChromeLinkServer {
     const extension = message.extension && typeof message.extension === "object" ? (message.extension as Record<string, unknown>) : {};
     const version = typeof extension.version === "string" ? extension.version.slice(0, 24) : "";
     const features = sanitizeExtensionFeatures(extension.features);
+    // Only Firefox's extension may narrow what it answers; a Chromium one relays every command.
+    // The list, like the rest of the hello, is not authenticated and is no
+    // security boundary: it only lets Codara give the reason early. The
+    // extension answers nothing it does not implement, listed or not.
+    const identity: ExtensionIdentity = { kind, cdpMethods: kind === "firefox" ? sanitizeCdpCapabilities(extension.capabilities) ?? new Set() : null };
     const linkId = typeof message.linkId === "string" ? message.linkId : "";
     const clientNonce = typeof message.nonce === "string" && LINK_NONCE.test(message.nonce) ? message.nonce : "";
     const paired = linkId && clientNonce ? this.options.store.find(linkId, extensionId) : null;
@@ -336,7 +369,7 @@ export class ChromeLinkServer {
         this.options.store.add({ ...paired, browser, lastSeenAt: new Date().toISOString() });
         ws.send(JSON.stringify({ type: "welcome", protocol: CHROME_LINK_PROTOCOL, linkId: paired.linkId, app: this.options.app }));
         const sealer = new LinkSealer(linkSessionKey(paired.tokenSha256, clientNonce, serverNonce), "codara");
-        adopt(this.open(ws, paired.linkId, browser, extensionId, version, sealer, features));
+        adopt(this.open(ws, paired.linkId, browser, extensionId, version, sealer, features, identity));
       });
       ws.send(JSON.stringify({ type: "challenge", nonce: serverNonce, proof: linkProof(paired.tokenSha256, "codara", clientNonce, serverNonce) }));
       return;
@@ -381,6 +414,7 @@ export class ChromeLinkServer {
         extensionId,
         version,
         features,
+        extension: identity,
         adopt,
         code: pairingCode(extensionKey, codaraKey),
         token,
@@ -392,9 +426,9 @@ export class ChromeLinkServer {
 
   private awaitApproval(
     ws: WebSocket,
-    request: Pick<PairingEntry, "version" | "features" | "token" | "sessionKey" | "adopt"> & { browser: ChromeBrowserInfo; extensionId: string; code: string },
+    request: Pick<PairingEntry, "version" | "features" | "extension" | "token" | "sessionKey" | "adopt"> & { browser: ChromeBrowserInfo; extensionId: string; code: string },
   ): void {
-    const { browser, extensionId, version, features, adopt, code, token, sessionKey } = request;
+    const { browser, extensionId, version, features, extension, adopt, code, token, sessionKey } = request;
     const timeoutMs = this.options.pairingTimeoutMs ?? 120_000;
     const now = Date.now();
     const pending: PendingPairing = {
@@ -407,7 +441,7 @@ export class ChromeLinkServer {
     };
     const timer = setTimeout(() => this.deny(pending.id, "Nobody allowed the connection in Codara in time."), timeoutMs);
     timer.unref?.();
-    this.pairings.set(pending.id, { pending, socket: ws, timer, version, features, token, sessionKey, adopt });
+    this.pairings.set(pending.id, { pending, socket: ws, timer, version, features, extension, token, sessionKey, adopt });
     for (const listener of this.pairingListeners) listener({ ...pending });
     this.emitChange();
   }
@@ -420,12 +454,14 @@ export class ChromeLinkServer {
     version: string,
     sealer: LinkSealer,
     features: string[],
+    extension: ExtensionIdentity,
   ): ChromeLink {
     const previous = this.live.get(linkId);
     // The same browser reconnected (its service worker restarted): the new
     // socket replaces the old one.
     if (previous) this.drop(previous, 4002, "replaced");
-    const link = new ChromeLink(linkId, browser, extensionId, version, ws, sealer, features);
+    this.refused.delete(extensionId);
+    const link = new ChromeLink(linkId, browser, extensionId, version, ws, sealer, features, extension.kind, extension.cdpMethods);
     this.live.set(linkId, link);
     link.onTabs(() => this.emitChange());
     for (const listener of this.upListeners) listener(link);
@@ -441,6 +477,17 @@ export class ChromeLinkServer {
     this.options.store.touch(link.linkId);
     for (const listener of this.downListeners) listener(link);
     this.emitChange();
+  }
+
+  /** Settings says which extension cannot connect and what to update; the extension retries, so only a change is announced. */
+  private noteRefused(extensionId: string, message: Record<string, unknown>, protocol: number): void {
+    const extension = message.extension && typeof message.extension === "object" ? (message.extension as Record<string, unknown>) : {};
+    const version = typeof extension.version === "string" ? extension.version.slice(0, 24) : "";
+    const known = this.refused.get(extensionId);
+    this.refused.delete(extensionId);
+    this.refused.set(extensionId, { extensionId, version, protocol, browser: sanitizeBrowserInfo(message.browser), at: Date.now() });
+    while (this.refused.size > MAX_REFUSED_EXTENSIONS) this.refused.delete(this.refused.keys().next().value!);
+    if (!known || known.version !== version || known.protocol !== protocol) this.emitChange();
   }
 
   private refuse(ws: WebSocket, message: Record<string, unknown>): void {

@@ -1967,25 +1967,38 @@ async function main() {
     // The real service lifecycle (with relay disabled and loopback-only) must
     // release and rebind the same derived port. This is the exact sequence a
     // stopped/restarted `npm run dev` process performs.
-    const restartDir = fs.mkdtempSync(
-      path.join(os.tmpdir(), "codara-remote-restart-"),
-    );
-    const restartDeps = {
-      remoteDir: restartDir,
-      deviceName: "Restart Test Studio",
-      appVersion: "test",
-      host: "127.0.0.1",
-      relayUrl: false,
-      listWorkspaces: async () => [],
-      createTerminal: async () => {
-        throw new Error("not used");
-      },
-      log: () => {},
-    };
-    const service = new remoteAccess.RemoteAccessService(restartDeps);
+    //
+    // The candidates (41000-61000) overlap the OS's ephemeral ports, so any
+    // outgoing connection on the machine may already hold a fresh identity's
+    // first candidate. The service then rightly advances and says so in its
+    // log; that identity cannot show the exact rebind, so take another one.
+    let restartDir = null;
+    let restartDeps = null;
+    let service = null;
     let restartedService = null;
     try {
-      await service.setEnabled(true);
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        if (restartDir) fs.rmSync(restartDir, { recursive: true, force: true });
+        restartDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-restart-"));
+        const logs = [];
+        restartDeps = {
+          remoteDir: restartDir,
+          deviceName: "Restart Test Studio",
+          appVersion: "test",
+          host: "127.0.0.1",
+          relayUrl: false,
+          listWorkspaces: async () => [],
+          createTerminal: async () => {
+            throw new Error("not used");
+          },
+          log: (line) => logs.push(line),
+        };
+        service = new remoteAccess.RemoteAccessService(restartDeps);
+        await service.setEnabled(true);
+        if (attempt === 4 || !logs.some((line) => line.includes("trying the next stable candidate"))) break;
+        await service.setEnabled(false);
+        service = null;
+      }
       const firstPort = service.getStatus().port;
       const key = identity.loadOrCreateIdentity(restartDir).publicKey;
       const candidates = stablePort.stableRemoteAccessPortCandidates(key);
@@ -2003,28 +2016,39 @@ async function main() {
         { firstPort, secondPort, state: restartedService.getStatus().state },
       );
     } finally {
-      await service.setEnabled(false);
+      if (service) await service.setEnabled(false);
       if (restartedService) await restartedService.setEnabled(false);
-      fs.rmSync(restartDir, { recursive: true, force: true });
+      if (restartDir) fs.rmSync(restartDir, { recursive: true, force: true });
     }
   }
   {
     // Occupy candidate zero like an unrelated dev server or an ephemeral
     // socket could. A production service must remain reachable on the next
     // deterministic candidate; the phone derives the same ordered set.
-    const fallbackDir = fs.mkdtempSync(
-      path.join(os.tmpdir(), "codara-remote-fallback-"),
-    );
-    const key = identity.loadOrCreateIdentity(fallbackDir).publicKey;
-    const candidates = stablePort.stableRemoteAccessPortCandidates(key);
-    const blocker = net.createServer();
+    //
+    // The blocker must be this test's own listener: an outgoing connection
+    // elsewhere may already hold a fresh identity's first candidate (they
+    // overlap the ephemeral ports) and could let go of it before the service
+    // binds. When the blocker cannot bind, take another identity.
+    let fallbackDir = null;
+    let candidates = null;
+    let blocker = null;
     const logs = [];
     let fallbackService = null;
     try {
-      await new Promise((resolve, reject) => {
-        blocker.once("error", reject);
-        blocker.listen(candidates[0], "127.0.0.1", resolve);
-      });
+      for (let attempt = 0; attempt < 5 && !blocker; attempt += 1) {
+        if (fallbackDir) fs.rmSync(fallbackDir, { recursive: true, force: true });
+        fallbackDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-fallback-"));
+        const key = identity.loadOrCreateIdentity(fallbackDir).publicKey;
+        candidates = stablePort.stableRemoteAccessPortCandidates(key);
+        const server = net.createServer();
+        const bound = await new Promise((resolve, reject) => {
+          server.once("error", (error) => (error.code === "EADDRINUSE" ? resolve(false) : reject(error)));
+          server.listen(candidates[0], "127.0.0.1", () => resolve(true));
+        });
+        if (bound) blocker = server;
+      }
+      if (!blocker) throw new Error("five identities in a row had their first stable candidate in use");
       fallbackService = new remoteAccess.RemoteAccessService({
         remoteDir: fallbackDir,
         deviceName: "Fallback Test Studio",
@@ -2053,8 +2077,8 @@ async function main() {
       );
     } finally {
       if (fallbackService) await fallbackService.setEnabled(false);
-      await new Promise((resolve) => blocker.close(resolve));
-      fs.rmSync(fallbackDir, { recursive: true, force: true });
+      if (blocker) await new Promise((resolve) => blocker.close(resolve));
+      if (fallbackDir) fs.rmSync(fallbackDir, { recursive: true, force: true });
     }
   }
   {

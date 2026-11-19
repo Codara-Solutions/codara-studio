@@ -91,7 +91,13 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npx playwright install chromium
+      # One machine runs both of ci.yml's halves here: the pool two at a
+      # time, then the serial suites alone. The budget fails the run with the
+      # slowest suites named before the job timeout would cancel it.
       - run: npm run test:all
+        env:
+          CODARA_TEST_JOBS: "2"
+          CODARA_TEST_BUDGET_SECONDS: "1500"
 
   build:
     needs: [prepare, test]

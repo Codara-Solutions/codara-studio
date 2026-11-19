@@ -54,19 +54,25 @@ const runStore = fs.readFileSync(
 );
 assert.match(
   runStore,
-  /result = fakeWorkflowWorker\s*\?\s*await runFakeWorkflowWorkerSession\([^)]*\)\s*:\s*isPiWorker\s*\?\s*await runPiWorkerSession\(/,
+  /result = fakeWorkflowWorker\s*\?\s*await runFakeWorkflowWorkerSession\([^)]*\)\s*:\s*fakePiWorker\s*\?\s*await runFakePiWorkerSession\([^)]*\)\s*:\s*isPiWorker\s*\?\s*await runPiWorkerSession\(/,
   "run-store must dispatch claude/codex worker attempts straight to runPiWorkerSession",
 );
 assert.match(
   runStore,
-  /const isPiWorker =\s*\n?\s*!fakeWorkflowWorker &&\s*\n?\s*\(task\.runtimePreference === "claude" \|\|\s*\n?\s*task\.runtimePreference === "codex" \|\|\s*\n?\s*task\.runtimePreference === "grok"\);/,
+  /const isPiWorker =\s*\n?\s*!fakeWorkflowWorker &&\s*\n?\s*!fakePiWorker &&\s*\n?\s*\(task\.runtimePreference === "claude" \|\|\s*\n?\s*task\.runtimePreference === "codex" \|\|\s*\n?\s*task\.runtimePreference === "grok"\);/,
   "the Pi-harness predicate is provider preference only — no env escape hatch",
 );
-// The workflow e2e's fake agents are the one env seam, and only for workflow calls.
+// The e2e fakes are the only env seams: the workflow one only for workflow
+// calls, the worker view's Pi stand-in never for one.
 assert.match(
   runStore,
   /const fakeWorkflowWorker = Boolean\(task\.workflowCall\) && process\.env\.CODARA_WORKFLOW_FAKE_WORKERS === "1";/,
   "the fake worker seam must stay limited to workflow calls",
+);
+assert.match(
+  runStore,
+  /const fakePiWorker =\s*\n?\s*!task\.workflowCall &&\s*\n?\s*process\.env\.CODARA_FAKE_PI_WORKERS === "1" &&/,
+  "the fake Pi worker seam must be env-gated and never stand in for a workflow call",
 );
 for (const legacySymbol of [
   "runStructuredWorker",

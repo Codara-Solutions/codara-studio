@@ -1,0 +1,156 @@
+import React, { useEffect, useState } from "react";
+import type { GitCommitDetail } from "@shared/types";
+import { DiffNumbers, FOLDER_TEXT_STYLE, ROW_STYLE, StatusLetter } from "./ChangeRow";
+import { Spinner, splitPath } from "./git-ui";
+import "./source-control.css";
+
+// A bulk commit (a vendored package) can touch thousands of files; past this
+// many the rest is one line pointing at the full view.
+const MAX_FILES = 200;
+
+// A commit never changes, so its detail is read once: opening it again, or
+// clicking up and down the graph, costs no new git processes. Kept small.
+const CACHE_SIZE = 40;
+const detailCache = new Map<string, GitCommitDetail>();
+
+function remember(key: string, detail: GitCommitDetail): void {
+  detailCache.delete(key);
+  detailCache.set(key, detail);
+  if (detailCache.size > CACHE_SIZE) detailCache.delete(detailCache.keys().next().value as string);
+}
+
+// A commit opened in place under its history row (DESIGN.md, "Source
+// Control"): its files as the same compact rows the change lists use, each
+// opening its diff in this commit as a tab. The full inspector, with the
+// message body, inline diffs and arrow-key stepping, stays one click away.
+export default function CommitFilesInline({
+  cwd,
+  hash,
+  indent,
+  onOpenFileDiff,
+  onInspect,
+}: {
+  cwd: string;
+  hash: string;
+  /** Left padding that lines the files up under the commit's subject. */
+  indent: number;
+  onOpenFileDiff: (path: string, hash: string, options?: { pin?: boolean }) => void;
+  onInspect: (hash: string) => void;
+}): React.ReactElement {
+  const key = `${cwd}\0${hash}`;
+  const [detail, setDetail] = useState<GitCommitDetail | null>(() => detailCache.get(key) ?? null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    const cached = detailCache.get(key);
+    if (cached) {
+      setDetail(cached);
+      return;
+    }
+    setDetail(null);
+    window.spark.git
+      .commitDetail(cwd, hash)
+      .then((result) => {
+        if (cancelled) return;
+        if (result.ok) {
+          remember(key, result.detail);
+          setDetail(result.detail);
+        } else setError(result.error);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, hash, key]);
+
+  const note = (content: React.ReactNode): React.ReactElement => (
+    <div style={{ ...ROW_STYLE, paddingLeft: indent, color: "var(--muted-2)", fontSize: 11.5, gap: 6 }}>
+      {content}
+    </div>
+  );
+
+  if (error) return note(<span style={{ color: "var(--danger)" }}>{error}</span>);
+  if (!detail)
+    return note(
+      <>
+        <Spinner size={10} /> Reading the commit…
+      </>,
+    );
+
+  const shown = detail.files.slice(0, MAX_FILES);
+  const hidden = detail.files.length - shown.length;
+  const inspect = (event: React.MouseEvent): void => {
+    event.stopPropagation();
+    onInspect(hash);
+  };
+
+  return (
+    <div data-testid="commit-files" style={{ paddingBottom: 2 }}>
+      {detail.files.length === 0 ? note("No file changes (an empty or merge commit).") : null}
+      <div role="list" aria-label={`Files in ${detail.shortHash}`}>
+        {shown.map((file) => {
+            const { dir, name } = splitPath(file.path);
+            return (
+              <div
+                key={file.path}
+                role="listitem"
+                data-testid="commit-file"
+                data-path={file.path}
+                className="scm-row"
+                title={`${file.oldPath ? `${file.oldPath} → ` : ""}${file.path}\nClick to open its diff in this commit · double-click to keep the tab`}
+                tabIndex={0}
+                onClick={() => onOpenFileDiff(file.path, hash)}
+                onDoubleClick={() => onOpenFileDiff(file.path, hash, { pin: true })}
+                onKeyDown={(event) => {
+                  // Enter opens the diff; Shift+Enter keeps the tab.
+                  if (event.key !== "Enter" || event.repeat) return;
+                  event.preventDefault();
+                  onOpenFileDiff(file.path, hash, event.shiftKey ? { pin: true } : undefined);
+                }}
+                style={{ ...ROW_STYLE, paddingLeft: indent }}
+              >
+                <span
+                  style={{
+                    flex: "0 1 auto",
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontFamily: "var(--font-sans)",
+                    fontSize: 12,
+                    color: "var(--ink-dim)",
+                  }}
+                >
+                  {name}
+                </span>
+                <span style={FOLDER_TEXT_STYLE}>{dir}</span>
+                <DiffNumbers stat={{ additions: file.additions, deletions: file.deletions, binary: false }} />
+                <StatusLetter status={file.status} />
+              </div>
+            );
+          })}
+      </div>
+      {hidden > 0
+        ? note(
+            <button type="button" className="scm-link scm-link-line" onClick={inspect}>
+              {hidden} more files · Open full view
+            </button>,
+          )
+        : null}
+      {note(
+        <button
+          type="button"
+          className="scm-link scm-link-line"
+          title="Open the full view: message, author, every diff inline, arrow keys to step through commits"
+          onClick={inspect}
+        >
+          {detail.author} · {detail.relativeDate} · Open full view
+        </button>,
+      )}
+    </div>
+  );
+}

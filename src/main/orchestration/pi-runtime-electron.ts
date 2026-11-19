@@ -11,7 +11,7 @@ import type {
 } from "@shared/types";
 
 import { familyForSubscription } from "../../shared/agent-families";
-import { anthropicModelSupportsFastMode } from "../../shared/fast-mode";
+import { fastModeAvailableFor } from "../../shared/fast-mode";
 import { resolveBundledResourcePath } from "../bundled-resources";
 import {
   mintAgentSocketCapability,
@@ -120,10 +120,9 @@ export function codaraPiPaths(configDir = join(codaraHome(), "pi-agent")): Codar
 }
 
 /**
- * The composer's fast-mode toggle (AppSettings.openAiFastMode; the key predates
- * Anthropic support). Read fail-closed: any error means OFF, because the wrong
- * answer bills a premium rate on every token rather than merely running at
- * normal speed.
+ * The composer's fast-mode toggle (AppSettings.openAiFastMode). Read
+ * fail-closed: any error means OFF, because the wrong answer bills a premium
+ * rate on every token rather than merely running at normal speed.
  */
 async function fastModeSettingEnabled(): Promise<boolean> {
   try {
@@ -145,20 +144,20 @@ async function autoCompactPercentSetting(): Promise<number | null> {
 /**
  * The fast mode a session for `provider` and `model` would actually launch
  * with. Managers and workers both resolve it here, from the one global
- * setting, which is how a worker inherits the manager's fast mode. OpenRouter
- * and providers without a fast mode are always false, and so is a Claude model
- * the API would refuse it for. Callers that compare session identity resolve
- * this ONCE per turn and pass the same value back into the launch options, so
- * the identity check and the process env can never disagree about a setting
- * the user flipped mid-turn.
+ * setting, which is how a Codex worker inherits fast mode whichever model the
+ * manager runs on. Only Codex (OpenAI on the ChatGPT subscription) has it:
+ * Claude, OpenRouter and every other provider are always false, so a session
+ * on them neither runs fast nor restarts when the setting flips. Callers that
+ * compare session identity resolve this ONCE per turn and pass the same value
+ * back into the launch options, so the identity check and the process env can
+ * never disagree about a setting the user flipped mid-turn.
  */
 export async function resolveCodaraPiFastMode(
   provider: PiProvider,
   model: string | undefined,
 ): Promise<boolean> {
-  if (provider === "openrouter") return false;
-  if (provider === "anthropic" && !anthropicModelSupportsFastMode(model)) return false;
-  if (provider !== "anthropic" && provider !== "openai-codex") return false;
+  if (provider !== "openai-codex") return false;
+  if (model !== undefined && !fastModeAvailableFor(model)) return false;
   return fastModeSettingEnabled();
 }
 

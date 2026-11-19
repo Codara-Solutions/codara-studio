@@ -31,6 +31,7 @@ export function sameStatus(a: GitStatus | null, b: GitStatus | null): boolean {
     a.behind !== b.behind ||
     a.hasConflicts !== b.hasConflicts ||
     a.error !== b.error ||
+    a.prefix !== b.prefix ||
     a.staged.length !== b.staged.length ||
     a.unstaged.length !== b.unstaged.length
   ) {

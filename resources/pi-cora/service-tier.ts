@@ -10,19 +10,14 @@
 // the LAST code to touch the body before it goes out, and therefore the only
 // place that both sets and removes fast mode.
 //
-// Policy: one opt-in setting, default off, the same for every provider that
-// has a fast mode, and inherited by every worker because each process reads
-// the launch-time stamp (CODARA_PI_FAST_MODE) Codara gives it.
+// Policy: one opt-in setting, default off, for Codex only (OpenAI on the
+// ChatGPT subscription), and inherited by every Codex worker because each
+// process reads the launch-time stamp (CODARA_PI_FAST_MODE) Codara gives it.
 //
 //   OpenAI    - `service_tier: "priority"` (OpenAI's Fast mode, 2x price).
-//   Anthropic - `speed: "fast"` plus the `fast-mode-2026-02-01` beta, and only
-//               on the models in ANTHROPIC_FAST_MODE_MODELS: every other
-//               Claude model answers fast mode with an error. The SDK pi-ai
-//               uses moves `betas` from the body into the anthropic-beta
-//               header. On a Claude subscription this bills usage credits
-//               (extra usage), on an API key the premium per-token rate.
-//               Anthropic's `service_tier` (Priority Tier) is never sent: it
-//               is a different product and fast mode excludes it.
+//   Anthropic - never fast. Anything fast-mode shaped (`speed`, a service
+//               tier) is stripped whatever the setting says, so a Claude
+//               session cannot bill premium usage through Codara.
 //   Others    - untouched; nothing is ever added for them.
 //
 // With the setting off, anything fast-mode shaped is stripped, so fast mode
@@ -62,12 +57,6 @@ export type ServiceTierEnv = Record<string, string | undefined>;
 export const OPENAI_FAST_SERVICE_TIER = "priority";
 
 /** Mirrors src/shared/fast-mode.ts; the extension test pins them equal. */
-export const ANTHROPIC_FAST_MODE_MODELS: readonly string[] = [
-  "claude-opus-5-5",
-  "claude-opus-5",
-  "claude-opus-4-8",
-];
-export const ANTHROPIC_FAST_MODE_BETA = "fast-mode-2026-02-01";
 export const FAST_MODE_FALLBACK_MARKER = "[codara-fast-fallback]";
 export const FAST_MODE_COOLDOWN_MS = 10 * 60_000;
 
@@ -81,12 +70,6 @@ export function isAnthropicProvider(provider: string | undefined): boolean {
 export function isOpenAiProvider(provider: string | undefined): boolean {
   const id = (provider ?? "").trim().toLowerCase();
   return id === "openai-codex" || id === "openai" || id.startsWith("openai");
-}
-
-export function anthropicModelSupportsFastMode(model: unknown): boolean {
-  if (typeof model !== "string") return false;
-  const id = model.trim().toLowerCase().replace(/:1m$/, "").replace(/-\d{8}$/, "");
-  return ANTHROPIC_FAST_MODE_MODELS.includes(id);
 }
 
 /** Whether Settings enabled fast mode for this process. */
@@ -105,19 +88,8 @@ function stripServiceTier(payload: Record<string, unknown>): void {
 }
 
 function stripAnthropicFastMode(payload: Record<string, unknown>): void {
+  stripServiceTier(payload);
   delete payload.speed;
-  if (!Array.isArray(payload.betas)) return;
-  const betas = payload.betas.filter((beta) => beta !== ANTHROPIC_FAST_MODE_BETA);
-  if (betas.length > 0) payload.betas = betas;
-  else delete payload.betas;
-}
-
-function addAnthropicFastMode(payload: Record<string, unknown>): void {
-  payload.speed = "fast";
-  const betas = Array.isArray(payload.betas) ? payload.betas : [];
-  payload.betas = betas.includes(ANTHROPIC_FAST_MODE_BETA)
-    ? betas
-    : [...betas, ANTHROPIC_FAST_MODE_BETA];
 }
 
 /**
@@ -134,19 +106,14 @@ export function applyServiceTierPolicy(
 ): unknown {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
   const body = payload as Record<string, unknown>;
-  const model = typeof body.model === "string" ? body.model : "";
 
   if (isAnthropicProvider(provider)) {
-    stripServiceTier(body);
-    if (fastMode && anthropicModelSupportsFastMode(model) && !declined(model)) {
-      addAnthropicFastMode(body);
-    } else {
-      stripAnthropicFastMode(body);
-    }
+    stripAnthropicFastMode(body);
     return body;
   }
 
   if (isOpenAiProvider(provider)) {
+    const model = typeof body.model === "string" ? body.model : "";
     if (fastMode && !declined(model)) body.service_tier = OPENAI_FAST_SERVICE_TIER;
     else stripServiceTier(body);
     return body;
@@ -157,11 +124,10 @@ export function applyServiceTierPolicy(
   return body;
 }
 
-/** Whether a shaped body asks for fast mode, under either provider's spelling. */
+/** Whether a shaped body asks for fast mode. */
 export function requestsFastMode(payload: unknown): boolean {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
-  const body = payload as Record<string, unknown>;
-  return body.speed === "fast" || body.service_tier === OPENAI_FAST_SERVICE_TIER;
+  return (payload as Record<string, unknown>).service_tier === OPENAI_FAST_SERVICE_TIER;
 }
 
 // Failures that say nothing about fast mode. Retrying them without fast mode

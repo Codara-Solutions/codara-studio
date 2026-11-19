@@ -1168,7 +1168,7 @@ directly. Never for workers or an imported pull request.
 
 | Tool | What it does |
 |---|---|
-| `codara_share_offer` | Takes `path`, an HTML or Markdown file (absolute, or relative to the agent's working directory) in a folder open in Codara, at most 5 MB. Codara opens the file and shows its Share prompt; nothing is uploaded unless you click Share there, and the agent never gets the link. Returns `offered: true`, or `offered: false` with a `reason` (`invalid`, `not_shareable`, `missing`, `too_large`, `not_allowed`, `rate_limited`, `no_window`, `codara_offline`). One prompt per agent every 10 seconds. See [share-links.md](./share-links.md). |
+| `codara_share_offer` | Takes `path`, an HTML or Markdown file (absolute, or relative to the agent's working directory) in a folder open in Codara, at most 5 MB. Codara opens the file and shows its Share prompt; nothing is uploaded unless you click Share there, and the agent never gets the link. Returns `offered: true`, or `offered: false` with a `reason` (`unavailable` while this build has no share service, `invalid`, `not_shareable`, `missing`, `too_large`, `not_allowed`, `rate_limited`, `no_window`, `codara_offline`). One prompt per agent every 10 seconds. See [share-links.md](./share-links.md). |
 
 ## Opening a file for the user
 
@@ -1255,7 +1255,7 @@ workspaces are not supported yet.
 
 | Tool | What it does |
 |---|---|
-| `codara_worktree_create` | Creates a worktree on a new branch (default `agent/<purpose>-<id>`, from the default branch after a fetch) or, with `checkout: true`, on an existing branch. The agent's own cwd does not change; it works under the returned `path`. Codara starts the repository's [worktree setup](./worktree-setup.md) there (files from `.worktreeinclude`, links, the setup command from `.codara/worktree.json` and your own copy-branch command) and returns its state as `setup`; `setupCommand` is now always null. A setup command or terminal command not yet approved for the repository does not run: `setup.state` is `awaiting-approval` until you run or allow it from Codara, and the agent must never run either itself (see [Approving the setup command](./worktree-setup.md#approving-the-setup-command)). With `waitForSetup: true`, or when the setup file asks for it, the call waits up to 5 minutes for setup to end. Because it can run that command, it is annotated as destructive and open-world, not read-only. Asking again for the same branch returns the existing worktree. At most 20 agent worktrees per repository. |
+| `codara_worktree_create` | Creates a worktree on a new branch (default `agent/<purpose>-<id>`, from the default branch after a fetch; a `base` such as `main` that tracks a remote branch forks from that branch freshly fetched, see below) or, with `checkout: true`, on an existing branch. The agent's own cwd does not change; it works under the returned `path`. Codara starts the repository's [worktree setup](./worktree-setup.md) there (files from `.worktreeinclude`, links, the setup command from `.codara/worktree.json` and your own copy-branch command) and returns its state as `setup`; `setupCommand` is now always null. A setup command or terminal command not yet approved for the repository does not run: `setup.state` is `awaiting-approval` until you run or allow it from Codara, and the agent must never run either itself (see [Approving the setup command](./worktree-setup.md#approving-the-setup-command)). With `waitForSetup: true`, or when the setup file asks for it, the call waits up to 5 minutes for setup to end. Because it can run that command, it is annotated as destructive and open-world, not read-only. Asking again for the same branch returns the existing worktree. At most 20 agent worktrees per repository. |
 | `codara_worktree_setup` | The setup state of a worktree: what was copied and linked, each command with its exit code, the error and the end of the log (`logLines`, at most 200). Without `workspaceId` or `path`, the worktree the agent works in. `wait: true` waits for setup to end, also while you decide on a command awaiting approval, up to `timeoutSeconds` (default 300, at most 540). Read-only. |
 | `codara_worktree_list` | Lists the repository's Codara-managed worktrees: who created each, uncommitted and ignored files, terminals, runs and processes using it, merge status, and `removable` with the `blockers` that `codara_worktree_remove` would report. `checkMerge: true` fetches and asks GitHub, so it is slower. Worktrees Codara does not manage are listed under `unmanaged` and are never touched. Worktrees the agent made in other repositories are listed under `elsewhere` with their `repoCwd`, also when the agent runs in a folder that is no repository. |
 | `codara_worktree_remove` | Removes a worktree and, by default, the branch it created. `dryRun: true` only checks. `workspace` names its repository's workspace when the agent runs elsewhere and did not make it. |
@@ -1290,7 +1290,16 @@ the `blockers` and a `hint`:
   worktree's own branch, its pushed copy (under its own name or its
   upstream's, unless that is its base or the default branch) or a commit
   id, also when it is `origin/HEAD` or `HEAD` and the remote's HEAD names
-  one of those;
+  one of those. Or, when the agent asking made the worktree (from its own
+  terminal or Cora run) and gave the work up: the branch on origin holds the
+  exact last commit, read from the remote during the check, and GitHub's
+  last pull request from it, in origin's repository, was closed without
+  merging, with none open, and its head is that commit or behind it. Both
+  are asked again just before the removal and must not have changed. The
+  local branch then stays, beside its copy on origin, the result names the
+  closed pull request under `givenUp`, and so does the audit log. Nobody
+  else's worktree, and no commit that is only local, is ever removed this
+  way;
 - it has no uncommitted or untracked files (edits hidden by
   `assume-unchanged` or `skip-worktree` count), no merge or rebase in
   progress, and no ignored files beyond build output and caches
@@ -1343,7 +1352,7 @@ The `code` is the first blocker; `blockers` lists them all, and a dry run or
 | `WORKTREE_SUBMODULES` | A submodule or committed nested repository is checked out. | Ask you. |
 | `WORKTREE_NESTED_REPOSITORY` | Another checkout or worktree sits inside it (`details.nestedRepositories`). | Move or remove it first, or ask you. |
 | `WORKTREE_NESTED_SCAN_INCOMPLETE` | The search for nested checkouts could not finish (`details.unscannedFolder`). | Delete that folder if it only holds build output or dependencies, then retry; otherwise ask you. |
-| `WORKTREE_NOT_MERGED` | The last commit is not merged into the target. `details.pushed` says whether origin has it under the branch's name or its upstream's; `details.upstream` names an upstream of another name, with `gone` when the remote deleted it. | Push and merge it, or ask you to delete it from the rail. |
+| `WORKTREE_NOT_MERGED` | The last commit is not merged into the target, and the worktree is not the asking agent's own given-up work (pushed, its last pull request closed unmerged). `details.pushed` says whether origin has it under the branch's name or its upstream's; `details.upstream` names an upstream of another name, with `gone` when the remote deleted it. | Push and merge it, or ask you to delete it from the rail. |
 | `WORKTREE_TARGET_NOT_FOUND` | The merge target does not exist or cannot be a target. | Pass `target`, the branch it was merged into. |
 | `WORKTREE_RUNNING_PANES` | Terminals are open in it. | Close your own with `codara_terminal_close`; otherwise wait or ask you. |
 | `WORKTREE_ACTIVE_RUNS` | Active Cora runs work in it. | Wait for them to finish, or ask you. |
@@ -1385,6 +1394,22 @@ commits, `checkout` for an existing branch, `workspace` for a folder that
 holds repositories (`nestedRepositories` lists them), a valid `base`.
 `codara_worktree_create` returns `fetch`: `ok`, `skipped`, or
 `failed: <reason>` (then `baseCommit` is the last fetched remote head).
+It says where the worktree starts with `base` (as asked), `baseRef` (the
+ref it forked from) and `baseCommit`. A `base` that names a local branch
+tracking a remote one (its upstream, or for the default branch, `main` say,
+that branch on origin) means the remote branch: Codara fetches it and forks
+from `origin/main`, not from a local `main` the main checkout may not have
+pulled. When the local branch lacks commits the remote has, the result
+carries `baseBehindRemote` (how many); when it has commits the remote lacks,
+`baseAheadOfRemote` and a warning, since the worktree starts without them.
+Offline, it forks from the last fetched `origin/main` with a warning, and
+from the local branch only when that remote branch was never fetched or the
+remote no longer has it. `baseRef` is what Codara records as the worktree's
+base, so the Review panel's diff and the merge check before removal compare
+against it, not against the local branch.
+`fetch: false` forks from the base as it is here: a local branch at its own
+commit, a remote-tracking ref at its last fetched commit. `HEAD`, tags,
+commits and branches that track nothing are used as they are.
 Every create and removal, refused or not, is logged to
 `~/.codarastudio/logs/worktree-audit.jsonl`. **Let agents create and remove
 worktrees** in Settings turns creating and removing off; listing still works.
@@ -1410,7 +1435,8 @@ shows, so it can recommend what to remove and ask you.
   listed under `notCovered`: their worktrees live on the remote host.
 - `action: "remove"` with `paths` opens an approval dialog in Codara that says
   which agent asks and lists each worktree with its repository, branch, size,
-  recommendation and reason. Only the safe ones start ticked. A worktree with
+  recommendation and reason. Nothing starts ticked, and Remove names how many
+  go. A worktree with
   unsaved changes or something running in it cannot be ticked; you remove
   those yourself from the screen. A separate, unticked choice per worktree
   also deletes its branch on the remote with your own git sign-in (`git push
@@ -1428,6 +1454,11 @@ can be removed once you tick it, since the dialog listed those files; a
 branch with commits that are not merged always stays. Read-only and edit-only
 Pi workers may scan but not remove, and imported pull-request runs do not get
 the tool.
+
+The asking agent's own tab, working from another folder, does not count as
+something running in a worktree it made. A worktree it gave up (pushed, its
+pull request closed) it can also remove itself with `codara_worktree_remove`,
+without asking.
 
 ## Whiteboard and board
 

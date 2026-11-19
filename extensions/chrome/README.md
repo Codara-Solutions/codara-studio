@@ -10,14 +10,17 @@ tools it uses for its own browser tabs.
 
 1. In Codara open Settings > Browser > Chrome extension and press
    **Reveal folder** (or **Copy path**). Codara copies the extension into
-   `<Codara home>/chrome-extension` and keeps that copy current.
+   `<Codara home>/chrome-extension` the first time, and later only when you
+   press **Update extension** (see Updates).
 2. Open `chrome://extensions` (Edge: `edge://extensions`), turn on
    **Developer mode**, choose **Load unpacked** and pick that folder.
 3. Click the Codara icon in the toolbar and choose **Connect to Codara**. The
    popup and Codara show the same six-digit code; press **Allow** in Codara
    only when they match.
-4. In the popup, turn on **Let agents use this tab** for each tab agents may
-   use. The popup shows the tab's id (`chrome:<tabId>`) with a copy button.
+4. In the popup, turn on the switch next to the tab's title for each tab
+   agents may use, or pick how far sharing reaches under **Agents may use**.
+   Agents find shared tabs on their own; the tab's id (`chrome:<tabId>`) and
+   its copy button are under **Details**.
 
 ## How it connects
 
@@ -59,10 +62,26 @@ tools it uses for its own browser tabs.
   and the tab's badge reads `AI` (`ON` when shared but idle). Cancel on that
   bar stops sharing every tab.
 
+## The agent on the page
+
+While an agent works in a shared tab, the page shows a pointer in its colour
+with its name, a thin glow around the page and an "<agent> working" pill with
+**Stop**, which takes that tab back from that agent only, until you give it
+back from the popup (or Settings > Browser in Codara). It is drawn through the
+debugger session in an isolated world, out of the agent's screenshots,
+snapshots and recordings, and never takes your clicks or typing. The page
+itself can notice and remove it, but cannot read it or press Stop for you; if
+a dialog or fullscreen video covers it, use **Stop** in the popup. **On the page** in the popup, or Settings > Browser in Codara, turns
+the glow or the whole overlay off.
+
 ## What agents can and cannot do
 
-- Only tabs you shared: this tab, every tab in this window, or every tab in
-  the browser (asks for confirmation). Stop one tab or all from the popup.
+- Only tabs you shared. **Agents may use** picks how far: **Tabs I pick**
+  (the ones you switch on), **This window** (every tab in it, also new ones)
+  or **Everything** (every tab in the browser; asks for confirmation). Stop
+  one tab or all from the popup. Chrome keeps every extension off its own
+  pages and the Chrome Web Store; the popup says so there instead of
+  offering a switch.
 - Never a site on the blocked list (Options, or **Blocked sites** in the
   popup). It starts with examples for banks, payment services, password
   managers and account sign-in pages; one host per line, `*.` for
@@ -71,10 +90,11 @@ tools it uses for its own browser tabs.
 - Browser pages (`chrome://`, the extension stores, other extensions) are
   never usable.
 - Cookies and site storage (`Network.getCookies`, `DOMStorage.*`,
-  `IndexedDB.*`, `Fetch.*` and similar) need **Allow cookie and storage
-  access** for that tab, and reach only that tab's site: another site's
+  `IndexedDB.*`, `Fetch.*` and similar) need **Read and change cookies and
+  storage here** for that tab, and reach only that tab's site: another site's
   cookies or storage, or a blocked site's, are refused even with it.
-  Without it, cookie headers are removed from network events. Profile-wide
+  Without it, cookie headers are removed from network events; other request
+  headers (such as `Authorization`) and response bodies still reach agents. Profile-wide
   cookie reads, clearing browser data, closing tabs it did not open, loading
   other URLs with your cookies (`Network.loadNetworkResource`), redirecting
   downloads and every `Browser.*` and `Target.*` command that would reach
@@ -102,14 +122,24 @@ tools it uses for its own browser tabs.
 
 ## Updates
 
-Codara keeps its copy of the extension (the folder you loaded) the same as
-the one it ships: it copies it again whenever a file differs. When this
-extension connects with an older version than that copy, Codara asks it,
-over the sealed session only, to reload itself (`chrome.runtime.reload()`).
-What you shared and the pairing are kept across the reload, and a reload
-that did not bring the new version is not tried again for 30 minutes.
-Versions before 1.1.0 cannot reload themselves: Settings > Browser then
-says to press the reload button on Codara in `chrome://extensions` once.
+Codara never changes this extension by itself. It copies the extension into
+`<Codara home>/chrome-extension` the first time you press **Reveal folder**
+(or **Copy path**), and leaves that copy alone after that, also when a newer
+Codara ships a newer extension. Settings > Browser then shows, for each
+connected browser, the version it runs and the one Codara ships, with an
+**Update extension** button. Only that button copies the new files into the
+folder and asks that browser's extension, over the sealed session, to reload
+itself (`chrome.runtime.reload()`). What you shared and the pairing are kept
+across the reload, and a reload that did not bring the new version is not
+tried again for 30 minutes. Until you press it, the version you run keeps
+working. An extension that is too old to connect at all (another link
+protocol) is listed there too, with the same button; you then press the
+reload button on Codara in `chrome://extensions`.
+
+An extension installed from the Chrome Web Store, or loaded from a folder
+other than Codara's, is never updated or reloaded by Codara: Chrome updates
+a store install by itself. Codara tells them apart by the extension id,
+which for an unpacked extension Chrome derives from the folder's path.
 
 ## Development
 
