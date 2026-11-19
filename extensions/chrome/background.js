@@ -35,7 +35,6 @@ import {
   DEFAULT_BLOCKED_SITES,
   DEFAULT_PORTS,
   LINK_PATH,
-  agentGroupFor,
   agentGroupTitle,
   agentTabId,
   badgeTitle,
@@ -45,6 +44,7 @@ import {
   childSessionError,
   closeTabError,
   commandUrl,
+  groupForAgents,
   isRestrictedUrl,
   isTabShared,
   openedTabAnswer,
@@ -217,38 +217,41 @@ async function usableTab(tabId) {
   return tab;
 }
 
-async function handleRequest(request) {
+// Codara's link closed, or another took its place, while the request
+// waited: nothing it asked for happens to a tab.
+function stillAsked(link) {
+  if (link && !link.live()) throw new Error("Codara's link to this browser closed before this ran.");
+}
+
+async function handleRequest(request, link) {
   await ready;
+  stillAsked(link);
   switch (request.type) {
-    case "attach": {
-      const tab = await usableTab(request.tabId);
-      if (!state.attached.includes(tab.id)) {
-        await chrome.debugger.attach({ tabId: tab.id }, "1.3");
-        await save({ attached: withValue(state.attached, tab.id) });
-        void refresh();
-        void drawPresence(tab.id);
-      }
+    case "attach":
+      await attachFor(request.tabId, link);
       return {};
-    }
     case "detach":
       await detachTab(Number(request.tabId));
       return {};
     case "cdp":
-      return relayCommand(request);
+      return relayCommand(request, link);
     case "open":
-      return openTab(request);
+      return openTab(request, link);
     case "close": {
       const tabId = Number(request.tabId);
       const tab = await chrome.tabs.get(tabId).catch(() => null);
       if (!tab) throw new Error(`${agentTabId(tabId)} is closed.`);
       const refused = closeTabError(tab, shareChoice(), state.agentTabs, rules);
       if (refused) throw new Error(refused);
+      stillAsked(link);
       await detachTab(tab.id);
+      stillAsked(link);
       await chrome.tabs.remove(tab.id);
       return {};
     }
     case "activate": {
       const tab = await usableTab(request.tabId);
+      stillAsked(link);
       await chrome.tabs.update(tab.id, { active: true });
       return {};
     }
@@ -257,7 +260,39 @@ async function handleRequest(request) {
   }
 }
 
-async function relayCommand(request) {
+// Attaches in flight per tab. One that finishes after its link closed lets
+// go again, and a newer link's attach on that tab waits until it has.
+const attaching = new Map();
+
+async function attachFor(requestedTabId, link) {
+  const tabId = (await usableTab(requestedTabId)).id;
+  const before = attaching.get(tabId);
+  const attach = (async () => {
+    await before;
+    // Checked again after the wait: the user may have unshared the tab, or
+    // blocked its site, meanwhile.
+    await usableTab(tabId);
+    if (state.attached.includes(tabId)) return;
+    stillAsked(link);
+    await chrome.debugger.attach({ tabId }, "1.3");
+    if (link && !link.live()) {
+      await chrome.debugger.detach({ tabId }).catch(() => {});
+      stillAsked(link);
+    }
+    await save({ attached: withValue(state.attached, tabId) });
+    void refresh();
+    void drawPresence(tabId);
+  })();
+  const settled = attach.catch(() => {});
+  attaching.set(tabId, settled);
+  try {
+    await attach;
+  } finally {
+    if (attaching.get(tabId) === settled) attaching.delete(tabId);
+  }
+}
+
+async function relayCommand(request, link) {
   const child = childSessionError(request);
   if (child) throw new Error(child);
   const tab = await usableTab(request.tabId);
@@ -286,7 +321,10 @@ async function relayCommand(request) {
   }
   const reserved = presenceWorldError(method, request.params, hiddenFor(tab.id));
   if (reserved) throw new Error(reserved);
-  const send = async () => (await chrome.debugger.sendCommand({ tabId: tab.id }, method, request.params ?? {})) ?? {};
+  const send = async () => {
+    stillAsked(link);
+    return (await chrome.debugger.sendCommand({ tabId: tab.id }, method, request.params ?? {})) ?? {};
+  };
   // Always: a recording's end brings the overlay back even if it went quiet meanwhile.
   if (method === "Page.stopScreencast") return stopScreencast(tab.id, send);
   if (!presence.has(tab.id)) return send();
@@ -558,7 +596,7 @@ async function setPresence(settings) {
   }
 }
 
-async function openTab(request) {
+async function openTab(request, link) {
   if (!state.allowOpen) {
     throw new Error('Opening tabs is off. The user can turn on "Open new tabs in a group" in the Codara extension popup.');
   }
@@ -568,7 +606,7 @@ async function openTab(request) {
   if (rule) throw new Error(`${url} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`);
   const tab = await chrome.tabs.create({ url, active: request.active === true });
   await save({ shareTabs: withValue(state.shareTabs, tab.id), agentTabs: withValue(state.agentTabs, tab.id) });
-  const group = await groupOpenedTab(tab, request.group);
+  const group = await groupOpenedTab(tab, request.group, link);
   const deadline = Date.now() + OPEN_LOAD_TIMEOUT_MS;
   let current = tab;
   while (current && current.status !== "complete" && Date.now() < deadline) {
@@ -584,23 +622,18 @@ async function openTab(request) {
 // Puts a tab an agent just opened in the agent's named group in its window,
 // joining one the extension made with that title. Only that new tab moves, so
 // no tab the user shared is ever grouped. A failure leaves it ungrouped.
-async function groupOpenedTab(tab, requested) {
+async function groupOpenedTab(tab, requested, link) {
   const title = agentGroupTitle(requested);
   if (!title || !chrome.tabGroups) return null;
-  try {
-    const groups = await chrome.tabGroups.query({ windowId: tab.windowId });
-    const existing = agentGroupFor(groups, state.agentGroups, title);
-    if (existing) {
-      await chrome.tabs.group({ groupId: existing.id, tabIds: [tab.id] });
-      return existing.title;
-    }
-    const groupId = await chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId: tab.windowId } });
-    await chrome.tabGroups.update(groupId, { title });
-    await save({ agentGroups: withValue(state.agentGroups, groupId) });
-    return title;
-  } catch {
-    return null;
-  }
+  return groupForAgents({
+    tab,
+    title,
+    agentGroupIds: state.agentGroups,
+    live: () => !link || link.live(),
+    tabs: chrome.tabs,
+    tabGroups: chrome.tabGroups,
+    record: (groupId) => save({ agentGroups: withValue(state.agentGroups, groupId) }),
+  });
 }
 
 const usageBadgeTimers = new Map();
@@ -937,9 +970,9 @@ async function handlePopup(request) {
       await link.connect({ pair: true });
       return popupState(request);
     case "unpair":
-      link.send({ type: "unpair" });
-      await save({ token: null, linkId: null });
-      link.disconnect("idle");
+      // Ends the link at once, so a pairing Codara approves meanwhile is
+      // not kept; the token is cleared after any pairing write in flight.
+      await link.forget({ type: "unpair" });
       await detachAll();
       break;
     case "shareTab":

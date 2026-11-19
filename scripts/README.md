@@ -479,10 +479,12 @@ The Firefox extension: `test-firefox-extension` (its tests in
 `extensions/firefox/test/`: the pages Firefox keeps extensions off, the
 protocol commands its hello lists, the manifest, and the assembly that takes
 the shared files from `extensions/chrome` unchanged but for checked patches)
-and `test-firefox-link` (Codara's side: `moz-extension://` origins, pairing
-bound to the profile's uuid, only the listed commands relayed). The real
-extension in a headless Firefox is `tests/e2e/firefox-extension.spec.ts`,
-which CI (Linux) runs on the current Firefox and on ESR 153.
+and `test-firefox-link` (Codara's side: `moz-extension://` origins and
+nothing shaped like one, pairing bound to the profile's extension uuid, only
+the protocol commands the extension's hello lists relayed and every other
+refused with the reason before it is sent). The real extension in a headless
+Firefox is `tests/e2e/firefox-extension.spec.ts`, which CI (Linux) runs on
+the current Firefox and on ESR 153.
 
 ### Security boundaries and packaging
 

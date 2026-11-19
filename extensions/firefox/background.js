@@ -497,18 +497,16 @@ async function handlePopup(request) {
       keepAwakeWhilePairing();
       await link.connect({ pair: true });
       return popupState(request);
-    case "unpair": {
+    case "unpair":
       pairingWanted = false;
       generation += 1;
-      // Closing waits for the sealed unpair frame to leave, so Codara forgets this browser too.
-      const socket = link.socket;
-      link.send({ type: "unpair" });
-      await save({ token: null, linkId: null });
-      await socket?.outbox?.catch(() => {});
-      link.disconnect("idle");
+      // The shared client's Disconnect: the link ends at once (a pairing
+      // Codara approves meanwhile is not kept), the sealed unpair frame
+      // leaves so Codara forgets this browser too, and the token is cleared
+      // after any pairing write in flight.
+      await link.forget({ type: "unpair" });
       await detachAll();
       break;
-    }
     case "shareTab":
       await setTabShared(Number(request.tabId), request.on === true);
       if (request.on === true) void link.wake();

@@ -59,6 +59,8 @@ export interface WorktreeInUse {
    * `elsewhere`, it then holds only work that may be unfinished.
    */
   idle?: true;
+  /** With "agent": the pane of its tab, so the agent asking can tell its own tab apart. */
+  paneId?: string;
 }
 
 /** Ignored files copied out of a worktree before it was removed, kept for 30 days. */

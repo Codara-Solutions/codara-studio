@@ -1321,6 +1321,38 @@ async function main() {
       assert.ok(await github.repositoryCacheKey(repo), "back to plain: cached again");
     }
 
+    {
+      // Every pull request of a head branch with its state, for telling a
+      // given-up branch apart. One that could be open but does not say so
+      // fails the whole list rather than going missing.
+      const entry = (number, state) => ({
+        number,
+        url: `https://github.com/codara/studio/pull/${number}`,
+        headRefName: "agent/x",
+        headRefOid: "a".repeat(40),
+        baseRefName: "main",
+        isCrossRepository: false,
+        mergeCommit: null,
+        ...(state ? { state } : {}),
+      });
+      const { adapter, calls } = fakeAdapter(github, [
+        { stdout: JSON.stringify([entry(4, "CLOSED"), entry(5, "MERGED"), entry(6, "OPEN")]), stderr: "" },
+        { stdout: JSON.stringify([entry(4, "CLOSED"), entry(6)]), stderr: "" },
+        { stdout: JSON.stringify([entry(4, "CLOSED"), { ...entry(6, "OPEN"), headRefOid: "not-a-sha" }]), stderr: "" },
+      ]);
+      const listed = await adapter.listPullRequestStatesForHead("/repo", "agent/x", "github.com/codara/studio");
+      assert.deepEqual(listed.map((pr) => [pr.number, pr.state]), [[4, "closed"], [5, "merged"], [6, "open"]]);
+      assert.deepEqual(calls[0].args.slice(0, 10), ["pr", "list", "--state", "all", "--head", "agent/x", "--repo", "github.com/codara/studio", "--limit", "20"]);
+      assert.match(calls[0].args.at(-1), /,state$/);
+      await rejectsCode(adapter.listPullRequestStatesForHead("/repo", "agent/x", "codara/studio"), "invalid-response");
+      await rejectsCode(adapter.listPullRequestStatesForHead("/repo", "agent/x", "codara/studio"), "invalid-response");
+      // The repository is always named, never left for gh to pick.
+      for (const repository of [undefined, "", "studio", "a/b/c/d", "--repo=x/y", "codara/studio; rm"]) {
+        await rejectsCode(adapter.listPullRequestStatesForHead("/repo", "agent/x", repository), "command-failed");
+      }
+      assert.equal(calls.length, 3, "a bad repository never reaches gh");
+    }
+
     console.log("All GitHub CLI adapter checks passed.");
   } finally {
     rmSync(temp, { recursive: true, force: true });
