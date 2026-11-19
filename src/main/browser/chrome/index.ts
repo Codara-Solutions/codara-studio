@@ -169,7 +169,8 @@ function shippedExtensionVersion(): string | null {
 
 /** What Settings says about a connected extension older than the one Codara ships. */
 function updateStateOf(link: ChromeLink | undefined): ChromeLinkState["browsers"][number]["extensionUpdate"] {
-  if (!link) return null;
+  // The Chrome extension's version says nothing about Firefox's.
+  if (!link || link.extensionKind === "firefox") return null;
   return extensionUpdateState({
     running: link.extensionVersion,
     features: link.extensionFeatures,

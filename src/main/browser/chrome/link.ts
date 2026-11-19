@@ -3,7 +3,7 @@
 
 import type { WebSocket } from "ws";
 
-import { sanitizeTabs, type ChromeBrowserInfo, type ChromeRequestType, type ChromeTabInfo, type LinkSealer } from "./protocol";
+import { sanitizeTabs, type ChromeBrowserInfo, type ChromeRequestType, type ChromeTabInfo, type ExtensionKind, type LinkSealer } from "./protocol";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -42,7 +42,15 @@ export class ChromeLink {
     private readonly sealer: LinkSealer,
     /** What the extension's hello said it can do, such as "reload". */
     readonly extensionFeatures: readonly string[] = [],
+    readonly extensionKind: ExtensionKind = "chromium",
+    /** The protocol commands the extension answers; null means it relays every one. */
+    readonly cdpMethods: ReadonlySet<string> | null = null,
   ) {}
+
+  /** Whether the extension answers this DevTools protocol command. */
+  answers(method: string): boolean {
+    return this.cdpMethods === null || this.cdpMethods.has(method);
+  }
 
   get isOpen(): boolean {
     return !this.closed;

@@ -4,6 +4,7 @@
 
 import type { CdpTransport } from "../cdp-session";
 import type { ChromeLink } from "./link";
+import { unsupportedCdpError } from "./protocol";
 
 export interface ChromeRelayTransport extends CdpTransport {
   /** Why the tab detached last (canceled_by_user, target_closed, blocked_site, unshared, link_closed). */
@@ -49,7 +50,13 @@ export function chromeRelayTransport(link: ChromeLink, tabId: number): ChromeRel
       attached = false;
       void link.request("detach", { tabId }).catch(() => {});
     },
-    send: (method, params) => link.request("cdp", { tabId, method, params: params ?? {} }),
+    // A command the extension does not answer is refused with the reason,
+    // before attaching (CdpSession asks refuses first) or a round trip.
+    refuses: (method) => (link.answers(method) ? null : unsupportedCdpError(method, link.browser.name)),
+    send: (method, params) =>
+      link.answers(method)
+        ? link.request("cdp", { tabId, method, params: params ?? {} })
+        : Promise.reject(new Error(unsupportedCdpError(method, link.browser.name))),
     onEvent(listener) {
       return link.onEvent((eventTab, method, params) => {
         if (eventTab === tabId) listener(method, params);
