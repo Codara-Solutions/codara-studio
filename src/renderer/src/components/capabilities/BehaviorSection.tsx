@@ -84,6 +84,15 @@ function routeOrderLabel(order: readonly CoraRoute[]): string {
   return order.map((route) => ROUTE_LABELS[route]).join(", then ");
 }
 
+/** The select names an offered order by its first route (each starts with a
+ *  different one) and spells out any other order in full. */
+function routeOrderOptionLabel(order: readonly CoraRoute[]): string {
+  const offered = ROUTE_ORDER_CHOICES.some((choice) => choice.join(",") === order.join(","));
+  if (!offered) return routeOrderLabel(order);
+  const first = ROUTE_LABELS[order[0]];
+  return `${first[0].toUpperCase()}${first.slice(1)} first`;
+}
+
 function RouteOrderRow({
   value,
   onChange,
@@ -113,16 +122,19 @@ function RouteOrderRow({
       <select
         className="spark-input"
         aria-labelledby="route-order-title"
+        title={value ? `Cora tries ${routeOrderLabel(value)}.` : "Every model launches as picked."}
         value={current}
         onChange={(event) =>
           onChange(event.target.value ? normalizeCoraRouteOrder(event.target.value.split(",")) : undefined)
         }
-        style={{ width: "auto", minWidth: 120 }}
+        // A long order name would otherwise widen the select and squeeze the
+        // explanation beside it into a narrow column.
+        style={{ width: "auto", minWidth: 120, maxWidth: 240 }}
       >
         <option value="">As picked (no reordering)</option>
         {choices.map((order) => (
           <option key={order.join(",")} value={order.join(",")}>
-            {routeOrderLabel(order)}
+            {routeOrderOptionLabel(order)}
           </option>
         ))}
       </select>
