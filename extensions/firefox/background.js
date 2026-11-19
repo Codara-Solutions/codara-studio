@@ -28,24 +28,22 @@ import {
 } from "./lib/firefox.js";
 import {
   MOVED_ERROR,
+  NO_ANSWER,
   PAGE_METHODS,
-  SYNTAX_ERROR,
   accessError,
   accessKey,
   accessNeeds,
   accessRequest,
   accessRows,
   captureOptions,
-  compileCheck,
   documentAddress,
+  documentGuard,
   expressionAnswer,
   expressionScript,
   frameFailed,
   layoutMetrics,
   measureLayout,
   screenshotAnswer,
-  statementsAnswer,
-  statementsScript,
   unansweredAsks,
 } from "./lib/page-tools.js";
 import {
@@ -302,9 +300,11 @@ async function answerCommand(request, socket) {
       return evaluateInPage(tab.id, params, socket);
     case "Page.getLayoutMetrics": {
       const page = await pinDocument(tab.id, socket);
+      const loads = navigations.get(tab.id) ?? 0;
       const [frame] = await inDocument(page, () => chrome.scripting.executeScript({ target: page.target, func: measureLayout }));
       const metrics = layoutMetrics(frame?.result);
-      await stillUsable(tab.id, socket);
+      // The sizes of a page the tab has since left would frame a full-page capture wrongly.
+      await stillOnPage(page.tab, loads, socket);
       return metrics;
     }
     case "Page.captureScreenshot": {
@@ -363,11 +363,9 @@ async function inDocument({ tab }, work) {
 }
 
 /**
- * Runtime.evaluate in the page's own world. The expression runs inside a
- * wrapper that returns its value or what it threw, as Codara's protocol
- * gives them. Firefox reports a script that does not compile only as an
- * empty error, so then the code is compiled without running (as an
- * expression, then as statements) before it runs once as statements.
+ * Runtime.evaluate in the page's own world, once: the expression runs inside
+ * a wrapper that returns its value or what it threw, as Codara's protocol
+ * gives them (Firefox would give a thrown error empty).
  */
 async function evaluateInPage(tabId, params, socket) {
   if (params.contextId !== undefined || params.uniqueContextId !== undefined) {
@@ -375,34 +373,20 @@ async function evaluateInPage(tabId, params, socket) {
   }
   const expression = String(params.expression ?? "");
   const awaitPromise = params.awaitPromise === true;
-  // Every script of the request runs in the one document pinned here, and
-  // its answer leaves only while the tab is still shared and allowed (the
-  // agent's own code may navigate it, so not necessarily on the same page).
+  // It runs in the document pinned here, on the address checked (see
+  // documentGuard), and its answer leaves only while the tab is still shared
+  // and allowed (the agent's own code may navigate it).
   const page = await pinDocument(tabId, socket);
-  const run = async (code) => {
-    await stillUsable(tabId, socket);
-    // Firefox removes the API when the user takes the permission back.
-    if (!chrome.userScripts) throw new Error(accessError("scripts", page.tab.url, wasAsked("scripts", page.tab.url)));
-    const [frame] = await inDocument(page, () => chrome.userScripts.execute({ js: [{ code }], target: page.target, world: "MAIN", injectImmediately: true }));
-    await stillUsable(tabId, socket);
-    if (!frame) throw new Error(`${agentTabId(tabId)} has no page to run the script in.`);
-    return frame;
-  };
-  const first = await run(expressionScript(expression, { awaitPromise }));
-  if (!frameFailed(first)) return expressionAnswer(first.result);
-  if (!frameFailed(await run(compileCheck(expression, { awaitPromise })))) {
-    throw new Error("The page did not finish the script; it may have navigated away. Nothing was run twice.");
-  }
-  if (frameFailed(await run(compileCheck(expression, { asScript: true })))) return SYNTAX_ERROR;
-  const strict = frameFailed(await run(compileCheck(expression, { asScript: true, strictProbe: true })));
-  const marker = `__codaraThrown${crypto.randomUUID().replaceAll("-", "")}`;
-  try {
-    return statementsAnswer(await run(statementsScript(expression, marker, { strict })), marker);
-  } catch (error) {
-    // The last statement's value cannot leave the page (a DOM node, a function).
-    if (/non-structured-clonable/i.test(String(error?.message))) return { result: { type: "object", value: {} } };
-    throw error;
-  }
+  await stillUsable(tabId, socket);
+  // Firefox removes the API when the user takes the permission back.
+  if (!chrome.userScripts) throw new Error(accessError("scripts", page.tab.url, wasAsked("scripts", page.tab.url)));
+  const moved = `codara-moved-${crypto.randomUUID()}`;
+  const js = [{ code: documentGuard(page.tab.url, moved) }, { code: expressionScript(expression, { awaitPromise }) }];
+  const [frame] = await inDocument(page, () => chrome.userScripts.execute({ js, target: page.target, world: "MAIN", injectImmediately: true }));
+  await stillUsable(tabId, socket);
+  if (!frame) throw new Error(`${agentTabId(tabId)} has no page to run the script in.`);
+  if (frame.error === moved) throw new Error(MOVED_ERROR);
+  return frameFailed(frame) ? NO_ANSWER : expressionAnswer(frame.result);
 }
 
 // ── Firefox permissions ─────────────────────────────────────────────────────

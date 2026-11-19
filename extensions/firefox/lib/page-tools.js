@@ -193,24 +193,15 @@ export function expressionScript(expression, { awaitPromise = false } = {}) {
 }
 
 /**
- * Code that only compiles, and runs none of it: the expression, or (`asScript`)
- * the statements as a function body, where their own directives hold.
- * `strictProbe` adds a `with` statement, which only strict code refuses: the
- * engine's own answer to whether the statements start with "use strict".
+ * Runs first, as its own script in the same userScripts.execute call: if
+ * the document is not on the checked address (a same-document route
+ * change, say), it throws `token` and Firefox runs none of the scripts
+ * after it. Being a separate script, the agent's code cannot change how it
+ * parses; `location` cannot be shadowed and `!==` calls nothing the page
+ * could have replaced.
  */
-export function compileCheck(code, { asScript = false, awaitPromise = false, strictProbe = false } = {}) {
-  const body = asScript ? `\n${code}\n${strictProbe ? ";\nwith ({}) {}\n" : ""}` : ` return (${code}\n);`;
-  return `void ${awaitPromise ? "async " : ""}function () {${body}};`;
-}
-
-/** Statements whose last value is the result, as Runtime.evaluate allows; a throw comes back under `marker`. */
-export function statementsScript(code, marker, { strict = false } = {}) {
-  const key = JSON.stringify(marker);
-  return [
-    // Their "use strict" stays the script's directive, outside the try block.
-    strict ? '"use strict";' : "",
-    `try {\n${code}\n} catch (__codaraError) { ({ ${key}: { thrown: (${describeThrown.toString()})(__codaraError) } }) }`,
-  ].join("\n");
+export function documentGuard(url, token) {
+  return `if (location.href !== ${JSON.stringify(String(url ?? ""))}) throw ${JSON.stringify(token)};`;
 }
 
 function exception(thrown) {
@@ -231,21 +222,16 @@ export function frameFailed(frame) {
   return !frame || frame.error !== undefined || !("result" in frame);
 }
 
-/** Runtime.evaluate's answer from a statementsScript run: its frame result, or the error Firefox gave. */
-export function statementsAnswer(frame, marker) {
-  if (frameFailed(frame)) {
-    return exception({ type: "string", value: "Firefox did not report this script's error (a rejected promise or a syntax error). Write the code as one expression, such as (() => { ... })(), to see it." });
-  }
-  const value = frame?.result;
-  if (plainObject(value) && plainObject(value[marker]) && plainObject(value[marker].thrown)) return exception(value[marker].thrown);
-  return { result: encodeValue(value) };
-}
-
-export const SYNTAX_ERROR = exception({
+/**
+ * When the expression script gives no answer: Codara sends one expression
+ * (its evaluate tool wraps statements itself), so it did not compile, or the
+ * page went away while it ran. Nothing is retried, so nothing runs twice.
+ */
+export const NO_ANSWER = exception({
   type: "object",
   subtype: "error",
   className: "SyntaxError",
-  description: "SyntaxError: the code is neither an expression nor statements Firefox can compile.",
+  description: "SyntaxError: Firefox gave no answer: the code is not one expression it can compile (write statements as (() => { ... })()), or the page went away while it ran.",
 });
 
 // ── Screenshots and layout ──────────────────────────────────────────────────

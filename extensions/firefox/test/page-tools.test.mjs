@@ -23,7 +23,7 @@ async function execute(code, globals) {
 
 export async function run(assembled) {
   const tools = await import(pathToFileURL(join(assembled, "lib", "page-tools.js")).href);
-  const { expressionScript, expressionAnswer, compileCheck, statementsScript, statementsAnswer, frameFailed, SYNTAX_ERROR } = tools;
+  const { expressionScript, expressionAnswer, frameFailed, NO_ANSWER, documentGuard } = tools;
   const evaluate = async (expression, options = {}, globals = {}) => expressionAnswer((await execute(expressionScript(expression, options), globals)).result);
 
   // Values come back as Runtime.evaluate gives them with returnByValue.
@@ -54,38 +54,26 @@ export async function run(assembled) {
   assert.throws(() => expressionAnswer(undefined), /no answer/);
   assert.throws(() => expressionAnswer({ value: "forged" }), /no answer/);
 
-  // Statements: only a compile error makes the wrapper fail, and the check compiles without running.
-  const effects = { ran: 0 };
-  assert.equal(frameFailed(await execute(expressionScript("var x = 1; x"), effects)), true);
-  assert.equal(frameFailed(await execute(compileCheck("ran += 1"), effects)), false);
-  assert.equal(frameFailed(await execute(compileCheck("var x = 1; x"), effects)), true);
-  assert.equal(frameFailed(await execute(compileCheck("ran += 1; ran", { asScript: true }), effects)), false);
-  assert.equal(effects.ran, 0, "compile checks run nothing");
-  assert.equal(frameFailed(await execute(compileCheck("await 1"), effects)), true);
-  assert.equal(frameFailed(await execute(compileCheck("await 1", { awaitPromise: true }), effects)), false);
-  assert.equal(frameFailed(await execute(compileCheck("1 +", { asScript: true }))), true);
-
-  const marker = "__codaraThrownTest";
-  assert.deepEqual(statementsAnswer(await execute(statementsScript("var a = 41; a + 1", marker)), marker), { result: { type: "number", value: 42 } });
-  const statementThrow = statementsAnswer(await execute(statementsScript("var a = 1;\nnull.x", marker)), marker);
-  assert.match(statementThrow.exceptionDetails.exception.description, /^TypeError: /);
-  assert.match(statementsAnswer({ error: null }, marker).exceptionDetails.exception.value, /did not report/);
-  assert.equal(SYNTAX_ERROR.exceptionDetails.exception.className, "SyntaxError");
-  // Whether statements start with "use strict" is the engine's answer, comments and all.
-  const isStrict = async (code) => frameFailed(await execute(compileCheck(code, { asScript: true, strictProbe: true })));
-  assert.equal(await isStrict('"use strict";\nundeclaredName = 1;'), true);
-  assert.equal(await isStrict("/* setup */ 'use strict'\nundeclaredName = 1"), true);
-  assert.equal(await isStrict('"use strict".length'), false);
-  assert.equal(await isStrict("undeclaredName = 1"), false);
-  assert.equal(frameFailed(await execute(compileCheck('"use strict"; var let = 1;', { asScript: true }))), true);
-  // And then holds when they run: no page global from a typo.
-  const sloppy = {};
-  const strict = statementsAnswer(await execute(statementsScript("/* setup */ 'use strict'\nundeclaredName = 1;", marker, { strict: true }), sloppy), marker);
-  assert.match(strict.exceptionDetails.exception.description, /^ReferenceError/);
-  assert.equal("undeclaredName" in sloppy, false);
+  // Firefox's answer for a frame: an error (even for a syntax error) or a result.
+  assert.equal(frameFailed(await execute(expressionScript("var x = 1; x"))), true, "statements do not compile as the expression");
   assert.equal(frameFailed({ frameId: 0, result: null }), false);
   assert.equal(frameFailed({ frameId: 0, error: null }), true);
   assert.equal(frameFailed(undefined), true);
+  assert.equal(NO_ANSWER.exceptionDetails.exception.className, "SyntaxError");
+
+  // The guard runs alone, first: on another address it throws its token
+  // (and Firefox runs nothing after it), even if the page replaced String methods.
+  const guard = documentGuard(PAGE, "moved-1");
+  assert.equal(inPage(guard), undefined);
+  assert.throws(() => inPage(guard, { location: { href: `${PAGE}#elsewhere` } }), (thrown) => thrown === "moved-1");
+  assert.throws(
+    () => inPage(`String.prototype.split = () => [${JSON.stringify(PAGE)}]; String.prototype.startsWith = () => true;\n${guard}`, { location: { href: "https://a.example/admin" } }),
+    (thrown) => thrown === "moved-1",
+  );
+  // The address is a string literal: one that looks like code runs nothing.
+  const quoted = { location: { href: PAGE } };
+  assert.throws(() => vm.runInNewContext(documentGuard('x"; globalThis.ran = 1; "', "t"), quoted), (thrown) => thrown === "t");
+  assert.equal(quoted.ran, undefined);
 
   permissions(tools);
   screenshots(tools);
