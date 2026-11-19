@@ -134,6 +134,26 @@ const DOMAINS = ["Log", "Network", "Page", "Runtime"];
 /** The DevTools protocol commands this extension answers, as listed in its hello. */
 export const CDP_METHODS = Object.freeze([...DOMAINS.flatMap((domain) => [`${domain}.disable`, `${domain}.enable`]), ...PAGE_METHODS, ...NAVIGATION_METHODS, "Network.getResponseBody", "Network.getCookies"].sort());
 
+/**
+ * The DevTools protocol events this extension sends (lib/network.js,
+ * lib/navigation.js, lib/console.js); Codara refuses to wait for any other
+ * on a Firefox tab (src/main/browser/chrome/protocol.ts FIREFOX_CDP_EVENTS,
+ * kept equal by scripts/test-user-browser-tools.cjs).
+ */
+export const CDP_EVENTS = Object.freeze([
+  "Network.loadingFailed",
+  "Network.loadingFinished",
+  "Network.requestWillBeSent",
+  "Network.responseReceived",
+  "Page.frameNavigated",
+  "Page.frameStartedLoading",
+  "Page.frameStoppedLoading",
+  "Page.loadEventFired",
+  "Page.navigatedWithinDocument",
+  "Runtime.consoleAPICalled",
+  "Runtime.exceptionThrown",
+]);
+
 /** Whether a command is one the extension answers without doing anything. */
 export function isDomainToggle(method) {
   const [domain, verb] = String(method ?? "").split(".");

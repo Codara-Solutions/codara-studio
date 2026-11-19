@@ -11,7 +11,10 @@ import { guardPageDialogs } from "../browser/dialog-guard";
 import { recordActedTab, withActedTab } from "../browser/acted-tab";
 import { noteChromeToolCall } from "../browser/chrome/activity";
 import { assertChromeDriverAllowed } from "../browser/chrome/presence";
+import type { ChromeLink } from "../browser/chrome/link";
+import { unsupportedCdpError } from "../browser/chrome/protocol";
 import { chromeLinkRuntime } from "../browser/chrome/runtime";
+import { normalizeEmulationRequest } from "../browser/emulation";
 import { BrowserTabRefError, parseTabRef, type BrowserTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { normalizeTabGroupName } from "../../shared/tab-group-name";
@@ -136,15 +139,33 @@ export function coerceNumericParams(params: Record<string, unknown>, depth = 0):
 // (src/shared/user-browser-tools.ts). A tab that cannot be found is left to
 // the handler, which says why.
 function refuseOnFirefox(method: string, params: Record<string, unknown>, ref: Extract<BrowserTabRef, { kind: "chrome" }>): void {
-  let kind: string | undefined;
+  let link: ChromeLink | undefined;
   try {
-    kind = chromeLinkRuntime()?.backend.locate(ref).link.extensionKind;
+    link = chromeLinkRuntime()?.backend.locate(ref).link;
   } catch {
     return;
   }
-  if (kind !== "firefox") return;
+  if (link?.extensionKind !== "firefox") return;
+  // open never acts on the tab it names: the link tool picks the browser that may open one.
+  if (method === "preview.chrome" && params.action === "open") return;
+  // Called with no settings, emulate only reads the state and sends nothing.
+  if (method === "preview.emulate" && readsEmulationOnly(params)) return;
+  // A raw command the extension does not answer is refused before the tab is attached.
+  if (method === "preview.cdp" && typeof params.method === "string" && !link.answers(params.method)) {
+    throw new PreviewToolParamsError(unsupportedCdpError(params.method, link.browser.name));
+  }
   const reason = firefoxRefusal(method, params);
   if (reason) throw new PreviewToolParamsError(reason);
+}
+
+function readsEmulationOnly(params: Record<string, unknown>): boolean {
+  try {
+    const request = normalizeEmulationRequest(params);
+    return !request.reset && Object.keys(request.changes).length === 0;
+  } catch {
+    // Its own checks answer a malformed call.
+    return false;
+  }
 }
 
 // Names agents reach for that a tool calls something else, and the hint for

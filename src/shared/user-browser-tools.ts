@@ -28,6 +28,26 @@ export interface UserBrowserTool {
 
 const NO_DEBUGGER = "Firefox gives extensions no debugger";
 
+/**
+ * The DevTools protocol events Firefox's extension sends: equal to its
+ * CDP_EVENTS (extensions/firefox/lib/firefox.js), which its own test keeps
+ * equal to what its code sends. A subscription to any other event on a
+ * Firefox tab would only ever time out, so it is refused.
+ */
+export const FIREFOX_CDP_EVENTS: readonly string[] = Object.freeze([
+  "Network.loadingFailed",
+  "Network.loadingFinished",
+  "Network.requestWillBeSent",
+  "Network.responseReceived",
+  "Page.frameNavigated",
+  "Page.frameStartedLoading",
+  "Page.frameStoppedLoading",
+  "Page.loadEventFired",
+  "Page.navigatedWithinDocument",
+  "Runtime.consoleAPICalled",
+  "Runtime.exceptionThrown",
+]);
+
 /** How the extension reaches each browser today: not a tool, the first row of the table. */
 export const USER_BROWSER_DISTRIBUTION: { chrome: string; firefox: string } = {
   chrome: "Loaded unpacked from Settings, Browser (a Chrome Web Store listing is prepared).",
@@ -46,17 +66,17 @@ export const USER_BROWSER_TOOLS: Readonly<Record<string, UserBrowserTool>> = {
   },
   codara_preview_cdp: {
     chrome: { status: "degraded", how: "The DevTools protocol allowlist, without Runtime, Debugger or DOM and CSS edits on your own browser." },
-    firefox: { status: "degraded", how: "Only what the extension answers: Page (navigate, frame tree, layout, screenshot), Network (bodies) and Log; the rest is refused with the reason." },
+    firefox: { status: "degraded", how: "Only the commands the extension answers (Page navigate, frame tree, layout metrics and screenshot; Network response bodies; the Log, Network, Page and Runtime enable and disable), within the allowlist above; any other is refused with the reason before the tab is touched." },
   },
   codara_preview_cdp_events: {
     chrome: { status: "degraded", how: "Events of the allowlisted domains, Debugger excepted." },
-    firefox: { status: "degraded", how: "Network, Page, Log and console events only." },
+    firefox: { status: "degraded", how: `Only the events the extension sends: ${FIREFOX_CDP_EVENTS.join(", ")}; a subscription to any other is refused.` },
   },
   codara_preview_chrome: {
     chrome: { status: "works", how: "Status, open a tab (in a tab group), close, activate." },
     firefox: {
       status: "degraded",
-      how: "Status and activate work; agents cannot open or close tabs yet.",
+      how: "Status and activate work; agents cannot open or close tabs yet (open is refused when only Firefox is connected; with Chrome connected too, Chrome opens it).",
       unavailable: {
         open: "Opening tabs is not available in Firefox yet: the user opens the tab and shares it from the Codara extension's popup.",
         close: "Closing tabs is not available in Firefox yet: the user closes it.",
@@ -66,7 +86,7 @@ export const USER_BROWSER_TOOLS: Readonly<Record<string, UserBrowserTool>> = {
   },
   codara_preview_click: {
     chrome: { status: "works", how: "Clicks the element in the page." },
-    firefox: { status: "works", how: "Clicks the element in the page; the page does not count it as a user gesture." },
+    firefox: { status: "degraded", how: "Clicks the element in the page, but the page gets no user activation: what needs a gesture (a popup, the clipboard, fullscreen, media with sound) is refused by the browser." },
   },
   codara_preview_close: {
     chrome: { status: "works", how: "Closes a tab an agent opened or the user shared." },
@@ -95,11 +115,11 @@ export const USER_BROWSER_TOOLS: Readonly<Record<string, UserBrowserTool>> = {
   },
   codara_preview_emulate: {
     chrome: { status: "works", how: "Device, color scheme, network and CPU throttling." },
-    firefox: { status: "not available", how: `Emulation needs the DevTools protocol, and ${NO_DEBUGGER}.` },
+    firefox: { status: "not available", how: `Emulation needs the DevTools protocol, and ${NO_DEBUGGER}. Called with no settings it still answers the current state (always none).` },
   },
   codara_preview_evaluate: {
     chrome: { status: "works", how: "Runs in the page." },
-    firefox: { status: "works", how: "Runs in the page through Firefox's user scripts, once the user allowed scripts in pages from the popup." },
+    firefox: { status: "degraded", how: "Runs in the page through Firefox's user scripts, once the user allowed scripts in pages from the popup, without user activation: what needs a gesture (a popup, the clipboard, fullscreen) is refused by the browser." },
   },
   codara_preview_find: {
     chrome: { status: "works", how: "Finds elements in the page." },
@@ -138,8 +158,8 @@ export const USER_BROWSER_TOOLS: Readonly<Record<string, UserBrowserTool>> = {
     firefox: { status: "works", how: "Web addresses only; waits for the load event, and a failed load does not say why." },
   },
   codara_preview_network: {
-    chrome: { status: "works", how: "Requests, responses, timing and bodies." },
-    firefox: { status: "degraded", how: "Requests and responses with headers and text bodies; no initiator, timing or sizes." },
+    chrome: { status: "works", how: "Requests, responses, timing and bodies; cookie and authorization values always redacted." },
+    firefox: { status: "degraded", how: "Requests and responses with headers and text bodies, and each request's elapsed time; no initiator, per-phase timing or sizes; only requests to sites the user let the extension use, never a blocked site." },
   },
   codara_preview_performance: {
     chrome: { status: "works", how: "Web vitals, load and interaction traces, memory." },
@@ -174,8 +194,14 @@ export const USER_BROWSER_TOOLS: Readonly<Record<string, UserBrowserTool>> = {
     firefox: { status: "works", how: "The page's structure with references to act on." },
   },
   codara_preview_storage: {
-    chrome: { status: "works", how: "Site storage; cookies read only, all with the tab's cookie switch on." },
-    firefox: { status: "works", how: "Site storage; cookies of the tab's own site and store, read only, with the tab's cookie switch on." },
+    chrome: {
+      status: "works",
+      how: "get reads local and session storage with values redacted; with the tab's cookie and storage switch on, it also reads cookies (HttpOnly values stay redacted) and unredacted values, and set and clear change local and session storage. Cookies are never changed, IndexedDB and caches never cleared, and fresh and discard are for Codara's own tabs.",
+    },
+    firefox: {
+      status: "works",
+      how: "As in Chrome; cookies come only from the tab's own host, scheme and cookie store (a container or private window keeps its own).",
+    },
   },
   codara_preview_type: {
     chrome: { status: "works", how: "Types into the field." },
@@ -190,8 +216,8 @@ export const USER_BROWSER_TOOLS: Readonly<Record<string, UserBrowserTool>> = {
     firefox: { status: "works", how: "The tab's address and title." },
   },
   codara_preview_wait_for: {
-    chrome: { status: "works", how: "Waits for text, an element or a condition." },
-    firefox: { status: "works", how: "Waits for text, an element or a condition." },
+    chrome: { status: "works", how: "Waits for text, an element, a condition or a quiet network." },
+    firefox: { status: "degraded", how: "Waits for text, an element or a condition; a quiet network counts only the requests the extension sees (sites the user let it use, never a blocked site), so another request may still be running." },
   },
 };
 
@@ -203,11 +229,18 @@ export function toolNameOf(method: string): string {
 /** Why this tool (or the mode its params pick) is not available on a Firefox tab, or null when it runs. */
 export function firefoxRefusal(method: string, params: Record<string, unknown>): string | null {
   const name = toolNameOf(method);
+  if (method === "preview.cdp_events" && params.action === "subscribe") {
+    const events = typeof params.events === "string" ? [params.events] : Array.isArray(params.events) ? params.events : [];
+    const missing = events.filter((event) => typeof event === "string" && !FIREFOX_CDP_EVENTS.includes(event));
+    if (missing.length) return `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not sent by Codara's extension for Firefox, so a subscription would only time out. It sends ${FIREFOX_CDP_EVENTS.join(", ")}.`;
+  }
   const row = USER_BROWSER_TOOLS[name];
   if (!row) return null;
   if (row.firefox.status === "not available") return `${name} is not available on a Firefox tab: ${row.firefox.how}`;
   const mode = row.modeParam ? params[row.modeParam] : undefined;
-  const reason = typeof mode === "string" ? row.firefox.unavailable?.[mode] : undefined;
+  const modes = row.firefox.unavailable;
+  // Own keys only: a mode such as "toString" is left to the tool's own checks.
+  const reason = typeof mode === "string" && modes && Object.hasOwn(modes, mode) ? modes[mode] : undefined;
   return reason ? `${name} ${mode} is not available on a Firefox tab: ${reason}` : null;
 }
 
@@ -220,9 +253,12 @@ const STATUS_LABEL: Record<ToolStatus, string> = {
 
 /** The table as docs/mcp-tools.md shows it. */
 export function userBrowserToolsMarkdown(): string {
-  const rows = Object.entries(USER_BROWSER_TOOLS).map(
-    ([name, row]) => `| \`${name}\` | ${STATUS_LABEL[row.chrome.status]}: ${row.chrome.how} | ${STATUS_LABEL[row.firefox.status]}: ${row.firefox.how} |`,
-  );
+  const cell = (support: ToolSupport) =>
+    [
+      `${STATUS_LABEL[support.status]}: ${support.how}`,
+      ...Object.entries(support.unavailable ?? {}).map(([mode, reason]) => `<br>Not available, \`${mode}\`: ${reason}`),
+    ].join("");
+  const rows = Object.entries(USER_BROWSER_TOOLS).map(([name, row]) => `| \`${name}\` | ${cell(row.chrome)} | ${cell(row.firefox)} |`);
   const distribution = `| Distribution | ${USER_BROWSER_DISTRIBUTION.chrome} | ${USER_BROWSER_DISTRIBUTION.firefox} |`;
   return ["| Tool | Chrome, Edge, Brave | Firefox |", "|---|---|---|", distribution, ...rows].join("\n");
 }
