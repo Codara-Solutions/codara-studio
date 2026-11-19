@@ -42,9 +42,8 @@ assert.deepEqual(routes.normalizeCoraRouteOrder(["openrouter", "bogus", "openrou
 assert.deepEqual(routes.normalizeCoraRouteOrder("subcloud"), ["subscription", "openrouter", "subcloud"]);
 
 // One model, spelled per route.
-assert.deepEqual(routes.routeSpellings("claude-opus-5"), { subscription: "claude-opus-5", openrouter: "anthropic/claude-opus-5", claudecode: "claude-code/claude-opus-5" });
-assert.deepEqual(routes.routeSpellings("anthropic/claude-opus-5"), { subscription: "claude-opus-5", openrouter: "anthropic/claude-opus-5", claudecode: "claude-code/claude-opus-5" });
-assert.deepEqual(routes.routeSpellings("claude-opus-5@high").claudecode, "claude-code/claude-opus-5@high", "Claude Code keeps the effort");
+assert.deepEqual(routes.routeSpellings("claude-opus-5"), { subscription: "claude-opus-5", openrouter: "anthropic/claude-opus-5" });
+assert.deepEqual(routes.routeSpellings("anthropic/claude-opus-5"), { subscription: "claude-opus-5", openrouter: "anthropic/claude-opus-5" });
 assert.deepEqual(routes.routeSpellings("gpt-5.6-sol"), { subscription: "gpt-5.6-sol", openrouter: "openai/gpt-5.6-sol" });
 assert.deepEqual(routes.routeSpellings("x-ai/grok-4.6"), { subscription: "grok-4.6", openrouter: "x-ai/grok-4.6" });
 assert.deepEqual(routes.routeSpellings("moonshotai/kimi-k2"), { openrouter: "moonshotai/kimi-k2" });
@@ -92,24 +91,6 @@ assert.equal(routes.workerFamilyOfModelId("anthropic/claude-opus-5"), "claude");
 assert.equal(routes.workerFamilyOfModelId("x-ai/grok-4.6"), "grok");
 assert.equal(routes.workerFamilyOfModelId("gpt-5.6-sol@low"), "codex");
 assert.equal(routes.workerFamilyOfModelId("moonshotai/kimi-k2"), undefined);
-// Claude Code: never in an order unless picked, and only when the launch says
-// it may run (a managed worker with Claude Code signed in).
-assert.ok(routes.CORA_ROUTES.includes("claudecode"));
-assert.ok(!routes.DEFAULT_CORA_ROUTE_ORDER.includes("claudecode"));
-assert.ok(!routes.normalizeCoraRouteOrder(undefined).includes("claudecode"));
-assert.ok(!routes.normalizeCoraRouteOrder(["openrouter"]).includes("claudecode"), "never appended");
-assert.deepEqual(routes.normalizeCoraRouteOrder(["claudecode", "subscription"]), ["claudecode", "subscription", "openrouter", "subcloud"]);
-const ccOrder = ["claudecode", "subscription", "openrouter", "subcloud"];
-assert.deepEqual(routes.chooseCoraRoute("claude-opus-5@high", ccOrder, both), { route: "subscription", model: "claude-opus-5@high" }, "no claudeCode flag: skipped (Cora herself)");
-assert.deepEqual(routes.chooseCoraRoute("claude-opus-5@high", ccOrder, { ...both, claudeCode: true }), { route: "claudecode", model: "claude-code/claude-opus-5@high" });
-assert.deepEqual(routes.chooseCoraRoute("anthropic/claude-opus-5", ccOrder, { ...both, claudeCode: true }), { route: "claudecode", model: "claude-code/claude-opus-5" });
-assert.deepEqual(routes.chooseCoraRoute("gpt-5.6-sol", ccOrder, { ...both, claudeCode: true }), { route: "openrouter", model: "openai/gpt-5.6-sol" }, "only Claude models");
-assert.equal(routes.routeOfModelId("claude-code/claude-opus-5"), "claudecode");
-assert.equal(routes.workerFamilyOfModelId("claude-code/claude-opus-5@high"), "claude");
-assert.equal(routes.claudeCodeModelOf("claude-code/claude-opus-5@high"), "claude-opus-5@high");
-assert.equal(routes.claudeCodeModelOf("claude-code/"), null);
-assert.equal(routes.claudeCodeModelOf("claude-opus-5"), null);
-assert.equal(routes.coraRouteLabel("claude-code/claude-opus-5"), "Claude Code");
 // Subcloud carries nothing until it exists.
 assert.equal(routes.chooseCoraRoute("claude-opus-5", ["subcloud"], both), null);
 
@@ -136,23 +117,6 @@ assert.deepEqual(
     ["Worker", "anthropic/claude-opus-5", "OpenRouter key", "", 7, 3, 1],
   ],
 );
-// A Claude Code worker shows the account by its name.
-assert.deepEqual(
-  routes.coraRouteRows([], [{ model: "claude-code/claude-opus-5@high", accountLabel: "Main", inputTokens: 4 }])
-    .map(({ route, account, inputTokens }) => [route, account, inputTokens]),
-  [["Claude Code", "Main", 4]],
-);
-
-// Claude Code is routed only for managed workers of a trusted run; Cora's own
-// route call passes no options, so it can never land there.
-const managed = runStore_().match(/const managedWorker =\n([\s\S]*?);\n/);
-assert.ok(managed, "managedWorker gate present");
-for (const part of ["isPiWorker", "!isAutomationRun", 'run.executionMode !== "direct"', "!task.workflowCall", 'runProjectPolicyMode(run) === "trusted"']) {
-  assert.ok(managed[1].includes(part), `managed-worker gate checks ${part}`);
-}
-assert.match(runStore_(), /return loadSettings\(\)\.then\(\(settings\) => routeCoraModel\(chat\.model, settings\)\)/);
-assert.match(runStore_(), /: claudeCodeWorker\n\s+\? await runClaudeCodeWorkerSession\(/);
-function runStore_() { return read("src/main/orchestration/run-store.ts"); }
 
 // Applied where the manager and the workers launch, and shown where users look.
 // The manager routes before its account is pinned and frozen, so a GPT pick
@@ -175,7 +139,7 @@ assert.match(runStore, /const kinds = connected\.map\(\(id\) => workerFamilyOfMo
 assert.match(runStore, /piThinkingLevel\(effortOfModelId\(plannedPiWorkerModel\)\)/);
 assert.match(runStore, /const thinking = thinkingOverride \?\? piThinkingForWorker\(task\);/);
 assert.match(read("src/main/orchestration/pi-backend.ts"), /provider === "anthropic" \? `\. \$\{CLAUDE_PI_LOGIN_BILLING_NOTE\}`/);
-assert.match(runStore, /routeCoraModel\(plannedPiWorkerModel, routeSettings, undefined, \{ managedWorker \}\)/);
+assert.match(runStore, /routeCoraModel\(plannedPiWorkerModel, routeSettings\)/);
 assert.match(runStore, /const workerSettings = isAutomationRun \? null : routeSettings;/, "automation workers are routed too");
 assert.match(runStore, /coraWorkerModelAvailability\(workerSettings\)/, "worker eligibility counts every route");
 assert.match(read("src/renderer/src/components/SessionInspector.tsx"), /<RoutesTable rows=\{routes\} \/>/);

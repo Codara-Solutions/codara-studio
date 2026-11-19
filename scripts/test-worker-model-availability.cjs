@@ -19,7 +19,7 @@ const ROOT = path.resolve(__dirname, "..");
 const SHARED_DIR = path.join(ROOT, "src", "shared");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "codara-worker-availability-"));
 
-globalThis.__availabilityHarness = { statuses: [], fail: false, claudeCodeReady: true, claudeCodeChecks: 0 };
+globalThis.__availabilityHarness = { statuses: [], fail: false };
 
 const harness = {
   name: "worker-model-availability-harness",
@@ -30,14 +30,6 @@ const harness = {
     build.onResolve({ filter: /pi-account-auth-store$/ }, () => ({ path: "auth-store", namespace: "stub" }));
     build.onResolve({ filter: /\/agent-runtimes$/ }, () => ({ path: "agent-runtimes", namespace: "stub" }));
     build.onResolve({ filter: /\/pi-model-catalog$/ }, () => ({ path: "pi-model-catalog", namespace: "stub" }));
-    build.onResolve({ filter: /\/claude-code-worker$/ }, () => ({ path: "claude-code-worker", namespace: "stub" }));
-    build.onLoad({ filter: /^claude-code-worker$/, namespace: "stub" }, () => ({
-      loader: "js",
-      contents: `export async function claudeCodeWorkerReady() {
-        globalThis.__availabilityHarness.claudeCodeChecks += 1;
-        return globalThis.__availabilityHarness.claudeCodeReady;
-      }`,
-    }));
     build.onLoad({ filter: /^pi-model-catalog$/, namespace: "stub" }, () => ({
       loader: "js",
       contents: "export async function inspectPiModelCatalog() { return []; }",
@@ -152,23 +144,6 @@ async function main() {
   assert.equal(await availability.routeCoraModel("anthropic/claude-opus-5", { ...keyed, openRouterCoraModels: ["anthropic/claude-opus-5"] }), "anthropic/claude-opus-5");
   assert.ok(!(await availability.coraWorkerModelAvailability(keyed)).connected.includes("gpt-5.6-sol"));
   console.log("PASS routes: a broken sign-in is not swapped for a paid key, and no order means as picked");
-
-  // Claude Code: only a managed worker, only when the user's order has it,
-  // only when Claude Code is installed and signed in.
-  const ccOrdered = { ...keyed, coraRouteOrder: ["claudecode", "subscription", "openrouter", "subcloud"] };
-  harnessState.claudeCodeChecks = 0;
-  assert.equal(await availability.routeCoraModel("claude-opus-5@high", ccOrdered, undefined, { managedWorker: true }), "claude-code/claude-opus-5@high");
-  assert.equal(await availability.routeCoraModel("claude-opus-5@high", ccOrdered), "claude-opus-5@high", "Cora herself and other launches never get it");
-  assert.equal(await availability.routeCoraModel("claude-opus-5@high", ccOrdered, undefined, { managedWorker: false }), "claude-opus-5@high");
-  assert.equal(harnessState.claudeCodeChecks, 1, "Claude Code is checked only for a managed worker");
-  assert.equal(await availability.routeCoraModel("claude-opus-5@high", ordered, undefined, { managedWorker: true }), "claude-opus-5@high", "not in the order: never used");
-  assert.equal(harnessState.claudeCodeChecks, 1, "and not even checked");
-  assert.equal(await availability.routeCoraModel("claude-opus-5@high", keyed, undefined, { managedWorker: true }), "claude-opus-5@high", "no order: as picked");
-  harnessState.claudeCodeReady = false;
-  assert.equal(await availability.routeCoraModel("claude-opus-5@high", ccOrdered, undefined, { managedWorker: true }), "claude-opus-5@high", "not installed or signed out: next route");
-  harnessState.claudeCodeReady = true;
-  assert.equal(await availability.routeCoraModel("gpt-5.6-sol", ccOrdered, undefined, { managedWorker: true }), "openai/gpt-5.6-sol", "GPT models skip it");
-  console.log("PASS routes: Claude Code runs managed Claude workers only, when picked and signed in");
 
   // Worker planning (launchWorkerAttemptInner): with an order chosen, the
   // worker's model is picked by what it is and only the order picks its

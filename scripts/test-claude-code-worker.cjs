@@ -170,11 +170,8 @@ async function main() {
   console.log("PASS failure, missing binary and Stop");
 
   // The launch adds no identity: Studio's own launch and provider arguments
-  // (run-store passes them in), never --bare or a key or base URL.
+  // come from the caller, never --bare or a key or base URL.
   const source = fs.readFileSync(SOURCE, "utf8");
-  const runStore = fs.readFileSync(path.join(ROOT, "src", "main", "orchestration", "run-store.ts"), "utf8");
-  assert.match(runStore, /getProvider\("claude"\)\.buildArgs\(/);
-  assert.match(runStore, /launchArgs: claudeLaunchArgs\(\{ userArgs: providerArgs \}\)/);
   for (const banned of ["--bare", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "user-agent", "x-app"]) {
     assert.ok(!source.includes(banned), `claude-code-worker.ts does not touch ${banned}`);
   }

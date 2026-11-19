@@ -10,6 +10,8 @@
 //   3. a key passed inline in a Bash call never reaches the worker log;
 //   4. Stop ends every process Claude Code started, and a Stop during the
 //      launch or the report read never starts a turn.
+// How run-store wires it is checked with the route
+// (scripts/test-claude-code-worker-session.cjs).
 // Runs against a fake `claude`: no model is called, no real login is read.
 //
 //   node scripts/test-claude-code-worker-boundary.cjs
@@ -240,16 +242,6 @@ async function main() {
     });
   });
 
-  await check("the run-store session never calls the account service's sync", () => {
-    const runStore = fs.readFileSync(path.join(ROOT, "src", "main", "orchestration", "run-store.ts"), "utf8");
-    const start = runStore.indexOf("async function runClaudeCodeWorkerSession(");
-    assert.ok(start > 0);
-    const body = runStore.slice(start, runStore.indexOf("\nasync function ", start + 10));
-    for (const banned of ["notifyNativeClaudeProfileLeaseReleased", "resolveNewNativeClaudeProfile", "reconcile", "credential-mirror", "unified-account", "pi-auth-storage", "readClaudeProfileLogin"]) {
-      assert.ok(!body.includes(banned), `runClaudeCodeWorkerSession mentions ${banned}`);
-    }
-  });
-
   // ── 2. child environment ──────────────────────────────────────────────────
   await check("the child environment is an allowlist: no provider keys, no inherited session markers", () => {
     const env = worker.claudeCodeWorkerEnv({
@@ -364,14 +356,6 @@ async function main() {
       );
       assert.deepEqual(turns, ["task"], during);
     }
-  });
-
-  await check("run-store's turn and its Stop check use the launch abort too", () => {
-    const runStore = fs.readFileSync(path.join(ROOT, "src", "main", "orchestration", "run-store.ts"), "utf8");
-    assert.match(runStore, /const stopped = \(\) => interrupted \|\| input\.launchAborted\(\);/);
-    assert.match(runStore, /const turn = async \(prompt: string, resume\?: string\): Promise<number> => \{\s*if \(stopped\(\)\) throw/);
-    assert.match(runStore, /await runClaudeCodeWorkerTurns\(\{\s*prompt: input\.promptText,\s*stopped,/);
-    assert.match(runStore, /await \(current as ClaudeCodeProcess \| null\)\?\.kill\(\)/);
   });
 }
 

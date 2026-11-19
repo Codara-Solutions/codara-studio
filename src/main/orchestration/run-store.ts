@@ -343,23 +343,11 @@ import {
 } from "./worker-model-hint";
 import { coraWorkerModelAvailability, routeCoraModel, workerPlanningModels } from "./worker-model-availability";
 import {
-  claudeCodeModelOf,
   coraRouteLabel,
   effortOfModelId,
   managerRoutePinnedByUser,
   workerFamilyOfModelId,
 } from "@shared/cora-routes";
-import {
-  claudeCodeEffortFlag,
-  claudeCodeModelAndEffort,
-  prepareClaudeCodeWorkerLaunch,
-  claudeCodeToolLine,
-  runClaudeCodeWorkerTurns,
-  startClaudeCodeWorker,
-  type ClaudeCodeEvent,
-  type ClaudeCodeProcess,
-  type ClaudeCodeWorkerLaunch,
-} from "./claude-code-worker";
 import { shouldResumeForUserMessage } from "./user-message-resume";
 import {
   captureWorkerDiff,
@@ -15146,20 +15134,9 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // The same model on the first route in Settings' order that carries it
   // now; attempt.model records that id, so the run shows the route it used.
   // Automation runs keep their pinned model and are routed the same way.
-  // Claude Code runs only managed workers of a trusted run, and only when the
-  // user picked an order that starts with it: it has no submit_result tool
-  // for direct and workflow turns, and no Pi fence for imported PRs.
-  const managedWorker =
-    isPiWorker &&
-    !isAutomationRun &&
-    run.executionMode !== "direct" &&
-    !task.workflowCall &&
-    runProjectPolicyMode(run) === "trusted";
   const piWorkerModel = plannedPiWorkerModel && routeSettings
-    ? await routeCoraModel(plannedPiWorkerModel, routeSettings, undefined, { managedWorker })
-        .catch(() => plannedPiWorkerModel)
+    ? await routeCoraModel(plannedPiWorkerModel, routeSettings).catch(() => plannedPiWorkerModel)
     : plannedPiWorkerModel;
-  const claudeCodeWorker = managedWorker && claudeCodeModelOf(piWorkerModel) !== null;
   // OpenRouter ids carry no `@effort`; the planned one becomes the thinking level.
   const routedThinking = piWorkerModel && !piWorkerModel.includes("@")
     ? piThinkingLevel(effortOfModelId(plannedPiWorkerModel))
@@ -15179,8 +15156,6 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
     ? "fake workflow worker"
     : fakePiWorker
       ? "fake Pi worker"
-    : claudeCodeWorker
-      ? `Claude Code (${piWorkerModel})`
     : isPiWorker
       ? `Pi harness (${launchRuntime}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
       : "pwsh (manual)";
@@ -15334,19 +15309,6 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
       ? await runFakeWorkflowWorkerSession({ run, task, attemptId: attempt.id, paths, command })
       : fakePiWorker
       ? await runFakePiWorkerSession({ run, task, attemptId: attempt.id, paths, command })
-      : claudeCodeWorker
-      ? await runClaudeCodeWorkerSession({
-          run,
-          task,
-          attemptId: attempt.id,
-          paths,
-          cwd: attempt.cwd,
-          promptText,
-          command,
-          model: piWorkerModel!,
-          effort: effortOfModelId(plannedPiWorkerModel) ?? task.effortHint,
-          launchAborted: () => workerLaunchAborted(attempt.id),
-        })
       : isPiWorker
       ? await runPiWorkerSession({
           run,
@@ -22543,175 +22505,6 @@ async function runPiWorkerSession({
   }
 }
 
-/**
- * A managed worker on the `claude-code/` route (claude-code-worker.ts).
- * Claude Code owns the loop and its compaction; this paints each tool call
- * into the worker pane and keeps a Pi worker's prompt.md and
- * final-report.json contract. Tokens and the account are recorded; no money
- * cost, it runs on the plan.
- */
-async function runClaudeCodeWorkerSession(input: {
-  run: RunState;
-  task: WorkerTask;
-  attemptId: string;
-  paths: WorkerArtifactPaths;
-  cwd: string;
-  promptText: string;
-  command: string;
-  model: string;
-  effort: string | undefined;
-  launchAborted: () => boolean;
-}): Promise<{ exitCode: number; error?: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }> {
-  const { run, task, attemptId, paths, cwd } = input;
-  let interrupted = false;
-  let current: ClaudeCodeProcess | null = null;
-  let launch: ClaudeCodeWorkerLaunch | null = null;
-  let sessionId: string | undefined;
-  const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-  let logQueue: Promise<void> = Promise.resolve();
-  // Everything shown and logged is redacted again with the keys this run
-  // knows (pasted-secrets), on top of the scrubbing claude-code-worker does.
-  const paint = (raw: string) => {
-    const text = redactPastedSecrets(run.id, raw);
-    pty.publishOutput(attemptId, text);
-    const plain = text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
-    logQueue = logQueue.catch(() => undefined).then(() => fs.appendFile(paths.stdoutLog, plain, "utf8"));
-  };
-  const stopped = () => interrupted || input.launchAborted();
-  const onEvent = (event: ClaudeCodeEvent) => {
-    if (event.kind === "session") sessionId = event.sessionId;
-    else if (event.kind === "tool") {
-      const line = claudeCodeToolLine(event);
-      paint(`\x1b[38;2;74;222;208m  ●\x1b[0m ${piWorkerSafeText(line, 200)}\r\n`);
-      applyHookStateReport({ paneId: attemptId, state: "working", note: piWorkerSafeText(line, PI_WORKER_ACTIVITY_MAX_CHARS) });
-    } else if (event.kind === "tool_failed") paint(`\x1b[33m    !  ${piWorkerSafeText(event.detail, 200)}\x1b[0m\r\n`);
-    else if (event.kind === "text") paint(`\x1b[2m  ${piWorkerSafeText(event.text, 700)}\x1b[0m\r\n`);
-    else {
-      usage.inputTokens += event.usage.input;
-      usage.outputTokens += event.usage.output;
-      usage.cacheReadTokens += event.usage.cacheRead;
-      usage.cacheWriteTokens += event.usage.cacheWrite;
-      sessionId = event.sessionId ?? sessionId;
-    }
-  };
-  // One headless turn; a resumed turn continues the same Claude Code session.
-  // Starts its process synchronously (runClaudeCodeWorkerTurns checks for a
-  // Stop right before calling it).
-  const turn = async (prompt: string, resume?: string): Promise<number> => {
-    if (stopped()) throw new Error("Claude Code worker was stopped.");
-    current = startClaudeCodeWorker({
-      binary: launch!.binary,
-      argv: resume ? [...launch!.argv, "--resume", resume] : launch!.argv,
-      env: launch!.env,
-      cwd,
-      prompt,
-      onEvent,
-    });
-    const exit = await current.done;
-    current = null;
-    if (exit.exitCode !== 0 && !interrupted && exit.stderrTail) paint(`\x1b[31m  ${piWorkerSafeText(exit.stderrTail, 700)}\x1b[0m\r\n`);
-    if (interrupted) throw new Error("Claude Code worker was stopped.");
-    return exit.exitCode;
-  };
-  try {
-    await ensurePiWorkerDisplayPty(attemptId, cwd);
-    await pty.waitForResize(attemptId, 5_000);
-    const cli = claudeCodeModelAndEffort(claudeCodeModelOf(input.model) ?? input.model, input.effort);
-    const [{ getProvider }, { claudeLaunchArgs }, { getHookRpcEnvSafe }, { acquireNativeClaudeProfileLease }] = await Promise.all([
-      import("../providers"),
-      import("../agent-launch-integration"),
-      import("../hook-rpc"),
-      import("./native-claude-profile-runtime"),
-    ]);
-    const effortFlag = claudeCodeEffortFlag(cli.effort);
-    const providerArgs = getProvider("claude").buildArgs({ cwd: "", model: cli.model, ...(effortFlag ? { effort: effortFlag } : {}) });
-    // The lease only marks the account in use. Releasing it tells nobody: a
-    // worker never starts the account service's login sync, which a Claude
-    // terminal's exit does (claude-code-worker.ts).
-    launch = await prepareClaudeCodeWorkerLaunch({
-      runId: run.id,
-      attemptDir: paths.attemptDir,
-      launchArgs: claudeLaunchArgs({ userArgs: providerArgs }),
-      providerArgs,
-      hookEnv: getHookRpcEnvSafe(attemptId) as Record<string, string> | null,
-      codaraHome: codaraHome(),
-      acquireLease: (profileId) => acquireNativeClaudeProfileLease(profileId, attemptId),
-    });
-    const accountLabel = launch.accountLabel;
-    pty.publishOutput(
-      attemptId,
-      `\x1b[2J\x1b[H\r\n\x1b[38;2;74;222;208m  ✦  CORA WORKER IN CLAUDE CODE\x1b[0m\r\n` +
-        `\x1b[2m     ${task.title}\x1b[0m\r\n\x1b[2m     ${cli.model} · ${cli.effort ?? "default effort"} · ${accountLabel}\x1b[0m\r\n\r\n`,
-    );
-    if (input.launchAborted() || !(await markAttemptRunning(run.id, task.id, attemptId, new Date().toISOString()))) {
-      interrupted = true;
-      throw new Error("Claude Code worker was interrupted before it started.");
-    }
-    await commitRunChange(await requireRun(run.id), {
-      type: "worker_attempt.running",
-      message: `Worker attempt running in Claude Code: ${task.title}`,
-      workerTaskId: task.id,
-      payload: { attemptId, command: input.command, harness: "claude-code", model: cli.model, effort: cli.effort, accountLabel },
-      mutate: (draft, timestamp) => {
-        const attempt = draft.workerAttempts.find((item) => item.id === attemptId);
-        if (!attempt) return false;
-        attempt.accountLabel = accountLabel;
-        draft.updatedAt = timestamp;
-      },
-    });
-    activeWorkerProcesses.set(attemptId, {
-      runId: run.id,
-      stepId: task.stepId,
-      workerTaskId: task.id,
-      attemptId,
-      command: input.command,
-      processGenerationId: randomUUID(),
-      inputCapability: "none",
-      write: () => undefined,
-      kill: () => {
-        interrupted = true;
-        void current?.kill();
-      },
-    });
-    applyHookStateReport({ paneId: attemptId, state: "working", note: "starting…" });
-
-    const { exitCode, report } = await runClaudeCodeWorkerTurns({
-      prompt: input.promptText,
-      stopped,
-      turn,
-      sessionId: () => sessionId,
-      readReport: () => readWorkerReport(paths.finalReportJson),
-      finalizePrompt: async () => {
-        const { problem } = await readWorkerReportWithProblem(paths.finalReportJson);
-        return `Your task turn ended without a valid final report at ${paths.finalReportJson}${problem ? `: ${problem}` : ""}. ` +
-          'The "status" field must be exactly one of "complete", "partial", "blocked" or "failed". ' +
-          "Do not redo completed work. Write the mandatory final-report.json using the exact schema and absolute path from the original task prompt, then confirm it parses as JSON.";
-      },
-      onFinalizing: () => paint("\r\n  \x1b[33m↻ Finalizing the evidence report…\x1b[0m\r\n"),
-    });
-    if (!report) {
-      throw new Error(exitCode === 0
-        ? "Claude Code worker completed without a parseable final-report.json."
-        : `Claude Code exited with code ${exitCode} before writing its final report.`);
-    }
-    applyHookStateReport({ paneId: attemptId, state: "done", note: "Claude Code worker report ready" });
-    paintPiWorkerReportOutcome(paint, report);
-    await logQueue.catch(() => undefined);
-    return { exitCode: 0, ...usage };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await writeAutoFailureReport(paths, task, message, { interrupted }).catch(() => null);
-    applyHookStateReport({ paneId: attemptId, state: interrupted ? "done" : "error", note: message });
-    paint(`\r\n\x1b[31m  ×  CLAUDE CODE WORKER STOPPED\x1b[0m\r\n  ${message}\r\n`);
-    await logQueue.catch(() => undefined);
-    return { exitCode: 1, error: message, ...usage };
-  } finally {
-    activeWorkerProcesses.delete(attemptId);
-    await (current as ClaudeCodeProcess | null)?.kill().catch(() => undefined);
-    launch?.release();
-    try { pty.killImmediate(attemptId); } catch { /* already closed */ }
-  }
-}
 
 async function stampAttemptAccountProfile(
   runId: string,
