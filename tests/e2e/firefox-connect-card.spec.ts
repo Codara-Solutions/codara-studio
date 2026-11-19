@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -34,13 +34,18 @@ for (const theme of ["codara-daylight", "codara-classic"] as const) {
     const home = join(root, "studio");
     await mkdir(home, { recursive: true });
     await writeFile(join(home, "spark-preferences.json"), JSON.stringify({ theme }), "utf8");
+    // A stand-in for the user's Firefox, first on PATH: it writes down what Codara started it with.
+    const bin = join(root, "bin");
+    await mkdir(bin);
+    await writeFile(join(bin, "firefox"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${join(root, "firefox-args.txt")}"\n`);
+    await chmod(join(bin, "firefox"), 0o755);
     const app = await electron.launch({
       args: ["."],
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: home, CODARA_HOME_DIR: home, SPARK_HOME_DIR: home,
         SPARK_SKIP_LEGACY_MIGRATION: "1", SPARK_NO_SHELL_INTEGRATION: "1", SPARK_ALLOW_MULTI: "1",
-        HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: join(root, "claude"), CODEX_HOME: join(root, "codex"),
+        HOME: root, USERPROFILE: root, PATH: `${bin}:${process.env.PATH ?? ""}`, CLAUDE_CONFIG_DIR: join(root, "claude"), CODEX_HOME: join(root, "codex"),
         CODARA_CHROME_LINK: "1", CODARA_CHROME_LINK_PORTS: String(await freePort()),
       },
     });
@@ -79,21 +84,34 @@ for (const theme of ["codara-daylight", "codara-classic"] as const) {
       await expect(card).toContainText("about:debugging#/runtime/this-firefox");
       await expect(card).toContainText("Load Temporary Add-on");
       await expect(card).toContainText("Firefox removes a temporary add-on when it quits");
+      // Why a developer add-on, and the Firefoxes that keep it, with the README's section.
+      await expect(card).toContainText("Mozilla's add-on site does not take add-ons that let an agent run scripts in pages");
+      await expect(card).toContainText("Firefox Developer Edition, Nightly or ESR can keep it across restarts");
+      await expect(card).toContainText("The file dialog takes the path pasted in");
       await expect(card).not.toContainText("chrome://extensions");
       await expect(card.locator('li[aria-current="step"]')).toHaveText("1Add");
       await expect(card.getByRole("status")).toContainText("Waiting for the extension");
 
       // The folder is this version's, in Codara's home, and Copy path makes it.
       const folder = join(home, "firefox-extension", VERSION);
-      await expect(card.locator(".chrome-folder__path")).toHaveText(folder);
+      // The path shown and copied is manifest.json's own: the file the file dialog asks for.
+      await expect(card.locator(".chrome-folder__path")).toHaveText(join(folder, "manifest.json"));
       expect(existsSync(folder)).toBe(false);
       await card.getByRole("button", { name: "Copy path" }).click();
       await expect(card.getByRole("button", { name: "Copied" })).toBeVisible();
+      expect(await codara.evaluate(() => navigator.clipboard.readText())).toBe(join(folder, "manifest.json"));
       const manifest = JSON.parse(readFileSync(join(folder, "manifest.json"), "utf8"));
       expect(manifest.browser_specific_settings.gecko.id).toBe("@codara-firefox");
       expect(manifest.version).toBe(VERSION);
       expect(existsSync(join(folder, "popup.html"))).toBe(true);
       await expect(card.getByRole("alert")).toHaveCount(0);
+
+      // Open in Firefox (Linux): the user's Firefox, from PATH, with the fixed page in a new tab and nothing else.
+      if (process.platform === "linux") {
+        await card.getByRole("button", { name: "Open in Firefox" }).click();
+        await expect.poll(() => (existsSync(join(root, "firefox-args.txt")) ? readFileSync(join(root, "firefox-args.txt"), "utf8") : ""), { timeout: 10_000 }).toBe("--new-tab\nabout:debugging#/runtime/this-firefox\n");
+        await expect(card.getByRole("alert")).toHaveCount(0);
+      }
 
       for (const width of WIDTHS) {
         await codara.setViewportSize({ width, height: 860 });

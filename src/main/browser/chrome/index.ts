@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import type { ChromeLinkIncompatibleExtension, ChromeLinkState, ChromePresenceSettings, SeparateBrowserTool } from "../../../shared/chrome-link";
 import { codaraHome, LEGACY_DIR_NAMES } from "../../codara-home";
 import { firefoxExtensionFolder, prepareFirefoxExtensionFolder } from "../firefox-extension";
+import { findUserFirefox, openFirefoxDebugging } from "../firefox-open";
 import type { IpcHandle } from "../../ipc";
 import { paneAgentRuntime } from "../../pane-agent-runtime";
 import { runtimeDisplayName } from "../agent-driver";
@@ -445,6 +446,10 @@ export function registerChromeLinkIpc(handle: IpcHandle): void {
     return folder;
   });
   handle("chromeLink:prepareFirefoxExtension", async (): Promise<string> => prepareFirefoxExtensionFolder());
+  handle("chromeLink:prepareFirefoxManifest", async (): Promise<string> => join(await prepareFirefoxExtensionFolder(), "manifest.json"));
+  handle("chromeLink:canOpenFirefoxDebugging", async (): Promise<boolean> => findUserFirefox() !== null);
+  // Only the fixed about:debugging address, in the user's own Firefox, on their click.
+  handle("chromeLink:openFirefoxDebugging", async (): Promise<boolean> => openFirefoxDebugging());
   handle("chromeLink:revealFirefoxExtension", async (): Promise<string> => {
     const folder = await prepareFirefoxExtensionFolder();
     const failure = await shell.openPath(folder);
