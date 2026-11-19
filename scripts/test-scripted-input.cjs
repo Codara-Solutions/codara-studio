@@ -30,6 +30,7 @@ const PAGE = `<!doctype html><title>Input</title>
   <form id="k"><input id="k1"> <input type="image" id="kimg" alt="Go"> <button id="kb">B</button></form>
   <form id="q"><input id="q1"> <input id="q2"> <button type="bogus" id="qb">Q</button></form>
   <button id="dis" disabled>Off</button>
+  <fieldset disabled style="display: inline"><span id="help">Help</span></fieldset> <button id="pd">Keep focus</button> <div id="sh"></div>
   <script>window.seen = []; window.state = { clicks: 0, submitted: 0, dropped: null, files: null, hovered: false, left: false, keyCodes: [], gSent: 0, hSent: 0, custom: 0 };
     document.querySelector("#g").addEventListener("submit", (event) => { event.preventDefault(); window.state.gSent++; });
     document.querySelector("#h").addEventListener("submit", (event) => { event.preventDefault(); window.state.hSent++; });
@@ -37,6 +38,14 @@ const PAGE = `<!doctype html><title>Input</title>
     window.state.submitters = [];
     for (const id of ["k", "q"]) document.querySelector("#" + id).addEventListener("submit", (event) => { event.preventDefault(); window.state.submitters.push(event.submitter && event.submitter.id); });
     window.state.disClicks = 0;
+    window.state.helpClicks = 0;
+    window.state.pdClicks = 0;
+    document.querySelector("#help").addEventListener("click", () => window.state.helpClicks++);
+    document.querySelector("#pd").addEventListener("pointerdown", (event) => event.preventDefault());
+    document.querySelector("#pd").addEventListener("click", () => window.state.pdClicks++);
+    const shadow = document.querySelector("#sh").attachShadow({ mode: "open" });
+    shadow.innerHTML = '<form id="sf"><input id="s1"> <input id="s2"> <button id="sb">S</button></form>';
+    shadow.querySelector("#sf").addEventListener("submit", (event) => { event.preventDefault(); window.state.submitters.push(event.submitter && event.submitter.id); });
     document.querySelector("#dis").addEventListener("click", () => window.state.disClicks++);
     document.querySelector("#hover").addEventListener("mouseleave", () => (window.state.left = true));
     for (const type of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "auxclick", "keydown", "keyup", "wheel"]) {
@@ -54,6 +63,9 @@ const PAGE = `<!doctype html><title>Input</title>
     });</script>`;
 
 const REFUSED = /^(Input\.|DOM\.setFileInputFiles$)/;
+
+// The Firefox extension's own answer when the page a command asked for is gone.
+let MOVED_ERROR = null;
 
 async function openTarget(chromium, lib, url, { refuse }) {
   const { targetId } = await chromium.newPage("about:blank");
@@ -77,7 +89,11 @@ async function openTarget(chromium, lib, url, { refuse }) {
     onDetach: (listener) => inner.onDetach(listener),
     send: async (method, params) => {
       sent.push(method);
-      const answer = await inner.send(method, params);
+      // An evaluate asked for a page that is gone gets the extension's answer for it.
+      const answer = await inner.send(method, params).catch((error) => {
+        if (refuse && method === "Runtime.evaluate" && params?.uniqueContextId && /Cannot find context|uniqueContextId not found/.test(error.message)) throw new Error(MOVED_ERROR);
+        throw error;
+      });
       if (method !== "Runtime.evaluate") return answer;
       const named = refuse && page ? { ...answer, uniqueContextId: page } : answer;
       const after = hooks.afterAnswer;
@@ -154,6 +170,12 @@ async function drive(ops, target, uploads) {
   await ops.pressKey(target, { key: "Enter", selector: "#q1" });
   // A disabled button takes no click.
   await ops.mouse(target, await target.evaluate("(() => { const el = document.querySelector('#dis'); el.scrollIntoView({ block: 'center' }); const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()"));
+  // What a disabled fieldset holds besides controls still takes a click; a cancelled pointerdown still clicks.
+  await ops.mouse(target, { selector: "#help" });
+  await ops.mouse(target, { selector: "#pd" });
+  // Enter in a form inside a shadow root presses its default button.
+  await target.evaluate("document.querySelector('#sh').shadowRoot.querySelector('#s1').focus()");
+  await ops.pressKey(target, { key: "Enter" });
   // A press and a release in two calls click; leaving an element tells it.
   await ops.mouse(target, { selector: "#b", action: "down" });
   await ops.mouse(target, { selector: "#b", action: "up" });
@@ -166,6 +188,10 @@ async function drive(ops, target, uploads) {
   await ops.mouse(target, { selector: "#e" });
   for (const key of ["a", "😀", "Backspace"]) await ops.key(target, { key });
   out.fields = await target.evaluate("[document.querySelector('#m').value, document.querySelector('#e').value]");
+  // A caret inside an emoji types after it, never over it.
+  await target.evaluate("const e = document.querySelector('#e'); e.value = 'a😀b'; e.focus(); e.setSelectionRange(2, 2)");
+  await ops.key(target, { key: "x" });
+  out.caretInEmoji = await target.evaluate("document.querySelector('#e').value");
   // A field in a frame of the same site.
   await ops.mouse(target, { selector: "#fr" });
   await ops.key(target, { key: "z" });
@@ -190,10 +216,15 @@ async function drive(ops, target, uploads) {
     export * as ops from "./chrome/tab-ops";
     export { uploadMimeType, SCRIPTED_UPLOAD_MAX_BYTES, scriptedUploadPinProbe, scriptedUploadProbe } from "./scripted-input";
     export { createPreviewDOM } from "../../shared/preview-dom";
+    export { FIREFOX_PAGE_MOVED_ERROR } from "./chrome/protocol";
   `);
   const { ops } = lib;
+  ({ MOVED_ERROR } = await import(require("node:url").pathToFileURL(path.join(__dirname, "../extensions/firefox/lib/page-tools.js")).href));
+  assert.equal(lib.FIREFOX_PAGE_MOVED_ERROR, MOVED_ERROR, "Codara knows the extension's answer for a page that is gone by its exact text");
   const server = await startPageServer({
     "/input": PAGE,
+    // A page that counts any click anywhere on it.
+    "/cover": `<!doctype html><button id="b" style="position: fixed; inset: 0">Cover</button><script>window.covered = 0; document.addEventListener("click", () => window.covered++, true);</script>`,
     // A page that sets a trap where the upload keeps its pins.
     "/trap": `<!doctype html><input id="file" type="file" multiple><script>
       window.caught = [];
@@ -256,6 +287,8 @@ async function drive(ops, target, uploads) {
     assert.equal(played.afterSpace.clicks, 4, "Space on a button presses it");
     assert.equal(played.textarea, trusted.textarea);
     assert.equal(played.textarea, "x\ny");
+    assert.equal(played.caretInEmoji, trusted.caretInEmoji);
+    assert.equal(played.caretInEmoji, "a😀xb");
     assert.equal(played.scroll.scrolled, "div#scroller");
     // (The trusted wheel scrolls smoothly, after the call returns: only the scripted one is read at once.)
     assert.equal(played.scrollTop, 200);
@@ -265,7 +298,8 @@ async function drive(ops, target, uploads) {
     assert.deepEqual(played.files, trusted.files);
     assert.deepEqual(played.files, ["notes.txt text/plain hello from a file", 'data.json application/json {"a":1}']);
     assert.equal(played.upload.count, 2);
-    assert.deepEqual(played.afterSplit.submitters, ["kimg", "qb"]);
+    assert.deepEqual(played.afterSplit.submitters, ["kimg", "qb", "sb"]);
+    assert.deepEqual([played.afterSplit.helpClicks, played.afterSplit.pdClicks], [1, 1]);
     assert.equal(played.afterSplit.disClicks, 0);
     assert.deepEqual(played.afterSplit.seen.filter((entry) => entry.startsWith("click")), untrusted(trusted.afterSplit.seen).filter((entry) => entry.startsWith("click")));
     assert.equal(played.afterSplit.clicks, 5, "a press and a release in two calls click");
@@ -307,6 +341,35 @@ async function drive(ops, target, uploads) {
     };
     await assert.rejects(ops.upload(target, { selector: "#one", paths: [notes] }), /file input changed while the files were read/);
     await target.evaluate("document.querySelector('#one').type = 'file'");
+    // A click found by selector is played only in the page it was found in.
+    await target.session.send("Page.navigate", { url: server.url("/input") });
+    for (let i = 0; i < 100 && (await target.evaluate("document.readyState + location.pathname").catch(() => "")) !== "complete/input"; i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    firefox.hooks.afterAnswer = async (params) => {
+      if (params.uniqueContextId) return;
+      firefox.hooks.afterAnswer = null;
+      await target.session.send("Page.navigate", { url: server.url("/cover") });
+      for (let i = 0; i < 100 && (await target.evaluate("document.readyState + location.pathname").catch(() => "")) !== "complete/cover"; i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    };
+    await assert.rejects(ops.mouse(target, { selector: "#b" }), /page changed between finding the element and acting on it/);
+    assert.equal(await target.evaluate("window.covered"), 0, "the page that replaced it got no click");
+    await target.session.send("Page.navigate", { url: server.url("/input") });
+    for (let i = 0; i < 100 && (await target.evaluate("document.readyState + location.pathname").catch(() => "")) !== "complete/input"; i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    // A file that is shorter than its size said when read is refused.
+    {
+      const fsp = require("node:fs/promises");
+      const realOpen = fsp.open;
+      fsp.open = async (...args) => {
+        const handle = await realOpen(...args);
+        const stat = handle.stat.bind(handle);
+        handle.stat = async () => Object.assign(await stat(), { size: 30 });
+        return handle;
+      };
+      try {
+        await assert.rejects(ops.upload(target, { selector: "#file", paths: [notes] }), /changed while it was read/);
+      } finally {
+        fsp.open = realOpen;
+      }
+    }
     // A named pipe is not waited on.
     if (process.platform !== "win32") {
       const pipe = path.join(uploads, "pipe");

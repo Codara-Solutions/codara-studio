@@ -233,9 +233,13 @@ export async function scriptedInputProbe(steps: InputStep[], createDOM?: () => {
       }
       // Fields without a selection (email, number) edit at the end.
       if (start === null || end === null) start = end = value.length;
-      // A caret or selection inside a character covers all of it.
-      start = edgeBefore(value, start);
-      end = edgeAfter(value, end);
+      // A selection or deletion inside a character covers all of it; a caret
+      // inside one types after it, as Chromium does.
+      if (start === end && !inputType.startsWith("delete")) start = end = edgeAfter(value, start);
+      else {
+        start = edgeBefore(value, start);
+        end = edgeAfter(value, end);
+      }
       if (inputType === "deleteContentBackward" && start === end) start = edgeBefore(value, start - 1);
       if (inputType === "deleteContentForward" && start === end) end = edgeAfter(value, end + 1);
       let text = data ?? "";
@@ -269,8 +273,8 @@ export async function scriptedInputProbe(steps: InputStep[], createDOM?: () => {
     const elements = Array.from(form.elements);
     // The default button: the first submit button of the form in tree order,
     // image inputs included (form.elements leaves them out), by each one's own type.
-    const doc = form.ownerDocument;
-    const submitter = Array.from(doc.querySelectorAll("button, input"))
+    const root = form.getRootNode() as Document | ShadowRoot;
+    const submitter = Array.from(root.querySelectorAll("button, input"))
       .filter((item) => (item as HTMLButtonElement | HTMLInputElement).form === form)
       .find((item) => (is(item, "HTMLButtonElement") && (item as HTMLButtonElement).type === "submit") || (is(item, "HTMLInputElement") && /^(submit|image)$/.test((item as HTMLInputElement).type))) as HTMLElement | undefined;
     if (submitter) {
@@ -395,9 +399,11 @@ export async function scriptedInputProbe(steps: InputStep[], createDOM?: () => {
         // A click goes to the element both the press and the release were on, or their nearest common ancestor.
         let common: Element | null = pressed ? pressed.el : null;
         while (common && !common.contains(el)) common = parentOf(common);
-        // A disabled control takes no click, as with a real mouse.
-        if (common?.closest?.("button, input, select, textarea, optgroup, option, fieldset")?.matches(":disabled")) common = null;
-        if (common && pressed?.button === button && pressed.mouse) {
+        // A disabled control takes no click, as with a real mouse (what else a
+        // disabled fieldset holds still does). A cancelled pointerdown keeps
+        // only the mouse events from following, not the click.
+        if (common?.closest?.("button, input, select, textarea, optgroup, option")?.matches(":disabled")) common = null;
+        if (common && pressed?.button === button) {
           if (button === "left") {
             fire(common, "click", pointerInit(step, at, 0));
             if (step.clickCount === 2) fire(common, "dblclick", pointerInit(step, at, 0));
