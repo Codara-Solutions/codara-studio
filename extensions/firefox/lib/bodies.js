@@ -3,12 +3,15 @@
 // Measured on Firefox 160: the filter sees the body as the page gets it
 // (gzip already decoded, binary as is, a cached load too); a redirect's own
 // hop ends with "Channel redirected" and the next hop gets a new filter
-// under the same request id; the body can end after onCompleted. Bounded:
-// at most 10 MB per body and 50 MB in all, the oldest dropped first.
+// under the same request id; the body can end after onCompleted. A body is
+// given only once its row reached Codara and Firefox reported the request
+// done (the filter's own end says nothing of a broken transfer). Bounded:
+// at most 10 MB per body, 50 MB and 1000 bodies in all, oldest first.
 // No browser.* here, so the tests run it in Node.
 
 export const BODY_MAX = 10 * 1024 * 1024;
 export const BODIES_MAX = 50 * 1024 * 1024;
+export const HOPS_MAX = 1000;
 const TEXT_MIME = /^(text\/|application\/(json|[\w.+-]*\+json|javascript|ecmascript|xml|[\w.+-]*\+xml|x-www-form-urlencoded|graphql)|image\/svg\+xml)/i;
 
 export const NO_BODY = "No resource with given identifier found";
@@ -38,19 +41,49 @@ export function bodyAnswer(bytes, contentType = "") {
 }
 
 export class BodyStore {
-  constructor({ perBody = BODY_MAX, total = BODIES_MAX } = {}) {
+  constructor({ perBody = BODY_MAX, total = BODIES_MAX, count = HOPS_MAX } = {}) {
     this.perBody = perBody;
     this.total = total;
+    this.count = count;
     this.hops = new Map();
     this.size = 0;
   }
 
-  /** A request's hop starts (what an earlier hop kept is dropped); the hop is the handle for what follows. */
-  start(requestId, tabId, url) {
+  /**
+   * A request's hop starts (what an earlier hop kept is dropped); the hop
+   * is the handle for what follows. `request` keeps the addresses checked
+   * again when the body is read: url, documentUrl, originUrl, frameAncestors.
+   */
+  start(requestId, tabId, request) {
     this.drop(requestId);
-    const hop = { requestId, tabId, url, chunks: [], bytes: 0, contentType: "", ended: false, error: null, waiters: [] };
+    const hop = { requestId, tabId, request, chunks: [], bytes: 0, contentType: "", ended: false, done: null, published: false, error: null, waiters: [] };
     this.hops.set(requestId, hop);
+    if (this.hops.size > this.count) this.drop(this.hops.keys().next().value, BODY_DROPPED);
     return hop;
+  }
+
+  /** Its row reached Codara (its response was sent). */
+  publish(requestId) {
+    const hop = this.hops.get(requestId);
+    if (hop) hop.published = true;
+  }
+
+  /** Firefox reported the request done (true) or failed (false). */
+  outcome(requestId, completed) {
+    const hop = this.hops.get(requestId);
+    if (!hop || hop.done !== null) return;
+    hop.done = completed;
+    if (!completed && !hop.error) this.fail(hop);
+    this.wake(hop);
+  }
+
+  fail(hop) {
+    this.size -= hop.bytes;
+    Object.assign(hop, { chunks: [], bytes: 0, error: BODY_FAILED });
+  }
+
+  wake(hop) {
+    if (hop.error || (hop.ended && hop.done !== null)) for (const wake of hop.waiters.splice(0)) wake();
   }
 
   data(hop, chunk) {
@@ -79,11 +112,8 @@ export class BodyStore {
   end(hop, error = null) {
     if (this.hops.get(hop.requestId) !== hop || hop.ended) return;
     hop.ended = true;
-    if (error && !hop.error) {
-      this.size -= hop.bytes;
-      Object.assign(hop, { chunks: [], bytes: 0, error: BODY_FAILED });
-    }
-    for (const wake of hop.waiters.splice(0)) wake();
+    if (error && !hop.error) this.fail(hop);
+    this.wake(hop);
   }
 
   drop(requestId, error = NO_BODY) {
@@ -105,14 +135,17 @@ export class BodyStore {
    */
   async body(requestId, tabId, waitMs = 10_000) {
     const hop = this.hops.get(String(requestId));
-    if (!hop || hop.tabId !== tabId) throw new Error(NO_BODY);
-    if (!hop.ended) {
+    if (!hop || hop.tabId !== tabId || !hop.published) throw new Error(NO_BODY);
+    if (!hop.error && !(hop.ended && hop.done !== null)) {
       let timer;
+      let wake;
       const ended = await Promise.race([
-        new Promise((resolve) => hop.waiters.push(() => resolve(true))),
+        new Promise((resolve) => hop.waiters.push((wake = () => resolve(true)))),
         new Promise((resolve) => (timer = setTimeout(() => resolve(false), waitMs))),
       ]);
       clearTimeout(timer);
+      // A read that gave up leaves nothing behind.
+      hop.waiters = hop.waiters.filter((other) => other !== wake);
       if (!ended) throw new Error(BODY_LOADING);
     }
     if (hop.error) throw new Error(hop.error);
@@ -122,6 +155,6 @@ export class BodyStore {
       bytes.set(chunk, at);
       at += chunk.length;
     }
-    return { url: hop.url, ...bodyAnswer(bytes, hop.contentType) };
+    return { request: hop.request, ...bodyAnswer(bytes, hop.contentType) };
   }
 }

@@ -331,6 +331,7 @@ async function answerCommand(request, socket) {
     seeTab(tab);
     if (domain === "Page") pageOf(tab.id, tab.url);
     if (domain === "Network" && verb === "disable") forgetRequests(tab.id);
+    if (domain === "Network" && verb === "enable") bodyFilters(tab.id, true);
     if (domain === "Runtime") await switchConsole(tab.id);
     return {};
   }
@@ -713,10 +714,30 @@ const REQUESTS_KEPT = 500;
 function forgetRequests(tabId) {
   for (const [id, seen] of requests) if (seen.details.tabId === tabId) requests.delete(id);
   bodies.forgetTab(tabId);
+  bodyFilters(tabId, false);
 }
 
 // Response bodies (lib/bodies.js), kept only for the requests Codara sees.
+// The filter needs a blocking listener; one registered at the top would
+// hold every tab's requests while Firefox wakes this page, so each
+// recorded tab gets its own, from Network.enable to its end (nothing is
+// ever blocked: the listener only sets the copy).
 const bodies = new BodyStore();
+const BODY_TYPES = ["main_frame", "sub_frame", "stylesheet", "script", "image", "imageset", "font", "media", "object", "xmlhttprequest", "other"];
+const bodyListeners = new Map();
+function bodyFilters(tabId, on) {
+  const listener = bodyListeners.get(tabId);
+  if (on && !listener) {
+    const keep = (details) => void (networkWanted(details) && keepBody(details));
+    browser.webRequest.onBeforeRequest.addListener(keep, { urls: ["<all_urls>"], tabId, types: BODY_TYPES }, ["blocking"]);
+    bodyListeners.set(tabId, keep);
+  }
+  if (!on && listener) {
+    browser.webRequest.onBeforeRequest.removeListener(listener);
+    bodyListeners.delete(tabId);
+  }
+}
+
 function keepBody(details) {
   let filter;
   try {
@@ -724,7 +745,8 @@ function keepBody(details) {
   } catch {
     return;
   }
-  const hop = bodies.start(details.requestId, details.tabId, details.url);
+  const { url, documentUrl, originUrl, frameAncestors, type, tabId } = details;
+  const hop = bodies.start(details.requestId, details.tabId, { url, documentUrl, originUrl, frameAncestors, type, tabId });
   // The page gets every byte first, whatever happens to the copy.
   filter.ondata = (event) => {
     filter.write(event.data);
@@ -739,13 +761,17 @@ function keepBody(details) {
   filter.onerror = () => bodies.end(hop, filter.error || "failed");
 }
 
-/** Network.getResponseBody: a body Codara saw the request of, of this tab, still shared and attached, from a site not blocked now. */
+/**
+ * Network.getResponseBody: a body whose row Codara has, of this tab, still
+ * shared and attached; its request is checked again as the log checks it
+ * (its site, page, origin and frames), since the blocked sites may have
+ * changed meanwhile.
+ */
 async function responseBody(tabId, params, socket) {
   await stillUsable(tabId, socket);
-  const { url, ...answer } = await bodies.body(String(params.requestId ?? ""), tabId);
-  const rule = firefoxBlockingRule(url, rules);
-  if (rule) throw new Error(`${url} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`);
+  const { request, ...answer } = await bodies.body(String(params.requestId ?? ""), tabId);
   await stillUsable(tabId, socket);
+  if (!requestVisible(request, blockedUrl)) throw new Error(`The response of ${request.url} is from a site agents may not use (the extension's blocked sites).`);
   return answer;
 }
 
@@ -787,6 +813,7 @@ function requestSent(details) {
 function requestLost(details, why) {
   const seen = requests.get(details.requestId);
   requests.delete(details.requestId);
+  bodies.drop(details.requestId);
   if (seen?.open) sendNetwork(details, failedEvent({ ...details, error: why }));
 }
 
@@ -794,17 +821,18 @@ const loaderOf = (details) => (details.type === "main_frame" ? pageOf(details.ta
 const ALL_URLS = { urls: ["<all_urls>"] };
 const HIDDEN_REDIRECT = "Redirected to a site the extension may not show.";
 
-// Blocking only so the body filter can be set; nothing is ever blocked.
 chrome.webRequest.onBeforeRequest.addListener((details) => {
   if (!networkWanted(details)) return;
   requests.set(details.requestId, { redirect: null, ...requests.get(details.requestId), details, sent: false });
-  keepBody(details);
   if (requests.size > REQUESTS_KEPT) {
     const [oldest] = requests.values();
     if (networkWanted(oldest.details)) requestLost(oldest.details, "Too many requests open at once to follow this one.");
-    else requests.delete(oldest.details.requestId);
+    else {
+      requests.delete(oldest.details.requestId);
+      bodies.drop(oldest.details.requestId);
+    }
   }
-}, ALL_URLS, ["blocking"]);
+}, ALL_URLS);
 chrome.webRequest.onSendHeaders.addListener((details) => {
   const seen = requests.get(details.requestId);
   if (!seen || seen.sent || !networkWanted(details) || !redirectOf(seen)) return;
@@ -825,16 +853,22 @@ chrome.webRequest.onBeforeRedirect.addListener(async (details) => {
   // Sharing is checked again: the tab may have left what was shared while Firefox answered.
   const ending = lateRedirectEnd({ allowed, seen, now: requests.get(details.requestId), redirect: details, wanted: networkWanted(details) });
   if (ending === "end") requestLost(details, HIDDEN_REDIRECT);
-  else if (ending === "forget") requests.delete(details.requestId);
+  else if (ending === "forget") {
+    requests.delete(details.requestId);
+    bodies.drop(details.requestId);
+  }
 }, ALL_URLS, ["responseHeaders"]);
 chrome.webRequest.onResponseStarted.addListener((details) => {
   if (!requests.has(details.requestId) || !networkWanted(details) || !requestSent(details)) return;
   bodies.type(details.requestId, details.responseHeaders?.find((header) => header.name.toLowerCase() === "content-type")?.value);
   sendNetwork(details, responseEvent(details, loaderOf(details)));
+  bodies.publish(details.requestId);
 }, ALL_URLS, ["responseHeaders"]);
 for (const [event, toEvent] of [[chrome.webRequest.onCompleted, finishedEvent], [chrome.webRequest.onErrorOccurred, failedEvent]]) {
   event.addListener((details) => {
     if (requests.has(details.requestId) && networkWanted(details) && requestSent(details)) sendNetwork(details, toEvent(details));
+    // Firefox's word on the transfer: a body is given only after it completed.
+    bodies.outcome(details.requestId, toEvent === finishedEvent);
     requests.delete(details.requestId);
   }, ALL_URLS);
 }
