@@ -27,10 +27,17 @@ const PAGE = `<!doctype html><title>Input</title>
   <form id="g"><input id="g1"> <input id="g2"></form> <form id="h"><input id="h1"></form>
   <div id="rb" role="button" tabindex="0">Custom</div> <input id="m" maxlength="2"> <input id="e">
   <iframe id="fr" srcdoc="<input id='inner'>" style="height: 40px"></iframe>
+  <form id="k"><input id="k1"> <input type="image" id="kimg" alt="Go"> <button id="kb">B</button></form>
+  <form id="q"><input id="q1"> <input id="q2"> <button type="bogus" id="qb">Q</button></form>
+  <button id="dis" disabled>Off</button>
   <script>window.seen = []; window.state = { clicks: 0, submitted: 0, dropped: null, files: null, hovered: false, left: false, keyCodes: [], gSent: 0, hSent: 0, custom: 0 };
     document.querySelector("#g").addEventListener("submit", (event) => { event.preventDefault(); window.state.gSent++; });
     document.querySelector("#h").addEventListener("submit", (event) => { event.preventDefault(); window.state.hSent++; });
     document.querySelector("#rb").addEventListener("click", () => window.state.custom++);
+    window.state.submitters = [];
+    for (const id of ["k", "q"]) document.querySelector("#" + id).addEventListener("submit", (event) => { event.preventDefault(); window.state.submitters.push(event.submitter && event.submitter.id); });
+    window.state.disClicks = 0;
+    document.querySelector("#dis").addEventListener("click", () => window.state.disClicks++);
     document.querySelector("#hover").addEventListener("mouseleave", () => (window.state.left = true));
     for (const type of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "auxclick", "keydown", "keyup", "wheel"]) {
       document.addEventListener(type, (event) => window.seen.push(type + (event.isTrusted ? "!" : "") + ":" + (event.target.id || event.target.tagName)), true);
@@ -52,6 +59,15 @@ async function openTarget(chromium, lib, url, { refuse }) {
   const { targetId } = await chromium.newPage("about:blank");
   const inner = chromium.transportFor(targetId);
   const sent = [];
+  // As the Firefox extension does, every evaluate's answer names its page
+  // (here Chromium's own context id for the top frame), and an evaluate that
+  // asks for one runs only there; a test can act after an answer (afterAnswer).
+  let page = null;
+  inner.onEvent((method, params) => {
+    if (method === "Runtime.executionContextCreated" && params.context.auxData?.isDefault && params.context.auxData.frameId === targetId) page = params.context.uniqueId;
+    if (method === "Runtime.executionContextsCleared") page = null;
+  });
+  const hooks = { afterAnswer: null };
   const transport = {
     ...inner,
     attach: () => inner.attach(),
@@ -59,13 +75,19 @@ async function openTarget(chromium, lib, url, { refuse }) {
     detach: () => inner.detach(),
     onEvent: (listener) => inner.onEvent(listener),
     onDetach: (listener) => inner.onDetach(listener),
-    send: (method, params) => {
+    send: async (method, params) => {
       sent.push(method);
-      return inner.send(method, params);
+      const answer = await inner.send(method, params);
+      if (method !== "Runtime.evaluate") return answer;
+      const named = refuse && page ? { ...answer, uniqueContextId: page } : answer;
+      const after = hooks.afterAnswer;
+      if (after) await after(params, named);
+      return named;
     },
     refuses: (method) => (refuse && REFUSED.test(method) ? `${method} is not available in Firefox: Firefox gives extensions no debugger.` : null),
   };
   const session = new lib.CdpSession(`test:${targetId}`, transport);
+  await session.send("Runtime.enable");
   const target = {
     kind: "preview",
     ref: "tab-1",
@@ -90,6 +112,7 @@ async function openTarget(chromium, lib, url, { refuse }) {
   return {
     target,
     sent,
+    hooks,
     close() {
       session.dispose({ detach: true });
       void chromium.send("Target.closeTarget", { targetId }).catch(() => {});
@@ -126,6 +149,11 @@ async function drive(ops, target, uploads) {
   await ops.pressKey(target, { key: "Enter", selector: "#g1" });
   await ops.pressKey(target, { key: "Enter", selector: "#h1" });
   await ops.pressKey(target, { key: "Enter", selector: "#rb" });
+  // The default button is the form's first submit button in tree order, image inputs and unknown types included.
+  await ops.pressKey(target, { key: "Enter", selector: "#k1" });
+  await ops.pressKey(target, { key: "Enter", selector: "#q1" });
+  // A disabled button takes no click.
+  await ops.mouse(target, await target.evaluate("(() => { const el = document.querySelector('#dis'); el.scrollIntoView({ block: 'center' }); const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()"));
   // A press and a release in two calls click; leaving an element tells it.
   await ops.mouse(target, { selector: "#b", action: "down" });
   await ops.mouse(target, { selector: "#b", action: "up" });
@@ -164,7 +192,16 @@ async function drive(ops, target, uploads) {
     export { createPreviewDOM } from "../../shared/preview-dom";
   `);
   const { ops } = lib;
-  const server = await startPageServer({ "/input": PAGE });
+  const server = await startPageServer({
+    "/input": PAGE,
+    // A page that sets a trap where the upload keeps its pins.
+    "/trap": `<!doctype html><input id="file" type="file" multiple><script>
+      window.caught = [];
+      const trap = { get: () => document.querySelector("#file"), delete: () => true, set: () => trap };
+      Object.defineProperty(window, Symbol.for("codara.uploadPins"), { get: () => { window.caught.push("looked"); return trap; } });
+      for (const name of ["atob", "DataTransfer", "File"]) { const real = window[name]; window[name] = function (...args) { window.caught.push(name); return new.target ? new real(...args) : real(...args); }; }
+    </script>`,
+  });
   const uploads = fs.mkdtempSync(path.join(os.tmpdir(), "codara-scripted-input-"));
   fs.writeFileSync(path.join(uploads, "notes.txt"), "hello from a file");
   fs.writeFileSync(path.join(uploads, "data.json"), '{"a":1}');
@@ -228,6 +265,8 @@ async function drive(ops, target, uploads) {
     assert.deepEqual(played.files, trusted.files);
     assert.deepEqual(played.files, ["notes.txt text/plain hello from a file", 'data.json application/json {"a":1}']);
     assert.equal(played.upload.count, 2);
+    assert.deepEqual(played.afterSplit.submitters, ["kimg", "qb"]);
+    assert.equal(played.afterSplit.disClicks, 0);
     assert.deepEqual(played.afterSplit.seen.filter((entry) => entry.startsWith("click")), untrusted(trusted.afterSplit.seen).filter((entry) => entry.startsWith("click")));
     assert.equal(played.afterSplit.clicks, 5, "a press and a release in two calls click");
     assert.equal(played.afterSplit.left, true, "the element the pointer left hears it");
@@ -246,14 +285,46 @@ async function drive(ops, target, uploads) {
     fs.writeFileSync(big, "");
     fs.truncateSync(big, lib.SCRIPTED_UPLOAD_MAX_BYTES + 1);
     await assert.rejects(ops.upload(target, { selector: "#file", paths: [big] }), /at most 10 MB/);
-    // The upload's bytes go only to the page whose input was pinned.
-    const pin = { selector: "#file", count: 1, pin: "pin-1", key: "codara.uploadPins" };
-    const file = { name: "a.txt", type: "text/plain", lastModified: 1_700_000_000_000, data: Buffer.from("secret").toString("base64") };
-    assert.deepEqual(await target.evaluate(`(${lib.scriptedUploadPinProbe})(${JSON.stringify(pin)}, ${lib.createPreviewDOM})`), { ok: true });
+    // The upload's bytes go only to the page whose input was pinned: a page
+    // that replaced it while the files were read gets nothing, even one that
+    // sets a trap where the pins are kept.
+    const notes = path.join(uploads, "notes.txt");
+    firefox.hooks.afterAnswer = async (params) => {
+      if (!String(params.expression).includes("codara.uploadPins") || params.uniqueContextId) return;
+      firefox.hooks.afterAnswer = null;
+      await target.session.send("Page.navigate", { url: server.url("/trap") });
+      for (let i = 0; i < 100 && (await target.evaluate("document.readyState + location.pathname").catch(() => "")) !== "complete/trap"; i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    };
+    await assert.rejects(ops.upload(target, { selector: "#file", paths: [notes] }), /page changed while the files were read; nothing was uploaded/);
+    assert.deepEqual(await target.evaluate("[location.pathname, window.caught.length, document.querySelector('#file').files.length]"), ["/trap", 0, 0], "the trap page got nothing");
+    // An input that stops taking files meanwhile gets none.
     await target.session.send("Page.navigate", { url: server.url("/input") });
-    for (let i = 0; i < 100 && (await target.evaluate("document.readyState + typeof window.state").catch(() => "")) !== "completeobject"; i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.deepEqual(await target.evaluate(`(${lib.scriptedUploadProbe})(${JSON.stringify({ pin: "pin-1", key: "codara.uploadPins", files: [file] })})`), { ok: false, error: "The page changed while the files were read: nothing was uploaded." });
-    assert.equal(await target.evaluate("document.querySelector('#file').files.length"), 0);
+    for (let i = 0; i < 100 && (await target.evaluate("document.readyState + location.pathname").catch(() => "")) !== "complete/input"; i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    firefox.hooks.afterAnswer = async (params) => {
+      if (!String(params.expression).includes("codara.uploadPins") || params.uniqueContextId) return;
+      firefox.hooks.afterAnswer = null;
+      await target.evaluate("document.querySelector('#one').type = 'text'");
+    };
+    await assert.rejects(ops.upload(target, { selector: "#one", paths: [notes] }), /file input changed while the files were read/);
+    await target.evaluate("document.querySelector('#one').type = 'file'");
+    // A named pipe is not waited on.
+    if (process.platform !== "win32") {
+      const pipe = path.join(uploads, "pipe");
+      require("node:child_process").execFileSync("mkfifo", [pipe]);
+      await assert.rejects(ops.upload(target, { selector: "#file", paths: [pipe] }), /is not a file/);
+    }
+    // Text edits keep whole characters: no half emoji at maxlength, none left by a delete inside one.
+    await target.evaluate("const m = document.querySelector('#m'); m.maxLength = 3; m.value = 'ab'; m.focus(); m.setSelectionRange(2, 2)");
+    await ops.key(target, { key: "😀" });
+    assert.equal(await target.evaluate("document.querySelector('#m').value"), "ab");
+    await target.evaluate("const e = document.querySelector('#e'); e.value = 'a😀b'; e.focus(); e.setSelectionRange(2, 2)");
+    await ops.key(target, { key: "Backspace" });
+    assert.equal(await target.evaluate("document.querySelector('#e').value"), "ab");
+    // A diagonal wheel: the vertical box holds its axis, the horizontal part goes on to the box around it.
+    await target.evaluate(`document.body.insertAdjacentHTML("beforeend", '<div id="wide" style="width: 300px; overflow: auto"><div style="width: 2000px"><div id="tall" style="width: 200px; height: 80px; overflow: auto; overscroll-behavior-y: contain"><div style="height: 400px">t</div></div></div></div>'); document.querySelector("#tall").scrollTop = 1000`);
+    const diagonal = await ops.scroll(target, { selector: "#tall", deltaX: 100, deltaY: 100 });
+    assert.equal(diagonal.scrolled, "div#wide");
+    assert.deepEqual(await target.evaluate("[document.querySelector('#wide').scrollLeft, document.querySelector('#tall').scrollTop, scrollY]"), [100, 320, 0]);
     // The file's own time and type.
     const dated = path.join(uploads, "photo.avif");
     fs.writeFileSync(dated, "img");

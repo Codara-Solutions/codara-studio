@@ -149,27 +149,37 @@ export async function scriptedInputProbe(steps: InputStep[], createDOM?: () => {
     return found && is(found, "HTMLElement") && !found.matches(":disabled") ? (found as HTMLElement) : null;
   };
 
-  // Scrolls the nearest element under the point that can scroll that way, else the page.
-  // A box at its end whose overscroll-behavior is contain or none stops the wheel there.
+  // Scrolls, axis by axis, the nearest element under the point that can
+  // scroll that way, then the page with what is left. A box at its end whose
+  // overscroll-behavior holds that axis keeps the rest of it.
   const scrollFrom = (el: Element, dx: number, dy: number): string | null => {
     const doc = el.ownerDocument;
     const view = viewOf(el);
-    for (let node: Element | null = el; node && node !== doc.documentElement && node !== doc.body; node = parentOf(node)) {
+    const left = { x: dx, y: dy };
+    let moved: string | null = null;
+    for (let node: Element | null = el; node && node !== doc.documentElement && node !== doc.body && (left.x || left.y); node = parentOf(node)) {
       const style = view.getComputedStyle(node);
-      const scrollerY = /(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight;
-      const scrollerX = /(auto|scroll|overlay)/.test(style.overflowX) && node.scrollWidth > node.clientWidth;
-      if ((dy !== 0 && scrollerY) || (dx !== 0 && scrollerX)) {
-        const before = [node.scrollLeft, node.scrollTop];
-        node.scrollBy({ left: scrollerX ? dx : 0, top: scrollerY ? dy : 0, behavior: "instant" as ScrollBehavior });
-        if (node.scrollLeft !== before[0] || node.scrollTop !== before[1]) return describe(node);
-        const held = (axis: string) => /^(contain|none)$/.test(axis);
-        if ((dy !== 0 && scrollerY && held(style.overscrollBehaviorY)) || (dx !== 0 && scrollerX && held(style.overscrollBehaviorX))) return null;
+      for (const axis of ["x", "y"] as const) {
+        if (!left[axis]) continue;
+        const scrolls = axis === "y"
+          ? /(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight
+          : /(auto|scroll|overlay)/.test(style.overflowX) && node.scrollWidth > node.clientWidth;
+        if (!scrolls) continue;
+        const before = axis === "y" ? node.scrollTop : node.scrollLeft;
+        node.scrollBy({ left: axis === "x" ? left.x : 0, top: axis === "y" ? left.y : 0, behavior: "instant" as ScrollBehavior });
+        if ((axis === "y" ? node.scrollTop : node.scrollLeft) !== before) {
+          moved ??= describe(node);
+          left[axis] = 0;
+        } else if (/^(contain|none)$/.test(axis === "y" ? style.overscrollBehaviorY : style.overscrollBehaviorX)) left[axis] = 0;
       }
     }
-    const page = doc.scrollingElement ?? doc.documentElement;
-    const before = [page.scrollLeft, page.scrollTop];
-    page.scrollBy({ left: dx, top: dy, behavior: "instant" as ScrollBehavior });
-    return page.scrollLeft !== before[0] || page.scrollTop !== before[1] ? "page" : null;
+    if (left.x || left.y) {
+      const page = doc.scrollingElement ?? doc.documentElement;
+      const before = [page.scrollLeft, page.scrollTop];
+      page.scrollBy({ left: left.x, top: left.y, behavior: "instant" as ScrollBehavior });
+      if (page.scrollLeft !== before[0] || page.scrollTop !== before[1]) moved ??= "page";
+    }
+    return moved;
   };
 
   // The focused element, through shadow roots and frames of the same site.
@@ -195,23 +205,19 @@ export async function scriptedInputProbe(steps: InputStep[], createDOM?: () => {
   const isTextField = (el: Element): boolean =>
     is(el, "HTMLTextAreaElement") || (is(el, "HTMLInputElement") && !/^(checkbox|radio|button|submit|reset|image|file|range|color|hidden)$/.test((el as HTMLInputElement).type));
 
-  // Where the character before or after a caret begins or ends (whole emoji and accented letters, not half of one).
-  const boundary = (text: string, at: number, forward: boolean): number => {
-    const Segmenter = (Intl as unknown as { Segmenter?: new (locale?: string, options?: { granularity: string }) => { segment(text: string): Iterable<{ index: number; segment: string }> } }).Segmenter;
-    if (Segmenter) {
-      let last = 0;
-      for (const { index, segment } of new Segmenter(undefined, { granularity: "grapheme" }).segment(text)) {
-        if (forward && index >= at) return index + segment.length;
-        if (!forward && index + segment.length >= at) return index;
-        last = index + segment.length;
-      }
-      return forward ? text.length : last;
-    }
-    const step = forward ? (text.codePointAt(at) ?? 0) > 0xffff ? 2 : 1 : at >= 2 && /[\udc00-\udfff]/.test(text[at - 1]) && /[\ud800-\udbff]/.test(text[at - 2]) ? 2 : 1;
-    return forward ? Math.min(text.length, at + step) : Math.max(0, at - step);
+  // The places between whole characters (an emoji, a letter and its accents), as offsets in the text.
+  const edges = (text: string): number[] => {
+    const Segmenter = (Intl as unknown as { Segmenter?: new (locale?: string, options?: { granularity: string }) => { segment(text: string): Iterable<{ index: number }> } }).Segmenter;
+    const out: number[] = [];
+    if (Segmenter) for (const { index } of new Segmenter(undefined, { granularity: "grapheme" }).segment(text)) out.push(index);
+    else for (let i = 0; i < text.length; i += (text.codePointAt(i) ?? 0) > 0xffff ? 2 : 1) out.push(i);
+    out.push(text.length);
+    return out;
   };
+  const edgeBefore = (text: string, at: number) => edges(text).filter((edge) => edge <= at).pop() ?? 0;
+  const edgeAfter = (text: string, at: number) => edges(text).find((edge) => edge >= at) ?? text.length;
 
-  // Text typed into a field as a browser would: beforeinput, the edit (within maxlength), input.
+  // Text typed into a field as a browser would: beforeinput, the edit (whole characters, within maxlength), input.
   const typeInto = (el: Element, inputType: string, data: string | null) => {
     if (isTextField(el)) {
       const field = el as HTMLInputElement | HTMLTextAreaElement;
@@ -227,14 +233,17 @@ export async function scriptedInputProbe(steps: InputStep[], createDOM?: () => {
       }
       // Fields without a selection (email, number) edit at the end.
       if (start === null || end === null) start = end = value.length;
-      if (inputType === "deleteContentBackward" && start === end) start = boundary(value, start, false);
-      if (inputType === "deleteContentForward" && start === end) end = boundary(value, end, true);
+      // A caret or selection inside a character covers all of it.
+      start = edgeBefore(value, start);
+      end = edgeAfter(value, end);
+      if (inputType === "deleteContentBackward" && start === end) start = edgeBefore(value, start - 1);
+      if (inputType === "deleteContentForward" && start === end) end = edgeAfter(value, end + 1);
       let text = data ?? "";
-      // A field at its maxlength takes no more, as a browser does.
+      // A field at its maxlength takes no more, and never half a character.
       if (text && field.maxLength >= 0) {
         const room = field.maxLength - (value.length - (end - start));
-        if (room <= 0) return;
-        if (text.length > room) text = text.slice(0, room);
+        text = text.slice(0, edges(text).filter((edge) => edge <= Math.max(0, room)).pop() ?? 0);
+        if (!text) return;
       }
       if (start === end && !text) return;
       if (!fire(el, "beforeinput", { inputType, data: text || data })) return;
@@ -258,7 +267,12 @@ export async function scriptedInputProbe(steps: InputStep[], createDOM?: () => {
     const form = field.form;
     if (!form) return;
     const elements = Array.from(form.elements);
-    const submitter = elements.find((item) => item.matches('button:not([type]), button[type="submit"], input[type="submit"], input[type="image"]')) as HTMLElement | undefined;
+    // The default button: the first submit button of the form in tree order,
+    // image inputs included (form.elements leaves them out), by each one's own type.
+    const doc = form.ownerDocument;
+    const submitter = Array.from(doc.querySelectorAll("button, input"))
+      .filter((item) => (item as HTMLButtonElement | HTMLInputElement).form === form)
+      .find((item) => (is(item, "HTMLButtonElement") && (item as HTMLButtonElement).type === "submit") || (is(item, "HTMLInputElement") && /^(submit|image)$/.test((item as HTMLInputElement).type))) as HTMLElement | undefined;
     if (submitter) {
       if (!submitter.matches(":disabled")) submitter.click();
       return;
@@ -381,6 +395,8 @@ export async function scriptedInputProbe(steps: InputStep[], createDOM?: () => {
         // A click goes to the element both the press and the release were on, or their nearest common ancestor.
         let common: Element | null = pressed ? pressed.el : null;
         while (common && !common.contains(el)) common = parentOf(common);
+        // A disabled control takes no click, as with a real mouse.
+        if (common?.closest?.("button, input, select, textarea, optgroup, option, fieldset")?.matches(":disabled")) common = null;
         if (common && pressed?.button === button && pressed.mouse) {
           if (button === "left") {
             fire(common, "click", pointerInit(step, at, 0));
@@ -469,13 +485,13 @@ export async function scriptedUploadPinProbe(
   const input = createDOM().find(options.selector);
   const view = (input?.ownerDocument.defaultView ?? window) as Window & typeof globalThis;
   if (!input || !(input instanceof view.HTMLInputElement) || input.type !== "file") return { ok: false, error: `file input not found: ${options.selector}` };
-  if (input.disabled) return { ok: false, error: "the file input is disabled" };
+  if (input.matches(":disabled")) return { ok: false, error: "the file input is disabled" };
   if (options.count > 1 && !input.multiple) return { ok: false, error: "this file input takes one file" };
   const key = Symbol.for(options.key);
-  const store = window as unknown as Record<symbol, Map<string, HTMLInputElement> | undefined>;
-  const pins = store[key] ?? new Map<string, HTMLInputElement>();
+  const store = window as unknown as Record<symbol, Map<string, { input: HTMLInputElement; doc: Document; count: number }> | undefined>;
+  const pins = store[key] ?? new Map<string, { input: HTMLInputElement; doc: Document; count: number }>();
   Object.defineProperty(window, key, { value: pins, configurable: true, enumerable: false });
-  pins.set(options.pin, input);
+  pins.set(options.pin, { input, doc: input.ownerDocument, count: options.count });
   return { ok: true };
 }
 
@@ -485,10 +501,15 @@ export async function scriptedUploadPinProbe(
  * does. Without the pin (another page now) nothing is set.
  */
 export async function scriptedUploadProbe(options: { pin: string; key: string; files: { name: string; type: string; lastModified: number; data: string }[] }) {
-  const pins = (window as unknown as Record<symbol, Map<string, HTMLInputElement> | undefined>)[Symbol.for(options.key)];
-  const input = pins?.get(options.pin);
+  const pins = (window as unknown as Record<symbol, Map<string, { input: HTMLInputElement; doc: Document; count: number }> | undefined>)[Symbol.for(options.key)];
+  const pinned = pins?.get(options.pin);
   pins?.delete(options.pin);
-  if (!input || !input.isConnected) return { ok: false, error: "The page changed while the files were read: nothing was uploaded." };
+  if (!pinned || !pinned.input.isConnected || pinned.input.ownerDocument !== pinned.doc) return { ok: false, error: "The page changed while the files were read: nothing was uploaded." };
+  // The input may have changed meanwhile too: it still takes these files, or none are set.
+  const input = pinned.input;
+  if (input.type !== "file" || input.matches(":disabled") || (pinned.count > 1 && !input.multiple)) {
+    return { ok: false, error: "The file input changed while the files were read: nothing was uploaded." };
+  }
   const view = (input.ownerDocument.defaultView ?? window) as Window & typeof globalThis;
   const transfer = new view.DataTransfer();
   for (const file of options.files) {

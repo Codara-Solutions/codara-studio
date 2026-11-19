@@ -365,6 +365,27 @@ export async function run(assembled) {
       await fake.fire("tabs.onAttached", 1, { newWindowId: 1, newPosition: 0 });
     }
 
+    // An evaluate can ask to run only in the page an earlier answer named:
+    // never in another document of the tab, nor one the extension did not name.
+    {
+      const evaluate = (params) => request({ type: "cdp", tabId: 1, method: "Runtime.evaluate", params: { expression: "1", returnByValue: true, ...params } });
+      fake.documents.set(1, "doc-a");
+      const first = await evaluate({});
+      assert.equal(first.uniqueContextId, "firefox-document:doc-a", "an answer names its page");
+      fake.executed.length = 0;
+      assert.deepEqual((await evaluate({ uniqueContextId: first.uniqueContextId })).result, { type: "string", value: "ran" });
+      assert.deepEqual(fake.executed.map((target) => target.documentIds), [["doc-a"]], "run in that page only");
+      fake.documents.set(1, "doc-b");
+      fake.executed.length = 0;
+      await assert.rejects(evaluate({ uniqueContextId: first.uniqueContextId }), /went to another page/, "the tab's page changed: nothing runs");
+      for (const uniqueContextId of ["firefox-document:doc-b", "firefox-document:frame-7", "doc-a", 5]) {
+        await assert.rejects(evaluate({ uniqueContextId }), /not available in Firefox/, `${uniqueContextId}: a page no answer named`);
+      }
+      await assert.rejects(evaluate({ contextId: 1 }), /not available in Firefox/);
+      assert.deepEqual(fake.executed, [], "nothing ran in any of them");
+      fake.documents.delete(1);
+    }
+
     // The tab's own cookie store, and never the default one in its place.
     fake.calls.getAll.length = 0;
     await cookies(1);

@@ -8,6 +8,7 @@
 // (Firefox), is played as a script in the page (scripted-input.ts).
 
 import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename } from "node:path";
 import { Script } from "node:vm";
@@ -429,21 +430,49 @@ export async function upload(target: BrowserTarget, params: Params): Promise<unk
 }
 
 /**
+ * Runtime.evaluate, by value, awaited; with `context`, only in the page an
+ * earlier answer named (the Firefox extension names its page in every
+ * answer's uniqueContextId and refuses to run in any other).
+ */
+async function evaluateIn<T>(target: BrowserTarget, expression: string, context?: string): Promise<{ value: T; context: string | null }> {
+  const answer = await target.session.send<{
+    result?: { value?: unknown };
+    exceptionDetails?: { text?: string; exception?: { description?: string; value?: unknown } };
+    uniqueContextId?: unknown;
+  }>("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true, ...(context ? { uniqueContextId: context } : {}) });
+  if (answer.exceptionDetails) {
+    const details = answer.exceptionDetails;
+    throw new Error((details.exception?.description ?? (typeof details.exception?.value === "string" ? details.exception.value : null) ?? details.text ?? "evaluation failed").split("\n")[0]);
+  }
+  return { value: (answer.result?.value ?? null) as T, context: typeof answer.uniqueContextId === "string" ? answer.uniqueContextId : null };
+}
+
+const PAGE_CHANGED = "upload: the page changed while the files were read; nothing was uploaded.";
+
+/**
  * Upload where the browser cannot set a file input's files (Firefox): Codara
  * reads the files and the page gets them as File objects set on the input,
  * as a drop from the desktop would. The input is found and pinned in its
- * page first; the bytes go only to that page, never to one that replaced it
- * while the files were read. Each file is read from one open handle, within
- * what is left of the limit, so a file that grows meanwhile cannot pass it.
+ * page first, and the script carrying the bytes runs only in that page
+ * (the extension refuses any other), so no page that replaced it meanwhile
+ * gets them. Each file is read from one open handle (never waiting on a
+ * pipe), within what is left of the limit; one that grows while read is
+ * refused.
  */
 async function scriptedUpload(target: BrowserTarget, selector: string, paths: string[]): Promise<unknown> {
   const pin = randomUUID();
-  checked(await run<{ ok?: boolean; error?: string }>(target, `(${scriptedUploadPinProbe.toString()})(${JSON.stringify({ selector, count: paths.length, pin, key: SCRIPTED_UPLOAD_PIN_KEY })}, ${createPreviewDOM.toString()})`));
+  const pinned = await evaluateIn<{ ok?: boolean; error?: string }>(
+    target,
+    `(${scriptedUploadPinProbe.toString()})(${JSON.stringify({ selector, count: paths.length, pin, key: SCRIPTED_UPLOAD_PIN_KEY })}, ${createPreviewDOM.toString()})`,
+  );
+  checked(pinned.value ?? {});
+  if (!pinned.context) throw new Error("upload: this browser's Codara extension cannot keep an upload to one page; update the extension.");
   const tooLarge = () => new Error(`upload: in this browser the files go through the page, at most ${SCRIPTED_UPLOAD_MAX_BYTES / 1_000_000} MB in all; these are larger.`);
   let left = SCRIPTED_UPLOAD_MAX_BYTES;
   const files: { name: string; type: string; lastModified: number; data: string }[] = [];
   for (const path of paths) {
-    const handle = await open(path, "r").catch(() => null);
+    // Non-blocking, so a named pipe is refused below instead of waiting for a writer.
+    const handle = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)).catch(() => null);
     if (!handle) throw new Error(`upload: ${path} is not a file.`);
     try {
       const info = await handle.stat();
@@ -464,7 +493,17 @@ async function scriptedUpload(target: BrowserTarget, selector: string, paths: st
       await handle.close();
     }
   }
-  const result = checked(await run<{ ok?: boolean; error?: string }>(target, `(${scriptedUploadProbe.toString()})(${JSON.stringify({ pin, key: SCRIPTED_UPLOAD_PIN_KEY, files })})`));
+  const placed = await evaluateIn<{ ok?: boolean; error?: string; count?: number }>(
+    target,
+    `(${scriptedUploadProbe.toString()})(${JSON.stringify({ pin, key: SCRIPTED_UPLOAD_PIN_KEY, files })})`,
+    pinned.context,
+  ).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    // The page it was pinned to is gone (Firefox: the tab went to another page; Chromium: no such context).
+    if (/another page|context/i.test(message)) throw new Error(PAGE_CHANGED);
+    throw error;
+  });
+  const result = checked(placed.value ?? { ok: false, error: PAGE_CHANGED });
   return { ...result, ok: true, selector, files: paths, trusted: false, note: SCRIPTED_INPUT_NOTE };
 }
 
