@@ -34,9 +34,11 @@ it shares included) change under the same version: raise `version` in
    Add-on** and pick `manifest.json` in that folder. Firefox removes a
    temporary add-on when it restarts, so load it again after each restart;
    Codara's Settings shows the browser as paired but not connected, with
-   these steps. Removing it can take the add-on's storage with it (its
-   pairing, blocked sites and ports): Connect to Codara then pairs it again,
-   and Disconnect in Codara's Settings forgets the old pairing.
+   these steps. Its pairing, blocked sites and settings stay in the Firefox
+   profile across restarts (the add-on has a fixed id, `@codara-firefox`;
+   measured on ESR 153 and 160 with a real restart), so loaded again it
+   reconnects by itself. Removing it (Remove in `about:debugging` or
+   `about:addons`) deletes them.
 3. Click the Codara button in the toolbar, **Connect to Codara**, and allow
    the same six-digit code in Codara.
 4. Share a tab with its switch, or pick **This window** or **Everything**.
