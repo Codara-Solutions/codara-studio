@@ -63,7 +63,8 @@ function site(request: IncomingMessage, response: ServerResponse): void {
     return;
   }
   response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-  const image = url.pathname === "/slow-load" ? `<img src="/slow-image" alt="">` : "";
+  // An app page: it changes its route while it loads.
+  const image = url.pathname === "/slow-load" ? `<script>history.replaceState(null, "", "/slow-load?routed=1")</script><img src="/slow-image" alt="">` : "";
   response.end(`<!doctype html><title>Page ${url.pathname.slice(1)}</title><h1>Page ${url.pathname}</h1>${image}`);
 }
 
@@ -244,15 +245,16 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     await shootPopup("firefox-popup-asking", asking.state, asking.access);
 
     // Navigate: Codara waits for the page's load event, sent by the
-    // extension from Firefox's tab changes (without it, 15 s go by).
+    // extension from Firefox's tab changes (without it, 15 s go by), also
+    // when the page changes its route meanwhile.
     const started = Date.now();
-    expect(await request("preview.navigate", { tabId, url: `${origin}/slow-load` })).toMatchObject({ url: `${origin}/slow-load`, title: "Page slow-load" });
+    expect(await request("preview.navigate", { tabId, url: `${origin}/slow-load` })).toMatchObject({ url: `${origin}/slow-load?routed=1`, title: "Page slow-load" });
     expect(Date.now() - started).toBeGreaterThan(1_200);
     expect(Date.now() - started).toBeLessThan(10_000);
     const tabUrl = () => firefox!.evaluate<string>(popup, `browser.tabs.get(${accountTab}).then((tab) => tab.url)`);
-    expect(await tabUrl()).toBe(`${origin}/slow-load`);
+    expect(await tabUrl()).toBe(`${origin}/slow-load?routed=1`);
     // A fragment moves within the page, with no load to wait for.
-    expect(await request("preview.navigate", { tabId, url: `${origin}/slow-load#part` })).toMatchObject({ url: `${origin}/slow-load#part` });
+    expect(await request("preview.navigate", { tabId, url: `${origin}/slow-load?routed=1#part` })).toMatchObject({ url: `${origin}/slow-load?routed=1#part` });
     // Firefox's error page is a failed load, not a page.
     const deadPort = await freePort();
     await expect(request("preview.navigate", { tabId, url: `http://127.0.0.1:${deadPort}/` })).rejects.toThrow(/could not load .*Firefox showed its error page/);

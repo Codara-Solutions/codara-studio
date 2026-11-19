@@ -6,9 +6,12 @@
 // - tabs.update resolves at once, before the load starts;
 // - a new document reports { status: "loading" }, then { status: "loading",
 //   url } when it commits, then { status: "complete" } at its load event;
-// - a #hash change or history.pushState reports one { status: "complete", url };
-// - so does Firefox's own error page (an address that does not resolve, a
-//   server that does not answer), with no loading commit before it.
+// - a #hash change or history.pushState reports one { url } with the tab's
+//   status: "loading" while the page still loads, else "complete";
+// - Firefox's own error page (an address that does not resolve, a server
+//   that does not answer) reports { status: "complete", url }, with no
+//   loading commit before it.
+// So a commit is the first loading address change after a load started.
 //
 // No browser.* here, so the tests run it in Node.
 
@@ -62,9 +65,13 @@ export function isSameDocument(from, to) {
   }
 }
 
-/** What Firefox's change says about a navigation: a new document committed, the tab moved within its document (or to an error page), the load ended, or nothing. */
-export function changeKind(change) {
-  if (change.url !== undefined) return change.status === "loading" ? "commit" : "moved";
+/**
+ * What Firefox's change says about the tab's page: a load started, a new
+ * document committed, the tab moved within its document (or to an error
+ * page), the load ended, or nothing.
+ */
+export function changeKind(change, page) {
+  if (change.url !== undefined) return change.status === "loading" && page.awaitingCommit ? "commit" : "moved";
   if (change.status === "loading") return "started";
   if (change.status === "complete") return "loaded";
   return null;
@@ -118,42 +125,49 @@ export function frameTree(tabId, url, loaderId) {
  * commits), and whether a load is under way.
  */
 export function freshPage(newId) {
-  return { loaderId: newId(), nextLoaderId: newId(), loading: false };
+  return { loaderId: newId(), nextLoaderId: newId(), loading: false, awaitingCommit: false };
 }
 
 /**
  * The protocol events for one change of a tab, as [method, params] pairs,
- * and the tab's page after it. Firefox reports no DOMContentLoaded, so only
- * the load event is sent: Codara's navigate waits for either.
+ * the tab's page after it, and the change's kind. Firefox reports no
+ * DOMContentLoaded, so only the load event is sent: Codara's navigate waits
+ * for either.
  */
 export function pageEvents(change, tab, page, newId, now) {
   const frameId = mainFrameId(tab.id);
   const timestamp = now / 1000;
   const events = [];
-  let { loaderId, nextLoaderId, loading } = page;
-  switch (changeKind(change)) {
+  let { loaderId, nextLoaderId, loading, awaitingCommit } = page;
+  const kind = changeKind(change, page);
+  switch (kind) {
     case "started":
       if (!loading) events.push(["Page.frameStartedLoading", { frameId }]);
       loading = true;
+      awaitingCommit = true;
       break;
     case "commit":
-      if (!loading) events.push(["Page.frameStartedLoading", { frameId }]);
-      loading = true;
+      awaitingCommit = false;
       loaderId = nextLoaderId;
       nextLoaderId = newId();
       events.push(["Page.frameNavigated", { frame: frameOf(tab.id, change.url, loaderId), type: "Navigation" }]);
       break;
     case "moved":
       events.push(["Page.navigatedWithinDocument", { frameId, url: change.url }]);
-      if (loading) events.push(["Page.frameStoppedLoading", { frameId }]);
-      loading = false;
+      // A route change while the page loads leaves the load going; an error page ends it.
+      if (loading && change.status !== "loading") {
+        events.push(["Page.frameStoppedLoading", { frameId }]);
+        loading = false;
+        awaitingCommit = false;
+      }
       break;
     case "loaded":
       if (loading) {
         events.push(["Page.loadEventFired", { timestamp }], ["Page.frameStoppedLoading", { frameId }]);
       }
       loading = false;
+      awaitingCommit = false;
       break;
   }
-  return { events, page: { loaderId, nextLoaderId, loading } };
+  return { events, page: { loaderId, nextLoaderId, loading, awaitingCommit }, kind };
 }

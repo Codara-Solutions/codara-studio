@@ -8,10 +8,13 @@ import { pathToFileURL } from "node:url";
 const LOAD = [{ status: "loading" }, { isArticle: false }, { title: "a.example/b" }, { status: "loading", url: "https://a.example/b" }, { title: "B" }, { status: "complete" }];
 const HASH = [{ status: "complete", url: "https://a.example/b#part" }];
 const ERROR_PAGE = [{ status: "loading" }, { status: "complete" }, { title: "nope.invalid/" }, { status: "complete", url: "https://nope.invalid/" }];
+// A page that changes its route while it still loads: the address changes
+// report "loading" too, but only the first after the start is a new document.
+const ROUTED_WHILE_LOADING = [{ status: "loading" }, { status: "loading", url: "https://a.example/app" }, { status: "loading", url: "https://a.example/app?x=1" }, { status: "loading", url: "https://a.example/app/route" }, { status: "complete" }];
 
 export async function run(assembled) {
   const nav = await import(pathToFileURL(join(assembled, "lib", "navigation.js")).href);
-  const { NAVIGATE_ERROR, changeKind, frameTree, freshPage, isSameDocument, mainFrameId, navigateAnswer, navigateUrl, pageEvents } = nav;
+  const { NAVIGATE_ERROR, frameTree, freshPage, isSameDocument, mainFrameId, navigateAnswer, navigateUrl, pageEvents } = nav;
   const frameId = mainFrameId(7);
 
   // ── which addresses Page.navigate loads ──
@@ -39,10 +42,6 @@ export async function run(assembled) {
   assert.equal(isSameDocument("https://a.example/b", "https://a.example/c#part"), false);
   assert.equal(isSameDocument("https://a.example/b?x=1", "https://a.example/b?x=2#part"), false);
 
-  assert.deepEqual(LOAD.map(changeKind), ["started", null, null, "commit", null, "loaded"]);
-  assert.deepEqual(HASH.map(changeKind), ["moved"]);
-  assert.deepEqual(ERROR_PAGE.map(changeKind), ["started", "loaded", null, "moved"]);
-
   // ── navigate's answer ──
   assert.deepEqual(navigateAnswer(7, false, "commit", "L2"), { frameId, loaderId: "L2" });
   assert.deepEqual(navigateAnswer(7, false, null, "L2"), { frameId, loaderId: "L2" }, "still loading: Codara waits for the load event");
@@ -55,16 +54,19 @@ export async function run(assembled) {
   const replay = (changes, start = freshPage(newId)) => {
     let page = start;
     const sent = [];
+    const kinds = [];
     for (const change of changes) {
       const out = pageEvents(change, { id: 7 }, page, newId, 5000);
       page = out.page;
       sent.push(...out.events);
+      kinds.push(out.kind);
     }
-    return { page, sent };
+    return { page, sent, kinds };
   };
   const start = freshPage(newId);
-  assert.deepEqual(start, { loaderId: "L1", nextLoaderId: "L2", loading: false });
+  assert.deepEqual(start, { loaderId: "L1", nextLoaderId: "L2", loading: false, awaitingCommit: false });
   const loaded = replay(LOAD, start);
+  assert.deepEqual(loaded.kinds, ["started", null, null, "commit", null, "loaded"]);
   assert.deepEqual(loaded.sent, [
     ["Page.frameStartedLoading", { frameId }],
     ["Page.frameNavigated", { frame: { id: frameId, loaderId: "L2", url: "https://a.example/b", securityOrigin: "https://a.example", mimeType: "text/html" }, type: "Navigation" }],
@@ -76,17 +78,30 @@ export async function run(assembled) {
   assert.equal(loaded.page.loading, false);
 
   const hashed = replay(HASH, loaded.page);
+  assert.deepEqual(hashed.kinds, ["moved"]);
   assert.deepEqual(hashed.sent, [["Page.navigatedWithinDocument", { frameId, url: "https://a.example/b#part" }]], "no load event for a fragment");
   assert.equal(hashed.page.loaderId, loaded.page.loaderId);
 
   // Firefox's error page: the load stops, and no load event says it loaded.
   const failed = replay(ERROR_PAGE, loaded.page);
+  assert.deepEqual(failed.kinds, ["started", "loaded", null, "moved"]);
   assert.deepEqual(failed.sent.map(([method]) => method), ["Page.frameStartedLoading", "Page.loadEventFired", "Page.frameStoppedLoading", "Page.navigatedWithinDocument"]);
-  // A commit without the start before it still starts the load once.
-  assert.deepEqual(replay([{ status: "loading", url: "https://a.example/c#top" }], loaded.page).sent.map(([method, params]) => [method, params.frame?.urlFragment]), [
+  // Route changes while the page loads move within the new document, and its load still ends with the load event.
+  const routed = replay(ROUTED_WHILE_LOADING, loaded.page);
+  assert.deepEqual(routed.kinds, ["started", "commit", "moved", "moved", "loaded"]);
+  assert.deepEqual(routed.sent.map(([method, params]) => [method, params.frame?.url ?? params.url]), [
     ["Page.frameStartedLoading", undefined],
-    ["Page.frameNavigated", "#top"],
+    ["Page.frameNavigated", "https://a.example/app"],
+    ["Page.navigatedWithinDocument", "https://a.example/app?x=1"],
+    ["Page.navigatedWithinDocument", "https://a.example/app/route"],
+    ["Page.loadEventFired", undefined],
+    ["Page.frameStoppedLoading", undefined],
   ]);
+  // A fragment in the committed address is the frame's urlFragment.
+  const withFragment = replay([{ status: "loading" }, { status: "loading", url: "https://a.example/c#top" }], loaded.page);
+  assert.deepEqual(withFragment.sent[1][1].frame, { id: frameId, loaderId: withFragment.page.loaderId, url: "https://a.example/c", urlFragment: "#top", securityOrigin: "https://a.example", mimeType: "text/html" });
+  // An address change with no load started (the extension started mid-load) is not taken for a new document.
+  assert.deepEqual(replay([{ status: "loading", url: "https://a.example/d" }]).kinds, ["moved"]);
   // A load the page was in before the extension saw it start sends no load event.
   assert.deepEqual(replay([{ status: "complete" }]).sent, []);
 

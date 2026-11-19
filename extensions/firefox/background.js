@@ -15,7 +15,7 @@
 // picks up where it left off.
 
 import { LinkClient } from "./lib/link-client.js";
-import { changeKind, frameTree, freshPage, isSameDocument, navigateAnswer, navigateUrl, pageEvents } from "./lib/navigation.js";
+import { frameTree, freshPage, isSameDocument, navigateAnswer, navigateUrl, pageEvents } from "./lib/navigation.js";
 import {
   CDP_METHODS,
   browserIdentity,
@@ -629,13 +629,12 @@ const COMMIT_WAIT_MS = 10_000;
 
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
   if (isPageChange(change)) navigations.set(tabId, (navigations.get(tabId) ?? 0) + 1);
-  const { events, page } = pageEvents(change, { id: tabId }, pageOf(tabId), newLoaderId, Date.now());
+  const { events, page, kind } = pageEvents(change, { id: tabId }, pageOf(tabId), newLoaderId, Date.now());
   pages.set(tabId, page);
   // Only for a tab Codara still may use: never a page on a blocked site, nor one Firefox keeps extensions off.
   if (events.length && state && pageEventTabs.has(tabId) && state.attached.includes(tabId) && shared(tab) && !firefoxBlockingRule(tab.url, rules)) {
     for (const [method, params] of events) sendLive({ type: "cdp_event", tabId, method, params });
   }
-  const kind = changeKind(change);
   if (kind === "commit" || kind === "moved") for (const done of [...(addressWaiters.get(tabId) ?? [])]) done(kind);
   if (change.url !== undefined) {
     await ready;
