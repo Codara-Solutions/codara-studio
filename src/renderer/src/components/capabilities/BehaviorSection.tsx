@@ -69,7 +69,7 @@ const ROUTE_LABELS: Record<CoraRoute, string> = {
   subscription: "your sign-ins",
   openrouter: "OpenRouter",
   subcloud: "Subcloud",
-  claudecode: "Claude Code for Claude workers",
+  claudecode: "Claude Code (Claude workers)",
 };
 
 // The orders worth offering: the first route is the one that matters most.
