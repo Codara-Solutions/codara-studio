@@ -326,8 +326,7 @@
           "!package.json",
           "!.gitignore",
           "!README.md",
-          "!LISTING.txt",
-          "!versions.json"
+          "!LISTING.txt"
         ]
       },
       {

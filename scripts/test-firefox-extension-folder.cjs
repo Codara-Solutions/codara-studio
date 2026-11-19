@@ -69,7 +69,7 @@ function copyFiltered(from, to, filter) {
 }
 
 (async () => {
-  const { assembledEntries, ASSEMBLY_MARKER } = await import(pathToFileURL(path.join(ROOT, "extensions/firefox/build/assemble.mjs")).href);
+  const { assembledEntries, ASSEMBLY_MARKER, recordVersion } = await import(pathToFileURL(path.join(ROOT, "extensions/firefox/build/assemble.mjs")).href);
   const expected = new Map(assembledEntries().map((entry) => [entry.name, entry.data]));
   const version = JSON.parse(fs.readFileSync(path.join(ROOT, "extensions/firefox/manifest.json"), "utf8")).version;
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codara-firefox-folder-"));
@@ -109,6 +109,13 @@ function copyFiltered(from, to, filter) {
     const inTheWay = /is already there and is not a whole copy of Codara's extension for Firefox/;
     await assert.rejects((await load({ isPackaged: false, getAppPath: () => ROOT }, home)).prepareFirefoxExtensionFolder(), inTheWay);
     assert.equal(fs.readFileSync(path.join(folder, "notes.txt"), "utf8"), "the user's own file\n");
+    assert.equal(fs.readFileSync(path.join(folder, "background.js"), "utf8"), "// the copy Firefox loaded\n");
+    // A folder missing a module the add-on imports is not one Firefox can start: told, left as it is.
+    fs.rmSync(folder, { recursive: true });
+    fs.cpSync(whole, folder, { recursive: true });
+    fs.rmSync(path.join(folder, "lib", "access-clock.js"));
+    await assert.rejects((await load({ isPackaged: false, getAppPath: () => ROOT }, home)).prepareFirefoxExtensionFolder(), inTheWay);
+    assert.equal(fs.existsSync(path.join(folder, "lib", "access-clock.js")), false);
     assert.equal(fs.readFileSync(path.join(folder, "background.js"), "utf8"), "// the copy Firefox loaded\n");
     // A manifest alone is not a folder Firefox can load: told, left as it is.
     fs.rmSync(folder, { recursive: true });
@@ -156,18 +163,35 @@ function copyFiltered(from, to, filter) {
       assert.equal(packaged, path.join(packagedHome, "firefox-extension", version));
       sameAsAssembly(packaged, "packaged");
 
-      // Sources that change while Codara runs land under the version they carry, never the one read at start.
-      const manifestPath = path.join(resources, "firefox-extension-source", "manifest.json");
+      // Files that are not the ones recorded for their version are never handed out under it.
+      const sourceDir = path.join(resources, "firefox-extension-source");
+      const backgroundPath = path.join(sourceDir, "background.js");
+      const background = fs.readFileSync(backgroundPath);
+      fs.appendFileSync(backgroundPath, "\n// edited\n");
+      const editedHome = path.join(scratch, "edited-home");
+      lib = await load({ isPackaged: true, getAppPath: () => path.join(resources, "app.asar") }, editedHome);
+      await assert.rejects(lib.prepareFirefoxExtensionFolder(), /are not the ones recorded for version/);
+      assert.deepEqual(fs.readdirSync(path.join(editedHome, "firefox-extension")), [], "nothing handed out, no staging left");
+      fs.writeFileSync(backgroundPath, background);
+
+      // Sources that change while Codara runs land under the version they carry, never the one read at start;
+      // the folder of the version read at start is left alone, whatever is in it.
+      const manifestPath = path.join(sourceDir, "manifest.json");
       const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
       const runningHome = path.join(scratch, "running-home");
       lib = await load({ isPackaged: true, getAppPath: () => path.join(resources, "app.asar") }, runningHome);
       assert.equal(lib.firefoxExtensionFolder(), path.join(runningHome, "firefox-extension", version));
+      fs.mkdirSync(path.join(runningHome, "firefox-extension", version), { recursive: true });
+      fs.writeFileSync(path.join(runningHome, "firefox-extension", version, "notes.txt"), "kept\n");
       fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, version: "98.0.0" }));
+      recordVersion(sourceDir);
       assert.equal(await lib.prepareFirefoxExtensionFolder(), path.join(runningHome, "firefox-extension", "98.0.0"));
-      assert.deepEqual(fs.readdirSync(path.join(runningHome, "firefox-extension")), ["98.0.0"]);
+      assert.deepEqual(fs.readdirSync(path.join(runningHome, "firefox-extension")).sort(), ["98.0.0", version].sort());
+      assert.deepEqual(fs.readdirSync(path.join(runningHome, "firefox-extension", version)), ["notes.txt"]);
 
       // A newer version gets its own folder; the one Firefox loaded stays as it was.
       fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, version: "99.0.0" }));
+      recordVersion(sourceDir);
       fs.writeFileSync(path.join(packaged, "popup.js"), "// loaded before the update\n");
       lib = await load({ isPackaged: true, getAppPath: () => path.join(resources, "app.asar") }, packagedHome);
       const newer = await lib.prepareFirefoxExtensionFolder();

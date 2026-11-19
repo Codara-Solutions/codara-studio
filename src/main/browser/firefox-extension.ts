@@ -7,7 +7,7 @@
 // they choose to.
 
 import { app } from "electron";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -57,17 +57,36 @@ export function firefoxExtensionFolder(): string | null {
   return version ? join(codaraHome(), "firefox-extension", version) : null;
 }
 
-/** Whether `dir` is a whole folder Codara assembled for `version` (its marker, that version, the files it runs). */
-function wholeFolder(dir: string, version: string): boolean {
+type AssembleModule = {
+  assemble: (out: string, options: { firefoxDir: string; chromeDir: string }) => { dir: string };
+  payloadDigest: (entries: { name: string; data: Buffer }[]) => string;
+  recordedVersions: (dir: string) => Record<string, string>;
+  ASSEMBLY_MARKER: string;
+};
+
+/** Every file under `dir` but the assembly's marker, relative, sorted as the assembly sorts them. */
+function folderEntries(dir: string, marker: string): { name: string; data: Buffer }[] {
+  const out: { name: string; data: Buffer }[] = [];
+  const walk = (folder: string, prefix: string) => {
+    for (const entry of readdirSync(folder, { withFileTypes: true })) {
+      const name = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(join(folder, entry.name), name);
+      else if (name !== marker) out.push({ name, data: readFileSync(join(folder, entry.name)) });
+    }
+  };
+  walk(dir, "");
+  return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/** Whether `dir` is a whole folder Codara assembled: its marker, and every one of `names` there as a file, with this version. */
+function wholeFolder(dir: string, version: string, names: string[], marker: string): boolean {
   try {
-    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
-    return manifest.version === version && WHOLE_FILES.every((name) => existsSync(join(dir, name)));
+    if (!statSync(join(dir, marker)).isFile() || !names.every((name) => statSync(join(dir, name)).isFile())) return false;
+    return JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")).version === version;
   } catch {
     return false;
   }
 }
-// The assembly's marker (build/assemble.mjs ASSEMBLY_MARKER) and what Firefox runs first.
-const WHOLE_FILES = [".codara-firefox-assembly", "manifest.json", "background.js", "popup.html", "popup.js"];
 
 const inTheWay = (dir: string) =>
   new Error(`${dir} is already there and is not a whole copy of Codara's extension for Firefox: move it away, then try again.`);
@@ -75,40 +94,44 @@ const inTheWay = (dir: string) =>
 /**
  * Assembles this version's folder the first time; an existing one is left
  * exactly as it is and nothing in it is ever deleted. Assembled in a staging
- * folder of its own beside it and renamed into place in one step, so a
- * folder Codara made is always whole: if another Codara got there first,
- * its folder is used; if anything else is in the way, the user is told. The
- * folder is named after the version the staged files carry, so sources that
- * changed since this Codara started never land under an older version.
+ * folder of its own beside it, checked against the files recorded for its
+ * version (versions.json), and renamed into place in one step, so a folder
+ * Codara made is always whole and holds that version's files: if another
+ * Codara got there first, its folder is used; if anything else is in the
+ * way, the user is told. The folder is named after the version the staged
+ * files carry, so sources that changed since this Codara started never land
+ * under an older version.
  */
 export async function prepareFirefoxExtensionFolder(): Promise<string> {
   const sources = firefoxSources();
   const shown = firefoxExtensionFolder();
-  const version = shippedFirefoxVersion();
-  if (!sources || !shown || !version) throw new Error("This Codara build does not include the extension for Firefox.");
-  if (wholeFolder(shown, version)) return shown;
-  if (existsSync(shown)) {
-    // An empty folder holds nothing to lose (rmdir removes only an empty one); anything else is the user's.
-    if (readdirSync(shown).length) throw inTheWay(shown);
-    rmdirSync(shown);
-  }
+  if (!sources || !shown) throw new Error("This Codara build does not include the extension for Firefox.");
   const parent = dirname(shown);
   mkdirSync(parent, { recursive: true });
-  const { assemble } = (await import(/* @vite-ignore */ pathToFileURL(join(sources.firefoxDir, "build", "assemble.mjs")).href)) as {
-    assemble: (out: string, options: { firefoxDir: string; chromeDir: string }) => { dir: string };
-  };
+  const build = (await import(/* @vite-ignore */ pathToFileURL(join(sources.firefoxDir, "build", "assemble.mjs")).href)) as AssembleModule;
   // A new, empty folder only this call uses: nothing already there is ever removed.
   const staging = mkdtempSync(join(parent, ".staging-"));
   try {
-    assemble(staging, sources);
-    const staged = JSON.parse(readFileSync(join(staging, "manifest.json"), "utf8")).version;
-    if (typeof staged !== "string" || !VERSION.test(staged)) throw new Error("The extension for Firefox in this Codara has no plain version.");
-    const target = join(parent, staged);
+    build.assemble(staging, sources);
+    const entries = folderEntries(staging, build.ASSEMBLY_MARKER);
+    const version = JSON.parse(readFileSync(join(staging, "manifest.json"), "utf8")).version;
+    if (typeof version !== "string" || !VERSION.test(version)) throw new Error("The extension for Firefox in this Codara has no plain version.");
+    if (build.recordedVersions(sources.firefoxDir)[version] !== build.payloadDigest(entries)) {
+      throw new Error(`The extension files for Firefox in this Codara are not the ones recorded for version ${version}, so they are not handed out under it.`);
+    }
+    const names = entries.map((entry) => entry.name);
+    const target = join(parent, version);
+    if (wholeFolder(target, version, names, build.ASSEMBLY_MARKER)) return target;
+    if (existsSync(target)) {
+      // An empty folder holds nothing to lose (rmdir removes only an empty one); anything else is the user's.
+      if (readdirSync(target).length) throw inTheWay(target);
+      rmdirSync(target);
+    }
     try {
       // Fails on a folder that is there and not empty: it is never replaced.
       renameSync(staging, target);
     } catch {
-      if (wholeFolder(target, staged)) return target;
+      if (wholeFolder(target, version, names, build.ASSEMBLY_MARKER)) return target;
       throw inTheWay(target);
     }
     return target;
