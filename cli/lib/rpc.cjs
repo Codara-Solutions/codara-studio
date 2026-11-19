@@ -71,6 +71,9 @@ async function rpcRaw(flags, method, params, { timeoutMs } = {}) {
           "Content-Length": Buffer.byteLength(payload),
           Authorization: `Bearer ${token}`,
         },
+        // A connection per call: a reused one can be closed as idle by Codara
+        // just as a call goes out on it (ECONNRESET).
+        agent: false,
       },
       (res) => {
         let data = "";

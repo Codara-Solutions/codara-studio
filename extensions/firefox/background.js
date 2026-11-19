@@ -16,6 +16,7 @@
 
 import { BODY_FAILED, BODY_TYPES, BodyStore, NO_BODY, bodyPlan, copyBody } from "./lib/bodies.js";
 import { consoleAddresses, consoleEvent } from "./lib/console.js";
+import { STORAGE_WRITES, cookieGate, cookieUrls, readCookies, storageWriteRefusal } from "./lib/cookies.js";
 import { LateReply, LinkClient } from "./lib/link-client.js";
 import { failedEvent, finishedEvent, lateRedirectEnd, requestEvent, requestVisible, responseEvent } from "./lib/network.js";
 import {
@@ -148,8 +149,17 @@ async function load() {
   await chrome.storage.session.set({ attached: [], browserSession: state.browserSession });
 }
 
+// What a tab may share moved on: the switch, attaching, sharing, the blocked
+// sites, a tab's page or window, site access or the link. Counted, so a
+// cookie read that began before never goes out (tabCookies), even if the
+// same access is given again meanwhile.
+let accessGeneration = 0;
+const accessChanged = () => void (accessGeneration += 1);
+const ACCESS_KEYS = ["storageTabs", "attached", "shareAll", "shareWindows", "shareTabs", "stopped", "blockedSites"];
+
 async function save(patch) {
   await ready;
+  if (ACCESS_KEYS.some((key) => key in patch)) accessChanged();
   Object.assign(state, patch);
   const session = {};
   const local = {};
@@ -233,6 +243,7 @@ const link = new LinkClient({
     void ready.then(() => sendLive({ type: "presence_settings", ...presenceSettings(state.presence) }));
   },
   onDisconnected: () => {
+    accessChanged();
     keepAwake(false);
     // Every body filter lets go at once, before the tabs are let go one by one.
     forgetAllBodies();
@@ -342,6 +353,8 @@ async function answerCommand(request, socket) {
     return {};
   }
   if (method === "Network.getResponseBody") return responseBody(tab.id, request.params ?? {}, socket);
+  if (method === "Network.getCookies") return tabCookies(tab.id, request.params ?? {}, socket);
+  if (STORAGE_WRITES.includes(method)) throw new Error(storageWriteRefusal(method));
   if (method === "Page.getFrameTree") {
     const now = await stillUsable(tab.id, socket);
     return frameTree(now.id, now.url, pageOf(now.id, now.url).loaderId);
@@ -575,7 +588,10 @@ chrome.permissions.onAdded.addListener(() => {
   popupQueue = popupQueue.then(forgetGrantedAsks).catch(() => {});
 });
 // A site the user took back: no body kept from before goes out (reads check again too).
-chrome.permissions.onRemoved.addListener(() => bodies.purge(() => false));
+chrome.permissions.onRemoved.addListener(() => {
+  accessChanged();
+  bodies.purge(() => false);
+});
 
 const usageBadgeTimers = new Map();
 
@@ -794,6 +810,38 @@ async function responseBody(tabId, params, socket) {
   }, still);
 }
 
+/**
+ * Network.getCookies (lib/cookies.js): the tab's own site's cookies, from
+ * its own cookie store, with its cookie switch on. Everything that allowed
+ * the read is asked again when the answer leaves: the switch, the tab still
+ * attached and shared on that site, the blocked sites, the site access and
+ * the link.
+ */
+async function tabCookies(tabId, params, socket) {
+  const tab = await stillUsable(tabId, socket);
+  seeTab(tab);
+  const urls = cookieUrls(params, tab.url);
+  const refusal = cookieGate({
+    urls,
+    ref: agentTabId(tabId),
+    now: () => ({ generation: accessGeneration, socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
+  });
+  const store = tab.cookieStoreId ? { storeId: tab.cookieStoreId } : {};
+  const read = await readCookies(urls, {
+    getAll: (url) => browser.cookies.getAll({ url, ...store }),
+    refusal,
+    // Firefox's own site access for the tab's site (every URL asked is on its host).
+    // (asked only once the refusal passed, so the tab shows a web page).
+    permitted: () => {
+      const { protocol, hostname } = new URL(tab.url);
+      return chrome.permissions.contains({ origins: [`${protocol}//${hostname}/*`] }).catch(() => false);
+    },
+    rules: () => rules,
+  });
+  seeTab(await stillUsable(tabId, socket));
+  return new LateReply(read.build, read.still);
+}
+
 /** The blocked sites changed: bodies of requests the log would not show now go. */
 function purgeBodies() {
   bodies.purge((request) => requestVisible(request, blockedUrl));
@@ -965,6 +1013,7 @@ chrome.tabs.onAttached.addListener(scheduleRefresh);
 // event of it goes on, and it is let go if so.
 // Between windows a tab is in none: nothing of it goes on until it lands.
 chrome.tabs.onDetached.addListener((tabId) => {
+  accessChanged();
   const seen = tabsSeen.get(tabId);
   if (seen) seen.windowId = null;
   // Its bodies and requests go too (a hop that starts between windows is none
@@ -973,6 +1022,7 @@ chrome.tabs.onDetached.addListener((tabId) => {
   bodies.forgetTab(tabId);
 });
 chrome.tabs.onAttached.addListener(async (tabId, { newWindowId }) => {
+  accessChanged();
   const seen = tabsSeen.get(tabId);
   if (seen) seen.windowId = newWindowId;
   await ready;
@@ -994,6 +1044,7 @@ const navigating = new Set();
 const NAVIGATE_WAIT_MS = 25_000;
 
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
+  if ("url" in change) accessChanged();
   seeTab(tab);
   if (isPageChange(change)) navigations.set(tabId, (navigations.get(tabId) ?? 0) + 1);
   const { events, page, kind } = pageEvents(change, { id: tabId }, pageOf(tabId), newLoaderId, Date.now());
@@ -1019,6 +1070,7 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
   if (state.shareWindows.includes(windowId)) await save({ shareWindows: without(state.shareWindows, windowId) });
 });
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  accessChanged();
   tabsSeen.delete(tabId);
   attachedSince.delete(tabId);
   consoleSwitches.delete(tabId);
@@ -1226,6 +1278,7 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
 // are searched at once.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !state) return;
+  if ("blockedSites" in changes) accessChanged();
   for (const key of ["ports", "blockedSites", "allowOpen"]) {
     if (key in changes) state[key] = changes[key].newValue ?? LOCAL_DEFAULTS[key];
   }

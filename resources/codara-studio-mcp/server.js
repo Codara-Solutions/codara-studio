@@ -2749,6 +2749,11 @@ async function postJsonRpc(method, params, timeoutMs, signal) {
           "Content-Length": bytes,
           Authorization: `Bearer ${handshake.token}`,
         },
+        // A connection of its own for each call. This process lives as long
+        // as its agent and calls minutes apart, and Node's keep-alive agent
+        // would send a call on a connection Codara is closing as idle, which
+        // fails it with ECONNRESET and nothing in Codara's log.
+        agent: false,
         // Aborting hangs up, which is what tells the main process to stop
         // serving a long poll whose caller (a cancelled MCP call or an
         // interrupted Cora turn) is gone.
