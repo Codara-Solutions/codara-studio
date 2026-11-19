@@ -1,13 +1,27 @@
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import os from "node:os";
+import { registerHooks } from "node:module";
 import path from "node:path";
 
-import {
+// Studio's sources import their siblings without an extension (the bundler
+// resolves them); Node's type stripping needs `.ts` spelled out.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    try {
+      return nextResolve(specifier, context);
+    } catch (error) {
+      if (!specifier.startsWith(".") || path.extname(specifier)) throw error;
+      return nextResolve(`${specifier}.ts`, context);
+    }
+  },
+});
+
+const {
   followUpNeedsManager,
   isConversationalRequest,
   shouldUseDirectExecution,
-} from "../src/main/orchestration/direct-execution.ts";
+} = await import("../src/main/orchestration/direct-execution.ts");
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "cora-direct-mode-"));
 try {
