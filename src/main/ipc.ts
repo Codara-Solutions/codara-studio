@@ -2943,6 +2943,9 @@ export function registerIpc(): void {
   handle("orchestration:startAutopilot", async (_e, input: StartAutopilotInput): Promise<RunState> => {
     assertLocalWorkspace(input.cwd, "Automations and autopilot");
     const { startAutopilot } = await getRunStore();
+    // initialNoteTypedByUser arrives only from the chat composer's first send
+    // (OrchestrationSidebar.tsx startChat); selections, plans and imports
+    // never carry it.
     return startAutopilot(input);
   });
 
@@ -2968,6 +2971,7 @@ export function registerIpc(): void {
 
   handle("orchestration:addRunMessage", async (_e, input: AddRunMessageInput): Promise<RunState> => {
     const { addRunMessage } = await getRunStore();
+    // typedByUser arrives only from the chat composer (ChatComposer.tsx).
     return addRunMessage(input);
   });
 

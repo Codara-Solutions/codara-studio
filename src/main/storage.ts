@@ -21,6 +21,7 @@ import { removeWorkspaceFromAppState } from "./workspace-state-edits";
 import { UNREADABLE_STATE } from "./worktree-folders";
 import { normalizeWorkspaceColor } from "@shared/workspace-colors";
 import { normalizeAutoCompactPercent } from "@shared/context-compaction";
+import { normalizeCoraRouteOrder } from "@shared/cora-routes";
 import { ALLOWED_WORKER_MODELS, DEFAULT_CORA_WORKER_MODELS } from "@shared/worker-model-roster";
 
 const STATE_FILE = "spark-state.json";
@@ -418,6 +419,9 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     openAiFastMode: settings.openAiFastMode === true,
     coraAlwaysVerifyEdits: settings.coraAlwaysVerifyEdits === true,
     coraAutoCompactPercent: normalizeAutoCompactPercent(settings.coraAutoCompactPercent),
+    // Unset until the user picks an order in Settings: models launch as
+    // picked, so an upgrade never moves a chat to another route by itself.
+    coraRouteOrder: settings.coraRouteOrder === undefined ? undefined : normalizeCoraRouteOrder(settings.coraRouteOrder),
   };
 }
 
