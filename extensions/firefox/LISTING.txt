@@ -30,6 +30,9 @@ Before upload (by hand)
      with Codara and share a tab.
   3. The privacy policy needs a "Codara for Firefox" section (see section 4)
      before the listing is made public.
+  4. Run Mozilla's own linter on the zip (it checks more of the manifest
+     than pack.mjs does, but not the policies):
+     npx addons-linter codara-firefox-<version>.zip   (0 errors, 0 warnings)
 
 
 == 1. HOW TO DISTRIBUTE ==
@@ -56,11 +59,9 @@ accept it; manifest browser_specific_settings.gecko.data_collection_permissions)
   (websiteContent); what agents do in them (websiteActivity); sign-in
   headers, cookies and storage the page can reach (authenticationInfo).
   Nothing goes to any other server.
-  Also to confirm: the pairing tells the Codara app the Firefox version
-  (shown in Codara's Settings). Mozilla lists browser information under
-  technicalAndInteraction, which may only be optional. If Mozilla counts
-  data handed to a local app as collected, either stop sending the version
-  or ask for it as optional consent.
+  The pairing names the browser ("Firefox") but not its version: Mozilla
+  lists browser details under technicalAndInteraction, which may only be
+  optional, and Codara does not need it.
 
 Source code submission:
   "Do You Need to Submit Source Code?"  Yes: upload
@@ -91,7 +92,7 @@ How it works:
 - Pair the add-on with the Codara app once, by checking that both show the same code.
 - Agents see only the tabs you share from the add-on's popup: one tab, a whole window, or every tab. Never the sites on your blocked list (banks and password managers are preset), and never Firefox's own pages.
 - At install, Firefox shows what the add-on passes to the Codara app (see the data list) and asks you to accept it. No site access is asked at install: Firefox asks you, from the popup, for each site you share and for running scripts in pages.
-- On a shared tab, agents can do what the page's own scripts can: read its site storage and cookies that are not HttpOnly, and see its network requests and responses, including sign-in headers such as Authorization. A second switch per tab, off by default, lets them read that site's cookies through Firefox (HttpOnly values stay hidden), read its storage in full, and change its local and session storage. Share only tabs you would let an agent use as you.
+- On a shared tab, agents can do what the page's own scripts can: read its content, its site storage and cookies that are not HttpOnly, and its network requests and responses, bodies included. The add-on passes the requests' headers to the Codara app as they are, Authorization included; Codara's tools never give agents the values of Authorization and cookie headers in your own browser. A second switch per tab, off by default, lets the add-on pass that site's cookies to the Codara app, HttpOnly ones included, and lets agents read its storage in full and change its local and session storage; agents never get the values of HttpOnly cookies. Share only tabs you would let an agent use as you.
 - Every action is logged in the Codara app with the agent that made it.
 
 The add-on talks only to the Codara app on this computer (127.0.0.1) and sends nothing to any other server, Codara's included. The Codara app hands what agents read to the agents you run (such as Claude Code or Codex), and those agents send it to their AI provider under your own account, as with anything else you give them.
@@ -121,7 +122,7 @@ Notes to reviewer:
 Paste into the listing's privacy policy, or add as a "Codara for Firefox"
 section beside "Codara for Chrome" on the Codara Studio privacy page:
 
-  "Codara for Firefox (browser add-on). The add-on works only with the Codara app on your own computer. It reads the tabs you choose to share: their address, title, content, screenshots, console and network activity, including sign-in data the page itself can reach (request headers such as Authorization, response bodies, site storage and cookies that are not HttpOnly). With a second switch per tab, off by default, it also reads that site's cookies through Firefox and its storage in full (agents never get the values of HttpOnly cookies), and agents may change its local and session storage. It passes this only to the Codara app, over a connection to 127.0.0.1 that never leaves your computer and is encrypted after pairing. The Codara app hands it to the coding agents you run, such as Claude Code or Codex, which send it to their AI provider under your own account. The add-on sends nothing to Codara Solutions or to any other server. In Firefox it keeps its settings and the pairing until you remove it, and which tabs are shared until Firefox closes. The Codara app keeps the paired browsers and a log of agent actions on your computer: Disconnect in Codara's Settings, Browser, forgets a paired browser, and the log is the file chrome-link/activity.jsonl in Codara's home folder (and activity.jsonl.1, its older part), which you can delete."
+  "Codara for Firefox (browser add-on). The add-on works only with the Codara app on your own computer. It reads the tabs you choose to share: their address, title, content, screenshots, console and network activity, including sign-in data the page itself can reach (request headers such as Authorization, response bodies, site storage and cookies that are not HttpOnly). With a second switch per tab, off by default, it also reads that site's cookies through Firefox, HttpOnly ones included, and its storage in full, and agents may change its local and session storage. The Codara app never gives agents the values of Authorization and cookie headers or of HttpOnly cookies from your own browser; everything else listed here, agents can read. It passes this only to the Codara app, over a connection to 127.0.0.1 that never leaves your computer and is encrypted after pairing. The Codara app hands it to the coding agents you run, such as Claude Code or Codex, which send it to their AI provider under your own account. The add-on sends nothing to Codara Solutions or to any other server. In Firefox it keeps its settings and the pairing until you remove it, and which tabs are shared until Firefox closes. The Codara app keeps the paired browsers and a log of agent actions on your computer: Disconnect in Codara's Settings, Browser, forgets a paired browser, and the log is the file chrome-link/activity.jsonl in Codara's home folder (and activity.jsonl.1, its older part), which you can delete."
 
 
 == 5. PERMISSIONS (for reviewer questions) ==

@@ -145,9 +145,13 @@ export function unsupportedMethodError(method) {
   return `${method} is not available in Firefox: Firefox gives extensions no debugger, and the Codara extension for Firefox cannot do it another way.`;
 }
 
-/** The browser's name and version for the hello, from runtime.getBrowserInfo(). */
+/**
+ * The browser's name for the hello, from runtime.getBrowserInfo(). Its
+ * version is not sent: Mozilla counts browser details as technical data,
+ * which an add-on may pass on only with its own optional consent, and Codara
+ * needs no version (the hello lists the commands the extension answers).
+ */
 export function browserIdentity(info) {
   const name = typeof info?.name === "string" && info.name ? info.name : "Firefox";
-  const version = typeof info?.version === "string" ? info.version : "";
-  return { name, version };
+  return { name, version: "" };
 }

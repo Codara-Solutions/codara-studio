@@ -14,12 +14,12 @@
 // which the reviewer rebuilds the very same zip.
 
 import { createHash } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { linkSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { zip } from "../../chrome/build/pack.mjs";
-import { assembledEntries, CHROME_DIR, FIREFOX_DIR, payloadDigest, recordedVersions } from "./assemble.mjs";
+import { assembledEntries, CHROME_DIR, FIREFOX_DIR, ownFiles, payloadDigest, recordedVersions, sharedSpec } from "./assemble.mjs";
 
 export const ADDON_ID = "@codara-firefox";
 
@@ -64,6 +64,9 @@ export function checkAddon(entries) {
   }
   const gecko = manifest.browser_specific_settings?.gecko ?? {};
   if (manifest.manifest_version !== 3) problems.push("manifest_version must be 3");
+  for (const field of ["name", "description"]) {
+    if (typeof manifest[field] !== "string" || !manifest[field].trim()) problems.push(`${field} is missing`);
+  }
   if (!PLAIN_VERSION.test(manifest.version ?? "")) problems.push(`version "${manifest.version}" is not a plain dotted version`);
   if (gecko.id !== ADDON_ID) problems.push(`the add-on id must stay ${ADDON_ID}: Mozilla ties the listing, and every update, to it`);
   if (!gecko.strict_min_version) problems.push("strict_min_version is missing");
@@ -98,22 +101,6 @@ export function checkAddon(entries) {
   return { manifest, problems };
 }
 
-/** Every file under `dir`, relative with forward slashes, skipping the top-level names in `skip`. */
-function filesUnder(dir, skip = []) {
-  const out = [];
-  const walk = (folder, prefix) => {
-    for (const name of readdirSync(folder).sort()) {
-      const rel = prefix ? `${prefix}/${name}` : name;
-      if (!prefix && skip.includes(name)) continue;
-      const path = join(folder, name);
-      if (statSync(path).isDirectory()) walk(path, rel);
-      else out.push(rel);
-    }
-  };
-  walk(dir, "");
-  return out;
-}
-
 const SOURCE_README = (version) => `Codara for Firefox ${version}: source of the uploaded zip
 
 The upload is assembled from two folders of the public codara-studio
@@ -128,34 +115,49 @@ out/codara-firefox-${version}.zip is then byte for byte the uploaded file
 (compare its sha256).
 `;
 
-/** The source archive's entries: the add-on's folder, the Chrome files it shares and the pack script it uses, as they are. */
-export function sourceEntries({ firefoxDir = FIREFOX_DIR, chromeDir = CHROME_DIR } = {}, version) {
-  const shared = JSON.parse(readFileSync(join(firefoxDir, "shared.json"), "utf8")).files;
-  const names = [
-    ...filesUnder(firefoxDir, ["dist", "test", "node_modules", ".gitignore"]).map((name) => [`extensions/firefox/${name}`, join(firefoxDir, name)]),
-    ...[...shared, "build/pack.mjs"].sort().map((name) => [`extensions/chrome/${name}`, join(chromeDir, name)]),
-  ];
-  return [
-    { name: "README.txt", data: Buffer.from(SOURCE_README(version)) },
-    ...names.map(([name, path]) => ({ name, data: readFileSync(path) })),
-  ];
+// What the build reads besides the add-on's own files: nothing else of either folder goes in the source archive.
+const FIREFOX_BUILD_FILES = ["build/assemble.mjs", "build/pack.mjs", "shared.json", "versions.json"];
+const CHROME_BUILD_FILES = ["build/pack.mjs"];
+
+/** A source file's bytes; a link or anything but a plain file is refused, so the archive holds only what is named. */
+function sourceFile(path) {
+  if (!lstatSync(path).isFile()) throw new Error(`${path} is not a plain file: the source archive takes only the files the build reads.`);
+  return readFileSync(path);
 }
 
-/** Writes `bytes` to `file` in one step and never over another file: the same bytes already there are fine. */
-function publish(file, bytes) {
-  if (existsSync(file)) {
-    if (statSync(file).isFile() && readFileSync(file).equals(bytes)) return;
-    throw new Error(`${file} is already there with other contents: pack into another folder, or move it away.`);
+/** The source archive's entries: exactly the files the assembly and this script read, as they are. */
+export function sourceEntries({ firefoxDir = FIREFOX_DIR, chromeDir = CHROME_DIR } = {}, version) {
+  const names = [
+    ...[...ownFiles(firefoxDir), ...FIREFOX_BUILD_FILES].map((name) => [`extensions/firefox/${name}`, join(firefoxDir, name)]),
+    ...[...sharedSpec(firefoxDir).files, ...CHROME_BUILD_FILES].map((name) => [`extensions/chrome/${name}`, join(chromeDir, name)]),
+  ].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return [{ name: "README.txt", data: Buffer.from(SOURCE_README(version)) }, ...names.map(([name, path]) => ({ name, data: sourceFile(path) }))];
+}
+
+/** Whether `file` is free (false) or already a plain file with these bytes (true); anything else is refused. */
+function alreadyThere(file, bytes) {
+  let info;
+  try {
+    info = lstatSync(file);
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
   }
+  // The path itself must be the file: a link to a matching zip could change under the checksum.
+  if (info.isFile() && readFileSync(file).equals(bytes)) return true;
+  throw new Error(`${file} is already there with other contents: pack into another folder, or move it away.`);
+}
+
+/** Writes `bytes` to `file` in one step and never over another file. */
+function publish(file, bytes) {
+  if (alreadyThere(file, bytes)) return;
   const staging = `${file}.${process.pid}.partial`;
   writeFileSync(staging, bytes, { flag: "wx" });
   try {
     // A hard link fails when the name is taken, so a file that appeared meanwhile is never replaced.
     linkSync(staging, file);
   } catch (error) {
-    if (!(existsSync(file) && statSync(file).isFile() && readFileSync(file).equals(bytes))) {
-      throw error.code === "EEXIST" ? new Error(`${file} is already there with other contents: pack into another folder, or move it away.`) : error;
-    }
+    if (error.code !== "EEXIST" || !alreadyThere(file, bytes)) throw error;
   } finally {
     rmSync(staging, { force: true });
   }
@@ -180,8 +182,11 @@ export function pack(outDir = join(FIREFOX_DIR, "dist"), options = {}) {
   mkdirSync(outDir, { recursive: true });
   const file = join(outDir, `codara-firefox-${manifest.version}.zip`);
   const source = join(outDir, `codara-firefox-${manifest.version}-source.zip`);
-  publish(file, bytes);
+  // Both names are checked before either is written, and the source goes first, so a refusal leaves no upload without its source.
+  alreadyThere(source, sourceBytes);
+  alreadyThere(file, bytes);
   publish(source, sourceBytes);
+  publish(file, bytes);
   return { file, source, sha256: createHash("sha256").update(bytes).digest("hex"), files: entries.map((entry) => entry.name), version: manifest.version };
 }
 
