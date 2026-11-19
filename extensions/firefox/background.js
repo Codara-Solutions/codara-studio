@@ -296,13 +296,16 @@ async function handleRequest(request) {
 }
 
 async function answerCommand(request, socket) {
+  const receivedAt = Date.now();
   const child = childSessionError(request);
   if (child) throw new Error(child);
   const tab = await usableTab(request.tabId);
   const method = String(request.method ?? "");
   if (!state.attached.includes(tab.id)) throw new Error(`${agentTabId(tab.id)} is not attached.`);
   if (isDomainToggle(method)) {
-    // Page events go to Codara from Page.enable on, as the debugger sends them.
+    // Page events go to Codara from Page.enable on, as the debugger sends
+    // them: on this request's own connection only.
+    stillLive(socket);
     if (method === "Page.enable") {
       pageEventTabs.add(tab.id);
       pageOf(tab.id, tab.url);
@@ -310,7 +313,7 @@ async function answerCommand(request, socket) {
     if (method === "Page.disable") pageEventTabs.delete(tab.id);
     return {};
   }
-  if (method === "Page.navigate") return navigateTab(tab, request.params ?? {}, socket);
+  if (method === "Page.navigate") return navigateTab(tab, request.params ?? {}, socket, receivedAt);
   if (method === "Page.getFrameTree") {
     const now = await stillUsable(tab.id, socket);
     return frameTree(now.id, now.url, pageOf(now.id, now.url).loaderId);
@@ -354,32 +357,38 @@ async function answerCommand(request, socket) {
  * debugger's waits for the commit: the new document, Firefox's error page,
  * or the fragment reached.
  */
-async function navigateTab(tab, params, socket) {
+async function navigateTab(tab, params, socket, receivedAt) {
   if (params === null || typeof params !== "object") throw new Error("Page.navigate needs an absolute http or https url.");
+  // One deadline for the whole answer, from the request's arrival, under the 30 s Codara waits.
+  const deadline = receivedAt + NAVIGATE_WAIT_MS;
   const checks = { isRestricted: isFirefoxRestrictedUrl, blockingRule: (address) => firefoxBlockingRule(address, rules) };
   navigateUrl(params, tab.id, checks);
-  const now = await stillUsable(tab.id, socket);
-  // Checked again with nothing awaited before the load: the user may have blocked the site meanwhile.
-  const url = navigateUrl(params, now.id, checks);
-  const sameDocument = isSameDocument(now.url, url);
-  if (sameDocument && now.url === url) return navigateAnswer(now.id, true, "moved", null);
-  // One navigation per tab: overlapping loads could not be told apart.
-  if (navigationWaiters.has(now.id)) throw new Error(NAVIGATE_BUSY_ERROR);
-  // The id the next document gets, also when it commits after the answer.
-  const { nextLoaderId } = pageOf(now.id, now.url);
-  // One deadline for the whole answer, under the 30 s Codara waits.
-  const deadline = Date.now() + NAVIGATE_WAIT_MS;
-  const waiter = waitForNavigation(now.id, { sameDocument, url, started: false }, deadline);
+  // One navigation per tab, held until its answer is sent: overlapping loads could not be told apart.
+  if (navigating.has(tab.id)) throw new Error(NAVIGATE_BUSY_ERROR);
+  navigating.add(tab.id);
   try {
-    await untilDeadline(chrome.tabs.update(now.id, { url }), deadline);
-  } catch (error) {
-    waiter.done(null);
-    throw error;
+    const now = await untilDeadline(stillUsable(tab.id, socket), deadline);
+    // Checked again with nothing awaited before the load: the user may have blocked the site meanwhile.
+    const url = navigateUrl(params, now.id, checks);
+    if (Date.now() >= deadline) throw new Error(NAVIGATE_TIMEOUT_ERROR);
+    const sameDocument = isSameDocument(now.url, url);
+    if (sameDocument && now.url === url) return navigateAnswer(now.id, true, "moved", null);
+    // The id the next document gets, also when it commits after the answer.
+    const { nextLoaderId } = pageOf(now.id, now.url);
+    const waiter = waitForNavigation(now.id, { sameDocument, url, started: false }, deadline);
+    try {
+      await untilDeadline(chrome.tabs.update(now.id, { url }), deadline);
+    } catch (error) {
+      waiter.done(null);
+      throw error;
+    }
+    const kind = await waiter.answer;
+    // A redirect may have taken the tab to a blocked site or a page Firefox keeps extensions off.
+    await untilDeadline(stillUsable(now.id, socket), deadline);
+    return navigateAnswer(now.id, sameDocument, kind, nextLoaderId);
+  } finally {
+    navigating.delete(tab.id);
   }
-  const kind = await waiter.answer;
-  // A redirect may have taken the tab to a blocked site or a page Firefox keeps extensions off.
-  await untilDeadline(stillUsable(now.id, socket), deadline);
-  return navigateAnswer(now.id, sameDocument, kind, nextLoaderId);
 }
 
 /**
@@ -667,6 +676,7 @@ const navigations = new Map();
 const pages = new Map();
 const pageEventTabs = new Set();
 const navigationWaiters = new Map();
+const navigating = new Set();
 const NAVIGATE_WAIT_MS = 25_000;
 
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
@@ -698,6 +708,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   pages.delete(tabId);
   pageEventTabs.delete(tabId);
   navigationWaiters.get(tabId)?.done(null);
+  navigating.delete(tabId);
   await ready;
   const usage = { ...state.usage };
   delete usage[tabId];

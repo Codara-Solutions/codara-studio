@@ -58,6 +58,11 @@ function site(request: IncomingMessage, response: ServerResponse): void {
     setTimeout(() => response.writeHead(200, { "Content-Type": "image/gif" }).end(), 1_500);
     return;
   }
+  if (url.pathname === "/slow-answer") {
+    // A server slow to answer: the page commits only after 1.5 s.
+    setTimeout(() => response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end("<!doctype html><title>Page slow-answer</title>"), 1_500);
+    return;
+  }
   if (url.pathname === "/to-bank") {
     response.writeHead(302, { Location: `http://localhost:${url.searchParams.get("port")}/bank` }).end();
     return;
@@ -253,8 +258,15 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     expect(Date.now() - started).toBeLessThan(10_000);
     const tabUrl = () => firefox!.evaluate<string>(popup, `browser.tabs.get(${accountTab}).then((tab) => tab.url)`);
     expect(await tabUrl()).toBe(`${origin}/slow-load?routed=1`);
+    // One navigation per tab at a time: a second one before the first commits is refused.
+    const [first, second] = await Promise.allSettled([
+      request("preview.navigate", { tabId, url: `${origin}/slow-answer` }),
+      new Promise((resolve) => setTimeout(resolve, 300)).then(() => request("preview.navigate", { tabId, url: `${origin}/elsewhere` })),
+    ]);
+    expect(first).toMatchObject({ status: "fulfilled", value: { url: `${origin}/slow-answer` } });
+    expect(second).toMatchObject({ status: "rejected", reason: { message: expect.stringMatching(/still on its way/) } });
     // A fragment moves within the page, with no load to wait for.
-    expect(await request("preview.navigate", { tabId, url: `${origin}/slow-load?routed=1#part` })).toMatchObject({ url: `${origin}/slow-load?routed=1#part` });
+    expect(await request("preview.navigate", { tabId, url: `${origin}/slow-answer#part` })).toMatchObject({ url: `${origin}/slow-answer#part` });
     // Firefox's error page is a failed load, not a page.
     const deadPort = await freePort();
     await expect(request("preview.navigate", { tabId, url: `http://127.0.0.1:${deadPort}/` })).rejects.toThrow(/could not load .*Firefox showed its error page/);
