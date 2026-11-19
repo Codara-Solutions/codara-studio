@@ -5,6 +5,7 @@
 // brings forward only shared tabs. An opened tab always
 // goes in a tab group: the one the agent names, or its workspace's.
 
+import { firefoxRefusal } from "../../../shared/user-browser-tools";
 import { normalizeTabGroupName } from "../../../shared/tab-group-name";
 import { PreviewToolParamsError, type PreviewToolHost } from "../../preview-tools/types";
 import { formatTabRef, parseTabRef } from "../tab-ref";
@@ -46,6 +47,9 @@ export async function chromeLinkTool(params: Record<string, unknown>, _method: s
       if (links.length === 0) throw new Error("No browser is connected to Codara.");
       const link = links.find((candidate) => candidate.allowOpen);
       if (!link) {
+        // Firefox's extension cannot open tabs at all: say so, not which switch to turn on.
+        const firefox = links.every((candidate) => candidate.extensionKind === "firefox") ? firefoxRefusal("preview.chrome", { action: "open" }) : null;
+        if (firefox) throw new PreviewToolParamsError(firefox);
         throw new Error('The user has not let agents open tabs. They can turn on "Open new tabs in a group" in the Codara extension popup, or share an existing tab.');
       }
       const group = normalizeTabGroupName(params.group) || (await workspaceGroup(params, host));

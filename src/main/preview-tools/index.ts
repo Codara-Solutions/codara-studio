@@ -11,9 +11,11 @@ import { guardPageDialogs } from "../browser/dialog-guard";
 import { recordActedTab, withActedTab } from "../browser/acted-tab";
 import { noteChromeToolCall } from "../browser/chrome/activity";
 import { assertChromeDriverAllowed } from "../browser/chrome/presence";
-import { BrowserTabRefError, parseTabRef } from "../browser/tab-ref";
+import { chromeLinkRuntime } from "../browser/chrome/runtime";
+import { BrowserTabRefError, parseTabRef, type BrowserTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { normalizeTabGroupName } from "../../shared/tab-group-name";
+import { firefoxRefusal } from "../../shared/user-browser-tools";
 import { capturePreviewTools } from "./capture";
 import { cdpPreviewTools } from "./cdp";
 import { chromeLinkTools, chromeTargetTools } from "./chrome";
@@ -129,6 +131,22 @@ export function coerceNumericParams(params: Record<string, unknown>, depth = 0):
   }
 }
 
+// A tool, or a mode of one, that Firefox's extension cannot do is refused on
+// a Firefox tab with the capability table's reason, before anything is sent
+// (src/shared/user-browser-tools.ts). A tab that cannot be found is left to
+// the handler, which says why.
+function refuseOnFirefox(method: string, params: Record<string, unknown>, ref: Extract<BrowserTabRef, { kind: "chrome" }>): void {
+  let kind: string | undefined;
+  try {
+    kind = chromeLinkRuntime()?.backend.locate(ref).link.extensionKind;
+  } catch {
+    return;
+  }
+  if (kind !== "firefox") return;
+  const reason = firefoxRefusal(method, params);
+  if (reason) throw new PreviewToolParamsError(reason);
+}
+
 // Names agents reach for that a tool calls something else, and the hint for
 // a call that used another tool's fields.
 function readAliases(method: string, params: Record<string, unknown>): void {
@@ -193,6 +211,7 @@ async function dispatchPreviewTool(
   }
   // An agent the user stopped from the page's pill is refused there before anything runs.
   assertChromeDriverAllowed(ref, String(params.tabId), params.driver);
+  refuseOnFirefox(method, params, ref);
   // Every call that reaches the user's own browser is logged with its agent.
   noteChromeToolCall(method, params);
   if (entry.targets === "any") return guardPageDialogs(method, params, () => entry.run(params, method, host));
