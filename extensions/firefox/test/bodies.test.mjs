@@ -6,7 +6,18 @@ const bytes = (text) => new TextEncoder().encode(text);
 const at = (url) => ({ url, documentUrl: "https://a.example/app", tabId: 1 });
 
 export async function run(assembled) {
-  const { BodyStore, bodyAnswer, NO_BODY, BODY_FAILED, BODY_TOO_LARGE, BODY_LOADING } = await import(pathToFileURL(join(assembled, "lib", "bodies.js")).href);
+  const { BodyStore, bodyAnswer, bodyPlan, NO_BODY, BODY_FAILED, BODY_TOO_LARGE, BODY_NOT_TEXT, BODY_LOADING, BODY_READS } = await import(pathToFileURL(join(assembled, "lib", "bodies.js")).href);
+
+  // Which bodies are copied, from the response headers: text an agent reads, at most 5 MB, never downloads.
+  const response = (type, headers, extra = {}) => ({ type, statusCode: 200, method: "GET", responseHeaders: Object.entries(headers).map(([name, value]) => ({ name, value })), ...extra });
+  assert.deepEqual(bodyPlan(response("xmlhttprequest", { "Content-Type": "application/json" })), { keep: true });
+  assert.deepEqual(bodyPlan(response("main_frame", { "content-type": "text/html; charset=utf-8", "Content-Length": "5000000" })), { keep: true });
+  assert.deepEqual(bodyPlan(response("script", {})), { keep: true }, "no type said: kept within the cap");
+  assert.deepEqual(bodyPlan(response("xmlhttprequest", { "Content-Type": "text/plain", "Content-Length": "5000001" })), { keep: false, reason: BODY_TOO_LARGE });
+  for (const [type, headers] of [["image", { "Content-Type": "image/png" }], ["media", {}], ["font", {}], ["websocket", {}], ["xmlhttprequest", { "Content-Type": "application/octet-stream" }], ["xmlhttprequest", { "Content-Type": "video/mp4" }], ["other", { "Content-Type": "text/csv", "Content-Disposition": "attachment; filename=a.csv" }]]) {
+    assert.deepEqual(bodyPlan(response(type, headers)), { keep: false, reason: BODY_NOT_TEXT }, `${type} ${JSON.stringify(headers)}`);
+  }
+  for (const extra of [{ statusCode: 302 }, { statusCode: 204 }, { method: "HEAD" }]) assert.deepEqual(bodyPlan(response("xmlhttprequest", { "Content-Type": "text/plain" }, extra)), { keep: false, reason: null });
 
   // Text in its charset, the rest as base64, as the protocol gives them.
   assert.deepEqual(bodyAnswer(bytes('{"a":1}'), "application/json; charset=utf-8"), { body: '{"a":1}', base64Encoded: false });
@@ -15,7 +26,7 @@ export async function run(assembled) {
   assert.deepEqual(bodyAnswer(bytes("x"), "text/plain; charset=no-such"), { body: "x", base64Encoded: false });
   assert.equal(bodyAnswer(new Uint8Array(200_000).fill(65), "application/octet-stream").body.length, 266_668, "large bodies encode in pieces");
 
-  const store = new BodyStore({ perBody: 10, total: 16, count: 6 });
+  const store = new BodyStore({ perBody: 10, total: 16, count: 6, block: 4 });
   /** A body that reached its end, Firefox's completion and Codara's row. */
   const whole = (id, text, url = `https://a.example/${id}`) => {
     const hop = store.start(id, 1, at(url));
@@ -36,9 +47,22 @@ export async function run(assembled) {
   store.data(hop, bytes("lo"));
   store.end(hop);
   store.outcome("7", true);
-  assert.deepEqual(await pending, { request: at("https://a.example/data"), body: "hello", base64Encoded: false });
+  const { hop: given, ...answer } = await pending;
+  assert.deepEqual(answer, { request: at("https://a.example/data"), body: "hello", base64Encoded: false });
+  assert.ok(given === hop && store.holds(hop), "the read names the hop it read, to check it again later");
   await assert.rejects(store.body("7", 2), { message: NO_BODY }, "another tab's request");
   await assert.rejects(store.body("8", 1), { message: NO_BODY });
+
+  // A response not copied says why.
+  store.skip("6", 1, at("https://a.example/photo"), BODY_NOT_TEXT);
+  store.publish("6");
+  await assert.rejects(store.body("6", 1), { message: BODY_NOT_TEXT });
+  // The filter's own failure: explicit, no partial body.
+  const broken = store.start("5", 1, at("https://a.example/broken-filter"));
+  store.data(broken, bytes("par"));
+  store.end(broken, "Invalid request ID");
+  store.publish("5");
+  await assert.rejects(store.body("5", 1), { message: BODY_FAILED });
 
   // The filter's end says nothing of a broken transfer: a body Firefox reports failed is never given.
   const cut = store.start("9", 1, at("https://a.example/cut"));
@@ -58,21 +82,52 @@ export async function run(assembled) {
   store.end(next);
   store.publish("10");
   store.outcome("10", true);
-  assert.deepEqual(await store.body("10", 1), { request: at("https://a.example/final"), body: "ZmluYWw=", base64Encoded: true });
+  assert.deepEqual({ ...(await store.body("10", 1)), hop: null }, { hop: null, request: at("https://a.example/final"), body: "ZmluYWw=", base64Encoded: true });
 
   // Bounds: over 10 bytes a body is not kept; over 16 bytes or 6 bodies in all, the oldest go first.
-  whole("12", "0123456789A");
-  await assert.rejects(store.body("12", 1), { message: BODY_TOO_LARGE });
+  const over = store.start("12", 1, at("https://a.example/12"));
+  assert.equal(store.data(over, bytes("0123456789")), true);
+  assert.equal(store.data(over, bytes("A")), false, "past the cap: the filter is told to let go");
+  store.publish("12");
+  await assert.rejects(store.body("12", 1, 1000), { message: BODY_TOO_LARGE }, "answered at once, no waiting for an end that will not come");
   whole("13", "0123456789");
   await assert.rejects(store.body("7", 1), { message: NO_BODY }, "the oldest went to make room");
   assert.ok(store.size <= 16, `${store.size}`);
+  // Tiny pieces are packed into blocks, and the budget counts the blocks held.
+  const tiny = store.start("15", 1, at("https://a.example/tiny"));
+  for (let i = 0; i < 9; i++) store.data(tiny, bytes("z"));
+  assert.equal(tiny.held, 12, "9 bytes in 3 blocks of 4");
+  assert.equal(tiny.blocks.length, 3);
+  store.end(tiny);
+  store.publish("15");
+  store.outcome("15", true);
+  assert.equal((await store.body("15", 1)).body, "enp6enp6enp6", "zzzzzzzzz, as base64");
+  // A body dropped while it still comes lets its filter go.
+  let released = 0;
+  const flowing = store.start("16", 1, at("https://a.example/flowing"), () => released++);
+  store.drop("16");
+  store.drop("15");
+  assert.equal(released, 1);
+  assert.equal(store.data(flowing, bytes("x")), false, "nothing more is kept for it");
+  // The blocked sites changed: bodies of requests the log would not show now go.
+  whole("17", "kept", "https://a.example/kept");
+  whole("18", "gone", "https://bank.example/gone");
+  store.purge((request) => !request.url.includes("bank.example"));
+  await assert.rejects(store.body("18", 1), { message: NO_BODY });
+  assert.equal((await store.body("17", 1)).body, "a2VwdA==");
   for (let i = 0; i < 20; i++) whole(`empty-${i}`, "");
   assert.equal(store.hops.size, 6, "empty bodies are counted too");
+  assert.match(BODY_FAILED, /^Body not available: the transfer failed/);
   const open = store.start("14", 1, at("https://a.example/stream"));
   store.publish("14");
   const waiting = store.body("14", 1, 1000);
+  // At most 8 reads wait at once, across the store.
+  const crowd = Array.from({ length: 7 }, () => store.body("14", 1, 1000).catch((error) => error.message));
+  await assert.rejects(store.body("14", 1, 1000), { message: BODY_READS });
   store.forgetTab(1);
   await assert.rejects(waiting, { message: NO_BODY }, "a body waited for is let go with its tab");
+  assert.deepEqual(await Promise.all(crowd), Array(7).fill(NO_BODY));
+  assert.equal(store.reads, 0, "every read gave its place back");
   assert.equal(store.size, 0);
   void open;
   return "bodies: text or base64, only once published and completed, own tab only, redirects, bounded in bytes and count, no waiter left";
