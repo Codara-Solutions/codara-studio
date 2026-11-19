@@ -63,7 +63,14 @@ test("the route order is saved and cleared, and a run shows its routes", async (
 
     await order.selectOption("subscription,openrouter,subcloud");
     await expect.poll(savedOrder).toEqual(["subscription", "openrouter", "subcloud"]);
+    await expect(order.locator("option:checked")).toHaveText("Your sign-ins first");
+    await expect(dialog.getByText("Cora now tries your sign-ins, then OpenRouter, then Subcloud.")).toBeVisible();
     await order.scrollIntoViewIfNeeded();
+    // The longest choice must not squeeze the explanation into a narrow column.
+    const title = dialog.locator("#route-order-title");
+    const textWidth = await title.evaluate((node) => node.parentElement!.getBoundingClientRect().width);
+    const rowWidth = await title.evaluate((node) => node.parentElement!.parentElement!.getBoundingClientRect().width);
+    expect(textWidth).toBeGreaterThan(rowWidth * 0.55);
     await page.screenshot({ path: testInfo.outputPath("route-order-setting.png") });
 
     await order.selectOption("");
