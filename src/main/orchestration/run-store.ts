@@ -355,6 +355,7 @@ import {
   prepareClaudeCodeWorkerLaunch,
   claudeCodeToolLine,
   runClaudeCodeWorkerTurns,
+  withoutStudioHooks,
   startClaudeCodeWorker,
   type ClaudeCodeEvent,
   type ClaudeCodeProcess,
@@ -21597,7 +21598,7 @@ const PI_WORKER_ACTIVITY_MAX_CHARS = 120;
  * full tail, so background workspaces and late-opened panes see the whole
  * transcript instead of a black hole.
  */
-async function ensurePiWorkerDisplayPty(attemptId: string, cwd: string): Promise<void> {
+async function ensurePiWorkerDisplayPty(attemptId: string, cwd: string, extraEnv: Record<string, string> = {}): Promise<void> {
   if (pty.exists(attemptId)) return;
   const shell = await defaultShell();
   if (!shell) throw new Error("No default shell is available for the Cora worker display.");
@@ -21608,7 +21609,7 @@ async function ensurePiWorkerDisplayPty(attemptId: string, cwd: string): Promise
     cols: PI_WORKER_FALLBACK_COLS,
     rows: PI_WORKER_FALLBACK_ROWS,
     webContents: null,
-    env: { SPARK_NO_SHELL_INTEGRATION: "1" },
+    env: { ...extraEnv, SPARK_NO_SHELL_INTEGRATION: "1" },
   });
   pty.resize(attemptId, PI_WORKER_FALLBACK_COLS, PI_WORKER_FALLBACK_ROWS);
 }
@@ -22584,7 +22585,7 @@ async function runClaudeCodeWorkerSession(input: {
       const line = claudeCodeToolLine(event);
       paint(`\x1b[38;2;74;222;208m  ●\x1b[0m ${piWorkerSafeText(line, 200)}\r\n`);
       applyHookStateReport({ paneId: attemptId, state: "working", note: piWorkerSafeText(line, PI_WORKER_ACTIVITY_MAX_CHARS) });
-    } else if (event.kind === "tool_failed") paint(`\x1b[33m    !  ${piWorkerSafeText(event.detail, 200)}\x1b[0m\r\n`);
+    } else if (event.kind === "tool_failed") paint(`\x1b[33m    !  the tool reported an error\x1b[0m\r\n`);
     else if (event.kind === "text") paint(`\x1b[2m  ${piWorkerSafeText(event.text, 700)}\x1b[0m\r\n`);
     else {
       usage.inputTokens += event.usage.input;
@@ -22609,18 +22610,22 @@ async function runClaudeCodeWorkerSession(input: {
     });
     const exit = await current.done;
     current = null;
-    if (exit.exitCode !== 0 && !interrupted && exit.stderrTail) paint(`\x1b[31m  ${piWorkerSafeText(exit.stderrTail, 700)}\x1b[0m\r\n`);
+    // Claude Code's own error text is shown in the pane, never logged.
+    if (exit.exitCode !== 0 && !interrupted && exit.stderrTail) {
+      pty.publishOutput(attemptId, `\x1b[31m  ${piWorkerSafeText(redactPastedSecrets(run.id, exit.stderrTail), 700)}\x1b[0m\r\n`);
+    }
     if (interrupted) throw new Error("Claude Code worker was stopped.");
     return exit.exitCode;
   };
   try {
-    await ensurePiWorkerDisplayPty(attemptId, cwd);
+    // A worker's display shell (SPARK_RUN_ID set): never the plain-shell path,
+    // which resolves and syncs the Active accounts (pty-manager).
+    await ensurePiWorkerDisplayPty(attemptId, cwd, { SPARK_RUN_ID: run.id });
     await pty.waitForResize(attemptId, 5_000);
     const cli = claudeCodeModelAndEffort(claudeCodeModelOf(input.model) ?? input.model, input.effort);
-    const [{ getProvider }, { claudeLaunchArgs }, { getHookRpcEnvSafe }, { acquireNativeClaudeProfileLease }] = await Promise.all([
+    const [{ getProvider }, { claudeLaunchArgs }, { acquireNativeClaudeProfileLease }] = await Promise.all([
       import("../providers"),
       import("../agent-launch-integration"),
-      import("../hook-rpc"),
       import("./native-claude-profile-runtime"),
     ]);
     const effortFlag = claudeCodeEffortFlag(cli.effort);
@@ -22631,9 +22636,11 @@ async function runClaudeCodeWorkerSession(input: {
     launch = await prepareClaudeCodeWorkerLaunch({
       runId: run.id,
       attemptDir: paths.attemptDir,
-      launchArgs: claudeLaunchArgs({ userArgs: providerArgs }),
+      // The worker roster of the codara-studio server (no board or
+      // whiteboard writes), without Studio's hooks.
+      launchArgs: withoutStudioHooks(claudeLaunchArgs({ userArgs: providerArgs, mode: "worker" })),
       providerArgs,
-      hookEnv: getHookRpcEnvSafe(attemptId) as Record<string, string> | null,
+      hookEnv: null,
       codaraHome: codaraHome(),
       acquireLease: (profileId) => acquireNativeClaudeProfileLease(profileId, attemptId),
     });

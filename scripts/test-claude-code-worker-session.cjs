@@ -39,8 +39,18 @@ assert.match(body, /acquireLease: \(profileId\) => acquireNativeClaudeProfileLea
 console.log("PASS no login sync on launch or release");
 
 assert.match(body, /getProvider\("claude"\)\.buildArgs\(/);
-assert.match(body, /launchArgs: claudeLaunchArgs\(\{ userArgs: providerArgs \}\)/);
-console.log("PASS Studio's own provider and launch arguments");
+assert.match(body, /launchArgs: withoutStudioHooks\(claudeLaunchArgs\(\{ userArgs: providerArgs, mode: "worker" \}\)\)/);
+assert.match(body, /hookEnv: null,/);
+console.log("PASS Studio's own provider arguments, the worker tool roster, no hooks");
+
+// The display shell carries the run id, so pty-manager never takes the
+// plain-shell path that resolves and syncs the Active accounts.
+assert.match(body, /await ensurePiWorkerDisplayPty\(attemptId, cwd, \{ SPARK_RUN_ID: run\.id \}\);/);
+const ptyManager = fs.readFileSync(path.join(ROOT, "src", "main", "pty-manager.ts"), "utf8");
+const plainShell = ptyManager.indexOf("const selectors = await resolvePlainShellAccountSelectors()");
+assert.ok(plainShell > 0);
+assert.match(ptyManager.slice(Math.max(0, plainShell - 900), plainShell), /!Object\.prototype\.hasOwnProperty\.call\(opts\.env \?\? \{\}, "SPARK_RUN_ID"\)/);
+console.log("PASS the display shell never syncs accounts");
 
 assert.match(body, /const stopped = \(\) => interrupted \|\| input\.launchAborted\(\);/);
 assert.match(body, /const turn = async \(prompt: string, resume\?: string\): Promise<number> => \{\s*if \(stopped\(\)\) throw/);
@@ -50,5 +60,7 @@ console.log("PASS a Stop is checked before every turn and the tree is awaited");
 
 assert.match(body, /const paint = \(raw: string\) => \{\s*const text = redactPastedSecrets\(run\.id, raw\);/);
 assert.match(body, /const line = claudeCodeToolLine\(event\);/);
+assert.ok(!/paint\([^)]*stderrTail/.test(body), "Claude Code's error text is never logged");
+assert.ok(!/paint\([^)]*event\.detail/.test(body.slice(body.indexOf('event.kind === "tool_failed"'))), "a failed tool's text is never logged");
 console.log("PASS painted and logged text is redacted");
 console.log("claude code worker session: all checks passed");
