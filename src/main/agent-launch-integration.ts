@@ -327,14 +327,21 @@ export async function writeIntegrationFiles(
 // --settings replaces this file, and with it the links.
 const CLAUDE_SESSION_ENV = { FORCE_HYPERLINK: "1" } as const;
 
+function claudeSettingsText(hooks: Record<string, unknown> | null, guard: SeparateBrowserToolsGuard | null): string {
+  const content = { ...(hooks ?? {}), ...(guard?.claudeSettings ?? {}), env: { ...CLAUDE_SESSION_ENV } };
+  return `${JSON.stringify(content, null, 2)}\n`;
+}
+
 async function writeClaudeSettings(
   path: string,
   hooks: Record<string, unknown> | null,
   guard: SeparateBrowserToolsGuard | null,
 ): Promise<void> {
-  const content = { ...(hooks ?? {}), ...(guard?.claudeSettings ?? {}), env: { ...CLAUDE_SESSION_ENV } };
-  await writeIfChanged(path, `${JSON.stringify(content, null, 2)}\n`);
+  await writeIfChanged(path, claudeSettingsText(hooks, guard));
 }
+
+// The latest rewrite of the settings files; a worker launch waits for it.
+let settingsRewrite: Promise<void> = Promise.resolve();
 
 /**
  * "Keep agents in your Chrome" was switched, or the user's tools changed:
@@ -343,11 +350,16 @@ async function writeClaudeSettings(
  */
 export async function setSeparateBrowserToolsGuard(guard: SeparateBrowserToolsGuard | null): Promise<void> {
   if (!state) return;
-  state.separateBrowserTools = guard;
-  await writeClaudeSettings(state.claudeSettingsFile, state.claudeHooks, guard);
-  await writeClaudeSettings(state.claudeWorkerSettingsFile, null, guard);
-  state.claudeSettingsPath = state.claudeSettingsFile;
-  await writeShellArgsFiles();
+  const current = state;
+  const rewrite = (async () => {
+    current.separateBrowserTools = guard;
+    await writeClaudeSettings(current.claudeSettingsFile, current.claudeHooks, guard);
+    await writeClaudeSettings(current.claudeWorkerSettingsFile, null, guard);
+    current.claudeSettingsPath = current.claudeSettingsFile;
+    await writeShellArgsFiles();
+  })();
+  settingsRewrite = rewrite.catch(() => undefined);
+  await rewrite;
 }
 
 /** The `-c` value that starts one of the user's Codex servers disabled. */
@@ -437,6 +449,41 @@ export function claudeLaunchArgs(input: {
   }
   out.push(...extraLaunchArgs("claude"));
   return out;
+}
+
+/**
+ * The arguments for a Cora Claude Code worker: Studio's settings without
+ * hooks and the worker MCP roster. Waits for a settings rewrite in progress,
+ * then reads the files back: the launch fails when the worker settings are
+ * missing or do not match the current guard (a rewrite failed), or when the
+ * worker MCP file it would pass is missing.
+ */
+export async function claudeWorkerLaunchArgs(input: { userArgs: readonly string[] }): Promise<string[]> {
+  await settingsRewrite;
+  const current = state;
+  if (!current) throw new Error("Studio's settings for Claude Code workers are not ready yet. Run the task again in a moment.");
+  let written: string | null;
+  try {
+    written = await fs.readFile(current.claudeWorkerSettingsFile, "utf8");
+  } catch {
+    written = null;
+  }
+  if (written !== claudeSettingsText(null, current.separateBrowserTools)) {
+    throw new Error("Studio's settings for Claude Code workers are missing or out of date. Run the task again in a moment.");
+  }
+  const args = claudeLaunchArgs({ userArgs: input.userArgs, mode: "worker", withoutHooks: true });
+  if (!args.includes("--settings")) {
+    throw new Error("Studio's settings for Claude Code workers are not ready yet. Run the task again in a moment.");
+  }
+  const mcp = args.find((arg) => arg.startsWith("--mcp-config="))?.slice("--mcp-config=".length);
+  if (mcp) {
+    try {
+      await fs.access(mcp);
+    } catch {
+      throw new Error("Studio's tools for Claude Code workers are missing. Restart Studio, then run the task again.");
+    }
+  }
+  return args;
 }
 
 /** The arguments Codara inserts after `codex`; empty for management subcommands. */

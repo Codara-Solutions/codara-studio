@@ -18,10 +18,11 @@
 // the file system for login records during a launch.
 
 import { execFile, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { promises as fs, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { scrubSecrets } from "@shared/memory-items";
+import { redactText } from "../diagnostics/redact";
 import { psTimeEnvironment } from "../owned-process-tree";
 import { CODARA_CLAUDE_CLI_DIRNAME, codaraHomeDir, isCodaraManagedCliPath } from "./codara-managed-cli-roots";
 import { CLAUDE_CLI_PERSONAL_PROFILE_ID, isClaudeCliManagedProfileId } from "./claude-cli-profile-ids";
@@ -603,6 +604,123 @@ export async function prepareClaudeCodeWorkerLaunch(input: {
       releaseLease();
     },
   };
+}
+
+/**
+ * The end of one worker attempt, decided once after every turn's processes
+ * were torn down. A Stop recorded at that moment wins over a report, and a
+ * teardown that was not confirmed wins over both: the attempt then fails as
+ * "stopped, cleanup not confirmed" and the account hold is kept.
+ */
+export function claudeCodeWorkerVerdict(input: {
+  reportReady: boolean;
+  failure: string | null;
+  stopped: boolean;
+  cleanedUp: boolean;
+}): { succeeded: true } | { succeeded: false; stopped: boolean; message: string } {
+  if (!input.cleanedUp) {
+    return {
+      succeeded: false,
+      stopped: input.stopped,
+      message: "Claude Code worker stopped, but some of its processes could not be confirmed gone; the account stays marked in use.",
+    };
+  }
+  if (input.stopped) return { succeeded: false, stopped: true, message: "Claude Code worker was stopped." };
+  if (input.failure !== null || !input.reportReady) {
+    return { succeeded: false, stopped: false, message: input.failure ?? "Claude Code worker ended without a report." };
+  }
+  return { succeeded: true };
+}
+
+/**
+ * The run's finish path, for a Claude Code attempt that came back with a
+ * report: true when a Stop was recorded for the attempt meanwhile (the
+ * pause committed it as cancelled, its launch was aborted, or a Stop is
+ * still tearing the run down). The report then never becomes a success.
+ */
+export function claudeCodeStopOwnsVerdict(input: {
+  exitCode: number;
+  attemptStatus: string;
+  launchAborted: boolean;
+  stopInProgress: boolean;
+}): boolean {
+  return input.exitCode === 0 && (input.attemptStatus === "cancelled" || input.launchAborted || input.stopInProgress);
+}
+
+/**
+ * An error as it may be saved with the run (the failure report, the attempt
+ * record, the event journal): home folder paths, e-mail addresses and
+ * key-shaped values removed by the app's diagnostics redaction. The full
+ * text is only shown in the worker pane.
+ */
+export function claudeCodeSavedError(message: string): string {
+  const homeDirs = [homedir()];
+  try {
+    homeDirs.push(realpathSync(homedir()));
+  } catch {
+    // The home folder as reported is enough.
+  }
+  return oneLine(redactText(message, { homeDirs }), 700);
+}
+
+/**
+ * Every process one worker attempt started, across all its turns, and the
+ * single place its Stop is recorded. A Stop ends every turn's process, not
+ * only the last one; no turn starts after a Stop or after an earlier turn
+ * whose teardown was not confirmed; and `teardown()` is true only when every
+ * turn's processes were confirmed gone (the caller keeps its account hold
+ * otherwise).
+ */
+export class ClaudeCodeWorkerAttempt {
+  private stopRecorded = false;
+  private incomplete = false;
+  private readonly processes: ClaudeCodeProcess[] = [];
+
+  constructor(private readonly stoppedElsewhere: () => boolean = () => false) {}
+
+  /** A Stop was recorded for this attempt (here or through the launch). */
+  get stopped(): boolean {
+    return this.stopRecorded || this.stoppedElsewhere();
+  }
+
+  /** Some turn's processes could not be confirmed gone. */
+  get teardownIncomplete(): boolean {
+    return this.incomplete;
+  }
+
+  /** Start one turn's process. Must stay synchronous between the checks and
+   *  the start, so a Stop either lands before (nothing starts) or reaches
+   *  the new process through `stop()`. */
+  start(spawnTurn: () => ClaudeCodeProcess): ClaudeCodeProcess {
+    if (this.stopped) throw new Error("Claude Code worker was stopped.");
+    if (this.incomplete) {
+      throw new Error("An earlier Claude Code turn left processes that could not be confirmed stopped.");
+    }
+    const started = spawnTurn();
+    this.processes.push(started);
+    return started;
+  }
+
+  /** The end of a turn started here. An unconfirmed teardown blocks every
+   *  later turn and report. */
+  async end(started: ClaudeCodeProcess): Promise<{ exitCode: number; stderrTail: string; cleanedUp: boolean }> {
+    const result = await started.done;
+    if (!result.cleanedUp) this.incomplete = true;
+    return result;
+  }
+
+  /** Record a Stop and end every turn's processes. */
+  stop(): void {
+    this.stopRecorded = true;
+    for (const started of this.processes) void started.kill().catch(() => false);
+  }
+
+  /** End every turn's processes; true only when all were confirmed gone. */
+  async teardown(): Promise<boolean> {
+    const results = await Promise.all(this.processes.map((started) => started.kill().catch(() => false)));
+    if (results.some((clean) => !clean)) this.incomplete = true;
+    return !this.incomplete;
+  }
 }
 
 /**

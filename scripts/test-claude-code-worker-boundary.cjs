@@ -444,6 +444,82 @@ async function main() {
     }
   });
 
+  // ── 5. One owner per attempt ─────────────────────────────────────────────
+  const fakeProcess = ({ cleanedUp = true, killResult = true } = {}) => {
+    const proc = { kills: 0 };
+    proc.done = Promise.resolve({ exitCode: 0, stderrTail: "", cleanedUp });
+    proc.kill = async () => {
+      proc.kills += 1;
+      return killResult;
+    };
+    return proc;
+  };
+
+  await check("a turn whose teardown was not confirmed blocks every later turn and keeps the hold", async () => {
+    const attempt = new worker.ClaudeCodeWorkerAttempt();
+    const first = attempt.start(() => fakeProcess({ cleanedUp: false, killResult: false }));
+    const end = await attempt.end(first);
+    assert.equal(end.cleanedUp, false);
+    let started = false;
+    assert.throws(() => attempt.start(() => { started = true; return fakeProcess(); }), /could not be confirmed stopped/);
+    assert.equal(started, false, "the finalizing turn started");
+    assert.equal(await attempt.teardown(), false, "the hold would be released");
+  });
+
+  await check("the last turn ending clean does not hide an earlier turn's unfinished teardown", async () => {
+    const attempt = new worker.ClaudeCodeWorkerAttempt();
+    const first = attempt.start(() => fakeProcess({ cleanedUp: true, killResult: false }));
+    await attempt.end(first);
+    const second = attempt.start(() => fakeProcess());
+    await attempt.end(second);
+    assert.equal(await attempt.teardown(), false);
+  });
+
+  await check("a Stop reaches every turn's processes and no turn starts after it", async () => {
+    const attempt = new worker.ClaudeCodeWorkerAttempt();
+    const first = attempt.start(() => fakeProcess());
+    await attempt.end(first);
+    const second = attempt.start(() => fakeProcess());
+    attempt.stop();
+    assert.equal(attempt.stopped, true);
+    assert.ok(first.kills > 0 && second.kills > 0, "a turn's processes were not stopped");
+    assert.throws(() => attempt.start(() => fakeProcess()), /stopped/);
+    let elsewhere = false;
+    const launched = new worker.ClaudeCodeWorkerAttempt(() => elsewhere);
+    elsewhere = true;
+    assert.equal(launched.stopped, true, "a launch abort counts as a Stop");
+  });
+
+  await check("the verdict: a Stop wins over a report, an unconfirmed teardown wins over both", () => {
+    assert.deepEqual(worker.claudeCodeWorkerVerdict({ reportReady: true, failure: null, stopped: false, cleanedUp: true }), { succeeded: true });
+    const stopped = worker.claudeCodeWorkerVerdict({ reportReady: true, failure: null, stopped: true, cleanedUp: true });
+    assert.equal(stopped.succeeded, false);
+    assert.equal(stopped.stopped, true);
+    const unconfirmed = worker.claudeCodeWorkerVerdict({ reportReady: true, failure: null, stopped: true, cleanedUp: false });
+    assert.equal(unconfirmed.succeeded, false);
+    assert.match(unconfirmed.message, /could not be confirmed gone/);
+    assert.equal(worker.claudeCodeWorkerVerdict({ reportReady: true, failure: null, stopped: false, cleanedUp: false }).succeeded, false);
+  });
+
+  await check("the finish path keeps a Stop recorded for the attempt", () => {
+    const base = { exitCode: 0, attemptStatus: "running", launchAborted: false, stopInProgress: false };
+    assert.equal(worker.claudeCodeStopOwnsVerdict(base), false);
+    assert.equal(worker.claudeCodeStopOwnsVerdict({ ...base, attemptStatus: "cancelled" }), true);
+    assert.equal(worker.claudeCodeStopOwnsVerdict({ ...base, launchAborted: true }), true);
+    assert.equal(worker.claudeCodeStopOwnsVerdict({ ...base, stopInProgress: true }), true);
+    assert.equal(worker.claudeCodeStopOwnsVerdict({ ...base, exitCode: 1, attemptStatus: "cancelled" }), false);
+  });
+
+  await check("an error saved with the run loses its home folder path and keys", () => {
+    const home = os.homedir();
+    const raw = `spawn ${path.join(home, ".local", "bin", "claude")} ENOENT; key sk-ant-api03-InlineKeyAbc123Def456Ghi789Jkl; mail someone@example.com`;
+    const saved = worker.claudeCodeSavedError(raw);
+    assert.ok(!saved.includes(home), saved);
+    assert.match(saved, /~\/\.local\/bin\/claude/);
+    assert.ok(!saved.includes("sk-ant-api03"), saved);
+    assert.ok(!saved.includes("someone@example.com"), saved);
+  });
+
   await check("Stop never reads another process's environment", async () => {
     const out = fs.mkdtempSync(path.join(TMP, "out-"));
     const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "TREE", onEvent: () => undefined });

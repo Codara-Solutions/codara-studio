@@ -465,6 +465,39 @@ async function main() {
     assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(workerSettingsPath, "utf8"))), ["enabledPlugins", "deniedMcpServers", "env"]);
   });
 
+  await check("a Claude Code worker launch waits for a settings rewrite and refuses stale settings or a missing worker MCP file", async () => {
+    const workerSettingsPath = path.join(dir, "claude", "settings-worker.json");
+    const workerMcp = path.join(dir, "claude", "mcp-worker.json");
+    const expected = ["--settings", workerSettingsPath, `--mcp-config=${workerMcp}`];
+    assert.deepEqual(await launch.claudeWorkerLaunchArgs({ userArgs: [] }), expected);
+    // Asked while the guard is being switched off: it waits, then reads the
+    // new file back (no browser entries left).
+    const rewrite = launch.setSeparateBrowserToolsGuard(null);
+    const during = launch.claudeWorkerLaunchArgs({ userArgs: [] });
+    await rewrite;
+    assert.deepEqual(await during, expected);
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(workerSettingsPath, "utf8"))), ["env"]);
+    // A rewrite that did not land leaves the previous guard's file behind.
+    // The plain arguments still name it (what the launch checked before);
+    // the worker launch refuses it.
+    const current = fs.readFileSync(workerSettingsPath, "utf8");
+    await launch.setSeparateBrowserToolsGuard(guard);
+    const withGuard = fs.readFileSync(workerSettingsPath, "utf8");
+    fs.writeFileSync(workerSettingsPath, current);
+    assert.ok(launch.claudeLaunchArgs({ userArgs: [], mode: "worker", withoutHooks: true }).includes("--settings"));
+    await assert.rejects(launch.claudeWorkerLaunchArgs({ userArgs: [] }), /missing or out of date/);
+    fs.rmSync(workerSettingsPath);
+    await assert.rejects(launch.claudeWorkerLaunchArgs({ userArgs: [] }), /missing or out of date/);
+    fs.writeFileSync(workerSettingsPath, withGuard);
+    assert.deepEqual(await launch.claudeWorkerLaunchArgs({ userArgs: [] }), expected);
+    // The worker MCP file the launch would pass is gone.
+    const mcpText = fs.readFileSync(workerMcp, "utf8");
+    fs.rmSync(workerMcp);
+    await assert.rejects(launch.claudeWorkerLaunchArgs({ userArgs: [] }), /tools for Claude Code workers are missing/);
+    fs.writeFileSync(workerMcp, mcpText);
+    assert.deepEqual(await launch.claudeWorkerLaunchArgs({ userArgs: [] }), expected);
+  });
+
   await check("Keep agents in your Chrome on: Codex starts each browser server disabled, as a valid server", async () => {
     const disabled = codexDisabled();
     assert.deepEqual(disabled, [

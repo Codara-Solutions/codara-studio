@@ -353,11 +353,14 @@ import {
   claudeCodeEffortFlag,
   claudeCodeModelAndEffort,
   prepareClaudeCodeWorkerLaunch,
+  claudeCodeSavedError,
+  claudeCodeStopOwnsVerdict,
   claudeCodeToolLine,
+  claudeCodeWorkerVerdict,
+  ClaudeCodeWorkerAttempt,
   runClaudeCodeWorkerTurns,
   startClaudeCodeWorker,
   type ClaudeCodeEvent,
-  type ClaudeCodeProcess,
   type ClaudeCodeWorkerLaunch,
 } from "./claude-code-worker";
 import { shouldResumeForUserMessage } from "./user-message-resume";
@@ -15380,6 +15383,21 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   if (!finishedAttempt) throw new Error(`Worker attempt not found: ${input.attemptId}`);
   if (!finishedTask) throw new Error(`Worker task not found: ${task.id}`);
 
+  // A Claude Code worker's report never overwrites a Stop recorded for its
+  // attempt: one the pause already committed (the attempt is cancelled), a
+  // launch abort, or a Stop still tearing the run down. Only this harness:
+  // the others keep main's finish rules.
+  if (
+    claudeCodeWorker &&
+    claudeCodeStopOwnsVerdict({
+      exitCode: result.exitCode,
+      attemptStatus: finishedAttempt.status,
+      launchAborted: workerLaunchAborted(finishedAttempt.id),
+      stopInProgress: (forcePausingRuns.get(run.id) ?? 0) > 0,
+    })
+  ) {
+    result = { ...result, exitCode: 130, error: "Claude Code worker was stopped." };
+  }
   const finishedAt = new Date().toISOString();
   // A worker the user's Stop killed did not fail — it was interrupted. Record it
   // that way whichever side of the pause commit this exit lands on, so Resume
@@ -22563,10 +22581,8 @@ async function runClaudeCodeWorkerSession(input: {
   launchAborted: () => boolean;
 }): Promise<{ exitCode: number; error?: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }> {
   const { run, task, attemptId, paths, cwd } = input;
-  let interrupted = false;
-  let current: ClaudeCodeProcess | null = null;
-  // The last process started: its teardown result decides the lease.
-  let lastProcess: ClaudeCodeProcess | null = null;
+  // Every process of every turn, and the one place a Stop is recorded.
+  const attempt = new ClaudeCodeWorkerAttempt(input.launchAborted);
   let launch: ClaudeCodeWorkerLaunch | null = null;
   let sessionId: string | undefined;
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -22582,7 +22598,6 @@ async function runClaudeCodeWorkerSession(input: {
     const plain = text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
     logQueue = logQueue.catch(() => undefined).then(() => fs.appendFile(paths.stdoutLog, plain, "utf8"));
   };
-  const stopped = () => interrupted || input.launchAborted();
   const onEvent = (event: ClaudeCodeEvent) => {
     if (event.kind === "session") sessionId = event.sessionId;
     else if (event.kind === "tool") {
@@ -22600,144 +22615,145 @@ async function runClaudeCodeWorkerSession(input: {
     }
   };
   // One headless turn; a resumed turn continues the same Claude Code session.
-  // Starts its process synchronously (runClaudeCodeWorkerTurns checks for a
-  // Stop right before calling it).
+  // The attempt refuses to start it after a Stop or after an earlier turn
+  // whose processes could not be confirmed gone.
   const turn = async (prompt: string, resume?: string): Promise<number> => {
-    if (stopped()) throw new Error("Claude Code worker was stopped.");
-    current = lastProcess = startClaudeCodeWorker({
+    const started = attempt.start(() => startClaudeCodeWorker({
       binary: launch!.binary,
       argv: resume ? [...launch!.argv, "--resume", resume] : launch!.argv,
       env: launch!.env,
       cwd,
       prompt,
       onEvent,
-    });
-    const exit = await current.done;
-    current = null;
+    }));
+    const exit = await attempt.end(started);
     // Claude Code's own error text is shown in the pane, never logged.
-    if (exit.exitCode !== 0 && !interrupted && exit.stderrTail) {
+    if (exit.exitCode !== 0 && !attempt.stopped && exit.stderrTail) {
       show(`\x1b[31m  ${piWorkerSafeText(exit.stderrTail, 700)}\x1b[0m\r\n`);
     }
-    if (interrupted) throw new Error("Claude Code worker was stopped.");
+    if (attempt.stopped) throw new Error("Claude Code worker was stopped.");
+    if (!exit.cleanedUp) throw new Error("Claude Code left processes that could not be confirmed stopped.");
     return exit.exitCode;
   };
+  let report: Awaited<ReturnType<typeof readWorkerReport>> = null;
+  let failure: string | null = null;
   try {
-    // A worker's display shell (SPARK_RUN_ID set): never the plain-shell path,
-    // which resolves and syncs the Active accounts (pty-manager).
-    await ensurePiWorkerDisplayPty(attemptId, cwd, { SPARK_RUN_ID: run.id });
-    await pty.waitForResize(attemptId, 5_000);
-    const cli = claudeCodeModelAndEffort(claudeCodeModelOf(input.model) ?? input.model, input.effort);
-    const [{ getProvider }, { claudeLaunchArgs }, { acquireNativeClaudeProfileLease }] = await Promise.all([
-      import("../providers"),
-      import("../agent-launch-integration"),
-      import("./native-claude-profile-runtime"),
-    ]);
-    const effortFlag = claudeCodeEffortFlag(cli.effort);
-    const providerArgs = getProvider("claude").buildArgs({ cwd: "", model: cli.model, ...(effortFlag ? { effort: effortFlag } : {}) });
-    // The worker roster of the codara-studio server (no board or whiteboard
-    // writes), and Studio's settings (the browser guard included) without
-    // its hooks. Without those settings the worker does not start.
-    const launchArgs = claudeLaunchArgs({ userArgs: providerArgs, mode: "worker", withoutHooks: true });
-    if (!launchArgs.includes("--settings")) {
-      throw new Error("Studio's settings for Claude Code workers are not ready yet. Run the task again in a moment.");
-    }
-    // The lease only marks the account in use. Releasing it tells nobody: a
-    // worker never starts the account service's login sync, which a Claude
-    // terminal's exit does (claude-code-worker.ts).
-    launch = await prepareClaudeCodeWorkerLaunch({
-      runId: run.id,
-      attemptDir: paths.attemptDir,
-      launchArgs,
-      providerArgs,
-      hookEnv: null,
-      codaraHome: codaraHome(),
-      acquireLease: (profileId) => acquireNativeClaudeProfileLease(profileId, attemptId),
-    });
-    const accountLabel = launch.accountLabel;
-    pty.publishOutput(
-      attemptId,
-      `\x1b[2J\x1b[H\r\n\x1b[38;2;74;222;208m  ✦  CORA WORKER IN CLAUDE CODE\x1b[0m\r\n` +
-        `\x1b[2m     ${task.title}\x1b[0m\r\n\x1b[2m     ${cli.model} · ${cli.effort ?? "default effort"} · ${accountLabel}\x1b[0m\r\n\r\n`,
-    );
-    if (input.launchAborted() || !(await markAttemptRunning(run.id, task.id, attemptId, new Date().toISOString()))) {
-      interrupted = true;
-      throw new Error("Claude Code worker was interrupted before it started.");
-    }
-    await commitRunChange(await requireRun(run.id), {
-      type: "worker_attempt.running",
-      message: `Worker attempt running in Claude Code: ${task.title}`,
-      workerTaskId: task.id,
-      payload: { attemptId, command: input.command, harness: "claude-code", model: cli.model, effort: cli.effort, accountLabel },
-      mutate: (draft, timestamp) => {
-        const attempt = draft.workerAttempts.find((item) => item.id === attemptId);
-        if (!attempt) return false;
-        attempt.accountLabel = accountLabel;
-        draft.updatedAt = timestamp;
-      },
-    });
-    activeWorkerProcesses.set(attemptId, {
-      runId: run.id,
-      stepId: task.stepId,
-      workerTaskId: task.id,
-      attemptId,
-      command: input.command,
-      processGenerationId: randomUUID(),
-      inputCapability: "none",
-      write: () => undefined,
-      kill: () => {
-        interrupted = true;
-        void current?.kill();
-      },
-    });
-    applyHookStateReport({ paneId: attemptId, state: "working", note: "starting…" });
+    try {
+      // A worker's display shell (SPARK_RUN_ID set): never the plain-shell
+      // path, which resolves and syncs the Active accounts (pty-manager).
+      await ensurePiWorkerDisplayPty(attemptId, cwd, { SPARK_RUN_ID: run.id });
+      await pty.waitForResize(attemptId, 5_000);
+      const cli = claudeCodeModelAndEffort(claudeCodeModelOf(input.model) ?? input.model, input.effort);
+      const [{ getProvider }, { claudeWorkerLaunchArgs }, { acquireNativeClaudeProfileLease }] = await Promise.all([
+        import("../providers"),
+        import("../agent-launch-integration"),
+        import("./native-claude-profile-runtime"),
+      ]);
+      const effortFlag = claudeCodeEffortFlag(cli.effort);
+      const providerArgs = getProvider("claude").buildArgs({ cwd: "", model: cli.model, ...(effortFlag ? { effort: effortFlag } : {}) });
+      // The worker roster of the codara-studio server (no board or
+      // whiteboard writes), and Studio's settings (the browser guard
+      // included) without its hooks, read back once any rewrite of them
+      // finished. Missing or stale files stop the launch.
+      const launchArgs = await claudeWorkerLaunchArgs({ userArgs: providerArgs });
+      // The lease only marks the account in use. Releasing it tells nobody:
+      // a worker never starts the account service's login sync, which a
+      // Claude terminal's exit does (claude-code-worker.ts).
+      launch = await prepareClaudeCodeWorkerLaunch({
+        runId: run.id,
+        attemptDir: paths.attemptDir,
+        launchArgs,
+        providerArgs,
+        hookEnv: null,
+        codaraHome: codaraHome(),
+        acquireLease: (profileId) => acquireNativeClaudeProfileLease(profileId, attemptId),
+      });
+      const accountLabel = launch.accountLabel;
+      pty.publishOutput(
+        attemptId,
+        `\x1b[2J\x1b[H\r\n\x1b[38;2;74;222;208m  ✦  CORA WORKER IN CLAUDE CODE\x1b[0m\r\n` +
+          `\x1b[2m     ${task.title}\x1b[0m\r\n\x1b[2m     ${cli.model} · ${cli.effort ?? "default effort"} · ${accountLabel}\x1b[0m\r\n\r\n`,
+      );
+      if (attempt.stopped || !(await markAttemptRunning(run.id, task.id, attemptId, new Date().toISOString()))) {
+        attempt.stop();
+        throw new Error("Claude Code worker was interrupted before it started.");
+      }
+      await commitRunChange(await requireRun(run.id), {
+        type: "worker_attempt.running",
+        message: `Worker attempt running in Claude Code: ${task.title}`,
+        workerTaskId: task.id,
+        payload: { attemptId, command: input.command, harness: "claude-code", model: cli.model, effort: cli.effort, accountLabel },
+        mutate: (draft, timestamp) => {
+          const record = draft.workerAttempts.find((item) => item.id === attemptId);
+          if (!record) return false;
+          record.accountLabel = accountLabel;
+          draft.updatedAt = timestamp;
+        },
+      });
+      activeWorkerProcesses.set(attemptId, {
+        runId: run.id,
+        stepId: task.stepId,
+        workerTaskId: task.id,
+        attemptId,
+        command: input.command,
+        processGenerationId: randomUUID(),
+        inputCapability: "none",
+        write: () => undefined,
+        kill: () => attempt.stop(),
+      });
+      applyHookStateReport({ paneId: attemptId, state: "working", note: "starting…" });
 
-    const { exitCode, report } = await runClaudeCodeWorkerTurns({
-      prompt: input.promptText,
-      stopped,
-      turn,
-      sessionId: () => sessionId,
-      readReport: () => readWorkerReport(paths.finalReportJson),
-      finalizePrompt: async () => {
-        const { problem } = await readWorkerReportWithProblem(paths.finalReportJson);
-        return `Your task turn ended without a valid final report at ${paths.finalReportJson}${problem ? `: ${problem}` : ""}. ` +
-          'The "status" field must be exactly one of "complete", "partial", "blocked" or "failed". ' +
-          "Do not redo completed work. Write the mandatory final-report.json using the exact schema and absolute path from the original task prompt, then confirm it parses as JSON.";
-      },
-      onFinalizing: () => paint("\r\n  \x1b[33m↻ Finalizing the evidence report…\x1b[0m\r\n"),
-    });
-    if (!report) {
-      throw new Error(exitCode === 0
-        ? "Claude Code worker completed without a parseable final-report.json."
-        : `Claude Code exited with code ${exitCode} before writing its final report.`);
+      const turns = await runClaudeCodeWorkerTurns({
+        prompt: input.promptText,
+        stopped: () => attempt.stopped,
+        turn,
+        sessionId: () => sessionId,
+        readReport: () => readWorkerReport(paths.finalReportJson),
+        finalizePrompt: async () => {
+          const { problem } = await readWorkerReportWithProblem(paths.finalReportJson);
+          return `Your task turn ended without a valid final report at ${paths.finalReportJson}${problem ? `: ${problem}` : ""}. ` +
+            'The "status" field must be exactly one of "complete", "partial", "blocked" or "failed". ' +
+            "Do not redo completed work. Write the mandatory final-report.json using the exact schema and absolute path from the original task prompt, then confirm it parses as JSON.";
+        },
+        onFinalizing: () => paint("\r\n  \x1b[33m↻ Finalizing the evidence report…\x1b[0m\r\n"),
+      });
+      if (!turns.report) {
+        throw new Error(turns.exitCode === 0
+          ? "Claude Code worker completed without a parseable final-report.json."
+          : `Claude Code exited with code ${turns.exitCode} before writing its final report.`);
+      }
+      report = turns.report;
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
     }
-    await logQueue.catch(() => undefined);
-    // The last moment a Stop can land before success is published.
-    if (stopped()) throw new Error("Claude Code worker was stopped.");
-    paint("\r\n\x1b[32m  ✓  Claude Code worker report ready\x1b[0m\r\n");
-    paintPiWorkerReportOutcome(show, report);
-    await logQueue.catch(() => undefined);
-    applyHookStateReport({ paneId: attemptId, state: "done", note: "Claude Code worker report ready" });
-    return { exitCode: 0, ...usage };
-  } catch (error) {
-    // A Stop seen through the launch abort counts as one too.
-    if (stopped()) interrupted = true;
-    const message = error instanceof Error ? error.message : String(error);
-    await writeAutoFailureReport(paths, task, message, { interrupted }).catch(() => null);
-    applyHookStateReport({ paneId: attemptId, state: interrupted ? "done" : "error", note: message });
+    // Every turn's processes end before anything is decided. The verdict is
+    // then settled once, with no wait between reading the Stop and handing
+    // the Stop's handle back: a Stop that lands before this point turns a
+    // report into a stop, one after it finds no worker to stop.
+    const cleanedUp = await attempt.teardown();
+    activeWorkerProcesses.delete(attemptId);
+    const verdict = claudeCodeWorkerVerdict({ reportReady: report !== null, failure, stopped: attempt.stopped, cleanedUp });
+    if (cleanedUp) launch?.release();
+    if (verdict.succeeded) {
+      paint("\r\n\x1b[32m  ✓  Claude Code worker report ready\x1b[0m\r\n");
+      paintPiWorkerReportOutcome(show, report!);
+      applyHookStateReport({ paneId: attemptId, state: "done", note: "Claude Code worker report ready" });
+      await logQueue.catch(() => undefined);
+      return { exitCode: 0, ...usage };
+    }
+    const { message, stopped } = verdict;
+    // The full text goes to the pane only; what is saved with the run (the
+    // failure report, the attempt record, the event journal) is redacted.
+    const saved = claudeCodeSavedError(message);
+    await writeAutoFailureReport(paths, task, saved, { interrupted: stopped }).catch(() => null);
+    applyHookStateReport({ paneId: attemptId, state: stopped ? "done" : "error", note: saved });
     paint("\r\n\x1b[31m  ×  CLAUDE CODE WORKER STOPPED\x1b[0m\r\n");
-    show(`  ${piWorkerSafeText(message, 700)}\r\n`);
+    if (!cleanedUp) paint("\x1b[31m  ×  some processes could not be stopped; the account stays marked in use\x1b[0m\r\n");
+    show(`  ${piWorkerSafeText(failure && !stopped ? failure : message, 700)}\r\n`);
     await logQueue.catch(() => undefined);
-    return { exitCode: 1, error: message, ...usage };
+    return { exitCode: stopped ? 130 : 1, error: saved, ...usage };
   } finally {
     activeWorkerProcesses.delete(attemptId);
-    const stoppedCleanly = await (lastProcess as ClaudeCodeProcess | null)?.kill().catch(() => false) ?? true;
-    // Something Claude Code started still runs after the kill deadline: the
-    // account stays marked in use rather than handed back under it.
-    if (stoppedCleanly) launch?.release();
-    else {
-      paint("\x1b[31m  ×  some processes could not be stopped; the account stays marked in use\x1b[0m\r\n");
-      await logQueue.catch(() => undefined);
-    }
     try { pty.killImmediate(attemptId); } catch { /* already closed */ }
   }
 }

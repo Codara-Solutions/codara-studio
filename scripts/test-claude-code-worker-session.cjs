@@ -7,10 +7,15 @@
 //   - the session never starts the account service's login sync (no
 //     reconcile on launch, nothing on the release of the account hold);
 //   - Studio's own provider and launch arguments are used, nothing else;
-//   - a Stop, including one that lands during the launch or the report read
-//     (launchAborted), is checked before every turn, and the whole process
-//     tree is awaited on the way out;
-//   - everything painted or logged is redacted with the run's known keys.
+//   - the launch takes the worker arguments only after the settings files
+//     were read back (stale or missing ones stop it);
+//   - one owner (ClaudeCodeWorkerAttempt) starts every turn, a Stop reaches
+//     every turn's processes, and the verdict is settled once, after all of
+//     them are torn down, with the account hold kept unless that teardown
+//     was confirmed; the finish path never turns a recorded Stop into a
+//     success;
+//   - everything painted or logged is redacted with the run's known keys,
+//     and errors saved with the run are redacted (home paths included).
 //
 //   node scripts/test-claude-code-worker-session.cjs
 
@@ -39,14 +44,17 @@ assert.match(body, /acquireLease: \(profileId\) => acquireNativeClaudeProfileLea
 console.log("PASS no login sync on launch or release");
 
 assert.match(body, /getProvider\("claude"\)\.buildArgs\(/);
-assert.match(body, /const launchArgs = claudeLaunchArgs\(\{ userArgs: providerArgs, mode: "worker", withoutHooks: true \}\);/);
+// The launch reads the worker settings back after any rewrite and refuses
+// stale or missing files (agent-launch-integration.ts, tested there).
+assert.match(body, /const launchArgs = await claudeWorkerLaunchArgs\(\{ userArgs: providerArgs \}\);/);
+assert.ok(!/claudeLaunchArgs\(/.test(body), "the launch takes the checked worker arguments only");
 assert.match(body, /hookEnv: null,/);
 // The hook-free settings keep the browser guard and are rewritten with it.
 const integration = fs.readFileSync(path.join(ROOT, "src", "main", "agent-launch-integration.ts"), "utf8");
 assert.match(integration, /await writeClaudeSettings\(claudeWorkerSettingsFile, null, separateBrowserTools\);/);
-assert.match(integration, /await writeClaudeSettings\(state\.claudeWorkerSettingsFile, null, guard\);/);
+assert.match(integration, /await writeClaudeSettings\(current\.claudeWorkerSettingsFile, null, guard\);/);
 assert.match(integration, /const settings = input\.withoutHooks \? state\.claudeWorkerSettingsFile : state\.claudeSettingsPath;/);
-console.log("PASS Studio's own provider arguments, the worker tool roster, settings without hooks");
+console.log("PASS Studio's own provider arguments, the worker tool roster, checked settings without hooks");
 
 // The display shell carries the run id, so pty-manager never takes the
 // plain-shell path that resolves and syncs the Active accounts.
@@ -57,22 +65,36 @@ assert.ok(plainShell > 0);
 assert.match(ptyManager.slice(Math.max(0, plainShell - 900), plainShell), /!Object\.prototype\.hasOwnProperty\.call\(opts\.env \?\? \{\}, "SPARK_RUN_ID"\)/);
 console.log("PASS the display shell never syncs accounts");
 
-assert.match(body, /const stopped = \(\) => interrupted \|\| input\.launchAborted\(\);/);
-assert.match(body, /const turn = async \(prompt: string, resume\?: string\): Promise<number> => \{\s*if \(stopped\(\)\) throw/);
-assert.match(body, /await runClaudeCodeWorkerTurns\(\{\s*prompt: input\.promptText,\s*stopped,/);
-assert.match(body, /await \(lastProcess as ClaudeCodeProcess \| null\)\?\.kill\(\)/);
-console.log("PASS a Stop is checked before every turn and the tree is awaited");
+// One owner for the attempt: every turn's process is started through it, a
+// Stop reaches all of them, and a turn whose teardown was not confirmed
+// ends the attempt (ClaudeCodeWorkerAttempt, tested in the boundary suite).
+assert.match(body, /const attempt = new ClaudeCodeWorkerAttempt\(input\.launchAborted\);/);
+assert.match(body, /const started = attempt\.start\(\(\) => startClaudeCodeWorker\(\{/);
+assert.match(body, /const exit = await attempt\.end\(started\);/);
+assert.match(body, /if \(!exit\.cleanedUp\) throw new Error\(/);
+assert.match(body, /kill: \(\) => attempt\.stop\(\),/);
+assert.match(body, /await runClaudeCodeWorkerTurns\(\{\s*prompt: input\.promptText,\s*stopped: \(\) => attempt\.stopped,/);
+assert.ok(!/lastProcess|current\??\.kill/.test(body), "no single 'last process' decides the teardown");
+console.log("PASS one owner starts every turn, a Stop reaches all of them");
+
+// The verdict: every turn torn down first, then the Stop's handle removed
+// and the Stop read with no wait in between, then the hold released only
+// when the teardown was confirmed.
+assert.match(body, /const cleanedUp = await attempt\.teardown\(\);\s*activeWorkerProcesses\.delete\(attemptId\);\s*const verdict = claudeCodeWorkerVerdict\(\{ reportReady: report !== null, failure, stopped: attempt\.stopped, cleanedUp \}\);\s*if \(cleanedUp\) launch\?\.release\(\);/);
+const success = body.slice(body.indexOf("if (verdict.succeeded) {"), body.indexOf("return { exitCode: 0, ...usage };"));
+assert.ok(success.length > 0 && !/await (?!logQueue)/.test(success), "nothing is awaited between the verdict and success except the final log flush");
+assert.ok(body.indexOf("if (verdict.succeeded) {") > body.indexOf("const verdict = claudeCodeWorkerVerdict("), "success is painted only after the verdict");
+// The finish path keeps a Stop recorded for the attempt.
+const finish = runStore.slice(runStore.indexOf("? await runClaudeCodeWorkerSession({"));
+assert.match(finish, /claudeCodeWorker &&\s*claudeCodeStopOwnsVerdict\(\{\s*exitCode: result\.exitCode,\s*attemptStatus: finishedAttempt\.status,\s*launchAborted: workerLaunchAborted\(finishedAttempt\.id\),\s*stopInProgress: \(forcePausingRuns\.get\(run\.id\) \?\? 0\) > 0,\s*\}\)/);
+assert.ok(finish.indexOf("claudeCodeStopOwnsVerdict(") < finish.indexOf("const pauseInterrupted = workerExitInterruptedByForcePause("), "the Stop check comes before the verdict");
+console.log("PASS the verdict is settled once, after teardown, and a recorded Stop wins in the finish path");
 
 assert.match(body, /const paint = \(raw: string\) => \{\s*const text = redactPastedSecrets\(run\.id, raw\);/);
 assert.match(body, /const line = claudeCodeToolLine\(event\);/);
 assert.ok(!/paint\([^)]*stderrTail/.test(body), "Claude Code's error text is never logged");
 assert.match(body, /event\.kind === "tool_failed"\) paint\("[^"]*"\)/, "a failed tool is logged as a fixed line");
 assert.match(body, /event\.kind === "text"\) show\(/, "assistant text reaches the pane only");
-// Success is published only after the last flush and a final Stop check.
-assert.match(body, /await logQueue\.catch\(\(\) => undefined\);\s*\/\/[^\n]*\n\s*if \(stopped\(\)\) throw new Error\("Claude Code worker was stopped\."\);[\s\S]{0,300}?applyHookStateReport\(\{ paneId: attemptId, state: "done"/);
-// The log takes only fixed lines: the report's details and an error's text
-// go to the pane, after the last Stop check.
-assert.match(body, /if \(stopped\(\)\) throw new Error\("Claude Code worker was stopped\."\);\s*paint\("[^"$`]*"\);\s*paintPiWorkerReportOutcome\(show, report\);/);
 assert.ok(!/paintPiWorkerReportOutcome\(paint/.test(body), "the report's text is never logged");
 // The one logged line with a value in it is a tool's checked name.
 assert.deepEqual(
@@ -80,8 +102,14 @@ assert.deepEqual(
   ["paint(`\\x1b[38;2;74;222;208m  ●\\x1b[0m ${piWorkerSafeText(line, 200)}\\r\\n`)"],
   "no other logged line is built from variable text",
 );
-// Required settings, and the lease kept while anything still runs.
-assert.match(body, /if \(!launchArgs\.includes\("--settings"\)\) \{\s*throw new Error/);
-assert.match(body, /if \(stoppedCleanly\) launch\?\.release\(\);/);
 console.log("PASS painted and logged text is redacted; the log takes fixed lines only");
+
+// What is saved with the run (failure report, attempt record, event
+// journal) is the redacted error; the full text goes to the pane only.
+assert.match(body, /const saved = claudeCodeSavedError\(message\);/);
+assert.match(body, /await writeAutoFailureReport\(paths, task, saved, \{ interrupted: stopped \}\)/);
+assert.match(body, /return \{ exitCode: stopped \? 130 : 1, error: saved, \.\.\.usage \};/);
+assert.ok(!/error: (message|failure)\b/.test(body), "the raw error is never returned to be saved");
+assert.ok(!/writeAutoFailureReport\(paths, task, (message|failure)\b/.test(body));
+console.log("PASS saved errors are redacted; the pane shows the full text");
 console.log("claude code worker session: all checks passed");
