@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -7,6 +8,12 @@ const at = (url) => ({ url, documentUrl: "https://a.example/app", tabId: 1 });
 
 export async function run(assembled) {
   const { BodyStore, bodyAnswer, bodyPlan, NO_BODY, BODY_FAILED, BODY_TOO_LARGE, BODY_NOT_TEXT, BODY_LOADING, BODY_READS } = await import(pathToFileURL(join(assembled, "lib", "bodies.js")).href);
+
+  // A link that has started closing is not live: no filter is set and no chunk kept for it
+  // (the background has no harness, so its code is read).
+  const background = readFileSync(join(assembled, "background.js"), "utf8");
+  const live = background.slice(background.indexOf("function liveSocket() {"), background.indexOf("\n}\n", background.indexOf("function liveSocket() {")));
+  assert.match(live, /socket\.readyState !== WebSocket\.OPEN/);
 
   // Which bodies are copied, from the response headers: text an agent reads, at most 5 MB, never downloads.
   const response = (type, headers, extra = {}) => ({ type, statusCode: 200, method: "GET", responseHeaders: Object.entries(headers).map(([name, value]) => ({ name, value })), ...extra });

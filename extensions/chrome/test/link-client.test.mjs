@@ -390,7 +390,8 @@ export async function run() {
   scanning.disconnect();
 
   // A late reply is built when its turn to leave comes, and never leaves once its access ended.
-  const late = new LinkClient({});
+  let ended = 0;
+  const late = new LinkClient({ loadPairing: async () => null, onDisconnected: () => ended++ });
   const sent = [];
   let closed = 0;
   let sealing = null;
@@ -409,6 +410,11 @@ export async function run() {
     { id: 2, error: { message: "No resource with given identifier found" } },
   ]);
   assert.equal(closed, 1, "access ended while sealing: the link ends and the answer never leaves");
+  // It ends for the extension at once (its body filters let go now), not when the close comes back.
+  assert.equal(ended, 1);
+  assert.equal(late.socket, null);
+  late.socket = line;
+  line.epoch = late.epoch;
   // At most 4 late replies wait on a link, and none is built while the link holds too much unsent.
   sent.length = 0;
   sealing = null;

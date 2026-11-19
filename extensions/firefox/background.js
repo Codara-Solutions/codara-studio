@@ -131,7 +131,8 @@ function sendLive(message) {
 /** The link's socket, when it is the sealed, paired session of the current generation; else null. */
 function liveSocket() {
   const socket = link.socket;
-  if (!socket || !socket.sealer || socket.generation !== generation || !link.connected || !state?.token) return null;
+  // A link that has started closing is over: nothing new is copied for it.
+  if (!socket || socket.readyState !== WebSocket.OPEN || !socket.sealer || socket.generation !== generation || !link.connected || !state?.token) return null;
   return socket;
 }
 let rules = parseFirefoxBlockedSites(DEFAULT_BLOCKED_SITES);

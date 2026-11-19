@@ -158,9 +158,11 @@ export class LinkClient {
       const out = built(message, socket);
       const frame = await socket.sealer.seal(out);
       // Its access ended while it was sealed: a frame left out would break the
-      // count, so the link ends instead, and the answer never leaves.
+      // count, so the link ends instead, and the answer never leaves. It ends
+      // for the extension now, not when the close comes back.
       if (out.result !== undefined && message.result instanceof LateReply && !message.result.still()) {
-        socket.close();
+        if (this.current(socket)) this.lost();
+        else socket.close();
         return;
       }
       if (socket.readyState === 1) socket.send(frame);
