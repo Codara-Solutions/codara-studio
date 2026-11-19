@@ -3,7 +3,7 @@ import { createECDH } from "node:crypto";
 import { createServer } from "node:net";
 import { WebSocketServer } from "ws";
 
-import { LATE_BUFFER_MAX, LINK_BUSY, LateReply, LinkClient, linkProof, pairCommitment, pairedToken, pairingCode, sessionSealer, sha256Hex } from "../lib/link-client.js";
+import { ANSWERS_MAX, LATE_BUFFER_MAX, LINK_BUSY, LateReply, LinkClient, linkProof, pairCommitment, pairedToken, pairingCode, sessionSealer, sha256Hex } from "../lib/link-client.js";
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -429,6 +429,25 @@ export async function run() {
   await line.outbox;
   assert.deepEqual(sent, [{ id: 20, error: { message: LINK_BUSY } }]);
   assert.equal(builds, 0, "nothing read while the link is full");
+  // The answer being sealed counts, and so do "busy" answers: past ANSWERS_MAX waiting, the link ends.
+  let queueEnded = 0;
+  const queue = new LinkClient({ loadPairing: async () => null, onDisconnected: () => queueEnded++ });
+  let unblock;
+  const gate = new Promise((resolve) => (unblock = resolve));
+  const queued = [];
+  const slow = { readyState: 1, epoch: queue.epoch, send: (frame) => queued.push(JSON.parse(frame)), close: () => {}, sealer: { seal: async (message) => (await gate, JSON.stringify(message)) } };
+  queue.socket = slow;
+  for (let id = 1; id <= 5; id++) queue.sendOn(slow, { id, result: new LateReply(() => ({ id })) });
+  await wait(10);
+  for (let id = 6; id < ANSWERS_MAX; id++) assert.equal(queue.sendOn(slow, { id, result: {} }), true);
+  assert.equal(queueEnded, 0);
+  assert.equal(queue.sendOn(slow, { id: ANSWERS_MAX, result: new LateReply(() => ({})) }), true, "the last place, a busy answer");
+  assert.equal(queue.sendOn(slow, { id: ANSWERS_MAX + 1, result: {} }), false, "past the cap nothing is queued");
+  assert.equal(queueEnded, 1, "and the link ends");
+  unblock();
+  await slow.outbox;
+  assert.deepEqual(queued.slice(0, 5).map((message) => message.result?.id ?? message.error.message), [1, 2, 3, 4, LINK_BUSY], "the one being sealed holds its place");
+  assert.equal(slow.answers, 0);
 
   stranger.close();
   eager.close();

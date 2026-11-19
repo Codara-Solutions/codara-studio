@@ -44,6 +44,8 @@ export class LateReply {
 // before another is built: past either, the answer is "busy".
 export const LATE_REPLIES_MAX = 4;
 export const LATE_BUFFER_MAX = 16_000_000;
+// Answers to Codara's requests waiting on one link, of any kind.
+export const ANSWERS_MAX = 64;
 export const LINK_BUSY = "The link to Codara is busy: try again in a moment.";
 
 /** The message to send, with a LateReply built now (an error in its place if it throws). */
@@ -143,32 +145,49 @@ export class LinkClient {
   /** Send on `socket` only while it is the link in use: never on a later one. */
   sendOn(socket, message) {
     if (!socket || !this.current(socket) || socket.readyState !== 1) return false;
+    // Answers to Codara's requests wait at most ANSWERS_MAX at once, "busy"
+    // ones and the one being sealed included: past that the link ends.
+    const answer = message.id !== undefined;
+    if (answer && (socket.answers ?? 0) >= ANSWERS_MAX) {
+      this.lost();
+      return false;
+    }
     const late = message.result instanceof LateReply;
     if (late && (socket.late ?? 0) >= LATE_REPLIES_MAX) message = { id: message.id, error: { message: LINK_BUSY } };
-    else if (late) socket.late = (socket.late ?? 0) + 1;
+    const counted = message.result instanceof LateReply;
+    if (counted) socket.late = (socket.late ?? 0) + 1;
+    if (answer) socket.answers = (socket.answers ?? 0) + 1;
+    const done = () => {
+      if (counted) socket.late -= 1;
+      if (answer) socket.answers -= 1;
+    };
     if (!socket.sealer) {
-      if (message.result instanceof LateReply) socket.late -= 1;
+      done();
       socket.send(JSON.stringify(built(message, socket)));
       return true;
     }
     // Sealing is asynchronous and each frame's counter is its place in the
     // stream, so frames leave one at a time in the order they were sent.
     socket.outbox = (socket.outbox ?? Promise.resolve()).then(async () => {
-      if (message.result instanceof LateReply) socket.late -= 1;
-      const out = built(message, socket);
-      const frame = await socket.sealer.seal(out);
-      // Its access ended while it was sealed: a frame left out would break the
-      // count, so the link ends instead, and the answer never leaves. It ends
-      // for the extension now, not when the close comes back.
-      if (out.result !== undefined && message.result instanceof LateReply && !message.result.still()) {
-        if (this.current(socket)) this.lost();
-        else socket.close();
-        return;
+      try {
+        const out = built(message, socket);
+        const frame = await socket.sealer.seal(out);
+        // Its access ended while it was sealed: a frame left out would break the
+        // count, so the link ends instead, and the answer never leaves. It ends
+        // for the extension now, not when the close comes back.
+        if (out.result !== undefined && counted && !message.result.still()) {
+          if (this.current(socket)) this.lost();
+          else socket.close();
+          return;
+        }
+        if (socket.readyState === 1) socket.send(frame);
+      } finally {
+        done();
       }
-      if (socket.readyState === 1) socket.send(frame);
     }).catch(() => {});
     return true;
   }
+
 
   async run(pair, wake) {
     this.epoch += 1;
