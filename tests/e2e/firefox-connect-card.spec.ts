@@ -87,7 +87,7 @@ for (const theme of ["codara-daylight", "codara-classic"] as const) {
       // Why a developer add-on, and the Firefoxes that keep it, with the README's section.
       await expect(card).toContainText("Mozilla's add-on site does not take add-ons that let an agent run scripts in pages");
       await expect(card).toContainText("Firefox Developer Edition, Nightly or ESR can keep it across restarts");
-      await expect(card).toContainText("The file dialog takes the path pasted in");
+      await expect(card).toContainText("Tip: paste the path into the file dialog");
       await expect(card).not.toContainText("chrome://extensions");
       await expect(card.locator('li[aria-current="step"]')).toHaveText("1Add");
       await expect(card.getByRole("status")).toContainText("Waiting for the extension");

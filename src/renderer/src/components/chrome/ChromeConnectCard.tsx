@@ -192,8 +192,10 @@ export default function ChromeConnectCard({
                   )}
                 </li>
                 <li>
-                  Choose <strong>Load Temporary Add-on</strong> and pick this <span className="spark-mono">manifest.json</span>. The file dialog
-                  takes the path pasted in (press Ctrl+L first on Linux, Cmd+Shift+G on macOS; on Windows paste it into File name).
+                  Choose <strong>Load Temporary Add-on</strong> and pick this <span className="spark-mono">manifest.json</span>.
+                  <div className="chrome-connect__tip">
+                    Tip: paste the path into the file dialog (Ctrl+L on Linux, Cmd+Shift+G on macOS, the File name box on Windows).
+                  </div>
                   <div className="chrome-folder">
                     <span className="chrome-folder__path spark-mono" title={shownFirefoxManifest ?? undefined}>
                       {shownFirefoxManifest ?? "This Codara build does not include the extension for Firefox."}

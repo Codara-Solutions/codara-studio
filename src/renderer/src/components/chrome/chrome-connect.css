@@ -228,3 +228,10 @@ li[data-state="done"] > .chrome-connect__n {
   font-size: 12px;
   vertical-align: baseline;
 }
+
+/* A step's second, smaller line. */
+.chrome-connect__tip {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
