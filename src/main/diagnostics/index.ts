@@ -14,7 +14,7 @@
 // Nothing here uploads anything, and nothing here may stop the app from
 // starting: every step is best effort and logs its own failure.
 
-import { app, BrowserWindow, crashReporter, dialog, shell, type WebContents } from "electron";
+import { app, BrowserWindow, crashReporter, dialog, powerMonitor, shell, type WebContents } from "electron";
 import { existsSync, mkdirSync, promises as fs, realpathSync } from "node:fs";
 import * as inspector from "node:inspector";
 import * as os from "node:os";
@@ -158,7 +158,9 @@ export function startDiagnostics(): void {
     crashReporterOn = startCrashReporter(home);
     startHangWatchdog(dir, hangWatchdogSettings(process.env, inspector.url() !== undefined));
     syncDialogsHeld = holdDuringSyncDialogs(dialog);
-    if (startEventLoopProbe((line) => logMain("event-loop", line))) sampleEventLoopWhileFocused();
+    if (startEventLoopProbe((line) => logMain("event-loop", line), process.env, powerMonitor)) {
+      sampleEventLoopWhileFocused();
+    }
     watchProcessDeaths();
   } catch (error) {
     logMain("diagnostics", `black box start failed: ${describe(error)}`);
