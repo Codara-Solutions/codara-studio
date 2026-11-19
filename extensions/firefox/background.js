@@ -15,6 +15,7 @@
 // picks up where it left off.
 
 import { LinkClient } from "./lib/link-client.js";
+import { changeKind, frameTree, freshPage, isSameDocument, navigateAnswer, navigateUrl, pageEvents } from "./lib/navigation.js";
 import {
   CDP_METHODS,
   browserIdentity,
@@ -290,7 +291,17 @@ async function answerCommand(request, socket) {
   const tab = await usableTab(request.tabId);
   const method = String(request.method ?? "");
   if (!state.attached.includes(tab.id)) throw new Error(`${agentTabId(tab.id)} is not attached.`);
-  if (isDomainToggle(method)) return {};
+  if (isDomainToggle(method)) {
+    // Page events go to Codara from Page.enable on, as the debugger sends them.
+    if (method === "Page.enable") pageEventTabs.add(tab.id);
+    if (method === "Page.disable") pageEventTabs.delete(tab.id);
+    return {};
+  }
+  if (method === "Page.navigate") return navigateTab(tab, request.params ?? {}, socket);
+  if (method === "Page.getFrameTree") {
+    const now = await stillUsable(tab.id, socket);
+    return frameTree(now.id, now.url, pageOf(now.id).loaderId);
+  }
   if (!PAGE_METHODS.includes(method)) throw new Error(unsupportedMethodError(method));
   const params = request.params !== null && typeof request.params === "object" ? request.params : {};
   for (const need of accessNeeds(method)) {
@@ -323,6 +334,48 @@ async function answerCommand(request, socket) {
   }
   throw new Error(unsupportedMethodError(method));
 }
+
+/**
+ * Page.navigate: the address is checked before Firefox loads it, and the
+ * answer waits for the tab's next address change, as the debugger's waits
+ * for the commit: the page's own document, or Firefox's error page.
+ */
+async function navigateTab(tab, params, socket) {
+  if (params === null || typeof params !== "object") throw new Error("Page.navigate needs an absolute http or https url.");
+  const url = navigateUrl(params, tab.id, { isRestricted: isFirefoxRestrictedUrl, blockingRule: (address) => firefoxBlockingRule(address, rules) });
+  const now = await stillUsable(tab.id, socket);
+  const sameDocument = isSameDocument(now.url, url);
+  // The id the next document gets, also when it commits after the answer.
+  const { nextLoaderId } = pageOf(now.id);
+  const changed = sameDocument ? null : nextAddressChange(now.id);
+  await chrome.tabs.update(now.id, { url });
+  const kind = await changed;
+  // A redirect may have taken the tab to a blocked site or a page Firefox keeps extensions off.
+  await stillUsable(now.id, socket);
+  return navigateAnswer(now.id, sameDocument, kind, nextLoaderId);
+}
+
+/** The tab's next address change ("commit" or "moved"), or null if none comes in COMMIT_WAIT_MS or the tab closes. */
+function nextAddressChange(tabId) {
+  return new Promise((resolve) => {
+    const waiters = addressWaiters.get(tabId) ?? new Set();
+    addressWaiters.set(tabId, waiters);
+    const done = (kind) => {
+      clearTimeout(timer);
+      waiters.delete(done);
+      resolve(kind);
+    };
+    const timer = setTimeout(() => done(null), COMMIT_WAIT_MS);
+    waiters.add(done);
+  });
+}
+
+function pageOf(tabId) {
+  if (!pages.has(tabId)) pages.set(tabId, freshPage(newLoaderId));
+  return pages.get(tabId);
+}
+
+const newLoaderId = () => crypto.randomUUID().replace(/-/g, "").toUpperCase();
 
 /** The tab again, right before the extension acts in it: still shared, allowed, attached, and the request still live. */
 async function stillUsable(tabId, socket) {
@@ -479,6 +532,7 @@ function handleMessage(message) {
 // ── Attached tabs ───────────────────────────────────────────────────────────
 
 async function detachTab(tabId) {
+  pageEventTabs.delete(tabId);
   if (!state.attached.includes(tabId)) return;
   await save({ attached: without(state.attached, tabId) });
   void refresh();
@@ -566,9 +620,23 @@ chrome.tabs.onDetached.addListener(scheduleRefresh);
 // Page changes per tab (loads and route changes), so a capture or a layout
 // reading can tell the tab did not leave its page at any point meanwhile.
 const navigations = new Map();
+// Each tab's page (lib/navigation.js), the tabs whose page events Codara
+// asked for, and the navigations waiting for a tab's next address change.
+const pages = new Map();
+const pageEventTabs = new Set();
+const addressWaiters = new Map();
+const COMMIT_WAIT_MS = 10_000;
 
-chrome.tabs.onUpdated.addListener(async (tabId, change) => {
+chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
   if (isPageChange(change)) navigations.set(tabId, (navigations.get(tabId) ?? 0) + 1);
+  const { events, page } = pageEvents(change, { id: tabId }, pageOf(tabId), newLoaderId, Date.now());
+  pages.set(tabId, page);
+  // Only for a tab Codara still may use: never a page on a blocked site, nor one Firefox keeps extensions off.
+  if (events.length && state && pageEventTabs.has(tabId) && state.attached.includes(tabId) && shared(tab) && !firefoxBlockingRule(tab.url, rules)) {
+    for (const [method, params] of events) sendLive({ type: "cdp_event", tabId, method, params });
+  }
+  const kind = changeKind(change);
+  if (kind === "commit" || kind === "moved") for (const done of [...(addressWaiters.get(tabId) ?? [])]) done(kind);
   if (change.url !== undefined) {
     await ready;
     if (state.attached.includes(tabId) && (firefoxBlockingRule(change.url, rules) || isFirefoxRestrictedUrl(change.url))) {
@@ -584,6 +652,10 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
 });
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   navigations.delete(tabId);
+  pages.delete(tabId);
+  pageEventTabs.delete(tabId);
+  for (const done of [...(addressWaiters.get(tabId) ?? [])]) done(null);
+  addressWaiters.delete(tabId);
   await ready;
   const usage = { ...state.usage };
   delete usage[tabId];
