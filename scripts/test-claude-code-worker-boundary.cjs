@@ -126,6 +126,7 @@ process.stdin.on("end", () => {
   out({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "curl -H 'x-api-key: sk-ant-api03-InlineKeyAbc123Def456Ghi789Jkl' https://api.example.com && OPENAI_API_KEY=sk-proj-InlineOpenAi0123456789abcdef npm test" } }] } });
   out({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "deploy-tool push 9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928" } }] } });
   out({ type: "assistant", message: { content: [{ type: "tool_use", name: "Grep", input: { pattern: "Hex48SecretPattern9f8e7d6c5b4a3928" } }] } });
+  out({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "echo violetwordgarden" } }, { type: "tool_use", name: "Read", input: { file_path: "/srv/secrets/violetwordgarden.txt" } }, { type: "text", text: "the key is violetwordgarden" }] } });
   out({ type: "user", message: { content: [{ type: "tool_result", is_error: true, content: [{ type: "text", text: "401 for key sk-ant-api03-InlineKeyAbc123Def456Ghi789Jkl" }] }] } });
   out({ type: "result", subtype: "success", is_error: false, session_id: "sess-1", usage: {} });
 });
@@ -293,21 +294,23 @@ async function main() {
   await check("a key passed inline in a Bash call never reaches the worker log", async () => {
     const out = fs.mkdtempSync(path.join(TMP, "out-"));
     const log = path.join(out, "stdout.log");
-    // The line run-store paints and appends to the worker log for each event.
+    // What run-store appends to the worker log for each event: a tool's
+    // name and Studio's fixed line for a failed tool. Assistant text goes to
+    // the pane only.
     const lineOf = (event) =>
       event.kind === "tool" ? (worker.claudeCodeToolLine?.(event) ?? `${event.name} ${event.detail}`)
-        : event.kind === "tool_failed" ? event.detail
-          : event.kind === "text" ? event.text : "";
+        : event.kind === "tool_failed" ? "! the tool reported an error" : null;
     const run = worker.startClaudeCodeWorker({
       binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "do it",
-      onEvent: (event) => fs.appendFileSync(log, `${lineOf(event)}\n`),
+      onEvent: (event) => {
+        const line = lineOf(event);
+        if (line !== null) fs.appendFileSync(log, `${line}\n`);
+      },
     });
     await run.done;
     const written = fs.readFileSync(log, "utf8");
-    assert.match(written, /^Bash curl$/m, "the tool call is still shown, by its program");
-    assert.match(written, /^Bash deploy-tool push$/m);
-    assert.match(written, /^Grep$/m);
-    for (const secret of ["InlineKeyAbc123Def456Ghi789Jkl", "InlineOpenAi0123456789abcdef", "9f8e7d6c5b4a39281706f5e4d3c2b1a0", "Hex48SecretPattern"]) {
+    assert.deepEqual(written.trim().split("\n"), ["Bash", "Bash", "Grep", "Bash", "Read", "! the tool reported an error"]);
+    for (const secret of ["InlineKeyAbc123Def456Ghi789Jkl", "InlineOpenAi0123456789abcdef", "9f8e7d6c5b4a39281706f5e4d3c2b1a0", "Hex48SecretPattern", "violetwordgarden"]) {
       assert.ok(!written.includes(secret), `the log holds ${secret.slice(0, 10)}…`);
     }
   });
@@ -327,18 +330,15 @@ async function main() {
     assert.deepEqual(survivors, []);
   });
 
-  await check("Stop also ends a detached daemon that left the group and the tree", async () => {
-    if (process.platform !== "linux") return;
+  await check("Stop never reads another process's environment", async () => {
     const out = fs.mkdtempSync(path.join(TMP, "out-"));
-    const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "ESCAPE", onEvent: () => undefined });
-    const daemon = Number(await waitFor(path.join(out, "daemon.pid")));
-    await waitFor(path.join(out, "starter.done"));
-    assert.ok(alive(daemon), "the daemon runs before Stop");
+    const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "TREE", onEvent: () => undefined });
+    const pids = JSON.parse(await waitFor(path.join(out, "tree.json")));
+    opened.length = 0;
     await run.kill();
     await run.done;
-    const survived = alive(daemon);
-    if (survived) process.kill(daemon, "SIGKILL");
-    assert.equal(survived, false);
+    for (const pid of pids.filter(alive)) process.kill(pid, "SIGKILL");
+    assert.deepEqual(opened.filter((file) => /\/environ$/.test(file)), []);
   });
 
   await check("a background process left holding the output neither hangs the turn nor outlives it", async () => {
@@ -375,13 +375,6 @@ async function main() {
         finalizePrompt: async () => "finalize",
       }),
       /stopped/,
-    );
-  });
-
-  await check("Studio's hooks are left out of the launch", () => {
-    assert.deepEqual(
-      worker.withoutStudioHooks(["--settings", "/h/settings.json", "--mcp-config=/h/mcp-worker.json", "--settings=/x.json"]),
-      ["--mcp-config=/h/mcp-worker.json"],
     );
   });
 

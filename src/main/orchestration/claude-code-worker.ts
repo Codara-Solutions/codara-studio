@@ -2,7 +2,7 @@
 // (route `claude-code/`, src/shared/cora-routes.ts). Claude Code runs headless
 // (`claude -p`) on the account a new Studio Claude terminal would get, with
 // the codara-studio server's worker tools (no board or whiteboard writes)
-// and without Studio's hooks.
+// and Studio's settings without its hooks.
 // Claude Code owns the loop, its tools and its compaction; Studio reads its
 // stream-json output so every tool call shows in the run, and the worker
 // writes the same final-report.json a Pi worker would.
@@ -18,7 +18,6 @@
 // the file system for login records during a launch.
 
 import { execFile, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -40,8 +39,8 @@ export function claudeCodeEffortFlag(effort: string | undefined): "low" | "mediu
 
 export type ClaudeCodeEvent =
   | { kind: "session"; sessionId: string }
-  | { kind: "tool"; name: string; detail: string }
-  | { kind: "tool_failed"; detail: string }
+  | { kind: "tool"; name: string }
+  | { kind: "tool_failed" }
   | { kind: "text"; text: string }
   | {
       kind: "result";
@@ -61,23 +60,6 @@ export function claudeCodeWorkerArgv(input: {
 }): string[] {
   return [...input.launchArgs, ...input.providerArgs,
     "-p", "--output-format", "stream-json", "--verbose", "--add-dir", input.attemptDir];
-}
-
-/** Studio's launch arguments without its hooks (`--settings <file>`): a
- *  worker reports through its stream, and the hooks would write each tool's
- *  input to disk before anything is redacted. */
-export function withoutStudioHooks(launchArgs: readonly string[]): string[] {
-  const out: string[] = [];
-  for (let index = 0; index < launchArgs.length; index += 1) {
-    const arg = launchArgs[index]!;
-    if (arg === "--settings") {
-      index += 1;
-      continue;
-    }
-    if (arg.startsWith("--settings=")) continue;
-    out.push(arg);
-  }
-  return out;
 }
 
 /** `claude-opus-5@high` as the values of Claude Code's model and effort flags. */
@@ -102,42 +84,16 @@ function safeLine(text: unknown, max: number): string {
   return oneLine(typeof text === "string" ? scrubSecrets(text) : "", max);
 }
 
-/** The program a shell command runs, and its subcommand when that is a
- *  plain word (`npm test`, `git status`): never its arguments. */
-function commandSummary(command: string): string {
-  const words = command.trim().split(/\s+/).filter((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
-  const program = (words[0] ?? "").split("/").pop() ?? "";
-  if (!/^[A-Za-z0-9._+-]{1,40}$/.test(program)) return "";
-  const sub = words[1];
-  return sub && /^[a-z][a-z0-9:_-]{0,30}$/.test(sub) ? `${program} ${sub}` : program;
+/** A tool's name as it may be shown and logged: Claude Code's own tool and
+ *  MCP tool names fit this; anything else is just "tool". */
+function toolName(name: unknown): string {
+  return typeof name === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(name) ? name : "tool";
 }
 
-/**
- * What a tool call is about, in one short line built from known fields
- * only: a shell command's program (never its arguments), a file path, a
- * URL's host. Free text (search patterns, queries, descriptions) is not
- * kept, and what is kept still goes through the secret scrubber.
- */
-function toolDetail(input: Record<string, unknown> | null): string {
-  const text = (key: string) => (typeof input?.[key] === "string" ? (input[key] as string).trim() : "");
-  const command = text("command");
-  if (command) return safeLine(commandSummary(command), 60);
-  const file = text("file_path") || text("notebook_path") || text("path");
-  if (file) return safeLine(file, 140);
-  const url = text("url");
-  if (url) {
-    try {
-      return safeLine(new URL(url).host, 80);
-    } catch {
-      return "";
-    }
-  }
-  return "";
-}
-
-/** The pane and log line for a tool call: its name and redacted summary. */
-export function claudeCodeToolLine(event: { name: string; detail: string }): string {
-  return event.detail ? `${event.name} ${event.detail}` : event.name;
+/** The pane and log line for a tool call: its name only. Its input (a
+ *  command, a path, a query) is never kept. */
+export function claudeCodeToolLine(event: { name: string }): string {
+  return event.name;
 }
 
 /** The events one line of Claude Code's stream-json output carries. */
@@ -157,7 +113,7 @@ export function parseClaudeCodeStreamLine(line: string): ClaudeCodeEvent[] {
   if (event.type === "assistant") {
     return blocks.flatMap((block): ClaudeCodeEvent[] => {
       if (block?.type === "tool_use" && typeof block.name === "string") {
-        return [{ kind: "tool", name: block.name, detail: toolDetail(record(block.input)) }];
+        return [{ kind: "tool", name: toolName(block.name) }];
       }
       return block?.type === "text" && typeof block.text === "string" && block.text.trim()
         ? [{ kind: "text", text: safeLine(block.text, 700) }]
@@ -168,7 +124,7 @@ export function parseClaudeCodeStreamLine(line: string): ClaudeCodeEvent[] {
     // A failed tool's output is not kept, only that it failed.
     return blocks
       .filter((block) => block?.type === "tool_result" && block.is_error === true)
-      .map((): ClaudeCodeEvent => ({ kind: "tool_failed", detail: "" }));
+      .map((): ClaudeCodeEvent => ({ kind: "tool_failed" }));
   }
   if (event.type !== "result") return [];
   const usage = record(event.usage);
@@ -192,35 +148,6 @@ export interface ClaudeCodeProcess {
 }
 
 const STOP_GRACE_MS = 3_000;
-
-/** Set in the worker's environment and inherited by everything it starts,
- *  so Stop also finds a process that left both the group and the tree (a
- *  detached daemon). Studio's own marker; Claude Code does not read it. */
-export const CLAUDE_CODE_WORKER_MARKER = "CODARA_CLAUDE_CODE_WORKER";
-
-/** Linux: every process of this user whose environment carries `marker`. */
-async function markedProcesses(marker: string): Promise<number[]> {
-  if (process.platform !== "linux") return [];
-  const needle = Buffer.from(`${CLAUDE_CODE_WORKER_MARKER}=${marker}\0`);
-  let entries: string[];
-  try {
-    entries = await fs.readdir("/proc");
-  } catch {
-    return [];
-  }
-  const found: number[] = [];
-  await Promise.all(entries.map(async (entry) => {
-    const pid = Number(entry);
-    if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) return;
-    try {
-      const environ = await fs.readFile(`/proc/${pid}/environ`);
-      if (environ.includes(needle)) found.push(pid);
-    } catch {
-      // Gone, or another user's process.
-    }
-  }));
-  return found;
-}
 const DRAIN_AFTER_EXIT_MS = 1_000;
 
 /**
@@ -228,50 +155,39 @@ const DRAIN_AFTER_EXIT_MS = 1_000;
  * first and SIGKILL after a grace period. The tree is captured too, since a
  * tool can leave the group (setsid). Resolves once nothing is left alive.
  */
-async function stopProcessTree(pid: number | undefined, marker: string): Promise<void> {
+async function stopProcessTree(pid: number | undefined): Promise<void> {
+  if (!pid) return;
   if (process.platform === "win32") {
-    if (pid) spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
+    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
     return;
   }
-  const tree = pid ? captureOwnedProcessTree(pid) : null;
-  const signal = async (sig: NodeJS.Signals) => {
-    if (pid) {
-      try {
-        process.kill(-pid, sig);
-      } catch {
-        // The group is already gone.
-      }
+  const tree = captureOwnedProcessTree(pid);
+  const signal = (sig: NodeJS.Signals) => {
+    try {
+      process.kill(-pid, sig);
+    } catch {
+      // The group is already gone.
     }
     signalOwnedProcessTree(tree, sig);
-    for (const found of await markedProcesses(marker)) {
-      try {
-        process.kill(found, sig);
-      } catch {
-        // Already gone.
-      }
+  };
+  const anyAlive = () => {
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch {
+      return isOwnedProcessTreeAlive(tree);
     }
   };
-  const anyAlive = async () => {
-    if (pid) {
-      try {
-        process.kill(-pid, 0);
-        return true;
-      } catch {
-        // No group left.
-      }
-    }
-    return isOwnedProcessTreeAlive(tree) || (await markedProcesses(marker)).length > 0;
-  };
-  await signal("SIGTERM");
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 100));
+  signal("SIGTERM");
   const deadline = Date.now() + STOP_GRACE_MS;
-  while (Date.now() < deadline && (await anyAlive())) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  if (!(await anyAlive())) return;
-  await signal("SIGKILL");
+  while (Date.now() < deadline && anyAlive()) await pause();
+  // Whatever is left, or appears in the group meanwhile, is killed again on
+  // every pass until nothing is left.
   const killDeadline = Date.now() + STOP_GRACE_MS;
-  while (Date.now() < killDeadline && (await anyAlive())) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  while (Date.now() < killDeadline && anyAlive()) {
+    signal("SIGKILL");
+    await pause();
   }
 }
 
@@ -286,10 +202,9 @@ export function startClaudeCodeWorker(input: {
   prompt: string;
   onEvent: (event: ClaudeCodeEvent) => void;
 }): ClaudeCodeProcess {
-  const marker = randomBytes(12).toString("hex");
   const child: ChildProcessWithoutNullStreams = spawn(input.binary, [...input.argv], {
     cwd: input.cwd,
-    env: { ...input.env, [CLAUDE_CODE_WORKER_MARKER]: marker },
+    env: input.env,
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
     windowsHide: true,
@@ -297,7 +212,7 @@ export function startClaudeCodeWorker(input: {
   let buffered = "";
   let stderrTail = "";
   let stopping: Promise<void> | null = null;
-  const stopTree = () => (stopping ??= stopProcessTree(child.pid, marker));
+  const stopTree = () => (stopping ??= stopProcessTree(child.pid));
   const emit = (line: string) => {
     for (const event of parseClaudeCodeStreamLine(line)) {
       try {
