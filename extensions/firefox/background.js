@@ -14,6 +14,7 @@
 // session, local for the pairing and the blocked sites), so a restarted page
 // picks up where it left off.
 
+import { AccessClock } from "./lib/access-clock.js";
 import { BODY_FAILED, BODY_TYPES, BodyStore, NO_BODY, bodyPlan, copyBody } from "./lib/bodies.js";
 import { consoleAddresses, consoleEvent } from "./lib/console.js";
 import { STORAGE_WRITES, cookieGate, cookieUrls, readCookies, storageWriteRefusal } from "./lib/cookies.js";
@@ -149,17 +150,25 @@ async function load() {
   await chrome.storage.session.set({ attached: [], browserSession: state.browserSession });
 }
 
-// What a tab may share moved on: the switch, attaching, sharing, the blocked
-// sites, a tab's page or window, site access or the link. Counted, so a
-// cookie read that began before never goes out (tabCookies), even if the
-// same access is given again meanwhile.
-let accessGeneration = 0;
-const accessChanged = () => void (accessGeneration += 1);
-const ACCESS_KEYS = ["storageTabs", "attached", "shareAll", "shareWindows", "shareTabs", "stopped", "blockedSites"];
+// What a tab may share moved on: per tab its switch, attaching, sharing, its
+// page or window; per window its sharing; for every tab sharing everything,
+// the blocked sites, site access or the link. Stamped (lib/access-clock.js),
+// so a cookie read that began before never goes out (tabCookies), even if
+// the same access is given again meanwhile, while other tabs' and windows'
+// changes leave it alone.
+const access = new AccessClock();
 
-async function save(patch) {
+/**
+ * Applies a change to the extension's state and stores it. A change that
+ * depends on the state is given as `(state) => patch`, worked out from the
+ * state it is applied to in the same step: worked out before an await, it
+ * could put back what another change took away meanwhile (a tab's cookie
+ * switch turned off while another tab closed).
+ */
+async function save(update) {
   await ready;
-  if (ACCESS_KEYS.some((key) => key in patch)) accessChanged();
+  const patch = typeof update === "function" ? update(state) : update;
+  access.save(state, patch);
   Object.assign(state, patch);
   const session = {};
   const local = {};
@@ -243,7 +252,7 @@ const link = new LinkClient({
     void ready.then(() => sendLive({ type: "presence_settings", ...presenceSettings(state.presence) }));
   },
   onDisconnected: () => {
-    accessChanged();
+    access.all();
     keepAwake(false);
     // Every body filter lets go at once, before the tabs are let go one by one.
     forgetAllBodies();
@@ -303,7 +312,7 @@ async function handleRequest(request) {
       if (!state.attached.includes(tab.id)) {
         // From the next millisecond: an entry logged in this one may predate the attachment.
         attachedSince.set(tab.id, Date.now() + 1);
-        await save({ attached: withValue(state.attached, tab.id) });
+        await save((now) => ({ attached: withValue(now.attached, tab.id) }));
         void refresh();
         // A page loaded before this heard "off": its hook starts keeping now, nothing from before.
         void switchConsole(tab.id);
@@ -330,6 +339,10 @@ async function handleRequest(request) {
 }
 
 async function answerCommand(request, socket) {
+  // Noted before the first look at the tab: whatever changes its access from
+  // here on ends a read that holds it, even while the tab is looked up.
+  const since = access.now();
+  const lookedAt = lookStart();
   const child = childSessionError(request);
   if (child) throw new Error(child);
   const method = String(request.method ?? "");
@@ -345,7 +358,7 @@ async function answerCommand(request, socket) {
     if (verb === "enable") on.add(domain);
     else on.delete(domain);
     eventDomains.set(tab.id, on);
-    seeTab(tab);
+    seeTab(tab, lookedAt);
     if (domain === "Page") pageOf(tab.id, tab.url);
     if (domain === "Network" && verb === "disable") forgetRequests(tab.id);
     if (domain === "Network" && verb === "enable") bodyFilters(tab.id, true);
@@ -353,7 +366,7 @@ async function answerCommand(request, socket) {
     return {};
   }
   if (method === "Network.getResponseBody") return responseBody(tab.id, request.params ?? {}, socket);
-  if (method === "Network.getCookies") return tabCookies(tab.id, request.params ?? {}, socket);
+  if (method === "Network.getCookies") return tabCookies(tab, lookedAt, request.params ?? {}, socket, since);
   if (STORAGE_WRITES.includes(method)) throw new Error(storageWriteRefusal(method));
   if (method === "Page.getFrameTree") {
     const now = await stillUsable(tab.id, socket);
@@ -580,16 +593,22 @@ const ASK_KEY = /^(?:scripts|allSites|site:https?:\/\/[^/\s]+\/\*)$/;
 /** Forget the asks Firefox has granted since, so only a no is remembered. */
 async function forgetGrantedAsks() {
   await ready;
-  await save({ asked: unansweredAsks(state.asked, await chrome.permissions.getAll().catch(() => ({}))) });
+  const granted = await chrome.permissions.getAll().catch(() => ({}));
+  await save((now) => ({ asked: unansweredAsks(now.asked, granted) }));
 }
 
-// In line with the popup's actions, so a grant never overtakes the ask it answers.
-chrome.permissions.onAdded.addListener(() => {
+// In line with the popup's actions, so a grant never overtakes the ask it
+// answers. A read under way when access was given counts as changed too: it
+// was checked against what was granted before.
+// Site access given: a cookie read asks Firefox for it, so a read under way
+// is asked again (scripts in pages alone change no read).
+chrome.permissions.onAdded.addListener((added) => {
+  if (added?.origins?.length) access.all();
   popupQueue = popupQueue.then(forgetGrantedAsks).catch(() => {});
 });
 // A site the user took back: no body kept from before goes out (reads check again too).
 chrome.permissions.onRemoved.addListener(() => {
-  accessChanged();
+  access.all();
   bodies.purge(() => false);
 });
 
@@ -614,7 +633,8 @@ function handleMessage(message) {
   if (message.type !== "revoked" && !liveSocket()) return;
   if (message.type === "usage" && typeof message.tabId === "number") {
     const tabId = message.tabId;
-    void save({ usage: { ...state.usage, [tabId]: usageOf(message) } }).then(() => {
+    const usage = usageOf(message);
+    void save((now) => ({ usage: { ...now.usage, [tabId]: usage } })).then(() => {
       void updateTabBadge(tabId);
       clearTimeout(usageBadgeTimers.get(tabId));
       usageBadgeTimers.set(tabId, setTimeout(() => {
@@ -625,10 +645,13 @@ function handleMessage(message) {
   } else if (message.type === "presence_settings") {
     // The newer change wins; tell Codara when ours is the newer one.
     void ready.then(async () => {
-      const mine = presenceSettings(state.presence);
-      const next = newerSettings(mine, message);
-      if (next.at !== mine.at) await save({ presence: next });
-      else if (mine.at > presenceSettings(message).at) sendLive({ type: "presence_settings", ...mine });
+      let mine = null;
+      await save((now) => {
+        mine = presenceSettings(now.presence);
+        const next = newerSettings(mine, message);
+        return next.at !== mine.at ? { presence: next } : {};
+      });
+      if (mine.at > presenceSettings(message).at) sendLive({ type: "presence_settings", ...mine });
     });
   } else if (message.type === "revoked") {
     void detachAll();
@@ -643,7 +666,7 @@ async function detachTab(tabId) {
   forgetRequests(tabId);
   void switchConsole(tabId);
   if (!state.attached.includes(tabId)) return;
-  await save({ attached: without(state.attached, tabId) });
+  await save((now) => ({ attached: without(now.attached, tabId) }));
   void refresh();
 }
 
@@ -668,8 +691,20 @@ async function enforceSharing() {
 // Where each tab was last seen (window and address), so a request is
 // checked against where its tab is now without waiting on Firefox.
 const tabsSeen = new Map();
-function seeTab(tab) {
-  if (Number.isInteger(tab?.id)) tabsSeen.set(tab.id, { id: tab.id, windowId: tab.windowId, url: tab.url });
+// Every view of a tab is stamped with one counter: an event's when it comes
+// (loaded, moved, closed), a lookup's when it began (lookStart()). A view
+// older than the one kept never replaces it, so a lookup answered late does
+// not undo a move, and of two lookups the later one's answer stands.
+const tabsSeenAt = new Map();
+let seenTicks = 0;
+const lookStart = () => ++seenTicks;
+function heardOf(tabId) {
+  tabsSeenAt.set(tabId, ++seenTicks);
+}
+function seeTab(tab, lookedAt = ++seenTicks) {
+  if (!Number.isInteger(tab?.id) || (tabsSeenAt.get(tab.id) ?? 0) > lookedAt) return;
+  tabsSeenAt.set(tab.id, lookedAt);
+  tabsSeen.set(tab.id, { id: tab.id, windowId: tab.windowId, url: tab.url, cookieStoreId: tab.cookieStoreId });
 }
 
 /** Whether Codara may get this tab's events: attached, shared where it is now, not on a blocked site. */
@@ -812,33 +847,52 @@ async function responseBody(tabId, params, socket) {
 
 /**
  * Network.getCookies (lib/cookies.js): the tab's own site's cookies, from
- * its own cookie store, with its cookie switch on. Everything that allowed
- * the read is asked again when the answer leaves: the switch, the tab still
- * attached and shared on that site, the blocked sites, the site access and
- * the link.
+ * its own cookie store, with its cookie switch on. The read holds to one
+ * view of the tab, its first look: every later look must find it in the
+ * same window, on the same address, with the same cookie store (Firefox may
+ * answer a lookup with a move before its event comes), and nothing that
+ * decides its access may be stamped after that first look. Everything that
+ * allowed the read is asked again when the answer leaves: the switch, the
+ * tab still attached and shared on that site, the blocked sites, the site
+ * access and the link.
  */
-async function tabCookies(tabId, params, socket) {
-  const tab = await stillUsable(tabId, socket);
-  seeTab(tab);
-  const urls = cookieUrls(params, tab.url);
+async function tabCookies(first, lookedAt, params, socket, since) {
+  const tabId = first.id;
+  const changed = () => new Error(`${agentTabId(tabId)} or what it may share changed while its cookies were read; ask again.`);
+  const sameView = (tab) => tab.windowId === first.windowId && tab.url === first.url && tab.cookieStoreId === first.cookieStoreId;
+  const look = async () => {
+    const began = lookStart();
+    const tab = await stillUsable(tabId, socket);
+    seeTab(tab, began);
+    if (!sameView(tab)) throw changed();
+    return tab;
+  };
+  seeTab(first, lookedAt);
+  await look();
+  // Firefox names every tab's store; read without it, the default store
+  // would answer for a container tab or a private window.
+  if (typeof first.cookieStoreId !== "string" || !first.cookieStoreId) throw new Error(`Firefox did not say which cookie store ${agentTabId(tabId)} uses, so its cookies are not read.`);
+  const storeId = first.cookieStoreId;
+  const urls = cookieUrls(params, first.url);
   const refusal = cookieGate({
     urls,
     ref: agentTabId(tabId),
-    now: () => ({ generation: accessGeneration, socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
+    // The window of the first look: had the tab moved since, its own stamp moved, or a later look saw it.
+    // Until it is sealed, the newest view of the tab (a later lookup's, even another request's) must still be the first look's.
+    now: () => ({ changed: access.changedSince(since, tabId, first.windowId) || !sameView(tabsSeen.get(tabId) ?? {}), socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
   });
-  const store = tab.cookieStoreId ? { storeId: tab.cookieStoreId } : {};
   const read = await readCookies(urls, {
-    getAll: (url) => browser.cookies.getAll({ url, ...store }),
+    getAll: (url) => browser.cookies.getAll({ url, storeId }),
     refusal,
     // Firefox's own site access for the tab's site (every URL asked is on its host).
     // (asked only once the refusal passed, so the tab shows a web page).
     permitted: () => {
-      const { protocol, hostname } = new URL(tab.url);
+      const { protocol, hostname } = new URL(first.url);
       return chrome.permissions.contains({ origins: [`${protocol}//${hostname}/*`] }).catch(() => false);
     },
     rules: () => rules,
   });
-  seeTab(await stillUsable(tabId, socket));
+  await look();
   return new LateReply(read.build, read.still);
 }
 
@@ -1013,7 +1067,8 @@ chrome.tabs.onAttached.addListener(scheduleRefresh);
 // event of it goes on, and it is let go if so.
 // Between windows a tab is in none: nothing of it goes on until it lands.
 chrome.tabs.onDetached.addListener((tabId) => {
-  accessChanged();
+  access.tab(tabId);
+  heardOf(tabId);
   const seen = tabsSeen.get(tabId);
   if (seen) seen.windowId = null;
   // Its bodies and requests go too (a hop that starts between windows is none
@@ -1022,7 +1077,8 @@ chrome.tabs.onDetached.addListener((tabId) => {
   bodies.forgetTab(tabId);
 });
 chrome.tabs.onAttached.addListener(async (tabId, { newWindowId }) => {
-  accessChanged();
+  access.tab(tabId);
+  heardOf(tabId);
   const seen = tabsSeen.get(tabId);
   if (seen) seen.windowId = newWindowId;
   await ready;
@@ -1043,8 +1099,12 @@ const navigationWaiters = new Map();
 const navigating = new Set();
 const NAVIGATE_WAIT_MS = 25_000;
 
+// A tab's changes that never say its page or access changed. Any other
+// (a load starting with no address yet, a discard, a status) moves its stamp.
+const COSMETIC_CHANGES = new Set(["title", "favIconUrl", "audible", "mutedInfo", "attention", "isArticle", "sharingState", "pinned", "autoDiscardable"]);
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
-  if ("url" in change) accessChanged();
+  if (Object.keys(change).some((key) => !COSMETIC_CHANGES.has(key))) access.tab(tabId);
+  heardOf(tabId);
   seeTab(tab);
   if (isPageChange(change)) navigations.set(tabId, (navigations.get(tabId) ?? 0) + 1);
   const { events, page, kind } = pageEvents(change, { id: tabId }, pageOf(tabId), newLoaderId, Date.now());
@@ -1067,10 +1127,12 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
 });
 chrome.windows.onRemoved.addListener(async (windowId) => {
   await ready;
-  if (state.shareWindows.includes(windowId)) await save({ shareWindows: without(state.shareWindows, windowId) });
+  await save((now) => (now.shareWindows.includes(windowId) ? { shareWindows: without(now.shareWindows, windowId) } : {}));
 });
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  accessChanged();
+  access.tab(tabId);
+  // Kept heard, so a lookup answered before the close does not bring the tab back.
+  heardOf(tabId);
   tabsSeen.delete(tabId);
   attachedSince.delete(tabId);
   consoleSwitches.delete(tabId);
@@ -1081,16 +1143,17 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   eventDomains.delete(tabId);
   navigationWaiters.get(tabId)?.done(null);
   navigating.delete(tabId);
-  await ready;
-  const usage = { ...state.usage };
-  delete usage[tabId];
-  await save({
-    shareTabs: without(state.shareTabs, tabId),
-    stopped: without(state.stopped, tabId),
-    storageTabs: without(state.storageTabs, tabId),
-    agentTabs: without(state.agentTabs, tabId),
-    attached: without(state.attached, tabId),
-    usage,
+  await save((now) => {
+    const usage = { ...now.usage };
+    delete usage[tabId];
+    return {
+      shareTabs: without(now.shareTabs, tabId),
+      stopped: without(now.stopped, tabId),
+      storageTabs: without(now.storageTabs, tabId),
+      agentTabs: without(now.agentTabs, tabId),
+      attached: without(now.attached, tabId),
+      usage,
+    };
   });
   scheduleRefresh();
 });
@@ -1140,16 +1203,15 @@ async function popupState(request) {
 
 async function setTabShared(tabId, on) {
   if (on) {
-    await save({ shareTabs: withValue(state.shareTabs, tabId), stopped: without(state.stopped, tabId) });
+    await save((now) => ({ shareTabs: withValue(now.shareTabs, tabId), stopped: without(now.stopped, tabId) }));
     return;
   }
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  const stillShared = stopNeedsMark(shareChoice(), tab);
-  await save({
-    shareTabs: without(state.shareTabs, tabId),
-    storageTabs: without(state.storageTabs, tabId),
-    stopped: stillShared ? withValue(state.stopped, tabId) : state.stopped,
-  });
+  await save((now) => ({
+    shareTabs: without(now.shareTabs, tabId),
+    storageTabs: without(now.storageTabs, tabId),
+    stopped: stopNeedsMark(shareChoice(), tab) ? withValue(now.stopped, tabId) : now.stopped,
+  }));
 }
 
 async function handlePopup(request) {
@@ -1163,7 +1225,7 @@ async function handlePopup(request) {
     case "accessAsked":
       // The popup says so right before Firefox's question shows.
       if (typeof request.key !== "string" || !ASK_KEY.test(request.key)) throw new Error("Unknown permission.");
-      await save({ asked: { ...state.asked, [request.key]: Date.now() } });
+      await save((now) => ({ asked: { ...now.asked, [request.key]: Date.now() } }));
       return {};
     case "connect":
       pairingWanted = true;
@@ -1192,7 +1254,7 @@ async function handlePopup(request) {
     case "setReach": {
       const windowId = typeof request.windowId === "number" ? request.windowId : null;
       const inWindow = windowId === null ? [] : (await chrome.tabs.query({ windowId })).map((tab) => tab.id);
-      await save(reachPatch(shareChoice(), request.reach, windowId, inWindow));
+      await save(() => reachPatch(shareChoice(), request.reach, windowId, inWindow));
       if (request.reach !== "tabs") void link.wake();
       break;
     }
@@ -1201,20 +1263,23 @@ async function handlePopup(request) {
       break;
     case "setStorage": {
       const tabId = Number(request.tabId);
-      await save({ storageTabs: request.on === true ? withValue(state.storageTabs, tabId) : without(state.storageTabs, tabId) });
+      await save((now) => ({ storageTabs: request.on === true ? withValue(now.storageTabs, tabId) : without(now.storageTabs, tabId) }));
       break;
     }
     case "setAllowOpen":
       await save({ allowOpen: request.on === true });
       break;
     case "setPresence": {
-      const mine = presenceSettings(state.presence);
-      const next = {
-        overlay: typeof request.overlay === "boolean" ? request.overlay : mine.overlay,
-        glow: typeof request.glow === "boolean" ? request.glow : mine.glow,
-        at: Math.max(Date.now(), mine.at + 1),
-      };
-      await save({ presence: next });
+      let next = null;
+      await save((now) => {
+        const mine = presenceSettings(now.presence);
+        next = {
+          overlay: typeof request.overlay === "boolean" ? request.overlay : mine.overlay,
+          glow: typeof request.glow === "boolean" ? request.glow : mine.glow,
+          at: Math.max(Date.now(), mine.at + 1),
+        };
+        return { presence: next };
+      });
       sendLive({ type: "presence_settings", ...next });
       break;
     }
@@ -1278,7 +1343,7 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
 // are searched at once.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !state) return;
-  if ("blockedSites" in changes) accessChanged();
+  if ("blockedSites" in changes) access.all();
   for (const key of ["ports", "blockedSites", "allowOpen"]) {
     if (key in changes) state[key] = changes[key].newValue ?? LOCAL_DEFAULTS[key];
   }
@@ -1301,3 +1366,7 @@ void ready.then(async () => {
   await link.connect();
   await updateBadges();
 });
+
+// For the tests' fake Firefox (test/fake-browser.mjs); Firefox ignores what
+// an event page exports.
+export { access, link, ready, tabsSeen };

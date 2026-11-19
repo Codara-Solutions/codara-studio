@@ -34,8 +34,8 @@ export const cookieUrl = (text) => webUrl(text)?.href ?? null;
 /**
  * Why the cookies of `urls` may not go to Codara for this tab now, or null.
  * `tab` is { id, url }; `storageTabs` the tabs whose cookie switch is on.
- * Only the tab's own host: Firefox gives extensions no list of public
- * suffixes, so a domain above or below it cannot be told apart from
+ * Only the tab's own host and scheme: Firefox gives extensions no list of
+ * public suffixes, so a domain above or below it cannot be told apart from
  * another site (a.github.io and github.io).
  */
 export function cookieRefusal({ tab, urls, storageTabs, rules, ref }) {
@@ -51,7 +51,10 @@ export function cookieRefusal({ tab, urls, storageTabs, rules, ref }) {
   for (const text of urls) {
     const url = webUrl(text);
     if (!url || isFirefoxRestrictedUrl(url.href)) return `${text} has no cookies Codara may read.`;
-    if (hostOf(url) !== hostOf(page)) return `${text} is not this tab's site; the cookie and storage permission covers ${hostOf(page)} only.`;
+    // The page's own scheme too: an http page sees no Secure cookie, and Firefox's site access is checked for the page's scheme.
+    if (hostOf(url) !== hostOf(page) || url.protocol !== page.protocol) {
+      return `${text} is not this tab's site; the cookie and storage permission covers ${page.protocol}//${hostOf(page)} only.`;
+    }
     const rule = firefoxBlockingRule(url.href, rules);
     if (rule) return `${text} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`;
   }
@@ -106,18 +109,19 @@ export function storageWriteRefusal(method) {
 /**
  * Whether a cookie read may still go to Codara, asked before the read,
  * after it and when the answer leaves: the reason it may not, or null.
- * `now()` reads the extension's state at that moment: { generation (moves
- * on whenever the switch, attaching, sharing, the blocked sites, the tab's
- * page or window, site access or the link change, so access taken back and
- * given again still ends the read), socket (the live link), seen (the tab
- * as last seen, or none), allowed (attached, shared, not blocked),
- * storageTabs, rules }.
+ * `now()` reads the extension's state at that moment: { changed (whether
+ * anything that decides the tab's access changed since the read began,
+ * lib/access-clock.js: the tab's switch, attaching, sharing, page or
+ * window, its window's sharing, the blocked sites, site access or the
+ * link, so access taken back and given again still ends the read), socket
+ * (the live link), seen (the tab as last seen, or none), allowed (attached,
+ * shared, not blocked), storageTabs, rules }.
  */
 export function cookieGate({ urls, ref, now }) {
   const start = now();
   return () => {
     const state = now();
-    if (state.generation !== start.generation) return `${ref} or what it may share changed while its cookies were read; ask again.`;
+    if (state.changed) return `${ref} or what it may share changed while its cookies were read; ask again.`;
     if (!state.socket || state.socket !== start.socket) return "The link to Codara changed while the cookies were read.";
     if (!state.seen || !state.allowed) return `${ref} is no longer attached and shared with agents.`;
     return cookieRefusal({ tab: { id: state.seen.id, url: state.seen.url }, urls, storageTabs: state.storageTabs, rules: state.rules, ref });

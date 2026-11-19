@@ -148,7 +148,7 @@ export async function run(assembled) {
   // keeping (with the new cutoff), once the attachment is saved. The background has no harness, so its code is read.
   const background = readFileSync(join(assembled, "background.js"), "utf8");
   const attaching = background.slice(background.indexOf('case "attach": {'), background.indexOf('case "detach":'));
-  assert.match(attaching, /attachedSince\.set\([\s\S]*await save\(\{ attached: [\s\S]*switchConsole\(tab\.id\)/, "attaching a tab switches its console hook after the attachment is saved");
+  assert.match(attaching, /attachedSince\.set\([\s\S]*await save\(\(now\) => \(\{ attached: [\s\S]*switchConsole\(tab\.id\)/, "attaching a tab switches its console hook after the attachment is saved");
 
   // ── webRequest as Network events ──
   const base = { requestId: "38", tabId: 7, frameId: 0, type: "xmlhttprequest", url: "https://a.example/data.json", method: "GET", documentUrl: "https://a.example/app", timeStamp: 5000 };
