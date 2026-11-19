@@ -49,17 +49,21 @@ export async function run(assembled) {
   hook.page.console.log("early", { x: 1 }, [1, 2], 0 / 0);
   hook.page.console.assert(true, "fine");
   assert.deepEqual(hook.logged.map(([level]) => level), ["log", "assert"], "the page's own console still runs");
-  assert.deepEqual(hook.sent, [], "nothing is sent before the extension says the tab is shared");
-  hook.answerHello({ on: false });
+  assert.deepEqual(hook.sent, [], "nothing is sent before the extension answers");
+  hook.answerHello({ mode: "off" });
   await tick();
   hook.page.console.warn("unshared");
-  assert.deepEqual(hook.sent, [], "an unshared tab sends nothing, and keeps nothing");
-  hook.page.console.error("kept until shared");
-  hook.listeners.message({ type: "codara-console", on: true });
-  assert.equal(hook.sent.length, 2, "the entries kept since the tab was turned off go once it is on");
-  assert.deepEqual(hook.sent[1], { kind: "console", level: "error", args: [{ type: "string", value: "kept until shared" }], at: hook.sent[1].at, source: "https://a.example/app.js", line: 12 });
-  hook.page.console.log({ x: 1 }, [1, 2], 0 / 0, -0, 10n, null, undefined);
-  assert.deepEqual(hook.sent[2].args, [
+  hook.listeners.message({ type: "codara-console", mode: "on" });
+  assert.deepEqual(hook.sent, [], "a tab not shared at load sends nothing, and keeps nothing for later");
+  hook.listeners.message({ type: "codara-console", mode: "off" });
+  hook.page.console.log("while off");
+  hook.listeners.message({ type: "codara-console", mode: "wait" });
+  hook.page.console.error("kept while shared");
+  hook.listeners.message({ type: "codara-console", mode: "on" });
+  assert.equal(hook.sent.length, 1, "only what was logged while the tab was shared is replayed");
+  assert.deepEqual(hook.sent[0], { kind: "console", level: "error", args: [{ type: "string", value: "kept while shared" }], at: hook.sent[0].at, source: "https://a.example/app.js", line: 12 });
+  hook.page.console.log({ x: 1 }, [1, 2], 0 / 0, -0, 10n, null, undefined, "y".repeat(20_000), ...Array(30).fill(1));
+  assert.deepEqual(hook.sent[1].args.slice(0, 7), [
     { type: "object", value: '{"x":1}' },
     { type: "object", subtype: "array", value: "[1,2]" },
     { type: "number", unserializableValue: "NaN" },
@@ -68,16 +72,27 @@ export async function run(assembled) {
     { type: "object", subtype: "null", value: null },
     { type: "undefined" },
   ]);
-  hook.listeners.error({ message: "Uncaught TypeError: x is null", filename: "https://a.example/app.js", lineno: 3, error: { name: "TypeError", message: "x is null", stack: "f@https://a.example/app.js:3:1\n" } });
+  assert.equal(hook.sent[1].args.length, 20, "arguments capped in the page, before they are sent");
+  assert.equal(hook.sent[1].args[7].value.length, 10_000, "text capped in the page");
+  hook.page.console.log("same");
+  hook.page.console.log("same");
+  assert.notEqual(hook.sent.at(-1).at, hook.sent.at(-2).at, "two entries never share a time, so Codara's replay check keeps both");
+  const error = { name: "TypeError", message: "x is null", stack: "f@https://a.example/app.js:3:1\n" };
+  hook.listeners.error({ isTrusted: true, message: "Uncaught TypeError: x is null", filename: "https://a.example/app.js", lineno: 3, error });
   assert.deepEqual(hook.sent.at(-1), { kind: "exception", message: "TypeError: x is null\nf@https://a.example/app.js:3:1\n", source: "https://a.example/app.js", line: 3, at: hook.sent.at(-1).at });
-  hook.listeners.message({ type: "codara-console", on: false });
-  hook.page.console.log("after unsharing");
+  const before = hook.sent.length;
+  hook.listeners.error({ isTrusted: false, message: "made up", filename: "https://a.example/app.js", lineno: 1 });
+  hook.listeners.unhandledrejection({ isTrusted: false, reason: "made up" });
+  assert.equal(hook.sent.length, before, "events a page dispatches itself are not the page's errors");
+  hook.listeners.unhandledrejection({ isTrusted: true, reason: "no" });
+  assert.equal(hook.sent.at(-1).message, "Uncaught (in promise) no");
+  hook.listeners.message({ type: "codara-console", mode: "off" });
   const count = hook.sent.length;
   for (let i = 0; i < 300; i++) hook.page.console.log("loop");
-  assert.equal(hook.sent.length, count, "nothing once the tab is unshared");
-  hook.listeners.message({ type: "codara-console", on: true });
+  hook.listeners.message({ type: "codara-console", mode: "on" });
+  assert.equal(hook.sent.length, count, "nothing once the tab is unshared, and nothing kept from then");
   for (let i = 0; i < 300; i++) hook.page.console.log("loop");
-  assert.ok(hook.sent.length - count <= 100 + 50, "a page logging in a loop is capped per second");
+  assert.ok(hook.sent.length - count <= 100, "a page logging in a loop is capped per second, before it is described");
 
   // ── console entries as protocol events ──
   assert.deepEqual(consoleEvent({ kind: "console", level: "warn", args: [{ type: "string", value: "w" }, { type: "object", value: '{"a":1}', extra: "x" }], at: 5000, source: "https://a.example/app.js", line: 12 }), [
@@ -117,7 +132,8 @@ export async function run(assembled) {
   // Nothing for or from a blocked site, nor from no tab.
   const blocked = (url) => new URL(url).hostname === "bank.example";
   assert.equal(network.requestVisible(base, blocked), true);
-  assert.equal(network.requestVisible({ ...base, url: "https://bank.example/pixel.gif", type: "image" }, blocked), true, "a page's request to another site is the page's, as in Chrome");
+  assert.equal(network.requestVisible({ ...base, url: "https://bank.example/pixel.gif", type: "image" }, blocked), false, "a page's request to a blocked site");
+  assert.equal(network.requestVisible({ ...base, frameId: 9, frameAncestors: [{ url: "https://bank.example/", frameId: 3 }] }, blocked), false, "inside a blocked site's frame");
   assert.equal(network.requestVisible({ ...base, url: "https://bank.example/", type: "main_frame", documentUrl: undefined }, blocked), false);
   assert.equal(network.requestVisible({ ...base, url: "https://bank.example/frame", type: "sub_frame" }, blocked), false);
   assert.equal(network.requestVisible({ ...base, documentUrl: "https://bank.example/frame" }, blocked), false);

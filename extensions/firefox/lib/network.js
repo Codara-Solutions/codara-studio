@@ -46,12 +46,15 @@ export function frameIdOf(details) {
   return details.frameId === 0 ? mainFrameId(details.tabId) : `firefox-frame-${details.tabId}-${details.frameId}`;
 }
 
-/** Whether Codara may see a request of a tab: never one for or from a page on a blocked site. */
+/**
+ * Whether Codara may see a request of a tab: never one to a blocked site
+ * (stricter than Chrome, which lists a page's requests to any site), nor
+ * one from a page or frame on one, or inside a frame of one.
+ */
 export function requestVisible(details, isBlocked) {
-  if (!Number.isInteger(details?.tabId) || details.tabId < 0) return false;
+  if (!Number.isInteger(details?.tabId) || details.tabId < 0 || typeof details.url !== "string" || isBlocked(details.url)) return false;
   if (typeof details.documentUrl === "string" && isBlocked(details.documentUrl)) return false;
-  // A page (or a frame) loading from a blocked site is that site.
-  return !((details.type === "main_frame" || details.type === "sub_frame") && isBlocked(details.url));
+  return !(Array.isArray(details.frameAncestors) && details.frameAncestors.some((frame) => typeof frame?.url === "string" && isBlocked(frame.url)));
 }
 
 function responseOf(details) {

@@ -66,8 +66,14 @@ function site(request: IncomingMessage, response: ServerResponse): void {
   if (url.pathname === "/app") {
     // A strict page that logs from its first line and fetches with a cookie.
     response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; script-src 'nonce-app'; connect-src 'self'" });
-    response.end(`<!doctype html><title>Page app</title><script nonce="app">console.log("app started", { n: 1 }); console.warn("careful");
-      fetch("/api/data").then(() => fetch("/api/data?again=1")); setTimeout(() => null.y, 50);</script>`);
+    response.end(`<!doctype html><title>Page app</title><script nonce="app">window.getterRuns = 0;
+      console.log("app started", { n: 1, get secret() { window.getterRuns++; return "s"; } }); console.warn("careful");
+      window.dispatchEvent(new ErrorEvent("error", { message: "made up by the page" }));
+      fetch("/api/data").then(() => fetch("/api/hop")); setTimeout(() => null.y, 50);</script>`);
+    return;
+  }
+  if (url.pathname === "/api/hop") {
+    response.writeHead(302, { Location: "/api/data?again=1", "Set-Cookie": "hop=secret-value; HttpOnly; Path=/" }).end();
     return;
   }
   if (url.pathname === "/api/data") {
@@ -301,14 +307,17 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     await request("preview.navigate", { tabId, url: `${origin}/app` });
     await expect.poll(async () => (await request("preview.console", { tabId })).entries.map((entry: { level: string; message: string }) => `${entry.level} ${entry.message}`), { timeout: 10_000 })
       .toEqual(expect.arrayContaining(["info app started {\"n\":1}", "warning careful", expect.stringMatching(/^error TypeError: can't access property "y"/)]));
-    await expect.poll(async () => (await request("preview.network", { tabId, filter: "/api/data" })).requests.map((row: { status?: number; url: string }) => `${row.status} ${row.url}`), { timeout: 10_000 })
-      .toEqual([`200 ${origin}/api/data`, `200 ${origin}/api/data?again=1`]);
-    // Cookies never leave Firefox while the tab's cookie switch is off: not even their header names.
-    const { requests: calls } = await request("preview.network", { tabId, filter: "/api/data" });
-    const setting = await request("preview.network", { tabId, id: calls[0].id });
-    const sending = await request("preview.network", { tabId, id: calls[1].id });
-    expect(setting.request.responseHeaders).toMatchObject({ "Content-Type": "application/json" });
-    expect(JSON.stringify([setting.request.responseHeaders, sending.request.requestHeaders])).not.toMatch(/cookie|secret-value/i);
+    // Describing a logged object runs none of the page's code, and an error event the page made up is not the page's error.
+    expect(await firefox.evaluate(accountContext, "window.getterRuns")).toBe(0);
+    expect(JSON.stringify((await request("preview.console", { tabId })).entries)).not.toMatch(/made up by the page/);
+    await expect.poll(async () => (await request("preview.network", { tabId, filter: "/api/" })).requests.map((row: { status?: number; url: string }) => `${row.status} ${row.url}`), { timeout: 10_000 })
+      .toEqual([`200 ${origin}/api/data`, `302 ${origin}/api/hop`, `200 ${origin}/api/data?again=1`]);
+    // Cookies never leave Firefox while the tab's cookie switch is off, a redirect's included: not even their header names.
+    const { requests: calls } = await request("preview.network", { tabId, filter: "/api/" });
+    const details = await Promise.all(calls.map((call: { id: string }) => request("preview.network", { tabId, id: call.id })));
+    expect(details[0].request.responseHeaders).toMatchObject({ "Content-Type": "application/json" });
+    expect(details[1].request.responseHeaders).toMatchObject({ Location: "/api/data?again=1" });
+    expect(JSON.stringify(details)).not.toMatch(/cookie|secret-value/i);
 
     // Idle: Firefox unloads an idle event page (after 15 s in this profile)
     // and traffic on its socket does not count. The extension's keep-alive
