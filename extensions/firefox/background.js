@@ -671,11 +671,16 @@ const consoleAnswer = (tab) => ({ mode: consoleMode(tab), since: attachedSince.g
  * copy); Firefox refuses where the extension may not use the site.
  */
 async function switchConsole(tabId) {
+  // Only the newest switch of a tab speaks, with the mode as it is when it does.
+  const turn = (consoleSwitches.get(tabId) ?? 0) + 1;
+  consoleSwitches.set(tabId, turn);
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  const answer = consoleAnswer(tab);
-  if (answer.mode === "on") await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ["console-hook.js"] }).catch(() => {});
-  await chrome.tabs.sendMessage(tabId, { type: "codara-console", ...answer }, { frameId: 0 }).catch(() => {});
+  if (consoleAnswer(tab).mode === "on") await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ["console-hook.js"] }).catch(() => {});
+  const now = await chrome.tabs.get(tabId).catch(() => null);
+  if (consoleSwitches.get(tabId) !== turn) return;
+  await chrome.tabs.sendMessage(tabId, { type: "codara-console", ...consoleAnswer(now) }, { frameId: 0 }).catch(() => {});
 }
+const consoleSwitches = new Map();
 
 // The hook runs from document start on every site the user let the
 // extension use, so it sees what a page logs before Codara asks.
@@ -906,6 +911,7 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   tabsSeen.delete(tabId);
   attachedSince.delete(tabId);
+  consoleSwitches.delete(tabId);
   consoleBudgets.delete(tabId);
   forgetRequests(tabId);
   navigations.delete(tabId);

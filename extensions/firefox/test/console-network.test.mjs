@@ -154,5 +154,6 @@ export async function run(assembled) {
   assert.equal(network.requestVisible({ ...base, url: "https://bank.example/frame", type: "sub_frame" }, blocked), false);
   assert.equal(network.requestVisible({ ...base, documentUrl: "https://bank.example/frame" }, blocked), false);
   assert.equal(network.requestVisible({ ...base, tabId: -1 }, blocked), false);
+  assert.equal(network.requestVisible({ ...base, type: "sub_frame", url: "https://a.example/frame", originUrl: "https://bank.example/frame" }, blocked), false, "a blocked frame navigating itself");
   return "console and network: the hook sends nothing until shared, entries and webRequest as protocol events, cookies out unless switched on";
 }
