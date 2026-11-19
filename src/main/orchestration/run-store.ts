@@ -341,7 +341,13 @@ import {
   runtimeForWorkerModelId,
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
-import { coraWorkerModelAvailability } from "./worker-model-availability";
+import { coraWorkerModelAvailability, routeCoraModel, workerPlanningModels } from "./worker-model-availability";
+import {
+  coraRouteLabel,
+  effortOfModelId,
+  managerRoutePinnedByUser,
+  workerFamilyOfModelId,
+} from "@shared/cora-routes";
 import { shouldResumeForUserMessage } from "./user-message-resume";
 import {
   captureWorkerDiff,
@@ -453,8 +459,23 @@ async function freezeManagerExecutionAccount(
   };
 }
 
+/**
+ * The chat's model on the first route in Settings' order that carries it now
+ * (cora-routes.ts): a picked GPT model with no ChatGPT sign-in runs through a
+ * verified OpenRouter id, and the reverse. Resolved before the account is
+ * pinned or frozen, so the account and the SparkCall match the route the
+ * turn really takes. Pi only; a failed settings read keeps the picked model.
+ */
+async function routedManagerModel(run: RunState): Promise<string> {
+  const chat = resolveChatBackendConfig(run);
+  if (chat.backend !== "pi" || managerRoutePinnedByUser(run)) return chat.model;
+  return loadSettings().then((settings) => routeCoraModel(chat.model, settings)).catch(() => chat.model);
+}
+
+
 async function pinImplicitPiManagerAccount(
   run: RunState,
+  model: string = resolveChatBackendConfig(run).model,
 ): Promise<RunState> {
   const initial = resolveChatBackendConfig(run);
   if (
@@ -464,9 +485,9 @@ async function pinImplicitPiManagerAccount(
   ) {
     return run;
   }
-  const provider = piProviderForManagerModel(initial.model);
+  const provider = piProviderForManagerModel(model);
   if (!provider) return run;
-  const candidate = await selectImplicitPiAccount(provider, initial.model);
+  const candidate = await selectImplicitPiAccount(provider, model);
   if (!candidate) return run;
 
   // Re-resolve the route as an exact identity pin before persisting it. A
@@ -493,11 +514,12 @@ async function pinImplicitPiManagerAccount(
         current.backend !== "pi" ||
         current.accountProfileId ||
         draft.sparkCalls.length > 0 ||
-        piProviderForManagerModel(current.model) !== provider
+        current.model !== initial.model
       ) {
         return false;
       }
       draft.chatAccountProfileId = candidate.accountProfileId;
+      draft.chatAccountProfileImplicit = true;
       draft.updatedAt = timestamp;
     },
   });
@@ -7234,12 +7256,32 @@ async function askManagerBackendUnderTurnLock(
   // failed".
   let accountFailure: unknown;
   let chatConfig: ChatBackendConfig;
+  const entryEpoch = conversationEpoch(run);
+  const entryStatus = run.status;
+  const entryStops = forcePauseStartCount(run.id);
+  const routedModel = await routedManagerModel(run);
   try {
-    run = await pinImplicitPiManagerAccount(run);
-    chatConfig = await freezeManagerExecutionAccount(resolveChatBackendConfig(run));
+    run = await pinImplicitPiManagerAccount(run, routedModel);
+    chatConfig = await freezeManagerExecutionAccount({ ...resolveChatBackendConfig(run), model: routedModel });
   } catch (error) {
     accountFailure = error ?? new Error("Cora could not resolve an account for this turn");
-    chatConfig = resolveChatBackendConfig(run);
+    chatConfig = { ...resolveChatBackendConfig(run), model: routedModel };
+  }
+  // Stop and Cancel can land while the route and account are read. A turn
+  // they ended must not launch, so re-decide on the state they left, the same
+  // way askManagerBackend does for a turn that waited on the lock.
+  {
+    const stopping = forcePauseWindowClosed(run.id);
+    if (stopping) await stopping;
+    const latest = await getRun(run.id);
+    if (
+      !latest ||
+      conversationEpoch(latest) !== entryEpoch ||
+      forcePauseStartCount(run.id) !== entryStops ||
+      (latest.status !== entryStatus && (latest.status === "cancelled" || isTerminalRunStatus(latest.status)))
+    ) {
+      return latest ?? null;
+    }
   }
   // The Pi manager backend owns its own request
   // lifecycle, spawn/resume a real agent session, stream events, and return
@@ -9165,12 +9207,27 @@ async function finalizeCouncil(
   });
 }
 
+/** Worker families with an enabled model some route can carry now. */
+async function routableWorkerRuntimes(): Promise<Set<string>> {
+  try {
+    const { connected } = await coraWorkerModelAvailability(await loadSettings());
+    // OpenRouter ids count for their vendor's family (`openai/...` is codex).
+    const kinds = connected.map((id) => workerFamilyOfModelId(id));
+    return new Set(kinds.filter((kind): kind is "claude" | "codex" | "grok" => kind !== undefined));
+  } catch {
+    return new Set();
+  }
+}
+
 async function rerouteUnavailableAgentRuntimes(
   decision: SparkManagerDecision,
 ): Promise<{ decision: SparkManagerDecision; rerouted: RuntimeReroute[] }> {
   const diagnostics = await detectConfiguredAgentRuntimes();
   const available = diagnostics.filter(runtimeAssignable);
-  const availableKinds = new Set(available.map((runtime) => runtime.kind));
+  const availableKinds = new Set<string>(available.map((runtime) => runtime.kind));
+  // A family with no sign-in still counts when another route (a verified
+  // OpenRouter id) carries one of its enabled models; the launch routes it.
+  for (const kind of await routableWorkerRuntimes()) availableKinds.add(kind);
   const fallback = available.find((runtime) => runtime.kind === "codex")
     ?? available.find((runtime) => runtime.kind === "claude")
     ?? available.find((runtime) => runtime.kind === "grok");
@@ -11648,7 +11705,21 @@ export type ResumeManagerTurnRecoveryResult = {
   reason?: string;
 };
 
-type ResolvedManagerRecoveryAccount = { backend: "pi"; profileId: string };
+type ResolvedManagerRecoveryAccount = {
+  backend: "pi";
+  profileId: string;
+  /** The model the failed turn ran on, spelled for the route it took. */
+  model: string;
+};
+
+/** The model the parked turn actually launched: routing may have moved the
+ *  picked `openai/...` onto a sign-in (or the reverse), and the account the
+ *  user picks to resume must match that route. */
+function managerRecoveryModel(run: RunState): string {
+  const failedCallId = run.managerTurnRecovery?.failedSparkCallId;
+  const failed = failedCallId ? run.sparkCalls.find((call) => call.id === failedCallId) : undefined;
+  return failed?.model?.trim() || resolveChatBackendConfig(run).model;
+}
 
 async function resolveManagerRecoveryAccount(
   run: RunState,
@@ -11675,8 +11746,8 @@ async function resolveManagerRecoveryAccount(
       "Recovery Pi account profile id",
     );
     if (!profileId) throw new Error("A concrete subscription account is required.");
-    const config = resolveChatBackendConfig(run);
-    const provider = piProviderForManagerModel(config.model);
+    const model = managerRecoveryModel(run);
+    const provider = piProviderForManagerModel(model);
     if (!provider) throw new Error("OpenRouter chats do not use a subscription account profile.");
     const resolved = await resolveCodaraPiExecutionAccount({
       provider,
@@ -11685,7 +11756,7 @@ async function resolveManagerRecoveryAccount(
     if (resolved.accountProfileId !== profileId) {
       throw new Error("The selected subscription account could not be pinned exactly.");
     }
-    return { ok: true, account: { backend: "pi", profileId } };
+    return { ok: true, account: { backend: "pi", profileId, model } };
   } catch (error) {
     return {
       ok: false,
@@ -11863,6 +11934,9 @@ export async function resumeManagerTurnRecovery(
   const decision: { outcome: ResumeManagerTurnRecoveryResult["outcome"] } = {
     outcome: "stale",
   };
+  // The account was checked against this model; a model the user switched to
+  // since then needs its own check.
+  const modelAtResolve = run.chatModel?.trim() || undefined;
   run = await commitRunChange(run, {
     type: "run.manager_turn_recovery_claimed",
     message: "Parked manager turn recovery claimed",
@@ -11897,9 +11971,20 @@ export async function resumeManagerTurnRecovery(
           decision.outcome = "account-incompatible";
           return false;
         }
+        if ((draft.chatModel?.trim() || undefined) !== modelAtResolve) {
+          decision.outcome = "stale";
+          return false;
+        }
         const accountChanged =
           draft.chatAccountProfileId !== resolved.account.profileId;
         draft.chatAccountProfileId = resolved.account.profileId;
+        // The user picked this account to resume on. A pin the user chose
+        // stops routing, so the chat keeps the spelling the account serves
+        // (the routed one) instead of falling back to the picked spelling.
+        delete draft.chatAccountProfileImplicit;
+        if ((draft.chatModel?.trim() || undefined) !== resolved.account.model) {
+          draft.chatModel = resolved.account.model;
+        }
         if (accountChanged) {
           delete draft.chatSessionUuid;
           delete draft.chatSessionMode;
@@ -15023,20 +15108,38 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // its Pi session gets what they pasted, in memory; prompt.md, a relaunch
   // and the shell/manual pty paste keep the scrubbed text.
   const livePiPrompt = isPiWorker && run.executionMode === "direct" ? withPastedText(run.id, promptText) : null;
-  const workerSettings = isPiWorker && !isAutomationRun ? await loadSettings() : null;
-  const usableWorkerRuntimes = workerSettings
-    ? await detectConfiguredAgentRuntimes()
-        .then((diagnostics) => new Set<string>(diagnostics.filter(runtimeAssignable).map((item) => item.kind)))
-        .catch(() => undefined)
-    : undefined;
-  const piWorkerModel = isPiWorker
+  const routeSettings = isPiWorker ? await loadSettings().catch(() => null) : null;
+  const workerSettings = isAutomationRun ? null : routeSettings;
+  // Enabled models some route can carry now: a GPT model with no ChatGPT
+  // sign-in stays eligible when its OpenRouter id is verified, instead of
+  // being swapped for another family before routing runs.
+  const connectedWorkerModels = workerSettings
+    ? await coraWorkerModelAvailability(workerSettings)
+        .then((availability) => availability.connected)
+        .catch(() => [] as string[])
+    : [];
+  const routableWorkerModels = workerSettings
+    ? workerPlanningModels(connectedWorkerModels, workerSettings)
+    : connectedWorkerModels;
+  const plannedPiWorkerModel = isPiWorker
     ? piModelForWorker(
         task,
         isAutomationRun,
-        workerSettings ? availableCoraWorkerModels(workerSettings) : undefined,
+        workerSettings
+          ? routableWorkerModels.length > 0 ? routableWorkerModels : availableCoraWorkerModels(workerSettings)
+          : undefined,
         run.executionMode === "direct" && !isAutomationRun,
-        usableWorkerRuntimes,
       )
+    : undefined;
+  // The same model on the first route in Settings' order that carries it
+  // now; attempt.model records that id, so the run shows the route it used.
+  // Automation runs keep their pinned model and are routed the same way.
+  const piWorkerModel = plannedPiWorkerModel && routeSettings
+    ? await routeCoraModel(plannedPiWorkerModel, routeSettings).catch(() => plannedPiWorkerModel)
+    : plannedPiWorkerModel;
+  // OpenRouter ids carry no `@effort`; the planned one becomes the thinking level.
+  const routedThinking = piWorkerModel && !piWorkerModel.includes("@")
+    ? piThinkingLevel(effortOfModelId(plannedPiWorkerModel))
     : undefined;
   // Keep the attempt's runtime in step with the provider the model launches
   // on, so labels and session reuse never contradict the session.
@@ -15216,6 +15319,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
           promptText: livePiPrompt?.prompt ?? promptText,
           command,
           model: piWorkerModel!,
+          ...(routedThinking ? { thinking: routedThinking } : {}),
           launchAborted: () => workerLaunchAborted(attempt.id),
         })
       : await runWorkerSession({
@@ -15768,9 +15872,12 @@ async function performAutoCompaction(
   try {
     let run = await requireRun(runId);
     const epoch = conversationEpoch(run);
-    const chatConfig = await freezeManagerExecutionAccount(
-      resolveChatBackendConfig(run),
-    );
+    // The summary runs on the session the chat's turns used, so it takes the
+    // same route (and with it the same account) as a chat turn would now.
+    const chatConfig = await freezeManagerExecutionAccount({
+      ...resolveChatBackendConfig(run),
+      model: await routedManagerModel(run),
+    });
     if (
       runProjectPolicyMode(run) === "untrusted-pull-request" &&
       chatConfig.backend !== "pi"
@@ -16514,8 +16621,17 @@ export async function undoToCheckpoint(
 const forcePausingRuns = new Map<string, number>();
 const forcePauseWindowWaiters = new Map<string, Array<() => void>>();
 
+// How many Stops or cancels ever began per run, so a turn can tell that one
+// landed while it was setting up even after it finished.
+const forcePauseStarts = new Map<string, number>();
+
+function forcePauseStartCount(runId: string): number {
+  return forcePauseStarts.get(runId) ?? 0;
+}
+
 function openForcePauseWindow(runId: string): void {
   forcePausingRuns.set(runId, (forcePausingRuns.get(runId) ?? 0) + 1);
+  forcePauseStarts.set(runId, forcePauseStartCount(runId) + 1);
 }
 
 function closeForcePauseWindow(runId: string): void {
@@ -21064,13 +21180,15 @@ function piProviderForWorker(task: WorkerTask, model: string | undefined): PiPro
   return runtime === "claude" ? "anthropic" : "openai-codex";
 }
 
-function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
-  const effort = task.effortHint;
-  if (
-    effort === "minimal" || effort === "low" || effort === "medium" ||
+function piThinkingLevel(effort: unknown): PiThinkingLevel | undefined {
+  return effort === "minimal" || effort === "low" || effort === "medium" ||
     effort === "high" || effort === "xhigh" || effort === "max"
-  ) return effort;
-  return "high";
+    ? effort
+    : undefined;
+}
+
+function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
+  return piThinkingLevel(task.effortHint) ?? "high";
 }
 
 function piModelForWorker(
@@ -21718,6 +21836,7 @@ async function runPiWorkerSession({
   promptText,
   command,
   model,
+  thinking: thinkingOverride,
   launchAborted = () => false,
 }: {
   run: RunState;
@@ -21728,6 +21847,8 @@ async function runPiWorkerSession({
   promptText: string;
   command: string;
   model: string;
+  /** The planned `@effort` when routing moved the model to OpenRouter. */
+  thinking?: PiThinkingLevel;
   launchAborted?: () => boolean;
 }): Promise<{
   exitCode: number;
@@ -21743,8 +21864,8 @@ async function runPiWorkerSession({
 }> {
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
   const provider = piProviderForWorker(task, model);
-  const thinking = piThinkingForWorker(task);
-  const modelLabel = model;
+  const thinking = thinkingOverride ?? piThinkingForWorker(task);
+  const modelLabel = `${model} via ${coraRouteLabel(model)}`;
 
   let client: PiRpcClient | null = null;
   let unsubscribe: (() => void) | null = null;

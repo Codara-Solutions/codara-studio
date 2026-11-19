@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Virtuoso } from "react-virtuoso";
 import type { RunState, SparkCall, SparkEvent } from "@shared/types";
 import { isOpenRouterModelId } from "@shared/worker-model-roster";
+import { coraRouteRows, type CoraRouteRow } from "@shared/cora-routes";
 import { useRunEvents } from "../lib/useRunExecutionRecord";
 
 // A renderer-only diagnostic overlay over the active run. Pure presentation —
@@ -293,14 +294,64 @@ function hasCostData(call: SparkCall): boolean {
   );
 }
 
+function RoutesTable({ rows }: { rows: CoraRouteRow[] }) {
+  return (
+    <>
+      <SectionTitle
+        title="Routes"
+        detail="How Cora and each worker reached their model, the account used, and the tokens spent there."
+      />
+      <div
+        role="table"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "0.6fr 1.3fr 1fr 0.7fr 0.7fr 0.7fr 0.4fr",
+          gap: "0 12px",
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          color: "var(--ink-dim)",
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 8,
+          overflow: "hidden",
+          marginBottom: 16,
+        }}
+      >
+        <HeaderCell>Who</HeaderCell>
+        <HeaderCell>Model</HeaderCell>
+        <HeaderCell>Route</HeaderCell>
+        <HeaderCell>Account</HeaderCell>
+        <HeaderCell align="right">Input</HeaderCell>
+        <HeaderCell align="right">Output</HeaderCell>
+        <HeaderCell align="right">Calls</HeaderCell>
+        {rows.map((row) => (
+          <React.Fragment key={row.key}>
+            <BodyCell>{row.who}</BodyCell>
+            <BodyCell>{row.model}</BodyCell>
+            <BodyCell>{row.route}</BodyCell>
+            <BodyCell>{row.account || "none"}</BodyCell>
+            <BodyCell align="right">{formatInt(row.inputTokens)}</BodyCell>
+            <BodyCell align="right">{formatInt(row.outputTokens)}</BodyCell>
+            <BodyCell align="right">{row.count}</BodyCell>
+          </React.Fragment>
+        ))}
+      </div>
+    </>
+  );
+}
+
 function CostsTab({ run }: { run: RunState }) {
   const callsWithCost = useMemo(
     () => run.sparkCalls.filter(hasCostData),
     [run.sparkCalls],
   );
+  const routes = useMemo(() => coraRouteRows(run.sparkCalls, run.workerAttempts ?? []), [run.sparkCalls, run.workerAttempts]);
 
   if (callsWithCost.length === 0) {
-    return (
+    return routes.length > 0 ? (
+      <div style={{ padding: "16px 20px 20px", overflow: "auto", flex: 1 }}>
+        <RoutesTable rows={routes} />
+      </div>
+    ) : (
       <Placeholder
         title="No usage recorded"
         detail="This run has no provider token or cost data. Older and interrupted runs may not include it."
@@ -358,6 +409,7 @@ function CostsTab({ run }: { run: RunState }) {
 
   return (
     <div style={{ padding: "16px 20px 20px", overflow: "auto", flex: 1 }}>
+      {routes.length > 0 ? <RoutesTable rows={routes} /> : null}
       <SectionTitle
         title="Manager usage"
         detail="OpenRouter cost and provider token usage grouped by the kind of manager call."

@@ -4,6 +4,7 @@ import {
   autoCompactLimitTokens,
   normalizeAutoCompactPercent,
 } from "@shared/context-compaction";
+import { CLAUDE_PI_LOGIN_BILLING_NOTE, normalizeCoraRouteOrder, type CoraRoute } from "@shared/cora-routes";
 import {
   ToggleRow,
   sectionStyle,
@@ -64,6 +65,81 @@ function AutoCompactRow({
   );
 }
 
+const ROUTE_LABELS: Record<CoraRoute, string> = {
+  subscription: "your sign-ins",
+  openrouter: "OpenRouter",
+  subcloud: "Subcloud",
+};
+
+// The orders worth offering: the first route is the one that matters most.
+const ROUTE_ORDER_CHOICES: CoraRoute[][] = [
+  ["subscription", "openrouter", "subcloud"],
+  ["openrouter", "subscription", "subcloud"],
+  ["subcloud", "subscription", "openrouter"],
+];
+
+function routeOrderLabel(order: readonly CoraRoute[]): string {
+  return order.map((route) => ROUTE_LABELS[route]).join(", then ");
+}
+
+/** The select names an offered order by its first route (each starts with a
+ *  different one) and spells out any other order in full. */
+function routeOrderOptionLabel(order: readonly CoraRoute[]): string {
+  const offered = ROUTE_ORDER_CHOICES.some((choice) => choice.join(",") === order.join(","));
+  if (!offered) return routeOrderLabel(order);
+  const first = ROUTE_LABELS[order[0]];
+  return `${first[0].toUpperCase()}${first.slice(1)} first${order[0] === "openrouter" ? " (paid key)" : ""}`;
+}
+
+function RouteOrderRow({
+  value,
+  onChange,
+}: {
+  /** Undefined until the user picks: every model launches as picked. */
+  value: CoraRoute[] | undefined;
+  onChange: (next: CoraRoute[] | undefined) => void;
+}) {
+  const current = value ? value.join(",") : "";
+  const choices = !value || ROUTE_ORDER_CHOICES.some((order) => order.join(",") === current)
+    ? ROUTE_ORDER_CHOICES
+    : [value, ...ROUTE_ORDER_CHOICES];
+  return (
+    <div style={toggleRowStyle}>
+      <span style={{ minWidth: 0 }}>
+        <span id="route-order-title" style={toggleTitleStyle}>How Cora reaches models</span>
+        <span style={toggleDetailStyle}>
+          Cora and her workers use the first of these that can carry the model you picked: your Claude, ChatGPT or
+          xAI sign-in, an OpenRouter key with that model verified, or Subcloud once it is set up. A route never
+          set up is skipped. With your sign-ins first, a sign-in that expired or reached its limit is not swapped
+          for a paid key: that run stops and says what to fix. With OpenRouter first, every model with a verified
+          OpenRouter id runs on your OpenRouter key, paid per token, even when you have a sign-in for it. The Usage
+          tab of each run's details shows the route ("OpenRouter key" for those), account and tokens it used.{" "}
+          {CLAUDE_PI_LOGIN_BILLING_NOTE}
+        </span>
+      </span>
+      <select
+        className="spark-input"
+        aria-labelledby="route-order-title"
+        title={value ? `Cora tries ${routeOrderLabel(value)}.` : "Every model launches as picked."}
+        value={current}
+        onChange={(event) =>
+          onChange(event.target.value ? normalizeCoraRouteOrder(event.target.value.split(",")) : undefined)
+        }
+        // A long order name would otherwise widen the select and squeeze the
+        // explanation beside it into a narrow column.
+        style={{ width: "auto", minWidth: 120, maxWidth: 240 }}
+      >
+        <option value="">As picked (no reordering)</option>
+        {choices.map((order) => (
+          <option key={order.join(",")} value={order.join(",")}>
+            {routeOrderOptionLabel(order)}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 // Global switches about how agents are briefed and what Codara keeps
 // installed. The settings keys stay as they are (the phone reads them under
 // the same names); only the wording here is plain language.
@@ -98,6 +174,17 @@ export default function BehaviorSection({
               coraAutoCompactPercent === null
                 ? "Cora and her workers compact automatically."
                 : `Cora and her workers compact at ${coraAutoCompactPercent}% of the context window.`,
+            )
+          }
+        />
+        <RouteOrderRow
+          value={view.coraRouteOrder === undefined ? undefined : normalizeCoraRouteOrder(view.coraRouteOrder)}
+          onChange={(coraRouteOrder) =>
+            onChange(
+              { coraRouteOrder },
+              coraRouteOrder
+                ? `Cora now tries ${routeOrderLabel(coraRouteOrder)}.`
+                : "Cora launches every model as picked.",
             )
           }
         />
