@@ -51,7 +51,8 @@ export async function disposeManagerSessions(runId) {
   await globalThis.__coraDisposeHook?.(runId);
 }`;
 
-const PI_RUNTIME_STUB = `export async function resolveCodaraPiExecutionAccount() {
+const PI_RUNTIME_STUB = `export async function listCodaraPiSkillNames() { return new Set(); }
+export async function resolveCodaraPiExecutionAccount() {
   if (globalThis.__coraAccountFailure) throw new Error(globalThis.__coraAccountFailure);
   return {
     accountProfileId: "3f9a1c72-6b0e-4a2d-9c11-5e7d8a4b2f10",

@@ -47,7 +47,8 @@ export default { spawn };`,
   "./backend-registry": `export function getBackend() { throw new Error("no manager backend in this test"); }
 export function listBackends() { return []; }
 export async function disposeManagerSessions() {}`,
-  "./pi-runtime-electron": `export async function resolveCodaraPiExecutionAccount() { throw new Error("stubbed"); }
+  "./pi-runtime-electron": `export async function listCodaraPiSkillNames() { return new Set(); }
+export async function resolveCodaraPiExecutionAccount() { throw new Error("stubbed"); }
 export async function resolveCodaraPiRuntime() { throw new Error("stubbed"); }
 export async function resolveCodaraPiLibrary() { throw new Error("stubbed"); }
 export async function resolveUserPiRuntime() { throw new Error("stubbed"); }
