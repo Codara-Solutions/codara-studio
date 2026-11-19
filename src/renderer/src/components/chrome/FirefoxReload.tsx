@@ -130,8 +130,12 @@ export function useGoneFirefoxes(state: ChromeLinkState | null, goneAfterMs = FI
     for (const linkId of wasConnected.current) if (!present.has(linkId)) wasConnected.current.delete(linkId);
     setGone((list) => (list.some((id) => !present.has(id)) ? list.filter((id) => present.has(id)) : list));
   }, [state, goneAfterMs]);
-  useEffect(() => () => {
-    for (const timer of timers.current.values()) clearTimeout(timer);
+  useEffect(() => {
+    const pending = timers.current;
+    return () => {
+      for (const timer of pending.values()) clearTimeout(timer);
+      pending.clear();
+    };
   }, []);
   return gone;
 }
