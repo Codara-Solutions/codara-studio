@@ -346,6 +346,8 @@ async function evaluateInPage(tabId, params, socket) {
   const awaitPromise = params.awaitPromise === true;
   const run = async (code) => {
     const tab = await stillUsable(tabId, socket);
+    // Firefox removes the API when the user takes the permission back.
+    if (!chrome.userScripts) throw new Error(accessError("scripts", tab.url, wasAsked("scripts", tab.url)));
     const [frame] = await withSiteError(tab, () => chrome.userScripts.execute({ js: [{ code }], target: { tabId: tab.id }, world: "MAIN", injectImmediately: true }));
     if (!frame) throw new Error(`${agentTabId(tabId)} has no page to run the script in.`);
     return frame;
