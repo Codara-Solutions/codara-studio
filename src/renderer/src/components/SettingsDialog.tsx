@@ -51,6 +51,7 @@ import {
 import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/theme-context";
 import { usePreferences } from "../preferences/usePreferences";
+import { AgentToolsSection } from "./agent-cli-updates/AgentToolsSection";
 import SessionSearchSettings from "./session-search/SessionSearchSettings";
 import { useFeatureTipsSetting } from "./feature-tips/useFeatureTipsSetting";
 import KeybindingsSection, { ChordChips } from "../shortcuts/KeybindingsSection";
@@ -165,12 +166,13 @@ function friendlyModelLabel(id: string): string {
 }
 
 // Within a vendor group, order by tier like the Cora picker: premium and
-// flagship first, fast tiers last. Unrecognized ids sort after the known
-// lineup, still selectable.
+// flagship first, fast tiers last, the newest version first within a tier.
+// Unrecognized ids sort after the known lineup, still selectable.
 const COMMIT_MODEL_TIER_RANK: Array<{ match: RegExp; rank: number }> = [
   { match: /fable/i, rank: 0 },
   { match: /-sol$/i, rank: 0 },
   { match: /opus/i, rank: 1 },
+  { match: /-astra$/i, rank: 1 },
   { match: /^grok-/i, rank: 1 },
   { match: /-terra$/i, rank: 2 },
   { match: /sonnet/i, rank: 2 },
@@ -182,12 +184,22 @@ function commitModelRank(id: string): number {
   return COMMIT_MODEL_TIER_RANK.find(({ match }) => match.test(id))?.rank ?? 9;
 }
 
+function newerModelFirst(a: string, b: string): number {
+  const va = (a.match(/\d+/g) ?? []).map(Number);
+  const vb = (b.match(/\d+/g) ?? []).map(Number);
+  for (let index = 0; index < Math.max(va.length, vb.length); index += 1) {
+    const diff = (vb[index] ?? -1) - (va[index] ?? -1);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 const COMMIT_MESSAGE_NATIVE_MODELS: { id: string; label: string; group: string }[] =
   AGENT_FAMILY_IDS.flatMap((familyId) => {
     const vendor = AGENT_FAMILIES[familyId].vendorLabel;
     return ALLOWED_WORKER_MODELS.filter((id) => familyForModelId(id) === familyId)
       .slice()
-      .sort((a, b) => commitModelRank(a) - commitModelRank(b) || a.localeCompare(b))
+      .sort((a, b) => commitModelRank(a) - commitModelRank(b) || newerModelFirst(a, b) || a.localeCompare(b))
       .map((id) => ({ id, label: friendlyModelLabel(id), group: vendor }));
   });
 
@@ -197,6 +209,8 @@ interface SettingsDialogProps {
   defaultShell: ShellInfo | null;
   workspaceCwd?: string | null;
   initialTab?: SettingsTab;
+  /** A row or section to scroll to once the tab has rendered it. */
+  initialAnchor?: string;
   onClose: () => void;
   onSave: (settings: AppSettings) => Promise<void>;
   // Click "Open" on a row in the Runs tab. Caller is expected to switch
@@ -215,6 +229,7 @@ export default function SettingsDialog({
   defaultShell,
   workspaceCwd,
   initialTab = "general",
+  initialAnchor,
   onClose,
   onSave,
   onOpenRun,
@@ -237,7 +252,9 @@ export default function SettingsDialog({
   const contentRef = useRef<HTMLDivElement>(null);
   // A search result picked on another page: scrolled to once that page has
   // rendered the row carrying this anchor.
-  const [pendingTarget, setPendingTarget] = useState<SearchTarget | null>(null);
+  const [pendingTarget, setPendingTarget] = useState<SearchTarget | null>(
+    initialAnchor ? { anchor: initialAnchor, fallbacks: [], focus: false } : null,
+  );
 
   useEffect(() => {
     setActiveResult(0);
@@ -2906,7 +2923,7 @@ function FastModeRow() {
   return (
     <ToggleRow
       title="Fast mode"
-      desc={`Cora and her workers answer faster on models that support it. ${FAST_MODE_COST_NOTE}`}
+      desc={`Cora and her workers answer faster on Codex models. Claude always runs at standard speed. ${FAST_MODE_COST_NOTE}`}
       checked={fastMode.enabled}
       onChange={() => fastMode.toggle()}
     />
@@ -2936,6 +2953,8 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
   return (
     <>
       <AccountsSettings />
+
+      <AgentToolsSection />
 
       <LaunchArgsSection />
 

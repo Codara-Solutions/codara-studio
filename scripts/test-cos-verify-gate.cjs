@@ -177,11 +177,22 @@ async function endToEnd() {
   assert.equal(failed.verify.failures, 1);
   assert.equal(failed.evidence.find((item) => item.checkId === "docs").exitCode, 7);
 
+  // Timed around the check's own command, not the whole gate: the gate's git
+  // calls before it (base fetch, merge base, diff) took most of 4 s on a busy
+  // CI runner (PR 228's pool, 17 Nov).
+  const runs = [];
+  const timedRunner = async (command, options) => {
+    const started = Date.now();
+    const result = await runCommand(command, options);
+    runs.push({ command, ms: Date.now() - started, result });
+    return result;
+  };
   const slow = makeRepo("slow", { checks: [{ id: "slow", run: "sleep 5", timeoutSec: 1 }] });
   const third = await verifyingTask(store);
-  const started = Date.now();
-  const timedOut = await runGate({ store, workspaceId: WS, taskId: third.id, runId: third.runId, cwd: slow, runCommand });
-  assert.ok(Date.now() - started < 4000, "the timeout kills the command");
+  const timedOut = await runGate({ store, workspaceId: WS, taskId: third.id, runId: third.runId, cwd: slow, runCommand: timedRunner });
+  const sleeper = runs.find((run) => run.command === "sleep 5");
+  assert.ok(sleeper && sleeper.result.timedOut, "the check ran and hit its timeout");
+  assert.ok(sleeper.ms < 4000, `the timeout kills the command (${sleeper.ms} ms for a 5 s sleep with a 1 s limit)`);
   assert.equal(timedOut.evidence[0].ok, false);
   assert.match(fs.readFileSync(timedOut.evidence[0].artifact, "utf8"), /timed out/);
 }

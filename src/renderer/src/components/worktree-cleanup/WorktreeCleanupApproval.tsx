@@ -14,10 +14,11 @@ import "./worktree-cleanup.css";
 
 // An agent asked to remove worktrees through codara_worktree_cleanup. The
 // user sees exactly what would go, with the agent's recommendation and its
-// reason, and ticks what may go: only safe ones start ticked, a worktree with
-// unsaved changes or in use cannot be ticked at all, and deleting a merged
-// branch on the remote is a separate, unticked choice per worktree. Nothing
-// happens until the user presses Remove; closing the dialog declines.
+// reason, and ticks what may go: nothing starts ticked, so a stray Enter or
+// click removes nothing; a worktree with unsaved changes or in use cannot be
+// ticked at all, and deleting a merged branch on the remote is a separate,
+// unticked choice per worktree. Nothing happens until the user presses
+// Remove, which names how many go; closing the dialog declines.
 
 const ADVICE_TONE: Record<WorktreeAdvice, BadgeTone> = { safe: "ok", review: "warn", keep: "neutral" };
 
@@ -32,7 +33,7 @@ function errorMessage(err: unknown): string {
 }
 
 function initialChoices(items: readonly WorktreeCleanupApprovalItem[]): Record<string, Choice> {
-  return Object.fromEntries(items.map((item) => [checkKey(item), { remove: item.preselected, deleteRemoteBranch: false }]));
+  return Object.fromEntries(items.map((item) => [checkKey(item), { remove: false, deleteRemoteBranch: false }]));
 }
 
 function ApprovalItem({
@@ -70,7 +71,7 @@ function ApprovalItem({
         {item.path}
       </div>
       <div className="wtc-review-detail">{item.reason}</div>
-      {blocked ? <div className="wtc-review-blocker">{item.blocked}</div> : null}
+      {blocked && item.blocked !== item.reason ? <div className="wtc-review-blocker">{item.blocked}</div> : null}
       {!blocked && item.ignored.length ? (
         <div className="wtc-review-note">{`Removing it deletes these ignored files: ${item.ignored.join(", ")}.`}</div>
       ) : null}
@@ -227,7 +228,8 @@ export default function WorktreeCleanupApproval({
   const until = new Date(request.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   return (
-    <div className="spark-scrim wtc-scrim">
+    <div className="wtc-layer">
+      <div className="spark-scrim" />
       <div
         ref={dialogRef}
         role="dialog"

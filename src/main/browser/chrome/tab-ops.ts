@@ -6,6 +6,19 @@
 // both; input goes through the DevTools protocol, which needs neither focus
 // nor a visible tab.
 
+import { Script } from "node:vm";
+
+import {
+  CHANGES_STOP_EXPRESSION,
+  describeAlreadyThere,
+  describeChange,
+  describePage,
+  describeTyped,
+  pageAnsweredFine,
+  PAGE_LOAD_CHECK_EXPRESSION,
+  sameUrl,
+  type PageState,
+} from "../../../shared/browser-change";
 import { createPreviewDOM } from "../../../shared/preview-dom";
 import { createPreviewNames } from "../../../shared/preview-names";
 import { snapshotProbe } from "../../../renderer/src/components/Preview/domSnapshot";
@@ -41,9 +54,43 @@ function checked<T extends { ok?: boolean; error?: string }>(value: T): T {
   return value;
 }
 
+// Each tab's last navigate by an agent, so a repeated one can say what changed since.
+const lastNavigates = new Map<string, { title: string; at: number; failed?: boolean }>();
+const LAST_NAVIGATES_MAX = 200;
+const LOAD_CHECK_MS = 400;
+
+async function pageLoadedFine(target: BrowserTarget, url: string): Promise<boolean> {
+  const page = await Promise.race([
+    target.evaluate(PAGE_LOAD_CHECK_EXPRESSION).catch(() => null),
+    new Promise((resolve) => setTimeout(() => resolve(null), LOAD_CHECK_MS)),
+  ]);
+  return pageAnsweredFine(page, url);
+}
+
+function rememberNavigate(ref: string, title: string, failed = false): void {
+  lastNavigates.delete(ref);
+  lastNavigates.set(ref, { title, at: Date.now(), ...(failed ? { failed } : {}) });
+  if (lastNavigates.size > LAST_NAVIGATES_MAX) lastNavigates.delete(lastNavigates.keys().next().value as string);
+}
+
 export async function navigate(target: BrowserTarget, params: Params): Promise<unknown> {
   const url = str(params, "url");
   if (!url) throw new Error("navigate requires 'url'");
+  // The page the tab already shows is not loaded again, as on Codara tabs,
+  // unless its last load failed or answered with an error status.
+  if (params.reload !== true && lastNavigates.get(target.ref)?.failed !== true) {
+    const shown = await target.info().catch(() => null);
+    if (shown && sameUrl(shown.url, url) && (await pageLoadedFine(target, url))) {
+      return {
+        url: shown.url,
+        title: shown.title,
+        tabId: target.ref,
+        opened: false,
+        alreadyThere: true,
+        change: describeAlreadyThere(shown, lastNavigates.get(target.ref) ?? null),
+      };
+    }
+  }
   const session = target.session;
   // The load events below arrive only with the Page domain on; without it
   // every navigation would wait out the whole timeout.
@@ -61,14 +108,18 @@ export async function navigate(target: BrowserTarget, params: Params): Promise<u
       }
     });
     const result = await session.send<{ errorText?: string; loaderId?: string }>("Page.navigate", { url });
-    if (result.errorText) throw new Error(`The browser could not load ${url}: ${result.errorText}`);
+    if (result.errorText) {
+      rememberNavigate(target.ref, "", true);
+      throw new Error(`The browser could not load ${url}: ${result.errorText}`);
+    }
     // A same-document navigation (a #hash change) fires no load event.
     if (result.loaderId) await loaded;
   } finally {
     void releasePage().catch(() => {});
   }
   const info = await target.info();
-  return { url: info.url, title: info.title, tabId: target.ref, opened: false };
+  rememberNavigate(target.ref, info.title);
+  return { url: info.url, title: info.title, tabId: target.ref, opened: false, change: `Loaded ${describePage(info)}.` };
 }
 
 export async function url(target: BrowserTarget): Promise<unknown> {
@@ -88,6 +139,20 @@ export function snapshot(target: BrowserTarget, params: Params): Promise<unknown
 }
 
 /**
+ * Whether a snippet parses as one expression. Decided here, compiled and
+ * never run: a page whose policy forbids `new Function` would make every
+ * snippet look like an expression and a statement body fail to parse.
+ */
+export function isExpressionSnippet(code: string): boolean {
+  try {
+    new Script(`(function () { return (${code}\n); })`);
+    return true;
+  } catch (error) {
+    return !(error instanceof SyntaxError);
+  }
+}
+
+/**
  * The last expression's value, like evaluate on a Codara tab: a snippet that
  * parses as one expression is returned as is, anything else runs as a
  * function body where `return` yields the value. The parse check compiles
@@ -97,10 +162,7 @@ export async function evaluate(target: BrowserTarget, params: Params): Promise<u
   const code = str(params, "code");
   if (!code) throw new Error("evaluate requires 'code'");
   const awaitPromise = params.awaitPromise === true;
-  const isExpression = await run<boolean>(
-    target,
-    `(() => { try { new Function(${JSON.stringify(`return (${code}\n)`)}); return true; } catch (e) { if (e instanceof SyntaxError) return false; return true; } })()`,
-  ).catch(() => true);
+  const isExpression = isExpressionSnippet(code);
   const inner = isExpression ? `(${code}\n)` : `{ ${code}\n}`;
   const expression = awaitPromise
     ? `Promise.resolve((async () => ${inner})()).then((__r) => JSON.parse(JSON.stringify(__r ?? null)))`
@@ -108,10 +170,37 @@ export async function evaluate(target: BrowserTarget, params: Params): Promise<u
   return { value: await run(target, expression) };
 }
 
+/** Point the agent's cursor on the page at the element it acts on; never fails the action. */
+async function pointAt(target: BrowserTarget, selector: string, action: string): Promise<void> {
+  const spot = await point(target, { selector }).catch(() => null);
+  if (spot) await target.showActivity(action, spot).catch(() => {});
+}
+
+// How long a click's page gets to react before the result describes it, and
+// how long reading that may take before the page counts as still loading.
+const CLICK_SETTLE_MS = 150;
+const CLICK_READ_MS = 400;
+
+async function pageState(target: BrowserTarget): Promise<PageState | null> {
+  return target.info().then((info) => ({ url: info.url, title: info.title }), () => null);
+}
+
 export async function click(target: BrowserTarget, params: Params): Promise<unknown> {
   const selector = str(params, "selector");
   if (!selector) throw new Error("click requires 'selector'");
-  return checked(await run<{ ok?: boolean; error?: string }>(target, probe(clickProbe, { selector })));
+  await pointAt(target, selector, "click");
+  const before = await pageState(target);
+  const result = checked(await run<{ ok?: boolean; error?: string }>(target, probe(clickProbe, { selector, watch: true })));
+  if (!before) return result;
+  await new Promise((resolve) => setTimeout(resolve, CLICK_SETTLE_MS));
+  const read = await Promise.race([
+    target.evaluate<{ changes?: unknown }>(CHANGES_STOP_EXPRESSION).catch(() => null),
+    new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), CLICK_READ_MS)),
+  ]);
+  const after = await Promise.race([pageState(target), new Promise<null>((resolve) => setTimeout(() => resolve(null), CLICK_READ_MS))]);
+  if (!after) return { ...result, change: "The page is still loading after the click." };
+  const changes = read && typeof read.changes === "number" ? read.changes : null;
+  return { ...result, change: describeChange(before, { ...after, loading: read === undefined }, changes) };
 }
 
 export async function type(target: BrowserTarget, params: Params): Promise<unknown> {
@@ -119,7 +208,9 @@ export async function type(target: BrowserTarget, params: Params): Promise<unkno
   const text = str(params, "text");
   if (!selector) throw new Error("type requires 'selector'");
   if (text === null) throw new Error("type requires 'text'");
-  return checked(await run<{ ok?: boolean; error?: string }>(target, probe(typeProbe, { selector, text, clearFirst: params.clearFirst === true })));
+  await pointAt(target, selector, "type");
+  const result = checked(await run<{ ok?: boolean; error?: string }>(target, probe(typeProbe, { selector, text, clearFirst: params.clearFirst === true })));
+  return { ...result, change: describeTyped(result) };
 }
 
 // Stringified into the page: the element's viewport center, scrolled into view first unless asked not to.
@@ -329,7 +420,7 @@ export async function networkEntries(target: BrowserTarget, params: Params): Pro
 export async function resize(target: BrowserTarget, params: Params): Promise<unknown> {
   const width = num(params, "width");
   const height = num(params, "height");
-  if (!width || !height) throw new Error("resize requires numeric 'width' and 'height'");
+  if (!width || !height || width < 0 || height < 0) throw new Error("resize needs width and height in CSS pixels above 0, such as 375 and 667.");
   // The user's window keeps its size; the page lays out at the asked size.
   // It is the tab's emulated viewport, so emulate reset clears it and the
   // emulation state no longer names a device it replaced.

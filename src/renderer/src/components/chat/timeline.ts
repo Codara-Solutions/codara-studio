@@ -64,6 +64,8 @@ export interface ChatWorker {
   diff?: WorkerDiffSummary;
   /** Set while another attempt is still owed to this worker. */
   pending?: ChatPendingAttempt;
+  /** The latest attempt across the lineage: the one the worker view opens. */
+  attemptId?: string;
 }
 
 // An attempt the run-store still owes a logical worker: the task is queued (or
@@ -547,20 +549,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   orderedSteps.forEach((step, i) => {
     const stepWorkers: ChatWorker[] = workers
       .filter((worker) => worker.task.stepId === step.id)
-      .map((worker) => ({
-        // Keyed on the root of the supersedes chain so a runtime fallback
-        // updates the row in place instead of swapping one out for another.
-        id: logicalWorkerKey(worker),
-        taskId: worker.task.id,
-        title: worker.task.title,
-        runtime: worker.task.runtimePreference,
-        status: worker.task.status,
-        runtimeState: worker.latestAttempt?.runtimeState,
-        attemptCount: worker.attempts.length,
-        model: workerRowModel(worker, modelOptions),
-        diff: worker.latestAttempt?.diffSummary,
-        pending: pendingAttemptFor(worker, modelOptions) ?? undefined,
-      }));
+      .map((worker) => chatWorker(worker, modelOptions));
     items.push({
       kind: "step",
       id: step.id,
@@ -626,6 +615,40 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
     merged.push(item);
   }
   return merged;
+}
+
+function chatWorker(worker: LogicalWorker, modelOptions: WorkerModelOptions): ChatWorker {
+  return {
+    // Keyed on the root of the supersedes chain so a runtime fallback
+    // updates the row in place instead of swapping one out for another.
+    id: logicalWorkerKey(worker),
+    taskId: worker.task.id,
+    title: worker.task.title,
+    runtime: worker.task.runtimePreference,
+    status: worker.task.status,
+    runtimeState: worker.latestAttempt?.runtimeState,
+    attemptCount: worker.attempts.length,
+    model: workerRowModel(worker, modelOptions),
+    diff: worker.latestAttempt?.diffSummary,
+    pending: pendingAttemptFor(worker, modelOptions) ?? undefined,
+    attemptId: worker.latestAttempt?.id,
+  };
+}
+
+/** Every worker of the chat in step-card order: what the worker view's arrows step through. */
+export function listChatWorkers(run: RunState): ChatWorker[] {
+  const modelOptions: WorkerModelOptions = {
+    isAutomationRun: isAutomationRun(run),
+    isDirectRun: run.executionMode === "direct" && !run.automationId,
+  };
+  const workers = logicalWorkers(run);
+  return [...run.steps]
+    .sort((a, b) => a.index - b.index)
+    .flatMap((step) =>
+      workers
+        .filter((worker) => worker.task.stepId === step.id)
+        .map((worker) => chatWorker(worker, modelOptions)),
+    );
 }
 
 // Two copies close enough in time to be one send, on the pre-sort pass's own

@@ -24,6 +24,19 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Skip and stop must reach a call that is running. A fixed sleep before them
+// raced the sandbox start on a slow machine: the stop landed before the
+// second agent was even issued. Wait for the call itself instead.
+async function callRunning(runtime, index, ms = 15_000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const call = runtime.snapshot().phases.flatMap((phase) => phase.calls)[index];
+    if (call?.status === "running") return;
+    if (Date.now() > deadline) throw new Error(`call ${index} was not running after ${ms} ms: ${JSON.stringify(call)}`);
+    await sleep(10);
+  }
+}
+
 // Agents answer from their prompt: "fail:" throws inside the executor,
 // "null:" ends without a result, "delay=N" waits N ms, "tokens=N" reports
 // usage, "live=N" reports N tokens while still running. Everything else
@@ -256,7 +269,7 @@ async function main() {
       `return await parallel([() => agent("delay=4000 slow"), () => agent("fast")]);`,
       {
         async during(runtime) {
-          await sleep(300);
+          await callRunning(runtime, 0);
           check("skip finds the live call", runtime.skip(0) === true);
         },
       },
@@ -274,7 +287,7 @@ async function main() {
         journal,
         async during(runtime) {
           runtimeRef = runtime;
-          await sleep(400);
+          await callRunning(runtime, 1);
           await runtime.stop();
         },
       },
@@ -306,7 +319,7 @@ async function main() {
     await runScript(body, {
       journal,
       async during(runtime) {
-        await sleep(400);
+        await callRunning(runtime, 1);
         await runtime.stop();
       },
     });
@@ -328,7 +341,7 @@ async function main() {
       journal,
       async during(runtime) {
         runtimeRef = runtime;
-        await sleep(400);
+        await callRunning(runtime, 1);
         await runtime.stop();
       },
     });

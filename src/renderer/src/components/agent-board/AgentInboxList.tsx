@@ -93,6 +93,8 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
+  // Rows whose subagents' list is open; closed on every start, like a fold.
+  const [subagentsOpen, setSubagentsOpen] = useState<ReadonlySet<string>>(() => new Set());
   const [merging, setMerging] = useState<ReadonlySet<string>>(() => new Set());
   const [confirm, setConfirm] = useState<MergeConfirmRequest | null>(null);
   const [confirmResult, setConfirmResult] = useState<GitHubMergeResult | null>(null);
@@ -173,6 +175,13 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
     setPoint(null);
     menuAnchor.current = anchor;
     setMenu({ key: row.key, view: "snooze", openedAt: Date.now() });
+  }, []);
+  const onToggleSubagents = useCallback((key: string) => {
+    setSubagentsOpen((current) => {
+      const next = new Set(current);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
   }, []);
   const onRename = useCallback((row: Row, name: string | null) => {
     setRenaming(null);
@@ -280,6 +289,8 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
           focusable={row.key === tabStop}
           merging={merging.has(row.key)}
           renaming={renaming === row.key}
+          subagentsOpen={subagentsOpen.has(row.key)}
+          onToggleSubagents={onToggleSubagents}
           onOpen={onOpen}
           onMenu={onMenu}
           onSnooze={onSnooze}

@@ -72,6 +72,23 @@ const PI_MODELS: ChatModelOption[] = [
     backend: "pi",
     effortLevels,
   })),
+  // Curated so the picker offers GPT-6.2 even before (or without) the live
+  // catalog, which Pi 1.5.2's bundled data predates. Efforts are the ones
+  // OpenAI's Codex model list serves for both (low to max; Studio has no
+  // "ultra"), and the API rejects "none":
+  // https://developers.openai.com/api/docs/guides/reasoning
+  {
+    id: "gpt-6.2-sol",
+    label: "GPT-6.2 Sol",
+    backend: "pi",
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
+  {
+    id: "gpt-6.2-astra",
+    label: "GPT-6.2 Astra",
+    backend: "pi",
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
   {
     id: "claude-fable-5",
     label: "Claude Fable 5",
@@ -133,8 +150,10 @@ const TIER_RANK = {
   unknown: 6,
 } as const;
 
+// Every GPT-6 Sol and Astra is "latest"; sortByRank orders them newest
+// generation first, then Sol before Astra as in Codex's own model list.
 const MODEL_RANK: Array<{ match: RegExp; rank: number }> = [
-  { match: /^gpt-6-astra$/i, rank: TIER_RANK.latest },
+  { match: /^gpt-6(\.\d+)?-(sol|astra)$/i, rank: TIER_RANK.latest },
   { match: /^gpt-5\.6-sol$/i, rank: TIER_RANK.recommended },
   { match: /fable/i, rank: TIER_RANK.premium },
   { match: /opus/i, rank: TIER_RANK.flagship },
@@ -326,15 +345,34 @@ function mergeCatalogModels(
  * Order a group deliberately instead of inheriting whatever order the vendor
  * catalog happened to emit. Rank comes from MODEL_RANK, so the latest model
  * leads its vendor group and the rest descend by capability. Ties break on
- * label so the list cannot reshuffle between refreshes.
+ * the OpenAI generation, newest first (by label, "GPT-6 Astra" would sort
+ * above "GPT-6.2 Astra"), then Sol before Astra, then on label so the list
+ * cannot reshuffle between refreshes.
  */
 function sortByRank(models: ChatModelOption[]): ChatModelOption[] {
   return [...models].sort((a, b) => {
     const rankA = a.rank ?? modelRankFor(a.id);
     const rankB = b.rank ?? modelRankFor(b.id);
     if (rankA !== rankB) return rankA - rankB;
+    const baseA = decomposeModelId(a.id).baseId;
+    const baseB = decomposeModelId(b.id).baseId;
+    const generationA = codexGeneration(baseA);
+    const generationB = codexGeneration(baseB);
+    if (generationA && generationB) {
+      const newer = compareVersions(generationB, generationA);
+      if (newer !== 0) return newer;
+      const family = codexFamilyOrder(baseA) - codexFamilyOrder(baseB);
+      if (family !== 0) return family;
+    }
     return a.label.localeCompare(b.label);
   });
+}
+
+const CODEX_FAMILY_ORDER = ["sol", "astra", "terra", "luna"];
+
+function codexFamilyOrder(baseId: string): number {
+  const index = CODEX_FAMILY_ORDER.findIndex((family) => baseId.toLowerCase().endsWith(`-${family}`));
+  return index < 0 ? CODEX_FAMILY_ORDER.length : index;
 }
 
 /** The Pi group spans both providers, so it takes the catalog unscoped. */
@@ -355,13 +393,18 @@ function mergePiModels(
 //
 // The two providers need different rules because they version differently:
 //   * OpenAI keeps the supported variants from the shared catalog alongside
-//     the newest live generation. Discovering Astra does not retire Sol,
-//     Terra, or Luna; those remain supported elsewhere in the app too.
+//     the two newest live generations. Discovering Astra does not retire Sol,
+//     Terra, or Luna; those remain supported elsewhere in the app too. Two,
+//     so a release (6.2) does not take away the generation a user picked
+//     yesterday (6.1) or reset a saved pick of it.
 //   * Anthropic ships tiers on independent cadences (Sonnet 5 alongside Opus
 //     4.8), so keep the newest release of each tier instead. Anchoring to a
 //     single highest version would delete a whole tier the moment one tier
 //     moved ahead — including offline, where the curated rows are all we have.
 // ---------------------------------------------------------------------------
+
+/** OpenAI generations the default lineup shows, newest first. */
+const CURRENT_OPENAI_GENERATIONS = 2;
 
 /** Small/cheap tiers Cora does not offer as a chat model. */
 const MINOR_TIER_PATTERN = /haiku|mini|spark/i;
@@ -411,20 +454,21 @@ function keepCurrentGeneration(
   }
 
   if (provider === "openai") {
-    let newest: number[] | null = null;
+    const generations: number[][] = [];
     for (const model of models) {
       const generation = codexGeneration(decomposeModelId(model.id).baseId);
-      if (generation && (newest === null || compareVersions(generation, newest) > 0)) {
-        newest = generation;
+      if (generation && !generations.some((seen) => compareVersions(seen, generation) === 0)) {
+        generations.push(generation);
       }
     }
-    if (newest === null) return models;
+    if (generations.length === 0) return models;
+    const current = generations.sort((a, b) => compareVersions(b, a)).slice(0, CURRENT_OPENAI_GENERATIONS);
     return models.filter((model) => {
       const baseId = decomposeModelId(model.id).baseId;
       if (MINOR_TIER_PATTERN.test(baseId)) return false;
       if (CODEX_MODEL_CATALOG.some((entry) => entry.id === baseId)) return true;
       const generation = codexGeneration(baseId);
-      return generation === null || compareVersions(generation, newest) === 0;
+      return generation === null || current.some((kept) => compareVersions(generation, kept) === 0);
     });
   }
 

@@ -75,12 +75,146 @@ cursors in Figma for the name tag beside the arrow.
   banner offers Undo for six seconds; closing the tab forgets the stop.
 - The banner sits on the overlay surface (`.spark-glass--strong
   .spark-overlay-surface`), the same read tier as the pointing panels.
-- On a tab of the user's own Chrome there is no layer in the page, which
-  would need new extension permissions. Chrome shows its own "Codara started
-  debugging this browser" bar, the extension's button names the agent while
-  it acts, and the popup's Stop ends it there.
+- On a tab of the user's own Chrome the extension draws the same hand in
+  the page; see "The agent on the user's Chrome page" below.
 - The component lives in `components/Preview/agent-presence/` with its own
   CSS and store; BrowserPane only mounts it, so the toolbar can move freely.
+
+## Connecting a browser from Studio (2026-11)
+
+**Chosen:** variant I of two from the same options page (a guided card, one
+step at a time; a live checklist with both browsers side by side): a card in
+Settings > Browser and in the first-run guide's tools step (optional there)
+that shows only the current step, Add, Pair, Share a tab, and moves on by
+itself.
+
+**Why:** loading the extension meant reading four steps and then finding
+the pairing prompt somewhere else; nothing said which step you were on.
+
+**Rules:**
+
+- Each step ends on what Codara sees, never on a click in the card: a
+  pairing request (the extension was added and Connect was pressed), a
+  paired browser that is connected now, a shared tab in one. Codara cannot
+  see an extension that has not pressed Connect, by design, so Add waits for
+  that. A pairing whose browser is not connected does not count: the card
+  says "<browser> is paired but not connected: open it, or add the extension
+  again" at Pair.
+- With the link off or no free port, the card shows why instead of steps.
+- A pairing request always shows, even on a finished card, and the card asks
+  it itself: while a card is on screen the floating prompt stays away, so
+  there is one Allow.
+- How the extension gets in is one route value. Today it is the unpacked
+  folder; when the Chrome Web Store listing is live, the store route turns
+  Add into one "Add from Chrome Web Store" button (it opens the page in the
+  default browser, and says so) with "Load unpacked instead" under it, and
+  nothing else changes.
+- Firefox is one line ("Firefox: coming later") until its build exists.
+
+## The extension's popup (2026-11)
+
+**Chosen:** variant A, "Tidy", of four built for the owner (today's popup,
+A Tidy, B Live first, C One question). The options page with the mocks and
+their screenshots is archived as
+`Archive/2026-11-17-studio-browser-extension-options/` in the company code
+folder. One switch for this tab next to its title, a segmented **Agents may
+use** choice (Tabs I pick, This window, Everything) in place of the separate
+window and every-tab switches, the agent named by its name and colour with
+what it did last, and the shared tabs with Stop and Stop all.
+
+**Why:** the old popup had five switches, two copy buttons and a list of tab
+ids. Agents no longer need copied ids (`codara_preview_list` and
+`codara_preview_chrome` find shared tabs), the stop the user needs most sat at
+the bottom, and on pages Chrome keeps extensions off (the Web Store, browser
+pages) it still showed a share button that could never work.
+
+**Rules:**
+
+- The popup uses Studio's tokens (Codara Daylight when the browser is light,
+  Codara Classic when it is dark) copied into `popup.css`, and no colour of
+  its own. An agent's dot uses `--agent-<runtime>`, otherwise the accent.
+- Each reach is a view of the sharing state that already existed (every tab,
+  shared windows, tabs shared one by one, stopped tabs): picking one never
+  shares more than the switches it replaced, and what a user had before the
+  update reads back as the same reach. Narrowing from Everything keeps the
+  tabs the user stopped. `reachOf` and `reachPatch` in `lib/policy.js` hold
+  the mapping and its tests. Everything still asks first.
+- Under the choice, one line says what the reach includes. Opening new tabs
+  keeps its own switch and stays off until the user turns it on.
+- No tab ids in the main view. The id and its copy button sit under
+  **Details** for the current tab.
+- A page no extension may touch, or a site on the blocked list, shows one
+  line saying why and no switch, details or cookie row: never a control that
+  cannot work.
+- The cookie switch never claims more than it does: one line under it says
+  that even when off, agents see site storage, non-HttpOnly cookies and the
+  tab's requests and responses, sign-in headers included. The switch gates
+  only cookie headers, HttpOnly cookies and the storage commands.
+- Keyboard: the reach is a radio group with one tab stop and arrow keys; the
+  switches are native checkboxes with `role="switch"`; the 1 s refresh never
+  rebuilds a list that did not change, so focus stays put.
+
+## The agent on the user's Chrome page (2026-11)
+
+**Chosen:** variant 3 of four from the same options page (labelled pointer;
+halo and ripple; pointer, page-edge glow and Stop pill; nothing in the
+page): a pointer in the agent's colour with its name, a thin glow around the
+page in that colour, and a "<agent> working" pill with Stop at the bottom.
+The owner asked for a way to remove the glow: **Glow around the page**, and
+**Show the agent's pointer and Stop** to turn the whole overlay off, both in
+the extension's popup and Settings > Browser, on by default.
+
+**Why:** on the user's own Chrome nothing in the page said an agent was
+acting, and the only stop at hand was Chrome's debugging bar Cancel, which
+stops sharing every tab.
+
+**Rules:**
+
+- Drawn through the debugger session the extension already holds: an
+  isolated world (`Page.createIsolatedWorld`), a closed shadow root hung off
+  `<html>` (outside `<body>`, where the snapshot reads) and `aria-hidden`.
+  No new permission, no content script. Styles go through a constructed
+  sheet (`adoptedStyleSheets`), which a page's `style-src` cannot block. The
+  overlay's world name and execution context are refused to agents.
+- It never takes the user's input: `pointer-events: none` everywhere except
+  the pill, whose events stop in the shadow root. The pill lets clicks
+  through while the agent's input or script runs (at most two seconds), so an
+  agent cannot press Stop on itself and a selector click on a fixed element
+  under the pill still lands. Stop is mouse only (out of the page's tab order); the
+  popup is the keyboard path.
+- Never in what the agent reads: screenshots, DOM and accessibility captures
+  take the overlay out for the call and put it back, and a screencast keeps
+  it out until it stops. Forwarded DOM events leave out the host (tracked by
+  its backend node id) and its subtree. Nothing in it reads the page; the
+  only thing that leaves it is the user's Stop.
+- It does not hide from the page. A page's scripts can notice the host
+  element and remove it; they cannot read the agent's name, its colour or
+  press Stop for the user (closed shadow root, trusted clicks only).
+- Stop refuses that agent's next calls on that tab only, with the same
+  message as on a Codara tab. The pill then says "Stopped <agent>. Give it
+  back from the Codara popup." and has no button: the page never offers
+  Undo, so the spot that said Stop cannot take it back, and a page cannot
+  lure a click into it. Give back lives in the popup and in Settings >
+  Browser. Codara owns the stop list (`chrome-link/presence-stops.json`,
+  written aside and renamed) and sends it to the extension on connect and on
+  every change; the extension replaces its copy with it, never merges. A
+  Stop or give back in the browser is a request: the pill says "Stopped"
+  only once Codara confirms, the tab relays nothing while a Stop waits, and
+  one pressed while Codara is away is sent first after the reconnect. A
+  stop belongs to one browser session (an id the extension keeps in session
+  storage), so a reused tab id after a browser restart is never refused. It
+  ends only on give back, when the tab closes or stops being shared, or when
+  the browser is unpaired. An unreadable list is kept aside as `.corrupt`
+  and Codara fails closed: agents are refused on that browser's tabs until
+  the user shares each again. Other agents and other tabs are unaffected.
+- A modal dialog or fullscreen element covers the pill, and a page that
+  removes the host takes Stop with it until the next call; the popup's Stop
+  is the fallback that always works. Printing leaves the overlay out.
+- It shows only on attached, shared tabs, goes away eight seconds after the
+  agent's last call, is drawn again after a navigation, and removes itself
+  if the debugger session ends without a goodbye.
+- The pointer glides (320 ms) only without `prefers-reduced-motion`. Colours
+  are Studio's agent tokens, light or dark with the page's scheme.
 
 ## Tab links and agent tab approvals (2026-10)
 
@@ -279,8 +413,9 @@ there a process that lost its parent stays in Other apps.
 
 ## Source Control (2026-11)
 
-**Chosen:** layout B, agent lanes, with layout A's small commit box docked at
-the bottom. One lane per checkout of the active project: line 1 is its branch
+**Chosen:** layout B, agent lanes, with layout A's small commit box (docked at
+the bottom until 2026-11-17; now at the top of the active lane, see "VS Code
+layout, one scroll" below). One lane per checkout of the active project: line 1 is its branch
 with the pull request mark, line 2 its most urgent agent's state word (or "No
 agent · from main") and its diff size since the base, the same two lines a
 worktree has in the rail. The checkout the window is on is a lane too, last, and
@@ -320,8 +455,8 @@ VS Code (the commit box as part of the source control view).
 - Failed checks are never a green tick: the journey's step reads failed, ✕ in
   `--danger`, with the same glyphs as `PullRequestMark`.
 - An SSH workspace shows only its own lane: every other lane would be a round trip.
-- The list and the commit box are separate columns of the panel, so the box never
-  covers a lane. A lane unfolded near the bottom scrolls its buttons into view.
+- The commit box scrolls with the list, so it never covers a lane. A lane unfolded
+  near the bottom scrolls its buttons into view.
 
 **Start an agent and review with an agent (2026-11):** New agent sits above the
 lanes: a task, Claude Code or Codex, the branch to start from, in a new worktree by
@@ -353,6 +488,69 @@ is built to remove: `lane-collisions.ts`, `git-lane-collisions.ts`,
 for SSH workspaces and on git older than 2.38. It runs with no click behind it, so it
 also stays out of any repository where a merge could start a program the repository
 configures: a custom merge driver, a partial clone, an initialized submodule.
+
+**VS Code layout, one scroll (2026-11-17):** Etienne picked option G, "closest to
+VS Code, one scroll", from three VS Code shaped mocks drawn at the rail's real width
+in Studio's tokens. A text tab strip sits at the top of the panel: Changes, Issues,
+Pull request, Stashes. Changes is the working view; the GitHub issue and pull request
+list moves to Issues, the four steps (commit, share for review, checks, merge) and
+the branch's pull request to Pull request, and the stash list to Stashes. Nothing is
+dropped, only moved. It lands as a stack: the tabs first, then the compact change
+lists with the commit box on top, then the history graph opened in place.
+
+**Why:** "easier on the eyes, easier to understand, to help you understand rather
+than making work from there." The panel had grown into one long column where a
+journey, an issue queue and a stash list pushed the files and the history apart.
+
+**Rules:**
+
+- Tabs are text with an accent rule under the selected one, counts as quiet text on
+  `--hover-strong`, never a coloured badge. On a rail under 300px the tabs tighten and
+  Pull request reads PR, so all four stay on screen.
+- Tab pages stay mounted while hidden. Issues and Pull request share one GitHub read,
+  so the Issues count is known before the tab is opened and switching tabs never costs
+  a `gh` run.
+- Arrow keys, Home and End move between tabs (WAI-ARIA tabs).
+- The commit box sits under the active checkout's branch line, before the files:
+  branch, message, Commit. With that lane folded, or no lane to hold it, the box
+  keeps the top of the list, so it is never gone. Commit is the panel's one
+  accent-filled button; its arrow holds Amend and Split, and the menu opens above
+  the arrow when it would not fit below. The message is one quiet line until it is
+  written in. The branch line says "in sync" or "not published" in a word.
+- A rejected commit's hook output and Fix with agent show with the error strip
+  under the tab strip, not beside the box, so they are in view wherever it is.
+- Staged Changes and Changes are flat lists, one 22px row per file: the name in ink,
+  its folder dimmed after it, the line counts, the status letter. Hover trades the
+  counts for Open, Discard and Stage (Unstage when staged); the letter stays, and
+  hovering it says what it means ("U: new file git does not track yet").
+- Status letters are calm: an edit is the accent, a new file grey, only a deletion or
+  a conflict red. Nothing in the lists is yellow; yellow is kept for what needs you.
+- New files git does not track yet, two or more under a folder that holds no other
+  change, fold into one grey row for the shallowest such folder with "N files". It
+  unfolds in place, and its hover stages or discards all of them (discard asks for a
+  second click, since it deletes files git never had). A lone new file
+  keeps its own row. The fold is computed in the renderer (`change-list.ts`); git
+  still lists every file, so the diff view can open each one.
+- Staged Changes never folds: what is about to be committed shows file by file.
+- A folded folder acts on exactly the files its row shows. Discard arms a confirm
+  that names the count and the folder ("Delete 2 files in dist/?"); a double-click
+  or a click within 400 ms of arming does not confirm. Before deleting, the folder
+  is listed again; if a file appeared or went since the row was drawn, nothing is
+  deleted and the row is redrawn. Ignored files and nested repositories stay, and
+  a folder is removed only once empty.
+- Paths go to git as `:(top,literal)<path>`: names, never patterns, from the root.
+- A workspace opened below the repository root folds only folders inside itself;
+  changes elsewhere in the repository keep their own rows, marked "outside this
+  workspace".
+- The History graph is open by default and is the last thing on the Changes tab,
+  so it takes whatever room the lists leave. Its header holds Fetch and Read the
+  history again, on hover like the other sections.
+- A commit click opens its files in place under its row, as the same compact rows
+  (name, dimmed folder, counts, letter), and the lanes running past it carry on
+  down the side. One commit is open at a time; a second click folds it. A file
+  opens its diff in that commit as a tab (double-click keeps the tab). The full
+  inspector (message, inline diffs, arrow keys) is "Open full view" under the
+  files and View Changes in the row's menu.
 
 ## Worktrees in the rail (2026-10)
 
@@ -524,6 +722,18 @@ section headers, the snooze presets and the undo notice in the footer).
   to the bottom; in use that list read as rows with no section (2026-11), so
   it became the Needs you and Done sections, open by default. Needs you's
   count is the switch's badge.
+- Main agents only (2026-11, option A of four): a background subagent whose
+  starting session is on the tab is no row of its own but a "1 subagent"
+  chip on that session's third line (a `--info` dot while one works,
+  `--warn` while one waits). The chip opens one muted line per subagent in
+  place: title and time, the branch on hover. An orphan (its session
+  closed) stays a normal row; every count is main agents only. A subagent
+  waiting on the user lifts its parent into Needs you (its count and the
+  tab's badge). Under a settled or snoozed parent it is its own Needs you
+  row instead, so the parent can be put away while it waits. A settled row
+  is one line with no chip; a subagent that starts or shows new work brings
+  its settled parent back. Etienne: "I
+  mostly want to see the main agents only, not the sub agents".
 
 ## Merged worktrees leave on their own (2026-11)
 
@@ -650,6 +860,83 @@ keeps Studio's own control order. Worker rows stay separate timeline items. The
 composer uses `--panel`, so in the light themes it stays warm rather than near
 white.
 
+## Cora worker view (2026-11)
+
+**Chosen:** A, "Go inside". Clicking a worker in Cora swaps the whole
+conversation for that worker's own chat, the way Claude Code shows a subagent.
+Etienne picked A on 2026-11-17 ("I like A") from four mock-ups of the same
+chat: A go inside, B a side list of workers beside Main, C Main and the worker
+side by side, D the worker's steps expanded in place under its row. What he
+asked for: see what message a worker got and what it does, in a view that
+replaces the main agent's and looks the same.
+
+**References:** Claude Code's subagent view; the Cora chat above, whose rows
+the worker view reuses.
+
+**Rules it implies:**
+
+- A worker's view reuses the chat's own components: its steps are drawn by the
+  same rows as Cora's turns and fold the same way (only a worker that finished
+  well folds, and failures stay in sight). Its brief and the messages sent to
+  it are user bubbles and never fold. A worker never gets a renderer of its
+  own.
+- The terminal is a fallback behind a menu ("Raw terminal output", for output
+  the chat can't draw), never a primary button in Cora's chat. The board, Runs
+  and terminal agents outside the chat keep their terminals.
+- Main stays mounted underneath while you are inside a worker, so Back or Esc
+  returns to exactly where you were, and focus goes back to the row you opened.
+- One slim bar says where you are: Main, the worker, its model, its state and
+  its time. It is a navigation landmark; the arrows step through the chat's
+  workers. Esc leaves only when nothing inside the view (a menu, a popover)
+  wants it first.
+- A worker row in a step card is one button. "Open" shows on hover and focus,
+  not all the time.
+- A running worker's composer steers that worker only and says so. A finished
+  worker takes no messages: a follow-up goes through Cora.
+- Another worker ending while you are inside changes a status in the bar. It is
+  never a toast.
+- Colour means state, as in the chat: running, done and failed use the status
+  tokens; nothing else in the bar is tinted.
+
+## Cora agents rail (2026-11)
+
+**Chosen:** option 2, "Collapsible agents rail". Etienne picked it on
+2026-11-17 ("the number 2") after asking to "see the sub agents listed that are
+running in cora". He chose it from three mock-ups of the same chat: 1 an agents
+chip in the header, 2 the rail, 3 a line of running workers above the composer.
+It is a 32 px strip on the chat's left edge, with Cora on top and one mark per
+worker. It folds open into the full list over the chat.
+
+**Why:** every worker's state shows at once, in Main and inside a worker,
+without opening anything. A mark carries no name, so hover and the list say the
+rest.
+
+**Rules it implies:**
+
+- The strip shows only when the chat has workers, and it never grows: it is
+  32 px in every pane. The opened list and the tooltips float over the chat and
+  never push it aside.
+- A mark's shape carries the state, not only its colour: the chat's own
+  activity icons (spinner running, check done, the failed glyph failed, hollow
+  queued). The worker you are in, or Main, is the filled mark with a bar at
+  the edge.
+- Hover or keyboard focus shows the name, model, state, time and current step,
+  or the reason for a failed worker. Hover never moves focus. A click goes
+  inside the worker, and Cora's mark goes back to Main.
+- The list is grouped by step, like the step card. Running rows add the step
+  they are on, failed rows add their reason, and Main's row reads "waiting on
+  N".
+- Past eight workers, the running ones come first, then "+N", which opens the
+  list. The worker you are in always keeps its mark.
+- The strip is one tab stop. Up and down move between marks, Enter goes
+  inside, right opens the list, and Esc folds it and stops there, so it never
+  also leaves the worker.
+- The count of workers lives on the rail only: the composer drops its "N
+  workers running" line while the rail shows.
+- What a worker is doing now comes from a short summary the main process keeps
+  for each live worker and pushes when it changes. The rail never reads a
+  worker's feed.
+
 ## Automations (2026-11)
 
 **Chosen:** variant A, inbox and run history, from four variants built with the
@@ -753,3 +1040,25 @@ app's own segmented control, inputs and buttons; no new tokens.
   status and text, then Keep and Delete (`is-danger`). The admin token is
   one password field in About, Feedback with Save and Remove; the window
   only ever shows whether a token is set and where from.
+
+## Agent tool updates (2026-11)
+
+**Chosen:** no new tokens or components. The worker picker's Claude, Codex
+and Grok rows carry one small `spark-badge` at the right; Settings ›
+Accounts › Agent tools has the switch and one `SettingRow` per tool, with
+the existing `InlineMessage` for anything that happened.
+
+**Rules:**
+
+- Picker marks: Update (accent; updates on click when Codara can, else opens
+  Agent tools with the command), Updating or Restoring (muted, no action),
+  Waiting (muted), Rolled back (warn), Update failed (danger). Pi always
+  shows Pinned and its version, never a button. No mark when up to date.
+- A mark is its own button beside the row's button, never inside it.
+- A Settings row: the name with an Update available or Pinned badge, then
+  the version and how it was installed, then one status line. A tool Codara
+  cannot update (Homebrew, WinGet, a folder that needs administrator rights)
+  shows the exact command in `st-callout__code`, no button.
+- Messages are one sentence that says what happened and what is true now
+  ("Claude Code 2.1.328 failed its version check, so Codara put 2.1.327
+  back."), warn for a roll back, danger only when the tool may be broken.

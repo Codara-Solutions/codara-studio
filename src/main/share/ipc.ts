@@ -16,6 +16,7 @@ import { logMain } from "../file-log";
 import { assertAllowedReadPathResolved } from "../fs-sandbox";
 import type { IpcHandle } from "../ipc";
 import { readShareAsset } from "./assets";
+import { shareServiceStatus } from "./availability";
 import { fetchShareRemote } from "./remote";
 import type { ShareService } from "./service";
 
@@ -50,6 +51,7 @@ function idOf(value: unknown): string {
 
 /** Register this area's channels with the trusted-sender `handle`. */
 export function registerShareIpc(handle: IpcHandle): void {
+  handle("share:status", () => shareServiceStatus());
   handle("share:create", async (_event, input: unknown) => {
     const raw = (input ?? {}) as Partial<ShareCreateInput>;
     return (await shareService()).create({
@@ -62,7 +64,13 @@ export function registerShareIpc(handle: IpcHandle): void {
   handle("share:readAsset", (_event, request: unknown) =>
     readShareAsset(request, { assertReadable: assertAllowedReadPathResolved }),
   );
-  handle("share:fetchRemote", (_event, request: unknown) => fetchShareRemote(request));
+  // Downloads happen only to build a page for the share service, so a build
+  // without one makes none.
+  handle("share:fetchRemote", (_event, request: unknown) => {
+    const status = shareServiceStatus();
+    if (!status.available) throw new Error(status.message ?? "Share as link is not available.");
+    return fetchShareRemote(request);
+  });
   handle("share:delete", async (_event, id: unknown) => (await shareService()).delete(idOf(id)));
   handle("share:setExpiry", async (_event, input: unknown) => {
     const raw = (input ?? {}) as { id?: unknown; ttlDays?: unknown };

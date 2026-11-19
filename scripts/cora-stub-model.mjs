@@ -314,11 +314,15 @@ function takeFault() {
 }
 
 async function handleModel(req, res, flavour) {
+  // Arrival time, so a test can time the gap between two requests instead of
+  // a whole cora process, whose startup alone varies by seconds on a busy CPU.
+  const at = Date.now();
   const body = JSON.parse(await readBody(req));
   const view = flavour === "anthropic" ? anthropicView(body) : responsesView(body);
   const step = plan(view);
   const fault = takeFault();
   requests.push({
+    at,
     flavour,
     fault,
     path: req.url,
@@ -341,7 +345,9 @@ async function handleModel(req, res, flavour) {
   }
   if (fault === "chatgpt429") {
     res.writeHead(429, { "content-type": "application/json", ...control.headers });
-    return res.end(JSON.stringify({ error: control.body }));
+    // A function body is built per request, so a reset time can count from
+    // the request instead of from before a slow cora startup.
+    return res.end(JSON.stringify({ error: typeof control.body === "function" ? control.body() : control.body }));
   }
   if (fault === "anthropic429") {
     return jsonError(res, 429, "rate_limit_error", "This request would exceed your account's rate limit.", control.headers ?? {});
@@ -392,7 +398,7 @@ export function startStubModel() {
       client.on("message", () => {
         socketRequests += 1;
         takeFault();
-        client.send(JSON.stringify({ type: "error", status: 429, error: control.body }));
+        client.send(JSON.stringify({ type: "error", status: 429, error: typeof control.body === "function" ? control.body() : control.body }));
       });
     });
   });

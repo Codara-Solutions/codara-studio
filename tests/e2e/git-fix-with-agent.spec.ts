@@ -50,6 +50,9 @@ test("Fix with agent hands checks, a hook failure, conflicts and reviews to agen
     await page.waitForLoadState("domcontentloaded");
 
     // ── Failing checks, to a new Claude Code ────────────────────────────────
+    const sourceTab = (name: RegExp) =>
+      page.getByRole("tablist", { name: "Source Control views" }).getByRole("tab", { name });
+    await sourceTab(/^Pull request/).click({ timeout: 45_000 });
     const fixChecks = page.locator('[data-git-fix="checks"]');
     await expect(fixChecks).toBeVisible({ timeout: 45_000 });
     await expect(fixChecks).toHaveText(/Fix checks with agent/);
@@ -87,7 +90,8 @@ test("Fix with agent hands checks, a hook failure, conflicts and reviews to agen
 
     // ── A commit the pre-commit hook rejected, to that agent's pane ─────────
     await writeFile(join(fixture.workspaceDir, "src", "widget.ts"), "const unused = 1;\n", "utf8");
-    const message = page.getByPlaceholder("Message  (Ctrl+Enter to commit)");
+    await sourceTab(/^Changes/).click();
+    const message = page.getByRole("textbox", { name: "Commit message" });
     await expect(message).toBeVisible({ timeout: 15_000 });
     await message.fill("Add widget");
     // The box is always there; it can commit once the status poll sees the file.
@@ -137,6 +141,7 @@ test("Fix with agent hands checks, a hook failure, conflicts and reviews to agen
     await expect(page.getByText("Waiting in the agent inbox")).toBeVisible({ timeout: 10_000 });
 
     // ── Review threads: read, then closed with Escape ───────────────────────
+    await sourceTab(/^Pull request/).click();
     await page.locator('[data-git-fix="review"]').dispatchEvent("click");
     const reviewDialog = page.getByRole("dialog", { name: "Address review comments on #42" });
     await expect(reviewDialog).toBeVisible({ timeout: 15_000 });

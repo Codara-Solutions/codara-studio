@@ -8,6 +8,12 @@ export interface TraceSummaryInput {
   /** The tab's main frame id; its renderer's main thread is the one summarized. */
   frameId: string | null;
   maxBytes: number;
+  /**
+   * A traced load: what ran before its first navigation belongs to the page
+   * being replaced and to the call that reloads it, so the main thread,
+   * scripts and long tasks start there. An interaction trace keeps it all.
+   */
+  fromNavigation?: boolean;
 }
 
 export interface TraceLongTask {
@@ -100,7 +106,7 @@ export function summarizeTraceFile(input: TraceSummaryInput): TraceSummary {
   const SCRIPTING = new Set(["EvaluateScript", "FunctionCall", "TimerFire", "EventDispatch", "FireAnimationFrame", "FireIdleCallback", "RunMicrotasks", "v8.compile", "v8.compileModule", "v8.evaluateModule", "v8.produceCache", "v8.produceModuleCache", "V8.CompileCode", "V8.Execute", "v8.run", "v8.callFunction", "XHRReadyStateChange", "XHRLoad", "MajorGC", "MinorGC", "BlinkGC.AtomicPhase", "GCEvent", "CppGC.IncrementalSweep", "ThreadState::performIdleLazySweep", "v8.parseOnBackground", "V8.ParseFunction", "ProfileCall"]);
   const RENDERING = new Set(["UpdateLayoutTree", "Layout", "RecalculateStyles", "ScheduleStyleRecalculation", "InvalidateLayout", "HitTest", "PrePaint", "Layerize", "IntersectionObserverController::computeIntersections", "ComputeIntersections", "UpdateLayer", "UpdateLayerTree", "ScrollLayer"]);
   const PAINTING = new Set(["Paint", "PaintImage", "PaintSetup", "Decode Image", "Decode LazyPixelRef", "ResizeImage", "CompositeLayers", "Commit", "Rasterize", "RasterTask", "ImageDecodeTask"]);
-  const LOADING = new Set(["ParseHTML", "ParseAuthorStyleSheet", "ResourceSendRequest", "ResourceReceiveResponse", "ResourceReceivedData", "ResourceFinish"]);
+  const LOADING = new Set(["DocumentLoader::CommitNavigation", "ParseHTML", "ParseAuthorStyleSheet", "ResourceSendRequest", "ResourceReceiveResponse", "ResourceReceivedData", "ResourceFinish"]);
   const SCRIPT_ROOTS = new Set(["EvaluateScript", "FunctionCall", "v8.compileModule", "v8.evaluateModule", "TimerFire", "EventDispatch", "FireAnimationFrame", "RunMicrotasks"]);
   const category = (name: string) => (SCRIPTING.has(name) || /GC/.test(name) ? "scripting" : RENDERING.has(name) ? "rendering" : PAINTING.has(name) ? "painting" : LOADING.has(name) ? "loading" : "other");
   const scriptLabel = (event: TraceEvent) => {
@@ -117,6 +123,19 @@ export function summarizeTraceFile(input: TraceSummaryInput): TraceSummary {
     return [fn && `${fn}()`, url].filter(Boolean).join(" ") || event.name;
   };
 
+  // The main frame's navigations, oldest first.
+  const navigations = events.filter((event) => event.name === "navigationStart" && (event.args?.frame === input.frameId || event.args?.data?.frame === input.frameId)).sort((a, b) => a.ts - b.ts);
+  // A slice that starts before the cut drops with everything inside it.
+  const cut = input.fromNavigation && navigations.length ? navigations[0].ts : -Infinity;
+  let droppedUntil = -Infinity;
+  const counted = slices.filter((event) => {
+    if (event.ts < cut) {
+      droppedUntil = Math.max(droppedUntil, event.ts + (event.dur ?? 0));
+      return false;
+    }
+    return event.ts >= droppedUntil;
+  });
+
   const time = { scripting: 0, rendering: 0, painting: 0, loading: 0, other: 0 };
   const scripts = new Map<string, number>();
   const tasks: Array<{ event: TraceEvent; children: TraceEvent[] }> = [];
@@ -128,7 +147,7 @@ export function summarizeTraceFile(input: TraceSummaryInput): TraceSummary {
       time[category(frame.event.name) as keyof typeof time] += self;
     }
   };
-  for (const event of slices) {
+  for (const event of counted) {
     closeUntil(event.ts);
     const parent = stack[stack.length - 1];
     if (parent) parent.childTime += event.dur ?? 0;
@@ -149,7 +168,6 @@ export function summarizeTraceFile(input: TraceSummaryInput): TraceSummary {
   // Times are relative to the main frame's last navigation in the trace, or the trace start.
   let origin = start;
   const marks: TraceSummary["marks"] = {};
-  const navigations = events.filter((event) => event.name === "navigationStart" && (event.args?.frame === input.frameId || event.args?.data?.frame === input.frameId)).sort((a, b) => a.ts - b.ts);
   if (navigations.length) origin = navigations[navigations.length - 1].ts;
   const ms = (us: number) => Math.round(us / 100) / 10;
   const ofFrame = (event: TraceEvent) => (event.args?.frame ?? event.args?.data?.frame) === input.frameId && event.ts >= origin;

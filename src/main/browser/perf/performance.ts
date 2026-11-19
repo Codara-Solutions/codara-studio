@@ -83,10 +83,10 @@ async function settle(target: BrowserTarget, maxMs: number): Promise<void> {
   }
 }
 
-async function summarizeTrace(file: TraceFile, deadline: number): Promise<TraceSummary | { note: string }> {
+async function summarizeTrace(file: TraceFile, deadline: number, fromNavigation = false): Promise<TraceSummary | { note: string }> {
   const timeoutMs = Math.max(2_000, deadline - Date.now());
   try {
-    return await runInWorker(summarizeTraceFile, { path: file.path, frameId: file.frameId, maxBytes: TRACE_SUMMARY_MAX_BYTES }, { timeoutMs, maxOldGenerationSizeMb: 1536 });
+    return await runInWorker(summarizeTraceFile, { path: file.path, frameId: file.frameId, maxBytes: TRACE_SUMMARY_MAX_BYTES, fromNavigation }, { timeoutMs, maxOldGenerationSizeMb: 1536 });
   } catch (error) {
     return { note: `The trace summary failed (${error instanceof Error ? error.message : String(error)}); open the file in DevTools.` };
   }
@@ -183,7 +183,7 @@ export async function measureLoad(target: BrowserTarget, waitMs: number): Promis
       throw error;
     }
     const file = await stopTrace(target).finally(() => paint.release());
-    const [{ url, vitals }, trace] = await Promise.all([readVitals(target), summarizeTrace(file, deadline)]);
+    const [{ url, vitals }, trace] = await Promise.all([readVitals(target), summarizeTrace(file, deadline, true)]);
     const merged = withTraceMarks(vitals, trace);
     const notes = merged.notes ?? [];
     if (paint.background) notes.push(BACKGROUND_PAINT_NOTE);
