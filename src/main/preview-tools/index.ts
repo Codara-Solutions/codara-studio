@@ -14,11 +14,13 @@ import { assertChromeDriverAllowed } from "../browser/chrome/presence";
 import type { ChromeLink } from "../browser/chrome/link";
 import { unsupportedCdpError } from "../browser/chrome/protocol";
 import { chromeLinkRuntime } from "../browser/chrome/runtime";
+import { cdpParamsError, checkCdpCommand } from "../browser/cdp-policy";
 import { normalizeEmulationRequest } from "../browser/emulation";
+import { parseStorageArea, userBrowserStorageRefusal } from "../browser/storage";
 import { BrowserTabRefError, parseTabRef, type BrowserTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { normalizeTabGroupName } from "../../shared/tab-group-name";
-import { firefoxRefusal } from "../../shared/user-browser-tools";
+import { firefoxCdpParamsError, firefoxRefusal } from "../../shared/user-browser-tools";
 import { capturePreviewTools } from "./capture";
 import { cdpPreviewTools } from "./cdp";
 import { chromeLinkTools, chromeTargetTools } from "./chrome";
@@ -146,16 +148,42 @@ function refuseOnFirefox(method: string, params: Record<string, unknown>, ref: E
     return;
   }
   if (link?.extensionKind !== "firefox") return;
-  // open never acts on the tab it names: the link tool picks the browser that may open one.
-  if (method === "preview.chrome" && params.action === "open") return;
+  // open never acts on the tab it names: the link tool picks the browser that may open one,
+  // and with only Firefox connected there is none, which is said before anything is logged.
+  if (method === "preview.chrome" && params.action === "open") {
+    const links = chromeLinkRuntime()?.server.links() ?? [];
+    const reason = links.length && links.every((candidate) => candidate.extensionKind === "firefox") ? firefoxRefusal(method, params) : null;
+    if (reason) throw new PreviewToolParamsError(reason);
+    return;
+  }
   // Called with no settings, emulate only reads the state and sends nothing.
   if (method === "preview.emulate" && readsEmulationOnly(params)) return;
-  // A raw command the extension does not answer is refused before the tab is attached.
-  if (method === "preview.cdp" && typeof params.method === "string" && !link.answers(params.method)) {
-    throw new PreviewToolParamsError(unsupportedCdpError(params.method, link.browser.name));
+  // A raw command the policy refuses or the extension does not answer, or parameters it refuses, before the tab is attached.
+  if (method === "preview.cdp" && typeof params.method === "string") {
+    const policy = checkCdpCommand(params.method, { userBrowser: true });
+    if (!policy.ok) throw new PreviewToolParamsError(policy.reason);
+    if (!link.answers(params.method)) throw new PreviewToolParamsError(unsupportedCdpError(params.method, link.browser.name));
+    const commandParams = params.params && typeof params.params === "object" && !Array.isArray(params.params) ? (params.params as Record<string, unknown>) : {};
+    const refused = cdpParamsError(params.method, commandParams) ?? firefoxCdpParamsError(params.method, commandParams, ref.tabId);
+    if (refused) throw new PreviewToolParamsError(refused);
+  }
+  // Storage changes Codara never makes in the user's own browser, before the tab is touched.
+  if (method === "preview.storage") {
+    const refused = storageRefusal(params);
+    if (refused) throw new PreviewToolParamsError(refused);
   }
   const reason = firefoxRefusal(method, params);
   if (reason) throw new PreviewToolParamsError(reason);
+}
+
+function storageRefusal(params: Record<string, unknown>): string | null {
+  const action = typeof params.action === "string" ? params.action.toLowerCase() : "get";
+  try {
+    return userBrowserStorageRefusal(action, parseStorageArea(params.area));
+  } catch {
+    // Its own checks answer a malformed area.
+    return null;
+  }
 }
 
 function readsEmulationOnly(params: Record<string, unknown>): boolean {

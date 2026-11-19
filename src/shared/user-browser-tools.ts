@@ -52,7 +52,7 @@ export const FIREFOX_CDP_EVENTS: readonly string[] = Object.freeze([
 export const USER_BROWSER_DISTRIBUTION: { chrome: string; firefox: string } = {
   chrome: "Loaded unpacked from Settings, Browser (a Chrome Web Store listing is prepared).",
   firefox:
-    "Temporary install only today (about:debugging, Load Temporary Add-on): Firefox removes it when it restarts, so the user loads it again each time. Mozilla allows the userScripts API this add-on runs on for user script managers only, so it is not on addons.mozilla.org.",
+    "A developer install only: loaded from about:debugging (Load Temporary Add-on), and loaded again after each Firefox restart, which removes it. Firefox Developer Edition, Nightly or ESR can keep it once their signature requirement is turned off (xpinstall.signatures.required; https://extensionworkshop.com/documentation/publish/signing-and-distribution-overview/). It is not on addons.mozilla.org: Mozilla allows the userScripts API it runs on for user script managers only.",
 };
 
 export const USER_BROWSER_TOOLS: Readonly<Record<string, UserBrowserTool>> = {
@@ -66,7 +66,10 @@ export const USER_BROWSER_TOOLS: Readonly<Record<string, UserBrowserTool>> = {
   },
   codara_preview_cdp: {
     chrome: { status: "degraded", how: "The DevTools protocol allowlist, without Runtime, Debugger or DOM and CSS edits on your own browser." },
-    firefox: { status: "degraded", how: "Only the commands the extension answers (Page navigate, frame tree, layout metrics and screenshot; Network response bodies; the Log, Network, Page and Runtime enable and disable), within the allowlist above; any other is refused with the reason before the tab is touched." },
+    firefox: {
+      status: "degraded",
+      how: "Only the commands the extension answers and the allowlist above permits: Page.navigate (url only: no frame, no referrer), Page.getFrameTree, Page.getLayoutMetrics, Page.captureScreenshot, Network.getResponseBody, and the Log, Network and Page enable and disable. Any other, or other parameters, is refused with the reason before the tab is touched.",
+    },
   },
   codara_preview_cdp_events: {
     chrome: { status: "degraded", how: "Events of the allowlisted domains, Debugger excepted." },
@@ -196,7 +199,7 @@ export const USER_BROWSER_TOOLS: Readonly<Record<string, UserBrowserTool>> = {
   codara_preview_storage: {
     chrome: {
       status: "works",
-      how: "get reads local and session storage with values redacted; with the tab's cookie and storage switch on, it also reads cookies (HttpOnly values stay redacted) and unredacted values, and set and clear change local and session storage. Cookies are never changed, IndexedDB and caches never cleared, and fresh and discard are for Codara's own tabs.",
+      how: "get reads local and session storage, masking values whose key looks like a credential or whose value looks like a token (other values come as they are); the tab's cookie and storage switch is needed for cookies (HttpOnly values stay masked), for redact: false, and for set and clear, which change only local and session storage. Cookies are never changed, IndexedDB and caches never cleared (refused before the tab is touched on Firefox), and fresh and discard are for Codara's own tabs.",
     },
     firefox: {
       status: "works",
@@ -220,6 +223,25 @@ export const USER_BROWSER_TOOLS: Readonly<Record<string, UserBrowserTool>> = {
     firefox: { status: "degraded", how: "Waits for text, an element or a condition; a quiet network counts only the requests the extension sees (sites the user let it use, never a blocked site), so another request may still be running." },
   },
 };
+
+// Page.navigate parameters Firefox's extension takes (extensions/firefox/lib/navigation.js NAVIGATE_PARAMS).
+const FIREFOX_NAVIGATE_PARAMS = ["url", "frameId", "referrer", "transitionType", "referrerPolicy"];
+
+/**
+ * Why Firefox's extension would refuse these raw command parameters, with
+ * its own words, or null: checked before the tab is touched. The extension
+ * keeps its checks; scripts/test-user-browser-tools.cjs compares the two.
+ */
+export function firefoxCdpParamsError(method: string, params: Record<string, unknown>, tabId: number): string | null {
+  if (method !== "Page.navigate") return null;
+  const extra = Object.keys(params).filter((name) => !FIREFOX_NAVIGATE_PARAMS.includes(name));
+  if (extra.length) return `Page.navigate takes only url in Firefox, not ${extra.join(", ")}.`;
+  if (params.frameId !== undefined && params.frameId !== `firefox-tab-${tabId}`) {
+    return "Page.navigate in a frame is not available in Firefox: agents navigate the tab's own page.";
+  }
+  if (typeof params.referrer === "string" && params.referrer) return "Firefox cannot load a page with another referrer for an extension.";
+  return null;
+}
 
 /** The tool's name for a preview.* method (preview.snapshot is codara_preview_snapshot; browser.use is codara_browser_use). */
 export function toolNameOf(method: string): string {

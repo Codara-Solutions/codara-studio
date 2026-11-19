@@ -87,7 +87,7 @@ async function load(home) {
       }
       if (row.firefox.unavailable) assert.ok(row.modeParam, `${name} names the parameter that picks its modes`);
     }
-    assert.match(lib.USER_BROWSER_DISTRIBUTION.firefox, /Temporary install only/);
+    assert.match(lib.USER_BROWSER_DISTRIBUTION.firefox, /developer install only.*loaded again after each Firefox restart/);
     // The table shows each mode's reason, not only that the mode is missing.
     assert.ok(lib.userBrowserToolsMarkdown().includes(`Not available, \`sizes\`: ${table.codara_preview_compare.firefox.unavailable.sizes}`));
 
@@ -98,6 +98,26 @@ async function load(home) {
       assemble(path.join(assembled, "extension"));
       const firefox = await import(pathToFileURL(path.join(assembled, "extension/lib/firefox.js")).href);
       assert.deepEqual([...lib.FIREFOX_CDP_EVENTS], [...firefox.CDP_EVENTS], "FIREFOX_CDP_EVENTS equals the extension's CDP_EVENTS");
+      // Codara refuses Page.navigate parameters in the extension's own words, and only those it refuses.
+      const { navigateUrl } = await import(pathToFileURL(path.join(assembled, "extension/lib/navigation.js")).href);
+      const rules = { isRestricted: () => false, blockingRule: () => null };
+      for (const params of [
+        { url: "https://example.com/" },
+        { url: "https://example.com/", transitionType: "link", referrerPolicy: "origin" },
+        { url: "https://example.com/", frameId: "firefox-tab-12" },
+        { url: "https://example.com/", frameId: "child" },
+        { url: "https://example.com/", referrer: "https://elsewhere.example/" },
+        { url: "https://example.com/", referrer: "" },
+        { url: "https://example.com/", headers: {} },
+      ]) {
+        let theirs = null;
+        try {
+          navigateUrl(params, 12, rules);
+        } catch (error) {
+          theirs = error.message;
+        }
+        assert.equal(lib.firefoxCdpParamsError("Page.navigate", params, 12), theirs, JSON.stringify(params));
+      }
     } finally {
       fs.rmSync(assembled, { recursive: true, force: true });
     }
@@ -112,7 +132,7 @@ async function load(home) {
     let kind = "firefox";
     let findable = true;
     // Firefox's link answers the commands its hello listed; Chrome's every one.
-    const firefoxMethods = new Set(["Page.navigate", "Page.getFrameTree", "Network.getResponseBody", "Network.enable", "Page.enable"]);
+    const firefoxMethods = new Set(["Page.navigate", "Page.getFrameTree", "Network.getResponseBody", "Network.enable", "Page.enable", "Runtime.enable"]);
     const opened = [];
     const linkOf = (linkKind, allowOpen = false) => ({
       extensionKind: linkKind,
@@ -170,6 +190,19 @@ async function load(home) {
     // Raw commands the extension does not answer, and events it never sends, are refused before the tab is touched.
     await refused("preview.cdp", { method: "DOM.getDocument" }, /DOM\.getDocument is not available in Firefox: its Codara extension cannot do it/);
     await reaches("preview.cdp", { method: "Page.getFrameTree" });
+    // The user browser's policy and the extension's parameter checks also come first.
+    await refused("preview.cdp", { method: "Runtime.enable" }, /Runtime\.enable is not available on a tab of your own browser/);
+    await refused("preview.cdp", { method: "Page.navigate", params: { url: "https://example.com/", referrer: "https://elsewhere.example/" } }, /Firefox cannot load a page with another referrer/);
+    await refused("preview.cdp", { method: "Page.navigate", params: { url: "https://example.com/", frameId: "child" } }, /Page\.navigate in a frame is not available in Firefox/);
+    await reaches("preview.cdp", { method: "Page.navigate", params: { url: "https://example.com/", frameId: "firefox-tab-12" } });
+    // Storage changes never made in the user's own browser are refused before the tab is touched.
+    await refused("preview.storage", { action: "CLEAR", area: "Cache Storage" }, /Codara does not clear cookies, IndexedDB or caches in your own browser/);
+    await refused("preview.storage", { action: "clear" }, /does not clear cookies, IndexedDB or caches/);
+    await refused("preview.storage", { action: "set", area: "cookies", name: "a", value: "1" }, /Codara does not change cookies in your own browser/);
+    await reaches("preview.storage", { action: "set", area: "local", name: "a", value: "1" });
+    await reaches("preview.storage", { action: "clear", area: "session" });
+    // open names a Firefox tab and only Firefox is connected: refused before anything is logged or touched.
+    await refused("preview.chrome", { action: "open", url: "https://example.com/" }, /codara_preview_chrome open is not available on a Firefox tab: Opening tabs/);
     await refused("preview.cdp_events", { action: "subscribe", events: ["Network.responseReceived", "Log.entryAdded"] }, /Log\.entryAdded is not sent by Codara's extension for Firefox/);
     await refused("preview.cdp_events", { action: "subscribe", events: "Page.domContentEventFired" }, /Page\.domContentEventFired is not sent/);
     await reaches("preview.cdp_events", { action: "subscribe", events: ["Network.responseReceived", "Runtime.consoleAPICalled"] });

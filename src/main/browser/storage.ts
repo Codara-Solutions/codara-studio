@@ -269,12 +269,22 @@ export async function readStorage(
   return result;
 }
 
+const userBrowserRefusal = (what: string) =>
+  `Codara does not ${what} in your own browser, where it would sign you out of sites. On a Chrome tab get works, and set and clear work on area local or session; for a clean session use a Codara browser tab (storage action fresh gives a logged-out one).`;
+
 function refuseOnUserBrowser(target: BrowserTarget, what: string): void {
-  if (target.kind === "chrome") {
-    throw new StorageParamsError(
-      `Codara does not ${what} in your own browser, where it would sign you out of sites. On a Chrome tab get works, and set and clear work on area local or session; for a clean session use a Codara browser tab (storage action fresh gives a logged-out one).`,
-    );
-  }
+  if (target.kind === "chrome") throw new StorageParamsError(userBrowserRefusal(what));
+}
+
+/**
+ * What the storage tool always refuses on a tab of the user's own browser,
+ * by its action and area alone, so the refusal can come before the tab is
+ * touched (the same checks as setStorageItem and clearStorage).
+ */
+export function userBrowserStorageRefusal(action: string, area: StorageArea | null): string | null {
+  if (action === "set" && area === "cookies") return userBrowserRefusal("change cookies");
+  if (action === "clear" && (area === null || (area !== "local" && area !== "session"))) return userBrowserRefusal("clear cookies, IndexedDB or caches");
+  return null;
 }
 
 export async function setStorageItem(
