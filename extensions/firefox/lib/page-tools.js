@@ -265,14 +265,16 @@ export function screenshotAnswer(dataUrl) {
 export function measureLayout() {
   const root = document.documentElement;
   const body = document.body;
+  // In quirks mode the body's client box is the viewport (the root's is the document).
+  const viewport = document.compatMode === "BackCompat" && body ? body : root;
   const view = window.visualViewport;
   return {
     scrollX,
     scrollY,
-    clientWidth: root.clientWidth,
-    clientHeight: root.clientHeight,
-    contentWidth: Math.max(root.scrollWidth, body?.scrollWidth ?? 0, root.clientWidth),
-    contentHeight: Math.max(root.scrollHeight, body?.scrollHeight ?? 0, root.clientHeight),
+    clientWidth: viewport.clientWidth,
+    clientHeight: viewport.clientHeight,
+    contentWidth: Math.max(root.scrollWidth, body?.scrollWidth ?? 0, viewport.clientWidth),
+    contentHeight: Math.max(root.scrollHeight, body?.scrollHeight ?? 0, viewport.clientHeight),
     visual: view ? { offsetX: view.offsetLeft, offsetY: view.offsetTop, pageX: view.pageLeft, pageY: view.pageTop, width: view.width, height: view.height, scale: view.scale } : null,
     dpr: devicePixelRatio,
   };

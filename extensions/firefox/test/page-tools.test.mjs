@@ -166,5 +166,17 @@ function screenshots({ captureOptions, screenshotAnswer, measureLayout, layoutMe
   assert.equal(metrics.cssVisualViewport.pageY, 400);
   assert.deepEqual(metrics.contentSize, { x: 0, y: 0, width: 2700, height: 6058 }, "the old fields in device pixels");
   assert.equal(layoutMetrics({ ...measured, visual: null }).cssVisualViewport.clientWidth, 1350);
+  // In quirks mode the root's client size is the document's; the body's is the viewport's.
+  const quirks = {
+    ...page,
+    document: {
+      compatMode: "BackCompat",
+      documentElement: { clientWidth: 1350, clientHeight: 3029, scrollWidth: 1350, scrollHeight: 3029 },
+      body: { clientWidth: 1350, clientHeight: 680, scrollWidth: 1350, scrollHeight: 3029 },
+    },
+  };
+  const inQuirks = layoutMetrics(vm.runInNewContext(`(${measureLayout.toString()})()`, quirks));
+  assert.deepEqual(inQuirks.cssLayoutViewport, { pageX: 0, pageY: 400, clientWidth: 1350, clientHeight: 680 });
+  assert.deepEqual(inQuirks.cssContentSize, { x: 0, y: 0, width: 1350, height: 3029 });
   assert.throws(() => layoutMetrics(null), /did not report its size/);
 }
