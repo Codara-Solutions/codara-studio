@@ -72,15 +72,15 @@ export async function run(assembled) {
   assert.equal(cookiesAnswer([[one], [one, { ...one, path: "/x" }]]).cookies.length, 2);
   // Races: whatever changes while Firefox reads the cookies, nothing goes out once what allowed the read changed.
   const socket = {};
-  const fresh = () => ({ generation: 0, socket, seen: { id: 4, url: tab.url }, allowed: true, storageTabs: [4], rules });
+  const fresh = () => ({ changed: false, socket, seen: { id: 4, url: tab.url }, allowed: true, storageTabs: [4], rules });
   const jar = [{ name: "sid", value: "secret", domain: "shop.example", path: "/" }];
   const reader = (state, getAll, permitted = async () => true) =>
     readCookies([tab.url], { getAll, refusal: cookieGate({ urls: [tab.url], ref: "tab 4", now: () => ({ ...state }) }), permitted, rules: () => state.rules });
   const changes = {
     "the cookie switch turned off": (state) => (state.storageTabs = []),
-    // The background moves the generation on for any change of access, so access taken back and given again still ends the read.
-    "the switch turned off and on again": (state) => (state.generation += 1),
-    "the tab detached and attached again": (state) => (state.generation += 1),
+    // The background's clock says any change of access since the read began, so access taken back and given again still ends the read.
+    "the switch turned off and on again": (state) => (state.changed = true),
+    "the tab detached and attached again": (state) => (state.changed = true),
     "the tab detached, unshared or stopped": (state) => (state.allowed = false),
     "the tab closed": (state) => (state.seen = undefined),
     "the tab went to another site": (state) => (state.seen = { id: 4, url: "https://other.example/" }),

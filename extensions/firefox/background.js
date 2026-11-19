@@ -151,10 +151,11 @@ async function load() {
 }
 
 // What a tab may share moved on: per tab its switch, attaching, sharing, its
-// page or window; for every tab the shared windows, the blocked sites, site
-// access or the link. Stamped (lib/access-clock.js), so a cookie read that
-// began before never goes out (tabCookies), even if the same access is
-// given again meanwhile, while other tabs' changes leave it alone.
+// page or window; per window its sharing; for every tab sharing everything,
+// the blocked sites, site access or the link. Stamped (lib/access-clock.js),
+// so a cookie read that began before never goes out (tabCookies), even if
+// the same access is given again meanwhile, while other tabs' and windows'
+// changes leave it alone.
 const access = new AccessClock();
 
 /**
@@ -338,6 +339,9 @@ async function handleRequest(request) {
 }
 
 async function answerCommand(request, socket) {
+  // Noted before the first look at the tab: whatever changes its access from
+  // here on ends a read that holds it, even while the tab is looked up.
+  const since = access.now();
   const child = childSessionError(request);
   if (child) throw new Error(child);
   const method = String(request.method ?? "");
@@ -361,7 +365,7 @@ async function answerCommand(request, socket) {
     return {};
   }
   if (method === "Network.getResponseBody") return responseBody(tab.id, request.params ?? {}, socket);
-  if (method === "Network.getCookies") return tabCookies(tab.id, request.params ?? {}, socket);
+  if (method === "Network.getCookies") return tabCookies(tab.id, request.params ?? {}, socket, since);
   if (STORAGE_WRITES.includes(method)) throw new Error(storageWriteRefusal(method));
   if (method === "Page.getFrameTree") {
     const now = await stillUsable(tab.id, socket);
@@ -833,7 +837,7 @@ async function responseBody(tabId, params, socket) {
  * attached and shared on that site, the blocked sites, the site access and
  * the link.
  */
-async function tabCookies(tabId, params, socket) {
+async function tabCookies(tabId, params, socket, since) {
   const tab = await stillUsable(tabId, socket);
   seeTab(tab);
   // Firefox names every tab's store; read without it, the default store
@@ -844,7 +848,7 @@ async function tabCookies(tabId, params, socket) {
   const refusal = cookieGate({
     urls,
     ref: agentTabId(tabId),
-    now: () => ({ generation: access.of(tabId), socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
+    now: () => ({ changed: access.changedSince(since, tabId, tabsSeen.get(tabId)?.windowId), socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
   });
   const read = await readCookies(urls, {
     getAll: (url) => browser.cookies.getAll({ url, storeId }),

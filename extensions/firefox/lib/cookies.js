@@ -109,19 +109,19 @@ export function storageWriteRefusal(method) {
 /**
  * Whether a cookie read may still go to Codara, asked before the read,
  * after it and when the answer leaves: the reason it may not, or null.
- * `now()` reads the extension's state at that moment: { generation (the
- * tab's access stamp, lib/access-clock.js: it moves on whenever the tab's
- * switch, attaching, sharing, page or window, the blocked sites, site
- * access or the link change, so access taken back and given again still
- * ends the read), socket (the live link), seen (the tab
- * as last seen, or none), allowed (attached, shared, not blocked),
- * storageTabs, rules }.
+ * `now()` reads the extension's state at that moment: { changed (whether
+ * anything that decides the tab's access changed since the read began,
+ * lib/access-clock.js: the tab's switch, attaching, sharing, page or
+ * window, its window's sharing, the blocked sites, site access or the
+ * link, so access taken back and given again still ends the read), socket
+ * (the live link), seen (the tab as last seen, or none), allowed (attached,
+ * shared, not blocked), storageTabs, rules }.
  */
 export function cookieGate({ urls, ref, now }) {
   const start = now();
   return () => {
     const state = now();
-    if (state.generation !== start.generation) return `${ref} or what it may share changed while its cookies were read; ask again.`;
+    if (state.changed) return `${ref} or what it may share changed while its cookies were read; ask again.`;
     if (!state.socket || state.socket !== start.socket) return "The link to Codara changed while the cookies were read.";
     if (!state.seen || !state.allowed) return `${ref} is no longer attached and shared with agents.`;
     return cookieRefusal({ tab: { id: state.seen.id, url: state.seen.url }, urls, storageTabs: state.storageTabs, rules: state.rules, ref });

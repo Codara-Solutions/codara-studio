@@ -41,27 +41,30 @@ export async function run(assembled) {
 
   // ── the clock alone ──
   const clock = new AccessClock();
-  const first = clock.of(1);
+  let since = clock.now();
   clock.tab(2);
-  assert.equal(clock.of(1), first, "another tab's change leaves this tab's stamp");
+  clock.window(2);
+  assert.equal(clock.changedSince(since, 1, 1), false, "another tab's or window's change does not reach this tab");
+  assert.equal(clock.changedSince(since, 2, 1), true);
+  assert.equal(clock.changedSince(since, 3, 2), true, "a window's change reaches the tabs in it");
   clock.tab(1);
-  const second = clock.of(1);
-  assert.notEqual(second, first);
+  assert.equal(clock.changedSince(since, 1, 1), true);
+  since = clock.now();
   clock.all();
-  assert.notEqual(clock.of(1), second, "a change for every tab moves it too");
-  const seen = new Set();
+  assert.equal(clock.changedSince(since, 1, 1), true, "a change for every tab reaches it too");
   for (let i = 0; i < 50; i += 1) {
-    i % 3 ? clock.tab(1) : clock.all();
-    assert.ok(!seen.has(clock.of(1)), "a stamp never comes back");
-    seen.add(clock.of(1));
+    since = clock.now();
+    i % 3 ? clock.tab(1) : i % 3 === 1 ? clock.window(1) : clock.all();
+    clock.tab(2);
+    assert.equal(clock.changedSince(since, 1, 1), true, "every change after the noted tick is seen, whatever comes later");
   }
-  assert.deepEqual(accessMoves({ attached: [1, 2] }, { attached: [2, 3] }), { all: false, tabs: [1, 3] });
-  assert.deepEqual(accessMoves({ shareTabs: [1], stopped: [] }, { shareTabs: [1], stopped: [] }), { all: false, tabs: [] }, "written unchanged: nothing moves");
-  assert.deepEqual(accessMoves({ storageTabs: [1] }, { storageTabs: [1, 4] }), { all: false, tabs: [4] }, "a cookie switch reaches its own tab");
-  assert.deepEqual(accessMoves({ blockedSites: "a" }, { blockedSites: "b" }), { all: true, tabs: [] });
-  assert.deepEqual(accessMoves({ shareWindows: [1] }, { shareWindows: [] }).all, true);
+  assert.deepEqual(accessMoves({ attached: [1, 2] }, { attached: [2, 3] }), { all: false, tabs: [1, 3], windows: [] });
+  assert.deepEqual(accessMoves({ shareTabs: [1], stopped: [] }, { shareTabs: [1], stopped: [] }), { all: false, tabs: [], windows: [] }, "written unchanged: nothing moves");
+  assert.deepEqual(accessMoves({ storageTabs: [1] }, { storageTabs: [1, 4] }), { all: false, tabs: [4], windows: [] }, "a cookie switch reaches its own tab");
+  assert.deepEqual(accessMoves({ blockedSites: "a" }, { blockedSites: "b" }), { all: true, tabs: [], windows: [] });
+  assert.deepEqual(accessMoves({ shareWindows: [1, 2] }, { shareWindows: [2, 3] }), { all: false, tabs: [], windows: [1, 3] }, "a window shared or not reaches its own tabs");
   assert.deepEqual(accessMoves({ shareAll: false }, { shareAll: true }).all, true);
-  assert.deepEqual(accessMoves({ usage: {} }, { usage: { 1: {} } }), { all: false, tabs: [] }, "what an agent did is no access");
+  assert.deepEqual(accessMoves({ usage: {} }, { usage: { 1: {} } }), { all: false, tabs: [], windows: [] }, "what an agent did is no access");
 
   // Every save() of a patch that reads the state gives it as (state) => patch,
   // worked out where it is applied: a literal patch built from `state.` may be stale.
@@ -81,7 +84,7 @@ export async function run(assembled) {
   let hold = null;
   const jar = [{ name: "sid", value: "secret", domain: "shop.example", path: "/" }];
   const fake = fakeBrowser({
-    tabs: [tab(1), tab(2, { url: "https://other.example/" }), tab(3, { cookieStoreId: undefined })],
+    tabs: [tab(1), tab(2, { windowId: 2, url: "https://other.example/" }), tab(3, { cookieStoreId: undefined })],
     local: { token: "FAKE_test_token", linkId: "link-test" },
     getAll: () => (hold ? new Promise((resolve) => (hold = () => resolve(jar))) : Promise.resolve(jar)),
   });
@@ -105,9 +108,9 @@ export async function run(assembled) {
 
     // Each listener that changes access moves the stamp it should, and no other tab's.
     const moves = async (what, expect, act) => {
-      const before = { 1: access.of(1), 2: access.of(2) };
+      const since = access.now();
       await act();
-      const moved = [1, 2].filter((id) => access.of(id) !== before[id]);
+      const moved = [1, 2].filter((id) => access.changedSince(since, id, fake.tabs.get(id)?.windowId));
       assert.deepEqual(moved, expect === "all" ? [1, 2] : expect, `${what}: expected ${JSON.stringify(expect)} to move`);
     };
     const cookies = (tabId) => request({ type: "cdp", tabId, method: "Network.getCookies", params: {} });
@@ -123,8 +126,11 @@ export async function run(assembled) {
     await moves("tab 1 is discarded", [1], () => fake.fire("tabs.onUpdated", 1, { discarded: true }, fake.tabs.get(1)));
     await moves("tab 1 leaves its window", [1], () => fake.fire("tabs.onDetached", 1, { oldWindowId: 1, oldPosition: 0 }));
     await moves("tab 1 lands in a window", [1], () => fake.fire("tabs.onAttached", 1, { newWindowId: 1, newPosition: 0 }));
-    await fake.popup({ type: "setReach", reach: "window", windowId: 9 });
-    await moves("a shared window closes", "all", () => fake.fire("windows.onRemoved", 9));
+    // Tab 2 is in window 2: a window's sharing reaches only its own tabs.
+    await moves("window 2 shared", [2], () => fake.popup({ type: "setReach", reach: "window", windowId: 2 }));
+    await moves("window 1 shared", [1], () => fake.popup({ type: "setReach", reach: "window", windowId: 1 }));
+    await moves("window 1 no longer shared", [1], () => fake.popup({ type: "setReach", reach: "tabs", windowId: 1 }));
+    await moves("a shared window closes", [2], () => fake.fire("windows.onRemoved", 2));
     await moves("an unshared window closes", [], () => fake.fire("windows.onRemoved", 8));
     await moves("site access taken back", "all", () => fake.fire("permissions.onRemoved", { origins: ["https://shop.example/*"], permissions: [] }));
     await moves("site access granted", "all", () => fake.fire("permissions.onAdded", { origins: ["https://more.example/*"], permissions: [] }));
@@ -158,7 +164,7 @@ export async function run(assembled) {
       fake.tabs.delete(2);
       await fake.fire("tabs.onRemoved", 2, { windowId: 1, isWindowClosing: false });
     });
-    fake.tabs.set(2, tab(2, { url: "https://other.example/" }));
+    fake.tabs.set(2, tab(2, { windowId: 2, url: "https://other.example/" }));
     await ready(2);
     await moves("Stop all", "all", () => fake.popup({ type: "stopAll" }));
     for (const id of [1, 2, 3]) await ready(id);
@@ -167,7 +173,7 @@ export async function run(assembled) {
     // switch turns off never puts the switch back (in either order).
     // The close lands at every point of the switch's way through the page.
     for (let ticks = 0; ticks < 16; ticks += 1) {
-      fake.tabs.set(2, tab(2, { url: "https://other.example/" }));
+      fake.tabs.set(2, tab(2, { windowId: 2, url: "https://other.example/" }));
       await ready(2);
       await fake.popup({ type: "setStorage", tabId: 1, on: true });
       fake.tabs.delete(2);
@@ -176,7 +182,7 @@ export async function run(assembled) {
       await Promise.all([off, fake.fire("tabs.onRemoved", 2, { windowId: 1, isWindowClosing: false })]);
       await assert.rejects(cookies(1), /need the user's permission/, `tab 1's switch stays off (tab 2 closed ${ticks} ticks into the switch)`);
     }
-    fake.tabs.set(2, tab(2, { url: "https://other.example/" }));
+    fake.tabs.set(2, tab(2, { windowId: 2, url: "https://other.example/" }));
     for (const id of [1, 2]) await ready(id);
 
     // ── a cookie read in a busy browser ──
@@ -189,6 +195,14 @@ export async function run(assembled) {
       }],
       ["tab 2 is detached by Codara", () => request({ type: "detach", tabId: 2 })],
       ["another tab closes", () => fake.fire("tabs.onRemoved", 7, { windowId: 1, isWindowClosing: false })],
+      ["tab 2's window is shared and unshared", async () => {
+        await fake.popup({ type: "setReach", reach: "window", windowId: 2 });
+        await fake.popup({ type: "setReach", reach: "tabs", windowId: 2 });
+      }],
+      ["tab 2's shared window closes", async () => {
+        await fake.popup({ type: "setReach", reach: "window", windowId: 2 });
+        await fake.fire("windows.onRemoved", 2);
+      }],
     ];
     for (const [what, change] of busy) {
       // During the read.
@@ -246,6 +260,19 @@ export async function run(assembled) {
       await change();
       assert.equal(read.still(), false, `${what} before the answer leaves ends it`);
       assert.throws(() => read.build(), (error) => !/secret/.test(error.message), `${what}: nothing built`);
+    }
+
+    // A change while the page still looks the tab up (its first look) ends the read too.
+    for (const [what, change] of own.slice(0, 2)) {
+      let release;
+      fake.beforeGet = (id) => (id === 1 ? new Promise((resolve) => (release = resolve)) : null);
+      const reading = cookies(1);
+      await settle();
+      fake.beforeGet = null;
+      assert.equal(typeof release, "function", "the read waits on its first look at the tab");
+      await change();
+      release();
+      await assert.rejects(reading, (error) => !/secret/.test(error.message), `${what} during the first look ends the read`);
     }
 
     // The tab's own cookie store, and never the default one in its place.
