@@ -88,7 +88,7 @@ function routeOrderOptionLabel(order: readonly CoraRoute[]): string {
   const offered = ROUTE_ORDER_CHOICES.some((choice) => choice.join(",") === order.join(","));
   if (!offered) return routeOrderLabel(order);
   const first = ROUTE_LABELS[order[0]];
-  return `${first[0].toUpperCase()}${first.slice(1)} first`;
+  return `${first[0].toUpperCase()}${first.slice(1)} first${order[0] === "openrouter" ? " (paid key)" : ""}`;
 }
 
 function RouteOrderRow({
@@ -110,8 +110,10 @@ function RouteOrderRow({
         <span style={toggleDetailStyle}>
           Cora and her workers use the first of these that can carry the model you picked: your Claude, ChatGPT or
           xAI sign-in, an OpenRouter key with that model verified, or Subcloud once it is set up. A route never
-          set up is skipped. A sign-in that expired or reached its limit is not swapped for a paid key: that run
-          stops and says what to fix. The Costs tab of each run shows the route, account and tokens it used.{" "}
+          set up is skipped. With your sign-ins first, a sign-in that expired or reached its limit is not swapped
+          for a paid key: that run stops and says what to fix. With OpenRouter first, every model with a verified
+          OpenRouter id runs on your OpenRouter key, paid per token, even when you have a sign-in for it. The Usage
+          tab of each run's details shows the route ("OpenRouter key" for those), account and tokens it used.{" "}
           {CLAUDE_PI_LOGIN_BILLING_NOTE}
         </span>
       </span>

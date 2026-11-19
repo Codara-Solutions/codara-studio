@@ -2,6 +2,7 @@ import type { AppSettings, PiSubscriptionProvider } from "@shared/types";
 import {
   chooseCoraRoute,
   normalizeCoraRouteOrder,
+  workerModelsByIdentity,
   type CoraRouteAvailability,
 } from "@shared/cora-routes";
 import { ALLOWED_WORKER_MODELS, partitionWorkerModelsByAccount } from "@shared/worker-model-roster";
@@ -105,4 +106,14 @@ export async function coraWorkerModelAvailability(
     connected: [...split.connected, ...rerouted],
     disconnected: split.disconnected.filter((id) => !rerouted.includes(id)),
   };
+}
+
+/**
+ * The models a managed worker's model is picked from. With an order chosen, a
+ * model is planned by what it is (`openai/gpt-5.6-sol` and `gpt-5.6-sol` are
+ * one model) and routeCoraModel alone picks its route; planning on spellings
+ * would let the roster pick another family, or the paid spelling, first.
+ */
+export function workerPlanningModels(connected: readonly string[], settings: AppSettings): string[] {
+  return settings.coraRouteOrder === undefined ? [...connected] : workerModelsByIdentity(connected);
 }
