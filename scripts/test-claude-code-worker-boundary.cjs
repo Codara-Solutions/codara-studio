@@ -9,8 +9,10 @@
 //      inherited Claude Code session markers;
 //   3. a key passed inline in a Bash call never reaches the worker log (only
 //      a command's program is kept, never its arguments or a tool's output);
-//   4. Stop ends every process Claude Code started, and a Stop during the
-//      launch or the report read never starts a turn.
+//   4. Stop ends every process Claude Code started (helpers born during
+//      Stop, and a helper left in a tool's own group after the tool exited,
+//      included), a failed process listing never counts as "nothing left",
+//      and a Stop during the launch or the report read never starts a turn.
 // How run-store wires it is checked with the route
 // (scripts/test-claude-code-worker-session.cjs).
 // Runs against a fake `claude`: no model is called, no real login is read.
@@ -120,6 +122,22 @@ process.stdin.on("end", () => {
       "setInterval(() => {}, 1000);",
     ].join(";"), path.join(process.env.FAKE_OUT, "helper.pid"), path.join(process.env.FAKE_OUT, "tool.pid")], { stdio: "ignore", detached: true });
     void tool;
+    setInterval(() => {}, 1000);
+    return;
+  }
+  if (prompt.includes("GROUPHELPER")) {
+    // A tool that makes a process group of its own, starts a helper in it
+    // and exits at once: the helper is reparented, below nothing of ours,
+    // and outside Claude Code's group, but still in its session.
+    const script = [
+      "import os, subprocess, sys",
+      "os.setpgid(0, 0)",
+      "helper = subprocess.Popen([sys.executable, '-c', 'import time\\\\nwhile True: time.sleep(1)'])",
+      "open(sys.argv[1], 'w').write(str(helper.pid))",
+      "os._exit(0)",
+    ].join("\\n");
+    const tool = spawn("python3", ["-c", script, path.join(process.env.FAKE_OUT, "group-helper.pid")], { stdio: "ignore" });
+    tool.on("exit", () => fs.writeFileSync(path.join(process.env.FAKE_OUT, "tool.done"), "1"));
     setInterval(() => {}, 1000);
     return;
   }
@@ -358,6 +376,72 @@ async function main() {
     for (const pid of survivors) process.kill(pid, "SIGKILL");
     assert.deepEqual(survivors, []);
     assert.equal(clean, true, "kill() reports a clean teardown");
+  });
+
+  await check("a helper left in a tool's own process group after the tool exited is ended too", async () => {
+    const out = fs.mkdtempSync(path.join(TMP, "out-"));
+    const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "GROUPHELPER", onEvent: () => undefined });
+    const helper = Number(await waitFor(path.join(out, "group-helper.pid")));
+    await waitFor(path.join(out, "tool.done"));
+    assert.ok(alive(helper), "the helper runs before Stop");
+    const clean = await run.kill();
+    await run.done;
+    await sleep(200);
+    const survived = alive(helper);
+    if (survived) process.kill(helper, "SIGKILL");
+    assert.equal(survived, false, "the helper outlived Stop");
+    assert.equal(clean, true, "kill() reports a clean teardown");
+  });
+
+  await check("a process listing that fails never counts as 'nothing left'", async () => {
+    // A `ps` that fails from Stop on: the Claude Code group is ended by its
+    // group id, but the tool that left the group cannot be confirmed gone.
+    const bin = fs.mkdtempSync(path.join(TMP, "bin-"));
+    const flag = path.join(bin, "fail");
+    const realPs = require("node:child_process").execFileSync("sh", ["-c", "command -v ps"], { encoding: "utf8" }).trim();
+    fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\n[ -e ${JSON.stringify(flag)} ] && exit 1\nexec ${JSON.stringify(realPs)} "$@"\n`, { mode: 0o755 });
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath}`;
+    worker.setClaudeCodeTeardownForTests?.({ graceMs: 200, killDeadlineMs: 1_500 });
+    const out = fs.mkdtempSync(path.join(TMP, "out-"));
+    let pids = [];
+    try {
+      const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "TREE", onEvent: () => undefined });
+      pids = JSON.parse(await waitFor(path.join(out, "tree.json")));
+      fs.writeFileSync(flag, "1");
+      const clean = await run.kill();
+      const left = pids.filter(alive);
+      assert.ok(left.length > 0, "the tool that left the group is still running (the case under test)");
+      assert.equal(clean, false, "kill() said nothing was left while a tool still ran");
+      const turn = await run.done;
+      assert.equal(turn.cleanedUp, false, "the turn reported a clean end");
+    } finally {
+      process.env.PATH = savedPath;
+      worker.setClaudeCodeTeardownForTests?.(null);
+      for (const pid of pids.filter(alive)) process.kill(pid, "SIGKILL");
+    }
+  });
+
+  await check("a listing that fails once is retried, and a confirmed empty one ends clean", async () => {
+    let calls = 0;
+    worker.setClaudeCodeTeardownForTests({
+      graceMs: 200,
+      killDeadlineMs: 5_000,
+      listing: (real) => (++calls % 2 === 0 ? null : real()),
+    });
+    const out = fs.mkdtempSync(path.join(TMP, "out-"));
+    let pids = [];
+    try {
+      const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "TREE", onEvent: () => undefined });
+      pids = JSON.parse(await waitFor(path.join(out, "tree.json")));
+      const clean = await run.kill();
+      assert.deepEqual(pids.filter(alive), []);
+      assert.equal(clean, true);
+      assert.equal((await run.done).cleanedUp, true);
+    } finally {
+      worker.setClaudeCodeTeardownForTests(null);
+      for (const pid of pids.filter(alive)) process.kill(pid, "SIGKILL");
+    }
   });
 
   await check("Stop never reads another process's environment", async () => {

@@ -22,13 +22,7 @@ import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { scrubSecrets } from "@shared/memory-items";
-import {
-  captureOwnedProcessTree,
-  isOwnedProcessTreeAlive,
-  signalOwnedProcessTree,
-  type OwnedProcessIdentity,
-  type OwnedProcessTree,
-} from "../owned-process-tree";
+import { psTimeEnvironment } from "../owned-process-tree";
 import { CODARA_CLAUDE_CLI_DIRNAME, codaraHomeDir, isCodaraManagedCliPath } from "./codara-managed-cli-roots";
 import { CLAUDE_CLI_PERSONAL_PROFILE_ID, isClaudeCliManagedProfileId } from "./claude-cli-profile-ids";
 
@@ -144,25 +138,162 @@ export function parseClaudeCodeStreamLine(line: string): ClaudeCodeEvent[] {
 }
 
 export interface ClaudeCodeProcess {
-  done: Promise<{ exitCode: number; stderrTail: string }>;
-  /** Stop Claude Code and every process it started. True once none is
-   *  left; false when something still lived at the deadline. */
+  /** The turn's end. `cleanedUp` is false when something the turn started
+   *  could not be confirmed gone (the caller then keeps its hold and starts
+   *  nothing more). */
+  done: Promise<{ exitCode: number; stderrTail: string; cleanedUp: boolean }>;
+  /** Stop Claude Code and every process it started. True only once a
+   *  process listing confirmed none is left; false when something still
+   *  lived at the deadline or the listing could not be read. */
   kill(): Promise<boolean>;
 }
 
-const STOP_GRACE_MS = 3_000;
 const DRAIN_AFTER_EXIT_MS = 1_000;
+const teardownTiming = {
+  /** SIGTERM first, then this long before SIGKILL. */
+  graceMs: 3_000,
+  /** How long SIGKILL and the check are retried before teardown is
+   *  reported incomplete. */
+  killDeadlineMs: 30_000,
+  pollMs: 100,
+};
 
-/** How long SIGKILL is retried before teardown is reported incomplete. */
-const KILL_DEADLINE_MS = 30_000;
+/** One row of the teardown listing. `sessionId` is -1 where `ps` has no
+ *  session column (macOS). */
+export interface ClaudeCodeListedProcess {
+  pid: number;
+  parentPid: number;
+  groupId: number;
+  sessionId: number;
+  zombie: boolean;
+  startedAt: string;
+}
+
+const TEARDOWN_PS_TIMEOUT_MS = 3_000;
+const LINUX_PS_LINE = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/;
+const OTHER_PS_LINE = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/;
+
+/** Every process's pid, parent, group, session, state and start time. Null
+ *  when `ps` failed or timed out: never an empty list in its place. Only
+ *  these columns are read, never a command line or an environment. */
+function listProcessesForTeardown(): ClaudeCodeListedProcess[] | null {
+  const linux = process.platform === "linux";
+  const result = spawnSync("ps", ["-axo", linux ? "pid=,ppid=,pgid=,sid=,stat=,lstart=" : "pid=,ppid=,pgid=,stat=,lstart="], {
+    encoding: "utf8",
+    env: psTimeEnvironment(),
+    timeout: TEARDOWN_PS_TIMEOUT_MS,
+    maxBuffer: 8 * 1024 * 1024,
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0 || typeof result.stdout !== "string" || !result.stdout.trim()) return null;
+  const rows: ClaudeCodeListedProcess[] = [];
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const match = (linux ? LINUX_PS_LINE : OTHER_PS_LINE).exec(line);
+    if (!match) continue;
+    const [pid, parentPid, groupId] = [Number(match[1]), Number(match[2]), Number(match[3])];
+    const sessionId = linux ? Number(match[4]) : -1;
+    const stat = linux ? match[5] : match[4];
+    rows.push({ pid, parentPid, groupId, sessionId, zombie: stat.startsWith("Z"), startedAt: (linux ? match[6] : match[5]).trim() });
+  }
+  return rows.length > 0 ? rows : null;
+}
+
+let processListing: () => ClaudeCodeListedProcess[] | null = listProcessesForTeardown;
+
+/** Tests only: replace the teardown listing (null restores `ps`) and shorten
+ *  the teardown timing. */
+export function setClaudeCodeTeardownForTests(input: {
+  listing?: ((real: () => ClaudeCodeListedProcess[] | null) => ClaudeCodeListedProcess[] | null) | null;
+  graceMs?: number;
+  killDeadlineMs?: number;
+} | null): void {
+  processListing = input?.listing ? () => input.listing!(listProcessesForTeardown) : listProcessesForTeardown;
+  teardownTiming.graceMs = input?.graceMs ?? 3_000;
+  teardownTiming.killDeadlineMs = input?.killDeadlineMs ?? 30_000;
+}
 
 /**
- * End the process group a worker leads and every process below it, SIGTERM
- * first and SIGKILL after a grace period. Every process seen below a known
- * one is remembered, before each signal round and until the end, so a
- * helper started during teardown (in another group) is ended too. Resolves
- * true once nothing is left, false when something still lives at the
- * deadline (the caller then keeps its hold).
+ * Everything a worker started, as a set that only grows. Claude Code is
+ * spawned detached, so it leads a new session and a new process group.
+ * A process is the worker's when it is in that session, in a group or
+ * session a known member of it leads or joined, or below one of those by
+ * parent. A tool that makes its own group stays in the session, so a
+ * helper it starts there is found even after the tool exits and the helper
+ * is reparented. Only pids, parents, groups, sessions and start times are
+ * read (`ps`), never a command line or an environment.
+ *
+ * What this cannot reach: a process that starts a new session of its own
+ * (setsid) after its last known ancestor exited and before any listing saw
+ * it. That needs an OS container (a cgroup); the teardown then reports
+ * nothing left only for what it can see.
+ */
+class OwnedProcesses {
+  private readonly known = new Map<number, string>();
+  private readonly groups = new Set<number>();
+  private readonly sessions = new Set<number>();
+
+  constructor(rootPid: number) {
+    this.groups.add(rootPid);
+    if (process.platform === "linux") this.sessions.add(rootPid);
+  }
+
+  /** The live members in `listing`, learning every new one. */
+  members(listing: readonly ClaudeCodeListedProcess[]): ClaudeCodeListedProcess[] {
+    const owned = new Map<number, ClaudeCodeListedProcess>();
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const row of listing) {
+        if (owned.has(row.pid) || row.pid <= 1 || row.pid === process.pid) continue;
+        const ours =
+          this.known.get(row.pid) === row.startedAt ||
+          this.groups.has(row.groupId) ||
+          (row.sessionId > 1 && this.sessions.has(row.sessionId)) ||
+          owned.has(row.parentPid);
+        if (!ours) continue;
+        owned.set(row.pid, row);
+        this.known.set(row.pid, row.startedAt);
+        if (row.groupId > 1 && !this.groups.has(row.groupId)) {
+          this.groups.add(row.groupId);
+          grew = true;
+        }
+        if (row.sessionId > 1 && !this.sessions.has(row.sessionId)) {
+          this.sessions.add(row.sessionId);
+          grew = true;
+        }
+        grew = true;
+      }
+    }
+    return [...owned.values()].filter((row) => !row.zombie);
+  }
+
+  signal(sig: NodeJS.Signals, members: readonly ClaudeCodeListedProcess[] | null): void {
+    // A group cannot be handed to another process while one of its members
+    // lives, so signalling a known group is safe even without a listing.
+    for (const group of this.groups) {
+      try {
+        process.kill(-group, sig);
+      } catch {
+        // Gone already.
+      }
+    }
+    // Single pids only when a listing just confirmed who they are.
+    for (const member of members ?? []) {
+      try {
+        process.kill(member.pid, sig);
+      } catch {
+        // Exited between the listing and the signal.
+      }
+    }
+  }
+}
+
+/**
+ * End everything a worker started: SIGTERM, a grace period, then SIGKILL
+ * retried until the deadline. Every round lists processes again, so a
+ * helper born during teardown is found and ended too. A listing that fails
+ * or times out counts as "may still be alive", never as "gone": the result
+ * is true only once a listing confirmed nothing is left.
  */
 async function stopProcessTree(pid: number | undefined): Promise<boolean> {
   if (!pid) return true;
@@ -170,50 +301,47 @@ async function stopProcessTree(pid: number | undefined): Promise<boolean> {
     const result = spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
     return result.status === 0 || result.status === 128;
   }
-  const known = new Map<number, OwnedProcessIdentity>();
-  const remember = (tree: OwnedProcessTree | null) => {
-    for (const member of tree?.members ?? []) if (!known.has(member.pid)) known.set(member.pid, member);
+  const owned = new OwnedProcesses(pid);
+  const pause = () => new Promise((resolve) => setTimeout(resolve, teardownTiming.pollMs));
+  /** The live members now; null when that cannot be told. */
+  const look = (): ClaudeCodeListedProcess[] | null => {
+    const listing = processListing();
+    return listing ? owned.members(listing) : null;
   };
-  remember(captureOwnedProcessTree(pid));
-  const refresh = () => {
-    for (const member of [...known.values()]) {
-      const below = captureOwnedProcessTree(member.pid);
-      // Only below the same process: a recycled pid is not ours.
-      if (below?.members.some((entry) => entry.pid === member.pid && entry.startedAt === member.startedAt)) remember(below);
-    }
+  const round = (sig: NodeJS.Signals) => owned.signal(sig, look());
+  const termed = new Set<string>();
+  const term = (members: readonly ClaudeCodeListedProcess[] | null) => {
+    const fresh = (members ?? []).filter((member) => !termed.has(`${member.pid}@${member.startedAt}`));
+    for (const member of fresh) termed.add(`${member.pid}@${member.startedAt}`);
+    return fresh;
   };
-  const tracked = (): OwnedProcessTree => ({ rootPid: pid, members: [...known.values()] });
-  const groupAlive = () => {
-    try {
-      process.kill(-pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  const anyAlive = () => groupAlive() || isOwnedProcessTreeAlive(tracked());
-  const signal = (sig: NodeJS.Signals) => {
-    refresh();
-    try {
-      process.kill(-pid, sig);
-    } catch {
-      // The group is already gone.
-    }
-    signalOwnedProcessTree(tracked(), sig);
-  };
-  const pause = () => new Promise((resolve) => setTimeout(resolve, 100));
-  signal("SIGTERM");
-  const deadline = Date.now() + STOP_GRACE_MS;
-  while (Date.now() < deadline && anyAlive()) {
-    await pause();
-    refresh();
+  {
+    const first = look();
+    owned.signal("SIGTERM", term(first));
   }
-  const killDeadline = Date.now() + KILL_DEADLINE_MS;
-  while (Date.now() < killDeadline && anyAlive()) {
-    signal("SIGKILL");
+  let last = look();
+  const graceEnd = Date.now() + teardownTiming.graceMs;
+  while (Date.now() < graceEnd && (last === null || last.length > 0)) {
     await pause();
+    last = look();
+    // A helper born since the last look gets its SIGTERM too, once.
+    const fresh = term(last);
+    for (const member of fresh) {
+      try {
+        process.kill(member.pid, "SIGTERM");
+      } catch {
+        // Exited already.
+      }
+    }
   }
-  return !anyAlive();
+  const killEnd = Date.now() + teardownTiming.killDeadlineMs;
+  while (last === null || last.length > 0) {
+    round("SIGKILL");
+    await pause();
+    last = look();
+    if (Date.now() >= killEnd) break;
+  }
+  return last !== null && last.length === 0;
 }
 
 /** Start Claude Code, hand it the prompt on stdin, and report each event.
@@ -259,23 +387,26 @@ export function startClaudeCodeWorker(input: {
   });
   child.stdin.on("error", () => undefined);
   child.stdin.end(input.prompt);
-  const done = new Promise<{ exitCode: number; stderrTail: string }>((resolve) => {
+  const done = new Promise<{ exitCode: number; stderrTail: string; cleanedUp: boolean }>((resolve) => {
     let settled = false;
-    const finish = (exitCode: number) => {
+    const finish = (exitCode: number, cleanedUp: boolean) => {
       if (settled) return;
       settled = true;
       if (buffered.trim()) emit(buffered);
-      resolve({ exitCode, stderrTail: safeLine(stderrTail, 2_000) });
+      resolve({ exitCode, stderrTail: safeLine(stderrTail, 2_000), cleanedUp });
     };
     child.on("error", (error) => {
       stderrTail = `${stderrTail}\n${error.message}`.slice(-2_000);
-      finish(127);
+      // Nothing started without a pid; with one, its teardown decides.
+      if (!child.pid) finish(127, true);
+      else void stopTree().then((clean) => finish(127, clean), () => finish(127, false));
     });
     // The turn ends with nothing it started still running. A background
     // process left holding Claude Code's output would keep "close" from ever
     // firing, so the exit also ends the group after a moment to drain.
     const end = (code: number | null, signal: NodeJS.Signals | null) => {
-      void stopTree().finally(() => finish(code ?? (signal ? 130 : 1)));
+      const exitCode = code ?? (signal ? 130 : 1);
+      void stopTree().then((clean) => finish(exitCode, clean), () => finish(exitCode, false));
     };
     child.on("close", end);
     child.on("exit", (code, signal) => {
