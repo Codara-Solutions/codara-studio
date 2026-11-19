@@ -99,6 +99,21 @@ export const NAVIGATE_TIMEOUT_ERROR = "Firefox did not start showing the page in
 export const NAVIGATE_BUSY_ERROR = "Another navigation of this tab is still on its way; wait for it to load, then navigate again.";
 
 /**
+ * Notes on a navigation what a tab change tells it: a load started since
+ * it was asked, or the tab reached a page agents may not use (`refusal`
+ * gives why for an address, or null). The refusal is kept until the
+ * answer, so a redirect to a blocked site that the tab leaves again is
+ * refused like one that stays there.
+ */
+export function noteNavigationChange(target, kind, change, refusal) {
+  if (kind === "started") target.started = true;
+  if (change.url !== undefined && !target.refused) {
+    const why = refusal(change.url);
+    if (why) target.refused = why;
+  }
+}
+
+/**
  * Whether a tab change answers a navigation, given the changes since it
  * was asked (`target.started`: a load started since). For a new document:
  * its commit or Firefox's error page, only after a load started since it

@@ -68,6 +68,19 @@ export async function run(assembled) {
   assert.equal(answersNavigation("moved", { status: "complete", url: "https://a.example/b#other" }, fragment), false);
   assert.equal(answersNavigation("commit", { status: "loading", url: "https://a.example/b#part" }, fragment), false);
 
+  // A page agents may not use, reached on the way, is remembered until the answer: a redirect
+  // to a blocked site that the tab leaves again is refused like one that stays there.
+  const refusal = (url) => (new URL(url).hostname === "bank.example" ? "tab 7 is on a site agents may not use" : null);
+  const bounced = { sameDocument: false, url: "https://a.example/go", started: false };
+  for (const change of [{ status: "loading" }, { status: "loading", url: "https://bank.example/" }, { status: "loading" }, { status: "loading", url: "https://a.example/back" }]) {
+    nav.noteNavigationChange(bounced, change.url ? "commit" : "started", change, refusal);
+  }
+  assert.deepEqual(bounced, { sameDocument: false, url: "https://a.example/go", started: true, refused: "tab 7 is on a site agents may not use" });
+  const clean = { sameDocument: false, url: "https://a.example/go", started: false };
+  nav.noteNavigationChange(clean, "started", { status: "loading" }, refusal);
+  nav.noteNavigationChange(clean, "commit", { status: "loading", url: "https://a.example/go" }, refusal);
+  assert.deepEqual(clean, { sameDocument: false, url: "https://a.example/go", started: true });
+
   // ── events ──
   let ids = 0;
   const newId = () => `L${++ids}`;

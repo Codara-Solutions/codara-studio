@@ -17,6 +17,7 @@
 import { LinkClient } from "./lib/link-client.js";
 import {
   NAVIGATE_BUSY_ERROR,
+  noteNavigationChange,
   NAVIGATE_TIMEOUT_ERROR,
   answersNavigation,
   frameTree,
@@ -257,6 +258,13 @@ async function usableTab(tabId) {
   return tab;
 }
 
+/** Why agents may not use a tab on this address (as usableTab says it), or null. */
+function pageRefusal(tabId, url) {
+  if (isFirefoxRestrictedUrl(url)) return `${agentTabId(tabId)} is not shared with agents. Share it from the Codara extension popup first.`;
+  const rule = firefoxBlockingRule(url, rules);
+  return rule ? `${agentTabId(tabId)} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).` : null;
+}
+
 /** Throws unless the socket a request came on is still the live one (see liveSocket). */
 function stillLive(socket) {
   if (!socket || liveSocket() !== socket) throw new Error("This browser is no longer paired with Codara on this connection.");
@@ -385,7 +393,9 @@ async function navigateTab(tabId, params, socket) {
       throw error;
     }
     const kind = await waiter.answer;
-    // A redirect may have taken the tab to a blocked site or a page Firefox keeps extensions off.
+    // A redirect may have taken the tab to a blocked site or a page Firefox
+    // keeps extensions off, even if it left again since (the tab was let go then).
+    if (waiter.target.refused) throw new Error(waiter.target.refused);
     await untilDeadline(stillUsable(now.id, socket), deadline);
     // Codara stops waiting at 30 s: an answer past the deadline is none.
     if (Date.now() >= deadline) throw new Error(NAVIGATE_TIMEOUT_ERROR);
@@ -692,7 +702,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
     for (const [method, params] of events) sendLive({ type: "cdp_event", tabId, method, params });
   }
   const waiter = navigationWaiters.get(tabId);
-  if (waiter && kind === "started") waiter.target.started = true;
+  if (waiter) noteNavigationChange(waiter.target, kind, change, (address) => pageRefusal(tabId, address));
   if (waiter && answersNavigation(kind, change, waiter.target)) waiter.done(kind);
   if (change.url !== undefined) {
     await ready;
