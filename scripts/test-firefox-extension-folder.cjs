@@ -98,26 +98,44 @@ function copyFiltered(from, to, filter) {
     assert.equal(fs.statSync(path.join(folder, "manifest.json")).mtimeMs, before);
 
     // Something else where the folder goes (Codara's own is only ever renamed
-    // in whole) is never deleted or written over: the user is told.
+    // in whole) is never deleted or written over: the user is told. Nor is
+    // anything else beside it.
+    const whole = path.join(scratch, "whole-copy");
+    fs.cpSync(folder, whole, { recursive: true });
+    fs.mkdirSync(path.join(path.dirname(folder), `${version}.partial-${process.pid}`));
+    fs.writeFileSync(path.join(path.dirname(folder), `${version}.partial-${process.pid}`, "notes.txt"), "kept\n");
     fs.rmSync(path.join(folder, "manifest.json"));
     fs.writeFileSync(path.join(folder, "notes.txt"), "the user's own file\n");
-    await assert.rejects((await load({ isPackaged: false, getAppPath: () => ROOT }, home)).prepareFirefoxExtensionFolder(), /is already there and is not Codara's extension for Firefox/);
+    const inTheWay = /is already there and is not a whole copy of Codara's extension for Firefox/;
+    await assert.rejects((await load({ isPackaged: false, getAppPath: () => ROOT }, home)).prepareFirefoxExtensionFolder(), inTheWay);
     assert.equal(fs.readFileSync(path.join(folder, "notes.txt"), "utf8"), "the user's own file\n");
     assert.equal(fs.readFileSync(path.join(folder, "background.js"), "utf8"), "// the copy Firefox loaded\n");
-    assert.deepEqual(fs.readdirSync(path.dirname(folder)), [version], "no staging folder is left");
-    // Another Codara that publishes the folder while this one assembles: its folder is used, untouched.
+    // A manifest alone is not a folder Firefox can load: told, left as it is.
     fs.rmSync(folder, { recursive: true });
-    const other = await load({ isPackaged: false, getAppPath: () => ROOT }, home);
-    const pending = other.prepareFirefoxExtensionFolder();
     fs.mkdirSync(folder);
-    fs.writeFileSync(path.join(folder, "manifest.json"), "{\"from\":\"the other Codara\"}");
+    fs.writeFileSync(path.join(folder, "manifest.json"), JSON.stringify({ version }));
+    await assert.rejects((await load({ isPackaged: false, getAppPath: () => ROOT }, home)).prepareFirefoxExtensionFolder(), inTheWay);
+    assert.deepEqual(fs.readdirSync(folder), ["manifest.json"]);
+    // Another Codara that publishes a whole folder while this one assembles: its folder is used, untouched;
+    // one that leaves something else there is reported.
+    fs.rmSync(folder, { recursive: true });
+    let pending = (await load({ isPackaged: false, getAppPath: () => ROOT }, home)).prepareFirefoxExtensionFolder();
+    fs.cpSync(whole, folder, { recursive: true });
     assert.equal(await pending, folder);
-    assert.equal(fs.readFileSync(path.join(folder, "manifest.json"), "utf8"), "{\"from\":\"the other Codara\"}");
+    assert.equal(fs.readFileSync(path.join(folder, "background.js"), "utf8"), "// the copy Firefox loaded\n");
+    fs.rmSync(folder, { recursive: true });
+    pending = (await load({ isPackaged: false, getAppPath: () => ROOT }, home)).prepareFirefoxExtensionFolder();
+    fs.mkdirSync(folder);
+    fs.writeFileSync(path.join(folder, "notes.txt"), "the user's own file\n");
+    await assert.rejects(pending, inTheWay);
+    assert.deepEqual(fs.readdirSync(folder), ["notes.txt"]);
     // An empty folder there holds nothing to lose: the extension goes in.
     fs.rmSync(folder, { recursive: true });
     fs.mkdirSync(folder);
     await (await load({ isPackaged: false, getAppPath: () => ROOT }, home)).prepareFirefoxExtensionFolder();
     sameAsAssembly(folder, "made in an empty folder");
+    assert.equal(fs.readFileSync(path.join(path.dirname(folder), `${version}.partial-${process.pid}`, "notes.txt"), "utf8"), "kept\n", "nothing beside it is touched");
+    assert.deepEqual(fs.readdirSync(path.dirname(folder)).sort(), [version, `${version}.partial-${process.pid}`].sort(), "no staging folder is left");
 
     // Packaged: the sources as extraResources copies them, and they assemble the same add-on.
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
@@ -138,9 +156,17 @@ function copyFiltered(from, to, filter) {
       assert.equal(packaged, path.join(packagedHome, "firefox-extension", version));
       sameAsAssembly(packaged, "packaged");
 
-      // A newer version gets its own folder; the one Firefox loaded stays as it was.
+      // Sources that change while Codara runs land under the version they carry, never the one read at start.
       const manifestPath = path.join(resources, "firefox-extension-source", "manifest.json");
       const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      const runningHome = path.join(scratch, "running-home");
+      lib = await load({ isPackaged: true, getAppPath: () => path.join(resources, "app.asar") }, runningHome);
+      assert.equal(lib.firefoxExtensionFolder(), path.join(runningHome, "firefox-extension", version));
+      fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, version: "98.0.0" }));
+      assert.equal(await lib.prepareFirefoxExtensionFolder(), path.join(runningHome, "firefox-extension", "98.0.0"));
+      assert.deepEqual(fs.readdirSync(path.join(runningHome, "firefox-extension")), ["98.0.0"]);
+
+      // A newer version gets its own folder; the one Firefox loaded stays as it was.
       fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, version: "99.0.0" }));
       fs.writeFileSync(path.join(packaged, "popup.js"), "// loaded before the update\n");
       lib = await load({ isPackaged: true, getAppPath: () => path.join(resources, "app.asar") }, packagedHome);
