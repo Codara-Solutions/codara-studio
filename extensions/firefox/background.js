@@ -15,7 +15,7 @@
 // picks up where it left off.
 
 import { LinkClient } from "./lib/link-client.js";
-import { frameTree, freshPage, isSameDocument, navigateAnswer, navigateUrl, pageEvents } from "./lib/navigation.js";
+import { answersNavigation, frameTree, freshPage, isSameDocument, navigateAnswer, navigateUrl, pageEvents } from "./lib/navigation.js";
 import {
   CDP_METHODS,
   browserIdentity,
@@ -336,42 +336,59 @@ async function answerCommand(request, socket) {
 }
 
 /**
- * Page.navigate: the address is checked before Firefox loads it, and the
- * answer waits for the tab's next address change, as the debugger's waits
- * for the commit: the page's own document, or Firefox's error page.
+ * Page.navigate: the address is checked right before Firefox loads it,
+ * and the answer waits for the tab's change that answers it, as the
+ * debugger's waits for the commit: the new document, Firefox's error page,
+ * or the fragment reached.
  */
 async function navigateTab(tab, params, socket) {
   if (params === null || typeof params !== "object") throw new Error("Page.navigate needs an absolute http or https url.");
-  const url = navigateUrl(params, tab.id, { isRestricted: isFirefoxRestrictedUrl, blockingRule: (address) => firefoxBlockingRule(address, rules) });
+  const checks = { isRestricted: isFirefoxRestrictedUrl, blockingRule: (address) => firefoxBlockingRule(address, rules) };
+  navigateUrl(params, tab.id, checks);
   const now = await stillUsable(tab.id, socket);
+  // Checked again with nothing awaited before the load: the user may have blocked the site meanwhile.
+  const url = navigateUrl(params, now.id, checks);
   const sameDocument = isSameDocument(now.url, url);
+  if (sameDocument && now.url === url) return navigateAnswer(now.id, true, "moved", null);
+  const page = pageOf(now.id, now.url);
   // The id the next document gets, also when it commits after the answer.
-  const { nextLoaderId } = pageOf(now.id);
-  const changed = sameDocument ? null : nextAddressChange(now.id);
-  await chrome.tabs.update(now.id, { url });
+  const { nextLoaderId } = page;
+  const changed = addressChange(now.id, { sameDocument, url });
+  try {
+    await chrome.tabs.update(now.id, { url });
+  } catch (error) {
+    navigationWaiters.get(now.id)?.done("superseded");
+    throw error;
+  }
   const kind = await changed;
   // A redirect may have taken the tab to a blocked site or a page Firefox keeps extensions off.
   await stillUsable(now.id, socket);
   return navigateAnswer(now.id, sameDocument, kind, nextLoaderId);
 }
 
-/** The tab's next address change ("commit" or "moved"), or null if none comes in COMMIT_WAIT_MS or the tab closes. */
-function nextAddressChange(tabId) {
+/**
+ * The tab change that answers this navigation (see answersNavigation), or
+ * null when none comes in NAVIGATE_WAIT_MS or the tab closes. One
+ * navigation per tab: a newer one answers the older as superseded.
+ */
+function addressChange(tabId, target) {
+  navigationWaiters.get(tabId)?.done("superseded");
   return new Promise((resolve) => {
-    const waiters = addressWaiters.get(tabId) ?? new Set();
-    addressWaiters.set(tabId, waiters);
-    const done = (kind) => {
-      clearTimeout(timer);
-      waiters.delete(done);
-      resolve(kind);
+    const waiter = {
+      target,
+      done(kind) {
+        clearTimeout(timer);
+        if (navigationWaiters.get(tabId) === waiter) navigationWaiters.delete(tabId);
+        resolve(kind);
+      },
     };
-    const timer = setTimeout(() => done(null), COMMIT_WAIT_MS);
-    waiters.add(done);
+    const timer = setTimeout(() => waiter.done(null), NAVIGATE_WAIT_MS);
+    navigationWaiters.set(tabId, waiter);
   });
 }
 
-function pageOf(tabId) {
-  if (!pages.has(tabId)) pages.set(tabId, freshPage(newLoaderId));
+function pageOf(tabId, url = null) {
+  if (!pages.has(tabId)) pages.set(tabId, freshPage(newLoaderId, url));
   return pages.get(tabId);
 }
 
@@ -621,11 +638,12 @@ chrome.tabs.onDetached.addListener(scheduleRefresh);
 // reading can tell the tab did not leave its page at any point meanwhile.
 const navigations = new Map();
 // Each tab's page (lib/navigation.js), the tabs whose page events Codara
-// asked for, and the navigations waiting for a tab's next address change.
+// asked for, and the navigation waiting for each tab's answer.
 const pages = new Map();
 const pageEventTabs = new Set();
-const addressWaiters = new Map();
-const COMMIT_WAIT_MS = 10_000;
+const navigationWaiters = new Map();
+// Under the 30 s Codara waits for any answer.
+const NAVIGATE_WAIT_MS = 25_000;
 
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
   if (isPageChange(change)) navigations.set(tabId, (navigations.get(tabId) ?? 0) + 1);
@@ -635,8 +653,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
   if (events.length && state && pageEventTabs.has(tabId) && state.attached.includes(tabId) && shared(tab) && !firefoxBlockingRule(tab.url, rules)) {
     for (const [method, params] of events) sendLive({ type: "cdp_event", tabId, method, params });
   }
-  // A route change of the page still loading (status "loading") is not navigate's answer; Firefox's error page is.
-  if (kind === "commit" || (kind === "moved" && change.status !== "loading")) for (const done of [...(addressWaiters.get(tabId) ?? [])]) done(kind);
+  const waiter = navigationWaiters.get(tabId);
+  if (waiter && answersNavigation(kind, change, waiter.target)) waiter.done(kind);
   if (change.url !== undefined) {
     await ready;
     if (state.attached.includes(tabId) && (firefoxBlockingRule(change.url, rules) || isFirefoxRestrictedUrl(change.url))) {
@@ -654,8 +672,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   navigations.delete(tabId);
   pages.delete(tabId);
   pageEventTabs.delete(tabId);
-  for (const done of [...(addressWaiters.get(tabId) ?? [])]) done(null);
-  addressWaiters.delete(tabId);
+  navigationWaiters.get(tabId)?.done(null);
   await ready;
   const usage = { ...state.usage };
   delete usage[tabId];

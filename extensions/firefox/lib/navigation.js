@@ -11,7 +11,10 @@
 // - Firefox's own error page (an address that does not resolve, a server
 //   that does not answer) reports { status: "complete", url }, with no
 //   loading commit before it.
-// So a commit is the first loading address change after a load started.
+// So a commit is the first loading address change after a load started,
+// and a load that ends before any commit was a failed one: the address
+// change after it is Firefox's error page, as is a finished one to another
+// site (a document cannot move itself to another origin).
 //
 // No browser.* here, so the tests run it in Node.
 
@@ -67,29 +70,55 @@ export function isSameDocument(from, to) {
 
 /**
  * What Firefox's change says about the tab's page: a load started, a new
- * document committed, the tab moved within its document (or to an error
- * page), the load ended, or nothing.
+ * document committed, the tab moved within its document, Firefox showed
+ * its error page ("failed"), the load ended, or nothing.
  */
 export function changeKind(change, page) {
-  if (change.url !== undefined) return change.status === "loading" && page.awaitingCommit ? "commit" : "moved";
+  if (change.url !== undefined) {
+    if (change.status === "loading") return page.awaitingCommit ? "commit" : "moved";
+    return page.aborted || otherOrigin(page.url, change.url) ? "failed" : "moved";
+  }
   if (change.status === "loading") return "started";
   if (change.status === "complete") return "loaded";
   return null;
 }
 
+function otherOrigin(before, after) {
+  if (!before) return false;
+  try {
+    return new URL(before).origin !== new URL(after).origin;
+  } catch {
+    return true;
+  }
+}
+
 export const NAVIGATE_ERROR =
   "Firefox showed its error page instead: the site did not answer, or its address did not resolve.";
+export const NAVIGATE_TIMEOUT_ERROR = "Firefox did not start showing the page in 25 s.";
+export const NAVIGATE_SUPERSEDED_ERROR = "Another navigation in this tab replaced this one before it loaded.";
 
 /**
- * Page.navigate's answer once the tab's next change came (or null when none
- * came in time: the load is still on its way). A cross-document navigation
- * whose first address change is not a loading commit ended on Firefox's
- * error page.
+ * Whether a tab change answers a navigation: for a new document, its
+ * commit or Firefox's error page (never a route change of the page still
+ * loading); for a fragment, the tab reaching that address.
+ */
+export function answersNavigation(kind, change, { sameDocument, url }) {
+  if (sameDocument) return kind === "moved" && change.url === url;
+  return kind === "commit" || kind === "failed" || (kind === "moved" && change.status !== "loading");
+}
+
+/**
+ * Page.navigate's answer once the tab's change came: null when none came
+ * in time, "superseded" when another navigation of the tab replaced it.
+ * A new document's first address change that is not a loading commit is
+ * Firefox's error page.
  */
 export function navigateAnswer(tabId, sameDocument, kind, loaderId) {
   const frameId = mainFrameId(tabId);
+  if (kind === "superseded") return { frameId, errorText: NAVIGATE_SUPERSEDED_ERROR };
+  if (kind === null) return { frameId, errorText: NAVIGATE_TIMEOUT_ERROR };
   if (sameDocument) return { frameId };
-  if (kind === "moved") return { frameId, loaderId, errorText: NAVIGATE_ERROR };
+  if (kind !== "commit") return { frameId, loaderId, errorText: NAVIGATE_ERROR };
   return { frameId, loaderId };
 }
 
@@ -122,10 +151,11 @@ export function frameTree(tabId, url, loaderId) {
 /**
  * A tab's page as the extension tracks it: the document's loader id, the
  * one its next document will get (so a navigation can name it before it
- * commits), and whether a load is under way.
+ * commits), its address once known, whether a load is under way and has
+ * not committed yet, and whether the last load ended without a commit.
  */
-export function freshPage(newId) {
-  return { loaderId: newId(), nextLoaderId: newId(), loading: false, awaitingCommit: false };
+export function freshPage(newId, url = null) {
+  return { loaderId: newId(), nextLoaderId: newId(), url, loading: false, awaitingCommit: false, aborted: false };
 }
 
 /**
@@ -138,36 +168,45 @@ export function pageEvents(change, tab, page, newId, now) {
   const frameId = mainFrameId(tab.id);
   const timestamp = now / 1000;
   const events = [];
-  let { loaderId, nextLoaderId, loading, awaitingCommit } = page;
+  let { loaderId, nextLoaderId, url, loading, awaitingCommit, aborted } = page;
   const kind = changeKind(change, page);
+  const stop = () => {
+    if (loading) events.push(["Page.frameStoppedLoading", { frameId }]);
+    loading = false;
+    awaitingCommit = false;
+  };
   switch (kind) {
     case "started":
       if (!loading) events.push(["Page.frameStartedLoading", { frameId }]);
       loading = true;
       awaitingCommit = true;
+      aborted = false;
       break;
     case "commit":
       awaitingCommit = false;
       loaderId = nextLoaderId;
       nextLoaderId = newId();
+      url = change.url;
       events.push(["Page.frameNavigated", { frame: frameOf(tab.id, change.url, loaderId), type: "Navigation" }]);
       break;
     case "moved":
+      url = change.url;
       events.push(["Page.navigatedWithinDocument", { frameId, url: change.url }]);
-      // A route change while the page loads leaves the load going; an error page ends it.
-      if (loading && change.status !== "loading") {
-        events.push(["Page.frameStoppedLoading", { frameId }]);
-        loading = false;
-        awaitingCommit = false;
-      }
+      // A route change while the page loads leaves the load going.
+      if (change.status !== "loading") stop();
+      break;
+    case "failed":
+      // Firefox's error page is no page of the site: no event names it.
+      url = change.url;
+      aborted = false;
+      stop();
       break;
     case "loaded":
-      if (loading) {
-        events.push(["Page.loadEventFired", { timestamp }], ["Page.frameStoppedLoading", { frameId }]);
-      }
-      loading = false;
-      awaitingCommit = false;
+      // Only a committed document has a load event; a load that ended before its commit failed.
+      if (loading && !awaitingCommit) events.push(["Page.loadEventFired", { timestamp }]);
+      if (awaitingCommit) aborted = true;
+      stop();
       break;
   }
-  return { events, page: { loaderId, nextLoaderId, loading, awaitingCommit }, kind };
+  return { events, page: { loaderId, nextLoaderId, url, loading, awaitingCommit, aborted }, kind };
 }
