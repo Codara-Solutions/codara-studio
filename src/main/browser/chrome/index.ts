@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 
 import type { ChromeLinkIncompatibleExtension, ChromeLinkState, ChromePresenceSettings, SeparateBrowserTool } from "../../../shared/chrome-link";
 import { codaraHome, LEGACY_DIR_NAMES } from "../../codara-home";
+import { firefoxExtensionFolder, prepareFirefoxExtensionFolder } from "../firefox-extension";
 import type { IpcHandle } from "../../ipc";
 import { paneAgentRuntime } from "../../pane-agent-runtime";
 import { runtimeDisplayName } from "../agent-driver";
@@ -239,6 +240,7 @@ export function chromeLinkState(): ChromeLinkState {
     error: server?.error ?? null,
     extensionFolder: extensionFolder(),
     shippedExtensionVersion: shippedExtensionVersion(),
+    firefoxExtensionFolder: firefoxExtensionFolder(),
     browsers: (store?.list() ?? []).map((paired) => {
       const link = live.get(paired.linkId);
       const stopped = chromeStops(paired.linkId);
@@ -438,6 +440,13 @@ export function registerChromeLinkIpc(handle: IpcHandle): void {
   handle("chromeLink:prepareExtension", async (): Promise<string> => prepareExtensionFolder());
   handle("chromeLink:revealExtension", async (): Promise<string> => {
     const folder = prepareExtensionFolder();
+    const failure = await shell.openPath(folder);
+    if (failure) shell.showItemInFolder(join(folder, "manifest.json"));
+    return folder;
+  });
+  handle("chromeLink:prepareFirefoxExtension", async (): Promise<string> => prepareFirefoxExtensionFolder());
+  handle("chromeLink:revealFirefoxExtension", async (): Promise<string> => {
+    const folder = await prepareFirefoxExtensionFolder();
     const failure = await shell.openPath(folder);
     if (failure) shell.showItemInFolder(join(folder, "manifest.json"));
     return folder;

@@ -17,6 +17,13 @@ assembly fails instead of shipping Chrome's wording.
 
 ## Install (temporary add-on, for now)
 
+In Codara: Settings > Browser > Firefox walks through these steps. Its folder
+is this version's, assembled into Codara's home
+(`<codara home>/firefox-extension/<version>/`, by
+`src/main/browser/firefox-extension.ts`) the first time Copy path or Reveal
+folder is pressed, and never rewritten: a newer Codara assembles its version
+beside it. From a checkout:
+
 1. `node extensions/firefox/build/assemble.mjs` writes the extension to
    `extensions/firefox/dist/extension/`.
 2. Open `about:debugging#/runtime/this-firefox`, choose **Load Temporary

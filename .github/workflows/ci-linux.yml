@@ -70,6 +70,7 @@ jobs:
           tests/e2e/share-link.spec.ts
           tests/e2e/file-tree-marquee.spec.ts
           tests/e2e/agent-cli-updates.spec.ts
+          tests/e2e/firefox-connect-card.spec.ts
       # The Firefox extension's e2e on the current Firefox and on ESR 153, the
       # oldest it supports. Mozilla's own builds, unpacked: no snap, so the
       # throwaway profile in /tmp is the one Firefox opens.

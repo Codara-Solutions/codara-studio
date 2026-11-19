@@ -86,7 +86,7 @@ export const SETTINGS_TABS: ReadonlyArray<SettingsTabMeta> = [
     id: "browser",
     label: "Browser",
     title: "Browser",
-    description: "Where links open, and agents in your own Chrome.",
+    description: "Where links open, and agents in your own Chrome or Firefox.",
   },
   {
     id: "shared-pages",
