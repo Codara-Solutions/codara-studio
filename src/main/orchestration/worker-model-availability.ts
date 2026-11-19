@@ -7,6 +7,7 @@ import {
 } from "@shared/cora-routes";
 import { ALLOWED_WORKER_MODELS, partitionWorkerModelsByAccount } from "@shared/worker-model-roster";
 import { availableCoraWorkerModels, configuredOpenRouterCoraModels } from "../openrouter-config";
+import type { PiProfileAuthStatusLike } from "./pi-worker-providers";
 
 export interface CoraWorkerModelAvailability {
   /** Enabled models Cora can launch now. */
@@ -29,10 +30,14 @@ async function subscriptionState(): Promise<{
       import("./pi-account-auth-store"),
       import("./pi-worker-providers"),
     ]);
-    const inspection = await inspectPiAccountProfileAuthStore();
+    // Only these four status fields cross into the route code: never the
+    // profile snapshot, account email, fingerprint or anything credential.
+    const statuses: PiProfileAuthStatusLike[] = (await inspectPiAccountProfileAuthStore()).statuses.map(
+      ({ provider, connected, expired, canRefresh }) => ({ provider, connected, expired, canRefresh }),
+    );
     return {
-      usable: usablePiProviders(inspection.statuses),
-      configured: new Set(inspection.statuses.map((status) => status.provider)),
+      usable: usablePiProviders(statuses),
+      configured: new Set(statuses.map((status) => status.provider)),
     };
   } catch {
     return null;
