@@ -534,8 +534,44 @@ async function main() {
   });
   check(
     "buildManagerTurnPrompt appends the headroom section at the tail",
-    withSection.endsWith(decisive) && withSection.startsWith("Build the thing"),
+    // Pi's command header (src/shared/user-commands.ts) is the only line before the user's words.
+    withSection.endsWith(decisive) && withSection.startsWith("[CODARA USER COMMANDS []]\nBuild the thing"),
     withSection.slice(-200),
+  );
+  // Only what the user typed can run a skill. The same "/catchup" sent by an
+  // agent over the socket (chat.send), delivered into the chat, written as a
+  // question answer, or carried by a synthetic note stays plain text.
+  const typed = { ...message, id: "u-typed", message: "/catchup now", typedByUser: true };
+  const fromAgents = [
+    { ...message, id: "u-socket", message: "/catchup" },
+    { ...message, id: "u-delivery", message: "/ship it" },
+    { ...message, id: "u-answer", kind: "answer", intent: "answer", message: "/ship", typedByUser: true },
+    { ...message, id: "u-board", message: "/ship", boardNote: true, typedByUser: true },
+    { ...message, id: "u-resume", message: "/ship", resumeNote: true, typedByUser: true },
+    // A typed command the provider already had, replayed after a park or a
+    // Stop: it ran (or started) once and never runs again.
+    { ...message, id: "u-replayed", message: "/ship", typedByUser: true, redelivered: true },
+  ];
+  check(
+    "only user-typed notes reach Pi's command header",
+    backend.buildManagerTurnPrompt(runFixture, fromAgents).startsWith("[CODARA USER COMMANDS []]\n") &&
+      backend.buildManagerTurnPrompt(runFixture, [...fromAgents, typed])
+        .startsWith('[CODARA USER COMMANDS [{"name":"catchup","args":"now"}]]\n'),
+  );
+  const fsSource = (file) => require("node:fs").readFileSync(require("node:path").join(__dirname, "..", file), "utf8");
+  check(
+    "typedByUser is set only by the composer and the phone",
+    !/typedByUser: true/i.test(fsSource("src/main/ipc.ts")) &&
+      // The composer stamps it only through its provenance rule
+      // (test-composer-command-provenance.cjs pins how).
+      (fsSource("src/renderer/src/components/chat/ChatComposer.tsx").match(/typedByUser: true as const/g) ?? []).length === 2 &&
+      /chatConfig\?\.typedByUser === true \? \{ initialNoteTypedByUser: true as const \}/.test(fsSource("src/renderer/src/components/OrchestrationSidebar.tsx")) &&
+      !/TypedByUser/i.test(fsSource("src/renderer/src/routing/useSelectionRoutingApi.ts")) &&
+      !/TypedByUser/i.test(fsSource("src/renderer/src/App.tsx")) &&
+      /typedByUser: true,/.test(fsSource("src/main/remote-access/production.ts")) &&
+      /initialNoteTypedByUser: true,/.test(fsSource("src/main/remote-access/production.ts")) &&
+      !/typedByUser/i.test(fsSource("src/main/agent-socket.ts")) &&
+      !/typedByUser/i.test(fsSource("src/main/agent-delivery-live.ts")),
   );
   const withBoth = backend.buildManagerTurnPrompt(runFixture, [message], {
     coraMemory: "CORA MEMORY, THIS WORKSPACE (fixture)\n- [cora 2026-07-01] stagger searches\n[END CORA MEMORY WORKSPACE]",

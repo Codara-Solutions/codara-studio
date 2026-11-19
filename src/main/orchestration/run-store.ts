@@ -129,7 +129,7 @@ import {
 } from "@shared/context-compaction";
 import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
-import { followUpNeedsManager, shouldUseDirectExecution } from "./direct-execution";
+import { followUpNeedsManager, runsSkill, shouldUseDirectExecution } from "./direct-execution";
 import {
   resolveProjectPolicyMode,
   runProjectPolicyMode,
@@ -341,7 +341,13 @@ import {
   runtimeForWorkerModelId,
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
-import { coraWorkerModelAvailability } from "./worker-model-availability";
+import { coraWorkerModelAvailability, routeCoraModel, workerPlanningModels } from "./worker-model-availability";
+import {
+  coraRouteLabel,
+  effortOfModelId,
+  managerRoutePinnedByUser,
+  workerFamilyOfModelId,
+} from "@shared/cora-routes";
 import { shouldResumeForUserMessage } from "./user-message-resume";
 import {
   captureWorkerDiff,
@@ -370,6 +376,7 @@ import {
   renderBundledManagerInput,
   resolveChatBackendConfig,
   shouldIncludeCanonicalReplay,
+  userTypedCommandSource,
   type ChatBackendConfig,
   type ChatStreamEvent,
 } from "./agent-backend";
@@ -385,6 +392,7 @@ import { createRunRuntimeShutdown } from "./run-runtime-shutdown";
 import {
   cleanupPiMcpBridgeConfig,
   createCodaraPiWorkerLaunchPlan,
+  listCodaraPiSkillNames,
   resolveCodaraPiExecutionAccount,
 } from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
@@ -453,8 +461,23 @@ async function freezeManagerExecutionAccount(
   };
 }
 
+/**
+ * The chat's model on the first route in Settings' order that carries it now
+ * (cora-routes.ts): a picked GPT model with no ChatGPT sign-in runs through a
+ * verified OpenRouter id, and the reverse. Resolved before the account is
+ * pinned or frozen, so the account and the SparkCall match the route the
+ * turn really takes. Pi only; a failed settings read keeps the picked model.
+ */
+async function routedManagerModel(run: RunState): Promise<string> {
+  const chat = resolveChatBackendConfig(run);
+  if (chat.backend !== "pi" || managerRoutePinnedByUser(run)) return chat.model;
+  return loadSettings().then((settings) => routeCoraModel(chat.model, settings)).catch(() => chat.model);
+}
+
+
 async function pinImplicitPiManagerAccount(
   run: RunState,
+  model: string = resolveChatBackendConfig(run).model,
 ): Promise<RunState> {
   const initial = resolveChatBackendConfig(run);
   if (
@@ -464,9 +487,9 @@ async function pinImplicitPiManagerAccount(
   ) {
     return run;
   }
-  const provider = piProviderForManagerModel(initial.model);
+  const provider = piProviderForManagerModel(model);
   if (!provider) return run;
-  const candidate = await selectImplicitPiAccount(provider, initial.model);
+  const candidate = await selectImplicitPiAccount(provider, model);
   if (!candidate) return run;
 
   // Re-resolve the route as an exact identity pin before persisting it. A
@@ -493,11 +516,12 @@ async function pinImplicitPiManagerAccount(
         current.backend !== "pi" ||
         current.accountProfileId ||
         draft.sparkCalls.length > 0 ||
-        piProviderForManagerModel(current.model) !== provider
+        current.model !== initial.model
       ) {
         return false;
       }
       draft.chatAccountProfileId = candidate.accountProfileId;
+      draft.chatAccountProfileImplicit = true;
       draft.updatedAt = timestamp;
     },
   });
@@ -1591,6 +1615,11 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       hasAttachments: Boolean(input.initialAttachments?.length),
       hasFanOut: Boolean(input.fanOut),
       hasCouncil: Boolean(input.council),
+      // Only a note the user typed may run a skill (user-commands.ts); any
+      // other first note that starts with a slash is text for the direct lane.
+      ...(input.initialNoteTypedByUser === true && input.initialUserNote?.trim().startsWith("/")
+        ? { skillNames: await listCodaraPiSkillNames(input.cwd) }
+        : {}),
     }));
   // A direct Cora turn is implemented as one worker, which may only run a model
   // the user left enabled in the worker roster and has an account for. With
@@ -7234,12 +7263,32 @@ async function askManagerBackendUnderTurnLock(
   // failed".
   let accountFailure: unknown;
   let chatConfig: ChatBackendConfig;
+  const entryEpoch = conversationEpoch(run);
+  const entryStatus = run.status;
+  const entryStops = forcePauseStartCount(run.id);
+  const routedModel = await routedManagerModel(run);
   try {
-    run = await pinImplicitPiManagerAccount(run);
-    chatConfig = await freezeManagerExecutionAccount(resolveChatBackendConfig(run));
+    run = await pinImplicitPiManagerAccount(run, routedModel);
+    chatConfig = await freezeManagerExecutionAccount({ ...resolveChatBackendConfig(run), model: routedModel });
   } catch (error) {
     accountFailure = error ?? new Error("Cora could not resolve an account for this turn");
-    chatConfig = resolveChatBackendConfig(run);
+    chatConfig = { ...resolveChatBackendConfig(run), model: routedModel };
+  }
+  // Stop and Cancel can land while the route and account are read. A turn
+  // they ended must not launch, so re-decide on the state they left, the same
+  // way askManagerBackend does for a turn that waited on the lock.
+  {
+    const stopping = forcePauseWindowClosed(run.id);
+    if (stopping) await stopping;
+    const latest = await getRun(run.id);
+    if (
+      !latest ||
+      conversationEpoch(latest) !== entryEpoch ||
+      forcePauseStartCount(run.id) !== entryStops ||
+      (latest.status !== entryStatus && (latest.status === "cancelled" || isTerminalRunStatus(latest.status)))
+    ) {
+      return latest ?? null;
+    }
   }
   // The Pi manager backend owns its own request
   // lifecycle, spawn/resume a real agent session, stream events, and return
@@ -7358,6 +7407,38 @@ async function askManagerBackendUnderTurnLock(
       console.warn("[run-store] appendEvent for chat stream event failed:", err);
     });
   };
+
+  // A Stop that landed while the prompt was prepared already settled this
+  // call and requeued its input; dispatching now would start a fresh session
+  // the Stop never disposes. Wait for a Stop in progress to commit, then
+  // re-decide on what it left. A Stop after this point reaches the turn
+  // through the backend's session disposal.
+  {
+    const stopping = forcePauseWindowClosed(run.id);
+    if (stopping) await stopping;
+    let latest = await getRun(run.id);
+    // A Stop whose window opened while that read was pending (or at any
+    // point since this turn began) is not visible in the run yet: count
+    // Stops instead, wait for its commit, and do not dispatch.
+    const stoppedSinceEntry = forcePauseStartCount(run.id) !== entryStops;
+    if (stoppedSinceEntry) {
+      const again = forcePauseWindowClosed(run.id);
+      if (again) await again;
+      latest = await getRun(run.id);
+    }
+    const stillLive = latest?.sparkCalls.some(
+      (call) => call.id === callId && call.status === "started" && !call.completedAt,
+    );
+    // Stop and Cancel both settle every live call, and Stop moves the epoch;
+    // the run's status alone says nothing (a follow-up on a finished chat
+    // runs with the run still complete).
+    if (stoppedSinceEntry || !latest || !stillLive || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
+      acceptingStreamEvents = false;
+      // The prepared prompt never reached a session: its memory goes again.
+      releaseCoraMemoryInjection(run.id);
+      return latest ?? null;
+    }
+  }
 
   const callStartedMs = Date.now();
   // Set once the provider had this turn's prompt or the backend answered.
@@ -9165,12 +9246,27 @@ async function finalizeCouncil(
   });
 }
 
+/** Worker families with an enabled model some route can carry now. */
+async function routableWorkerRuntimes(): Promise<Set<string>> {
+  try {
+    const { connected } = await coraWorkerModelAvailability(await loadSettings());
+    // OpenRouter ids count for their vendor's family (`openai/...` is codex).
+    const kinds = connected.map((id) => workerFamilyOfModelId(id));
+    return new Set(kinds.filter((kind): kind is "claude" | "codex" | "grok" => kind !== undefined));
+  } catch {
+    return new Set();
+  }
+}
+
 async function rerouteUnavailableAgentRuntimes(
   decision: SparkManagerDecision,
 ): Promise<{ decision: SparkManagerDecision; rerouted: RuntimeReroute[] }> {
   const diagnostics = await detectConfiguredAgentRuntimes();
   const available = diagnostics.filter(runtimeAssignable);
-  const availableKinds = new Set(available.map((runtime) => runtime.kind));
+  const availableKinds = new Set<string>(available.map((runtime) => runtime.kind));
+  // A family with no sign-in still counts when another route (a verified
+  // OpenRouter id) carries one of its enabled models; the launch routes it.
+  for (const kind of await routableWorkerRuntimes()) availableKinds.add(kind);
   const fallback = available.find((runtime) => runtime.kind === "codex")
     ?? available.find((runtime) => runtime.kind === "claude")
     ?? available.find((runtime) => runtime.kind === "grok");
@@ -11648,7 +11744,21 @@ export type ResumeManagerTurnRecoveryResult = {
   reason?: string;
 };
 
-type ResolvedManagerRecoveryAccount = { backend: "pi"; profileId: string };
+type ResolvedManagerRecoveryAccount = {
+  backend: "pi";
+  profileId: string;
+  /** The model the failed turn ran on, spelled for the route it took. */
+  model: string;
+};
+
+/** The model the parked turn actually launched: routing may have moved the
+ *  picked `openai/...` onto a sign-in (or the reverse), and the account the
+ *  user picks to resume must match that route. */
+function managerRecoveryModel(run: RunState): string {
+  const failedCallId = run.managerTurnRecovery?.failedSparkCallId;
+  const failed = failedCallId ? run.sparkCalls.find((call) => call.id === failedCallId) : undefined;
+  return failed?.model?.trim() || resolveChatBackendConfig(run).model;
+}
 
 async function resolveManagerRecoveryAccount(
   run: RunState,
@@ -11675,8 +11785,8 @@ async function resolveManagerRecoveryAccount(
       "Recovery Pi account profile id",
     );
     if (!profileId) throw new Error("A concrete subscription account is required.");
-    const config = resolveChatBackendConfig(run);
-    const provider = piProviderForManagerModel(config.model);
+    const model = managerRecoveryModel(run);
+    const provider = piProviderForManagerModel(model);
     if (!provider) throw new Error("OpenRouter chats do not use a subscription account profile.");
     const resolved = await resolveCodaraPiExecutionAccount({
       provider,
@@ -11685,7 +11795,7 @@ async function resolveManagerRecoveryAccount(
     if (resolved.accountProfileId !== profileId) {
       throw new Error("The selected subscription account could not be pinned exactly.");
     }
-    return { ok: true, account: { backend: "pi", profileId } };
+    return { ok: true, account: { backend: "pi", profileId, model } };
   } catch (error) {
     return {
       ok: false,
@@ -11863,6 +11973,9 @@ export async function resumeManagerTurnRecovery(
   const decision: { outcome: ResumeManagerTurnRecoveryResult["outcome"] } = {
     outcome: "stale",
   };
+  // The account was checked against this model; a model the user switched to
+  // since then needs its own check.
+  const modelAtResolve = run.chatModel?.trim() || undefined;
   run = await commitRunChange(run, {
     type: "run.manager_turn_recovery_claimed",
     message: "Parked manager turn recovery claimed",
@@ -11897,9 +12010,20 @@ export async function resumeManagerTurnRecovery(
           decision.outcome = "account-incompatible";
           return false;
         }
+        if ((draft.chatModel?.trim() || undefined) !== modelAtResolve) {
+          decision.outcome = "stale";
+          return false;
+        }
         const accountChanged =
           draft.chatAccountProfileId !== resolved.account.profileId;
         draft.chatAccountProfileId = resolved.account.profileId;
+        // The user picked this account to resume on. A pin the user chose
+        // stops routing, so the chat keeps the spelling the account serves
+        // (the routed one) instead of falling back to the picked spelling.
+        delete draft.chatAccountProfileImplicit;
+        if ((draft.chatModel?.trim() || undefined) !== resolved.account.model) {
+          draft.chatModel = resolved.account.model;
+        }
         if (accountChanged) {
           delete draft.chatSessionUuid;
           delete draft.chatSessionMode;
@@ -12080,6 +12204,48 @@ function settleResumeInterruptedNotes(draft: RunState): boolean {
   return deliverable;
 }
 
+/** Whether a queued message the user typed names a skill Cora's Pi loads
+ *  here. Only typed notes count (userTypedCommandSource). */
+async function queuedTypedSkillCommand(run: RunState, messages: readonly HumanRunMessage[]): Promise<boolean> {
+  const typed = messages.filter(
+    (message) => userTypedCommandSource(message) && message.message.trim().startsWith("/"),
+  );
+  const cwd = workspaceCwdFromRun(run);
+  if (typed.length === 0 || !cwd) return false;
+  const skillNames = await listCodaraPiSkillNames(cwd);
+  return typed.some((message) => runsSkill(message.message.trim(), skillNames));
+}
+
+/** Hand a finished direct chat with queued input to the manager, which takes
+ *  the queue on its next turn. */
+async function escalateDirectChatForQueuedInput(run: RunState): Promise<RunState> {
+  let escalated = false;
+  const updated = await commitRunChange(run, {
+    type: "run.escalated_to_manager",
+    message: "Cora's manager takes over this chat for a skill the user typed",
+    payload: { reason: "typed_skill_command" },
+    mutate: (draft, timestamp) => {
+      if (draft.executionMode !== "direct" || !isTerminalRunStatus(draft.status)) return false;
+      if (queuedManagerInputMessages(draft).length === 0) return false;
+      escalated = true;
+      draft.executionMode = "managed";
+      delete draft.managerPlan;
+      draft.status = "planning";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "user_followup",
+        stopReason: undefined,
+        resumedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+  if (escalated) scheduleInitialChatDecision(updated.id, autopilotInputFromRun(updated), { afterCurrent: true });
+  return updated;
+}
+
 export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   // A run blocked on an open question resumes by ANSWERING it, never by a plain
@@ -12099,6 +12265,18 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     return requireRun(run.id);
   }
   const queuedDirectMessages = queuedManagerInputMessages(run);
+  if (
+    run.executionMode === "direct" &&
+    !run.automationId &&
+    isTerminalRunStatus(run.status) &&
+    queuedDirectMessages.length > 0 &&
+    (await queuedTypedSkillCommand(run, queuedDirectMessages))
+  ) {
+    // A skill the user typed while the direct worker ran: only the manager's
+    // Pi session runs skills, so the chat moves to it (as addRunMessage does
+    // for a follow-up typed into a finished direct chat).
+    return escalateDirectChatForQueuedInput(run);
+  }
   if (
     run.executionMode === "direct" &&
     !run.automationId &&
@@ -12572,9 +12750,13 @@ function sameMessageDeliverySignature(
     targetTurnId?: string;
     conversationEpoch: number;
     answersMessageId?: string;
+    typedByUser?: boolean;
   },
 ): boolean {
   return (
+    // A command the user typed is never swallowed as a repeat of the same
+    // text an agent queued: only the typed copy may run a skill.
+    (message.typedByUser === true) === (input.typedByUser === true) &&
     message.author === input.author &&
     message.kind === input.kind &&
     message.message === input.text &&
@@ -12617,7 +12799,14 @@ export async function addRunMessage(
     input.author === "user" &&
     input.kind === "note" &&
     isTerminalRunStatus(run.status) &&
-    (followUpNeedsManager(input.message) || (await loadSettings()).coraAlwaysVerifyEdits === true)
+    (followUpNeedsManager(
+      input.message,
+      // A skill name moves the chat to the manager only when the user typed
+      // it; an agent's send or a delivery that starts with one is text.
+      input.typedByUser === true && input.message.trim().startsWith("/") && workspaceCwdFromRun(run)
+        ? await listCodaraPiSkillNames(workspaceCwdFromRun(run)!)
+        : undefined,
+    ) || (await loadSettings()).coraAlwaysVerifyEdits === true)
   ) {
     run = await commitRunChange(run, {
       type: "run.escalated_to_manager",
@@ -12728,6 +12917,7 @@ export async function addRunMessage(
       targetTurnId,
       conversationEpoch: messageEpoch,
       answersMessageId: input.answersMessageId,
+      typedByUser: input.typedByUser === true && input.author === "user" && input.kind === "note",
     }) &&
     !answersDifferentQuestion &&
     !distinctQuestionRepost &&
@@ -12812,6 +13002,7 @@ export async function addRunMessage(
           targetTurnId: authoritativeTargetTurnId,
           conversationEpoch: messageEpoch,
           answersMessageId: input.answersMessageId,
+          typedByUser: input.typedByUser === true && input.author === "user" && input.kind === "note",
         }) &&
         !answersDifferentQuestionInDraft &&
         !distinctQuestionRepostInDraft &&
@@ -15023,20 +15214,38 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // its Pi session gets what they pasted, in memory; prompt.md, a relaunch
   // and the shell/manual pty paste keep the scrubbed text.
   const livePiPrompt = isPiWorker && run.executionMode === "direct" ? withPastedText(run.id, promptText) : null;
-  const workerSettings = isPiWorker && !isAutomationRun ? await loadSettings() : null;
-  const usableWorkerRuntimes = workerSettings
-    ? await detectConfiguredAgentRuntimes()
-        .then((diagnostics) => new Set<string>(diagnostics.filter(runtimeAssignable).map((item) => item.kind)))
-        .catch(() => undefined)
-    : undefined;
-  const piWorkerModel = isPiWorker
+  const routeSettings = isPiWorker ? await loadSettings().catch(() => null) : null;
+  const workerSettings = isAutomationRun ? null : routeSettings;
+  // Enabled models some route can carry now: a GPT model with no ChatGPT
+  // sign-in stays eligible when its OpenRouter id is verified, instead of
+  // being swapped for another family before routing runs.
+  const connectedWorkerModels = workerSettings
+    ? await coraWorkerModelAvailability(workerSettings)
+        .then((availability) => availability.connected)
+        .catch(() => [] as string[])
+    : [];
+  const routableWorkerModels = workerSettings
+    ? workerPlanningModels(connectedWorkerModels, workerSettings)
+    : connectedWorkerModels;
+  const plannedPiWorkerModel = isPiWorker
     ? piModelForWorker(
         task,
         isAutomationRun,
-        workerSettings ? availableCoraWorkerModels(workerSettings) : undefined,
+        workerSettings
+          ? routableWorkerModels.length > 0 ? routableWorkerModels : availableCoraWorkerModels(workerSettings)
+          : undefined,
         run.executionMode === "direct" && !isAutomationRun,
-        usableWorkerRuntimes,
       )
+    : undefined;
+  // The same model on the first route in Settings' order that carries it
+  // now; attempt.model records that id, so the run shows the route it used.
+  // Automation runs keep their pinned model and are routed the same way.
+  const piWorkerModel = plannedPiWorkerModel && routeSettings
+    ? await routeCoraModel(plannedPiWorkerModel, routeSettings).catch(() => plannedPiWorkerModel)
+    : plannedPiWorkerModel;
+  // OpenRouter ids carry no `@effort`; the planned one becomes the thinking level.
+  const routedThinking = piWorkerModel && !piWorkerModel.includes("@")
+    ? piThinkingLevel(effortOfModelId(plannedPiWorkerModel))
     : undefined;
   // Keep the attempt's runtime in step with the provider the model launches
   // on, so labels and session reuse never contradict the session.
@@ -15216,6 +15425,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
           promptText: livePiPrompt?.prompt ?? promptText,
           command,
           model: piWorkerModel!,
+          ...(routedThinking ? { thinking: routedThinking } : {}),
           launchAborted: () => workerLaunchAborted(attempt.id),
         })
       : await runWorkerSession({
@@ -15768,9 +15978,12 @@ async function performAutoCompaction(
   try {
     let run = await requireRun(runId);
     const epoch = conversationEpoch(run);
-    const chatConfig = await freezeManagerExecutionAccount(
-      resolveChatBackendConfig(run),
-    );
+    // The summary runs on the session the chat's turns used, so it takes the
+    // same route (and with it the same account) as a chat turn would now.
+    const chatConfig = await freezeManagerExecutionAccount({
+      ...resolveChatBackendConfig(run),
+      model: await routedManagerModel(run),
+    });
     if (
       runProjectPolicyMode(run) === "untrusted-pull-request" &&
       chatConfig.backend !== "pi"
@@ -15807,6 +16020,7 @@ async function performAutoCompaction(
     // Unlike prepareManagerTurn, this deliberately selects NO queued user
     // messages: the summarize turn is maintenance, not conversation, and input
     // arriving while it runs must stay queued for the next real turn.
+    const stopsBeforeCommit = forcePauseStartCount(runId);
     const prepared = await commitRunChange(run, {
       type: "spark_call.started",
       message: `Cora compaction summary call started: ${summarizeCall.model}`,
@@ -15835,6 +16049,37 @@ async function performAutoCompaction(
     });
     if (!prepared.sparkCalls.some((entry) => entry.id === callId)) return;
     run = prepared;
+    // A Stop that started while this call was committed disposes the chat's
+    // sessions first and commits the pause after: a summary sent in between
+    // would open a session that Stop never disposes. Wait for a Stop in
+    // progress, then re-decide on what it left, as a manager turn does
+    // before dispatch.
+    {
+      const stopping = forcePauseWindowClosed(runId);
+      if (stopping) await stopping;
+      let latest = await getRun(runId);
+      // A Stop whose window opened while that read was pending is not in
+      // the run yet: count Stops, and wait for its commit before settling.
+      const stoppedSinceCommit = forcePauseStartCount(runId) !== stopsBeforeCommit;
+      if (stoppedSinceCommit) {
+        const again = forcePauseWindowClosed(runId);
+        if (again) await again;
+        latest = await getRun(runId);
+      }
+      const stillLive = latest?.sparkCalls.some(
+        (entry) => entry.id === callId && entry.status === "started" && !entry.completedAt,
+      );
+      if (
+        stoppedSinceCommit ||
+        !latest ||
+        !stillLive ||
+        conversationEpoch(latest) !== epoch ||
+        ["paused", "blocked", "cancelled", "failed"].includes(latest.status)
+      ) {
+        if (stillLive) await settleAutoCompactionCall(runId, callId, epoch, "Stopped before the summary was sent.");
+        return;
+      }
+    }
     const compactionSource = structuredClone(run);
 
     const startedMs = Date.now();
@@ -16046,12 +16291,17 @@ async function compactConversationUnderTurnLock(runId: string): Promise<RunState
   if (!cwd) throw new Error("This run has no workspace directory.");
 
   const oldEpoch = conversationEpoch(run);
+  const earlierCalls = new Set(run.sparkCalls.map((call) => call.id));
   await performAutoCompaction(runId, cwd);
   const compacted = await requireRun(runId);
-  if (conversationEpoch(compacted) === oldEpoch) {
-    const failed = [...compacted.sparkCalls]
-      .reverse()
-      .find((call) => call.purpose === "compaction" && call.status === "failed");
+  // Compacted means this command's own summary call completed. A Stop also
+  // moves the epoch, and then nothing was compacted.
+  const ownCalls = compacted.sparkCalls.filter((call) => call.purpose === "compaction" && !earlierCalls.has(call.id));
+  if (!ownCalls.some((call) => call.status === "completed")) {
+    if (conversationEpoch(compacted) !== oldEpoch || ["paused", "cancelled"].includes(compacted.status)) {
+      throw new Error("The conversation was not compacted: the run was stopped first.");
+    }
+    const failed = [...ownCalls].reverse().find((call) => call.status === "failed");
     throw new Error(failed?.error || "Cora could not produce a safe conversation summary.");
   }
   return compacted;
@@ -16514,8 +16764,17 @@ export async function undoToCheckpoint(
 const forcePausingRuns = new Map<string, number>();
 const forcePauseWindowWaiters = new Map<string, Array<() => void>>();
 
+// How many Stops or cancels ever began per run, so a turn can tell that one
+// landed while it was setting up even after it finished.
+const forcePauseStarts = new Map<string, number>();
+
+function forcePauseStartCount(runId: string): number {
+  return forcePauseStarts.get(runId) ?? 0;
+}
+
 function openForcePauseWindow(runId: string): void {
   forcePausingRuns.set(runId, (forcePausingRuns.get(runId) ?? 0) + 1);
+  forcePauseStarts.set(runId, forcePauseStartCount(runId) + 1);
 }
 
 function closeForcePauseWindow(runId: string): void {
@@ -21064,13 +21323,15 @@ function piProviderForWorker(task: WorkerTask, model: string | undefined): PiPro
   return runtime === "claude" ? "anthropic" : "openai-codex";
 }
 
-function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
-  const effort = task.effortHint;
-  if (
-    effort === "minimal" || effort === "low" || effort === "medium" ||
+function piThinkingLevel(effort: unknown): PiThinkingLevel | undefined {
+  return effort === "minimal" || effort === "low" || effort === "medium" ||
     effort === "high" || effort === "xhigh" || effort === "max"
-  ) return effort;
-  return "high";
+    ? effort
+    : undefined;
+}
+
+function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
+  return piThinkingLevel(task.effortHint) ?? "high";
 }
 
 function piModelForWorker(
@@ -21718,6 +21979,7 @@ async function runPiWorkerSession({
   promptText,
   command,
   model,
+  thinking: thinkingOverride,
   launchAborted = () => false,
 }: {
   run: RunState;
@@ -21728,6 +21990,8 @@ async function runPiWorkerSession({
   promptText: string;
   command: string;
   model: string;
+  /** The planned `@effort` when routing moved the model to OpenRouter. */
+  thinking?: PiThinkingLevel;
   launchAborted?: () => boolean;
 }): Promise<{
   exitCode: number;
@@ -21743,8 +22007,8 @@ async function runPiWorkerSession({
 }> {
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
   const provider = piProviderForWorker(task, model);
-  const thinking = piThinkingForWorker(task);
-  const modelLabel = model;
+  const thinking = thinkingOverride ?? piThinkingForWorker(task);
+  const modelLabel = `${model} via ${coraRouteLabel(model)}`;
 
   let client: PiRpcClient | null = null;
   let unsubscribe: (() => void) | null = null;

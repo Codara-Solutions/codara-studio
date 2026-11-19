@@ -35,6 +35,7 @@
 //      reopening the complete one, driven over a run.json under a throwaway
 //      CODARA_HOME_DIR.
 
+const { completeStubExports } = require("./run-store-stub-exports.cjs");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -81,7 +82,8 @@ export default { spawn, exists };`,
 export function getBackend(kind) { return backend(kind); }
 export function listBackends() { return []; }
 export async function disposeManagerSessions() {}`,
-  "./pi-runtime-electron": `export async function resolveCodaraPiExecutionAccount() { return { accountProfileId: "3f9a1c72-6b0e-4a2d-9c11-5e7d8a4b2f10", provider: "anthropic", configDir: "/tmp/cora-stub-pi" }; }
+  "./pi-runtime-electron": `export async function listCodaraPiSkillNames() { return new Set(); }
+export async function resolveCodaraPiExecutionAccount() { return { accountProfileId: "3f9a1c72-6b0e-4a2d-9c11-5e7d8a4b2f10", provider: "anthropic", configDir: "/tmp/cora-stub-pi" }; }
 export async function resolveCodaraPiRuntime() { throw new Error("pi runtime is stubbed"); } export async function resolveCodaraPiLibrary() { throw new Error("pi runtime is stubbed"); } export async function resolveUserPiRuntime() { throw new Error("pi runtime is stubbed"); }
 export function codaraPiPaths() { return { home: "/tmp/cora-stub-pi" }; }
 export async function cleanupPiMcpBridgeConfig() {}
@@ -96,7 +98,7 @@ const RUN_STORE_STUB_PLUGIN = {
       (args) => ({ path: args.path, namespace: "stub" }),
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({
-      contents: RUN_STORE_STUBS[args.path],
+      contents: completeStubExports(args.path, RUN_STORE_STUBS[args.path]),
       loader: "js",
     }));
   },

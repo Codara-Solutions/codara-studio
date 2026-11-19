@@ -285,6 +285,17 @@ export class PiTurnAccumulator {
         this.addUsage(asRecord(entry.usage));
         this.emitUsage();
       }
+      // The skill files a typed command ran (resources/pi-cora/skill-commands.ts).
+      const skills = entry?.type === "custom" && entry.customType === "codara-skill-ran"
+        ? asRecord(entry.data)?.skills
+        : null;
+      if (Array.isArray(skills)) {
+        for (const skill of skills.map(asRecord)) {
+          if (typeof skill?.name !== "string") continue;
+          const path = typeof skill.path === "string" && skill.path ? ` from ${skill.path}` : "";
+          this.onStream?.({ kind: "system_note", message: `Ran the skill /${skill.name}${path}.` });
+        }
+      }
       return;
     }
 

@@ -317,6 +317,23 @@ itself rides out a busy or briefly unreachable provider. Cora runs on local
 folders only; an `ssh://` workspace gets a clear error instead of a broken
 launch.
 
+**Rules and skills.** Skills reach Pi from Codara's, Claude's, Codex's and
+the repository's skill folders (`listPiSkills` in `agent-sync.ts`). On a
+name clash the user's (or Codara's) skill loads; the repository's copy runs
+only as `/skill:repo:<name>`, and the chat notes which SKILL.md ran. Only a
+message typed in the composer or on the phone (`typedByUser`) runs a skill. A
+skill the user types as `/skill:<name>` or `/<name>` runs even when it is
+hidden from the model (`disable-model-invocation`): such a message skips the
+direct lane (`direct-execution.ts`). Studio lists the commands that open each
+of the turn's messages in one header line at the very start of the turn
+(`src/shared/user-commands.ts`), since quoted framing inside a message could
+otherwise pass for a message start; the manager extension strips the header
+and puts the first skill in front, where Pi expands it
+(`resources/pi-cora/skill-commands.ts`). The user's global agent rules
+(`~/.claude/CLAUDE.md`, else `~/.codex/AGENTS.md`; `user-agent-rules.ts`)
+ride the manager's system prompt (`resources/pi-cora/user-rules.ts`), read
+once per process; imported pull requests get neither.
+
 **Manager and workers.** Each chat has one manager Pi process, loaded with
 `resources/pi-cora/index.ts`. It is reused from turn to turn until a
 launch setting changes (account, model, effort, mode, policy, fast mode), and
