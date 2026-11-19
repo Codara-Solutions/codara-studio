@@ -1,0 +1,10 @@
+{
+  "name": "codara-firefox-extension",
+  "private": true,
+  "type": "module",
+  "description": "Development manifest for the Codara extension for Firefox; Firefox reads manifest.json from the assembled folder.",
+  "scripts": {
+    "assemble": "node build/assemble.mjs",
+    "test": "node test/run.mjs"
+  }
+}

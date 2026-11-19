@@ -8,9 +8,8 @@
 // Pinned:
 //   - A live step starts open and folds only on its live -> settled edge, and
 //     never after the user toggled it.
-//   - A worker with a live attempt offers "Open terminal", keyed by the
-//     surviving task id (the row's own id is the chain root), and says so
-//     when the pane is gone.
+//   - A worker that launched is one button that goes inside it, by its
+//     logical id; no "Open terminal" in Cora. Main stays mounted under it.
 //   - The callback reaches rows through a context, so memoized step cards
 //     are not re-rendered by a new prop.
 
@@ -35,23 +34,20 @@ assert.match(stepCard[0], /toggledRef\.current = true;\s*setOpen\(\(value\) => !
 
 const row = conversation.match(/function StepWorkerRow\([\s\S]*?\n\}\n/);
 assert.ok(row, "StepWorkerRow not found");
-assert.match(row[0], /const openWorkerTerminal = React\.useContext\(WorkerTerminalContext\);/);
-assert.match(
-  row[0],
-  /worker\.runtimeState !== undefined \|\| worker\.status === "claimed" \|\| worker\.status === "running"/,
-);
-assert.match(row[0], /if \(!openWorkerTerminal\(worker\.taskId\)\) setClosedTerminalKey\(terminalKey\);/);
-// A retry or fallback (new task id or runtime state) must re-offer the pane
-// instead of leaving the button disabled for the life of the row.
-assert.match(row[0], /const terminalKey = `\$\{worker\.taskId \?\? ""\}:\$\{worker\.runtimeState \?\? ""\}`;/);
-assert.match(row[0], /const terminalClosed = closedTerminalKey === terminalKey;/);
-assert.match(row[0], /\{terminalClosed \? "Terminal closed" : "Open terminal"\}/);
-assert.doesNotMatch(row[0], /openWorkerTerminal\(worker\.id\)/);
+// The row goes inside the worker (option A, DESIGN.md): the whole row is one
+// button carrying the logical worker id, and Cora offers no terminal button.
+assert.match(row[0], /const openWorker = React\.useContext\(WorkerOpenContext\);/);
+assert.match(row[0], /const canOpen = Boolean\(openWorker && worker\.attemptId\);/);
+assert.match(row[0], /<button\s+type="button"\s+className="cora-step-worker-open"\s+data-worker-row=\{worker\.id\}/);
+assert.match(row[0], /onClick=\{\(\) => openWorker\?\.\(worker\.id\)\}/);
+assert.doesNotMatch(row[0], /Open terminal/);
+assert.doesNotMatch(conversation, /WorkerTerminalContext/);
 
-assert.match(
-  conversation,
-  /<WorkerTerminalContext\.Provider value=\{onOpenWorkerTerminal \?\? null\}>/,
-);
-assert.match(panel, /<ChatConversation[\s\S]*?onOpenWorkerTerminal=\{onOpenBoardWorkerTerminal\}/);
+assert.match(conversation, /<WorkerOpenContext\.Provider value=\{onOpenWorker \?\? null\}>/);
+assert.match(panel, /<ChatConversation[\s\S]*?onOpenWorker=\{setInsideWorker\}/);
+// Main stays mounted, hidden and out of the tab order, under the worker view.
+assert.match(panel, /visibility: chatView === "chat" && !inside \? undefined : "hidden"/);
+assert.match(panel, /\{ inert: "" \}/);
+assert.match(panel, /const WorkerView = lazy\(\(\) => import\("\.\/WorkerView"\)\);/);
 
 console.log("chat step workers: ok");

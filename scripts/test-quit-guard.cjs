@@ -153,6 +153,14 @@ async function main() {
 
   // ── the quit prompt ──────────────────────────────────────────────────
   {
+    // An agent tool update in flight: a quit would cut its installer off.
+    const live = qg.collectLiveWork(null, [], ["Claude Code"]);
+    check("an agent tool update is live work", qg.hasLiveWork(live));
+    const quit = qg.quitPromptText(live, { restartingForUpdate: false, resumesTerminalAgents: false, keepsTerminalOutput: true });
+    check("the quit prompt names the update", quit.message === "Still working: the Claude Code update.", quit.message);
+    check("and says what happens to it", /puts the previous one back where it can, or tells you how/.test(quit.detail) && !/previous version is put back/.test(quit.detail), quit.detail);
+  }
+  {
     const live = qg.collectLiveWork({ chats: 1, automations: 0, workers: 1 }, [agent("claude", "api")]);
     const quit = qg.quitPromptText(live, { restartingForUpdate: false, resumesTerminalAgents: true, keepsTerminalOutput: true });
     check("the quit prompt names what is working", quit.message === "Still working: Claude Code in api and Cora in 1 chat.", quit.message);
@@ -279,6 +287,15 @@ async function main() {
     check("a failing probe keeps waiting rather than restarting", h.installs.length === 0 && h.gate.isWaiting());
     const fresh = gateHarness(new Error("not ready"));
     check("a probe failing on the first ask restarts as with nothing live", fresh.gate.request() === "started");
+  }
+
+  // ── the quit prompt reads the tools being updated ─────────────────
+  {
+    const index = fs.readFileSync(path.join(ROOT, "src", "main", "index.ts"), "utf8");
+    const start = index.indexOf("function currentLiveWork(): LiveWork {");
+    const body = index.slice(start, index.indexOf("\n}\n", start));
+    check("main's live work includes the agent tool updates", /collectLiveWork\([\s\S]*busyTools\(\)\.map\(/.test(body), body);
+    check("from the launch guard the update service marks", /import \{ busyTools \} from "\.\/agent-cli-updates\/launch-guard";/.test(index));
   }
 
   // ── a quit that proceeds ends the wait ──────────────────────────────

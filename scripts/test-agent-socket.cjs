@@ -31,6 +31,7 @@ const ROOT = path.resolve(__dirname, "..");
 require("./virtual-display.cjs").keepTestAppOffDesktop();
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "cora-socket-test-"));
 const HANDSHAKE = path.join(HOME, "agent-socket.json");
+const READY_GATE = path.join(HOME, "ready-gate");
 const ACCOUNT_ACCESS_SECRET = "account-access-secret-must-never-leak";
 const ACCOUNT_REFRESH_SECRET = "account-refresh-secret-must-never-leak";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -149,6 +150,11 @@ function rpcRaw(handshake, body, headers = {}) {
           Authorization: `Bearer ${handshake.token}`,
           ...headers,
         },
+        // A connection of its own for each call. Through Node's keep-alive
+        // agent a call could go out on a connection the app was closing,
+        // and CI then failed with ECONNRESET on a random call while the app
+        // ran on with nothing in its log. Nothing here tests connection reuse.
+        agent: false,
       },
       (res) => {
         let data = "";
@@ -156,7 +162,10 @@ function rpcRaw(handshake, body, headers = {}) {
         res.on("end", () => resolve({ status: res.statusCode, body: data }));
       },
     );
-    req.on("error", reject);
+    req.on("error", (error) => {
+      error.message = `${error.message} (during ${typeof body === "string" ? "a raw request" : body.method})`;
+      reject(error);
+    });
     req.end(payload);
   });
 }
@@ -330,6 +339,14 @@ async function main() {
       SPARK_NO_SHELL_INTEGRATION: "1",
       // Keeps the booted app off the user's desktop (headless on Linux).
       SPARK_E2E_BACKGROUND: "1",
+      // A share service address turns Share as link on, so the share.offer
+      // checks below reach the path gates. An offer never uploads, so nothing
+      // listens there.
+      CODARA_SHARE_URL: "http://127.0.0.1:9",
+      // Main counts the window ready only once this file exists, so the early
+      // terminal.list below reaches it before the window is ready on any
+      // machine (index.ts, under test only).
+      CODARA_E2E_READY_GATE: READY_GATE,
     },
     stdio: "ignore",
   });
@@ -347,6 +364,61 @@ async function main() {
     }
     check("handshake file written", Boolean(handshake && handshake.url && handshake.token));
     if (!handshake) throw new Error("no handshake — is out/ built?");
+    // The socket answers before the window has booted, and terminal and
+    // preview ops go through the renderer: one sent before React mounts is
+    // never heard and times out after 5 s. On a loaded CI runner the boot
+    // takes longer than the checks below take to reach the first such op.
+    const mainLog = path.join(HOME, "logs", "main.log");
+    const rendererReady = () => {
+      try {
+        return /\[boot\] renderer ready$/m.test(fs.readFileSync(mainLog, "utf8"));
+      } catch {
+        return false;
+      }
+    };
+    // A client that lists before the window has booted is held until it is
+    // ready, then answered from the panes the window sent main before it said
+    // so (App.tsx): no round trip into a renderer at its busiest moment. The
+    // gate makes the order certain: the list is held, the window has mounted
+    // and sent its panes, and only then does main count it ready.
+    const mainLogText = () => {
+      try {
+        return fs.readFileSync(mainLog, "utf8");
+      } catch {
+        return "";
+      }
+    };
+    const until = async (what, test, ms) => {
+      for (const deadline = Date.now() + ms; !test(); await sleep(100)) {
+        if (app.exitCode !== null || app.signalCode !== null) throw new Error(`Electron exited while waiting for ${what}`);
+        if (Date.now() > deadline) throw new Error(`no ${what} in main.log after ${ms / 1000} s`);
+      }
+    };
+    const listStarted = Date.now();
+    const earlyCall = rpc(handshake, "terminal.list", {});
+    await until("held terminal.list", () => /\[terminal-bridge\] held list until the window is ready$/m.test(mainLogText()), 30_000);
+    await until("'renderer ready'", rendererReady, 60_000);
+    fs.writeFileSync(READY_GATE, "");
+    const early = await earlyCall;
+    check(
+      "terminal.list sent before the window booted is answered once it has",
+      Array.isArray(early.result?.panes),
+      `after ${Date.now() - listStarted} ms: ${JSON.stringify(early).slice(0, 180)}`,
+    );
+    await until("end of the held list", () => /\[terminal-bridge\] held list \d+ ms, /.test(mainLogText()), 5_000).catch(() => undefined);
+    const heldOutcome = (mainLogText().match(/\[terminal-bridge\] held list \d+ ms, (.+)$/m) || [])[1];
+    check(
+      "it is answered from main's copy of the panes, with no round trip into the renderer",
+      heldOutcome === "answered from main's copy",
+      `main.log: ${heldOutcome ?? "no line for the held list"}`,
+    );
+    for (let waited = 0; !rendererReady(); waited += 250) {
+      if (app.exitCode !== null || app.signalCode !== null) throw new Error("Electron exited before its window booted");
+      // With the 60 s handshake wait this stays inside the runner's 180 s
+      // suite timeout, so this message, not a bare timeout, reports it.
+      if (waited >= 60_000) throw new Error("the window never booted (no 'renderer ready' in main.log after 60 s)");
+      await sleep(250);
+    }
 
     // Auth: wrong token → 401, no JSON-RPC processing.
     const bad = await rpcRaw(handshake, { jsonrpc: "2.0", id: 1, method: "preview.list", params: {} }, { Authorization: "Bearer wrong" });
@@ -2286,6 +2358,19 @@ async function main() {
       !/request too large/.test(bigWhiteboard.error?.message ?? "") && !bigWhiteboard.parseError,
       JSON.stringify(bigWhiteboard).slice(0, 200),
     );
+  } catch (error) {
+    // A reset connection alone does not say whether the app died or only
+    // dropped the socket; the home with its log is removed below.
+    console.error(
+      `  app at the failure: ${app.exitCode !== null || app.signalCode !== null ? `exited (code ${app.exitCode}, signal ${app.signalCode})` : "still running"}`,
+    );
+    try {
+      const log = fs.readFileSync(path.join(HOME, "logs", "main.log"), "utf8");
+      console.error(`  last lines of the app's main.log:\n${log.split("\n").slice(-40).join("\n")}`);
+    } catch {
+      console.error("  the app wrote no main.log");
+    }
+    throw error;
   } finally {
     // Launch the binary directly and await its exit: killing Electron's Node
     // CLI wrapper leaves the app writing into the directory being removed.

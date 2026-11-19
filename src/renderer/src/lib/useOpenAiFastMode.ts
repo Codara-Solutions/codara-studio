@@ -54,8 +54,8 @@ export interface OpenAiFastModeControl {
 }
 
 /**
- * Reads and flips AppSettings.openAiFastMode (the key predates Anthropic
- * support; it now covers every model with a fast mode, manager and workers).
+ * Reads and flips AppSettings.openAiFastMode (Codex models only, manager and
+ * workers).
  * Read fail-closed: an unreadable or unsaveable settings file reports OFF,
  * because the wrong answer bills a premium rate on every token rather than
  * merely running at normal speed. The value takes effect on the next manager

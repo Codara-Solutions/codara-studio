@@ -191,6 +191,14 @@ import {
 import { describeRunSettlement, isRunSettled, unresolvedWorkerTasks } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport, readWorkerReportWithProblem } from "./worker-report";
+import {
+  createWorkerFeedWriter,
+  liveWorkerFeedSnapshot,
+  readWorkerActivity,
+  readWorkerFeedFile,
+  type WorkerFeedWriter,
+} from "./worker-feed";
+import { WORKER_FEED_FILE, WORKER_FEED_LIMITS, type WorkerActivity, type WorkerFeedSnapshot } from "@shared/worker-feed";
 import { evaluateWorkerSessionReuse } from "./worker-session-reuse";
 import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonomy";
 import {
@@ -1081,6 +1089,12 @@ export async function getRun(runId: string): Promise<RunState | null> {
   // Cache MISS: read + parse + normalize from disk, then populate the cache.
   try {
     const raw = await fs.readFile(runPath(runId), "utf8");
+    // Another caller may have cached this run while the file was read, and
+    // changed it since: that copy is newer than what this read found on disk.
+    // Replacing it would hand every later reader the old run, and the next
+    // save would write the change away (a manager plan, a status).
+    const raced = runCache.get(runId);
+    if (raced) return raced;
     const run = normalizeRun(JSON.parse(raw) as RunState);
     runCache.set(run.id, run);
     return run;
@@ -1157,6 +1171,78 @@ export async function readWorkerAttemptLog(
   // The log mirrors the pane, so it carries cursor and screen escapes the
   // inspector would print as literal junk.
   return { text: stripAnsiAndControls(text ?? ""), truncated: size > WORKER_LOG_TAIL_BYTES };
+}
+
+/**
+ * What each live worker of a run is doing now, for the chat's agents rail:
+ * from memory only, one short entry per running Pi worker. Workers without a
+ * feed (shell, Claude Code, Codex) have none and show their state alone.
+ */
+export function readRunWorkerActivity(runId: string): WorkerActivity[] {
+  return readWorkerActivity(runId);
+}
+
+/**
+ * A worker attempt's own conversation as records (src/shared/worker-feed.ts):
+ * from memory while its session runs, from feed.jsonl beside its stdout.log
+ * after. Confined like readWorkerAttemptLog. An attempt that never kept a feed
+ * reads as `available: false`.
+ */
+export async function readWorkerAttemptFeed(
+  runId: string,
+  attemptId: string,
+): Promise<WorkerFeedSnapshot> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((candidate) => candidate.id === attemptId);
+  if (!attempt) throw new Error(`Worker attempt not found: ${attemptId}`);
+  const live = liveWorkerFeedSnapshot(attemptId);
+  if (live) return live;
+  const missing: WorkerFeedSnapshot = { available: false, live: false, records: [], partial: null };
+  if (!attempt.stdoutLogPath) return missing;
+  const artifactRoot = await fs.realpath(runDir(run.id)).catch(() => null);
+  if (!artifactRoot) return missing;
+  const feedPath = join(dirname(resolvePath(attempt.stdoutLogPath)), WORKER_FEED_FILE);
+  const realFeed = await fs.realpath(feedPath).catch(() => null);
+  if (!realFeed) return missing;
+  const relativeFeed = relative(artifactRoot, realFeed);
+  if (
+    relativeFeed === "" ||
+    relativeFeed.startsWith(`..${sep}`) ||
+    relativeFeed === ".." ||
+    isAbsolute(relativeFeed)
+  ) {
+    throw new Error("Worker feed path is outside its run artifacts.");
+  }
+  const records = await readWorkerFeedFile(realFeed);
+  return records ? { available: true, live: false, records, partial: null } : missing;
+}
+
+/**
+ * A message for a running worker from the chat. Only a Pi worker takes one:
+ * it reads it as steering before its next step. A terminal worker's input is
+ * keystrokes, which its own terminal is for.
+ */
+export async function messageWorkerAttempt(
+  runId: string,
+  attemptId: string,
+  text: string,
+): Promise<{ delivered: boolean }> {
+  const run = await requireRun(runId);
+  if (!run.workerAttempts.some((candidate) => candidate.id === attemptId)) {
+    throw new Error(`Worker attempt not found: ${attemptId}`);
+  }
+  // Control characters are keystrokes to a worker (a lone Esc aborts it).
+  const message = text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "").trim();
+  if (!message) return { delivered: false };
+  // Steering is re-sent after every compaction, so it stays short.
+  if (message.length > WORKER_FEED_LIMITS.steerChars) {
+    throw new Error(`A message to a worker is at most ${WORKER_FEED_LIMITS.steerChars} characters.`);
+  }
+  const descriptor = activeWorkerInputDescriptor(attemptId);
+  if (!descriptor || descriptor.capability !== "steer") return { delivered: false };
+  return {
+    delivered: writeActiveWorkerInput(attemptId, descriptor.processGenerationId, message),
+  };
 }
 
 /**
@@ -14980,11 +15066,18 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
 
   const promptText = await readWorkerPromptForLaunch(paths);
   const fakeWorkflowWorker = Boolean(task.workflowCall) && process.env.CODARA_WORKFLOW_FAKE_WORKERS === "1";
+  // The worker view e2e's stand-in for a Pi worker (CODARA_FAKE_PI_WORKERS=1),
+  // never for a workflow call: see runFakePiWorkerSession.
+  const fakePiWorker =
+    !task.workflowCall &&
+    process.env.CODARA_FAKE_PI_WORKERS === "1" &&
+    (task.runtimePreference === "claude" || task.runtimePreference === "codex" || task.runtimePreference === "grok");
   // Direct chats keep the user's exact model selection. Managed workers use
   // the enabled roster; automation workers keep their validated model hints.
   // All three paths run on Pi. Shell/manual keep the plain pty escape hatch.
   const isPiWorker =
     !fakeWorkflowWorker &&
+    !fakePiWorker &&
     (task.runtimePreference === "claude" ||
       task.runtimePreference === "codex" ||
       task.runtimePreference === "grok");
@@ -15046,9 +15139,11 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   if (workerLaunchAborted(attempt.id)) return run;
   const command = fakeWorkflowWorker
     ? "fake workflow worker"
+    : fakePiWorker
+      ? "fake Pi worker"
     : claudeCodeWorker
       ? `Claude Code (${piWorkerModel})`
-      : isPiWorker
+    : isPiWorker
       ? `Pi harness (${launchRuntime}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
       : "pwsh (manual)";
   const launchTimestamp = new Date().toISOString();
@@ -15199,6 +15294,8 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   try {
     result = fakeWorkflowWorker
       ? await runFakeWorkflowWorkerSession({ run, task, attemptId: attempt.id, paths, command })
+      : fakePiWorker
+      ? await runFakePiWorkerSession({ run, task, attemptId: attempt.id, paths, command })
       : claudeCodeWorker
       ? await runClaudeCodeWorkerSession({
           run,
@@ -21619,6 +21716,114 @@ async function runFakeWorkflowWorkerSession({
   }
 }
 
+// Test seam for the Cora worker view e2e (CODARA_FAKE_PI_WORKERS=1): stands in
+// for a Pi worker's session so a spec can go inside a running worker, message
+// it and stop it without a subscription. It writes a short scripted feed,
+// answers each message, and finishes after FAKE_DELAY_MS=<n> (default 300 ms,
+// at most 15 minutes) with a report naming one changed file and one check.
+// Its test run stays open while it waits, as a long one would; FAKE_FAIL
+// makes it fail there instead, with a short reason.
+async function runFakePiWorkerSession({
+  run,
+  task,
+  attemptId,
+  paths,
+  command,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attemptId: string;
+  paths: WorkerArtifactPaths;
+  command: string;
+}): Promise<{ exitCode: number; error?: string }> {
+  const delay = Math.min(15 * 60_000, Number(/FAKE_DELAY_MS=(\d+)/.exec(task.description)?.[1] ?? 300));
+  if (!(await markAttemptRunning(run.id, task.id, attemptId, new Date().toISOString()))) {
+    return { exitCode: 1, error: "Fake Pi worker was cancelled before it started." };
+  }
+  const feed = createWorkerFeedWriter({ runId: run.id, attemptId, path: join(paths.attemptDir, WORKER_FEED_FILE) });
+  let killed = false;
+  let wake: () => void = () => undefined;
+  try {
+    activeWorkerProcesses.set(attemptId, {
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId,
+      command,
+      processGenerationId: randomUUID(),
+      inputCapability: "steer",
+      write: (text) => {
+        feed.steer(text, "user");
+        feed.textDelta(`Noted: ${text}`);
+        feed.endMessage();
+      },
+      kill: () => {
+        killed = true;
+        wake();
+      },
+    });
+    feed.tool("fake-read", "read", { path: "README.md" });
+    feed.result("fake-read", "# Project\n\nA compact fixture.\n", false);
+    feed.textDelta("The readme names the project. Checking that the tests pass before changing anything.");
+    feed.endMessage();
+    feed.tool("fake-test", "bash", { command: "npm test" });
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, delay);
+      wake = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    if (killed) return { exitCode: 1, error: "Fake Pi worker was stopped." };
+    if (/FAKE_FAIL/.test(task.description)) {
+      feed.result("fake-test", "typecheck, 2 errors", true);
+      return { exitCode: 1, error: "typecheck, 2 errors" };
+    }
+    feed.result("fake-test", "12 passing", false);
+    feed.tool("fake-edit", "edit", { path: "src/example.ts", oldText: "count", newText: "total" });
+    feed.result("fake-edit", "Edited src/example.ts", false);
+    feed.textDelta(`Done: ${task.title}. One file changed and the tests pass.`);
+    feed.endMessage();
+    const report = {
+      status: "complete",
+      summary: `Fake report for: ${task.title}`,
+      files_changed: [{ path: "src/example.ts", reason: "Renamed the counter." }],
+      commands_run: [{ command: "npm test", exit_code: 0, summary: "12 passing" }],
+      tests: [{ command: "npm test", result: "passed" }],
+      proof: [],
+      risks: [],
+      followups: [],
+      handoff: [],
+    };
+    await fs.writeFile(paths.finalReportJson, JSON.stringify(report, null, 2), "utf8");
+    await fs.appendFile(paths.stdoutLog, `fake Pi worker: ${report.summary}\n`, "utf8").catch(() => undefined);
+    return { exitCode: 0 };
+  } finally {
+    activeWorkerProcesses.delete(attemptId);
+    await feed.close().catch(() => undefined);
+  }
+}
+
+// Steering re-sent after a compaction: the newest messages that fit in
+// 16,000 characters, so a worker messaged often from the chat does not carry
+// every message ever sent into each compacted prompt.
+const STEERING_CONTRACT_CHARS = 16_000;
+
+export function steeringForContract(steering: readonly string[]): string[] {
+  const kept: string[] = [];
+  let total = 0;
+  for (let index = steering.length - 1; index >= 0; index -= 1) {
+    const section = `Later steering ${index + 1}:\n${steering[index]}`;
+    if (kept.length > 0 && total + section.length > STEERING_CONTRACT_CHARS) {
+      kept.unshift(`(${index + 1} earlier steering ${index === 0 ? "message" : "messages"} left out; the newest are below.)`);
+      break;
+    }
+    kept.unshift(section);
+    total += section.length;
+  }
+  return kept;
+}
+
 async function runPiWorkerSession({
   run,
   task,
@@ -21687,7 +21892,7 @@ async function runPiWorkerSession({
       ...(task.allowedPaths.length ? [`Edit only: ${task.allowedPaths.join(", ")}`] : []),
       ...(task.forbiddenPaths.length ? [`Do not edit: ${task.forbiddenPaths.join(", ")}`] : []),
       ...(contractSections ? [contractSections] : []),
-      ...taskSteering.map((text, index) => `Later steering ${index + 1}:\n${text}`),
+      ...steeringForContract(taskSteering),
       ...(memory ? [`Cora memory and profile (re-sent after compaction; they still apply):\n${memory}`] : []),
     ].join("\n\n");
   };
@@ -21800,6 +22005,14 @@ async function runPiWorkerSession({
     throw new Error("Pi worker was interrupted before it started: the run was stopped.");
   };
 
+  // The chat's view of this worker: its tool calls, replies and the messages
+  // it was sent, as records. The pane and the log keep their text copy.
+  // Created right before the try, whose finally closes it.
+  const feed: WorkerFeedWriter = createWorkerFeedWriter({
+    runId: run.id,
+    attemptId,
+    path: join(paths.attemptDir, WORKER_FEED_FILE),
+  });
   try {
     // Inside the try so a display failure (no default shell, PTY spawn error)
     // ends this attempt with a failure report instead of escaping to the cycle,
@@ -21982,6 +22195,7 @@ async function runPiWorkerSession({
         const steering = input.replace(/[\r\n]+$/g, "").trim();
         if (steering) {
           taskSteering.push(steering);
+          feed.steer(steering, "user");
           void client.prompt(steering, "steer").catch(() => undefined);
         }
       },
@@ -22011,13 +22225,27 @@ async function runPiWorkerSession({
         assistantPaneCut = false;
         const label = piWorkerToolLabel(event.toolName);
         const detail = piWorkerToolDetail(event);
+        feed.tool(event.toolCallId, event.toolName, event.args);
         reportActivity(detail ? `${label} · ${detail}` : label);
         paint(
           `\r\n  ${paneToolStartMarker(label)}` +
           `${detail ? `\r\n    ${paneDim(detail)}` : ""}\r\n`,
         );
+      } else if (event.type === "entry_appended") {
+        // A cache warm Pi sent mid-run: billed, so counted, but it does not
+        // change what the context holds.
+        const warm = piWorkerMessageUsage(event);
+        if (warm) {
+          sawUsage = true;
+          usageTotals.input += warm.input;
+          usageTotals.output += warm.output;
+          usageTotals.cacheRead += warm.cacheRead;
+          usageTotals.cacheWrite += warm.cacheWrite;
+          if (provider === "openrouter") measuredCostTotal += warm.cost;
+        }
       } else if (event.type === "tool_execution_end") {
         const failed = event.isError === true;
+        feed.result(event.toolCallId, piWorkerResultRaw(event.result), failed);
         const marker = `  ${failed ? paneToolFailMarker() : paneToolOkMarker()}`;
         // Failure output keeps its line structure and is folded head + tail in
         // the PANE with a dim marker. The folded middle would otherwise be lost
@@ -22037,6 +22265,7 @@ async function runPiWorkerSession({
       } else if (event.type === "message_update") {
         const delta = event.assistantMessageEvent as Record<string, unknown> | undefined;
         if (delta?.type === "text_delta" && typeof delta.delta === "string" && delta.delta) {
+          feed.textDelta(delta.delta);
           if (assistantPaneCut) {
             appendWorkerLog(delta.delta);
           } else {
@@ -22057,6 +22286,7 @@ async function runPiWorkerSession({
           }
         }
       } else if (event.type === "message_end" || event.type === "compaction_end") {
+        feed.endMessage();
         if (assistantLineOpen) {
           paint("\r\n");
           assistantLineOpen = false;
@@ -22092,16 +22322,20 @@ async function runPiWorkerSession({
         const failure = piWorkerEventFailure(event);
         const fastFallback = failure ? fastModeFallbackNote(failure) : null;
         if (fastFallback) {
+          feed.note(piWorkerSafeText(fastFallback, 700), "info");
           reportActivity(piWorkerSafeText(fastFallback, 300));
           paint(`\r\n  ${paneDim(piWorkerSafeText(fastFallback, 700))}\r\n`);
         } else if (failure) {
+          feed.note(`Provider error: ${piWorkerSafeText(failure, 700)}`, "error");
           reportActivity(`Provider error: ${piWorkerSafeText(failure, 300)}`);
           paint(`\r\n  \x1b[31mProvider error: ${piWorkerSafeText(failure, 700)}\x1b[0m\r\n`);
         }
       } else if (event.type === "auto_retry_start") {
+        feed.note("Provider retry…", "info");
         reportActivity("Provider retry…");
         paint(`\r\n  ${paneRetryMarker("Provider retry…")}\r\n`);
       } else if (event.type === "auto_retry_end" && event.success === false) {
+        feed.note(`Provider retry failed: ${piWorkerSafeText(event.finalError, 700)}`, "error");
         reportActivity(`Provider retry failed: ${piWorkerSafeText(event.finalError, 300)}`);
         paint(`\r\n  \x1b[31mProvider retry failed: ${piWorkerSafeText(event.finalError, 700)}\x1b[0m\r\n`);
       } else if (event.type === "extension_error") {
@@ -22127,6 +22361,7 @@ async function runPiWorkerSession({
     const compactionProgress = (phase: "compacting" | "resuming", report?: CompactionReport) => {
       if (report) {
         const detail = describeCompaction(report);
+        feed.note(detail, "info");
         reportActivity(detail);
         paint(`\r\n  ${paneDim(detail)}\r\n`);
         void appendEvent({
@@ -22147,6 +22382,7 @@ async function runPiWorkerSession({
       paint(`\r\n  ${detail}\r\n`);
     };
     const wrapUpRequested = () => {
+      feed.note("Time limit reached: asking the worker to hand in a partial report", "info");
       reportActivity("Time limit reached: writing a partial report…");
       paint("\r\n  \x1b[33m⏱ Turn time limit reached: asking the worker to hand in a partial report\x1b[0m\r\n");
     };
@@ -22164,6 +22400,7 @@ async function runPiWorkerSession({
 
     let report = await readWorkerReport(paths.finalReportJson);
     if (!report) {
+      feed.steer("Your task turn ended without a valid final report. Write it without redoing the work.", "cora");
       // Tell the worker exactly what is wrong. A bare "not parseable" made it
       // rewrite the same shape, and the second miss threw its work away.
       const { problem } = await readWorkerReportWithProblem(paths.finalReportJson);
@@ -22198,6 +22435,7 @@ async function runPiWorkerSession({
     const resultProblem = await workflowResultProblem(task, paths, report.status);
     if (resultProblem) {
       paint("\r\n  \x1b[33m↻ Fixing the workflow result…\x1b[0m\r\n");
+      feed.steer(`Your submit_result call did not return a valid result: ${resultProblem}. Call it again.`, "cora");
       await waitForPiWorkerTurn(
         client,
         `Your submit_result call did not return a valid \`result\`: ${resultProblem}. ` +
@@ -22244,6 +22482,7 @@ async function runPiWorkerSession({
       }
     }
     applyHookStateReport({ paneId: attemptId, state: interrupted ? "done" : "error", note: message });
+    feed.note(interrupted ? `Stopped: ${piWorkerSafeText(message, 700)}` : piWorkerSafeText(message, 700), interrupted ? "info" : "error");
     paint(`\r\n\x1b[31m  ×  PI WORKER STOPPED\x1b[0m\r\n  ${message}\r\n`);
     await logQueue.catch(() => undefined);
     const failureCost = resolvedPiCostUsd();
@@ -22251,6 +22490,7 @@ async function runPiWorkerSession({
   } finally {
     unsubscribe?.();
     activeWorkerProcesses.delete(attemptId);
+    await feed.close().catch(() => undefined);
     await client?.stop().catch(() => undefined);
     await cleanupPiMcpBridgeConfig({
       mcpConfigPath,

@@ -164,6 +164,9 @@ async function send(params: Record<string, unknown>): Promise<unknown> {
     if (!inUserBrowser.ok) throw new PreviewToolParamsError(inUserBrowser.reason);
   }
   const session = target.session;
+  // Before the domain bookkeeping below, which answers enable and disable itself.
+  const unsupported = session.refuses(method);
+  if (unsupported) throw new PreviewToolParamsError(unsupported);
   const owner = ownerOf(params);
   const name = method.slice(decision.domain.length + 1);
   if (name === "enable") {

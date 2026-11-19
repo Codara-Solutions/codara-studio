@@ -228,6 +228,169 @@
   opacity: 0.8;
 }
 
+/* ── Subagents: a count chip on the parent's third line ───────────────────── */
+
+/* The open button and the chip that sits over its third line. */
+.agent-inbox-row__body {
+  position: relative;
+}
+
+.agent-inbox-row__chip {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 18px;
+  padding: 0 5px 0 7px;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.agent-inbox-row__chip:not(.is-ghost) {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+}
+
+/* Keeps the chip's width free at the end of the line it covers. */
+.agent-inbox-row__chip.is-ghost {
+  visibility: hidden;
+}
+
+.agent-inbox-row__chip:not(.is-ghost):hover,
+.agent-inbox-row__chip[aria-expanded="true"] {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.agent-inbox-row__chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.agent-inbox-row__chip-dot,
+.agent-inbox-subagent__dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.agent-inbox-row__chip-dot.is-info,
+.agent-inbox-subagent__dot.is-working {
+  background: var(--info);
+}
+
+.agent-inbox-row__chip-dot.is-warn,
+.agent-inbox-subagent__dot.is-input {
+  background: var(--warn);
+}
+
+.agent-inbox-subagent__dot.is-failed {
+  background: var(--danger);
+}
+
+.agent-inbox-subagent__dot.is-done {
+  background: var(--ok);
+}
+
+.agent-inbox-row__chip-chevron {
+  display: inline-flex;
+  color: var(--muted);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.agent-inbox-row__chip[aria-expanded="true"] .agent-inbox-row__chip-chevron {
+  transform: rotate(90deg);
+}
+
+/* The list sits on the row's surface: the open row's covers it too. */
+.agent-inbox-row.is-active.is-subagents-open {
+  border-radius: var(--radius-control, 7px);
+  background: var(--hover-strong);
+}
+
+.agent-inbox-row.is-active.is-subagents-open .agent-inbox-row__open {
+  background: transparent;
+}
+
+.agent-inbox-row__subagents {
+  margin: -4px 0 0;
+  padding: 0 0 6px 26px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-inbox-subagent {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  height: 22px;
+  padding: 0 10px 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  text-align: left;
+  cursor: default;
+}
+
+.agent-inbox-subagent:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.agent-inbox-subagent:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.agent-inbox-subagent__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-inbox-subagent__branch {
+  display: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.agent-inbox-subagent:hover .agent-inbox-subagent__branch,
+.agent-inbox-subagent:focus-visible .agent-inbox-subagent__branch {
+  display: inline;
+}
+
+.agent-inbox-subagent__time {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── Hover actions: they take the status slot's place ─────────────────────── */
 
 .agent-inbox-row__actions {
@@ -512,6 +675,7 @@
 @media (prefers-reduced-motion: reduce) {
   .agent-inbox__foot,
   .agent-inbox__shelf-chevron,
+  .agent-inbox-row__chip-chevron,
   .agent-inbox-row__open {
     transition: none;
   }

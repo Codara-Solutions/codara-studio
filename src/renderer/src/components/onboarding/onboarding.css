@@ -154,6 +154,9 @@
   color: var(--muted);
   margin: 8px 0;
 }
+.onboarding-browser {
+  margin-top: 18px;
+}
 .onboarding-note {
   color: var(--muted);
   font-size: 11px;

@@ -90,10 +90,12 @@ export function isBlockedUrl(url, rules) {
 }
 
 /** Browser pages, other extensions and the extension stores, which no agent may drive. */
-export function isRestrictedUrl(url) {
+export function isRestrictedUrl(url, { fileAccess = true } = {}) {
   const text = String(url ?? "");
   if (!text) return false;
   if (RESTRICTED_SCHEMES.test(text)) return true;
+  // Local files need "Allow access to file URLs" on the extension's details page.
+  if (/^file:/i.test(text)) return fileAccess === false;
   if (/^about:/i.test(text)) return !/^about:blank$/i.test(text);
   const parsed = parseUrl(text);
   if (!parsed) return false;
@@ -174,6 +176,50 @@ export function agentGroupFor(groups, agentGroupIds, title) {
       (group) => agentGroupIds.includes(group.id) && String(group.title ?? "").toLowerCase() === key,
     ) ?? null
   );
+}
+
+/**
+ * Puts a tab an agent opened into its group `title`: one the extension made
+ * in that window, or a new one it names and `record`s. `live()` says whether
+ * the link that asked is still the one in use; once it is not, the tab
+ * leaves the group it joined (if it is still there; Chrome removes a group
+ * left empty) and nothing is recorded, whether naming the group worked or
+ * not. Returns the group's title, or null when the tab is not grouped.
+ * `tabs` and `tabGroups` are chrome.tabs and chrome.tabGroups.
+ */
+export async function groupForAgents({ tab, title, agentGroupIds, live, tabs, tabGroups, record }) {
+  const leftIfStale = async (groupId) => {
+    if (live()) return false;
+    const now = await tabs.get(tab.id).catch(() => null);
+    if (now?.groupId === groupId) await tabs.ungroup(tab.id).catch(() => {});
+    return true;
+  };
+  try {
+    const groups = await tabGroups.query({ windowId: tab.windowId });
+    if (!live()) return null;
+    const existing = agentGroupFor(groups, agentGroupIds, title);
+    if (existing) {
+      await tabs.group({ groupId: existing.id, tabIds: [tab.id] });
+      if (await leftIfStale(existing.id)) return null;
+      return existing.title;
+    }
+    const groupId = await tabs.group({ tabIds: [tab.id], createProperties: { windowId: tab.windowId } });
+    if (await leftIfStale(groupId)) return null;
+    let named = true;
+    try {
+      await tabGroups.update(groupId, { title });
+    } catch {
+      named = false;
+    } finally {
+      // Whether naming worked or not: a closed link's grouping is undone.
+      if (await leftIfStale(groupId)) named = null;
+    }
+    if (!named) return null;
+    await record(groupId);
+    return title;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -258,6 +304,16 @@ function withoutHeaders(headers, names) {
 
 const COOKIE_HEADERS = ["cookie", "set-cookie"];
 
+/** A response without its cookie headers (raw header texts included). */
+function withoutCookies(response) {
+  const { requestHeadersText: _req, headersText: _res, ...rest } = response;
+  return {
+    ...rest,
+    headers: withoutHeaders(rest.headers, COOKIE_HEADERS),
+    ...(rest.requestHeaders ? { requestHeaders: withoutHeaders(rest.requestHeaders, COOKIE_HEADERS) } : {}),
+  };
+}
+
 /**
  * An event as Codara may see it. Without the tab's cookie and storage
  * permission, cookie headers and cookie lists are removed; everything else
@@ -267,7 +323,12 @@ export function redactCdpEvent(method, params, allowStorage) {
   if (allowStorage || !params || typeof params !== "object") return params;
   switch (method) {
     case "Network.requestWillBeSent":
-      return params.request ? { ...params, request: { ...params.request, headers: withoutHeaders(params.request.headers, COOKIE_HEADERS) } } : params;
+      // A redirect's response sets cookies too (Set-Cookie on a 302).
+      return {
+        ...params,
+        ...(params.request ? { request: { ...params.request, headers: withoutHeaders(params.request.headers, COOKIE_HEADERS) } } : {}),
+        ...(params.redirectResponse ? { redirectResponse: withoutCookies(params.redirectResponse) } : {}),
+      };
     case "Network.requestWillBeSentExtraInfo": {
       const { associatedCookies: _cookies, ...rest } = params;
       return { ...rest, headers: withoutHeaders(params.headers, COOKIE_HEADERS) };
@@ -276,32 +337,12 @@ export function redactCdpEvent(method, params, allowStorage) {
       const { blockedCookies: _blocked, headersText: _text, exemptedCookies: _exempted, ...rest } = params;
       return { ...rest, headers: withoutHeaders(params.headers, COOKIE_HEADERS) };
     }
-    case "Network.responseReceived": {
-      if (!params.response) return params;
-      const { requestHeadersText: _req, headersText: _res, ...response } = params.response;
-      return {
-        ...params,
-        response: {
-          ...response,
-          headers: withoutHeaders(response.headers, COOKIE_HEADERS),
-          ...(response.requestHeaders ? { requestHeaders: withoutHeaders(response.requestHeaders, COOKIE_HEADERS) } : {}),
-        },
-      };
-    }
+    case "Network.responseReceived":
+      return params.response ? { ...params, response: withoutCookies(params.response) } : params;
     case "Network.webSocketWillSendHandshakeRequest":
       return params.request ? { ...params, request: { ...params.request, headers: withoutHeaders(params.request.headers, COOKIE_HEADERS) } } : params;
-    case "Network.webSocketHandshakeResponseReceived": {
-      if (!params.response) return params;
-      const { headersText: _res, requestHeadersText: _req, ...response } = params.response;
-      return {
-        ...params,
-        response: {
-          ...response,
-          headers: withoutHeaders(response.headers, COOKIE_HEADERS),
-          ...(response.requestHeaders ? { requestHeaders: withoutHeaders(response.requestHeaders, COOKIE_HEADERS) } : {}),
-        },
-      };
-    }
+    case "Network.webSocketHandshakeResponseReceived":
+      return params.response ? { ...params, response: withoutCookies(params.response) } : params;
     default:
       return params;
   }
@@ -317,6 +358,88 @@ export function isTabShared(share, tab) {
   if (isRestrictedUrl(tab.url ?? tab.pendingUrl)) return false;
   if ((share.stopped ?? []).includes(tab.id)) return false;
   return share.all === true || (share.windows ?? []).includes(tab.windowId) || (share.tabs ?? []).includes(tab.id);
+}
+
+// The popup's "Agents may use" choice. Each reach is a view of the sharing
+// state that already exists (shareAll, shareWindows, shareTabs, stopped), so
+// picking one never grants more than the switches it replaced did, and a
+// user's stored choices read back as the same reach after an update.
+export const REACHES = Object.freeze(["tabs", "window", "all"]);
+
+export const REACH_TEXT = Object.freeze({
+  tabs: { label: "Tabs I pick", includes: "In this window, only the tabs you switch on." },
+  window: { label: "This window", includes: "Every tab in this window, including ones you open in it later." },
+  all: { label: "Everything", includes: "Every tab in this browser, including ones you open later." },
+});
+
+/** The reach the popup shows for one window: { all, windows } as in isTabShared. */
+export function reachOf(share, windowId) {
+  if (share?.all === true) return "all";
+  if (typeof windowId === "number" && (share?.windows ?? []).includes(windowId)) return "window";
+  return "tabs";
+}
+
+/**
+ * The storage patch for picking a reach in one window, given the current
+ * { all, windows, stopped } and the ids of that window's tabs. Widening to
+ * "all" or "window" lifts the stops it covers, as the old switches did;
+ * narrowing from "all" keeps every stop the user made; "tabs" keeps the tabs
+ * shared one by one and every other window as they were.
+ */
+export function reachPatch(share, reach, windowId, windowTabIds = []) {
+  const windows = share?.windows ?? [];
+  const stopped = share?.stopped ?? [];
+  switch (reach) {
+    case "all":
+      return { shareAll: true, stopped: [] };
+    case "window":
+      if (typeof windowId !== "number") throw new Error("This window cannot be shared.");
+      return {
+        shareAll: false,
+        shareWindows: windows.includes(windowId) ? windows : [...windows, windowId],
+        stopped: share?.all === true ? stopped : stopped.filter((id) => !windowTabIds.includes(id)),
+      };
+    case "tabs":
+      return { shareAll: false, shareWindows: windows.filter((id) => id !== windowId) };
+    default:
+      throw new Error(`Unknown reach ${reach}.`);
+  }
+}
+
+const TOOL_VERBS = {
+  click: "clicked",
+  type: "typed",
+  press_key: "pressed a key",
+  key: "pressed a key",
+  hover: "pointed",
+  scroll: "scrolled",
+  drag: "dragged",
+  navigate: "opened a page",
+  screenshot: "took a screenshot",
+  snapshot: "read the page",
+  find: "searched the page",
+  evaluate: "ran a script",
+  wait_for: "waited for the page",
+  run: "ran steps",
+  console: "read the console",
+  network: "read the network log",
+  chrome: "managed tabs",
+  close: "closed a tab",
+};
+
+/** What an agent's last tool call did, in a few plain words ("clicked"). */
+export function toolVerb(tool) {
+  const short = String(tool ?? "").replace(/^codara_preview_/, "").replace(/^preview\./, "");
+  if (!short) return "used this tab";
+  return TOOL_VERBS[short] ?? `used ${short.replace(/_/g, " ")}`;
+}
+
+// Studio's agent colours (src/renderer/src/styles.css); any other agent uses the accent.
+const AGENT_RUNTIMES = new Set(["claude", "codex", "grok", "pi"]);
+
+/** The CSS colour of an agent, from the runtime Codara reports for it. */
+export function agentColorVar(runtime) {
+  return AGENT_RUNTIMES.has(runtime) ? `var(--agent-${runtime})` : "var(--accent)";
 }
 
 /** How long after an agent's last call its name stays on the toolbar button. */
@@ -389,4 +512,18 @@ export function carriedSession(carry, now) {
   if (!carry || typeof carry !== "object" || !carry.session || typeof carry.session !== "object") return null;
   const age = now - Number(carry.at);
   return age >= 0 && age < RELOAD_CARRY_MS ? carry.session : null;
+}
+
+/**
+ * What the reach note adds about other windows, from what is shared there:
+ * windows shared from their own popup and tabs switched on one by one keep
+ * their choice, so the note never promises less access than there is.
+ */
+export function otherWindowsText({ otherWindows = 0, otherTabs = 0 } = {}) {
+  const parts = [];
+  if (otherWindows === 1) parts.push("Another window you shared stays shared.");
+  else if (otherWindows > 1) parts.push(`${otherWindows} other windows you shared stay shared.`);
+  if (otherTabs === 1) parts.push("A tab you shared in another window stays shared.");
+  else if (otherTabs > 1) parts.push(`${otherTabs} tabs you shared in other windows stay shared.`);
+  return parts.length ? parts.join(" ") : "Other windows stay off.";
 }

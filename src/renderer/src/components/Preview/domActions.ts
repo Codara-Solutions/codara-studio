@@ -18,10 +18,28 @@ export async function locateProbe(opts: { selector: string }, createDOM: typeof 
   }
 }
 
-export async function clickProbe(opts: { selector: string }, createDOM: typeof createPreviewDOM) {
+export async function clickProbe(opts: { selector: string; watch?: boolean }, createDOM: typeof createPreviewDOM) {
   const dom = createDOM();
   const el = await dom.ready(opts.selector);
   const { x, y } = dom.point(el);
+  if (opts.watch) {
+    // Counts what the click changes, so the result can say so
+    // (CHANGES_STOP_EXPRESSION reads and stops it). It stops itself if never read.
+    const host = window as unknown as { __codaraChanges?: { stop: () => number } };
+    host.__codaraChanges?.stop();
+    let changes = 0;
+    const observer = new MutationObserver((records) => { changes += records.length; });
+    observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    const timer = setTimeout(() => observer.disconnect(), 5_000);
+    host.__codaraChanges = {
+      stop() {
+        observer.disconnect();
+        clearTimeout(timer);
+        delete host.__codaraChanges;
+        return changes;
+      },
+    };
+  }
   const opts2 = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 } as MouseEventInit;
   el.dispatchEvent(new PointerEvent("pointerdown", opts2 as PointerEventInit));
   el.dispatchEvent(new MouseEvent("mousedown", opts2));
@@ -63,6 +81,8 @@ export async function typeProbe(opts: { selector: string; text: string; clearFir
     setter.call(input, (opts.clearFirst ? "" : input.value) + opts.text);
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
+    const value = input.type === "password" ? "•".repeat(input.value.length) : input.value.slice(0, 200);
+    return { ok: true, value, ...point };
   } else if ((el as HTMLElement).isContentEditable) {
     if (opts.clearFirst) {
       const range = document.createRange();
@@ -72,10 +92,10 @@ export async function typeProbe(opts: { selector: string; text: string; clearFir
       selection?.addRange(range);
     }
     document.execCommand("insertText", false, opts.text);
+    return { ok: true, value: (el.textContent ?? "").slice(0, 200), ...point };
   } else {
     return { ok: false, error: "element is not an input, textarea, or contentEditable" };
   }
-  return { ok: true, ...point };
 }
 
 export async function pressKeyProbe(opts: { key: string; selector: string | null }, createDOM: typeof createPreviewDOM) {
