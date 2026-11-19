@@ -704,7 +704,7 @@ function heardOf(tabId) {
 function seeTab(tab, lookedAt = ++seenTicks) {
   if (!Number.isInteger(tab?.id) || (tabsSeenAt.get(tab.id) ?? 0) > lookedAt) return;
   tabsSeenAt.set(tab.id, lookedAt);
-  tabsSeen.set(tab.id, { id: tab.id, windowId: tab.windowId, url: tab.url });
+  tabsSeen.set(tab.id, { id: tab.id, windowId: tab.windowId, url: tab.url, cookieStoreId: tab.cookieStoreId });
 }
 
 /** Whether Codara may get this tab's events: attached, shared where it is now, not on a blocked site. */
@@ -878,7 +878,8 @@ async function tabCookies(first, lookedAt, params, socket, since) {
     urls,
     ref: agentTabId(tabId),
     // The window of the first look: had the tab moved since, its own stamp moved, or a later look saw it.
-    now: () => ({ changed: access.changedSince(since, tabId, first.windowId), socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
+    // Until it is sealed, the newest view of the tab (a later lookup's, even another request's) must still be the first look's.
+    now: () => ({ changed: access.changedSince(since, tabId, first.windowId) || !sameView(tabsSeen.get(tabId) ?? {}), socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
   });
   const read = await readCookies(urls, {
     getAll: (url) => browser.cookies.getAll({ url, storeId }),
