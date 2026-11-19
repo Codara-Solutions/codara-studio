@@ -387,7 +387,8 @@ export class LinkClient {
     this.lastPong = Date.now();
     this.pingTimer = setInterval(() => {
       if (Date.now() - this.lastPong > PONG_DEADLINE_MS) {
-        this.close();
+        // lost() closes the socket itself; closing first would leave it
+        // nothing to lose, so no quick reconnect and a stale "connected".
         this.lost();
         return;
       }
