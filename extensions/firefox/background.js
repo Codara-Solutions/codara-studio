@@ -537,15 +537,15 @@ async function inDocument({ tab }, work) {
  * gives them (Firefox would give a thrown error empty).
  */
 async function evaluateInPage(tabId, params, socket) {
-  if (params.contextId !== undefined || params.uniqueContextId !== undefined) {
-    throw new Error("Runtime.evaluate in another world or frame is not available in Firefox: agents use the tab's own page.");
-  }
+  const asked = pageContext(tabId, params);
   const expression = String(params.expression ?? "");
   const awaitPromise = params.awaitPromise === true;
   // It runs in the document pinned here, on the address checked (see
   // documentGuard), and its answer leaves only while the tab is still shared
-  // and allowed (the agent's own code may navigate it).
+  // and allowed (the agent's own code may navigate it). Asked for an earlier
+  // answer's page, it runs only while that page is still the tab's.
   const page = await pinDocument(tabId, socket);
+  if (asked && page.target.documentIds[0] !== asked) throw new Error(MOVED_ERROR);
   await stillUsable(tabId, socket);
   // Firefox removes the API when the user takes the permission back.
   if (!chrome.userScripts) throw new Error(accessError("scripts", page.tab.url, wasAsked("scripts", page.tab.url)));
@@ -555,7 +555,31 @@ async function evaluateInPage(tabId, params, socket) {
   await stillUsable(tabId, socket);
   if (!frame) throw new Error(`${agentTabId(tabId)} has no page to run the script in.`);
   if (frame.error === moved) throw new Error(MOVED_ERROR);
-  return frameFailed(frame) ? NO_ANSWER : expressionAnswer(frame.result);
+  if (frameFailed(frame)) return NO_ANSWER;
+  return { ...expressionAnswer(frame.result), uniqueContextId: handOut(tabId, page.target.documentIds[0]) };
+}
+
+// The top-frame documents this extension's answers named, per tab (the last
+// few): Codara may ask a later evaluate to run only in one of them, never in
+// any other document (a frame's, or one it made up).
+const DOCUMENT_CONTEXT = "firefox-document:";
+const handedDocuments = new Map();
+
+function handOut(tabId, documentId) {
+  const known = (handedDocuments.get(tabId) ?? []).filter((id) => id !== documentId);
+  handedDocuments.set(tabId, [...known.slice(-7), documentId]);
+  return `${DOCUMENT_CONTEXT}${documentId}`;
+}
+
+/** The document an evaluate asks to run in (an earlier answer's uniqueContextId), or null for the tab's page now. */
+function pageContext(tabId, params) {
+  if (params.contextId !== undefined) throw new Error("Runtime.evaluate in another world or frame is not available in Firefox: agents use the tab's own page.");
+  if (params.uniqueContextId === undefined) return null;
+  const id = typeof params.uniqueContextId === "string" && params.uniqueContextId.startsWith(DOCUMENT_CONTEXT) ? params.uniqueContextId.slice(DOCUMENT_CONTEXT.length) : "";
+  if (!id || !handedDocuments.get(tabId)?.includes(id)) {
+    throw new Error("Runtime.evaluate in another world or frame is not available in Firefox: agents use the tab's own page.");
+  }
+  return id;
 }
 
 // ── Firefox permissions ─────────────────────────────────────────────────────
@@ -1134,6 +1158,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   // Kept heard, so a lookup answered before the close does not bring the tab back.
   heardOf(tabId);
   tabsSeen.delete(tabId);
+  handedDocuments.delete(tabId);
   attachedSince.delete(tabId);
   consoleSwitches.delete(tabId);
   consoleBudgets.delete(tabId);

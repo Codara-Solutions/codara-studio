@@ -4,8 +4,13 @@
 // probes the Codara tabs run (domSnapshot.ts, domActions.ts, preview-dom.ts),
 // so a snapshot's @references, a click or a typed value behave the same in
 // both; input goes through the DevTools protocol, which needs neither focus
-// nor a visible tab.
+// nor a visible tab, or, in a browser whose extension has no debugger
+// (Firefox), is played as a script in the page (scripted-input.ts).
 
+import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
+import { basename } from "node:path";
 import { Script } from "node:vm";
 
 import {
@@ -20,6 +25,7 @@ import {
   type PageState,
 } from "../../../shared/browser-change";
 import { createPreviewDOM } from "../../../shared/preview-dom";
+import { FIREFOX_PAGE_MOVED_ERROR } from "./protocol";
 import { createPreviewNames } from "../../../shared/preview-names";
 import { snapshotProbe } from "../../../renderer/src/components/Preview/domSnapshot";
 import { clickProbe, typeProbe } from "../../../renderer/src/components/Preview/domActions";
@@ -28,6 +34,16 @@ import { applyEmulation } from "../emulation";
 import { consoleRing } from "../recorders/console";
 import { clearNetwork, networkRing } from "../recorders/network";
 import { captureScreenshot, normalizeScreenshotRequest, type ImageCodec } from "../screenshot";
+import {
+  SCRIPTED_INPUT_NOTE,
+  SCRIPTED_UPLOAD_MAX_BYTES,
+  SCRIPTED_UPLOAD_PIN_KEY,
+  scriptedInputProbe,
+  scriptedUploadPinProbe,
+  scriptedUploadProbe,
+  uploadMimeType,
+  type InputStep,
+} from "../scripted-input";
 import type { BrowserTarget } from "../targets";
 
 type Params = Record<string, unknown>;
@@ -221,13 +237,21 @@ async function centerProbe(options: { selector: string; scrollIntoView: boolean 
   return { ok: true, ...dom.point(el) };
 }
 
-async function point(target: BrowserTarget, spec: Params, scrollIntoView = true): Promise<{ x: number; y: number }> {
+/**
+ * Where to act: explicit coordinates, or the center of the selector's
+ * element, with the page it was found in when the browser names it (the
+ * Firefox extension does), so a scripted replay runs only in that page.
+ */
+async function point(target: BrowserTarget, spec: Params, scrollIntoView = true): Promise<{ x: number; y: number; context?: string }> {
   if (typeof spec.x === "number" && typeof spec.y === "number") return { x: spec.x, y: spec.y };
   const selector = typeof spec.selector === "string" ? spec.selector : null;
   if (!selector) throw new Error("provide either { selector } or explicit { x, y }");
-  const found = checked(await run<{ ok?: boolean; error?: string; x: number; y: number }>(target, probe(centerProbe, { selector, scrollIntoView })));
-  return { x: found.x, y: found.y };
+  const found = await evaluateIn<{ ok?: boolean; error?: string; x: number; y: number }>(target, probe(centerProbe, { selector, scrollIntoView }));
+  const at = checked(found.value ?? {});
+  return found.context ? { x: at.x, y: at.y, context: found.context } : { x: at.x, y: at.y };
 }
+
+const SCRIPTED_PAGE_CHANGED = "The page changed between finding the element and acting on it: nothing was done. Read the page again and retry.";
 
 const MODIFIER_BITS: Record<string, number> = { alt: 1, control: 2, ctrl: 2, meta: 4, cmd: 4, command: 4, shift: 8 };
 
@@ -236,46 +260,81 @@ function modifierBits(raw: unknown): number {
   return raw.reduce((mask: number, name) => mask | (typeof name === "string" ? MODIFIER_BITS[name.toLowerCase()] ?? 0 : 0), 0);
 }
 
-async function mouseEvent(target: BrowserTarget, event: Record<string, unknown>): Promise<void> {
-  await target.session.send("Input.dispatchMouseEvent", event);
+/**
+ * Whether the tab's browser takes the protocol's trusted input. A Chromium
+ * extension relays it; Firefox's has no debugger and refuses it, so the
+ * input is scripted in the page instead (scripted-input.ts) and the answer
+ * says so.
+ */
+function scriptsInput(target: BrowserTarget, method: string): boolean {
+  return target.session.refuses(method) !== null;
+}
+
+/**
+ * Plays mouse events: trusted through the protocol, or scripted in the
+ * page in one go where the browser has no trusted input. What a scripted
+ * run adds to the answer (what it acted on, that it was scripted) is
+ * returned.
+ */
+async function mouseEvents(target: BrowserTarget, steps: InputStep[], ...points: { context?: string }[]): Promise<Record<string, unknown>> {
+  if (scriptsInput(target, "Input.dispatchMouseEvent")) return scripted(target, steps, pageOf(points));
+  for (const step of steps) await target.session.send("Input.dispatchMouseEvent", step);
+  return {};
+}
+
+/** The one page the points were found in (none for coordinates); two different pages: it changed between them. */
+function pageOf(points: { context?: string }[]): string | undefined {
+  const pages = [...new Set(points.map((at) => at.context).filter((context): context is string => Boolean(context)))];
+  if (pages.length > 1) throw new Error(SCRIPTED_PAGE_CHANGED);
+  return pages[0];
+}
+
+async function scripted(target: BrowserTarget, steps: InputStep[], context?: string): Promise<Record<string, unknown>> {
+  const played = await evaluateIn<{ ok?: boolean; error?: string }>(
+    target,
+    `(${scriptedInputProbe.toString()})(${JSON.stringify(steps)}, ${createPreviewDOM.toString()})`,
+    context,
+  ).catch((error: unknown) => {
+    if (context && pageGone(error)) throw new Error(SCRIPTED_PAGE_CHANGED);
+    throw error;
+  });
+  const { ok: _ok, ...result } = checked(played.value ?? {});
+  return { ...result, trusted: false, note: SCRIPTED_INPUT_NOTE };
 }
 
 export async function mouse(target: BrowserTarget, params: Params): Promise<unknown> {
   const action = str(params, "action") ?? "click";
-  const { x, y } = await point(target, params);
+  const at = await point(target, params);
+  const { x, y } = at;
   const modifiers = modifierBits(params.modifiers);
   const button = action === "rightclick" ? "right" : "left";
-  const press = (clickCount: number) => mouseEvent(target, { type: "mousePressed", x, y, button, clickCount, modifiers });
-  const release = (clickCount: number) => mouseEvent(target, { type: "mouseReleased", x, y, button, clickCount, modifiers });
-  await mouseEvent(target, { type: "mouseMoved", x, y, modifiers });
+  const press = (clickCount: number): InputStep => ({ type: "mousePressed", x, y, button, clickCount, modifiers });
+  const release = (clickCount: number): InputStep => ({ type: "mouseReleased", x, y, button, clickCount, modifiers });
+  const steps: InputStep[] = [{ type: "mouseMoved", x, y, modifiers }];
   switch (action) {
     case "down":
-      await press(1);
+      steps.push(press(1));
       break;
     case "up":
-      await release(1);
+      steps.push(release(1));
       break;
     case "click":
     case "rightclick":
-      await press(1);
-      await release(1);
+      steps.push(press(1), release(1));
       break;
     case "dblclick":
-      await press(1);
-      await release(1);
-      await press(2);
-      await release(2);
+      steps.push(press(1), release(1), press(2), release(2));
       break;
     default:
       throw new Error(`unknown mouse action '${action}' (expected down|up|click|dblclick|rightclick)`);
   }
-  return { ok: true, action, x, y, button };
+  return { ok: true, action, x, y, button, ...(await mouseEvents(target, steps, at)) };
 }
 
 export async function hover(target: BrowserTarget, params: Params): Promise<unknown> {
-  const { x, y } = await point(target, params);
-  await mouseEvent(target, { type: "mouseMoved", x, y });
-  return { ok: true, x, y };
+  const at = await point(target, params);
+  const { x, y } = at;
+  return { ok: true, x, y, ...(await mouseEvents(target, [{ type: "mouseMoved", x, y }], at)) };
 }
 
 export async function scroll(target: BrowserTarget, params: Params): Promise<unknown> {
@@ -283,25 +342,27 @@ export async function scroll(target: BrowserTarget, params: Params): Promise<unk
   const deltaY = num(params, "deltaY") ?? 0;
   if (deltaX === 0 && deltaY === 0) throw new Error("scroll requires a non-zero deltaX or deltaY");
   // The point is only where the wheel turns: centering it would fight the scroll.
-  const at = typeof params.selector === "string" || typeof params.x === "number"
+  const at: { x: number; y: number; context?: string } = typeof params.selector === "string" || typeof params.x === "number"
     ? await point(target, params, false)
     : await run<{ x: number; y: number }>(target, "({ x: innerWidth / 2, y: innerHeight / 2 })");
-  await mouseEvent(target, { type: "mouseWheel", x: at.x, y: at.y, deltaX, deltaY });
-  return { ok: true, x: at.x, y: at.y, deltaX, deltaY };
+  const played = await mouseEvents(target, [{ type: "mouseWheel", x: at.x, y: at.y, deltaX, deltaY }], at);
+  return { ok: true, x: at.x, y: at.y, deltaX, deltaY, ...played };
 }
 
 export async function drag(target: BrowserTarget, params: Params): Promise<unknown> {
   const from = await point(target, (params.from && typeof params.from === "object" ? params.from : {}) as Params);
   const to = await point(target, (params.to && typeof params.to === "object" ? params.to : {}) as Params);
   const steps = Math.max(1, Math.min(typeof params.steps === "number" ? params.steps | 0 : 12, 100));
-  await mouseEvent(target, { type: "mouseMoved", x: from.x, y: from.y });
-  await mouseEvent(target, { type: "mousePressed", x: from.x, y: from.y, button: "left", clickCount: 1 });
+  const events: InputStep[] = [
+    { type: "mouseMoved", x: from.x, y: from.y },
+    { type: "mousePressed", x: from.x, y: from.y, button: "left", clickCount: 1 },
+  ];
   for (let i = 1; i <= steps; i += 1) {
     const t = i / steps;
-    await mouseEvent(target, { type: "mouseMoved", x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t, button: "left", buttons: 1 });
+    events.push({ type: "mouseMoved", x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t, button: "left", buttons: 1 });
   }
-  await mouseEvent(target, { type: "mouseReleased", x: to.x, y: to.y, button: "left", clickCount: 1 });
-  return { ok: true, from, to, steps };
+  events.push({ type: "mouseReleased", x: to.x, y: to.y, button: "left", clickCount: 1 });
+  return { ok: true, from: { x: from.x, y: from.y }, to: { x: to.x, y: to.y }, steps, ...(await mouseEvents(target, events, from, to)) };
 }
 
 // Keys reach a page in a background tab or an unfocused window only with
@@ -331,11 +392,13 @@ async function withFocusEmulated<T>(target: BrowserTarget, run: () => Promise<T>
   }
 }
 
-async function dispatchKey(target: BrowserTarget, key: string, modifiers: string[], text: string | null): Promise<void> {
-  const events = previewKeyEvents(key, modifiers, text);
+async function dispatchKey(target: BrowserTarget, key: string, modifiers: string[], text: string | null): Promise<Record<string, unknown>> {
+  const events = previewKeyEvents(key, modifiers, text) as InputStep[];
+  if (scriptsInput(target, "Input.dispatchKeyEvent")) return scripted(target, events);
   await withFocusEmulated(target, async () => {
     for (const event of events) await target.session.send("Input.dispatchKeyEvent", event);
   });
+  return {};
 }
 
 export async function key(target: BrowserTarget, params: Params): Promise<unknown> {
@@ -343,14 +406,19 @@ export async function key(target: BrowserTarget, params: Params): Promise<unknow
   if (!raw) throw new Error("key requires 'key'");
   // "Control+K" and key "k" with modifiers ["control"] are the same chord, as on Codara tabs.
   const { key: name, modifiers } = parseKeyChord(raw, params.modifiers);
-  await dispatchKey(target, name, modifiers, str(params, "text"));
-  return { ok: true, key: name, modifiers };
+  const played = await dispatchKey(target, name, modifiers, str(params, "text"));
+  return { ok: true, key: name, modifiers, ...played };
 }
 
 export async function pressKey(target: BrowserTarget, params: Params): Promise<unknown> {
   const name = str(params, "key");
   if (!name) throw new Error("press_key requires 'key'");
   const selector = str(params, "selector");
+  // Scripted keys focus their target in the same script that plays them, so nothing can move focus in between.
+  if (scriptsInput(target, "Input.dispatchKeyEvent")) {
+    const steps = [...(selector ? [{ type: "focus", selector }] : []), ...(previewKeyEvents(name, [], null) as InputStep[])];
+    return { ok: true, key: name, ...(await scripted(target, steps)) };
+  }
   if (selector) {
     const focused = await run<boolean>(
       target,
@@ -360,8 +428,8 @@ export async function pressKey(target: BrowserTarget, params: Params): Promise<u
     );
     if (!focused) throw new Error(`key target is missing or not focusable: ${selector}`);
   }
-  await dispatchKey(target, name, [], null);
-  return { ok: true, key: name, trusted: true };
+  const played = await dispatchKey(target, name, [], null);
+  return { ok: true, key: name, trusted: true, ...played };
 }
 
 export async function upload(target: BrowserTarget, params: Params): Promise<unknown> {
@@ -369,6 +437,7 @@ export async function upload(target: BrowserTarget, params: Params): Promise<unk
   if (!selector) throw new Error("upload requires 'selector' (a file input)");
   const paths = Array.isArray(params.paths) ? params.paths.filter((p): p is string => typeof p === "string" && p.length > 0) : [];
   if (paths.length === 0) throw new Error("upload requires a non-empty 'paths' array");
+  if (scriptsInput(target, "DOM.setFileInputFiles")) return scriptedUpload(target, selector, paths);
   const found = await target.session.send<{ result?: { objectId?: string; subtype?: string }; exceptionDetails?: { exception?: { description?: string } } }>(
     "Runtime.evaluate",
     { expression: `(${createPreviewDOM.toString()})().find(${JSON.stringify(selector)})`, returnByValue: false },
@@ -382,6 +451,86 @@ export async function upload(target: BrowserTarget, params: Params): Promise<unk
     await target.session.send("Runtime.releaseObject", { objectId }).catch(() => {});
   }
   return { ok: true, selector, files: paths };
+}
+
+/**
+ * Runtime.evaluate, by value, awaited; with `context`, only in the page an
+ * earlier answer named (the Firefox extension names its page in every
+ * answer's uniqueContextId and refuses to run in any other).
+ */
+async function evaluateIn<T>(target: BrowserTarget, expression: string, context?: string): Promise<{ value: T; context: string | null }> {
+  const answer = await target.session.send<{
+    result?: { value?: unknown };
+    exceptionDetails?: { text?: string; exception?: { description?: string; value?: unknown } };
+    uniqueContextId?: unknown;
+  }>("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true, ...(context ? { uniqueContextId: context } : {}) });
+  if (answer.exceptionDetails) {
+    const details = answer.exceptionDetails;
+    throw new Error((details.exception?.description ?? (typeof details.exception?.value === "string" ? details.exception.value : null) ?? details.text ?? "evaluation failed").split("\n")[0]);
+  }
+  return { value: (answer.result?.value ?? null) as T, context: typeof answer.uniqueContextId === "string" ? answer.uniqueContextId : null };
+}
+
+/** The extension's own answer for a command whose page is no longer the tab's (protocol.ts), matched exactly. */
+const pageGone = (error: unknown): boolean => error instanceof Error && error.message === FIREFOX_PAGE_MOVED_ERROR;
+
+const PAGE_CHANGED = "upload: the page changed while the files were read; nothing was uploaded.";
+
+/**
+ * Upload where the browser cannot set a file input's files (Firefox): Codara
+ * reads the files and the page gets them as File objects set on the input,
+ * as a drop from the desktop would. The input is found and pinned in its
+ * page first, and the script carrying the bytes runs only in that page
+ * (the extension refuses any other), so no page that replaced it meanwhile
+ * gets them. Each file is read from one open handle (never waiting on a
+ * pipe), within what is left of the limit; one that grows while read is
+ * refused.
+ */
+async function scriptedUpload(target: BrowserTarget, selector: string, paths: string[]): Promise<unknown> {
+  const pin = randomUUID();
+  const pinned = await evaluateIn<{ ok?: boolean; error?: string }>(
+    target,
+    `(${scriptedUploadPinProbe.toString()})(${JSON.stringify({ selector, count: paths.length, pin, key: SCRIPTED_UPLOAD_PIN_KEY })}, ${createPreviewDOM.toString()})`,
+  );
+  checked(pinned.value ?? {});
+  if (!pinned.context) throw new Error("upload: this browser's Codara extension cannot keep an upload to one page; update the extension.");
+  const tooLarge = () => new Error(`upload: in this browser the files go through the page, at most ${SCRIPTED_UPLOAD_MAX_BYTES / 1_000_000} MB in all; these are larger.`);
+  let left = SCRIPTED_UPLOAD_MAX_BYTES;
+  const files: { name: string; type: string; lastModified: number; data: string }[] = [];
+  for (const path of paths) {
+    // Non-blocking, so a named pipe is refused below instead of waiting for a writer.
+    const handle = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)).catch(() => null);
+    if (!handle) throw new Error(`upload: ${path} is not a file.`);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw new Error(`upload: ${path} is not a file.`);
+      if (info.size > left) throw tooLarge();
+      // One byte more than its size tells a file that grew while it was read.
+      const buffer = Buffer.alloc(info.size + 1);
+      let read = 0;
+      while (read < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, read, buffer.length - read, read);
+        if (bytesRead === 0) break;
+        read += bytesRead;
+      }
+      if (read !== info.size) throw new Error(`upload: ${path} changed while it was read; nothing was uploaded.`);
+      left -= read;
+      files.push({ name: basename(path), type: uploadMimeType(path), lastModified: Math.round(info.mtimeMs), data: buffer.subarray(0, read).toString("base64") });
+    } finally {
+      await handle.close();
+    }
+  }
+  const placed = await evaluateIn<{ ok?: boolean; error?: string; count?: number }>(
+    target,
+    `(${scriptedUploadProbe.toString()})(${JSON.stringify({ pin, key: SCRIPTED_UPLOAD_PIN_KEY, files })})`,
+    pinned.context,
+  ).catch((error: unknown) => {
+    // The page it was pinned to is gone.
+    if (pageGone(error)) throw new Error(PAGE_CHANGED);
+    throw error;
+  });
+  const result = checked(placed.value ?? { ok: false, error: PAGE_CHANGED });
+  return { ...result, ok: true, selector, files: paths, trusted: false, note: SCRIPTED_INPUT_NOTE };
 }
 
 function clampLimit(raw: unknown): number {

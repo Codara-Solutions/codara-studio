@@ -44,6 +44,9 @@ export function fakeBrowser({ tabs = [], local = {}, getAll = async () => [] } =
     granted: true,
     getAll,
     beforeGet: null,
+    // Each tab's top document, and every userScripts.execute call.
+    documents: new Map(),
+    executed: [],
     listeners,
     api: {
       runtime: {
@@ -80,7 +83,19 @@ export function fakeBrowser({ tabs = [], local = {}, getAll = async () => [] } =
       scripting: {
         getRegisteredContentScripts: async () => [],
         registerContentScripts: async () => {},
-        executeScript: async () => [],
+        // The page's address from its top document (documentAddress), as Firefox answers it.
+        executeScript: async ({ target }) => {
+          const tab = open.get(target.tabId);
+          return tab ? [{ frameId: 0, documentId: fake.documents.get(target.tabId) ?? `doc-${target.tabId}`, result: tab.url }] : [];
+        },
+      },
+      userScripts: {
+        execute: async ({ target }) => {
+          fake.executed.push(target);
+          const now = fake.documents.get(target.tabId) ?? `doc-${target.tabId}`;
+          if (target.documentIds && !target.documentIds.includes(now)) throw new Error(`Invalid documentId ${target.documentIds[0]}`);
+          return [{ frameId: 0, documentId: now, result: { value: { type: "string", value: "ran" } } }];
+        },
       },
       webRequest: {
         filterResponseData: () => {

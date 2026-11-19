@@ -53,6 +53,30 @@ function site(request: IncomingMessage, response: ServerResponse): void {
       <div style="height: 2400px"></div><p>Bottom of the page</p>`);
     return;
   }
+  if (url.pathname === "/input") {
+    // A strict page whose own script records the events the scripted input tools play.
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; script-src 'nonce-input'; style-src 'unsafe-inline'" });
+    response.end(`<!doctype html><title>Page input</title>
+      <button id="b">Press</button> <span id="ctx">Menu here</span> <span id="hover">Hover me</span>
+      <form id="f"><input id="t"> <button>Go</button></form> <textarea id="ta"></textarea>
+      <div id="scroller" style="height: 100px; overflow: auto"><div style="height: 1000px">Long</div></div>
+      <div id="src" draggable="true" style="width: 80px">Drag me</div> <div id="dst" style="width: 120px; height: 40px">Drop here</div>
+      <input id="file" type="file" multiple>
+      <script nonce="input">window.seen = []; window.state = { clicks: 0, submitted: 0, dropped: null, files: null, hovered: false };
+        for (const type of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "keydown", "keyup", "wheel"]) {
+          document.addEventListener(type, (event) => window.seen.push(type + (event.isTrusted ? "!" : "") + ":" + (event.target.id || event.target.tagName)), true);
+        }
+        document.querySelector("#b").addEventListener("click", () => window.state.clicks++);
+        document.querySelector("#hover").addEventListener("mouseenter", () => (window.state.hovered = true));
+        document.querySelector("#f").addEventListener("submit", (event) => { event.preventDefault(); window.state.submitted++; });
+        document.querySelector("#src").addEventListener("dragstart", (event) => event.dataTransfer.setData("text/plain", "from src"));
+        document.querySelector("#dst").addEventListener("dragover", (event) => event.preventDefault());
+        document.querySelector("#dst").addEventListener("drop", (event) => { event.preventDefault(); window.state.dropped = event.dataTransfer.getData("text/plain"); });
+        document.querySelector("#file").addEventListener("change", async (event) => {
+          window.state.files = await Promise.all([...event.target.files].map(async (file) => file.name + " " + file.type + " " + (await file.text())));
+        });</script>`);
+    return;
+  }
   if (url.pathname === "/slow-image") {
     // Holds the load event of the page that shows it.
     setTimeout(() => response.writeHead(200, { "Content-Type": "image/gif" }).end(), 1_500);
@@ -252,6 +276,41 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     // page's own policy still holds: Trusted Types refuse a raw HTML write.
     expect(await request("preview.evaluate", { tabId, code: "try { document.body.innerHTML = '<b>x</b>'; return 'written'; } catch (error) { return error.name; }" })).toMatchObject({ value: "TypeError" });
     await expect(request("preview.evaluate", { tabId, code: "null.x" })).rejects.toThrow(/TypeError/);
+
+    // Trusted input does not exist for Firefox extensions: the tools play the
+    // same events as scripts in the page, which sees isTrusted false, and say so.
+    await request("preview.navigate", { tabId, url: `${origin}/input` });
+    const pageState = () => request("preview.evaluate", { tabId, code: "({ ...window.state, seen: window.seen.splice(0) })" }).then((answer) => answer.value);
+    const pressed = await request("preview.mouse", { tabId, selector: "#b" });
+    expect(pressed).toMatchObject({ ok: true, action: "click", trusted: false, target: "button#b", note: expect.stringMatching(/isTrusted false/) });
+    expect(await pageState()).toMatchObject({ clicks: 1, seen: ["pointerdown:b", "mousedown:b", "mouseup:b", "click:b"] });
+    await request("preview.mouse", { tabId, selector: "#b", action: "dblclick" });
+    expect(await pageState()).toMatchObject({ clicks: 3, seen: expect.arrayContaining(["dblclick:b"]) });
+    await request("preview.mouse", { tabId, selector: "#ctx", action: "rightclick" });
+    expect((await pageState()).seen).toContain("contextmenu:ctx");
+    expect(await request("preview.hover", { tabId, selector: "#hover" })).toMatchObject({ trusted: false });
+    expect(await pageState()).toMatchObject({ hovered: true });
+    // Keys type into the focused field, Backspace deletes, Enter submits its form.
+    await request("preview.mouse", { tabId, selector: "#t" });
+    for (const key of ["a", "b", "Backspace", "c"]) expect(await request("preview.key", { tabId, key })).toMatchObject({ trusted: false });
+    expect(await request("preview.evaluate", { tabId, code: "document.querySelector('#t').value" })).toMatchObject({ value: "ac" });
+    await request("preview.press_key", { tabId, key: "Enter", selector: "#t" });
+    expect(await pageState()).toMatchObject({ submitted: 1, seen: expect.arrayContaining(["keydown:t", "keyup:t"]) });
+    // The wheel scrolls what is under it.
+    expect(await request("preview.scroll", { tabId, selector: "#scroller", deltaY: 200 })).toMatchObject({ trusted: false, scrolled: "div#scroller" });
+    expect(await request("preview.evaluate", { tabId, code: "document.querySelector('#scroller').scrollTop" })).toMatchObject({ value: 200 });
+    // A draggable element runs drag and drop.
+    expect(await request("preview.drag", { tabId, from: { selector: "#src" }, to: { selector: "#dst" } })).toMatchObject({ trusted: false, dragged: "div#src", dropped: "div#dst" });
+    expect(await pageState()).toMatchObject({ dropped: "from src" });
+    // Files go through the page as File objects on the input.
+    const uploads = join(root, "uploads");
+    await mkdir(uploads);
+    await writeFile(join(uploads, "notes.txt"), "hello from a file");
+    await writeFile(join(uploads, "data.json"), '{"a":1}');
+    expect(await request("preview.upload", { tabId, selector: "#file", paths: [join(uploads, "notes.txt"), join(uploads, "data.json")] })).toMatchObject({ ok: true, trusted: false, count: 2 });
+    await expect.poll(async () => (await pageState()).files).toEqual(["notes.txt text/plain hello from a file", 'data.json application/json {"a":1}']);
+    await expect(request("preview.upload", { tabId, selector: "#file", paths: [uploads] })).rejects.toThrow(/is not a file/);
+    await request("preview.navigate", { tabId, url: `${origin}/account` });
 
     // Screenshots need all sites: no, then yes; then the tab, in the background, whole.
     await expect(request("preview.screenshot", { tabId })).rejects.toThrow(/Screenshots in Firefox need access to all sites/);
