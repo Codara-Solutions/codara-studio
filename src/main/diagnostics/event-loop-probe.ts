@@ -39,7 +39,7 @@ const STALL_MS = 1_000;
 const NOTABLE_MS = 250;
 const NOTABLE_QUIET_MS = 10 * 60 * 1000;
 const KEPT_WINDOWS = 60;
-// Longer than a whole default window, and five times the freeze watchdog's
+// Longer than a whole default window, and 12 times the freeze watchdog's 5 s
 // threshold, so a real stall this long is a freeze it already records with a
 // stack; a gap past it is a sleep the 'suspend' event missed.
 const SLEEP_CEILING_MS = 60_000;
