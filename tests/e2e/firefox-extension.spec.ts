@@ -69,13 +69,22 @@ function site(request: IncomingMessage, response: ServerResponse): void {
     response.end(`<!doctype html><title>Page app</title><script nonce="app">window.getterRuns = 0;
       console.log("app started", { n: 1, get secret() { window.getterRuns++; return "s"; } }); console.warn("careful");
       window.dispatchEvent(new ErrorEvent("error", { message: "made up by the page" }));
-      fetch("/api/data").then(() => fetch("/api/hop")); setTimeout(() => null.y, 50);</script><iframe src="/private/frame"></iframe>`);
+      fetch("/api/data").then(() => fetch("/api/hop")); setTimeout(() => null.y, 50);
+      window.loads = Object.fromEntries(["/load/cut", "/load/big", "/load/bigcut"].map((path) => [path, fetch(path).then((r) => r.text()).then((t) => "ok " + t.length, () => "failed")]));</script><iframe src="/private/frame"></iframe>`);
     return;
   }
   if (url.pathname === "/private/frame") {
     // Same origin, on a blocked path: it logs into the top page's console and leaves an error there.
     response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     response.end(`<!doctype html><script>parent.console.log("from the private frame"); parent.Promise.reject(new Error("private boom"));</script>`);
+    return;
+  }
+  if (url.pathname.startsWith("/load/")) {
+    // Broken under the body cap (said 800, sent 400), or 6 MB of text (past the cap), whole or broken.
+    const cut = url.pathname === "/load/cut";
+    response.writeHead(200, { "Content-Type": "text/plain", ...(cut ? { "Content-Length": "800" } : {}) });
+    response.write("x".repeat(cut ? 400 : 6_000_000));
+    setTimeout(() => (url.pathname === "/load/big" ? response.end() : response.socket?.destroy()), 300);
     return;
   }
   if (url.pathname === "/api/hop") {
@@ -319,11 +328,24 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     expect(JSON.stringify((await request("preview.console", { tabId })).entries)).not.toMatch(/made up by the page|private/);
     await expect.poll(async () => (await request("preview.network", { tabId, filter: "/api/" })).requests.map((row: { status?: number; url: string }) => `${row.status} ${row.url}`), { timeout: 10_000 })
       .toEqual([`200 ${origin}/api/data`, `302 ${origin}/api/hop`, `200 ${origin}/api/data?again=1`]);
+    // Transfers on a tab being recorded: past the 5 MB cap the filter lets go and Firefox carries the rest, a
+    // failure included; under it, a transfer cut mid-body looks complete to the page (measured: Firefox's
+    // filter cannot pass on the failure), and Codara never gets that body.
+    expect(await firefox.evaluate(accountContext, "Promise.all(Object.values(window.loads))")).toEqual(["ok 400", "ok 6000000", "failed"]);
+    const loads = (await request("preview.network", { tabId, filter: "/load/" })).requests;
+    const loadDetails = await Promise.all(loads.map((row: { id: string }) => request("preview.network", { tabId, id: row.id })));
+    expect(Object.fromEntries(loadDetails.map((detail) => [new URL(detail.request.url).pathname, detail.request.body]))).toEqual({
+      "/load/cut": { unavailable: "the request failed" },
+      "/load/big": { unavailable: "Body not available: it is over 5 MB, more than the extension keeps." },
+      "/load/bigcut": { unavailable: "the request failed" },
+    });
     // Cookies never leave Firefox while the tab's cookie switch is off, a redirect's included: not even their header names.
     const { requests: calls } = await request("preview.network", { tabId, filter: "/api/" });
     const details = await Promise.all(calls.map((call: { id: string }) => request("preview.network", { tabId, id: call.id })));
     expect(details[0].request.responseHeaders).toMatchObject({ "Content-Type": "application/json" });
     expect(details[1].request.responseHeaders).toMatchObject({ Location: "/api/data?again=1" });
+    // Response bodies as the page got them; a redirect has none.
+    expect([details[0].request.body, details[1].request.body, details[2].request.body]).toEqual(['{"ok":true}', { unavailable: "a redirect has no body" }, '{"ok":true}']);
     expect(JSON.stringify(details)).not.toMatch(/cookie|secret-value/i);
 
     // Idle: Firefox unloads an idle event page (after 15 s in this profile)

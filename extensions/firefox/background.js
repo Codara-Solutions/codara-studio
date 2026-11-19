@@ -14,8 +14,9 @@
 // session, local for the pairing and the blocked sites), so a restarted page
 // picks up where it left off.
 
+import { BODY_FAILED, BODY_TYPES, BodyStore, NO_BODY, bodyPlan, copyBody } from "./lib/bodies.js";
 import { consoleAddresses, consoleEvent } from "./lib/console.js";
-import { LinkClient } from "./lib/link-client.js";
+import { LateReply, LinkClient } from "./lib/link-client.js";
 import { failedEvent, finishedEvent, lateRedirectEnd, requestEvent, requestVisible, responseEvent } from "./lib/network.js";
 import {
   NAVIGATE_BUSY_ERROR,
@@ -130,7 +131,8 @@ function sendLive(message) {
 /** The link's socket, when it is the sealed, paired session of the current generation; else null. */
 function liveSocket() {
   const socket = link.socket;
-  if (!socket || !socket.sealer || socket.generation !== generation || !link.connected || !state?.token) return null;
+  // A link that has started closing is over: nothing new is copied for it.
+  if (!socket || socket.readyState !== WebSocket.OPEN || !socket.sealer || socket.generation !== generation || !link.connected || !state?.token) return null;
   return socket;
 }
 let rules = parseFirefoxBlockedSites(DEFAULT_BLOCKED_SITES);
@@ -155,7 +157,10 @@ async function save(patch) {
     if (key in SESSION_DEFAULTS) session[key] = value;
     else if (key in LOCAL_DEFAULTS) local[key] = value;
   }
-  if ("blockedSites" in patch) rules = parseFirefoxBlockedSites(state.blockedSites);
+  if ("blockedSites" in patch) {
+    rules = parseFirefoxBlockedSites(state.blockedSites);
+    purgeBodies();
+  }
   await Promise.all([
     Object.keys(session).length ? chrome.storage.session.set(session) : null,
     Object.keys(local).length ? chrome.storage.local.set(local) : null,
@@ -229,6 +234,8 @@ const link = new LinkClient({
   },
   onDisconnected: () => {
     keepAwake(false);
+    // Every body filter lets go at once, before the tabs are let go one by one.
+    forgetAllBodies();
     void detachAll();
   },
 });
@@ -330,9 +337,11 @@ async function answerCommand(request, socket) {
     seeTab(tab);
     if (domain === "Page") pageOf(tab.id, tab.url);
     if (domain === "Network" && verb === "disable") forgetRequests(tab.id);
+    if (domain === "Network" && verb === "enable") bodyFilters(tab.id, true);
     if (domain === "Runtime") await switchConsole(tab.id);
     return {};
   }
+  if (method === "Network.getResponseBody") return responseBody(tab.id, request.params ?? {}, socket);
   if (method === "Page.getFrameTree") {
     const now = await stillUsable(tab.id, socket);
     return frameTree(now.id, now.url, pageOf(now.id, now.url).loaderId);
@@ -565,6 +574,8 @@ async function forgetGrantedAsks() {
 chrome.permissions.onAdded.addListener(() => {
   popupQueue = popupQueue.then(forgetGrantedAsks).catch(() => {});
 });
+// A site the user took back: no body kept from before goes out (reads check again too).
+chrome.permissions.onRemoved.addListener(() => bodies.purge(() => false));
 
 const usageBadgeTimers = new Map();
 
@@ -708,8 +719,84 @@ function consoleBudget(tabId) {
 // with the tab, or when too many are open.
 const requests = new Map();
 const REQUESTS_KEPT = 500;
+function forgetAllBodies() {
+  for (const tabId of [...bodyListeners.keys()]) bodyFilters(tabId, false);
+  bodies.purge(() => false);
+}
 function forgetRequests(tabId) {
   for (const [id, seen] of requests) if (seen.details.tabId === tabId) requests.delete(id);
+  bodies.forgetTab(tabId);
+  bodyFilters(tabId, false);
+}
+
+// Response bodies (lib/bodies.js), kept only for the requests Codara sees,
+// and only text responses (bodyPlan), decided once their headers are in.
+// The filter needs a blocking listener; one registered at the top would
+// hold every tab's requests while Firefox wakes this page, so each
+// recorded tab gets its own, from Network.enable to its end (nothing is
+// ever blocked: the listener only sets the copy).
+const bodies = new BodyStore();
+const bodyListeners = new Map();
+function bodyFilters(tabId, on) {
+  const listener = bodyListeners.get(tabId);
+  if (on && !listener) {
+    const keep = (details) => void (networkWanted(details) && keepBody(details));
+    browser.webRequest.onHeadersReceived.addListener(keep, { urls: ["<all_urls>"], tabId, types: BODY_TYPES }, ["blocking", "responseHeaders"]);
+    bodyListeners.set(tabId, keep);
+  }
+  if (!on && listener) {
+    browser.webRequest.onHeadersReceived.removeListener(listener);
+    bodyListeners.delete(tabId);
+  }
+}
+
+function keepBody(details) {
+  // Only a request in the log, this very hop (one that started while it was recorded), on the live link.
+  if (requests.get(details.requestId)?.details.url !== details.url || !liveSocket()) return;
+  const { url, documentUrl, originUrl, frameAncestors, type, tabId } = details;
+  const request = { url, documentUrl, originUrl, frameAncestors, type, tabId };
+  const plan = bodyPlan(details);
+  if (!plan.keep) return bodies.skip(details.requestId, tabId, request, plan.reason);
+  let filter;
+  try {
+    filter = browser.webRequest.filterResponseData(details.requestId);
+  } catch {
+    return bodies.skip(details.requestId, tabId, request, BODY_FAILED);
+  }
+  // Copied only while the tab may be (still shared and recorded, on the live link).
+  copyBody(filter, bodies, { requestId: details.requestId, tabId, request }, () => networkWanted(details) && Boolean(liveSocket()));
+}
+
+/**
+ * Network.getResponseBody: a body whose row Codara has, of this tab, still
+ * shared and attached; its request is checked again as the log checks it
+ * (its site, page, origin and frames), since the blocked sites may have
+ * changed meanwhile.
+ */
+async function responseBody(tabId, params, socket) {
+  await stillUsable(tabId, socket);
+  const hop = await bodies.body(String(params.requestId ?? ""), tabId);
+  const { request } = hop;
+  // The user may have taken the site back meanwhile (taking it back later drops the body).
+  const { protocol, hostname } = new URL(request.url);
+  const allowed = await chrome.permissions.contains({ origins: [`${protocol}//${hostname}/*`] }).catch(() => false);
+  await stillUsable(tabId, socket);
+  if (!requestVisible(request, blockedUrl)) throw new Error(`The response of ${request.url} is from a site agents may not use (the extension's blocked sites).`);
+  // Still the body kept for that request, its tab still recorded and shared,
+  // on this link: asked again when the answer is built and once it is sealed.
+  const still = () =>
+    allowed && liveSocket() === socket && bodies.holds(hop) && eventsOn(tabId, "Network") && eventsAllowed(tabsSeen.get(tabId)) && requestVisible(request, blockedUrl);
+  if (!still()) throw new Error(NO_BODY);
+  // Built only when its turn to leave comes: one body copy at a time, never one that lost its access.
+  return new LateReply(() => {
+    if (!still()) throw new Error(NO_BODY);
+    return bodies.answer(hop);
+  }, still);
+}
+
+/** The blocked sites changed: bodies of requests the log would not show now go. */
+function purgeBodies() {
+  bodies.purge((request) => requestVisible(request, blockedUrl));
 }
 
 const blockedUrl = (url) => firefoxBlockingRule(url, rules) !== null;
@@ -750,6 +837,7 @@ function requestSent(details) {
 function requestLost(details, why) {
   const seen = requests.get(details.requestId);
   requests.delete(details.requestId);
+  bodies.drop(details.requestId);
   if (seen?.open) sendNetwork(details, failedEvent({ ...details, error: why }));
 }
 
@@ -763,7 +851,10 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
   if (requests.size > REQUESTS_KEPT) {
     const [oldest] = requests.values();
     if (networkWanted(oldest.details)) requestLost(oldest.details, "Too many requests open at once to follow this one.");
-    else requests.delete(oldest.details.requestId);
+    else {
+      requests.delete(oldest.details.requestId);
+      bodies.drop(oldest.details.requestId);
+    }
   }
 }, ALL_URLS);
 chrome.webRequest.onSendHeaders.addListener((details) => {
@@ -786,15 +877,24 @@ chrome.webRequest.onBeforeRedirect.addListener(async (details) => {
   // Sharing is checked again: the tab may have left what was shared while Firefox answered.
   const ending = lateRedirectEnd({ allowed, seen, now: requests.get(details.requestId), redirect: details, wanted: networkWanted(details) });
   if (ending === "end") requestLost(details, HIDDEN_REDIRECT);
-  else if (ending === "forget") requests.delete(details.requestId);
+  else if (ending === "forget") {
+    requests.delete(details.requestId);
+    bodies.drop(details.requestId);
+  }
 }, ALL_URLS, ["responseHeaders"]);
 chrome.webRequest.onResponseStarted.addListener((details) => {
   if (!requests.has(details.requestId) || !networkWanted(details) || !requestSent(details)) return;
+  bodies.type(details.requestId, details.responseHeaders?.find((header) => header.name.toLowerCase() === "content-type")?.value);
   sendNetwork(details, responseEvent(details, loaderOf(details)));
+  bodies.publish(details.requestId);
 }, ALL_URLS, ["responseHeaders"]);
 for (const [event, toEvent] of [[chrome.webRequest.onCompleted, finishedEvent], [chrome.webRequest.onErrorOccurred, failedEvent]]) {
   event.addListener((details) => {
-    if (requests.has(details.requestId) && networkWanted(details) && requestSent(details)) sendNetwork(details, toEvent(details));
+    const shown = requests.has(details.requestId) && networkWanted(details) && requestSent(details);
+    if (shown) sendNetwork(details, toEvent(details));
+    // Firefox's word on the transfer: a body is given only after it completed, and only for a row Codara got the end of.
+    if (shown) bodies.outcome(details.requestId, toEvent === finishedEvent);
+    else bodies.drop(details.requestId);
     requests.delete(details.requestId);
   }, ALL_URLS);
 }
@@ -867,6 +967,10 @@ chrome.tabs.onAttached.addListener(scheduleRefresh);
 chrome.tabs.onDetached.addListener((tabId) => {
   const seen = tabsSeen.get(tabId);
   if (seen) seen.windowId = null;
+  // Its bodies and requests go too (a hop that starts between windows is none
+  // of Codara's), and the filters still copying let go.
+  for (const [id, seen] of requests) if (seen.details.tabId === tabId) requests.delete(id);
+  bodies.forgetTab(tabId);
 });
 chrome.tabs.onAttached.addListener(async (tabId, { newWindowId }) => {
   const seen = tabsSeen.get(tabId);
@@ -1125,7 +1229,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
   for (const key of ["ports", "blockedSites", "allowOpen"]) {
     if (key in changes) state[key] = changes[key].newValue ?? LOCAL_DEFAULTS[key];
   }
-  if ("blockedSites" in changes) rules = parseFirefoxBlockedSites(state.blockedSites);
+  if ("blockedSites" in changes) {
+    rules = parseFirefoxBlockedSites(state.blockedSites);
+    purgeBodies();
+  }
   if ("ports" in changes && !link.connected) void link.wake();
 });
 

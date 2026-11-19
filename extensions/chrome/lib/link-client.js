@@ -27,6 +27,38 @@ const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 const OFFLINE_DELAYS_MS = [30_000, 60_000, 120_000, 300_000];
 const REQUEST_TYPES = new Set(["attach", "detach", "cdp", "open", "close", "activate"]);
 
+/**
+ * A request's answer built only when its turn to leave comes (`build()`,
+ * which may throw), so what it says still holds then; `still()` is asked
+ * again once it is sealed. A handler returns one for an answer that must
+ * not outlive the access it was read under.
+ */
+export class LateReply {
+  constructor(build, still = () => true) {
+    this.build = build;
+    this.still = still;
+  }
+}
+
+// Late replies waiting on one link, and the bytes the link may hold unsent
+// before another is built: past either, the answer is "busy".
+export const LATE_REPLIES_MAX = 4;
+export const LATE_BUFFER_MAX = 16_000_000;
+// Answers to Codara's requests waiting on one link, of any kind.
+export const ANSWERS_MAX = 64;
+export const LINK_BUSY = "The link to Codara is busy: try again in a moment.";
+
+/** The message to send, with a LateReply built now (an error in its place if it throws). */
+function built(message, socket) {
+  if (!(message.result instanceof LateReply)) return message;
+  try {
+    if ((socket.bufferedAmount ?? 0) > LATE_BUFFER_MAX) throw new Error(LINK_BUSY);
+    return { id: message.id, result: message.result.build() ?? {} };
+  } catch (error) {
+    return { id: message.id, error: { message: error instanceof Error ? error.message : String(error) } };
+  }
+}
+
 export class LinkClient {
   /**
    * @param {object} deps
@@ -113,18 +145,49 @@ export class LinkClient {
   /** Send on `socket` only while it is the link in use: never on a later one. */
   sendOn(socket, message) {
     if (!socket || !this.current(socket) || socket.readyState !== 1) return false;
+    // Answers to Codara's requests wait at most ANSWERS_MAX at once, "busy"
+    // ones and the one being sealed included: past that the link ends.
+    const answer = message.id !== undefined;
+    if (answer && (socket.answers ?? 0) >= ANSWERS_MAX) {
+      this.lost();
+      return false;
+    }
+    const late = message.result instanceof LateReply;
+    if (late && (socket.late ?? 0) >= LATE_REPLIES_MAX) message = { id: message.id, error: { message: LINK_BUSY } };
+    const counted = message.result instanceof LateReply;
+    if (counted) socket.late = (socket.late ?? 0) + 1;
+    if (answer) socket.answers = (socket.answers ?? 0) + 1;
+    const done = () => {
+      if (counted) socket.late -= 1;
+      if (answer) socket.answers -= 1;
+    };
     if (!socket.sealer) {
-      socket.send(JSON.stringify(message));
+      done();
+      socket.send(JSON.stringify(built(message, socket)));
       return true;
     }
     // Sealing is asynchronous and each frame's counter is its place in the
     // stream, so frames leave one at a time in the order they were sent.
     socket.outbox = (socket.outbox ?? Promise.resolve()).then(async () => {
-      const frame = await socket.sealer.seal(message);
-      if (socket.readyState === 1) socket.send(frame);
+      try {
+        const out = built(message, socket);
+        const frame = await socket.sealer.seal(out);
+        // Its access ended while it was sealed: a frame left out would break the
+        // count, so the link ends instead, and the answer never leaves. It ends
+        // for the extension now, not when the close comes back.
+        if (out.result !== undefined && counted && !message.result.still()) {
+          if (this.current(socket)) this.lost();
+          else socket.close();
+          return;
+        }
+        if (socket.readyState === 1) socket.send(frame);
+      } finally {
+        done();
+      }
     }).catch(() => {});
     return true;
   }
+
 
   async run(pair, wake) {
     this.epoch += 1;

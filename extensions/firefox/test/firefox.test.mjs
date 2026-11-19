@@ -73,8 +73,8 @@ export async function run(assembled) {
   assert.ok(CDP_METHODS.includes("Runtime.enable") && CDP_METHODS.includes("Network.disable"), "the recorders' domains start");
   assert.ok(CDP_METHODS.every((method) => /^[A-Z][A-Za-z]+\.[a-z][A-Za-z]+$/.test(method)), "every listed name is a protocol command");
   assert.equal(new Set(CDP_METHODS).size, CDP_METHODS.length);
-  for (const method of ["Runtime.evaluate", "Page.captureScreenshot", "Page.getLayoutMetrics", "Page.navigate", "Page.getFrameTree"]) assert.ok(CDP_METHODS.includes(method), method);
-  for (const method of ["Page.reload", "Input.dispatchMouseEvent", "Network.getResponseBody"]) assert.ok(!CDP_METHODS.includes(method), `${method}: nothing is listed before it works`);
+  for (const method of ["Runtime.evaluate", "Page.captureScreenshot", "Page.getLayoutMetrics", "Page.navigate", "Page.getFrameTree", "Network.getResponseBody"]) assert.ok(CDP_METHODS.includes(method), method);
+  for (const method of ["Page.reload", "Input.dispatchMouseEvent", "Network.getRequestPostData", "Network.getCookies"]) assert.ok(!CDP_METHODS.includes(method), `${method}: nothing is listed before it works`);
   assert.equal(isDomainToggle("Page.enable"), true);
   assert.equal(isDomainToggle("Page.navigate"), false);
   assert.equal(isDomainToggle("Tracing.enable"), false, "only the listed domains");
