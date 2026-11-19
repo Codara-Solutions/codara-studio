@@ -40,10 +40,17 @@ export class LateReply {
   }
 }
 
+// Late replies waiting on one link, and the bytes the link may hold unsent
+// before another is built: past either, the answer is "busy".
+export const LATE_REPLIES_MAX = 4;
+export const LATE_BUFFER_MAX = 16_000_000;
+export const LINK_BUSY = "The link to Codara is busy: try again in a moment.";
+
 /** The message to send, with a LateReply built now (an error in its place if it throws). */
-function built(message) {
+function built(message, socket) {
   if (!(message.result instanceof LateReply)) return message;
   try {
+    if ((socket.bufferedAmount ?? 0) > LATE_BUFFER_MAX) throw new Error(LINK_BUSY);
     return { id: message.id, result: message.result.build() ?? {} };
   } catch (error) {
     return { id: message.id, error: { message: error instanceof Error ? error.message : String(error) } };
@@ -136,14 +143,19 @@ export class LinkClient {
   /** Send on `socket` only while it is the link in use: never on a later one. */
   sendOn(socket, message) {
     if (!socket || !this.current(socket) || socket.readyState !== 1) return false;
+    const late = message.result instanceof LateReply;
+    if (late && (socket.late ?? 0) >= LATE_REPLIES_MAX) message = { id: message.id, error: { message: LINK_BUSY } };
+    else if (late) socket.late = (socket.late ?? 0) + 1;
     if (!socket.sealer) {
-      socket.send(JSON.stringify(built(message)));
+      if (message.result instanceof LateReply) socket.late -= 1;
+      socket.send(JSON.stringify(built(message, socket)));
       return true;
     }
     // Sealing is asynchronous and each frame's counter is its place in the
     // stream, so frames leave one at a time in the order they were sent.
     socket.outbox = (socket.outbox ?? Promise.resolve()).then(async () => {
-      const out = built(message);
+      if (message.result instanceof LateReply) socket.late -= 1;
+      const out = built(message, socket);
       const frame = await socket.sealer.seal(out);
       // Its access ended while it was sealed: a frame left out would break the
       // count, so the link ends instead, and the answer never leaves.

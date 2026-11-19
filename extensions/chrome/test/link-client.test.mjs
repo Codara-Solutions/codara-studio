@@ -3,7 +3,7 @@ import { createECDH } from "node:crypto";
 import { createServer } from "node:net";
 import { WebSocketServer } from "ws";
 
-import { LateReply, LinkClient, linkProof, pairCommitment, pairedToken, pairingCode, sessionSealer, sha256Hex } from "../lib/link-client.js";
+import { LATE_BUFFER_MAX, LINK_BUSY, LateReply, LinkClient, linkProof, pairCommitment, pairedToken, pairingCode, sessionSealer, sha256Hex } from "../lib/link-client.js";
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -409,6 +409,20 @@ export async function run() {
     { id: 2, error: { message: "No resource with given identifier found" } },
   ]);
   assert.equal(closed, 1, "access ended while sealing: the link ends and the answer never leaves");
+  // At most 4 late replies wait on a link, and none is built while the link holds too much unsent.
+  sent.length = 0;
+  sealing = null;
+  for (let id = 10; id < 15; id++) late.sendOn(line, { id, result: new LateReply(() => ({ id })) });
+  await line.outbox;
+  assert.deepEqual(sent.map((message) => message.result?.id ?? message.error.message), [10, 11, 12, 13, LINK_BUSY]);
+  assert.equal(line.late, 0, "every place given back");
+  sent.length = 0;
+  line.bufferedAmount = LATE_BUFFER_MAX + 1;
+  let builds = 0;
+  late.sendOn(line, { id: 20, result: new LateReply(() => ({ built: ++builds })) });
+  await line.outbox;
+  assert.deepEqual(sent, [{ id: 20, error: { message: LINK_BUSY } }]);
+  assert.equal(builds, 0, "nothing read while the link is full");
 
   stranger.close();
   eager.close();

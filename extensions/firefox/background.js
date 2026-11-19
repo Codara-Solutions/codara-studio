@@ -233,6 +233,8 @@ const link = new LinkClient({
   },
   onDisconnected: () => {
     keepAwake(false);
+    // Every body filter lets go at once, before the tabs are let go one by one.
+    forgetAllBodies();
     void detachAll();
   },
 });
@@ -716,6 +718,10 @@ function consoleBudget(tabId) {
 // with the tab, or when too many are open.
 const requests = new Map();
 const REQUESTS_KEPT = 500;
+function forgetAllBodies() {
+  for (const tabId of [...bodyListeners.keys()]) bodyFilters(tabId, false);
+  bodies.purge(() => false);
+}
 function forgetRequests(tabId) {
   for (const [id, seen] of requests) if (seen.details.tabId === tabId) requests.delete(id);
   bodies.forgetTab(tabId);
@@ -744,8 +750,8 @@ function bodyFilters(tabId, on) {
 }
 
 function keepBody(details) {
-  // Only a request in the log (one that started while it was recorded).
-  if (!requests.has(details.requestId)) return;
+  // Only a request in the log, this very hop (one that started while it was recorded), on the live link.
+  if (requests.get(details.requestId)?.details.url !== details.url || !liveSocket()) return;
   const { url, documentUrl, originUrl, frameAncestors, type, tabId } = details;
   const request = { url, documentUrl, originUrl, frameAncestors, type, tabId };
   const plan = bodyPlan(details);
@@ -771,7 +777,7 @@ function keepBody(details) {
     filter.write(event.data);
     if (!copying) return;
     // The tab left what is shared, or its log stopped: nothing more is kept, and the filter lets go.
-    if (!networkWanted(details)) return bodies.drop(details.requestId);
+    if (!networkWanted(details) || !liveSocket()) return bodies.drop(details.requestId);
     let more = false;
     try {
       more = bodies.data(hop, new Uint8Array(event.data));
@@ -986,7 +992,9 @@ chrome.tabs.onAttached.addListener(scheduleRefresh);
 chrome.tabs.onDetached.addListener((tabId) => {
   const seen = tabsSeen.get(tabId);
   if (seen) seen.windowId = null;
-  // Its bodies go too, and the filters still copying let go.
+  // Its bodies and requests go too (a hop that starts between windows is none
+  // of Codara's), and the filters still copying let go.
+  for (const [id, seen] of requests) if (seen.details.tabId === tabId) requests.delete(id);
   bodies.forgetTab(tabId);
 });
 chrome.tabs.onAttached.addListener(async (tabId, { newWindowId }) => {

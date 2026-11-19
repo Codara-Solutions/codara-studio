@@ -19,7 +19,7 @@
 export const BODY_MAX = 5_000_000;
 export const BODIES_MAX = 20_000_000;
 export const HOPS_MAX = 1000;
-const TEXT_MIME = /^(text\/|application\/(json|[\w.+-]*\+json|javascript|ecmascript|xml|[\w.+-]*\+xml|x-www-form-urlencoded|graphql))/i;
+const TEXT_MIME = /^(text\/[\w.+-]+|application\/(json|javascript|ecmascript|xml|x-www-form-urlencoded|graphql|[\w.-]+\+(json|xml)))$/i;
 /** The request types whose bodies are kept, if their response is text (and not a download). */
 export const BODY_TYPES = Object.freeze(["main_frame", "sub_frame", "xmlhttprequest", "script", "stylesheet", "other"]);
 

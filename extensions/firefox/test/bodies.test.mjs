@@ -13,8 +13,9 @@ export async function run(assembled) {
   assert.deepEqual(bodyPlan(response("xmlhttprequest", { "Content-Type": "application/json" })), { keep: true });
   assert.deepEqual(bodyPlan(response("main_frame", { "content-type": "text/html; charset=utf-8", "Content-Length": "5000000" })), { keep: true });
   assert.deepEqual(bodyPlan(response("script", { "Content-Type": "text/javascript" })), { keep: true });
+  for (const type of ["application/problem+json", "application/atom+xml", "application/x-www-form-urlencoded", "text/css"]) assert.deepEqual(bodyPlan(response("other", { "Content-Type": type })), { keep: true }, type);
   assert.deepEqual(bodyPlan(response("xmlhttprequest", { "Content-Type": "text/plain", "Content-Length": "5000001" })), { keep: false, reason: BODY_TOO_LARGE });
-  for (const [type, headers] of [["image", { "Content-Type": "image/png" }], ["media", {}], ["font", {}], ["websocket", {}], ["xmlhttprequest", { "Content-Type": "application/octet-stream" }], ["xmlhttprequest", { "Content-Type": "video/mp4" }], ["xmlhttprequest", { "Content-Type": "image/svg+xml" }], ["xmlhttprequest", {}], ["script", {}], ["other", { "Content-Type": "text/csv", "Content-Disposition": "attachment; filename=a.csv" }]]) {
+  for (const [type, headers] of [["image", { "Content-Type": "image/png" }], ["media", {}], ["font", {}], ["websocket", {}], ["xmlhttprequest", { "Content-Type": "application/octet-stream" }], ["xmlhttprequest", { "Content-Type": "video/mp4" }], ["xmlhttprequest", { "Content-Type": "image/svg+xml" }], ["xmlhttprequest", { "Content-Type": "application/vnd.a+json-compressed" }], ["xmlhttprequest", { "Content-Type": "application/jsonx" }], ["xmlhttprequest", {}], ["script", {}], ["other", { "Content-Type": "text/csv", "Content-Disposition": "attachment; filename=a.csv" }]]) {
     assert.deepEqual(bodyPlan(response(type, headers)), { keep: false, reason: BODY_NOT_TEXT }, `${type} ${JSON.stringify(headers)}`);
   }
   for (const extra of [{ statusCode: 302 }, { statusCode: 204 }, { method: "HEAD" }]) assert.deepEqual(bodyPlan(response("xmlhttprequest", { "Content-Type": "text/plain" }, extra)), { keep: false, reason: null });
