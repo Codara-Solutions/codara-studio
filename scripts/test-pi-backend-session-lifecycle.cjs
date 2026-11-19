@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
+const { completeStubExports } = require("./run-store-stub-exports.cjs");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -321,7 +322,7 @@ async function loadBackend() {
           (args) => ({ path: args.path, namespace: "stub" }),
         );
         build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({
-          contents: stubs[args.path],
+          contents: completeStubExports(args.path, stubs[args.path]),
           loader: "js",
         }));
       },

@@ -29,6 +29,11 @@ const harness = {
     }));
     build.onResolve({ filter: /pi-account-auth-store$/ }, () => ({ path: "auth-store", namespace: "stub" }));
     build.onResolve({ filter: /\/agent-runtimes$/ }, () => ({ path: "agent-runtimes", namespace: "stub" }));
+    build.onResolve({ filter: /\/pi-model-catalog$/ }, () => ({ path: "pi-model-catalog", namespace: "stub" }));
+    build.onLoad({ filter: /^pi-model-catalog$/, namespace: "stub" }, () => ({
+      loader: "js",
+      contents: "export async function inspectPiModelCatalog() { return []; }",
+    }));
     build.onLoad({ filter: /^auth-store$/, namespace: "stub" }, () => ({
       loader: "js",
       contents: `
@@ -105,6 +110,95 @@ async function main() {
   assert.equal(none.connected.length, 0);
   assert.ok(none.disconnected.length > 0, "the waiting models are reported so Cora can explain");
   console.log("PASS no connected account leaves no launchable model and names the waiting ones");
+
+  // Route order (cora-routes.ts), with a verified OpenRouter key for GPT.
+  const openRouter = await load("src/main/openrouter-config.ts");
+  const key = "test-key-not-real";
+  const orModels = ["openai/gpt-5.6-sol"];
+  const keyed = {
+    openRouterApiKey: key,
+    openRouterCoraModels: orModels,
+    openRouterVerifiedKeyHash: openRouter.openRouterConfigurationHash(key, orModels),
+  };
+  const ordered = { ...keyed, coraRouteOrder: ["subscription", "openrouter", "subcloud"] };
+
+  // Never set up: OpenRouter carries the model.
+  harnessState.statuses = [{ provider: "anthropic", connected: true, expired: false }];
+  assert.equal(await availability.routeCoraModel("gpt-5.6-sol", ordered), "openai/gpt-5.6-sol");
+  assert.ok((await availability.coraWorkerModelAvailability(ordered)).connected.includes("gpt-5.6-sol"));
+  // Set up but expired, or signed out: no silent move to the paid key; the
+  // launch fails and says to sign in again.
+  for (const broken of [
+    { provider: "openai-codex", connected: true, expired: true, canRefresh: false },
+    { provider: "openai-codex", connected: false, expired: false },
+  ]) {
+    harnessState.statuses = [{ provider: "anthropic", connected: true, expired: false }, broken];
+    assert.equal(await availability.routeCoraModel("gpt-5.6-sol", ordered), "gpt-5.6-sol", JSON.stringify(broken));
+    const split = await availability.coraWorkerModelAvailability(ordered);
+    assert.ok(split.disconnected.includes("gpt-5.6-sol") && !split.connected.includes("gpt-5.6-sol"));
+  }
+  // No order chosen (every existing user after the upgrade, and automations
+  // until the user picks one): models launch as picked.
+  harnessState.statuses = [{ provider: "anthropic", connected: true, expired: false }];
+  assert.equal(await availability.routeCoraModel("gpt-5.6-sol", keyed), "gpt-5.6-sol");
+  assert.equal(await availability.routeCoraModel("anthropic/claude-opus-5", { ...keyed, openRouterCoraModels: ["anthropic/claude-opus-5"] }), "anthropic/claude-opus-5");
+  assert.ok(!(await availability.coraWorkerModelAvailability(keyed)).connected.includes("gpt-5.6-sol"));
+  console.log("PASS routes: a broken sign-in is not swapped for a paid key, and no order means as picked");
+
+  // Worker planning (launchWorkerAttemptInner): with an order chosen, the
+  // worker's model is picked by what it is and only the order picks its
+  // route. Enabled: Claude Opus, and GPT-5.6 Sol only as its OpenRouter id.
+  const gptTask = { runtimePreference: "codex", modelHint: "gpt-5.6-sol" };
+  const plan = async (statuses, extra, enabled) => {
+    harnessState.statuses = statuses;
+    const settings = { ...ordered, coraWorkerModels: enabled, ...extra };
+    const { connected } = await availability.coraWorkerModelAvailability(settings);
+    const planned = roster.plannedWorkerModel(gptTask, {
+      enabledModels: availability.workerPlanningModels(connected, settings),
+    });
+    return { planned, launched: await availability.routeCoraModel(planned, settings) };
+  };
+  const claude = { provider: "anthropic", connected: true, expired: false };
+  // No ChatGPT sign-in ever: the GPT task keeps GPT, through the key.
+  let chosen = await plan([claude], {}, ["claude-opus-5", "openai/gpt-5.6-sol"]);
+  assert.equal(chosen.launched, "openai/gpt-5.6-sol", JSON.stringify(chosen));
+  // Both spellings enabled, the ChatGPT sign-in expired, sign-ins first: the
+  // sign-in spelling launches and fails with "sign in again", never the key.
+  chosen = await plan(
+    [claude, { provider: "openai-codex", connected: true, expired: true, canRefresh: false }],
+    {},
+    ["claude-opus-5", "gpt-5.6-sol", "openai/gpt-5.6-sol"],
+  );
+  assert.equal(chosen.launched, "gpt-5.6-sol", JSON.stringify(chosen));
+  // OpenRouter first: the key, as the user ordered.
+  chosen = await plan(
+    [claude, { provider: "openai-codex", connected: true, expired: false }],
+    { coraRouteOrder: ["openrouter", "subscription", "subcloud"] },
+    ["claude-opus-5", "gpt-5.6-sol", "openai/gpt-5.6-sol"],
+  );
+  assert.equal(chosen.launched, "openai/gpt-5.6-sol", JSON.stringify(chosen));
+  // No order: planning sees the spellings as they are.
+  harnessState.statuses = [claude];
+  assert.deepEqual(availability.workerPlanningModels(["openai/gpt-5.6-sol"], keyed), ["openai/gpt-5.6-sol"]);
+  console.log("PASS worker planning picks the model, then the order picks its route");
+
+  // The route code keeps only which providers are set up or usable and which
+  // OpenRouter ids are verified: never a token, key, email or fingerprint.
+  harnessState.statuses = [
+    {
+      provider: "openai-codex", profileId: "p-1", connected: true, expired: false,
+      accountEmail: "someone@example.test", accountFingerprint: "fp-secret-digest", access: "FAKE_access_token",
+    },
+  ];
+  const routeView = await availability.coraRouteAvailability(ordered);
+  const serialized = JSON.stringify(routeView, (_, value) => (value instanceof Set ? [...value] : value));
+  for (const secret of [key, "someone@example.test", "fp-secret-digest", "FAKE_access_token", "p-1"]) {
+    assert.ok(!serialized.includes(secret), `route availability carries ${secret}`);
+  }
+  assert.deepEqual(Object.keys(routeView).sort(), ["nativeModels", "openRouterModels", "subscriptions"]);
+  const availabilitySource = fs.readFileSync(path.join(ROOT, "src/main/orchestration/worker-model-availability.ts"), "utf8");
+  assert.doesNotMatch(availabilitySource, /console\.|writeFile|appendFile|fetch\(|commitRunChange|emit\(/, "route lookups log, store or send nothing");
+  console.log("PASS route lookups keep provider status and model ids only");
 
   harnessState.fail = true;
   const unreadable = await availability.coraWorkerModelAvailability(settings);
