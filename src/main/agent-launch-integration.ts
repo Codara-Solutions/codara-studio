@@ -116,6 +116,10 @@ interface IntegrationState {
   claudeSettingsFile: string;
   /** The `--settings` file, or null while it has nothing to say. */
   claudeSettingsPath: string | null;
+  /** The same settings without the hooks, for Cora's Claude Code workers:
+   *  they report through their stream, and the hooks would write each
+   *  tool's input to disk. */
+  claudeWorkerSettingsFile: string;
   claudeMcpConfigPaths: Partial<Record<AgentMcpMode, string>>;
   codexNotifyArgv: string[] | null;
   codexTuiNotificationsUnset: boolean;
@@ -279,6 +283,8 @@ export async function writeIntegrationFiles(
   const claudeHooks = hookScript ? { ...claudeHookSettings(python, hookScript) } : null;
   const separateBrowserTools = options.separateBrowserTools ?? null;
   await writeClaudeSettings(claudeSettingsPath, claudeHooks, separateBrowserTools);
+  const claudeWorkerSettingsFile = join(dir, "claude", "settings-worker.json");
+  await writeClaudeSettings(claudeWorkerSettingsFile, null, separateBrowserTools);
   const claudeMcpConfigPaths: Partial<Record<AgentMcpMode, string>> = {};
   for (const mode of MCP_MODES) {
     const path = join(dir, "claude", `mcp-${mode}.json`);
@@ -298,6 +304,7 @@ export async function writeIntegrationFiles(
     separateBrowserTools,
     claudeSettingsFile: claudeSettingsPath,
     claudeSettingsPath,
+    claudeWorkerSettingsFile,
     claudeMcpConfigPaths,
     codexNotifyArgv,
     codexTuiNotificationsUnset: tuiNotificationsUnset(codexText),
@@ -338,6 +345,7 @@ export async function setSeparateBrowserToolsGuard(guard: SeparateBrowserToolsGu
   if (!state) return;
   state.separateBrowserTools = guard;
   await writeClaudeSettings(state.claudeSettingsFile, state.claudeHooks, guard);
+  await writeClaudeSettings(state.claudeWorkerSettingsFile, null, guard);
   state.claudeSettingsPath = state.claudeSettingsFile;
   await writeShellArgsFiles();
 }
@@ -404,15 +412,21 @@ function hasFlag(args: readonly string[], flag: string): boolean {
 }
 
 /** The arguments Codara inserts after `claude`; empty for management subcommands. */
-export function claudeLaunchArgs(input: { userArgs: readonly string[]; mode?: AgentMcpMode }): string[] {
+export function claudeLaunchArgs(input: {
+  userArgs: readonly string[];
+  mode?: AgentMcpMode;
+  /** Studio's settings without its hooks (Cora's Claude Code workers). */
+  withoutHooks?: boolean;
+}): string[] {
   if (!state) return [];
   const first = input.userArgs[0];
   if (first !== undefined && CLAUDE_PASS_THROUGH.has(first)) return [];
   const out: string[] = [];
   // Claude keeps only the last --settings it is given, so a user's own one
   // wins and Codara's hooks stay out of that session.
-  if (state.claudeSettingsPath && !hasFlag(input.userArgs, "--settings")) {
-    out.push("--settings", state.claudeSettingsPath);
+  const settings = input.withoutHooks ? state.claudeWorkerSettingsFile : state.claudeSettingsPath;
+  if (settings && !hasFlag(input.userArgs, "--settings")) {
+    out.push("--settings", settings);
   }
   const mcp = state.claudeMcpConfigPaths[input.mode ?? "studio"];
   if (mcp && !readSparkBuiltinOptOuts().has("claude") && !hasFlag(input.userArgs, "--strict-mcp-config")) {

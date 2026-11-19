@@ -452,6 +452,19 @@ async function main() {
     assert.deepEqual(tree(HOME), userHomeBefore, "the switch wrote into the user's home");
   });
 
+  await check("a Claude Code worker gets the same settings without the hooks, the browser guard kept", async () => {
+    const workerSettingsPath = path.join(dir, "claude", "settings-worker.json");
+    const workerMcp = path.join(dir, "claude", "mcp-worker.json");
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [], mode: "worker", withoutHooks: true }), ["--settings", workerSettingsPath, `--mcp-config=${workerMcp}`]);
+    const workerSettings = JSON.parse(fs.readFileSync(workerSettingsPath, "utf8"));
+    assert.deepEqual(Object.keys(workerSettings), ["enabledPlugins", "deniedMcpServers", "env"]);
+    assert.deepEqual(workerSettings.deniedMcpServers, [{ serverName: "my-chrome" }]);
+    await launch.setSeparateBrowserToolsGuard(null);
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(workerSettingsPath, "utf8"))), ["env"]);
+    await launch.setSeparateBrowserToolsGuard(guard);
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(workerSettingsPath, "utf8"))), ["enabledPlugins", "deniedMcpServers", "env"]);
+  });
+
   await check("Keep agents in your Chrome on: Codex starts each browser server disabled, as a valid server", async () => {
     const disabled = codexDisabled();
     assert.deepEqual(disabled, [

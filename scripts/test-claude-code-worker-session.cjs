@@ -39,9 +39,14 @@ assert.match(body, /acquireLease: \(profileId\) => acquireNativeClaudeProfileLea
 console.log("PASS no login sync on launch or release");
 
 assert.match(body, /getProvider\("claude"\)\.buildArgs\(/);
-assert.match(body, /launchArgs: withoutStudioHooks\(claudeLaunchArgs\(\{ userArgs: providerArgs, mode: "worker" \}\)\)/);
+assert.match(body, /launchArgs: claudeLaunchArgs\(\{ userArgs: providerArgs, mode: "worker", withoutHooks: true \}\)/);
 assert.match(body, /hookEnv: null,/);
-console.log("PASS Studio's own provider arguments, the worker tool roster, no hooks");
+// The hook-free settings keep the browser guard and are rewritten with it.
+const integration = fs.readFileSync(path.join(ROOT, "src", "main", "agent-launch-integration.ts"), "utf8");
+assert.match(integration, /await writeClaudeSettings\(claudeWorkerSettingsFile, null, separateBrowserTools\);/);
+assert.match(integration, /await writeClaudeSettings\(state\.claudeWorkerSettingsFile, null, guard\);/);
+assert.match(integration, /const settings = input\.withoutHooks \? state\.claudeWorkerSettingsFile : state\.claudeSettingsPath;/);
+console.log("PASS Studio's own provider arguments, the worker tool roster, settings without hooks");
 
 // The display shell carries the run id, so pty-manager never takes the
 // plain-shell path that resolves and syncs the Active accounts.
@@ -61,6 +66,9 @@ console.log("PASS a Stop is checked before every turn and the tree is awaited");
 assert.match(body, /const paint = \(raw: string\) => \{\s*const text = redactPastedSecrets\(run\.id, raw\);/);
 assert.match(body, /const line = claudeCodeToolLine\(event\);/);
 assert.ok(!/paint\([^)]*stderrTail/.test(body), "Claude Code's error text is never logged");
-assert.ok(!/paint\([^)]*event\.detail/.test(body.slice(body.indexOf('event.kind === "tool_failed"'))), "a failed tool's text is never logged");
+assert.match(body, /event\.kind === "tool_failed"\) paint\(`[^`$]*`\)/, "a failed tool is logged as a fixed line");
+assert.match(body, /event\.kind === "text"\) show\(/, "assistant text reaches the pane only");
+// Success is published only after the last flush and a final Stop check.
+assert.match(body, /await logQueue\.catch\(\(\) => undefined\);\s*\/\/[^\n]*\n\s*if \(stopped\(\)\) throw new Error\("Claude Code worker was stopped\."\);\s*applyHookStateReport\(\{ paneId: attemptId, state: "done"/);
 console.log("PASS painted and logged text is redacted");
 console.log("claude code worker session: all checks passed");

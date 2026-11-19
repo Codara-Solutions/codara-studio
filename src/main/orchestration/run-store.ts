@@ -355,7 +355,6 @@ import {
   prepareClaudeCodeWorkerLaunch,
   claudeCodeToolLine,
   runClaudeCodeWorkerTurns,
-  withoutStudioHooks,
   startClaudeCodeWorker,
   type ClaudeCodeEvent,
   type ClaudeCodeProcess,
@@ -22570,8 +22569,10 @@ async function runClaudeCodeWorkerSession(input: {
   let sessionId: string | undefined;
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let logQueue: Promise<void> = Promise.resolve();
-  // Everything shown and logged is redacted again with the keys this run
-  // knows (pasted-secrets), on top of the scrubbing claude-code-worker does.
+  // `show` reaches the pane only; `paint` also appends to stdout.log and is
+  // used only for tool names and Studio's own fixed lines, never for text a
+  // model or a tool wrote. Both are redacted with the run's known keys.
+  const show = (raw: string) => pty.publishOutput(attemptId, redactPastedSecrets(run.id, raw));
   const paint = (raw: string) => {
     const text = redactPastedSecrets(run.id, raw);
     pty.publishOutput(attemptId, text);
@@ -22586,7 +22587,7 @@ async function runClaudeCodeWorkerSession(input: {
       paint(`\x1b[38;2;74;222;208m  ●\x1b[0m ${piWorkerSafeText(line, 200)}\r\n`);
       applyHookStateReport({ paneId: attemptId, state: "working", note: piWorkerSafeText(line, PI_WORKER_ACTIVITY_MAX_CHARS) });
     } else if (event.kind === "tool_failed") paint(`\x1b[33m    !  the tool reported an error\x1b[0m\r\n`);
-    else if (event.kind === "text") paint(`\x1b[2m  ${piWorkerSafeText(event.text, 700)}\x1b[0m\r\n`);
+    else if (event.kind === "text") show(`\x1b[2m  ${piWorkerSafeText(event.text, 700)}\x1b[0m\r\n`);
     else {
       usage.inputTokens += event.usage.input;
       usage.outputTokens += event.usage.output;
@@ -22612,7 +22613,7 @@ async function runClaudeCodeWorkerSession(input: {
     current = null;
     // Claude Code's own error text is shown in the pane, never logged.
     if (exit.exitCode !== 0 && !interrupted && exit.stderrTail) {
-      pty.publishOutput(attemptId, `\x1b[31m  ${piWorkerSafeText(redactPastedSecrets(run.id, exit.stderrTail), 700)}\x1b[0m\r\n`);
+      show(`\x1b[31m  ${piWorkerSafeText(exit.stderrTail, 700)}\x1b[0m\r\n`);
     }
     if (interrupted) throw new Error("Claude Code worker was stopped.");
     return exit.exitCode;
@@ -22637,8 +22638,9 @@ async function runClaudeCodeWorkerSession(input: {
       runId: run.id,
       attemptDir: paths.attemptDir,
       // The worker roster of the codara-studio server (no board or
-      // whiteboard writes), without Studio's hooks.
-      launchArgs: withoutStudioHooks(claudeLaunchArgs({ userArgs: providerArgs, mode: "worker" })),
+      // whiteboard writes), and Studio's settings (the browser guard
+      // included) without its hooks.
+      launchArgs: claudeLaunchArgs({ userArgs: providerArgs, mode: "worker", withoutHooks: true }),
       providerArgs,
       hookEnv: null,
       codaraHome: codaraHome(),
@@ -22701,11 +22703,15 @@ async function runClaudeCodeWorkerSession(input: {
         ? "Claude Code worker completed without a parseable final-report.json."
         : `Claude Code exited with code ${exitCode} before writing its final report.`);
     }
-    applyHookStateReport({ paneId: attemptId, state: "done", note: "Claude Code worker report ready" });
     paintPiWorkerReportOutcome(paint, report);
     await logQueue.catch(() => undefined);
+    // The last moment a Stop can land before success is published.
+    if (stopped()) throw new Error("Claude Code worker was stopped.");
+    applyHookStateReport({ paneId: attemptId, state: "done", note: "Claude Code worker report ready" });
     return { exitCode: 0, ...usage };
   } catch (error) {
+    // A Stop seen through the launch abort counts as one too.
+    if (stopped()) interrupted = true;
     const message = error instanceof Error ? error.message : String(error);
     await writeAutoFailureReport(paths, task, message, { interrupted }).catch(() => null);
     applyHookStateReport({ paneId: attemptId, state: interrupted ? "done" : "error", note: message });
