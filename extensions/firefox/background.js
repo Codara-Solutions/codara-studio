@@ -366,7 +366,7 @@ async function answerCommand(request, socket) {
     return {};
   }
   if (method === "Network.getResponseBody") return responseBody(tab.id, request.params ?? {}, socket);
-  if (method === "Network.getCookies") return tabCookies(tab.id, request.params ?? {}, socket, since);
+  if (method === "Network.getCookies") return tabCookies(tab, lookedAt, request.params ?? {}, socket, since);
   if (STORAGE_WRITES.includes(method)) throw new Error(storageWriteRefusal(method));
   if (method === "Page.getFrameTree") {
     const now = await stillUsable(tab.id, socket);
@@ -691,17 +691,19 @@ async function enforceSharing() {
 // Where each tab was last seen (window and address), so a request is
 // checked against where its tab is now without waiting on Firefox.
 const tabsSeen = new Map();
-// When Firefox last told of each tab in an event (loaded, moved, closed). A
-// lookup that began before that answers with an older view, and it never
-// overwrites the event's: lookups pass the tick lookStart() gave as they began.
-const tabsHeard = new Map();
-let heardTicks = 0;
+// Every view of a tab is stamped with one counter: an event's when it comes
+// (loaded, moved, closed), a lookup's when it began (lookStart()). A view
+// older than the one kept never replaces it, so a lookup answered late does
+// not undo a move, and of two lookups the later one's answer stands.
+const tabsSeenAt = new Map();
+let seenTicks = 0;
+const lookStart = () => ++seenTicks;
 function heardOf(tabId) {
-  tabsHeard.set(tabId, ++heardTicks);
+  tabsSeenAt.set(tabId, ++seenTicks);
 }
-const lookStart = () => heardTicks;
-function seeTab(tab, lookedAt = Infinity) {
-  if (!Number.isInteger(tab?.id) || (tabsHeard.get(tab.id) ?? 0) > lookedAt) return;
+function seeTab(tab, lookedAt = ++seenTicks) {
+  if (!Number.isInteger(tab?.id) || (tabsSeenAt.get(tab.id) ?? 0) > lookedAt) return;
+  tabsSeenAt.set(tab.id, lookedAt);
   tabsSeen.set(tab.id, { id: tab.id, windowId: tab.windowId, url: tab.url });
 }
 
@@ -845,25 +847,38 @@ async function responseBody(tabId, params, socket) {
 
 /**
  * Network.getCookies (lib/cookies.js): the tab's own site's cookies, from
- * its own cookie store, with its cookie switch on. Everything that allowed
- * the read is asked again when the answer leaves: the switch, the tab still
- * attached and shared on that site, the blocked sites, the site access and
- * the link.
+ * its own cookie store, with its cookie switch on. The read holds to one
+ * view of the tab, its first look: every later look must find it in the
+ * same window, on the same address, with the same cookie store (Firefox may
+ * answer a lookup with a move before its event comes), and nothing that
+ * decides its access may be stamped after that first look. Everything that
+ * allowed the read is asked again when the answer leaves: the switch, the
+ * tab still attached and shared on that site, the blocked sites, the site
+ * access and the link.
  */
-async function tabCookies(tabId, params, socket, since) {
-  const lookedAt = lookStart();
-  const tab = await stillUsable(tabId, socket);
-  seeTab(tab, lookedAt);
+async function tabCookies(first, lookedAt, params, socket, since) {
+  const tabId = first.id;
+  const changed = () => new Error(`${agentTabId(tabId)} or what it may share changed while its cookies were read; ask again.`);
+  const sameView = (tab) => tab.windowId === first.windowId && tab.url === first.url && tab.cookieStoreId === first.cookieStoreId;
+  const look = async () => {
+    const began = lookStart();
+    const tab = await stillUsable(tabId, socket);
+    seeTab(tab, began);
+    if (!sameView(tab)) throw changed();
+    return tab;
+  };
+  seeTab(first, lookedAt);
+  await look();
   // Firefox names every tab's store; read without it, the default store
   // would answer for a container tab or a private window.
-  if (typeof tab.cookieStoreId !== "string" || !tab.cookieStoreId) throw new Error(`Firefox did not say which cookie store ${agentTabId(tabId)} uses, so its cookies are not read.`);
-  const storeId = tab.cookieStoreId;
-  const urls = cookieUrls(params, tab.url);
+  if (typeof first.cookieStoreId !== "string" || !first.cookieStoreId) throw new Error(`Firefox did not say which cookie store ${agentTabId(tabId)} uses, so its cookies are not read.`);
+  const storeId = first.cookieStoreId;
+  const urls = cookieUrls(params, first.url);
   const refusal = cookieGate({
     urls,
     ref: agentTabId(tabId),
-    // The window this request's own look found: had the tab moved since, its own stamp moved too.
-    now: () => ({ changed: access.changedSince(since, tabId, tab.windowId), socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
+    // The window of the first look: had the tab moved since, its own stamp moved, or a later look saw it.
+    now: () => ({ changed: access.changedSince(since, tabId, first.windowId), socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
   });
   const read = await readCookies(urls, {
     getAll: (url) => browser.cookies.getAll({ url, storeId }),
@@ -871,13 +886,12 @@ async function tabCookies(tabId, params, socket, since) {
     // Firefox's own site access for the tab's site (every URL asked is on its host).
     // (asked only once the refusal passed, so the tab shows a web page).
     permitted: () => {
-      const { protocol, hostname } = new URL(tab.url);
+      const { protocol, hostname } = new URL(first.url);
       return chrome.permissions.contains({ origins: [`${protocol}//${hostname}/*`] }).catch(() => false);
     },
     rules: () => rules,
   });
-  const lookedAgain = lookStart();
-  seeTab(await stillUsable(tabId, socket), lookedAgain);
+  await look();
   return new LateReply(read.build, read.still);
 }
 

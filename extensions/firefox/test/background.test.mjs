@@ -310,6 +310,61 @@ export async function run(assembled) {
       await fake.fire("tabs.onAttached", 1, { newWindowId: 1, newPosition: 0 });
     }
 
+    // Firefox can answer a lookup with a change whose event has not come yet:
+    // a read holds to its first look, and any later look that finds the tab
+    // elsewhere (another window, address or cookie store) ends it.
+    const quietly = (change) => fake.tabs.set(1, { ...fake.tabs.get(1), ...change });
+    for (const [what, change] of [
+      ["moved to another window", { windowId: 2 }],
+      ["on another page", { url: `${SHOP}next` }],
+      ["in another cookie store", { cookieStoreId: "firefox-container-1" }],
+    ]) {
+      const original = { ...fake.tabs.get(1) };
+      let looks = 0;
+      fake.beforeGet = (id) => {
+        if (id === 1 && (looks += 1) === 1) quietly(change);
+      };
+      await assert.rejects(cookies(1), /changed while its cookies were read/, `a tab ${what} after the first look, its event still to come`);
+      fake.beforeGet = null;
+      fake.tabs.set(1, original);
+      // After the read too: its last look finds the change.
+      looks = 0;
+      hold = true;
+      const reading = cookies(1);
+      await settle();
+      quietly(change);
+      hold();
+      hold = null;
+      await assert.rejects(reading, /changed while its cookies were read/, `a tab ${what} during the read, its event still to come`);
+      fake.tabs.set(1, original);
+    }
+
+    // Of two lookups that began between the same events, the later one's
+    // answer stands: an earlier one answered late does not replace it.
+    {
+      let release;
+      fake.beforeGet = (id) => (id === 1 ? new Promise((resolve) => (release = resolve)) : null);
+      const enabling = request({ type: "cdp", tabId: 1, method: "Network.enable", params: {} });
+      await settle();
+      fake.beforeGet = null;
+      quietly({ windowId: 2 });
+      hold = true;
+      const reading = cookies(1);
+      await settle();
+      assert.equal(seenWindow(1), 2, "the read's own look is kept");
+      release();
+      await enabling;
+      assert.equal(seenWindow(1), 2, "the earlier lookup's late answer does not replace it");
+      await fake.popup({ type: "setReach", reach: "window", windowId: 1 });
+      await fake.popup({ type: "setReach", reach: "tabs", windowId: 1 });
+      hold();
+      hold = null;
+      assert.deepEqual(names(await reading), ["sid"], "the window the tab left changing ends no read");
+      fake.tabs.set(1, { ...fake.tabs.get(1), windowId: 1 });
+      await fake.fire("tabs.onDetached", 1, { oldWindowId: 2, oldPosition: 0 });
+      await fake.fire("tabs.onAttached", 1, { newWindowId: 1, newPosition: 0 });
+    }
+
     // The tab's own cookie store, and never the default one in its place.
     fake.calls.getAll.length = 0;
     await cookies(1);
