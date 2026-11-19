@@ -725,11 +725,12 @@ export interface AppSettings {
   // opens. Optional for the same reason as coraAlwaysVerifyEdits.
   coraAutoCompactPercent?: number | null;
   // The order in which Cora (manager and Pi workers) tries the ways to reach
-  // a model: a provider sign-in, an OpenRouter key, Subcloud
+  // a model: a provider sign-in, an OpenRouter key, Subcloud, or (managed
+  // Claude workers only, never added unless picked) Claude Code
   // (src/shared/cora-routes.ts). A route never set up is skipped; a sign-in
   // that expired or hit its limit is not handed on. Unset (the default, also
   // after an upgrade) launches every model as picked.
-  coraRouteOrder?: Array<"subscription" | "openrouter" | "subcloud">;
+  coraRouteOrder?: Array<"subscription" | "openrouter" | "subcloud" | "claudecode">;
 }
 
 export interface OpenRouterValidationInput {
@@ -4452,6 +4453,9 @@ export interface WorkerAttempt {
    * silently switch subscriptions. Undefined for legacy/non-Pi attempts.
    */
   accountProfileId?: string;
+  /** The Claude account a Claude Code worker ran on, by its name in
+   *  Settings > Accounts (route `claude-code/`). */
+  accountLabel?: string;
   /**
    * Concrete native Codex CLI account used by a native CLI/app-server
    * attempt. Distinct from Pi accountProfileId; absent is legacy/personal.

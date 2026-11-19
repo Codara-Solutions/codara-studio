@@ -12,10 +12,22 @@ import { subscriptionForModelId } from "./agent-families";
 import type { PiSubscriptionProvider } from "./types";
 import { ALLOWED_WORKER_MODELS } from "./worker-model-roster";
 
-export type CoraRoute = "subscription" | "openrouter" | "subcloud";
+export type CoraRoute = "subscription" | "openrouter" | "subcloud" | "claudecode";
 
-export const CORA_ROUTES: readonly CoraRoute[] = ["subscription", "openrouter", "subcloud"];
-export const DEFAULT_CORA_ROUTE_ORDER: readonly CoraRoute[] = CORA_ROUTES;
+export const CORA_ROUTES: readonly CoraRoute[] = ["subscription", "openrouter", "subcloud", "claudecode"];
+/** Claude Code is not here: it is in an order only when the user picked one
+ *  that starts with it, never appended. */
+export const DEFAULT_CORA_ROUTE_ORDER: readonly CoraRoute[] = ["subscription", "openrouter", "subcloud"];
+
+/** A Claude model run by the official Claude Code CLI as a managed worker,
+ *  on the Claude account Studio has selected (claude-code-worker.ts). */
+export const CLAUDE_CODE_PREFIX = "claude-code/";
+
+/** The Claude model a `claude-code/` id runs, or null for any other id. */
+export function claudeCodeModelOf(model: string | undefined | null): string | null {
+  const id = model?.trim() ?? "";
+  return id.startsWith(CLAUDE_CODE_PREFIX) && id.length > CLAUDE_CODE_PREFIX.length ? id.slice(CLAUDE_CODE_PREFIX.length) : null;
+}
 
 const OPENROUTER_PREFIX: Record<PiSubscriptionProvider, string> = {
   anthropic: "anthropic/",
@@ -44,6 +56,7 @@ export function routeOfModelId(model: string | undefined | null): CoraRoute | nu
   const id = model?.trim() ?? "";
   if (!id) return null;
   if (id.startsWith("subcloud/")) return "subcloud";
+  if (id.startsWith(CLAUDE_CODE_PREFIX)) return "claudecode";
   if (id.includes("/")) return "openrouter";
   return subscriptionForModelId(id) ? "subscription" : null;
 }
@@ -72,6 +85,7 @@ const WORKER_RUNTIME: Record<PiSubscriptionProvider, "claude" | "codex" | "grok"
 export function workerFamilyOfModelId(model: string | undefined | null): "claude" | "codex" | "grok" | undefined {
   const { base } = splitEffort((model ?? "").trim());
   if (!base) return undefined;
+  if (base.startsWith(CLAUDE_CODE_PREFIX)) return "claude";
   for (const [provider, prefix] of Object.entries(OPENROUTER_PREFIX) as Array<[PiSubscriptionProvider, string]>) {
     if (base.startsWith(prefix)) return WORKER_RUNTIME[provider];
   }
@@ -97,14 +111,23 @@ export function routeSpellings(
   const route = routeOfModelId(base);
   if (route === "subscription") {
     const provider = subscriptionForModelId(base);
-    return provider ? { subscription: `${base}${effort}`, openrouter: `${OPENROUTER_PREFIX[provider]}${base}` } : {};
+    if (!provider) return {};
+    return {
+      subscription: `${base}${effort}`,
+      openrouter: `${OPENROUTER_PREFIX[provider]}${base}`,
+      ...(provider === "anthropic" ? { claudecode: `${CLAUDE_CODE_PREFIX}${base}${effort}` } : {}),
+    };
   }
   if (route === "openrouter") {
     for (const [provider, prefix] of Object.entries(OPENROUTER_PREFIX) as Array<[PiSubscriptionProvider, string]>) {
       if (!base.startsWith(prefix)) continue;
       const native = base.slice(prefix.length);
       if (subscriptionForModelId(native) === provider && nativeModels.has(native)) {
-        return { subscription: native, openrouter: base };
+        return {
+          subscription: native,
+          openrouter: base,
+          ...(provider === "anthropic" ? { claudecode: `${CLAUDE_CODE_PREFIX}${native}` } : {}),
+        };
       }
     }
     return { openrouter: base };
@@ -136,6 +159,9 @@ export interface CoraRouteAvailability {
   /** Native ids the sign-ins serve (Pi's catalog); the worker roster when
    *  absent. */
   nativeModels?: ReadonlySet<string>;
+  /** Claude Code is installed with a signed-in account and this launch is a
+   *  managed worker. Never set for Cora herself. */
+  claudeCode?: boolean;
 }
 
 export interface CoraRouteChoice {
@@ -163,6 +189,8 @@ export function chooseCoraRoute(
       if (provider && availability.subscriptions.has(provider)) return { route, model: id };
     } else if (route === "openrouter") {
       if (availability.openRouterModels.has(id)) return { route, model: id };
+    } else if (route === "claudecode") {
+      if (availability.claudeCode === true) return { route, model: id };
     }
   }
   return null;
@@ -173,6 +201,7 @@ export function coraRouteLabel(model: string | undefined | null): string {
   const route = routeOfModelId(model);
   if (route === "openrouter") return "OpenRouter key";
   if (route === "subcloud") return "Subcloud";
+  if (route === "claudecode") return "Claude Code";
   if (route !== "subscription") return "Unknown";
   const provider = subscriptionForModelId(model ?? "");
   if (provider === "anthropic") return "Claude sign-in";
@@ -195,6 +224,8 @@ export interface CoraRouteRow {
 interface RouteUsage {
   model?: string;
   accountProfileId?: string;
+  /** A readable account name (Claude Code workers), shown instead of the id. */
+  accountLabel?: string;
   inputTokens?: number;
   outputTokens?: number;
 }
@@ -208,7 +239,7 @@ export function coraRouteRows(
   const rows = new Map<string, CoraRouteRow>();
   const add = (who: CoraRouteRow["who"], usage: RouteUsage) => {
     if (!usage.model) return;
-    const account = usage.accountProfileId ? usage.accountProfileId.slice(0, 8) : "";
+    const account = usage.accountLabel?.trim() || (usage.accountProfileId ? usage.accountProfileId.slice(0, 8) : "");
     const key = `${who}|${usage.model}|${account}`;
     const row = rows.get(key) ?? {
       key, who, model: usage.model, route: coraRouteLabel(usage.model), account, inputTokens: 0, outputTokens: 0, count: 0,

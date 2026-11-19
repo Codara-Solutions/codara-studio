@@ -80,6 +80,14 @@ test("the route order is saved and cleared, and a run shows its routes", async (
     await expect(order.locator("option:checked")).toHaveText("OpenRouter first (paid key)");
     await expect(dialog.getByText(/With OpenRouter first, every model with a verified OpenRouter id runs on your OpenRouter key, paid per token, even when you have a sign-in for it\./)).toBeVisible();
 
+    // Claude Code is offered only as its own choice, first, and is saved as picked.
+    await order.selectOption({ label: "Claude Code (Claude workers) first" });
+    await expect.poll(savedOrder).toEqual(["claudecode", "subscription", "openrouter", "subcloud"]);
+    await expect(
+      dialog.getByText("Cora now tries Claude Code (Claude workers), then your sign-ins, then OpenRouter, then Subcloud."),
+    ).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("route-order-claude-code-setting.png") });
+
     await order.selectOption("");
     await expect.poll(savedOrder).toBeUndefined();
     await page.keyboard.press("Escape");
@@ -99,6 +107,9 @@ test("the route order is saved and cleared, and a run shows its routes", async (
     await expect(routes).toContainText("OpenRouter key");
     await expect(routes).toContainText("anthropic/claude-opus-5");
     await expect(routes).toContainText("acct-cla");
+    await expect(routes).toContainText("claude-code/claude-opus-5@high");
+    await expect(routes.getByText("Claude Code", { exact: true })).toBeVisible();
+    await expect(routes).toContainText("Work account");
     await page.screenshot({ path: testInfo.outputPath("route-order-costs.png") });
   } finally {
     await app.close();
@@ -131,6 +142,10 @@ async function seedRoutedRun(home: string, cwd: string, runId: string): Promise<
       id: "attempt-routed", runId, workerTaskId: "task-routed", attemptNumber: 1, runtime: "pi",
       model: "anthropic/claude-opus-5", cwd, status: "succeeded", createdAt: at(5), updatedAt: at(8),
       inputTokens: 30_100, outputTokens: 2_150,
+    }, {
+      id: "attempt-claude-code", runId, workerTaskId: "task-claude-code", attemptNumber: 1, runtime: "claude",
+      model: "claude-code/claude-opus-5@high", accountLabel: "Work account", cwd, status: "succeeded",
+      createdAt: at(6), updatedAt: at(8), inputTokens: 18_200, outputTokens: 1_400,
     }],
     humanMessages: [
       { id: "msg-user", runId, author: "user", kind: "note", intent: "turn", deliveryState: "acknowledged", backendTurnId: "spark-routed", conversationEpoch: 0, message: "Route it", attachments: [], createdAt: at(1) },

@@ -7,6 +7,7 @@ import {
 } from "@shared/cora-routes";
 import { ALLOWED_WORKER_MODELS, partitionWorkerModelsByAccount } from "@shared/worker-model-roster";
 import { availableCoraWorkerModels, configuredOpenRouterCoraModels } from "../openrouter-config";
+import { claudeCodeWorkerReady } from "./claude-code-worker";
 import type { PiProfileAuthStatusLike } from "./pi-worker-providers";
 
 export interface CoraWorkerModelAvailability {
@@ -62,14 +63,34 @@ async function nativeCatalogModels(): Promise<Set<string> | undefined> {
  * says to sign in again, instead of moving to a paid key without a word. A
  * sign-in at its usage limit is not handed to another route either.
  */
-export async function coraRouteAvailability(settings: AppSettings): Promise<CoraRouteAvailability | null> {
-  const [state, nativeModels] = await Promise.all([subscriptionState(), nativeCatalogModels()]);
+export async function coraRouteAvailability(
+  settings: AppSettings,
+  options: CoraRouteOptions = {},
+): Promise<CoraRouteAvailability | null> {
+  // Claude Code is checked only for a managed worker whose user picked an
+  // order with it; Cora herself and every other launch never get it.
+  const wantsClaudeCode =
+    options.managedWorker === true && settings.coraRouteOrder?.includes("claudecode") === true;
+  const [state, nativeModels, claudeCode] = await Promise.all([
+    subscriptionState(),
+    nativeCatalogModels(),
+    wantsClaudeCode ? (options.claudeCodeReady ?? claudeCodeWorkerReady)() : Promise.resolve(false),
+  ]);
   if (!state) return null;
   return {
     subscriptions: state.configured,
     openRouterModels: new Set(configuredOpenRouterCoraModels(settings)),
     ...(nativeModels ? { nativeModels } : {}),
+    ...(claudeCode ? { claudeCode: true } : {}),
   };
+}
+
+export interface CoraRouteOptions {
+  /** A managed worker of a trusted run (not a direct chat, automation or
+   *  workflow step): the only launch Claude Code may run. */
+  managedWorker?: boolean;
+  /** Test seam for the Claude Code check. */
+  claudeCodeReady?: () => Promise<boolean>;
 }
 
 /**
@@ -81,10 +102,11 @@ export async function routeCoraModel(
   model: string,
   settings: AppSettings,
   availability?: CoraRouteAvailability | null,
+  options: CoraRouteOptions = {},
 ): Promise<string> {
   // No order chosen in Settings: every model launches as picked.
   if (settings.coraRouteOrder === undefined) return model;
-  const known = availability === undefined ? await coraRouteAvailability(settings) : availability;
+  const known = availability === undefined ? await coraRouteAvailability(settings, options) : availability;
   if (!known) return model;
   return chooseCoraRoute(model, normalizeCoraRouteOrder(settings.coraRouteOrder), known)?.model ?? model;
 }

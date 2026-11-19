@@ -54,9 +54,11 @@ const runStore = fs.readFileSync(
 );
 assert.match(
   runStore,
-  /result = fakeWorkflowWorker\s*\?\s*await runFakeWorkflowWorkerSession\([^)]*\)\s*:\s*fakePiWorker\s*\?\s*await runFakePiWorkerSession\([^)]*\)\s*:\s*isPiWorker\s*\?\s*await runPiWorkerSession\(/,
-  "run-store must dispatch claude/codex worker attempts straight to runPiWorkerSession",
+  /result = fakeWorkflowWorker\s*\?\s*await runFakeWorkflowWorkerSession\([^)]*\)\s*:\s*fakePiWorker\s*\?\s*await runFakePiWorkerSession\([^)]*\)\s*:\s*claudeCodeWorker\s*\?\s*await runClaudeCodeWorkerSession\([\s\S]*?\)\s*:\s*isPiWorker\s*\?\s*await runPiWorkerSession\(/,
+  "run-store must dispatch claude/codex worker attempts to runPiWorkerSession, except a managed worker the user routed to Claude Code",
 );
+// Claude Code is the one exception, and only for a model routed there.
+assert.match(runStore, /const claudeCodeWorker = managedWorker && claudeCodeModelOf\(piWorkerModel\) !== null;/);
 assert.match(
   runStore,
   /const isPiWorker =\s*\n?\s*!fakeWorkflowWorker &&\s*\n?\s*!fakePiWorker &&\s*\n?\s*\(task\.runtimePreference === "claude" \|\|\s*\n?\s*task\.runtimePreference === "codex" \|\|\s*\n?\s*task\.runtimePreference === "grok"\);/,

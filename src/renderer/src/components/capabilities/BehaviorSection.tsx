@@ -69,6 +69,7 @@ const ROUTE_LABELS: Record<CoraRoute, string> = {
   subscription: "your sign-ins",
   openrouter: "OpenRouter",
   subcloud: "Subcloud",
+  claudecode: "Claude Code (Claude workers)",
 };
 
 // The orders worth offering: the first route is the one that matters most.
@@ -76,6 +77,7 @@ const ROUTE_ORDER_CHOICES: CoraRoute[][] = [
   ["subscription", "openrouter", "subcloud"],
   ["openrouter", "subscription", "subcloud"],
   ["subcloud", "subscription", "openrouter"],
+  ["claudecode", "subscription", "openrouter", "subcloud"],
 ];
 
 function routeOrderLabel(order: readonly CoraRoute[]): string {
@@ -112,8 +114,10 @@ function RouteOrderRow({
           xAI sign-in, an OpenRouter key with that model verified, or Subcloud once it is set up. A route never
           set up is skipped. With your sign-ins first, a sign-in that expired or reached its limit is not swapped
           for a paid key: that run stops and says what to fix. With OpenRouter first, every model with a verified
-          OpenRouter id runs on your OpenRouter key, paid per token, even when you have a sign-in for it. The Usage
-          tab of each run's details shows the route ("OpenRouter key" for those), account and tokens it used.{" "}
+          OpenRouter id runs on your OpenRouter key, paid per token, even when you have a sign-in for it. With Claude
+          Code first, Cora's Claude workers run in Claude Code on the Claude account selected in Settings &gt;
+          Accounts; Cora herself stays on her own route. The Usage tab of each run's details shows the route
+          ("OpenRouter key" for those), account and tokens it used.{" "}
           {CLAUDE_PI_LOGIN_BILLING_NOTE}
         </span>
       </span>
