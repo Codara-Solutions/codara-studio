@@ -10,6 +10,7 @@
 // fire, it picks the backend from `run.chatBackend` (defaulting to Pi
 // for legacy / unset chats) and calls one of the methods below.
 
+import { userCommandsHeader } from "../../shared/user-commands";
 import type {
   AgentEffortLevel,
   ChatBackendKind,
@@ -471,7 +472,15 @@ export function buildManagerTurnPrompt(
   inputMessages: HumanRunMessage[],
   opts?: ManagerTurnPromptOptions,
 ): string {
-  return appendSubscriptionHeadroom(
+  // Pi's manager extension strips this line and runs the skills it names
+  // (src/shared/user-commands.ts); it goes first, before any user text.
+  // Only what the user typed (typedByUser), once: an agent's chat.send, a delivery,
+  // an answer whose option text the model wrote, or a synthetic note never
+  // runs a skill.
+  const commands = (run.chatBackend ?? "pi") === "pi"
+    ? userCommandsHeader(inputMessages.map((message) => (userTypedCommandSource(message) ? message.message : "")))
+    : "";
+  const prompt = appendSubscriptionHeadroom(
     appendCoraMemory(
       appendPriorRuns(
         appendRunState(buildManagerTurnInput(run, inputMessages, opts), opts?.runState),
@@ -480,6 +489,22 @@ export function buildManagerTurnPrompt(
       opts?.coraMemory,
     ),
     opts?.subscriptionHeadroom,
+  );
+  return commands ? `${commands}\n${prompt}` : prompt;
+}
+
+/** Whether a message may run a skill by starting with a slash command. */
+export function userTypedCommandSource(message: HumanRunMessage): boolean {
+  return (
+    message.typedByUser === true &&
+    message.author === "user" &&
+    message.kind === "note" &&
+    !message.boardNote &&
+    !message.resumeNote &&
+    !message.compaction &&
+    // A replay of a turn the provider already had (a parked or stopped turn
+    // retried) never runs its command a second time.
+    message.redelivered !== true
   );
 }
 

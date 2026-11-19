@@ -30,6 +30,7 @@ async function main() {
     on(name, handler) { hooks.set(name, [...(hooks.get(name) ?? []), handler]); },
     registerTool(tool) { registered.set(tool.name, tool); },
     sendMessage(message, options) { followUps.push({ message, options }); },
+    getCommands() { return []; },
   });
   const emit = async (name, event = {}) => { for (const handler of hooks.get(name) ?? []) await handler(event, {}); };
   await registered.get("codara_whiteboard_update").execute("update", {});

@@ -1,3 +1,4 @@
+import { withoutLeadingSlashCommand } from "../../shared/user-commands";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type { PiManagerLaunchPlan } from "./pi-runtime";
@@ -425,7 +426,13 @@ export class PiRpcClient {
   }
 
   prompt(message: string, streamingBehavior?: "steer" | "followUp"): Promise<unknown> {
-    return this.request({ type: "prompt", message, ...(streamingBehavior ? { streamingBehavior } : {}) });
+    // Studio never sends a command: a slash at the start is text (a worker
+    // prompt, steering, a replay), so Pi must not run it as one.
+    return this.request({
+      type: "prompt",
+      message: withoutLeadingSlashCommand(message),
+      ...(streamingBehavior ? { streamingBehavior } : {}),
+    });
   }
 
   abort(): Promise<unknown> {
