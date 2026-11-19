@@ -73,6 +73,13 @@ test("the route order is saved and cleared, and a run shows its routes", async (
     expect(textWidth).toBeGreaterThan(rowWidth * 0.55);
     await page.screenshot({ path: testInfo.outputPath("route-order-setting.png") });
 
+    // OpenRouter first is paid per token even for a model a sign-in serves;
+    // the setting says so where it is chosen.
+    await order.selectOption("openrouter,subscription,subcloud");
+    await expect.poll(savedOrder).toEqual(["openrouter", "subscription", "subcloud"]);
+    await expect(order.locator("option:checked")).toHaveText("OpenRouter first (paid key)");
+    await expect(dialog.getByText(/With OpenRouter first, every model with a verified OpenRouter id runs on your OpenRouter key, paid per token, even when you have a sign-in for it\./)).toBeVisible();
+
     await order.selectOption("");
     await expect.poll(savedOrder).toBeUndefined();
     await page.keyboard.press("Escape");

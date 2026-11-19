@@ -92,7 +92,7 @@ function site(request: IncomingMessage, response: ServerResponse): void {
     return;
   }
   if (url.pathname === "/api/data") {
-    response.writeHead(200, { "Content-Type": "application/json", "Set-Cookie": "session=secret-value; HttpOnly; Path=/" }).end('{"ok":true}');
+    response.writeHead(200, { "Content-Type": "application/json", "Set-Cookie": ["session=secret-value; HttpOnly; Path=/", "theme=dark; Path=/"] }).end('{"ok":true}');
     return;
   }
   if (url.pathname === "/to-bank") {
@@ -347,6 +347,33 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     // Response bodies as the page got them; a redirect has none.
     expect([details[0].request.body, details[1].request.body, details[2].request.body]).toEqual(['{"ok":true}', { unavailable: "a redirect has no body" }, '{"ok":true}']);
     expect(JSON.stringify(details)).not.toMatch(/cookie|secret-value/i);
+
+    // Cookies: only with the tab's cookie switch on, the tab's own site's, from Firefox's cookies API.
+    const cookies = (redact: boolean) => request("preview.storage", { tabId, area: "cookies", redact });
+    await expect(cookies(true)).rejects.toThrow(/need the user's permission/);
+    const setStorage = (on: boolean) => firefox!.evaluate(popup, `browser.runtime.sendMessage({ type: "setStorage", tabId: ${accountTab}, on: ${on} })`);
+    await setStorage(true);
+    await expect.poll(async () => (await cookies(false).catch((error) => ({ error: error.message }))).cookies?.length ?? 0, { timeout: 10_000 }).toBeGreaterThan(0);
+    const { cookies: jar } = await cookies(false);
+    expect(jar).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "theme", value: "dark", domain: "127.0.0.1", path: "/" }),
+      // HttpOnly values of the user's own browser stay redacted in Codara.
+      expect.objectContaining({ name: "session", value: "[redacted] (12 chars)", httpOnly: true }),
+    ]));
+    expect(JSON.stringify(jar)).not.toMatch(/secret-value/);
+    // Site storage, read and changed through the page, as in Chrome; changing cookies or clearing IndexedDB and caches
+    // in the user's own browser is refused by Codara itself, as in Chrome.
+    expect(await request("preview.storage", { tabId, action: "set", area: "local", name: "draft", value: "hello" })).toMatchObject({ ok: true, set: "draft" });
+    expect(await request("preview.storage", { tabId, action: "set", area: "session", name: "step", value: "2" })).toMatchObject({ ok: true });
+    expect(await request("preview.storage", { tabId, area: "local", redact: false })).toMatchObject({ localStorage: { items: { draft: "hello" } } });
+    expect(await firefox.evaluate(accountContext, "localStorage.getItem('draft') + ' ' + sessionStorage.getItem('step')")).toBe("hello 2");
+    expect(await request("preview.storage", { tabId, action: "clear", area: "local", name: "draft" })).toMatchObject({ removed: { localStorage: 1 } });
+    expect(await request("preview.storage", { tabId, action: "clear", area: "session" })).toMatchObject({ removed: { sessionStorage: 1 } });
+    await expect(request("preview.storage", { tabId, action: "set", area: "cookies", name: "a", value: "b" })).rejects.toThrow(/does not change cookies in your own browser/);
+    await expect(request("preview.storage", { tabId, action: "clear", area: "indexeddb" })).rejects.toThrow(/does not clear cookies, IndexedDB or caches in your own browser/);
+    await setStorage(false);
+    await expect.poll(async () => cookies(true).then(() => "read", (error) => error.message), { timeout: 10_000 }).toMatch(/need the user's permission/);
+    await expect(request("preview.storage", { tabId, action: "set", area: "local", name: "draft", value: "x" })).rejects.toThrow(/need the user's permission/);
 
     // Idle: Firefox unloads an idle event page (after 15 s in this profile)
     // and traffic on its socket does not count. The extension's keep-alive

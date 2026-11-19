@@ -18,7 +18,7 @@ export function run() {
   assert.equal(manifest.host_permissions, undefined, "no site access at install");
   // Only "tabs" has a line in Firefox's install question: the others have none (measured on 160; the e2e checks it).
   // The body filter must be granted at install: granted later, it did not start (measured).
-  assert.deepEqual([...manifest.permissions].sort(), ["alarms", "scripting", "storage", "tabs", "webRequest", "webRequestBlocking", "webRequestFilterResponse"]);
+  assert.deepEqual([...manifest.permissions].sort(), ["alarms", "cookies", "scripting", "storage", "tabs", "webRequest", "webRequestBlocking", "webRequestFilterResponse"]);
   // userScripts can only be optional, and is asked alone (Firefox refuses it with another permission).
   assert.deepEqual(manifest.optional_permissions, ["userScripts"]);
   assert.deepEqual(manifest.optional_host_permissions, ["<all_urls>"], "one site at a time, or all sites, asked from the popup");

@@ -149,7 +149,7 @@ assert.doesNotMatch(read("src/main/storage.ts"), /coraRouteOrder: \[\.\.\.DEFAUL
 // A chat on a pinned account is never routed off it.
 assert.match(runStore, /if \(chat\.backend !== "pi" \|\| managerRoutePinnedByUser\(run\)\) return chat\.model;/);
 assert.match(runStore, /draft\.chatAccountProfileId = candidate\.accountProfileId;\n\s+draft\.chatAccountProfileImplicit = true;/);
-assert.match(runStore, /draft\.chatAccountProfileId = resolved\.account\.profileId;\n\s+\/\/ The user picked this account to resume on\.\n\s+delete draft\.chatAccountProfileImplicit;/);
+assert.match(runStore, /draft\.chatAccountProfileId = resolved\.account\.profileId;\n\s+\/\/ The user picked this account to resume on\.[^\n]*\n(?:\s+\/\/[^\n]*\n)*\s+delete draft\.chatAccountProfileImplicit;/);
 // Two turns of a chat on anthropic/claude-opus-5 with sign-ins first: turn 1
 // routes to the sign-in and Cora pins that account implicitly; turn 2 must
 // still route, not go back to the paid OpenRouter spelling.
