@@ -73,6 +73,10 @@ export async function run(assembled) {
   hook.page.console.log(loop, { long: Array(100_000).fill(7) }, new Date(0));
   assert.deepEqual(hook.sent.at(-1).args.map((arg) => arg.value.slice(0, 40)), ['{"a":1,"self":{"a":1,"self":{"a":1,"self', '{"long":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7', '"1970-01-01T00:00:00.000Z"']);
   assert.ok(hook.sent.at(-1).args[1].value.endsWith(",…]}"), "a long array is cut, not walked");
+  hook.page.console.log(Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`k${i}`, i])), { ["x".repeat(50_000)]: 1, y: 2 });
+  assert.ok(hook.sent.at(-1).args[0].value.endsWith(',"k99":99,…}'), "at most 100 keys are shown");
+  assert.equal(hook.sent.at(-1).args[1].value.length <= 10_010, true, "key text counts against the length");
+  hook.sent.pop();
   hook.sent.pop();
   assert.deepEqual(hook.sent.at(-1).args.slice(0, 7), [
     { type: "object", value: '{"x":1}' },

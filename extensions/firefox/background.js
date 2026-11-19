@@ -283,7 +283,8 @@ async function handleRequest(request) {
       const tab = await usableTab(request.tabId);
       stillLive(socket);
       if (!state.attached.includes(tab.id)) {
-        attachedSince.set(tab.id, Date.now());
+        // From the next millisecond: an entry logged in this one may predate the attachment.
+        attachedSince.set(tab.id, Date.now() + 1);
         await save({ attached: withValue(state.attached, tab.id) });
         void refresh();
       }
@@ -661,7 +662,7 @@ function consoleMode(tab) {
 // logged before it. Unknown after the event page restarts, so then from
 // its start.
 const attachedSince = new Map();
-const startedAt = Date.now();
+const startedAt = Date.now() + 1;
 const consoleAnswer = (tab) => ({ mode: consoleMode(tab), since: attachedSince.get(tab?.id) ?? startedAt });
 
 /**
@@ -724,17 +725,25 @@ function redirectOf(seen) {
   return false;
 }
 
-/** Sends the request's own event first if Firefox reported none with headers (a cached load). */
+/**
+ * Sends the hop's own event first if Firefox reported none with headers (a
+ * cached load). Whether the request still goes on to Codara.
+ */
 function requestSent(details) {
   const seen = requests.get(details.requestId);
-  if (!seen || seen.sent || !redirectOf(seen)) return;
+  if (!seen) return false;
+  if (seen.sent) return true;
+  if (!redirectOf(seen)) return false;
   sendNetwork(details, requestEvent(seen.details, { headers: [], redirect: seen.redirect, loaderId: loaderOf(seen.details) }));
-  Object.assign(seen, { sent: true, redirect: null });
+  Object.assign(seen, { sent: true, open: true, redirect: null });
+  return true;
 }
 
-/** Ends a request Codara will hear no more of, as failed. */
+/** Ends a request Codara will hear no more of: failed, if Codara has its row. */
 function requestLost(details, why) {
-  if (requests.delete(details.requestId)) sendNetwork(details, failedEvent({ ...details, error: why }));
+  const seen = requests.get(details.requestId);
+  requests.delete(details.requestId);
+  if (seen?.open) sendNetwork(details, failedEvent({ ...details, error: why }));
 }
 
 const loaderOf = (details) => (details.type === "main_frame" ? pageOf(details.tabId).nextLoaderId : pageOf(details.tabId).loaderId);
@@ -746,7 +755,7 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
   requests.set(details.requestId, { redirect: null, ...requests.get(details.requestId), details, sent: false });
   if (requests.size > REQUESTS_KEPT) {
     const [oldest] = requests.values();
-    if (oldest.sent && networkWanted(oldest.details)) requestLost(oldest.details, "Too many requests open at once to follow this one.");
+    if (networkWanted(oldest.details)) requestLost(oldest.details, "Too many requests open at once to follow this one.");
     else requests.delete(oldest.details.requestId);
   }
 }, ALL_URLS);
@@ -754,12 +763,11 @@ chrome.webRequest.onSendHeaders.addListener((details) => {
   const seen = requests.get(details.requestId);
   if (!seen || seen.sent || !networkWanted(details) || !redirectOf(seen)) return;
   sendNetwork(details, requestEvent(details, { headers: details.requestHeaders, redirect: seen.redirect, loaderId: loaderOf(details) }));
-  Object.assign(seen, { sent: true, redirect: null });
+  Object.assign(seen, { sent: true, open: true, redirect: null });
 }, ALL_URLS, ["requestHeaders"]);
 chrome.webRequest.onBeforeRedirect.addListener(async (details) => {
   const seen = requests.get(details.requestId);
-  if (!seen || !networkWanted(details)) return;
-  requestSent(details);
+  if (!seen || !networkWanted(details) || !requestSent(details)) return;
   Object.assign(seen, { redirect: details, sent: false });
   // The next hop goes where Codara may not look (a blocked site), or where
   // Firefox tells the extension nothing (a site it may not use): this
@@ -770,16 +778,12 @@ chrome.webRequest.onBeforeRedirect.addListener(async (details) => {
   if (!(await chrome.permissions.contains({ origins: [`${protocol}//${hostname}/*`] }).catch(() => false))) requestLost(details, HIDDEN_REDIRECT);
 }, ALL_URLS, ["responseHeaders"]);
 chrome.webRequest.onResponseStarted.addListener((details) => {
-  if (!requests.has(details.requestId) || !networkWanted(details)) return;
-  requestSent(details);
+  if (!requests.has(details.requestId) || !networkWanted(details) || !requestSent(details)) return;
   sendNetwork(details, responseEvent(details, loaderOf(details)));
 }, ALL_URLS, ["responseHeaders"]);
 for (const [event, toEvent] of [[chrome.webRequest.onCompleted, finishedEvent], [chrome.webRequest.onErrorOccurred, failedEvent]]) {
   event.addListener((details) => {
-    if (requests.has(details.requestId) && networkWanted(details)) {
-      requestSent(details);
-      sendNetwork(details, toEvent(details));
-    }
+    if (requests.has(details.requestId) && networkWanted(details) && requestSent(details)) sendNetwork(details, toEvent(details));
     requests.delete(details.requestId);
   }, ALL_URLS);
 }
@@ -1081,7 +1085,10 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
     void ready.then(() => respond(consoleAnswer(sender.tab)));
     return true;
   }
-  if (request?.type === "codara-console-entry" && consoleMode(sender.tab) === "on" && consoleBudget(sender.tab.id)) {
+  // An entry from before the tab's current attachment (a replay the hook
+  // should have dropped) never goes on.
+  const fresh = request?.entry?.at >= consoleAnswer(sender.tab).since;
+  if (request?.type === "codara-console-entry" && fresh && consoleMode(sender.tab) === "on" && consoleBudget(sender.tab.id)) {
     const event = consoleEvent(request.entry);
     if (event) sendLive({ type: "cdp_event", tabId: sender.tab.id, method: event[0], params: event[1] });
   }

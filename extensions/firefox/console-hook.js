@@ -41,6 +41,7 @@
   }
   function setMode(next, since) {
     mode = ["on", "wait"].includes(next) && Number.isFinite(since) ? next : "off";
+    // `since` is the first millisecond after the attachment: anything kept from before is dropped.
     kept = mode === "off" ? [] : kept.filter((entry) => entry.at >= since);
     if (mode === "on") for (const entry of kept.splice(0)) send(entry);
   }
@@ -60,12 +61,23 @@
     else if (depth >= 4) out = Array.isArray(value) ? "[…]" : "{…}";
     else {
       const array = Array.isArray(value);
-      const keys = array ? [] : Object.keys(value);
+      // At most 101 keys are looked up (one to tell there are more), each charged to the room left.
+      const keys = [];
+      if (!array) {
+        for (const key in value) {
+          if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+          if (keys.push(key) > 100) break;
+        }
+      }
       const length = array ? value.length : keys.length;
       const parts = [];
       for (let i = 0; i < Math.min(length, 100) && room.left > 0; i++) {
-        const part = array ? json(value[i], room, depth + 1) : `${JSON.stringify(keys[i])}:${json(value[keys[i]], room, depth + 1)}`;
-        parts.push(part);
+        if (array) parts.push(json(value[i], room, depth + 1));
+        else {
+          const key = JSON.stringify(keys[i].slice(0, room.left));
+          room.left -= key.length + 1;
+          parts.push(`${key}:${json(value[keys[i]], room, depth + 1)}`);
+        }
       }
       if (length > parts.length) parts.push("…");
       return array ? `[${parts.join(",")}]` : `{${parts.join(",")}}`;
