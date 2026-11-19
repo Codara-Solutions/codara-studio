@@ -59,3 +59,20 @@ export function consoleEvent(entry) {
   }
   return null;
 }
+
+/**
+ * Every address an event carries: its call site and the frames of any
+ * error stack in it. A same-origin frame can call the top page's console,
+ * so an entry is dropped whole when one of these is on a blocked site.
+ */
+export function consoleAddresses(params) {
+  const found = [];
+  const details = params?.exceptionDetails;
+  for (const frame of [...(params?.stackTrace?.callFrames ?? []), ...(details?.stackTrace?.callFrames ?? [])]) found.push(frame.url);
+  if (details?.url) found.push(details.url);
+  for (const value of [details?.exception, ...(params?.args ?? [])]) {
+    if (value?.subtype !== "error" || typeof value.description !== "string") continue;
+    for (const [, url] of value.description.matchAll(/@(.*?):\d+:\d+$/gm)) found.push(url);
+  }
+  return [...new Set(found.filter((url) => typeof url === "string" && url))];
+}

@@ -14,7 +14,7 @@
 // session, local for the pairing and the blocked sites), so a restarted page
 // picks up where it left off.
 
-import { consoleEvent } from "./lib/console.js";
+import { consoleAddresses, consoleEvent } from "./lib/console.js";
 import { LinkClient } from "./lib/link-client.js";
 import { failedEvent, finishedEvent, requestEvent, requestVisible, responseEvent } from "./lib/network.js";
 import {
@@ -1096,7 +1096,9 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
   const fresh = request?.entry?.at >= consoleAnswer(sender.tab).since;
   if (request?.type === "codara-console-entry" && fresh && consoleMode(sender.tab) === "on" && consoleBudget(sender.tab.id)) {
     const event = consoleEvent(request.entry);
-    if (event) sendLive({ type: "cdp_event", tabId: sender.tab.id, method: event[0], params: event[1] });
+    // A same-origin frame on a blocked path can log into this page: such an entry is dropped whole.
+    const fromBlocked = event && consoleAddresses(event[1]).some((url) => firefoxBlockingRule(url, rules));
+    if (event && !fromBlocked) sendLive({ type: "cdp_event", tabId: sender.tab.id, method: event[0], params: event[1] });
   }
   return false;
 });

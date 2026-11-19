@@ -65,11 +65,17 @@ function site(request: IncomingMessage, response: ServerResponse): void {
   }
   if (url.pathname === "/app") {
     // A strict page that logs from its first line and fetches with a cookie.
-    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; script-src 'nonce-app'; connect-src 'self'" });
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; script-src 'nonce-app'; connect-src 'self'; frame-src 'self'" });
     response.end(`<!doctype html><title>Page app</title><script nonce="app">window.getterRuns = 0;
       console.log("app started", { n: 1, get secret() { window.getterRuns++; return "s"; } }); console.warn("careful");
       window.dispatchEvent(new ErrorEvent("error", { message: "made up by the page" }));
-      fetch("/api/data").then(() => fetch("/api/hop")); setTimeout(() => null.y, 50);</script>`);
+      fetch("/api/data").then(() => fetch("/api/hop")); setTimeout(() => null.y, 50);</script><iframe src="/private/frame"></iframe>`);
+    return;
+  }
+  if (url.pathname === "/private/frame") {
+    // Same origin, on a blocked path: it logs into the top page's console and leaves an error there.
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    response.end(`<!doctype html><script>parent.console.log("from the private frame"); parent.Promise.reject(new Error("private boom"));</script>`);
     return;
   }
   if (url.pathname === "/api/hop") {
@@ -168,7 +174,7 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     const elsewhereTab = await tabIdOf("/elsewhere");
     expect(accountTab).toBeGreaterThan(0);
     // The test Codara's port, and localhost on the blocked list.
-    await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "state" }).then(({ blockedSites }) => browser.storage.local.set({ ports: [${linkPort}], blockedSites: blockedSites + "\\nlocalhost" }))`);
+    await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "state" }).then(({ blockedSites }) => browser.storage.local.set({ ports: [${linkPort}], blockedSites: blockedSites + "\\nlocalhost\\n127.0.0.1/private" }))`);
     await firefox.closeTab(popup);
     popup = await firefox.openExtensionPage(`${POPUP}?tab=${accountTab}`);
     const text = (selector: string) => firefox!.evaluate<string>(popup, `document.querySelector(${JSON.stringify(selector)})?.textContent ?? ""`);
@@ -309,7 +315,8 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
       .toEqual(expect.arrayContaining(["info app started {\"n\":1}", "warning careful", expect.stringMatching(/^error TypeError: can't access property "y"/)]));
     // Describing a logged object runs none of the page's code, and an error event the page made up is not the page's error.
     expect(await firefox.evaluate(accountContext, "window.getterRuns")).toBe(0);
-    expect(JSON.stringify((await request("preview.console", { tabId })).entries)).not.toMatch(/made up by the page/);
+    // Nothing from a frame on a blocked path of the same site: neither its log nor its error, nor its address.
+    expect(JSON.stringify((await request("preview.console", { tabId })).entries)).not.toMatch(/made up by the page|private/);
     await expect.poll(async () => (await request("preview.network", { tabId, filter: "/api/" })).requests.map((row: { status?: number; url: string }) => `${row.status} ${row.url}`), { timeout: 10_000 })
       .toEqual([`200 ${origin}/api/data`, `302 ${origin}/api/hop`, `200 ${origin}/api/data?again=1`]);
     // Cookies never leave Firefox while the tab's cookie switch is off, a redirect's included: not even their header names.

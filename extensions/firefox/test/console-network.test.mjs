@@ -125,6 +125,15 @@ export async function run(assembled) {
   assert.equal(long[1].args.length, 20);
   assert.equal(long[1].args[0].value.length, 10_000);
 
+  // Every address an entry would carry: its call site, and the frames in any error's stack.
+  const { consoleAddresses } = await import(pathToFileURL(join(assembled, "lib", "console.js")).href);
+  assert.deepEqual(consoleAddresses(consoleEvent({ kind: "console", level: "log", args: [{ type: "string", value: "hi" }], at: 1, source: "https://a.example/private/frame", line: 3 })[1]), ["https://a.example/private/frame"]);
+  assert.deepEqual(
+    consoleAddresses(consoleEvent({ kind: "exception", message: "Uncaught (in promise) Error: boom\nrun@https://a.example/private/frame:4:9\n@https://a.example/app.js:1:1\n", at: 1 })[1]),
+    ["https://a.example/private/frame", "https://a.example/app.js"],
+  );
+  assert.deepEqual(consoleAddresses(consoleEvent({ kind: "console", level: "error", args: [{ type: "object", subtype: "error", description: "Error: x\nf@https://a.example/private/f:1:1\n" }], at: 1 })[1]), ["https://a.example/private/f"]);
+
   // ── webRequest as Network events ──
   const base = { requestId: "38", tabId: 7, frameId: 0, type: "xmlhttprequest", url: "https://a.example/data.json", method: "GET", documentUrl: "https://a.example/app", timeStamp: 5000 };
   const sent = network.requestEvent(base, {
