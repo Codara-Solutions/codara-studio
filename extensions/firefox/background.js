@@ -14,6 +14,7 @@
 // session, local for the pairing and the blocked sites), so a restarted page
 // picks up where it left off.
 
+import { AccessClock } from "./lib/access-clock.js";
 import { BODY_FAILED, BODY_TYPES, BodyStore, NO_BODY, bodyPlan, copyBody } from "./lib/bodies.js";
 import { consoleAddresses, consoleEvent } from "./lib/console.js";
 import { STORAGE_WRITES, cookieGate, cookieUrls, readCookies, storageWriteRefusal } from "./lib/cookies.js";
@@ -149,17 +150,16 @@ async function load() {
   await chrome.storage.session.set({ attached: [], browserSession: state.browserSession });
 }
 
-// What a tab may share moved on: the switch, attaching, sharing, the blocked
-// sites, a tab's page or window, site access or the link. Counted, so a
-// cookie read that began before never goes out (tabCookies), even if the
-// same access is given again meanwhile.
-let accessGeneration = 0;
-const accessChanged = () => void (accessGeneration += 1);
-const ACCESS_KEYS = ["storageTabs", "attached", "shareAll", "shareWindows", "shareTabs", "stopped", "blockedSites"];
+// What a tab may share moved on: per tab its switch, attaching, sharing, its
+// page or window; for every tab the shared windows, the blocked sites, site
+// access or the link. Stamped (lib/access-clock.js), so a cookie read that
+// began before never goes out (tabCookies), even if the same access is
+// given again meanwhile, while other tabs' changes leave it alone.
+const access = new AccessClock();
 
 async function save(patch) {
   await ready;
-  if (ACCESS_KEYS.some((key) => key in patch)) accessChanged();
+  access.save(state, patch);
   Object.assign(state, patch);
   const session = {};
   const local = {};
@@ -243,7 +243,7 @@ const link = new LinkClient({
     void ready.then(() => sendLive({ type: "presence_settings", ...presenceSettings(state.presence) }));
   },
   onDisconnected: () => {
-    accessChanged();
+    access.all();
     keepAwake(false);
     // Every body filter lets go at once, before the tabs are let go one by one.
     forgetAllBodies();
@@ -589,7 +589,7 @@ chrome.permissions.onAdded.addListener(() => {
 });
 // A site the user took back: no body kept from before goes out (reads check again too).
 chrome.permissions.onRemoved.addListener(() => {
-  accessChanged();
+  access.all();
   bodies.purge(() => false);
 });
 
@@ -820,15 +820,18 @@ async function responseBody(tabId, params, socket) {
 async function tabCookies(tabId, params, socket) {
   const tab = await stillUsable(tabId, socket);
   seeTab(tab);
+  // Firefox names every tab's store; read without it, the default store
+  // would answer for a container tab or a private window.
+  if (typeof tab.cookieStoreId !== "string" || !tab.cookieStoreId) throw new Error(`Firefox did not say which cookie store ${agentTabId(tabId)} uses, so its cookies are not read.`);
+  const storeId = tab.cookieStoreId;
   const urls = cookieUrls(params, tab.url);
   const refusal = cookieGate({
     urls,
     ref: agentTabId(tabId),
-    now: () => ({ generation: accessGeneration, socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
+    now: () => ({ generation: access.of(tabId), socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
   });
-  const store = tab.cookieStoreId ? { storeId: tab.cookieStoreId } : {};
   const read = await readCookies(urls, {
-    getAll: (url) => browser.cookies.getAll({ url, ...store }),
+    getAll: (url) => browser.cookies.getAll({ url, storeId }),
     refusal,
     // Firefox's own site access for the tab's site (every URL asked is on its host).
     // (asked only once the refusal passed, so the tab shows a web page).
@@ -1013,7 +1016,7 @@ chrome.tabs.onAttached.addListener(scheduleRefresh);
 // event of it goes on, and it is let go if so.
 // Between windows a tab is in none: nothing of it goes on until it lands.
 chrome.tabs.onDetached.addListener((tabId) => {
-  accessChanged();
+  access.tab(tabId);
   const seen = tabsSeen.get(tabId);
   if (seen) seen.windowId = null;
   // Its bodies and requests go too (a hop that starts between windows is none
@@ -1022,7 +1025,7 @@ chrome.tabs.onDetached.addListener((tabId) => {
   bodies.forgetTab(tabId);
 });
 chrome.tabs.onAttached.addListener(async (tabId, { newWindowId }) => {
-  accessChanged();
+  access.tab(tabId);
   const seen = tabsSeen.get(tabId);
   if (seen) seen.windowId = newWindowId;
   await ready;
@@ -1044,7 +1047,7 @@ const navigating = new Set();
 const NAVIGATE_WAIT_MS = 25_000;
 
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
-  if ("url" in change) accessChanged();
+  if ("url" in change) access.tab(tabId);
   seeTab(tab);
   if (isPageChange(change)) navigations.set(tabId, (navigations.get(tabId) ?? 0) + 1);
   const { events, page, kind } = pageEvents(change, { id: tabId }, pageOf(tabId), newLoaderId, Date.now());
@@ -1070,7 +1073,7 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
   if (state.shareWindows.includes(windowId)) await save({ shareWindows: without(state.shareWindows, windowId) });
 });
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  accessChanged();
+  access.tab(tabId);
   tabsSeen.delete(tabId);
   attachedSince.delete(tabId);
   consoleSwitches.delete(tabId);
@@ -1278,7 +1281,7 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
 // are searched at once.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !state) return;
-  if ("blockedSites" in changes) accessChanged();
+  if ("blockedSites" in changes) access.all();
   for (const key of ["ports", "blockedSites", "allowOpen"]) {
     if (key in changes) state[key] = changes[key].newValue ?? LOCAL_DEFAULTS[key];
   }
@@ -1301,3 +1304,7 @@ void ready.then(async () => {
   await link.connect();
   await updateBadges();
 });
+
+// For the tests' fake Firefox (test/fake-browser.mjs); Firefox ignores what
+// an event page exports.
+export { access, link, ready };

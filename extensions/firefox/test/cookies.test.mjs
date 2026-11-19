@@ -15,7 +15,11 @@ export async function run(assembled) {
   assert.deepEqual(cookieUrls({ urls: ["https://shop.example/", 7, ""] }, tab.url), ["https://shop.example/"]);
 
   // The tab's own host only, with its switch on; never another site, a blocked one or a browser page.
-  assert.equal(refusal([tab.url, "https://shop.example/other?x=1", "http://shop.example/"]), null);
+  assert.equal(refusal([tab.url, "https://shop.example/other?x=1"]), null);
+  // The page's own scheme only: an http page's switch gives no Secure cookie, and site access is checked for the page's scheme.
+  assert.match(refusal(["http://shop.example/"]), /not this tab's site/);
+  assert.match(refusal(["https://shop.example/"], { tab: { id: 4, url: "http://shop.example/" } }), /not this tab's site/);
+  assert.equal(refusal(["http://shop.example/a"], { tab: { id: 4, url: "http://shop.example/" } }), null);
   assert.match(refusal([tab.url], { storageTabs: [5] }), /need the user's permission/);
   assert.match(refusal([tab.url], { tab: null }), /need the user's permission/, "a tab gone meanwhile");
   assert.match(refusal(["https://other.example/"]), /not this tab's site/);
