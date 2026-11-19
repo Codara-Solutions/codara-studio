@@ -58,8 +58,10 @@ export function firefoxExtensionFolder(): string | null {
 
 /**
  * Assembles this version's folder the first time; an existing one is left
- * exactly as it is. Written beside it first and renamed into place, so a
- * folder that exists is always whole.
+ * exactly as it is and nothing in it is ever deleted. Written beside it
+ * first and renamed into place in one step, so a folder Codara made is
+ * always whole: if another Codara got there first, its folder is used; if
+ * something else is in the way, the user is told.
  */
 export async function prepareFirefoxExtensionFolder(): Promise<string> {
   const sources = firefoxSources();
@@ -73,9 +75,13 @@ export async function prepareFirefoxExtensionFolder(): Promise<string> {
   };
   try {
     assemble(staging, sources);
-    if (existsSync(join(target, "manifest.json"))) return target;
-    rmSync(target, { recursive: true, force: true });
-    renameSync(staging, target);
+    try {
+      // Fails on a folder that is there and not empty: it is never replaced.
+      renameSync(staging, target);
+    } catch (error) {
+      if (existsSync(join(target, "manifest.json"))) return target;
+      throw new Error(`${target} is already there and is not Codara's extension for Firefox: move it away, then try again. (${error instanceof Error ? error.message : String(error)})`);
+    }
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }

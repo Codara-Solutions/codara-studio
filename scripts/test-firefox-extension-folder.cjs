@@ -97,10 +97,27 @@ function copyFiltered(from, to, filter) {
     assert.equal(fs.readFileSync(path.join(folder, "background.js"), "utf8"), "// the copy Firefox loaded\n");
     assert.equal(fs.statSync(path.join(folder, "manifest.json")).mtimeMs, before);
 
-    // A folder left without its manifest (a write cut short) is made again.
+    // Something else where the folder goes (Codara's own is only ever renamed
+    // in whole) is never deleted or written over: the user is told.
     fs.rmSync(path.join(folder, "manifest.json"));
+    fs.writeFileSync(path.join(folder, "notes.txt"), "the user's own file\n");
+    await assert.rejects((await load({ isPackaged: false, getAppPath: () => ROOT }, home)).prepareFirefoxExtensionFolder(), /is already there and is not Codara's extension for Firefox/);
+    assert.equal(fs.readFileSync(path.join(folder, "notes.txt"), "utf8"), "the user's own file\n");
+    assert.equal(fs.readFileSync(path.join(folder, "background.js"), "utf8"), "// the copy Firefox loaded\n");
+    assert.deepEqual(fs.readdirSync(path.dirname(folder)), [version], "no staging folder is left");
+    // Another Codara that publishes the folder while this one assembles: its folder is used, untouched.
+    fs.rmSync(folder, { recursive: true });
+    const other = await load({ isPackaged: false, getAppPath: () => ROOT }, home);
+    const pending = other.prepareFirefoxExtensionFolder();
+    fs.mkdirSync(folder);
+    fs.writeFileSync(path.join(folder, "manifest.json"), "{\"from\":\"the other Codara\"}");
+    assert.equal(await pending, folder);
+    assert.equal(fs.readFileSync(path.join(folder, "manifest.json"), "utf8"), "{\"from\":\"the other Codara\"}");
+    // An empty folder there holds nothing to lose: the extension goes in.
+    fs.rmSync(folder, { recursive: true });
+    fs.mkdirSync(folder);
     await (await load({ isPackaged: false, getAppPath: () => ROOT }, home)).prepareFirefoxExtensionFolder();
-    sameAsAssembly(folder, "made again");
+    sameAsAssembly(folder, "made in an empty folder");
 
     // Packaged: the sources as extraResources copies them, and they assemble the same add-on.
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
@@ -143,7 +160,7 @@ function copyFiltered(from, to, filter) {
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
-  console.log("firefox extension folder: assembled once per version into Codara's home, never rewritten, a cut-short one made again; packaged resources assemble the same add-on");
+  console.log("firefox extension folder: assembled once per version into Codara's home, never rewritten, nothing in its place deleted; packaged resources assemble the same add-on");
 })().catch((error) => {
   console.error(error);
   process.exit(1);

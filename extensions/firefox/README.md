@@ -21,8 +21,12 @@ In Codara: Settings > Browser > Firefox walks through these steps. Its folder
 is this version's, assembled into Codara's home
 (`<codara home>/firefox-extension/<version>/`, by
 `src/main/browser/firefox-extension.ts`) the first time Copy path or Reveal
-folder is pressed, and never rewritten: a newer Codara assembles its version
-beside it. From a checkout:
+folder is pressed, and never rewritten or deleted: a newer Codara assembles
+its version beside it. So each version's files are recorded in
+`versions.json`, and the tests fail when the add-on's files (the Chrome files
+it shares included) change under the same version: raise `version` in
+`manifest.json` and run `node extensions/firefox/build/assemble.mjs
+--record-version`. From a checkout:
 
 1. `node extensions/firefox/build/assemble.mjs` writes the extension to
    `extensions/firefox/dist/extension/`.

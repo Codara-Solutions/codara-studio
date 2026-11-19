@@ -54,6 +54,7 @@ export default function ChromeConnectCard({
   const [another, setAnother] = useState(false);
   // With the store route, the folder steps stay one click away.
   const [unpacked, setUnpacked] = useState(false);
+  const [firefoxTemporary, setFirefoxTemporary] = useState(false);
   const [folder, setFolder] = useState<string | null>(null);
   const [family, setFamily] = useState<BrowserFamily>("chromium");
   const [firefoxFolder, setFirefoxFolder] = useState<string | null>(null);
@@ -142,7 +143,7 @@ export default function ChromeConnectCard({
           <Segmented ariaLabel="Your browser" options={BROWSER_FAMILIES} value={family} onChange={setFamily} />
         ) : null}
         {step === "add" && family === "firefox" ? (
-          firefoxRoute.kind === "store" && !unpacked ? (
+          firefoxRoute.kind === "store" && !firefoxTemporary ? (
             <>
               <div className="chrome-connect__h">Add Codara to Firefox</div>
               <p className="chrome-connect__d">
@@ -153,7 +154,7 @@ export default function ChromeConnectCard({
                 <button type="button" className="spark-btn is-primary" onClick={() => void run(() => window.spark.openInSystemBrowser(firefoxRoute.url))}>
                   Add from Firefox Add-ons
                 </button>
-                <button type="button" className="chrome-connect__link" onClick={() => setUnpacked(true)}>
+                <button type="button" className="chrome-connect__link" onClick={() => setFirefoxTemporary(true)}>
                   Load it temporarily instead
                 </button>
               </div>
@@ -306,9 +307,12 @@ export default function ChromeConnectCard({
               Open a site agents may use, click the Codara icon and turn on <strong>Let agents use this tab</strong>. Agents never see
               the tabs you do not share.
             </p>
-            {firefoxConnected ? (
-              <p className="chrome-connect__d">In Firefox the popup then asks for that site and for scripts in pages: allow both there.</p>
-            ) : null}
+            {firefoxConnected ? <FirefoxAccessNote /> : null}
+            <div className="chrome-connect__actions">
+              <button type="button" className="spark-btn" onClick={() => setAnother(true)}>
+                Connect another browser
+              </button>
+            </div>
           </>
         ) : (
           <>
@@ -316,6 +320,7 @@ export default function ChromeConnectCard({
             <p className="chrome-connect__d">
               {`${progress.paired} browser${progress.paired === 1 ? "" : "s"} paired, ${progress.shared} tab${progress.shared === 1 ? "" : "s"} shared. Share or stop tabs from the extension's popup.`}
             </p>
+            {firefoxConnected ? <FirefoxAccessNote /> : null}
             <div className="chrome-connect__actions">
               <button type="button" className="spark-btn" onClick={() => setAnother(true)}>
                 Connect another browser
@@ -346,5 +351,15 @@ export default function ChromeConnectCard({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** Firefox shares a tab before it lets the extension into the page: its popup asks for both, after sharing. */
+function FirefoxAccessNote(): React.ReactElement {
+  return (
+    <p className="chrome-connect__d">
+      In Firefox, agents can read and act on a shared tab only once its popup has your OK: press <strong>Allow</strong> with the site's name and{" "}
+      <strong>Allow scripts</strong> there.
+    </p>
   );
 }
