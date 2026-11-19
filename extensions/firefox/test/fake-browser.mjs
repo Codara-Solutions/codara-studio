@@ -57,11 +57,13 @@ export function fakeBrowser({ tabs = [], local = {}, getAll = async () => [] } =
       storage: { session: area({}), local: area({ ...local }), ...events("storage", ["onChanged"]) },
       tabs: {
         get: async (id) => {
-          // A test can hold a lookup (fake.beforeGet) to change things while the page waits on Firefox.
-          await fake.beforeGet?.(id);
+          // Firefox answers as asked; a test can hold the answer on its way
+          // (fake.beforeGet) and change things before the page reads it.
           const tab = open.get(id);
-          if (!tab) throw new Error(`Invalid tab ID: ${id}`);
-          return { ...tab };
+          const answer = tab ? { ...tab } : null;
+          await fake.beforeGet?.(id);
+          if (!answer) throw new Error(`Invalid tab ID: ${id}`);
+          return answer;
         },
         query: async ({ windowId } = {}) => [...open.values()].filter((tab) => windowId === undefined || tab.windowId === windowId).map((tab) => ({ ...tab })),
         update: async (id, change) => ({ ...open.get(id), ...change }),

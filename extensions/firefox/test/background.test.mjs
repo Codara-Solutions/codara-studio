@@ -10,18 +10,19 @@ const tab = (id, more = {}) => ({ id, windowId: 1, url: SHOP, title: `Tab ${id}`
 
 // Every event the background page listens to, and what firing it does to
 // what a tab may share. A listener added to background.js fails this test
-// until it is listed here: "tab" moves that tab's stamp only, "all" every
-// tab's, "none" no stamp (it never takes access away).
+// until it is listed here: "tab" moves that tab's stamp only, "window" the
+// stamp of the tabs in that window, "all" every tab's, "sites" every tab's
+// when site access changes, "none" no stamp (it never takes access away).
 const LISTENERS = {
   "tabs.onUpdated": "tab",
   "tabs.onAttached": "tab",
   "tabs.onDetached": "tab",
   "tabs.onRemoved": "tab",
-  "windows.onRemoved": "all",
+  "windows.onRemoved": "window",
   "permissions.onRemoved": "all",
   "storage.onChanged": "all",
   "runtime.onMessage": "popup",
-  "permissions.onAdded": "all",
+  "permissions.onAdded": "sites",
   "tabs.onCreated": "none",
   "tabs.onActivated": "none",
   "webRequest.onBeforeRequest": "none",
@@ -91,6 +92,7 @@ export async function run(assembled) {
   const { page, restore } = await loadBackground(assembled, fake);
   try {
     const { access, link } = page;
+    const seenWindow = (id) => page.tabsSeen.get(id)?.windowId;
     liveLink(link);
     const request = (body) => link.deps.onRequest(body);
     for (const id of [1, 2, 3]) {
@@ -134,6 +136,8 @@ export async function run(assembled) {
     await moves("an unshared window closes", [], () => fake.fire("windows.onRemoved", 8));
     await moves("site access taken back", "all", () => fake.fire("permissions.onRemoved", { origins: ["https://shop.example/*"], permissions: [] }));
     await moves("site access granted", "all", () => fake.fire("permissions.onAdded", { origins: ["https://more.example/*"], permissions: [] }));
+    // A cookie read asks Firefox for the site's access, never for scripts in pages.
+    await moves("scripts in pages allowed", [], () => fake.fire("permissions.onAdded", { origins: [], permissions: ["userScripts"] }));
     await moves("the blocked sites changed in storage", "all", () => fake.fire("storage.onChanged", { blockedSites: { newValue: "bank.example\nnew.example" } }, "local"));
     await moves("the ports changed in storage", [], () => fake.fire("storage.onChanged", { ports: { newValue: [47615] } }, "local"));
     await moves("tab 1's cookie switch turned off", [1], () => fake.popup({ type: "setStorage", tabId: 1, on: false }));
@@ -195,6 +199,7 @@ export async function run(assembled) {
       }],
       ["tab 2 is detached by Codara", () => request({ type: "detach", tabId: 2 })],
       ["another tab closes", () => fake.fire("tabs.onRemoved", 7, { windowId: 1, isWindowClosing: false })],
+      ["scripts in pages allowed", () => fake.fire("permissions.onAdded", { origins: [], permissions: ["userScripts"] })],
       ["tab 2's window is shared and unshared", async () => {
         await fake.popup({ type: "setReach", reach: "window", windowId: 2 });
         await fake.popup({ type: "setReach", reach: "tabs", windowId: 2 });
@@ -273,6 +278,36 @@ export async function run(assembled) {
       await change();
       release();
       await assert.rejects(reading, (error) => !/secret/.test(error.message), `${what} during the first look ends the read`);
+    }
+
+    // A lookup answered before the tab moved, read after, never stands for
+    // where the tab is: the read checks the window its own look found, and
+    // the older answer does not overwrite the move.
+    {
+      let release;
+      fake.beforeGet = (id) => (id === 1 ? new Promise((resolve) => (release = resolve)) : null);
+      const enabling = request({ type: "cdp", tabId: 1, method: "Network.enable", params: {} });
+      await settle();
+      fake.beforeGet = null;
+      assert.equal(typeof release, "function", "the old lookup is on its way");
+      fake.tabs.set(1, { ...fake.tabs.get(1), windowId: 2 });
+      await fake.fire("tabs.onDetached", 1, { oldWindowId: 1, oldPosition: 0 });
+      await fake.fire("tabs.onAttached", 1, { newWindowId: 2, newPosition: 0 });
+      await fake.popup({ type: "setReach", reach: "window", windowId: 2 });
+      hold = true;
+      const reading = cookies(1);
+      await settle();
+      assert.equal(typeof hold, "function", "the read reached Firefox");
+      release();
+      await enabling;
+      assert.equal(seenWindow(1), 2, "the answer from before the move does not overwrite it");
+      await fake.popup({ type: "setReach", reach: "tabs", windowId: 2 });
+      hold();
+      hold = null;
+      await assert.rejects(reading, (error) => !/secret/.test(error.message), "the tab's new window unshared during the read ends it");
+      fake.tabs.set(1, { ...fake.tabs.get(1), windowId: 1 });
+      await fake.fire("tabs.onDetached", 1, { oldWindowId: 2, oldPosition: 0 });
+      await fake.fire("tabs.onAttached", 1, { newWindowId: 1, newPosition: 0 });
     }
 
     // The tab's own cookie store, and never the default one in its place.

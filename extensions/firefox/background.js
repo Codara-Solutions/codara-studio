@@ -342,6 +342,7 @@ async function answerCommand(request, socket) {
   // Noted before the first look at the tab: whatever changes its access from
   // here on ends a read that holds it, even while the tab is looked up.
   const since = access.now();
+  const lookedAt = lookStart();
   const child = childSessionError(request);
   if (child) throw new Error(child);
   const method = String(request.method ?? "");
@@ -357,7 +358,7 @@ async function answerCommand(request, socket) {
     if (verb === "enable") on.add(domain);
     else on.delete(domain);
     eventDomains.set(tab.id, on);
-    seeTab(tab);
+    seeTab(tab, lookedAt);
     if (domain === "Page") pageOf(tab.id, tab.url);
     if (domain === "Network" && verb === "disable") forgetRequests(tab.id);
     if (domain === "Network" && verb === "enable") bodyFilters(tab.id, true);
@@ -599,8 +600,10 @@ async function forgetGrantedAsks() {
 // In line with the popup's actions, so a grant never overtakes the ask it
 // answers. A read under way when access was given counts as changed too: it
 // was checked against what was granted before.
-chrome.permissions.onAdded.addListener(() => {
-  access.all();
+// Site access given: a cookie read asks Firefox for it, so a read under way
+// is asked again (scripts in pages alone change no read).
+chrome.permissions.onAdded.addListener((added) => {
+  if (added?.origins?.length) access.all();
   popupQueue = popupQueue.then(forgetGrantedAsks).catch(() => {});
 });
 // A site the user took back: no body kept from before goes out (reads check again too).
@@ -688,8 +691,18 @@ async function enforceSharing() {
 // Where each tab was last seen (window and address), so a request is
 // checked against where its tab is now without waiting on Firefox.
 const tabsSeen = new Map();
-function seeTab(tab) {
-  if (Number.isInteger(tab?.id)) tabsSeen.set(tab.id, { id: tab.id, windowId: tab.windowId, url: tab.url });
+// When Firefox last told of each tab in an event (loaded, moved, closed). A
+// lookup that began before that answers with an older view, and it never
+// overwrites the event's: lookups pass the tick lookStart() gave as they began.
+const tabsHeard = new Map();
+let heardTicks = 0;
+function heardOf(tabId) {
+  tabsHeard.set(tabId, ++heardTicks);
+}
+const lookStart = () => heardTicks;
+function seeTab(tab, lookedAt = Infinity) {
+  if (!Number.isInteger(tab?.id) || (tabsHeard.get(tab.id) ?? 0) > lookedAt) return;
+  tabsSeen.set(tab.id, { id: tab.id, windowId: tab.windowId, url: tab.url });
 }
 
 /** Whether Codara may get this tab's events: attached, shared where it is now, not on a blocked site. */
@@ -838,8 +851,9 @@ async function responseBody(tabId, params, socket) {
  * the link.
  */
 async function tabCookies(tabId, params, socket, since) {
+  const lookedAt = lookStart();
   const tab = await stillUsable(tabId, socket);
-  seeTab(tab);
+  seeTab(tab, lookedAt);
   // Firefox names every tab's store; read without it, the default store
   // would answer for a container tab or a private window.
   if (typeof tab.cookieStoreId !== "string" || !tab.cookieStoreId) throw new Error(`Firefox did not say which cookie store ${agentTabId(tabId)} uses, so its cookies are not read.`);
@@ -848,7 +862,8 @@ async function tabCookies(tabId, params, socket, since) {
   const refusal = cookieGate({
     urls,
     ref: agentTabId(tabId),
-    now: () => ({ changed: access.changedSince(since, tabId, tabsSeen.get(tabId)?.windowId), socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
+    // The window this request's own look found: had the tab moved since, its own stamp moved too.
+    now: () => ({ changed: access.changedSince(since, tabId, tab.windowId), socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
   });
   const read = await readCookies(urls, {
     getAll: (url) => browser.cookies.getAll({ url, storeId }),
@@ -861,7 +876,8 @@ async function tabCookies(tabId, params, socket, since) {
     },
     rules: () => rules,
   });
-  seeTab(await stillUsable(tabId, socket));
+  const lookedAgain = lookStart();
+  seeTab(await stillUsable(tabId, socket), lookedAgain);
   return new LateReply(read.build, read.still);
 }
 
@@ -1037,6 +1053,7 @@ chrome.tabs.onAttached.addListener(scheduleRefresh);
 // Between windows a tab is in none: nothing of it goes on until it lands.
 chrome.tabs.onDetached.addListener((tabId) => {
   access.tab(tabId);
+  heardOf(tabId);
   const seen = tabsSeen.get(tabId);
   if (seen) seen.windowId = null;
   // Its bodies and requests go too (a hop that starts between windows is none
@@ -1046,6 +1063,7 @@ chrome.tabs.onDetached.addListener((tabId) => {
 });
 chrome.tabs.onAttached.addListener(async (tabId, { newWindowId }) => {
   access.tab(tabId);
+  heardOf(tabId);
   const seen = tabsSeen.get(tabId);
   if (seen) seen.windowId = newWindowId;
   await ready;
@@ -1071,6 +1089,7 @@ const NAVIGATE_WAIT_MS = 25_000;
 const COSMETIC_CHANGES = new Set(["title", "favIconUrl", "audible", "mutedInfo", "attention", "isArticle", "sharingState", "pinned", "autoDiscardable"]);
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
   if (Object.keys(change).some((key) => !COSMETIC_CHANGES.has(key))) access.tab(tabId);
+  heardOf(tabId);
   seeTab(tab);
   if (isPageChange(change)) navigations.set(tabId, (navigations.get(tabId) ?? 0) + 1);
   const { events, page, kind } = pageEvents(change, { id: tabId }, pageOf(tabId), newLoaderId, Date.now());
@@ -1097,6 +1116,8 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
 });
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   access.tab(tabId);
+  // Kept heard, so a lookup answered before the close does not bring the tab back.
+  heardOf(tabId);
   tabsSeen.delete(tabId);
   attachedSince.delete(tabId);
   consoleSwitches.delete(tabId);
@@ -1333,4 +1354,4 @@ void ready.then(async () => {
 
 // For the tests' fake Firefox (test/fake-browser.mjs); Firefox ignores what
 // an event page exports.
-export { access, link, ready };
+export { access, link, ready, tabsSeen };
