@@ -16,6 +16,19 @@
 
 import { LinkClient } from "./lib/link-client.js";
 import {
+  NAVIGATE_BUSY_ERROR,
+  noteNavigationChange,
+  NAVIGATE_TIMEOUT_ERROR,
+  answersNavigation,
+  frameTree,
+  freshPage,
+  navigateAnswer,
+  navigationPlan,
+  startDeadline,
+  navigateUrl,
+  pageEvents,
+} from "./lib/navigation.js";
+import {
   CDP_METHODS,
   browserIdentity,
   isDomainToggle,
@@ -246,6 +259,13 @@ async function usableTab(tabId) {
   return tab;
 }
 
+/** Why agents may not use a tab on this address (as usableTab says it), or null. */
+function pageRefusal(tabId, url) {
+  if (isFirefoxRestrictedUrl(url)) return `${agentTabId(tabId)} is not shared with agents. Share it from the Codara extension popup first.`;
+  const rule = firefoxBlockingRule(url, rules);
+  return rule ? `${agentTabId(tabId)} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).` : null;
+}
+
 /** Throws unless the socket a request came on is still the live one (see liveSocket). */
 function stillLive(socket) {
   if (!socket || liveSocket() !== socket) throw new Error("This browser is no longer paired with Codara on this connection.");
@@ -287,10 +307,25 @@ async function handleRequest(request) {
 async function answerCommand(request, socket) {
   const child = childSessionError(request);
   if (child) throw new Error(child);
-  const tab = await usableTab(request.tabId);
   const method = String(request.method ?? "");
+  if (method === "Page.navigate") return navigateTab(Number(request.tabId), request.params ?? {}, socket);
+  const tab = await usableTab(request.tabId);
   if (!state.attached.includes(tab.id)) throw new Error(`${agentTabId(tab.id)} is not attached.`);
-  if (isDomainToggle(method)) return {};
+  if (isDomainToggle(method)) {
+    // Page events go to Codara from Page.enable on, as the debugger sends
+    // them: on this request's own connection only.
+    stillLive(socket);
+    if (method === "Page.enable") {
+      pageEventTabs.add(tab.id);
+      pageOf(tab.id, tab.url);
+    }
+    if (method === "Page.disable") pageEventTabs.delete(tab.id);
+    return {};
+  }
+  if (method === "Page.getFrameTree") {
+    const now = await stillUsable(tab.id, socket);
+    return frameTree(now.id, now.url, pageOf(now.id, now.url).loaderId);
+  }
   if (!PAGE_METHODS.includes(method)) throw new Error(unsupportedMethodError(method));
   const params = request.params !== null && typeof request.params === "object" ? request.params : {};
   for (const need of accessNeeds(method)) {
@@ -323,6 +358,92 @@ async function answerCommand(request, socket) {
   }
   throw new Error(unsupportedMethodError(method));
 }
+
+/**
+ * Page.navigate: the address is checked right before Firefox loads it,
+ * and the answer waits for the tab's change that answers it, as the
+ * debugger's waits for the commit: the new document, Firefox's error page,
+ * or the fragment reached.
+ */
+async function navigateTab(tabId, params, socket) {
+  // One deadline for the whole answer, from the request's arrival, under the 30 s Codara waits.
+  const deadline = startDeadline(NAVIGATE_WAIT_MS);
+  if (params === null || typeof params !== "object") throw new Error("Page.navigate needs an absolute http or https url.");
+  const checks = { isRestricted: isFirefoxRestrictedUrl, blockingRule: (address) => firefoxBlockingRule(address, rules) };
+  navigateUrl(params, tabId, checks);
+  // One navigation per tab, from before its first look at the tab until its
+  // answer is sent: overlapping loads could not be told apart.
+  if (navigating.has(tabId)) throw new Error(NAVIGATE_BUSY_ERROR);
+  navigating.add(tabId);
+  try {
+    const now = await untilDeadline(stillUsable(tabId, socket), deadline);
+    // Checked again with nothing awaited before the load: the user may have blocked the site meanwhile.
+    const url = navigateUrl(params, now.id, checks);
+    if (deadline.passed()) throw new Error(NAVIGATE_TIMEOUT_ERROR);
+    const page = pageOf(now.id, now.url);
+    const plan = navigationPlan(page, now.url, url);
+    // A #fragment of Firefox's error page stays the error page: the failed load it is.
+    if (plan === "error") return navigateAnswer(now.id, true, "failed", null);
+    if (plan === "there") return navigateAnswer(now.id, true, "moved", null);
+    const sameDocument = plan === "fragment";
+    // The id the next document gets, also when it commits after the answer.
+    const { nextLoaderId } = page;
+    const waiter = waitForNavigation(now.id, { sameDocument, url, started: false }, deadline);
+    try {
+      await untilDeadline(plan === "reload" ? chrome.tabs.reload(now.id) : chrome.tabs.update(now.id, { url }), deadline);
+    } catch (error) {
+      waiter.done(null);
+      throw error;
+    }
+    const kind = await waiter.answer;
+    // A redirect may have taken the tab to a blocked site or a page Firefox
+    // keeps extensions off, even if it left again since (the tab was let go then).
+    if (waiter.target.refused) throw new Error(waiter.target.refused);
+    await untilDeadline(stillUsable(now.id, socket), deadline);
+    // Codara stops waiting at 30 s: an answer past the deadline is none.
+    if (deadline.passed()) throw new Error(NAVIGATE_TIMEOUT_ERROR);
+    return navigateAnswer(now.id, sameDocument, kind, nextLoaderId);
+  } finally {
+    navigating.delete(tabId);
+  }
+}
+
+/**
+ * The tab's navigation waiting for its answer: the change that answers it
+ * (see answersNavigation), or null at the deadline or when the tab closes.
+ */
+function waitForNavigation(tabId, target, deadline) {
+  let resolve;
+  const waiter = {
+    target,
+    answer: new Promise((done) => (resolve = done)),
+    done(kind) {
+      clearTimeout(timer);
+      // Only its own entry: a later navigation's stays.
+      if (navigationWaiters.get(tabId) === waiter) navigationWaiters.delete(tabId);
+      resolve(kind);
+    },
+  };
+  const timer = setTimeout(() => waiter.done(null), deadline.left());
+  navigationWaiters.set(tabId, waiter);
+  return waiter;
+}
+
+function untilDeadline(promise, deadline) {
+  let timer;
+  const late = new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(NAVIGATE_TIMEOUT_ERROR)), deadline.left())));
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+/** The tab's tracked page, its address filled in from a checked tab when not known yet. */
+function pageOf(tabId, url = null) {
+  const page = pages.get(tabId) ?? freshPage(newLoaderId);
+  if (page.url === null && url) page.url = url;
+  pages.set(tabId, page);
+  return page;
+}
+
+const newLoaderId = () => crypto.randomUUID().replace(/-/g, "").toUpperCase();
 
 /** The tab again, right before the extension acts in it: still shared, allowed, attached, and the request still live. */
 async function stillUsable(tabId, socket) {
@@ -479,6 +600,7 @@ function handleMessage(message) {
 // ── Attached tabs ───────────────────────────────────────────────────────────
 
 async function detachTab(tabId) {
+  pageEventTabs.delete(tabId);
   if (!state.attached.includes(tabId)) return;
   await save({ attached: without(state.attached, tabId) });
   void refresh();
@@ -566,9 +688,25 @@ chrome.tabs.onDetached.addListener(scheduleRefresh);
 // Page changes per tab (loads and route changes), so a capture or a layout
 // reading can tell the tab did not leave its page at any point meanwhile.
 const navigations = new Map();
+// Each tab's page (lib/navigation.js), the tabs whose page events Codara
+// asked for, and the navigation waiting for each tab's answer.
+const pages = new Map();
+const pageEventTabs = new Set();
+const navigationWaiters = new Map();
+const navigating = new Set();
+const NAVIGATE_WAIT_MS = 25_000;
 
-chrome.tabs.onUpdated.addListener(async (tabId, change) => {
+chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
   if (isPageChange(change)) navigations.set(tabId, (navigations.get(tabId) ?? 0) + 1);
+  const { events, page, kind } = pageEvents(change, { id: tabId }, pageOf(tabId), newLoaderId, Date.now());
+  pages.set(tabId, page);
+  // Only for a tab Codara still may use: never a page on a blocked site, nor one Firefox keeps extensions off.
+  if (events.length && state && pageEventTabs.has(tabId) && state.attached.includes(tabId) && shared(tab) && !firefoxBlockingRule(tab.url, rules)) {
+    for (const [method, params] of events) sendLive({ type: "cdp_event", tabId, method, params });
+  }
+  const waiter = navigationWaiters.get(tabId);
+  if (waiter) noteNavigationChange(waiter.target, kind, change, (address) => pageRefusal(tabId, address));
+  if (waiter && answersNavigation(kind, change, waiter.target)) waiter.done(kind);
   if (change.url !== undefined) {
     await ready;
     if (state.attached.includes(tabId) && (firefoxBlockingRule(change.url, rules) || isFirefoxRestrictedUrl(change.url))) {
@@ -584,6 +722,10 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
 });
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   navigations.delete(tabId);
+  pages.delete(tabId);
+  pageEventTabs.delete(tabId);
+  navigationWaiters.get(tabId)?.done(null);
+  navigating.delete(tabId);
   await ready;
   const usage = { ...state.usage };
   delete usage[tabId];

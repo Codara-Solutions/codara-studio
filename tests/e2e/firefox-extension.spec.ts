@@ -53,8 +53,24 @@ function site(request: IncomingMessage, response: ServerResponse): void {
       <div style="height: 2400px"></div><p>Bottom of the page</p>`);
     return;
   }
+  if (url.pathname === "/slow-image") {
+    // Holds the load event of the page that shows it.
+    setTimeout(() => response.writeHead(200, { "Content-Type": "image/gif" }).end(), 1_500);
+    return;
+  }
+  if (url.pathname === "/slow-answer") {
+    // A server slow to answer: the page commits only after 1.5 s.
+    setTimeout(() => response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end("<!doctype html><title>Page slow-answer</title>"), 1_500);
+    return;
+  }
+  if (url.pathname === "/to-bank") {
+    response.writeHead(302, { Location: `http://localhost:${url.searchParams.get("port")}/bank` }).end();
+    return;
+  }
   response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-  response.end(`<!doctype html><title>Page ${url.pathname.slice(1)}</title><h1>Page ${url.pathname}</h1>`);
+  // An app page: it changes its route while it loads.
+  const image = url.pathname === "/slow-load" ? `<script>history.replaceState(null, "", "/slow-load?routed=1")</script><img src="/slow-image" alt="">` : "";
+  response.end(`<!doctype html><title>Page ${url.pathname.slice(1)}</title><h1>Page ${url.pathname}</h1>${image}`);
 }
 
 function freePort(): Promise<number> {
@@ -70,7 +86,7 @@ function freePort(): Promise<number> {
 
 const linkState = (codara: Page) => codara.evaluate(() => (window as unknown as { spark: { chromeLink: { state(): Promise<any> } } }).spark.chromeLink.state());
 
-test("the Firefox extension pairs, shares a tab with agents and says plainly what Firefox cannot do yet", async ({}, testInfo) => {
+test("the Firefox extension pairs, shares a tab with agents, and reads, acts on and navigates it", async ({}, testInfo) => {
   test.setTimeout(240_000);
   const binary = findFirefox();
   // CI sets CODARA_E2E_REQUIRE_FIREFOX, so a missing Firefox fails there instead of skipping.
@@ -123,7 +139,7 @@ test("the Firefox extension pairs, shares a tab with agents and says plainly wha
       prefs: { "extensions.background.idle.timeout": 15_000, "extensions.webextOptionalPermissionPrompts": true, ...(dark ? { "ui.systemUsesDarkTheme": 1, "layout.css.prefers-color-scheme.content-override": 0 } : {}) },
     });
     await firefox.install(extension);
-    await firefox.open(`${origin}/account`);
+    const accountContext = await firefox.open(`${origin}/account`);
     await firefox.open(`${origin}/elsewhere`);
     await firefox.open(`http://localhost:${sitePort}/bank`);
     let popup = await firefox.openExtensionPage(POPUP);
@@ -233,8 +249,39 @@ test("the Firefox extension pairs, shares a tab with agents and says plainly wha
     await shootPopup("firefox-popup", await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "state", tabId: ${accountTab} })`), null);
     await shootPopup("firefox-popup-asking", asking.state, asking.access);
 
-    // What the extension cannot do yet is refused with the reason, not a timeout.
-    await expect(request("preview.navigate", { tabId, url: `${origin}/elsewhere` })).rejects.toThrow(/Page\.navigate is not available in Firefox/);
+    // Navigate: Codara waits for the page's load event, sent by the
+    // extension from Firefox's tab changes (without it, 15 s go by), also
+    // when the page changes its route meanwhile.
+    const started = Date.now();
+    expect(await request("preview.navigate", { tabId, url: `${origin}/slow-load` })).toMatchObject({ url: `${origin}/slow-load?routed=1`, title: "Page slow-load" });
+    expect(Date.now() - started).toBeGreaterThan(1_200);
+    expect(Date.now() - started).toBeLessThan(10_000);
+    const tabUrl = () => firefox!.evaluate<string>(popup, `browser.tabs.get(${accountTab}).then((tab) => tab.url)`);
+    expect(await tabUrl()).toBe(`${origin}/slow-load?routed=1`);
+    // One navigation per tab at a time: a second one before the first commits is refused.
+    const [first, second] = await Promise.allSettled([
+      request("preview.navigate", { tabId, url: `${origin}/slow-answer` }),
+      new Promise((resolve) => setTimeout(resolve, 300)).then(() => request("preview.navigate", { tabId, url: `${origin}/elsewhere` })),
+    ]);
+    expect(first).toMatchObject({ status: "fulfilled", value: { url: `${origin}/slow-answer` } });
+    expect(second).toMatchObject({ status: "rejected", reason: { message: expect.stringMatching(/still on its way/) } });
+    // A fragment moves within the page, with no load to wait for.
+    expect(await request("preview.navigate", { tabId, url: `${origin}/slow-answer#part` })).toMatchObject({ url: `${origin}/slow-answer#part` });
+    // Firefox's error page is a failed load, not a page.
+    const deadPort = await freePort();
+    await expect(request("preview.navigate", { tabId, url: `http://127.0.0.1:${deadPort}/` })).rejects.toThrow(/could not load .*Firefox showed its error page/);
+    // On the error page a #fragment stays on the error page (measured): still a failed load, never "loaded".
+    await expect(request("preview.navigate", { tabId, url: `http://127.0.0.1:${deadPort}/#retry` })).rejects.toThrow(/could not load .*Firefox showed its error page/);
+    // A blocked site is refused before it loads, and the tab stays where it was.
+    await firefox.navigate(accountContext, `${origin}/account`);
+    await expect(request("preview.navigate", { tabId, url: `http://localhost:${sitePort}/bank` })).rejects.toThrow(/on a site agents may not use \("localhost"/);
+    expect(await tabUrl()).toBe(`${origin}/account`);
+    // A redirect there is refused too: the tab is let go, and its page never reported.
+    await expect(request("preview.navigate", { tabId, url: `${origin}/to-bank?port=${sitePort}` })).rejects.toThrow(/on a site agents may not use/);
+    await expect.poll(async () => (await linkState(codara)).browsers[0].tabs.find((tab: { id: string }) => tab.id === tabId)).toMatchObject({ blocked: true, url: "" });
+    await firefox.navigate(accountContext, `${origin}/account`);
+    await expect.poll(async () => (await linkState(codara)).browsers[0].tabs.find((tab: { id: string }) => tab.id === tabId)).toMatchObject({ blocked: false });
+    expect(await request("preview.navigate", { tabId, url: `${origin}/account#top` })).toMatchObject({ url: `${origin}/account#top` });
 
     // Idle: Firefox unloads an idle event page (after 15 s in this profile)
     // and traffic on its socket does not count. The extension's keep-alive
