@@ -123,9 +123,23 @@ export function run() {
     writeFileSync(join(rebuilt, "extensions/chrome/STORE.md"), "chrome's own\n");
     const stray = readZip(readFileSync(pack(join(out, "stray"), { firefoxDir: join(rebuilt, "extensions/firefox"), chromeDir: join(rebuilt, "extensions/chrome") }).source));
     assert.deepEqual([...stray.keys()], [...sourceZip.keys()], "the same files as before, nothing local added");
+    // Never into the sources (dist/ excepted), where the zips would become part of the add-on.
+    const opts = { firefoxDir: join(rebuilt, "extensions/firefox"), chromeDir: join(rebuilt, "extensions/chrome") };
+    assert.throws(() => pack(join(rebuilt, "extensions/firefox/release"), opts), /is inside the extension's sources/);
+    assert.throws(() => pack(join(rebuilt, "extensions/chrome/out"), opts), /is inside the extension's sources/);
+    assert.equal(existsSync(join(rebuilt, "extensions/firefox/release")), false, "nothing made there");
+    assert.equal(pack(join(rebuilt, "extensions/firefox/dist"), opts).sha256, first.sha256);
+    // A folder reached through a link is not the source's own.
+    const elsewhere = join(out, "elsewhere-lib");
+    cpSync(join(rebuilt, "extensions/chrome/lib"), elsewhere, { recursive: true });
+    rmSync(join(rebuilt, "extensions/chrome/lib"), { recursive: true });
+    symlinkSync(elsewhere, join(rebuilt, "extensions/chrome/lib"));
+    assert.throws(() => sourceEntries(opts, manifest.version), /lib\/link-client\.js is not a plain file of its folder/);
+    rmSync(join(rebuilt, "extensions/chrome/lib"));
+    cpSync(elsewhere, join(rebuilt, "extensions/chrome/lib"), { recursive: true });
     rmSync(join(rebuilt, "extensions/chrome/popup.css"));
     symlinkSync(join(CHROME_DIR, "popup.css"), join(rebuilt, "extensions/chrome/popup.css"));
-    assert.throws(() => sourceEntries({ firefoxDir: join(rebuilt, "extensions/firefox"), chromeDir: join(rebuilt, "extensions/chrome") }, manifest.version), /popup\.css is not a plain file/);
+    assert.throws(() => sourceEntries({ firefoxDir: join(rebuilt, "extensions/firefox"), chromeDir: join(rebuilt, "extensions/chrome") }, manifest.version), /popup\.css is not a plain file of its folder/);
     assert.notEqual(CHROME_DIR, join(rebuilt, "extensions/chrome"));
 
     // The upload is the version Codara hands out: a version whose files are not the recorded ones is not packed.

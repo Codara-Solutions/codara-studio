@@ -14,8 +14,9 @@
 // which the reviewer rebuilds the very same zip.
 
 import { createHash } from "node:crypto";
-import { linkSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { zip } from "../../chrome/build/pack.mjs";
@@ -119,19 +120,65 @@ out/codara-firefox-${version}.zip is then byte for byte the uploaded file
 const FIREFOX_BUILD_FILES = ["build/assemble.mjs", "build/pack.mjs", "shared.json", "versions.json"];
 const CHROME_BUILD_FILES = ["build/pack.mjs"];
 
-/** A source file's bytes; a link or anything but a plain file is refused, so the archive holds only what is named. */
-function sourceFile(path) {
-  if (!lstatSync(path).isFile()) throw new Error(`${path} is not a plain file: the source archive takes only the files the build reads.`);
+/**
+ * A source file's bytes. It must be a plain file reached without a link in
+ * any part of its path below its folder, so the archive holds only the
+ * folders' own files.
+ */
+function sourceFile(root, name) {
+  const path = join(root, name);
+  const notPlain = () => new Error(`${path} is not a plain file of its folder: the source archive takes only the files the build reads, never through a link.`);
+  let real;
+  try {
+    real = realpathSync(path);
+  } catch {
+    throw notPlain();
+  }
+  if (real !== join(realpathSync(root), name) || !lstatSync(path).isFile()) throw notPlain();
   return readFileSync(path);
 }
 
-/** The source archive's entries: exactly the files the assembly and this script read, as they are. */
-export function sourceEntries({ firefoxDir = FIREFOX_DIR, chromeDir = CHROME_DIR } = {}, version) {
-  const names = [
-    ...[...ownFiles(firefoxDir), ...FIREFOX_BUILD_FILES].map((name) => [`extensions/firefox/${name}`, join(firefoxDir, name)]),
-    ...[...sharedSpec(firefoxDir).files, ...CHROME_BUILD_FILES].map((name) => [`extensions/chrome/${name}`, join(chromeDir, name)]),
-  ].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return [{ name: "README.txt", data: Buffer.from(SOURCE_README(version)) }, ...names.map(([name, path]) => ({ name, data: sourceFile(path) }))];
+/** The files the assembly and this script read, as they are, each read once. */
+function sourceFiles({ firefoxDir = FIREFOX_DIR, chromeDir = CHROME_DIR } = {}) {
+  return [
+    ...[...ownFiles(firefoxDir), ...FIREFOX_BUILD_FILES].map((name) => ({ name: `extensions/firefox/${name}`, data: sourceFile(firefoxDir, name) })),
+    ...[...sharedSpec(firefoxDir).files, ...CHROME_BUILD_FILES].map((name) => ({ name: `extensions/chrome/${name}`, data: sourceFile(chromeDir, name) })),
+  ].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/** The source archive's entries: its README and exactly the files the build reads. */
+export function sourceEntries(options = {}, version) {
+  return [{ name: "README.txt", data: Buffer.from(SOURCE_README(version)) }, ...sourceFiles(options)];
+}
+
+/** `path` with its existing part's links resolved (the rest does not exist yet). */
+function realOrPlanned(path) {
+  const rest = [];
+  let at = resolve(path);
+  for (;;) {
+    try {
+      return join(realpathSync(at), ...rest.reverse());
+    } catch {
+      const parent = dirname(at);
+      if (parent === at) return resolve(path);
+      rest.push(basename(at));
+      at = parent;
+    }
+  }
+}
+
+/** The output folder may not be inside either source folder (but dist/), where the zips would become inputs. */
+function checkOutDir(outDir, firefoxDir, chromeDir) {
+  const within = (dir, root) => {
+    const rel = relative(root, dir);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  };
+  const out = [resolve(outDir), realOrPlanned(outDir)];
+  const roots = [firefoxDir, chromeDir].flatMap((root) => [root, realpathSync(root)]);
+  const dists = [firefoxDir, realpathSync(firefoxDir)].map((root) => join(root, "dist"));
+  if (out.some((dir) => roots.some((root) => within(dir, root)) && !dists.some((dist) => within(dir, dist)))) {
+    throw new Error(`${outDir} is inside the extension's sources, where the zips would be read as part of the add-on: pack into dist/ or a folder outside.`);
+  }
 }
 
 /** Whether `file` is free (false) or already a plain file with these bytes (true); anything else is refused. */
@@ -169,16 +216,33 @@ function publish(file, bytes) {
  * upload's sha256 and its entries.
  */
 export function pack(outDir = join(FIREFOX_DIR, "dist"), options = {}) {
-  const entries = assembledEntries(options);
+  const firefoxDir = resolve(options.firefoxDir ?? FIREFOX_DIR);
+  const chromeDir = resolve(options.chromeDir ?? CHROME_DIR);
+  // Every input is read once; the upload is assembled from that very copy, so the source archive always rebuilds it.
+  const files = sourceFiles({ firefoxDir, chromeDir });
+  const copy = mkdtempSync(join(tmpdir(), "codara-firefox-pack-"));
+  let entries;
+  let recorded;
+  try {
+    for (const { name, data } of files) {
+      mkdirSync(dirname(join(copy, name)), { recursive: true });
+      writeFileSync(join(copy, name), data);
+    }
+    const copied = { firefoxDir: join(copy, "extensions/firefox"), chromeDir: join(copy, "extensions/chrome") };
+    entries = assembledEntries(copied);
+    recorded = recordedVersions(copied.firefoxDir);
+  } finally {
+    rmSync(copy, { recursive: true, force: true });
+  }
   const { manifest, problems } = checkAddon(entries);
   // The upload is the very version Codara hands out: same number, same files.
-  const firefoxDir = options.firefoxDir ?? FIREFOX_DIR;
-  if (recordedVersions(firefoxDir)[manifest.version] !== payloadDigest(entries)) {
+  if (recorded[manifest.version] !== payloadDigest(entries)) {
     problems.push(`version ${manifest.version} is not recorded with these files: raise "version" in manifest.json and run node extensions/firefox/build/assemble.mjs --record-version`);
   }
   if (problems.length) throw new Error(`The add-on is not ready to pack:\n  ${problems.join("\n  ")}`);
   const bytes = zip(entries);
-  const sourceBytes = zip(sourceEntries(options, manifest.version));
+  const sourceBytes = zip([{ name: "README.txt", data: Buffer.from(SOURCE_README(manifest.version)) }, ...files]);
+  checkOutDir(outDir, firefoxDir, chromeDir);
   mkdirSync(outDir, { recursive: true });
   const file = join(outDir, `codara-firefox-${manifest.version}.zip`);
   const source = join(outDir, `codara-firefox-${manifest.version}-source.zip`);
