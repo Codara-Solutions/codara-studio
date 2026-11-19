@@ -15,8 +15,13 @@
 // therefore sees the same sequence of events as with real waits, minus the
 // scheduling jitter, which is what made the real-time versions slow and
 // occasionally flaky under load.
+//
+// Timers run on the monotonic timeline, as libuv's do. Date.now() is that
+// timeline plus a wall-clock offset that jumpWall() moves, the way NTP or a
+// manual clock change moves the real one. installFakeClock({ performance:
+// true }) also puts performance.now() (node:perf_hooks) on the timeline.
 
-function installFakeClock({ start = Date.now() } = {}) {
+function installFakeClock({ start = Date.now(), performance: fakePerformance = false } = {}) {
   const real = {
     setTimeout: globalThis.setTimeout,
     clearTimeout: globalThis.clearTimeout,
@@ -25,7 +30,11 @@ function installFakeClock({ start = Date.now() } = {}) {
     setImmediate: globalThis.setImmediate,
     Date: globalThis.Date,
   };
+  const perf = globalThis.performance;
+  const perfOwnNow = Object.getOwnPropertyDescriptor(perf, "now");
+  const perfBase = perf.now();
   let now = start;
+  let wallOffset = 0;
   let seq = 0;
   const timers = new Map();
 
@@ -71,11 +80,11 @@ function installFakeClock({ start = Date.now() } = {}) {
 
   class FakeDate extends real.Date {
     constructor(...args) {
-      if (args.length === 0) super(now);
+      if (args.length === 0) super(now + wallOffset);
       else super(...args);
     }
     static now() {
-      return now;
+      return now + wallOffset;
     }
   }
 
@@ -84,6 +93,9 @@ function installFakeClock({ start = Date.now() } = {}) {
   globalThis.clearTimeout = clear;
   globalThis.clearInterval = clear;
   globalThis.Date = FakeDate;
+  if (fakePerformance) {
+    Object.defineProperty(perf, "now", { configurable: true, writable: true, value: () => perfBase + (now - start) });
+  }
 
   const settle = async () => {
     // Two macrotask turns: microtasks queued by the callback drain before the
@@ -102,7 +114,7 @@ function installFakeClock({ start = Date.now() } = {}) {
   }
 
   return {
-    now: () => now,
+    now: () => now + wallOffset,
     pending: () => timers.size,
     async advance(ms) {
       const target = now + Math.max(0, Number(ms) || 0);
@@ -124,6 +136,11 @@ function installFakeClock({ start = Date.now() } = {}) {
     stall(ms) {
       now += Math.max(0, Number(ms) || 0);
     },
+    // Only the wall clock moves (NTP, a manual change): Date.now() jumps,
+    // the monotonic timeline and the timers do not.
+    jumpWall(ms) {
+      wallOffset += Number(ms) || 0;
+    },
     uninstall() {
       Object.assign(globalThis, {
         setTimeout: real.setTimeout,
@@ -132,6 +149,10 @@ function installFakeClock({ start = Date.now() } = {}) {
         clearInterval: real.clearInterval,
         Date: real.Date,
       });
+      if (fakePerformance) {
+        if (perfOwnNow) Object.defineProperty(perf, "now", perfOwnNow);
+        else delete perf.now;
+      }
     },
     real,
   };

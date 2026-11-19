@@ -8,9 +8,21 @@
 // neither window. Runs on scripts/fake-clock.cjs, whose stall() blocks the
 // loop without firing timers, so the order is exact and no real time passes.
 //
+// It also guards what is not a stall: a wall-clock jump (the probe measures
+// on the monotonic clock) and a system sleep (macOS's and Windows' monotonic
+// clocks keep counting through it, so the probe pauses on powerMonitor's
+// 'suspend' and, should that event be missed, drops a sample too long to be
+// anything but a sleep).
+//
+// What this suite can and cannot prove: main's old probe used perf_hooks'
+// native histogram, which this fake clock cannot drive, so its failure there
+// says nothing about the boundary bug. The boundary fix itself was shown
+// with real-time runs (see the pull request).
+//
 //   node scripts/test-event-loop-probe-boundary.cjs
 
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -43,7 +55,7 @@ async function main() {
       logLevel: "silent",
       alias: { "@shared": path.join(ROOT, "src", "shared") },
     });
-    const clock = require("./fake-clock.cjs").installFakeClock({ start: 1_800_000_000_000 });
+    const clock = require("./fake-clock.cjs").installFakeClock({ start: 1_800_000_000_000, performance: true });
     const probe = require(outfile);
     // 325 ms windows against the 50 ms sampler: a boundary at +325 while the
     // sampler last ran at +300, so after a stall the window timer is due first.
@@ -86,6 +98,85 @@ async function main() {
       const windows = probe.recentEventLoopWindows().slice(before);
       assert.ok(windows.length >= 1, JSON.stringify(windows));
       assert.ok(windows.every((window) => window.maxMs < 100), JSON.stringify(windows));
+    });
+
+    const EIGHT_HOURS = 8 * 60 * 60 * 1000;
+    const smooth = (windows) => windows.length >= 1 && windows.every((window) => window.maxMs < 100);
+
+    await check("the wall clock jumping 8 hours forward is not a stall", async () => {
+      const before = probe.recentEventLoopWindows().length;
+      const lines = [];
+      assert.equal(probe.startEventLoopProbe((line) => lines.push(line), env), true);
+      await clock.advance(120);
+      clock.jumpWall(EIGHT_HOURS);
+      await clock.advance(700);
+      probe.stopEventLoopProbe();
+      const windows = probe.recentEventLoopWindows().slice(before);
+      assert.ok(smooth(windows), JSON.stringify(windows));
+      assert.ok(!lines.some((line) => /stalled/.test(line)), lines.join("\n"));
+    });
+
+    // A sleep as macOS and Windows see it: the monotonic clock counts it and no
+    // timer fires until the machine is back. 30 s is under the probe's sleep
+    // ceiling, so only the pause on 'suspend' keeps it out.
+    const SHORT_SLEEP = 30_000;
+    await check("a 30 s system sleep between suspend and resume is not a stall", async () => {
+      const before = probe.recentEventLoopWindows().length;
+      const power = new EventEmitter();
+      const lines = [];
+      assert.equal(probe.startEventLoopProbe((line) => lines.push(line), env, power), true);
+      await clock.advance(120);
+      power.emit("suspend");
+      clock.stall(SHORT_SLEEP);
+      power.emit("resume");
+      await clock.advance(700);
+      probe.stopEventLoopProbe();
+      assert.equal(power.listenerCount("suspend") + power.listenerCount("resume"), 0, "listeners left after stop");
+      const windows = probe.recentEventLoopWindows().slice(before);
+      assert.ok(smooth(windows), JSON.stringify(windows));
+      assert.ok(!lines.some((line) => /stalled/.test(line)), lines.join("\n"));
+    });
+
+    await check("a sleep whose resume event comes after the overdue timers is not a stall", async () => {
+      const before = probe.recentEventLoopWindows().length;
+      const power = new EventEmitter();
+      assert.equal(probe.startEventLoopProbe(() => undefined, env, power), true);
+      await clock.advance(120);
+      power.emit("suspend");
+      clock.stall(SHORT_SLEEP);
+      await clock.advance(100);
+      power.emit("resume");
+      await clock.advance(700);
+      probe.stopEventLoopProbe();
+      const windows = probe.recentEventLoopWindows().slice(before);
+      assert.ok(smooth(windows), JSON.stringify(windows));
+    });
+
+    await check("a sleep whose suspend event was missed is not a stall", async () => {
+      const before = probe.recentEventLoopWindows().length;
+      assert.equal(probe.startEventLoopProbe(() => undefined, env, new EventEmitter()), true);
+      await clock.advance(120);
+      clock.stall(EIGHT_HOURS);
+      await clock.advance(700);
+      probe.stopEventLoopProbe();
+      const windows = probe.recentEventLoopWindows().slice(before);
+      assert.ok(smooth(windows), JSON.stringify(windows));
+    });
+
+    await check("a stall after a resume still shows", async () => {
+      const before = probe.recentEventLoopWindows().length;
+      const power = new EventEmitter();
+      assert.equal(probe.startEventLoopProbe(() => undefined, env, power), true);
+      await clock.advance(120);
+      power.emit("suspend");
+      clock.stall(SHORT_SLEEP);
+      power.emit("resume");
+      await clock.advance(120);
+      clock.stall(1_500);
+      await clock.advance(700);
+      probe.stopEventLoopProbe();
+      const windows = probe.recentEventLoopWindows().slice(before);
+      assert.ok(windows.some((window) => window.maxMs >= 1_400), JSON.stringify(windows));
     });
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });

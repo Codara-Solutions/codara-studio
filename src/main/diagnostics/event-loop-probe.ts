@@ -19,10 +19,18 @@
 // background is not woken 20 times a second; the freeze watchdog keeps
 // watching either way.
 //
+// Time asleep is not a stall either. The sampler reads performance.now(),
+// libuv's uv_hrtime, so a wall-clock change does not move it. But that clock
+// only stops during a system sleep on Linux (CLOCK_MONOTONIC); on macOS it is
+// mach_continuous_time and on Windows QueryPerformanceCounter, and both keep
+// counting through a sleep. So sampling also pauses between powerMonitor's
+// 'suspend' and 'resume', and a single gap over SLEEP_CEILING_MS, which only
+// a sleep whose 'suspend' never arrived produces, is dropped.
+//
 //   CODARA_EVENT_LOOP_WINDOW_MS=60000   window length (tests use less)
 //   CODARA_EVENT_LOOP_PROBE=0           no probe
 
-import { createHistogram } from "node:perf_hooks";
+import { createHistogram, performance } from "node:perf_hooks";
 import type { EventLoopWindow } from "@shared/diagnostics";
 import { formatDuration } from "@shared/diagnostics";
 
@@ -31,6 +39,16 @@ const STALL_MS = 1_000;
 const NOTABLE_MS = 250;
 const NOTABLE_QUIET_MS = 10 * 60 * 1000;
 const KEPT_WINDOWS = 60;
+// Longer than a whole default window, and five times the freeze watchdog's
+// threshold, so a real stall this long is a freeze it already records with a
+// stack; a gap past it is a sleep the 'suspend' event missed.
+const SLEEP_CEILING_MS = 60_000;
+
+/** Electron's powerMonitor, or a stand-in for tests. */
+export interface PowerEvents {
+  on(event: "suspend" | "resume", listener: () => void): unknown;
+  off(event: "suspend" | "resume", listener: () => void): unknown;
+}
 
 export interface DelayHistogram {
   percentile(p: number): number;
@@ -103,7 +121,7 @@ export function eventLoopLogLines(
 
 const windows: EventLoopWindow[] = [];
 let timer: NodeJS.Timeout | null = null;
-let stopHistogram: (() => void) | null = null;
+let stopSampling: (() => void) | null = null;
 let setSampling: ((active: boolean) => void) | null = null;
 
 export function recentEventLoopWindows(): EventLoopWindow[] {
@@ -117,6 +135,7 @@ export function eventLoopProbeRunning(): boolean {
 export function startEventLoopProbe(
   log: (message: string) => void,
   env: NodeJS.ProcessEnv = process.env,
+  power?: PowerEvents,
 ): boolean {
   if (timer || env.CODARA_EVENT_LOOP_PROBE?.trim() === "0") return timer !== null;
   const parsed = Number(env.CODARA_EVENT_LOOP_WINDOW_MS);
@@ -129,14 +148,16 @@ export function startEventLoopProbe(
     return false;
   }
   // Recorded in nanoseconds, the unit summarizeEventLoopWindow reads.
-  let lastTick = Date.now();
+  let lastTick = performance.now();
   let sampler: NodeJS.Timeout | null = null;
   const startSampler = (): void => {
-    lastTick = Date.now();
+    lastTick = performance.now();
     sampler = setInterval(() => {
-      const now = Date.now();
-      histogram.record(Math.max(1, Math.round((now - lastTick) * 1e6)));
+      const now = performance.now();
+      const gapMs = now - lastTick;
       lastTick = now;
+      if (gapMs > SLEEP_CEILING_MS) return;
+      histogram.record(Math.max(1, Math.round(gapMs * 1e6)));
     }, RESOLUTION_MS);
     sampler.unref();
   };
@@ -145,11 +166,13 @@ export function startEventLoopProbe(
     sampler = null;
   };
   startSampler();
-  stopHistogram = stopSampler;
   let sampling = true;
+  let focused = true;
+  let suspended = false;
   // Whether the histogram sampled at all in the current window.
   let sampledInWindow = true;
-  setSampling = (active) => {
+  const update = (): void => {
+    const active = focused && !suspended;
     if (active === sampling) return;
     sampling = active;
     if (active) {
@@ -159,6 +182,25 @@ export function startEventLoopProbe(
     } else {
       stopSampler();
     }
+  };
+  setSampling = (active) => {
+    focused = active;
+    update();
+  };
+  const onSuspend = (): void => {
+    suspended = true;
+    update();
+  };
+  const onResume = (): void => {
+    suspended = false;
+    update();
+  };
+  power?.on("suspend", onSuspend);
+  power?.on("resume", onResume);
+  stopSampling = () => {
+    stopSampler();
+    power?.off("suspend", onSuspend);
+    power?.off("resume", onResume);
   };
   const state = createEventLoopLogState();
   timer = setInterval(() => {
@@ -188,7 +230,7 @@ export function setEventLoopProbeSampling(active: boolean): void {
 export function stopEventLoopProbe(): void {
   if (timer) clearInterval(timer);
   timer = null;
-  stopHistogram?.();
-  stopHistogram = null;
+  stopSampling?.();
+  stopSampling = null;
   setSampling = null;
 }
