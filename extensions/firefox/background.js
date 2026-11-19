@@ -16,6 +16,7 @@
 
 import { BODY_FAILED, BODY_TYPES, BodyStore, NO_BODY, bodyPlan, copyBody } from "./lib/bodies.js";
 import { consoleAddresses, consoleEvent } from "./lib/console.js";
+import { cookieGate, cookieUrls, readCookies } from "./lib/cookies.js";
 import { LateReply, LinkClient } from "./lib/link-client.js";
 import { failedEvent, finishedEvent, lateRedirectEnd, requestEvent, requestVisible, responseEvent } from "./lib/network.js";
 import {
@@ -342,6 +343,7 @@ async function answerCommand(request, socket) {
     return {};
   }
   if (method === "Network.getResponseBody") return responseBody(tab.id, request.params ?? {}, socket);
+  if (method === "Network.getCookies") return tabCookies(tab.id, request.params ?? {}, socket);
   if (method === "Page.getFrameTree") {
     const now = await stillUsable(tab.id, socket);
     return frameTree(now.id, now.url, pageOf(now.id, now.url).loaderId);
@@ -575,7 +577,12 @@ chrome.permissions.onAdded.addListener(() => {
   popupQueue = popupQueue.then(forgetGrantedAsks).catch(() => {});
 });
 // A site the user took back: no body kept from before goes out (reads check again too).
-chrome.permissions.onRemoved.addListener(() => bodies.purge(() => false));
+// Counted, so a cookie read that began before never goes out (tabCookies).
+let accessTakenBack = 0;
+chrome.permissions.onRemoved.addListener(() => {
+  accessTakenBack += 1;
+  bodies.purge(() => false);
+});
 
 const usageBadgeTimers = new Map();
 
@@ -792,6 +799,28 @@ async function responseBody(tabId, params, socket) {
     if (!still()) throw new Error(NO_BODY);
     return bodies.answer(hop);
   }, still);
+}
+
+/**
+ * Network.getCookies (lib/cookies.js): the tab's own site's cookies, from
+ * its own cookie store, with its cookie switch on. Everything that allowed
+ * the read is asked again when the answer leaves: the switch, the tab still
+ * attached and shared on that site, the blocked sites, the site access and
+ * the link.
+ */
+async function tabCookies(tabId, params, socket) {
+  const tab = await stillUsable(tabId, socket);
+  seeTab(tab);
+  const urls = cookieUrls(params, tab.url);
+  const refusal = cookieGate({
+    urls,
+    ref: agentTabId(tabId),
+    now: () => ({ taken: accessTakenBack, socket: liveSocket(), seen: tabsSeen.get(tabId), allowed: eventsAllowed(tabsSeen.get(tabId)), storageTabs: state.storageTabs, rules }),
+  });
+  const store = tab.cookieStoreId ? { storeId: tab.cookieStoreId } : {};
+  const read = await readCookies(urls, (url) => browser.cookies.getAll({ url, ...store }), refusal);
+  seeTab(await stillUsable(tabId, socket));
+  return new LateReply(read.build, read.still);
 }
 
 /** The blocked sites changed: bodies of requests the log would not show now go. */
