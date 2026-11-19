@@ -64,6 +64,19 @@ export function unansweredAsks(asked, { permissions = [], origins = [] } = {}) {
   return Object.fromEntries(Object.entries(asked ?? {}).filter(([key]) => !yes(key)));
 }
 
+/**
+ * The question to ask now for `need`, from the rows the popup shows: only
+ * one for this tab and, for a site, for the site the tab is on now. Null
+ * otherwise: the popup reloads and shows the current site's question, and
+ * never asks for the site the tab has left.
+ */
+export function currentQuestion(rows, need, { tabId, url }) {
+  const row = (Array.isArray(rows) ? rows : []).find((item) => item?.need === need && item.tabId === tabId);
+  if (!row) return null;
+  if (need === "site" && row.key !== accessKey("site", url)) return null;
+  return row;
+}
+
 /** The tool error when a need is not granted; `asked` when the user was asked and did not allow it. */
 export function accessError(need, url, asked) {
   const host = hostOf(url);

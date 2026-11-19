@@ -80,7 +80,19 @@ export async function run(assembled) {
   return "page tools: evaluate's wrapper and answers, compile checks run nothing, permissions and their errors, screenshots and layout";
 }
 
-function permissions({ PAGE_METHODS, accessNeeds, sitePattern, accessRequest, accessKey, accessError, accessRows, unansweredAsks }) {
+function permissions({ PAGE_METHODS, accessNeeds, sitePattern, accessRequest, accessKey, accessError, accessRows, unansweredAsks, currentQuestion }) {
+  // A question shown for one site never asks for it once the tab is on another.
+  const shown = [
+    { need: "site", tabId: 7, key: "site:https://a.example/*", request: { origins: ["https://a.example/*"] } },
+    { need: "scripts", tabId: 7, key: "scripts", request: { permissions: ["userScripts"] } },
+  ];
+  assert.equal(currentQuestion(shown, "site", { tabId: 7, url: "https://a.example/other?x" }), shown[0], "same site, other page");
+  assert.equal(currentQuestion(shown, "site", { tabId: 7, url: "https://b.example/" }), null, "the tab moved to another site");
+  assert.equal(currentQuestion(shown, "site", { tabId: 7, url: "http://a.example/" }), null, "another scheme is another site");
+  assert.equal(currentQuestion(shown, "site", { tabId: 8, url: "https://a.example/" }), null, "another tab");
+  assert.equal(currentQuestion(shown, "scripts", { tabId: 7, url: "https://b.example/" }), shown[1], "not about a site");
+  assert.equal(currentQuestion(shown, "allSites", { tabId: 7, url: "https://a.example/" }), null);
+
   // A no is forgotten only when that very permission is granted.
   const asked = { "site:https://a.example/*": 1, scripts: 2, allSites: 3 };
   assert.deepEqual(unansweredAsks(asked, { permissions: [], origins: ["<all_urls>"] }), { "site:https://a.example/*": 1, scripts: 2 });

@@ -417,7 +417,7 @@ async function accessView(request) {
   const rows = accessRows({ url: tab.url, reach: reachOf(shareChoice(), request.windowId), has, asked });
   return {
     shared: shared(tab),
-    rows: rows.map((row) => ({ ...row, asked: asked[row.need], key: accessKey(row.need, tab.url), request: accessRequest(row.need, tab.url) })),
+    rows: rows.map((row) => ({ ...row, tabId: tab.id, asked: asked[row.need], key: accessKey(row.need, tab.url), request: accessRequest(row.need, tab.url) })),
   };
 }
 

@@ -5,10 +5,17 @@
 // anything is awaited. Turning on "share this tab" also asks for its site,
 // unless the user already said no to that site: then only the button asks.
 // Nothing is asked at install.
+//
+// The questions come from the background every second, so a click checks
+// them against the tab's address as Firefox last reported it (tabs.onUpdated,
+// read at once): a question for a site the tab has left is never asked.
+
+import { currentQuestion } from "./lib/page-tools.js";
 
 const $ = (id) => document.getElementById(id);
 
 let tab = null;
+let liveUrl = "";
 let view = { shared: false, rows: [] };
 let shown = "";
 // Asked from this popup, before the background has it on record.
@@ -54,7 +61,11 @@ function render() {
       button.type = "button";
       button.className = at === 0 ? "btn pri" : "btn";
       button.textContent = row.button;
-      button.addEventListener("click", () => void ask(row));
+      button.addEventListener("click", () => {
+        const now = currentQuestion(view.rows, row.need, { tabId: tab?.id, url: liveUrl });
+        if (now) void ask(now);
+        else void load();
+      });
       line.append(button);
       item.append(text, line);
       return item;
@@ -67,10 +78,18 @@ async function start() {
   const forced = Number(new URLSearchParams(location.search).get("tab"));
   if (forced) tab = await chrome.tabs.get(forced).catch(() => null);
   if (!tab) [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  liveUrl = tab?.url ?? "";
+  chrome.tabs.onUpdated.addListener((tabId, change) => {
+    if (tabId !== tab?.id || change.url === undefined) return;
+    // Another page: the questions shown may be for another site until reloaded.
+    liveUrl = change.url;
+    void load();
+  });
   $("share-tab")?.addEventListener("change", (event) => {
     if (!event.target.checked) return;
-    const site = view.rows.find((row) => row.need === "site" && !row.asked && !askedHere.has(row.key));
-    if (site) void ask(site);
+    const site = currentQuestion(view.rows, "site", { tabId: tab?.id, url: liveUrl });
+    if (!site) void load();
+    else if (!site.asked && !askedHere.has(site.key)) void ask(site);
   });
   await load();
   setInterval(() => void load(), 1000);

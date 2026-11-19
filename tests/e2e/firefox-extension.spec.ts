@@ -30,7 +30,7 @@ function popupPreview(path: string, response: ServerResponse): void {
   let body: Buffer | string = readFileSync(join(preview.dir, file));
   if (file === "popup.html") {
     const answers = `{ access: ${JSON.stringify(preview.access ?? { rows: [] })}, state: ${JSON.stringify(preview.state)} }`;
-    const stub = `<script>window.chrome = { runtime: { sendMessage: async (message) => (${answers})[message.type === "access" ? "access" : "state"], openOptionsPage() {} }, tabs: { get: async () => (${JSON.stringify(preview.tab)}), query: async () => [${JSON.stringify(preview.tab)}] }, permissions: { request: async () => false } };</script>`;
+    const stub = `<script>window.chrome = { runtime: { sendMessage: async (message) => (${answers})[message.type === "access" ? "access" : "state"], openOptionsPage() {} }, tabs: { get: async () => (${JSON.stringify(preview.tab)}), query: async () => [${JSON.stringify(preview.tab)}], onUpdated: { addListener() {} } }, permissions: { request: async () => false } };</script>`;
     body = body.toString("utf8").replace("<script", `${stub}<script`);
   }
   response.writeHead(200, { "Content-Type": PREVIEW_TYPES[extname(file)] ?? "application/octet-stream" });
