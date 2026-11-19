@@ -35,6 +35,7 @@
 //      reopening the complete one, driven over a run.json under a throwaway
 //      CODARA_HOME_DIR.
 
+const { completeStubExports } = require("./run-store-stub-exports.cjs");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -97,7 +98,7 @@ const RUN_STORE_STUB_PLUGIN = {
       (args) => ({ path: args.path, namespace: "stub" }),
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({
-      contents: RUN_STORE_STUBS[args.path],
+      contents: completeStubExports(args.path, RUN_STORE_STUBS[args.path]),
       loader: "js",
     }));
   },

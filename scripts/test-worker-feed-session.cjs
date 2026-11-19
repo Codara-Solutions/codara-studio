@@ -6,6 +6,7 @@
 //
 //   node scripts/test-worker-feed-session.cjs
 
+const { completeStubExports } = require("./run-store-stub-exports.cjs");
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -95,7 +96,7 @@ const stubPlugin = {
       path: args.path,
       namespace: "stub",
     }));
-    build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({ contents: STUBS[args.path], loader: "js" }));
+    build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({ contents: completeStubExports(args.path, STUBS[args.path]), loader: "js" }));
   },
 };
 

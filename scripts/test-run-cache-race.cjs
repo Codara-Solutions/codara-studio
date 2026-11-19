@@ -15,6 +15,7 @@
 //
 //   node scripts/test-run-cache-race.cjs
 
+const { completeStubExports } = require("./run-store-stub-exports.cjs");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -106,7 +107,7 @@ async function main() {
             path: args.path,
             namespace: "stub",
           }));
-          build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({ contents: STUBS[args.path], loader: "js" }));
+          build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({ contents: completeStubExports(args.path, STUBS[args.path]), loader: "js" }));
         },
       },
     ],
