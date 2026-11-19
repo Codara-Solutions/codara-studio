@@ -14,7 +14,7 @@ const ROUTED_WHILE_LOADING = [{ status: "loading" }, { status: "loading", url: "
 
 export async function run(assembled) {
   const nav = await import(pathToFileURL(join(assembled, "lib", "navigation.js")).href);
-  const { NAVIGATE_ERROR, NAVIGATE_SUPERSEDED_ERROR, NAVIGATE_TIMEOUT_ERROR, answersNavigation, frameTree, freshPage, isSameDocument, mainFrameId, navigateAnswer, navigateUrl, pageEvents } = nav;
+  const { NAVIGATE_ERROR, NAVIGATE_TIMEOUT_ERROR, answersNavigation, frameTree, freshPage, isSameDocument, mainFrameId, navigateAnswer, navigateUrl, pageEvents } = nav;
   const frameId = mainFrameId(7);
 
   // ── which addresses Page.navigate loads ──
@@ -47,13 +47,17 @@ export async function run(assembled) {
   assert.deepEqual(navigateAnswer(7, false, "failed", "L2"), { frameId, loaderId: "L2", errorText: NAVIGATE_ERROR });
   assert.deepEqual(navigateAnswer(7, false, "moved", "L2"), { frameId, loaderId: "L2", errorText: NAVIGATE_ERROR });
   assert.deepEqual(navigateAnswer(7, true, "moved", "L2"), { frameId }, "a fragment: no loader, no load event to wait for");
-  // Nothing committed in time, or a newer navigation took over: never an answer that something loaded.
+  // Nothing committed in time: never an answer that something loaded.
   assert.deepEqual(navigateAnswer(7, false, null, "L2"), { frameId, errorText: NAVIGATE_TIMEOUT_ERROR });
   assert.deepEqual(navigateAnswer(7, true, null, "L2"), { frameId, errorText: NAVIGATE_TIMEOUT_ERROR });
-  assert.deepEqual(navigateAnswer(7, false, "superseded", "L2"), { frameId, errorText: NAVIGATE_SUPERSEDED_ERROR });
 
   // Which tab change answers a navigation.
-  const newDocument = { sameDocument: false, url: "https://a.example/c" };
+  const newDocument = { sameDocument: false, url: "https://a.example/c", started: true };
+  // Before a load started since it was asked, nothing answers it: an older load's commit, the old page's route change, an error page.
+  const notStarted = { ...newDocument, started: false };
+  assert.equal(answersNavigation("commit", { status: "loading", url: "https://a.example/old-load" }, notStarted), false);
+  assert.equal(answersNavigation("moved", { status: "complete", url: "https://a.example/b/route" }, notStarted), false);
+  assert.equal(answersNavigation("failed", { status: "complete", url: "https://nope.invalid/" }, notStarted), false);
   const fragment = { sameDocument: true, url: "https://a.example/b#part" };
   assert.equal(answersNavigation("commit", { status: "loading", url: "https://a.example/c" }, newDocument), true);
   assert.equal(answersNavigation("failed", { status: "complete", url: "https://nope.invalid/" }, newDocument), true);

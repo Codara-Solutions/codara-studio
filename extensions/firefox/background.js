@@ -15,7 +15,17 @@
 // picks up where it left off.
 
 import { LinkClient } from "./lib/link-client.js";
-import { answersNavigation, frameTree, freshPage, isSameDocument, navigateAnswer, navigateUrl, pageEvents } from "./lib/navigation.js";
+import {
+  NAVIGATE_BUSY_ERROR,
+  NAVIGATE_TIMEOUT_ERROR,
+  answersNavigation,
+  frameTree,
+  freshPage,
+  isSameDocument,
+  navigateAnswer,
+  navigateUrl,
+  pageEvents,
+} from "./lib/navigation.js";
 import {
   CDP_METHODS,
   browserIdentity,
@@ -293,14 +303,17 @@ async function answerCommand(request, socket) {
   if (!state.attached.includes(tab.id)) throw new Error(`${agentTabId(tab.id)} is not attached.`);
   if (isDomainToggle(method)) {
     // Page events go to Codara from Page.enable on, as the debugger sends them.
-    if (method === "Page.enable") pageEventTabs.add(tab.id);
+    if (method === "Page.enable") {
+      pageEventTabs.add(tab.id);
+      pageOf(tab.id, tab.url);
+    }
     if (method === "Page.disable") pageEventTabs.delete(tab.id);
     return {};
   }
   if (method === "Page.navigate") return navigateTab(tab, request.params ?? {}, socket);
   if (method === "Page.getFrameTree") {
     const now = await stillUsable(tab.id, socket);
-    return frameTree(now.id, now.url, pageOf(now.id).loaderId);
+    return frameTree(now.id, now.url, pageOf(now.id, now.url).loaderId);
   }
   if (!PAGE_METHODS.includes(method)) throw new Error(unsupportedMethodError(method));
   const params = request.params !== null && typeof request.params === "object" ? request.params : {};
@@ -350,46 +363,58 @@ async function navigateTab(tab, params, socket) {
   const url = navigateUrl(params, now.id, checks);
   const sameDocument = isSameDocument(now.url, url);
   if (sameDocument && now.url === url) return navigateAnswer(now.id, true, "moved", null);
-  const page = pageOf(now.id, now.url);
+  // One navigation per tab: overlapping loads could not be told apart.
+  if (navigationWaiters.has(now.id)) throw new Error(NAVIGATE_BUSY_ERROR);
   // The id the next document gets, also when it commits after the answer.
-  const { nextLoaderId } = page;
-  const changed = addressChange(now.id, { sameDocument, url });
+  const { nextLoaderId } = pageOf(now.id, now.url);
+  // One deadline for the whole answer, under the 30 s Codara waits.
+  const deadline = Date.now() + NAVIGATE_WAIT_MS;
+  const waiter = waitForNavigation(now.id, { sameDocument, url, started: false }, deadline);
   try {
-    await chrome.tabs.update(now.id, { url });
+    await untilDeadline(chrome.tabs.update(now.id, { url }), deadline);
   } catch (error) {
-    navigationWaiters.get(now.id)?.done("superseded");
+    waiter.done(null);
     throw error;
   }
-  const kind = await changed;
+  const kind = await waiter.answer;
   // A redirect may have taken the tab to a blocked site or a page Firefox keeps extensions off.
-  await stillUsable(now.id, socket);
+  await untilDeadline(stillUsable(now.id, socket), deadline);
   return navigateAnswer(now.id, sameDocument, kind, nextLoaderId);
 }
 
 /**
- * The tab change that answers this navigation (see answersNavigation), or
- * null when none comes in NAVIGATE_WAIT_MS or the tab closes. One
- * navigation per tab: a newer one answers the older as superseded.
+ * The tab's navigation waiting for its answer: the change that answers it
+ * (see answersNavigation), or null at the deadline or when the tab closes.
  */
-function addressChange(tabId, target) {
-  navigationWaiters.get(tabId)?.done("superseded");
-  return new Promise((resolve) => {
-    const waiter = {
-      target,
-      done(kind) {
-        clearTimeout(timer);
-        if (navigationWaiters.get(tabId) === waiter) navigationWaiters.delete(tabId);
-        resolve(kind);
-      },
-    };
-    const timer = setTimeout(() => waiter.done(null), NAVIGATE_WAIT_MS);
-    navigationWaiters.set(tabId, waiter);
-  });
+function waitForNavigation(tabId, target, deadline) {
+  let resolve;
+  const waiter = {
+    target,
+    answer: new Promise((done) => (resolve = done)),
+    done(kind) {
+      clearTimeout(timer);
+      // Only its own entry: a later navigation's stays.
+      if (navigationWaiters.get(tabId) === waiter) navigationWaiters.delete(tabId);
+      resolve(kind);
+    },
+  };
+  const timer = setTimeout(() => waiter.done(null), Math.max(0, deadline - Date.now()));
+  navigationWaiters.set(tabId, waiter);
+  return waiter;
 }
 
+function untilDeadline(promise, deadline) {
+  let timer;
+  const late = new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(NAVIGATE_TIMEOUT_ERROR)), Math.max(0, deadline - Date.now()))));
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+/** The tab's tracked page, its address filled in from a checked tab when not known yet. */
 function pageOf(tabId, url = null) {
-  if (!pages.has(tabId)) pages.set(tabId, freshPage(newLoaderId, url));
-  return pages.get(tabId);
+  const page = pages.get(tabId) ?? freshPage(newLoaderId);
+  if (page.url === null && url) page.url = url;
+  pages.set(tabId, page);
+  return page;
 }
 
 const newLoaderId = () => crypto.randomUUID().replace(/-/g, "").toUpperCase();
@@ -642,7 +667,6 @@ const navigations = new Map();
 const pages = new Map();
 const pageEventTabs = new Set();
 const navigationWaiters = new Map();
-// Under the 30 s Codara waits for any answer.
 const NAVIGATE_WAIT_MS = 25_000;
 
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
@@ -654,6 +678,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
     for (const [method, params] of events) sendLive({ type: "cdp_event", tabId, method, params });
   }
   const waiter = navigationWaiters.get(tabId);
+  if (waiter && kind === "started") waiter.target.started = true;
   if (waiter && answersNavigation(kind, change, waiter.target)) waiter.done(kind);
   if (change.url !== undefined) {
     await ready;

@@ -95,27 +95,28 @@ function otherOrigin(before, after) {
 export const NAVIGATE_ERROR =
   "Firefox showed its error page instead: the site did not answer, or its address did not resolve.";
 export const NAVIGATE_TIMEOUT_ERROR = "Firefox did not start showing the page in 25 s.";
-export const NAVIGATE_SUPERSEDED_ERROR = "Another navigation in this tab replaced this one before it loaded.";
+export const NAVIGATE_BUSY_ERROR = "Another navigation of this tab is still on its way; wait for it to load, then navigate again.";
 
 /**
- * Whether a tab change answers a navigation: for a new document, its
- * commit or Firefox's error page (never a route change of the page still
- * loading); for a fragment, the tab reaching that address.
+ * Whether a tab change answers a navigation, given the changes since it
+ * was asked (`target.started`: a load started since). For a new document:
+ * its commit or Firefox's error page, only after a load started since it
+ * was asked (a route change of the old page never answers it); for a
+ * fragment, the tab reaching that address.
  */
-export function answersNavigation(kind, change, { sameDocument, url }) {
-  if (sameDocument) return kind === "moved" && change.url === url;
+export function answersNavigation(kind, change, target) {
+  if (target.sameDocument) return kind === "moved" && change.url === target.url;
+  if (!target.started) return false;
   return kind === "commit" || kind === "failed" || (kind === "moved" && change.status !== "loading");
 }
 
 /**
- * Page.navigate's answer once the tab's change came: null when none came
- * in time, "superseded" when another navigation of the tab replaced it.
- * A new document's first address change that is not a loading commit is
- * Firefox's error page.
+ * Page.navigate's answer once the tab's change came, or null when none
+ * came in time. A new document's first address change that is not a
+ * loading commit is Firefox's error page.
  */
 export function navigateAnswer(tabId, sameDocument, kind, loaderId) {
   const frameId = mainFrameId(tabId);
-  if (kind === "superseded") return { frameId, errorText: NAVIGATE_SUPERSEDED_ERROR };
   if (kind === null) return { frameId, errorText: NAVIGATE_TIMEOUT_ERROR };
   if (sameDocument) return { frameId };
   if (kind !== "commit") return { frameId, loaderId, errorText: NAVIGATE_ERROR };
