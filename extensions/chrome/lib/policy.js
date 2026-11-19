@@ -179,6 +179,50 @@ export function agentGroupFor(groups, agentGroupIds, title) {
 }
 
 /**
+ * Puts a tab an agent opened into its group `title`: one the extension made
+ * in that window, or a new one it names and `record`s. `live()` says whether
+ * the link that asked is still the one in use; once it is not, the tab
+ * leaves the group it joined (if it is still there; Chrome removes a group
+ * left empty) and nothing is recorded, whether naming the group worked or
+ * not. Returns the group's title, or null when the tab is not grouped.
+ * `tabs` and `tabGroups` are chrome.tabs and chrome.tabGroups.
+ */
+export async function groupForAgents({ tab, title, agentGroupIds, live, tabs, tabGroups, record }) {
+  const leftIfStale = async (groupId) => {
+    if (live()) return false;
+    const now = await tabs.get(tab.id).catch(() => null);
+    if (now?.groupId === groupId) await tabs.ungroup(tab.id).catch(() => {});
+    return true;
+  };
+  try {
+    const groups = await tabGroups.query({ windowId: tab.windowId });
+    if (!live()) return null;
+    const existing = agentGroupFor(groups, agentGroupIds, title);
+    if (existing) {
+      await tabs.group({ groupId: existing.id, tabIds: [tab.id] });
+      if (await leftIfStale(existing.id)) return null;
+      return existing.title;
+    }
+    const groupId = await tabs.group({ tabIds: [tab.id], createProperties: { windowId: tab.windowId } });
+    if (await leftIfStale(groupId)) return null;
+    let named = true;
+    try {
+      await tabGroups.update(groupId, { title });
+    } catch {
+      named = false;
+    } finally {
+      // Whether naming worked or not: a closed link's grouping is undone.
+      if (await leftIfStale(groupId)) named = null;
+    }
+    if (!named) return null;
+    await record(groupId);
+    return title;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * What the agent learns about a tab it opened. A page that redirected to a
  * blocked site tells it nothing: not where it ended, nor its title.
  */

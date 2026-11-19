@@ -35,7 +35,6 @@ import {
   DEFAULT_BLOCKED_SITES,
   DEFAULT_PORTS,
   LINK_PATH,
-  agentGroupFor,
   agentGroupTitle,
   agentTabId,
   badgeTitle,
@@ -45,6 +44,7 @@ import {
   childSessionError,
   closeTabError,
   commandUrl,
+  groupForAgents,
   isRestrictedUrl,
   isTabShared,
   openedTabAnswer,
@@ -622,38 +622,18 @@ async function openTab(request, link) {
 // Puts a tab an agent just opened in the agent's named group in its window,
 // joining one the extension made with that title. Only that new tab moves, so
 // no tab the user shared is ever grouped. A failure leaves it ungrouped.
-// The link that asked closed while the tab joined `groupId`: the tab leaves
-// it again if it is still there (Chrome removes a group left empty), and
-// the group is not recorded as the agents'.
-async function leftIfStale(link, tabId, groupId) {
-  if (!link || link.live()) return false;
-  const now = await chrome.tabs.get(tabId).catch(() => null);
-  if (now?.groupId === groupId) await chrome.tabs.ungroup(tabId).catch(() => {});
-  return true;
-}
-
 async function groupOpenedTab(tab, requested, link) {
   const title = agentGroupTitle(requested);
   if (!title || !chrome.tabGroups) return null;
-  try {
-    const groups = await chrome.tabGroups.query({ windowId: tab.windowId });
-    // The link that asked closed meanwhile: the tab stays where it opened.
-    if (link && !link.live()) return null;
-    const existing = agentGroupFor(groups, state.agentGroups, title);
-    if (existing) {
-      await chrome.tabs.group({ groupId: existing.id, tabIds: [tab.id] });
-      if (await leftIfStale(link, tab.id, existing.id)) return null;
-      return existing.title;
-    }
-    const groupId = await chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId: tab.windowId } });
-    if (await leftIfStale(link, tab.id, groupId)) return null;
-    await chrome.tabGroups.update(groupId, { title });
-    if (await leftIfStale(link, tab.id, groupId)) return null;
-    await save({ agentGroups: withValue(state.agentGroups, groupId) });
-    return title;
-  } catch {
-    return null;
-  }
+  return groupForAgents({
+    tab,
+    title,
+    agentGroupIds: state.agentGroups,
+    live: () => !link || link.live(),
+    tabs: chrome.tabs,
+    tabGroups: chrome.tabGroups,
+    record: (groupId) => save({ agentGroups: withValue(state.agentGroups, groupId) }),
+  });
 }
 
 const usageBadgeTimers = new Map();
