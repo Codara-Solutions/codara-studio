@@ -9,7 +9,16 @@
 // gets a text patch; a patch whose text is no longer in the Chrome file
 // stops the build instead of shipping the Chrome wording. Everything else
 // (manifest.json, background.js, lib/firefox.js) lives here.
+//
+//   node extensions/firefox/build/assemble.mjs --record-version
+//
+// records the assembled add-on's digest for its manifest version in
+// versions.json. Codara hands each version out once, in a folder it never
+// rewrites, so changed files (shared Chrome files included) need a new
+// version: the tests fail until the digest of the version in manifest.json
+// is the one recorded.
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,7 +26,7 @@ import { fileURLToPath } from "node:url";
 export const FIREFOX_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const CHROME_DIR = resolve(FIREFOX_DIR, "..", "chrome");
 // Files of this folder that are not part of the extension Firefox loads.
-export const DEV_FILES = Object.freeze(["build", "test", "dist", "package.json", "README.md", "LISTING.txt", "shared.json", ".gitignore"]);
+export const DEV_FILES = Object.freeze(["build", "test", "dist", "package.json", "README.md", "LISTING.txt", "shared.json", "versions.json", ".gitignore"]);
 
 export function sharedSpec(dir = FIREFOX_DIR) {
   return JSON.parse(readFileSync(join(dir, "shared.json"), "utf8"));
@@ -66,6 +75,35 @@ export function assembledEntries({ firefoxDir = FIREFOX_DIR, chromeDir = CHROME_
     if (!spec.files.includes(name)) throw new Error(`shared.json patches ${name}, which it does not share.`);
   }
   return [...entries.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([name, data]) => ({ name, data }));
+}
+
+/** One digest of every assembled file's name and bytes. */
+export function payloadDigest(entries) {
+  const hash = createHash("sha256");
+  for (const { name, data } of entries) {
+    hash.update(`${name}\0${data.length}\0`);
+    hash.update(data);
+  }
+  return hash.digest("hex");
+}
+
+/** The digest versions.json records for each version handed out. */
+export function recordedVersions(dir = FIREFOX_DIR) {
+  return JSON.parse(readFileSync(join(dir, "versions.json"), "utf8"));
+}
+
+/** Record this version's digest; a version already recorded with other files is refused. */
+export function recordVersion(dir = FIREFOX_DIR) {
+  const entries = assembledEntries({ firefoxDir: dir });
+  const version = JSON.parse(entries.find((entry) => entry.name === "manifest.json").data.toString("utf8")).version;
+  const digest = payloadDigest(entries);
+  const versions = recordedVersions(dir);
+  if (versions[version] && versions[version] !== digest) {
+    throw new Error(`Version ${version} was recorded with other files: raise "version" in manifest.json, then record again.`);
+  }
+  versions[version] = digest;
+  writeFileSync(join(dir, "versions.json"), `${JSON.stringify(versions, null, 2)}\n`);
+  return { version, digest };
 }
 
 /** Written into every assembly; only a folder holding it is ever replaced. */
@@ -120,6 +158,11 @@ export function assemble(out = join(FIREFOX_DIR, "dist", "extension"), options =
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const outFlag = process.argv.indexOf("--out");
   try {
+    if (process.argv.includes("--record-version")) {
+      const { version, digest } = recordVersion();
+      console.log(`Recorded ${version}: ${digest}`);
+      process.exit(0);
+    }
     const result = assemble(outFlag > 0 ? resolve(process.argv[outFlag + 1]) : undefined);
     console.log(`Assembled ${result.files.length} files into ${result.dir}`);
   } catch (error) {

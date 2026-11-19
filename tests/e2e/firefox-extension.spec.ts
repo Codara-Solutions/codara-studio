@@ -190,10 +190,13 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
 
     // CODARA_E2E_COLOR_SCHEME=dark draws the extension's pages dark, for the screenshots.
     const dark = process.env.CODARA_E2E_COLOR_SCHEME === "dark";
-    firefox = await launchFirefox(binary!, {
+    const launchOptions = {
       // Firefox's real permission questions, answered below as the user would.
       prefs: { "extensions.background.idle.timeout": 15_000, "extensions.webextOptionalPermissionPrompts": true, ...(dark ? { "ui.systemUsesDarkTheme": 1, "layout.css.prefers-color-scheme.content-override": 0 } : {}) },
-    });
+      // Kept on disk (inside root) so the restart below is a real one.
+      profileDir: join(root, "firefox-profile"),
+    };
+    firefox = await launchFirefox(binary!, launchOptions);
     await firefox.install(extension);
     // Firefox's install question for these permissions: only the tabs line (scripting and webRequest add none).
     const manifest = JSON.parse(readFileSync(join(extension, "manifest.json"), "utf8"));
@@ -227,6 +230,28 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     const paired = (await linkState(codara)).browsers[0];
     expect(paired).toMatchObject({ connected: true, browser: { name: "Firefox" }, extensionId: FIREFOX_EXTENSION_UUID, extensionUpdate: null });
 
+    // Settings > Browser with Firefox paired and nothing shared: Share a tab,
+    // the popup's own questions named, and the way to connect another browser.
+    const guide = codara.getByRole("dialog", { name: /Your next idea/ });
+    if (await guide.isVisible().catch(() => false)) {
+      await codara.getByRole("button", { name: "Let's get started" }).click();
+      await codara.getByRole("button", { name: "Finish later" }).click();
+      await expect(guide).toBeHidden();
+    }
+    const settings = codara.getByRole("dialog", { name: "Settings" });
+    await expect(async () => {
+      await codara.getByTitle("Settings").first().click({ force: true });
+      await expect(settings).toBeVisible({ timeout: 2_000 });
+    }).toPass({ timeout: 20_000 });
+    await settings.getByRole("button", { name: "Browser", exact: true }).click();
+    const card = settings.locator("[data-chrome-connect]");
+    await expect(card).toHaveAttribute("data-chrome-connect", "share");
+    await expect(card).toContainText("press Allow with the site's name and Allow scripts there");
+    await card.getByRole("button", { name: "Connect another browser" }).click();
+    await expect(card).toHaveAttribute("data-chrome-connect", "add");
+    await card.getByRole("button", { name: "Cancel" }).click();
+    await expect(card).toHaveAttribute("data-chrome-connect", "share");
+
     // Nothing is shared yet; then the user shares the tab from the popup,
     // which asks Firefox for that site at the same click. The user says no:
     // the tab is shared, agents get a plain error, and turning sharing off
@@ -240,6 +265,11 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
       return tabs.filter((tab: { kind?: string }) => tab.kind === "chrome").map((tab: { id: string; title: string }) => [tab.id, tab.title]);
     }, { timeout: 15_000 }).toEqual([[tabId, "Page account"]]);
     await expect(request("preview.snapshot", { tabId })).rejects.toThrow(/The user did not allow Codara to use 127\.0\.0\.1 in Firefox/);
+    // Shared, but the site not allowed: the card says it is connected and still names what the popup asks.
+    await expect(card).toHaveAttribute("data-chrome-connect", "done");
+    await expect(card).toContainText("press Allow with the site's name and Allow scripts there");
+    await codara.keyboard.press("Escape");
+    await expect(settings).toBeHidden();
     const shareSwitch = () => firefox!.evaluate<boolean>(popup, "document.querySelector('#share-tab').checked");
     await firefox.click(popup, "#share-tab");
     await expect.poll(shareSwitch).toBe(false);
@@ -469,6 +499,30 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     expect(received.find((tab) => tab.id === `chrome:${blockedTab}`)).toMatchObject({ blocked: true, url: "", title: "" });
     expect(received.map((tab) => tab.id).sort()).toEqual([`chrome:${accountTab}`, `chrome:${blockedTab}`, `chrome:${elsewhereTab}`, `chrome:${otherWindowTab}`].sort());
     expect(JSON.stringify(received)).not.toMatch(/localhost|Page bank|moz-extension|about:/);
+
+    // A real Firefox restart on the same profile removes the temporary
+    // add-on: Codara shows the browser paired but not connected, with how to
+    // load it again.
+    await firefox.close();
+    await expect.poll(async () => (await linkState(codara)).browsers.map((browser: { connected: boolean }) => browser.connected), { timeout: 30_000 }).toEqual([false]);
+    await expect(async () => {
+      if (!(await settings.isVisible())) await codara.getByTitle("Settings").first().click({ force: true });
+      await expect(settings).toBeVisible({ timeout: 2_000 });
+    }).toPass({ timeout: 20_000 });
+    await settings.getByRole("button", { name: "Browser", exact: true }).click();
+    await expect(card).toHaveAttribute("data-chrome-connect", "offline");
+    await expect(card).toContainText("Firefox removes the Codara add-on each time it restarts, so it has to be loaded again");
+    await card.getByRole("button", { name: "Show the Firefox steps" }).click();
+    await expect(card).toHaveAttribute("data-chrome-connect", "add");
+    await expect(card).toContainText("Load Temporary Add-on");
+    // Loaded again in the restarted Firefox: its storage (the pairing, the
+    // port, the blocked sites) and its moz-extension address stayed in the
+    // profile, so it reconnects by itself on the same pairing.
+    firefox = await launchFirefox(binary!, launchOptions);
+    await firefox.install(extension);
+    await expect.poll(async () => (await linkState(codara)).browsers.map((browser: { connected: boolean; linkId: string }) => [browser.connected, browser.linkId]), { timeout: 30_000 }).toEqual([[true, paired.linkId]]);
+    popup = await firefox.openExtensionPage(POPUP);
+    expect(await firefox.evaluate(popup, `browser.storage.local.get("blockedSites").then(({ blockedSites }) => blockedSites)`)).toContain("127.0.0.1/private");
 
     // Disconnect in the popup: Codara forgets this browser, pairing and all.
     await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "unpair" })`);

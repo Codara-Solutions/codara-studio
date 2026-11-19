@@ -54,10 +54,13 @@ export interface HeadlessFirefox {
   close(): Promise<void>;
 }
 
-export async function launchFirefox(binary: { path: string; version: number }, { prefs = {} }: { prefs?: Record<string, unknown> } = {}): Promise<HeadlessFirefox> {
+export async function launchFirefox(
+  binary: { path: string; version: number },
+  { prefs = {}, profileDir }: { prefs?: Record<string, unknown>; /** A profile kept on disk across launches, as a real restart keeps it; the caller removes it. */ profileDir?: string } = {},
+): Promise<HeadlessFirefox> {
   const root = mkdtempSync(join(tmpdir(), "codara-firefox-"));
-  const profile = join(root, "profile");
-  mkdirSync(profile);
+  const profile = profileDir ?? join(root, "profile");
+  mkdirSync(profile, { recursive: true });
   const all: Record<string, unknown> = {
     "extensions.webextensions.uuids": JSON.stringify({ [FIREFOX_EXTENSION_ID]: FIREFOX_EXTENSION_UUID }),
     // permissions.request still needs a click in the extension's page; this only skips the doorhanger.

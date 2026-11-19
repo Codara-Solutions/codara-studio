@@ -24,6 +24,10 @@ export const chromeLinkApi = {
   prepareExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:prepareExtension"),
   /** The same, and open the folder in the file manager. */
   revealExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:revealExtension"),
+  /** The Firefox extension's folder for this version, assembled into Codara's home the first time. */
+  prepareFirefoxExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:prepareFirefoxExtension"),
+  /** The same, and open the folder in the file manager. */
+  revealFirefoxExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:revealFirefoxExtension"),
   /**
    * The user pressed Update extension: copy the extension Codara ships into
    * its folder, and ask that connected browser's extension to reload itself.

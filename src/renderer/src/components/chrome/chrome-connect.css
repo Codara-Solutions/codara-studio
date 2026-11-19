@@ -2,6 +2,8 @@
    Its own file, loaded with the card: chrome-link.css is in the startup set. */
 .chrome-connect {
   display: grid;
+  /* One column no wider than the card: a long folder path ellipsizes instead of widening it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   margin-top: 8px;
   padding: 14px;
@@ -88,6 +90,11 @@ li[data-state="done"] > .chrome-connect__n {
   background: var(--ok-soft);
   border-color: var(--ok);
   color: var(--ink);
+}
+
+.chrome-connect__focus,
+.chrome-connect .chrome-steps {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .chrome-connect__focus {

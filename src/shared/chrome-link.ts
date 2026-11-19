@@ -139,6 +139,12 @@ export interface ChromeLinkState {
   extensionFolder: string;
   /** The version of the extension in that folder, as this Codara ships it. */
   shippedExtensionVersion: string | null;
+  /**
+   * The folder whose manifest.json Firefox loads as a temporary add-on, one
+   * per version (src/main/browser/firefox-extension.ts); null when this
+   * Codara ships no extension for Firefox.
+   */
+  firefoxExtensionFolder: string | null;
   browsers: ChromeLinkBrowserState[];
   /**
    * Extensions that tried to connect lately and speak another link protocol,

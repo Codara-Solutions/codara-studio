@@ -86,7 +86,7 @@ test("the connect card walks from Add to Pair to Share a tab on what Codara sees
     await codara.getByRole("button", { name: "Let's get started" }).click();
     const firstRun = codara.locator(".onboarding-browser [data-chrome-connect]");
     await expect(firstRun).toHaveAttribute("data-chrome-connect", "add");
-    await expect(firstRun).toContainText("Firefox: coming later.");
+    await expect(firstRun).toContainText("Chrome, Edge, Brave and other Chromium browsers, or Firefox 153 and later.");
     await expect(firstRun.getByRole("button", { name: "Reveal folder" })).toBeVisible();
     await expect(firstRun.locator('li[aria-current="step"]')).toHaveText("1Add");
     await expect(firstRun.getByRole("status")).toContainText("Waiting for the extension");

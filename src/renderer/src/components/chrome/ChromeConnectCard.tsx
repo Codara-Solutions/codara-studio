@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { chromeConnectProgress, type ChromeConnectStep, type ChromeLinkState } from "@shared/chrome-link";
+import { Segmented } from "../settings/SettingsPrimitives";
 import { useConnectCardOnScreen } from "./useChromeLink";
 import "./chrome-link.css";
 import "./chrome-connect.css";
@@ -13,6 +14,20 @@ import "./chrome-connect.css";
  */
 export type ChromeInstallRoute = { kind: "unpacked" } | { kind: "store"; url: string };
 export const CHROME_INSTALL_ROUTE: ChromeInstallRoute = { kind: "unpacked" };
+
+/**
+ * How the add-on gets into Firefox. Today the user loads Codara's folder as a
+ * temporary add-on. Once the Firefox Add-ons listing is live, a "store" route
+ * with its URL turns the Add step into one "Add from Firefox Add-ons" button.
+ */
+export type FirefoxInstallRoute = { kind: "temporary" } | { kind: "store"; url: string };
+export const FIREFOX_INSTALL_ROUTE: FirefoxInstallRoute = { kind: "temporary" };
+
+type BrowserFamily = "chromium" | "firefox";
+const BROWSER_FAMILIES: { value: BrowserFamily; label: string }[] = [
+  { value: "chromium", label: "Chrome, Edge, Brave" },
+  { value: "firefox", label: "Firefox" },
+];
 
 const STEPS: { id: Exclude<ChromeConnectStep, "done">; label: string }[] = [
   { id: "add", label: "Add" },
@@ -28,16 +43,21 @@ const STEPS: { id: Exclude<ChromeConnectStep, "done">; label: string }[] = [
 export default function ChromeConnectCard({
   state,
   route = CHROME_INSTALL_ROUTE,
+  firefoxRoute = FIREFOX_INSTALL_ROUTE,
 }: {
   state: ChromeLinkState;
   route?: ChromeInstallRoute;
+  firefoxRoute?: FirefoxInstallRoute;
 }): React.ReactElement {
   useConnectCardOnScreen();
   const progress = chromeConnectProgress(state);
   const [another, setAnother] = useState(false);
   // With the store route, the folder steps stay one click away.
   const [unpacked, setUnpacked] = useState(false);
+  const [firefoxTemporary, setFirefoxTemporary] = useState(false);
   const [folder, setFolder] = useState<string | null>(null);
+  const [family, setFamily] = useState<BrowserFamily>("chromium");
+  const [firefoxFolder, setFirefoxFolder] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,6 +94,11 @@ export default function ChromeConnectCard({
       setTimeout(() => setCopied(null), 1500);
     });
   const shownFolder = folder ?? state.extensionFolder;
+  const shownFirefoxFolder = firefoxFolder ?? state.firefoxExtensionFolder;
+  // Firefox asks for the site and for scripts in pages from its popup, after sharing.
+  const firefoxConnected = state.browsers.some((browser) => browser.connected && /firefox/i.test(browser.browser.name));
+  // A temporary add-on is gone after every Firefox restart: say so, and how to load it again.
+  const firefoxOffline = progress.offline.some((name) => /firefox/i.test(name));
   const pairing = state.pending[0];
 
   // Nothing can connect while the link is off: say why instead of the steps.
@@ -96,7 +121,7 @@ export default function ChromeConnectCard({
     <div className="chrome-connect" data-chrome-connect={step}>
       <div className="chrome-connect__top">
         <span className="chrome-connect__title">Connect your browser</span>
-        <span className="chrome-connect__browsers">Chrome, Edge, Brave and other Chromium browsers. Firefox: coming later.</span>
+        <span className="chrome-connect__browsers">Chrome, Edge, Brave and other Chromium browsers, or Firefox 153 and later.</span>
       </div>
 
       <ol className="chrome-connect__steps" aria-label="Steps">
@@ -117,6 +142,72 @@ export default function ChromeConnectCard({
 
       <div className="chrome-connect__focus" ref={pairRef}>
         {step === "add" ? (
+          <Segmented ariaLabel="Your browser" options={BROWSER_FAMILIES} value={family} onChange={setFamily} />
+        ) : null}
+        {step === "add" && family === "firefox" ? (
+          firefoxRoute.kind === "store" && !firefoxTemporary ? (
+            <>
+              <div className="chrome-connect__h">Add Codara to Firefox</div>
+              <p className="chrome-connect__d">
+                The add-on page opens in your default browser. If that is not Firefox, open the same page in Firefox. Press{" "}
+                <strong>Add to Firefox</strong>, then the Codara icon in the toolbar and <strong>Connect to Codara</strong>.
+              </p>
+              <div className="chrome-connect__actions">
+                <button type="button" className="spark-btn is-primary" onClick={() => void run(() => window.spark.openInSystemBrowser(firefoxRoute.url))}>
+                  Add from Firefox Add-ons
+                </button>
+                <button type="button" className="chrome-connect__link" onClick={() => setFirefoxTemporary(true)}>
+                  Load it temporarily instead
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="chrome-connect__h">Add the extension to Firefox</div>
+              <ol className="chrome-steps">
+                <li>
+                  <strong>Reveal the extension folder</strong> (or copy its path).
+                  <div className="chrome-folder">
+                    <span className="chrome-folder__path spark-mono" title={shownFirefoxFolder ?? undefined}>
+                      {shownFirefoxFolder ?? "This Codara build does not include the extension for Firefox."}
+                    </span>
+                    <button
+                      type="button"
+                      className="spark-btn"
+                      disabled={busy || !shownFirefoxFolder}
+                      onClick={() => void copy("firefox-path", async () => {
+                        const path = await window.spark.chromeLink.prepareFirefoxExtension();
+                        setFirefoxFolder(path);
+                        return path;
+                      })}
+                    >
+                      {copied === "firefox-path" ? "Copied" : "Copy path"}
+                    </button>
+                    <button
+                      type="button"
+                      className="spark-btn is-primary"
+                      disabled={busy || !shownFirefoxFolder}
+                      onClick={() => void run(async () => setFirefoxFolder(await window.spark.chromeLink.revealFirefoxExtension()))}
+                    >
+                      Reveal folder
+                    </button>
+                  </div>
+                </li>
+                <li>
+                  In Firefox open <span className="spark-mono">about:debugging#/runtime/this-firefox</span>{" "}
+                  <button type="button" className="chrome-connect__copy" onClick={() => void copy("firefox-address", async () => "about:debugging#/runtime/this-firefox")}>
+                    {copied === "firefox-address" ? "Copied" : "Copy"}
+                  </button>
+                  , choose <strong>Load Temporary Add-on</strong> and pick <span className="spark-mono">manifest.json</span> in that folder.
+                </li>
+                <li>
+                  Click the Codara icon in the toolbar (pin it from the puzzle piece) and press <strong>Connect to Codara</strong>.
+                </li>
+              </ol>
+              <p className="chrome-connect__d">Firefox removes a temporary add-on when it quits: load it again after a restart.</p>
+            </>
+          )
+        ) : step === "add" ? (
           route.kind === "store" && !unpacked ? (
             <>
               <div className="chrome-connect__h">Add Codara to your browser</div>
@@ -201,11 +292,30 @@ export default function ChromeConnectCard({
         ) : step === "offline" ? (
           <>
             <div className="chrome-connect__h">{`${progress.offline.join(", ")} ${progress.offline.length === 1 ? "is" : "are"} paired but not connected`}</div>
+            {firefoxOffline ? (
+              <p className="chrome-connect__d" data-firefox-offline="">
+                Firefox removes the Codara add-on each time it restarts, so it has to be loaded again: in Firefox open{" "}
+                <span className="spark-mono">about:debugging#/runtime/this-firefox</span>, choose <strong>Load Temporary Add-on</strong> and
+                pick <strong>manifest.json</strong> in the extension folder. It keeps its pairing and settings, and connects again by itself.
+              </p>
+            ) : null}
             <p className="chrome-connect__d">
               Open it, or add the extension again. It connects by itself while Codara is running; if it does not, click the Codara icon in
               the toolbar and press <strong>Connect to Codara</strong>.
             </p>
             <div className="chrome-connect__actions">
+              {firefoxOffline ? (
+                <button
+                  type="button"
+                  className="spark-btn"
+                  onClick={() => {
+                    setFamily("firefox");
+                    setAnother(true);
+                  }}
+                >
+                  Show the Firefox steps
+                </button>
+              ) : null}
               <button type="button" className="spark-btn" onClick={() => setAnother(true)}>
                 Add the extension again
               </button>
@@ -218,6 +328,12 @@ export default function ChromeConnectCard({
               Open a site agents may use, click the Codara icon and turn on <strong>Let agents use this tab</strong>. Agents never see
               the tabs you do not share.
             </p>
+            {firefoxConnected ? <FirefoxAccessNote /> : null}
+            <div className="chrome-connect__actions">
+              <button type="button" className="spark-btn" onClick={() => setAnother(true)}>
+                Connect another browser
+              </button>
+            </div>
           </>
         ) : (
           <>
@@ -225,6 +341,7 @@ export default function ChromeConnectCard({
             <p className="chrome-connect__d">
               {`${progress.paired} browser${progress.paired === 1 ? "" : "s"} paired, ${progress.shared} tab${progress.shared === 1 ? "" : "s"} shared. Share or stop tabs from the extension's popup.`}
             </p>
+            {firefoxConnected ? <FirefoxAccessNote /> : null}
             <div className="chrome-connect__actions">
               <button type="button" className="spark-btn" onClick={() => setAnother(true)}>
                 Connect another browser
@@ -255,5 +372,15 @@ export default function ChromeConnectCard({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** Firefox shares a tab before it lets the extension into the page: its popup asks for both, after sharing. */
+function FirefoxAccessNote(): React.ReactElement {
+  return (
+    <p className="chrome-connect__d">
+      In Firefox, agents can read and act on a shared tab only once its popup has your OK: press <strong>Allow</strong> with the site's name and{" "}
+      <strong>Allow scripts</strong> there.
+    </p>
   );
 }

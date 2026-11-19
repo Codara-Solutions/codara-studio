@@ -316,6 +316,20 @@
         "to": "cora-cli"
       },
       {
+        "from": "extensions/firefox",
+        "to": "firefox-extension-source",
+        "filter": [
+          "**/*",
+          "!test/**",
+          "!dist/**",
+          "!build/pack.mjs",
+          "!package.json",
+          "!.gitignore",
+          "!README.md",
+          "!LISTING.txt"
+        ]
+      },
+      {
         "from": "extensions/chrome",
         "to": "chrome-extension",
         "filter": [

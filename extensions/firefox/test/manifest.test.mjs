@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { FIREFOX_DIR } from "../build/assemble.mjs";
+import { FIREFOX_DIR, assembledEntries, payloadDigest, recordVersion, recordedVersions } from "../build/assemble.mjs";
 
 export function run() {
   const manifest = JSON.parse(readFileSync(join(FIREFOX_DIR, "manifest.json"), "utf8"));
@@ -22,5 +23,23 @@ export function run() {
   // userScripts can only be optional, and is asked alone (Firefox refuses it with another permission).
   assert.deepEqual(manifest.optional_permissions, ["userScripts"]);
   assert.deepEqual(manifest.optional_host_permissions, ["<all_urls>"], "one site at a time, or all sites, asked from the popup");
-  return "manifest: MV3 event page, Firefox 153, loopback WebSocket allowed, no site access at install";
+  // Codara hands each version out once, in a folder it never rewrites: other files need another version.
+  const recorded = recordedVersions();
+  assert.equal(
+    recorded[manifest.version],
+    payloadDigest(assembledEntries()),
+    `the add-on's files changed but its version ${manifest.version} did not (or was not recorded): raise "version" in manifest.json and run node extensions/firefox/build/assemble.mjs --record-version`,
+  );
+  const copy = mkdtempSync(join(tmpdir(), "codara-firefox-versions-"));
+  try {
+    cpSync(FIREFOX_DIR, copy, { recursive: true, filter: (from) => !from.includes(`${FIREFOX_DIR}/dist`) });
+    writeFileSync(join(copy, "background.js"), `${readFileSync(join(copy, "background.js"), "utf8")}\n// changed\n`);
+    assert.throws(() => recordVersion(copy), /Version .* was recorded with other files: raise "version"/);
+    writeFileSync(join(copy, "manifest.json"), JSON.stringify({ ...manifest, version: "99.0.0" }));
+    assert.equal(recordVersion(copy).version, "99.0.0");
+    assert.deepEqual(Object.keys(recordedVersions(copy)), [...Object.keys(recorded), "99.0.0"]);
+  } finally {
+    rmSync(copy, { recursive: true, force: true });
+  }
+  return "manifest: MV3 event page, Firefox 153, loopback WebSocket allowed, no site access at install, one recorded set of files per version";
 }
