@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 
-import type { ChromeLinkBrowserState } from "@shared/chrome-link";
-import { Disclosure, SettingRow, SettingsSection } from "../settings/SettingsPrimitives";
+import { extensionUpdateNotice, NOT_FROM_CODARA_FOLDER, type ChromeLinkBrowserState, type ChromeLinkIncompatibleExtension } from "@shared/chrome-link";
+import { SettingRow, SettingsSection, ToggleRow } from "../settings/SettingsPrimitives";
+import ChromeConnectCard from "./ChromeConnectCard";
 import KeepAgentsInChromeRow from "./KeepAgentsInChromeRow";
 import { formatWhen, useChromeLink } from "./useChromeLink";
 import "./chrome-link.css";
@@ -11,21 +12,83 @@ function sharedCount(browser: ChromeLinkBrowserState): number {
 }
 
 /**
+ * A connected extension older than the one Codara ships. Codara changes it
+ * only when the user presses Update extension here; until then it keeps
+ * working as it is.
+ */
+function ExtensionUpdateNotice({
+  browser,
+  shipped,
+  busy,
+  onUpdate,
+}: {
+  browser: ChromeLinkBrowserState;
+  shipped: string;
+  busy: boolean;
+  onUpdate: () => void;
+}): React.ReactElement | null {
+  const notice = extensionUpdateNotice(browser, shipped);
+  if (!notice) return null;
+  return (
+    <div className="chrome-update" role={notice.action ? undefined : "status"} data-chrome-extension-update={browser.extensionUpdate ?? undefined}>
+      <div className="chrome-update__text">
+        <span>{notice.status}</span>
+        {notice.detail ? <span className="chrome-update__desc">{notice.detail}</span> : null}
+      </div>
+      {notice.action ? (
+        <button type="button" className="spark-btn is-primary" disabled={busy} onClick={onUpdate}>
+          {notice.action === "update" ? "Update extension" : "Reload extension"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/** An extension that tried to connect and speaks another link protocol than this Codara. */
+function IncompatibleNotice({
+  extension,
+  shipped,
+  busy,
+  onUpdate,
+}: {
+  extension: ChromeLinkIncompatibleExtension;
+  shipped: string;
+  busy: boolean;
+  onUpdate: () => void;
+}): React.ReactElement {
+  const who = `${extension.browser.name}'s Codara extension ${extension.version}`.trim();
+  const text =
+    extension.update === "codara"
+      ? `${who} is newer than this Codara understands, so it cannot connect. Update Codara to use it.`
+      : extension.copied
+        ? `Codara's extension folder now holds ${shipped}. Open chrome://extensions in ${extension.browser.name} and press the reload button on Codara to connect.`
+        : extension.fromCodaraFolder
+          ? `${who} is too old for this Codara, so it cannot connect. Update extension copies ${shipped} into Codara's extension folder; then press the reload button on Codara in chrome://extensions.`
+          : `${who} is too old for this Codara, so it cannot connect. It was not loaded from Codara's folder: ${NOT_FROM_CODARA_FOLDER}`;
+  const canUpdate = extension.update === "extension" && extension.fromCodaraFolder && !extension.copied;
+  return (
+    <div className="chrome-update" role="alert" data-chrome-incompatible={extension.extensionId}>
+      <span className="chrome-update__text">{text}</span>
+      {canUpdate ? (
+        <button type="button" className="spark-btn is-primary" disabled={busy} onClick={onUpdate}>
+          Update extension
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * Settings > Browser > Chrome extension: how to install the extension in
  * Chrome, Edge, Brave or another Chromium browser, the browsers paired with
  * Codara and the tabs they share, and what agents did there.
  */
 export default function ChromeLinkSection(): React.ReactElement | null {
   const state = useChromeLink();
-  const [folder, setFolder] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [stepsOpen, setStepsOpen] = useState(false);
+  const [updating, setUpdating] = useState(false);
   if (!state) return null;
-  // The steps stay open until a browser is paired; after that they fold.
-  const showSteps = stepsOpen || state.browsers.length === 0;
 
-  const shownFolder = folder ?? state.extensionFolder;
   const run = async (action: () => Promise<unknown>) => {
     setError(null);
     try {
@@ -34,15 +97,16 @@ export default function ChromeLinkSection(): React.ReactElement | null {
       setError(failure instanceof Error ? failure.message : String(failure));
     }
   };
-  const copyFolder = () =>
+  const update = (which: { linkId: string } | { extensionId: string }) =>
     run(async () => {
-      const path = await window.spark.chromeLink.prepareExtension();
-      setFolder(path);
-      await navigator.clipboard.writeText(path);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      setUpdating(true);
+      try {
+        await window.spark.chromeLink.updateExtension(which);
+      } finally {
+        setUpdating(false);
+      }
     });
-  const reveal = () => run(async () => setFolder(await window.spark.chromeLink.revealExtension()));
+  const shipped = state.shippedExtensionVersion ?? "a newer version";
   const disconnect = (browser: ChromeLinkBrowserState) => run(() => window.spark.chromeLink.disconnect(browser.linkId));
 
   return (
@@ -51,6 +115,20 @@ export default function ChromeLinkSection(): React.ReactElement | null {
       description="Let agents use tabs of your own Chrome, Edge, Brave or other Chromium browser, with your sign-ins. They see only the tabs you share from the extension's popup, never blocked sites, and every action is logged."
     >
       <KeepAgentsInChromeRow />
+
+      <ToggleRow
+        title="Show the agent on your pages"
+        desc="While an agent works in a tab you shared: a pointer in its colour with its name, and a Stop button at the bottom of the page that takes the tab back from that agent. The extension's popup has the same switches."
+        checked={state.presence.overlay}
+        onChange={(overlay) => void run(() => window.spark.chromeLink.setPresence({ overlay }))}
+      />
+      <ToggleRow
+        title="Glow around the page"
+        desc="A thin edge in the agent's colour while it works."
+        checked={state.presence.overlay && state.presence.glow}
+        disabled={!state.presence.overlay}
+        onChange={(glow) => void run(() => window.spark.chromeLink.setPresence({ glow }))}
+      />
 
       <SettingRow
         title="Link status"
@@ -63,66 +141,12 @@ export default function ChromeLinkSection(): React.ReactElement | null {
         }
       />
 
-      {state.pending.map((pairing) => (
-        <SettingRow
-          key={pairing.id}
-          anchor="Link status"
-          title={`${pairing.browser.name} wants to connect`}
-          desc={`Allow it only if the extension shows the code ${pairing.code}.`}
-          control={
-            <span className="st-button-pair">
-              <button type="button" className="spark-btn" onClick={() => void run(() => window.spark.chromeLink.deny(pairing.id))}>
-                Deny
-              </button>
-              <button type="button" className="spark-btn is-primary" onClick={() => void run(() => window.spark.chromeLink.approve(pairing.id))}>
-                Allow
-              </button>
-            </span>
-          }
-        />
-      ))}
-
       <SettingRow
         title="Connect a browser"
         stacked
-        desc="Load the extension folder in your browser, then pair it with Codara."
+        desc="Add the extension, pair it, share a tab. Each step moves on by itself when Codara sees it done."
       >
-        <div className="chrome-folder">
-          <span className="chrome-folder__path spark-mono" title={shownFolder}>
-            {shownFolder}
-          </span>
-          <button type="button" className="spark-btn" onClick={() => void copyFolder()}>
-            {copied ? "Copied" : "Copy path"}
-          </button>
-          <button type="button" className="spark-btn is-primary" onClick={() => void reveal()}>
-            Reveal folder
-          </button>
-        </div>
-        {error ? <div className="chrome-folder__path" role="alert">{error}</div> : null}
-        {state.browsers.length > 0 ? (
-          <Disclosure open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)}>
-            How to connect
-          </Disclosure>
-        ) : null}
-        {showSteps ? (
-          <ol className="chrome-steps">
-            <li>
-              <strong>Reveal the extension folder</strong> (or copy its path).
-            </li>
-            <li>
-              In your browser open <span className="spark-mono">chrome://extensions</span> (Edge:{" "}
-              <span className="spark-mono">edge://extensions</span>), turn on <strong>Developer mode</strong>, choose{" "}
-              <strong>Load unpacked</strong> and pick that folder.
-            </li>
-            <li>
-              Click the Codara icon in the toolbar and choose <strong>Connect to Codara</strong>.
-            </li>
-            <li>
-              Codara shows a code: <strong>Allow</strong> it when it matches the popup&apos;s. Then turn on{" "}
-              <strong>Let agents use this tab</strong> in the popup for each tab agents may use.
-            </li>
-          </ol>
-        ) : null}
+        <ChromeConnectCard state={state} />
       </SettingRow>
 
       <SettingRow
@@ -130,6 +154,16 @@ export default function ChromeLinkSection(): React.ReactElement | null {
         stacked
         desc={state.browsers.length === 0 ? "None yet. Follow the steps above to connect one." : "Disconnect forgets a browser. Its extension must connect again, with a new code."}
       >
+        {error ? <div className="chrome-folder__path" role="alert">{error}</div> : null}
+        {state.incompatible.map((extension) => (
+          <IncompatibleNotice
+            key={extension.extensionId}
+            extension={extension}
+            shipped={shipped}
+            busy={updating}
+            onUpdate={() => void update({ extensionId: extension.extensionId })}
+          />
+        ))}
         {state.browsers.length > 0 ? (
           <div className="st-list">
             {state.browsers.map((browser) => (
@@ -142,21 +176,39 @@ export default function ChromeLinkSection(): React.ReactElement | null {
                   <div className="st-device__meta">
                     {`${sharedCount(browser)} shared tab${sharedCount(browser) === 1 ? "" : "s"}, paired ${formatWhen(browser.pairedAt)}, last seen ${browser.connected ? "now" : formatWhen(browser.lastSeenAt)}`}
                   </div>
-                  {browser.extensionUpdate ? (
-                    <div className="st-device__meta" role="status" data-chrome-extension-update={browser.extensionUpdate}>
-                      {browser.extensionUpdate === "updating"
-                        ? `Updating the extension to ${state.shippedExtensionVersion ?? "the latest version"}.`
-                        : `This browser runs extension ${browser.extensionVersion ?? "an older version"}, Codara ships ${state.shippedExtensionVersion ?? "a newer one"}. Update the extension: open chrome://extensions and press the reload button on Codara.`}
-                    </div>
-                  ) : null}
+                  <ExtensionUpdateNotice
+                    browser={browser}
+                    shipped={shipped}
+                    busy={updating}
+                    onUpdate={() => void update({ linkId: browser.linkId })}
+                  />
                   {browser.tabs.length > 0 ? (
                     <ul className="chrome-tabs">
                       {browser.tabs.map((tab) => (
-                        <li key={tab.id}>
-                          <span className="spark-mono">{tab.id}</span>
-                          <span className="chrome-tabs__title">{tab.blocked ? "Blocked site" : tab.title || tab.url}</span>
-                          <span>{tab.attached ? "in use" : tab.storage ? "cookies allowed" : ""}</span>
-                        </li>
+                        <React.Fragment key={tab.id}>
+                          <li>
+                            <span className="spark-mono">{tab.id}</span>
+                            <span className="chrome-tabs__title">{tab.blocked ? "Blocked site" : tab.title || tab.url}</span>
+                            <span>{tab.attached ? "in use" : tab.storage ? "cookie tools on" : ""}</span>
+                          </li>
+                          {tab.paused ? (
+                            <li className="chrome-tabs__stopped" role="status">
+                              <span className="chrome-tabs__title">Shared tabs were paused after a problem reading saved stops: share each tab again.</span>
+                            </li>
+                          ) : null}
+                          {tab.stopped.map((agent) => (
+                            <li key={`${tab.id}-${agent.key}`} className="chrome-tabs__stopped">
+                              <span className="chrome-tabs__title">{`You stopped ${agent.name} here.`}</span>
+                              <button
+                                type="button"
+                                className="spark-btn"
+                                onClick={() => void run(() => window.spark.chromeLink.giveBack(browser.linkId, Number(tab.id.split(/[:/]/).pop()), agent.key))}
+                              >
+                                Give back
+                              </button>
+                            </li>
+                          ))}
+                        </React.Fragment>
                       ))}
                     </ul>
                   ) : null}

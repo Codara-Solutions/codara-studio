@@ -187,12 +187,13 @@ export default function WorktreeSetupFileDialog({
   const nothing = !preview.worktreeInclude && !preview.setupFile && !existing;
 
   return createPortal(
-    <div
-      className="spark-scrim wts-scrim"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !saving) onClose();
-      }}
-    >
+    <div className="wts-layer">
+      <div
+        className="spark-scrim"
+        onMouseDown={() => {
+          if (!saving) onClose();
+        }}
+      />
       <div
         ref={ref}
         role="dialog"

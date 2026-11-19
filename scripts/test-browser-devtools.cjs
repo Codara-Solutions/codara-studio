@@ -408,7 +408,7 @@ async function storageOnUserBrowser(lib) {
     async evaluate() { return { removed: 2 }; },
   };
   await assert.rejects(lib.setStorageItem(target, { area: "cookies", name: "a", value: "b" }), /does not change cookies in your own browser/);
-  await assert.rejects(lib.clearStorage(target, { area: null }), /does not clear cookies, IndexedDB or caches in your own browser/);
+  await assert.rejects(lib.clearStorage(target, { area: null }), /does not clear cookies, IndexedDB or caches in your own browser, where it would sign you out of sites\. On a Chrome tab get works, and set and clear work on area local or session/);
   await assert.rejects(lib.clearStorage(target, { area: "indexeddb" }), /own browser/);
   const local = await lib.clearStorage(target, { area: "local" });
   assert.deepEqual(local.removed, { localStorage: 2 }, "the page's own local storage may be cleared on a shared tab");

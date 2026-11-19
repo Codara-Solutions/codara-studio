@@ -222,6 +222,42 @@ async function main() {
   assert.equal((await opener.open({ paneId: "pane-host", mode: "overlay", command: "fzf" })).mode, "overlay");
   console.log("PASS overlays cover one pane at a time, end with it or a reload, and route tabs to the pane underneath");
 
+  // An agent tool being updated: refused at once with the reason, before any
+  // pane is asked for (the launch's own refusal would only reach the pane).
+  const updating = fakeDeps();
+  updating.alive.add("pane-u");
+  updating.toolUpdating = (command) => (command?.startsWith("codex ") ? "Codex is updating. Try again in a few minutes." : null);
+  const updatingOpener = paneOpen.createPaneOpener(updating);
+  for (const mode of ["overlay", "tab"]) {
+    await rejectsWith(
+      updatingOpener.open({ paneId: "pane-u", mode, command: "codex resume 12345678 --yolo" }),
+      "spawn",
+      /Codex is updating\. Try again in a few minutes\./,
+    );
+  }
+  assert.deepEqual(updating.calls, [], "no pane is asked for");
+  // The real check, and its wiring into every caller that opens a pane.
+  const guard = require("esbuild").buildSync({
+    entryPoints: [path.join(ROOT, "src", "main", "agent-cli-updates", "launch-guard.ts")],
+    bundle: true, platform: "node", format: "cjs", write: false, logLevel: "silent",
+  }).outputFiles[0].text;
+  const launchGuard = new Module("launch-guard", module);
+  launchGuard._compile(guard, path.join(ROOT, "launch-guard.cjs"));
+  const { setToolBusy, toolUpdating } = launchGuard.exports;
+  assert.equal(toolUpdating("codex resume 12345678 --yolo"), null);
+  setToolBusy("codex", true, "Codex");
+  assert.equal(toolUpdating("codex resume 12345678 --yolo"), "Codex is updating. Try again in a few minutes.");
+  assert.equal(toolUpdating("ls -la"), null, "other commands are not refused");
+  setToolBusy("codex", false);
+  const socketWiring = fs.readFileSync(path.join(ROOT, "src", "main", "agent-socket.ts"), "utf8");
+  const createCheck = socketWiring.indexOf("const updating = toolUpdating(command);\n  if (updating) return errorResponse(id, ERR_TERMINAL_SPAWN, updating);");
+  const createTab = socketWiring.indexOf("const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string; group?: string }>(");
+  assert.ok(createCheck > 0 && createCheck < createTab, "terminal.create asks before creating the tab");
+  assert.match(socketWiring, /createPaneOpener\(\{[\s\S]*?toolUpdating,\s*\}\)/, "pane.open is wired to the check");
+  const phone = fs.readFileSync(path.join(ROOT, "src", "main", "remote-access", "production.ts"), "utf8");
+  assert.match(phone, /const updating = toolUpdating\(command\);\s*if \(updating\) throw [^\n]*\n\s*try \{\s*result = await requestTerminalOp/, "the phone asks before creating the tab");
+  console.log("PASS a launch of an agent tool being updated is refused before any pane");
+
   // Failures to start leave nothing behind.
   const failing = fakeDeps();
   failing.alive.add("pane-x");

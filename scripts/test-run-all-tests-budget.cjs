@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// CI splits the unit suites across two macOS machines (CODARA_TEST_PART) and
-// holds each half to a time budget (CODARA_TEST_BUDGET_SECONDS). A run that
-// goes over must fail with a message naming what it stopped, well before the
+// CI splits the unit suites across several macOS machines (CODARA_TEST_PART,
+// CODARA_TEST_SHARD) and holds each part to a time budget
+// (CODARA_TEST_BUDGET_SECONDS). A run that goes over must fail with a message naming what it stopped, well before the
 // job's own timeout would cancel it with no explanation (issue #204).
 //
 //   node scripts/test-run-all-tests-budget.cjs

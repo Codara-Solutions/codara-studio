@@ -708,12 +708,11 @@ export interface AppSettings {
   // afterwards. Default off. Interactive / non-autopilot launches are
   // unaffected and stay byte-identical regardless of this flag.
   autopilotSandbox: boolean;
-  // Fast mode for every Cora session whose model has one: the manager and
-  // every worker it launches. OpenAI GPT models get the priority tier, Claude
-  // Opus 5.5 / Opus 5 / Opus 4.8 get `speed: "fast"` (billed as extra usage on
-  // a subscription). Off by default. The name predates Anthropic support and
-  // is kept so existing settings files carry over; src/shared/fast-mode.ts
-  // and resources/pi-cora/service-tier.ts own the policy.
+  // Fast mode for every Cora session on a Codex model: the manager and every
+  // Codex worker it launches get OpenAI's priority tier. Claude and every
+  // other model always run at standard speed. Off by default. The name is
+  // kept so existing settings files carry over; src/shared/fast-mode.ts and
+  // resources/pi-cora/service-tier.ts own the policy.
   openAiFastMode: boolean;
   // "Always verify edits with a worker". Off by default: Cora makes small,
   // low-risk edits herself. On restores the old rule that every project
@@ -1369,6 +1368,10 @@ export interface AppPreferences {
   // and keeps the process alive so main-process timers (automations / loops)
   // keep firing instead of quitting. Quit explicitly from the tray menu.
   keepRunningInBackground?: boolean;
+  // When true (default), Codara updates Claude Code, Codex and Grok by
+  // itself once a newer version is out, only while none of that tool's
+  // sessions run (src/main/agent-cli-updates/). Pi is never updated.
+  agentCliAutoUpdate?: boolean;
   // Opt-in (default off): draw with the graphics card on native Wayland,
   // where Codara otherwise draws on the CPU. Read before app ready, so it
   // applies at the next start; CODARA_WAYLAND_HARDWARE_ACCELERATION wins over
@@ -1656,6 +1659,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   glassRefraction: 100,
   glassChroma: 100,
   keepRunningInBackground: true,
+  agentCliAutoUpdate: true,
   waylandHardwareAcceleration: false,
   claudeFollowsActiveAccount: true,
   keepAwakeMode: "agents",
@@ -2700,6 +2704,11 @@ export interface GitStatus {
   unstaged: GitFileChange[];
   hasConflicts: boolean;
   error?: string;
+  /**
+   * Where the workspace sits below the repository root, with a trailing
+   * slash ("src/"), or "" at the root. File paths are from the root.
+   */
+  prefix?: string;
 }
 
 /** Added/removed line counts for one changed file (git diff --numstat). */
@@ -4024,6 +4033,11 @@ export interface HumanRunMessage {
    *  finished, so the next turn is told it is not new and not to redo work
    *  that already started. */
   redelivered?: true;
+  /** The user typed this note in Studio's composer or on the phone. Set only
+   *  by those two entry points (ipc.ts, remote-access); agents, deliveries,
+   *  answers and synthetic notes never carry it. Only such a message can run
+   *  a skill by starting with a slash command (src/shared/user-commands.ts). */
+  typedByUser?: true;
 }
 
 export interface WorkerArtifactPaths {
@@ -5179,6 +5193,9 @@ export interface StartAutopilotInput {
   // first human message on the run so the manager sees it during plan_analysis.
   initialUserNote?: string;
   initialUserNoteClientMessageId?: string;
+  /** Set by the composer's IPC handler and the phone handler only: the user
+   *  typed the initial note (HumanRunMessage.typedByUser). */
+  initialNoteTypedByUser?: true;
   initialAttachments?: AddRunMessageAttachmentInput[];
   // Which Cora manager backend should drive this run. Set by the explorer's
   // "Run plan" engine flyout and the Source Control "Smart Merge" engine
@@ -5243,6 +5260,9 @@ export interface AddRunMessageInput {
   answersMessageId?: string;
   /** Internal recursion guard used while addDirectIteration records its note. */
   skipDirectDispatch?: true;
+  /** Set by the composer's IPC handler and the phone handler only; see
+   *  HumanRunMessage.typedByUser. */
+  typedByUser?: true;
 }
 
 export interface CancelQueuedMessageInput {

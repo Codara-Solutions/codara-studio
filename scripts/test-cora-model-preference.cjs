@@ -80,12 +80,12 @@ async function main() {
     "src/renderer/src/components/chat/composer/types.ts",
   ));
   const groups = composerTypes.buildVisibleGroups({ piCatalog: [
-    { id: "gpt-6-astra", label: "GPT-6 Astra", provider: "openai-codex" },
+    { id: "gpt-6.2-astra", label: "GPT-6.2 Astra", provider: "openai-codex" },
   ] });
-  assert.equal(groups[0].models[0].id, "gpt-6-astra", "Astra must lead OpenAI");
+  assert.equal(groups[0].models[0].id, "gpt-6.2-sol", "GPT-6.2 Sol must lead OpenAI");
   assert.equal(
-    composerTypes.resolvePreferredChatModel(groups, "gpt-6-astra")?.id,
-    "gpt-6-astra",
+    composerTypes.resolvePreferredChatModel(groups, "gpt-6.2-astra")?.id,
+    "gpt-6.2-astra",
   );
   assert.equal(
     composerTypes.resolvePreferredChatModel(composerTypes.buildVisibleGroups({}), "gpt-6-astra")?.id,

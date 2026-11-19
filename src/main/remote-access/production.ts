@@ -127,6 +127,7 @@ import {
 } from "./phone-notify";
 import { getPreferenceCached, getPreferenceSync } from "../preferences-store";
 import * as pty from "../pty-manager";
+import { toolUpdating } from "../agent-cli-updates/launch-guard";
 import { noteTerminalUserInput } from "../terminal-agent-notify";
 import { codaraHome } from "../codara-home";
 import {
@@ -2086,6 +2087,7 @@ async function sendCoraMessageForRemote(input: {
         cwd: root,
         initialUserNote: message,
         initialUserNoteClientMessageId: clientMessageId,
+        initialNoteTypedByUser: true,
         chatBackend: "pi",
         ...(model ? { chatModel: model } : {}),
         ...(input.effort ? { chatEffort: input.effort as AgentEffortLevel } : {}),
@@ -2116,6 +2118,7 @@ async function sendCoraMessageForRemote(input: {
             kind: "note",
             message,
             clientMessageId,
+            typedByUser: true,
           });
     }
     // Commit the compact route before replying. A lost reply can now recover
@@ -3886,6 +3889,9 @@ async function createRemoteTerminal(
     paneId: string;
     cwd: string;
   };
+  // Before a pane exists: the launch's own refusal would only reach the pane.
+  const updating = toolUpdating(command);
+  if (updating) throw Object.assign(new Error(updating), { code: "REMOTE_AGENT_TOOL_UPDATING" });
   try {
     result = await requestTerminalOp<{
       tabId: string;

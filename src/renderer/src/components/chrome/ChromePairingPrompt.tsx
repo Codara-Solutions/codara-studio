@@ -1,18 +1,20 @@
 import React, { useState } from "react";
 
-import { useChromeLink } from "./useChromeLink";
+import { useChromeLink, useConnectCardShown } from "./useChromeLink";
 import "./chrome-link.css";
 
 /**
  * A browser asked to connect: show its code beside Allow and Deny, wherever
  * the user is in Codara. The same code shows in the extension's popup, so
- * the user can tell their own browser from anything else asking.
+ * the user can tell their own browser from anything else asking. Not while
+ * the connect card is on screen: it asks there.
  */
 export default function ChromePairingPrompt(): React.ReactElement | null {
   const state = useChromeLink();
   const [busy, setBusy] = useState(false);
+  const cardShown = useConnectCardShown();
   const pairing = state?.pending[0];
-  if (!pairing) return null;
+  if (!pairing || cardShown) return null;
 
   const decide = async (allow: boolean) => {
     setBusy(true);
