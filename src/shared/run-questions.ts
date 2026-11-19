@@ -209,6 +209,9 @@ export function dedupeHumanRunMessages(
       message.backendTurnId ?? "",
       String(message.conversationEpoch ?? 0),
       (message.attachments ?? []).map((attachment) => attachment.id || attachment.path).join("|"),
+      // A command the user typed never folds into the same text an agent
+      // sent: only the typed copy may run a skill.
+      message.typedByUser === true ? "typed" : "",
     ].join("\u0000");
     const recent = recentBySignature.get(signature);
     if (
