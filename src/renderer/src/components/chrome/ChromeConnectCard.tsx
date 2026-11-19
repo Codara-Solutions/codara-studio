@@ -17,8 +17,9 @@ export const CHROME_INSTALL_ROUTE: ChromeInstallRoute = { kind: "unpacked" };
 
 /**
  * How the add-on gets into Firefox. Today the user loads Codara's folder as a
- * temporary add-on. Once the Firefox Add-ons listing is live, a "store" route
- * with its URL turns the Add step into one "Add from Firefox Add-ons" button.
+ * temporary add-on. A "store" route with a listing's URL would turn the Add
+ * step into one "Add from Firefox Add-ons" button; there is no listing, and
+ * none can be submitted as the add-on stands (extensions/firefox/LISTING.txt).
  */
 export type FirefoxInstallRoute = { kind: "temporary" } | { kind: "store"; url: string };
 export const FIREFOX_INSTALL_ROUTE: FirefoxInstallRoute = { kind: "temporary" };

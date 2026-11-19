@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 
-import { FIREFOX_DIR, assembledEntries } from "../build/assemble.mjs";
+import { CHROME_DIR, FIREFOX_DIR, assembledEntries } from "../build/assemble.mjs";
 import { ADDON_ID, checkAddon, pack } from "../build/pack.mjs";
 
 /** Reads a zip's entries back from its central directory. */
@@ -54,6 +54,21 @@ export function run() {
   refused(withManifest(entries, (m) => (m.browser_specific_settings.gecko.id = "codara@example")), /add-on id must stay @codara-firefox/);
   refused(withManifest(entries, (m) => delete m.browser_specific_settings.gecko.data_collection_permissions), /data_collection_permissions/);
   refused(withManifest(entries, (m) => (m.version = "1.0-beta")), /plain dotted version/);
+  refused(withManifest(entries, (m) => (m.version = "0.01.1")), /plain dotted version/);
+  refused(withManifest(entries, (m) => (m.version = "1.2.3.4.5")), /plain dotted version/);
+  const collecting = (declared, pattern) => refused(withManifest(entries, (m) => (m.browser_specific_settings.gecko.data_collection_permissions = declared)), pattern);
+  collecting({ required: "websiteContent" }, /required must be a list/);
+  collecting({ required: [] }, /required must be a list/);
+  collecting({ required: ["websiteContent", "pageText"] }, /"pageText", which is not one of Mozilla's categories/);
+  collecting({ required: ["none", "websiteContent"] }, /"none" stands alone/);
+  collecting({ required: ["websiteContent", "technicalAndInteraction"] }, /technicalAndInteraction can only be optional/);
+  collecting({ required: ["websiteContent"], optional: "technicalAndInteraction" }, /optional must be a list/);
+  assert.deepEqual(checkAddon(withManifest(entries, (m) => (m.browser_specific_settings.gecko.data_collection_permissions = { required: ["none"], optional: ["technicalAndInteraction"] }))).problems, []);
+  // Sharing a tab sends its address, the page and what the agent does in it, and the sign-in data the page reaches.
+  assert.deepEqual(
+    [...manifest.browser_specific_settings.gecko.data_collection_permissions.required].sort(),
+    ["authenticationInfo", "browsingActivity", "websiteActivity", "websiteContent"],
+  );
   refused(withManifest(entries, (m) => (m.host_permissions = ["<all_urls>"])), /no site access at install/);
   refused(withManifest(entries, (m) => (m.description = "x".repeat(133))), /longer than 132/);
   refused(entries.filter((entry) => entry.name !== "popup.js"), /popup.html loads popup.js, which is missing/);
@@ -76,6 +91,25 @@ export function run() {
     for (const devOnly of ["build/pack.mjs", "build/assemble.mjs", "test/run.mjs", "shared.json", "versions.json", "README.md", "LISTING.txt", "package.json"]) {
       assert.ok(!zipped.has(devOnly), `${devOnly} stays out of the upload`);
     }
+    // Packing never writes over another file of the same name; the same bytes there are fine.
+    const other = mkdtempSync(join(out, "other-"));
+    writeFileSync(join(other, `codara-firefox-${manifest.version}.zip`), "someone else's file");
+    assert.throws(() => pack(other), /is already there with other contents/);
+    assert.equal(readFileSync(join(other, `codara-firefox-${manifest.version}.zip`), "utf8"), "someone else's file");
+
+    // The source archive rebuilds the very same upload, from its own folders and nothing else.
+    const sourceZip = readZip(readFileSync(first.source));
+    assert.match(sourceZip.get("README.txt").toString("utf8"), /node extensions\/firefox\/build\/pack\.mjs --out out/);
+    assert.ok(!sourceZip.has("extensions/firefox/test/run.mjs") && !sourceZip.has("extensions/chrome/background.js"), "only what the build reads");
+    const rebuilt = join(out, "rebuilt");
+    for (const [name, data] of sourceZip) {
+      mkdirSync(dirname(join(rebuilt, name)), { recursive: true });
+      writeFileSync(join(rebuilt, name), data);
+    }
+    const again = pack(join(out, "again"), { firefoxDir: join(rebuilt, "extensions/firefox"), chromeDir: join(rebuilt, "extensions/chrome") });
+    assert.equal(again.sha256, first.sha256, "the source rebuilds the upload byte for byte");
+    assert.notEqual(CHROME_DIR, join(rebuilt, "extensions/chrome"));
+
     // The upload is the version Codara hands out: a version whose files are not the recorded ones is not packed.
     const copy = join(out, "source");
     cpSync(FIREFOX_DIR, copy, { recursive: true, filter: (from) => !from.includes(`${FIREFOX_DIR}/dist`) });
