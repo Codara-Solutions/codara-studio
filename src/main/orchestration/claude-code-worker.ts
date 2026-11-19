@@ -1,7 +1,8 @@
 // A managed Cora worker run by the official Claude Code CLI instead of Pi
 // (route `claude-code/`, src/shared/cora-routes.ts). Claude Code runs headless
 // (`claude -p`) on the account a new Studio Claude terminal would get, with
-// the hooks and codara-studio server Studio gives every Claude it starts.
+// the codara-studio server's worker tools (no board or whiteboard writes)
+// and without Studio's hooks.
 // Claude Code owns the loop, its tools and its compaction; Studio reads its
 // stream-json output so every tool call shows in the run, and the worker
 // writes the same final-report.json a Pi worker would.
@@ -17,6 +18,7 @@
 // the file system for login records during a launch.
 
 import { execFile, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -61,6 +63,23 @@ export function claudeCodeWorkerArgv(input: {
     "-p", "--output-format", "stream-json", "--verbose", "--add-dir", input.attemptDir];
 }
 
+/** Studio's launch arguments without its hooks (`--settings <file>`): a
+ *  worker reports through its stream, and the hooks would write each tool's
+ *  input to disk before anything is redacted. */
+export function withoutStudioHooks(launchArgs: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let index = 0; index < launchArgs.length; index += 1) {
+    const arg = launchArgs[index]!;
+    if (arg === "--settings") {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--settings=")) continue;
+    out.push(arg);
+  }
+  return out;
+}
+
 /** `claude-opus-5@high` as the values of Claude Code's model and effort flags. */
 export function claudeCodeModelAndEffort(model: string, fallbackEffort: string | undefined) {
   const at = model.indexOf("@");
@@ -83,12 +102,35 @@ function safeLine(text: unknown, max: number): string {
   return oneLine(typeof text === "string" ? scrubSecrets(text) : "", max);
 }
 
-/** What a tool call is about, in one short redacted line. The arguments
- *  themselves are never kept. */
+/** The program a shell command runs, and its subcommand when that is a
+ *  plain word (`npm test`, `git status`): never its arguments. */
+function commandSummary(command: string): string {
+  const words = command.trim().split(/\s+/).filter((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+  const program = (words[0] ?? "").split("/").pop() ?? "";
+  if (!/^[A-Za-z0-9._+-]{1,40}$/.test(program)) return "";
+  const sub = words[1];
+  return sub && /^[a-z][a-z0-9:_-]{0,30}$/.test(sub) ? `${program} ${sub}` : program;
+}
+
+/**
+ * What a tool call is about, in one short line built from known fields
+ * only: a shell command's program (never its arguments), a file path, a
+ * URL's host. Free text (search patterns, queries, descriptions) is not
+ * kept, and what is kept still goes through the secret scrubber.
+ */
 function toolDetail(input: Record<string, unknown> | null): string {
-  for (const key of ["command", "file_path", "path", "pattern", "url", "query", "description"]) {
-    const value = input?.[key];
-    if (typeof value === "string" && value.trim()) return safeLine(value, 140);
+  const text = (key: string) => (typeof input?.[key] === "string" ? (input[key] as string).trim() : "");
+  const command = text("command");
+  if (command) return safeLine(commandSummary(command), 60);
+  const file = text("file_path") || text("notebook_path") || text("path");
+  if (file) return safeLine(file, 140);
+  const url = text("url");
+  if (url) {
+    try {
+      return safeLine(new URL(url).host, 80);
+    } catch {
+      return "";
+    }
   }
   return "";
 }
@@ -123,13 +165,10 @@ export function parseClaudeCodeStreamLine(line: string): ClaudeCodeEvent[] {
     });
   }
   if (event.type === "user") {
+    // A failed tool's output is not kept, only that it failed.
     return blocks
       .filter((block) => block?.type === "tool_result" && block.is_error === true)
-      .map((block): ClaudeCodeEvent => {
-        const body = block!.content;
-        const text = Array.isArray(body) ? body.map((part) => record(part)?.text ?? "").join(" ") : body;
-        return { kind: "tool_failed", detail: safeLine(text, 200) };
-      });
+      .map((): ClaudeCodeEvent => ({ kind: "tool_failed", detail: "" }));
   }
   if (event.type !== "result") return [];
   const usage = record(event.usage);
@@ -153,6 +192,35 @@ export interface ClaudeCodeProcess {
 }
 
 const STOP_GRACE_MS = 3_000;
+
+/** Set in the worker's environment and inherited by everything it starts,
+ *  so Stop also finds a process that left both the group and the tree (a
+ *  detached daemon). Studio's own marker; Claude Code does not read it. */
+export const CLAUDE_CODE_WORKER_MARKER = "CODARA_CLAUDE_CODE_WORKER";
+
+/** Linux: every process of this user whose environment carries `marker`. */
+async function markedProcesses(marker: string): Promise<number[]> {
+  if (process.platform !== "linux") return [];
+  const needle = Buffer.from(`${CLAUDE_CODE_WORKER_MARKER}=${marker}\0`);
+  let entries: string[];
+  try {
+    entries = await fs.readdir("/proc");
+  } catch {
+    return [];
+  }
+  const found: number[] = [];
+  await Promise.all(entries.map(async (entry) => {
+    const pid = Number(entry);
+    if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) return;
+    try {
+      const environ = await fs.readFile(`/proc/${pid}/environ`);
+      if (environ.includes(needle)) found.push(pid);
+    } catch {
+      // Gone, or another user's process.
+    }
+  }));
+  return found;
+}
 const DRAIN_AFTER_EXIT_MS = 1_000;
 
 /**
@@ -160,35 +228,51 @@ const DRAIN_AFTER_EXIT_MS = 1_000;
  * first and SIGKILL after a grace period. The tree is captured too, since a
  * tool can leave the group (setsid). Resolves once nothing is left alive.
  */
-async function stopProcessTree(pid: number | undefined): Promise<void> {
-  if (!pid) return;
+async function stopProcessTree(pid: number | undefined, marker: string): Promise<void> {
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
+    if (pid) spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
     return;
   }
-  const tree = captureOwnedProcessTree(pid);
-  const signal = (sig: NodeJS.Signals) => {
-    try {
-      process.kill(-pid, sig);
-    } catch {
-      // The group is already gone.
+  const tree = pid ? captureOwnedProcessTree(pid) : null;
+  const signal = async (sig: NodeJS.Signals) => {
+    if (pid) {
+      try {
+        process.kill(-pid, sig);
+      } catch {
+        // The group is already gone.
+      }
     }
     signalOwnedProcessTree(tree, sig);
-  };
-  const groupAlive = () => {
-    try {
-      process.kill(-pid, 0);
-      return true;
-    } catch {
-      return false;
+    for (const found of await markedProcesses(marker)) {
+      try {
+        process.kill(found, sig);
+      } catch {
+        // Already gone.
+      }
     }
   };
-  signal("SIGTERM");
+  const anyAlive = async () => {
+    if (pid) {
+      try {
+        process.kill(-pid, 0);
+        return true;
+      } catch {
+        // No group left.
+      }
+    }
+    return isOwnedProcessTreeAlive(tree) || (await markedProcesses(marker)).length > 0;
+  };
+  await signal("SIGTERM");
   const deadline = Date.now() + STOP_GRACE_MS;
-  while (Date.now() < deadline && (groupAlive() || isOwnedProcessTreeAlive(tree))) {
+  while (Date.now() < deadline && (await anyAlive())) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  if (groupAlive() || isOwnedProcessTreeAlive(tree)) signal("SIGKILL");
+  if (!(await anyAlive())) return;
+  await signal("SIGKILL");
+  const killDeadline = Date.now() + STOP_GRACE_MS;
+  while (Date.now() < killDeadline && (await anyAlive())) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 /** Start Claude Code, hand it the prompt on stdin, and report each event.
@@ -202,9 +286,10 @@ export function startClaudeCodeWorker(input: {
   prompt: string;
   onEvent: (event: ClaudeCodeEvent) => void;
 }): ClaudeCodeProcess {
+  const marker = randomBytes(12).toString("hex");
   const child: ChildProcessWithoutNullStreams = spawn(input.binary, [...input.argv], {
     cwd: input.cwd,
-    env: input.env,
+    env: { ...input.env, [CLAUDE_CODE_WORKER_MARKER]: marker },
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
     windowsHide: true,
@@ -212,7 +297,7 @@ export function startClaudeCodeWorker(input: {
   let buffered = "";
   let stderrTail = "";
   let stopping: Promise<void> | null = null;
-  const stopTree = () => (stopping ??= stopProcessTree(child.pid));
+  const stopTree = () => (stopping ??= stopProcessTree(child.pid, marker));
   const emit = (line: string) => {
     for (const event of parseClaudeCodeStreamLine(line)) {
       try {
@@ -451,9 +536,10 @@ export async function prepareClaudeCodeWorkerLaunch(input: {
 
 /**
  * The worker's turns: the task, then at most one turn on the same session to
- * write a missing report. `stopped` is read right before each turn starts,
- * so a Stop that lands during the launch or while the report is read never
- * starts one; `turn` must start its process synchronously.
+ * write a missing report. `stopped` is read right before each turn starts
+ * and after each report read, so a Stop that lands during the launch or
+ * while the report is read never starts a turn and never ends as a success;
+ * `turn` must start its process synchronously.
  */
 export async function runClaudeCodeWorkerTurns<Report>(input: {
   prompt: string;
@@ -465,16 +551,21 @@ export async function runClaudeCodeWorkerTurns<Report>(input: {
   onFinalizing?: () => void;
 }): Promise<{ exitCode: number; report: Report | null }> {
   const stoppedError = () => new Error("Claude Code worker was stopped.");
-  if (input.stopped()) throw stoppedError();
+  const check = () => {
+    if (input.stopped()) throw stoppedError();
+  };
+  check();
   const exitCode = await input.turn(input.prompt);
   let report = await input.readReport();
+  check();
   const session = input.sessionId();
   if (!report && session) {
     const prompt = await input.finalizePrompt();
-    if (input.stopped()) throw stoppedError();
+    check();
     input.onFinalizing?.();
     await input.turn(prompt, session);
     report = await input.readReport();
+    check();
   }
   return { exitCode, report };
 }

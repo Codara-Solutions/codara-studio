@@ -115,7 +115,7 @@ async function main() {
   assert.deepEqual(worker.parseClaudeCodeStreamLine('{"type":"stream_event"}'), []);
   assert.deepEqual(
     worker.parseClaudeCodeStreamLine(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Grep", input: { pattern: "foo\nbar" } }] } })),
-    [{ kind: "tool", name: "Grep", detail: "foo bar" }],
+    [{ kind: "tool", name: "Grep", detail: "" }],
   );
   assert.deepEqual(
     worker.parseClaudeCodeStreamLine(JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, usage: {} })),
@@ -144,7 +144,7 @@ async function main() {
   });
   assert.deepEqual(events.map((event) => event.kind), ["session", "text", "tool", "tool_failed", "tool", "result"]);
   assert.deepEqual(events[2], { kind: "tool", name: "Bash", detail: "npm test" });
-  assert.equal(events[3].detail, "1 failing");
+  assert.equal(events[3].detail, "");
   assert.deepEqual(events[5].usage, { input: 10, output: 20, cacheRead: 30, cacheWrite: 40 });
   assert.equal(events[5].ok, true);
   assert.equal(JSON.parse(fs.readFileSync(path.join(attemptDir, "final-report.json"), "utf8")).status, "complete");

@@ -132,7 +132,7 @@ export function stopNeedsMark(share, tab) {
 const DOMAINS = ["Log", "Network", "Page", "Runtime"];
 
 /** The DevTools protocol commands this extension answers, as listed in its hello. */
-export const CDP_METHODS = Object.freeze([...DOMAINS.flatMap((domain) => [`${domain}.disable`, `${domain}.enable`]), ...PAGE_METHODS, ...NAVIGATION_METHODS, "Network.getResponseBody"].sort());
+export const CDP_METHODS = Object.freeze([...DOMAINS.flatMap((domain) => [`${domain}.disable`, `${domain}.enable`]), ...PAGE_METHODS, ...NAVIGATION_METHODS, "Network.getResponseBody", "Network.getCookies"].sort());
 
 /** Whether a command is one the extension answers without doing anything. */
 export function isDomainToggle(method) {

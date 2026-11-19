@@ -785,6 +785,8 @@ function sortedEqual(actual, expected, label) {
         ));
       });
     });
+    let mockConnections = 0;
+    mockAgentSocket.on("connection", () => { mockConnections += 1; });
     await new Promise((resolve, reject) => {
       mockAgentSocket.once("error", reject);
       mockAgentSocket.listen(0, "127.0.0.1", resolve);
@@ -808,6 +810,12 @@ function sortedEqual(actual, expected, label) {
       paneId: "pane-owned",
     });
     assert.notStrictEqual(scopedCall.isError, true);
+    // Each call opens its own connection: a kept-alive one can be closed as
+    // idle by Codara just as the next call goes out on it (ECONNRESET).
+    const connectionsBefore = mockConnections;
+    await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.strictEqual(mockConnections - connectionsBefore, 2, "two calls, two connections");
     assert.strictEqual(
       receivedAuthorization.at(-1),
       `Bearer ${"a".repeat(64)}`,
