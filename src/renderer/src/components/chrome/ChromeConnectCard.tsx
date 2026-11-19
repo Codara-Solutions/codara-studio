@@ -296,8 +296,7 @@ export default function ChromeConnectCard({
               <p className="chrome-connect__d" data-firefox-offline="">
                 Firefox removes the Codara add-on each time it restarts, so it has to be loaded again: in Firefox open{" "}
                 <span className="spark-mono">about:debugging#/runtime/this-firefox</span>, choose <strong>Load Temporary Add-on</strong> and
-                pick <strong>manifest.json</strong> in the extension folder. Then click the Codara icon and press{" "}
-                <strong>Connect to Codara</strong>; if Codara asks to pair it again, check the code and allow it.
+                pick <strong>manifest.json</strong> in the extension folder. It keeps its pairing and settings, and connects again by itself.
               </p>
             ) : null}
             <p className="chrome-connect__d">
