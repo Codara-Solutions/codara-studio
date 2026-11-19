@@ -26,6 +26,8 @@ import {
   captureOwnedProcessTree,
   isOwnedProcessTreeAlive,
   signalOwnedProcessTree,
+  type OwnedProcessIdentity,
+  type OwnedProcessTree,
 } from "../owned-process-tree";
 import { CODARA_CLAUDE_CLI_DIRNAME, codaraHomeDir, isCodaraManagedCliPath } from "./codara-managed-cli-roots";
 import { CLAUDE_CLI_PERSONAL_PROFILE_ID, isClaudeCliManagedProfileId } from "./claude-cli-profile-ids";
@@ -143,52 +145,75 @@ export function parseClaudeCodeStreamLine(line: string): ClaudeCodeEvent[] {
 
 export interface ClaudeCodeProcess {
   done: Promise<{ exitCode: number; stderrTail: string }>;
-  /** Stop Claude Code and every process it started; resolves once none is left. */
-  kill(): Promise<void>;
+  /** Stop Claude Code and every process it started. True once none is
+   *  left; false when something still lived at the deadline. */
+  kill(): Promise<boolean>;
 }
 
 const STOP_GRACE_MS = 3_000;
 const DRAIN_AFTER_EXIT_MS = 1_000;
 
+/** How long SIGKILL is retried before teardown is reported incomplete. */
+const KILL_DEADLINE_MS = 30_000;
+
 /**
  * End the process group a worker leads and every process below it, SIGTERM
- * first and SIGKILL after a grace period. The tree is captured too, since a
- * tool can leave the group (setsid). Resolves once nothing is left alive.
+ * first and SIGKILL after a grace period. Every process seen below a known
+ * one is remembered, before each signal round and until the end, so a
+ * helper started during teardown (in another group) is ended too. Resolves
+ * true once nothing is left, false when something still lives at the
+ * deadline (the caller then keeps its hold).
  */
-async function stopProcessTree(pid: number | undefined): Promise<void> {
-  if (!pid) return;
+async function stopProcessTree(pid: number | undefined): Promise<boolean> {
+  if (!pid) return true;
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
-    return;
+    const result = spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
+    return result.status === 0 || result.status === 128;
   }
-  const tree = captureOwnedProcessTree(pid);
+  const known = new Map<number, OwnedProcessIdentity>();
+  const remember = (tree: OwnedProcessTree | null) => {
+    for (const member of tree?.members ?? []) if (!known.has(member.pid)) known.set(member.pid, member);
+  };
+  remember(captureOwnedProcessTree(pid));
+  const refresh = () => {
+    for (const member of [...known.values()]) {
+      const below = captureOwnedProcessTree(member.pid);
+      // Only below the same process: a recycled pid is not ours.
+      if (below?.members.some((entry) => entry.pid === member.pid && entry.startedAt === member.startedAt)) remember(below);
+    }
+  };
+  const tracked = (): OwnedProcessTree => ({ rootPid: pid, members: [...known.values()] });
+  const groupAlive = () => {
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const anyAlive = () => groupAlive() || isOwnedProcessTreeAlive(tracked());
   const signal = (sig: NodeJS.Signals) => {
+    refresh();
     try {
       process.kill(-pid, sig);
     } catch {
       // The group is already gone.
     }
-    signalOwnedProcessTree(tree, sig);
-  };
-  const anyAlive = () => {
-    try {
-      process.kill(-pid, 0);
-      return true;
-    } catch {
-      return isOwnedProcessTreeAlive(tree);
-    }
+    signalOwnedProcessTree(tracked(), sig);
   };
   const pause = () => new Promise((resolve) => setTimeout(resolve, 100));
   signal("SIGTERM");
   const deadline = Date.now() + STOP_GRACE_MS;
-  while (Date.now() < deadline && anyAlive()) await pause();
-  // Whatever is left, or appears in the group meanwhile, is killed again on
-  // every pass until nothing is left.
-  const killDeadline = Date.now() + STOP_GRACE_MS;
+  while (Date.now() < deadline && anyAlive()) {
+    await pause();
+    refresh();
+  }
+  const killDeadline = Date.now() + KILL_DEADLINE_MS;
   while (Date.now() < killDeadline && anyAlive()) {
     signal("SIGKILL");
     await pause();
   }
+  return !anyAlive();
 }
 
 /** Start Claude Code, hand it the prompt on stdin, and report each event.
@@ -211,7 +236,7 @@ export function startClaudeCodeWorker(input: {
   });
   let buffered = "";
   let stderrTail = "";
-  let stopping: Promise<void> | null = null;
+  let stopping: Promise<boolean> | null = null;
   const stopTree = () => (stopping ??= stopProcessTree(child.pid));
   const emit = (line: string) => {
     for (const event of parseClaudeCodeStreamLine(line)) {

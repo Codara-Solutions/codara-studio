@@ -107,6 +107,22 @@ process.stdin.on("end", () => {
     setInterval(() => {}, 1000);
     return;
   }
+  if (prompt.includes("RESPAWN")) {
+    // A tool that, asked to stop, starts a helper in a new group and holds on
+    // until it is killed: the helper is born after Stop captured the tree.
+    const tool = spawn(process.execPath, ["-e", [
+      "const fs = require('node:fs')",
+      "process.on('SIGTERM', () => {",
+      "  const h = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true });",
+      "  fs.writeFileSync(process.argv[1], String(h.pid));",
+      "});",
+      "fs.writeFileSync(process.argv[2], String(process.pid));",
+      "setInterval(() => {}, 1000);",
+    ].join(";"), path.join(process.env.FAKE_OUT, "helper.pid"), path.join(process.env.FAKE_OUT, "tool.pid")], { stdio: "ignore", detached: true });
+    void tool;
+    setInterval(() => {}, 1000);
+    return;
+  }
   if (prompt.includes("ESCAPE")) {
     // A tool that starts a detached daemon and exits at once: the daemon
     // leaves the group and is no longer below Claude Code when Stop comes.
@@ -328,6 +344,20 @@ async function main() {
     const survivors = pids.filter(alive);
     for (const pid of survivors) process.kill(pid, "SIGKILL");
     assert.deepEqual(survivors, []);
+  });
+
+  await check("a helper a tool starts while it is being stopped is ended too", async () => {
+    const out = fs.mkdtempSync(path.join(TMP, "out-"));
+    const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "RESPAWN", onEvent: () => undefined });
+    const tool = Number(await waitFor(path.join(out, "tool.pid")));
+    assert.ok(alive(tool));
+    const clean = await run.kill();
+    await run.done;
+    const helper = Number(await waitFor(path.join(out, "helper.pid")));
+    const survivors = [tool, helper].filter(alive);
+    for (const pid of survivors) process.kill(pid, "SIGKILL");
+    assert.deepEqual(survivors, []);
+    assert.equal(clean, true, "kill() reports a clean teardown");
   });
 
   await check("Stop never reads another process's environment", async () => {
