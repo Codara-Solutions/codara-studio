@@ -11,12 +11,34 @@ import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
+import { processEnvWithoutElectronViteDev } from "../env-sanitize";
+
 export const FIREFOX_DEBUGGING_ADDRESS = "about:debugging#/runtime/this-firefox";
 
 /** Firefox's own command names on Linux, in the order they are tried. */
 const LINUX_NAMES = ["firefox", "firefox-esr", "firefox-developer-edition", "firefox-nightly"];
-/** Variables an AppImage sets for its own libraries, which would break another program. */
-const APPIMAGE_ONLY = ["APPIMAGE", "APPDIR", "ARGV0", "OWD", "LD_LIBRARY_PATH", "LD_PRELOAD", "GTK_PATH", "GIO_MODULE_DIR", "GDK_PIXBUF_MODULE_FILE", "GSETTINGS_SCHEMA_DIR", "PYTHONHOME", "PYTHONPATH"];
+/**
+ * Set by Electron itself at start, whatever the user had (checked on
+ * Electron 43: GDK_BACKEND becomes its own backend, NO_AT_BRIDGE=1 turns off
+ * the accessibility bridge, CHROME_DESKTOP names Codara's desktop file). The
+ * user's values cannot be read back, so Firefox gets none and picks its own.
+ */
+const ELECTRON_SET = ["GDK_BACKEND", "NO_AT_BRIDGE", "CHROME_DESKTOP"];
+
+/**
+ * The environment the user's own programs get from Codara: without
+ * electron-vite's and npm's dev wiring or Codara's AppImage mount
+ * (env-sanitize.ts), Electron's own variables, or what Electron changed.
+ */
+export function userProgramEnv(): NodeJS.ProcessEnv {
+  const env = processEnvWithoutElectronViteDev();
+  for (const key of Object.keys(env)) if (key.startsWith("ELECTRON_")) delete env[key];
+  for (const key of ELECTRON_SET) delete env[key];
+  // Older Electrons replaced the desktop's name and kept it aside.
+  if (env.ORIGINAL_XDG_CURRENT_DESKTOP !== undefined) env.XDG_CURRENT_DESKTOP = env.ORIGINAL_XDG_CURRENT_DESKTOP;
+  delete env.ORIGINAL_XDG_CURRENT_DESKTOP;
+  return env;
+}
 
 interface Host {
   platform?: NodeJS.Platform;
@@ -35,8 +57,8 @@ function executable(file: string): boolean {
   }
 }
 
-/** The user's Firefox, found the way their shell would; null where opening it is not offered. */
-export function findUserFirefox({ platform = process.platform, env = process.env, home = homedir(), isExecutable = executable }: Host = {}): string | null {
+/** The user's Mozilla Firefox, found the way their shell would; null where opening it is not offered. */
+export function findUserFirefox({ platform = process.platform, env = userProgramEnv(), home = homedir(), isExecutable = executable }: Host = {}): string | null {
   if (platform !== "linux") return null;
   for (const dir of (env.PATH ?? "").split(":")) {
     if (!dir || !isAbsolute(dir)) continue;
@@ -51,27 +73,43 @@ export function findUserFirefox({ platform = process.platform, env = process.env
   return null;
 }
 
-/** The user's environment without Codara's own: Electron's variables, and an AppImage's libraries. */
-function userEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const out: NodeJS.ProcessEnv = {};
-  const appImage = Boolean(env.APPIMAGE || env.APPDIR);
-  for (const [key, value] of Object.entries(env)) {
-    if (key.startsWith("ELECTRON_")) continue;
-    if (appImage && APPIMAGE_ONLY.includes(key)) continue;
-    out[key] = value;
-  }
-  return out;
+interface Child {
+  once(event: "spawn", listener: () => void): unknown;
+  once(event: "error", listener: (error: Error) => void): unknown;
+  on(event: "error", listener: (error: Error) => void): unknown;
+  unref(): void;
 }
+type Spawn = (command: string, args: string[], options: SpawnOptions) => Child;
 
-type Spawn = (command: string, args: string[], options: SpawnOptions) => { on(event: "error", listener: () => void): unknown; unref(): void };
-
-/** Opens about:debugging's This Firefox page in the user's Firefox; false when that is not possible here. */
-export function openFirefoxDebugging(host: Host & { spawn?: Spawn } = {}): boolean {
-  const env = host.env ?? process.env;
-  const binary = findUserFirefox({ ...host, env });
-  if (!binary) return false;
-  const child = (host.spawn ?? (nodeSpawn as unknown as Spawn))(binary, ["--new-tab", FIREFOX_DEBUGGING_ADDRESS], { detached: true, stdio: "ignore", env: userEnv(env) });
-  child.on("error", () => undefined);
-  child.unref();
-  return true;
+/**
+ * Opens about:debugging's This Firefox page in the user's Firefox. True once
+ * Firefox started; false when there is none here, it failed to start, or it
+ * did not start within startTimeoutMs, so the caller offers Copy instead.
+ */
+export function openFirefoxDebugging(host: Omit<Host, "env"> & { spawn?: Spawn; startTimeoutMs?: number } = {}): Promise<boolean> {
+  const env = userProgramEnv();
+  const home = host.home ?? homedir();
+  const binary = findUserFirefox({ ...host, env, home });
+  if (!binary) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (opened: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(opened);
+    };
+    const timer = setTimeout(() => settle(false), host.startTimeoutMs ?? 2_000);
+    let child: Child;
+    try {
+      // From the user's home, so no folder of Codara's (an AppImage mount) stays busy.
+      child = (host.spawn ?? (nodeSpawn as unknown as Spawn))(binary, ["--new-tab", FIREFOX_DEBUGGING_ADDRESS], { detached: true, stdio: "ignore", cwd: home, env });
+    } catch {
+      settle(false);
+      return;
+    }
+    child.on("error", () => settle(false));
+    child.once("spawn", () => settle(true));
+    child.unref();
+  });
 }

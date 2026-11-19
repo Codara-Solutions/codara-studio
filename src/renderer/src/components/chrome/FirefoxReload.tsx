@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import type { ChromeLinkState } from "@shared/chrome-link";
+import { GoneFirefoxTracker } from "./firefox-gone";
 import { useChromeLink, useConnectCardShown } from "./useChromeLink";
 import "./chrome-link.css";
 
@@ -11,12 +12,16 @@ import "./chrome-link.css";
 // the file dialog asks for, and after a paired Firefox drops, says so once.
 
 export const FIREFOX_DEBUGGING_ADDRESS = "about:debugging#/runtime/this-firefox";
+/** What Open in Firefox starts, said on the button. */
+export const OPEN_IN_FIREFOX_TITLE = "Opens this page in Mozilla Firefox. Forks such as LibreWolf are not opened: copy the address instead.";
 /** The README's install section: why a developer add-on, and how Developer Edition, Nightly or ESR keep it. */
-export const FIREFOX_INSTALL_DOCS = "https://github.com/Codara-Solutions/codara-studio/blob/main/extensions/firefox/README.md#install-a-developer-install";
-/** A paired Firefox that stays away this long has really gone (closed or restarted), not blinked. */
-export const FIREFOX_GONE_AFTER_MS = 20_000;
-
-const isFirefox = (name: string) => /firefox/i.test(name);
+export const FIREFOX_INSTALL_DOCS = "https://github.com/Codara-Solutions/codara-studio/blob/main/extensions/firefox/README.md";
+/**
+ * A paired Firefox that stays away this long has really gone (closed or
+ * restarted), not blinked: longer than the add-on's own 30 s wake alarm and
+ * first 30 s reconnect step (extensions/firefox/background.js, link-client.js).
+ */
+export const FIREFOX_GONE_AFTER_MS = 45_000;
 
 let canOpen: Promise<boolean> | null = null;
 /** Whether Codara can open about:debugging in the user's Firefox on this computer; asked once. */
@@ -56,6 +61,7 @@ export function FirefoxLoadActions({ onError }: { onError?: (message: string) =>
         <button
           type="button"
           className="spark-btn is-primary"
+          title={OPEN_IN_FIREFOX_TITLE}
           onClick={() => void act("open", async () => {
             if (!(await window.spark.chromeLink.openFirefoxDebugging())) throw new Error(`Codara could not start Firefox: open ${FIREFOX_DEBUGGING_ADDRESS} in it yourself.`);
           })}
@@ -92,51 +98,21 @@ export function FirefoxWhyNote(): React.ReactElement {
   );
 }
 
-/**
- * The paired Firefoxes that dropped and stayed away FIREFOX_GONE_AFTER_MS,
- * by linkId: once per disconnect (back connected, it may be noticed again),
- * never for one the user unpaired (it leaves the list).
- */
+/** The paired Firefoxes that dropped and stayed away goneAfterMs (firefox-gone.ts), by linkId. */
 export function useGoneFirefoxes(state: ChromeLinkState | null, goneAfterMs = FIREFOX_GONE_AFTER_MS): string[] {
   const [gone, setGone] = useState<string[]>([]);
-  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  const wasConnected = useRef(new Set<string>());
+  const tracker = useRef<GoneFirefoxTracker | null>(null);
   useEffect(() => {
-    const browsers = (state?.browsers ?? []).filter((browser) => isFirefox(browser.browser.name));
-    const present = new Set(browsers.map((browser) => browser.linkId));
-    for (const browser of browsers) {
-      if (browser.connected) {
-        wasConnected.current.add(browser.linkId);
-        const timer = timers.current.get(browser.linkId);
-        if (timer) clearTimeout(timer);
-        timers.current.delete(browser.linkId);
-        setGone((list) => (list.includes(browser.linkId) ? list.filter((id) => id !== browser.linkId) : list));
-      } else if (wasConnected.current.has(browser.linkId) && !timers.current.has(browser.linkId)) {
-        // It dropped while Codara watched: notice it if it stays away.
-        wasConnected.current.delete(browser.linkId);
-        timers.current.set(browser.linkId, setTimeout(() => {
-          timers.current.delete(browser.linkId);
-          setGone((list) => (list.includes(browser.linkId) ? list : [...list, browser.linkId]));
-        }, goneAfterMs));
-      }
-    }
-    // Unpaired (or forgotten in Settings): no notice, now or later.
-    for (const [linkId, timer] of timers.current) {
-      if (!present.has(linkId)) {
-        clearTimeout(timer);
-        timers.current.delete(linkId);
-      }
-    }
-    for (const linkId of wasConnected.current) if (!present.has(linkId)) wasConnected.current.delete(linkId);
-    setGone((list) => (list.some((id) => !present.has(id)) ? list.filter((id) => present.has(id)) : list));
-  }, [state, goneAfterMs]);
-  useEffect(() => {
-    const pending = timers.current;
+    const created = new GoneFirefoxTracker(goneAfterMs, setGone);
+    tracker.current = created;
     return () => {
-      for (const timer of pending.values()) clearTimeout(timer);
-      pending.clear();
+      created.dispose();
+      tracker.current = null;
     };
-  }, []);
+  }, [goneAfterMs]);
+  useEffect(() => {
+    tracker.current?.update(state?.browsers ?? []);
+  }, [state, goneAfterMs]);
   return gone;
 }
 

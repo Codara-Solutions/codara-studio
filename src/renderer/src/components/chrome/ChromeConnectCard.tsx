@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 
 import { chromeConnectProgress, type ChromeConnectStep, type ChromeLinkState } from "@shared/chrome-link";
 import { Segmented } from "../settings/SettingsPrimitives";
-import { FIREFOX_DEBUGGING_ADDRESS, FirefoxLoadActions, FirefoxWhyNote, useCanOpenFirefoxDebugging } from "./FirefoxReload";
+import { FIREFOX_DEBUGGING_ADDRESS, FirefoxLoadActions, FirefoxWhyNote, OPEN_IN_FIREFOX_TITLE, useCanOpenFirefoxDebugging } from "./FirefoxReload";
 import { useConnectCardOnScreen } from "./useChromeLink";
 import "./chrome-link.css";
 import "./chrome-connect.css";
@@ -178,6 +178,7 @@ export default function ChromeConnectCard({
                     <button
                       type="button"
                       className="spark-btn is-primary chrome-connect__inline-btn"
+                      title={OPEN_IN_FIREFOX_TITLE}
                       disabled={busy}
                       onClick={() => void run(async () => {
                         if (!(await window.spark.chromeLink.openFirefoxDebugging())) throw new Error(`Codara could not start Firefox: open ${FIREFOX_DEBUGGING_ADDRESS} in it yourself.`);
