@@ -76,7 +76,8 @@ export function isSameDocument(from, to) {
 export function changeKind(change, page) {
   if (change.url !== undefined) {
     if (change.status === "loading") return page.awaitingCommit ? "commit" : "moved";
-    return page.aborted || otherOrigin(page.url, change.url) ? "failed" : "moved";
+    // A #fragment on Firefox's error page moves within the error page (measured).
+    return page.aborted || page.showsError || otherOrigin(page.url, change.url) ? "failed" : "moved";
   }
   if (change.status === "loading") return "started";
   if (change.status === "complete") return "loaded";
@@ -105,7 +106,7 @@ export const NAVIGATE_BUSY_ERROR = "Another navigation of this tab is still on i
  * fragment, the tab reaching that address.
  */
 export function answersNavigation(kind, change, target) {
-  if (target.sameDocument) return kind === "moved" && change.url === target.url;
+  if (target.sameDocument) return (kind === "moved" || kind === "failed") && change.url === target.url;
   if (!target.started) return false;
   return kind === "commit" || kind === "failed" || (kind === "moved" && change.status !== "loading");
 }
@@ -118,6 +119,8 @@ export function answersNavigation(kind, change, target) {
 export function navigateAnswer(tabId, sameDocument, kind, loaderId) {
   const frameId = mainFrameId(tabId);
   if (kind === null) return { frameId, errorText: NAVIGATE_TIMEOUT_ERROR };
+  // Still Firefox's error page, a #fragment of it included: never "loaded".
+  if (kind === "failed") return sameDocument ? { frameId, errorText: NAVIGATE_ERROR } : { frameId, loaderId, errorText: NAVIGATE_ERROR };
   if (sameDocument) return { frameId };
   if (kind !== "commit") return { frameId, loaderId, errorText: NAVIGATE_ERROR };
   return { frameId, loaderId };
@@ -153,10 +156,11 @@ export function frameTree(tabId, url, loaderId) {
  * A tab's page as the extension tracks it: the document's loader id, the
  * one its next document will get (so a navigation can name it before it
  * commits), its address once known, whether a load is under way and has
- * not committed yet, and whether the last load ended without a commit.
+ * not committed yet, whether the last load ended without a commit, and
+ * whether the tab shows Firefox's error page.
  */
 export function freshPage(newId, url = null) {
-  return { loaderId: newId(), nextLoaderId: newId(), url, loading: false, awaitingCommit: false, aborted: false };
+  return { loaderId: newId(), nextLoaderId: newId(), url, loading: false, awaitingCommit: false, aborted: false, showsError: false };
 }
 
 /**
@@ -169,7 +173,7 @@ export function pageEvents(change, tab, page, newId, now) {
   const frameId = mainFrameId(tab.id);
   const timestamp = now / 1000;
   const events = [];
-  let { loaderId, nextLoaderId, url, loading, awaitingCommit, aborted } = page;
+  let { loaderId, nextLoaderId, url, loading, awaitingCommit, aborted, showsError } = page;
   const kind = changeKind(change, page);
   const stop = () => {
     if (loading) events.push(["Page.frameStoppedLoading", { frameId }]);
@@ -182,12 +186,14 @@ export function pageEvents(change, tab, page, newId, now) {
       loading = true;
       awaitingCommit = true;
       aborted = false;
+      showsError = false;
       break;
     case "commit":
       awaitingCommit = false;
       loaderId = nextLoaderId;
       nextLoaderId = newId();
       url = change.url;
+      showsError = false;
       events.push(["Page.frameNavigated", { frame: frameOf(tab.id, change.url, loaderId), type: "Navigation" }]);
       break;
     case "moved":
@@ -200,6 +206,7 @@ export function pageEvents(change, tab, page, newId, now) {
       // Firefox's error page is no page of the site: no event names it.
       url = change.url;
       aborted = false;
+      showsError = true;
       stop();
       break;
     case "loaded":
@@ -209,5 +216,5 @@ export function pageEvents(change, tab, page, newId, now) {
       stop();
       break;
   }
-  return { events, page: { loaderId, nextLoaderId, url, loading, awaitingCommit, aborted }, kind };
+  return { events, page: { loaderId, nextLoaderId, url, loading, awaitingCommit, aborted, showsError }, kind };
 }

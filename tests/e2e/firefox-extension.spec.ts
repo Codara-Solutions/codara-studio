@@ -270,6 +270,8 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     // Firefox's error page is a failed load, not a page.
     const deadPort = await freePort();
     await expect(request("preview.navigate", { tabId, url: `http://127.0.0.1:${deadPort}/` })).rejects.toThrow(/could not load .*Firefox showed its error page/);
+    // On the error page a #fragment stays on the error page (measured): still a failed load, never "loaded".
+    await expect(request("preview.navigate", { tabId, url: `http://127.0.0.1:${deadPort}/#retry` })).rejects.toThrow(/could not load .*Firefox showed its error page/);
     // A blocked site is refused before it loads, and the tab stays where it was.
     await firefox.navigate(accountContext, `${origin}/account`);
     await expect(request("preview.navigate", { tabId, url: `http://localhost:${sitePort}/bank` })).rejects.toThrow(/on a site agents may not use \("localhost"/);

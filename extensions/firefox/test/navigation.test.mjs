@@ -84,7 +84,7 @@ export async function run(assembled) {
     return { page, sent, kinds };
   };
   const start = freshPage(newId);
-  assert.deepEqual(start, { loaderId: "L1", nextLoaderId: "L2", url: null, loading: false, awaitingCommit: false, aborted: false });
+  assert.deepEqual(start, { loaderId: "L1", nextLoaderId: "L2", url: null, loading: false, awaitingCommit: false, aborted: false, showsError: false });
   const loaded = replay(LOAD, start);
   assert.deepEqual(loaded.kinds, ["started", null, null, "commit", null, "loaded"]);
   assert.deepEqual(loaded.sent, [
@@ -107,6 +107,14 @@ export async function run(assembled) {
   assert.deepEqual(failed.kinds, ["started", "loaded", null, "failed"]);
   assert.deepEqual(failed.sent.map(([method]) => method), ["Page.frameStartedLoading", "Page.frameStoppedLoading"]);
   assert.equal(failed.page.loaderId, loaded.page.loaderId);
+  // The tab shows the error page until a load starts: a #fragment there stays on it (measured), never a route change.
+  assert.equal(failed.page.showsError, true);
+  const onErrorPage = replay([{ status: "complete", url: "https://nope.invalid/#retry" }], failed.page);
+  assert.deepEqual([onErrorPage.kinds, onErrorPage.sent, onErrorPage.page.showsError], [["failed"], [], true]);
+  assert.equal(answersNavigation("failed", { status: "complete", url: "https://nope.invalid/#retry" }, { sameDocument: true, url: "https://nope.invalid/#retry" }), true);
+  assert.deepEqual(navigateAnswer(7, true, "failed", "L2"), { frameId, errorText: NAVIGATE_ERROR });
+  assert.equal(replay([{ status: "loading" }], failed.page).page.showsError, false);
+  assert.equal(loaded.page.showsError, false);
   // An error page Firefox shows without starting a load (a port it refuses), on another site: still no page.
   const refused = replay([{ title: "127.0.0.1:1/x" }, { status: "complete", url: "http://127.0.0.1:1/x" }], loaded.page);
   assert.deepEqual([refused.kinds, refused.sent], [[null, "failed"], []]);
