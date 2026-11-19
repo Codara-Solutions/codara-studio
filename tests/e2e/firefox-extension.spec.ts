@@ -361,8 +361,19 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
       expect.objectContaining({ name: "session", value: "[redacted] (12 chars)", httpOnly: true }),
     ]));
     expect(JSON.stringify(jar)).not.toMatch(/secret-value/);
+    // Site storage, read and changed through the page, as in Chrome; changing cookies or clearing IndexedDB and caches
+    // in the user's own browser is refused by Codara itself, as in Chrome.
+    expect(await request("preview.storage", { tabId, action: "set", area: "local", name: "draft", value: "hello" })).toMatchObject({ ok: true, set: "draft" });
+    expect(await request("preview.storage", { tabId, action: "set", area: "session", name: "step", value: "2" })).toMatchObject({ ok: true });
+    expect(await request("preview.storage", { tabId, area: "local", redact: false })).toMatchObject({ localStorage: { items: { draft: "hello" } } });
+    expect(await firefox.evaluate(accountContext, "localStorage.getItem('draft') + ' ' + sessionStorage.getItem('step')")).toBe("hello 2");
+    expect(await request("preview.storage", { tabId, action: "clear", area: "local", name: "draft" })).toMatchObject({ removed: { localStorage: 1 } });
+    expect(await request("preview.storage", { tabId, action: "clear", area: "session" })).toMatchObject({ removed: { sessionStorage: 1 } });
+    await expect(request("preview.storage", { tabId, action: "set", area: "cookies", name: "a", value: "b" })).rejects.toThrow(/does not change cookies in your own browser/);
+    await expect(request("preview.storage", { tabId, action: "clear", area: "indexeddb" })).rejects.toThrow(/does not clear cookies, IndexedDB or caches in your own browser/);
     await setStorage(false);
     await expect.poll(async () => cookies(true).then(() => "read", (error) => error.message), { timeout: 10_000 }).toMatch(/need the user's permission/);
+    await expect(request("preview.storage", { tabId, action: "set", area: "local", name: "draft", value: "x" })).rejects.toThrow(/need the user's permission/);
 
     // Idle: Firefox unloads an idle event page (after 15 s in this profile)
     // and traffic on its socket does not count. The extension's keep-alive

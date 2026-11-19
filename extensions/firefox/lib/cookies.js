@@ -6,7 +6,6 @@
 // No browser.* here, so the tests run it in Node.
 
 import { isFirefoxRestrictedUrl, firefoxBlockingRule } from "./firefox.js";
-import { storageScopeError } from "./policy.js";
 
 // URLs one getCookies may ask about.
 export const COOKIE_URLS_MAX = 20;
@@ -17,9 +16,27 @@ export function cookieUrls(params, tabUrl) {
   return asked.length ? asked : [tabUrl];
 }
 
+/** An http(s) URL without credentials, parsed once, or null. */
+function webUrl(text) {
+  try {
+    const url = new URL(String(text ?? ""));
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+const hostOf = (url) => url.hostname.replace(/\.$/, "");
+
+/** The URL Firefox is asked about: the very one cookieRefusal checked. */
+export const cookieUrl = (text) => webUrl(text)?.href ?? null;
+
 /**
  * Why the cookies of `urls` may not go to Codara for this tab now, or null.
  * `tab` is { id, url }; `storageTabs` the tabs whose cookie switch is on.
+ * Only the tab's own host: Firefox gives extensions no list of public
+ * suffixes, so a domain above or below it cannot be told apart from
+ * another site (a.github.io and github.io).
  */
 export function cookieRefusal({ tab, urls, storageTabs, rules, ref }) {
   if (!tab || !storageTabs.includes(tab.id)) {
@@ -28,25 +45,23 @@ export function cookieRefusal({ tab, urls, storageTabs, rules, ref }) {
   // The tab's own page first: a tab now on a blocked site or a browser page gives nothing.
   const tabRule = firefoxBlockingRule(tab.url, rules);
   if (tabRule) return `${ref} is on a site agents may not use ("${tabRule.raw}" in the extension's blocked sites).`;
-  if (!/^https?:\/\//i.test(String(tab.url ?? "")) || isFirefoxRestrictedUrl(tab.url)) return `${ref} shows a page with no cookies Codara may read.`;
+  const page = webUrl(tab.url);
+  if (!page || isFirefoxRestrictedUrl(page.href)) return `${ref} shows a page with no cookies Codara may read.`;
   if (urls.length > COOKIE_URLS_MAX) return `At most ${COOKIE_URLS_MAX} URLs per cookie read.`;
-  for (const url of urls) {
-    if (!/^https?:\/\//i.test(url) || isFirefoxRestrictedUrl(url)) return `${url} has no cookies Codara may read.`;
-    // Never a bare top-level domain above the tab's site (a host of one label is the tab's own only).
-    const host = hostOf(url);
-    if (!host || (!host.includes(".") && host !== hostOf(tab.url))) return `${url} is not this tab's site; the cookie and storage permission covers ${hostOf(tab.url)} only.`;
-    const rule = firefoxBlockingRule(url, rules);
-    if (rule) return `${url} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`;
+  for (const text of urls) {
+    const url = webUrl(text);
+    if (!url || isFirefoxRestrictedUrl(url.href)) return `${text} has no cookies Codara may read.`;
+    if (hostOf(url) !== hostOf(page)) return `${text} is not this tab's site; the cookie and storage permission covers ${hostOf(page)} only.`;
+    const rule = firefoxBlockingRule(url.href, rules);
+    if (rule) return `${text} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`;
   }
-  return storageScopeError({ urls }, tab.url, rules);
+  return null;
 }
 
-function hostOf(url) {
-  try {
-    return new URL(url).hostname.replace(/\.$/, "");
-  } catch {
-    return "";
-  }
+/** Whether a cookie Firefox gave belongs to no blocked site or path (a domain cookie of a blocked parent does). */
+export function cookieVisible(cookie, rules) {
+  const host = String(cookie.domain ?? "").replace(/^\./, "");
+  return Boolean(host) && !firefoxBlockingRule(`https://${host}${String(cookie.path ?? "/")}`, rules);
 }
 
 const SAME_SITE = { strict: "Strict", lax: "Lax", no_restriction: "None" };
@@ -72,28 +87,37 @@ export function cdpCookie(cookie) {
 }
 
 /** The cookies of several URLs, each once, as the protocol gives them. */
-export function cookiesAnswer(lists) {
+export function cookiesAnswer(lists, visible = () => true) {
   const seen = new Map();
   for (const cookie of lists.flat()) {
+    if (!visible(cookie)) continue;
     const key = `${cookie.name}\u0000${cookie.domain}\u0000${cookie.path}`;
     if (!seen.has(key)) seen.set(key, cdpCookie(cookie));
   }
   return { cookies: [...seen.values()] };
 }
 
+/** Why the user's command to change or clear storage in their own browser is not done: never silently ignored. */
+export const STORAGE_WRITES = Object.freeze(["Network.setCookie", "Network.setCookies", "Network.deleteCookies", "Network.clearBrowserCookies", "Storage.clearDataForOrigin", "Storage.clearCookies", "Storage.setCookies"]);
+export function storageWriteRefusal(method) {
+  return `${method}: Codara does not change or clear cookies, IndexedDB or caches in your own browser, as in Chrome. With the tab's cookie switch on it reads the tab's cookies and reads and changes its local and session storage.`;
+}
+
 /**
  * Whether a cookie read may still go to Codara, asked before the read,
  * after it and when the answer leaves: the reason it may not, or null.
- * `now()` reads the extension's state at that moment: { taken (site access
- * taken back, counted), socket (the live link), seen (the tab as last seen,
- * or none if closed), allowed (attached, shared, not blocked), storageTabs,
- * rules }.
+ * `now()` reads the extension's state at that moment: { generation (moves
+ * on whenever the switch, attaching, sharing, the blocked sites, the tab's
+ * page or window, site access or the link change, so access taken back and
+ * given again still ends the read), socket (the live link), seen (the tab
+ * as last seen, or none), allowed (attached, shared, not blocked),
+ * storageTabs, rules }.
  */
 export function cookieGate({ urls, ref, now }) {
   const start = now();
   return () => {
     const state = now();
-    if (state.taken !== start.taken) return `The user took back a site's access while the cookies of ${ref} were read; ask again.`;
+    if (state.generation !== start.generation) return `${ref} or what it may share changed while its cookies were read; ask again.`;
     if (!state.socket || state.socket !== start.socket) return "The link to Codara changed while the cookies were read.";
     if (!state.seen || !state.allowed) return `${ref} is no longer attached and shared with agents.`;
     return cookieRefusal({ tab: { id: state.seen.id, url: state.seen.url }, urls, storageTabs: state.storageTabs, rules: state.rules, ref });
@@ -101,22 +125,28 @@ export function cookieGate({ urls, ref, now }) {
 }
 
 /**
- * Reads the cookies of `urls` with `getAll(url)`, past `refusal()` before
- * and after; `build()` gives the answer only while `refusal()` is still
- * null, so nothing goes out once what allowed the read has changed.
+ * Reads the cookies of `urls` with `getAll(url)`, past `refusal()` and
+ * `permitted()` (Firefox's site access for them) before and after; `build()`
+ * gives the answer only while `refusal()` is still null, without the
+ * cookies of a site blocked by then (`rules()`).
  */
-export async function readCookies(urls, getAll, refusal) {
-  const before = refusal();
-  if (before) throw new Error(before);
-  const answer = cookiesAnswer(await Promise.all(urls.map(getAll)));
-  const after = refusal();
-  if (after) throw new Error(after);
+export async function readCookies(urls, { getAll, refusal, permitted, rules }) {
+  const check = async () => {
+    const before = refusal();
+    if (before) throw new Error(before);
+    if (!(await permitted())) throw new Error("Firefox has no access to this site for the Codara extension: allow it from the popup first.");
+    const after = refusal();
+    if (after) throw new Error(after);
+  };
+  await check();
+  const lists = await Promise.all(urls.map((url) => getAll(cookieUrl(url))));
+  await check();
   return {
     still: () => !refusal(),
     build: () => {
       const now = refusal();
       if (now) throw new Error(now);
-      return answer;
+      return cookiesAnswer(lists, (cookie) => cookieVisible(cookie, rules()));
     },
   };
 }
