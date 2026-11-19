@@ -27,6 +27,25 @@ import {
   unsupportedMethodError,
 } from "./lib/firefox.js";
 import {
+  PAGE_METHODS,
+  SYNTAX_ERROR,
+  accessError,
+  accessKey,
+  accessNeeds,
+  accessRequest,
+  accessRows,
+  captureOptions,
+  compileCheck,
+  expressionAnswer,
+  expressionScript,
+  frameFailed,
+  layoutMetrics,
+  measureLayout,
+  screenshotAnswer,
+  statementsAnswer,
+  statementsScript,
+} from "./lib/page-tools.js";
+import {
   DEFAULT_BLOCKED_SITES,
   DEFAULT_PORTS,
   LINK_PATH,
@@ -58,6 +77,10 @@ const LOCAL_DEFAULTS = {
   ports: null,
   linkScan: null,
   presence: { overlay: true, glow: true, at: 0 },
+  // Permissions the popup asked the user for and Firefox has not granted
+  // since: the user said no (or closed the question). The popup does not
+  // ask again by itself; its button still does.
+  asked: {},
 };
 const ALARM = "codara-link";
 // A third of Firefox's default 30 s idle timeout.
@@ -244,7 +267,7 @@ async function handleRequest(request) {
       await detachTab(Number(request.tabId));
       return {};
     case "cdp":
-      return answerCommand(request);
+      return answerCommand(request, socket);
     case "open":
     case "close":
       throw new Error("Opening and closing tabs is not available in Firefox yet. The user opens or closes the tab, and shares it from the Codara extension popup.");
@@ -259,15 +282,137 @@ async function handleRequest(request) {
   }
 }
 
-async function answerCommand(request) {
+async function answerCommand(request, socket) {
   const child = childSessionError(request);
   if (child) throw new Error(child);
   const tab = await usableTab(request.tabId);
   const method = String(request.method ?? "");
   if (!state.attached.includes(tab.id)) throw new Error(`${agentTabId(tab.id)} is not attached.`);
   if (isDomainToggle(method)) return {};
+  if (!PAGE_METHODS.includes(method)) throw new Error(unsupportedMethodError(method));
+  const params = request.params !== null && typeof request.params === "object" ? request.params : {};
+  for (const need of accessNeeds(method)) {
+    if (!(await granted(need, tab.url))) throw new Error(accessError(need, tab.url, wasAsked(need, tab.url)));
+  }
+  switch (method) {
+    case "Runtime.evaluate":
+      return evaluateInPage(tab.id, params, socket);
+    case "Page.getLayoutMetrics": {
+      const now = await stillUsable(tab.id, socket);
+      const [frame] = await withSiteError(now, () => chrome.scripting.executeScript({ target: { tabId: now.id }, func: measureLayout }));
+      return layoutMetrics(frame?.result);
+    }
+    case "Page.captureScreenshot": {
+      const now = await stillUsable(tab.id, socket);
+      // Firefox removes captureTab with access to all sites.
+      if (typeof chrome.tabs.captureTab !== "function") throw new Error(accessError("allSites", now.url, wasAsked("allSites", now.url)));
+      return screenshotAnswer(await chrome.tabs.captureTab(now.id, captureOptions(params)));
+    }
+  }
   throw new Error(unsupportedMethodError(method));
 }
+
+/** The tab again, right before the extension acts in it: still shared, allowed, attached, and the request still live. */
+async function stillUsable(tabId, socket) {
+  stillLive(socket);
+  const tab = await usableTab(tabId);
+  stillLive(socket);
+  if (!state.attached.includes(tab.id)) throw new Error(`${agentTabId(tab.id)} is not attached.`);
+  return tab;
+}
+
+/** Firefox's own refusal (the tab moved to a site not allowed) as the same plain error. */
+async function withSiteError(tab, work) {
+  try {
+    return await work();
+  } catch (error) {
+    if (/missing host permission/i.test(String(error?.message))) throw new Error(accessError("site", tab.url, wasAsked("site", tab.url)));
+    throw error;
+  }
+}
+
+/**
+ * Runtime.evaluate in the page's own world. The expression runs inside a
+ * wrapper that returns its value or what it threw, as Codara's protocol
+ * gives them. Firefox reports a script that does not compile only as an
+ * empty error, so then the code is compiled without running (as an
+ * expression, then as statements) before it runs once as statements.
+ */
+async function evaluateInPage(tabId, params, socket) {
+  if (params.contextId !== undefined || params.uniqueContextId !== undefined) {
+    throw new Error("Runtime.evaluate in another world or frame is not available in Firefox: agents use the tab's own page.");
+  }
+  const expression = String(params.expression ?? "");
+  const awaitPromise = params.awaitPromise === true;
+  const run = async (code) => {
+    const tab = await stillUsable(tabId, socket);
+    const [frame] = await withSiteError(tab, () => chrome.userScripts.execute({ js: [{ code }], target: { tabId: tab.id }, world: "MAIN", injectImmediately: true }));
+    if (!frame) throw new Error(`${agentTabId(tabId)} has no page to run the script in.`);
+    return frame;
+  };
+  const first = await run(expressionScript(expression, { awaitPromise }));
+  if (!frameFailed(first)) return expressionAnswer(first.result);
+  if (!frameFailed(await run(compileCheck(expression, { awaitPromise })))) {
+    throw new Error("The page did not finish the script; it may have navigated away. Nothing was run twice.");
+  }
+  if (frameFailed(await run(compileCheck(expression, { asScript: true })))) return SYNTAX_ERROR;
+  const marker = `__codaraThrown${crypto.randomUUID().replaceAll("-", "")}`;
+  try {
+    return statementsAnswer(await run(statementsScript(expression, marker)), marker);
+  } catch (error) {
+    // The last statement's value cannot leave the page (a DOM node, a function).
+    if (/non-structured-clonable/i.test(String(error?.message))) return { result: { type: "object", value: {} } };
+    throw error;
+  }
+}
+
+// ── Firefox permissions ─────────────────────────────────────────────────────
+
+const NEED_NAMES = ["site", "scripts", "allSites"];
+
+async function granted(need, url) {
+  const request = accessRequest(need, url);
+  return request ? chrome.permissions.contains(request).catch(() => false) : false;
+}
+
+function wasAsked(need, url) {
+  return Boolean(state.asked?.[accessKey(need, url)]);
+}
+
+/** What the popup offers for a tab: the permissions still missing, each with its sentence and request. */
+async function accessView(request) {
+  const tab = typeof request.tabId === "number" ? await chrome.tabs.get(request.tabId).catch(() => null) : null;
+  if (!tab || !accessRequest("site", tab.url) || isFirefoxRestrictedUrl(tab.url) || firefoxBlockingRule(tab.url, rules)) return { shared: false, rows: [] };
+  const has = {};
+  const asked = {};
+  for (const need of NEED_NAMES) {
+    has[need] = await granted(need, tab.url);
+    asked[need] = wasAsked(need, tab.url);
+  }
+  const rows = accessRows({ url: tab.url, reach: reachOf(shareChoice(), request.windowId), has, asked });
+  return {
+    shared: shared(tab),
+    rows: rows.map((row) => ({ ...row, asked: asked[row.need], key: accessKey(row.need, tab.url), request: accessRequest(row.need, tab.url) })),
+  };
+}
+
+const ASK_KEY = /^(?:scripts|allSites|site:https?:\/\/[^/\s]+\/\*)$/;
+
+/** Forget the asks Firefox has granted since, so only a no is remembered. */
+async function forgetGrantedAsks() {
+  await ready;
+  const kept = {};
+  for (const [key, at] of Object.entries(state.asked ?? {})) {
+    const request = key === "scripts" ? accessRequest("scripts") : key === "allSites" ? accessRequest("allSites") : { origins: [key.slice("site:".length)] };
+    if (!(await chrome.permissions.contains(request).catch(() => false))) kept[key] = at;
+  }
+  await save({ asked: kept });
+}
+
+// In line with the popup's actions, so a grant never overtakes the ask it answers.
+chrome.permissions.onAdded.addListener(() => {
+  popupQueue = popupQueue.then(forgetGrantedAsks).catch(() => {});
+});
 
 const usageBadgeTimers = new Map();
 
@@ -490,6 +635,13 @@ async function handlePopup(request) {
     case "state":
       if (request.opened === true) void link.wake();
       return popupState(request);
+    case "access":
+      return accessView(request);
+    case "accessAsked":
+      // The popup says so right before Firefox's question shows.
+      if (typeof request.key !== "string" || !ASK_KEY.test(request.key)) throw new Error("Unknown permission.");
+      await save({ asked: { ...state.asked, [request.key]: Date.now() } });
+      return {};
     case "connect":
       pairingWanted = true;
       generation += 1;

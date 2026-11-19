@@ -42,6 +42,12 @@ export interface HeadlessFirefox {
   navigate(context: string, url: string): Promise<void>;
   /** An expression's value in a tab or an extension page. */
   evaluate<T = any>(context: string, expression: string): Promise<T>;
+  /** A real mouse click on an element, which Firefox counts as the user's (permissions.request needs one). */
+  click(context: string, selector: string): Promise<void>;
+  /** Whether Firefox shows its "add permissions" question for an extension. */
+  permissionQuestionShown(): Promise<boolean>;
+  /** Answer that question as the user's Allow or Deny would; fails if none shows within 10 s. */
+  answerPermissionQuestion(allow: boolean): Promise<void>;
   screenshot(context: string): Promise<Buffer>;
   close(): Promise<void>;
 }
@@ -153,6 +159,12 @@ export async function launchFirefox(binary: { path: string; version: number }, {
         else socket.send(JSON.stringify({ id, method, params }));
       });
     await call("session.new", { capabilities: {} });
+    // An expression in the browser window itself (its toolbar and doorhangers).
+    const inBrowserWindow = async (expression: string): Promise<unknown> => {
+      const { contexts } = await call<{ contexts: { context: string }[] }>("browsingContext.getTree", { maxDepth: 0, "moz:scope": "chrome" });
+      const answer = await call<{ result?: { value?: unknown } }>("script.evaluate", { expression, target: { context: contexts[0].context }, awaitPromise: false });
+      return answer.result?.value;
+    };
     const firefox: HeadlessFirefox = {
       pid: child.pid,
       version: binary.version,
@@ -203,6 +215,39 @@ export async function launchFirefox(binary: { path: string; version: number }, {
         });
         if (answer.type === "exception") throw new Error(answer.exceptionDetails?.text ?? "the page threw");
         return deserialize(answer.result) as any;
+      },
+      async click(context, selector) {
+        const node = await call<{ result: { type: string; sharedId?: string } }>("script.evaluate", {
+          expression: `document.querySelector(${JSON.stringify(selector)})`,
+          target: { context },
+          awaitPromise: false,
+          resultOwnership: "root",
+        });
+        if (node.result.type !== "node" || !node.result.sharedId) throw new Error(`no ${selector} to click`);
+        const element = { type: "element", element: { sharedId: node.result.sharedId } };
+        await call("input.performActions", {
+          context,
+          actions: [{ type: "pointer", id: "mouse", actions: [{ type: "pointerMove", x: 0, y: 0, origin: element }, { type: "pointerDown", button: 0 }, { type: "pointerUp", button: 0 }] }],
+        });
+      },
+      async permissionQuestionShown() {
+        return (await inBrowserWindow(`PopupNotifications._currentNotifications.some((note) => note.id === "addon-webext-permissions")`)) === true;
+      },
+      // The question's own Allow and Deny run these callbacks.
+      async answerPermissionQuestion(allow) {
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          const answered = await inBrowserWindow(`(() => {
+            const note = PopupNotifications._currentNotifications.find((note) => note.id === "addon-webext-permissions");
+            if (!note) return false;
+            (${allow} ? note.mainAction : note.secondaryActions[0]).callback();
+            note.remove();
+            return true;
+          })()`);
+          if (answered === true) return;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        throw new Error("Firefox asked for no permission");
       },
       async screenshot(context) {
         const { data } = await call<{ data: string }>("browsingContext.captureScreenshot", { context });
