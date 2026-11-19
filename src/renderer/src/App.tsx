@@ -112,6 +112,7 @@ import { useWorkspaceBranches } from "./git/useWorkspaceBranches";
 import { useWorktreeRailStates } from "./git/useWorktreeRailStates";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
 import ChromePairingPrompt from "./components/chrome/ChromePairingPrompt";
+import FirefoxReloadNotice from "./components/chrome/FirefoxReload";
 import CrossWorkspacePrompt from "./components/cross-workspace/CrossWorkspacePrompt";
 import TabActionPrompt from "./components/tab-actions/TabActionPrompt";
 import SshManagerDialog from "./components/remote/SshManagerDialog";
@@ -7274,6 +7275,7 @@ export default function App() {
         <RemoteAuthPrompt />
         <HostKeyPrompt />
         <ChromePairingPrompt />
+        <FirefoxReloadNotice />
         <CrossWorkspacePrompt />
         <TabActionPrompt />
 

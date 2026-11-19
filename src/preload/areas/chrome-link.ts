@@ -26,6 +26,12 @@ export const chromeLinkApi = {
   revealExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:revealExtension"),
   /** The Firefox extension's folder for this version, assembled into Codara's home the first time. */
   prepareFirefoxExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:prepareFirefoxExtension"),
+  /** The full path of that folder's manifest.json, which Firefox's Load Temporary Add-on asks for. */
+  prepareFirefoxManifest: (): Promise<string> => ipcRenderer.invoke("chromeLink:prepareFirefoxManifest"),
+  /** Whether Codara can open about:debugging in the user's Firefox here (Linux, Firefox found). */
+  canOpenFirefoxDebugging: (): Promise<boolean> => ipcRenderer.invoke("chromeLink:canOpenFirefoxDebugging"),
+  /** Open about:debugging#/runtime/this-firefox in the user's Firefox; false when it could not be. */
+  openFirefoxDebugging: (): Promise<boolean> => ipcRenderer.invoke("chromeLink:openFirefoxDebugging"),
   /** The same, and open the folder in the file manager. */
   revealFirefoxExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:revealFirefoxExtension"),
   /**

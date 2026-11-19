@@ -41,8 +41,16 @@
 
 .chrome-pairing__actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* After a paired Firefox drops: quiet, at the bottom, out of the pairing prompt's way. */
+.chrome-pairing--notice {
+  top: auto;
+  bottom: 16px;
+  width: min(380px, calc(100vw - 32px));
 }
 
 /* Seconds left on a card that times out; it sits left of the buttons. */

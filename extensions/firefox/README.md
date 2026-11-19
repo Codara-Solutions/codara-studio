@@ -17,7 +17,13 @@ assembly fails instead of shipping Chrome's wording.
 
 ## Install (a developer install)
 
-In Codara: Settings > Browser > Firefox walks through these steps. Its folder
+In Codara: Settings > Browser > Firefox walks through these steps. On
+Linux its **Open in Firefox** opens `about:debugging` in the user's own
+Firefox (`firefox --new-tab`, on their click; Firefox lets no link or page
+open about: pages); elsewhere it copies the address. **Copy path** copies
+the full path of `manifest.json`, which the file dialog takes pasted in.
+When a paired Firefox closes or restarts, Codara shows one quiet notice
+with the same actions (not when the user disconnected it on purpose). Its folder
 is this version's, assembled into Codara's home
 (`<codara home>/firefox-extension/<version>/`, by
 `src/main/browser/firefox-extension.ts`) the first time Copy path or Reveal

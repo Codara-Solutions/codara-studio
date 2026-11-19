@@ -143,7 +143,7 @@ function freePort(): Promise<number> {
 const linkState = (codara: Page) => codara.evaluate(() => (window as unknown as { spark: { chromeLink: { state(): Promise<any> } } }).spark.chromeLink.state());
 
 test("the Firefox extension pairs, shares a tab with agents, and reads, acts on and navigates it", async ({}, testInfo) => {
-  test.setTimeout(240_000);
+  test.setTimeout(300_000);
   const binary = findFirefox();
   // CI sets CODARA_E2E_REQUIRE_FIREFOX, so a missing Firefox fails there instead of skipping.
   if (process.env.CODARA_E2E_REQUIRE_FIREFOX === "1") expect(binary, "a Firefox 153 or later on PATH or in CODARA_E2E_FIREFOX").not.toBeNull();
@@ -163,6 +163,8 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
   try {
     await mkdir(userDataDir);
     await mkdir(workspaceDir);
+    // The app's theme follows CODARA_E2E_COLOR_SCHEME too, for the notice's screenshot.
+    await writeFile(join(userDataDir, "spark-preferences.json"), JSON.stringify({ theme: process.env.CODARA_E2E_COLOR_SCHEME === "dark" ? "codara-classic" : "codara-daylight" }));
     await writeFile(join(userDataDir, "spark-state.json"), JSON.stringify({
       activeWorkspaceId: "ws-firefox",
       workspaces: [{ id: "ws-firefox", name: "Firefox link", cwd: workspaceDir, color: "#42D6C7", workers: [] }],
@@ -503,8 +505,25 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     // A real Firefox restart on the same profile removes the temporary
     // add-on: Codara shows the browser paired but not connected, with how to
     // load it again.
+    // Settings closed, as the user is elsewhere in Codara.
+    await codara.keyboard.press("Escape");
+    await expect(settings).toBeHidden();
+    const notice = codara.locator("[data-firefox-reload]");
     await firefox.close();
     await expect.poll(async () => (await linkState(codara)).browsers.map((browser: { connected: boolean }) => browser.connected), { timeout: 30_000 }).toEqual([false]);
+    // Gone for good, not a blink: one quiet notice says so, with how to load it again.
+    await expect(notice).toBeHidden();
+    // After 45 s: longer than the add-on's own reconnect steps.
+    await expect(notice).toBeVisible({ timeout: 75_000 });
+    await expect(notice).toContainText("Load Codara in Firefox again");
+    await expect(notice).toContainText("Firefox closed or restarted, which removes the Codara add-on");
+    await expect(notice.getByRole("button", { name: "Copy manifest.json path" })).toBeVisible();
+    await notice.screenshot({ path: testInfo.outputPath(`firefox-reload-notice-${process.env.CODARA_E2E_COLOR_SCHEME === "dark" ? "dark" : "light"}.png`), animations: "disabled" });
+    // Dismissed, it stays away for this disconnect.
+    await notice.getByRole("button", { name: "Dismiss" }).click();
+    await expect(notice).toBeHidden();
+    await codara.waitForTimeout(3_000);
+    await expect(notice).toBeHidden();
     await expect(async () => {
       if (!(await settings.isVisible())) await codara.getByTitle("Settings").first().click({ force: true });
       await expect(settings).toBeVisible({ timeout: 2_000 });
@@ -525,6 +544,8 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     expect(await firefox.evaluate(popup, `browser.storage.local.get("blockedSites").then(({ blockedSites }) => blockedSites)`)).toContain("127.0.0.1/private");
 
     // Disconnect in the popup: Codara forgets this browser, pairing and all.
+    // (No notice follows: the pairing goes before the link drops; the case
+    // of a drop followed by Disconnect is scripts/test-firefox-gone.cjs.)
     await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "unpair" })`);
     await expect.poll(async () => (await linkState(codara)).browsers.length, { timeout: 15_000 }).toBe(0);
   } finally {

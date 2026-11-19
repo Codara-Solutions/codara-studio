@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 
 import { chromeConnectProgress, type ChromeConnectStep, type ChromeLinkState } from "@shared/chrome-link";
 import { Segmented } from "../settings/SettingsPrimitives";
+import { FIREFOX_DEBUGGING_ADDRESS, FirefoxLoadActions, FirefoxWhyNote, OPEN_IN_FIREFOX_TITLE, useCanOpenFirefoxDebugging } from "./FirefoxReload";
 import { useConnectCardOnScreen } from "./useChromeLink";
 import "./chrome-link.css";
 import "./chrome-connect.css";
@@ -59,6 +60,8 @@ export default function ChromeConnectCard({
   const [folder, setFolder] = useState<string | null>(null);
   const [family, setFamily] = useState<BrowserFamily>("chromium");
   const [firefoxFolder, setFirefoxFolder] = useState<string | null>(null);
+  const [firefoxManifest, setFirefoxManifest] = useState<string | null>(null);
+  const canOpenFirefoxPage = useCanOpenFirefoxDebugging();
   const [copied, setCopied] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -96,6 +99,9 @@ export default function ChromeConnectCard({
     });
   const shownFolder = folder ?? state.extensionFolder;
   const shownFirefoxFolder = firefoxFolder ?? state.firefoxExtensionFolder;
+  // The file Load Temporary Add-on asks for, in the folder's own separator.
+  const shownFirefoxManifest =
+    firefoxManifest ?? (shownFirefoxFolder ? `${shownFirefoxFolder}${/\\/.test(shownFirefoxFolder) && !shownFirefoxFolder.includes("/") ? "\\" : "/"}manifest.json` : null);
   // Firefox asks for the site and for scripts in pages from its popup, after sharing.
   const firefoxConnected = state.browsers.some((browser) => browser.connected && /firefox/i.test(browser.browser.name));
   // A temporary add-on is gone after every Firefox restart: say so, and how to load it again.
@@ -167,18 +173,41 @@ export default function ChromeConnectCard({
               <div className="chrome-connect__h">Add the extension to Firefox</div>
               <ol className="chrome-steps">
                 <li>
-                  <strong>Reveal the extension folder</strong> (or copy its path).
+                  In Firefox open <span className="spark-mono">{FIREFOX_DEBUGGING_ADDRESS}</span>{" "}
+                  {canOpenFirefoxPage ? (
+                    <button
+                      type="button"
+                      className="spark-btn is-primary chrome-connect__inline-btn"
+                      title={OPEN_IN_FIREFOX_TITLE}
+                      disabled={busy}
+                      onClick={() => void run(async () => {
+                        if (!(await window.spark.chromeLink.openFirefoxDebugging())) throw new Error(`Codara could not start Firefox: open ${FIREFOX_DEBUGGING_ADDRESS} in it yourself.`);
+                      })}
+                    >
+                      Open in Firefox
+                    </button>
+                  ) : (
+                    <button type="button" className="chrome-connect__copy" onClick={() => void copy("firefox-address", async () => FIREFOX_DEBUGGING_ADDRESS)}>
+                      {copied === "firefox-address" ? "Copied" : "Copy"}
+                    </button>
+                  )}
+                </li>
+                <li>
+                  Choose <strong>Load Temporary Add-on</strong> and pick this <span className="spark-mono">manifest.json</span>.
+                  <div className="chrome-connect__tip">
+                    Tip: paste the path into the file dialog (Ctrl+L on Linux, Cmd+Shift+G on macOS, the File name box on Windows).
+                  </div>
                   <div className="chrome-folder">
-                    <span className="chrome-folder__path spark-mono" title={shownFirefoxFolder ?? undefined}>
-                      {shownFirefoxFolder ?? "This Codara build does not include the extension for Firefox."}
+                    <span className="chrome-folder__path spark-mono" title={shownFirefoxManifest ?? undefined}>
+                      {shownFirefoxManifest ?? "This Codara build does not include the extension for Firefox."}
                     </span>
                     <button
                       type="button"
                       className="spark-btn"
                       disabled={busy || !shownFirefoxFolder}
                       onClick={() => void copy("firefox-path", async () => {
-                        const path = await window.spark.chromeLink.prepareFirefoxExtension();
-                        setFirefoxFolder(path);
+                        const path = await window.spark.chromeLink.prepareFirefoxManifest();
+                        setFirefoxManifest(path);
                         return path;
                       })}
                     >
@@ -186,7 +215,7 @@ export default function ChromeConnectCard({
                     </button>
                     <button
                       type="button"
-                      className="spark-btn is-primary"
+                      className="spark-btn"
                       disabled={busy || !shownFirefoxFolder}
                       onClick={() => void run(async () => setFirefoxFolder(await window.spark.chromeLink.revealFirefoxExtension()))}
                     >
@@ -195,17 +224,13 @@ export default function ChromeConnectCard({
                   </div>
                 </li>
                 <li>
-                  In Firefox open <span className="spark-mono">about:debugging#/runtime/this-firefox</span>{" "}
-                  <button type="button" className="chrome-connect__copy" onClick={() => void copy("firefox-address", async () => "about:debugging#/runtime/this-firefox")}>
-                    {copied === "firefox-address" ? "Copied" : "Copy"}
-                  </button>
-                  , choose <strong>Load Temporary Add-on</strong> and pick <span className="spark-mono">manifest.json</span> in that folder.
-                </li>
-                <li>
                   Click the Codara icon in the toolbar (pin it from the puzzle piece) and press <strong>Connect to Codara</strong>.
                 </li>
               </ol>
-              <p className="chrome-connect__d">Firefox removes a temporary add-on when it quits: load it again after a restart.</p>
+              <p className="chrome-connect__d">
+                Firefox removes a temporary add-on when it quits: load it again after a restart (it keeps its pairing and settings).
+              </p>
+              <FirefoxWhyNote />
             </>
           )
         ) : step === "add" ? (
@@ -294,11 +319,16 @@ export default function ChromeConnectCard({
           <>
             <div className="chrome-connect__h">{`${progress.offline.join(", ")} ${progress.offline.length === 1 ? "is" : "are"} paired but not connected`}</div>
             {firefoxOffline ? (
-              <p className="chrome-connect__d" data-firefox-offline="">
-                Firefox removes the Codara add-on each time it restarts, so it has to be loaded again: in Firefox open{" "}
-                <span className="spark-mono">about:debugging#/runtime/this-firefox</span>, choose <strong>Load Temporary Add-on</strong> and
-                pick <strong>manifest.json</strong> in the extension folder. It keeps its pairing and settings, and connects again by itself.
-              </p>
+              <>
+                <p className="chrome-connect__d" data-firefox-offline="">
+                  Firefox removes the Codara add-on each time it restarts, so it has to be loaded again: in Firefox open{" "}
+                  <span className="spark-mono">{FIREFOX_DEBUGGING_ADDRESS}</span>, choose <strong>Load Temporary Add-on</strong> and pick{" "}
+                  <strong>manifest.json</strong> in the extension folder. It keeps its pairing and settings, and connects again by itself.
+                </p>
+                <div className="chrome-connect__actions">
+                  <FirefoxLoadActions onError={setError} />
+                </div>
+              </>
             ) : null}
             <p className="chrome-connect__d">
               Open it, or add the extension again. It connects by itself while Codara is running; if it does not, click the Codara icon in
