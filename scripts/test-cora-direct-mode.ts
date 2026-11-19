@@ -1,13 +1,27 @@
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import os from "node:os";
+import { registerHooks } from "node:module";
 import path from "node:path";
 
-import {
+// Studio's sources import their siblings without an extension (the bundler
+// resolves them); Node's type stripping needs `.ts` spelled out.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    try {
+      return nextResolve(specifier, context);
+    } catch (error) {
+      if (!specifier.startsWith(".") || path.extname(specifier)) throw error;
+      return nextResolve(`${specifier}.ts`, context);
+    }
+  },
+});
+
+const {
   followUpNeedsManager,
   isConversationalRequest,
   shouldUseDirectExecution,
-} from "../src/main/orchestration/direct-execution.ts";
+} = await import("../src/main/orchestration/direct-execution.ts");
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "cora-direct-mode-"));
 try {
@@ -18,6 +32,22 @@ try {
     true,
     "bounded work in a small workspace uses the direct lane",
   );
+  const skillNames = new Set(["ceo", "verify", "ketchup"]);
+  for (const prompt of ["/ceo", "/skill:verify the parser", "/ketchup"]) {
+    assert.equal(
+      await shouldUseDirectExecution({ cwd: root, prompt, skillNames }),
+      false,
+      `${prompt} runs a skill, which only the manager expands`,
+    );
+    assert.equal(followUpNeedsManager(prompt, skillNames), true, `${prompt} as a follow-up goes to the manager`);
+  }
+  // A leading path or an unknown name is not a skill: the direct lane keeps it.
+  for (const prompt of ["/home/me/app/src/index.ts has a typo, fix it", "/tmp/build.log shows the failure", "/unknown do it"]) {
+    assert.equal(await shouldUseDirectExecution({ cwd: root, prompt, skillNames }), true, prompt);
+    assert.equal(followUpNeedsManager(prompt, skillNames), false, prompt);
+  }
+  assert.equal(followUpNeedsManager("/ceo"), false, "no skill list means no skill to run");
+  assert.equal(followUpNeedsManager("fix src/app.ts"), false);
   assert.equal(isConversationalRequest("hello!"), true);
   assert.equal(isConversationalRequest("what is your favorite food?"), true);
   assert.equal(isConversationalRequest("fix the hello button"), false);

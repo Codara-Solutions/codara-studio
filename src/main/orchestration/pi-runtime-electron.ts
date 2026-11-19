@@ -25,6 +25,7 @@ import {
   hasVerifiedOpenRouterKey,
 } from "../openrouter-config";
 import { coraWorkerModelAvailability } from "./worker-model-availability";
+import { userAgentRulesPath } from "./user-agent-rules";
 import { forgetResolvedBinary, resolveBinary } from "../binary-resolver";
 import { getEnrichedEnv } from "../path-reconstruction";
 import { writeFileAtomic } from "../fs-atomic";
@@ -409,6 +410,30 @@ export async function cleanupPiMcpBridgeConfig(plan: {
   }
 }
 
+/** Names of the skills Cora's Pi loads in `cwd`, for telling a typed
+ *  `/<skill>` from a path such as `/home/...`. Empty when discovery fails. */
+export async function listCodaraPiSkillNames(cwd: string): Promise<Set<string>> {
+  try {
+    const [{ listPiSkillsWithShadows }, settings] = await Promise.all([import("../agent-sync"), loadSettings()]);
+    const found = listPiSkillsWithShadows({ cwd, piAgentDir: codaraPiPaths().configDir, settings });
+    return new Set([...found.skills.map((skill) => skill.name), ...found.shadowed.map((skill) => `repo:${skill.name}`)]);
+  } catch {
+    return new Set();
+  }
+}
+
+/** Repository skills a user skill of the same name shadows, as
+ *  {name: SKILL.md}, for `/skill:repo:<name>` (CODARA_PI_REPO_SKILLS). */
+async function shadowedRepoSkills(cwd: string, configDir: string): Promise<Record<string, string>> {
+  try {
+    const [{ listPiSkillsWithShadows }, settings] = await Promise.all([import("../agent-sync"), loadSettings()]);
+    const found = listPiSkillsWithShadows({ cwd, piAgentDir: configDir, settings });
+    return Object.fromEntries(found.shadowed.map((skill) => [skill.name, skill.skillFile]));
+  } catch {
+    return {};
+  }
+}
+
 /**
  * The skill folders a trusted Pi session loads. Undefined keeps Pi's own
  * discovery, so a discovery failure never costs a session its skills.
@@ -738,6 +763,12 @@ export async function createCodaraPiLaunchPlan(
       plan.env.CODARA_PI_WORKER_MODELS_DISCONNECTED = JSON.stringify(workerModels.disconnected);
     }
     if (settings.coraAlwaysVerifyEdits) plan.env.CODARA_PI_ALWAYS_VERIFY_EDITS = "1";
+    if (!untrustedPullRequest) {
+      const rulesPath = userAgentRulesPath();
+      if (rulesPath) plan.env.CODARA_PI_USER_RULES_PATH = rulesPath;
+      const repoSkills = await shadowedRepoSkills(options.cwd, paths.configDir);
+      if (Object.keys(repoSkills).length > 0) plan.env.CODARA_PI_REPO_SKILLS = JSON.stringify(repoSkills);
+    }
     return untrustedPullRequest
       ? attachUntrustedSocketCapability(plan, {
           audience: "untrusted-pi-manager",

@@ -1,4 +1,5 @@
 import { subscriptionForModelId } from "../../shared/agent-families";
+import { CLAUDE_PI_LOGIN_BILLING_NOTE, coraRouteLabel } from "../../shared/cora-routes";
 import type {
   ChatMode,
   CoraExecutionPolicy,
@@ -569,7 +570,8 @@ async function ensureSession(
   evictIdleSessions(runId);
   onStream?.({
     kind: "system_note",
-    message: `Cora Pi session ready · ${provider}/${model} · ${thinking} thinking · ${executionPolicy} chat mode`,
+    message: `Cora Pi session ready · ${model} via ${coraRouteLabel(model)} · ${thinking} thinking · ${executionPolicy} chat mode` +
+      (provider === "anthropic" ? `. ${CLAUDE_PI_LOGIN_BILLING_NOTE}` : ""),
   });
   return session;
 }

@@ -15,6 +15,7 @@
 //
 //   node scripts/test-run-cache-race.cjs
 
+const { completeStubExports } = require("./run-store-stub-exports.cjs");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -47,7 +48,8 @@ export default { spawn };`,
   "./backend-registry": `export function getBackend() { throw new Error("no manager backend in this test"); }
 export function listBackends() { return []; }
 export async function disposeManagerSessions() {}`,
-  "./pi-runtime-electron": `export async function resolveCodaraPiExecutionAccount() { throw new Error("stubbed"); }
+  "./pi-runtime-electron": `export async function listCodaraPiSkillNames() { return new Set(); }
+export async function resolveCodaraPiExecutionAccount() { throw new Error("stubbed"); }
 export async function resolveCodaraPiRuntime() { throw new Error("stubbed"); }
 export async function resolveCodaraPiLibrary() { throw new Error("stubbed"); }
 export async function resolveUserPiRuntime() { throw new Error("stubbed"); }
@@ -105,7 +107,7 @@ async function main() {
             path: args.path,
             namespace: "stub",
           }));
-          build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({ contents: STUBS[args.path], loader: "js" }));
+          build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({ contents: completeStubExports(args.path, STUBS[args.path]), loader: "js" }));
         },
       },
     ],
