@@ -80,7 +80,7 @@ export async function run(assembled) {
   assert.equal(isDomainToggle("Tracing.enable"), false, "only the listed domains");
   assert.match(unsupportedMethodError("Tracing.start"), /^Tracing\.start is not available in Firefox/);
 
-  assert.deepEqual(browserIdentity({ name: "Firefox", version: "158.0", vendor: "Mozilla" }), { name: "Firefox", version: "158.0" });
+  assert.deepEqual(browserIdentity({ name: "Firefox", version: "158.0", vendor: "Mozilla" }), { name: "Firefox", version: "" }, "no browser version leaves");
   assert.deepEqual(browserIdentity(null), { name: "Firefox", version: "" });
   return "firefox: pages Firefox keeps extensions off, sharing, the commands the hello lists";
 }
