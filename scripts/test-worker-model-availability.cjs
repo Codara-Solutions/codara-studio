@@ -239,6 +239,44 @@ async function main() {
   assert.doesNotMatch(availabilitySource, /console\.|writeFile|appendFile|fetch\(|commitRunChange|emit\(/, "route lookups log, store or send nothing");
   console.log("PASS route lookups keep provider status and model ids only");
 
+  // One rule says which runs' workers are managed (Claude Code may carry
+  // them), and every place that narrows the worker models uses it: task
+  // creation, the manager's roster and its planning, and the launch. A Claude
+  // model only Claude Code carries is then kept until the launch routes it.
+  assert.equal(typeof availability.runHasManagedWorkers, "function", "runHasManagedWorkers is missing");
+  assert.equal(availability.runHasManagedWorkers({ executionMode: "managed" }), true);
+  assert.equal(availability.runHasManagedWorkers({ executionMode: "direct" }), false);
+  assert.equal(availability.runHasManagedWorkers({ executionMode: "managed", projectPolicyMode: "untrusted-pull-request" }), false);
+  assert.equal(availability.runHasManagedWorkers({ executionMode: "managed", origin: { kind: "github-pull-request" } }), false);
+  const read = (file) => fs.readFileSync(path.join(ROOT, file), "utf8");
+  const socket = read("src/main/agent-socket.ts");
+  const spawnStart = socket.indexOf("async function handleOrchestratorSpawnWorkers(");
+  assert.match(
+    socket.slice(spawnStart, socket.indexOf("\nasync function ", spawnStart + 10)),
+    /coraWorkerModelAvailability\(await loadSettings\(\), \{ managedWorker: runHasManagedWorkers\(run\) \}\)/,
+    "task creation narrows the models without the managed-worker rule",
+  );
+  const store = read("src/main/orchestration/run-store.ts");
+  assert.match(store, /async function routableWorkerRuntimes\(run: RunState\)[\s\S]{0,300}?managedWorker: runHasManagedWorkers\(run\)/, "planning drops Claude Code's models");
+  assert.match(store, /rerouteUnavailableAgentRuntimes\(run, decision\)/);
+  assert.match(store, /const managedWorker = isPiWorker && !isAutomationRun && runHasManagedWorkers\(run\) && !task\.workflowCall;/);
+  assert.match(read("src/main/orchestration/pi-runtime-electron.ts"), /coraWorkerModelAvailability\(settings, \{ managedWorker: options\.managedWorkers === true \}\)/, "the manager's roster drops Claude Code's models");
+  assert.match(read("src/main/orchestration/pi-backend.ts"), /managedWorkers: runHasManagedWorkers\(input\.run\),/);
+  // Every other narrowing is for launches that are never managed workers.
+  for (const file of ["src/main/agent-socket.ts", "src/main/orchestration/run-store.ts", "src/main/orchestration/pi-runtime-electron.ts", "src/main/orchestration/workflow-driver.ts"]) {
+    for (const call of read(file).match(/coraWorkerModelAvailability\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)/g) ?? []) {
+      if (/managedWorker/.test(call)) continue;
+      assert.ok(
+        (file.endsWith("run-store.ts") && call === "coraWorkerModelAvailability(await loadSettings())") || file.endsWith("workflow-driver.ts"),
+        `${file}: ${call} narrows worker models without the managed-worker rule`,
+      );
+    }
+  }
+  const direct = store.indexOf("async function resolveDirectWorkerModel(");
+  assert.match(store.slice(direct, direct + 300), /coraWorkerModelAvailability\(await loadSettings\(\)\)/, "the direct-chat worker is the only plain call in run-store");
+  assert.equal((store.match(/coraWorkerModelAvailability\(await loadSettings\(\)\)/g) ?? []).length, 1);
+  console.log("PASS one managed-worker rule at task creation, planning, the manager's roster and the launch");
+
   harnessState.fail = true;
   const unreadable = await availability.coraWorkerModelAvailability(settings);
   assert.ok(unreadable.connected.length >= 3 && unreadable.disconnected.length === 0);

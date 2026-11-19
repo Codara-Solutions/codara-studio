@@ -201,7 +201,8 @@ import {
   enabledWorkerModelFor,
   rosterModelFor,
 } from "./orchestration/worker-model-hint";
-import { coraWorkerModelAvailability } from "./orchestration/worker-model-availability";
+import { coraWorkerModelAvailability, runHasManagedWorkers } from "./orchestration/worker-model-availability";
+import { UNCONFIRMED_CLEANUP_ERROR } from "./orchestration/claude-code-worker";
 import {
   WORKFLOW_DEFAULTS,
   clampWorkflowCaps,
@@ -4671,6 +4672,11 @@ async function handleOrchestratorSpawnWorkers(
   }
   const blocked = rejectIfAutomationRun(run, id, "codara_spawn_workers");
   if (blocked) return blocked;
+  // A worker whose processes could not be confirmed gone holds the run: no
+  // new worker joins the tree it may still be changing.
+  if (runStore.unconfirmedWorkerCleanup(run)) {
+    return errorResponse(id, ERR_FORBIDDEN, UNCONFIRMED_CLEANUP_ERROR);
+  }
   const untrustedPullRequest =
     runProjectPolicyMode(run) === "untrusted-pull-request";
   if (untrustedPullRequest) {
@@ -4738,7 +4744,7 @@ async function handleOrchestratorSpawnWorkers(
   // since then must still never receive a worker.
   const workerModelAvailability = untrustedPullRequest
     ? null
-    : await coraWorkerModelAvailability(await loadSettings());
+    : await coraWorkerModelAvailability(await loadSettings(), { managedWorker: runHasManagedWorkers(run) });
   const enabledWorkerModels = workerModelAvailability
     ? workerModelAvailability.connected
     : [...ALLOWED_WORKER_MODELS];
@@ -5841,6 +5847,7 @@ async function handleOrchestratorWaitForWorkers(
     started_at: string | null;
     finished_at: string | null;
     final_report_path: string | null;
+    cleanup_unconfirmed?: true;
     final_report: unknown;
     error: string | null;
     failure_kind: string | null;
@@ -5889,6 +5896,8 @@ async function handleOrchestratorWaitForWorkers(
         started_at: lastAttempt?.startedAt ?? null,
         finished_at: lastAttempt?.finishedAt ?? null,
         final_report_path: lastAttempt?.finalReportPath ?? null,
+        // Its processes could not be confirmed gone: it keeps no report.
+        ...(lastAttempt?.cleanupUnconfirmed ? { cleanup_unconfirmed: true } : {}),
         final_report: report
           ? {
               status: report.status,
@@ -6118,6 +6127,8 @@ async function handleOrchestratorGetWorkerStatus(
       started_at: lastAttempt?.startedAt ?? null,
       finished_at: lastAttempt?.finishedAt ?? null,
       final_report_path: lastAttempt?.finalReportPath ?? null,
+      // Its processes could not be confirmed gone: it keeps no report.
+      ...(lastAttempt?.cleanupUnconfirmed ? { cleanup_unconfirmed: true } : {}),
       final_report_status: report?.status ?? null,
       final_report_summary: report?.summary ?? null,
       ...workerAttemptDiagnostics(lastAttempt),

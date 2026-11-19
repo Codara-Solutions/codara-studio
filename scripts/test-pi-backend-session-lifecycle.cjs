@@ -294,6 +294,7 @@ async function loadBackend() {
       module.exports = {
         renderRunProjectPolicy: () => "",
         runProjectPolicyMode: (run) => run.projectPolicyMode ?? "trusted",
+        runHasManagedWorkers: (run) => run.executionMode !== "direct" && (run.projectPolicyMode ?? "trusted") === "trusted",
       };`,
     "../agent-socket-capabilities": `
       const h = () => globalThis.${HARNESS_KEY};

@@ -82,6 +82,9 @@ export interface CreateCodaraPiLaunchOptions {
   thinking?: PiThinkingLevel;
   sessionName?: string;
   projectPolicyMode?: ProjectPolicyMode;
+  /** The run's workers are managed workers (runHasManagedWorkers): the
+   *  roster Cora plans with then counts the models Claude Code carries. */
+  managedWorkers?: boolean;
   /** Explicit profile pin; undefined asks the central resolver for its default. */
   accountProfileId?: string;
   /** Pre-resolved once per turn so session matching and launch cannot diverge. */
@@ -757,7 +760,7 @@ export async function createCodaraPiLaunchPlan(
     });
     // Cora is offered only models it can launch; the ones waiting on a sign-in
     // are named separately so it can tell the user instead of planning on them.
-    const workerModels = await coraWorkerModelAvailability(settings);
+    const workerModels = await coraWorkerModelAvailability(settings, { managedWorker: options.managedWorkers === true });
     plan.env.CODARA_PI_WORKER_MODELS = JSON.stringify(workerModels.connected);
     if (workerModels.disconnected.length > 0) {
       plan.env.CODARA_PI_WORKER_MODELS_DISCONNECTED = JSON.stringify(workerModels.disconnected);

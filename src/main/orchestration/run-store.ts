@@ -341,7 +341,7 @@ import {
   runtimeForWorkerModelId,
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
-import { coraWorkerModelAvailability, routeCoraModel, workerPlanningModels } from "./worker-model-availability";
+import { coraWorkerModelAvailability, routeCoraModel, runHasManagedWorkers, workerPlanningModels } from "./worker-model-availability";
 import {
   claudeCodeModelOf,
   coraRouteLabel,
@@ -362,7 +362,9 @@ import {
   startClaudeCodeWorker,
   type ClaudeCodeEvent,
   type ClaudeCodeWorkerLaunch,
+  UNCONFIRMED_CLEANUP_ERROR,
 } from "./claude-code-worker";
+import type { ClaudeWorkerLaunchSnapshot } from "../agent-launch-integration";
 import { shouldResumeForUserMessage } from "./user-message-resume";
 import {
   captureWorkerDiff,
@@ -1263,6 +1265,24 @@ export async function messageWorkerAttempt(
 }
 
 /**
+ * The one gate after a Claude Code worker whose processes could not all be
+ * confirmed gone (attempt.cleanupUnconfirmed, set by the finish path, which
+ * also drops the attempt's report path). Every step that would act on such
+ * a run passes through here: manager review (runAutopilotManagerReview),
+ * the worker cycle that schedules it (runAutopilotWorkerCycle), every worker
+ * launch (launchWorkerAttemptInner), a retry (retryWorkerTask) and a spawn
+ * from the manager (agent-socket's codara_spawn_workers). What may still run
+ * is never reviewed, retried, or joined by a new worker in the same tree.
+ */
+export function unconfirmedWorkerCleanup(run: Pick<RunState, "workerAttempts">): WorkerAttempt | undefined {
+  return run.workerAttempts.find((attempt) => attempt.cleanupUnconfirmed === true);
+}
+
+function assertWorkerCleanupConfirmed(run: Pick<RunState, "workerAttempts">): void {
+  if (unconfirmedWorkerCleanup(run)) throw new Error(UNCONFIRMED_CLEANUP_ERROR);
+}
+
+/**
  * Stop one worker without pausing its run. The attempt is marked cancelled
  * BEFORE the kill: the finish path reads a cancelled attempt as an
  * interruption, so the stopped worker is never reviewed, failed over to the
@@ -1275,7 +1295,7 @@ export async function stopWorkerAttempt(runId: string, attemptId: string): Promi
   if (!attempt) throw new Error(`Worker attempt not found: ${attemptId}`);
   if (ATTEMPT_TERMINAL_STATUSES.has(attempt.status)) return run;
   const launching = launchingWorkerAttempts.get(attemptId);
-  if (launching) launching.aborted = true;
+  if (launching) abortLaunchingAttempt(launching);
   const stopped = await commitRunChange(run, {
     type: "worker_attempt.stopped_by_user",
     message: "Worker stopped by the user",
@@ -1324,6 +1344,7 @@ export async function retryWorkerTask(runId: string, workerTaskId: string): Prom
   if (!["failed", "cancelled", "blocked"].includes(task.status)) {
     throw new Error("Only a failed, stopped, or blocked worker can be retried.");
   }
+  assertWorkerCleanupConfirmed(run);
   if (run.status === "paused") {
     throw new Error("Resume the run before retrying a worker.");
   }
@@ -6010,6 +6031,39 @@ async function markInitialAutopilotPlanningFailed(runId: string, err: unknown): 
   });
 }
 
+/**
+ * The run goes no further after a worker whose processes could not be
+ * confirmed gone: nothing reviews or continues it. While other workers or
+ * cycles of the run are still going they finish first (each of their cycles
+ * stops here too); the last one fails the run with the reason.
+ */
+async function stopRunAfterUnconfirmedCleanup(runId: string, attemptId: string): Promise<void> {
+  const othersInFlight =
+    hasOtherAutopilotCycles(runId, attemptId) ||
+    activeWorkersForRun(runId).some((worker) => worker.attemptId !== attemptId) ||
+    [...launchingWorkerAttempts].some(([launchingId, entry]) => entry.runId === runId && launchingId !== attemptId);
+  if (othersInFlight) return;
+  const run = await getRun(runId);
+  if (!run) return;
+  await commitRunChange(run, {
+    type: "autopilot.worker_cleanup_unconfirmed",
+    message: UNCONFIRMED_CLEANUP_ERROR,
+    payload: { attemptId, error: UNCONFIRMED_CLEANUP_ERROR },
+    mutate: (draft, timestamp) => {
+      if (["cancelled", "complete", "failed", "paused"].includes(draft.status)) return false;
+      draft.status = "failed";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "failed",
+        lastAction: "worker_cleanup_unconfirmed",
+        stopReason: UNCONFIRMED_CLEANUP_ERROR,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promise<void> {
   let launched: RunState;
   let cwd = "";
@@ -6032,6 +6086,10 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     latest.status === "complete" ||
     latest.status === "failed"
   ) {
+    return;
+  }
+  if (unconfirmedWorkerCleanup(latest)) {
+    await stopRunAfterUnconfirmedCleanup(runId, attemptId);
     return;
   }
   const hasOtherActiveCycles = hasOtherAutopilotCycles(runId, attemptId);
@@ -6317,6 +6375,7 @@ async function runAutopilotManagerReview(
 ): Promise<void> {
   let run = await requireRun(runId);
   if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled") return;
+  if (unconfirmedWorkerCleanup(run)) return;
   if (hasAutopilotCycles(runId) || activeWorkersForRun(runId).length > 0) return;
 
   // Looms v2: direct runs never consult a manager — the worker's final report
@@ -9255,10 +9314,13 @@ async function finalizeCouncil(
   });
 }
 
-/** Worker families with an enabled model some route can carry now. */
-async function routableWorkerRuntimes(): Promise<Set<string>> {
+/** Worker families with an enabled model some route can carry now, for
+ *  this run's workers (Claude Code counts for managed ones). */
+async function routableWorkerRuntimes(run: RunState): Promise<Set<string>> {
   try {
-    const { connected } = await coraWorkerModelAvailability(await loadSettings());
+    const { connected } = await coraWorkerModelAvailability(await loadSettings(), {
+      managedWorker: runHasManagedWorkers(run),
+    });
     // OpenRouter ids count for their vendor's family (`openai/...` is codex).
     const kinds = connected.map((id) => workerFamilyOfModelId(id));
     return new Set(kinds.filter((kind): kind is "claude" | "codex" | "grok" => kind !== undefined));
@@ -9268,6 +9330,7 @@ async function routableWorkerRuntimes(): Promise<Set<string>> {
 }
 
 async function rerouteUnavailableAgentRuntimes(
+  run: RunState,
   decision: SparkManagerDecision,
 ): Promise<{ decision: SparkManagerDecision; rerouted: RuntimeReroute[] }> {
   const diagnostics = await detectConfiguredAgentRuntimes();
@@ -9275,7 +9338,7 @@ async function rerouteUnavailableAgentRuntimes(
   const availableKinds = new Set<string>(available.map((runtime) => runtime.kind));
   // A family with no sign-in still counts when another route (a verified
   // OpenRouter id) carries one of its enabled models; the launch routes it.
-  for (const kind of await routableWorkerRuntimes()) availableKinds.add(kind);
+  for (const kind of await routableWorkerRuntimes(run)) availableKinds.add(kind);
   const fallback = available.find((runtime) => runtime.kind === "codex")
     ?? available.find((runtime) => runtime.kind === "claude")
     ?? available.find((runtime) => runtime.kind === "grok");
@@ -10434,7 +10497,7 @@ async function applySparkManagerDecisionCurrent(
     }
   }
 
-  const runtimeRepair = await rerouteUnavailableAgentRuntimes(decision);
+  const runtimeRepair = await rerouteUnavailableAgentRuntimes(run, decision);
   decision = runtimeRepair.decision;
   if (runtimeRepair.rerouted.length > 0) {
     await appendEvent({
@@ -15181,6 +15244,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   if (!attempt) throw new Error(`Worker attempt not found: ${input.attemptId}`);
   // Stopped before its cycle reached it: a cancelled attempt never launches.
   if (attempt.status === "cancelled") return run;
+  assertWorkerCleanupConfirmed(run);
   if (attempt.status !== "prompt_ready" && attempt.status !== "failed") {
     throw new Error(`Worker attempt is not ready to launch: ${attempt.status}`);
   }
@@ -15228,12 +15292,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // Claude Code runs only managed workers of a trusted run, and only when the
   // user picked an order that starts with it: it has no submit_result tool
   // for direct and workflow turns, and no Pi fence for imported PRs.
-  const managedWorker =
-    isPiWorker &&
-    !isAutomationRun &&
-    run.executionMode !== "direct" &&
-    !task.workflowCall &&
-    runProjectPolicyMode(run) === "trusted";
+  const managedWorker = isPiWorker && !isAutomationRun && runHasManagedWorkers(run) && !task.workflowCall;
   // Enabled models some route can carry now: a GPT model with no ChatGPT
   // sign-in stays eligible when its OpenRouter id is verified, and a Claude
   // model with no Pi sign-in when Claude Code carries it for this worker,
@@ -15565,7 +15624,14 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   finishedAttempt.stdoutLogPath = paths.stdoutLog;
   finishedAttempt.stderrLogPath = paths.stderrLog;
   finishedAttempt.rawLogPath = paths.rawLog;
-  finishedAttempt.finalReportPath = paths.finalReportJson;
+  if (claudeCodeWorker && result.cleanupUnconfirmed) {
+    // Something it started may still run and still write: the attempt
+    // keeps no report, and unconfirmedWorkerCleanup holds the run.
+    finishedAttempt.cleanupUnconfirmed = true;
+    finishedAttempt.finalReportPath = undefined;
+  } else {
+    finishedAttempt.finalReportPath = paths.finalReportJson;
+  }
   // Snapshot the worker's measurable code impact before merge/review or a
   // later worker can move the shared tree. Best-effort: non-Git workspaces and
   // legacy attempts without a pre-worker baseline simply omit the counters.
@@ -19980,6 +20046,18 @@ function workerLaunchAborted(attemptId: string): boolean {
   return launchingWorkerAttempts.get(attemptId)?.aborted === true;
 }
 
+/** Abort one launch: the flag its checkpoints read, and its own abort (a
+ *  Claude Code worker's Stop, which reaches its sign-in probe). The run's
+ *  Stop and the worker's own Stop button both come through here. */
+function abortLaunchingAttempt(entry: LaunchingWorkerAttempt): void {
+  entry.aborted = true;
+  try {
+    entry.onAbort?.();
+  } catch {
+    /* the launch is aborted either way */
+  }
+}
+
 /**
  * Abort every launch of this run that has not registered a live process yet
  * and close the display PTYs they may already own. Returns them so the caller
@@ -19989,12 +20067,7 @@ function abortLaunchingWorkers(runId: string): Array<{ attemptId: string; worker
   const aborted: Array<{ attemptId: string; workerTaskId: string }> = [];
   for (const [attemptId, entry] of launchingWorkerAttempts) {
     if (entry.runId !== runId) continue;
-    entry.aborted = true;
-    try {
-      entry.onAbort?.();
-    } catch {
-      /* the launch is aborted either way */
-    }
+    abortLaunchingAttempt(entry);
     aborted.push({ attemptId, workerTaskId: entry.workerTaskId });
     try {
       pty.killImmediate(attemptId);
@@ -22703,9 +22776,8 @@ async function runClaudeCodeWorkerSession(input: {
   const launching = launchingWorkerAttempts.get(attemptId);
   if (launching) launching.onAbort = () => attempt.stop();
   let launch: ClaudeCodeWorkerLaunch | null = null;
-  // The checked worker arguments, read back again right before each turn.
-  let workerArgs: (() => Promise<string[]>) | null = null;
-  let launchArgs: string[] = [];
+  // The settings and tools this launch was given, as files of its own.
+  let snapshot: ClaudeWorkerLaunchSnapshot | null = null;
   let sessionId: string | undefined;
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let logQueue: Promise<void> = Promise.resolve();
@@ -22740,12 +22812,6 @@ async function runClaudeCodeWorkerSession(input: {
   // The attempt refuses to start it after a Stop or after an earlier turn
   // whose processes could not be confirmed gone.
   const turn = async (prompt: string, resume?: string): Promise<number> => {
-    // Settings and tools re-read right before the turn: a browser-guard
-    // rewrite that failed since the launch stops it here.
-    const current = await workerArgs!();
-    if (current.length !== launchArgs.length || current.some((arg, index) => arg !== launchArgs[index])) {
-      throw new Error("Studio's settings for Claude Code workers changed since the launch. Run the task again.");
-    }
     const started = attempt.start(() => startClaudeCodeWorker({
       binary: launch!.binary,
       argv: resume ? [...launch!.argv, "--resume", resume] : launch!.argv,
@@ -22772,7 +22838,7 @@ async function runClaudeCodeWorkerSession(input: {
       await ensurePiWorkerDisplayPty(attemptId, cwd, { SPARK_RUN_ID: run.id });
       await pty.waitForResize(attemptId, 5_000);
       const cli = claudeCodeModelAndEffort(claudeCodeModelOf(input.model) ?? input.model, input.effort);
-      const [{ getProvider }, { claudeWorkerLaunchArgs }, { acquireNativeClaudeProfileLease }] = await Promise.all([
+      const [{ getProvider }, { claudeWorkerLaunchSnapshot }, { acquireNativeClaudeProfileLease }] = await Promise.all([
         import("../providers"),
         import("../agent-launch-integration"),
         import("./native-claude-profile-runtime"),
@@ -22780,11 +22846,11 @@ async function runClaudeCodeWorkerSession(input: {
       const effortFlag = claudeCodeEffortFlag(cli.effort);
       const providerArgs = getProvider("claude").buildArgs({ cwd: "", model: cli.model, ...(effortFlag ? { effort: effortFlag } : {}) });
       // The worker roster of the codara-studio server (no board or
-      // whiteboard writes), and Studio's settings (the browser guard
-      // included) without its hooks, read back once any rewrite of them
-      // finished. Missing or stale files stop the launch.
-      workerArgs = () => claudeWorkerLaunchArgs({ userArgs: providerArgs });
-      launchArgs = await workerArgs();
+      // whiteboard writes), and Studio's settings (the browser guard in
+      // force now) without its hooks, written for this launch alone: every
+      // turn starts with exactly these files.
+      snapshot = await claudeWorkerLaunchSnapshot({ userArgs: providerArgs, launchId: attemptId });
+      const launchArgs = snapshot.args;
       // The lease only marks the account in use. Releasing it tells nobody:
       // a worker never starts the account service's login sync, which a
       // Claude terminal's exit does (claude-code-worker.ts).
@@ -22797,8 +22863,10 @@ async function runClaudeCodeWorkerSession(input: {
         codaraHome: codaraHome(),
         acquireLease: (profileId) => acquireNativeClaudeProfileLease(profileId, attemptId),
         // A Stop recorded during the display setup or the settings check
-        // keeps the sign-in probe from starting, and ends it if it runs.
+        // keeps the sign-in probe from starting, and ends it if it runs;
+        // the probe and anything it starts are the attempt's to tear down.
         signal: attempt.signal,
+        track: (probe) => attempt.track(probe),
       });
       const accountLabel = launch.accountLabel;
       pty.publishOutput(
@@ -22865,7 +22933,10 @@ async function runClaudeCodeWorkerSession(input: {
     const cleanedUp = await attempt.teardown();
     activeWorkerProcesses.delete(attemptId);
     const verdict = claudeCodeWorkerVerdict({ reportReady: report !== null, failure, stopped: attempt.stopped, cleanedUp });
-    if (cleanedUp) launch?.release();
+    if (cleanedUp) {
+      launch?.release();
+      await snapshot?.dispose();
+    }
     if (verdict.succeeded) {
       paint("\r\n\x1b[32m  ✓  Claude Code worker report ready\x1b[0m\r\n");
       paintPiWorkerReportOutcome(show, report!);
@@ -22877,7 +22948,10 @@ async function runClaudeCodeWorkerSession(input: {
     // The full text goes to the pane only; what is saved with the run (the
     // failure report, the attempt record, the event journal) is redacted.
     const saved = claudeCodeSavedError(message);
-    await writeAutoFailureReport(paths, task, saved, { interrupted: stopped }).catch(() => null);
+    // With processes that may still run, no report is kept for the attempt
+    // at all (the finish path drops its path): one they write later must
+    // never read as this attempt's.
+    if (cleanedUp) await writeAutoFailureReport(paths, task, saved, { interrupted: stopped }).catch(() => null);
     applyHookStateReport({ paneId: attemptId, state: stopped ? "done" : "error", note: saved });
     paint("\r\n\x1b[31m  ×  CLAUDE CODE WORKER STOPPED\x1b[0m\r\n");
     if (!cleanedUp) paint("\x1b[31m  ×  some processes could not be stopped; the account stays marked in use\x1b[0m\r\n");

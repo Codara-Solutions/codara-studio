@@ -116,6 +116,19 @@ export function runProjectPolicyMode(
   return resolveProjectPolicyMode(run);
 }
 
+/**
+ * A run whose Cora workers are managed workers: a planned run (not a direct
+ * chat, which also covers automations) of a trusted project. Only their
+ * workers may run in Claude Code (the launch adds, per task, that it is not a
+ * workflow call). Every place that narrows the worker models to what can run
+ * now uses this one rule: the manager's roster, its planning, task creation
+ * and the launch, so a Claude model Claude Code carries is never swapped for
+ * another family before the launch routes it.
+ */
+export function runHasManagedWorkers(run: Pick<RunState, "executionMode" | "origin" | "projectPolicyMode">): boolean {
+  return run.executionMode !== "direct" && runProjectPolicyMode(run) === "trusted";
+}
+
 export function renderUntrustedProjectPolicy(): string {
   return [
     "[UNTRUSTED PULL REQUEST POLICY]",

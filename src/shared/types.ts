@@ -4456,6 +4456,11 @@ export interface WorkerAttempt {
   /** The Claude account a Claude Code worker ran on, by its name in
    *  Settings > Accounts (route `claude-code/`). */
   accountLabel?: string;
+  /** A Claude Code worker whose processes could not all be confirmed gone
+   *  when it ended. Nothing of its run proceeds past it (no review, retry
+   *  or new worker) and it keeps no report: see run-store's
+   *  unconfirmedWorkerCleanup. */
+  cleanupUnconfirmed?: boolean;
   /**
    * Concrete native Codex CLI account used by a native CLI/app-server
    * attempt. Distinct from Pi accountProfileId; absent is legacy/personal.

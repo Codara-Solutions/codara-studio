@@ -33,6 +33,16 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "codara-claude-code-boundary-"
 const FORBIDDEN = /(credential-mirror|unified-account|pi-auth-storage|pi-account-auth-store|claude-cli-live-login|claude-cli-credentials|claude-login-keeper|claude-cli-account-profiles|native-claude-profile-runtime|system-cli-login)\.ts$/;
 
 let failures = 0;
+// Claude Code workers run on Linux only (claudeCodeWorkerSupported): the
+// checks that start real processes and expect a confirmed teardown run
+// there, and are counted as skipped elsewhere (macOS CI), never passed.
+const LINUX = process.platform === "linux";
+let skipped = 0;
+async function linuxCheck(name, fn) {
+  if (LINUX) return check(name, fn);
+  skipped += 1;
+  console.log(`SKIP ${name} (Linux only: Claude Code workers run on Linux only)`);
+}
 async function check(name, fn) {
   try {
     await fn();
@@ -40,6 +50,7 @@ async function check(name, fn) {
   } catch (error) {
     failures += 1;
     console.log(`FAIL ${name}: ${String(error && error.message).split("\n")[0]}`);
+    if (process.env.BOUNDARY_DEBUG) console.log(String(error && error.stack));
   }
 }
 
@@ -76,8 +87,8 @@ async function load() {
 // A stand-in for the Claude Code CLI. `auth status --json` answers from
 // FAKE_SIGNED_IN; a turn records its environment and acts on the prompt.
 const FAKE = path.join(TMP, "claude");
-const steerStatus = (out, signedIn, delayMs = 0) =>
-  fs.writeFileSync(path.join(TMP, "status-control.json"), JSON.stringify({ out, signedIn, delayMs }));
+const steerStatus = (out, signedIn, delayMs = 0, helper = false) =>
+  fs.writeFileSync(path.join(TMP, "status-control.json"), JSON.stringify({ out, signedIn, delayMs, helper }));
 fs.writeFileSync(FAKE, `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -89,6 +100,11 @@ if (argv[0] === "auth" && argv[1] === "status") {
   const control = JSON.parse(fs.readFileSync(path.join(__dirname, "status-control.json"), "utf8"));
   fs.appendFileSync(path.join(control.out, "status-calls.jsonl"), JSON.stringify({ argv, configDir: process.env.CLAUDE_CONFIG_DIR ?? null, pid: process.pid }) + "\\n");
   const signedIn = control.signedIn;
+  if (control.helper) {
+    // A probe that starts a helper of its own, in its session.
+    const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    fs.writeFileSync(path.join(control.out, "probe-helper.pid"), String(helper.pid));
+  }
   setTimeout(() => {
     process.stdout.write(JSON.stringify({ loggedIn: signedIn, authMethod: "claude.ai" }));
     process.exit(signedIn ? 0 : 1);
@@ -230,7 +246,7 @@ async function main() {
     assert.deepEqual(reached, []);
   });
 
-  await check("a launch and its release open no login record and load no credential module", async () => {
+  await linuxCheck("a launch and its release open no login record and load no credential module", async () => {
     assert.equal(typeof worker.claudeCodeWorkerAccount, "function", "claudeCodeWorkerAccount is missing");
     const root = accountRoot();
     const out = fs.mkdtempSync(path.join(TMP, "out-"));
@@ -265,7 +281,7 @@ async function main() {
     assert.deepEqual(status.map(({ argv, configDir }) => ({ argv, configDir })), [{ argv: ["auth", "status", "--json"], configDir: path.join(root, "live", "home") }]);
   });
 
-  await check("a signed-out account stops the launch with 'sign in in a Claude terminal' and takes no hold", async () => {
+  await linuxCheck("a signed-out account stops the launch with 'sign in in a Claude terminal' and takes no hold", async () => {
     const root = accountRoot();
     const account = await worker.claudeCodeWorkerAccount({ accountRoot: root, baseEnv: {} });
     const leases = [];
@@ -352,7 +368,7 @@ async function main() {
   });
 
   // ── 4. Stop ──────────────────────────────────────────────────────────────
-  await check("Stop ends every process Claude Code started", async () => {
+  await linuxCheck("Stop ends every process Claude Code started", async () => {
     const out = fs.mkdtempSync(path.join(TMP, "out-"));
     const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "TREE", onEvent: () => undefined });
     const pids = JSON.parse(await waitFor(path.join(out, "tree.json")));
@@ -366,7 +382,7 @@ async function main() {
     assert.deepEqual(survivors, []);
   });
 
-  await check("a helper a tool starts while it is being stopped is ended too", async () => {
+  await linuxCheck("a helper a tool starts while it is being stopped is ended too", async () => {
     const out = fs.mkdtempSync(path.join(TMP, "out-"));
     const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "RESPAWN", onEvent: () => undefined });
     const tool = Number(await waitFor(path.join(out, "tool.pid")));
@@ -380,7 +396,7 @@ async function main() {
     assert.equal(clean, true, "kill() reports a clean teardown");
   });
 
-  await check("a helper left in a tool's own process group after the tool exited is ended too", async () => {
+  await linuxCheck("a helper left in a tool's own process group after the tool exited is ended too", async () => {
     const out = fs.mkdtempSync(path.join(TMP, "out-"));
     const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "GROUPHELPER", onEvent: () => undefined });
     const helper = Number(await waitFor(path.join(out, "group-helper.pid")));
@@ -395,7 +411,7 @@ async function main() {
     assert.equal(clean, true, "kill() reports a clean teardown");
   });
 
-  await check("a process listing that fails never counts as 'nothing left'", async () => {
+  await linuxCheck("a process listing that fails never counts as 'nothing left'", async () => {
     // A `ps` that fails from Stop on: the Claude Code group is ended by its
     // group id, but the tool that left the group cannot be confirmed gone.
     const bin = fs.mkdtempSync(path.join(TMP, "bin-"));
@@ -424,7 +440,7 @@ async function main() {
     }
   });
 
-  await check("a listing that fails once is retried, and a confirmed empty one ends clean", async () => {
+  await linuxCheck("a listing that fails once is retried, and a confirmed empty one ends clean", async () => {
     let calls = 0;
     worker.setClaudeCodeTeardownForTests({
       graceMs: 200,
@@ -437,8 +453,7 @@ async function main() {
       const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "TREE", onEvent: () => undefined });
       pids = JSON.parse(await waitFor(path.join(out, "tree.json")));
       const clean = await run.kill();
-      assert.deepEqual(pids.filter(alive), []);
-      assert.equal(clean, true);
+      assert.deepEqual({ left: pids.filter(alive), clean }, { left: [], clean: true });
       assert.equal((await run.done).cleanedUp, true);
     } finally {
       worker.setClaudeCodeTeardownForTests(null);
@@ -519,6 +534,7 @@ async function main() {
       "spawn /mnt/private/client-name/claude EACCES",
       "key sk-ant-api03-InlineKeyAbc123Def456Ghi789Jkl rejected for someone@example.com",
       "Claude Code worker was stopped. /mnt/private/client-name",
+      "Studio's settings for Claude Code workers are at /home/someone/private. Run the task again in a moment.",
     ]) {
       assert.equal(worker.claudeCodeSavedError(raw), fallback, raw);
     }
@@ -526,27 +542,88 @@ async function main() {
     for (const fixed of [
       "Claude Code worker was stopped.",
       "Claude Code exited with code 2 before writing its final report.",
-      'Claude Code is not signed in to "Work". Sign in to this account in a Claude terminal, then run the task again.',
-      "Studio's settings for Claude Code workers are missing or out of date. Run the task again in a moment.",
+      "Studio's settings for Claude Code workers are not ready yet. Run the task again in a moment.",
       "Claude Code worker stopped, but some of its processes could not be confirmed gone; the account stays marked in use.",
+      worker.UNCONFIRMED_CLEANUP_ERROR,
     ]) {
       assert.equal(worker.claudeCodeSavedError(fixed), fixed);
     }
+    // The account's label is the user's own text: never saved, whatever it holds.
+    for (const label of ["Work", "someone@example.com", path.join(os.homedir(), "clients", "private"), 'Jane "J" Doe']) {
+      for (const message of [
+        `Claude Code is not signed in to "${label}". Sign in to this account in a Claude terminal, then run the task again.`,
+        `Claude Code did not say whether "${label}" is signed in. Open a Claude terminal on this account to check, then run the task again.`,
+      ]) {
+        const saved = worker.claudeCodeSavedError(message);
+        assert.ok(!saved.includes(label), `the saved error keeps the label ${label}`);
+        assert.ok(saved.startsWith("Claude Code "), saved);
+        assert.notEqual(saved, fallback, "a sign-in message lost its meaning");
+      }
+    }
   });
 
-  await check("a group or session with no process left is retired: a process that reuses its id is not adopted", () => {
-    const owned = worker.claudeCodeOwnedProcessesForTests(5000);
-    const row = (pid, parentPid, groupId, sessionId, startedAt = "Thu Nov 19 10:00:00 2026") =>
-      ({ pid, parentPid, groupId, sessionId, zombie: false, startedAt });
-    // Claude Code (5000) and a tool in its own group 5100, in the session.
-    assert.deepEqual(owned.members([row(5000, 1, 5000, 5000), row(5100, 5000, 5100, 5000), row(42, 1, 42, 42)]).map((r) => r.pid), [5000, 5100]);
-    // Only the tool is left: still found by its group after its parent exits.
-    assert.deepEqual(owned.members([row(5100, 1, 5100, 5000), row(42, 1, 42, 42)]).map((r) => r.pid), [5100]);
+  // ps prints start times like "Thu Nov 19 10:00:00 2026", in local time.
+  const stamp = (ms) => {
+    const d = new Date(ms);
+    const two = (n) => String(n).padStart(2, "0");
+    return `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()]} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()]} ${String(d.getDate()).padStart(2, " ")} ${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())} ${d.getFullYear()}`;
+  };
+  const T0 = Date.parse("2026-11-19T10:00:00");
+  const at = (seconds) => stamp(T0 + seconds * 1000);
+  const row = (pid, parentPid, groupId, sessionId, startedAt) => ({ pid, parentPid, groupId, sessionId, zombie: false, startedAt });
+  const pids = (rows) => rows.map((r) => r.pid).sort((a, b) => a - b);
+  // Claude Code (5000) as its start recorded it, last known alive at T0 + 10 s.
+  const ownedFrom = () => worker.claudeCodeOwnedProcessesForTests(5000, { startedAt: at(0), heldUntil: T0 + 10_000 });
+
+  await linuxCheck("a group or session with no process left is retired: a process that reuses its id is not adopted", () => {
+    const owned = ownedFrom();
+    // Claude Code and a tool in its own group 5100, in the session.
+    assert.deepEqual(pids(owned.members([row(5000, 1, 5000, 5000, at(0)), row(5100, 5000, 5100, 5000, at(5)), row(42, 1, 42, 42, at(-900))], T0 + 10_000)), [5000, 5100]);
+    // Only the tool is left: still the worker's, by its identity.
+    assert.deepEqual(pids(owned.members([row(5100, 1, 5100, 5000, at(5)), row(42, 1, 42, 42, at(-900))], T0 + 20_000)), [5100]);
     // Everything gone.
-    assert.deepEqual(owned.members([row(42, 1, 42, 42)]), []);
-    // A new, unrelated process gets pid 5100 and leads group and session 5100,
-    // and another one reuses 5000: neither is the worker's.
-    assert.deepEqual(owned.members([row(5100, 1, 5100, 5100, "Thu Nov 19 10:05:00 2026"), row(5000, 1, 5000, 5000, "Thu Nov 19 10:05:01 2026"), row(42, 1, 42, 42)]), []);
+    assert.deepEqual(owned.members([row(42, 1, 42, 42, at(-900))], T0 + 30_000), []);
+    // New, unrelated processes get pids 5100 and 5000 and lead groups and
+    // sessions with those ids: neither is the worker's, and nothing is left
+    // to tell apart.
+    assert.deepEqual(owned.members([row(5100, 1, 5100, 5100, at(300)), row(5000, 1, 5000, 5000, at(301)), row(42, 1, 42, 42, at(-900))], T0 + 400_000), []);
+    assert.deepEqual(owned.ambiguous, []);
+  });
+
+  await linuxCheck("an id handed on between two listings is not adopted: identity is a pid with its start time", () => {
+    // No listing in between saw the worker's processes gone.
+    const owned = ownedFrom();
+    assert.deepEqual(pids(owned.members([row(5000, 1, 5000, 5000, at(0)), row(5100, 5000, 5100, 5000, at(5))], T0 + 10_000)), [5000, 5100]);
+    // Both exited; pid 5000 now leads a new session and group, pid 5100 a
+    // new group in it, and a child of 5100 was started there.
+    const next = [row(5000, 1, 5000, 5000, at(600)), row(5100, 5000, 5100, 5000, at(601)), row(5200, 5100, 5100, 5000, at(602))];
+    assert.deepEqual(owned.members(next, T0 + 700_000), [], "a process that took a worker's pid was adopted");
+    assert.deepEqual(owned.ambiguous, []);
+  });
+
+  await linuxCheck("a group whose leader was never seen is not adopted through a newcomer with its id", () => {
+    const owned = ownedFrom();
+    // A helper the worker left in group 5100 (its leader, the tool, exited
+    // before any listing): the worker's, born in its session before Claude
+    // Code was last seen alive.
+    assert.deepEqual(pids(owned.members([row(5000, 1, 5000, 5000, at(0)), row(5150, 1, 5100, 5000, at(4))], T0 + 10_000)), [5000, 5150]);
+    // Then all exit, and an unrelated process gets pid 5100 and leads a
+    // group 5100 of its own, much later.
+    assert.deepEqual(owned.members([row(5100, 1, 5100, 7000, at(900))], T0 + 950_000), []);
+    assert.deepEqual(owned.ambiguous, []);
+  });
+
+  await linuxCheck("a process that cannot be told to be the worker's is never adopted, and keeps the teardown unconfirmed", () => {
+    // Claude Code exited at T0 + 10 s; a process in its session started in
+    // that same second (nothing else of the worker is left to vouch for it).
+    const owned = ownedFrom();
+    assert.deepEqual(owned.members([row(5300, 1, 5000, 5000, at(10))], T0 + 11_000), []);
+    assert.deepEqual(pids(owned.ambiguous), [5300]);
+    // One born well before that moment was born into the worker's session:
+    // it is the worker's.
+    const earlier = ownedFrom();
+    assert.deepEqual(pids(earlier.members([row(5300, 1, 5000, 5000, at(6))], T0 + 11_000)), [5300]);
+    assert.deepEqual(earlier.ambiguous, []);
   });
 
   await check("workers run only where teardown can confirm nothing is left (Linux)", () => {
@@ -555,7 +632,68 @@ async function main() {
     assert.equal(worker.claudeCodeWorkerSupported("win32"), false);
   });
 
-  await check("a Stop recorded before the sign-in probe keeps it from starting; one during it ends it", async () => {
+  await check("where teardown cannot confirm, a launch is refused before anything starts", async () => {
+    const out = fs.mkdtempSync(path.join(TMP, "out-"));
+    steerStatus(out, true);
+    const real = Object.getOwnPropertyDescriptor(process, "platform");
+    if (LINUX) Object.defineProperty(process, "platform", { ...real, value: "darwin" });
+    const leases = [];
+    try {
+      await assert.rejects(
+        worker.prepareClaudeCodeWorkerLaunch({
+          runId: "run-1", attemptDir: TMP, launchArgs: [], providerArgs: [], hookEnv: null, codaraHome: "/h",
+          acquireLease: () => { leases.push("acquire"); return () => undefined; },
+          binary: FAKE, account: { profileId: "personal", label: "x", configDirEnv: null }, baseEnv: { PATH: process.env.PATH },
+        }),
+        /run on Linux only/,
+      );
+    } finally {
+      if (LINUX) Object.defineProperty(process, "platform", real);
+    }
+    assert.equal(fs.existsSync(path.join(out, "status-calls.jsonl")), false, "the sign-in probe started");
+    assert.deepEqual(leases, []);
+  });
+
+  await linuxCheck("the sign-in probe is the attempt's: a Stop ends it and everything it started, and the teardown waits for it", async () => {
+    const root = accountRoot();
+    const account = await worker.claudeCodeWorkerAccount({ accountRoot: root, baseEnv: {} });
+    const out = fs.mkdtempSync(path.join(TMP, "out-"));
+    steerStatus(out, true, 10_000, true);
+    const attempt = new worker.ClaudeCodeWorkerAttempt();
+    const launching = worker.prepareClaudeCodeWorkerLaunch({
+      runId: "run-1", attemptDir: TMP, launchArgs: [], providerArgs: [], hookEnv: null, codaraHome: "/h",
+      acquireLease: () => () => undefined,
+      binary: FAKE, account, baseEnv: { PATH: process.env.PATH, HOME: os.homedir() },
+      signal: attempt.signal,
+      track: (probe) => attempt.track(probe),
+    });
+    const helper = Number(await waitFor(path.join(out, "probe-helper.pid")));
+    const probe = JSON.parse(await waitFor(path.join(out, "status-calls.jsonl"))).pid;
+    attempt.stop();
+    await assert.rejects(launching, /stopped/);
+    const clean = await attempt.teardown();
+    const survivors = [probe, helper].filter(alive);
+    for (const pid of survivors) process.kill(pid, "SIGKILL");
+    steerStatus(out, true);
+    assert.deepEqual(survivors, [], "the probe or its helper outlived the Stop");
+    assert.equal(clean, true, "the attempt's teardown did not cover the probe");
+  });
+
+  await linuxCheck("a probe whose processes cannot be confirmed gone gives no answer and leaves the attempt unconfirmed", async () => {
+    const out = fs.mkdtempSync(path.join(TMP, "out-"));
+    steerStatus(out, true);
+    worker.setClaudeCodeTeardownForTests({ graceMs: 100, killDeadlineMs: 300, listing: () => null });
+    const attempt = new worker.ClaudeCodeWorkerAttempt();
+    try {
+      const answer = await worker.claudeCodeSignedIn(FAKE, { PATH: process.env.PATH, HOME: os.homedir() }, { track: (probe) => attempt.track(probe) });
+      assert.equal(answer, null);
+      assert.equal(await attempt.teardown(), false);
+    } finally {
+      worker.setClaudeCodeTeardownForTests(null);
+    }
+  });
+
+  await linuxCheck("a Stop recorded before the sign-in probe keeps it from starting; one during it ends it", async () => {
     const root = accountRoot();
     const account = await worker.claudeCodeWorkerAccount({ accountRoot: root, baseEnv: {} });
     const base = {
@@ -594,7 +732,7 @@ async function main() {
     steerStatus(during, true);
   });
 
-  await check("Stop never reads another process's environment", async () => {
+  await linuxCheck("Stop never reads another process's environment", async () => {
     const out = fs.mkdtempSync(path.join(TMP, "out-"));
     const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "TREE", onEvent: () => undefined });
     const pids = JSON.parse(await waitFor(path.join(out, "tree.json")));
@@ -605,16 +743,24 @@ async function main() {
     assert.deepEqual(opened.filter((file) => /\/environ$/.test(file)), []);
   });
 
-  await check("a background process left holding the output neither hangs the turn nor outlives it", async () => {
+  await linuxCheck("a background process left holding the output neither hangs the turn nor counts as cleaned up", async () => {
+    // Started in the same second Claude Code exited, after which nothing ties
+    // it to the worker: it cannot be told from a process that took the
+    // freed ids, so it is not signalled, and the turn is not confirmed clean
+    // (the attempt keeps its account hold).
+    worker.setClaudeCodeTeardownForTests({ graceMs: 300, killDeadlineMs: 1_000 });
     const out = fs.mkdtempSync(path.join(TMP, "out-"));
-    const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "LEAVE", onEvent: () => undefined });
-    const timeout = sleep(8_000).then(() => "hung");
-    const result = await Promise.race([run.done.then(() => "done"), timeout]);
-    const bg = Number(await waitFor(path.join(out, "bg.pid")));
-    const survived = alive(bg);
-    if (survived) process.kill(bg, "SIGKILL");
-    assert.equal(result, "done");
-    assert.equal(survived, false);
+    try {
+      const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "LEAVE", onEvent: () => undefined });
+      const timeout = sleep(8_000).then(() => "hung");
+      const result = await Promise.race([run.done, timeout]);
+      const bg = Number(await waitFor(path.join(out, "bg.pid")));
+      if (alive(bg)) process.kill(bg, "SIGKILL");
+      assert.notEqual(result, "hung");
+      assert.equal(result.cleanedUp, false, "a process that could not be told apart counted as gone");
+    } finally {
+      worker.setClaudeCodeTeardownForTests(null);
+    }
   });
 
   await check("a Stop during the launch never starts a turn", async () => {
@@ -673,6 +819,8 @@ main()
       console.log(`${failures} check(s) failed`);
       process.exit(1);
     }
-    console.log("Claude Code worker boundary: all checks passed");
+    console.log(skipped > 0
+      ? `Claude Code worker boundary: all checks passed; ${skipped} Linux-only check(s) SKIPPED on ${process.platform}`
+      : "Claude Code worker boundary: all checks passed");
     process.exit(0);
   });

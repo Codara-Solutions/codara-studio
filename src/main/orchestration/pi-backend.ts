@@ -41,7 +41,7 @@ import {
   type ManagerRequestInput,
   type AgentBackend,
 } from "./agent-backend";
-import { runProjectPolicyMode } from "./project-policy";
+import { runHasManagedWorkers, runProjectPolicyMode } from "./project-policy";
 import {
   isAgentSocketCapabilityActive,
   revokeAgentSocketCapability,
@@ -463,6 +463,7 @@ async function ensureSession(
     thinking,
     sessionName: input.run.title,
     projectPolicyMode,
+    managedWorkers: runHasManagedWorkers(input.run),
   };
   const launch = async (): Promise<{
     client: PiRpcClient;

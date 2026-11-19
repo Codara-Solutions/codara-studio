@@ -17,7 +17,7 @@
 // scripts/test-claude-code-worker.cjs checks the import graph and spies on
 // the file system for login records during a launch.
 
-import { execFile, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -200,13 +200,21 @@ function listProcessesForTeardown(): ClaudeCodeListedProcess[] | null {
 
 let processListing: () => ClaudeCodeListedProcess[] | null = listProcessesForTeardown;
 
-/** Tests only: replace the teardown listing (null restores `ps`) and shorten
- *  the teardown timing. */
-/** Tests only: the ownership rules of a teardown, without signals. */
-export function claudeCodeOwnedProcessesForTests(rootPid: number): { members(listing: readonly ClaudeCodeListedProcess[]): ClaudeCodeListedProcess[] } {
-  return new OwnedProcesses(rootPid);
+/** Tests only: the ownership rules of a teardown, without signals. `root`
+ *  is what the start recorded: the root's start time and the last moment
+ *  it was known alive. */
+export function claudeCodeOwnedProcessesForTests(
+  rootPid: number,
+  root?: { startedAt?: string; heldUntil: number },
+): {
+  members(listing: readonly ClaudeCodeListedProcess[], listedAt?: number): ClaudeCodeListedProcess[];
+  readonly ambiguous: readonly ClaudeCodeListedProcess[];
+} {
+  return new OwnedProcesses(rootPid, root);
 }
 
+/** Tests only: replace the teardown listing (null restores `ps`) and shorten
+ *  the teardown timing. */
 export function setClaudeCodeTeardownForTests(input: {
   listing?: ((real: () => ClaudeCodeListedProcess[] | null) => ClaudeCodeListedProcess[] | null) | null;
   graceMs?: number;
@@ -217,82 +225,172 @@ export function setClaudeCodeTeardownForTests(input: {
   teardownTiming.killDeadlineMs = input?.killDeadlineMs ?? 30_000;
 }
 
+/** `ps` prints start times to the second, and the clock it derives them
+ *  from may sit a second off the wall clock: a start this close to a moment
+ *  is neither before nor after it. */
+const START_MARGIN_S = 1;
+function startSecond(startedAt: string): number {
+  const ms = Date.parse(startedAt);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : Number.NaN;
+}
+/** Surely started before `moment` (ms). False when the stamp is unreadable. */
+const startedBefore = (startedAt: string, moment: number): boolean =>
+  startSecond(startedAt) < Math.floor(moment / 1000) - START_MARGIN_S;
+/** Surely started after `moment` (ms). False when the stamp is unreadable. */
+const startedAfter = (startedAt: string, moment: number): boolean =>
+  startSecond(startedAt) > Math.floor(moment / 1000) + START_MARGIN_S;
+
+/** A process group or session the worker held. */
+interface HeldId {
+  /** The start time of the process whose pid is this id, once it was seen
+   *  as the worker's. */
+  leader?: string;
+  /** The last moment (ms) one of the worker's processes was seen in it. */
+  heldUntil: number;
+}
+
 /**
- * Everything a worker started, as a set that only grows. Claude Code is
- * spawned detached, so it leads a new session and a new process group.
- * A process is the worker's when it is in that session, in a group or
- * session a known member of it leads or joined, or below one of those by
- * parent. A tool that makes its own group stays in the session, so a
- * helper it starts there is found even after the tool exits and the helper
- * is reparented. Only pids, parents, groups, sessions and start times are
- * read (`ps`), never a command line or an environment.
+ * Everything a worker started, by identity: a pid together with its start
+ * time, so a pid the system hands to another process is never taken for
+ * the worker's. Claude Code is spawned detached, so it leads a new session
+ * and a new process group. In each listing:
+ *   - a process is the worker's when its pid and start time are one already
+ *     seen as the worker's, or its parent is the worker's in this listing;
+ *   - a group or session one of the worker's processes is in now is the
+ *     worker's, and so is everything else in it (an id cannot be handed on
+ *     while a process still uses it);
+ *   - a process in a session the worker held that surely started before the
+ *     last moment the session was seen held was born into it (a process
+ *     joins a session only at birth or by leading a new one), so it is the
+ *     worker's: this finds a helper left by a tool that exited;
+ *   - the process whose pid is a held id, with another start time than that
+ *     id's known leader or surely started after the id was last held, shows
+ *     the id was handed on: it is dropped, and nothing is adopted by it;
+ *   - anything else in a held group or session cannot be told apart: it is
+ *     never signalled, and while it lives the teardown is not confirmed (the
+ *     caller keeps its account hold).
+ * Only pids, parents, groups, sessions, states and start times are read
+ * (`ps`), never a command line or an environment.
  *
  * What this cannot reach: a process that starts a new session of its own
  * (setsid) after its last known ancestor exited and before any listing saw
  * it. That needs an OS container (a cgroup); the teardown then reports
- * nothing left only for what it can see.
+ * nothing left only for what it can see. And a signal goes to a pid the
+ * listing just confirmed, a moment later: the system could hand that pid on
+ * in between only by running through every other free pid first.
  */
 class OwnedProcesses {
   private readonly known = new Map<number, string>();
-  private readonly groups = new Set<number>();
-  private readonly sessions = new Set<number>();
+  private readonly groups = new Map<number, HeldId>();
+  private readonly sessions = new Map<number, HeldId>();
+  /** Groups one of the worker's processes was in at the last listing: the
+   *  only groups signalled by their id. */
+  private confirmedGroups = new Set<number>();
+  /** Processes in a held group or session at the last listing that could
+   *  not be told to be the worker's. */
+  ambiguous: ClaudeCodeListedProcess[] = [];
 
-  constructor(rootPid: number) {
-    this.groups.add(rootPid);
-    if (process.platform === "linux") this.sessions.add(rootPid);
+  constructor(private readonly rootPid: number, root?: { startedAt?: string; heldUntil: number }) {
+    const held = (): HeldId => ({ ...(root?.startedAt ? { leader: root.startedAt } : {}), heldUntil: root?.heldUntil ?? 0 });
+    this.groups.set(rootPid, held());
+    if (process.platform === "linux") this.sessions.set(rootPid, held());
+    if (root?.startedAt) this.known.set(rootPid, root.startedAt);
   }
 
-  /** The live members in `listing`, learning every new one. A group or
-   *  session with no process left in the listing is retired: nothing can
-   *  join it again, so a later process that reuses its id is not ours. */
-  members(listing: readonly ClaudeCodeListedProcess[]): ClaudeCodeListedProcess[] {
+  /** The root has not exited yet at `moment`: its group and session are
+   *  still the worker's then. */
+  holdRoot(moment: number): void {
+    for (const held of [this.groups.get(this.rootPid), this.sessions.get(this.rootPid)]) {
+      if (held && moment > held.heldUntil) held.heldUntil = moment;
+    }
+  }
+
+  /** The worker's live processes in `listing` (taken at `listedAt`),
+   *  learning every new one; `ambiguous` holds what could not be told. */
+  members(listing: readonly ClaudeCodeListedProcess[], listedAt = Date.now()): ClaudeCodeListedProcess[] {
+    const byPid = new Map(listing.map((row) => [row.pid, row] as const));
+    // A held id whose own pid is now another process: handed on.
+    for (const held of [this.groups, this.sessions]) {
+      for (const [id, entry] of [...held]) {
+        const leader = byPid.get(id);
+        if (!leader) continue;
+        const handedOn = entry.leader !== undefined
+          ? leader.startedAt !== entry.leader
+          : startedAfter(leader.startedAt, entry.heldUntil);
+        if (handedOn) held.delete(id);
+      }
+    }
     const owned = new Map<number, ClaudeCodeListedProcess>();
+    const ownGroups = new Set<number>();
+    const ownSessions = new Set<number>();
+    const leads = (row: ClaudeCodeListedProcess, id: number, entry: HeldId | undefined): boolean =>
+      entry !== undefined && row.pid === id &&
+      (entry.leader !== undefined ? entry.leader === row.startedAt : startedBefore(row.startedAt, entry.heldUntil));
     let grew = true;
     while (grew) {
       grew = false;
       for (const row of listing) {
         if (owned.has(row.pid) || row.pid <= 1 || row.pid === process.pid) continue;
+        const group = this.groups.get(row.groupId);
+        const session = row.sessionId > 1 ? this.sessions.get(row.sessionId) : undefined;
         const ours =
           this.known.get(row.pid) === row.startedAt ||
-          this.groups.has(row.groupId) ||
-          (row.sessionId > 1 && this.sessions.has(row.sessionId)) ||
-          owned.has(row.parentPid);
+          owned.has(row.parentPid) ||
+          (row.groupId > 1 && ownGroups.has(row.groupId)) ||
+          (row.sessionId > 1 && ownSessions.has(row.sessionId)) ||
+          leads(row, row.groupId, group) ||
+          leads(row, row.sessionId, session) ||
+          (session !== undefined && startedBefore(row.startedAt, session.heldUntil));
         if (!ours) continue;
         owned.set(row.pid, row);
-        this.known.set(row.pid, row.startedAt);
-        if (row.groupId > 1 && !this.groups.has(row.groupId)) {
-          this.groups.add(row.groupId);
-          grew = true;
-        }
-        if (row.sessionId > 1 && !this.sessions.has(row.sessionId)) {
-          this.sessions.add(row.sessionId);
-          grew = true;
-        }
+        if (row.groupId > 1) ownGroups.add(row.groupId);
+        if (row.sessionId > 1) ownSessions.add(row.sessionId);
         grew = true;
       }
     }
-    const live = [...owned.values()].filter((row) => !row.zombie);
-    const liveGroups = new Set(live.map((row) => row.groupId));
-    const liveSessions = new Set(live.map((row) => row.sessionId));
-    for (const group of [...this.groups]) if (!liveGroups.has(group)) this.groups.delete(group);
-    for (const session of [...this.sessions]) if (!liveSessions.has(session)) this.sessions.delete(session);
+    for (const row of owned.values()) this.known.set(row.pid, row.startedAt);
     for (const pid of [...this.known.keys()]) if (!owned.has(pid)) this.known.delete(pid);
+    for (const [ids, held] of [[ownGroups, this.groups], [ownSessions, this.sessions]] as const) {
+      for (const id of ids) {
+        const entry = held.get(id) ?? { heldUntil: 0 };
+        entry.heldUntil = Math.max(entry.heldUntil, listedAt);
+        const leader = owned.get(id);
+        if (leader && entry.leader === undefined) entry.leader = leader.startedAt;
+        held.set(id, entry);
+      }
+    }
+    const live = [...owned.values()].filter((row) => !row.zombie);
+    // An id with no live process left is retired: nothing can join it
+    // again. One with only processes that could not be told stays held, so
+    // they keep counting.
+    const running = listing.filter((row) => !row.zombie);
+    const liveGroups = new Set(running.map((row) => row.groupId));
+    const liveSessions = new Set(running.map((row) => row.sessionId));
+    for (const id of [...this.groups.keys()]) if (!liveGroups.has(id)) this.groups.delete(id);
+    for (const id of [...this.sessions.keys()]) if (!liveSessions.has(id)) this.sessions.delete(id);
+    this.confirmedGroups = new Set(live.map((row) => row.groupId).filter((id) => id > 1));
+    this.ambiguous = running.filter((row) =>
+      !owned.has(row.pid) && row.pid > 1 && row.pid !== process.pid &&
+      (this.groups.has(row.groupId) || (row.sessionId > 1 && this.sessions.has(row.sessionId))));
     return live;
   }
 
-  signal(sig: NodeJS.Signals, members: readonly ClaudeCodeListedProcess[] | null): void {
-    // Only groups that had a live member at the last listing are still
-    // held: a group id cannot be handed to another process while one of its
-    // members lives, so these are signalled even when this round's listing
-    // failed.
-    for (const group of this.groups) {
+  /**
+   * Signal what the listing just taken confirmed: each of the worker's
+   * processes by pid, and each group one of them is in. When that listing
+   * failed, only the root's group, and only while the root has not exited
+   * (its pid, and so its group id, cannot be handed on before that).
+   */
+  signal(sig: NodeJS.Signals, members: readonly ClaudeCodeListedProcess[] | null, rootAlive: boolean): void {
+    const groups = new Set(members === null ? [] : this.confirmedGroups);
+    if (rootAlive) groups.add(this.rootPid);
+    for (const group of groups) {
       try {
         process.kill(-group, sig);
       } catch {
         // Gone already.
       }
     }
-    // Single pids only when a listing just confirmed who they are.
     for (const member of members ?? []) {
       try {
         process.kill(member.pid, sig);
@@ -303,14 +401,28 @@ class OwnedProcesses {
   }
 }
 
+/** What the start of a process recorded about it, for its teardown. */
+interface OwnedRoot {
+  pid: number | undefined;
+  /** Its start time, read right after it was spawned (its pid cannot be
+   *  handed on before Node reaps it). */
+  startedAt?: string;
+  /** False once it exited (and was reaped). */
+  alive: () => boolean;
+  /** The last moment it was alive: now, or when it exited. */
+  heldUntil: () => number;
+}
+
 /**
  * End everything a worker started: SIGTERM, a grace period, then SIGKILL
  * retried until the deadline. Every round lists processes again, so a
  * helper born during teardown is found and ended too. A listing that fails
- * or times out counts as "may still be alive", never as "gone": the result
- * is true only once a listing confirmed nothing is left.
+ * or times out counts as "may still be alive", never as "gone", and so does
+ * a process that cannot be told to be the worker's or not: the result is
+ * true only once a listing confirmed nothing of either is left.
  */
-async function stopProcessTree(pid: number | undefined): Promise<boolean> {
+async function stopProcessTree(root: OwnedRoot): Promise<boolean> {
+  const pid = root.pid;
   if (!pid) return true;
   if (process.platform === "win32") {
     // Best effort, never proof: taskkill's status does not show that a
@@ -319,31 +431,35 @@ async function stopProcessTree(pid: number | undefined): Promise<boolean> {
     spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
     return false;
   }
-  const owned = new OwnedProcesses(pid);
+  const owned = new OwnedProcesses(pid, { startedAt: root.startedAt, heldUntil: root.heldUntil() });
   const pause = () => new Promise((resolve) => setTimeout(resolve, teardownTiming.pollMs));
   /** The live members now; null when that cannot be told. */
   const look = (): ClaudeCodeListedProcess[] | null => {
+    const listedAt = Date.now();
+    if (root.alive()) owned.holdRoot(listedAt);
     const listing = processListing();
-    return listing ? owned.members(listing) : null;
+    return listing ? owned.members(listing, listedAt) : null;
   };
-  const round = (sig: NodeJS.Signals) => owned.signal(sig, look());
+  const unsettled = (members: readonly ClaudeCodeListedProcess[] | null) =>
+    members === null || members.length > 0 || owned.ambiguous.length > 0;
   const termed = new Set<string>();
-  const term = (members: readonly ClaudeCodeListedProcess[] | null) => {
-    const fresh = (members ?? []).filter((member) => !termed.has(`${member.pid}@${member.startedAt}`));
+  const term = (members: readonly ClaudeCodeListedProcess[]) => {
+    const fresh = members.filter((member) => !termed.has(`${member.pid}@${member.startedAt}`));
     for (const member of fresh) termed.add(`${member.pid}@${member.startedAt}`);
     return fresh;
   };
-  {
-    const first = look();
-    owned.signal("SIGTERM", term(first));
-  }
-  let last = look();
-  const graceEnd = Date.now() + teardownTiming.graceMs;
-  while (Date.now() < graceEnd && (last === null || last.length > 0)) {
-    await pause();
-    last = look();
-    // A helper born since the last look gets its SIGTERM too, once.
-    const fresh = term(last);
+  // Nothing is signalled before a listing has shown the tree: ending Claude
+  // Code first would orphan a process that left its group before anyone saw
+  // it. Each listing then SIGTERMs what it shows for the first time.
+  let listedOnce = false;
+  const termRound = (members: readonly ClaudeCodeListedProcess[] | null) => {
+    if (members === null) return;
+    const fresh = term(members);
+    if (!listedOnce) {
+      listedOnce = true;
+      owned.signal("SIGTERM", fresh, root.alive());
+      return;
+    }
     for (const member of fresh) {
       try {
         process.kill(member.pid, "SIGTERM");
@@ -351,17 +467,36 @@ async function stopProcessTree(pid: number | undefined): Promise<boolean> {
         // Exited already.
       }
     }
-  }
-  const killEnd = Date.now() + teardownTiming.killDeadlineMs;
-  while (last === null || last.length > 0) {
-    round("SIGKILL");
+  };
+  let last = look();
+  termRound(last);
+  const graceEnd = Date.now() + teardownTiming.graceMs;
+  while (Date.now() < graceEnd && unsettled(last)) {
     await pause();
     last = look();
-    if (Date.now() >= killEnd) break;
+    termRound(last);
   }
+  // A process that could not be told apart is never signalled, so only
+  // the worker's own are waited on past the grace period.
+  // Each round signals exactly what its own listing just showed.
+  const killEnd = Date.now() + teardownTiming.killDeadlineMs;
+  while (last === null || last.length > 0) {
+    if (Date.now() >= killEnd) break;
+    const now = look();
+    last = now;
+    if (now !== null) {
+      listedOnce = true;
+      if (now.length === 0) break;
+      owned.signal("SIGKILL", now, root.alive());
+    }
+    await pause();
+  }
+  // No listing ever worked: Claude Code's own group is still ended (its id
+  // is its own until it exits); the result stays unconfirmed.
+  if (!listedOnce && last === null) owned.signal("SIGKILL", null, root.alive());
   // Only Linux lists sessions, which is what finds a helper that left its
   // group before any listing saw it; elsewhere "nothing left" is not proven.
-  return claudeCodeWorkerSupported() && last !== null && last.length === 0;
+  return claudeCodeWorkerSupported() && !unsettled(last);
 }
 
 /**
@@ -374,55 +509,59 @@ export function claudeCodeWorkerSupported(platform: NodeJS.Platform = process.pl
   return platform === "linux";
 }
 
-/** Start Claude Code, hand it the prompt on stdin, and report each event.
- *  It leads its own process group, so Stop and the end of the turn reach
- *  everything it started. */
-export function startClaudeCodeWorker(input: {
+/**
+ * Start a process that leads its own session and process group, and own
+ * everything it starts: `kill()` ends all of it, and `done` comes once the
+ * process exited and its teardown settled. Its start time is read at once,
+ * while its pid cannot be handed on, so the teardown knows it by identity.
+ */
+function startOwnedProcess(input: {
   binary: string;
   argv: readonly string[];
   env: NodeJS.ProcessEnv;
   cwd: string;
-  prompt: string;
-  onEvent: (event: ClaudeCodeEvent) => void;
+  /** Written to stdin and closed; null leaves stdin closed. */
+  stdin: string | null;
+  onStdout: (chunk: string) => void;
+  /** Called once with any output left unterminated at the end. */
+  onEnd?: () => void;
 }): ClaudeCodeProcess {
-  const child: ChildProcessWithoutNullStreams = spawn(input.binary, [...input.argv], {
+  const child: ChildProcess = spawn(input.binary, [...input.argv], {
     cwd: input.cwd,
     env: input.env,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: [input.stdin === null ? "ignore" : "pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
     windowsHide: true,
   });
-  let buffered = "";
-  let stderrTail = "";
-  let stopping: Promise<boolean> | null = null;
-  const stopTree = () => (stopping ??= stopProcessTree(child.pid));
-  const emit = (line: string) => {
-    for (const event of parseClaudeCodeStreamLine(line)) {
-      try {
-        input.onEvent(event);
-      } catch {
-        // A display failure must not end the worker.
-      }
-    }
-  };
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    const lines = (buffered + chunk).split("\n");
-    buffered = lines.pop() ?? "";
-    lines.forEach(emit);
+  let exitedAt: number | null = null;
+  child.once("exit", () => {
+    exitedAt = Date.now();
   });
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
+  const root: OwnedRoot = {
+    pid: child.pid,
+    startedAt: child.pid ? processListing()?.find((row) => row.pid === child.pid)?.startedAt : undefined,
+    alive: () => exitedAt === null,
+    heldUntil: () => exitedAt ?? Date.now(),
+  };
+  let stopping: Promise<boolean> | null = null;
+  const stopTree = () => (stopping ??= stopProcessTree(root));
+  let stderrTail = "";
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => input.onStdout(chunk));
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => {
     stderrTail = `${stderrTail}${chunk}`.slice(-2_000);
   });
-  child.stdin.on("error", () => undefined);
-  child.stdin.end(input.prompt);
+  if (child.stdin) {
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(input.stdin ?? "");
+  }
   const done = new Promise<{ exitCode: number; stderrTail: string; cleanedUp: boolean }>((resolve) => {
     let settled = false;
     const finish = (exitCode: number, cleanedUp: boolean) => {
       if (settled) return;
       settled = true;
-      if (buffered.trim()) emit(buffered);
+      input.onEnd?.();
       resolve({ exitCode, stderrTail: safeLine(stderrTail, 2_000), cleanedUp });
     };
     child.on("error", (error) => {
@@ -431,9 +570,9 @@ export function startClaudeCodeWorker(input: {
       if (!child.pid) finish(127, true);
       else void stopTree().then((clean) => finish(127, clean), () => finish(127, false));
     });
-    // The turn ends with nothing it started still running. A background
-    // process left holding Claude Code's output would keep "close" from ever
-    // firing, so the exit also ends the group after a moment to drain.
+    // The process ends with nothing it started still running. A background
+    // process left holding its output would keep "close" from ever firing,
+    // so the exit also ends the tree after a moment to drain.
     const end = (code: number | null, signal: NodeJS.Signals | null) => {
       const exitCode = code ?? (signal ? 130 : 1);
       void stopTree().then((clean) => finish(exitCode, clean), () => finish(exitCode, false));
@@ -444,6 +583,45 @@ export function startClaudeCodeWorker(input: {
     });
   });
   return { done, kill: stopTree };
+}
+
+/** Start Claude Code, hand it the prompt on stdin, and report each event.
+ *  It leads its own session and process group, so Stop and the end of the
+ *  turn reach everything it started. */
+export function startClaudeCodeWorker(input: {
+  binary: string;
+  argv: readonly string[];
+  env: NodeJS.ProcessEnv;
+  cwd: string;
+  prompt: string;
+  onEvent: (event: ClaudeCodeEvent) => void;
+}): ClaudeCodeProcess {
+  let buffered = "";
+  const emit = (line: string) => {
+    for (const event of parseClaudeCodeStreamLine(line)) {
+      try {
+        input.onEvent(event);
+      } catch {
+        // A display failure must not end the worker.
+      }
+    }
+  };
+  return startOwnedProcess({
+    binary: input.binary,
+    argv: input.argv,
+    env: input.env,
+    cwd: input.cwd,
+    stdin: input.prompt,
+    onStdout: (chunk) => {
+      const lines = (buffered + chunk).split("\n");
+      buffered = lines.pop() ?? "";
+      lines.forEach(emit);
+    },
+    onEnd: () => {
+      if (buffered.trim()) emit(buffered);
+      buffered = "";
+    },
+  });
 }
 
 /**
@@ -536,29 +714,51 @@ export async function claudeCodeWorkerAccount(input: {
   };
 }
 
-/** Claude Code's own `auth status --json`, reduced to one boolean (null when
- *  it gave no answer). Nothing else from its output is kept. */
-export function claudeCodeSignedIn(binary: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<boolean | null> {
-  return new Promise((resolveStatus) => {
-    if (signal?.aborted) {
-      resolveStatus(null);
-      return;
-    }
-    execFile(
-      binary,
-      ["auth", "status", "--json"],
-      { env, cwd: homedir(), timeout: 15_000, maxBuffer: 16 * 1024, windowsHide: true, ...(signal ? { signal, killSignal: "SIGKILL" as const } : {}) },
-      // Signed out exits non-zero and still prints its JSON.
-      (_error, stdout) => {
-        try {
-          const loggedIn = record(JSON.parse(String(stdout ?? "")))?.loggedIn;
-          resolveStatus(typeof loggedIn === "boolean" ? loggedIn : null);
-        } catch {
-          resolveStatus(null);
-        }
-      },
-    );
+const STATUS_PROBE_TIMEOUT_MS = 15_000;
+const STATUS_PROBE_MAX_BYTES = 16 * 1024;
+
+/**
+ * Claude Code's own `auth status --json`, reduced to one boolean (null when
+ * it gave no answer). Nothing else from its output is kept. The probe is
+ * started and owned like a worker turn (startOwnedProcess): `track` hands it
+ * to the attempt, so the attempt's Stop and teardown reach it and anything
+ * it started, and a probe whose processes could not be confirmed gone
+ * answers null.
+ */
+export async function claudeCodeSignedIn(
+  binary: string,
+  env: NodeJS.ProcessEnv,
+  options: { signal?: AbortSignal; track?: (probe: ClaudeCodeProcess) => void } = {},
+): Promise<boolean | null> {
+  const { signal, track } = options;
+  if (signal?.aborted) return null;
+  let stdout = "";
+  const probe = startOwnedProcess({
+    binary,
+    argv: ["auth", "status", "--json"],
+    env,
+    cwd: homedir(),
+    stdin: null,
+    onStdout: (chunk) => {
+      if (stdout.length < STATUS_PROBE_MAX_BYTES) stdout += chunk.slice(0, STATUS_PROBE_MAX_BYTES - stdout.length);
+    },
   });
+  track?.(probe);
+  const stop = () => void probe.kill().catch(() => false);
+  signal?.addEventListener("abort", stop, { once: true });
+  const timer = setTimeout(stop, STATUS_PROBE_TIMEOUT_MS);
+  try {
+    // Signed out exits non-zero and still prints its JSON.
+    const result = await probe.done;
+    if (!result.cleanedUp || signal?.aborted) return null;
+    const loggedIn = record(JSON.parse(stdout))?.loggedIn;
+    return typeof loggedIn === "boolean" ? loggedIn : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", stop);
+  }
 }
 
 const READY_TTL_MS = 60_000;
@@ -609,6 +809,9 @@ export async function prepareClaudeCodeWorkerLaunch(input: {
   /** The attempt's Stop: checked before the sign-in probe starts, and it
    *  ends the probe if it lands while the probe runs. */
   signal?: AbortSignal;
+  /** Hands the sign-in probe to the attempt that owns its processes
+   *  (ClaudeCodeWorkerAttempt.track). */
+  track?: (probe: ClaudeCodeProcess) => void;
 }): Promise<ClaudeCodeWorkerLaunch> {
   const stoppedError = () => new Error("Claude Code worker was stopped.");
   if (!claudeCodeWorkerSupported()) {
@@ -626,7 +829,7 @@ export async function prepareClaudeCodeWorkerLaunch(input: {
     runId: input.runId,
   });
   if (input.signal?.aborted) throw stoppedError();
-  const signedIn = await claudeCodeSignedIn(binary, env, input.signal);
+  const signedIn = await claudeCodeSignedIn(binary, env, { signal: input.signal, track: input.track });
   if (input.signal?.aborted) throw stoppedError();
   if (signedIn !== true) {
     throw new Error(
@@ -692,30 +895,42 @@ export function claudeCodeStopOwnsVerdict(input: {
 }
 
 /**
- * Studio's own messages for a Claude Code worker, the only error text saved
- * with the run (the failure report, the attempt record, the event journal).
- * Anything else (an exception from the system, a path, Claude Code's own
- * output) is saved as one fixed line; its detail is shown in the worker
- * pane only.
+ * The one function every error saved with a Claude Code worker's run goes
+ * through (the failure report, the attempt record, the event journal).
+ * Only Studio's own fixed lines are saved, each matched whole: a message
+ * that names the account (its label is the user's own text and may hold a
+ * name, an email or a path) is saved as its fixed form without the label,
+ * and anything else (an exception from the system, a path, Claude Code's
+ * own output) as one fixed line. The full text is shown in the worker pane
+ * only.
  */
-const SAVED_ERROR_FORMS: readonly RegExp[] = [
-  /^Claude Code is not installed: the `claude` command was not found\.$/,
-  /^Claude Code is not signed in to "[^"\n]{1,80}"\. Sign in to this account in a Claude terminal, then run the task again\.$/,
-  /^Claude Code did not say whether "[^"\n]{1,80}" is signed in\. Open a Claude terminal on this account to check, then run the task again\.$/,
-  /^Claude Code workers run on Linux only for now: Studio cannot yet confirm that a stopped worker left nothing running on this system\.$/,
-  /^Claude Code worker was stopped\.$/,
-  /^Claude Code worker was interrupted before it started\.$/,
-  /^Claude Code worker stopped, but some of its processes could not be confirmed gone; the account stays marked in use\.$/,
-  /^Claude Code worker completed without a parseable final-report\.json\.$/,
-  /^Claude Code exited with code -?\d{1,4} before writing its final report\.$/,
-  /^Claude Code worker ended without a report\.$/,
-  /^Studio's (settings|tools) for Claude Code workers [^\n/\\]{1,120}\.$/,
+const SAVED_ERRORS: ReadonlyArray<readonly [RegExp, string | null]> = [
+  [/^Claude Code is not signed in to "[^\n]*"\. Sign in to this account in a Claude terminal, then run the task again\.$/,
+    "Claude Code is not signed in to the account a new Claude terminal uses. Sign in to it in a Claude terminal, then run the task again."],
+  [/^Claude Code did not say whether "[^\n]*" is signed in\. Open a Claude terminal on this account to check, then run the task again\.$/,
+    "Claude Code did not say whether the account a new Claude terminal uses is signed in. Open a Claude terminal to check, then run the task again."],
+  [/^Claude Code is not installed: the `claude` command was not found\.$/, null],
+  [/^Claude Code workers run on Linux only for now: Studio cannot yet confirm that a stopped worker left nothing running on this system\.$/, null],
+  [/^Claude Code worker was stopped\.$/, null],
+  [/^Claude Code worker was interrupted before it started\.$/, null],
+  [/^Claude Code worker stopped, but some of its processes could not be confirmed gone; the account stays marked in use\.$/, null],
+  [/^Claude Code worker completed without a parseable final-report\.json\.$/, null],
+  [/^Claude Code exited with code -?\d{1,4} before writing its final report\.$/, null],
+  [/^Claude Code worker ended without a report\.$/, null],
+  [/^Studio's settings for Claude Code workers are not ready yet\. Run the task again in a moment\.$/, null],
+  [/^Studio's settings for Claude Code workers could not be prepared\. Run the task again in a moment\.$/, null],
+  [/^An earlier Claude Code worker in this run left processes that could not be confirmed gone\. Restart Studio once they are stopped, then run the task again\.$/, null],
 ];
+/** Why nothing more runs in a run after a worker whose processes could not
+ *  be confirmed gone (run-store's unconfirmedWorkerCleanup). */
+export const UNCONFIRMED_CLEANUP_ERROR =
+  "An earlier Claude Code worker in this run left processes that could not be confirmed gone. Restart Studio once they are stopped, then run the task again.";
 const SAVED_ERROR_FALLBACK = "Claude Code worker failed; the worker pane shows the details.";
 
 export function claudeCodeSavedError(message: string): string {
   const line = message.trim();
-  return SAVED_ERROR_FORMS.some((form) => form.test(line)) ? line : SAVED_ERROR_FALLBACK;
+  for (const [form, saved] of SAVED_ERRORS) if (form.test(line)) return saved ?? line;
+  return SAVED_ERROR_FALLBACK;
 }
 
 /**
@@ -758,6 +973,13 @@ export class ClaudeCodeWorkerAttempt {
     const started = spawnTurn();
     this.processes.push(started);
     return started;
+  }
+
+  /** Own a process this attempt started outside a turn (the sign-in
+   *  probe): a Stop reaches it, and the teardown waits for it. */
+  track(started: ClaudeCodeProcess): void {
+    this.processes.push(started);
+    if (this.stopped) void started.kill().catch(() => false);
   }
 
   /** The end of a turn started here. An unconfirmed teardown blocks every

@@ -9,6 +9,7 @@ import { ALLOWED_WORKER_MODELS, partitionWorkerModelsByAccount } from "@shared/w
 import { availableCoraWorkerModels, configuredOpenRouterCoraModels } from "../openrouter-config";
 import { claudeCodeWorkerReady } from "./claude-code-worker";
 import type { PiProfileAuthStatusLike } from "./pi-worker-providers";
+export { runHasManagedWorkers } from "./project-policy";
 
 export interface CoraWorkerModelAvailability {
   /** Enabled models Cora can launch now. */

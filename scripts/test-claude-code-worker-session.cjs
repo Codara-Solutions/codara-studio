@@ -7,8 +7,9 @@
 //   - the session never starts the account service's login sync (no
 //     reconcile on launch, nothing on the release of the account hold);
 //   - Studio's own provider and launch arguments are used, nothing else;
-//   - the launch takes the worker arguments only after the settings files
-//     were read back (stale or missing ones stop it);
+//   - the launch takes its settings and tools as a snapshot of its own,
+//     made once (agent-launch-integration.ts, tested there), and every turn
+//     starts with exactly that;
 //   - one owner (ClaudeCodeWorkerAttempt) starts every turn, a Stop reaches
 //     every turn's processes, and the verdict is settled once, after all of
 //     them are torn down, with the account hold kept unless that teardown
@@ -44,12 +45,12 @@ assert.match(body, /acquireLease: \(profileId\) => acquireNativeClaudeProfileLea
 console.log("PASS no login sync on launch or release");
 
 assert.match(body, /getProvider\("claude"\)\.buildArgs\(/);
-// The launch reads the worker settings back after any rewrite and refuses
-// stale or missing files (agent-launch-integration.ts, tested there).
-assert.match(body, /workerArgs = \(\) => claudeWorkerLaunchArgs\(\{ userArgs: providerArgs \}\);\s*launchArgs = await workerArgs\(\);/);
-// ...and again right before each turn: a rewrite that failed since stops it.
-assert.match(body, /const turn = async \(prompt: string, resume\?: string\): Promise<number> => \{[\s\S]{0,200}?const current = await workerArgs!\(\);[\s\S]{0,300}?throw new Error\([\s\S]{0,200}?const started = attempt\.start\(/);
-assert.ok(!/claudeLaunchArgs\(/.test(body), "the launch takes the checked worker arguments only");
+// The launch's settings and tools are one snapshot, written once for it
+// (agent-launch-integration.ts, tested there); every turn starts with the
+// arguments built from it and nothing reads the shared files again.
+assert.match(body, /snapshot = await claudeWorkerLaunchSnapshot\(\{ userArgs: providerArgs, launchId: attemptId \}\);\s*const launchArgs = snapshot\.args;/);
+assert.ok(!/claudeLaunchArgs\(|claudeWorkerLaunchArgs\(/.test(body), "the launch takes the snapshot's arguments only");
+assert.match(body, /if \(cleanedUp\) \{\s*launch\?\.release\(\);\s*await snapshot\?\.dispose\(\);\s*\}/, "the snapshot outlives a worker that may still read it");
 assert.match(body, /hookEnv: null,/);
 // The hook-free settings keep the browser guard and are rewritten with it.
 const integration = fs.readFileSync(path.join(ROOT, "src", "main", "agent-launch-integration.ts"), "utf8");
@@ -77,8 +78,13 @@ assert.match(body, /if \(!exit\.cleanedUp\) throw new Error\(/);
 assert.match(body, /kill: \(\) => attempt\.stop\(\),/);
 // A launch abort reaches the attempt at once, and the sign-in probe through it.
 assert.match(body, /const launching = launchingWorkerAttempts\.get\(attemptId\);\s*if \(launching\) launching\.onAbort = \(\) => attempt\.stop\(\);/);
-assert.match(body, /signal: attempt\.signal,/);
-assert.match(runStore, /entry\.aborted = true;\s*try \{\s*entry\.onAbort\?\.\(\);/);
+assert.match(body, /signal: attempt\.signal,\s*track: \(probe\) => attempt\.track\(probe\),/);
+// The run's Stop and the worker's own Stop button abort a launch the same
+// way: through abortLaunchingAttempt, which fires the attempt's abort.
+assert.match(runStore, /function abortLaunchingAttempt\(entry: LaunchingWorkerAttempt\): void \{\s*entry\.aborted = true;\s*try \{\s*entry\.onAbort\?\.\(\);/);
+assert.equal((runStore.match(/\.aborted = true;/g) ?? []).length, 1, "a launch is aborted somewhere without its abort");
+const stopWorker = runStore.slice(runStore.indexOf("export async function stopWorkerAttempt("), runStore.indexOf("export async function retryWorkerTask("));
+assert.match(stopWorker, /if \(launching\) abortLaunchingAttempt\(launching\);/);
 assert.match(body, /await runClaudeCodeWorkerTurns\(\{\s*prompt: input\.promptText,\s*stopped: \(\) => attempt\.stopped,/);
 assert.ok(!/lastProcess|current\??\.kill/.test(body), "no single 'last process' decides the teardown");
 console.log("PASS one owner starts every turn, a Stop reaches all of them");
@@ -86,7 +92,7 @@ console.log("PASS one owner starts every turn, a Stop reaches all of them");
 // The verdict: every turn torn down first, then the Stop's handle removed
 // and the Stop read with no wait in between, then the hold released only
 // when the teardown was confirmed.
-assert.match(body, /const cleanedUp = await attempt\.teardown\(\);\s*activeWorkerProcesses\.delete\(attemptId\);\s*const verdict = claudeCodeWorkerVerdict\(\{ reportReady: report !== null, failure, stopped: attempt\.stopped, cleanedUp \}\);\s*if \(cleanedUp\) launch\?\.release\(\);/);
+assert.match(body, /const cleanedUp = await attempt\.teardown\(\);\s*activeWorkerProcesses\.delete\(attemptId\);\s*const verdict = claudeCodeWorkerVerdict\(\{ reportReady: report !== null, failure, stopped: attempt\.stopped, cleanedUp \}\);\s*if \(cleanedUp\) \{\s*launch\?\.release\(\);/);
 const success = body.slice(body.indexOf("if (verdict.succeeded) {"), body.indexOf("return { exitCode: 0, ...usage };"));
 assert.ok(success.length > 0 && !/await (?!logQueue)/.test(success), "nothing is awaited between the verdict and success except the final log flush");
 assert.ok(body.indexOf("if (verdict.succeeded) {") > body.indexOf("const verdict = claudeCodeWorkerVerdict("), "success is painted only after the verdict");
@@ -101,11 +107,14 @@ assert.ok(finish.indexOf("if (claudeCodeDiffFirst) await persistAttemptDiff(") <
 const verdictToSave = finish.slice(finish.indexOf("claudeCodeStopOwnsVerdict("), finish.indexOf("await saveRun(run);"));
 assert.deepEqual(verdictToSave.match(/await [^\n]*/g), ["await persistAttemptDiff(run, finishedAttempt, paths).catch(() => undefined);"]);
 assert.match(verdictToSave, /if \(!claudeCodeDiffFirst\) await persistAttemptDiff\(/);
-// A report whose processes may still run is neither reviewed nor retried.
+// A report whose processes may still run is neither reviewed nor retried
+// (scripts/test-claude-code-cleanup-gate.cjs drives every way there).
 assert.match(finish, /if \(pauseInterrupted\) return run;\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*if \(claudeCodeWorker && result\.cleanupUnconfirmed\) return run;/);
+assert.match(finish, /if \(claudeCodeWorker && result\.cleanupUnconfirmed\) \{[\s\S]{0,200}?finishedAttempt\.cleanupUnconfirmed = true;\s*finishedAttempt\.finalReportPath = undefined;/);
 assert.match(body, /\.\.\.\(cleanedUp \? \{\} : \{ cleanupUnconfirmed: true \}\)/);
-// Planning keeps a Claude model only Claude Code carries, for a managed worker.
-assert.match(finish.length ? runStore : "", /await coraWorkerModelAvailability\(workerSettings, \{ managedWorker \}\)/);
+// Planning keeps a Claude model only Claude Code carries, for a managed worker
+// (the one rule: scripts/test-worker-model-availability.cjs).
+assert.match(runStore, /await coraWorkerModelAvailability\(workerSettings, \{ managedWorker \}\)/);
 console.log("PASS the verdict is settled once, after teardown, and a recorded Stop wins in the finish path");
 
 assert.match(body, /const paint = \(raw: string\) => \{\s*const text = redactPastedSecrets\(run\.id, raw\);/);
@@ -126,7 +135,10 @@ console.log("PASS painted and logged text is redacted; the log takes fixed lines
 // journal) is one of Studio's fixed messages; the full text goes to the
 // pane only.
 assert.match(body, /const saved = claudeCodeSavedError\(message\);/);
-assert.match(body, /await writeAutoFailureReport\(paths, task, saved, \{ interrupted: stopped \}\)/);
+assert.match(body, /if \(cleanedUp\) await writeAutoFailureReport\(paths, task, saved, \{ interrupted: stopped \}\)/);
+// Every error the finish path saves for a Claude Code attempt is one this
+// function returned, or Studio's fixed "stopped" line.
+assert.match(finish, /result = \{ \.\.\.result, exitCode: 130, error: "Claude Code worker was stopped\." \};/);
 assert.match(body, /return \{ exitCode: stopped \? 130 : 1, error: saved, \.\.\.\(cleanedUp \? \{\} : \{ cleanupUnconfirmed: true \}\), \.\.\.usage \};/);
 assert.ok(!/error: (message|failure)\b/.test(body), "the raw error is never returned to be saved");
 assert.ok(!/writeAutoFailureReport\(paths, task, (message|failure)\b/.test(body));

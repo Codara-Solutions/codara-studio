@@ -145,11 +145,16 @@ assert.deepEqual(
 
 // Claude Code is routed only for managed workers of a trusted run; Cora's own
 // route call passes no options, so it can never land there.
-const managed = runStore_().match(/const managedWorker =\n([\s\S]*?);\n/);
+const managed = runStore_().match(/const managedWorker = ([^\n]*);\n/);
 assert.ok(managed, "managedWorker gate present");
-for (const part of ["isPiWorker", "!isAutomationRun", 'run.executionMode !== "direct"', "!task.workflowCall", 'runProjectPolicyMode(run) === "trusted"']) {
+for (const part of ["isPiWorker", "!isAutomationRun", "runHasManagedWorkers(run)", "!task.workflowCall"]) {
   assert.ok(managed[1].includes(part), `managed-worker gate checks ${part}`);
 }
+// The run's half of that rule, shared with planning and task creation.
+assert.match(
+  read("src/main/orchestration/project-policy.ts"),
+  /export function runHasManagedWorkers\([^)]*\): boolean \{\s*return run\.executionMode !== "direct" && runProjectPolicyMode\(run\) === "trusted";\s*\}/,
+);
 assert.match(runStore_(), /return loadSettings\(\)\.then\(\(settings\) => routeCoraModel\(chat\.model, settings\)\)/);
 assert.match(runStore_(), /: claudeCodeWorker\n\s+\? await runClaudeCodeWorkerSession\(/);
 function runStore_() { return read("src/main/orchestration/run-store.ts"); }
@@ -170,7 +175,7 @@ const recheckAt = runStore.indexOf("const stopping = forcePauseWindowClosed(run.
 assert.ok(recheckAt > routedAt && recheckAt < runStore.indexOf("const preparedTurn = await prepareManagerTurn(run, sparkCall);", routedAt));
 assert.match(runStore.slice(recheckAt, recheckAt + 700), /latest\.status === "cancelled"[\s\S]*return latest \?\? null;/);
 // The earlier family rewrite counts routes too, and a dropped effort becomes thinking.
-assert.match(runStore, /for \(const kind of await routableWorkerRuntimes\(\)\) availableKinds\.add\(kind\);/);
+assert.match(runStore, /for \(const kind of await routableWorkerRuntimes\(run\)\) availableKinds\.add\(kind\);/);
 assert.match(runStore, /const kinds = connected\.map\(\(id\) => workerFamilyOfModelId\(id\)\);/);
 assert.match(runStore, /piThinkingLevel\(effortOfModelId\(plannedPiWorkerModel\)\)/);
 assert.match(runStore, /const thinking = thinkingOverride \?\? piThinkingForWorker\(task\);/);

@@ -451,45 +451,60 @@ export function claudeLaunchArgs(input: {
   return out;
 }
 
+export interface ClaudeWorkerLaunchSnapshot {
+  /** The arguments Studio inserts after `claude`, naming the files below. */
+  args: string[];
+  /** Remove the launch's files (once nothing it started can read them). */
+  dispose: () => Promise<void>;
+}
+
+const WORKER_SETTINGS_NOT_READY = "Studio's settings for Claude Code workers are not ready yet. Run the task again in a moment.";
+const WORKER_SETTINGS_NOT_PREPARED = "Studio's settings for Claude Code workers could not be prepared. Run the task again in a moment.";
+
 /**
- * The arguments for a Cora Claude Code worker: Studio's settings without
- * hooks and the worker MCP roster. Waits for a settings rewrite in progress,
- * then reads the files back: the launch fails when the worker settings are
- * missing or do not match the current guard (a rewrite failed), or when the
- * worker MCP file it would pass is missing.
+ * The settings and tools one Cora Claude Code worker launches with, made
+ * once for that launch: Studio's settings without hooks for the browser
+ * guard in force now, and the worker roster of the codara-studio server,
+ * written as files of the launch's own that nothing else rewrites, read back,
+ * and named by the arguments returned. What was checked is what is launched:
+ * a later switch of the guard, or a rewrite of the shared files that fails,
+ * never changes a running worker (new launches follow the switch).
  */
-export async function claudeWorkerLaunchArgs(input: { userArgs: readonly string[] }): Promise<string[]> {
+export async function claudeWorkerLaunchSnapshot(input: {
+  userArgs: readonly string[];
+  /** The launch's own folder name: the worker attempt id. */
+  launchId: string;
+}): Promise<ClaudeWorkerLaunchSnapshot> {
+  // A switch in progress has already set the guard; waiting keeps the
+  // shared files and the launch's in step.
   await settingsRewrite;
   const current = state;
-  if (!current) throw new Error("Studio's settings for Claude Code workers are not ready yet. Run the task again in a moment.");
-  let written: string | null;
-  try {
-    written = await fs.readFile(current.claudeWorkerSettingsFile, "utf8");
-  } catch {
-    written = null;
-  }
-  if (written !== claudeSettingsText(null, current.separateBrowserTools)) {
-    throw new Error("Studio's settings for Claude Code workers are missing or out of date. Run the task again in a moment.");
-  }
+  if (!current || !/^[A-Za-z0-9_-]{1,120}$/.test(input.launchId)) throw new Error(WORKER_SETTINGS_NOT_READY);
   const args = claudeLaunchArgs({ userArgs: input.userArgs, mode: "worker", withoutHooks: true });
-  if (!args.includes("--settings")) {
-    throw new Error("Studio's settings for Claude Code workers are not ready yet. Run the task again in a moment.");
+  const settingsAt = args.indexOf("--settings");
+  if (settingsAt < 0 || args[settingsAt + 1] !== current.claudeWorkerSettingsFile) {
+    throw new Error(WORKER_SETTINGS_NOT_READY);
   }
-  // The worker MCP file must hold exactly the worker roster this Studio
-  // writes: a directory, another mode's file or an old build's is refused.
-  const mcp = args.find((arg) => arg.startsWith("--mcp-config="))?.slice("--mcp-config=".length);
-  if (mcp) {
-    let descriptor: string | null;
-    try {
-      descriptor = await fs.readFile(mcp, "utf8");
-    } catch {
-      descriptor = null;
-    }
-    if (descriptor !== claudeMcpConfig("worker")) {
-      throw new Error("Studio's tools for Claude Code workers are missing or out of date. Restart Studio, then run the task again.");
-    }
+  const dir = join(dirname(current.claudeWorkerSettingsFile), "worker-launches", input.launchId);
+  const files: Array<[string, string]> = [[join(dir, "settings.json"), claudeSettingsText(null, current.separateBrowserTools)]];
+  args[settingsAt + 1] = files[0][0];
+  const mcpAt = args.findIndex((arg) => arg.startsWith("--mcp-config="));
+  if (mcpAt >= 0) {
+    files.push([join(dir, "mcp.json"), claudeMcpConfig("worker")]);
+    args[mcpAt] = `--mcp-config=${files[1][0]}`;
   }
-  return args;
+  const dispose = () => fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  try {
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    for (const [path, text] of files) {
+      await writeFileAtomic(path, text, { mode: 0o600 });
+      if ((await fs.readFile(path, "utf8")) !== text) throw new Error("not written");
+    }
+  } catch {
+    await dispose();
+    throw new Error(WORKER_SETTINGS_NOT_PREPARED);
+  }
+  return { args, dispose };
 }
 
 /** The arguments Codara inserts after `codex`; empty for management subcommands. */
