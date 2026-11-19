@@ -601,6 +601,9 @@ interface LaunchingWorkerAttempt {
   runId: string;
   workerTaskId: string;
   aborted: boolean;
+  /** Told the moment the launch is aborted (a Claude Code worker ends its
+   *  sign-in probe with it); unset for every other launch. */
+  onAbort?: () => void;
 }
 const launchingWorkerAttempts = new Map<string, LaunchingWorkerAttempt>();
 const activeAutopilotCycles = new Map<string, Promise<void>>();
@@ -15125,11 +15128,21 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   const livePiPrompt = isPiWorker && run.executionMode === "direct" ? withPastedText(run.id, promptText) : null;
   const routeSettings = isPiWorker ? await loadSettings().catch(() => null) : null;
   const workerSettings = isAutomationRun ? null : routeSettings;
+  // Claude Code runs only managed workers of a trusted run, and only when the
+  // user picked an order that starts with it: it has no submit_result tool
+  // for direct and workflow turns, and no Pi fence for imported PRs.
+  const managedWorker =
+    isPiWorker &&
+    !isAutomationRun &&
+    run.executionMode !== "direct" &&
+    !task.workflowCall &&
+    runProjectPolicyMode(run) === "trusted";
   // Enabled models some route can carry now: a GPT model with no ChatGPT
-  // sign-in stays eligible when its OpenRouter id is verified, instead of
-  // being swapped for another family before routing runs.
+  // sign-in stays eligible when its OpenRouter id is verified, and a Claude
+  // model with no Pi sign-in when Claude Code carries it for this worker,
+  // instead of being swapped for another family before routing runs.
   const connectedWorkerModels = workerSettings
-    ? await coraWorkerModelAvailability(workerSettings)
+    ? await coraWorkerModelAvailability(workerSettings, { managedWorker })
         .then((availability) => availability.connected)
         .catch(() => [] as string[])
     : [];
@@ -15149,15 +15162,6 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // The same model on the first route in Settings' order that carries it
   // now; attempt.model records that id, so the run shows the route it used.
   // Automation runs keep their pinned model and are routed the same way.
-  // Claude Code runs only managed workers of a trusted run, and only when the
-  // user picked an order that starts with it: it has no submit_result tool
-  // for direct and workflow turns, and no Pi fence for imported PRs.
-  const managedWorker =
-    isPiWorker &&
-    !isAutomationRun &&
-    run.executionMode !== "direct" &&
-    !task.workflowCall &&
-    runProjectPolicyMode(run) === "trusted";
   const piWorkerModel = plannedPiWorkerModel && routeSettings
     ? await routeCoraModel(plannedPiWorkerModel, routeSettings, undefined, { managedWorker })
         .catch(() => plannedPiWorkerModel)
@@ -15331,6 +15335,8 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
     piSessionId?: string;
     contextTokens?: number;
     contextWindowTokens?: number;
+    /** A Claude Code worker whose processes could not be confirmed gone. */
+    cleanupUnconfirmed?: boolean;
   };
   try {
     result = fakeWorkflowWorker
@@ -15383,6 +15389,11 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   if (!finishedAttempt) throw new Error(`Worker attempt not found: ${input.attemptId}`);
   if (!finishedTask) throw new Error(`Worker task not found: ${task.id}`);
 
+  // A Claude Code worker's diff is measured BEFORE its verdict: a Stop the
+  // pause records during that wait then still finds the attempt running and
+  // cancels it, and from the verdict to the save below nothing waits.
+  const claudeCodeDiffFirst = claudeCodeWorker && result.exitCode === 0;
+  if (claudeCodeDiffFirst) await persistAttemptDiff(run, finishedAttempt, paths).catch(() => undefined);
   // A Claude Code worker's report never overwrites a Stop recorded for its
   // attempt: one the pause already committed (the attempt is cancelled), a
   // launch abort, or a Stop still tearing the run down. Only this harness:
@@ -15461,7 +15472,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // Snapshot the worker's measurable code impact before merge/review or a
   // later worker can move the shared tree. Best-effort: non-Git workspaces and
   // legacy attempts without a pre-worker baseline simply omit the counters.
-  await persistAttemptDiff(run, finishedAttempt, paths).catch(() => undefined);
+  if (!claudeCodeDiffFirst) await persistAttemptDiff(run, finishedAttempt, paths).catch(() => undefined);
   if (!keepTaskVerdict) {
     finishedTask.status =
       result.exitCode === 0 ? "needs_review" : pauseInterrupted ? "cancelled" : "failed";
@@ -15512,6 +15523,9 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // queues launch fallbacks and verifier retries, and relaunching a worker into
   // a run the user just stopped is exactly what the pause was for.
   if (pauseInterrupted) return run;
+  // Nor for a Claude Code attempt whose processes may still run: its report
+  // is neither reviewed nor retried while something it started is alive.
+  if (claudeCodeWorker && result.cleanupUnconfirmed) return run;
 
   // Converge a successful sandboxed worker's edits back into the run workspace.
   // The worker ran in an isolated worktree forked off the run checkpoint, so its
@@ -19879,6 +19893,11 @@ function abortLaunchingWorkers(runId: string): Array<{ attemptId: string; worker
   for (const [attemptId, entry] of launchingWorkerAttempts) {
     if (entry.runId !== runId) continue;
     entry.aborted = true;
+    try {
+      entry.onAbort?.();
+    } catch {
+      /* the launch is aborted either way */
+    }
     aborted.push({ attemptId, workerTaskId: entry.workerTaskId });
     try {
       pty.killImmediate(attemptId);
@@ -22579,11 +22598,17 @@ async function runClaudeCodeWorkerSession(input: {
   model: string;
   effort: string | undefined;
   launchAborted: () => boolean;
-}): Promise<{ exitCode: number; error?: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }> {
+}): Promise<{ exitCode: number; error?: string; cleanupUnconfirmed?: boolean; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }> {
   const { run, task, attemptId, paths, cwd } = input;
-  // Every process of every turn, and the one place a Stop is recorded.
+  // Every process of every turn, and the one place a Stop is recorded. A
+  // launch abort records it too, at once, so it reaches the sign-in probe.
   const attempt = new ClaudeCodeWorkerAttempt(input.launchAborted);
+  const launching = launchingWorkerAttempts.get(attemptId);
+  if (launching) launching.onAbort = () => attempt.stop();
   let launch: ClaudeCodeWorkerLaunch | null = null;
+  // The checked worker arguments, read back again right before each turn.
+  let workerArgs: (() => Promise<string[]>) | null = null;
+  let launchArgs: string[] = [];
   let sessionId: string | undefined;
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let logQueue: Promise<void> = Promise.resolve();
@@ -22618,6 +22643,12 @@ async function runClaudeCodeWorkerSession(input: {
   // The attempt refuses to start it after a Stop or after an earlier turn
   // whose processes could not be confirmed gone.
   const turn = async (prompt: string, resume?: string): Promise<number> => {
+    // Settings and tools re-read right before the turn: a browser-guard
+    // rewrite that failed since the launch stops it here.
+    const current = await workerArgs!();
+    if (current.length !== launchArgs.length || current.some((arg, index) => arg !== launchArgs[index])) {
+      throw new Error("Studio's settings for Claude Code workers changed since the launch. Run the task again.");
+    }
     const started = attempt.start(() => startClaudeCodeWorker({
       binary: launch!.binary,
       argv: resume ? [...launch!.argv, "--resume", resume] : launch!.argv,
@@ -22655,7 +22686,8 @@ async function runClaudeCodeWorkerSession(input: {
       // whiteboard writes), and Studio's settings (the browser guard
       // included) without its hooks, read back once any rewrite of them
       // finished. Missing or stale files stop the launch.
-      const launchArgs = await claudeWorkerLaunchArgs({ userArgs: providerArgs });
+      workerArgs = () => claudeWorkerLaunchArgs({ userArgs: providerArgs });
+      launchArgs = await workerArgs();
       // The lease only marks the account in use. Releasing it tells nobody:
       // a worker never starts the account service's login sync, which a
       // Claude terminal's exit does (claude-code-worker.ts).
@@ -22667,6 +22699,9 @@ async function runClaudeCodeWorkerSession(input: {
         hookEnv: null,
         codaraHome: codaraHome(),
         acquireLease: (profileId) => acquireNativeClaudeProfileLease(profileId, attemptId),
+        // A Stop recorded during the display setup or the settings check
+        // keeps the sign-in probe from starting, and ends it if it runs.
+        signal: attempt.signal,
       });
       const accountLabel = launch.accountLabel;
       pty.publishOutput(
@@ -22751,7 +22786,7 @@ async function runClaudeCodeWorkerSession(input: {
     if (!cleanedUp) paint("\x1b[31m  ×  some processes could not be stopped; the account stays marked in use\x1b[0m\r\n");
     show(`  ${piWorkerSafeText(failure && !stopped ? failure : message, 700)}\r\n`);
     await logQueue.catch(() => undefined);
-    return { exitCode: stopped ? 130 : 1, error: saved, ...usage };
+    return { exitCode: stopped ? 130 : 1, error: saved, ...(cleanedUp ? {} : { cleanupUnconfirmed: true }), ...usage };
   } finally {
     activeWorkerProcesses.delete(attemptId);
     try { pty.killImmediate(attemptId); } catch { /* already closed */ }

@@ -119,16 +119,21 @@ export async function routeCoraModel(
  */
 export async function coraWorkerModelAvailability(
   settings: AppSettings,
+  options: CoraRouteOptions = {},
 ): Promise<CoraWorkerModelAvailability> {
   const enabled = availableCoraWorkerModels(settings);
-  const [state, availability] = await Promise.all([subscriptionState(), coraRouteAvailability(settings)]);
+  const [state, availability] = await Promise.all([subscriptionState(), coraRouteAvailability(settings, options)]);
   if (!state || !availability) return { connected: enabled, disconnected: [] };
   const split = partitionWorkerModelsByAccount(enabled, state.usable);
   if (settings.coraRouteOrder === undefined) return split;
   const order = normalizeCoraRouteOrder(settings.coraRouteOrder);
   // A model whose sign-in was never set up still runs when OpenRouter
-  // carries it; a broken sign-in keeps it waiting for the user.
-  const rerouted = split.disconnected.filter((id) => chooseCoraRoute(id, order, availability)?.route === "openrouter");
+  // carries it, or Claude Code for a managed worker (options.managedWorker);
+  // a broken sign-in keeps it waiting for the user.
+  const rerouted = split.disconnected.filter((id) => {
+    const route = chooseCoraRoute(id, order, availability)?.route;
+    return route === "openrouter" || route === "claudecode";
+  });
   return {
     connected: [...split.connected, ...rerouted],
     disconnected: split.disconnected.filter((id) => !rerouted.includes(id)),

@@ -18,11 +18,10 @@
 // the file system for login records during a launch.
 
 import { execFile, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { promises as fs, realpathSync } from "node:fs";
+import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { scrubSecrets } from "@shared/memory-items";
-import { redactText } from "../diagnostics/redact";
 import { psTimeEnvironment } from "../owned-process-tree";
 import { CODARA_CLAUDE_CLI_DIRNAME, codaraHomeDir, isCodaraManagedCliPath } from "./codara-managed-cli-roots";
 import { CLAUDE_CLI_PERSONAL_PROFILE_ID, isClaudeCliManagedProfileId } from "./claude-cli-profile-ids";
@@ -203,6 +202,11 @@ let processListing: () => ClaudeCodeListedProcess[] | null = listProcessesForTea
 
 /** Tests only: replace the teardown listing (null restores `ps`) and shorten
  *  the teardown timing. */
+/** Tests only: the ownership rules of a teardown, without signals. */
+export function claudeCodeOwnedProcessesForTests(rootPid: number): { members(listing: readonly ClaudeCodeListedProcess[]): ClaudeCodeListedProcess[] } {
+  return new OwnedProcesses(rootPid);
+}
+
 export function setClaudeCodeTeardownForTests(input: {
   listing?: ((real: () => ClaudeCodeListedProcess[] | null) => ClaudeCodeListedProcess[] | null) | null;
   graceMs?: number;
@@ -238,7 +242,9 @@ class OwnedProcesses {
     if (process.platform === "linux") this.sessions.add(rootPid);
   }
 
-  /** The live members in `listing`, learning every new one. */
+  /** The live members in `listing`, learning every new one. A group or
+   *  session with no process left in the listing is retired: nothing can
+   *  join it again, so a later process that reuses its id is not ours. */
   members(listing: readonly ClaudeCodeListedProcess[]): ClaudeCodeListedProcess[] {
     const owned = new Map<number, ClaudeCodeListedProcess>();
     let grew = true;
@@ -265,12 +271,20 @@ class OwnedProcesses {
         grew = true;
       }
     }
-    return [...owned.values()].filter((row) => !row.zombie);
+    const live = [...owned.values()].filter((row) => !row.zombie);
+    const liveGroups = new Set(live.map((row) => row.groupId));
+    const liveSessions = new Set(live.map((row) => row.sessionId));
+    for (const group of [...this.groups]) if (!liveGroups.has(group)) this.groups.delete(group);
+    for (const session of [...this.sessions]) if (!liveSessions.has(session)) this.sessions.delete(session);
+    for (const pid of [...this.known.keys()]) if (!owned.has(pid)) this.known.delete(pid);
+    return live;
   }
 
   signal(sig: NodeJS.Signals, members: readonly ClaudeCodeListedProcess[] | null): void {
-    // A group cannot be handed to another process while one of its members
-    // lives, so signalling a known group is safe even without a listing.
+    // Only groups that had a live member at the last listing are still
+    // held: a group id cannot be handed to another process while one of its
+    // members lives, so these are signalled even when this round's listing
+    // failed.
     for (const group of this.groups) {
       try {
         process.kill(-group, sig);
@@ -299,8 +313,11 @@ class OwnedProcesses {
 async function stopProcessTree(pid: number | undefined): Promise<boolean> {
   if (!pid) return true;
   if (process.platform === "win32") {
-    const result = spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
-    return result.status === 0 || result.status === 128;
+    // Best effort, never proof: taskkill's status does not show that a
+    // child whose parent already exited is gone. (Workers do not run on
+    // Windows yet: claudeCodeWorkerSupported.)
+    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
+    return false;
   }
   const owned = new OwnedProcesses(pid);
   const pause = () => new Promise((resolve) => setTimeout(resolve, teardownTiming.pollMs));
@@ -342,7 +359,19 @@ async function stopProcessTree(pid: number | undefined): Promise<boolean> {
     last = look();
     if (Date.now() >= killEnd) break;
   }
-  return last !== null && last.length === 0;
+  // Only Linux lists sessions, which is what finds a helper that left its
+  // group before any listing saw it; elsewhere "nothing left" is not proven.
+  return claudeCodeWorkerSupported() && last !== null && last.length === 0;
+}
+
+/**
+ * Claude Code workers run where their teardown can confirm that nothing is
+ * left: Linux, whose process listing carries the session. macOS lists no
+ * session id and Windows has no listing here, so the route is not offered
+ * there yet.
+ */
+export function claudeCodeWorkerSupported(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "linux";
 }
 
 /** Start Claude Code, hand it the prompt on stdin, and report each event.
@@ -509,12 +538,16 @@ export async function claudeCodeWorkerAccount(input: {
 
 /** Claude Code's own `auth status --json`, reduced to one boolean (null when
  *  it gave no answer). Nothing else from its output is kept. */
-export function claudeCodeSignedIn(binary: string, env: NodeJS.ProcessEnv): Promise<boolean | null> {
+export function claudeCodeSignedIn(binary: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<boolean | null> {
   return new Promise((resolveStatus) => {
+    if (signal?.aborted) {
+      resolveStatus(null);
+      return;
+    }
     execFile(
       binary,
       ["auth", "status", "--json"],
-      { env, cwd: homedir(), timeout: 15_000, maxBuffer: 16 * 1024, windowsHide: true },
+      { env, cwd: homedir(), timeout: 15_000, maxBuffer: 16 * 1024, windowsHide: true, ...(signal ? { signal, killSignal: "SIGKILL" as const } : {}) },
       // Signed out exits non-zero and still prints its JSON.
       (_error, stdout) => {
         try {
@@ -536,6 +569,7 @@ let readyCache: { at: number; ready: Promise<boolean> } | null = null;
 export function claudeCodeWorkerReady(now = Date.now()): Promise<boolean> {
   if (readyCache && now - readyCache.at < READY_TTL_MS) return readyCache.ready;
   const ready = (async () => {
+    if (!claudeCodeWorkerSupported()) return false;
     const { resolveBinary } = await import("../binary-resolver");
     const binary = await resolveBinary("claude");
     if (!binary) return false;
@@ -572,7 +606,15 @@ export async function prepareClaudeCodeWorkerLaunch(input: {
   binary?: string | null;
   account?: ClaudeCodeWorkerAccount;
   baseEnv?: NodeJS.ProcessEnv;
+  /** The attempt's Stop: checked before the sign-in probe starts, and it
+   *  ends the probe if it lands while the probe runs. */
+  signal?: AbortSignal;
 }): Promise<ClaudeCodeWorkerLaunch> {
+  const stoppedError = () => new Error("Claude Code worker was stopped.");
+  if (!claudeCodeWorkerSupported()) {
+    throw new Error("Claude Code workers run on Linux only for now: Studio cannot yet confirm that a stopped worker left nothing running on this system.");
+  }
+  if (input.signal?.aborted) throw stoppedError();
   const binary = input.binary !== undefined ? input.binary : await (await import("../binary-resolver")).resolveBinary("claude");
   if (!binary) throw new Error("Claude Code is not installed: the `claude` command was not found.");
   const account = input.account ?? (await claudeCodeWorkerAccount({ baseEnv: input.baseEnv }));
@@ -583,7 +625,9 @@ export async function prepareClaudeCodeWorkerLaunch(input: {
     codaraHome: input.codaraHome,
     runId: input.runId,
   });
-  const signedIn = await claudeCodeSignedIn(binary, env);
+  if (input.signal?.aborted) throw stoppedError();
+  const signedIn = await claudeCodeSignedIn(binary, env, input.signal);
+  if (input.signal?.aborted) throw stoppedError();
   if (signedIn !== true) {
     throw new Error(
       signedIn === false
@@ -648,19 +692,30 @@ export function claudeCodeStopOwnsVerdict(input: {
 }
 
 /**
- * An error as it may be saved with the run (the failure report, the attempt
- * record, the event journal): home folder paths, e-mail addresses and
- * key-shaped values removed by the app's diagnostics redaction. The full
- * text is only shown in the worker pane.
+ * Studio's own messages for a Claude Code worker, the only error text saved
+ * with the run (the failure report, the attempt record, the event journal).
+ * Anything else (an exception from the system, a path, Claude Code's own
+ * output) is saved as one fixed line; its detail is shown in the worker
+ * pane only.
  */
+const SAVED_ERROR_FORMS: readonly RegExp[] = [
+  /^Claude Code is not installed: the `claude` command was not found\.$/,
+  /^Claude Code is not signed in to "[^"\n]{1,80}"\. Sign in to this account in a Claude terminal, then run the task again\.$/,
+  /^Claude Code did not say whether "[^"\n]{1,80}" is signed in\. Open a Claude terminal on this account to check, then run the task again\.$/,
+  /^Claude Code workers run on Linux only for now: Studio cannot yet confirm that a stopped worker left nothing running on this system\.$/,
+  /^Claude Code worker was stopped\.$/,
+  /^Claude Code worker was interrupted before it started\.$/,
+  /^Claude Code worker stopped, but some of its processes could not be confirmed gone; the account stays marked in use\.$/,
+  /^Claude Code worker completed without a parseable final-report\.json\.$/,
+  /^Claude Code exited with code -?\d{1,4} before writing its final report\.$/,
+  /^Claude Code worker ended without a report\.$/,
+  /^Studio's (settings|tools) for Claude Code workers [^\n/\\]{1,120}\.$/,
+];
+const SAVED_ERROR_FALLBACK = "Claude Code worker failed; the worker pane shows the details.";
+
 export function claudeCodeSavedError(message: string): string {
-  const homeDirs = [homedir()];
-  try {
-    homeDirs.push(realpathSync(homedir()));
-  } catch {
-    // The home folder as reported is enough.
-  }
-  return oneLine(redactText(message, { homeDirs }), 700);
+  const line = message.trim();
+  return SAVED_ERROR_FORMS.some((form) => form.test(line)) ? line : SAVED_ERROR_FALLBACK;
 }
 
 /**
@@ -673,6 +728,10 @@ export function claudeCodeSavedError(message: string): string {
  */
 export class ClaudeCodeWorkerAttempt {
   private stopRecorded = false;
+  private readonly aborter = new AbortController();
+  /** Aborted by a Stop: hands the Stop to work that is not a turn yet (the
+   *  launch's sign-in probe). */
+  readonly signal = this.aborter.signal;
   private incomplete = false;
   private readonly processes: ClaudeCodeProcess[] = [];
 
@@ -712,6 +771,7 @@ export class ClaudeCodeWorkerAttempt {
   /** Record a Stop and end every turn's processes. */
   stop(): void {
     this.stopRecorded = true;
+    this.aborter.abort();
     for (const started of this.processes) void started.kill().catch(() => false);
   }
 

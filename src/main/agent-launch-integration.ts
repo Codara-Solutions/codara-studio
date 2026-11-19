@@ -475,12 +475,18 @@ export async function claudeWorkerLaunchArgs(input: { userArgs: readonly string[
   if (!args.includes("--settings")) {
     throw new Error("Studio's settings for Claude Code workers are not ready yet. Run the task again in a moment.");
   }
+  // The worker MCP file must hold exactly the worker roster this Studio
+  // writes: a directory, another mode's file or an old build's is refused.
   const mcp = args.find((arg) => arg.startsWith("--mcp-config="))?.slice("--mcp-config=".length);
   if (mcp) {
+    let descriptor: string | null;
     try {
-      await fs.access(mcp);
+      descriptor = await fs.readFile(mcp, "utf8");
     } catch {
-      throw new Error("Studio's tools for Claude Code workers are missing. Restart Studio, then run the task again.");
+      descriptor = null;
+    }
+    if (descriptor !== claudeMcpConfig("worker")) {
+      throw new Error("Studio's tools for Claude Code workers are missing or out of date. Restart Studio, then run the task again.");
     }
   }
   return args;

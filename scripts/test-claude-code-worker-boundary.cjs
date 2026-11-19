@@ -76,8 +76,8 @@ async function load() {
 // A stand-in for the Claude Code CLI. `auth status --json` answers from
 // FAKE_SIGNED_IN; a turn records its environment and acts on the prompt.
 const FAKE = path.join(TMP, "claude");
-const steerStatus = (out, signedIn) =>
-  fs.writeFileSync(path.join(TMP, "status-control.json"), JSON.stringify({ out, signedIn }));
+const steerStatus = (out, signedIn, delayMs = 0) =>
+  fs.writeFileSync(path.join(TMP, "status-control.json"), JSON.stringify({ out, signedIn, delayMs }));
 fs.writeFileSync(FAKE, `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -87,10 +87,12 @@ if (argv[0] === "auth" && argv[1] === "status") {
   // The worker's allowlisted environment drops test variables, so the test
   // steers this answer through a file beside the fake.
   const control = JSON.parse(fs.readFileSync(path.join(__dirname, "status-control.json"), "utf8"));
-  fs.appendFileSync(path.join(control.out, "status-calls.jsonl"), JSON.stringify({ argv, configDir: process.env.CLAUDE_CONFIG_DIR ?? null }) + "\\n");
+  fs.appendFileSync(path.join(control.out, "status-calls.jsonl"), JSON.stringify({ argv, configDir: process.env.CLAUDE_CONFIG_DIR ?? null, pid: process.pid }) + "\\n");
   const signedIn = control.signedIn;
-  process.stdout.write(JSON.stringify({ loggedIn: signedIn, authMethod: "claude.ai" }));
-  process.exit(signedIn ? 0 : 1);
+  setTimeout(() => {
+    process.stdout.write(JSON.stringify({ loggedIn: signedIn, authMethod: "claude.ai" }));
+    process.exit(signedIn ? 0 : 1);
+  }, control.delayMs ?? 0);
 }
 let prompt = "";
 process.stdin.setEncoding("utf8");
@@ -260,7 +262,7 @@ async function main() {
     assert.deepEqual(loadedForbidden, []);
     // Signed in or not came from Claude Code itself, in that account's home.
     const status = fs.readFileSync(path.join(out, "status-calls.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.deepEqual(status, [{ argv: ["auth", "status", "--json"], configDir: path.join(root, "live", "home") }]);
+    assert.deepEqual(status.map(({ argv, configDir }) => ({ argv, configDir })), [{ argv: ["auth", "status", "--json"], configDir: path.join(root, "live", "home") }]);
   });
 
   await check("a signed-out account stops the launch with 'sign in in a Claude terminal' and takes no hold", async () => {
@@ -510,14 +512,86 @@ async function main() {
     assert.equal(worker.claudeCodeStopOwnsVerdict({ ...base, exitCode: 1, attemptStatus: "cancelled" }), false);
   });
 
-  await check("an error saved with the run loses its home folder path and keys", () => {
-    const home = os.homedir();
-    const raw = `spawn ${path.join(home, ".local", "bin", "claude")} ENOENT; key sk-ant-api03-InlineKeyAbc123Def456Ghi789Jkl; mail someone@example.com`;
-    const saved = worker.claudeCodeSavedError(raw);
-    assert.ok(!saved.includes(home), saved);
-    assert.match(saved, /~\/\.local\/bin\/claude/);
-    assert.ok(!saved.includes("sk-ant-api03"), saved);
-    assert.ok(!saved.includes("someone@example.com"), saved);
+  await check("only Studio's own messages are saved with the run; any other error text is one fixed line", () => {
+    const fallback = worker.claudeCodeSavedError("anything else");
+    for (const raw of [
+      `spawn ${path.join(os.homedir(), ".local", "bin", "claude")} ENOENT`,
+      "spawn /mnt/private/client-name/claude EACCES",
+      "key sk-ant-api03-InlineKeyAbc123Def456Ghi789Jkl rejected for someone@example.com",
+      "Claude Code worker was stopped. /mnt/private/client-name",
+    ]) {
+      assert.equal(worker.claudeCodeSavedError(raw), fallback, raw);
+    }
+    assert.ok(!/[\/~]/.test(fallback), fallback);
+    for (const fixed of [
+      "Claude Code worker was stopped.",
+      "Claude Code exited with code 2 before writing its final report.",
+      'Claude Code is not signed in to "Work". Sign in to this account in a Claude terminal, then run the task again.',
+      "Studio's settings for Claude Code workers are missing or out of date. Run the task again in a moment.",
+      "Claude Code worker stopped, but some of its processes could not be confirmed gone; the account stays marked in use.",
+    ]) {
+      assert.equal(worker.claudeCodeSavedError(fixed), fixed);
+    }
+  });
+
+  await check("a group or session with no process left is retired: a process that reuses its id is not adopted", () => {
+    const owned = worker.claudeCodeOwnedProcessesForTests(5000);
+    const row = (pid, parentPid, groupId, sessionId, startedAt = "Thu Nov 19 10:00:00 2026") =>
+      ({ pid, parentPid, groupId, sessionId, zombie: false, startedAt });
+    // Claude Code (5000) and a tool in its own group 5100, in the session.
+    assert.deepEqual(owned.members([row(5000, 1, 5000, 5000), row(5100, 5000, 5100, 5000), row(42, 1, 42, 42)]).map((r) => r.pid), [5000, 5100]);
+    // Only the tool is left: still found by its group after its parent exits.
+    assert.deepEqual(owned.members([row(5100, 1, 5100, 5000), row(42, 1, 42, 42)]).map((r) => r.pid), [5100]);
+    // Everything gone.
+    assert.deepEqual(owned.members([row(42, 1, 42, 42)]), []);
+    // A new, unrelated process gets pid 5100 and leads group and session 5100,
+    // and another one reuses 5000: neither is the worker's.
+    assert.deepEqual(owned.members([row(5100, 1, 5100, 5100, "Thu Nov 19 10:05:00 2026"), row(5000, 1, 5000, 5000, "Thu Nov 19 10:05:01 2026"), row(42, 1, 42, 42)]), []);
+  });
+
+  await check("workers run only where teardown can confirm nothing is left (Linux)", () => {
+    assert.equal(worker.claudeCodeWorkerSupported("linux"), true);
+    assert.equal(worker.claudeCodeWorkerSupported("darwin"), false);
+    assert.equal(worker.claudeCodeWorkerSupported("win32"), false);
+  });
+
+  await check("a Stop recorded before the sign-in probe keeps it from starting; one during it ends it", async () => {
+    const root = accountRoot();
+    const account = await worker.claudeCodeWorkerAccount({ accountRoot: root, baseEnv: {} });
+    const base = {
+      runId: "run-1",
+      attemptDir: path.join(TMP, "attempt"),
+      launchArgs: ["--settings", "/h/settings.json"],
+      providerArgs: [],
+      hookEnv: null,
+      codaraHome: "/home/x/.codarastudio",
+      binary: FAKE,
+      account,
+      baseEnv: { PATH: process.env.PATH, HOME: os.homedir() },
+    };
+    const leases = [];
+    const acquireLease = (id) => { leases.push(id); return () => undefined; };
+    const before = fs.mkdtempSync(path.join(TMP, "out-"));
+    steerStatus(before, true);
+    const attempt = new worker.ClaudeCodeWorkerAttempt();
+    attempt.stop();
+    await assert.rejects(worker.prepareClaudeCodeWorkerLaunch({ ...base, acquireLease, signal: attempt.signal }), /stopped/);
+    assert.equal(fs.existsSync(path.join(before, "status-calls.jsonl")), false, "the probe started after the Stop");
+    const during = fs.mkdtempSync(path.join(TMP, "out-"));
+    steerStatus(during, true, 10_000);
+    const running = new worker.ClaudeCodeWorkerAttempt();
+    const launching = worker.prepareClaudeCodeWorkerLaunch({ ...base, acquireLease, signal: running.signal });
+    const call = JSON.parse(await waitFor(path.join(during, "status-calls.jsonl")));
+    const startedAt = Date.now();
+    running.stop();
+    await assert.rejects(launching, /stopped/);
+    assert.ok(Date.now() - startedAt < 5_000, "the launch waited for the probe");
+    await sleep(200);
+    const probeAlive = alive(call.pid);
+    if (probeAlive) process.kill(call.pid, "SIGKILL");
+    assert.equal(probeAlive, false, "the probe outlived the Stop");
+    assert.deepEqual(leases, [], "a stopped launch took the account");
+    steerStatus(during, true);
   });
 
   await check("Stop never reads another process's environment", async () => {

@@ -177,7 +177,7 @@ assert.match(runStore, /const thinking = thinkingOverride \?\? piThinkingForWork
 assert.match(read("src/main/orchestration/pi-backend.ts"), /provider === "anthropic" \? `\. \$\{CLAUDE_PI_LOGIN_BILLING_NOTE\}`/);
 assert.match(runStore, /routeCoraModel\(plannedPiWorkerModel, routeSettings, undefined, \{ managedWorker \}\)/);
 assert.match(runStore, /const workerSettings = isAutomationRun \? null : routeSettings;/, "automation workers are routed too");
-assert.match(runStore, /coraWorkerModelAvailability\(workerSettings\)/, "worker eligibility counts every route");
+assert.match(runStore, /coraWorkerModelAvailability\(workerSettings, \{ managedWorker \}\)/, "worker eligibility counts every route, Claude Code for a managed worker");
 assert.match(read("src/renderer/src/components/SessionInspector.tsx"), /<RoutesTable rows=\{routes\} \/>/);
 assert.match(read("src/renderer/src/components/capabilities/BehaviorSection.tsx"), /CLAUDE_PI_LOGIN_BILLING_NOTE/);
 assert.match(read("src/main/storage.ts"), /coraRouteOrder: settings\.coraRouteOrder === undefined \? undefined : normalizeCoraRouteOrder/, "unset stays unset after an upgrade");

@@ -496,6 +496,15 @@ async function main() {
     await assert.rejects(launch.claudeWorkerLaunchArgs({ userArgs: [] }), /tools for Claude Code workers are missing/);
     fs.writeFileSync(workerMcp, mcpText);
     assert.deepEqual(await launch.claudeWorkerLaunchArgs({ userArgs: [] }), expected);
+    // A directory in its place, or another roster's file, is not the worker's.
+    fs.rmSync(workerMcp);
+    fs.mkdirSync(workerMcp);
+    await assert.rejects(launch.claudeWorkerLaunchArgs({ userArgs: [] }), /tools for Claude Code workers are missing or out of date/);
+    fs.rmSync(workerMcp, { recursive: true });
+    fs.writeFileSync(workerMcp, fs.readFileSync(path.join(dir, "claude", "mcp-studio.json"), "utf8"));
+    await assert.rejects(launch.claudeWorkerLaunchArgs({ userArgs: [] }), /tools for Claude Code workers are missing or out of date/);
+    fs.writeFileSync(workerMcp, mcpText);
+    assert.deepEqual(await launch.claudeWorkerLaunchArgs({ userArgs: [] }), expected);
   });
 
   await check("Keep agents in your Chrome on: Codex starts each browser server disabled, as a valid server", async () => {

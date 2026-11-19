@@ -170,6 +170,20 @@ async function main() {
   assert.equal(await availability.routeCoraModel("gpt-5.6-sol", ccOrdered, undefined, { managedWorker: true }), "openai/gpt-5.6-sol", "GPT models skip it");
   console.log("PASS routes: Claude Code runs managed Claude workers only, when picked and signed in");
 
+  // A managed worker's planning keeps a Claude model that only Claude Code
+  // carries (no Pi sign-in for Claude, only Codex's), so a Claude task is
+  // not handed to GPT before routing.
+  harnessState.statuses = [{ provider: "openai-codex", connected: true, expired: false }];
+  const piOnlyCodex = await availability.coraWorkerModelAvailability(ccOrdered, { managedWorker: true });
+  assert.ok(piOnlyCodex.connected.some((id) => id.startsWith("claude-")), JSON.stringify(piOnlyCodex));
+  const notManaged = await availability.coraWorkerModelAvailability(ccOrdered);
+  assert.ok(!notManaged.connected.some((id) => id.startsWith("claude-")), "only a managed worker plans on Claude Code");
+  harnessState.claudeCodeReady = false;
+  const signedOut = await availability.coraWorkerModelAvailability(ccOrdered, { managedWorker: true });
+  assert.ok(!signedOut.connected.some((id) => id.startsWith("claude-")), "Claude Code signed out: not planned on it");
+  harnessState.claudeCodeReady = true;
+  console.log("PASS planning: a managed worker keeps a Claude model only Claude Code carries");
+
   // Worker planning (launchWorkerAttemptInner): with an order chosen, the
   // worker's model is picked by what it is and only the order picks its
   // route. Enabled: Claude Opus, and GPT-5.6 Sol only as its OpenRouter id.
