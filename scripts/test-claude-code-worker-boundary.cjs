@@ -7,7 +7,8 @@
 //      spies and a file-system spy;
 //   2. the child environment comes from an allowlist: no provider keys, no
 //      inherited Claude Code session markers;
-//   3. a key passed inline in a Bash call never reaches the worker log;
+//   3. a key passed inline in a Bash call never reaches the worker log (only
+//      a command's program is kept, never its arguments or a tool's output);
 //   4. Stop ends every process Claude Code started, and a Stop during the
 //      launch or the report read never starts a turn.
 // How run-store wires it is checked with the route
@@ -106,6 +107,14 @@ process.stdin.on("end", () => {
     setInterval(() => {}, 1000);
     return;
   }
+  if (prompt.includes("ESCAPE")) {
+    // A tool that starts a detached daemon and exits at once: the daemon
+    // leaves the group and is no longer below Claude Code when Stop comes.
+    const starter = spawn(process.execPath, ["-e", "const d = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true }); d.unref(); require('node:fs').writeFileSync(process.argv[1], String(d.pid));", path.join(process.env.FAKE_OUT, "daemon.pid")], { stdio: "ignore" });
+    starter.on("exit", () => fs.writeFileSync(path.join(process.env.FAKE_OUT, "starter.done"), "1"));
+    setInterval(() => {}, 1000);
+    return;
+  }
   if (prompt.includes("LEAVE")) {
     // A background process that keeps Claude Code's output open after it exits.
     const bg = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "inherit", "inherit"] });
@@ -115,6 +124,8 @@ process.stdin.on("end", () => {
   }
   out({ type: "system", subtype: "init", session_id: "sess-1" });
   out({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "curl -H 'x-api-key: sk-ant-api03-InlineKeyAbc123Def456Ghi789Jkl' https://api.example.com && OPENAI_API_KEY=sk-proj-InlineOpenAi0123456789abcdef npm test" } }] } });
+  out({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "deploy-tool push 9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928" } }] } });
+  out({ type: "assistant", message: { content: [{ type: "tool_use", name: "Grep", input: { pattern: "Hex48SecretPattern9f8e7d6c5b4a3928" } }] } });
   out({ type: "user", message: { content: [{ type: "tool_result", is_error: true, content: [{ type: "text", text: "401 for key sk-ant-api03-InlineKeyAbc123Def456Ghi789Jkl" }] }] } });
   out({ type: "result", subtype: "success", is_error: false, session_id: "sess-1", usage: {} });
 });
@@ -293,8 +304,10 @@ async function main() {
     });
     await run.done;
     const written = fs.readFileSync(log, "utf8");
-    assert.match(written, /^Bash curl/m, "the tool call is still shown");
-    for (const secret of ["InlineKeyAbc123Def456Ghi789Jkl", "InlineOpenAi0123456789abcdef"]) {
+    assert.match(written, /^Bash curl$/m, "the tool call is still shown, by its program");
+    assert.match(written, /^Bash deploy-tool push$/m);
+    assert.match(written, /^Grep$/m);
+    for (const secret of ["InlineKeyAbc123Def456Ghi789Jkl", "InlineOpenAi0123456789abcdef", "9f8e7d6c5b4a39281706f5e4d3c2b1a0", "Hex48SecretPattern"]) {
       assert.ok(!written.includes(secret), `the log holds ${secret.slice(0, 10)}…`);
     }
   });
@@ -312,6 +325,20 @@ async function main() {
     const survivors = pids.filter(alive);
     for (const pid of survivors) process.kill(pid, "SIGKILL");
     assert.deepEqual(survivors, []);
+  });
+
+  await check("Stop also ends a detached daemon that left the group and the tree", async () => {
+    if (process.platform !== "linux") return;
+    const out = fs.mkdtempSync(path.join(TMP, "out-"));
+    const run = worker.startClaudeCodeWorker({ binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "ESCAPE", onEvent: () => undefined });
+    const daemon = Number(await waitFor(path.join(out, "daemon.pid")));
+    await waitFor(path.join(out, "starter.done"));
+    assert.ok(alive(daemon), "the daemon runs before Stop");
+    await run.kill();
+    await run.done;
+    const survived = alive(daemon);
+    if (survived) process.kill(daemon, "SIGKILL");
+    assert.equal(survived, false);
   });
 
   await check("a background process left holding the output neither hangs the turn nor outlives it", async () => {
@@ -337,6 +364,25 @@ async function main() {
       /stopped/,
     );
     assert.deepEqual(turns, []);
+  });
+
+  await check("a Stop while a finished report is read never ends as a success", async () => {
+    let stopped = false;
+    await assert.rejects(
+      worker.runClaudeCodeWorkerTurns({
+        prompt: "task", stopped: () => stopped, turn: async () => 0, sessionId: () => "sess-1",
+        readReport: async () => { stopped = true; return { status: "complete" }; },
+        finalizePrompt: async () => "finalize",
+      }),
+      /stopped/,
+    );
+  });
+
+  await check("Studio's hooks are left out of the launch", () => {
+    assert.deepEqual(
+      worker.withoutStudioHooks(["--settings", "/h/settings.json", "--mcp-config=/h/mcp-worker.json", "--settings=/x.json"]),
+      ["--mcp-config=/h/mcp-worker.json"],
+    );
   });
 
   await check("a Stop while the report is read never starts the finalizing turn", async () => {
