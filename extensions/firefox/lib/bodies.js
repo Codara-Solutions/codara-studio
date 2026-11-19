@@ -68,6 +68,58 @@ export function bodyAnswer(bytes, contentType = "") {
   return { body: decoder.decode(bytes), base64Encoded: false };
 }
 
+/**
+ * Copies a response through its filter (webRequest.filterResponseData)
+ * into the store; `keep()` is asked before each piece is kept. The page
+ * gets every byte first. When the copy is let go (past the cap, dropped,
+ * or `keep()` says no), the filter disconnects and Firefox carries the
+ * rest itself, a failure included. Firefox refuses disconnect() until the
+ * filter started: a filter let go before then disconnects as it starts,
+ * and is never closed as if it had carried the whole body.
+ */
+export function copyBody(filter, store, { requestId, tabId, request }, keep) {
+  let started = false;
+  let released = false;
+  let disconnected = false;
+  const disconnect = () => {
+    if (!started || disconnected) return;
+    try {
+      filter.disconnect();
+      disconnected = true;
+    } catch {}
+  };
+  const letGo = () => {
+    released = true;
+    disconnect();
+  };
+  const hop = store.start(requestId, tabId, request, letGo);
+  filter.onstart = () => {
+    started = true;
+    if (released) disconnect();
+  };
+  filter.ondata = (event) => {
+    filter.write(event.data);
+    if (released) return disconnect();
+    let more = false;
+    try {
+      more = keep() && store.data(hop, new Uint8Array(event.data));
+    } catch {}
+    if (!more) {
+      if (store.holds(hop)) store.drop(requestId);
+      letGo();
+    }
+  };
+  filter.onstop = () => {
+    store.end(hop);
+    // Only a filter still carrying the body closes; one that could not
+    // disconnect must still end, or the page would wait for ever.
+    if (!disconnected) filter.close();
+  };
+  // Codara is told the transfer failed, never given part of a body as the whole.
+  filter.onerror = () => store.end(hop, BODY_FAILED);
+  return hop;
+}
+
 // Bytes are packed into blocks of this size, and the budget counts the
 // blocks held, so a body sent in tiny pieces costs what it holds.
 const BLOCK = 64 * 1024;

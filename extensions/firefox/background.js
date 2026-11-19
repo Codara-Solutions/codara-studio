@@ -14,7 +14,7 @@
 // session, local for the pairing and the blocked sites), so a restarted page
 // picks up where it left off.
 
-import { BODY_FAILED, BODY_TYPES, BodyStore, NO_BODY, bodyPlan } from "./lib/bodies.js";
+import { BODY_FAILED, BODY_TYPES, BodyStore, NO_BODY, bodyPlan, copyBody } from "./lib/bodies.js";
 import { consoleAddresses, consoleEvent } from "./lib/console.js";
 import { LateReply, LinkClient } from "./lib/link-client.js";
 import { failedEvent, finishedEvent, lateRedirectEnd, requestEvent, requestVisible, responseEvent } from "./lib/network.js";
@@ -763,34 +763,8 @@ function keepBody(details) {
   } catch {
     return bodies.skip(details.requestId, tabId, request, BODY_FAILED);
   }
-  let copying = true;
-  const letGo = () => {
-    copying = false;
-    try {
-      filter.disconnect();
-    } catch {}
-  };
-  // Dropped while the body still comes: the filter lets go, and Firefox carries the rest.
-  const hop = bodies.start(details.requestId, tabId, request, letGo);
-  // The page gets every byte first, whatever happens to the copy. Past the
-  // cap the filter lets go, and Firefox carries the rest (a failure too).
-  filter.ondata = (event) => {
-    filter.write(event.data);
-    if (!copying) return;
-    // The tab left what is shared, or its log stopped: nothing more is kept, and the filter lets go.
-    if (!networkWanted(details) || !liveSocket()) return bodies.drop(details.requestId);
-    let more = false;
-    try {
-      more = bodies.data(hop, new Uint8Array(event.data));
-    } catch {}
-    if (!more) letGo();
-  };
-  filter.onstop = () => {
-    bodies.end(hop);
-    filter.close();
-  };
-  // Codara is told the transfer failed, never given part of a body as the whole.
-  filter.onerror = () => bodies.end(hop, BODY_FAILED);
+  // Copied only while the tab may be (still shared and recorded, on the live link).
+  copyBody(filter, bodies, { requestId: details.requestId, tabId, request }, () => networkWanted(details) && Boolean(liveSocket()));
 }
 
 /**

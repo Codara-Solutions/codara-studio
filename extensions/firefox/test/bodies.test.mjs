@@ -7,7 +7,7 @@ const bytes = (text) => new TextEncoder().encode(text);
 const at = (url) => ({ url, documentUrl: "https://a.example/app", tabId: 1 });
 
 export async function run(assembled) {
-  const { BodyStore, bodyAnswer, bodyPlan, NO_BODY, BODY_FAILED, BODY_TOO_LARGE, BODY_NOT_TEXT, BODY_LOADING, BODY_READS } = await import(pathToFileURL(join(assembled, "lib", "bodies.js")).href);
+  const { BodyStore, copyBody, bodyAnswer, bodyPlan, NO_BODY, BODY_FAILED, BODY_TOO_LARGE, BODY_NOT_TEXT, BODY_LOADING, BODY_READS } = await import(pathToFileURL(join(assembled, "lib", "bodies.js")).href);
 
   // A link that has started closing is not live: no filter is set and no chunk kept for it
   // (the background has no harness, so its code is read).
@@ -143,5 +143,54 @@ export async function run(assembled) {
   assert.equal(store.reads, 0, "every read gave its place back");
   assert.equal(store.size, 0);
   void open;
+
+  // The filter, as Firefox runs it: disconnect() throws until the filter started.
+  const filterOf = () => {
+    const filter = { started: false, written: [], calls: [] };
+    filter.write = (data) => filter.written.push(data);
+    filter.close = () => filter.calls.push("close");
+    filter.disconnect = () => {
+      if (!filter.started) throw new Error("Invalid state");
+      filter.calls.push("disconnect");
+    };
+    filter.start = () => {
+      filter.started = true;
+      filter.onstart?.();
+    };
+    return filter;
+  };
+  const piece = (text) => ({ data: bytes(text).buffer });
+  const copies = new BodyStore();
+  // An ordinary body: the page gets every byte, the copy is kept, the filter closes at the end.
+  const plain = filterOf();
+  copyBody(plain, copies, { requestId: "c1", tabId: 1, request: at("https://a.example/c1") }, () => true);
+  plain.start();
+  plain.ondata(piece("ab"));
+  plain.onstop();
+  copies.publish("c1");
+  copies.outcome("c1", true);
+  assert.deepEqual(copies.answer(await copies.body("c1", 1)), { body: "YWI=", base64Encoded: true });
+  assert.deepEqual(plain.calls, ["close"]);
+  // Let go before it started (the link ended, the log stopped): it disconnects once it starts, and never takes the close path.
+  const early = filterOf();
+  copyBody(early, copies, { requestId: "c2", tabId: 1, request: at("https://a.example/c2") }, () => true);
+  copies.forgetTab(1);
+  assert.deepEqual(early.calls, [], "too early to disconnect");
+  early.start();
+  assert.deepEqual(early.calls, ["disconnect"], "disconnected as soon as it started");
+  early.onstop?.();
+  assert.deepEqual(early.calls, ["disconnect"], "a released filter is never closed as if it had carried the body");
+  // Let go mid-body when the tab may no longer be copied: the page still gets the chunk, nothing is kept.
+  let allowed = true;
+  const midway = filterOf();
+  copyBody(midway, copies, { requestId: "c3", tabId: 1, request: at("https://a.example/c3") }, () => allowed);
+  midway.start();
+  midway.ondata(piece("a"));
+  allowed = false;
+  midway.ondata(piece("b"));
+  assert.equal(midway.written.length, 2);
+  assert.deepEqual(midway.calls, ["disconnect"]);
+  copies.publish("c3");
+  await assert.rejects(copies.body("c3", 1), { message: NO_BODY });
   return "bodies: text or base64, only once published and completed, own tab only, redirects, bounded in bytes and count, no waiter left";
 }
