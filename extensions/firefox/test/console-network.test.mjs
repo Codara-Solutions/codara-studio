@@ -134,6 +134,22 @@ export async function run(assembled) {
   );
   assert.deepEqual(consoleAddresses(consoleEvent({ kind: "console", level: "error", args: [{ type: "object", subtype: "error", description: "Error: x\nf@https://a.example/private/f:1:1\n" }], at: 1 })[1]), ["https://a.example/private/f"]);
 
+  // What the hook does with that: from "off", "wait" with the cutoff keeps what comes after only.
+  const late = hookedPage(assembled);
+  late.answerHello({ mode: "off" });
+  await tick();
+  late.page.console.log("before the attachment");
+  late.listeners.message({ type: "codara-console", mode: "wait", since: Date.now() });
+  late.page.console.log("after the attachment");
+  late.listeners.message({ type: "codara-console", mode: "on", since: Date.now() - 1000 });
+  assert.deepEqual(late.sent.map((entry) => entry.args[0].value), ["after the attachment"]);
+
+  // A page loaded before its tab was attached heard "off" at load: attaching tells its hook to start
+  // keeping (with the new cutoff), once the attachment is saved. The background has no harness, so its code is read.
+  const background = readFileSync(join(assembled, "background.js"), "utf8");
+  const attaching = background.slice(background.indexOf('case "attach": {'), background.indexOf('case "detach":'));
+  assert.match(attaching, /attachedSince\.set\([\s\S]*await save\(\{ attached: [\s\S]*switchConsole\(tab\.id\)/, "attaching a tab switches its console hook after the attachment is saved");
+
   // ── webRequest as Network events ──
   const base = { requestId: "38", tabId: 7, frameId: 0, type: "xmlhttprequest", url: "https://a.example/data.json", method: "GET", documentUrl: "https://a.example/app", timeStamp: 5000 };
   const sent = network.requestEvent(base, {

@@ -287,6 +287,8 @@ async function handleRequest(request) {
         attachedSince.set(tab.id, Date.now() + 1);
         await save({ attached: withValue(state.attached, tab.id) });
         void refresh();
+        // A page loaded before this heard "off": its hook starts keeping now, nothing from before.
+        void switchConsole(tab.id);
       }
       return {};
     }
