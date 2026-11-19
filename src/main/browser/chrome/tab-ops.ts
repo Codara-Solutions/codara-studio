@@ -25,6 +25,7 @@ import {
   type PageState,
 } from "../../../shared/browser-change";
 import { createPreviewDOM } from "../../../shared/preview-dom";
+import { FIREFOX_PAGE_MOVED_ERROR } from "./protocol";
 import { createPreviewNames } from "../../../shared/preview-names";
 import { snapshotProbe } from "../../../renderer/src/components/Preview/domSnapshot";
 import { clickProbe, typeProbe } from "../../../renderer/src/components/Preview/domActions";
@@ -236,13 +237,21 @@ async function centerProbe(options: { selector: string; scrollIntoView: boolean 
   return { ok: true, ...dom.point(el) };
 }
 
-async function point(target: BrowserTarget, spec: Params, scrollIntoView = true): Promise<{ x: number; y: number }> {
+/**
+ * Where to act: explicit coordinates, or the center of the selector's
+ * element, with the page it was found in when the browser names it (the
+ * Firefox extension does), so a scripted replay runs only in that page.
+ */
+async function point(target: BrowserTarget, spec: Params, scrollIntoView = true): Promise<{ x: number; y: number; context?: string }> {
   if (typeof spec.x === "number" && typeof spec.y === "number") return { x: spec.x, y: spec.y };
   const selector = typeof spec.selector === "string" ? spec.selector : null;
   if (!selector) throw new Error("provide either { selector } or explicit { x, y }");
-  const found = checked(await run<{ ok?: boolean; error?: string; x: number; y: number }>(target, probe(centerProbe, { selector, scrollIntoView })));
-  return { x: found.x, y: found.y };
+  const found = await evaluateIn<{ ok?: boolean; error?: string; x: number; y: number }>(target, probe(centerProbe, { selector, scrollIntoView }));
+  const at = checked(found.value ?? {});
+  return found.context ? { x: at.x, y: at.y, context: found.context } : { x: at.x, y: at.y };
 }
+
+const SCRIPTED_PAGE_CHANGED = "The page changed between finding the element and acting on it: nothing was done. Read the page again and retry.";
 
 const MODIFIER_BITS: Record<string, number> = { alt: 1, control: 2, ctrl: 2, meta: 4, cmd: 4, command: 4, shift: 8 };
 
@@ -267,22 +276,36 @@ function scriptsInput(target: BrowserTarget, method: string): boolean {
  * run adds to the answer (what it acted on, that it was scripted) is
  * returned.
  */
-async function mouseEvents(target: BrowserTarget, steps: InputStep[]): Promise<Record<string, unknown>> {
-  if (scriptsInput(target, "Input.dispatchMouseEvent")) return scripted(target, steps);
+async function mouseEvents(target: BrowserTarget, steps: InputStep[], ...points: { context?: string }[]): Promise<Record<string, unknown>> {
+  if (scriptsInput(target, "Input.dispatchMouseEvent")) return scripted(target, steps, pageOf(points));
   for (const step of steps) await target.session.send("Input.dispatchMouseEvent", step);
   return {};
 }
 
-async function scripted(target: BrowserTarget, steps: InputStep[]): Promise<Record<string, unknown>> {
-  const { ok: _ok, ...result } = checked(
-    await run<{ ok?: boolean; error?: string }>(target, `(${scriptedInputProbe.toString()})(${JSON.stringify(steps)}, ${createPreviewDOM.toString()})`),
-  );
+/** The one page the points were found in (none for coordinates); two different pages: it changed between them. */
+function pageOf(points: { context?: string }[]): string | undefined {
+  const pages = [...new Set(points.map((at) => at.context).filter((context): context is string => Boolean(context)))];
+  if (pages.length > 1) throw new Error(SCRIPTED_PAGE_CHANGED);
+  return pages[0];
+}
+
+async function scripted(target: BrowserTarget, steps: InputStep[], context?: string): Promise<Record<string, unknown>> {
+  const played = await evaluateIn<{ ok?: boolean; error?: string }>(
+    target,
+    `(${scriptedInputProbe.toString()})(${JSON.stringify(steps)}, ${createPreviewDOM.toString()})`,
+    context,
+  ).catch((error: unknown) => {
+    if (context && pageGone(error)) throw new Error(SCRIPTED_PAGE_CHANGED);
+    throw error;
+  });
+  const { ok: _ok, ...result } = checked(played.value ?? {});
   return { ...result, trusted: false, note: SCRIPTED_INPUT_NOTE };
 }
 
 export async function mouse(target: BrowserTarget, params: Params): Promise<unknown> {
   const action = str(params, "action") ?? "click";
-  const { x, y } = await point(target, params);
+  const at = await point(target, params);
+  const { x, y } = at;
   const modifiers = modifierBits(params.modifiers);
   const button = action === "rightclick" ? "right" : "left";
   const press = (clickCount: number): InputStep => ({ type: "mousePressed", x, y, button, clickCount, modifiers });
@@ -305,12 +328,13 @@ export async function mouse(target: BrowserTarget, params: Params): Promise<unkn
     default:
       throw new Error(`unknown mouse action '${action}' (expected down|up|click|dblclick|rightclick)`);
   }
-  return { ok: true, action, x, y, button, ...(await mouseEvents(target, steps)) };
+  return { ok: true, action, x, y, button, ...(await mouseEvents(target, steps, at)) };
 }
 
 export async function hover(target: BrowserTarget, params: Params): Promise<unknown> {
-  const { x, y } = await point(target, params);
-  return { ok: true, x, y, ...(await mouseEvents(target, [{ type: "mouseMoved", x, y }])) };
+  const at = await point(target, params);
+  const { x, y } = at;
+  return { ok: true, x, y, ...(await mouseEvents(target, [{ type: "mouseMoved", x, y }], at)) };
 }
 
 export async function scroll(target: BrowserTarget, params: Params): Promise<unknown> {
@@ -318,10 +342,10 @@ export async function scroll(target: BrowserTarget, params: Params): Promise<unk
   const deltaY = num(params, "deltaY") ?? 0;
   if (deltaX === 0 && deltaY === 0) throw new Error("scroll requires a non-zero deltaX or deltaY");
   // The point is only where the wheel turns: centering it would fight the scroll.
-  const at = typeof params.selector === "string" || typeof params.x === "number"
+  const at: { x: number; y: number; context?: string } = typeof params.selector === "string" || typeof params.x === "number"
     ? await point(target, params, false)
     : await run<{ x: number; y: number }>(target, "({ x: innerWidth / 2, y: innerHeight / 2 })");
-  const played = await mouseEvents(target, [{ type: "mouseWheel", x: at.x, y: at.y, deltaX, deltaY }]);
+  const played = await mouseEvents(target, [{ type: "mouseWheel", x: at.x, y: at.y, deltaX, deltaY }], at);
   return { ok: true, x: at.x, y: at.y, deltaX, deltaY, ...played };
 }
 
@@ -338,7 +362,7 @@ export async function drag(target: BrowserTarget, params: Params): Promise<unkno
     events.push({ type: "mouseMoved", x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t, button: "left", buttons: 1 });
   }
   events.push({ type: "mouseReleased", x: to.x, y: to.y, button: "left", clickCount: 1 });
-  return { ok: true, from, to, steps, ...(await mouseEvents(target, events)) };
+  return { ok: true, from: { x: from.x, y: from.y }, to: { x: to.x, y: to.y }, steps, ...(await mouseEvents(target, events, from, to)) };
 }
 
 // Keys reach a page in a background tab or an unfocused window only with
@@ -447,6 +471,9 @@ async function evaluateIn<T>(target: BrowserTarget, expression: string, context?
   return { value: (answer.result?.value ?? null) as T, context: typeof answer.uniqueContextId === "string" ? answer.uniqueContextId : null };
 }
 
+/** The extension's own answer for a command whose page is no longer the tab's (protocol.ts), matched exactly. */
+const pageGone = (error: unknown): boolean => error instanceof Error && error.message === FIREFOX_PAGE_MOVED_ERROR;
+
 const PAGE_CHANGED = "upload: the page changed while the files were read; nothing was uploaded.";
 
 /**
@@ -486,7 +513,7 @@ async function scriptedUpload(target: BrowserTarget, selector: string, paths: st
         if (bytesRead === 0) break;
         read += bytesRead;
       }
-      if (read > info.size) throw new Error(`upload: ${path} changed while it was read; nothing was uploaded.`);
+      if (read !== info.size) throw new Error(`upload: ${path} changed while it was read; nothing was uploaded.`);
       left -= read;
       files.push({ name: basename(path), type: uploadMimeType(path), lastModified: Math.round(info.mtimeMs), data: buffer.subarray(0, read).toString("base64") });
     } finally {
@@ -498,9 +525,8 @@ async function scriptedUpload(target: BrowserTarget, selector: string, paths: st
     `(${scriptedUploadProbe.toString()})(${JSON.stringify({ pin, key: SCRIPTED_UPLOAD_PIN_KEY, files })})`,
     pinned.context,
   ).catch((error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error);
-    // The page it was pinned to is gone (Firefox: the tab went to another page; Chromium: no such context).
-    if (/another page|context/i.test(message)) throw new Error(PAGE_CHANGED);
+    // The page it was pinned to is gone.
+    if (pageGone(error)) throw new Error(PAGE_CHANGED);
     throw error;
   });
   const result = checked(placed.value ?? { ok: false, error: PAGE_CHANGED });

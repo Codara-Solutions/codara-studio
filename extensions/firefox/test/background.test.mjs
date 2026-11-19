@@ -339,6 +339,33 @@ export async function run(assembled) {
       fake.tabs.set(1, original);
     }
 
+    // A newer lookup (another request's) that finds the tab changed, while the
+    // read's own last look still saw it as before, ends the read before it
+    // leaves: a view is the tab's window, address and cookie store.
+    for (const [what, change] of [
+      ["moved to another window", { windowId: 2 }],
+      ["on another page", { url: `${SHOP}next` }],
+      ["in another cookie store", { cookieStoreId: "firefox-container-1" }],
+    ]) {
+      const original = { ...fake.tabs.get(1) };
+      let release;
+      let looks = 0;
+      fake.beforeGet = (id) => (id === 1 && (looks += 1) === 3 ? new Promise((resolve) => (release = resolve)) : null);
+      const reading = cookies(1);
+      await settle();
+      fake.beforeGet = null;
+      assert.equal(typeof release, "function", "the read's last look is on its way");
+      quietly(change);
+      await request({ type: "cdp", tabId: 1, method: "Network.enable", params: {} });
+      release();
+      const read = await reading.catch((error) => error);
+      assert.ok(read instanceof Error || read.still() === false, `a newer view of the tab ${what} ends the read`);
+      if (!(read instanceof Error)) assert.throws(() => read.build(), (error) => !/secret/.test(error.message));
+      fake.tabs.set(1, original);
+      await request({ type: "cdp", tabId: 1, method: "Network.enable", params: {} });
+      assert.equal(seenWindow(1), original.windowId);
+    }
+
     // Of two lookups that began between the same events, the later one's
     // answer stands: an earlier one answered late does not replace it.
     {

@@ -217,6 +217,14 @@ export function sanitizeCdpCapabilities(value: unknown): ReadonlySet<string> | n
 }
 
 /** The refusal for a command the connected extension does not answer. */
+/**
+ * What the Firefox extension answers when a command for one page finds the
+ * tab on another (extensions/firefox/lib/page-tools.js MOVED_ERROR, the
+ * same text: scripts/test-scripted-input.cjs checks it). Codara tells a
+ * page that is gone by this exact answer, never by its wording.
+ */
+export const FIREFOX_PAGE_MOVED_ERROR = "The tab went to another page while the agent's command was on its way; it was not answered. Read the tab again and retry.";
+
 export function unsupportedCdpError(method: string, browserName: string): string {
   return `${method} is not available in ${browserName || "this browser"}: its Codara extension cannot do it (browsers other than Chrome give extensions no debugger).`;
 }
