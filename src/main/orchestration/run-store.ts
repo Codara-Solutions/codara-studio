@@ -15965,6 +15965,28 @@ async function performAutoCompaction(
     });
     if (!prepared.sparkCalls.some((entry) => entry.id === callId)) return;
     run = prepared;
+    // A Stop that started while this call was committed disposes the chat's
+    // sessions first and commits the pause after: a summary sent in between
+    // would open a session that Stop never disposes. Wait for a Stop in
+    // progress, then re-decide on what it left, as a manager turn does
+    // before dispatch.
+    {
+      const stopping = forcePauseWindowClosed(runId);
+      if (stopping) await stopping;
+      const latest = await getRun(runId);
+      const stillLive = latest?.sparkCalls.some(
+        (entry) => entry.id === callId && entry.status === "started" && !entry.completedAt,
+      );
+      if (
+        !latest ||
+        !stillLive ||
+        conversationEpoch(latest) !== epoch ||
+        ["paused", "blocked", "cancelled", "failed"].includes(latest.status)
+      ) {
+        if (stillLive) await settleAutoCompactionCall(runId, callId, epoch, "Stopped before the summary was sent.");
+        return;
+      }
+    }
     const compactionSource = structuredClone(run);
 
     const startedMs = Date.now();
