@@ -1,0 +1,122 @@
+CODARA FOR FIREFOX: ADDONS.MOZILLA.ORG SUBMISSION PACK
+Fields in the order Mozilla's Developer Hub asks for them (Submit a New Add-on).
+Nothing here is submitted by the build: the upload is a manual step.
+
+Build the upload
+  node extensions/firefox/build/pack.mjs --out <folder>
+  It assembles the add-on (build/assemble.mjs), checks it (build/pack.mjs
+  checkAddon: id, data collection, version, every file named, no remote or
+  minified code) and writes codara-firefox-<version>.zip with its sha256.
+  The same sources give the same bytes.
+
+Before upload (by hand)
+  1. Raise "version" in extensions/firefox/manifest.json if this version was
+     uploaded before: Mozilla never takes the same version twice.
+  2. Load the zip's folder in a real Firefox 153 or later
+     (about:debugging#/runtime/this-firefox, Load Temporary Add-on), pair it
+     with Codara and share a tab.
+  3. The privacy policy needs a "Codara for Firefox" section (see section 4)
+     before the listing is made public.
+
+
+== 1. HOW TO DISTRIBUTE ==
+
+On this site (listed on addons.mozilla.org).
+(Choose "On your own" only for a self-hosted, signed-only build: then the
+install card's Firefox route stays a file the user installs, not a listing.)
+
+
+== 2. UPLOAD VERSION ==
+
+File:                 codara-firefox-<version>.zip
+Compatible with:      Firefox (desktop). Not Firefox for Android: it has no
+                      Codara app beside it.
+
+Data collection (Firefox asks the user at install; manifest
+browser_specific_settings.gecko.data_collection_permissions):
+  required: websiteContent, websiteActivity, authenticationInfo
+  TO CONFIRM BY THE FOUNDER AT UPLOAD: Mozilla shows these to the user as
+  what the add-on collects. They match what the extension passes to the
+  Codara app on the same computer (page content and screenshots of shared
+  tabs; their addresses, network log and console; sign-in headers, cookies
+  and storage the page can reach). Nothing goes to any other server.
+
+Source code submission:
+  "Do You Need to Submit Source Code?"  No.
+  Every file in the zip is plain JavaScript, HTML, CSS and PNG as written in
+  this repository: nothing is bundled, minified, transpiled or generated.
+  The zip is the assembly of extensions/firefox and the Chrome files named in
+  extensions/firefox/shared.json (copied as they are, two text patches in
+  popup.js and popup.html, listed in shared.json). A reviewer can rebuild it
+  from the public repository with the command above and compare the sha256.
+
+
+== 3. DESCRIBE ADD-ON ==
+
+Name:        Codara
+Add-on URL:  codara (or the closest free slug)
+Summary (up to 250 characters):
+  Let the coding agents you run in the Codara app use the Firefox tabs you
+  choose to share, signed in as you: read a page, fill in a form, click
+  through a flow, take a screenshot, read the console and network log.
+
+Description:
+Codara runs coding agents on your computer. With this add-on they can use the Firefox tabs you choose, signed in as you: read a page, fill in a form, click through a flow, take a screenshot, read the console and the network log.
+
+How it works:
+- Pair the add-on with the Codara app once, by checking that both show the same code.
+- Agents see only the tabs you share from the add-on's popup: one tab, a whole window, or every tab. Never the sites on your blocked list (banks and password managers are preset), and never Firefox's own pages.
+- Firefox asks you, from the popup, for each site you share and for running scripts in pages. Nothing is asked at install.
+- On a shared tab, agents can do what the page's own scripts can: read its site storage and cookies that are not HttpOnly, and see its network requests and responses, including sign-in headers such as Authorization. A second switch per tab, off by default, also lets them read all of that site's cookies and its storage. Share only tabs you would let an agent use as you.
+- Every action is logged in the Codara app with the agent that made it.
+
+The add-on talks only to the Codara app on this computer (127.0.0.1) and sends nothing to any other server, Codara's included. The Codara app hands what agents read to the agents you run (such as Claude Code or Codex), and those agents send it to their AI provider under your own account, as with anything else you give them.
+
+What differs from Codara for Chrome: Firefox gives add-ons no debugger, so clicks, keys and scrolling are played by a script in the page (the page sees them as untrusted), and emulation, throttling and tracing are not available.
+
+Requires the Codara app on the same computer.
+
+Categories:     Web Development (and Other, if a second is asked)
+Support email:  Codara's support address
+Support site:   the Codara Studio web page
+License:        MIT License (the repository's license)
+Privacy policy: yes, see section 4
+Notes to reviewer:
+  The add-on needs the Codara desktop app on the same computer: it connects
+  only to ws://127.0.0.1:47615-47619. Without it the popup shows "Codara is
+  not running" and nothing else happens. The source is the public
+  codara-studio repository, folder extensions/firefox; the upload is built by
+  extensions/firefox/build/pack.mjs and contains no generated code.
+  userScripts is optional and asked from the popup, on its own, when the user
+  turns on a tab: Codara's agents read and act on the shared page through
+  userScripts.execute in that tab only, bound to the document checked.
+
+
+== 4. PRIVACY POLICY TEXT ==
+
+Paste into the listing's privacy policy, or add as a "Codara for Firefox"
+section beside "Codara for Chrome" on the Codara Studio privacy page:
+
+  "Codara for Firefox (browser add-on). The add-on works only with the Codara app on your own computer. It reads the tabs you choose to share: their address, title, content, screenshots, console and network activity, including sign-in data the page itself can reach (request headers such as Authorization, response bodies, site storage and cookies that are not HttpOnly). With a second switch per tab, off by default, it also reads all of that site's cookies and its storage. It passes this only to the Codara app, over a connection to 127.0.0.1 that never leaves your computer and is encrypted after pairing. The Codara app hands it to the coding agents you run, such as Claude Code or Codex, which send it to their AI provider under your own account. The add-on sends nothing to Codara Solutions or to any other server. In Firefox it keeps its settings and the pairing until you remove it, and which tabs are shared until Firefox closes. The Codara app keeps the paired browsers and a log of agent actions on your computer; delete the chrome-link folder in Codara's home folder to remove them."
+
+
+== 5. PERMISSIONS (for reviewer questions) ==
+
+tabs                 list the tabs in the popup to share them; follow a shared tab's address so one that moves to a blocked site is dropped at once.
+storage              the pairing, the blocked sites and the sharing choices.
+cookies              Network.getCookies, only on a tab whose cookie switch the user turned on, from that tab's own cookie store.
+alarms               reconnect after Firefox unloads the event page.
+scripting            measure the page for a full-page screenshot, read the page's address in its own document.
+webRequest, webRequestBlocking, webRequestFilterResponse
+                     the network log and text response bodies of shared tabs that Codara records; never a blocked site.
+userScripts (optional, asked from the popup)
+                     run the agent's page script in the shared tab's own world.
+<all_urls> (optional, asked from the popup per site, or all sites for screenshots and shared windows)
+                     work on the sites the user shares.
+
+
+== AFTER APPROVAL ==
+Codara's connect card already has a slot for the listing: set
+FIREFOX_INSTALL_ROUTE in src/renderer/src/components/chrome/ChromeConnectCard.tsx
+to { kind: "store", url: "<listing URL>" } and the Firefox Add step becomes one
+"Add from Firefox Add-ons" button.

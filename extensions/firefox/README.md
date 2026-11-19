@@ -130,6 +130,7 @@ says the user declined.
 ```sh
 node extensions/firefox/test/run.mjs          # firefox rules, manifest, assembly
 node extensions/firefox/build/assemble.mjs    # dist/extension/
+node extensions/firefox/build/pack.mjs        # dist/codara-firefox-<version>.zip and its sha256, for addons.mozilla.org
 npm test -- firefox                           # the above plus Codara's side
 CODARA_E2E_REQUIRE_FIREFOX=1 npx playwright test tests/e2e/firefox-extension.spec.ts
 ```
@@ -140,3 +141,10 @@ remote control only; the extension never uses it) and pairs it with a test
 Codara on a port of its own. `CODARA_E2E_FIREFOX` points it at another
 Firefox binary; `CODARA_E2E_COLOR_SCHEME=dark` takes the popup screenshots
 dark.
+
+`build/pack.mjs` checks the add-on as Mozilla will (the id `@codara-firefox`,
+the data collection it declares, a plain version recorded in
+`versions.json` with these very files, every file named, no remote or
+minified code) and writes the zip of exactly the assembled files, the same
+bytes for the same sources. `LISTING.txt` holds the Developer Hub's fields;
+submitting stays a manual step.
