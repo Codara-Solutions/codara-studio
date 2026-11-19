@@ -7,7 +7,8 @@
 // nor a visible tab, or, in a browser whose extension has no debugger
 // (Firefox), is played as a script in the page (scripted-input.ts).
 
-import { readFile, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { open } from "node:fs/promises";
 import { basename } from "node:path";
 import { Script } from "node:vm";
 
@@ -31,7 +32,16 @@ import { applyEmulation } from "../emulation";
 import { consoleRing } from "../recorders/console";
 import { clearNetwork, networkRing } from "../recorders/network";
 import { captureScreenshot, normalizeScreenshotRequest, type ImageCodec } from "../screenshot";
-import { SCRIPTED_INPUT_NOTE, SCRIPTED_UPLOAD_MAX_BYTES, scriptedInputProbe, scriptedUploadProbe, uploadMimeType, type InputStep } from "../scripted-input";
+import {
+  SCRIPTED_INPUT_NOTE,
+  SCRIPTED_UPLOAD_MAX_BYTES,
+  SCRIPTED_UPLOAD_PIN_KEY,
+  scriptedInputProbe,
+  scriptedUploadPinProbe,
+  scriptedUploadProbe,
+  uploadMimeType,
+  type InputStep,
+} from "../scripted-input";
 import type { BrowserTarget } from "../targets";
 
 type Params = Record<string, unknown>;
@@ -263,7 +273,9 @@ async function mouseEvents(target: BrowserTarget, steps: InputStep[]): Promise<R
 }
 
 async function scripted(target: BrowserTarget, steps: InputStep[]): Promise<Record<string, unknown>> {
-  const { ok: _ok, ...result } = checked(await run<{ ok?: boolean; error?: string }>(target, `(${scriptedInputProbe.toString()})(${JSON.stringify(steps)})`));
+  const { ok: _ok, ...result } = checked(
+    await run<{ ok?: boolean; error?: string }>(target, `(${scriptedInputProbe.toString()})(${JSON.stringify(steps)}, ${createPreviewDOM.toString()})`),
+  );
   return { ...result, trusted: false, note: SCRIPTED_INPUT_NOTE };
 }
 
@@ -377,6 +389,11 @@ export async function pressKey(target: BrowserTarget, params: Params): Promise<u
   const name = str(params, "key");
   if (!name) throw new Error("press_key requires 'key'");
   const selector = str(params, "selector");
+  // Scripted keys focus their target in the same script that plays them, so nothing can move focus in between.
+  if (scriptsInput(target, "Input.dispatchKeyEvent")) {
+    const steps = [...(selector ? [{ type: "focus", selector }] : []), ...(previewKeyEvents(name, [], null) as InputStep[])];
+    return { ok: true, key: name, ...(await scripted(target, steps)) };
+  }
   if (selector) {
     const focused = await run<boolean>(
       target,
@@ -414,22 +431,40 @@ export async function upload(target: BrowserTarget, params: Params): Promise<unk
 /**
  * Upload where the browser cannot set a file input's files (Firefox): Codara
  * reads the files and the page gets them as File objects set on the input,
- * as a drop from the desktop would. The page sees the input's change event
- * scripted, and the files' last-modified time is now.
+ * as a drop from the desktop would. The input is found and pinned in its
+ * page first; the bytes go only to that page, never to one that replaced it
+ * while the files were read. Each file is read from one open handle, within
+ * what is left of the limit, so a file that grows meanwhile cannot pass it.
  */
 async function scriptedUpload(target: BrowserTarget, selector: string, paths: string[]): Promise<unknown> {
-  let total = 0;
-  const files: { name: string; type: string; data: string }[] = [];
+  const pin = randomUUID();
+  checked(await run<{ ok?: boolean; error?: string }>(target, `(${scriptedUploadPinProbe.toString()})(${JSON.stringify({ selector, count: paths.length, pin, key: SCRIPTED_UPLOAD_PIN_KEY })}, ${createPreviewDOM.toString()})`));
+  const tooLarge = () => new Error(`upload: in this browser the files go through the page, at most ${SCRIPTED_UPLOAD_MAX_BYTES / 1_000_000} MB in all; these are larger.`);
+  let left = SCRIPTED_UPLOAD_MAX_BYTES;
+  const files: { name: string; type: string; lastModified: number; data: string }[] = [];
   for (const path of paths) {
-    const info = await stat(path).catch(() => null);
-    if (!info?.isFile()) throw new Error(`upload: ${path} is not a file.`);
-    total += info.size;
-    if (total > SCRIPTED_UPLOAD_MAX_BYTES) {
-      throw new Error(`upload: in this browser the files go through the page, at most ${SCRIPTED_UPLOAD_MAX_BYTES / 1_000_000} MB in all; these are larger.`);
+    const handle = await open(path, "r").catch(() => null);
+    if (!handle) throw new Error(`upload: ${path} is not a file.`);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw new Error(`upload: ${path} is not a file.`);
+      if (info.size > left) throw tooLarge();
+      // One byte more than its size tells a file that grew while it was read.
+      const buffer = Buffer.alloc(info.size + 1);
+      let read = 0;
+      while (read < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, read, buffer.length - read, read);
+        if (bytesRead === 0) break;
+        read += bytesRead;
+      }
+      if (read > info.size) throw new Error(`upload: ${path} changed while it was read; nothing was uploaded.`);
+      left -= read;
+      files.push({ name: basename(path), type: uploadMimeType(path), lastModified: Math.round(info.mtimeMs), data: buffer.subarray(0, read).toString("base64") });
+    } finally {
+      await handle.close();
     }
-    files.push({ name: basename(path), type: uploadMimeType(path), data: (await readFile(path)).toString("base64") });
   }
-  const result = checked(await run<{ ok?: boolean; error?: string }>(target, `(${scriptedUploadProbe.toString()})(${JSON.stringify({ selector, files })}, ${createPreviewDOM.toString()})`));
+  const result = checked(await run<{ ok?: boolean; error?: string }>(target, `(${scriptedUploadProbe.toString()})(${JSON.stringify({ pin, key: SCRIPTED_UPLOAD_PIN_KEY, files })})`));
   return { ...result, ok: true, selector, files: paths, trusted: false, note: SCRIPTED_INPUT_NOTE };
 }
 

@@ -24,8 +24,15 @@ const PAGE = `<!doctype html><title>Input</title>
   <div id="scroller" style="height: 100px; overflow: auto"><div style="height: 1000px">Long</div></div>
   <div id="src" draggable="true" style="width: 80px">Drag me</div> <div id="dst" style="width: 120px; height: 40px">Drop here</div>
   <input id="file" type="file" multiple> <input id="one" type="file">
-  <script>window.seen = []; window.state = { clicks: 0, submitted: 0, dropped: null, files: null, hovered: false, keyCodes: [] };
-    for (const type of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "keydown", "keyup", "wheel"]) {
+  <form id="g"><input id="g1"> <input id="g2"></form> <form id="h"><input id="h1"></form>
+  <div id="rb" role="button" tabindex="0">Custom</div> <input id="m" maxlength="2"> <input id="e">
+  <iframe id="fr" srcdoc="<input id='inner'>" style="height: 40px"></iframe>
+  <script>window.seen = []; window.state = { clicks: 0, submitted: 0, dropped: null, files: null, hovered: false, left: false, keyCodes: [], gSent: 0, hSent: 0, custom: 0 };
+    document.querySelector("#g").addEventListener("submit", (event) => { event.preventDefault(); window.state.gSent++; });
+    document.querySelector("#h").addEventListener("submit", (event) => { event.preventDefault(); window.state.hSent++; });
+    document.querySelector("#rb").addEventListener("click", () => window.state.custom++);
+    document.querySelector("#hover").addEventListener("mouseleave", () => (window.state.left = true));
+    for (const type of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "auxclick", "keydown", "keyup", "wheel"]) {
       document.addEventListener(type, (event) => window.seen.push(type + (event.isTrusted ? "!" : "") + ":" + (event.target.id || event.target.tagName)), true);
     }
     document.addEventListener("keydown", (event) => window.state.keyCodes.push(event.keyCode));
@@ -115,6 +122,26 @@ async function drive(ops, target, uploads) {
   await ops.pressKey(target, { key: "Enter" });
   await ops.key(target, { key: "y" });
   out.textarea = await target.evaluate("document.querySelector('#ta').value");
+  // Enter: a form with two fields and no button is not sent, one with a single field is; a custom button is not pressed.
+  await ops.pressKey(target, { key: "Enter", selector: "#g1" });
+  await ops.pressKey(target, { key: "Enter", selector: "#h1" });
+  await ops.pressKey(target, { key: "Enter", selector: "#rb" });
+  // A press and a release in two calls click; leaving an element tells it.
+  await ops.mouse(target, { selector: "#b", action: "down" });
+  await ops.mouse(target, { selector: "#b", action: "up" });
+  await ops.hover(target, { selector: "#hover" });
+  await ops.hover(target, { selector: "#b" });
+  out.afterSplit = await state();
+  // A field's maxlength holds; Backspace takes a whole emoji.
+  await ops.mouse(target, { selector: "#m" });
+  for (const key of ["a", "b", "c"]) await ops.key(target, { key });
+  await ops.mouse(target, { selector: "#e" });
+  for (const key of ["a", "😀", "Backspace"]) await ops.key(target, { key });
+  out.fields = await target.evaluate("[document.querySelector('#m').value, document.querySelector('#e').value]");
+  // A field in a frame of the same site.
+  await ops.mouse(target, { selector: "#fr" });
+  await ops.key(target, { key: "z" });
+  out.inFrame = await target.evaluate("document.querySelector('#fr').contentDocument.querySelector('#inner').value");
   out.scroll = await ops.scroll(target, { selector: "#scroller", deltaY: 200 });
   out.scrollTop = await target.evaluate("document.querySelector('#scroller').scrollTop");
   out.drag = await ops.drag(target, { from: { selector: "#src" }, to: { selector: "#dst" } });
@@ -133,7 +160,8 @@ async function drive(ops, target, uploads) {
   }
   const lib = bundleBrowser(`
     export * as ops from "./chrome/tab-ops";
-    export { uploadMimeType, SCRIPTED_UPLOAD_MAX_BYTES } from "./scripted-input";
+    export { uploadMimeType, SCRIPTED_UPLOAD_MAX_BYTES, scriptedUploadPinProbe, scriptedUploadProbe } from "./scripted-input";
+    export { createPreviewDOM } from "../../shared/preview-dom";
   `);
   const { ops } = lib;
   const server = await startPageServer({ "/input": PAGE });
@@ -174,7 +202,7 @@ async function drive(ops, target, uploads) {
     assert.deepEqual(played.afterContext.seen, untrusted(trusted.afterContext.seen));
     // And the same outcome for every tool.
     // (Not the drag: the protocol's mouse alone starts no drag and drop in headless Chromium.)
-    for (const key of ["afterClick", "afterDbl", "afterContext", "afterHover", "afterEnter", "afterSpace"]) {
+    for (const key of ["afterClick", "afterDbl", "afterContext", "afterHover", "afterEnter", "afterSpace", "afterSplit"]) {
       const { seen: _a, keyCodes: _b, ...outcome } = played[key];
       const { seen: _c, keyCodes: _d, ...expected } = trusted[key];
       assert.deepEqual(outcome, { ...expected, files: null }, key);
@@ -200,6 +228,14 @@ async function drive(ops, target, uploads) {
     assert.deepEqual(played.files, trusted.files);
     assert.deepEqual(played.files, ["notes.txt text/plain hello from a file", 'data.json application/json {"a":1}']);
     assert.equal(played.upload.count, 2);
+    assert.deepEqual(played.afterSplit.seen.filter((entry) => entry.startsWith("click")), untrusted(trusted.afterSplit.seen).filter((entry) => entry.startsWith("click")));
+    assert.equal(played.afterSplit.clicks, 5, "a press and a release in two calls click");
+    assert.equal(played.afterSplit.left, true, "the element the pointer left hears it");
+    assert.deepEqual([played.afterSplit.gSent, played.afterSplit.hSent, played.afterSplit.custom], [0, 1, 0], "HTML's implicit submission, and no press of a custom button");
+    assert.deepEqual(played.fields, trusted.fields);
+    assert.deepEqual(played.fields, ["ab", "a"]);
+    assert.equal(played.inFrame, trusted.inFrame);
+    assert.equal(played.inFrame, "z");
 
     // An upload this path cannot do says why.
     const target = firefox.target;
@@ -210,6 +246,27 @@ async function drive(ops, target, uploads) {
     fs.writeFileSync(big, "");
     fs.truncateSync(big, lib.SCRIPTED_UPLOAD_MAX_BYTES + 1);
     await assert.rejects(ops.upload(target, { selector: "#file", paths: [big] }), /at most 10 MB/);
+    // The upload's bytes go only to the page whose input was pinned.
+    const pin = { selector: "#file", count: 1, pin: "pin-1", key: "codara.uploadPins" };
+    const file = { name: "a.txt", type: "text/plain", lastModified: 1_700_000_000_000, data: Buffer.from("secret").toString("base64") };
+    assert.deepEqual(await target.evaluate(`(${lib.scriptedUploadPinProbe})(${JSON.stringify(pin)}, ${lib.createPreviewDOM})`), { ok: true });
+    await target.session.send("Page.navigate", { url: server.url("/input") });
+    for (let i = 0; i < 100 && (await target.evaluate("document.readyState + typeof window.state").catch(() => "")) !== "completeobject"; i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(await target.evaluate(`(${lib.scriptedUploadProbe})(${JSON.stringify({ pin: "pin-1", key: "codara.uploadPins", files: [file] })})`), { ok: false, error: "The page changed while the files were read: nothing was uploaded." });
+    assert.equal(await target.evaluate("document.querySelector('#file').files.length"), 0);
+    // The file's own time and type.
+    const dated = path.join(uploads, "photo.avif");
+    fs.writeFileSync(dated, "img");
+    fs.utimesSync(dated, new Date(1_700_000_000_000), new Date(1_700_000_000_000));
+    await ops.upload(target, { selector: "#one", paths: [dated] });
+    assert.deepEqual(await target.evaluate("[...document.querySelector('#one').files].map((f) => [f.name, f.type, f.lastModified])"), [["photo.avif", "image/avif", 1_700_000_000_000]]);
+    // A drag in one step still drops.
+    await ops.drag(target, { from: { selector: "#src" }, to: { selector: "#dst" }, steps: 1 });
+    assert.equal(await target.evaluate("window.state.dropped"), "from src");
+    // A box that keeps its overscroll keeps the wheel at its end.
+    await target.evaluate("const box = document.querySelector('#scroller'); box.style.overscrollBehavior = 'contain'; box.scrollTop = box.scrollHeight; document.body.style.height = '5000px'; scrollTo(0, 0)");
+    assert.equal((await ops.scroll(target, { selector: "#scroller", deltaY: 300 })).scrolled, null);
+    assert.equal(await target.evaluate("scrollY"), 0, "the page behind does not move");
     // A point outside the page.
     await assert.rejects(ops.mouse(target, { x: -50, y: -50 }), /outside the page/);
     // A page that cancels the wheel keeps its scroll.
