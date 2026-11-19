@@ -26,13 +26,9 @@ async function load() {
     format: "cjs",
     outfile,
     logLevel: "silent",
-    plugins: [{
-      name: "relative-external",
-      setup(build) {
-        // The launch helpers load Studio's modules lazily; these tests never call them.
-        build.onResolve({ filter: /^\.\.?\// }, (args) => (args.kind === "entry-point" ? undefined : { path: args.path, external: true }));
-      },
-    }],
+    tsconfig: path.join(ROOT, "tsconfig.node.json"),
+    packages: "external",
+    external: ["electron"],
   });
   return require(outfile);
 }
@@ -94,15 +90,18 @@ async function main() {
   assert.deepEqual(worker.claudeCodeModelAndEffort("claude-opus-5", "high"), { model: "claude-opus-5", effort: "high" });
   console.log("PASS argv and model/effort");
 
-  // Environment: the account's own, no agent-socket credentials, plus the
-  // hook and run ids a worker pane carries.
+  // Environment: an allowlist (test-claude-code-worker-boundary.cjs covers
+  // what it drops), the account's CLAUDE_CONFIG_DIR, and the hook and run ids
+  // a worker pane carries.
   const env = worker.claudeCodeWorkerEnv({
-    profileEnv: { CLAUDE_CONFIG_DIR: "/acct", PATH: "/bin", SPARK_AGENT_TOKEN: "x", SPARK_AGENT_SOCKET: "y", SPARK_PANE_TOKEN: "z" },
+    baseEnv: { PATH: "/bin", SPARK_AGENT_TOKEN: "x", SPARK_AGENT_SOCKET: "y", SPARK_PANE_TOKEN: "z" },
+    configDirEnv: "/acct",
     hookEnv: { SPARK_HOOK_URL: "http://127.0.0.1:1", SPARK_HOOK_TOKEN: "t", SPARK_PANE_ID: "att-1" },
     codaraHome: "/home/x/.codarastudio",
     runId: "run-1",
   });
   assert.equal(env.CLAUDE_CONFIG_DIR, "/acct");
+  assert.equal(env.PATH, "/bin");
   assert.equal(env.SPARK_AGENT_TOKEN, undefined);
   assert.equal(env.SPARK_AGENT_SOCKET, undefined);
   assert.equal(env.SPARK_PANE_TOKEN, undefined);
@@ -166,17 +165,17 @@ async function main() {
   const hanging = worker.startClaudeCodeWorker({
     binary: FAKE, argv: [], env: { ...process.env, FAKE_OUT: out }, cwd: TMP, prompt: "HANG", onEvent: () => undefined,
   });
-  setTimeout(() => hanging.kill(), 300);
+  setTimeout(() => void hanging.kill(), 300);
   assert.notEqual((await hanging.done).exitCode, 0);
   console.log("PASS failure, missing binary and Stop");
 
-  // The launch reads no credentials and adds no identity: it uses the account
-  // a new Studio Claude terminal gets, and Studio's own provider flags.
+  // The launch adds no identity: Studio's own launch and provider arguments
+  // (run-store passes them in), never --bare or a key or base URL.
   const source = fs.readFileSync(SOURCE, "utf8");
-  assert.match(source, /runtime\.resolveNewNativeClaudeProfile\(\)/);
-  assert.match(source, /getProvider\("claude"\)\.buildArgs\(/);
-  assert.match(source, /claudeLaunchArgs\(\{ userArgs: providerArgs \}\)/);
-  for (const banned of ["--bare", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "user-agent", "x-app", "readFile"]) {
+  const runStore = fs.readFileSync(path.join(ROOT, "src", "main", "orchestration", "run-store.ts"), "utf8");
+  assert.match(runStore, /getProvider\("claude"\)\.buildArgs\(/);
+  assert.match(runStore, /launchArgs: claudeLaunchArgs\(\{ userArgs: providerArgs \}\)/);
+  for (const banned of ["--bare", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "user-agent", "x-app"]) {
     assert.ok(!source.includes(banned), `claude-code-worker.ts does not touch ${banned}`);
   }
   console.log("PASS launch uses the selected account as Claude Code ships");

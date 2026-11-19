@@ -350,8 +350,11 @@ import {
   workerFamilyOfModelId,
 } from "@shared/cora-routes";
 import {
+  claudeCodeEffortFlag,
   claudeCodeModelAndEffort,
   prepareClaudeCodeWorkerLaunch,
+  claudeCodeToolLine,
+  runClaudeCodeWorkerTurns,
   startClaudeCodeWorker,
   type ClaudeCodeEvent,
   type ClaudeCodeProcess,
@@ -22566,15 +22569,19 @@ async function runClaudeCodeWorkerSession(input: {
   let sessionId: string | undefined;
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let logQueue: Promise<void> = Promise.resolve();
-  const paint = (text: string) => {
+  // Everything shown and logged is redacted again with the keys this run
+  // knows (pasted-secrets), on top of the scrubbing claude-code-worker does.
+  const paint = (raw: string) => {
+    const text = redactPastedSecrets(run.id, raw);
     pty.publishOutput(attemptId, text);
     const plain = text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
     logQueue = logQueue.catch(() => undefined).then(() => fs.appendFile(paths.stdoutLog, plain, "utf8"));
   };
+  const stopped = () => interrupted || input.launchAborted();
   const onEvent = (event: ClaudeCodeEvent) => {
     if (event.kind === "session") sessionId = event.sessionId;
     else if (event.kind === "tool") {
-      const line = event.detail ? `${event.name} ${event.detail}` : event.name;
+      const line = claudeCodeToolLine(event);
       paint(`\x1b[38;2;74;222;208m  ●\x1b[0m ${piWorkerSafeText(line, 200)}\r\n`);
       applyHookStateReport({ paneId: attemptId, state: "working", note: piWorkerSafeText(line, PI_WORKER_ACTIVITY_MAX_CHARS) });
     } else if (event.kind === "tool_failed") paint(`\x1b[33m    !  ${piWorkerSafeText(event.detail, 200)}\x1b[0m\r\n`);
@@ -22588,7 +22595,10 @@ async function runClaudeCodeWorkerSession(input: {
     }
   };
   // One headless turn; a resumed turn continues the same Claude Code session.
+  // Starts its process synchronously (runClaudeCodeWorkerTurns checks for a
+  // Stop right before calling it).
   const turn = async (prompt: string, resume?: string): Promise<number> => {
+    if (stopped()) throw new Error("Claude Code worker was stopped.");
     current = startClaudeCodeWorker({
       binary: launch!.binary,
       argv: resume ? [...launch!.argv, "--resume", resume] : launch!.argv,
@@ -22607,7 +22617,26 @@ async function runClaudeCodeWorkerSession(input: {
     await ensurePiWorkerDisplayPty(attemptId, cwd);
     await pty.waitForResize(attemptId, 5_000);
     const cli = claudeCodeModelAndEffort(claudeCodeModelOf(input.model) ?? input.model, input.effort);
-    launch = await prepareClaudeCodeWorkerLaunch({ attemptId, runId: run.id, ...cli, attemptDir: paths.attemptDir });
+    const [{ getProvider }, { claudeLaunchArgs }, { getHookRpcEnvSafe }, { acquireNativeClaudeProfileLease }] = await Promise.all([
+      import("../providers"),
+      import("../agent-launch-integration"),
+      import("../hook-rpc"),
+      import("./native-claude-profile-runtime"),
+    ]);
+    const effortFlag = claudeCodeEffortFlag(cli.effort);
+    const providerArgs = getProvider("claude").buildArgs({ cwd: "", model: cli.model, ...(effortFlag ? { effort: effortFlag } : {}) });
+    // The lease only marks the account in use. Releasing it tells nobody: a
+    // worker never starts the account service's login sync, which a Claude
+    // terminal's exit does (claude-code-worker.ts).
+    launch = await prepareClaudeCodeWorkerLaunch({
+      runId: run.id,
+      attemptDir: paths.attemptDir,
+      launchArgs: claudeLaunchArgs({ userArgs: providerArgs }),
+      providerArgs,
+      hookEnv: getHookRpcEnvSafe(attemptId) as Record<string, string> | null,
+      codaraHome: codaraHome(),
+      acquireLease: (profileId) => acquireNativeClaudeProfileLease(profileId, attemptId),
+    });
     const accountLabel = launch.accountLabel;
     pty.publishOutput(
       attemptId,
@@ -22641,24 +22670,25 @@ async function runClaudeCodeWorkerSession(input: {
       write: () => undefined,
       kill: () => {
         interrupted = true;
-        current?.kill();
+        void current?.kill();
       },
     });
     applyHookStateReport({ paneId: attemptId, state: "working", note: "starting…" });
 
-    const exitCode = await turn(input.promptText);
-    let report = await readWorkerReport(paths.finalReportJson);
-    if (!report && sessionId) {
-      const { problem } = await readWorkerReportWithProblem(paths.finalReportJson);
-      paint("\r\n  \x1b[33m↻ Finalizing the evidence report…\x1b[0m\r\n");
-      await turn(
-        `Your task turn ended without a valid final report at ${paths.finalReportJson}${problem ? `: ${problem}` : ""}. ` +
+    const { exitCode, report } = await runClaudeCodeWorkerTurns({
+      prompt: input.promptText,
+      stopped,
+      turn,
+      sessionId: () => sessionId,
+      readReport: () => readWorkerReport(paths.finalReportJson),
+      finalizePrompt: async () => {
+        const { problem } = await readWorkerReportWithProblem(paths.finalReportJson);
+        return `Your task turn ended without a valid final report at ${paths.finalReportJson}${problem ? `: ${problem}` : ""}. ` +
           'The "status" field must be exactly one of "complete", "partial", "blocked" or "failed". ' +
-          "Do not redo completed work. Write the mandatory final-report.json using the exact schema and absolute path from the original task prompt, then confirm it parses as JSON.",
-        sessionId,
-      );
-      report = await readWorkerReport(paths.finalReportJson);
-    }
+          "Do not redo completed work. Write the mandatory final-report.json using the exact schema and absolute path from the original task prompt, then confirm it parses as JSON.";
+      },
+      onFinalizing: () => paint("\r\n  \x1b[33m↻ Finalizing the evidence report…\x1b[0m\r\n"),
+    });
     if (!report) {
       throw new Error(exitCode === 0
         ? "Claude Code worker completed without a parseable final-report.json."
@@ -22677,7 +22707,7 @@ async function runClaudeCodeWorkerSession(input: {
     return { exitCode: 1, error: message, ...usage };
   } finally {
     activeWorkerProcesses.delete(attemptId);
-    (current as ClaudeCodeProcess | null)?.kill();
+    await (current as ClaudeCodeProcess | null)?.kill().catch(() => undefined);
     launch?.release();
     try { pty.killImmediate(attemptId); } catch { /* already closed */ }
   }
