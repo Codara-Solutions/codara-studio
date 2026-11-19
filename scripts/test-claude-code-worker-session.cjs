@@ -39,7 +39,7 @@ assert.match(body, /acquireLease: \(profileId\) => acquireNativeClaudeProfileLea
 console.log("PASS no login sync on launch or release");
 
 assert.match(body, /getProvider\("claude"\)\.buildArgs\(/);
-assert.match(body, /launchArgs: claudeLaunchArgs\(\{ userArgs: providerArgs, mode: "worker", withoutHooks: true \}\)/);
+assert.match(body, /const launchArgs = claudeLaunchArgs\(\{ userArgs: providerArgs, mode: "worker", withoutHooks: true \}\);/);
 assert.match(body, /hookEnv: null,/);
 // The hook-free settings keep the browser guard and are rewritten with it.
 const integration = fs.readFileSync(path.join(ROOT, "src", "main", "agent-launch-integration.ts"), "utf8");
@@ -60,15 +60,28 @@ console.log("PASS the display shell never syncs accounts");
 assert.match(body, /const stopped = \(\) => interrupted \|\| input\.launchAborted\(\);/);
 assert.match(body, /const turn = async \(prompt: string, resume\?: string\): Promise<number> => \{\s*if \(stopped\(\)\) throw/);
 assert.match(body, /await runClaudeCodeWorkerTurns\(\{\s*prompt: input\.promptText,\s*stopped,/);
-assert.match(body, /await \(current as ClaudeCodeProcess \| null\)\?\.kill\(\)/);
+assert.match(body, /await \(lastProcess as ClaudeCodeProcess \| null\)\?\.kill\(\)/);
 console.log("PASS a Stop is checked before every turn and the tree is awaited");
 
 assert.match(body, /const paint = \(raw: string\) => \{\s*const text = redactPastedSecrets\(run\.id, raw\);/);
 assert.match(body, /const line = claudeCodeToolLine\(event\);/);
 assert.ok(!/paint\([^)]*stderrTail/.test(body), "Claude Code's error text is never logged");
-assert.match(body, /event\.kind === "tool_failed"\) paint\(`[^`$]*`\)/, "a failed tool is logged as a fixed line");
+assert.match(body, /event\.kind === "tool_failed"\) paint\("[^"]*"\)/, "a failed tool is logged as a fixed line");
 assert.match(body, /event\.kind === "text"\) show\(/, "assistant text reaches the pane only");
 // Success is published only after the last flush and a final Stop check.
-assert.match(body, /await logQueue\.catch\(\(\) => undefined\);\s*\/\/[^\n]*\n\s*if \(stopped\(\)\) throw new Error\("Claude Code worker was stopped\."\);\s*applyHookStateReport\(\{ paneId: attemptId, state: "done"/);
-console.log("PASS painted and logged text is redacted");
+assert.match(body, /await logQueue\.catch\(\(\) => undefined\);\s*\/\/[^\n]*\n\s*if \(stopped\(\)\) throw new Error\("Claude Code worker was stopped\."\);[\s\S]{0,300}?applyHookStateReport\(\{ paneId: attemptId, state: "done"/);
+// The log takes only fixed lines: the report's details and an error's text
+// go to the pane, after the last Stop check.
+assert.match(body, /if \(stopped\(\)\) throw new Error\("Claude Code worker was stopped\."\);\s*paint\("[^"$`]*"\);\s*paintPiWorkerReportOutcome\(show, report\);/);
+assert.ok(!/paintPiWorkerReportOutcome\(paint/.test(body), "the report's text is never logged");
+// The one logged line with a value in it is a tool's checked name.
+assert.deepEqual(
+  body.match(/paint\(`[^`]*`\)/g),
+  ["paint(`\\x1b[38;2;74;222;208m  ●\\x1b[0m ${piWorkerSafeText(line, 200)}\\r\\n`)"],
+  "no other logged line is built from variable text",
+);
+// Required settings, and the lease kept while anything still runs.
+assert.match(body, /if \(!launchArgs\.includes\("--settings"\)\) \{\s*throw new Error/);
+assert.match(body, /if \(stoppedCleanly\) launch\?\.release\(\);/);
+console.log("PASS painted and logged text is redacted; the log takes fixed lines only");
 console.log("claude code worker session: all checks passed");
