@@ -7416,14 +7416,23 @@ async function askManagerBackendUnderTurnLock(
   {
     const stopping = forcePauseWindowClosed(run.id);
     if (stopping) await stopping;
-    const latest = await getRun(run.id);
+    let latest = await getRun(run.id);
+    // A Stop whose window opened while that read was pending (or at any
+    // point since this turn began) is not visible in the run yet: count
+    // Stops instead, wait for its commit, and do not dispatch.
+    const stoppedSinceEntry = forcePauseStartCount(run.id) !== entryStops;
+    if (stoppedSinceEntry) {
+      const again = forcePauseWindowClosed(run.id);
+      if (again) await again;
+      latest = await getRun(run.id);
+    }
     const stillLive = latest?.sparkCalls.some(
       (call) => call.id === callId && call.status === "started" && !call.completedAt,
     );
     // Stop and Cancel both settle every live call, and Stop moves the epoch;
     // the run's status alone says nothing (a follow-up on a finished chat
     // runs with the run still complete).
-    if (!latest || !stillLive || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
+    if (stoppedSinceEntry || !latest || !stillLive || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
       acceptingStreamEvents = false;
       // The prepared prompt never reached a session: its memory goes again.
       releaseCoraMemoryInjection(run.id);
@@ -16011,6 +16020,7 @@ async function performAutoCompaction(
     // Unlike prepareManagerTurn, this deliberately selects NO queued user
     // messages: the summarize turn is maintenance, not conversation, and input
     // arriving while it runs must stay queued for the next real turn.
+    const stopsBeforeCommit = forcePauseStartCount(runId);
     const prepared = await commitRunChange(run, {
       type: "spark_call.started",
       message: `Cora compaction summary call started: ${summarizeCall.model}`,
@@ -16039,6 +16049,37 @@ async function performAutoCompaction(
     });
     if (!prepared.sparkCalls.some((entry) => entry.id === callId)) return;
     run = prepared;
+    // A Stop that started while this call was committed disposes the chat's
+    // sessions first and commits the pause after: a summary sent in between
+    // would open a session that Stop never disposes. Wait for a Stop in
+    // progress, then re-decide on what it left, as a manager turn does
+    // before dispatch.
+    {
+      const stopping = forcePauseWindowClosed(runId);
+      if (stopping) await stopping;
+      let latest = await getRun(runId);
+      // A Stop whose window opened while that read was pending is not in
+      // the run yet: count Stops, and wait for its commit before settling.
+      const stoppedSinceCommit = forcePauseStartCount(runId) !== stopsBeforeCommit;
+      if (stoppedSinceCommit) {
+        const again = forcePauseWindowClosed(runId);
+        if (again) await again;
+        latest = await getRun(runId);
+      }
+      const stillLive = latest?.sparkCalls.some(
+        (entry) => entry.id === callId && entry.status === "started" && !entry.completedAt,
+      );
+      if (
+        stoppedSinceCommit ||
+        !latest ||
+        !stillLive ||
+        conversationEpoch(latest) !== epoch ||
+        ["paused", "blocked", "cancelled", "failed"].includes(latest.status)
+      ) {
+        if (stillLive) await settleAutoCompactionCall(runId, callId, epoch, "Stopped before the summary was sent.");
+        return;
+      }
+    }
     const compactionSource = structuredClone(run);
 
     const startedMs = Date.now();
@@ -16250,12 +16291,17 @@ async function compactConversationUnderTurnLock(runId: string): Promise<RunState
   if (!cwd) throw new Error("This run has no workspace directory.");
 
   const oldEpoch = conversationEpoch(run);
+  const earlierCalls = new Set(run.sparkCalls.map((call) => call.id));
   await performAutoCompaction(runId, cwd);
   const compacted = await requireRun(runId);
-  if (conversationEpoch(compacted) === oldEpoch) {
-    const failed = [...compacted.sparkCalls]
-      .reverse()
-      .find((call) => call.purpose === "compaction" && call.status === "failed");
+  // Compacted means this command's own summary call completed. A Stop also
+  // moves the epoch, and then nothing was compacted.
+  const ownCalls = compacted.sparkCalls.filter((call) => call.purpose === "compaction" && !earlierCalls.has(call.id));
+  if (!ownCalls.some((call) => call.status === "completed")) {
+    if (conversationEpoch(compacted) !== oldEpoch || ["paused", "cancelled"].includes(compacted.status)) {
+      throw new Error("The conversation was not compacted: the run was stopped first.");
+    }
+    const failed = [...ownCalls].reverse().find((call) => call.status === "failed");
     throw new Error(failed?.error || "Cora could not produce a safe conversation summary.");
   }
   return compacted;
