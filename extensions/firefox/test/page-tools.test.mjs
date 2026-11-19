@@ -55,11 +55,17 @@ export async function run(assembled) {
   assert.throws(() => expressionAnswer({ value: "forged" }), /no answer/);
 
   // The code runs only in the document that was checked: not on another
-  // page the tab went to meanwhile; a #hash change is the same document.
+  // page the tab went to meanwhile, even one that replaced String methods.
   const ran = { count: 0 };
   await assert.rejects(evaluate("count += 1", {}, { ran, count: 0, location: { href: "https://blocked.example/" } }), (error) => error.message === MOVED_ERROR);
   await assert.rejects(evaluate("count += 1", { awaitPromise: true }, { location: { href: "https://a.example/account" } }), (error) => error.message === MOVED_ERROR);
-  assert.deepEqual(await evaluate("1", { url: `${PAGE}#top` }, { location: { href: `${PAGE}#other` } }), { result: { type: "number", value: 1 } });
+  const forging = 'String.prototype.split = () => ["https://a.example/account?x=1"]; String.prototype.startsWith = () => true;';
+  for (const script of [expressionScript("count += 1", { url: PAGE }), statementsScript("count += 1", "m", { url: PAGE })]) {
+    const page = { count: 0, location: { href: "https://blocked.example/" } };
+    vm.runInNewContext(`${forging}\n${script}`, page);
+    assert.equal(page.count, 0, "a page's own String methods do not open the guard");
+  }
+  assert.deepEqual(await evaluate("1", { url: `${PAGE}#top` }, { location: { href: `${PAGE}#top` } }), { result: { type: "number", value: 1 } });
   const elsewhere = { effects: 0, location: { href: "https://blocked.example/" } };
   await assert.rejects(async () => statementsAnswer(await execute(statementsScript("effects += 1; effects", "m", { url: PAGE }), elsewhere), "m"), (error) => error.message === MOVED_ERROR);
   assert.equal(elsewhere.effects, 0, "nothing ran on the other page");
@@ -81,14 +87,18 @@ export async function run(assembled) {
   assert.match(statementThrow.exceptionDetails.exception.description, /^TypeError: /);
   assert.match(statementsAnswer({ error: null }, marker).exceptionDetails.exception.value, /did not report/);
   assert.equal(SYNTAX_ERROR.exceptionDetails.exception.className, "SyntaxError");
-  // A leading "use strict" still holds: no page global from a typo.
+  // Whether statements start with "use strict" is the engine's answer, comments and all.
+  const isStrict = async (code) => frameFailed(await execute(compileCheck(code, { asScript: true, strictProbe: true })));
+  assert.equal(await isStrict('"use strict";\nundeclaredName = 1;'), true);
+  assert.equal(await isStrict("/* setup */ 'use strict'\nundeclaredName = 1"), true);
+  assert.equal(await isStrict('"use strict".length'), false);
+  assert.equal(await isStrict("undeclaredName = 1"), false);
+  assert.equal(frameFailed(await execute(compileCheck('"use strict"; var let = 1;', { asScript: true }))), true);
+  // And then holds when they run: no page global from a typo.
   const sloppy = {};
-  const strict = statementsAnswer(await execute(statementsScript('"use strict";\nundeclaredName = 1;', marker, { url: PAGE }), sloppy), marker);
+  const strict = statementsAnswer(await execute(statementsScript("/* setup */ 'use strict'\nundeclaredName = 1;", marker, { url: PAGE, strict: true }), sloppy), marker);
   assert.match(strict.exceptionDetails.exception.description, /^ReferenceError/);
   assert.equal("undeclaredName" in sloppy, false);
-  // The compile check compiles the statements in the shape they run in, strict included.
-  assert.equal(frameFailed(await execute(compileCheck('"use strict"; var let = 1;', { asScript: true }))), true);
-  assert.equal(frameFailed(await execute(compileCheck("var let = 1; let", { asScript: true }))), false);
   assert.equal(frameFailed({ frameId: 0, result: null }), false);
   assert.equal(frameFailed({ frameId: 0, error: null }), true);
   assert.equal(frameFailed(undefined), true);
@@ -171,7 +181,7 @@ function screenshots({ captureOptions, screenshotAnswer, measureLayout, layoutMe
     scrollY: 400,
     devicePixelRatio: 2,
   };
-  const measured = vm.runInNewContext(`(${measureLayout.toString()})(${JSON.stringify(PAGE)})`, { ...page, location: { href: `${PAGE}#here` } });
+  const measured = vm.runInNewContext(`(${measureLayout.toString()})(${JSON.stringify(PAGE)})`, { ...page, location: { href: PAGE } });
   assert.throws(() => layoutMetrics(vm.runInNewContext(`(${measureLayout.toString()})(${JSON.stringify(PAGE)})`, { ...page, location: { href: "https://blocked.example/" } })), /went to another page/);
   const metrics = layoutMetrics(measured);
   assert.deepEqual(metrics.cssContentSize, { x: 0, y: 0, width: 1350, height: 3029 });

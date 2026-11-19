@@ -152,18 +152,15 @@ export function describeThrown(error) {
   return { type, value: plain ? error : String(error) };
 }
 
-/** A URL without its fragment: a #hash change keeps the document. */
-export function documentUrl(url) {
-  return String(url ?? "").split("#")[0];
-}
-
 /** The tool error when the tab left the page that was checked before anything ran there. */
 export const MOVED_ERROR = "The tab went to another page while the agent's command was on its way; it was not answered. Read the tab again and retry.";
 
 // Run first in the page, in the same script as the agent's code: the code
 // runs only in the document the extension checked (shared, not blocked).
-// `location` cannot be shadowed by a page's own declarations.
-const inDocument = (url) => `location.href.split("#")[0] === ${JSON.stringify(documentUrl(url))}`;
+// `location` cannot be shadowed by a page's own declarations, and `===`
+// calls nothing the page could have replaced (a #hash change made in
+// between reads as another page too, which only asks for a retry).
+const inDocument = (url) => `location.href === ${JSON.stringify(String(url ?? ""))}`;
 
 /**
  * The code that evaluates an expression in the page and returns
@@ -188,20 +185,23 @@ export function expressionScript(expression, { awaitPromise = false, url = "" } 
   ].join("\n");
 }
 
-/** Code that only compiles the expression (or, `asScript`, the statements as they will run), and runs none of it. */
-export function compileCheck(code, { asScript = false, awaitPromise = false } = {}) {
-  const body = asScript ? `\n${statementsScript(code, "check")}\n` : ` return (${code}\n);`;
+/**
+ * Code that only compiles, and runs none of it: the expression, or (`asScript`)
+ * the statements as a function body, where their own directives hold.
+ * `strictProbe` adds a `with` statement, which only strict code refuses: the
+ * engine's own answer to whether the statements start with "use strict".
+ */
+export function compileCheck(code, { asScript = false, awaitPromise = false, strictProbe = false } = {}) {
+  const body = asScript ? `\n${code}\n${strictProbe ? ";\nwith ({}) {}\n" : ""}` : ` return (${code}\n);`;
   return `void ${awaitPromise ? "async " : ""}function () {${body}};`;
 }
 
-// A leading "use strict" stays the script's directive, outside the try block.
-const STRICT = /^\s*(['"])use strict\1/;
-
 /** Statements whose last value is the result, as Runtime.evaluate allows; a throw, or another page, comes back under `marker`. */
-export function statementsScript(code, marker, { url = "" } = {}) {
+export function statementsScript(code, marker, { url = "", strict = false } = {}) {
   const key = JSON.stringify(marker);
   return [
-    STRICT.test(code) ? '"use strict";' : "",
+    // Their "use strict" stays the script's directive, outside the try block.
+    strict ? '"use strict";' : "",
     `if (!(${inDocument(url)})) ({ ${key}: { moved: true } });`,
     `else try {\n${code}\n} catch (__codaraError) { ({ ${key}: { thrown: (${describeThrown.toString()})(__codaraError) } }) }`,
   ].join("\n");
@@ -272,7 +272,7 @@ export function screenshotAnswer(dataUrl) {
 
 /** Runs in the page's isolated world through scripting.executeScript; measures only, and only the expected document. */
 export function measureLayout(expected) {
-  if (location.href.split("#")[0] !== expected) return { moved: true };
+  if (location.href !== expected) return { moved: true };
   const root = document.documentElement;
   const body = document.body;
   const view = window.visualViewport;

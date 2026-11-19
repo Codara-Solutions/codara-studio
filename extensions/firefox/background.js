@@ -37,7 +37,6 @@ import {
   accessRows,
   captureOptions,
   compileCheck,
-  documentUrl,
   expressionAnswer,
   expressionScript,
   frameFailed,
@@ -301,10 +300,11 @@ async function answerCommand(request, socket) {
       return evaluateInPage(tab.id, params, socket);
     case "Page.getLayoutMetrics": {
       const now = await stillUsable(tab.id, socket);
-      // Measured only in the document checked here.
-      const [frame] = await withSiteError(now, () => chrome.scripting.executeScript({ target: { tabId: now.id }, func: measureLayout, args: [documentUrl(now.url)] }));
+      const loads = navigations.get(now.id) ?? 0;
+      // Measured only in the document checked here, and answered only if the tab is still there.
+      const [frame] = await withSiteError(now, () => chrome.scripting.executeScript({ target: { tabId: now.id }, func: measureLayout, args: [now.url] }));
       const metrics = layoutMetrics(frame?.result);
-      await stillUsable(tab.id, socket);
+      await stillOnPage(now, loads, socket);
       return metrics;
     }
     case "Page.captureScreenshot": {
@@ -315,8 +315,7 @@ async function answerCommand(request, socket) {
       // went elsewhere (a blocked site, say) is dropped.
       const loads = navigations.get(now.id) ?? 0;
       const image = await chrome.tabs.captureTab(now.id, captureOptions(params));
-      const after = await stillUsable(tab.id, socket);
-      if (documentUrl(after.url) !== documentUrl(now.url) || (navigations.get(now.id) ?? 0) !== loads) throw new Error(MOVED_ERROR);
+      await stillOnPage(now, loads, socket);
       return screenshotAnswer(image);
     }
   }
@@ -330,6 +329,12 @@ async function stillUsable(tabId, socket) {
   stillLive(socket);
   if (!state.attached.includes(tab.id)) throw new Error(`${agentTabId(tab.id)} is not attached.`);
   return tab;
+}
+
+/** Throws unless the tab is still usable and on the page `before` was, with no page load since `loads`. */
+async function stillOnPage(before, loads, socket) {
+  const after = await stillUsable(before.id, socket);
+  if (after.url !== before.url || (navigations.get(before.id) ?? 0) !== loads) throw new Error(MOVED_ERROR);
 }
 
 /** Firefox's own refusal (the tab moved to a site not allowed) as the same plain error. */
@@ -359,11 +364,15 @@ async function evaluateInPage(tabId, params, socket) {
   // expressionScript), and its answer leaves only while the tab is still
   // shared and allowed: the agent's own code may navigate it, so not
   // necessarily on the same page.
+  // One page for the whole request: a fallback never runs on a page the tab went to after the first try.
+  let checkedUrl = null;
   const run = async (script) => {
     const tab = await stillUsable(tabId, socket);
+    checkedUrl ??= tab.url;
+    if (tab.url !== checkedUrl) throw new Error(MOVED_ERROR);
     // Firefox removes the API when the user takes the permission back.
     if (!chrome.userScripts) throw new Error(accessError("scripts", tab.url, wasAsked("scripts", tab.url)));
-    const code = script(tab.url);
+    const code = script(checkedUrl);
     const [frame] = await withSiteError(tab, () => chrome.userScripts.execute({ js: [{ code }], target: { tabId: tab.id }, world: "MAIN", injectImmediately: true }));
     await stillUsable(tabId, socket);
     if (!frame) throw new Error(`${agentTabId(tabId)} has no page to run the script in.`);
@@ -375,9 +384,10 @@ async function evaluateInPage(tabId, params, socket) {
     throw new Error("The page did not finish the script; it may have navigated away. Nothing was run twice.");
   }
   if (frameFailed(await run(() => compileCheck(expression, { asScript: true })))) return SYNTAX_ERROR;
+  const strict = frameFailed(await run(() => compileCheck(expression, { asScript: true, strictProbe: true })));
   const marker = `__codaraThrown${crypto.randomUUID().replaceAll("-", "")}`;
   try {
-    return statementsAnswer(await run((url) => statementsScript(expression, marker, { url })), marker);
+    return statementsAnswer(await run((url) => statementsScript(expression, marker, { url, strict })), marker);
   } catch (error) {
     // The last statement's value cannot leave the page (a DOM node, a function).
     if (/non-structured-clonable/i.test(String(error?.message))) return { result: { type: "object", value: {} } };
