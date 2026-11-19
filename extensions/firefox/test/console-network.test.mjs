@@ -12,13 +12,12 @@ function hookedPage(assembled) {
   let answerHello;
   const page = {
     console: Object.fromEntries(["log", "info", "debug", "warn", "error", "trace", "dir", "table", "assert"].map((level) => [level, (...args) => logged.push([level, ...args])])),
-    JSON,
-    Array,
-    Error: function PageError() {
-      return { stack: "@https://a.example/app.js:12:5\n" };
-    },
   };
   const context = {
+    // The hook's own stack: its frame, then the page's (as Firefox gives it).
+    Error: function HookError() {
+      return { stack: "@moz-extension://id/console-hook.js:80:15\nrun@https://a.example/app.js:12:5\n" };
+    },
     window: { wrappedJSObject: page, addEventListener: (type, listener) => (listeners[type] = listener) },
     exportFunction: (fn, target, { defineAs }) => (target[defineAs] = fn),
     browser: {
@@ -53,17 +52,29 @@ export async function run(assembled) {
   hook.answerHello({ mode: "off" });
   await tick();
   hook.page.console.warn("unshared");
-  hook.listeners.message({ type: "codara-console", mode: "on" });
+  hook.listeners.message({ type: "codara-console", mode: "on", since: 0 });
   assert.deepEqual(hook.sent, [], "a tab not shared at load sends nothing, and keeps nothing for later");
-  hook.listeners.message({ type: "codara-console", mode: "off" });
+  hook.listeners.message({ type: "codara-console", mode: "off", since: 0 });
   hook.page.console.log("while off");
-  hook.listeners.message({ type: "codara-console", mode: "wait" });
+  hook.listeners.message({ type: "codara-console", mode: "wait", since: 0 });
   hook.page.console.error("kept while shared");
-  hook.listeners.message({ type: "codara-console", mode: "on" });
+  hook.listeners.message({ type: "codara-console", mode: "on", since: 0 });
   assert.equal(hook.sent.length, 1, "only what was logged while the tab was shared is replayed");
   assert.deepEqual(hook.sent[0], { kind: "console", level: "error", args: [{ type: "string", value: "kept while shared" }], at: hook.sent[0].at, source: "https://a.example/app.js", line: 12 });
+  // Entries from before the tab's current sharing began are never replayed.
+  hook.listeners.message({ type: "codara-console", mode: "off", since: 0 });
+  hook.listeners.message({ type: "codara-console", mode: "wait", since: 0 });
+  hook.page.console.log("from an earlier sharing");
+  hook.listeners.message({ type: "codara-console", mode: "on", since: Date.now() + 5000 });
+  assert.equal(hook.sent.length, 1, "kept entries older than the sharing are dropped");
+  const loop = { a: 1 };
+  loop.self = loop;
   hook.page.console.log({ x: 1 }, [1, 2], 0 / 0, -0, 10n, null, undefined, "y".repeat(20_000), ...Array(30).fill(1));
-  assert.deepEqual(hook.sent[1].args.slice(0, 7), [
+  hook.page.console.log(loop, { long: Array(100_000).fill(7) }, new Date(0));
+  assert.deepEqual(hook.sent.at(-1).args.map((arg) => arg.value.slice(0, 40)), ['{"a":1,"self":{"a":1,"self":{"a":1,"self', '{"long":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7', '"1970-01-01T00:00:00.000Z"']);
+  assert.ok(hook.sent.at(-1).args[1].value.endsWith(",…]}"), "a long array is cut, not walked");
+  hook.sent.pop();
+  assert.deepEqual(hook.sent.at(-1).args.slice(0, 7), [
     { type: "object", value: '{"x":1}' },
     { type: "object", subtype: "array", value: "[1,2]" },
     { type: "number", unserializableValue: "NaN" },
@@ -72,8 +83,8 @@ export async function run(assembled) {
     { type: "object", subtype: "null", value: null },
     { type: "undefined" },
   ]);
-  assert.equal(hook.sent[1].args.length, 20, "arguments capped in the page, before they are sent");
-  assert.equal(hook.sent[1].args[7].value.length, 10_000, "text capped in the page");
+  assert.equal(hook.sent.at(-1).args.length, 20, "arguments capped in the page, before they are sent");
+  assert.equal(hook.sent.at(-1).args[7].value.length, 10_000, "text capped in the page");
   hook.page.console.log("same");
   hook.page.console.log("same");
   assert.notEqual(hook.sent.at(-1).at, hook.sent.at(-2).at, "two entries never share a time, so Codara's replay check keeps both");
@@ -86,10 +97,10 @@ export async function run(assembled) {
   assert.equal(hook.sent.length, before, "events a page dispatches itself are not the page's errors");
   hook.listeners.unhandledrejection({ isTrusted: true, reason: "no" });
   assert.equal(hook.sent.at(-1).message, "Uncaught (in promise) no");
-  hook.listeners.message({ type: "codara-console", mode: "off" });
+  hook.listeners.message({ type: "codara-console", mode: "off", since: 0 });
   const count = hook.sent.length;
   for (let i = 0; i < 300; i++) hook.page.console.log("loop");
-  hook.listeners.message({ type: "codara-console", mode: "on" });
+  hook.listeners.message({ type: "codara-console", mode: "on", since: 0 });
   assert.equal(hook.sent.length, count, "nothing once the tab is unshared, and nothing kept from then");
   for (let i = 0; i < 300; i++) hook.page.console.log("loop");
   assert.ok(hook.sent.length - count <= 100, "a page logging in a loop is capped per second, before it is described");
@@ -119,6 +130,7 @@ export async function run(assembled) {
   });
   assert.deepEqual(sent[1].request, { url: "https://a.example/data.json", method: "GET", headers: { Accept: "*/*", Cookie: "s=1" } });
   assert.deepEqual(sent[1].redirectResponse.headers, { location: "/data.json", "Set-Cookie": "a=1\nb=2" });
+  assert.deepEqual(network.headerObject([{ name: "constructor", value: "x" }, { name: "toString", value: "y" }]), { constructor: "x", toString: "y" }, "header names are only names");
   assert.deepEqual([sent[1].type, sent[1].frameId, sent[1].loaderId, sent[1].documentURL, sent[1].redirectResponse.status, sent[1].redirectResponse.statusText], ["Fetch", "firefox-tab-7", "L1", "https://a.example/app", 302, "Found"]);
   // Cookies come out unless the tab's cookie switch is on, as in Chrome.
   assert.deepEqual(redactCdpEvent(...sent, false).request.headers, { Accept: "*/*" });

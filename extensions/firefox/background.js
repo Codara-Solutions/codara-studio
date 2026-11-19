@@ -283,6 +283,7 @@ async function handleRequest(request) {
       const tab = await usableTab(request.tabId);
       stillLive(socket);
       if (!state.attached.includes(tab.id)) {
+        attachedSince.set(tab.id, Date.now());
         await save({ attached: withValue(state.attached, tab.id) });
         void refresh();
       }
@@ -608,6 +609,7 @@ function handleMessage(message) {
 
 async function detachTab(tabId) {
   eventDomains.delete(tabId);
+  attachedSince.delete(tabId);
   forgetRequests(tabId);
   void switchConsole(tabId);
   if (!state.attached.includes(tabId)) return;
@@ -655,6 +657,13 @@ function consoleMode(tab) {
   return eventsOn(tab.id, "Runtime") ? "on" : "wait";
 }
 
+// When each tab's current attachment began: the hook drops what a page
+// logged before it. Unknown after the event page restarts, so then from
+// its start.
+const attachedSince = new Map();
+const startedAt = Date.now();
+const consoleAnswer = (tab) => ({ mode: consoleMode(tab), since: attachedSince.get(tab?.id) ?? startedAt });
+
 /**
  * Tells the tab's console hook its mode. Turning it on also puts the hook
  * into a page loaded before it was registered (it guards against a second
@@ -662,9 +671,9 @@ function consoleMode(tab) {
  */
 async function switchConsole(tabId) {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  const mode = consoleMode(tab);
-  if (mode === "on") await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ["console-hook.js"] }).catch(() => {});
-  await chrome.tabs.sendMessage(tabId, { type: "codara-console", mode }, { frameId: 0 }).catch(() => {});
+  const answer = consoleAnswer(tab);
+  if (answer.mode === "on") await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ["console-hook.js"] }).catch(() => {});
+  await chrome.tabs.sendMessage(tabId, { type: "codara-console", ...answer }, { frameId: 0 }).catch(() => {});
 }
 
 // The hook runs from document start on every site the user let the
@@ -705,10 +714,20 @@ function sendNetwork(details, [method, params]) {
   sendLive({ type: "cdp_event", tabId: details.tabId, method, params: redactCdpEvent(method, params, state.storageTabs.includes(details.tabId)) });
 }
 
+/**
+ * The redirect response that led to this hop, if Codara may still see it
+ * (its site may have been blocked since); otherwise the request ends here.
+ */
+function redirectOf(seen) {
+  if (!seen.redirect || requestVisible(seen.redirect, blockedUrl)) return true;
+  requestLost(seen.details, HIDDEN_REDIRECT);
+  return false;
+}
+
 /** Sends the request's own event first if Firefox reported none with headers (a cached load). */
 function requestSent(details) {
   const seen = requests.get(details.requestId);
-  if (!seen || seen.sent) return;
+  if (!seen || seen.sent || !redirectOf(seen)) return;
   sendNetwork(details, requestEvent(seen.details, { headers: [], redirect: seen.redirect, loaderId: loaderOf(seen.details) }));
   Object.assign(seen, { sent: true, redirect: null });
 }
@@ -725,11 +744,15 @@ const HIDDEN_REDIRECT = "Redirected to a site the extension may not show.";
 chrome.webRequest.onBeforeRequest.addListener((details) => {
   if (!networkWanted(details)) return;
   requests.set(details.requestId, { redirect: null, ...requests.get(details.requestId), details, sent: false });
-  if (requests.size > REQUESTS_KEPT) requests.delete(requests.keys().next().value);
+  if (requests.size > REQUESTS_KEPT) {
+    const [oldest] = requests.values();
+    if (oldest.sent && networkWanted(oldest.details)) requestLost(oldest.details, "Too many requests open at once to follow this one.");
+    else requests.delete(oldest.details.requestId);
+  }
 }, ALL_URLS);
 chrome.webRequest.onSendHeaders.addListener((details) => {
   const seen = requests.get(details.requestId);
-  if (!seen || seen.sent || !networkWanted(details)) return;
+  if (!seen || seen.sent || !networkWanted(details) || !redirectOf(seen)) return;
   sendNetwork(details, requestEvent(details, { headers: details.requestHeaders, redirect: seen.redirect, loaderId: loaderOf(details) }));
   Object.assign(seen, { sent: true, redirect: null });
 }, ALL_URLS, ["requestHeaders"]);
@@ -825,6 +848,11 @@ chrome.tabs.onActivated.addListener(scheduleRefresh);
 chrome.tabs.onAttached.addListener(scheduleRefresh);
 // A tab moved to another window may have left what the user shared: no
 // event of it goes on, and it is let go if so.
+// Between windows a tab is in none: nothing of it goes on until it lands.
+chrome.tabs.onDetached.addListener((tabId) => {
+  const seen = tabsSeen.get(tabId);
+  if (seen) seen.windowId = null;
+});
 chrome.tabs.onAttached.addListener(async (tabId, { newWindowId }) => {
   const seen = tabsSeen.get(tabId);
   if (seen) seen.windowId = newWindowId;
@@ -873,6 +901,7 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
 });
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   tabsSeen.delete(tabId);
+  attachedSince.delete(tabId);
   consoleBudgets.delete(tabId);
   forgetRequests(tabId);
   navigations.delete(tabId);
@@ -1049,7 +1078,7 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
   if (sender.id !== chrome.runtime.id || fromOwnPage(sender) || !sender.tab || sender.frameId !== 0 || typeof sender.url !== "string") return false;
   if (firefoxBlockingRule(sender.url, rules) || isFirefoxRestrictedUrl(sender.url)) return false;
   if (request?.type === "codara-console-hello") {
-    void ready.then(() => respond({ mode: consoleMode(sender.tab) }));
+    void ready.then(() => respond(consoleAnswer(sender.tab)));
     return true;
   }
   if (request?.type === "codara-console-entry" && consoleMode(sender.tab) === "on" && consoleBudget(sender.tab.id)) {

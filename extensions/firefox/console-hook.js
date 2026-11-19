@@ -5,8 +5,9 @@
 // errors. The extension sets its mode: "on" sends what the page logs;
 // "wait" (the tab is shared, Codara has not asked yet) keeps the last few
 // entries, as the debugger replays them when Codara starts listening;
-// "off" sends and keeps nothing, and forgets what it kept. It waits for
-// the extension's first answer before keeping anything past that.
+// "off" sends and keeps nothing, and forgets what it kept. Each answer
+// says since when the tab is shared with Codara: anything kept from before
+// (the moments before the first answer included) is dropped, never sent.
 
 (() => {
   // Registered for document start and put into pages loaded before that: one copy per page.
@@ -38,16 +39,40 @@
     kept.push(entry);
     if (kept.length > KEPT) kept.shift();
   }
-  function setMode(next) {
-    mode = ["on", "wait"].includes(next) ? next : "off";
-    if (mode === "off") kept = [];
+  function setMode(next, since) {
+    mode = ["on", "wait"].includes(next) && Number.isFinite(since) ? next : "off";
+    kept = mode === "off" ? [] : kept.filter((entry) => entry.at >= since);
     if (mode === "on") for (const entry of kept.splice(0)) send(entry);
   }
 
   const cap = (text) => String(text).slice(0, TEXT);
-  // Logged values reach this script as Xrays (measured on Firefox 160): its
-  // own JSON and Object functions see only their data properties, so no
-  // getter, toJSON or other page code runs to describe them.
+  // Logged values reach this script as Xrays (measured on Firefox 160): it
+  // sees only their data properties, so no getter, toJSON or other page
+  // code runs to describe them. The walk is bounded (depth, items, length),
+  // so a huge or self-referencing value costs the page little.
+  function json(value, room, depth = 0) {
+    if (room.left <= 0) return "…";
+    let out;
+    if (value === null || ["number", "boolean"].includes(typeof value)) out = Number.isNaN(value) ? "NaN" : String(value);
+    else if (typeof value === "string") out = JSON.stringify(value.slice(0, room.left));
+    else if (typeof value !== "object") out = typeof value === "undefined" ? "undefined" : `[${typeof value}]`;
+    else if (Object.prototype.toString.call(value) === "[object Date]") out = JSON.stringify(Date.prototype.toISOString.call(value));
+    else if (depth >= 4) out = Array.isArray(value) ? "[…]" : "{…}";
+    else {
+      const array = Array.isArray(value);
+      const keys = array ? [] : Object.keys(value);
+      const length = array ? value.length : keys.length;
+      const parts = [];
+      for (let i = 0; i < Math.min(length, 100) && room.left > 0; i++) {
+        const part = array ? json(value[i], room, depth + 1) : `${JSON.stringify(keys[i])}:${json(value[keys[i]], room, depth + 1)}`;
+        parts.push(part);
+      }
+      if (length > parts.length) parts.push("…");
+      return array ? `[${parts.join(",")}]` : `{${parts.join(",")}}`;
+    }
+    room.left -= out.length;
+    return out;
+  }
   const errorText = (value) => {
     try {
       if (typeof value?.stack === "string" && typeof value?.message === "string") return cap(`${value.name ?? "Error"}: ${value.message}\n${value.stack}`);
@@ -74,20 +99,22 @@
     const error = errorText(value);
     if (error) return { type: "object", subtype: "error", description: error };
     const subtype = Array.isArray(value) ? { subtype: "array" } : {};
-    let json = null;
     try {
-      json = JSON.stringify(value);
-    } catch {}
-    return typeof json === "string" ? { type: "object", ...subtype, value: cap(json) } : { type: "object", ...subtype, description: Object.prototype.toString.call(value) };
+      return { type: "object", ...subtype, value: cap(json(value, { left: TEXT })) };
+    } catch {
+      return { type: "object", ...subtype, description: Object.prototype.toString.call(value) };
+    }
   }
-  // The page's frame that called: an Error made in the page leaves this script's frames out (measured).
+  // The page's frame that called: this script's own stack lists the page's
+  // frames after its own (measured on Firefox 160), with no page code run.
   function caller() {
     try {
-      const frame = /@(.*):(\d+):\d+$/m.exec(String(new page.Error().stack).split("\n")[0]);
-      return frame ? { source: cap(frame[1]), line: Number(frame[2]) } : {};
-    } catch {
-      return {};
-    }
+      for (const line of String(new Error().stack).split("\n")) {
+        const frame = /@(.*):(\d+):\d+$/.exec(line);
+        if (frame && !frame[1].startsWith("moz-extension:")) return { source: cap(frame[1]), line: Number(frame[2]) };
+      }
+    } catch {}
+    return {};
   }
 
   for (const level of ["log", "info", "debug", "warn", "error", "trace", "dir", "table", "assert"]) {
@@ -121,7 +148,7 @@
   });
 
   browser.runtime.onMessage.addListener((message) => {
-    if (message?.type === "codara-console") setMode(message.mode);
+    if (message?.type === "codara-console") setMode(message.mode, message.since);
   });
-  browser.runtime.sendMessage({ type: "codara-console-hello" }).then((answer) => setMode(answer?.mode), () => setMode("off"));
+  browser.runtime.sendMessage({ type: "codara-console-hello" }).then((answer) => setMode(answer?.mode, answer?.since), () => setMode("off"));
 })();

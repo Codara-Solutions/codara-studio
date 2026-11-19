@@ -32,13 +32,13 @@ export function resourceType(type) {
 
 /** webRequest's header list as the protocol's object; repeated names are joined by newlines, as Chrome does. */
 export function headerObject(list) {
-  const out = {};
+  const out = new Map();
   for (const header of Array.isArray(list) ? list : []) {
     if (typeof header?.name !== "string") continue;
     const value = typeof header.value === "string" ? header.value : "";
-    out[header.name] = header.name in out ? `${out[header.name]}\n${value}` : value;
+    out.set(header.name, out.has(header.name) ? `${out.get(header.name)}\n${value}` : value);
   }
-  return out;
+  return Object.fromEntries(out);
 }
 
 /** The protocol's frame id for a webRequest frame of a tab. */
