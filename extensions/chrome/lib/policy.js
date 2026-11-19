@@ -304,6 +304,16 @@ function withoutHeaders(headers, names) {
 
 const COOKIE_HEADERS = ["cookie", "set-cookie"];
 
+/** A response without its cookie headers (raw header texts included). */
+function withoutCookies(response) {
+  const { requestHeadersText: _req, headersText: _res, ...rest } = response;
+  return {
+    ...rest,
+    headers: withoutHeaders(rest.headers, COOKIE_HEADERS),
+    ...(rest.requestHeaders ? { requestHeaders: withoutHeaders(rest.requestHeaders, COOKIE_HEADERS) } : {}),
+  };
+}
+
 /**
  * An event as Codara may see it. Without the tab's cookie and storage
  * permission, cookie headers and cookie lists are removed; everything else
@@ -313,7 +323,12 @@ export function redactCdpEvent(method, params, allowStorage) {
   if (allowStorage || !params || typeof params !== "object") return params;
   switch (method) {
     case "Network.requestWillBeSent":
-      return params.request ? { ...params, request: { ...params.request, headers: withoutHeaders(params.request.headers, COOKIE_HEADERS) } } : params;
+      // A redirect's response sets cookies too (Set-Cookie on a 302).
+      return {
+        ...params,
+        ...(params.request ? { request: { ...params.request, headers: withoutHeaders(params.request.headers, COOKIE_HEADERS) } } : {}),
+        ...(params.redirectResponse ? { redirectResponse: withoutCookies(params.redirectResponse) } : {}),
+      };
     case "Network.requestWillBeSentExtraInfo": {
       const { associatedCookies: _cookies, ...rest } = params;
       return { ...rest, headers: withoutHeaders(params.headers, COOKIE_HEADERS) };
@@ -322,32 +337,12 @@ export function redactCdpEvent(method, params, allowStorage) {
       const { blockedCookies: _blocked, headersText: _text, exemptedCookies: _exempted, ...rest } = params;
       return { ...rest, headers: withoutHeaders(params.headers, COOKIE_HEADERS) };
     }
-    case "Network.responseReceived": {
-      if (!params.response) return params;
-      const { requestHeadersText: _req, headersText: _res, ...response } = params.response;
-      return {
-        ...params,
-        response: {
-          ...response,
-          headers: withoutHeaders(response.headers, COOKIE_HEADERS),
-          ...(response.requestHeaders ? { requestHeaders: withoutHeaders(response.requestHeaders, COOKIE_HEADERS) } : {}),
-        },
-      };
-    }
+    case "Network.responseReceived":
+      return params.response ? { ...params, response: withoutCookies(params.response) } : params;
     case "Network.webSocketWillSendHandshakeRequest":
       return params.request ? { ...params, request: { ...params.request, headers: withoutHeaders(params.request.headers, COOKIE_HEADERS) } } : params;
-    case "Network.webSocketHandshakeResponseReceived": {
-      if (!params.response) return params;
-      const { headersText: _res, requestHeadersText: _req, ...response } = params.response;
-      return {
-        ...params,
-        response: {
-          ...response,
-          headers: withoutHeaders(response.headers, COOKIE_HEADERS),
-          ...(response.requestHeaders ? { requestHeaders: withoutHeaders(response.requestHeaders, COOKIE_HEADERS) } : {}),
-        },
-      };
-    }
+    case "Network.webSocketHandshakeResponseReceived":
+      return params.response ? { ...params, response: withoutCookies(params.response) } : params;
     default:
       return params;
   }

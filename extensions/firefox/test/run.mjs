@@ -11,6 +11,7 @@ import { join } from "node:path";
 
 import { assemble } from "../build/assemble.mjs";
 import * as assembling from "./assemble.test.mjs";
+import * as consoleNetwork from "./console-network.test.mjs";
 import * as firefox from "./firefox.test.mjs";
 import * as manifest from "./manifest.test.mjs";
 import * as navigation from "./navigation.test.mjs";
@@ -20,7 +21,7 @@ const scratch = mkdtempSync(join(tmpdir(), "codara-firefox-test-"));
 let failed = false;
 try {
   const { dir } = assemble(join(scratch, "extension"));
-  for (const suite of [firefox, pageTools, navigation, manifest, assembling]) {
+  for (const suite of [firefox, pageTools, navigation, consoleNetwork, manifest, assembling]) {
     try {
       console.log(`ok - ${await suite.run(dir)}`);
     } catch (error) {

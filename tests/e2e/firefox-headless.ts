@@ -44,6 +44,8 @@ export interface HeadlessFirefox {
   evaluate<T = any>(context: string, expression: string): Promise<T>;
   /** A real mouse click on an element, which Firefox counts as the user's (permissions.request needs one). */
   click(context: string, selector: string): Promise<void>;
+  /** The lines Firefox's install question shows for these permissions. */
+  installQuestion(permissions: string[]): Promise<string[]>;
   /** Whether Firefox shows its "add permissions" question for an extension. */
   permissionQuestionShown(): Promise<boolean>;
   /** Answer that question as the user's Allow or Deny would; fails if none shows within 10 s. */
@@ -169,6 +171,10 @@ export async function launchFirefox(binary: { path: string; version: number }, {
       pid: child.pid,
       version: binary.version,
       call,
+      async installQuestion(permissions) {
+        const text = await inBrowserWindow(`(() => { const { ExtensionData } = ChromeUtils.importESModule("resource://gre/modules/Extension.sys.mjs"); return JSON.stringify(ExtensionData.formatPermissionStrings({ permissions: { permissions: ${JSON.stringify(permissions)}, origins: [] } }).msgs); })()`);
+        return JSON.parse(String(text));
+      },
       async install(dir) {
         await call("webExtension.install", { extensionData: { type: "path", path: dir } });
       },
@@ -203,7 +209,27 @@ export async function launchFirefox(binary: { path: string; version: number }, {
         await call("browsingContext.close", { context });
       },
       async navigate(context, target) {
-        await call("browsingContext.navigate", { context, url: target, wait: "complete" });
+        // After a load that a redirect took to another site's process, Firefox's
+        // remote agent can still count that load as running and never answer
+        // the next navigate, though the page loads (its trace: "Document already
+        // loading", then "Skip stop state"). So the page's own word counts too:
+        // a new document (the old one is marked first) at that address, loaded.
+        const page = (expression: string) =>
+          call<{ result?: { value?: string } }>("script.evaluate", { expression, target: { context }, awaitPromise: false, resultOwnership: "none" }).then((answer) => answer?.result?.value, () => null);
+        await page("window.codaraOldDocument = true; ''");
+        const navigated = call("browsingContext.navigate", { context, url: target, wait: "complete" });
+        const deadline = Date.now() + 60_000;
+        let done = false;
+        void navigated.then(() => (done = true), () => {});
+        while (!done) {
+          if (Date.now() > deadline) return void (await navigated);
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          if ((await page("window.codaraOldDocument ? '' : location.href + ' ' + document.readyState")) === `${new URL(target).href} complete`) {
+            navigated.catch(() => {});
+            return;
+          }
+        }
+        await navigated;
       },
       async evaluate(context, expression) {
         const answer = await call<{ type: string; result?: any; exceptionDetails?: { text?: string } }>("script.evaluate", {

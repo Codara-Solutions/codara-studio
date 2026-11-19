@@ -17,7 +17,7 @@
       }
     }
   },
-  "permissions": ["tabs", "storage", "alarms", "scripting"],
+  "permissions": ["tabs", "storage", "alarms", "scripting", "webRequest"],
   "optional_permissions": ["userScripts"],
   "optional_host_permissions": ["<all_urls>"],
   "background": {

@@ -112,6 +112,9 @@ export function run() {
   assert.deepEqual(received.response, { url: "u", headers: {}, requestHeaders: { x: "1" } });
   const sent = redactCdpEvent("Network.requestWillBeSent", { request: { url: "u", headers: { cookie: "a", "x-y": "z" } } }, false);
   assert.deepEqual(sent.request.headers, { "x-y": "z" });
+  // A redirect that sets a cookie: its Set-Cookie comes out too.
+  const redirected = redactCdpEvent("Network.requestWillBeSent", { request: { url: "u", headers: {} }, redirectResponse: { status: 302, headers: { Location: "/next", "Set-Cookie": "s=1; HttpOnly" }, headersText: "raw", requestHeaders: { Cookie: "a" } } }, false);
+  assert.deepEqual(redirected.redirectResponse, { status: 302, headers: { Location: "/next" }, requestHeaders: {} });
   const other = { a: 1 };
   assert.equal(redactCdpEvent("Page.loadEventFired", other, false), other);
 

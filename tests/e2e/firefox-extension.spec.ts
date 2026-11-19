@@ -63,6 +63,29 @@ function site(request: IncomingMessage, response: ServerResponse): void {
     setTimeout(() => response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end("<!doctype html><title>Page slow-answer</title>"), 1_500);
     return;
   }
+  if (url.pathname === "/app") {
+    // A strict page that logs from its first line and fetches with a cookie.
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; script-src 'nonce-app'; connect-src 'self'; frame-src 'self'" });
+    response.end(`<!doctype html><title>Page app</title><script nonce="app">window.getterRuns = 0;
+      console.log("app started", { n: 1, get secret() { window.getterRuns++; return "s"; } }); console.warn("careful");
+      window.dispatchEvent(new ErrorEvent("error", { message: "made up by the page" }));
+      fetch("/api/data").then(() => fetch("/api/hop")); setTimeout(() => null.y, 50);</script><iframe src="/private/frame"></iframe>`);
+    return;
+  }
+  if (url.pathname === "/private/frame") {
+    // Same origin, on a blocked path: it logs into the top page's console and leaves an error there.
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    response.end(`<!doctype html><script>parent.console.log("from the private frame"); parent.Promise.reject(new Error("private boom"));</script>`);
+    return;
+  }
+  if (url.pathname === "/api/hop") {
+    response.writeHead(302, { Location: "/api/data?again=1", "Set-Cookie": "hop=secret-value; HttpOnly; Path=/" }).end();
+    return;
+  }
+  if (url.pathname === "/api/data") {
+    response.writeHead(200, { "Content-Type": "application/json", "Set-Cookie": "session=secret-value; HttpOnly; Path=/" }).end('{"ok":true}');
+    return;
+  }
   if (url.pathname === "/to-bank") {
     response.writeHead(302, { Location: `http://localhost:${url.searchParams.get("port")}/bank` }).end();
     return;
@@ -139,6 +162,9 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
       prefs: { "extensions.background.idle.timeout": 15_000, "extensions.webextOptionalPermissionPrompts": true, ...(dark ? { "ui.systemUsesDarkTheme": 1, "layout.css.prefers-color-scheme.content-override": 0 } : {}) },
     });
     await firefox.install(extension);
+    // Firefox's install question for these permissions: only the tabs line (scripting and webRequest add none).
+    const manifest = JSON.parse(readFileSync(join(extension, "manifest.json"), "utf8"));
+    expect(await firefox.installQuestion(manifest.permissions)).toEqual(["Access browser tabs"]);
     const accountContext = await firefox.open(`${origin}/account`);
     await firefox.open(`${origin}/elsewhere`);
     await firefox.open(`http://localhost:${sitePort}/bank`);
@@ -148,7 +174,7 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     const elsewhereTab = await tabIdOf("/elsewhere");
     expect(accountTab).toBeGreaterThan(0);
     // The test Codara's port, and localhost on the blocked list.
-    await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "state" }).then(({ blockedSites }) => browser.storage.local.set({ ports: [${linkPort}], blockedSites: blockedSites + "\\nlocalhost" }))`);
+    await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "state" }).then(({ blockedSites }) => browser.storage.local.set({ ports: [${linkPort}], blockedSites: blockedSites + "\\nlocalhost\\n127.0.0.1/private" }))`);
     await firefox.closeTab(popup);
     popup = await firefox.openExtensionPage(`${POPUP}?tab=${accountTab}`);
     const text = (selector: string) => firefox!.evaluate<string>(popup, `document.querySelector(${JSON.stringify(selector)})?.textContent ?? ""`);
@@ -282,6 +308,23 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     await firefox.navigate(accountContext, `${origin}/account`);
     await expect.poll(async () => (await linkState(codara)).browsers[0].tabs.find((tab: { id: string }) => tab.id === tabId)).toMatchObject({ blocked: false });
     expect(await request("preview.navigate", { tabId, url: `${origin}/account#top` })).toMatchObject({ url: `${origin}/account#top` });
+
+    // The console from the page's first line, and the network log, on a strict page.
+    await request("preview.navigate", { tabId, url: `${origin}/app` });
+    await expect.poll(async () => (await request("preview.console", { tabId })).entries.map((entry: { level: string; message: string }) => `${entry.level} ${entry.message}`), { timeout: 10_000 })
+      .toEqual(expect.arrayContaining(["info app started {\"n\":1}", "warning careful", expect.stringMatching(/^error TypeError: can't access property "y"/)]));
+    // Describing a logged object runs none of the page's code, and an error event the page made up is not the page's error.
+    expect(await firefox.evaluate(accountContext, "window.getterRuns")).toBe(0);
+    // Nothing from a frame on a blocked path of the same site: neither its log nor its error, nor its address.
+    expect(JSON.stringify((await request("preview.console", { tabId })).entries)).not.toMatch(/made up by the page|private/);
+    await expect.poll(async () => (await request("preview.network", { tabId, filter: "/api/" })).requests.map((row: { status?: number; url: string }) => `${row.status} ${row.url}`), { timeout: 10_000 })
+      .toEqual([`200 ${origin}/api/data`, `302 ${origin}/api/hop`, `200 ${origin}/api/data?again=1`]);
+    // Cookies never leave Firefox while the tab's cookie switch is off, a redirect's included: not even their header names.
+    const { requests: calls } = await request("preview.network", { tabId, filter: "/api/" });
+    const details = await Promise.all(calls.map((call: { id: string }) => request("preview.network", { tabId, id: call.id })));
+    expect(details[0].request.responseHeaders).toMatchObject({ "Content-Type": "application/json" });
+    expect(details[1].request.responseHeaders).toMatchObject({ Location: "/api/data?again=1" });
+    expect(JSON.stringify(details)).not.toMatch(/cookie|secret-value/i);
 
     // Idle: Firefox unloads an idle event page (after 15 s in this profile)
     // and traffic on its socket does not count. The extension's keep-alive
