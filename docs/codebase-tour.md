@@ -345,6 +345,10 @@ startup pass) and `startStudioClaudeLoginKeeper` are called from `index.ts`.
     written against `BrowserTarget`), `activity.ts` (who did what), and
     `index.ts` (boot, IPC, the folder Settings reveals). The UI is
     `components/chrome/` (the pairing prompt and the Settings section).
+    Firefox's extension is `extensions/firefox/`: its own event page and
+    manifest, the rest assembled from `extensions/chrome`. It has no
+    debugger, so it answers the protocol commands its hello lists and
+    Codara refuses the others (`relay-transport.ts`).
 - **Sending to an agent.** `src/main/agent-delivery.ts` pastes into a pane's
   agent of any runtime (unsubmitted unless the user pressed Send), adds to a
   Cora chat, or queues for `codara_preview_inbox`; attachments become files

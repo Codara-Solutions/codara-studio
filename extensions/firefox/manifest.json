@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Codara",
+  "short_name": "Codara",
+  "version": "0.1.0",
+  "description": "Let the agents you run in Codara use the Firefox tabs you share, with your signed-in sessions.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "@codara-firefox",
+      "strict_min_version": "153.0",
+      "data_collection_permissions": {
+        "required": [
+          "websiteContent",
+          "websiteActivity",
+          "authenticationInfo"
+        ]
+      }
+    }
+  },
+  "permissions": ["tabs", "storage", "alarms"],
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'"
+  },
+  "action": {
+    "default_title": "Codara",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
+}
