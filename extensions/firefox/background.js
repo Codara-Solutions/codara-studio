@@ -157,8 +157,16 @@ async function load() {
 // given again meanwhile, while other tabs' changes leave it alone.
 const access = new AccessClock();
 
-async function save(patch) {
+/**
+ * Applies a change to the extension's state and stores it. A change that
+ * depends on the state is given as `(state) => patch`, worked out from the
+ * state it is applied to in the same step: worked out before an await, it
+ * could put back what another change took away meanwhile (a tab's cookie
+ * switch turned off while another tab closed).
+ */
+async function save(update) {
   await ready;
+  const patch = typeof update === "function" ? update(state) : update;
   access.save(state, patch);
   Object.assign(state, patch);
   const session = {};
@@ -303,7 +311,7 @@ async function handleRequest(request) {
       if (!state.attached.includes(tab.id)) {
         // From the next millisecond: an entry logged in this one may predate the attachment.
         attachedSince.set(tab.id, Date.now() + 1);
-        await save({ attached: withValue(state.attached, tab.id) });
+        await save((now) => ({ attached: withValue(now.attached, tab.id) }));
         void refresh();
         // A page loaded before this heard "off": its hook starts keeping now, nothing from before.
         void switchConsole(tab.id);
@@ -580,11 +588,15 @@ const ASK_KEY = /^(?:scripts|allSites|site:https?:\/\/[^/\s]+\/\*)$/;
 /** Forget the asks Firefox has granted since, so only a no is remembered. */
 async function forgetGrantedAsks() {
   await ready;
-  await save({ asked: unansweredAsks(state.asked, await chrome.permissions.getAll().catch(() => ({}))) });
+  const granted = await chrome.permissions.getAll().catch(() => ({}));
+  await save((now) => ({ asked: unansweredAsks(now.asked, granted) }));
 }
 
-// In line with the popup's actions, so a grant never overtakes the ask it answers.
+// In line with the popup's actions, so a grant never overtakes the ask it
+// answers. A read under way when access was given counts as changed too: it
+// was checked against what was granted before.
 chrome.permissions.onAdded.addListener(() => {
+  access.all();
   popupQueue = popupQueue.then(forgetGrantedAsks).catch(() => {});
 });
 // A site the user took back: no body kept from before goes out (reads check again too).
@@ -614,7 +626,8 @@ function handleMessage(message) {
   if (message.type !== "revoked" && !liveSocket()) return;
   if (message.type === "usage" && typeof message.tabId === "number") {
     const tabId = message.tabId;
-    void save({ usage: { ...state.usage, [tabId]: usageOf(message) } }).then(() => {
+    const usage = usageOf(message);
+    void save((now) => ({ usage: { ...now.usage, [tabId]: usage } })).then(() => {
       void updateTabBadge(tabId);
       clearTimeout(usageBadgeTimers.get(tabId));
       usageBadgeTimers.set(tabId, setTimeout(() => {
@@ -625,10 +638,13 @@ function handleMessage(message) {
   } else if (message.type === "presence_settings") {
     // The newer change wins; tell Codara when ours is the newer one.
     void ready.then(async () => {
-      const mine = presenceSettings(state.presence);
-      const next = newerSettings(mine, message);
-      if (next.at !== mine.at) await save({ presence: next });
-      else if (mine.at > presenceSettings(message).at) sendLive({ type: "presence_settings", ...mine });
+      let mine = null;
+      await save((now) => {
+        mine = presenceSettings(now.presence);
+        const next = newerSettings(mine, message);
+        return next.at !== mine.at ? { presence: next } : {};
+      });
+      if (mine.at > presenceSettings(message).at) sendLive({ type: "presence_settings", ...mine });
     });
   } else if (message.type === "revoked") {
     void detachAll();
@@ -643,7 +659,7 @@ async function detachTab(tabId) {
   forgetRequests(tabId);
   void switchConsole(tabId);
   if (!state.attached.includes(tabId)) return;
-  await save({ attached: without(state.attached, tabId) });
+  await save((now) => ({ attached: without(now.attached, tabId) }));
   void refresh();
 }
 
@@ -1046,8 +1062,11 @@ const navigationWaiters = new Map();
 const navigating = new Set();
 const NAVIGATE_WAIT_MS = 25_000;
 
+// A tab's changes that never say its page or access changed. Any other
+// (a load starting with no address yet, a discard, a status) moves its stamp.
+const COSMETIC_CHANGES = new Set(["title", "favIconUrl", "audible", "mutedInfo", "attention", "isArticle", "sharingState", "pinned", "autoDiscardable"]);
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
-  if ("url" in change) access.tab(tabId);
+  if (Object.keys(change).some((key) => !COSMETIC_CHANGES.has(key))) access.tab(tabId);
   seeTab(tab);
   if (isPageChange(change)) navigations.set(tabId, (navigations.get(tabId) ?? 0) + 1);
   const { events, page, kind } = pageEvents(change, { id: tabId }, pageOf(tabId), newLoaderId, Date.now());
@@ -1070,7 +1089,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
 });
 chrome.windows.onRemoved.addListener(async (windowId) => {
   await ready;
-  if (state.shareWindows.includes(windowId)) await save({ shareWindows: without(state.shareWindows, windowId) });
+  await save((now) => (now.shareWindows.includes(windowId) ? { shareWindows: without(now.shareWindows, windowId) } : {}));
 });
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   access.tab(tabId);
@@ -1084,16 +1103,17 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   eventDomains.delete(tabId);
   navigationWaiters.get(tabId)?.done(null);
   navigating.delete(tabId);
-  await ready;
-  const usage = { ...state.usage };
-  delete usage[tabId];
-  await save({
-    shareTabs: without(state.shareTabs, tabId),
-    stopped: without(state.stopped, tabId),
-    storageTabs: without(state.storageTabs, tabId),
-    agentTabs: without(state.agentTabs, tabId),
-    attached: without(state.attached, tabId),
-    usage,
+  await save((now) => {
+    const usage = { ...now.usage };
+    delete usage[tabId];
+    return {
+      shareTabs: without(now.shareTabs, tabId),
+      stopped: without(now.stopped, tabId),
+      storageTabs: without(now.storageTabs, tabId),
+      agentTabs: without(now.agentTabs, tabId),
+      attached: without(now.attached, tabId),
+      usage,
+    };
   });
   scheduleRefresh();
 });
@@ -1143,16 +1163,15 @@ async function popupState(request) {
 
 async function setTabShared(tabId, on) {
   if (on) {
-    await save({ shareTabs: withValue(state.shareTabs, tabId), stopped: without(state.stopped, tabId) });
+    await save((now) => ({ shareTabs: withValue(now.shareTabs, tabId), stopped: without(now.stopped, tabId) }));
     return;
   }
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  const stillShared = stopNeedsMark(shareChoice(), tab);
-  await save({
-    shareTabs: without(state.shareTabs, tabId),
-    storageTabs: without(state.storageTabs, tabId),
-    stopped: stillShared ? withValue(state.stopped, tabId) : state.stopped,
-  });
+  await save((now) => ({
+    shareTabs: without(now.shareTabs, tabId),
+    storageTabs: without(now.storageTabs, tabId),
+    stopped: stopNeedsMark(shareChoice(), tab) ? withValue(now.stopped, tabId) : now.stopped,
+  }));
 }
 
 async function handlePopup(request) {
@@ -1166,7 +1185,7 @@ async function handlePopup(request) {
     case "accessAsked":
       // The popup says so right before Firefox's question shows.
       if (typeof request.key !== "string" || !ASK_KEY.test(request.key)) throw new Error("Unknown permission.");
-      await save({ asked: { ...state.asked, [request.key]: Date.now() } });
+      await save((now) => ({ asked: { ...now.asked, [request.key]: Date.now() } }));
       return {};
     case "connect":
       pairingWanted = true;
@@ -1195,7 +1214,7 @@ async function handlePopup(request) {
     case "setReach": {
       const windowId = typeof request.windowId === "number" ? request.windowId : null;
       const inWindow = windowId === null ? [] : (await chrome.tabs.query({ windowId })).map((tab) => tab.id);
-      await save(reachPatch(shareChoice(), request.reach, windowId, inWindow));
+      await save(() => reachPatch(shareChoice(), request.reach, windowId, inWindow));
       if (request.reach !== "tabs") void link.wake();
       break;
     }
@@ -1204,20 +1223,23 @@ async function handlePopup(request) {
       break;
     case "setStorage": {
       const tabId = Number(request.tabId);
-      await save({ storageTabs: request.on === true ? withValue(state.storageTabs, tabId) : without(state.storageTabs, tabId) });
+      await save((now) => ({ storageTabs: request.on === true ? withValue(now.storageTabs, tabId) : without(now.storageTabs, tabId) }));
       break;
     }
     case "setAllowOpen":
       await save({ allowOpen: request.on === true });
       break;
     case "setPresence": {
-      const mine = presenceSettings(state.presence);
-      const next = {
-        overlay: typeof request.overlay === "boolean" ? request.overlay : mine.overlay,
-        glow: typeof request.glow === "boolean" ? request.glow : mine.glow,
-        at: Math.max(Date.now(), mine.at + 1),
-      };
-      await save({ presence: next });
+      let next = null;
+      await save((now) => {
+        const mine = presenceSettings(now.presence);
+        next = {
+          overlay: typeof request.overlay === "boolean" ? request.overlay : mine.overlay,
+          glow: typeof request.glow === "boolean" ? request.glow : mine.glow,
+          at: Math.max(Date.now(), mine.at + 1),
+        };
+        return { presence: next };
+      });
       sendLive({ type: "presence_settings", ...next });
       break;
     }

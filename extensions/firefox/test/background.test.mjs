@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -20,7 +21,7 @@ const LISTENERS = {
   "permissions.onRemoved": "all",
   "storage.onChanged": "all",
   "runtime.onMessage": "popup",
-  "permissions.onAdded": "none",
+  "permissions.onAdded": "all",
   "tabs.onCreated": "none",
   "tabs.onActivated": "none",
   "webRequest.onBeforeRequest": "none",
@@ -62,6 +63,20 @@ export async function run(assembled) {
   assert.deepEqual(accessMoves({ shareAll: false }, { shareAll: true }).all, true);
   assert.deepEqual(accessMoves({ usage: {} }, { usage: { 1: {} } }), { all: false, tabs: [] }, "what an agent did is no access");
 
+  // Every save() of a patch that reads the state gives it as (state) => patch,
+  // worked out where it is applied: a literal patch built from `state.` may be stale.
+  const source = readFileSync(join(assembled, "background.js"), "utf8");
+  for (let at = source.indexOf("save({"); at >= 0; at = source.indexOf("save({", at + 1)) {
+    let depth = 0;
+    let end = at + 5;
+    for (; end < source.length; end += 1) {
+      if (source[end] === "{") depth += 1;
+      else if (source[end] === "}" && --depth === 0) break;
+    }
+    const patch = source.slice(at, end + 1);
+    assert.ok(!/\bstate\./.test(patch) && !/shareChoice\(/.test(patch), `a literal save() patch reads the state; give it as (now) => patch: ${patch}`);
+  }
+
   // ── the background page itself, in a fake Firefox ──
   let hold = null;
   const jar = [{ name: "sid", value: "secret", domain: "shop.example", path: "/" }];
@@ -95,22 +110,24 @@ export async function run(assembled) {
       const moved = [1, 2].filter((id) => access.of(id) !== before[id]);
       assert.deepEqual(moved, expect === "all" ? [1, 2] : expect, `${what}: expected ${JSON.stringify(expect)} to move`);
     };
+    const cookies = (tabId) => request({ type: "cdp", tabId, method: "Network.getCookies", params: {} });
     const ready = async (id) => {
       await fake.popup({ type: "shareTab", tabId: id, on: true });
       await fake.popup({ type: "setStorage", tabId: id, on: true });
       await request({ type: "attach", tabId: id });
     };
     await moves("tab 1 loads a page", [1], () => fake.fire("tabs.onUpdated", 1, { url: SHOP }, fake.tabs.get(1)));
-    await moves("tab 1 only changes its title or status", [], () => fake.fire("tabs.onUpdated", 1, { status: "complete", title: "x" }, fake.tabs.get(1)));
+    await moves("tab 1 only changes its title", [], () => fake.fire("tabs.onUpdated", 1, { title: "x", favIconUrl: "" }, fake.tabs.get(1)));
+    // A load can start with no address yet: its status alone moves the stamp.
+    await moves("tab 1 starts a load", [1], () => fake.fire("tabs.onUpdated", 1, { status: "loading" }, fake.tabs.get(1)));
+    await moves("tab 1 is discarded", [1], () => fake.fire("tabs.onUpdated", 1, { discarded: true }, fake.tabs.get(1)));
     await moves("tab 1 leaves its window", [1], () => fake.fire("tabs.onDetached", 1, { oldWindowId: 1, oldPosition: 0 }));
     await moves("tab 1 lands in a window", [1], () => fake.fire("tabs.onAttached", 1, { newWindowId: 1, newPosition: 0 }));
-    await moves("a shared window closes", "all", async () => {
-      await fake.popup({ type: "setReach", reach: "window", windowId: 9 });
-      await fake.fire("windows.onRemoved", 9);
-    });
+    await fake.popup({ type: "setReach", reach: "window", windowId: 9 });
+    await moves("a shared window closes", "all", () => fake.fire("windows.onRemoved", 9));
     await moves("an unshared window closes", [], () => fake.fire("windows.onRemoved", 8));
     await moves("site access taken back", "all", () => fake.fire("permissions.onRemoved", { origins: ["https://shop.example/*"], permissions: [] }));
-    await moves("site access granted", [], () => fake.fire("permissions.onAdded", { origins: ["https://more.example/*"], permissions: [] }));
+    await moves("site access granted", "all", () => fake.fire("permissions.onAdded", { origins: ["https://more.example/*"], permissions: [] }));
     await moves("the blocked sites changed in storage", "all", () => fake.fire("storage.onChanged", { blockedSites: { newValue: "bank.example\nnew.example" } }, "local"));
     await moves("the ports changed in storage", [], () => fake.fire("storage.onChanged", { ports: { newValue: [47615] } }, "local"));
     await moves("tab 1's cookie switch turned off", [1], () => fake.popup({ type: "setStorage", tabId: 1, on: false }));
@@ -146,8 +163,23 @@ export async function run(assembled) {
     await moves("Stop all", "all", () => fake.popup({ type: "stopAll" }));
     for (const id of [1, 2, 3]) await ready(id);
 
+    // Changes worked out from the state they apply to: closing tab 2 while tab 1's
+    // switch turns off never puts the switch back (in either order).
+    // The close lands at every point of the switch's way through the page.
+    for (let ticks = 0; ticks < 16; ticks += 1) {
+      fake.tabs.set(2, tab(2, { url: "https://other.example/" }));
+      await ready(2);
+      await fake.popup({ type: "setStorage", tabId: 1, on: true });
+      fake.tabs.delete(2);
+      const off = fake.popup({ type: "setStorage", tabId: 1, on: false });
+      for (let i = 0; i < ticks; i += 1) await Promise.resolve();
+      await Promise.all([off, fake.fire("tabs.onRemoved", 2, { windowId: 1, isWindowClosing: false })]);
+      await assert.rejects(cookies(1), /need the user's permission/, `tab 1's switch stays off (tab 2 closed ${ticks} ticks into the switch)`);
+    }
+    fake.tabs.set(2, tab(2, { url: "https://other.example/" }));
+    for (const id of [1, 2]) await ready(id);
+
     // ── a cookie read in a busy browser ──
-    const cookies = (tabId) => request({ type: "cdp", tabId, method: "Network.getCookies", params: {} });
     const names = (answer) => answer.build().cookies.map((cookie) => cookie.name);
     const busy = [
       ["tab 2 loads a page", () => fake.fire("tabs.onUpdated", 2, { url: "https://other.example/next" }, { ...fake.tabs.get(2), url: "https://other.example/next" })],
@@ -178,6 +210,8 @@ export async function run(assembled) {
     // The unsafe direction: any change to the tab itself, even one undone, still ends its read.
     const own = [
       ["tab 1 loads a page", () => fake.fire("tabs.onUpdated", 1, { url: SHOP }, fake.tabs.get(1))],
+      ["tab 1 starts a load with no address yet", () => fake.fire("tabs.onUpdated", 1, { status: "loading" }, fake.tabs.get(1))],
+      ["site access granted for another site", () => fake.fire("permissions.onAdded", { origins: ["https://more.example/*"], permissions: [] })],
       ["tab 1 moves window and back", async () => {
         await fake.fire("tabs.onDetached", 1, { oldWindowId: 1, oldPosition: 0 });
         await fake.fire("tabs.onAttached", 1, { newWindowId: 1, newPosition: 0 });
