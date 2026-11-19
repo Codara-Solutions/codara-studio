@@ -128,6 +128,21 @@ assert.deepEqual(cacheWrites.result().usage, { inputTokens: 12, outputTokens: 5,
 assert.equal(cacheWrites.result().contextTokens, 49, "occupancy is the latest prompt including cache writes, not cumulative usage");
 assert.equal(cacheEvents.filter((event) => event.kind === "usage").at(-1).cacheWriteTokens, 52);
 
+// The skill file a typed command ran shows in the chat as a note.
+{
+  const notes = [];
+  const skillTurn = new PiTurnAccumulator((event) => notes.push(event));
+  skillTurn.consume({ type: "entry_appended", entry: { type: "custom", customType: "codara-skill-ran", data: { skills: [
+    { name: "ship", path: "/home/u/.claude/skills/ship/SKILL.md" },
+    { name: "repo:ship", path: "/repo/.claude/skills/ship/SKILL.md" },
+  ] } } });
+  skillTurn.consume({ type: "entry_appended", entry: { type: "custom", customType: "other", data: { skills: [{ name: "x" }] } } });
+  assert.deepEqual(notes.map((event) => event.message), [
+    "Ran the skill /ship from /home/u/.claude/skills/ship/SKILL.md.",
+    "Ran the skill /repo:ship from /repo/.claude/skills/ship/SKILL.md.",
+  ]);
+}
+
 // Only the newest assistant message is the final answer. Progress prose from
 // an earlier tool-loop round must never be promoted when the actual final
 // completion is explicitly empty.

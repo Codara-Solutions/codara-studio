@@ -29,8 +29,9 @@ How `scripts/run-all-tests.cjs` works:
 
 - **The filename glob is the registry.** A new `test-*.cjs` or `test-*.mjs`
   file runs as soon as it exists. You add no entry anywhere. A `.ts` file does
-  not match: `test-cora-direct-mode.ts` only runs through
-  `npm run test:cora-direct-mode`.
+  not match: `test-cora-direct-mode.ts` runs through
+  `npm run test:cora-direct-mode` and through `test-cora-direct-mode-runs.cjs`,
+  which the registry picks up.
 - Each file runs as `node <file>` in its own process (and process group)
   with a 180 second timeout. It passes when it exits with code 0. A timeout
   kills the whole group, Electron and Chromium children included.
