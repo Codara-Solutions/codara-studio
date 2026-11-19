@@ -293,7 +293,7 @@ async function main() {
     "chatConfig = await freezeManagerExecutionAccount(",
   );
   const managerPin = runStoreSource.lastIndexOf(
-    "run = await pinImplicitPiManagerAccount(run);",
+    "run = await pinImplicitPiManagerAccount(run, routedModel);",
     managerStart,
   );
   const managerCall = runStoreSource.indexOf(

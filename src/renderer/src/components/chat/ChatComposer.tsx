@@ -36,6 +36,7 @@ import ModelThinkingPicker from "./composer/ModelThinkingPicker";
 import { readModelVisibility, shownModelGroups } from "./composer/model-visibility";
 import { prefillDraft } from "./composer/prefill-draft";
 import { DRAFT_PREFILL_PENDING_EVENT, consumeDraftPrefill } from "./composer/pending-prefill";
+import { prefilledCommandAfter, prefilledCommandAfterEdit, sentAsTyped } from "./composer/command-provenance";
 import ProfilePicker from "./composer/ProfilePicker";
 import CapabilitiesButton from "./composer/CapabilitiesButton";
 import {
@@ -75,6 +76,9 @@ export interface ChatComposerStartConfig {
   mode?: ChatMode;
   effort?: AgentEffortLevel;
   profileId?: string;
+  /** The first message was typed here, not handed over by another surface
+   *  (composer/command-provenance.ts): only then may it run a skill. */
+  typedByUser?: boolean;
 }
 
 // The chat composer. One surface for two jobs:
@@ -159,6 +163,9 @@ interface ChatComposerDraftSnapshot {
   model: string;
   effort: AgentEffortLevel;
   profileId: string;
+  /** A command another surface put at the start of the draft (Unqueue, Undo,
+   *  a worker's or the whiteboard's text), kept across tab switches. */
+  prefilledCommand: string | null;
 }
 
 // Navigation-only draft cache. It intentionally lives outside React so it
@@ -215,6 +222,11 @@ export default function ChatComposer({
     ? peekPreferredChatModel()
     : undefined;
   const [draft, setDraft] = useState(() => restoredDraft?.draft ?? "");
+  // See composer/command-provenance.ts.
+  const prefilledCommandRef = useRef<string | null>(restoredDraft?.prefilledCommand ?? null);
+  // Set by a text paste for the change event it causes: pasted text is not
+  // typed, so a command it puts at the start of the draft stays text.
+  const pasteInFlightRef = useRef(false);
   const [images, setImages] = useState<AddRunMessageAttachmentInput[]>(() =>
     restoredDraft?.images ? [...restoredDraft.images] : [],
   );
@@ -356,6 +368,7 @@ export default function ChatComposer({
     model: draftChatModel,
     effort: draftChatEffort,
     profileId: draftCoraProfileId,
+    prefilledCommand: prefilledCommandRef.current,
   };
   // This instance's draft state belongs to the key it restored from at mount.
   // On a chat-tab switch the parent updates draftKey one commit BEFORE the
@@ -527,7 +540,11 @@ export default function ChatComposer({
       // Welcome starters frame a task ("Investigate and fix this bug: "), so
       // they go in front of what the user already typed instead of replacing it.
       const prepend = detail?.prepend === true;
-      setDraft((current) => prefillDraft(current, text, { replace, prepend }));
+      setDraft((current) => {
+        const next = prefillDraft(current, text, { replace, prepend });
+        prefilledCommandRef.current = prefilledCommandAfter(current, next, prefilledCommandRef.current);
+        return next;
+      });
       window.setTimeout(() => {
         const node = textareaRef.current;
         if (!node) return;
@@ -548,7 +565,11 @@ export default function ChatComposer({
     const take = () => {
       const text = consumeDraftPrefill(draftKey);
       if (!text) return;
-      setDraft((current) => prefillDraft(current, text));
+      setDraft((current) => {
+        const next = prefillDraft(current, text);
+        prefilledCommandRef.current = prefilledCommandAfter(current, next, prefilledCommandRef.current);
+        return next;
+      });
       window.setTimeout(() => textareaRef.current?.focus({ preventScroll: true }), 0);
     };
     take();
@@ -841,6 +862,8 @@ export default function ChatComposer({
       const sentDraft = latestDraft?.draft ?? draft;
       const message = messageForSend(sentDraft, attachments.length);
       if (!message) return;
+      // Only a command typed here may run a skill (composer/command-provenance.ts).
+      const typedByUser = sentAsTyped(prefilledCommandRef.current, message);
       if (!run_ || isUnstartedChatRun(run_)) {
         // No run yet, or a run the board's draft promotion minted that has
         // never had a conversation: both are "first send" — onStartChat
@@ -852,6 +875,7 @@ export default function ChatComposer({
           mode: lockedMode ?? DEFAULT_CHAT_MODE,
           effort: latestDraft?.effort ?? draftChatEffort,
           profileId: latestDraft?.profileId ?? draftCoraProfileId,
+          typedByUser,
         };
         await onStartChat(message, clientMessageId, attachments, chatConfig);
       } else if (openQuestion) {
@@ -883,7 +907,7 @@ export default function ChatComposer({
             kind: "note",
             message,
             attachments,
-            typedByUser: true,
+            ...(typedByUser ? { typedByUser: true as const } : {}),
           });
         }
       } else {
@@ -895,15 +919,17 @@ export default function ChatComposer({
           message,
           attachments,
           // Typed here: only such a note can run a skill (user-commands.ts).
-          typedByUser: true,
+          ...(typedByUser ? { typedByUser: true as const } : {}),
         });
       }
       if (draftKey) chatComposerDrafts.delete(draftKey);
       // The textarea stays editable while a send is in flight; text typed in
       // the meantime is the next message, not part of this one.
-      setDraft((current) =>
-        current.startsWith(sentDraft) ? current.slice(sentDraft.length).trimStart() : current,
-      );
+      setDraft((current) => {
+        const next = current.startsWith(sentDraft) ? current.slice(sentDraft.length).trimStart() : current;
+        prefilledCommandRef.current = prefilledCommandAfterEdit(prefilledCommandRef.current, next);
+        return next;
+      });
       setImages((current) => current.filter((image) => !sentImages.includes(image)));
       setFileReferences((current) =>
         current.filter((reference) => !sentFileReferences.includes(reference)),
@@ -1070,7 +1096,15 @@ export default function ChatComposer({
 
   const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const files = imageFilesFromClipboard(event.clipboardData);
-    if (files.length === 0) return;
+    if (files.length === 0) {
+      pasteInFlightRef.current = true;
+      // The change event follows within this task; a paste that changed
+      // nothing must not mark the next keystroke as pasted.
+      window.setTimeout(() => {
+        pasteInFlightRef.current = false;
+      }, 0);
+      return;
+    }
     event.preventDefault();
     void attachPastedImages(files);
   };
@@ -1556,6 +1590,10 @@ export default function ChatComposer({
           spellCheck={false}
           onChange={(event) => {
             const next = event.target.value;
+            prefilledCommandRef.current = pasteInFlightRef.current
+              ? prefilledCommandAfter(draft, next, prefilledCommandRef.current)
+              : prefilledCommandAfterEdit(prefilledCommandRef.current, next);
+            pasteInFlightRef.current = false;
             setDraft(next);
             updateMentionFromSelection(next, event.currentTarget.selectionStart);
           }}

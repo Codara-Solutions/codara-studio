@@ -119,7 +119,7 @@ assert.match(sidebar, /onDismissError=\{dismissError\}/);
 assert.match(sidebar, /useEffect\(\(\) => \{\s*setError\(null\);\s*\}, \[activeRunId, creatingNewRun\]\);/);
 
 // ── Prefill (welcome starters, undo) ───────────────────────────────────────
-assert.match(composer, /setDraft\(\(current\) => prefillDraft\(current, text, \{ replace, prepend \}\)\);/);
+assert.match(composer, /setDraft\(\(current\) => \{\s*const next = prefillDraft\(current, text, \{ replace, prepend \}\);/);
 
 (async () => {
   const esbuild = require("esbuild");

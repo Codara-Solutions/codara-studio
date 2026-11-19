@@ -724,6 +724,12 @@ export interface AppSettings {
   // per launch to the manager, Pi workers and the Claude/Codex terminals Cora
   // opens. Optional for the same reason as coraAlwaysVerifyEdits.
   coraAutoCompactPercent?: number | null;
+  // The order in which Cora (manager and Pi workers) tries the ways to reach
+  // a model: a provider sign-in, an OpenRouter key, Subcloud
+  // (src/shared/cora-routes.ts). A route never set up is skipped; a sign-in
+  // that expired or hit its limit is not handed on. Unset (the default, also
+  // after an upgrade) launches every model as picked.
+  coraRouteOrder?: Array<"subscription" | "openrouter" | "subcloud">;
 }
 
 export interface OpenRouterValidationInput {
@@ -3483,6 +3489,10 @@ export interface RunState {
    * retrofitted.
    */
   chatAccountProfileId?: string;
+  /** chatAccountProfileId was chosen by Cora on the first turn
+   *  (pinImplicitPiManagerAccount), not by the user. Such a pin follows the
+   *  route order; a pin the user chose keeps the chat on its account. */
+  chatAccountProfileImplicit?: true;
   /**
    * Concrete native Codex CLI account profile this chat was pinned to at
    * launch, resolved from the provider's active account in Settings. This is
