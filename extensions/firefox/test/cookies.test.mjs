@@ -15,7 +15,11 @@ export async function run(assembled) {
   assert.deepEqual(cookieUrls({ urls: ["https://shop.example/", 7, ""] }, tab.url), ["https://shop.example/"]);
 
   // The tab's own host only, with its switch on; never another site, a blocked one or a browser page.
-  assert.equal(refusal([tab.url, "https://shop.example/other?x=1", "http://shop.example/"]), null);
+  assert.equal(refusal([tab.url, "https://shop.example/other?x=1"]), null);
+  // The page's own scheme only: an http page's switch gives no Secure cookie, and site access is checked for the page's scheme.
+  assert.match(refusal(["http://shop.example/"]), /not this tab's site/);
+  assert.match(refusal(["https://shop.example/"], { tab: { id: 4, url: "http://shop.example/" } }), /not this tab's site/);
+  assert.equal(refusal(["http://shop.example/a"], { tab: { id: 4, url: "http://shop.example/" } }), null);
   assert.match(refusal([tab.url], { storageTabs: [5] }), /need the user's permission/);
   assert.match(refusal([tab.url], { tab: null }), /need the user's permission/, "a tab gone meanwhile");
   assert.match(refusal(["https://other.example/"]), /not this tab's site/);
@@ -68,15 +72,15 @@ export async function run(assembled) {
   assert.equal(cookiesAnswer([[one], [one, { ...one, path: "/x" }]]).cookies.length, 2);
   // Races: whatever changes while Firefox reads the cookies, nothing goes out once what allowed the read changed.
   const socket = {};
-  const fresh = () => ({ generation: 0, socket, seen: { id: 4, url: tab.url }, allowed: true, storageTabs: [4], rules });
+  const fresh = () => ({ changed: false, socket, seen: { id: 4, url: tab.url }, allowed: true, storageTabs: [4], rules });
   const jar = [{ name: "sid", value: "secret", domain: "shop.example", path: "/" }];
   const reader = (state, getAll, permitted = async () => true) =>
     readCookies([tab.url], { getAll, refusal: cookieGate({ urls: [tab.url], ref: "tab 4", now: () => ({ ...state }) }), permitted, rules: () => state.rules });
   const changes = {
     "the cookie switch turned off": (state) => (state.storageTabs = []),
-    // The background moves the generation on for any change of access, so access taken back and given again still ends the read.
-    "the switch turned off and on again": (state) => (state.generation += 1),
-    "the tab detached and attached again": (state) => (state.generation += 1),
+    // The background's clock says any change of access since the read began, so access taken back and given again still ends the read.
+    "the switch turned off and on again": (state) => (state.changed = true),
+    "the tab detached and attached again": (state) => (state.changed = true),
     "the tab detached, unshared or stopped": (state) => (state.allowed = false),
     "the tab closed": (state) => (state.seen = undefined),
     "the tab went to another site": (state) => (state.seen = { id: 4, url: "https://other.example/" }),
