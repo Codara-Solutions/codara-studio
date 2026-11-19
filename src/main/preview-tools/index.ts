@@ -11,9 +11,16 @@ import { guardPageDialogs } from "../browser/dialog-guard";
 import { recordActedTab, withActedTab } from "../browser/acted-tab";
 import { noteChromeToolCall } from "../browser/chrome/activity";
 import { assertChromeDriverAllowed } from "../browser/chrome/presence";
-import { BrowserTabRefError, parseTabRef } from "../browser/tab-ref";
+import type { ChromeLink } from "../browser/chrome/link";
+import { unsupportedCdpError } from "../browser/chrome/protocol";
+import { chromeLinkRuntime } from "../browser/chrome/runtime";
+import { cdpParamsError, checkCdpCommand } from "../browser/cdp-policy";
+import { normalizeEmulationRequest } from "../browser/emulation";
+import { parseStorageArea, userBrowserStorageRefusal } from "../browser/storage";
+import { BrowserTabRefError, parseTabRef, type BrowserTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { normalizeTabGroupName } from "../../shared/tab-group-name";
+import { firefoxCdpParamsError, firefoxRefusal } from "../../shared/user-browser-tools";
 import { capturePreviewTools } from "./capture";
 import { cdpPreviewTools } from "./cdp";
 import { chromeLinkTools, chromeTargetTools } from "./chrome";
@@ -129,6 +136,66 @@ export function coerceNumericParams(params: Record<string, unknown>, depth = 0):
   }
 }
 
+// A tool, or a mode of one, that Firefox's extension cannot do is refused on
+// a Firefox tab with the capability table's reason, before anything is sent
+// (src/shared/user-browser-tools.ts). A tab that cannot be found is left to
+// the handler, which says why.
+function refuseOnFirefox(method: string, params: Record<string, unknown>, ref: Extract<BrowserTabRef, { kind: "chrome" }>): void {
+  let link: ChromeLink | undefined;
+  try {
+    link = chromeLinkRuntime()?.backend.locate(ref).link;
+  } catch {
+    return;
+  }
+  if (link?.extensionKind !== "firefox") return;
+  // open never acts on the tab it names: the link tool picks the browser that may open one,
+  // and with only Firefox connected there is none, which is said before anything is logged.
+  if (method === "preview.chrome" && params.action === "open") {
+    const links = chromeLinkRuntime()?.server.links() ?? [];
+    const reason = links.length && links.every((candidate) => candidate.extensionKind === "firefox") ? firefoxRefusal(method, params) : null;
+    if (reason) throw new PreviewToolParamsError(reason);
+    return;
+  }
+  // Called with no settings, emulate only reads the state and sends nothing.
+  if (method === "preview.emulate" && readsEmulationOnly(params)) return;
+  // A raw command the policy refuses or the extension does not answer, or parameters it refuses, before the tab is attached.
+  if (method === "preview.cdp" && typeof params.method === "string") {
+    const policy = checkCdpCommand(params.method, { userBrowser: true });
+    if (!policy.ok) throw new PreviewToolParamsError(policy.reason);
+    if (!link.answers(params.method)) throw new PreviewToolParamsError(unsupportedCdpError(params.method, link.browser.name));
+    const commandParams = params.params && typeof params.params === "object" && !Array.isArray(params.params) ? (params.params as Record<string, unknown>) : {};
+    const refused = cdpParamsError(params.method, commandParams) ?? firefoxCdpParamsError(params.method, commandParams, ref.tabId);
+    if (refused) throw new PreviewToolParamsError(refused);
+  }
+  // Storage changes Codara never makes in the user's own browser, before the tab is touched.
+  if (method === "preview.storage") {
+    const refused = storageRefusal(params);
+    if (refused) throw new PreviewToolParamsError(refused);
+  }
+  const reason = firefoxRefusal(method, params);
+  if (reason) throw new PreviewToolParamsError(reason);
+}
+
+function storageRefusal(params: Record<string, unknown>): string | null {
+  const action = typeof params.action === "string" ? params.action.toLowerCase() : "get";
+  try {
+    return userBrowserStorageRefusal(action, parseStorageArea(params.area));
+  } catch {
+    // Its own checks answer a malformed area.
+    return null;
+  }
+}
+
+function readsEmulationOnly(params: Record<string, unknown>): boolean {
+  try {
+    const request = normalizeEmulationRequest(params);
+    return !request.reset && Object.keys(request.changes).length === 0;
+  } catch {
+    // Its own checks answer a malformed call.
+    return false;
+  }
+}
+
 // Names agents reach for that a tool calls something else, and the hint for
 // a call that used another tool's fields.
 function readAliases(method: string, params: Record<string, unknown>): void {
@@ -193,6 +260,7 @@ async function dispatchPreviewTool(
   }
   // An agent the user stopped from the page's pill is refused there before anything runs.
   assertChromeDriverAllowed(ref, String(params.tabId), params.driver);
+  refuseOnFirefox(method, params, ref);
   // Every call that reaches the user's own browser is logged with its agent.
   noteChromeToolCall(method, params);
   if (entry.targets === "any") return guardPageDialogs(method, params, () => entry.run(params, method, host));

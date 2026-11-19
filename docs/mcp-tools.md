@@ -330,6 +330,59 @@ own. With two browsers paired, ids carry the browser:
 - An imported pull request's run may not use the user's browser at all, and
   Pi workers that may not change the app do not get `codara_preview_chrome`.
 
+#### Chrome and Firefox, tool by tool
+
+The Codara extension for Firefox (`extensions/firefox/README.md`) pairs and
+shares tabs as in Chrome, but Firefox gives extensions no debugger: the
+extension answers part of the DevTools protocol itself, and input is played
+as events in the page. On a Firefox tab a tool, or a mode of one, marked
+"Not available" is refused before anything runs, with the reason in this
+table. "No tab" tools do not act on a tab. The table is
+`src/shared/user-browser-tools.ts`; `scripts/test-user-browser-tools.cjs`
+keeps this copy equal to it and checks every browser tool has a row.
+
+<!-- user-browser-tools:start -->
+| Tool | Chrome, Edge, Brave | Firefox |
+|---|---|---|
+| Distribution | Loaded unpacked from Settings, Browser (a Chrome Web Store listing is prepared). | A developer install only: loaded from about:debugging (Load Temporary Add-on), and loaded again after each Firefox restart, which removes it. Firefox Developer Edition, Nightly or ESR can keep it once their signature requirement is turned off (xpinstall.signatures.required; https://extensionworkshop.com/documentation/publish/signing-and-distribution-overview/). It is not on addons.mozilla.org: Mozilla allows the userScripts API it runs on for user script managers only. |
+| `codara_browser_use` | Works: Each browser call in the script is the tool of the same name. | Works, degraded: Each browser call in the script is the tool of the same name, as in its row. |
+| `codara_preview_audit` | Works: Accessibility and quality checks run in a world of their own beside the page. | Not available: It needs a script world apart from the page's, and Firefox gives extensions no debugger to make one. Use codara_preview_snapshot and codara_preview_evaluate. |
+| `codara_preview_cdp` | Works, degraded: The DevTools protocol allowlist, without Runtime, Debugger or DOM and CSS edits on your own browser. | Works, degraded: Only the commands the extension answers and the allowlist above permits: Page.navigate (url only: no frame, no referrer), Page.getFrameTree, Page.getLayoutMetrics, Page.captureScreenshot, Network.getResponseBody, and the Log, Network and Page enable and disable. Any other, or other parameters, is refused with the reason before the tab is touched. |
+| `codara_preview_cdp_events` | Works, degraded: Events of the allowlisted domains, Debugger excepted. | Works, degraded: Only the events the extension sends: Network.loadingFailed, Network.loadingFinished, Network.requestWillBeSent, Network.responseReceived, Page.frameNavigated, Page.frameStartedLoading, Page.frameStoppedLoading, Page.loadEventFired, Page.navigatedWithinDocument, Runtime.consoleAPICalled, Runtime.exceptionThrown; a subscription to any other is refused. |
+| `codara_preview_chrome` | Works: Status, open a tab (in a tab group), close, activate. | Works, degraded: Status and activate work; agents cannot open or close tabs yet (open is refused when only Firefox is connected; with Chrome connected too, Chrome opens it).<br>Not available, `open`: Opening tabs is not available in Firefox yet: the user opens the tab and shares it from the Codara extension's popup.<br>Not available, `close`: Closing tabs is not available in Firefox yet: the user closes it. |
+| `codara_preview_click` | Works: Clicks the element in the page. | Works, degraded: Clicks the element in the page, but the page gets no user activation: what needs a gesture (a popup, the clipboard, fullscreen, media with sound) is refused by the browser. |
+| `codara_preview_close` | Works: Closes a tab an agent opened or the user shared. | Not available: Closing tabs is not available in Firefox yet: the user closes it. |
+| `codara_preview_compare` | Works: Baseline, diff, list and screen sizes. | Works, degraded: Baseline, diff and list work; screen sizes do not.<br>Not available, `sizes`: Screen sizes resize the page, and Firefox gives extensions no debugger to do that. Compare at the window's own size. |
+| `codara_preview_console` | Works: The page's console and errors, with object previews. | Works, degraded: The page's own console calls and uncaught errors; no browser, security or network messages, no frames' consoles, objects as JSON. |
+| `codara_preview_dialog` | Works: Sees and answers alert, confirm and prompt. | Not available: Firefox tells extensions nothing about a page's alert, confirm or prompt: the user answers them in Firefox. |
+| `codara_preview_drag` | Works: Trusted mouse events. | Works, degraded: Played as page events (trusted: false): HTML drag and drop works, the page sees isTrusted false. |
+| `codara_preview_emulate` | Works: Device, color scheme, network and CPU throttling. | Not available: Emulation needs the DevTools protocol, and Firefox gives extensions no debugger. Called with no settings it still answers the current state (always none). |
+| `codara_preview_evaluate` | Works: Runs in the page. | Works, degraded: Runs in the page through Firefox's user scripts, once the user allowed scripts in pages from the popup, without user activation: what needs a gesture (a popup, the clipboard, fullscreen) is refused by the browser. |
+| `codara_preview_find` | Works: Finds elements in the page. | Works: Finds elements in the page. |
+| `codara_preview_hover` | Works: Trusted mouse move. | Works, degraded: Played as page events (trusted: false): mouseover and enter fire, CSS :hover does not. |
+| `codara_preview_inbox` | No tab: Reads what the user queued; no tab. | No tab: Reads what the user queued; no tab. |
+| `codara_preview_inspect` | Works: The element, its styles and a crop of it. | Works: The element and its styles; the crop needs access to all sites (asked from the popup). |
+| `codara_preview_key` | Works: Trusted key events. | Works, degraded: Played as page events (trusted: false), typing into the focused field as a browser would. |
+| `codara_preview_list` | No tab: Lists Codara's tabs and the shared ones. | No tab: Lists Codara's tabs and the shared ones. |
+| `codara_preview_locate` | Works: Locators in the page. | Works: Locators in the page. |
+| `codara_preview_mouse` | Works: Trusted mouse events. | Works, degraded: Played as page events (trusted: false): no native context menu or select popup. |
+| `codara_preview_navigate` | Works: Loads the address and waits for it. | Works: Web addresses only; waits for the load event, and a failed load does not say why. |
+| `codara_preview_network` | Works: Requests, responses, timing and bodies; cookie and authorization values always redacted. | Works, degraded: Requests and responses with headers and text bodies, and each request's elapsed time; no initiator, per-phase timing or sizes; only requests to sites the user let the extension use, never a blocked site. |
+| `codara_preview_performance` | Works: Web vitals, load and interaction traces, memory. | Not available: Traces, vitals and heap need the DevTools protocol, and Firefox gives extensions no debugger. |
+| `codara_preview_press_key` | Works: Trusted key press. | Works, degraded: Focus and key played as page events in one go (trusted: false). |
+| `codara_preview_record` | Works: Records the tab as a video. | Not available: Recording needs the screencast of the DevTools protocol, and Firefox gives extensions no debugger. Take screenshots instead. |
+| `codara_preview_resize` | Works: Sets the page's size. | Not available: Resizing the page needs the DevTools protocol, and Firefox gives extensions no debugger: the user resizes the window. |
+| `codara_preview_run` | No tab: Runs steps; each is the tool of the same name. | No tab: Runs steps; each is the tool of the same name. |
+| `codara_preview_screenshot` | Works: The view or the full page. | Works: The view or the full page, background tabs too; needs access to all sites (asked from the popup). |
+| `codara_preview_scroll` | Works: Trusted wheel. | Works, degraded: Played as a wheel event in the page (trusted: false); scrolls what is under it unless the page cancels it. |
+| `codara_preview_snapshot` | Works: The page's structure with references to act on. | Works: The page's structure with references to act on. |
+| `codara_preview_storage` | Works: get reads local and session storage, masking values whose key looks like a credential or whose value looks like a token (other values come as they are); the tab's cookie and storage switch is needed for cookies (HttpOnly values stay masked), for redact: false, and for set and clear, which change only local and session storage. Cookies are never changed, IndexedDB and caches never cleared (refused before the tab is touched on Firefox), and fresh and discard are for Codara's own tabs. | Works: As in Chrome; cookies come only from the tab's own host, scheme and cookie store (a container or private window keeps its own). |
+| `codara_preview_type` | Works: Types into the field. | Works: Types into the field. |
+| `codara_preview_upload` | Works: Sets the files on the file input. | Works, degraded: The files go through the page as File objects, 10 MB in all, only to the page the input was found in. |
+| `codara_preview_url` | Works: The tab's address and title. | Works: The tab's address and title. |
+| `codara_preview_wait_for` | Works: Waits for text, an element, a condition or a quiet network. | Works, degraded: Waits for text, an element or a condition; a quiet network counts only the requests the extension sees (sites the user let it use, never a blocked site), so another request may still be running. |
+<!-- user-browser-tools:end -->
+
 Large results stay out of the agent's context: images and long bodies are
 written under `<codara home>/workspace-data/<workspace>/`, never into the
 repository, and the result gives the path.

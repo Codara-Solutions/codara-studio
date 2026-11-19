@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // lib/firefox.js imports Chrome's policy.js, so it runs from the assembled folder.
 export async function run(assembled) {
-  const { CDP_METHODS, browserIdentity, isDomainToggle, isFirefoxRestrictedUrl, isShareable, firefoxBlockingRule, parseFirefoxBlockedSites, stopNeedsMark, unsupportedMethodError } = await import(pathToFileURL(join(assembled, "lib", "firefox.js")).href);
+  const { CDP_EVENTS, CDP_METHODS, browserIdentity, isDomainToggle, isFirefoxRestrictedUrl, isShareable, firefoxBlockingRule, parseFirefoxBlockedSites, stopNeedsMark, unsupportedMethodError } = await import(pathToFileURL(join(assembled, "lib", "firefox.js")).href);
   for (const url of [
     "about:preferences",
     "about:blank",
@@ -72,6 +73,10 @@ export async function run(assembled) {
 
   assert.ok(CDP_METHODS.includes("Runtime.enable") && CDP_METHODS.includes("Network.disable"), "the recorders' domains start");
   assert.ok(CDP_METHODS.every((method) => /^[A-Z][A-Za-z]+\.[a-z][A-Za-z]+$/.test(method)), "every listed name is a protocol command");
+  // The events listed are exactly the ones the extension's code sends ([name, params] pairs).
+  const sources = ["background.js", ...readdirSync(join(assembled, "lib")).map((name) => join("lib", name))].map((name) => readFileSync(join(assembled, name), "utf8"));
+  const sent = new Set(sources.flatMap((source) => [...source.matchAll(/\[\s*"((?:Network|Page|Runtime|Log)\.[a-z]\w*)"\s*,\s*\{/g)].map((match) => match[1])));
+  assert.deepEqual([...sent].sort(), [...CDP_EVENTS], "CDP_EVENTS lists every event the extension sends, and only those");
   assert.equal(new Set(CDP_METHODS).size, CDP_METHODS.length);
   for (const method of ["Runtime.evaluate", "Page.captureScreenshot", "Page.getLayoutMetrics", "Page.navigate", "Page.getFrameTree", "Network.getResponseBody", "Network.getCookies"]) assert.ok(CDP_METHODS.includes(method), method);
   for (const method of ["Page.reload", "Input.dispatchMouseEvent", "Network.getRequestPostData", "Network.setCookie", "Network.deleteCookies"]) assert.ok(!CDP_METHODS.includes(method), `${method}: nothing is listed before it works`);
