@@ -18,13 +18,14 @@ import * as cookies from "./cookies.test.mjs";
 import * as firefox from "./firefox.test.mjs";
 import * as manifest from "./manifest.test.mjs";
 import * as navigation from "./navigation.test.mjs";
+import * as pack from "./pack.test.mjs";
 import * as pageTools from "./page-tools.test.mjs";
 
 const scratch = mkdtempSync(join(tmpdir(), "codara-firefox-test-"));
 let failed = false;
 try {
   const { dir } = assemble(join(scratch, "extension"));
-  for (const suite of [firefox, pageTools, navigation, consoleNetwork, bodies, cookies, background, manifest, assembling]) {
+  for (const suite of [firefox, pageTools, navigation, consoleNetwork, bodies, cookies, background, manifest, assembling, pack]) {
     try {
       console.log(`ok - ${await suite.run(dir)}`);
     } catch (error) {
