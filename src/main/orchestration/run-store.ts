@@ -341,8 +341,14 @@ import {
   runtimeForWorkerModelId,
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
-import { coraWorkerModelAvailability, routeCoraModel } from "./worker-model-availability";
-import { claudeCodeModelOf, coraRouteLabel, effortOfModelId, managerRoutePinnedByUser, workerFamilyOfModelId } from "@shared/cora-routes";
+import { coraWorkerModelAvailability, routeCoraModel, workerPlanningModels } from "./worker-model-availability";
+import {
+  claudeCodeModelOf,
+  coraRouteLabel,
+  effortOfModelId,
+  managerRoutePinnedByUser,
+  workerFamilyOfModelId,
+} from "@shared/cora-routes";
 import {
   claudeCodeModelAndEffort,
   prepareClaudeCodeWorkerLaunch,
@@ -11708,7 +11714,21 @@ export type ResumeManagerTurnRecoveryResult = {
   reason?: string;
 };
 
-type ResolvedManagerRecoveryAccount = { backend: "pi"; profileId: string };
+type ResolvedManagerRecoveryAccount = {
+  backend: "pi";
+  profileId: string;
+  /** The model the failed turn ran on, spelled for the route it took. */
+  model: string;
+};
+
+/** The model the parked turn actually launched: routing may have moved the
+ *  picked `openai/...` onto a sign-in (or the reverse), and the account the
+ *  user picks to resume must match that route. */
+function managerRecoveryModel(run: RunState): string {
+  const failedCallId = run.managerTurnRecovery?.failedSparkCallId;
+  const failed = failedCallId ? run.sparkCalls.find((call) => call.id === failedCallId) : undefined;
+  return failed?.model?.trim() || resolveChatBackendConfig(run).model;
+}
 
 async function resolveManagerRecoveryAccount(
   run: RunState,
@@ -11735,8 +11755,8 @@ async function resolveManagerRecoveryAccount(
       "Recovery Pi account profile id",
     );
     if (!profileId) throw new Error("A concrete subscription account is required.");
-    const config = resolveChatBackendConfig(run);
-    const provider = piProviderForManagerModel(config.model);
+    const model = managerRecoveryModel(run);
+    const provider = piProviderForManagerModel(model);
     if (!provider) throw new Error("OpenRouter chats do not use a subscription account profile.");
     const resolved = await resolveCodaraPiExecutionAccount({
       provider,
@@ -11745,7 +11765,7 @@ async function resolveManagerRecoveryAccount(
     if (resolved.accountProfileId !== profileId) {
       throw new Error("The selected subscription account could not be pinned exactly.");
     }
-    return { ok: true, account: { backend: "pi", profileId } };
+    return { ok: true, account: { backend: "pi", profileId, model } };
   } catch (error) {
     return {
       ok: false,
@@ -11923,6 +11943,9 @@ export async function resumeManagerTurnRecovery(
   const decision: { outcome: ResumeManagerTurnRecoveryResult["outcome"] } = {
     outcome: "stale",
   };
+  // The account was checked against this model; a model the user switched to
+  // since then needs its own check.
+  const modelAtResolve = run.chatModel?.trim() || undefined;
   run = await commitRunChange(run, {
     type: "run.manager_turn_recovery_claimed",
     message: "Parked manager turn recovery claimed",
@@ -11957,11 +11980,20 @@ export async function resumeManagerTurnRecovery(
           decision.outcome = "account-incompatible";
           return false;
         }
+        if ((draft.chatModel?.trim() || undefined) !== modelAtResolve) {
+          decision.outcome = "stale";
+          return false;
+        }
         const accountChanged =
           draft.chatAccountProfileId !== resolved.account.profileId;
         draft.chatAccountProfileId = resolved.account.profileId;
-        // The user picked this account to resume on.
+        // The user picked this account to resume on. A pin the user chose
+        // stops routing, so the chat keeps the spelling the account serves
+        // (the routed one) instead of falling back to the picked spelling.
         delete draft.chatAccountProfileImplicit;
+        if ((draft.chatModel?.trim() || undefined) !== resolved.account.model) {
+          draft.chatModel = resolved.account.model;
+        }
         if (accountChanged) {
           delete draft.chatSessionUuid;
           delete draft.chatSessionMode;
@@ -15090,11 +15122,14 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // Enabled models some route can carry now: a GPT model with no ChatGPT
   // sign-in stays eligible when its OpenRouter id is verified, instead of
   // being swapped for another family before routing runs.
-  const routableWorkerModels = workerSettings
+  const connectedWorkerModels = workerSettings
     ? await coraWorkerModelAvailability(workerSettings)
         .then((availability) => availability.connected)
         .catch(() => [] as string[])
     : [];
+  const routableWorkerModels = workerSettings
+    ? workerPlanningModels(connectedWorkerModels, workerSettings)
+    : connectedWorkerModels;
   const plannedPiWorkerModel = isPiWorker
     ? piModelForWorker(
         task,
@@ -15872,9 +15907,12 @@ async function performAutoCompaction(
   try {
     let run = await requireRun(runId);
     const epoch = conversationEpoch(run);
-    const chatConfig = await freezeManagerExecutionAccount(
-      resolveChatBackendConfig(run),
-    );
+    // The summary runs on the session the chat's turns used, so it takes the
+    // same route (and with it the same account) as a chat turn would now.
+    const chatConfig = await freezeManagerExecutionAccount({
+      ...resolveChatBackendConfig(run),
+      model: await routedManagerModel(run),
+    });
     if (
       runProjectPolicyMode(run) === "untrusted-pull-request" &&
       chatConfig.backend !== "pi"

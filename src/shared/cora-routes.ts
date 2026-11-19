@@ -135,6 +135,22 @@ export function routeSpellings(
   return route ? { [route]: `${base}${effort}` } : {};
 }
 
+/** One id per enabled model, in its sign-in spelling when a sign-in can serve
+ *  it (`openai/gpt-5.6-sol` and `gpt-5.6-sol` are the same model). A worker's
+ *  model is picked from these by what it is, then chooseCoraRoute picks how
+ *  to reach it, so planning never decides the route ahead of the order. */
+export function workerModelsByIdentity(
+  models: readonly string[],
+  nativeModels: ReadonlySet<string> = NATIVE_ROUTABLE_MODELS,
+): string[] {
+  const out: string[] = [];
+  for (const id of models) {
+    const identity = routeSpellings(id, nativeModels).subscription ?? id.trim();
+    if (identity && !out.includes(identity)) out.push(identity);
+  }
+  return out;
+}
+
 export interface CoraRouteAvailability {
   /** Subscription providers with a usable sign-in. */
   subscriptions: ReadonlySet<PiSubscriptionProvider>;

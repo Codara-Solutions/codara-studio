@@ -2,11 +2,13 @@ import type { AppSettings, PiSubscriptionProvider } from "@shared/types";
 import {
   chooseCoraRoute,
   normalizeCoraRouteOrder,
+  workerModelsByIdentity,
   type CoraRouteAvailability,
 } from "@shared/cora-routes";
 import { ALLOWED_WORKER_MODELS, partitionWorkerModelsByAccount } from "@shared/worker-model-roster";
 import { availableCoraWorkerModels, configuredOpenRouterCoraModels } from "../openrouter-config";
 import { claudeCodeWorkerReady } from "./claude-code-worker";
+import type { PiProfileAuthStatusLike } from "./pi-worker-providers";
 
 export interface CoraWorkerModelAvailability {
   /** Enabled models Cora can launch now. */
@@ -29,10 +31,14 @@ async function subscriptionState(): Promise<{
       import("./pi-account-auth-store"),
       import("./pi-worker-providers"),
     ]);
-    const inspection = await inspectPiAccountProfileAuthStore();
+    // Only these four status fields cross into the route code: never the
+    // profile snapshot, account email, fingerprint or anything credential.
+    const statuses: PiProfileAuthStatusLike[] = (await inspectPiAccountProfileAuthStore()).statuses.map(
+      ({ provider, connected, expired, canRefresh }) => ({ provider, connected, expired, canRefresh }),
+    );
     return {
-      usable: usablePiProviders(inspection.statuses),
-      configured: new Set(inspection.statuses.map((status) => status.provider)),
+      usable: usablePiProviders(statuses),
+      configured: new Set(statuses.map((status) => status.provider)),
     };
   } catch {
     return null;
@@ -127,4 +133,14 @@ export async function coraWorkerModelAvailability(
     connected: [...split.connected, ...rerouted],
     disconnected: split.disconnected.filter((id) => !rerouted.includes(id)),
   };
+}
+
+/**
+ * The models a managed worker's model is picked from. With an order chosen, a
+ * model is planned by what it is (`openai/gpt-5.6-sol` and `gpt-5.6-sol` are
+ * one model) and routeCoraModel alone picks its route; planning on spellings
+ * would let the roster pick another family, or the paid spelling, first.
+ */
+export function workerPlanningModels(connected: readonly string[], settings: AppSettings): string[] {
+  return settings.coraRouteOrder === undefined ? [...connected] : workerModelsByIdentity(connected);
 }

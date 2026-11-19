@@ -170,6 +170,61 @@ async function main() {
   assert.equal(await availability.routeCoraModel("gpt-5.6-sol", ccOrdered, undefined, { managedWorker: true }), "openai/gpt-5.6-sol", "GPT models skip it");
   console.log("PASS routes: Claude Code runs managed Claude workers only, when picked and signed in");
 
+  // Worker planning (launchWorkerAttemptInner): with an order chosen, the
+  // worker's model is picked by what it is and only the order picks its
+  // route. Enabled: Claude Opus, and GPT-5.6 Sol only as its OpenRouter id.
+  const gptTask = { runtimePreference: "codex", modelHint: "gpt-5.6-sol" };
+  const plan = async (statuses, extra, enabled) => {
+    harnessState.statuses = statuses;
+    const settings = { ...ordered, coraWorkerModels: enabled, ...extra };
+    const { connected } = await availability.coraWorkerModelAvailability(settings);
+    const planned = roster.plannedWorkerModel(gptTask, {
+      enabledModels: availability.workerPlanningModels(connected, settings),
+    });
+    return { planned, launched: await availability.routeCoraModel(planned, settings) };
+  };
+  const claude = { provider: "anthropic", connected: true, expired: false };
+  // No ChatGPT sign-in ever: the GPT task keeps GPT, through the key.
+  let chosen = await plan([claude], {}, ["claude-opus-5", "openai/gpt-5.6-sol"]);
+  assert.equal(chosen.launched, "openai/gpt-5.6-sol", JSON.stringify(chosen));
+  // Both spellings enabled, the ChatGPT sign-in expired, sign-ins first: the
+  // sign-in spelling launches and fails with "sign in again", never the key.
+  chosen = await plan(
+    [claude, { provider: "openai-codex", connected: true, expired: true, canRefresh: false }],
+    {},
+    ["claude-opus-5", "gpt-5.6-sol", "openai/gpt-5.6-sol"],
+  );
+  assert.equal(chosen.launched, "gpt-5.6-sol", JSON.stringify(chosen));
+  // OpenRouter first: the key, as the user ordered.
+  chosen = await plan(
+    [claude, { provider: "openai-codex", connected: true, expired: false }],
+    { coraRouteOrder: ["openrouter", "subscription", "subcloud"] },
+    ["claude-opus-5", "gpt-5.6-sol", "openai/gpt-5.6-sol"],
+  );
+  assert.equal(chosen.launched, "openai/gpt-5.6-sol", JSON.stringify(chosen));
+  // No order: planning sees the spellings as they are.
+  harnessState.statuses = [claude];
+  assert.deepEqual(availability.workerPlanningModels(["openai/gpt-5.6-sol"], keyed), ["openai/gpt-5.6-sol"]);
+  console.log("PASS worker planning picks the model, then the order picks its route");
+
+  // The route code keeps only which providers are set up or usable and which
+  // OpenRouter ids are verified: never a token, key, email or fingerprint.
+  harnessState.statuses = [
+    {
+      provider: "openai-codex", profileId: "p-1", connected: true, expired: false,
+      accountEmail: "someone@example.test", accountFingerprint: "fp-secret-digest", access: "FAKE_access_token",
+    },
+  ];
+  const routeView = await availability.coraRouteAvailability(ordered);
+  const serialized = JSON.stringify(routeView, (_, value) => (value instanceof Set ? [...value] : value));
+  for (const secret of [key, "someone@example.test", "fp-secret-digest", "FAKE_access_token", "p-1"]) {
+    assert.ok(!serialized.includes(secret), `route availability carries ${secret}`);
+  }
+  assert.deepEqual(Object.keys(routeView).sort(), ["nativeModels", "openRouterModels", "subscriptions"]);
+  const availabilitySource = fs.readFileSync(path.join(ROOT, "src/main/orchestration/worker-model-availability.ts"), "utf8");
+  assert.doesNotMatch(availabilitySource, /console\.|writeFile|appendFile|fetch\(|commitRunChange|emit\(/, "route lookups log, store or send nothing");
+  console.log("PASS route lookups keep provider status and model ids only");
+
   harnessState.fail = true;
   const unreadable = await availability.coraWorkerModelAvailability(settings);
   assert.ok(unreadable.connected.length >= 3 && unreadable.disconnected.length === 0);
