@@ -235,6 +235,13 @@ async function main() {
     assert.ok(findable("capabilities", "Auto-compact context at"));
   });
 
+  check("the route order row, drawn by hand, is in the index", () => {
+    const behavior = read(path.join(COMPONENTS, "capabilities", "BehaviorSection.tsx"));
+    assert.match(behavior, />How Cora reaches models</);
+    assert.ok(findable("capabilities", "How Cora reaches models"));
+    assert.equal(top("openrouter order"), "How Cora reaches models");
+  });
+
   check("every index entry names something its page renders", () => {
     const dialog = read(path.join(COMPONENTS, "SettingsDialog.tsx"));
     const functions = topLevelFunctions(dialog);
@@ -279,6 +286,7 @@ async function main() {
     rendered.capabilities = new Set([
       ...renderedRows(read(path.join(COMPONENTS, "capabilities", "BehaviorSection.tsx"))).map((row) => row.name),
       "Auto-compact context at",
+      "How Cora reaches models",
       ...Object.values(CAPABILITY_PAGE_LABEL),
     ]);
     const cards = read(path.join(COMPONENTS, "AccountCards.tsx"));
