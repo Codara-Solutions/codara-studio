@@ -116,3 +116,14 @@ export function failedEvent(details) {
     { requestId: String(details.requestId), timestamp: details.timeStamp / 1000, type: resourceType(details.type), errorText: error, canceled: error === "NS_BINDING_ABORTED" },
   ];
 }
+
+/**
+ * What to do once the slow check of a redirect's next site is back: keep
+ * following ("keep": allowed, or the request already ended or moved to a
+ * later hop), end Codara's row ("end"), or, when the tab left what was
+ * shared meanwhile, forget it without a word ("forget").
+ */
+export function lateRedirectEnd({ allowed, seen, now, redirect, wanted }) {
+  if (allowed || now !== seen || now.redirect !== redirect) return "keep";
+  return wanted ? "end" : "forget";
+}

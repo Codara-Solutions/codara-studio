@@ -16,7 +16,7 @@
 
 import { consoleAddresses, consoleEvent } from "./lib/console.js";
 import { LinkClient } from "./lib/link-client.js";
-import { failedEvent, finishedEvent, requestEvent, requestVisible, responseEvent } from "./lib/network.js";
+import { failedEvent, finishedEvent, lateRedirectEnd, requestEvent, requestVisible, responseEvent } from "./lib/network.js";
 import {
   NAVIGATE_BUSY_ERROR,
   noteNavigationChange,
@@ -782,7 +782,11 @@ chrome.webRequest.onBeforeRedirect.addListener(async (details) => {
   const next = { ...details, url: details.redirectUrl, documentUrl: details.type === "main_frame" ? details.redirectUrl : details.documentUrl };
   if (!requestVisible(next, blockedUrl)) return requestLost(details, HIDDEN_REDIRECT);
   const { protocol, hostname } = new URL(details.redirectUrl);
-  if (!(await chrome.permissions.contains({ origins: [`${protocol}//${hostname}/*`] }).catch(() => false))) requestLost(details, HIDDEN_REDIRECT);
+  const allowed = await chrome.permissions.contains({ origins: [`${protocol}//${hostname}/*`] }).catch(() => false);
+  // Sharing is checked again: the tab may have left what was shared while Firefox answered.
+  const ending = lateRedirectEnd({ allowed, seen, now: requests.get(details.requestId), redirect: details, wanted: networkWanted(details) });
+  if (ending === "end") requestLost(details, HIDDEN_REDIRECT);
+  else if (ending === "forget") requests.delete(details.requestId);
 }, ALL_URLS, ["responseHeaders"]);
 chrome.webRequest.onResponseStarted.addListener((details) => {
   if (!requests.has(details.requestId) || !networkWanted(details) || !requestSent(details)) return;

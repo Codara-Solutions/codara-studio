@@ -180,5 +180,12 @@ export async function run(assembled) {
   assert.equal(network.requestVisible({ ...base, documentUrl: "https://bank.example/frame" }, blocked), false);
   assert.equal(network.requestVisible({ ...base, tabId: -1 }, blocked), false);
   assert.equal(network.requestVisible({ ...base, type: "sub_frame", url: "https://a.example/frame", originUrl: "https://bank.example/frame" }, blocked), false, "a blocked frame navigating itself");
-  return "console and network: the hook sends nothing until shared, entries and webRequest as protocol events, cookies out unless switched on";
+  // After the slow check of a redirect's next site: end the row only if it is still that hop and the tab still shared.
+  const hop = { redirect: { requestId: "38" } };
+  assert.equal(network.lateRedirectEnd({ allowed: true, seen: hop, now: hop, redirect: hop.redirect, wanted: true }), "keep");
+  assert.equal(network.lateRedirectEnd({ allowed: false, seen: hop, now: hop, redirect: hop.redirect, wanted: true }), "end");
+  assert.equal(network.lateRedirectEnd({ allowed: false, seen: hop, now: hop, redirect: hop.redirect, wanted: false }), "forget", "the tab left what was shared meanwhile: nothing more is sent");
+  assert.equal(network.lateRedirectEnd({ allowed: false, seen: hop, now: undefined, redirect: hop.redirect, wanted: true }), "keep", "already ended");
+  assert.equal(network.lateRedirectEnd({ allowed: false, seen: hop, now: { redirect: { requestId: "38" } }, redirect: hop.redirect, wanted: true }), "keep", "a later hop");
+    return "console and network: the hook sends nothing until shared, entries and webRequest as protocol events, cookies out unless switched on";
 }
