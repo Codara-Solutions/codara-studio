@@ -27,6 +27,29 @@ const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 const OFFLINE_DELAYS_MS = [30_000, 60_000, 120_000, 300_000];
 const REQUEST_TYPES = new Set(["attach", "detach", "cdp", "open", "close", "activate"]);
 
+/**
+ * A request's answer built only when its turn to leave comes (`build()`,
+ * which may throw), so what it says still holds then; `still()` is asked
+ * again once it is sealed. A handler returns one for an answer that must
+ * not outlive the access it was read under.
+ */
+export class LateReply {
+  constructor(build, still = () => true) {
+    this.build = build;
+    this.still = still;
+  }
+}
+
+/** The message to send, with a LateReply built now (an error in its place if it throws). */
+function built(message) {
+  if (!(message.result instanceof LateReply)) return message;
+  try {
+    return { id: message.id, result: message.result.build() ?? {} };
+  } catch (error) {
+    return { id: message.id, error: { message: error instanceof Error ? error.message : String(error) } };
+  }
+}
+
 export class LinkClient {
   /**
    * @param {object} deps
@@ -114,13 +137,20 @@ export class LinkClient {
   sendOn(socket, message) {
     if (!socket || !this.current(socket) || socket.readyState !== 1) return false;
     if (!socket.sealer) {
-      socket.send(JSON.stringify(message));
+      socket.send(JSON.stringify(built(message)));
       return true;
     }
     // Sealing is asynchronous and each frame's counter is its place in the
     // stream, so frames leave one at a time in the order they were sent.
     socket.outbox = (socket.outbox ?? Promise.resolve()).then(async () => {
-      const frame = await socket.sealer.seal(message);
+      const out = built(message);
+      const frame = await socket.sealer.seal(out);
+      // Its access ended while it was sealed: a frame left out would break the
+      // count, so the link ends instead, and the answer never leaves.
+      if (out.result !== undefined && message.result instanceof LateReply && !message.result.still()) {
+        socket.close();
+        return;
+      }
       if (socket.readyState === 1) socket.send(frame);
     }).catch(() => {});
     return true;

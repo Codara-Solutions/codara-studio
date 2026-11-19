@@ -16,7 +16,7 @@
 
 import { BODY_FAILED, BODY_TYPES, BodyStore, NO_BODY, bodyPlan } from "./lib/bodies.js";
 import { consoleAddresses, consoleEvent } from "./lib/console.js";
-import { LinkClient } from "./lib/link-client.js";
+import { LateReply, LinkClient } from "./lib/link-client.js";
 import { failedEvent, finishedEvent, lateRedirectEnd, requestEvent, requestVisible, responseEvent } from "./lib/network.js";
 import {
   NAVIGATE_BUSY_ERROR,
@@ -744,6 +744,8 @@ function bodyFilters(tabId, on) {
 }
 
 function keepBody(details) {
+  // Only a request in the log (one that started while it was recorded).
+  if (!requests.has(details.requestId)) return;
   const { url, documentUrl, originUrl, frameAncestors, type, tabId } = details;
   const request = { url, documentUrl, originUrl, frameAncestors, type, tabId };
   const plan = bodyPlan(details);
@@ -768,6 +770,8 @@ function keepBody(details) {
   filter.ondata = (event) => {
     filter.write(event.data);
     if (!copying) return;
+    // The tab left what is shared, or its log stopped: nothing more is kept, and the filter lets go.
+    if (!networkWanted(details)) return bodies.drop(details.requestId);
     let more = false;
     try {
       more = bodies.data(hop, new Uint8Array(event.data));
@@ -790,15 +794,23 @@ function keepBody(details) {
  */
 async function responseBody(tabId, params, socket) {
   await stillUsable(tabId, socket);
-  const { hop, request, ...answer } = await bodies.body(String(params.requestId ?? ""), tabId);
-  // The user may have taken the site back meanwhile.
+  const hop = await bodies.body(String(params.requestId ?? ""), tabId);
+  const { request } = hop;
+  // The user may have taken the site back meanwhile (taking it back later drops the body).
   const { protocol, hostname } = new URL(request.url);
   const allowed = await chrome.permissions.contains({ origins: [`${protocol}//${hostname}/*`] }).catch(() => false);
   await stillUsable(tabId, socket);
-  // Still the body kept for that request, with the log still on: a drop meanwhile wins.
-  if (!allowed || !bodies.holds(hop) || !eventsOn(tabId, "Network")) throw new Error(NO_BODY);
   if (!requestVisible(request, blockedUrl)) throw new Error(`The response of ${request.url} is from a site agents may not use (the extension's blocked sites).`);
-  return answer;
+  // Still the body kept for that request, its tab still recorded and shared,
+  // on this link: asked again when the answer is built and once it is sealed.
+  const still = () =>
+    allowed && liveSocket() === socket && bodies.holds(hop) && eventsOn(tabId, "Network") && eventsAllowed(tabsSeen.get(tabId)) && requestVisible(request, blockedUrl);
+  if (!still()) throw new Error(NO_BODY);
+  // Built only when its turn to leave comes: one body copy at a time, never one that lost its access.
+  return new LateReply(() => {
+    if (!still()) throw new Error(NO_BODY);
+    return bodies.answer(hop);
+  }, still);
 }
 
 /** The blocked sites changed: bodies of requests the log would not show now go. */
@@ -897,9 +909,10 @@ chrome.webRequest.onResponseStarted.addListener((details) => {
 }, ALL_URLS, ["responseHeaders"]);
 for (const [event, toEvent] of [[chrome.webRequest.onCompleted, finishedEvent], [chrome.webRequest.onErrorOccurred, failedEvent]]) {
   event.addListener((details) => {
-    if (requests.has(details.requestId) && networkWanted(details) && requestSent(details)) sendNetwork(details, toEvent(details));
-    // Firefox's word on the transfer: a body is given only after it completed, and only one the log still shows.
-    if (networkWanted(details)) bodies.outcome(details.requestId, toEvent === finishedEvent);
+    const shown = requests.has(details.requestId) && networkWanted(details) && requestSent(details);
+    if (shown) sendNetwork(details, toEvent(details));
+    // Firefox's word on the transfer: a body is given only after it completed, and only for a row Codara got the end of.
+    if (shown) bodies.outcome(details.requestId, toEvent === finishedEvent);
     else bodies.drop(details.requestId);
     requests.delete(details.requestId);
   }, ALL_URLS);
@@ -973,6 +986,8 @@ chrome.tabs.onAttached.addListener(scheduleRefresh);
 chrome.tabs.onDetached.addListener((tabId) => {
   const seen = tabsSeen.get(tabId);
   if (seen) seen.windowId = null;
+  // Its bodies go too, and the filters still copying let go.
+  bodies.forgetTab(tabId);
 });
 chrome.tabs.onAttached.addListener(async (tabId, { newWindowId }) => {
   const seen = tabsSeen.get(tabId);

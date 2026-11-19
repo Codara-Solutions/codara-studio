@@ -12,9 +12,9 @@ export async function run(assembled) {
   const response = (type, headers, extra = {}) => ({ type, statusCode: 200, method: "GET", responseHeaders: Object.entries(headers).map(([name, value]) => ({ name, value })), ...extra });
   assert.deepEqual(bodyPlan(response("xmlhttprequest", { "Content-Type": "application/json" })), { keep: true });
   assert.deepEqual(bodyPlan(response("main_frame", { "content-type": "text/html; charset=utf-8", "Content-Length": "5000000" })), { keep: true });
-  assert.deepEqual(bodyPlan(response("script", {})), { keep: true }, "no type said: kept within the cap");
+  assert.deepEqual(bodyPlan(response("script", { "Content-Type": "text/javascript" })), { keep: true });
   assert.deepEqual(bodyPlan(response("xmlhttprequest", { "Content-Type": "text/plain", "Content-Length": "5000001" })), { keep: false, reason: BODY_TOO_LARGE });
-  for (const [type, headers] of [["image", { "Content-Type": "image/png" }], ["media", {}], ["font", {}], ["websocket", {}], ["xmlhttprequest", { "Content-Type": "application/octet-stream" }], ["xmlhttprequest", { "Content-Type": "video/mp4" }], ["other", { "Content-Type": "text/csv", "Content-Disposition": "attachment; filename=a.csv" }]]) {
+  for (const [type, headers] of [["image", { "Content-Type": "image/png" }], ["media", {}], ["font", {}], ["websocket", {}], ["xmlhttprequest", { "Content-Type": "application/octet-stream" }], ["xmlhttprequest", { "Content-Type": "video/mp4" }], ["xmlhttprequest", { "Content-Type": "image/svg+xml" }], ["xmlhttprequest", {}], ["script", {}], ["other", { "Content-Type": "text/csv", "Content-Disposition": "attachment; filename=a.csv" }]]) {
     assert.deepEqual(bodyPlan(response(type, headers)), { keep: false, reason: BODY_NOT_TEXT }, `${type} ${JSON.stringify(headers)}`);
   }
   for (const extra of [{ statusCode: 302 }, { statusCode: 204 }, { method: "HEAD" }]) assert.deepEqual(bodyPlan(response("xmlhttprequest", { "Content-Type": "text/plain" }, extra)), { keep: false, reason: null });
@@ -28,6 +28,8 @@ export async function run(assembled) {
 
   const store = new BodyStore({ perBody: 10, total: 16, count: 6, block: 4 });
   /** A body that reached its end, Firefox's completion and Codara's row. */
+  /** What Codara gets: the hop once ended, and its body built at the last moment. */
+  const read = async (id, tab = 1, waitMs) => store.answer(await store.body(id, tab, waitMs));
   const whole = (id, text, url = `https://a.example/${id}`) => {
     const hop = store.start(id, 1, at(url));
     store.data(hop, bytes(text));
@@ -47,9 +49,10 @@ export async function run(assembled) {
   store.data(hop, bytes("lo"));
   store.end(hop);
   store.outcome("7", true);
-  const { hop: given, ...answer } = await pending;
-  assert.deepEqual(answer, { request: at("https://a.example/data"), body: "hello", base64Encoded: false });
+  const given = await pending;
   assert.ok(given === hop && store.holds(hop), "the read names the hop it read, to check it again later");
+  assert.deepEqual(given.request, at("https://a.example/data"));
+  assert.deepEqual(store.answer(given), { body: "hello", base64Encoded: false });
   await assert.rejects(store.body("7", 2), { message: NO_BODY }, "another tab's request");
   await assert.rejects(store.body("8", 1), { message: NO_BODY });
 
@@ -82,7 +85,7 @@ export async function run(assembled) {
   store.end(next);
   store.publish("10");
   store.outcome("10", true);
-  assert.deepEqual({ ...(await store.body("10", 1)), hop: null }, { hop: null, request: at("https://a.example/final"), body: "ZmluYWw=", base64Encoded: true });
+  assert.deepEqual(await read("10"), { body: "ZmluYWw=", base64Encoded: true });
 
   // Bounds: over 10 bytes a body is not kept; over 16 bytes or 6 bodies in all, the oldest go first.
   const over = store.start("12", 1, at("https://a.example/12"));
@@ -101,12 +104,14 @@ export async function run(assembled) {
   store.end(tiny);
   store.publish("15");
   store.outcome("15", true);
-  assert.equal((await store.body("15", 1)).body, "enp6enp6enp6", "zzzzzzzzz, as base64");
+  const tinyHop = await store.body("15", 1);
+  assert.equal(store.answer(tinyHop).body, "enp6enp6enp6", "zzzzzzzzz, as base64");
   // A body dropped while it still comes lets its filter go.
   let released = 0;
   const flowing = store.start("16", 1, at("https://a.example/flowing"), () => released++);
   store.drop("16");
   store.drop("15");
+  assert.throws(() => store.answer(tinyHop), { message: NO_BODY }, "a body dropped after the read is never built");
   assert.equal(released, 1);
   assert.equal(store.data(flowing, bytes("x")), false, "nothing more is kept for it");
   // The blocked sites changed: bodies of requests the log would not show now go.
@@ -114,7 +119,7 @@ export async function run(assembled) {
   whole("18", "gone", "https://bank.example/gone");
   store.purge((request) => !request.url.includes("bank.example"));
   await assert.rejects(store.body("18", 1), { message: NO_BODY });
-  assert.equal((await store.body("17", 1)).body, "a2VwdA==");
+  assert.equal((await read("17")).body, "a2VwdA==");
   for (let i = 0; i < 20; i++) whole(`empty-${i}`, "");
   assert.equal(store.hops.size, 6, "empty bodies are counted too");
   assert.match(BODY_FAILED, /^Body not available: the transfer failed/);

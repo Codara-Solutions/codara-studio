@@ -19,7 +19,7 @@
 export const BODY_MAX = 5_000_000;
 export const BODIES_MAX = 20_000_000;
 export const HOPS_MAX = 1000;
-const TEXT_MIME = /^(text\/|application\/(json|[\w.+-]*\+json|javascript|ecmascript|xml|[\w.+-]*\+xml|x-www-form-urlencoded|graphql)|image\/svg\+xml)/i;
+const TEXT_MIME = /^(text\/|application\/(json|[\w.+-]*\+json|javascript|ecmascript|xml|[\w.+-]*\+xml|x-www-form-urlencoded|graphql))/i;
 /** The request types whose bodies are kept, if their response is text (and not a download). */
 export const BODY_TYPES = Object.freeze(["main_frame", "sub_frame", "xmlhttprequest", "script", "stylesheet", "other"]);
 
@@ -40,8 +40,9 @@ export function bodyPlan(details, cap = BODY_MAX) {
   const status = details.statusCode;
   if ((status >= 300 && status < 400) || status === 204 || details.method === "HEAD") return { keep: false, reason: null };
   if (!BODY_TYPES.includes(details.type) || /^\s*attachment/i.test(header(details, "content-disposition"))) return { keep: false, reason: BODY_NOT_TEXT };
+  // Only a response that says it is text: no type said, no body kept.
   const type = header(details, "content-type").split(";")[0].trim();
-  if (type && !TEXT_MIME.test(type)) return { keep: false, reason: BODY_NOT_TEXT };
+  if (!TEXT_MIME.test(type)) return { keep: false, reason: BODY_NOT_TEXT };
   const length = Number(header(details, "content-length"));
   if (Number.isFinite(length) && length > cap) return { keep: false, reason: BODY_TOO_LARGE };
   return { keep: true };
@@ -200,8 +201,9 @@ export class BodyStore {
   }
 
   /**
-   * The body of a request of this tab, once it has ended (waiting up to
-   * `waitMs`), with its hop and request; throws the protocol's errors.
+   * The hop of a request of this tab once its body has ended (waiting up to
+   * `waitMs`); throws the protocol's errors. The body itself is built by
+   * answer(), at the last moment.
    */
   async body(requestId, tabId, waitMs = 10_000) {
     const hop = this.hops.get(String(requestId));
@@ -225,6 +227,13 @@ export class BodyStore {
       }
     }
     if (hop.error) throw new Error(hop.error);
+    return hop;
+  }
+
+  /** The body of a hop body() gave, as the protocol answers it, while the store still holds it. */
+  answer(hop) {
+    if (hop.error) throw new Error(hop.error);
+    if (!this.holds(hop)) throw new Error(NO_BODY);
     const bytes = new Uint8Array(hop.bytes);
     let at = 0;
     for (const block of hop.blocks) {
@@ -232,6 +241,6 @@ export class BodyStore {
       bytes.set(piece, at);
       at += piece.length;
     }
-    return { hop, request: hop.request, ...bodyAnswer(bytes, hop.contentType) };
+    return bodyAnswer(bytes, hop.contentType);
   }
 }

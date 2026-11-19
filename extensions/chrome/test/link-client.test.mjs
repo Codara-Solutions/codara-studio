@@ -3,7 +3,7 @@ import { createECDH } from "node:crypto";
 import { createServer } from "node:net";
 import { WebSocketServer } from "ws";
 
-import { LinkClient, linkProof, pairCommitment, pairedToken, pairingCode, sessionSealer, sha256Hex } from "../lib/link-client.js";
+import { LateReply, LinkClient, linkProof, pairCommitment, pairedToken, pairingCode, sessionSealer, sha256Hex } from "../lib/link-client.js";
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -389,6 +389,27 @@ export async function run() {
   assert.deepEqual(recovering, [1_000, 2_000, 5_000, 10_000, 30_000, 60_000]);
   scanning.disconnect();
 
+  // A late reply is built when its turn to leave comes, and never leaves once its access ended.
+  const late = new LinkClient({});
+  const sent = [];
+  let closed = 0;
+  let sealing = null;
+  const line = { readyState: 1, epoch: late.epoch, send: (frame) => sent.push(JSON.parse(frame)), close: () => closed++, sealer: { seal: async (message) => (sealing?.(), JSON.stringify(message)) } };
+  late.socket = line;
+  let value = "read under access";
+  late.sendOn(line, { id: 1, result: new LateReply(() => ({ value })) });
+  value = "what holds when it leaves";
+  late.sendOn(line, { id: 2, result: new LateReply(() => { throw new Error("No resource with given identifier found"); }) });
+  let access = true;
+  sealing = () => (access = false);
+  late.sendOn(line, { id: 3, result: new LateReply(() => ({ value: "secret" }), () => access) });
+  await line.outbox;
+  assert.deepEqual(sent, [
+    { id: 1, result: { value: "what holds when it leaves" } },
+    { id: 2, error: { message: "No resource with given identifier found" } },
+  ]);
+  assert.equal(closed, 1, "access ended while sealing: the link ends and the answer never leaves");
+
   stranger.close();
   eager.close();
   bluffer.close();
@@ -396,5 +417,5 @@ export async function run() {
   refuser.close();
   other.close();
   codara.close();
-  return "link client: skips closed and foreign ports, pairs, answers requests, reconnects, tries past a Codara that does not know it, answers only a Codara that proves the pairing (never an unproven pairing offer), honors revoke and deny, pairs over ECDH without sending the token, reloads only when the sealed session asks, drops the link on an unsealed or replayed frame, tries the last port that worked first, opens no WebSocket on a port the probe finds closed, and backs off while Codara is unreachable until a wake";
+  return "link client: skips closed and foreign ports, pairs, answers requests, reconnects, tries past a Codara that does not know it, answers only a Codara that proves the pairing (never an unproven pairing offer), honors revoke and deny, pairs over ECDH without sending the token, reloads only when the sealed session asks, drops the link on an unsealed or replayed frame, tries the last port that worked first, opens no WebSocket on a port the probe finds closed, backs off while Codara is unreachable until a wake, and builds a late reply only when it leaves (never once its access ended)";
 }
