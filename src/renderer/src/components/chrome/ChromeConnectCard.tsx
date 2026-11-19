@@ -98,6 +98,8 @@ export default function ChromeConnectCard({
   const shownFirefoxFolder = firefoxFolder ?? state.firefoxExtensionFolder;
   // Firefox asks for the site and for scripts in pages from its popup, after sharing.
   const firefoxConnected = state.browsers.some((browser) => browser.connected && /firefox/i.test(browser.browser.name));
+  // A temporary add-on is gone after every Firefox restart: say so, and how to load it again.
+  const firefoxOffline = progress.offline.some((name) => /firefox/i.test(name));
   const pairing = state.pending[0];
 
   // Nothing can connect while the link is off: say why instead of the steps.
@@ -291,11 +293,31 @@ export default function ChromeConnectCard({
         ) : step === "offline" ? (
           <>
             <div className="chrome-connect__h">{`${progress.offline.join(", ")} ${progress.offline.length === 1 ? "is" : "are"} paired but not connected`}</div>
+            {firefoxOffline ? (
+              <p className="chrome-connect__d" data-firefox-offline="">
+                Firefox removes the Codara add-on each time it restarts, so it has to be loaded again: in Firefox open{" "}
+                <span className="spark-mono">about:debugging#/runtime/this-firefox</span>, choose <strong>Load Temporary Add-on</strong> and
+                pick <strong>manifest.json</strong> in the extension folder. Then click the Codara icon and press{" "}
+                <strong>Connect to Codara</strong>; if Codara asks to pair it again, check the code and allow it.
+              </p>
+            ) : null}
             <p className="chrome-connect__d">
               Open it, or add the extension again. It connects by itself while Codara is running; if it does not, click the Codara icon in
               the toolbar and press <strong>Connect to Codara</strong>.
             </p>
             <div className="chrome-connect__actions">
+              {firefoxOffline ? (
+                <button
+                  type="button"
+                  className="spark-btn"
+                  onClick={() => {
+                    setFamily("firefox");
+                    setAnother(true);
+                  }}
+                >
+                  Show the Firefox steps
+                </button>
+              ) : null}
               <button type="button" className="spark-btn" onClick={() => setAnother(true)}>
                 Add the extension again
               </button>
