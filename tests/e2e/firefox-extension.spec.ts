@@ -497,8 +497,53 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     expect(received.map((tab) => tab.id).sort()).toEqual([`chrome:${accountTab}`, `chrome:${blockedTab}`, `chrome:${elsewhereTab}`, `chrome:${otherWindowTab}`].sort());
     expect(JSON.stringify(received)).not.toMatch(/localhost|Page bank|moz-extension|about:/);
 
+    // A Firefox restart removes the temporary add-on: Codara shows the browser
+    // paired but not connected, with how to load it again.
+    await firefox.uninstall("@codara-firefox");
+    await expect.poll(async () => (await linkState(codara)).browsers[0]?.connected, { timeout: 30_000 }).toBe(false);
+    await expect(async () => {
+      if (!(await settings.isVisible())) await codara.getByTitle("Settings").first().click({ force: true });
+      await expect(settings).toBeVisible({ timeout: 2_000 });
+    }).toPass({ timeout: 20_000 });
+    await settings.getByRole("button", { name: "Browser", exact: true }).click();
+    await expect(card).toHaveAttribute("data-chrome-connect", "offline");
+    await expect(card).toContainText("Firefox removes the Codara add-on each time it restarts, so it has to be loaded again");
+    await card.getByRole("button", { name: "Show the Firefox steps" }).click();
+    await expect(card).toHaveAttribute("data-chrome-connect", "add");
+    await expect(card).toContainText("Load Temporary Add-on");
+    // Loaded again (this profile pins the add-on's moz-extension address, as
+    // its user.js does at every start). Removing the add-on took its storage,
+    // pairing and all, so the user pairs it again: Codara's card shows the
+    // pairing as for a new browser.
+    const { contexts } = await firefox.call<{ contexts: { context: string }[] }>("browsingContext.getTree", { maxDepth: 0, "moz:scope": "chrome" });
+    await firefox.call("script.evaluate", {
+      expression: `Services.prefs.setStringPref("extensions.webextensions.uuids", ${JSON.stringify(JSON.stringify({ "@codara-firefox": FIREFOX_EXTENSION_UUID }))}); true`,
+      target: { context: contexts[0].context },
+      awaitPromise: false,
+    });
+    await firefox.install(extension);
+    popup = await firefox.openExtensionPage(POPUP);
+    expect(await firefox.evaluate(popup, `browser.storage.local.get("token").then((all) => all.token ?? null)`)).toBeNull();
+    await firefox.evaluate(popup, `browser.storage.local.set({ ports: [${linkPort}] })`);
+    await firefox.closeTab(popup);
+    popup = await firefox.openExtensionPage(POPUP);
+    await expect.poll(() => text("#connect-button"), { timeout: 15_000 }).toBe("Connect to Codara");
+    await click("#connect-button");
+    // With the card on screen, the pairing is allowed in the card itself.
+    await expect(card).toHaveAttribute("data-chrome-connect", "pair");
+    await expect(card).toContainText(await text("#pairing-code"));
+    await card.getByRole("button", { name: "Allow" }).click();
+    await expect.poll(() => text("#status-text"), { timeout: 15_000 }).toMatch(/^Studio \d/);
+    // The old pairing stays, not connected, beside the new one until the user disconnects it.
+    expect((await linkState(codara)).browsers.map((browser: { connected: boolean }) => browser.connected).sort()).toEqual([false, true]);
+
     // Disconnect in the popup: Codara forgets this browser, pairing and all.
     await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "unpair" })`);
+    await expect.poll(async () => (await linkState(codara)).browsers.map((browser: { connected: boolean }) => browser.connected), { timeout: 15_000 }).toEqual([false]);
+    // Disconnect in Settings forgets the old one.
+    await expect(settings.getByRole("button", { name: "Disconnect" })).toHaveCount(1);
+    await expect(settings.getByText(/^Firefox[\d. ]*\(not connected\)$/)).toBeVisible();
+    await settings.getByRole("button", { name: "Disconnect" }).click();
     await expect.poll(async () => (await linkState(codara)).browsers.length, { timeout: 15_000 }).toBe(0);
   } finally {
     await firefox?.close().catch(() => undefined);

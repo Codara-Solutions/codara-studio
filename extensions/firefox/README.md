@@ -15,7 +15,7 @@ listed in `shared.json` and copied in by the assembly, which never writes to
 text patch in `shared.json`; if the Chrome file no longer has that text the
 assembly fails instead of shipping Chrome's wording.
 
-## Install (temporary add-on, for now)
+## Install (a developer install)
 
 In Codara: Settings > Browser > Firefox walks through these steps. Its folder
 is this version's, assembled into Codara's home
@@ -31,12 +31,25 @@ it shares included) change under the same version: raise `version` in
 1. `node extensions/firefox/build/assemble.mjs` writes the extension to
    `extensions/firefox/dist/extension/`.
 2. Open `about:debugging#/runtime/this-firefox`, choose **Load Temporary
-   Add-on** and pick `manifest.json` in that folder. Firefox forgets a
-   temporary add-on when it quits; a signed build from addons.mozilla.org
-   will replace this step.
+   Add-on** and pick `manifest.json` in that folder. Firefox removes a
+   temporary add-on when it restarts, so load it again after each restart;
+   Codara's Settings shows the browser as paired but not connected, with
+   these steps. Removing it can take the add-on's storage with it (its
+   pairing, blocked sites and ports): Connect to Codara then pairs it again,
+   and Disconnect in Codara's Settings forgets the old pairing.
 3. Click the Codara button in the toolbar, **Connect to Codara**, and allow
    the same six-digit code in Codara.
 4. Share a tab with its switch, or pick **This window** or **Everything**.
+
+To keep it across restarts, Firefox Developer Edition, Nightly or ESR can
+install it unsigned once `xpinstall.signatures.required` is turned off in
+`about:config` (Mozilla's [signing
+overview](https://extensionworkshop.com/documentation/publish/signing-and-distribution-overview/)):
+zip the folder's contents and choose **Install Add-on From File** in
+`about:addons`. Release Firefox installs only add-ons Mozilla signed, and
+this one is not on addons.mozilla.org: Mozilla allows the `userScripts` API
+it runs on for user script managers only (decided 19 Nov 2026: a developer
+install only for now; see `LISTING.txt` in the pack PR).
 
 ## How it connects
 
