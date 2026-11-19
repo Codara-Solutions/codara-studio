@@ -129,7 +129,7 @@ import {
 } from "@shared/context-compaction";
 import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
-import { followUpNeedsManager, shouldUseDirectExecution } from "./direct-execution";
+import { followUpNeedsManager, runsSkill, shouldUseDirectExecution } from "./direct-execution";
 import {
   resolveProjectPolicyMode,
   runProjectPolicyMode,
@@ -376,6 +376,7 @@ import {
   renderBundledManagerInput,
   resolveChatBackendConfig,
   shouldIncludeCanonicalReplay,
+  userTypedCommandSource,
   type ChatBackendConfig,
   type ChatStreamEvent,
 } from "./agent-backend";
@@ -391,6 +392,7 @@ import { createRunRuntimeShutdown } from "./run-runtime-shutdown";
 import {
   cleanupPiMcpBridgeConfig,
   createCodaraPiWorkerLaunchPlan,
+  listCodaraPiSkillNames,
   resolveCodaraPiExecutionAccount,
 } from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
@@ -1613,6 +1615,11 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       hasAttachments: Boolean(input.initialAttachments?.length),
       hasFanOut: Boolean(input.fanOut),
       hasCouncil: Boolean(input.council),
+      // Only a note the user typed may run a skill (user-commands.ts); any
+      // other first note that starts with a slash is text for the direct lane.
+      ...(input.initialNoteTypedByUser === true && input.initialUserNote?.trim().startsWith("/")
+        ? { skillNames: await listCodaraPiSkillNames(input.cwd) }
+        : {}),
     }));
   // A direct Cora turn is implemented as one worker, which may only run a model
   // the user left enabled in the worker roster and has an account for. With
@@ -12188,6 +12195,48 @@ function settleResumeInterruptedNotes(draft: RunState): boolean {
   return deliverable;
 }
 
+/** Whether a queued message the user typed names a skill Cora's Pi loads
+ *  here. Only typed notes count (userTypedCommandSource). */
+async function queuedTypedSkillCommand(run: RunState, messages: readonly HumanRunMessage[]): Promise<boolean> {
+  const typed = messages.filter(
+    (message) => userTypedCommandSource(message) && message.message.trim().startsWith("/"),
+  );
+  const cwd = workspaceCwdFromRun(run);
+  if (typed.length === 0 || !cwd) return false;
+  const skillNames = await listCodaraPiSkillNames(cwd);
+  return typed.some((message) => runsSkill(message.message.trim(), skillNames));
+}
+
+/** Hand a finished direct chat with queued input to the manager, which takes
+ *  the queue on its next turn. */
+async function escalateDirectChatForQueuedInput(run: RunState): Promise<RunState> {
+  let escalated = false;
+  const updated = await commitRunChange(run, {
+    type: "run.escalated_to_manager",
+    message: "Cora's manager takes over this chat for a skill the user typed",
+    payload: { reason: "typed_skill_command" },
+    mutate: (draft, timestamp) => {
+      if (draft.executionMode !== "direct" || !isTerminalRunStatus(draft.status)) return false;
+      if (queuedManagerInputMessages(draft).length === 0) return false;
+      escalated = true;
+      draft.executionMode = "managed";
+      delete draft.managerPlan;
+      draft.status = "planning";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "user_followup",
+        stopReason: undefined,
+        resumedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+  if (escalated) scheduleInitialChatDecision(updated.id, autopilotInputFromRun(updated), { afterCurrent: true });
+  return updated;
+}
+
 export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   // A run blocked on an open question resumes by ANSWERING it, never by a plain
@@ -12207,6 +12256,18 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     return requireRun(run.id);
   }
   const queuedDirectMessages = queuedManagerInputMessages(run);
+  if (
+    run.executionMode === "direct" &&
+    !run.automationId &&
+    isTerminalRunStatus(run.status) &&
+    queuedDirectMessages.length > 0 &&
+    (await queuedTypedSkillCommand(run, queuedDirectMessages))
+  ) {
+    // A skill the user typed while the direct worker ran: only the manager's
+    // Pi session runs skills, so the chat moves to it (as addRunMessage does
+    // for a follow-up typed into a finished direct chat).
+    return escalateDirectChatForQueuedInput(run);
+  }
   if (
     run.executionMode === "direct" &&
     !run.automationId &&
@@ -12680,9 +12741,13 @@ function sameMessageDeliverySignature(
     targetTurnId?: string;
     conversationEpoch: number;
     answersMessageId?: string;
+    typedByUser?: boolean;
   },
 ): boolean {
   return (
+    // A command the user typed is never swallowed as a repeat of the same
+    // text an agent queued: only the typed copy may run a skill.
+    (message.typedByUser === true) === (input.typedByUser === true) &&
     message.author === input.author &&
     message.kind === input.kind &&
     message.message === input.text &&
@@ -12725,7 +12790,14 @@ export async function addRunMessage(
     input.author === "user" &&
     input.kind === "note" &&
     isTerminalRunStatus(run.status) &&
-    (followUpNeedsManager(input.message) || (await loadSettings()).coraAlwaysVerifyEdits === true)
+    (followUpNeedsManager(
+      input.message,
+      // A skill name moves the chat to the manager only when the user typed
+      // it; an agent's send or a delivery that starts with one is text.
+      input.typedByUser === true && input.message.trim().startsWith("/") && workspaceCwdFromRun(run)
+        ? await listCodaraPiSkillNames(workspaceCwdFromRun(run)!)
+        : undefined,
+    ) || (await loadSettings()).coraAlwaysVerifyEdits === true)
   ) {
     run = await commitRunChange(run, {
       type: "run.escalated_to_manager",
@@ -12836,6 +12908,7 @@ export async function addRunMessage(
       targetTurnId,
       conversationEpoch: messageEpoch,
       answersMessageId: input.answersMessageId,
+      typedByUser: input.typedByUser === true && input.author === "user" && input.kind === "note",
     }) &&
     !answersDifferentQuestion &&
     !distinctQuestionRepost &&
@@ -12920,6 +12993,7 @@ export async function addRunMessage(
           targetTurnId: authoritativeTargetTurnId,
           conversationEpoch: messageEpoch,
           answersMessageId: input.answersMessageId,
+          typedByUser: input.typedByUser === true && input.author === "user" && input.kind === "note",
         }) &&
         !answersDifferentQuestionInDraft &&
         !distinctQuestionRepostInDraft &&

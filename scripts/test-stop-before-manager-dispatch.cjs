@@ -9,6 +9,7 @@
 
 "use strict";
 
+const { completeStubExports } = require("./run-store-stub-exports.cjs");
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -77,7 +78,7 @@ const stubPlugin = {
       { filter: /^(electron|node-pty|\.\/backend-registry|\.\/pi-runtime-electron|\.\/subscription-headroom)$/ },
       (args) => ({ path: args.path, namespace: "stub" }),
     );
-    build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({ contents: STUBS[args.path], loader: "js" }));
+    build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({ contents: completeStubExports(args.path, STUBS[args.path]), loader: "js" }));
   },
 };
 

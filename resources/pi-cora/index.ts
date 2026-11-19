@@ -12,6 +12,8 @@ import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
 import { studioBrowserOnlyDecision } from "./studio-browser-policy";
 import { barePythonHint, pythonAvailability } from "./python-guard";
+import { SKILL_RAN_ENTRY, repoSkillsFromEnv, rewriteSkillCommand, skillNamesFromCommands, skillsRun } from "./skill-commands";
+import { loadUserRulesSection } from "./user-rules";
 import {
   MANAGER_SESSION_WAIT_DESCRIPTION,
   managerSessionWaitSchema,
@@ -157,6 +159,21 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
   let mcp: McpBridgeHandle | null = null;
   const whiteboardReview = createWhiteboardReviewGuard();
   pi.on("input", () => { whiteboardReview.reset(); });
+  // A skill the user types runs even when it is hidden from the model
+  // (disable-model-invocation). Studio's command header is always removed;
+  // an imported pull request runs no skills.
+  const repoSkills = untrustedPullRequest ? new Map<string, string>() : repoSkillsFromEnv(process.env.CODARA_PI_REPO_SKILLS);
+  pi.on("input", (event) => {
+    const skills = untrustedPullRequest ? new Map<string, string | undefined>() : skillNamesFromCommands(pi.getCommands());
+    const ran = skillsRun(event.text, skills, repoSkills);
+    // Studio shows which SKILL.md ran (pi-turn.ts reads this entry).
+    if (ran.length > 0) pi.appendEntry(SKILL_RAN_ENTRY, { skills: ran });
+    const text = rewriteSkillCommand(event.text, skills, repoSkills);
+    return text === null ? undefined : { action: "transform" as const, text };
+  });
+  // Read once per process: a file that changed mid-chat would rewrite the
+  // cached system prompt on every turn.
+  const userRules = untrustedPullRequest ? "" : loadUserRulesSection();
   pi.on("agent_end", (event) => {
     const last = event.messages.at(-1) as { stopReason?: string } | undefined;
     if (last?.stopReason === "aborted" || last?.stopReason === "error") return;
@@ -207,7 +224,7 @@ Imported pull-request security contract:
 
 ${buildCoraPiSystemPrompt(activeMode(), activeExecutionPolicy(), { alwaysVerifyEdits: alwaysVerifyEdits(), untrusted: untrustedPullRequest })}${workerModelContract()}
 ${untrustedContract}
-${mcp?.promptSuffix() ?? ""}`,
+${mcp?.promptSuffix() ?? ""}${userRules ? `\n\n${userRules}` : ""}`,
     };
   });
 
