@@ -14,6 +14,7 @@
 // session, local for the pairing and the blocked sites), so a restarted page
 // picks up where it left off.
 
+import { BodyStore } from "./lib/bodies.js";
 import { consoleAddresses, consoleEvent } from "./lib/console.js";
 import { LinkClient } from "./lib/link-client.js";
 import { failedEvent, finishedEvent, lateRedirectEnd, requestEvent, requestVisible, responseEvent } from "./lib/network.js";
@@ -333,6 +334,7 @@ async function answerCommand(request, socket) {
     if (domain === "Runtime") await switchConsole(tab.id);
     return {};
   }
+  if (method === "Network.getResponseBody") return responseBody(tab.id, request.params ?? {}, socket);
   if (method === "Page.getFrameTree") {
     const now = await stillUsable(tab.id, socket);
     return frameTree(now.id, now.url, pageOf(now.id, now.url).loaderId);
@@ -710,6 +712,41 @@ const requests = new Map();
 const REQUESTS_KEPT = 500;
 function forgetRequests(tabId) {
   for (const [id, seen] of requests) if (seen.details.tabId === tabId) requests.delete(id);
+  bodies.forgetTab(tabId);
+}
+
+// Response bodies (lib/bodies.js), kept only for the requests Codara sees.
+const bodies = new BodyStore();
+function keepBody(details) {
+  let filter;
+  try {
+    filter = browser.webRequest.filterResponseData(details.requestId);
+  } catch {
+    return;
+  }
+  const hop = bodies.start(details.requestId, details.tabId, details.url);
+  // The page gets every byte first, whatever happens to the copy.
+  filter.ondata = (event) => {
+    filter.write(event.data);
+    try {
+      bodies.data(hop, new Uint8Array(event.data));
+    } catch {}
+  };
+  filter.onstop = () => {
+    bodies.end(hop);
+    filter.close();
+  };
+  filter.onerror = () => bodies.end(hop, filter.error || "failed");
+}
+
+/** Network.getResponseBody: a body Codara saw the request of, of this tab, still shared and attached, from a site not blocked now. */
+async function responseBody(tabId, params, socket) {
+  await stillUsable(tabId, socket);
+  const { url, ...answer } = await bodies.body(String(params.requestId ?? ""), tabId);
+  const rule = firefoxBlockingRule(url, rules);
+  if (rule) throw new Error(`${url} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`);
+  await stillUsable(tabId, socket);
+  return answer;
 }
 
 const blockedUrl = (url) => firefoxBlockingRule(url, rules) !== null;
@@ -757,15 +794,17 @@ const loaderOf = (details) => (details.type === "main_frame" ? pageOf(details.ta
 const ALL_URLS = { urls: ["<all_urls>"] };
 const HIDDEN_REDIRECT = "Redirected to a site the extension may not show.";
 
+// Blocking only so the body filter can be set; nothing is ever blocked.
 chrome.webRequest.onBeforeRequest.addListener((details) => {
   if (!networkWanted(details)) return;
   requests.set(details.requestId, { redirect: null, ...requests.get(details.requestId), details, sent: false });
+  keepBody(details);
   if (requests.size > REQUESTS_KEPT) {
     const [oldest] = requests.values();
     if (networkWanted(oldest.details)) requestLost(oldest.details, "Too many requests open at once to follow this one.");
     else requests.delete(oldest.details.requestId);
   }
-}, ALL_URLS);
+}, ALL_URLS, ["blocking"]);
 chrome.webRequest.onSendHeaders.addListener((details) => {
   const seen = requests.get(details.requestId);
   if (!seen || seen.sent || !networkWanted(details) || !redirectOf(seen)) return;
@@ -790,6 +829,7 @@ chrome.webRequest.onBeforeRedirect.addListener(async (details) => {
 }, ALL_URLS, ["responseHeaders"]);
 chrome.webRequest.onResponseStarted.addListener((details) => {
   if (!requests.has(details.requestId) || !networkWanted(details) || !requestSent(details)) return;
+  bodies.type(details.requestId, details.responseHeaders?.find((header) => header.name.toLowerCase() === "content-type")?.value);
   sendNetwork(details, responseEvent(details, loaderOf(details)));
 }, ALL_URLS, ["responseHeaders"]);
 for (const [event, toEvent] of [[chrome.webRequest.onCompleted, finishedEvent], [chrome.webRequest.onErrorOccurred, failedEvent]]) {

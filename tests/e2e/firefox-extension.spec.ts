@@ -324,6 +324,8 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     const details = await Promise.all(calls.map((call: { id: string }) => request("preview.network", { tabId, id: call.id })));
     expect(details[0].request.responseHeaders).toMatchObject({ "Content-Type": "application/json" });
     expect(details[1].request.responseHeaders).toMatchObject({ Location: "/api/data?again=1" });
+    // Response bodies as the page got them; a redirect has none.
+    expect([details[0].request.body, details[1].request.body, details[2].request.body]).toEqual(['{"ok":true}', { unavailable: "a redirect has no body" }, '{"ok":true}']);
     expect(JSON.stringify(details)).not.toMatch(/cookie|secret-value/i);
 
     // Idle: Firefox unloads an idle event page (after 15 s in this profile)
