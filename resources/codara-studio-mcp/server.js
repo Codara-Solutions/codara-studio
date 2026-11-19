@@ -687,7 +687,7 @@ const WORKTREE_TOOLS = [
   {
     name: "codara_worktree_remove",
     description:
-      "Remove a Codara-managed worktree whose exact tip is merged (ancestor, merged PR or identical squash), clean and idle, and delete its branch. A refusal returns code, blockers and hint. dryRun:true only checks.",
+      "Remove a clean, idle Codara-managed worktree whose exact tip is merged (ancestor, merged PR, squash) and its branch; or one you made, pushed, last PR closed unmerged (branch kept). Refusal: code, blockers, hint. dryRun checks.",
     inputSchema: {
       type: "object",
       properties: {

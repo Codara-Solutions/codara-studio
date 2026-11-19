@@ -28,10 +28,12 @@
   word-wrap: break-word;
 }
 
-.spark-markdown > *:first-child {
+.spark-markdown > *:first-child,
+.spark-markdown__zoom > *:first-child {
   margin-top: 0;
 }
-.spark-markdown > *:last-child {
+.spark-markdown > *:last-child,
+.spark-markdown__zoom > *:last-child {
   margin-bottom: 0;
 }
 

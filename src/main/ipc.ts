@@ -41,6 +41,7 @@ import { createMachinesService, readLocalStats } from "./remote/machines";
 import type { MachinesSnapshot } from "@shared/machines";
 import { isRemotePath } from "@shared/remote";
 import type { LaneChanges } from "@shared/source-lanes";
+import type { WorkerActivity, WorkerFeedSnapshot } from "@shared/worker-feed";
 import { MUTE_KEY_PATTERN } from "@shared/notify-center";
 import type { UsageSummaryInput } from "@shared/usage-analytics";
 import type {
@@ -2558,6 +2559,14 @@ export function registerIpc(): void {
   );
 
   handle(
+    "git:discardFolder",
+    async (_e, input: { cwd: string; dir: string; files: string[] }): Promise<GitOpResult> => {
+      const { discardNewFolder } = await getGitOps();
+      return discardNewFolder(input.cwd, input.dir, input.files);
+    },
+  );
+
+  handle(
     "git:commit",
     async (
       _e,
@@ -2849,6 +2858,43 @@ export function registerIpc(): void {
       }
       const { readWorkerAttemptLog } = await getRunStore();
       return readWorkerAttemptLog(input.runId, input.attemptId);
+    },
+  );
+
+  handle(
+    "orchestration:readWorkerFeed",
+    async (_e, input: { runId: string; attemptId: string }): Promise<WorkerFeedSnapshot> => {
+      if (!input || typeof input.runId !== "string" || typeof input.attemptId !== "string") {
+        throw new Error("Invalid worker feed request.");
+      }
+      const { readWorkerAttemptFeed } = await getRunStore();
+      return readWorkerAttemptFeed(input.runId, input.attemptId);
+    },
+  );
+
+  handle("orchestration:readWorkerActivity", async (_e, runId: unknown): Promise<WorkerActivity[]> => {
+    if (typeof runId !== "string" || !runId || runId.length > 200) throw new Error("Invalid worker activity request.");
+    const { readRunWorkerActivity } = await getRunStore();
+    return readRunWorkerActivity(runId);
+  });
+
+  handle(
+    "orchestration:messageWorker",
+    async (
+      _e,
+      input: { runId: string; attemptId: string; text: string },
+    ): Promise<{ delivered: boolean }> => {
+      if (
+        !input ||
+        typeof input.runId !== "string" ||
+        typeof input.attemptId !== "string" ||
+        typeof input.text !== "string" ||
+        input.text.length > 64_000
+      ) {
+        throw new Error("Invalid worker message.");
+      }
+      const { messageWorkerAttempt } = await getRunStore();
+      return messageWorkerAttempt(input.runId, input.attemptId, input.text);
     },
   );
 
@@ -3406,6 +3452,12 @@ export function registerIpc(): void {
   registerKeepAwakeIpc(handle);
   // Drawing with the graphics card: Settings, General, Window.
   registerGpuDrawingIpc(handle);
+  // Agent CLI updates (agent-cli-updates/): Settings and the worker picker.
+  const agentCliUpdates = () => import("./agent-cli-updates");
+  handle("agentCliUpdates:status", async () => (await agentCliUpdates()).agentCliUpdatesStatus());
+  handle("agentCliUpdates:check", async () => (await agentCliUpdates()).checkAgentCliUpdates());
+  handle("agentCliUpdates:update", async (_event, tool: unknown) => (await agentCliUpdates()).updateAgentCli(tool));
+  handle("agentCliUpdates:cancel", async (_event, tool: unknown) => (await agentCliUpdates()).cancelAgentCliUpdate(tool));
   // The status bar's dev-build update line (dev-update-hint.ts); null when not running.
   handle("devUpdate:status", async () => (app.isPackaged ? null : (await import("./dev-update-hint")).devUpdateStatus()));
 

@@ -45,6 +45,10 @@ interface Command {
   executable: string;
   args: string[];
   display: string;
+  /** Added to the enriched environment. */
+  env?: Record<string, string>;
+  /** The arguments are one command line already quoted for cmd.exe. */
+  verbatim?: boolean;
 }
 interface SetupDependencies {
   platform: NodeJS.Platform;
@@ -61,18 +65,20 @@ export async function runSetupCommand(
   command: Command,
   timeout: number,
   onOutput?: (output: string) => void,
+  onStart?: (pid: number) => void,
 ): Promise<string> {
   const env = await getEnrichedEnv();
   return new Promise((resolve, reject) => {
     const child = spawn(command.executable, command.args, {
       cwd: homedir(),
-      env,
+      env: command.env ? { ...env, ...command.env } : env,
       windowsHide: true,
       // cmd.exe needs its quoted command intact; Node's argv escaping is for executables.
-      windowsVerbatimArguments: process.platform === "win32" && command.executable === "cmd.exe",
+      windowsVerbatimArguments: process.platform === "win32" && (command.verbatim ?? /(?:^|[\\/])cmd\.exe$/i.test(command.executable)),
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
+    if (child.pid) onStart?.(child.pid);
     let output = "";
     let timedOut = false;
     const append = (chunk: Buffer) => {

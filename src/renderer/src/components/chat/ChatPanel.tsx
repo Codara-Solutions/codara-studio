@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import type {
   AddRunMessageAttachmentInput,
   BoardCard,
@@ -13,7 +13,7 @@ import RunIdChip from "../RunIdChip";
 import ChatConversation from "./ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
 import CopyBranchWelcome from "./CopyBranchWelcome";
-import { describeRunStatus, statusToneColor } from "./timeline";
+import { describeRunStatus, listChatWorkers, statusToneColor } from "./timeline";
 import { retryableFailedCallId } from "./failed-turn";
 import WelcomeAutomations from "./WelcomeAutomations";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
@@ -29,6 +29,9 @@ const BoardView = lazy(() => import("../board/BoardView"));
 // time this panel shows it; from then on it stays mounted (hidden) like the
 // conversation, so in-flight canvas state survives view switches.
 const CoraWhiteboardSurface = lazy(() => import("./CoraWhiteboard"));
+// Inside a worker: its own chat in place of Main's (option A, DESIGN.md).
+const WorkerView = lazy(() => import("./WorkerView"));
+const AgentsRail = lazy(() => import("./AgentsRail"));
 
 // Fallbacks for callers that don't thread the board callbacks (tests,
 // isolated mounts). Module-level so their identities are stable across
@@ -131,6 +134,60 @@ export default function ChatPanel({
   );
   const usingHoistedChatView = chatViewProp !== undefined;
   const [whiteboardOpened, setWhiteboardOpened] = useState(false);
+  // The worker the user went inside, by logical worker id, for the run it
+  // belongs to: another chat is never shown inside a worker, not even for the
+  // one render before an effect could reset it. Null is Main. Main stays
+  // mounted underneath, hidden, so it keeps its scroll position.
+  const [insideTarget, setInsideTarget] = useState<{ runId: string; workerId: string } | null>(null);
+  const insideWorker =
+    insideTarget && activeRun && insideTarget.runId === activeRun.id ? insideTarget.workerId : null;
+  const activeRunId = activeRun?.id ?? null;
+  const setInsideWorker = useCallback(
+    (workerId: string | null) =>
+      setInsideTarget(workerId && activeRunId ? { runId: activeRunId, workerId } : null),
+    [activeRunId],
+  );
+  const inside = insideWorker !== null && chatView === "chat" && activeRun !== null;
+  // Anything that asks for Main's composer (its shortcut, a prefill from the
+  // browser or a stop) brings Main back first: the composer is inert while a
+  // worker covers it. A prefill lands in the draft either way and focuses it
+  // a tick later; a focus request is sent again once Main is back, since the
+  // composer's own listener may already have tried an inert textarea.
+  useEffect(() => {
+    if (!inside || suspendGlobalEvents) return undefined;
+    const leave = (event: Event) => {
+      flushSync(() => setInsideTarget(null));
+      if (event.type === "spark:focus-composer") {
+        window.requestAnimationFrame(() => window.dispatchEvent(new Event("spark:focus-composer")));
+      }
+    };
+    window.addEventListener("spark:focus-composer", leave, true);
+    window.addEventListener("spark:prefill-composer", leave, true);
+    return () => {
+      window.removeEventListener("spark:focus-composer", leave, true);
+      window.removeEventListener("spark:prefill-composer", leave, true);
+    };
+  }, [inside, suspendGlobalEvents]);
+  const leaveWorker = useCallback((keepFocus: boolean) => {
+    const left = insideWorker;
+    setInsideWorker(null);
+    // Back where you came from: the row you opened, when it is still drawn.
+    // From the agents rail, focus stays on the rail.
+    window.requestAnimationFrame(() => {
+      if (!left || keepFocus) return;
+      const row = panelRef.current?.querySelector<HTMLElement>(`[data-worker-row="${CSS.escape(left)}"]`);
+      row?.focus({ preventScroll: true });
+    });
+  }, [insideWorker]);
+  // The agents rail: on the chat's left edge whenever the chat has workers,
+  // in Main and inside a worker alike.
+  const hasWorkers = useMemo(() => (activeRun ? listChatWorkers(activeRun).length > 0 : false), [activeRun]);
+  // The bar's Back passes its click event: never read it as keepFocus.
+  const leaveBack = useCallback(() => leaveWorker(false), [leaveWorker]);
+  const leaveFromRail = useCallback(() => {
+    if (inside) leaveWorker(true);
+  }, [inside, leaveWorker]);
+  const showRail = hasWorkers && chatView === "chat" && activeRun !== null && !isUnstartedChatRun(activeRun);
   const mountWhiteboard = whiteboardOpened || chatView === "whiteboard";
   useEffect(() => {
     if (chatView === "whiteboard") setWhiteboardOpened(true);
@@ -141,7 +198,8 @@ export default function ChatPanel({
   // decides). Documents and terminals elsewhere keep their own find.
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [findRequest, setFindRequest] = useState(0);
-  const canFind = chatView === "chat" && activeRun !== null && !isUnstartedChatRun(activeRun);
+  const canFind =
+    chatView === "chat" && activeRun !== null && !isUnstartedChatRun(activeRun) && insideWorker === null;
   useEffect(() => {
     if (suspendGlobalEvents || !canFind) return;
     return registerFindTarget({
@@ -189,6 +247,7 @@ export default function ChatPanel({
   return (
     <div
       ref={panelRef}
+      data-testid="cora-panel"
       style={{
         display: "flex",
         flexDirection: "column",
@@ -230,6 +289,28 @@ export default function ChatPanel({
       {!collapsed && (
         <>
           {error && <ErrorBar message={error} onDismiss={onDismissError} />}
+          {/* The conversation and its composer, with room for a worker view
+              to cover both: Main keeps its exact layout underneath, so its
+              scroll position is still where it was when you come back. */}
+          <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex" }}>
+          {showRail && activeRun && (
+            // Holds the strip's 32 px while its chunk loads, so the chat
+            // never shifts sideways when the rail arrives.
+            <Suspense fallback={<div aria-hidden style={{ flex: "0 0 32px" }} />}>
+              <AgentsRail
+                // A run switch starts the rail fresh: no list or tooltip
+                // carried over from another chat.
+                key={activeRun.id}
+                run={activeRun}
+                insideId={inside ? insideWorker : null}
+                mainGlyph={<SparkMark size={11} />}
+                onOpenWorker={setInsideWorker}
+                onOpenMain={leaveFromRail}
+                suspended={suspendGlobalEvents === true}
+              />
+            </Suspense>
+          )}
+          <div style={{ position: "relative", flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
           {activeRun ? (
             // Both views stack absolutely so each ALWAYS has real
             // dimensions, even when "hidden". xterm's fit-addon measures
@@ -256,9 +337,13 @@ export default function ChatPanel({
                   // child-overridable, so an explicit value here would defeat
                   // ChatStack's hidden wrapper and paint/hit-test this
                   // retained panel over the active workspace's Cora.
-                  visibility: chatView === "chat" ? undefined : "hidden",
-                  pointerEvents: chatView === "chat" ? undefined : "none",
+                  visibility: chatView === "chat" && !inside ? undefined : "hidden",
+                  pointerEvents: chatView === "chat" && !inside ? undefined : "none",
                 }}
+                aria-hidden={inside || undefined}
+                // React 18 has no inert prop yet; the attribute keeps Main's
+                // rows out of the tab order while a worker covers them.
+                {...(inside ? ({ inert: "" } as Record<string, string>) : {})}
               >
                 {isUnstartedChatRun(activeRun) ? (
                   // A run minted by the board's draft promotion (or a bare
@@ -272,7 +357,7 @@ export default function ChatPanel({
                     key={`conversation:${activeRun.id}`}
                     run={activeRun}
                     cwd={workspace?.cwd ?? null}
-                    onOpenWorkerTerminal={onOpenBoardWorkerTerminal}
+                    onOpenWorker={setInsideWorker}
                     findRequest={findRequest}
                   />
                 )}
@@ -358,7 +443,10 @@ export default function ChatPanel({
           <div
             style={{
               display: chatView === "chat" ? "contents" : "none",
+              visibility: inside ? "hidden" : undefined,
             }}
+            aria-hidden={inside || undefined}
+            {...(inside ? ({ inert: "" } as Record<string, string>) : {})}
           >
             <ChatComposer
               key={`composer:${activeRun?.id ?? "new-chat"}`}
@@ -374,9 +462,32 @@ export default function ChatPanel({
               // deleting another run from history). Only the draft/new-chat
               // path (run === null) truly requires a workspace to start.
               disabled={!workspace && !activeRun}
+              workersOnRail={showRail}
               onStartChat={onStartChat}
               onForcePauseRun={onForcePauseRun}
             />
+          </div>
+          {inside && insideWorker && activeRun && (
+            <Suspense fallback={null}>
+              <WorkerView
+                run={activeRun}
+                workerId={insideWorker}
+                onBack={leaveBack}
+                onSelectWorker={setInsideWorker}
+                onOpenTerminal={onOpenBoardWorkerTerminal}
+                onAskCora={(text) => {
+                  setInsideWorker(null);
+                  window.requestAnimationFrame(() => {
+                    window.dispatchEvent(
+                      new CustomEvent("spark:prefill-composer", { detail: { text, prepend: true } }),
+                    );
+                    window.dispatchEvent(new Event("spark:focus-composer"));
+                  });
+                }}
+              />
+            </Suspense>
+          )}
+          </div>
           </div>
         </>
       )}

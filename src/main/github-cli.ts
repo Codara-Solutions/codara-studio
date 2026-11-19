@@ -149,6 +149,10 @@ export interface GitHubMergedPullRequest {
   mergeCommitOid?: string | null;
 }
 
+export interface GitHubHeadPullRequest extends GitHubMergedPullRequest {
+  state: "open" | "closed" | "merged";
+}
+
 export type GitHubCliErrorCode =
   | "not-installed"
   | "not-authenticated"
@@ -241,6 +245,9 @@ export interface GitHubCliAdapter {
   listMergedPullRequests?(cwd: string, limit?: number): Promise<GitHubMergedPullRequest[]>;
   // The most recent pull requests closed without merging.
   listClosedPullRequests?(cwd: string, limit?: number): Promise<GitHubMergedPullRequest[]>;
+  // Every pull request whose head is `branch` in `repository`
+  // ([HOST/]OWNER/NAME), open, closed or merged.
+  listPullRequestStatesForHead?(cwd: string, branch: string, repository: string): Promise<GitHubHeadPullRequest[]>;
   createPullRequest?(input: {
     cwd: string;
     title: string;
@@ -846,6 +853,43 @@ export function createGitHubCliAdapter(
         /* parseMergedPullRequests reports the invalid JSON. */
       }
       return parseMergedPullRequests(stdout).filter((pr) => !merged.has(pr.number));
+    },
+
+    async listPullRequestStatesForHead(cwd: string, branch: string, repository: string): Promise<GitHubHeadPullRequest[]> {
+      const head = boundedBranch(branch, "head branch");
+      // Named, never resolved: gh would prefer a remote called upstream.
+      if (typeof repository !== "string" || !/^(?:[a-z0-9.-]{1,253}\/)?[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(repository)) {
+        throw new GitHubCliError("command-failed", "The GitHub repository is invalid.");
+      }
+      const stdout = await runRead(cwd, [
+        "pr",
+        "list",
+        "--state",
+        "all",
+        "--head",
+        head,
+        "--repo",
+        repository,
+        "--limit",
+        "20",
+        "--json",
+        `${MERGED_PULL_REQUEST_JSON_FIELDS},state`,
+      ]);
+      const parsed = parseMergedPullRequests(stdout);
+      const states = new Map<number, GitHubHeadPullRequest["state"]>();
+      const raw: unknown = JSON.parse(stdout);
+      const entries = Array.isArray(raw) ? raw : [];
+      for (const entry of entries) {
+        if (!isRecord(entry) || typeof entry.number !== "number") continue;
+        const state = entry.state === "OPEN" ? "open" : entry.state === "CLOSED" ? "closed" : entry.state === "MERGED" ? "merged" : null;
+        if (state) states.set(entry.number, state);
+      }
+      // Callers decide a branch was given up from this list: an entry that
+      // did not validate, or has no state, could be an open one.
+      if (parsed.length !== entries.length || parsed.some((pr) => !states.has(pr.number))) {
+        throw invalidResponse("GitHub CLI returned a pull request without a valid state.");
+      }
+      return parsed.map((pr) => ({ ...pr, state: states.get(pr.number)! }));
     },
 
     async createPullRequest(input): Promise<void> {

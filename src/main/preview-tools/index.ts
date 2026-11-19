@@ -10,6 +10,7 @@ import { describeDriver } from "../browser/agent-driver";
 import { guardPageDialogs } from "../browser/dialog-guard";
 import { recordActedTab, withActedTab } from "../browser/acted-tab";
 import { noteChromeToolCall } from "../browser/chrome/activity";
+import { assertChromeDriverAllowed } from "../browser/chrome/presence";
 import { BrowserTabRefError, parseTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { normalizeTabGroupName } from "../../shared/tab-group-name";
@@ -109,6 +110,37 @@ function readGroupParam(params: Record<string, unknown>): void {
   else delete params.group;
 }
 
+// Numeric fields of the browser tools' schemas, and the objects that nest
+// them. Agents and the CLI often send these as strings ("1280").
+const NUMERIC_FIELDS = new Set([
+  "width", "height", "x", "y", "deltaX", "deltaY", "timeoutMs", "maxBytes", "stableMs", "limit", "quality", "maxWidth",
+  "scale", "threshold", "fps", "maxSeconds", "steps", "autoMs", "cpu", "deviceScaleFactor", "ms",
+]);
+const NESTED_FIELDS = new Set(["clip", "from", "to"]);
+const NUMERIC_TEXT = /^\s*-?(\d+\.?\d*|\.\d+)\s*$/;
+
+/** Reads numeric strings as numbers, in place. */
+export function coerceNumericParams(params: Record<string, unknown>, depth = 0): void {
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === "string" && NUMERIC_FIELDS.has(key) && NUMERIC_TEXT.test(value)) params[key] = Number(value);
+    else if (depth === 0 && NESTED_FIELDS.has(key) && value && typeof value === "object" && !Array.isArray(value)) {
+      coerceNumericParams(value as Record<string, unknown>, 1);
+    }
+  }
+}
+
+// Names agents reach for that a tool calls something else, and the hint for
+// a call that used another tool's fields.
+function readAliases(method: string, params: Record<string, unknown>): void {
+  if (method === "preview.evaluate" && params.code === undefined && typeof params.expression === "string") {
+    params.code = params.expression;
+    delete params.expression;
+  }
+  if (method === "preview.click" && params.selector === undefined && params.x !== undefined && params.y !== undefined) {
+    throw new PreviewToolParamsError("click needs a selector (an @reference or CSS). To click at x, y use codara_preview_mouse.");
+  }
+}
+
 async function dispatchPreviewTool(
   method: string,
   params: Record<string, unknown>,
@@ -132,6 +164,10 @@ async function dispatchPreviewTool(
     params.driver = await describeDriver({ callerPid, ...params }, host);
   }
   readGroupParam(params);
+  if (method.startsWith("preview.")) {
+    coerceNumericParams(params);
+    readAliases(method, params);
+  }
   let ref;
   try {
     ref = parseTabRef(params.tabId);
@@ -155,6 +191,8 @@ async function dispatchPreviewTool(
   if (!(await host.mayUseUserBrowser(params))) {
     throw new PreviewToolParamsError("This session may not use tabs of your own browser.");
   }
+  // An agent the user stopped from the page's pill is refused there before anything runs.
+  assertChromeDriverAllowed(ref, String(params.tabId), params.driver);
   // Every call that reaches the user's own browser is logged with its agent.
   noteChromeToolCall(method, params);
   if (entry.targets === "any") return guardPageDialogs(method, params, () => entry.run(params, method, host));

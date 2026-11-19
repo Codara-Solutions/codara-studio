@@ -1,0 +1,252 @@
+/* Inside a Cora worker (WorkerView.tsx). Loaded with the view's own chunk.
+   Rows inside reuse the main chat's classes; only the bar, the brief header,
+   the report and the composer frame are its own. */
+
+.cora-worker-view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+  outline: none;
+}
+
+.cora-worker-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 8px 0 6px;
+  border-bottom: 1px solid var(--rule-soft);
+  color: var(--muted);
+  font: 400 12.5px/1 var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.cora-worker-bar__back,
+.cora-worker-bar__icon {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink-dim);
+  font: inherit;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.cora-worker-bar__back {
+  padding: 0 7px 0 4px;
+}
+.cora-worker-bar__icon {
+  width: 24px;
+  padding: 0;
+}
+.cora-worker-bar__back:hover,
+.cora-worker-bar__icon:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-worker-bar__icon:disabled {
+  opacity: 0.35;
+}
+.cora-worker-bar__back:focus-visible,
+.cora-worker-bar__icon:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-worker-bar__sep {
+  flex: 0 0 auto;
+  opacity: 0.5;
+}
+.cora-worker-bar .cora-activity-icon {
+  flex: 0 0 auto;
+}
+.cora-worker-bar__title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+  font-weight: 600;
+}
+.cora-worker-bar__meta {
+  flex: 0 1 auto;
+  display: inline-flex;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+.cora-worker-bar__state[data-state="running"] {
+  color: var(--info);
+}
+.cora-worker-bar__state[data-state="done"] {
+  color: var(--ok);
+}
+.cora-worker-bar__state[data-state="failed"] {
+  color: var(--danger);
+}
+.cora-worker-bar__ping {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink-dim);
+}
+.cora-worker-bar__ping:not(:empty) {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--panel-2);
+}
+.cora-worker-bar__end {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+.cora-worker-bar__end .spark-kbd {
+  margin-right: 6px;
+}
+.cora-worker-bar__count {
+  min-width: 36px;
+  text-align: center;
+}
+
+.cora-worker-menu {
+  min-width: 220px;
+}
+.cora-worker-menu__rule {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--rule-soft);
+}
+.cora-worker-menu__two {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.cora-worker-menu__hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.cora-worker-view__empty {
+  padding: 24px 16px;
+  color: var(--muted);
+}
+
+.cora-worker-composer {
+  flex: 0 0 auto;
+  padding: 0 16px 14px;
+}
+.cora-worker-composer__shell {
+  max-width: 768px;
+  margin: 0 auto;
+}
+.cora-worker-composer__shell textarea {
+  width: 100%;
+  min-height: 40px;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font: 400 14px/1.5 var(--font-sans);
+}
+.cora-worker-composer__shell textarea::placeholder {
+  color: var(--muted);
+}
+.cora-worker-composer__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.cora-worker-composer__hint {
+  margin-left: auto;
+  font-size: 11.5px;
+}
+.cora-worker-composer__send,
+.cora-worker-composer__stop {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  cursor: default;
+}
+.cora-worker-composer__send {
+  background: var(--panel-3);
+  color: var(--ink);
+}
+.cora-worker-composer__stop {
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: var(--lift-hi);
+}
+.cora-worker-composer__send:focus-visible,
+.cora-worker-composer__stop:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-worker-composer__stop:disabled {
+  opacity: 0.55;
+}
+.cora-worker-composer__error {
+  max-width: 768px;
+  margin: 0 auto 6px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.cora-worker-followup {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--rule-soft);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.cora-worker-followup__ask {
+  appearance: none;
+  height: 26px;
+  margin-left: auto;
+  padding: 0 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink);
+  font: 500 12px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-worker-followup .cora-worker-followup__ask {
+  margin-left: 0;
+}
+.cora-worker-followup__ask:hover {
+  background: var(--hover);
+}
+.cora-worker-followup__ask:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}

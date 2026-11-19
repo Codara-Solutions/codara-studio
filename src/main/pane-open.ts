@@ -45,6 +45,8 @@ export interface PaneOpenDeps {
   kill: (paneId: string) => void;
   isDirectory: (path: string) => Promise<boolean>;
   requestTerminalOp: <T>(op: "overlay" | "closeOverlay" | "create" | "destroy", params: Record<string, unknown>) => Promise<T>;
+  /** The refusal when the command launches an agent tool being updated. */
+  toolUpdating?: (command: string | undefined) => string | null;
 }
 
 const MAX_COMMAND_CHARS = 8_192;
@@ -184,6 +186,9 @@ export function createPaneOpener(deps: PaneOpenDeps) {
       if (request.cwd && !(await deps.isDirectory(request.cwd))) {
         throw new PaneOpenError(`cwd is not a folder: ${request.cwd}`, "invalid");
       }
+      // Before a pane exists: the launch's own refusal would only reach the pane.
+      const updating = deps.toolUpdating?.(request.command) ?? null;
+      if (updating) throw new PaneOpenError(updating, "spawn");
       return request.mode === "overlay" ? openOverlay(request) : openTab(request);
     },
     hostOf(paneId: string): string | null {

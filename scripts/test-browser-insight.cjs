@@ -223,6 +223,29 @@ function writeSyntheticTrace(file) {
   fs.writeFileSync(file, JSON.stringify({ traceEvents: events }));
 }
 
+// A traced reload on a slow machine: the call that reloads the page runs as a
+// script with no URL before the navigation, the new document's commit
+// dispatches visibilitychange inside it, and the page's inline script is the
+// long task that matters.
+function writeReloadTrace(file) {
+  const pid = 10;
+  const tid = 1;
+  const events = [
+    { name: "thread_name", ph: "M", pid, tid, ts: 0, args: { name: "CrRendererMain" } },
+    { name: "TracingStartedInBrowser", ph: "I", pid: 1, tid: 1, ts: 0, args: { data: { frames: [{ frame: "F1", processId: pid }] } } },
+    { name: "RunTask", ph: "X", pid, tid, ts: 10_000, dur: 150_000 },
+    { name: "EvaluateScript", ph: "X", pid, tid, ts: 10_500, dur: 149_000, args: { data: {} } },
+    { name: "navigationStart", ph: "R", pid, tid, ts: 200_000, args: { frame: "F1" } },
+    { name: "RunTask", ph: "X", pid, tid, ts: 201_000, dur: 140_000 },
+    { name: "DocumentLoader::CommitNavigation", ph: "X", pid, tid, ts: 201_500, dur: 139_000 },
+    { name: "EventDispatch", ph: "X", pid, tid, ts: 202_000, dur: 2_000, args: { data: { type: "visibilitychange" } } },
+    { name: "RunTask", ph: "X", pid, tid, ts: 400_000, dur: 130_000 },
+    { name: "ParseHTML", ph: "X", pid, tid, ts: 400_500, dur: 129_000, args: { data: { frame: "F1" } } },
+    { name: "EvaluateScript", ph: "X", pid, tid, ts: 405_000, dur: 120_000, args: { data: { url: "http://h/perf", frame: "F1" } } },
+  ];
+  fs.writeFileSync(file, JSON.stringify({ traceEvents: events }));
+}
+
 async function summaries(lib) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-insight-files-"));
   try {
@@ -273,6 +296,23 @@ async function summaries(lib) {
     assert.equal(trace.mainThread.busyMs, 100);
     assert.deepEqual(trace.topScripts, [{ script: "heavy() /app.js", ms: 70 }]);
     assert.deepEqual(trace.marks, { fcpMs: 500, lcpMs: 800, layoutShifts: 1, cls: 0.12 });
+
+    const reloadFile = path.join(dir, "reload.json");
+    writeReloadTrace(reloadFile);
+    const reload = lib.summarizeTraceFile({ path: reloadFile, frameId: "F1", maxBytes: 1 << 30, fromNavigation: true });
+    assert.deepEqual(
+      reload.longTasks.longest.map((task) => task.cause),
+      ["DocumentLoader::CommitNavigation", "script /perf"],
+      "the reload call before the navigation is not a long task of the load, and a commit is not its tiny event",
+    );
+    assert.equal(reload.longTasks.count, 2);
+    assert.deepEqual(reload.topScripts.map((row) => row.script), ["script /perf", "visibilitychange handler"], "nor one of its scripts");
+    assert.equal(reload.mainThread.busyMs, 270, "nor main-thread time");
+    // An interaction trace keeps what ran before a navigation: the click
+    // that submitted a form is the point of it.
+    const interaction = lib.summarizeTraceFile({ path: reloadFile, frameId: "F1", maxBytes: 1 << 30 });
+    assert.equal(interaction.longTasks.count, 3);
+    assert.equal(interaction.longTasks.longest[0].cause, "script");
 
     await assert.rejects(lib.runInWorker(() => { for (;;) { /* spin */ } }, null, { timeoutMs: 300 }), /longer than/);
     await assert.rejects(lib.runInWorker(() => { throw new Error("boom"); }, null, { timeoutMs: 5_000 }), /boom/);

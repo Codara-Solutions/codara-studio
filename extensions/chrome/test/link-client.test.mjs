@@ -3,7 +3,7 @@ import { createECDH } from "node:crypto";
 import { createServer } from "node:net";
 import { WebSocketServer } from "ws";
 
-import { LinkClient, linkProof, pairCommitment, pairedToken, pairingCode, sessionSealer, sha256Hex } from "../lib/link-client.js";
+import { ANSWERS_MAX, LATE_BUFFER_MAX, LINK_BUSY, LateReply, LinkClient, linkProof, pairCommitment, pairedToken, pairingCode, sessionSealer, sha256Hex } from "../lib/link-client.js";
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -389,6 +389,66 @@ export async function run() {
   assert.deepEqual(recovering, [1_000, 2_000, 5_000, 10_000, 30_000, 60_000]);
   scanning.disconnect();
 
+  // A late reply is built when its turn to leave comes, and never leaves once its access ended.
+  let ended = 0;
+  const late = new LinkClient({ loadPairing: async () => null, onDisconnected: () => ended++ });
+  const sent = [];
+  let closed = 0;
+  let sealing = null;
+  const line = { readyState: 1, epoch: late.epoch, send: (frame) => sent.push(JSON.parse(frame)), close: () => closed++, sealer: { seal: async (message) => (sealing?.(), JSON.stringify(message)) } };
+  late.socket = line;
+  let value = "read under access";
+  late.sendOn(line, { id: 1, result: new LateReply(() => ({ value })) });
+  value = "what holds when it leaves";
+  late.sendOn(line, { id: 2, result: new LateReply(() => { throw new Error("No resource with given identifier found"); }) });
+  let access = true;
+  sealing = () => (access = false);
+  late.sendOn(line, { id: 3, result: new LateReply(() => ({ value: "secret" }), () => access) });
+  await line.outbox;
+  assert.deepEqual(sent, [
+    { id: 1, result: { value: "what holds when it leaves" } },
+    { id: 2, error: { message: "No resource with given identifier found" } },
+  ]);
+  assert.equal(closed, 1, "access ended while sealing: the link ends and the answer never leaves");
+  // It ends for the extension at once (its body filters let go now), not when the close comes back.
+  assert.equal(ended, 1);
+  assert.equal(late.socket, null);
+  late.socket = line;
+  line.epoch = late.epoch;
+  // At most 4 late replies wait on a link, and none is built while the link holds too much unsent.
+  sent.length = 0;
+  sealing = null;
+  for (let id = 10; id < 15; id++) late.sendOn(line, { id, result: new LateReply(() => ({ id })) });
+  await line.outbox;
+  assert.deepEqual(sent.map((message) => message.result?.id ?? message.error.message), [10, 11, 12, 13, LINK_BUSY]);
+  assert.equal(line.late, 0, "every place given back");
+  sent.length = 0;
+  line.bufferedAmount = LATE_BUFFER_MAX + 1;
+  let builds = 0;
+  late.sendOn(line, { id: 20, result: new LateReply(() => ({ built: ++builds })) });
+  await line.outbox;
+  assert.deepEqual(sent, [{ id: 20, error: { message: LINK_BUSY } }]);
+  assert.equal(builds, 0, "nothing read while the link is full");
+  // The answer being sealed counts, and so do "busy" answers: past ANSWERS_MAX waiting, the link ends.
+  let queueEnded = 0;
+  const queue = new LinkClient({ loadPairing: async () => null, onDisconnected: () => queueEnded++ });
+  let unblock;
+  const gate = new Promise((resolve) => (unblock = resolve));
+  const queued = [];
+  const slow = { readyState: 1, epoch: queue.epoch, send: (frame) => queued.push(JSON.parse(frame)), close: () => {}, sealer: { seal: async (message) => (await gate, JSON.stringify(message)) } };
+  queue.socket = slow;
+  for (let id = 1; id <= 5; id++) queue.sendOn(slow, { id, result: new LateReply(() => ({ id })) });
+  await wait(10);
+  for (let id = 6; id < ANSWERS_MAX; id++) assert.equal(queue.sendOn(slow, { id, result: {} }), true);
+  assert.equal(queueEnded, 0);
+  assert.equal(queue.sendOn(slow, { id: ANSWERS_MAX, result: new LateReply(() => ({})) }), true, "the last place, a busy answer");
+  assert.equal(queue.sendOn(slow, { id: ANSWERS_MAX + 1, result: {} }), false, "past the cap nothing is queued");
+  assert.equal(queueEnded, 1, "and the link ends");
+  unblock();
+  await slow.outbox;
+  assert.deepEqual(queued.slice(0, 5).map((message) => message.result?.id ?? message.error.message), [1, 2, 3, 4, LINK_BUSY], "the one being sealed holds its place");
+  assert.equal(slow.answers, 0);
+
   stranger.close();
   eager.close();
   bluffer.close();
@@ -396,5 +456,5 @@ export async function run() {
   refuser.close();
   other.close();
   codara.close();
-  return "link client: skips closed and foreign ports, pairs, answers requests, reconnects, tries past a Codara that does not know it, answers only a Codara that proves the pairing (never an unproven pairing offer), honors revoke and deny, pairs over ECDH without sending the token, reloads only when the sealed session asks, drops the link on an unsealed or replayed frame, tries the last port that worked first, opens no WebSocket on a port the probe finds closed, and backs off while Codara is unreachable until a wake";
+  return "link client: skips closed and foreign ports, pairs, answers requests, reconnects, tries past a Codara that does not know it, answers only a Codara that proves the pairing (never an unproven pairing offer), honors revoke and deny, pairs over ECDH without sending the token, reloads only when the sealed session asks, drops the link on an unsealed or replayed frame, tries the last port that worked first, opens no WebSocket on a port the probe finds closed, backs off while Codara is unreachable until a wake, and builds a late reply only when it leaves (never once its access ended)";
 }

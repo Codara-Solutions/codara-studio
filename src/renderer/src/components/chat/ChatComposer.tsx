@@ -16,7 +16,7 @@ import { pathToFileUrl } from "../../lib/pathToFileUrl";
 import { unwrapIpcError } from "../../lib/ipc-error";
 import AnchoredMenu from "./composer/AnchoredMenu";
 import { DEFAULT_PI_COMPACT_AT_TOKENS } from "@shared/context-compaction";
-import { fastModeSupportFor } from "@shared/fast-mode";
+import { fastModeAvailableFor } from "@shared/fast-mode";
 import { useOpenAiFastMode } from "../../lib/useOpenAiFastMode";
 import {
   backendFailureRetryText,
@@ -108,6 +108,9 @@ interface Props {
   // aimed at the visible chat composer. Run-scoped listeners (chat.usage
   // token accumulation) intentionally keep running so totals stay accurate.
   suspendGlobalEvents?: boolean;
+  // The chat's agents rail shows its workers: the "2 workers running" line
+  // then stays off, so the count lives in one place.
+  workersOnRail?: boolean;
   onStartChat: (
     message: string,
     clientMessageId: string,
@@ -203,6 +206,7 @@ export default function ChatComposer({
   disabled,
   lockedMode,
   suspendGlobalEvents,
+  workersOnRail,
   onStartChat,
   onForcePauseRun,
 }: Props) {
@@ -879,6 +883,7 @@ export default function ChatComposer({
             kind: "note",
             message,
             attachments,
+            typedByUser: true,
           });
         }
       } else {
@@ -889,6 +894,8 @@ export default function ChatComposer({
           kind: "note",
           message,
           attachments,
+          // Typed here: only such a note can run a skill (user-commands.ts).
+          typedByUser: true,
         });
       }
       if (draftKey) chatComposerDrafts.delete(draftKey);
@@ -1195,8 +1202,9 @@ export default function ChatComposer({
   // Fast mode remains a single GLOBAL setting even though its control lives
   // here: the flash button writes AppSettings.openAiFastMode, which the manager
   // and every worker read at launch, and there is no per-chat fast-mode state.
+  // Only Codex models run fast, so the button is not drawn for any other.
   const fastMode = useOpenAiFastMode();
-  const fastModeSupport = fastModeSupportFor(activeChatModelId);
+  const showFastMode = fastModeAvailableFor(activeChatModelId);
   const availableEfforts: AgentEffortLevel[] = effortsFor(activeChatModelOption);
   const visibleEffort: AgentEffortLevel = availableEfforts.includes(activeChatEffort)
     ? activeChatEffort
@@ -1607,17 +1615,21 @@ export default function ChatComposer({
               }}
               onManage={openProfileManager}
             />
-            <FastModeToggle
-              enabled={fastMode.enabled}
-              onToggle={fastMode.toggle}
-              unavailableReason={fastModeSupport.supported ? undefined : fastModeSupport.reason}
-            />
+            {showFastMode ? (
+              <FastModeToggle enabled={fastMode.enabled} onToggle={fastMode.toggle} />
+            ) : null}
           </div>
-          {workerActivity ? (
+          {workerActivity && !workersOnRail ? (
             <WorkerActivityStatus
               activity={workerActivity}
               steeringQueues={isActive}
             />
+          ) : workerActivity && (workerActivity.runPaused || isActive) ? (
+            // The rail counts the workers; this line still says what the
+            // composer does with what you type, as the full line's tail did.
+            <span className="composer-toolbar__hint composer-toolbar__hint--worker-tail">
+              {workerActivity.runPaused ? "Paused" : "Messages queue"}
+            </span>
           ) : (
             // Status only. Keyboard tips competed with the model pill for the
             // same row and truncated both; the placeholder and the Send

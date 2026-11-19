@@ -6,6 +6,11 @@
 // the handshake from an earlier port can neither read nor drive the session.
 // src/main/browser/chrome/protocol.ts describes the wire format.
 // Everything browser-specific is passed in, so the tests drive it in Node.
+//
+// Each connection has its own epoch: a search, and the socket it adopts,
+// belong to the epoch they started in, and closing or disconnecting starts
+// a new one. Work that awaited across that change (a reply, a pairing being
+// saved, a revocation) belongs to a connection that is over, and is dropped.
 
 import { DEFAULT_PORTS, LINK_PATH, PROTOCOL } from "./policy.js";
 
@@ -13,12 +18,46 @@ const PROBE_TIMEOUT_MS = 1500;
 const PING_INTERVAL_MS = 20_000;
 // Two missed pongs: the socket is dead even though it never closed.
 const PONG_DEADLINE_MS = 2 * PING_INTERVAL_MS + 5_000;
+// How long Disconnect waits for its last frame to leave.
+const FAREWELL_TIMEOUT_MS = 1_000;
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 // While no Codara answers on any port. A lost link climbs the quick
 // RECONNECT_DELAYS_MS first, since Codara restarting for an update is the
 // usual reason; a worker that wakes up to find nothing starts here.
 const OFFLINE_DELAYS_MS = [30_000, 60_000, 120_000, 300_000];
 const REQUEST_TYPES = new Set(["attach", "detach", "cdp", "open", "close", "activate"]);
+
+/**
+ * A request's answer built only when its turn to leave comes (`build()`,
+ * which may throw), so what it says still holds then; `still()` is asked
+ * again once it is sealed. A handler returns one for an answer that must
+ * not outlive the access it was read under.
+ */
+export class LateReply {
+  constructor(build, still = () => true) {
+    this.build = build;
+    this.still = still;
+  }
+}
+
+// Late replies waiting on one link, and the bytes the link may hold unsent
+// before another is built: past either, the answer is "busy".
+export const LATE_REPLIES_MAX = 4;
+export const LATE_BUFFER_MAX = 16_000_000;
+// Answers to Codara's requests waiting on one link, of any kind.
+export const ANSWERS_MAX = 64;
+export const LINK_BUSY = "The link to Codara is busy: try again in a moment.";
+
+/** The message to send, with a LateReply built now (an error in its place if it throws). */
+function built(message, socket) {
+  if (!(message.result instanceof LateReply)) return message;
+  try {
+    if ((socket.bufferedAmount ?? 0) > LATE_BUFFER_MAX) throw new Error(LINK_BUSY);
+    return { id: message.id, result: message.result.build() ?? {} };
+  } catch (error) {
+    return { id: message.id, error: { message: error instanceof Error ? error.message : String(error) } };
+  }
+}
 
 export class LinkClient {
   /**
@@ -29,7 +68,7 @@ export class LinkClient {
    * @param {() => Promise<{ token: string, linkId: string } | null>} deps.loadPairing
    * @param {(token: string, linkId: string) => Promise<void>} deps.savePairing
    * @param {() => Promise<void>} deps.clearPairing
-   * @param {(request: object) => Promise<unknown>} deps.onRequest
+   * @param {(request: object, link: { live: () => boolean }) => Promise<unknown>} deps.onRequest  `live()`: the asking link is still the one in use
    * @param {(message: object) => void} [deps.onMessage]
    * @param {(message: object) => void} [deps.onReload]  Codara ships a newer extension
    * @param {(status: object) => void} [deps.onStatus]
@@ -48,6 +87,9 @@ export class LinkClient {
     this.pingTimer = null;
     this.attempt = 0;
     this.lastPong = 0;
+    this.epoch = 0;
+    // Pairing storage, one write at a time (pairingStore).
+    this.storing = Promise.resolve();
     // lastPort: where Codara last answered. misses and retryAt: the offline
     // backoff; recovering: the misses count from a lost link.
     this.scan = null;
@@ -69,10 +111,11 @@ export class LinkClient {
       else return Promise.resolve(this.status);
     }
     if (this.connecting) return this.connecting;
-    this.connecting = this.run(pair, wake).finally(() => {
-      this.connecting = null;
+    const connecting = this.run(pair, wake).finally(() => {
+      if (this.connecting === connecting) this.connecting = null;
     });
-    return this.connecting;
+    this.connecting = connecting;
+    return connecting;
   }
 
   /** Look for Codara now, whatever the backoff says. */
@@ -85,33 +128,80 @@ export class LinkClient {
   disconnect(state = "idle") {
     this.clearReconnect();
     this.close();
+    // The search in progress, if any, is over: the next connect() starts afresh.
+    this.connecting = null;
     this.setStatus({ state, code: null, port: null, error: null });
   }
 
   send(message) {
-    const socket = this.socket;
-    if (!socket || socket.readyState !== 1) return false;
+    return this.sendOn(this.socket, message);
+  }
+
+  /** Whether `socket` is the link in use now, and not one from an earlier connection. */
+  current(socket) {
+    return socket !== null && socket === this.socket && socket.epoch === this.epoch;
+  }
+
+  /** Send on `socket` only while it is the link in use: never on a later one. */
+  sendOn(socket, message) {
+    if (!socket || !this.current(socket) || socket.readyState !== 1) return false;
+    // Answers to Codara's requests wait at most ANSWERS_MAX at once, "busy"
+    // ones and the one being sealed included: past that the link ends.
+    const answer = message.id !== undefined;
+    if (answer && (socket.answers ?? 0) >= ANSWERS_MAX) {
+      this.lost();
+      return false;
+    }
+    const late = message.result instanceof LateReply;
+    if (late && (socket.late ?? 0) >= LATE_REPLIES_MAX) message = { id: message.id, error: { message: LINK_BUSY } };
+    const counted = message.result instanceof LateReply;
+    if (counted) socket.late = (socket.late ?? 0) + 1;
+    if (answer) socket.answers = (socket.answers ?? 0) + 1;
+    const done = () => {
+      if (counted) socket.late -= 1;
+      if (answer) socket.answers -= 1;
+    };
     if (!socket.sealer) {
-      socket.send(JSON.stringify(message));
+      done();
+      socket.send(JSON.stringify(built(message, socket)));
       return true;
     }
     // Sealing is asynchronous and each frame's counter is its place in the
     // stream, so frames leave one at a time in the order they were sent.
     socket.outbox = (socket.outbox ?? Promise.resolve()).then(async () => {
-      const frame = await socket.sealer.seal(message);
-      if (socket.readyState === 1) socket.send(frame);
+      try {
+        const out = built(message, socket);
+        const frame = await socket.sealer.seal(out);
+        // Its access ended while it was sealed: a frame left out would break the
+        // count, so the link ends instead, and the answer never leaves. It ends
+        // for the extension now, not when the close comes back.
+        if (out.result !== undefined && counted && !message.result.still()) {
+          if (this.current(socket)) this.lost();
+          else socket.close();
+          return;
+        }
+        if (socket.readyState === 1) socket.send(frame);
+      } finally {
+        done();
+      }
     }).catch(() => {});
     return true;
   }
 
+
   async run(pair, wake) {
+    this.epoch += 1;
+    const epoch = this.epoch;
+    const stale = () => epoch !== this.epoch;
     this.clearReconnect();
-    const pairing = await this.deps.loadPairing();
+    const pairing = await this.readPairing();
+    if (stale()) return this.status;
     if (!pairing && !pair) {
       this.setStatus({ state: "idle", code: null, error: null });
       return this.status;
     }
     const scan = await this.loadScan();
+    if (stale()) return this.status;
     const now = this.now();
     if (!pair && !wake && scan.retryAt > now) {
       // The alarm wakes the worker every 30 s; the backoff decides.
@@ -120,6 +210,7 @@ export class LinkClient {
     }
     this.setStatus({ state: "searching", code: null, error: null });
     const configured = (await this.deps.ports?.()) ?? DEFAULT_PORTS;
+    if (stale()) return this.status;
     // The port that worked last time first: when Codara is there, no other
     // port is touched.
     const ports = configured.includes(scan.lastPort) ? [scan.lastPort, ...configured.filter((port) => port !== scan.lastPort)] : configured;
@@ -136,14 +227,14 @@ export class LinkClient {
       if (!probed.has(port)) probed.set(port, await this.deps.probe(port).catch(() => false));
       return probed.get(port);
     };
-    let result = await this.scanPorts(ports, rounds, pairing, listening);
-    if (result.done) return this.status;
+    let result = await this.scanPorts(ports, rounds, pairing, listening, epoch);
+    if (result.done || stale()) return this.status;
     if (!result.reached && this.deps.probe && pair) {
       // Nothing answered the probe. Should a browser ever refuse the probe
       // itself, pressing Connect still reaches Codara: it opens a WebSocket
       // on every port.
-      result = await this.scanPorts(ports, rounds, pairing, async () => true);
-      if (result.done) return this.status;
+      result = await this.scanPorts(ports, rounds, pairing, async () => true, epoch);
+      if (result.done || stale()) return this.status;
     }
     const { unknown, refusal } = result;
     if (refusal && !unknown) {
@@ -160,18 +251,21 @@ export class LinkClient {
       return this.status;
     }
     this.setStatus({ state: "offline", error: "Codara is not running, or its Chrome link is off." });
-    await this.backOff();
+    await this.backOff(epoch);
     return this.status;
   }
 
-  async scanPorts(ports, rounds, pairing, listening) {
+  async scanPorts(ports, rounds, pairing, listening, epoch) {
     let unknown = false;
     let refusal = null;
     let reached = false;
     for (const asking of rounds) {
       for (const port of ports) {
-        if (!(await listening(port))) continue;
-        const outcome = await this.tryPort(port, pairing, asking);
+        const open = await listening(port);
+        if (epoch !== this.epoch) return { done: true, unknown, refusal, reached };
+        if (!open) continue;
+        const outcome = await this.tryPort(port, pairing, asking, epoch);
+        if (outcome === "cancelled" || epoch !== this.epoch) return { done: true, unknown, refusal, reached };
         if (outcome === "closed") continue;
         reached = true;
         if (outcome === "unknown") unknown = true;
@@ -185,7 +279,7 @@ export class LinkClient {
     return { done: false, unknown, refusal, reached };
   }
 
-  tryPort(port, pairing, pair) {
+  tryPort(port, pairing, pair, epoch = this.epoch) {
     return new Promise((resolve) => {
       let settled = false;
       let socket;
@@ -200,16 +294,35 @@ export class LinkClient {
         clearTimeout(timer);
         resolve(outcome);
       };
-      const timer = setTimeout(() => {
+      const expire = () => {
+        if (settled) return;
         try {
           socket?.close();
         } catch {
           /* already closed */
         }
         finish(opened ? "next" : "closed");
-      }, PROBE_TIMEOUT_MS);
+      };
+      // A Codara that proved the pairing gets the frames it sent before the
+      // deadline read first: a "revoked" among them still counts.
+      const timer = setTimeout(() => (proven ? void frames.then(expire) : expire()), PROBE_TIMEOUT_MS);
+      // Disconnect pressed, or another search started, while this one waited.
+      const cancelled = () => {
+        if (epoch === this.epoch) return false;
+        try {
+          socket.close();
+        } catch {
+          /* already closed */
+        }
+        finish("cancelled");
+        return true;
+      };
+      // Past this attempt's end (timed out, closed, refused or cancelled), a
+      // handshake that resumes never sends or adopts anything.
+      const gone = () => settled || cancelled();
       try {
         socket = new this.deps.WebSocket(`ws://127.0.0.1:${port}${LINK_PATH}`);
+        socket.epoch = epoch;
       } catch {
         finish("closed");
         return;
@@ -218,14 +331,23 @@ export class LinkClient {
         opened = true;
         const hello = await this.deps.hello();
         const commit = keys ? { pairCommit: await pairCommitment((await keys).key) } : {};
+        if (gone()) return;
         socket.send(JSON.stringify({ type: "hello", protocol: PROTOCOL, ...hello, ...(pairing ? { linkId: pairing.linkId, nonce } : {}), pair: pair === true, ...commit }));
       };
-      socket.onerror = () => finish(opened ? "next" : "closed");
-      socket.onclose = () => {
-        if (!settled) finish(opened ? "next" : "closed");
-        else if (this.socket === socket) this.lost();
-      };
+      // Frames that arrived before an error or close are acted on first:
+      // Codara sends "revoked" (or "welcome") and may close right after.
+      let frames = Promise.resolve();
+      socket.onerror = () => void frames.then(() => finish(opened ? "next" : "closed"));
+      socket.onclose = () =>
+        void frames.then(() => {
+          if (!settled) finish(opened ? "next" : "closed");
+          else if (this.socket === socket) this.lost();
+        });
+      // Once adopted, the socket speaks only while it is the link in use;
+      // before that, only while its search is not cancelled.
+      const over = () => (settled ? !this.current(socket) : cancelled());
       const frame = async (data) => {
+        if (over()) return;
         let message = parse(data);
         if (!message) return;
         if (socket.sealer) {
@@ -237,13 +359,14 @@ export class LinkClient {
             if (this.socket === socket) this.lost();
             return;
           }
+          if (over()) return;
         }
         if (!settled && message.type === "challenge" && pairing && !proven) {
           // Answer only a Codara that proved it holds this pairing's secret:
           // whatever else sits on the port gets nothing it could replay.
           const secret = await sha256Hex(pairing.token);
           const expected = await linkProof(secret, "codara", nonce, String(message.nonce ?? ""));
-          if (settled) return;
+          if (gone()) return;
           if (message.proof !== expected) {
             socket.close();
             finish("unknown");
@@ -251,7 +374,9 @@ export class LinkClient {
           }
           proven = true;
           session = { secret, first: nonce, second: String(message.nonce) };
-          socket.send(JSON.stringify({ type: "auth", proof: await linkProof(secret, "browser", String(message.nonce), nonce) }));
+          const proof = await linkProof(secret, "browser", String(message.nonce), nonce);
+          if (gone()) return;
+          socket.send(JSON.stringify({ type: "auth", proof }));
           return;
         }
         if (!settled) {
@@ -291,21 +416,28 @@ export class LinkClient {
             // Revealed only now, after Codara sent its key: a relay had to
             // pick its keys before it could see this one.
             const own = await keys;
+            if (gone()) return;
             socket.pairing = { privateKey: own.privateKey, extensionKey: own.key, codaraKey };
             socket.send(JSON.stringify({ type: "pair_key", key: own.key }));
             message = { type: "pairing", code: await pairingCode(own.key, codaraKey) };
           }
-          if (message.type === "welcome") socket.sealer = await sessionSealer(session.secret, session.first, session.second);
+          if (message.type === "welcome") {
+            const sealer = await sessionSealer(session.secret, session.first, session.second);
+            if (gone()) return;
+            socket.sealer = sealer;
+            // The pairing this session proved: the only one its revocation may clear.
+            socket.credential = pairing.token;
+          }
+          if (gone()) return;
           this.adopt(socket, port);
           finish(message.type === "welcome" || message.type === "pairing" ? "ok" : "stop");
         }
         // Requests are answered side by side; everything else in order.
-        if (message.id !== undefined && REQUEST_TYPES.has(message.type)) void this.handle(message);
-        else await this.handle(message);
+        if (message.id !== undefined && REQUEST_TYPES.has(message.type)) void this.handle(message, socket);
+        else await this.handle(message, socket);
       };
       // One frame at a time: opening a sealed frame is asynchronous, and a
       // frame opens only after the one before it.
-      let frames = Promise.resolve();
       socket.onmessage = (event) => {
         frames = frames.then(() => frame(event.data)).catch(() => {});
       };
@@ -318,15 +450,18 @@ export class LinkClient {
     this.lastPong = Date.now();
     this.pingTimer = setInterval(() => {
       if (Date.now() - this.lastPong > PONG_DEADLINE_MS) {
-        this.close();
+        // lost() closes the socket itself; closing first would leave it
+        // nothing to lose, so no quick reconnect and a stale "connected".
         this.lost();
         return;
       }
-      this.send({ type: "ping" });
+      this.sendOn(socket, { type: "ping" });
     }, PING_INTERVAL_MS);
   }
 
-  async handle(message) {
+  /** One message from `socket`, acted on only while that socket is the link in use. */
+  async handle(message, socket) {
+    if (!this.current(socket)) return;
     switch (message.type) {
       case "welcome":
         this.attempt = 0;
@@ -337,18 +472,36 @@ export class LinkClient {
         this.setStatus({ state: "pairing", code: message.code ?? null, error: null });
         return;
       case "paired": {
-        const socket = this.socket;
-        const pairing = socket?.pairing;
+        const pairing = socket.pairing;
         if (!pairing || typeof message.linkId !== "string") {
           this.lost();
           return;
         }
         // Both sides derive the token from the exchange; it is never sent.
+        // A pairing cancelled meanwhile (Disconnect, or Connect pressed
+        // again) saves nothing: its token would replace the one in use.
         const shared = await sharedSecret(pairing.privateKey, pairing.codaraKey);
         const token = await pairedToken(shared, pairing.extensionKey, pairing.codaraKey);
+        const sealer = await sessionSealer(await sha256Hex(token), pairing.extensionKey, pairing.codaraKey);
+        if (!this.current(socket)) return;
         socket.pairing = null;
-        socket.sealer = await sessionSealer(await sha256Hex(token), pairing.extensionKey, pairing.codaraKey);
-        await this.deps.savePairing(token, message.linkId);
+        socket.sealer = sealer;
+        socket.credential = token;
+        const kept = await this.pairingStore(async () => {
+          if (!this.current(socket)) return false;
+          const previous = await this.deps.loadPairing();
+          if (!this.current(socket)) return false;
+          await this.deps.savePairing(token, message.linkId);
+          if (this.current(socket)) return true;
+          // Cancelled while saving: the pairing stored before comes back,
+          // as long as this write is still the one stored.
+          if ((await this.deps.loadPairing())?.token === token) {
+            if (previous) await this.deps.savePairing(previous.token, previous.linkId);
+            else await this.deps.clearPairing();
+          }
+          return false;
+        });
+        if (!kept || !this.current(socket)) return;
         this.attempt = 0;
         this.setStatus({ state: "connected", code: null, linkId: message.linkId ?? null, app: message.app ?? null, error: null });
         this.deps.onConnected?.();
@@ -360,7 +513,23 @@ export class LinkClient {
         return;
       case "unpaired":
       case "revoked":
-        await this.deps.clearPairing();
+        if (!socket.sealer) {
+          // Codara revokes only inside the session the pairing seals. An
+          // unsealed one (a pairing in progress, a program on the path) ends
+          // this attempt, and the saved pairing stays.
+          this.disconnect("error");
+          this.setStatus({ error: "The connection to Codara was interrupted. Press Connect to try again." });
+          return;
+        }
+        {
+          // Only the pairing this session proved is forgotten: a newer one
+          // saved meanwhile stays.
+          const credential = socket.credential;
+          await this.pairingStore(async () => {
+            if (credential && (await this.deps.loadPairing())?.token === credential) await this.deps.clearPairing();
+          });
+        }
+        if (!this.current(socket)) return;
         this.disconnect("unpaired");
         this.setStatus({ error: message.type === "revoked" ? "Codara disconnected this browser." : "Codara no longer knows this browser. Connect again." });
         this.deps.onMessage?.(message);
@@ -375,37 +544,94 @@ export class LinkClient {
       case "reload":
         // Only from the sealed session of a proven Codara: anything on the
         // path before that could otherwise restart the extension at will.
-        if (this.status.state === "connected" && this.socket?.sealer) this.deps.onReload?.(message);
+        if (this.status.state === "connected" && socket.sealer) this.deps.onReload?.(message);
         return;
       default:
         break;
     }
     if (message.id !== undefined && REQUEST_TYPES.has(message.type)) {
       if (this.status.state !== "connected") {
-        this.send({ id: message.id, error: { message: "This browser is not paired with you yet." } });
+        this.sendOn(socket, { id: message.id, error: { message: "This browser is not paired with you yet." } });
         return;
       }
+      // The answer goes back on the link that asked, or nowhere: a later
+      // link numbers its requests from 1 again.
+      // `live` tells the handler, after any await of its own, whether this
+      // link is still the one in use before it acts on a tab.
       try {
-        const result = await this.deps.onRequest(message);
-        this.send({ id: message.id, result: result ?? {} });
+        const result = await this.deps.onRequest(message, { live: () => this.current(socket) });
+        this.sendOn(socket, { id: message.id, result: result ?? {} });
       } catch (error) {
-        this.send({ id: message.id, error: { message: error instanceof Error ? error.message : String(error) } });
+        this.sendOn(socket, { id: message.id, error: { message: error instanceof Error ? error.message : String(error) } });
       }
       return;
     }
     this.deps.onMessage?.(message);
   }
 
+  /**
+   * Pairing storage, one step at a time: what a write checked still holds
+   * when it lands, and a read never sees a token whose save may yet be
+   * taken back. Work inside calls the deps directly, never this again.
+   */
+  pairingStore(work) {
+    const done = this.storing.then(work);
+    this.storing = done.catch(() => {});
+    return done;
+  }
+
+  readPairing() {
+    return this.pairingStore(() => this.deps.loadPairing());
+  }
+
+  /**
+   * The user's Disconnect: from this moment nothing in flight is kept (a
+   * pairing Codara approves now is not saved), `farewell` leaves before the
+   * link closes, then the pairing is forgotten, after any write before it.
+   */
+  async forget(farewell) {
+    const socket = this.socket;
+    if (farewell) this.send(farewell);
+    const flushed = socket?.outbox;
+    // The old socket leaves the client now, still open so the farewell can
+    // leave: its drop, frames and pings no longer reach the client, and
+    // nothing later in here touches a link, status or timer started since.
+    if (socket) {
+      this.socket = null;
+      socket.onclose = null;
+      this.deps.onDisconnected?.();
+    }
+    this.disconnect("idle");
+    // Queued before anything awaits: a reconnect meanwhile (the alarm, a
+    // Connect pressed again) reads no pairing.
+    const cleared = this.pairingStore(() => this.deps.clearPairing());
+    if (flushed) {
+      let timer;
+      await Promise.race([flushed, new Promise((resolve) => (timer = setTimeout(resolve, FAREWELL_TIMEOUT_MS)))]);
+      clearTimeout(timer);
+    }
+    try {
+      socket?.close();
+    } catch {
+      /* already closed */
+    }
+    await cleared;
+  }
+
+
   lost() {
     if (!this.socket) return;
     this.close();
     this.setStatus({ state: "offline", code: null, error: "Lost the connection to Codara." });
-    void this.updateScan({ misses: 0, retryAt: 0, recovering: true }).then(() => this.scheduleReconnect());
+    const epoch = this.epoch;
+    void this.updateScan({ misses: 0, retryAt: 0, recovering: true }).then(() => this.scheduleReconnect(epoch));
   }
 
+  /** End the link in use; whatever it still had in flight belongs to a connection that is over. */
   close() {
     const socket = this.socket;
     this.socket = null;
+    this.epoch += 1;
     clearInterval(this.pingTimer);
     this.pingTimer = null;
     if (socket) {
@@ -419,22 +645,26 @@ export class LinkClient {
     }
   }
 
-  async scheduleReconnect() {
+  async scheduleReconnect(epoch = this.epoch) {
+    // A connection that is over must not touch the timer a newer one set.
+    if (epoch !== this.epoch) return;
     this.clearReconnect();
-    if (!(await this.deps.loadPairing())) return;
+    if (!(await this.readPairing()) || epoch !== this.epoch) return;
     const delay = RECONNECT_DELAYS_MS[Math.min(this.attempt, RECONNECT_DELAYS_MS.length - 1)];
     this.attempt += 1;
     this.scheduleAt(delay);
   }
 
   /** No Codara on any port: wait longer each time, and remember it across worker restarts. */
-  async backOff() {
+  async backOff(epoch = this.epoch) {
     const scan = await this.loadScan();
+    if (epoch !== this.epoch) return;
     const ladder = scan.recovering ? [...RECONNECT_DELAYS_MS.slice(0, -1), ...OFFLINE_DELAYS_MS] : OFFLINE_DELAYS_MS;
     const delay = ladder[Math.min(scan.misses, ladder.length - 1)];
     await this.updateScan({ misses: scan.misses + 1, retryAt: this.now() + delay });
+    if (epoch !== this.epoch) return;
     this.clearReconnect();
-    if (!(await this.deps.loadPairing())) return;
+    if (!(await this.readPairing()) || epoch !== this.epoch) return;
     this.scheduleAt(delay);
   }
 
