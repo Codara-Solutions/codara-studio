@@ -25,6 +25,13 @@ export async function run(assembled) {
   for (const [type, headers] of [["image", { "Content-Type": "image/png" }], ["media", {}], ["font", {}], ["websocket", {}], ["xmlhttprequest", { "Content-Type": "application/octet-stream" }], ["xmlhttprequest", { "Content-Type": "video/mp4" }], ["xmlhttprequest", { "Content-Type": "image/svg+xml" }], ["xmlhttprequest", { "Content-Type": "application/vnd.a+json-compressed" }], ["xmlhttprequest", { "Content-Type": "application/jsonx" }], ["xmlhttprequest", {}], ["script", {}], ["other", { "Content-Type": "text/csv", "Content-Disposition": "attachment; filename=a.csv" }]]) {
     assert.deepEqual(bodyPlan(response(type, headers)), { keep: false, reason: BODY_NOT_TEXT }, `${type} ${JSON.stringify(headers)}`);
   }
+  // Only no disposition, or exactly "inline": anything else Firefox may treat as a download.
+  for (const disposition of ["inline", "INLINE", "Inline; filename=a.json", "inline ;x=1", "  inline  "]) {
+    assert.deepEqual(bodyPlan(response("xmlhttprequest", { "Content-Type": "application/json", "Content-Disposition": disposition })), { keep: true }, disposition);
+  }
+  for (const disposition of ["attachment", "x-download; filename=report.txt", "inlinex", "inline-ish", "form-data; name=a", ";inline"]) {
+    assert.deepEqual(bodyPlan(response("xmlhttprequest", { "Content-Type": "application/json", "Content-Disposition": disposition })), { keep: false, reason: BODY_NOT_TEXT }, disposition);
+  }
   for (const extra of [{ statusCode: 302 }, { statusCode: 204 }, { method: "HEAD" }]) assert.deepEqual(bodyPlan(response("xmlhttprequest", { "Content-Type": "text/plain" }, extra)), { keep: false, reason: null });
 
   // Text in its charset, the rest as base64, as the protocol gives them.

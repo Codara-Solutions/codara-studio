@@ -39,7 +39,9 @@ const header = (details, name) => details.responseHeaders?.find((one) => one.nam
 export function bodyPlan(details, cap = BODY_MAX) {
   const status = details.statusCode;
   if ((status >= 300 && status < 400) || status === 204 || details.method === "HEAD") return { keep: false, reason: null };
-  if (!BODY_TYPES.includes(details.type) || /^\s*attachment/i.test(header(details, "content-disposition"))) return { keep: false, reason: BODY_NOT_TEXT };
+  // No disposition, or exactly "inline": any other Firefox may treat as a download.
+  const disposition = header(details, "content-disposition").trim();
+  if (!BODY_TYPES.includes(details.type) || (disposition && !/^inline\s*(;|$)/i.test(disposition))) return { keep: false, reason: BODY_NOT_TEXT };
   // Only a response that says it is text: no type said, no body kept.
   const type = header(details, "content-type").split(";")[0].trim();
   if (!TEXT_MIME.test(type)) return { keep: false, reason: BODY_NOT_TEXT };
