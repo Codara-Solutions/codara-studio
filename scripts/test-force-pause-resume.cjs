@@ -49,6 +49,7 @@
 //
 // Exits non-zero on any failed assertion.
 
+const { completeStubExports } = require("./run-store-stub-exports.cjs");
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -101,7 +102,8 @@ export async function disposeManagerSessions(runId) {
 
 // Account resolution is the only other thing a manager turn touches before the
 // backend call, and a throwaway CODARA_HOME_DIR has no connected accounts.
-const PI_RUNTIME_STUB = `export async function resolveCodaraPiExecutionAccount() {
+const PI_RUNTIME_STUB = `export async function listCodaraPiSkillNames() { return new Set(); }
+export async function resolveCodaraPiExecutionAccount() {
   // Account resolution runs before the backend call. A throw here is recorded
   // as the turn's own failed SparkCall and goes through the startup-failure
   // policy, and the resume path must still leave a driver. The harness arms it
@@ -176,7 +178,7 @@ const stubPlugin = {
       namespace: "stub",
     }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({
-      contents: STUBS[args.path],
+      contents: completeStubExports(args.path, STUBS[args.path]),
       loader: "js",
     }));
   },
