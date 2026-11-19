@@ -41,6 +41,7 @@ import {
   expressionAnswer,
   expressionScript,
   frameFailed,
+  isPageChange,
   layoutMetrics,
   measureLayout,
   screenshotAnswer,
@@ -299,9 +300,10 @@ async function answerCommand(request, socket) {
     case "Runtime.evaluate":
       return evaluateInPage(tab.id, params, socket);
     case "Page.getLayoutMetrics": {
-      const page = await pinDocument(tab.id, socket);
+      // Stamped before the page is pinned: any change from here on drops the reading.
       const loads = navigations.get(tab.id) ?? 0;
-      const [frame] = await inDocument(page, () => chrome.scripting.executeScript({ target: page.target, func: measureLayout }));
+      const page = await pinDocument(tab.id, socket);
+      const [frame] = await inDocument(page, () => chrome.scripting.executeScript({ target: page.target, func: measureLayout, args: [page.tab.url] }));
       const metrics = layoutMetrics(frame?.result);
       // The sizes of a page the tab has since left would frame a full-page capture wrongly.
       await stillOnPage(page.tab, loads, socket);
@@ -561,11 +563,12 @@ chrome.tabs.onCreated.addListener(scheduleRefresh);
 chrome.tabs.onActivated.addListener(scheduleRefresh);
 chrome.tabs.onAttached.addListener(scheduleRefresh);
 chrome.tabs.onDetached.addListener(scheduleRefresh);
-// Page loads per tab, so a capture can tell the tab did not leave its page meanwhile.
+// Page changes per tab (loads and route changes), so a capture or a layout
+// reading can tell the tab did not leave its page at any point meanwhile.
 const navigations = new Map();
 
 chrome.tabs.onUpdated.addListener(async (tabId, change) => {
-  if (change.status === "loading") navigations.set(tabId, (navigations.get(tabId) ?? 0) + 1);
+  if (isPageChange(change)) navigations.set(tabId, (navigations.get(tabId) ?? 0) + 1);
   if (change.url !== undefined) {
     await ready;
     if (state.attached.includes(tabId) && (firefoxBlockingRule(change.url, rules) || isFirefoxRestrictedUrl(change.url))) {

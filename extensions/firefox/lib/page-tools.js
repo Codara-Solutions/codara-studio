@@ -261,8 +261,17 @@ export function screenshotAnswer(dataUrl) {
   return { data: match[1] };
 }
 
-/** Runs in the page's isolated world through scripting.executeScript; measures only. */
-export function measureLayout() {
+/**
+ * Whether a tabs.onUpdated change means the tab is on another page: a load,
+ * or an app's own route change (one there and back counts twice).
+ */
+export function isPageChange(change) {
+  return change?.status === "loading" || change?.url !== undefined;
+}
+
+/** Runs in the page's isolated world through scripting.executeScript; measures only, and only on the page checked. */
+export function measureLayout(expected) {
+  if (location.href !== expected) return { moved: true };
   const root = document.documentElement;
   const body = document.body;
   // In quirks mode the body's client box is the viewport (the root's is the document).
@@ -283,6 +292,7 @@ export function measureLayout() {
 /** Page.getLayoutMetrics's answer from measureLayout: the css* fields in CSS pixels, the others in device pixels. */
 export function layoutMetrics(measured) {
   if (!plainObject(measured)) throw new Error("The page did not report its size.");
+  if (measured.moved === true) throw new Error(MOVED_ERROR);
   const n = (value) => (Number.isFinite(value) ? value : 0);
   const dpr = n(measured.dpr) || 1;
   const visual = measured.visual ?? { offsetX: 0, offsetY: 0, pageX: n(measured.scrollX), pageY: n(measured.scrollY), width: n(measured.clientWidth), height: n(measured.clientHeight), scale: 1 };

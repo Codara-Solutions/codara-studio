@@ -135,7 +135,14 @@ function permissions({ PAGE_METHODS, accessNeeds, sitePattern, accessRequest, ac
   assert.equal(rows[0].button, "Allow a.example");
 }
 
-function screenshots({ captureOptions, screenshotAnswer, measureLayout, layoutMetrics }) {
+function screenshots({ captureOptions, screenshotAnswer, measureLayout, layoutMetrics, isPageChange, MOVED_ERROR }) {
+  // A reading is dropped when the tab changed page at any point while it was
+  // taken: a load, or an app's own route change (there and back included).
+  assert.equal(isPageChange({ status: "loading" }), true);
+  assert.equal(isPageChange({ url: "https://a.example/b" }), true, "a route change counts, not only a load");
+  assert.equal(isPageChange({ title: "New title" }), false);
+  assert.equal(isPageChange({ status: "complete" }), false);
+
   assert.deepEqual(captureOptions({ format: "png" }), { format: "png" });
   assert.deepEqual(captureOptions(undefined), { format: "png" });
   assert.throws(() => captureOptions({ format: "webp" }), /PNG or JPEG only, not webp/);
@@ -159,7 +166,10 @@ function screenshots({ captureOptions, screenshotAnswer, measureLayout, layoutMe
     scrollY: 400,
     devicePixelRatio: 2,
   };
-  const measured = vm.runInNewContext(`(${measureLayout.toString()})()`, page);
+  const measure = (context, expected = PAGE) => vm.runInNewContext(`(${measureLayout.toString()})(${JSON.stringify(expected)})`, { location: { href: PAGE }, ...context });
+  const measured = measure(page);
+  // Measured only on the page checked: another address of the same document is not measured.
+  assert.throws(() => layoutMetrics(measure({ ...page, location: { href: "https://a.example/other" } })), (error) => error.message === MOVED_ERROR);
   const metrics = layoutMetrics(measured);
   assert.deepEqual(metrics.cssContentSize, { x: 0, y: 0, width: 1350, height: 3029 });
   assert.deepEqual(metrics.cssLayoutViewport, { pageX: 0, pageY: 400, clientWidth: 1350, clientHeight: 680 });
@@ -175,7 +185,7 @@ function screenshots({ captureOptions, screenshotAnswer, measureLayout, layoutMe
       body: { clientWidth: 1350, clientHeight: 680, scrollWidth: 1350, scrollHeight: 3029 },
     },
   };
-  const inQuirks = layoutMetrics(vm.runInNewContext(`(${measureLayout.toString()})()`, quirks));
+  const inQuirks = layoutMetrics(measure(quirks));
   assert.deepEqual(inQuirks.cssLayoutViewport, { pageX: 0, pageY: 400, clientWidth: 1350, clientHeight: 680 });
   assert.deepEqual(inQuirks.cssContentSize, { x: 0, y: 0, width: 1350, height: 3029 });
   assert.throws(() => layoutMetrics(null), /did not report its size/);
