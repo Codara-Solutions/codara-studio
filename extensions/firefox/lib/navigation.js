@@ -55,6 +55,18 @@ export function navigateUrl(params, tabId, { isRestricted, blockingRule }) {
 }
 
 /**
+ * A time limit on a steady clock (performance.now, which setting the
+ * system clock does not move): how long is left, and whether it passed.
+ */
+export function startDeadline(ms, clock = () => performance.now()) {
+  const end = clock() + ms;
+  return {
+    left: () => Math.max(0, end - clock()),
+    passed: () => clock() >= end,
+  };
+}
+
+/**
  * How navigate goes from the tab's address to another: "load" a new
  * document; "fragment", a #fragment of the loaded page; "there", already
  * at that address of a page seen loading; "reload", that address of a

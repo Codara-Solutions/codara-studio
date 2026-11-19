@@ -24,6 +24,7 @@ import {
   freshPage,
   navigateAnswer,
   navigationPlan,
+  startDeadline,
   navigateUrl,
   pageEvents,
 } from "./lib/navigation.js";
@@ -366,7 +367,7 @@ async function answerCommand(request, socket) {
  */
 async function navigateTab(tabId, params, socket) {
   // One deadline for the whole answer, from the request's arrival, under the 30 s Codara waits.
-  const deadline = Date.now() + NAVIGATE_WAIT_MS;
+  const deadline = startDeadline(NAVIGATE_WAIT_MS);
   if (params === null || typeof params !== "object") throw new Error("Page.navigate needs an absolute http or https url.");
   const checks = { isRestricted: isFirefoxRestrictedUrl, blockingRule: (address) => firefoxBlockingRule(address, rules) };
   navigateUrl(params, tabId, checks);
@@ -378,7 +379,7 @@ async function navigateTab(tabId, params, socket) {
     const now = await untilDeadline(stillUsable(tabId, socket), deadline);
     // Checked again with nothing awaited before the load: the user may have blocked the site meanwhile.
     const url = navigateUrl(params, now.id, checks);
-    if (Date.now() >= deadline) throw new Error(NAVIGATE_TIMEOUT_ERROR);
+    if (deadline.passed()) throw new Error(NAVIGATE_TIMEOUT_ERROR);
     const page = pageOf(now.id, now.url);
     const plan = navigationPlan(page, now.url, url);
     // A #fragment of Firefox's error page stays the error page: the failed load it is.
@@ -400,7 +401,7 @@ async function navigateTab(tabId, params, socket) {
     if (waiter.target.refused) throw new Error(waiter.target.refused);
     await untilDeadline(stillUsable(now.id, socket), deadline);
     // Codara stops waiting at 30 s: an answer past the deadline is none.
-    if (Date.now() >= deadline) throw new Error(NAVIGATE_TIMEOUT_ERROR);
+    if (deadline.passed()) throw new Error(NAVIGATE_TIMEOUT_ERROR);
     return navigateAnswer(now.id, sameDocument, kind, nextLoaderId);
   } finally {
     navigating.delete(tabId);
@@ -423,14 +424,14 @@ function waitForNavigation(tabId, target, deadline) {
       resolve(kind);
     },
   };
-  const timer = setTimeout(() => waiter.done(null), Math.max(0, deadline - Date.now()));
+  const timer = setTimeout(() => waiter.done(null), deadline.left());
   navigationWaiters.set(tabId, waiter);
   return waiter;
 }
 
 function untilDeadline(promise, deadline) {
   let timer;
-  const late = new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(NAVIGATE_TIMEOUT_ERROR)), Math.max(0, deadline - Date.now()))));
+  const late = new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(NAVIGATE_TIMEOUT_ERROR)), deadline.left())));
   return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 }
 

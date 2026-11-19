@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -80,6 +81,29 @@ export async function run(assembled) {
   nav.noteNavigationChange(clean, "started", { status: "loading" }, refusal);
   nav.noteNavigationChange(clean, "commit", { status: "loading", url: "https://a.example/go" }, refusal);
   assert.deepEqual(clean, { sameDocument: false, url: "https://a.example/go", started: true });
+
+  // navigate's 25 s run on a steady clock: setting the wall clock back or forth changes nothing.
+  const realNow = Date.now;
+  let wall = realNow();
+  Date.now = () => wall;
+  try {
+    const deadline = nav.startDeadline(25_000);
+    wall -= 30_000;
+    assert.ok(deadline.left() <= 25_000 && deadline.left() > 20_000, "a wall clock set back gives no extra time");
+    wall += 120_000;
+    assert.equal(deadline.passed(), false, "a wall clock set forward ends nothing early");
+  } finally {
+    Date.now = realNow;
+  }
+  let steady = 1_000;
+  const ticking = nav.startDeadline(25_000, () => steady);
+  steady += 24_999;
+  assert.deepEqual([ticking.left(), ticking.passed()], [1, false]);
+  steady += 1;
+  assert.deepEqual([ticking.left(), ticking.passed()], [0, true]);
+  const background = readFileSync(join(assembled, "background.js"), "utf8");
+  const navigating = background.slice(background.indexOf("async function navigateTab"), background.indexOf("function pageOf"));
+  assert.ok(navigating.length > 500 && !navigating.includes("Date.now"), "navigate's own code keeps time on the deadline only");
 
   // ── events ──
   let ids = 0;
