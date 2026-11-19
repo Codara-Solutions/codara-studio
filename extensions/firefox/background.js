@@ -14,7 +14,9 @@
 // session, local for the pairing and the blocked sites), so a restarted page
 // picks up where it left off.
 
+import { consoleEvent } from "./lib/console.js";
 import { LinkClient } from "./lib/link-client.js";
+import { failedEvent, finishedEvent, requestEvent, requestVisible, responseEvent } from "./lib/network.js";
 import {
   NAVIGATE_BUSY_ERROR,
   noteNavigationChange,
@@ -69,6 +71,7 @@ import {
   badgeTitle,
   childSessionError,
   reachOf,
+  redactCdpEvent,
   reachPatch,
 } from "./lib/policy.js";
 import { newerSettings, presenceSettings } from "./lib/presence.js";
@@ -312,14 +315,16 @@ async function answerCommand(request, socket) {
   const tab = await usableTab(request.tabId);
   if (!state.attached.includes(tab.id)) throw new Error(`${agentTabId(tab.id)} is not attached.`);
   if (isDomainToggle(method)) {
-    // Page events go to Codara from Page.enable on, as the debugger sends
-    // them: on this request's own connection only.
+    // A domain's events go to Codara from its enable on, as the debugger
+    // sends them: on this request's own connection only.
     stillLive(socket);
-    if (method === "Page.enable") {
-      pageEventTabs.add(tab.id);
-      pageOf(tab.id, tab.url);
-    }
-    if (method === "Page.disable") pageEventTabs.delete(tab.id);
+    const [domain, verb] = method.split(".");
+    const on = eventDomains.get(tab.id) ?? new Set();
+    if (verb === "enable") on.add(domain);
+    else on.delete(domain);
+    eventDomains.set(tab.id, on);
+    if (domain === "Page") pageOf(tab.id, tab.url);
+    if (domain === "Runtime") await switchConsole(tab.id, verb === "enable");
     return {};
   }
   if (method === "Page.getFrameTree") {
@@ -600,7 +605,8 @@ function handleMessage(message) {
 // ── Attached tabs ───────────────────────────────────────────────────────────
 
 async function detachTab(tabId) {
-  pageEventTabs.delete(tabId);
+  eventDomains.delete(tabId);
+  void switchConsole(tabId, false);
   if (!state.attached.includes(tabId)) return;
   await save({ attached: without(state.attached, tabId) });
   void refresh();
@@ -620,6 +626,85 @@ async function enforceSharing() {
       if (tab) sendLive({ type: "detached", tabId, reason: "unshared" });
     }
   }
+}
+
+// ── Console and network ─────────────────────────────────────────────────────
+
+/** Whether the page's console goes to Codara: an attached, shared tab, not on a blocked site, after Runtime.enable. */
+function consoleWanted(tab) {
+  return Boolean(state && tab && state.attached.includes(tab.id) && eventsOn(tab.id, "Runtime") && shared(tab) && !firefoxBlockingRule(tab.url, rules));
+}
+
+/**
+ * Tells the tab's console hook whether to send. Turning it on also puts the
+ * hook into a page loaded before it was registered (it guards against a
+ * second copy); Firefox refuses where the extension may not use the site.
+ */
+async function switchConsole(tabId, on) {
+  if (on) await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ["console-hook.js"] }).catch(() => {});
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  await chrome.tabs.sendMessage(tabId, { type: "codara-console", on: on && consoleWanted(tab) }, { frameId: 0 }).catch(() => {});
+}
+
+// The hook runs from document start on every site the user let the
+// extension use, so it sees what a page logs before Codara asks.
+chrome.scripting
+  .getRegisteredContentScripts({ ids: ["codara-console"] })
+  .then((found) => found.length || chrome.scripting.registerContentScripts([{ id: "codara-console", js: ["console-hook.js"], matches: ["<all_urls>"], runAt: "document_start", allFrames: false, persistAcrossSessions: false }]))
+  .catch(() => {});
+
+// Requests seen per id until they end: the request (sent to Codara or not
+// yet), and the redirect response that led to its next hop.
+const requests = new Map();
+
+function networkWanted(details) {
+  return Boolean(state && state.attached.includes(details.tabId) && eventsOn(details.tabId, "Network") && requestVisible(details, (url) => firefoxBlockingRule(url, rules) !== null));
+}
+
+function sendNetwork(details, [method, params]) {
+  // Cookies stay out unless the user turned on the cookie switch for this tab, as in Chrome.
+  sendLive({ type: "cdp_event", tabId: details.tabId, method, params: redactCdpEvent(method, params, state.storageTabs.includes(details.tabId)) });
+}
+
+/** Sends the request's own event first if Firefox reported none with headers (a cached load). */
+function requestSent(details) {
+  const seen = requests.get(details.requestId);
+  if (!seen || seen.sent) return;
+  sendNetwork(details, requestEvent(seen.details, { headers: [], redirect: seen.redirect, loaderId: loaderOf(seen.details) }));
+  Object.assign(seen, { sent: true, redirect: null });
+}
+
+const loaderOf = (details) => (details.type === "main_frame" ? pageOf(details.tabId).nextLoaderId : pageOf(details.tabId).loaderId);
+const ALL_URLS = { urls: ["<all_urls>"] };
+
+chrome.webRequest.onBeforeRequest.addListener((details) => {
+  if (networkWanted(details)) requests.set(details.requestId, { redirect: null, ...requests.get(details.requestId), details, sent: false });
+}, ALL_URLS);
+chrome.webRequest.onSendHeaders.addListener((details) => {
+  const seen = requests.get(details.requestId);
+  if (!seen || seen.sent || !networkWanted(details)) return;
+  sendNetwork(details, requestEvent(details, { headers: details.requestHeaders, redirect: seen.redirect, loaderId: loaderOf(details) }));
+  Object.assign(seen, { sent: true, redirect: null });
+}, ALL_URLS, ["requestHeaders"]);
+chrome.webRequest.onBeforeRedirect.addListener((details) => {
+  const seen = requests.get(details.requestId);
+  if (!seen || !networkWanted(details)) return;
+  requestSent(details);
+  Object.assign(seen, { redirect: details, sent: false });
+}, ALL_URLS, ["responseHeaders"]);
+chrome.webRequest.onResponseStarted.addListener((details) => {
+  if (!requests.has(details.requestId) || !networkWanted(details)) return;
+  requestSent(details);
+  sendNetwork(details, responseEvent(details, loaderOf(details)));
+}, ALL_URLS, ["responseHeaders"]);
+for (const [event, toEvent] of [[chrome.webRequest.onCompleted, finishedEvent], [chrome.webRequest.onErrorOccurred, failedEvent]]) {
+  event.addListener((details) => {
+    if (requests.has(details.requestId) && networkWanted(details)) {
+      requestSent(details);
+      sendNetwork(details, toEvent(details));
+    }
+    requests.delete(details.requestId);
+  }, ALL_URLS);
 }
 
 // ── Tabs ────────────────────────────────────────────────────────────────────
@@ -691,7 +776,9 @@ const navigations = new Map();
 // Each tab's page (lib/navigation.js), the tabs whose page events Codara
 // asked for, and the navigation waiting for each tab's answer.
 const pages = new Map();
-const pageEventTabs = new Set();
+// The protocol domains whose events Codara asked for, per tab.
+const eventDomains = new Map();
+const eventsOn = (tabId, domain) => eventDomains.get(tabId)?.has(domain) === true;
 const navigationWaiters = new Map();
 const navigating = new Set();
 const NAVIGATE_WAIT_MS = 25_000;
@@ -701,7 +788,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
   const { events, page, kind } = pageEvents(change, { id: tabId }, pageOf(tabId), newLoaderId, Date.now());
   pages.set(tabId, page);
   // Only for a tab Codara still may use: never a page on a blocked site, nor one Firefox keeps extensions off.
-  if (events.length && state && pageEventTabs.has(tabId) && state.attached.includes(tabId) && shared(tab) && !firefoxBlockingRule(tab.url, rules)) {
+  if (events.length && state && eventsOn(tabId, "Page") && state.attached.includes(tabId) && shared(tab) && !firefoxBlockingRule(tab.url, rules)) {
     for (const [method, params] of events) sendLive({ type: "cdp_event", tabId, method, params });
   }
   const waiter = navigationWaiters.get(tabId);
@@ -723,7 +810,7 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   navigations.delete(tabId);
   pages.delete(tabId);
-  pageEventTabs.delete(tabId);
+  eventDomains.delete(tabId);
   navigationWaiters.get(tabId)?.done(null);
   navigating.delete(tabId);
   await ready;
@@ -886,6 +973,24 @@ function fromOwnPage(sender) {
 // One action at a time, in the order the user made them: a Stop all is never
 // undone by an Everything that was still reading the tabs.
 let popupQueue = Promise.resolve();
+
+// The console hook in a page's own frame (console-hook.js): it may only ask
+// whether to send, and send what the page logged; the page's own data,
+// checked and capped by lib/console.js, and dropped unless this tab is
+// shared with Codara.
+chrome.runtime.onMessage.addListener((request, sender, respond) => {
+  if (sender.id !== chrome.runtime.id || fromOwnPage(sender) || !sender.tab || sender.frameId !== 0 || typeof sender.url !== "string") return false;
+  if (firefoxBlockingRule(sender.url, rules) || isFirefoxRestrictedUrl(sender.url)) return false;
+  if (request?.type === "codara-console-hello") {
+    void ready.then(() => respond({ on: consoleWanted(sender.tab) }));
+    return true;
+  }
+  if (request?.type === "codara-console-entry" && consoleWanted(sender.tab)) {
+    const event = consoleEvent(request.entry);
+    if (event) sendLive({ type: "cdp_event", tabId: sender.tab.id, method: event[0], params: event[1] });
+  }
+  return false;
+});
 
 chrome.runtime.onMessage.addListener((request, sender, respond) => {
   if (!fromOwnPage(sender) || !request || typeof request.type !== "string") return false;

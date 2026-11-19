@@ -16,8 +16,8 @@ export function run() {
   assert.deepEqual(manifest.background.scripts, ["background.js"], "an event page: Firefox has no extension service workers");
   // Nothing beyond what the link needs at install; sites are asked for when shared.
   assert.equal(manifest.host_permissions, undefined, "no site access at install");
-  // scripting shows no line in Firefox's install prompt (it does nothing without site access).
-  assert.deepEqual([...manifest.permissions].sort(), ["alarms", "scripting", "storage", "tabs"]);
+  // Only "tabs" has a line in Firefox's install question: scripting and webRequest have none (measured on 160).
+  assert.deepEqual([...manifest.permissions].sort(), ["alarms", "scripting", "storage", "tabs", "webRequest"]);
   // userScripts can only be optional, and is asked alone (Firefox refuses it with another permission).
   assert.deepEqual(manifest.optional_permissions, ["userScripts"]);
   assert.deepEqual(manifest.optional_host_permissions, ["<all_urls>"], "one site at a time, or all sites, asked from the popup");

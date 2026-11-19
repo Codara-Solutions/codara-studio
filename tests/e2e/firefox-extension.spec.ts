@@ -63,6 +63,17 @@ function site(request: IncomingMessage, response: ServerResponse): void {
     setTimeout(() => response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end("<!doctype html><title>Page slow-answer</title>"), 1_500);
     return;
   }
+  if (url.pathname === "/app") {
+    // A strict page that logs from its first line and fetches with a cookie.
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; script-src 'nonce-app'; connect-src 'self'" });
+    response.end(`<!doctype html><title>Page app</title><script nonce="app">console.log("app started", { n: 1 }); console.warn("careful");
+      fetch("/api/data").then(() => fetch("/api/data?again=1")); setTimeout(() => null.y, 50);</script>`);
+    return;
+  }
+  if (url.pathname === "/api/data") {
+    response.writeHead(200, { "Content-Type": "application/json", "Set-Cookie": "session=secret-value; HttpOnly; Path=/" }).end('{"ok":true}');
+    return;
+  }
   if (url.pathname === "/to-bank") {
     response.writeHead(302, { Location: `http://localhost:${url.searchParams.get("port")}/bank` }).end();
     return;
@@ -139,6 +150,9 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
       prefs: { "extensions.background.idle.timeout": 15_000, "extensions.webextOptionalPermissionPrompts": true, ...(dark ? { "ui.systemUsesDarkTheme": 1, "layout.css.prefers-color-scheme.content-override": 0 } : {}) },
     });
     await firefox.install(extension);
+    // Firefox's install question for these permissions: only the tabs line (scripting and webRequest add none).
+    const manifest = JSON.parse(readFileSync(join(extension, "manifest.json"), "utf8"));
+    expect(await firefox.installQuestion(manifest.permissions)).toEqual(["Access browser tabs"]);
     const accountContext = await firefox.open(`${origin}/account`);
     await firefox.open(`${origin}/elsewhere`);
     await firefox.open(`http://localhost:${sitePort}/bank`);
@@ -282,6 +296,19 @@ test("the Firefox extension pairs, shares a tab with agents, and reads, acts on 
     await firefox.navigate(accountContext, `${origin}/account`);
     await expect.poll(async () => (await linkState(codara)).browsers[0].tabs.find((tab: { id: string }) => tab.id === tabId)).toMatchObject({ blocked: false });
     expect(await request("preview.navigate", { tabId, url: `${origin}/account#top` })).toMatchObject({ url: `${origin}/account#top` });
+
+    // The console from the page's first line, and the network log, on a strict page.
+    await request("preview.navigate", { tabId, url: `${origin}/app` });
+    await expect.poll(async () => (await request("preview.console", { tabId })).entries.map((entry: { level: string; message: string }) => `${entry.level} ${entry.message}`), { timeout: 10_000 })
+      .toEqual(expect.arrayContaining(["info app started {\"n\":1}", "warning careful", expect.stringMatching(/^error TypeError: can't access property "y"/)]));
+    await expect.poll(async () => (await request("preview.network", { tabId, filter: "/api/data" })).requests.map((row: { status?: number; url: string }) => `${row.status} ${row.url}`), { timeout: 10_000 })
+      .toEqual([`200 ${origin}/api/data`, `200 ${origin}/api/data?again=1`]);
+    // Cookies never leave Firefox while the tab's cookie switch is off: not even their header names.
+    const { requests: calls } = await request("preview.network", { tabId, filter: "/api/data" });
+    const setting = await request("preview.network", { tabId, id: calls[0].id });
+    const sending = await request("preview.network", { tabId, id: calls[1].id });
+    expect(setting.request.responseHeaders).toMatchObject({ "Content-Type": "application/json" });
+    expect(JSON.stringify([setting.request.responseHeaders, sending.request.requestHeaders])).not.toMatch(/cookie|secret-value/i);
 
     // Idle: Firefox unloads an idle event page (after 15 s in this profile)
     // and traffic on its socket does not count. The extension's keep-alive
