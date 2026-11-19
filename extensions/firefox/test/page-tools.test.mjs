@@ -5,8 +5,10 @@ import vm from "node:vm";
 
 // The scripts run here in a fresh context, as userScripts.execute runs them
 // in a page: the value of the script's last statement is the result.
+const PAGE = "https://a.example/account?x=1";
+
 function inPage(code, globals = {}) {
-  return vm.runInNewContext(code, { ...globals });
+  return vm.runInNewContext(code, { location: { href: PAGE }, ...globals });
 }
 
 /** What Firefox reports for a script: { result } or an empty error when it does not compile or throws. */
@@ -21,8 +23,8 @@ async function execute(code, globals) {
 
 export async function run(assembled) {
   const tools = await import(pathToFileURL(join(assembled, "lib", "page-tools.js")).href);
-  const { expressionScript, expressionAnswer, compileCheck, statementsScript, statementsAnswer, frameFailed, SYNTAX_ERROR } = tools;
-  const evaluate = async (expression, options = {}, globals = {}) => expressionAnswer((await execute(expressionScript(expression, options), globals)).result);
+  const { expressionScript, expressionAnswer, compileCheck, statementsScript, statementsAnswer, frameFailed, SYNTAX_ERROR, MOVED_ERROR } = tools;
+  const evaluate = async (expression, options = {}, globals = {}) => expressionAnswer((await execute(expressionScript(expression, { url: PAGE, ...options }), globals)).result);
 
   // Values come back as Runtime.evaluate gives them with returnByValue.
   assert.deepEqual(await evaluate("document.title", {}, { document: { title: "Strict" } }), { result: { type: "string", value: "Strict" } });
@@ -52,6 +54,16 @@ export async function run(assembled) {
   assert.throws(() => expressionAnswer(undefined), /no answer/);
   assert.throws(() => expressionAnswer({ value: "forged" }), /no answer/);
 
+  // The code runs only in the document that was checked: not on another
+  // page the tab went to meanwhile; a #hash change is the same document.
+  const ran = { count: 0 };
+  await assert.rejects(evaluate("count += 1", {}, { ran, count: 0, location: { href: "https://blocked.example/" } }), (error) => error.message === MOVED_ERROR);
+  await assert.rejects(evaluate("count += 1", { awaitPromise: true }, { location: { href: "https://a.example/account" } }), (error) => error.message === MOVED_ERROR);
+  assert.deepEqual(await evaluate("1", { url: `${PAGE}#top` }, { location: { href: `${PAGE}#other` } }), { result: { type: "number", value: 1 } });
+  const elsewhere = { effects: 0, location: { href: "https://blocked.example/" } };
+  await assert.rejects(async () => statementsAnswer(await execute(statementsScript("effects += 1; effects", "m", { url: PAGE }), elsewhere), "m"), (error) => error.message === MOVED_ERROR);
+  assert.equal(elsewhere.effects, 0, "nothing ran on the other page");
+
   // Statements: only a compile error makes the wrapper fail, and the check compiles without running.
   const effects = { ran: 0 };
   assert.equal(frameFailed(await execute(expressionScript("var x = 1; x"), effects)), true);
@@ -64,11 +76,19 @@ export async function run(assembled) {
   assert.equal(frameFailed(await execute(compileCheck("1 +", { asScript: true }))), true);
 
   const marker = "__codaraThrownTest";
-  assert.deepEqual(statementsAnswer(await execute(statementsScript("var a = 41; a + 1", marker)), marker), { result: { type: "number", value: 42 } });
-  const statementThrow = statementsAnswer(await execute(statementsScript("var a = 1;\nnull.x", marker)), marker);
+  assert.deepEqual(statementsAnswer(await execute(statementsScript("var a = 41; a + 1", marker, { url: PAGE })), marker), { result: { type: "number", value: 42 } });
+  const statementThrow = statementsAnswer(await execute(statementsScript("var a = 1;\nnull.x", marker, { url: PAGE })), marker);
   assert.match(statementThrow.exceptionDetails.exception.description, /^TypeError: /);
   assert.match(statementsAnswer({ error: null }, marker).exceptionDetails.exception.value, /did not report/);
   assert.equal(SYNTAX_ERROR.exceptionDetails.exception.className, "SyntaxError");
+  // A leading "use strict" still holds: no page global from a typo.
+  const sloppy = {};
+  const strict = statementsAnswer(await execute(statementsScript('"use strict";\nundeclaredName = 1;', marker, { url: PAGE }), sloppy), marker);
+  assert.match(strict.exceptionDetails.exception.description, /^ReferenceError/);
+  assert.equal("undeclaredName" in sloppy, false);
+  // The compile check compiles the statements in the shape they run in, strict included.
+  assert.equal(frameFailed(await execute(compileCheck('"use strict"; var let = 1;', { asScript: true }))), true);
+  assert.equal(frameFailed(await execute(compileCheck("var let = 1; let", { asScript: true }))), false);
   assert.equal(frameFailed({ frameId: 0, result: null }), false);
   assert.equal(frameFailed({ frameId: 0, error: null }), true);
   assert.equal(frameFailed(undefined), true);
@@ -111,9 +131,9 @@ function permissions({ PAGE_METHODS, accessNeeds, sitePattern, accessRequest, ac
   const needs = (rows) => rows.map((row) => row.need);
   // One tab: its site first, then scripts, then screenshots (all sites).
   assert.deepEqual(needs(accessRows({ url: "https://a.example/", reach: "tabs", has: none, asked: noAsks })), ["site", "scripts", "allSites"]);
-  // This window or Everything: all sites instead of one, once.
-  assert.deepEqual(needs(accessRows({ url: "https://a.example/", reach: "window", has: none, asked: noAsks })), ["allSites", "scripts"]);
-  assert.deepEqual(needs(accessRows({ url: "https://a.example/", reach: "all", has: { ...none, site: true }, asked: noAsks })), ["allSites", "scripts"]);
+  // This window or Everything: all sites first, the site still on offer (enough to read this tab).
+  assert.deepEqual(needs(accessRows({ url: "https://a.example/", reach: "window", has: none, asked: noAsks })), ["allSites", "site", "scripts"]);
+  assert.deepEqual(needs(accessRows({ url: "https://a.example/", reach: "all", has: { ...none, site: true }, asked: { ...noAsks, allSites: true } })), ["allSites", "scripts"]);
   // All sites covers the site.
   assert.deepEqual(needs(accessRows({ url: "https://a.example/", reach: "tabs", has: { site: true, scripts: false, allSites: true }, asked: noAsks })), ["scripts"]);
   assert.deepEqual(accessRows({ url: "https://a.example/", reach: "all", has: { site: true, scripts: true, allSites: true }, asked: noAsks }), []);
@@ -151,7 +171,8 @@ function screenshots({ captureOptions, screenshotAnswer, measureLayout, layoutMe
     scrollY: 400,
     devicePixelRatio: 2,
   };
-  const measured = vm.runInNewContext(`(${measureLayout.toString()})()`, page);
+  const measured = vm.runInNewContext(`(${measureLayout.toString()})(${JSON.stringify(PAGE)})`, { ...page, location: { href: `${PAGE}#here` } });
+  assert.throws(() => layoutMetrics(vm.runInNewContext(`(${measureLayout.toString()})(${JSON.stringify(PAGE)})`, { ...page, location: { href: "https://blocked.example/" } })), /went to another page/);
   const metrics = layoutMetrics(measured);
   assert.deepEqual(metrics.cssContentSize, { x: 0, y: 0, width: 1350, height: 3029 });
   assert.deepEqual(metrics.cssLayoutViewport, { pageX: 0, pageY: 400, clientWidth: 1350, clientHeight: 680 });

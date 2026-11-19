@@ -197,8 +197,9 @@ test("the Firefox extension pairs, shares a tab with agents and says plainly wha
     await request("preview.type", { tabId, selector: "#note", text: "from the agent" });
     await request("preview.click", { tabId, selector: "#agree" });
     expect(await request("preview.evaluate", { tabId, code: "[document.querySelector('#note').value, document.querySelector('#agree').checked]" })).toMatchObject({ value: ["from the agent", true] });
-    // The page's own policy still holds for the page: Trusted Types refuse a raw HTML write.
-    expect(await request("preview.evaluate", { tabId, code: "(() => { try { document.body.innerHTML = '<b>x</b>'; return 'written'; } catch (error) { return error.name; } })()" })).toMatchObject({ value: "TypeError" });
+    // A statement body runs too (the page's policy forbids new Function), and the
+    // page's own policy still holds: Trusted Types refuse a raw HTML write.
+    expect(await request("preview.evaluate", { tabId, code: "try { document.body.innerHTML = '<b>x</b>'; return 'written'; } catch (error) { return error.name; }" })).toMatchObject({ value: "TypeError" });
     await expect(request("preview.evaluate", { tabId, code: "null.x" })).rejects.toThrow(/TypeError/);
 
     // Screenshots need all sites: no, then yes; then the tab, in the background, whole.

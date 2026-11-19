@@ -11,6 +11,8 @@ const $ = (id) => document.getElementById(id);
 let tab = null;
 let view = { shared: false, rows: [] };
 let shown = "";
+// Asked from this popup, before the background has it on record.
+const askedHere = new Set();
 
 async function load() {
   try {
@@ -23,6 +25,7 @@ async function load() {
 }
 
 function ask(row) {
+  askedHere.add(row.key);
   // The background remembers the question, so a no is not asked again by itself.
   void chrome.runtime.sendMessage({ type: "accessAsked", key: row.key }).catch(() => {});
   return chrome.permissions
@@ -66,7 +69,7 @@ async function start() {
   if (!tab) [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   $("share-tab")?.addEventListener("change", (event) => {
     if (!event.target.checked) return;
-    const site = view.rows.find((row) => row.need === "site" && !row.asked);
+    const site = view.rows.find((row) => row.need === "site" && !row.asked && !askedHere.has(row.key));
     if (site) void ask(site);
   });
   await load();

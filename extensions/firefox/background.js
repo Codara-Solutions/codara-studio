@@ -27,6 +27,7 @@ import {
   unsupportedMethodError,
 } from "./lib/firefox.js";
 import {
+  MOVED_ERROR,
   PAGE_METHODS,
   SYNTAX_ERROR,
   accessError,
@@ -36,6 +37,7 @@ import {
   accessRows,
   captureOptions,
   compileCheck,
+  documentUrl,
   expressionAnswer,
   expressionScript,
   frameFailed,
@@ -299,14 +301,23 @@ async function answerCommand(request, socket) {
       return evaluateInPage(tab.id, params, socket);
     case "Page.getLayoutMetrics": {
       const now = await stillUsable(tab.id, socket);
-      const [frame] = await withSiteError(now, () => chrome.scripting.executeScript({ target: { tabId: now.id }, func: measureLayout }));
-      return layoutMetrics(frame?.result);
+      // Measured only in the document checked here.
+      const [frame] = await withSiteError(now, () => chrome.scripting.executeScript({ target: { tabId: now.id }, func: measureLayout, args: [documentUrl(now.url)] }));
+      const metrics = layoutMetrics(frame?.result);
+      await stillUsable(tab.id, socket);
+      return metrics;
     }
     case "Page.captureScreenshot": {
       const now = await stillUsable(tab.id, socket);
       // Firefox removes captureTab with access to all sites.
       if (typeof chrome.tabs.captureTab !== "function") throw new Error(accessError("allSites", now.url, wasAsked("allSites", now.url)));
-      return screenshotAnswer(await chrome.tabs.captureTab(now.id, captureOptions(params)));
+      // captureTab takes a tab, not a document: an image taken while the tab
+      // went elsewhere (a blocked site, say) is dropped.
+      const loads = navigations.get(now.id) ?? 0;
+      const image = await chrome.tabs.captureTab(now.id, captureOptions(params));
+      const after = await stillUsable(tab.id, socket);
+      if (documentUrl(after.url) !== documentUrl(now.url) || (navigations.get(now.id) ?? 0) !== loads) throw new Error(MOVED_ERROR);
+      return screenshotAnswer(image);
     }
   }
   throw new Error(unsupportedMethodError(method));
@@ -344,23 +355,29 @@ async function evaluateInPage(tabId, params, socket) {
   }
   const expression = String(params.expression ?? "");
   const awaitPromise = params.awaitPromise === true;
-  const run = async (code) => {
+  // Each script runs only in the document checked right before (see
+  // expressionScript), and its answer leaves only while the tab is still
+  // shared and allowed: the agent's own code may navigate it, so not
+  // necessarily on the same page.
+  const run = async (script) => {
     const tab = await stillUsable(tabId, socket);
     // Firefox removes the API when the user takes the permission back.
     if (!chrome.userScripts) throw new Error(accessError("scripts", tab.url, wasAsked("scripts", tab.url)));
+    const code = script(tab.url);
     const [frame] = await withSiteError(tab, () => chrome.userScripts.execute({ js: [{ code }], target: { tabId: tab.id }, world: "MAIN", injectImmediately: true }));
+    await stillUsable(tabId, socket);
     if (!frame) throw new Error(`${agentTabId(tabId)} has no page to run the script in.`);
     return frame;
   };
-  const first = await run(expressionScript(expression, { awaitPromise }));
+  const first = await run((url) => expressionScript(expression, { awaitPromise, url }));
   if (!frameFailed(first)) return expressionAnswer(first.result);
-  if (!frameFailed(await run(compileCheck(expression, { awaitPromise })))) {
+  if (!frameFailed(await run(() => compileCheck(expression, { awaitPromise })))) {
     throw new Error("The page did not finish the script; it may have navigated away. Nothing was run twice.");
   }
-  if (frameFailed(await run(compileCheck(expression, { asScript: true })))) return SYNTAX_ERROR;
+  if (frameFailed(await run(() => compileCheck(expression, { asScript: true })))) return SYNTAX_ERROR;
   const marker = `__codaraThrown${crypto.randomUUID().replaceAll("-", "")}`;
   try {
-    return statementsAnswer(await run(statementsScript(expression, marker)), marker);
+    return statementsAnswer(await run((url) => statementsScript(expression, marker, { url })), marker);
   } catch (error) {
     // The last statement's value cannot leave the page (a DOM node, a function).
     if (/non-structured-clonable/i.test(String(error?.message))) return { result: { type: "object", value: {} } };
@@ -545,7 +562,11 @@ chrome.tabs.onCreated.addListener(scheduleRefresh);
 chrome.tabs.onActivated.addListener(scheduleRefresh);
 chrome.tabs.onAttached.addListener(scheduleRefresh);
 chrome.tabs.onDetached.addListener(scheduleRefresh);
+// Page loads per tab, so a capture can tell the tab did not leave its page meanwhile.
+const navigations = new Map();
+
 chrome.tabs.onUpdated.addListener(async (tabId, change) => {
+  if (change.status === "loading") navigations.set(tabId, (navigations.get(tabId) ?? 0) + 1);
   if (change.url !== undefined) {
     await ready;
     if (state.attached.includes(tabId) && (firefoxBlockingRule(change.url, rules) || isFirefoxRestrictedUrl(change.url))) {
@@ -560,6 +581,7 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
   if (state.shareWindows.includes(windowId)) await save({ shareWindows: without(state.shareWindows, windowId) });
 });
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  navigations.delete(tabId);
   await ready;
   const usage = { ...state.usage };
   delete usage[tabId];
