@@ -485,7 +485,7 @@ async function main() {
     writeJson(CLAUDE_JSON, { mcpServers: {} });
   });
 
-  await check("Pi skill folders follow the Capability Center switches", () => {
+  await check("Pi skill folders follow the Capability Center switches", async () => {
     fs.mkdirSync(path.join(FAKE_CWD, ".pi", "skills"), { recursive: true });
     fs.writeFileSync(path.join(FAKE_CWD, ".pi", "skills", "quick.md"), "---\nname: quick\ndescription: Quick skill\n---\nDo it.\n");
     const systemSkill = path.join(FAKE_HOME, ".codex", "skills", ".system", "bundled");
@@ -508,10 +508,9 @@ async function main() {
       false,
       "switching a Codara skill off keeps it from the next launch",
     );
-    return sync.deleteAgentAsset({ id: codaraItem.id }).then((removed) => {
-      assert.equal(removed.ok, true, removed.error);
-      assert.equal(fs.existsSync(codaraSkill), false);
-    });
+    const removed = await sync.deleteAgentAsset({ id: codaraItem.id });
+    assert.equal(removed.ok, true, removed.error);
+    assert.equal(fs.existsSync(codaraSkill), false);
     assert.ok(paths.includes(path.join(FAKE_HOME, ".claude", "skills", "b")), "a Claude skill reaches Cora");
     // A repository skill and a user skill with the same name: the user's copy
     // is the one Pi loads, so a typed /quick runs it; the repository's is
@@ -522,6 +521,16 @@ async function main() {
     const clash = sync.listPiSkillsWithShadows({ cwd: FAKE_CWD, settings: settings() });
     assert.deepEqual(clash.skills.filter((skill) => skill.name === "quick").map((skill) => skill.location), [userQuick]);
     assert.deepEqual(clash.shadowed, [{ name: "quick", skillFile: path.join(FAKE_CWD, ".pi", "skills", "quick.md") }]);
+    // A second repository copy (.claude/skills) never replaces the first one
+    // Pi would load (.pi/skills): /skill:repo:quick names the .pi copy.
+    const repoClaudeQuick = path.join(FAKE_CWD, ".claude", "skills", "quick");
+    fs.mkdirSync(repoClaudeQuick, { recursive: true });
+    fs.writeFileSync(path.join(repoClaudeQuick, "SKILL.md"), "---\nname: quick\ndescription: Repo Claude quick\n---\n");
+    assert.deepEqual(
+      sync.listPiSkillsWithShadows({ cwd: FAKE_CWD, settings: settings() }).shadowed,
+      [{ name: "quick", skillFile: path.join(FAKE_CWD, ".pi", "skills", "quick.md") }],
+    );
+    fs.rmSync(repoClaudeQuick, { recursive: true, force: true });
     fs.rmSync(userQuick, { recursive: true, force: true });
     assert.deepEqual(sync.listPiSkillsWithShadows({ cwd: FAKE_CWD, settings: settings() }).shadowed, [], "no clash, nothing shadowed");
     assert.equal(paths.some((entry) => entry.includes("gamma")), false, "a switched-off skill stays off");

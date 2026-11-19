@@ -474,7 +474,7 @@ export function buildManagerTurnPrompt(
 ): string {
   // Pi's manager extension strips this line and runs the skills it names
   // (src/shared/user-commands.ts); it goes first, before any user text.
-  // Only what the user typed (typedByUser): an agent's chat.send, a delivery,
+  // Only what the user typed (typedByUser), once: an agent's chat.send, a delivery,
   // an answer whose option text the model wrote, or a synthetic note never
   // runs a skill.
   const commands = (run.chatBackend ?? "pi") === "pi"
@@ -501,7 +501,10 @@ export function userTypedCommandSource(message: HumanRunMessage): boolean {
     message.kind === "note" &&
     !message.boardNote &&
     !message.resumeNote &&
-    !message.compaction
+    !message.compaction &&
+    // A replay of a turn the provider already had (a parked or stopped turn
+    // retried) never runs its command a second time.
+    message.redelivered !== true
   );
 }
 

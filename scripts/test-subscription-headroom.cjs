@@ -548,6 +548,9 @@ async function main() {
     { ...message, id: "u-answer", kind: "answer", intent: "answer", message: "/ship", typedByUser: true },
     { ...message, id: "u-board", message: "/ship", boardNote: true, typedByUser: true },
     { ...message, id: "u-resume", message: "/ship", resumeNote: true, typedByUser: true },
+    // A typed command the provider already had, replayed after a park or a
+    // Stop: it ran (or started) once and never runs again.
+    { ...message, id: "u-replayed", message: "/ship", typedByUser: true, redelivered: true },
   ];
   check(
     "only user-typed notes reach Pi's command header",
@@ -559,8 +562,10 @@ async function main() {
   check(
     "typedByUser is set only by the composer and the phone",
     !/typedByUser: true/i.test(fsSource("src/main/ipc.ts")) &&
-      (fsSource("src/renderer/src/components/chat/ChatComposer.tsx").match(/typedByUser: true/g) ?? []).length === 2 &&
-      /initialNoteTypedByUser: true,/.test(fsSource("src/renderer/src/components/OrchestrationSidebar.tsx")) &&
+      // The composer stamps it only through its provenance rule
+      // (test-composer-command-provenance.cjs pins how).
+      (fsSource("src/renderer/src/components/chat/ChatComposer.tsx").match(/typedByUser: true as const/g) ?? []).length === 2 &&
+      /chatConfig\?\.typedByUser === true \? \{ initialNoteTypedByUser: true as const \}/.test(fsSource("src/renderer/src/components/OrchestrationSidebar.tsx")) &&
       !/TypedByUser/i.test(fsSource("src/renderer/src/routing/useSelectionRoutingApi.ts")) &&
       !/TypedByUser/i.test(fsSource("src/renderer/src/App.tsx")) &&
       /typedByUser: true,/.test(fsSource("src/main/remote-access/production.ts")) &&

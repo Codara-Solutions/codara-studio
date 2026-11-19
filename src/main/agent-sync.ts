@@ -456,7 +456,16 @@ export function listPiSkillsWithShadows(input: {
       const key = sessionKey("skill", name);
       if (seenNames.has(key)) {
         const skillFile = location.endsWith(".md") ? location : findSkillFile(location);
-        if (root.repo && skillFile && out.some((skill) => skill.name === name)) shadowed.push({ name, skillFile });
+        // The repository's own copy is the first one in root order (.pi before
+        // .agents, .claude, .codex), as Pi would load it with no user copy.
+        if (
+          root.repo &&
+          skillFile &&
+          out.some((skill) => skill.name === name) &&
+          !shadowed.some((skill) => skill.name === name)
+        ) {
+          shadowed.push({ name, skillFile });
+        }
         continue;
       }
       seenNames.add(key);

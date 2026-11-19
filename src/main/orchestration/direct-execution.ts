@@ -15,7 +15,7 @@ const STUDIO_SURFACE_REQUEST =
 // only the manager's Pi session expands skills the user invokes. The same
 // first-line rule as the manager's header (user-commands.ts), so a message
 // that starts with a path such as `/home/...` stays on the direct lane.
-function runsSkill(text: string, skillNames: ReadonlySet<string> | undefined): boolean {
+export function runsSkill(text: string, skillNames: ReadonlySet<string> | undefined): boolean {
   const command = userCommandOf(text);
   return Boolean(command && skillNames?.has(command.name));
 }
