@@ -16,6 +16,10 @@ export function run() {
   assert.deepEqual(manifest.background.scripts, ["background.js"], "an event page: Firefox has no extension service workers");
   // Nothing beyond what the link needs at install; sites are asked for when shared.
   assert.equal(manifest.host_permissions, undefined, "no site access at install");
-  assert.deepEqual([...manifest.permissions].sort(), ["alarms", "storage", "tabs"]);
+  // scripting shows no line in Firefox's install prompt (it does nothing without site access).
+  assert.deepEqual([...manifest.permissions].sort(), ["alarms", "scripting", "storage", "tabs"]);
+  // userScripts can only be optional, and is asked alone (Firefox refuses it with another permission).
+  assert.deepEqual(manifest.optional_permissions, ["userScripts"]);
+  assert.deepEqual(manifest.optional_host_permissions, ["<all_urls>"], "one site at a time, or all sites, asked from the popup");
   return "manifest: MV3 event page, Firefox 153, loopback WebSocket allowed, no site access at install";
 }

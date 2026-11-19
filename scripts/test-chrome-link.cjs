@@ -40,7 +40,7 @@ async function load() {
         `export { chromeLinkTool } from "./link-tool";`,
         `export { registerBrowserBackend, resolveBrowserTarget } from "../targets";`,
         `export { consoleRing } from "../recorders/console";`,
-        `export { click, navigate, type } from "./tab-ops";`,
+        `export { click, isExpressionSnippet, navigate, type } from "./tab-ops";`,
         `export { chromeTargetTools } from "../../preview-tools/chrome";`,
         `export { pageActivity } from "../page-activity";`,
         `export { currentEmulation, resetEmulation } from "../emulation";`,
@@ -339,6 +339,15 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   assert.ok(lib.pageActivity(target.session).lastActionAt > 0, "the action is stamped on the tab");
   const evaluated = answers.slice(beforeAction).filter((m) => m.method === "Runtime.evaluate");
   assert.equal(evaluated[0].params.expression, lib.MARK_BASELINE_EXPRESSION, "the baseline is taken before the action runs");
+  // Expression or statements is decided in Codara, never with the page's
+  // new Function, which a strict page's policy forbids.
+  assert.ok(evaluated.every((m) => !m.params.expression.includes("new Function")), "no parse check in the page");
+  assert.equal(evaluated.at(-1).params.expression.includes("(6 * 7\n)"), true, "6 * 7 runs as an expression");
+  assert.equal(lib.isExpressionSnippet("document.title"), true);
+  assert.equal(lib.isExpressionSnippet("const count = 41; return count + 1;"), false);
+  assert.equal(lib.isExpressionSnippet("1 + // comment"), false);
+  assert.equal(lib.isExpressionSnippet("globalThis.__ranBySnippetCheck = true"), true);
+  assert.equal(globalThis.__ranBySnippetCheck, undefined, "the check compiles and never runs");
 
   // resize is the tab's emulated viewport: emulate reset clears it.
   const beforeResize = answers.length;

@@ -18,7 +18,7 @@ const POPUP = `moz-extension://${FIREFOX_EXTENSION_UUID}/popup.html`;
 // BiDi cannot capture the extension's own pages, so the screenshots render
 // the very same popup files as a web page, answered from the state the real
 // extension gave a moment before.
-const preview: { dir: string; state: unknown; tab: unknown } = { dir: "", state: null, tab: null };
+const preview: { dir: string; state: unknown; tab: unknown; access: unknown } = { dir: "", state: null, tab: null, access: null };
 const PREVIEW_TYPES: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png" };
 
 function popupPreview(path: string, response: ServerResponse): void {
@@ -29,17 +29,28 @@ function popupPreview(path: string, response: ServerResponse): void {
   }
   let body: Buffer | string = readFileSync(join(preview.dir, file));
   if (file === "popup.html") {
-    const stub = `<script>window.chrome = { runtime: { sendMessage: async () => (${JSON.stringify(preview.state)}), openOptionsPage() {} }, tabs: { get: async () => (${JSON.stringify(preview.tab)}), query: async () => [${JSON.stringify(preview.tab)}] } };</script>`;
+    const answers = `{ access: ${JSON.stringify(preview.access ?? { rows: [] })}, state: ${JSON.stringify(preview.state)} }`;
+    const stub = `<script>window.chrome = { runtime: { sendMessage: async (message) => (${answers})[message.type === "access" ? "access" : "state"], openOptionsPage() {} }, tabs: { get: async () => (${JSON.stringify(preview.tab)}), query: async () => [${JSON.stringify(preview.tab)}], onUpdated: { addListener() {} } }, permissions: { request: async () => false } };</script>`;
     body = body.toString("utf8").replace("<script", `${stub}<script`);
   }
   response.writeHead(200, { "Content-Type": PREVIEW_TYPES[extname(file)] ?? "application/octet-stream" });
   response.end(body);
 }
 
+const STRICT_CSP = "default-src 'none'; style-src 'unsafe-inline'; require-trusted-types-for 'script'";
+
 function site(request: IncomingMessage, response: ServerResponse): void {
   const url = new URL(request.url ?? "/", "http://fixture");
   if (url.pathname.startsWith("/popup-preview/")) {
     popupPreview(url.pathname, response);
+    return;
+  }
+  if (url.pathname === "/account") {
+    // A strict page: no script of its own, Trusted Types, and a form agents fill.
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": STRICT_CSP });
+    response.end(`<!doctype html><title>Page account</title><h1>Page /account</h1>
+      <label>Note <input id="note"></label> <label><input id="agree" type="checkbox"> Agree</label>
+      <div style="height: 2400px"></div><p>Bottom of the page</p>`);
     return;
   }
   response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -108,7 +119,8 @@ test("the Firefox extension pairs, shares a tab with agents and says plainly wha
     // CODARA_E2E_COLOR_SCHEME=dark draws the extension's pages dark, for the screenshots.
     const dark = process.env.CODARA_E2E_COLOR_SCHEME === "dark";
     firefox = await launchFirefox(binary!, {
-      prefs: { "extensions.background.idle.timeout": 15_000, ...(dark ? { "ui.systemUsesDarkTheme": 1, "layout.css.prefers-color-scheme.content-override": 0 } : {}) },
+      // Firefox's real permission questions, answered below as the user would.
+      prefs: { "extensions.background.idle.timeout": 15_000, "extensions.webextOptionalPermissionPrompts": true, ...(dark ? { "ui.systemUsesDarkTheme": 1, "layout.css.prefers-color-scheme.content-override": 0 } : {}) },
     });
     await firefox.install(extension);
     await firefox.open(`${origin}/account`);
@@ -140,28 +152,89 @@ test("the Firefox extension pairs, shares a tab with agents and says plainly wha
     const paired = (await linkState(codara)).browsers[0];
     expect(paired).toMatchObject({ connected: true, browser: { name: "Firefox" }, extensionId: FIREFOX_EXTENSION_UUID, extensionUpdate: null });
 
-    // Nothing is shared yet; then the user shares the tab from the popup.
+    // Nothing is shared yet; then the user shares the tab from the popup,
+    // which asks Firefox for that site at the same click. The user says no:
+    // the tab is shared, agents get a plain error, and turning sharing off
+    // and on again does not ask again.
     await expect(request("preview.snapshot", { tabId: `chrome:${accountTab}` })).rejects.toThrow(/is not shared with agents/);
-    await click("#share-tab");
+    const tabId = `chrome:${accountTab}`;
+    await firefox.click(popup, "#share-tab");
+    await firefox.answerPermissionQuestion(false);
     await expect.poll(async () => {
       const { tabs } = await request("preview.list");
       return tabs.filter((tab: { kind?: string }) => tab.kind === "chrome").map((tab: { id: string; title: string }) => [tab.id, tab.title]);
-    }, { timeout: 15_000 }).toEqual([[`chrome:${accountTab}`, "Page account"]]);
+    }, { timeout: 15_000 }).toEqual([[tabId, "Page account"]]);
+    await expect(request("preview.snapshot", { tabId })).rejects.toThrow(/The user did not allow Codara to use 127\.0\.0\.1 in Firefox/);
+    const shareSwitch = () => firefox!.evaluate<boolean>(popup, "document.querySelector('#share-tab').checked");
+    await firefox.click(popup, "#share-tab");
+    await expect.poll(shareSwitch).toBe(false);
+    await firefox.click(popup, "#share-tab");
+    await expect.poll(shareSwitch).toBe(true);
+    await codara.waitForTimeout(1_000);
+    expect(await firefox.permissionQuestionShown()).toBe(false);
+
+    // Each permission from its own button in the popup, one sentence each.
+    const allow = async (need: string, yes: boolean) => {
+      const button = `#access-rows [data-need="${need}"] button`;
+      await expect.poll(() => firefox!.evaluate<boolean>(popup, `Boolean(document.querySelector(${JSON.stringify(button)})) && !document.querySelector("#access").hidden`), { timeout: 10_000 }).toBe(true);
+      await firefox!.click(popup, button);
+      await firefox!.answerPermissionQuestion(yes);
+    };
+    expect(await text('#access-rows [data-need="site"] p')).toBe("You did not allow 127.0.0.1, so agents get an error on this tab.");
+    // The popup with its questions, for the screenshots below.
+    const asking = {
+      state: await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "state", tabId: ${accountTab} })`),
+      access: await firefox.evaluate(popup, `browser.tabs.get(${accountTab}).then((tab) => browser.runtime.sendMessage({ type: "access", tabId: tab.id, windowId: tab.windowId }))`),
+    };
+    await allow("site", true);
+    await expect(request("preview.snapshot", { tabId })).rejects.toThrow(/needs the user's OK to run scripts in shared tabs/);
+    await allow("scripts", false);
+    await expect(request("preview.snapshot", { tabId })).rejects.toThrow(/The user did not allow Codara to run scripts in Firefox tabs/);
+    await allow("scripts", true);
+
+    // Read the strict page, and type and click through the default tools.
+    expect(JSON.stringify(await request("preview.snapshot", { tabId }))).toContain("Page /account");
+    await request("preview.type", { tabId, selector: "#note", text: "from the agent" });
+    await request("preview.click", { tabId, selector: "#agree" });
+    expect(await request("preview.evaluate", { tabId, code: "[document.querySelector('#note').value, document.querySelector('#agree').checked]" })).toMatchObject({ value: ["from the agent", true] });
+    // A statement body runs too (the page's policy forbids new Function), and the
+    // page's own policy still holds: Trusted Types refuse a raw HTML write.
+    expect(await request("preview.evaluate", { tabId, code: "try { document.body.innerHTML = '<b>x</b>'; return 'written'; } catch (error) { return error.name; }" })).toMatchObject({ value: "TypeError" });
+    await expect(request("preview.evaluate", { tabId, code: "null.x" })).rejects.toThrow(/TypeError/);
+
+    // Screenshots need all sites: no, then yes; then the tab, in the background, whole.
+    await expect(request("preview.screenshot", { tabId })).rejects.toThrow(/Screenshots in Firefox need access to all sites/);
+    await allow("allSites", false);
+    await expect(request("preview.screenshot", { tabId })).rejects.toThrow(/The user did not allow screenshots in Firefox/);
+    await allow("allSites", true);
+    await expect.poll(() => firefox!.evaluate<boolean>(popup, `document.querySelector("#access").hidden`)).toBe(true);
+    expect(await firefox.evaluate<boolean>(popup, `browser.tabs.get(${accountTab}).then((tab) => tab.active)`)).toBe(false);
+    const viewport = await request("preview.screenshot", { tabId });
+    expect(viewport.dataUrl).toMatch(/^data:image\/jpeg;base64,/);
+    expect(viewport.imageSize.width).toBeGreaterThan(100);
+    const page = await request("preview.screenshot", { tabId, fullPage: true });
+    expect(page.region.height).toBeGreaterThan(2400);
+    await writeFile(testInfo.outputPath("firefox-background-tab.jpg"), Buffer.from(page.dataUrl.split(",")[1], "base64"));
 
     // The popup as the user sees it, kept with the run's results.
     preview.dir = extension;
     preview.tab = await firefox.evaluate(popup, `browser.tabs.get(${accountTab})`);
-    preview.state = await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "state", tabId: ${accountTab} })`);
-    const shown = await firefox.open(`${origin}/popup-preview/popup.html`);
-    await firefox.call("browsingContext.setViewport", { context: shown, viewport: { width: 340, height: 600 } });
-    await expect.poll(() => firefox!.evaluate<string>(shown, "document.querySelector('#status-text')?.textContent ?? ''")).toMatch(/^Studio \d/);
-    const height = await firefox.evaluate<number>(shown, "Math.ceil(document.body.getBoundingClientRect().height)");
-    const shot = await firefox.call<{ data: string }>("browsingContext.captureScreenshot", { context: shown, clip: { type: "box", x: 0, y: 0, width: 340, height } });
-    await writeFile(testInfo.outputPath(`firefox-popup-${dark ? "dark" : "light"}.png`), Buffer.from(shot.data, "base64"));
-    await firefox.call("browsingContext.close", { context: shown });
+    const shootPopup = async (name: string, state: unknown, access: unknown) => {
+      Object.assign(preview, { state, access });
+      const shown = await firefox!.open(`${origin}/popup-preview/popup.html`);
+      await firefox!.call("browsingContext.setViewport", { context: shown, viewport: { width: 340, height: 600 } });
+      await expect.poll(() => firefox!.evaluate<string>(shown, "document.querySelector('#status-text')?.textContent ?? ''")).toMatch(/^Studio \d/);
+      if (access) await expect.poll(() => firefox!.evaluate<boolean>(shown, "document.querySelector('#access').hidden")).toBe(false);
+      const height = await firefox!.evaluate<number>(shown, "Math.ceil(document.body.getBoundingClientRect().height)");
+      const shot = await firefox!.call<{ data: string }>("browsingContext.captureScreenshot", { context: shown, clip: { type: "box", x: 0, y: 0, width: 340, height } });
+      await writeFile(testInfo.outputPath(`${name}-${dark ? "dark" : "light"}.png`), Buffer.from(shot.data, "base64"));
+      await firefox!.call("browsingContext.close", { context: shown });
+    };
+    await shootPopup("firefox-popup", await firefox.evaluate(popup, `browser.runtime.sendMessage({ type: "state", tabId: ${accountTab} })`), null);
+    await shootPopup("firefox-popup-asking", asking.state, asking.access);
 
     // What the extension cannot do yet is refused with the reason, not a timeout.
-    await expect(request("preview.snapshot", { tabId: `chrome:${accountTab}` })).rejects.toThrow(/Runtime\.evaluate is not available in Firefox/);
+    await expect(request("preview.navigate", { tabId, url: `${origin}/elsewhere` })).rejects.toThrow(/Page\.navigate is not available in Firefox/);
 
     // Idle: Firefox unloads an idle event page (after 15 s in this profile)
     // and traffic on its socket does not count. The extension's keep-alive

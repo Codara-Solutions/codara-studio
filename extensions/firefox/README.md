@@ -8,7 +8,7 @@ blocked sites, the per-tab cookie switch and the log in Codara are the
 same; what Firefox cannot do is listed below and refused with the reason.
 
 This folder holds only what differs from Chrome (`manifest.json`,
-`background.js`, `lib/firefox.js`). The popup, the options page, the icons
+`background.js`, `access.js`, `lib/firefox.js`, `lib/page-tools.js`). The popup, the options page, the icons
 and the link, policy and presence code are the Chrome extension's own files,
 listed in `shared.json` and copied in by the assembly, which never writes to
 `extensions/chrome`. A shared file that needs other words in Firefox gets a
@@ -73,9 +73,9 @@ also passed locally on Firefox 158.0, 160.0.1 and ESR 153.7.0.
 | Share one tab, a window, everything; blocked sites; browser pages refused | Works (e2e) | Popup shared with Chrome. Firefox pages (about:blank too: a page can write into one), local files and Mozilla's add-on and account sites are never shared. Blocked sites written in Unicode match the punycode hosts in tab URLs. Only the popup and the options page can steer the extension, one action at a time. |
 | Stay connected while idle | Works (e2e) | Spike: a WebSocket alone was unloaded at the idle timeout (close 1001, at 4 s and at 25 s timeouts); `storage.local.get` per ping did not help; one `runtime.getPlatformInfo()` per ping held 80 s at Firefox's default 30 s. An alarm wakes an unloaded page and it reconnects. The e2e holds the link 40 s at a 15 s timeout with the 10 s keep-alive, and fails with it removed. |
 | Refuse what Firefox cannot do, with the reason | Works (e2e) | Codara reads the hello's command list. |
-| Read the page, run an agent's script | Not yet; measured | `userScripts.execute` in the page's main world: works on a page with `default-src 'none'` and Trusted Types, sees page globals, awaits promises, returns objects. Needs the `userScripts` permission, which Firefox lets the user grant only at runtime ("Allow unverified third-party scripts to access your data"), and access to that site. A thrown error comes back empty, so the extension wraps the code. `scripting.executeScript` with `eval` is blocked by such a page's policy and is not used. |
-| Screenshots of background tabs | Not yet; measured | `tabs.captureTab` captures a background tab and beyond the viewport. It exists only with access to all sites (`captureTab is not a function` with one site), so screenshots ask for all sites. |
-| Navigate, open and close tabs, tab groups | Not yet; measured | `tabs.group` and `tabGroups` exist in Firefox 158 and ESR 153. Until then opening a tab is refused, the extension tells Codara it cannot open tabs, and the popup hides "Open new tabs in a group". |
+| Read the page, click and type with the default tools, run an agent's script | Works (e2e) | `userScripts.execute` in the page's main world (`lib/page-tools.js`): works on a page with `default-src 'none'` and Trusted Types, sees page globals, awaits promises. Firefox returns a thrown error, and a script that does not compile, as an empty error, so the expression runs once inside a wrapper that returns its value or what it threw, as Chrome's DevTools protocol gives them. Codara sends one expression (its evaluate tool wraps statements itself, deciding which in Codara: a strict page forbids `new Function`). Needs the site and Firefox's `userScripts` permission ("unverified third-party scripts"), each asked from the popup. The script is bound by its document id to the document checked (shared, not blocked), so Firefox refuses to run it anywhere else, a reload included, and a guard that runs first as its own script stops it if that document changed address meanwhile (measured: a throwing first script stops the ones after it, on ESR 153 and 160); its answer leaves only while the tab is still shared. As in Chrome's DevTools evaluate, the agent's code has the page's own reach (a same-origin frame or opener included). Differs from Chrome: the page does not count the script as a user gesture. The e2e reads, types into and clicks a strict page, and checks the declined-permission errors. |
+| Screenshots of background tabs, full page | Works (e2e) | `tabs.captureTab`, with `rect` for a full page; `Page.getLayoutMetrics` from a script that only measures (`scripting`, no install prompt line). `captureTab` exists only with access to all sites (`captureTab is not a function` with one site), so screenshots ask for all sites. A capture taken while the tab went to another page is dropped. The e2e captures a background tab, whole. |
+| Navigate, open and close tabs, tab groups, the frame tree | Not yet; measured | `tabs.group` and `tabGroups` exist in Firefox 158 and ESR 153. Until then opening a tab is refused, the extension tells Codara it cannot open tabs, and the popup hides "Open new tabs in a group". |
 | Console | Not yet | Page script from document start; misses Firefox's own security and network messages. |
 | Network log with headers, response bodies | Not yet; measured | `webRequest` events carry tab ids and headers; `filterResponseData` returned bodies in MV3. Needs access to the site. |
 | Cookies, HttpOnly included, behind the per-tab switch | Not yet; measured | `cookies.getAll` read an HttpOnly cookie. |
@@ -85,14 +85,29 @@ also passed locally on Firefox 158.0, 160.0.1 and ESR 153.7.0.
 
 NOT TESTED: background-tab screenshots in a visible or minimized window
 (only headless); macOS and Windows; how addons.mozilla.org review treats
-`userScripts`; the alarm's minimum period in a signed build.
+`userScripts`; the alarm's minimum period in a signed build; the permission
+questions from the real toolbar popup (the e2e opens the popup as a tab and
+answers Firefox's own question; a real popup may close when the question
+shows, which is why the background records the question before it is asked).
 
 ## Permissions
 
-At install: `tabs`, `storage`, `alarms` (`tabGroups` comes with opening tabs). Nothing else: site
-access, `userScripts` and access to all sites are asked from a click in the
-popup at the moment a feature needs them, with what stops working without
-them, and never again right after a no.
+At install: `tabs`, `storage`, `alarms` and `scripting` (no line in
+Firefox's install prompt: it does nothing without site access). Nothing
+else is asked at install. The rest is asked from a click in the popup,
+under "Firefox needs your OK", with one sentence each (`access.js`):
+
+| Asked for | When | Without it |
+|---|---|---|
+| The tab's site (`http://host/*`, no port: Firefox's patterns take none) | Turning on "share this tab", or its button | Agents get "the user did not allow Codara to use <site>" |
+| `userScripts` | Its button. Firefox refuses it together with any other permission, so it is always its own question | Agents cannot read or act on pages, with a plain error |
+| All sites | Its button; with "This window" or "Everything" it replaces the per-site question | Screenshots fail with a plain error |
+
+Firefox asks only when `permissions.request` is called from a click before
+anything is awaited. The extension remembers each question it asked
+(`asked`, forgotten once Firefox grants it): after a no, sharing a tab does
+not ask again by itself; only the button does, and the error agents get
+says the user declined.
 
 ## Development
 

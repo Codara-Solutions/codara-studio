@@ -6,6 +6,8 @@
 // both; input goes through the DevTools protocol, which needs neither focus
 // nor a visible tab.
 
+import { Script } from "node:vm";
+
 import {
   CHANGES_STOP_EXPRESSION,
   describeAlreadyThere,
@@ -137,6 +139,20 @@ export function snapshot(target: BrowserTarget, params: Params): Promise<unknown
 }
 
 /**
+ * Whether a snippet parses as one expression. Decided here, compiled and
+ * never run: a page whose policy forbids `new Function` would make every
+ * snippet look like an expression and a statement body fail to parse.
+ */
+export function isExpressionSnippet(code: string): boolean {
+  try {
+    new Script(`(function () { return (${code}\n); })`);
+    return true;
+  } catch (error) {
+    return !(error instanceof SyntaxError);
+  }
+}
+
+/**
  * The last expression's value, like evaluate on a Codara tab: a snippet that
  * parses as one expression is returned as is, anything else runs as a
  * function body where `return` yields the value. The parse check compiles
@@ -146,10 +162,7 @@ export async function evaluate(target: BrowserTarget, params: Params): Promise<u
   const code = str(params, "code");
   if (!code) throw new Error("evaluate requires 'code'");
   const awaitPromise = params.awaitPromise === true;
-  const isExpression = await run<boolean>(
-    target,
-    `(() => { try { new Function(${JSON.stringify(`return (${code}\n)`)}); return true; } catch (e) { if (e instanceof SyntaxError) return false; return true; } })()`,
-  ).catch(() => true);
+  const isExpression = isExpressionSnippet(code);
   const inner = isExpression ? `(${code}\n)` : `{ ${code}\n}`;
   const expression = awaitPromise
     ? `Promise.resolve((async () => ${inner})()).then((__r) => JSON.parse(JSON.stringify(__r ?? null)))`
