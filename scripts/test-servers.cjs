@@ -833,6 +833,31 @@ async function main() {
       ["grok", "-c", /set by Codara/],
       ["codex", `-c mcp_servers."codara-studio".command=x`, /set by Codara/],
       ["pi", "--mode rpc", /set by Codara/],
+      // agy runs only interactively, from an allowlist: Go's flag parsing
+      // takes -flag as --flag and =value forms, and a plain word after a
+      // switch would start a subcommand.
+      ...[
+        "--print", "-print", "-p", "--p", "-p=true", "--prompt", "-prompt", "--prompt-interactive", "-i",
+        "--continue", "-continue", "-c", "--c", "-c=true", "-conversation=abc", "--conversation abc",
+        "--output-format=stream-json", "-output-format=stream-json", "-input-format=stream-json",
+        "--remote-control", "-remote-control", "-remote-agent", "--json-schema x.json", "--print-timeout=5s",
+        `--settings '{"a":1}'`, "--disable-slash-commands", "---mode plan", "--mode=plan --",
+      ].map((text) => ["antigravity", text, /cannot be added for Antigravity/]),
+      ["antigravity", "--sandbox acp", /"acp" cannot be added/],
+      ["antigravity", "--mode=plan acp", /"acp" cannot be added/],
+      ["antigravity", "--sandbox remote-control start", /"remote-control" cannot be added/],
+      ["antigravity", "-- acp", /-- cannot be added/],
+      // A value goes after =, never as a separate word: whatever agy's flag
+      // types are, no plain word can reach it as a subcommand.
+      ["antigravity", "--mode", /Write --mode=value/],
+      ["antigravity", "--model x", /Write --model=value/],
+      ["antigravity", "--model=", /Write --model=value/],
+      ["antigravity", "--new-project --model acp", /Write --model=value/],
+      ["antigravity", "--new-project acp", /"acp" cannot be added/],
+      ["antigravity", "--sandbox=true", /takes no value/],
+      // Windows PowerShell 5.1 would split these arguments.
+      ["antigravity", `--model='x" acp "y'`, /cannot contain "/],
+      ["antigravity", `--add-dir='C:\\a b\\'`, /end with \\/],
       ["claude", "--add-dir ../shared", /--add-dir=\.\.\/shared/],
       ["claude", `--verbose --allowedTools "Bash(git:*)"`, /one value per flag/],
       ["claude", "--disallowed-tools Bash --model opus", /one value per flag/],
@@ -850,6 +875,10 @@ async function main() {
     // The = form ends a variadic option at one value, so a typed prompt stays the prompt.
     assert.deepEqual(launch.checkLaunchArgs("claude", `--add-dir=../shared --add-dir=../b --allowedTools="Bash(git:*)"`).argv, ["--add-dir=../shared", "--add-dir=../b", "--allowedTools=Bash(git:*)"]);
     assert.deepEqual(launch.checkLaunchArgs("codex", "--image=shot.png").argv, ["--image=shot.png"]);
+    assert.deepEqual(
+      launch.checkLaunchArgs("antigravity", `-mode=plan --model=gemini --effort=high --add-dir='C:\\a b' --sandbox --dangerously-skip-permissions --new-project --agent="my agent" --log-file=/tmp/a.log -project=p`).ok,
+      true,
+    );
   });
 
   await check("launch arguments reach each launch and the typed-command files, nothing else", async () => {
@@ -867,7 +896,13 @@ async function main() {
 
     await assert.rejects(launch.saveLaunchArgsSettings({ args: { claude: "--verbose && curl x" }, claudeChrome: false }), /claude: /);
     await launch.saveLaunchArgsSettings({
-      args: { claude: "--verbose", codex: "--search", grok: "--disable-web-search", pi: "--thinking high" },
+      args: {
+        claude: "--verbose",
+        codex: "--search",
+        grok: "--disable-web-search",
+        pi: "--thinking high",
+        antigravity: "--mode=plan",
+      },
       claudeChrome: true,
     });
     await launch.writeShellArgsFiles();
@@ -878,10 +913,22 @@ async function main() {
     assert.deepEqual(launch.plainAgentLaunchArgs("grok", { userArgs: ["login"] }), []);
     assert.deepEqual(launch.plainAgentLaunchArgs("pi", { userArgs: [] }), ["--thinking", "high"]);
     assert.deepEqual(launch.plainAgentLaunchArgs("pi", { userArgs: ["install", "x"] }), []);
+    assert.deepEqual(launch.plainAgentLaunchArgs("antigravity", { userArgs: [] }), ["--mode=plan"]);
+    assert.deepEqual(launch.plainAgentLaunchArgs("antigravity", { userArgs: ["mcp", "list"] }), []);
     const typed = (cli) => fs.readFileSync(path.join(dir, cli, "args.txt"), "utf8").split("\n").filter(Boolean);
     assert.deepEqual(typed("claude").slice(-2), ["--verbose", "--chrome"]);
     assert.deepEqual(typed("grok"), ["--disable-web-search"]);
     assert.deepEqual(typed("pi"), ["--thinking", "high"]);
+    assert.deepEqual(typed("agy"), ["--mode=plan"]);
+    // A settings file edited by hand gets no further at launch than in Settings.
+    fs.writeFileSync(
+      path.join(CODARA, "agent-launch-args.json"),
+      JSON.stringify({ version: 1, args: { antigravity: "--mode=plan -print hi" }, claudeChrome: false }),
+    );
+    launch.resetLaunchArgsCacheForTests();
+    assert.deepEqual(launch.plainAgentLaunchArgs("antigravity", { userArgs: [] }), []);
+    await launch.writeShellArgsFiles();
+    assert.deepEqual(typed("agy"), [], "a hand-edited agy flag reached the typed-command file");
 
     await launch.saveLaunchArgsSettings({ args: { claude: "--no-chrome" }, claudeChrome: true });
     assert.ok(!launch.claudeLaunchArgs({ userArgs: [] }).includes("--chrome"), "--chrome next to --no-chrome");

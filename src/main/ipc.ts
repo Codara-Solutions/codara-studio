@@ -121,7 +121,7 @@ import {
 } from "./orchestration/native-grok-profile-runtime";
 import { latestSessionStart } from "./agent-session-registry";
 import { findPiSessionFile } from "./pi-session-tracker";
-import { parseManualAgentStartupCommand } from "./manual-agent-startup";
+import { parseManualAgentStartupCommand, startupCommandRunsUserAgent } from "./manual-agent-startup";
 import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
 import {
   resolveFrozenNativeCodexProfile,
@@ -534,6 +534,7 @@ import {
   trackTerminalScrollbackPanes,
 } from "./terminal-scrollback";
 import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
+import { registerAntigravityIpc } from "./antigravity-cli";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
 import { registerCrossWorkspaceIpc } from "./cross-workspace-ipc";
 import { registerTabActionIpc } from "./tab-action-ipc";
@@ -3337,7 +3338,10 @@ export function registerIpc(): void {
     ) => {
       // Spawning a pty starts a real OS process; only the trusted renderer may.
       let projectPolicyMode: ProjectPolicyMode | undefined;
-      if (parseManualAgentStartupCommand(args.startupCommand)) {
+      if (
+        parseManualAgentStartupCommand(args.startupCommand) ||
+        startupCommandRunsUserAgent(args.startupCommand)
+      ) {
         // Security boundary: trust for a managed agent autorun comes only from
         // the persisted workspace origin loaded in main. The renderer supplies
         // a process cwd, never a policy label, and cannot mark an imported pull
@@ -4454,6 +4458,7 @@ export function registerIpc(): void {
   registerReviewIpc(handle);
   registerTerminalScrollbackIpc(handle);
   registerAgentHibernationIpc(handle);
+  registerAntigravityIpc(handle);
   registerWorktreeCleanupIpc(handle);
   registerCrossWorkspaceIpc(handle);
   registerTabActionIpc(handle);

@@ -1,6 +1,6 @@
 // Extra startup arguments per agent runtime, from Settings. They ride on the
 // command line of each launch Codara makes (and of a `claude`, `codex`,
-// `grok` or `pi` typed in a Codara pane, through the args files the pane
+// `grok`, `pi` or `agy` typed in a Codara pane, through the args files the pane
 // functions read), never in ~/.claude, ~/.codex, ~/.grok or any CLI config.
 // The text is split into argv here, once: nothing a user types is ever run
 // by a shell, and anything that would need one is refused.
@@ -30,7 +30,50 @@ const RESERVED: Record<LaunchArgRuntime, readonly string[]> = {
   codex: ["resume", "exec"],
   grok: ["--session-id", "-s", "--resume", "-r", "--continue", "-c", "--single", "-p", "--output-format"],
   pi: ["--session", "--resume", "-r", "--continue", "-c", "--print", "-p", "--mode"],
+  // agy is checked against an allowlist instead (ANTIGRAVITY_FLAGS below).
+  antigravity: [],
 };
+/**
+ * The only agy flags Settings may add (`agy --help`, 1.5.13), and whether
+ * each takes a value. agy parses flags the Go way: `-flag` is `--flag` and
+ * the first plain word starts a subcommand (`acp`, `remote-control`), so a
+ * value is written `--name=value` and no separate word is ever let through,
+ * whatever agy's own flag types turn out to be. Codara starts agy only for
+ * the person at the keyboard: print, stream, prompt, resume, settings and
+ * remote flags stay out.
+ */
+const ANTIGRAVITY_FLAGS: ReadonlyMap<string, boolean> = new Map([
+  ["mode", true],
+  ["model", true],
+  ["effort", true],
+  ["agent", true],
+  ["add-dir", true],
+  ["project", true],
+  ["log-file", true],
+  ["new-project", false],
+  ["sandbox", false],
+  ["dangerously-skip-permissions", false],
+]);
+
+function checkAntigravityArgs(argv: readonly string[]): void {
+  const allowed = [...ANTIGRAVITY_FLAGS].map(([name, value]) => (value ? `--${name}=...` : `--${name}`)).join(", ");
+  for (const arg of argv) {
+    // Windows PowerShell 5.1 passes a " inside an argument unescaped, and a
+    // trailing \ escapes the closing quote: either would split the argument.
+    if (arg.includes('"') || arg.endsWith("\\")) {
+      throw new LaunchArgsError(`${arg.split("=")[0]}: a value cannot contain " or end with \\.`);
+    }
+    const match = /^--?([a-z][a-z-]*)(?:=([\s\S]*))?$/.exec(arg);
+    const takesValue = match ? ANTIGRAVITY_FLAGS.get(match[1]) : undefined;
+    if (!match || takesValue === undefined) {
+      const shown = arg.startsWith("-") ? arg.split("=")[0] : `"${arg}"`;
+      throw new LaunchArgsError(`${shown} cannot be added for Antigravity. Allowed: ${allowed}.`);
+    }
+    const [, name, inline] = match;
+    if (!takesValue && inline !== undefined) throw new LaunchArgsError(`--${name} takes no value.`);
+    if (takesValue && !inline) throw new LaunchArgsError(`Write --${name}=value, with the value after =.`);
+  }
+}
 /**
  * Options that take every following word as another value. The Settings
  * flags sit right before what the user types after the command, so the
@@ -42,6 +85,7 @@ const VARIADIC: Record<LaunchArgRuntime, readonly string[]> = {
   codex: ["-i", "--image"],
   grok: [],
   pi: [],
+  antigravity: [],
 };
 // Codex takes config overrides as -c key=value; Codara's own keys stay its own.
 const CODEX_RESERVED_KEYS = /^\s*(?:mcp_servers\s*\.\s*(?:codara-studio\b|"codara-studio"|'codara-studio')|notify\s*=|tui\s*\.\s*notifications\s*=)/;
@@ -97,6 +141,7 @@ export function checkLaunchArgs(runtime: LaunchArgRuntime, text: string): Launch
     if (argv.length && !argv[0].startsWith("-")) {
       throw new LaunchArgsError(`Start with a flag, such as --verbose. "${argv[0]}" would be read as a prompt or a command.`);
     }
+    if (runtime === "antigravity") checkAntigravityArgs(argv);
     for (let index = 0; index < argv.length; index += 1) {
       const arg = argv[index];
       const flag = arg.includes("=") && arg.startsWith("--") ? arg.slice(0, arg.indexOf("=")) : arg;

@@ -218,6 +218,7 @@ const RUNTIME_LABEL: Record<AgentBoardRuntime, string> = {
   codex: "Codex",
   grok: "Grok",
   pi: "Pi",
+  antigravity: "Antigravity",
   cora: "Cora",
 };
 

@@ -870,7 +870,8 @@ export function validatedTerminalAgentSession(value: unknown): TerminalAgentSess
     candidate.runtime !== "claude" &&
     candidate.runtime !== "codex" &&
     candidate.runtime !== "grok" &&
-    candidate.runtime !== "pi"
+    candidate.runtime !== "pi" &&
+    candidate.runtime !== "antigravity"
   ) {
     return null;
   }

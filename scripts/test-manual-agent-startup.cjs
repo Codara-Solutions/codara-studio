@@ -13,7 +13,18 @@ async function main() {
       entryPoints: [path.resolve(__dirname, "../src/main/manual-agent-startup.ts")],
       bundle: true, platform: "node", format: "cjs", outfile, logLevel: "silent",
     });
-    const { parseManualAgentStartupCommand, formatManualAgentStartup } = require(outfile);
+    const { parseManualAgentStartupCommand, formatManualAgentStartup, startupCommandRunsUserAgent } = require(outfile);
+    // agy and pi are the user's own CLIs typed into a shell, never a managed
+    // launch, but an imported pull request checkout refuses them all the same.
+    for (const command of ["agy", "agy --continue", "agy --mode plan", "pi", "pi --session x"]) {
+      assert.equal(parseManualAgentStartupCommand(command), null, command);
+    }
+    for (const command of ["agy", "agy --continue", " /home/u/.local/bin/agy -c", "agy.exe", "pi", "PI.cmd --session x"]) {
+      assert.equal(startupCommandRunsUserAgent(command), true, command);
+    }
+    for (const command of [undefined, "", "claude", "echo agy", "agyx", "pip install x", "./build.sh agy"]) {
+      assert.equal(startupCommandRunsUserAgent(command), false, String(command));
+    }
     const source = 'codex resume 12345678 --yolo -m gpt-5 -c "model_reasoning_effort=high"';
     const parsed = parseManualAgentStartupCommand(source);
     assert.ok(parsed);

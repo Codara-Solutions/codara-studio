@@ -536,7 +536,7 @@ function Highlighted({ text, indices }: { text: string; indices: number[] }) {
   return <>{parts}</>;
 }
 
-const BRAND_RUNTIMES = new Set<string>(["claude", "codex", "grok", "pi"]);
+const BRAND_RUNTIMES = new Set<string>(["claude", "codex", "grok", "pi", "antigravity"]);
 
 function EntryIcon({ entry }: { entry: JumpEntry }) {
   switch (entry.kind) {

@@ -284,3 +284,16 @@ export function startupCommandRunsClaude(command: string | null | undefined): bo
   const name = posix.basename(first.replaceAll("\\", "/")).toLowerCase();
   return name === "claude" || name === "claude.exe" || name === "claude.cmd";
 }
+
+/**
+ * True when a pane's startup command starts the user's own `agy` or `pi`,
+ * which Studio types into the pane's shell rather than launching as a
+ * managed agent. They read the repository's agent files all the same, so an
+ * imported pull request checkout refuses them like the managed ones.
+ */
+export function startupCommandRunsUserAgent(command: string | null | undefined): boolean {
+  const first = command?.trim().split(/\s+/, 1)[0]?.replace(/^["']|["']$/g, "");
+  if (!first) return false;
+  const name = posix.basename(first.replaceAll("\\", "/")).toLowerCase().replace(/\.(?:exe|cmd)$/, "");
+  return name === "agy" || name === "pi";
+}

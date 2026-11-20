@@ -13,9 +13,40 @@ export const GROK_LAUNCH_COMMAND = "grok --yolo";
 // does not claim `pi`): it is typed into an ordinary shell, whose prompt
 // markers tell Codara when Pi exits.
 export const PI_LAUNCH_COMMAND = "pi";
+// Google's Antigravity CLI runs the same way: the user's own `agy` with their
+// own Google sign-in, typed into an ordinary shell, Settings' startup flags
+// added by the pane's `agy` function. Codara never runs it non-interactively.
+export const ANTIGRAVITY_LAUNCH_COMMAND = "agy";
+// An Antigravity pane's restore pointer has no conversation id: Codara never
+// reads agy's own files, and agy's `--continue` reopens its latest
+// conversation. The pointer's id is this fixed word.
+export const ANTIGRAVITY_CONTINUE_SESSION_ID = "continue";
+
+// `agy --continue` reopens agy's latest conversation, and agy does not say
+// whether "latest" is per folder. Until it does, one Antigravity pane per app
+// run reopens it; any other pane starts a new conversation instead of a
+// second copy of the same one. The same pane keeps it when it restarts again.
+let antigravityContinuePane: string | null = null;
+
+export function antigravityRestoreCommand(paneId: string): { command: string; notice: string | null } {
+  antigravityContinuePane ??= paneId;
+  return antigravityContinuePane === paneId
+    ? { command: `${ANTIGRAVITY_LAUNCH_COMMAND} --continue`, notice: null }
+    : {
+        command: ANTIGRAVITY_LAUNCH_COMMAND,
+        notice: "another Antigravity tab reopened agy's latest conversation; this one starts a new one",
+      };
+}
+
+/** The vendor's install command, for a machine without `agy`. */
+export function antigravityInstallCommand(platform: string): string {
+  return platform === "win32"
+    ? "irm https://antigravity.google/cli/install.ps1 | iex"
+    : "curl -fsSL https://antigravity.google/cli/install.sh | bash";
+}
 
 // Runtimes whose CLI sessions Codara can capture + restore across app restarts.
-export type AgentSessionRuntime = "claude" | "codex" | "grok" | "pi";
+export type AgentSessionRuntime = "claude" | "codex" | "grok" | "pi" | "antigravity";
 
 /** A past session to resume in a new terminal tab of its workspace. */
 export interface AgentSessionResumeRequest {
@@ -119,5 +150,6 @@ export function buildAgentResumeCommand(session: {
   if (session.runtime === "claude") return buildClaudeResumeCommand(session.sessionId);
   if (session.runtime === "grok") return buildGrokResumeCommand(session.sessionId);
   if (session.runtime === "pi") return buildPiResumeCommand(session.sessionId);
+  if (session.runtime === "antigravity") return `${ANTIGRAVITY_LAUNCH_COMMAND} --continue`;
   return buildCodexResumeCommand(session.sessionId);
 }

@@ -179,9 +179,13 @@ async function main() {
       { paneId: "pi3", tabId: "t3", tabTitle: "Restored Pi", excluded: false, runtimeHint: "pi" },
       { paneId: "pi4", tabId: "t4", tabTitle: "Late Pi", excluded: false },
       { paneId: "pi5", tabId: "t5", tabTitle: "Fullscreen Pi", excluded: false },
+      // Antigravity (agy) shares Pi's shape: the user's own CLI in a shell.
+      { paneId: "ag1", tabId: "t6", tabTitle: "shell", excluded: false },
+      { paneId: "ag2", tabId: "t7", tabTitle: "Antigravity", excluded: false },
+      { paneId: "ag3", tabId: "t8", tabTitle: "Antigravity", excluded: false },
     ],
   });
-  check("taps attached", T.taps.size === 5);
+  check("taps attached", T.taps.size === 8);
   check("a restored Pi pointer hints the runtime", mod.activeTerminalAgentPaneIds().includes("pi3"));
 
   // ── The startup header identifies Pi ──
@@ -284,6 +288,25 @@ async function main() {
   check("pi 1.x reprinting its transcript on the way out is not yet an exit", lastChip("pi5")?.state !== "done");
   feed("pi5", EXIT_LINE);
   check("pi 1.x quit: the resume line after the alternate screen ends it", lastChip("pi5")?.state === "done");
+
+  // ── Antigravity: armed by the typed command or its process, never by text ──
+  const AGY_GREETING = "\x1b[?1049h\x1b[H\x1b[2J\n Welcome to the Antigravity CLI.\r\n > \r\n ? for shortcuts\r\n";
+  const AGY_PERMISSION = "Requesting permission for:\r\n  rm -rf build\r\n> Yes, allow tool call\r\n  No, deny tool call\r\n";
+  const alertsBefore = T.alerts.length;
+  feed("ag1", "commit 3e01\r\n" + AGY_GREETING + AGY_PERMISSION);
+  await sleep(2600);
+  check("agy text in a plain shell does not arm Antigravity", lastChip("ag1") === null);
+  check("agy text in a plain shell raises no alert", T.alerts.length === alertsBefore);
+  check("a plain shell showing agy text is not an active agent", !mod.activeTerminalAgentPaneIds().includes("ag1"));
+  feed("ag2", "\x1b]633;E;agy --mode plan\x07\x1b]633;C\x07" + AGY_GREETING);
+  check("the typed agy command arms Antigravity", lastChip("ag2")?.runtime === "antigravity");
+  feed("ag2", AGY_PERMISSION);
+  check("an armed Antigravity pane needs you on a permission prompt", lastChip("ag2")?.state === "blocked");
+  T.pids.set("ag3", 5050);
+  T.processes.set(5050, [{ pid: 5051, depth: 1, command: "node /home/u/.local/bin/agy" }]);
+  feed("ag3", AGY_GREETING);
+  await sleep(2600);
+  check("an agy process arms Antigravity", lastChip("ag3")?.runtime === "antigravity");
 
   mod.disposeAllTerminalAgentWatchers();
   console.log(`\n${pass} Pi notifier checks passed.`);

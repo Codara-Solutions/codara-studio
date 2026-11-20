@@ -15,6 +15,7 @@ const RUNTIME_ROWS: ReadonlyArray<{ runtime: LaunchArgRuntime; title: string; pl
   { runtime: "codex", title: "Codex flags", placeholder: "For example --search -m gpt-5.5" },
   { runtime: "grok", title: "Grok flags", placeholder: "For example --disable-web-search" },
   { runtime: "pi", title: "Pi flags", placeholder: "For example --thinking high" },
+  { runtime: "antigravity", title: "Antigravity flags", placeholder: "For example --mode=plan --effort=high" },
 ];
 
 function RuntimeFlagsField({

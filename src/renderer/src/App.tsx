@@ -197,6 +197,8 @@ import { isRecording } from "./shortcuts/recording";
 import { IS_MAC } from "./shortcuts/platform";
 import { usePreferences } from "./preferences/usePreferences";
 import {
+  ANTIGRAVITY_CONTINUE_SESSION_ID,
+  ANTIGRAVITY_LAUNCH_COMMAND,
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
   GROK_LAUNCH_COMMAND,
@@ -2856,7 +2858,7 @@ export default function App() {
         tabId: string;
         tabTitle: string;
         excluded: boolean;
-        runtimeHint?: "claude" | "codex" | "grok" | "pi" | null;
+        runtimeHint?: "claude" | "codex" | "grok" | "pi" | "antigravity" | null;
       }> = [];
       for (const tab of layout.tabs) {
         if (tab.kind !== "terminal") continue;
@@ -5115,6 +5117,14 @@ export default function App() {
     () => launchNewWorkerTab(PI_LAUNCH_COMMAND),
     [launchNewWorkerTab],
   );
+  // The user's own `agy`, typed into a new tab's shell like `pi`; the tab is
+  // named for it so it reads as Antigravity before the TUI has painted.
+  const openAntigravityWorker = useCallback(() => {
+    tabsRef.current.newTerminalTab(resolveWorkerLaunchCwd() ?? undefined, ANTIGRAVITY_LAUNCH_COMMAND, {
+      title: "Antigravity",
+      color: agentBrandColor("antigravity"),
+    });
+  }, [resolveWorkerLaunchCwd]);
 
   // Resuming a past session: Settings' session list and the session picker.
   // The session opens in a new terminal tab of the workspace that holds
@@ -5814,10 +5824,10 @@ export default function App() {
               ...(leaf.cwd ? { cwd: leaf.cwd } : {}),
               ...(tab.group ? { group: tab.group.name, groupId: tab.group.id } : {}),
               ...(leaf.agentOwner ? { agentOwner: leaf.agentOwner } : {}),
-              // The phone protocol has no Pi profile; a Pi pane is shared
-              // as the shell it runs in.
+              // The phone protocol has no Pi or Antigravity profile; such a
+              // pane is shared as the shell it runs in.
               profile:
-                leaf.agentSession?.runtime === "pi"
+                leaf.agentSession?.runtime === "pi" || leaf.agentSession?.runtime === "antigravity"
                   ? "shell"
                   : leaf.agentSession?.runtime ?? "shell",
             });
@@ -6822,9 +6832,35 @@ export default function App() {
       //   in the same pane within 90s of the previous pointer's capture can
       //   leave the old sessionId blessed as active. Narrow window; the mild
       //   failure is that restore opens that pane's previous conversation.
-      if (
+      if (state.running && state.runtime === "antigravity" && leaf.agentSession?.runtime !== "antigravity") {
+        // agy has no session id Codara can read; the pane only needs its
+        // folder to come back with `agy --continue` after a restart. The
+        // agent running now replaces an earlier one's pointer, once main has
+        // seen a real agy process (printed text alone saves nothing).
+        const cwd = leaf.cwd ?? paneRuntimeRef.current.get(paneId)?.cwd;
+        if (cwd) {
+          void (async () => {
+            for (let attempt = 0; attempt < 10; attempt += 1) {
+              if (attempt > 0) await new Promise((done) => window.setTimeout(done, 1_000));
+              if (!(await window.spark.antigravity?.runsInPane(paneId).catch(() => false))) continue;
+              const tNow = tabsRef.current;
+              const tabNow = tNow.tabs.find((item) => item.id === tabId);
+              const leafNow = tabNow?.kind === "terminal" ? findLeafByPaneId(tabNow.root, paneId) : null;
+              if (!leafNow || leafNow.agentSession?.runtime === "antigravity") return;
+              tNow.setLeafAgentSession(tabId, paneId, {
+                runtime: "antigravity",
+                sessionId: ANTIGRAVITY_CONTINUE_SESSION_ID,
+                cwd,
+                capturedAt: new Date().toISOString(),
+                active: true,
+              });
+              return;
+            }
+          })();
+        }
+      } else if (
         state.running &&
-        (state.runtime === "claude" || state.runtime === "codex" || state.runtime === "pi") &&
+        (state.runtime === "claude" || state.runtime === "codex" || state.runtime === "pi" || state.runtime === "antigravity") &&
         leaf.agentSession?.sessionId &&
         leaf.agentSession.runtime === state.runtime &&
         leaf.agentSession.active !== true
@@ -7164,6 +7200,7 @@ export default function App() {
               onNewCodexWorker={openCodexWorker}
               onNewGrokWorker={openGrokWorker}
               onNewPiWorker={openPiWorker}
+              onNewAntigravityWorker={openAntigravityWorker}
               onOpenSessionPicker={openSessionPicker}
               onNewChat={handleNewChat}
               onOpenBoardCardRun={handleOpenBoardCardRun}
@@ -7790,6 +7827,7 @@ interface WorkspaceProps {
   onNewCodexWorker: () => void;
   onNewGrokWorker: () => void;
   onNewPiWorker: () => void;
+  onNewAntigravityWorker: () => void;
   onOpenSessionPicker: () => void;
   onNewChat: () => void;
   // "Open chat" on a Cora Board card with a live run — App's run-selection
@@ -7847,6 +7885,7 @@ const Workspace = React.memo(function Workspace({
   onNewCodexWorker,
   onNewGrokWorker,
   onNewPiWorker,
+  onNewAntigravityWorker,
   onOpenSessionPicker,
   onNewChat,
   onOpenBoardCardRun,
@@ -8583,6 +8622,7 @@ const Workspace = React.memo(function Workspace({
         onNewCodexWorker={onNewCodexWorker}
         onNewGrokWorker={onNewGrokWorker}
         onNewPiWorker={onNewPiWorker}
+        onNewAntigravityWorker={onNewAntigravityWorker}
         onOpenSessionPicker={onOpenSessionPicker}
         onNewChat={onNewChat}
         onRenameChat={onRenameChat}

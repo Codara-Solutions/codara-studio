@@ -9,6 +9,7 @@ import AutomationsStripButton from "../components/automations/AutomationsStripBu
 import QuickCommandsButton from "../quick-commands/QuickCommandsButton";
 import { CodaraMark, RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
 import { agentBrandTone } from "../lib/agent-brand";
+import { antigravityInstallCommand } from "../workers/launch-commands";
 import { liveTerminalRuntime } from "./terminalAgentState";
 import { collectLeaves } from "./paneTree";
 import {
@@ -80,6 +81,7 @@ interface Props {
   onNewCodexWorker: () => void;
   onNewGrokWorker: () => void;
   onNewPiWorker: () => void;
+  onNewAntigravityWorker: () => void;
   onOpenSessionPicker: () => void;
   // Starts a new draft Cora chat — the ✦ Cora button's action (identical to
   // the chat.new chord). The new-chat welcome surface is Cora's landing page.
@@ -178,6 +180,7 @@ function TabBar({
   onNewCodexWorker,
   onNewGrokWorker,
   onNewPiWorker,
+  onNewAntigravityWorker,
   onOpenSessionPicker,
   onNewChat,
   onRenameChat,
@@ -1124,6 +1127,12 @@ function TabBar({
                 onNewPiWorker();
               }}
             />
+            <AntigravityPickerRow
+              onLaunch={() => {
+                setPickerOpen(false);
+                onNewAntigravityWorker();
+              }}
+            />
             <PickerSectionLabel label="Sessions" />
             <PickerItem
               label="Resume a session…"
@@ -1975,7 +1984,10 @@ function KindIcon({ tab }: { tab: Tab }) {
     const workerRuntime = workerRuntimes[0];
     if (workerRuntime) {
       return (
-        <span style={{ display: "inline-flex", flex: "0 0 14px", color: `var(--agent-${workerRuntime})` }}>
+        <span
+          data-agent-runtime={workerRuntime}
+          style={{ display: "inline-flex", flex: "0 0 14px", color: `var(--agent-${workerRuntime})` }}
+        >
           <RuntimeMark runtime={workerRuntime} size={13} />
         </span>
       );
@@ -2290,7 +2302,71 @@ function AgentCliMark({ id, onOpenSettings }: { id: AgentCliToolId; onOpenSettin
   );
 }
 
-type PickerAccent = "shell" | "claude" | "codex" | "grok" | "pi";
+type PickerAccent = "shell" | "claude" | "codex" | "grok" | "pi" | "antigravity";
+
+// The user's own Antigravity CLI (`agy`). Asked each time the menu opens, so
+// an install made meanwhile shows up. While `agy` is missing the row shows
+// the install command and a click copies it, instead of starting a shell
+// that cannot find the command.
+function AntigravityPickerRow({ onLaunch }: { onLaunch: () => void }) {
+  const [installed, setInstalled] = useState<boolean | null>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    let live = true;
+    window.spark.antigravity
+      ?.installed()
+      .then((value) => {
+        if (live) setInstalled(value);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
+  const command = antigravityInstallCommand(/Win/i.test(navigator.platform) ? "win32" : navigator.platform);
+  const missing = installed === false;
+  return (
+    <div data-testid="antigravity-worker-row" data-installed={installed === null ? "unknown" : String(installed)}>
+      <PickerItem
+        label="Antigravity worker"
+        glyph={<RuntimeGlyph runtime="antigravity" />}
+        accent="antigravity"
+        trailing={
+          missing ? (
+            <span className="spark-badge is-warn" title={`Install it with: ${command}`}>
+              {copied ? "Copied" : "Not installed"}
+            </span>
+          ) : undefined
+        }
+        onClick={() => {
+          if (!missing) {
+            onLaunch();
+            return;
+          }
+          void navigator.clipboard
+            ?.writeText(command)
+            .then(() => setCopied(true))
+            .catch(() => undefined);
+        }}
+      />
+      {missing && (
+        <div
+          role="note"
+          style={{ padding: "0 12px 8px 44px", fontSize: 11, lineHeight: 1.45, color: "var(--ink-dim)" }}
+        >
+          Antigravity's <code className="spark-mono">agy</code> is not on this computer. Install it in a terminal
+          with:
+          <code
+            className="spark-mono"
+            style={{ display: "block", marginTop: 4, userSelect: "text", overflowWrap: "anywhere", color: "var(--ink)" }}
+          >
+            {command}
+          </code>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Same three tints the pane toolbar's add-pane menu uses, so a Claude row
 // reads identically whether it is spawned from the strip or from a pane.

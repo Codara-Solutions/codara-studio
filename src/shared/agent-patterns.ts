@@ -11,7 +11,8 @@ import type { RuntimeState } from "./types";
 
 // Internal-only union of every agent CLI we can detect from terminal output.
 // Codara's public surface (App.tsx, TerminalStack.tsx, run-store, etc.) only
-// models the runtimes a pane can launch (Claude Code, Codex, Grok, Pi);
+// models the runtimes a pane can launch (Claude Code, Codex, Grok, Pi,
+// Antigravity);
 // anything outside that set is coerced to `null` at the onAgentState boundary
 // so the UI accent / tab-type machinery doesn't need to grow new cases for
 // each new banner we recognise. Detection is still useful even when coerced:
@@ -35,20 +36,34 @@ export type AgentRuntime =
 
 // Public runtime tag emitted through onAgentState. Mirrors the runtimes the
 // rest of the app already knows how to render. The boundary in
-// useTerminalSession coerces every other AgentRuntime down to `null`. Pi is
-// public for terminal tracking only: it is the user's own `pi`, not one of
-// the account families in agent-families.ts.
-export type PublicAgentRuntime = "claude" | "codex" | "grok" | "pi";
+// useTerminalSession coerces every other AgentRuntime down to `null`. Pi and
+// Antigravity are public for terminal tracking only: each is the user's own
+// CLI (`pi`, `agy`) with the user's own sign-in, not one of the account
+// families in agent-families.ts.
+export type PublicAgentRuntime = "claude" | "codex" | "grok" | "pi" | "antigravity";
 
 export const KNOWN_PUBLIC_RUNTIMES: ReadonlySet<AgentRuntime> = new Set([
   "claude",
   "codex",
   "grok",
   "pi",
+  "antigravity",
 ]);
 
 export function coercePublicRuntime(runtime: AgentRuntime): PublicAgentRuntime | null {
   return KNOWN_PUBLIC_RUNTIMES.has(runtime) ? (runtime as PublicAgentRuntime) : null;
+}
+
+/**
+ * The public runtime screen text alone may arm a pane as. Antigravity is
+ * left out: any shell can print agy's greeting (a git log, a grep in this
+ * repository), and an armed pane raises alerts and saves a pointer that
+ * starts `agy --continue` after a restart. Only the typed `agy` command or
+ * a running agy process makes a pane an Antigravity one.
+ */
+export function screenPublicRuntime(runtime: AgentRuntime | null): PublicAgentRuntime | null {
+  const known = runtime ? coercePublicRuntime(runtime) : null;
+  return known === "antigravity" ? null : known;
 }
 
 // Pi's startup header line followed by its key-hint line. Through 0.87 the
@@ -90,7 +105,10 @@ export const RUNTIME_BANNERS: ReadonlyArray<{ runtime: AgentRuntime; pattern: Re
   // header) so README mentions and stray log lines don't trigger them.
   { runtime: "aider",      pattern: /\baider\s*v\d|\baider\s*chat\b/i },
   { runtime: "amp",        pattern: /\bSourcegraph\s*Amp\b|\bAmp\s*CLI\b/i },
-  { runtime: "antigravity",pattern: /\bAntigravity\b|\bagy\s*v?\d/i },
+  // Antigravity (`agy`) greets with "Welcome to the Antigravity CLI." (live
+  // agy 1.5.13 capture). The product name alone is too common in shell
+  // output to arm a pane on.
+  { runtime: "antigravity",pattern: /\bAntigravity\s*CLI\b/ },
   { runtime: "cline",      pattern: /\bCline\s*v\d|\bcline-cli\b/i },
   { runtime: "copilot",    pattern: /\bGitHub\s*Copilot\s*CLI\b|\bcopilot\s*v\d/i },
   { runtime: "droid",      pattern: /\bDroid\s*CLI\b|\bfactory\.ai\b/i },
@@ -232,7 +250,7 @@ const PI_LIVE_IDENTITY: RegExp[] = [
 
 export function sniffLiveRuntime(text: string): PublicAgentRuntime | null {
   const fromBanner = sniffRuntime(text);
-  if (fromBanner) return coercePublicRuntime(fromBanner);
+  if (fromBanner) return screenPublicRuntime(fromBanner);
   const stripped = stripAnsi(text);
   for (const re of CLAUDE_LIVE_IDENTITY) {
     if (re.test(stripped)) return "claude";
@@ -304,6 +322,9 @@ function runtimeFromExecutable(exe: string): AgentRuntime | null {
   ) {
     return "pi";
   }
+  if (normalized === "agy" || normalized.endsWith("/agy") || normalized.endsWith("\\agy")) {
+    return "antigravity";
+  }
   return null;
 }
 
@@ -332,8 +353,9 @@ export function runtimeFromCommandLine(cmdLine: string): AgentRuntime | null {
 // Pi sets `process.title = "pi"`, so `ps` shows the bare name; launched
 // through its npm shim it reads `node …/bin/pi`. Unlike the others it ships
 // no versioned binaries, and a two-letter prefix would also claim unrelated
-// `pi-*` tools, so only the exact name counts.
-const AGENT_PROCESS_BASENAME_RE = /^(?:(claude|codex|grok)(?:[-.][\w.-]*)?|(pi))$/;
+// `pi-*` tools, so only the exact name counts. Antigravity's `agy` is one
+// native binary, matched by its exact name too.
+const AGENT_PROCESS_BASENAME_RE = /^(?:(claude|codex|grok)(?:[-.][\w.-]*)?|(pi))$|^agy$/;
 // A running agent script shows its interpreter first ("node …/codex.js"),
 // which never appears in a typed launch command, hence the wider set here.
 const AGENT_PROCESS_WRAPPERS = new Set([...AGENT_LAUNCH_WRAPPERS, "node", "nodejs", "python", "python3"]);
@@ -352,7 +374,7 @@ export function runtimeFromProcessCommand(command: string): PublicAgentRuntime |
   for (const token of candidates) {
     const name = basename(token).replace(/\.(?:js|cjs|mjs|exe)$/, "");
     const match = AGENT_PROCESS_BASENAME_RE.exec(name);
-    if (match) return (match[1] ?? match[2]) as PublicAgentRuntime;
+    if (match) return (match[1] ?? match[2] ?? "antigravity") as PublicAgentRuntime;
   }
   return null;
 }
@@ -384,8 +406,10 @@ export function promoteGenericArm(
 ): PublicAgentRuntime | null {
   if (budget <= 0) return null;
   const fresh = ring.slice(Math.max(0, ringFrom));
-  const sniffed = sniffOsc633CommandRuntime(fresh) ?? sniffRuntime(fresh);
-  if (sniffed) return coercePublicRuntime(sniffed);
+  const typed = sniffOsc633CommandRuntime(fresh);
+  if (typed) return coercePublicRuntime(typed);
+  const banner = sniffRuntime(fresh);
+  if (banner) return screenPublicRuntime(banner);
   return sniffLiveRuntime(fresh);
 }
 
@@ -553,6 +577,25 @@ export const RUNTIME_PATTERNS: Record<PublicAgentRuntime, RuntimePatterns> = {
       // Extension input and editor: `enter submit  escape/ctrl+c cancel`,
       // the editor adding `shift+enter newline` in between.
       /\bsubmit\s+(?:\S+\s+newline\s+)?\S+\s+cancel\b/,
+    ],
+    done: [],
+  },
+  // Antigravity (the user's own `agy`). Only the signed-out start screen is
+  // VERIFIED (live agy 1.5.13 capture, no network): the login-method picker
+  // ends with `↑/↓ Navigate · enter Select`. The rest comes from the strings
+  // agy 1.5.13 ships, not from a live session: its permission dialogs
+  // ("Requesting permission for:", "Yes, allow tool call", "No, deny
+  // access", "Allow access to this file?") and its interrupt hint. Like
+  // Grok, absence of these never clears a chip.
+  antigravity: {
+    working: [
+      /esc\s*to\s*interrupt/i,
+    ],
+    blocked: [
+      /↑\/↓\s*Navigate\s*·\s*enter\s*Select/,
+      /Requesting\s*permission\s*for:/,
+      /\bYes,\s*allow\s*(?:tool\s*call|access|creation)\b/,
+      /\bNo,\s*(?:deny|reject)\s*(?:tool\s*call|access|permission|creation|this\s*change)\b/,
     ],
     done: [],
   },
@@ -902,6 +945,10 @@ const AGENT_UI_ANCHORS: Record<PublicAgentRuntime, RegExp[]> = {
   pi: [
     PI_FOOTER_CONTEXT_RE,
     PI_HEADER_RE,
+  ],
+  antigravity: [
+    /\bAntigravity\s*CLI\b/,
+    /\?\s*for\s*shortcuts/i,
   ],
 };
 

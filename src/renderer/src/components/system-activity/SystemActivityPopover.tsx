@@ -42,7 +42,7 @@ const HISTORY_GAP_MS = 6_000;
 const PROCESSES_SHOWN = 4;
 const APPS_SHOWN = 5;
 
-const BRAND_RUNTIMES = new Set(["claude", "codex", "grok", "pi"]);
+const BRAND_RUNTIMES = new Set(["claude", "codex", "grok", "pi", "antigravity"]);
 
 const COLORS: Record<SystemResource, string> = {
   cpu: "var(--metric-cpu)",

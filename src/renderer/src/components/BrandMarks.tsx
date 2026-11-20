@@ -1,10 +1,11 @@
 // Provider marks from the CC0 simple-icons set. The Anthropic, OpenAI, and
 // xAI trademarks identify the respective CLIs. Marks draw in currentColor;
 // call sites tint them with the fixed `--agent-claude` / `--agent-codex` /
-// `--agent-grok` / `--agent-pi` tokens so they never follow the workspace
-// accent. Pi's mark is a plain pi glyph.
+// `--agent-grok` / `--agent-pi` / `--agent-antigravity` tokens so they never
+// follow the workspace accent. Pi's mark is a plain pi glyph and
+// Antigravity's a plain arch, not Google's logo.
 
-export type BrandRuntime = "claude" | "codex" | "grok" | "pi";
+export type BrandRuntime = "claude" | "codex" | "grok" | "pi" | "antigravity";
 
 export function ClaudeMark({ size = 14 }: { size?: number }) {
   return (
@@ -66,6 +67,21 @@ export function PiMark({ size = 14 }: { size?: number }) {
   );
 }
 
+export function AntigravityMark({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="currentColor"
+      aria-hidden
+      focusable="false"
+    >
+      <path d="M12 3c-1.6 0-2.7 1-3.4 2.6L3.1 19.9c-.5 1.1.3 2.1 1.3 2.1.6 0 1.1-.3 1.4-1l2.7-6.1c.8-1.8 2-2.7 3.5-2.7s2.7.9 3.5 2.7l2.7 6.1c.3.7.8 1 1.4 1 1 0 1.8-1 1.3-2.1L15.4 5.6C14.7 4 13.6 3 12 3z" />
+    </svg>
+  );
+}
+
 export function RuntimeMark({
   runtime,
   size = 14,
@@ -76,6 +92,7 @@ export function RuntimeMark({
   if (runtime === "codex") return <CodexMark size={size} />;
   if (runtime === "grok") return <GrokMark size={size} />;
   if (runtime === "pi") return <PiMark size={size} />;
+  if (runtime === "antigravity") return <AntigravityMark size={size} />;
   return <ClaudeMark size={size} />;
 }
 

@@ -65,6 +65,7 @@ import { cosTasksApi } from "./areas/cos-tasks";
 import { skillOriginsApi } from "./areas/skill-origins";
 import { terminalScrollbackApi } from "./areas/terminal-scrollback";
 import { agentHibernationApi } from "./areas/agent-hibernation";
+import { antigravityApi } from "./areas/antigravity";
 import { worktreeCleanupApi } from "./areas/worktree-cleanup";
 import { crossWorkspaceApi } from "./areas/cross-workspace";
 import { tabActionsApi } from "./areas/tab-actions";
@@ -1472,7 +1473,7 @@ const api = {
         tabId: string;
         tabTitle: string;
         excluded: boolean;
-        runtimeHint?: "claude" | "codex" | "grok" | "pi" | null;
+        runtimeHint?: "claude" | "codex" | "grok" | "pi" | "antigravity" | null;
       }>;
     }): Promise<TerminalAgentStatePayload[]> => ipcRenderer.invoke("terminalNotify:sync", input),
     // Level-triggered recovery for renderer reload/cold hydration. Live events
@@ -1929,6 +1930,7 @@ const api = {
   gitFix: gitFixApi,
   diagnostics: diagnosticsApi,
   agentHibernation: agentHibernationApi,
+  antigravity: antigravityApi,
   worktreeSetup: worktreeSetupApi,
   workerFeed: workerFeedApi,
   share: shareApi,

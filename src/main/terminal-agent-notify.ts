@@ -8,6 +8,7 @@ import {
   PI_EXIT_LINE_RE,
   runtimeFromCommandLine,
   runtimeFromProcessCommand,
+  screenPublicRuntime,
   sniffLiveRuntime,
   sniffRuntime,
   stripAnsi,
@@ -335,7 +336,7 @@ export interface TerminalNotifyPaneEntry {
 }
 
 function knownRuntimeHint(value: unknown): PublicAgentRuntime | null {
-  return value === "claude" || value === "codex" || value === "grok" || value === "pi"
+  return value === "claude" || value === "codex" || value === "grok" || value === "pi" || value === "antigravity"
     ? value
     : null;
 }
@@ -1517,7 +1518,8 @@ export function terminalAgentHibernationEvidence(paneId: string): AgentHibernati
     excluded: w.excluded,
     disposing: w.disposing,
     attached: w.attached,
-    runtime: w.runtime,
+    // Antigravity panes never sleep: no restore pointer brings one back yet.
+    runtime: w.runtime === "antigravity" ? null : w.runtime,
     state: w.state,
     chipState: w.lastEmittedState,
     turnActive: turnActive(w),
@@ -1916,7 +1918,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
   } else if (!w.runtime || w.lastEmittedState === null) {
     const window = w.ring.slice(-(decoded.length + SNIFF_OVERLAP));
     const banner = sniffRuntime(window);
-    let sniffed = banner ? coercePublicRuntime(banner) : null;
+    let sniffed = screenPublicRuntime(banner);
     if (!sniffed) sniffed = sniffLiveRuntime(w.ring.slice(-2048));
     if (sniffed) identifyRuntime(w, sniffed, "banner");
   }
@@ -2022,7 +2024,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       applyProblem || w.codexScreen || programOwned
         ? null
         : classifyTail(w.runtime, plain, fresh, { preStripped: true });
-    if (cls === "blocked" && (w.runtime === "claude" || w.runtime === "pi")) {
+    if (cls === "blocked" && (w.runtime === "claude" || w.runtime === "pi" || w.runtime === "antigravity")) {
       // With hooks, a permission dialog exists only while a tool call waits;
       // anything else that matches is transcript text that looks like one.
       if (!hookOwned || w.pendingToolCalls > 0) {
@@ -2308,6 +2310,7 @@ function runtimeLabel(runtime: PublicAgentRuntime | null): string {
   if (runtime === "codex") return "Codex";
   if (runtime === "grok") return "Grok";
   if (runtime === "pi") return "Pi";
+  if (runtime === "antigravity") return "Antigravity";
   return "Terminal";
 }
 

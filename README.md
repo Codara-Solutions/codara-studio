@@ -24,8 +24,8 @@ place to run several of them side by side, across projects and accounts.
   workspace per project folder, local or over SSH. Shell integration for zsh,
   bash and PowerShell lets Codara tell when a command or an agent turn starts
   and ends. Your shell startup files are never edited.
-- **Agent CLIs in panes.** The **+** menu opens a Claude Code, Codex, Grok or
-  Pi pane in one click. Codara notices when Claude Code, Codex, Grok or Pi
+- **Agent CLIs in panes.** The **+** menu opens a Claude Code, Codex, Grok,
+  Pi or Antigravity (`agy`) pane in one click. Codara notices when one of them
   finishes a turn or needs you, even in a background workspace.
 - **Cora, the orchestrator.** Describe the work in a Cora chat. Cora plans it,
   hands pieces to Claude, Codex, Grok or Pi workers in their own panes,

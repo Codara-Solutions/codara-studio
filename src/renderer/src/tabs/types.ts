@@ -79,7 +79,7 @@ export interface TerminalLeafHibernation {
 // itself lives in the CLI's own on-disk history and is rehydrated by --resume.
 // Unlike `worker`/`autorun` (transient, stripped on save), this survives restart.
 export interface TerminalAgentSession {
-  runtime: "claude" | "codex" | "grok" | "pi";
+  runtime: "claude" | "codex" | "grok" | "pi" | "antigravity";
   /** Frozen native Claude account. Undefined is legacy personal/unset. */
   nativeClaudeProfileId?: string;
   /** Frozen native Codex account home. Undefined is legacy/personal. */
