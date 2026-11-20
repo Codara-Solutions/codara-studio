@@ -1322,6 +1322,14 @@ const api = {
     exists: (id: string): Promise<boolean> => ipcRenderer.invoke("pty:exists", { id }),
     resourceSnapshot: (): Promise<PtyResourceSnapshot> =>
       ipcRenderer.invoke("pty:resourceSnapshot"),
+    // Panes whose shell is running a command (OSC 133/633 C without its D):
+    // the current set once, then each change.
+    shellBusyIds: (): Promise<string[]> => ipcRenderer.invoke("pty:shellBusyIds"),
+    onShellBusy: (handler: (change: { id: string; busy: boolean }) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, change: { id: string; busy: boolean }) => handler(change);
+      ipcRenderer.on("pty:shell-busy", listener);
+      return () => ipcRenderer.off("pty:shell-busy", listener);
+    },
     pause: (id: string): Promise<void> => ipcRenderer.invoke("pty:pause", { id }),
     resume: (id: string, redraw = false): Promise<void> =>
       ipcRenderer.invoke("pty:resume", { id, redraw }),

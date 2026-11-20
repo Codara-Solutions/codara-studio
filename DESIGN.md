@@ -619,7 +619,44 @@ child row lighter than its parent), GitHub's PR list for the check glyphs.
   worktree leaves the rail. Test and build output never counts as something
   a worktree holds.
 
+## Tab counts in the rail (2026-11)
+
+**Chosen:** the number at a row's right edge counts tabs, not agents: "3"
+muted while none of the workspace's three tabs runs, "1/3" in its accent
+while one does, in the same place, colours and type as the agent number it
+replaces. Nested worktree rows get the same number for their own tabs, and
+none at all while they have no tab open. Asked for on 2026-11-20: "x
+running / x opened", "it should be about tabs".
+
+**Why:** the agent number did not say which workspaces hold open tabs, and a
+worktree row said nothing about its tabs, so the rail could not show where
+work is open.
+
+**Rules:**
+
+- A tab is one the tab bar shows for that workspace: terminals, agent tabs,
+  browsers, editors, diffs, Cora chats. Worker and Runs tabs (they live in
+  the chat panel) and docked tabs (inside their host's grid) are not.
+- A tab runs while a Cora chat's run is live, or a terminal has, in any
+  pane, an agent working (mid-turn, in the background, quiet or starting) or
+  a shell running a command (shell integration's OSC 133/633 C, until D).
+  An agent pane follows its agent only: its shell is busy for as long as the
+  CLI is open. Browsers and editors never run.
+- Each row counts its own workspace's tabs; a project does not add its
+  worktrees' tabs. The tooltip and accessible name say it in words: "1 of 3
+  tabs running", "3 tabs open", plus ", 1 agent sleeping" while an agent of
+  the row sleeps.
+- A workspace shows a number once its tabs are live: opened since the app
+  started, or holding an agent session restored at launch. Others show none.
+- A folded project still says an agent works in one of its worktrees: the
+  row stays busy (`aria-busy`) and its tile keeps the working ring.
+
 ## One home for agent counts (2026-10)
+
+Superseded on 2026-11-20 by "Tab counts in the rail": the number counts
+tabs. The first rule's family census now drives the project's busy state
+and working ring, not a number; the rules about the line under the name
+still hold.
 
 **Chosen:** B, number only. The number at a workspace row's right edge is the
 one place the rail counts agents: a muted "3" while they are idle, "1/3" in

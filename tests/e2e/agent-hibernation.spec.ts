@@ -65,9 +65,8 @@ test("an idle Claude pane in a background workspace sleeps and resumes when open
     });
     // Stopped for real, and the workspace still counts it, as asleep.
     await expect.poll(() => isAlive(first[0].pid), { timeout: 10_000 }).toBe(false);
-    const count = workspaceA.getByTestId("workspace-agent-count");
-    await expect(count).toHaveAttribute("aria-label", /1 sleeping$/);
-    await expect(count).toHaveAttribute("data-sleeping", "1");
+    await expect(workspaceA).toHaveAttribute("data-agent-sleeping", "1");
+    await expect(workspaceA.getByTestId("workspace-tab-count")).toHaveAttribute("aria-label", /, 1 agent sleeping$/);
     expect(logs.some((line) => line.includes(`pane=${PANE_ID} claude is sleeping`))).toBe(true);
 
     // Opening the workspace resumes the same session in the same pane.
@@ -77,7 +76,7 @@ test("an idle Claude pane in a background workspace sleeps and resumes when open
     expect(launches[1].pid).not.toBe(first[0].pid);
     await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });
     await expect(page.getByTestId("pane-sleeping-chip")).toHaveCount(0);
-    await expect(count).not.toHaveAttribute("data-sleeping", /.+/);
+    await expect(workspaceA).not.toHaveAttribute("data-agent-sleeping");
     expect(
       await terminalNode.evaluate(
         (node) => (window as unknown as { __codaraKeptTerminalNode?: Element }).__codaraKeptTerminalNode === node,

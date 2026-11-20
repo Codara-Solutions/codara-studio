@@ -132,6 +132,7 @@ import {
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useAgentHibernation } from "./lib/useAgentHibernation";
 import { sleepingPaneIds } from "./lib/agentHibernation";
+import { railTabCount, type RailTabCount } from "./tabs/railTabCount";
 import type { TerminalLeafHibernation } from "./tabs/types";
 import { useChatSurfaces } from "./tabs/chatSurfaces";
 import {
@@ -1508,6 +1509,50 @@ export default function App() {
     setWorkspaceAgentCounts(agentsByWorkspaceId);
     return () => setWorkspaceAgentCounts(null);
   }, [agentsByWorkspaceId]);
+
+  // Panes whose shell runs a command, across every workspace. Main pushes each
+  // change; the first read covers a renderer that loaded after them.
+  const [busyShellPaneIds, setBusyShellPaneIds] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    const heard = new Set<string>();
+    const apply = ({ id, busy }: { id: string; busy: boolean }) => {
+      heard.add(id);
+      setBusyShellPaneIds((current) => {
+        if (current.has(id) === busy) return current;
+        const next = new Set(current);
+        if (busy) next.add(id);
+        else next.delete(id);
+        return next;
+      });
+    };
+    const off = window.spark.pty.onShellBusy?.(apply);
+    // An event that arrived before the read is newer than it.
+    void window.spark.pty.shellBusyIds?.().then((ids) => {
+      const fresh = ids.filter((id) => !heard.has(id));
+      if (fresh.length > 0) setBusyShellPaneIds((current) => new Set([...current, ...fresh]));
+    }).catch(() => undefined);
+    return () => off?.();
+  }, []);
+
+  // The rail's number: each workspace's tabs and how many run (railTabCount).
+  const tabCountsByWorkspaceId = useMemo(() => {
+    const runningRunIds = new Set(
+      globalRuns.runs.filter((run) => isRunningStatus(run.status)).map((run) => run.id),
+    );
+    const m: Record<string, RailTabCount> = {};
+    for (const w of workspaces) {
+      const layoutTabs = w.id === tabs.tabsWorkspaceId
+        ? tabs.tabs
+        : tabs.inactiveWorkspaceLayouts.find((layout) => layout.workspaceId === w.id)?.tabs ?? [];
+      m[w.id] = railTabCount(layoutTabs, {
+        runningRunIds,
+        agentPaneIds: terminalAgents[w.id],
+        workingPaneIds: terminalWorking[w.id],
+        busyShellPaneIds,
+      });
+    }
+    return m;
+  }, [workspaces, globalRuns.runs, terminalWorking, terminalAgents, busyShellPaneIds, tabs.tabs, tabs.tabsWorkspaceId, tabs.inactiveWorkspaceLayouts]);
 
   // Reclaim activity-spin records for workspaces that no longer exist: a
   // workspace deleted while a hidden pane was mid-turn never receives a
@@ -7090,6 +7135,7 @@ export default function App() {
             toneByWorkspaceId={toneByWorkspaceId}
             workingByWorkspaceId={workingByWorkspaceId}
             agentsByWorkspaceId={agentsByWorkspaceId}
+            tabCountsByWorkspaceId={tabCountsByWorkspaceId}
             branchByWorkspaceId={branchByWorkspaceId}
             worktreeByWorkspaceId={worktreeByWorkspaceId}
             worktreeStatesLoaded={worktreeStatesLoaded}
@@ -7242,6 +7288,7 @@ export default function App() {
             toneByWorkspaceId={toneByWorkspaceId}
             workingByWorkspaceId={workingByWorkspaceId}
             agentsByWorkspaceId={agentsByWorkspaceId}
+            tabCountsByWorkspaceId={tabCountsByWorkspaceId}
             branchByWorkspaceId={branchByWorkspaceId}
             worktreeByWorkspaceId={worktreeByWorkspaceId}
             worktreeStatesLoaded={worktreeStatesLoaded}

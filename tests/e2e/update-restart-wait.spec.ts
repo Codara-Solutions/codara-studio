@@ -44,8 +44,8 @@ test("an update restart waits for a working terminal agent", async () => {
     await input.focus();
     await input.pressSequentially("codex", { delay: 2 });
     await input.press("Enter");
-    await expect(page.locator('[data-workspace-id="ws-wait"]').getByTestId("workspace-agent-count"))
-      .toHaveAttribute("data-working", "true", { timeout: 20_000 });
+    await expect(page.locator('[data-workspace-id="ws-wait"]'))
+      .toHaveAttribute("data-agent-count", /^1\//, { timeout: 20_000 });
     // The rail counts an agent from the moment it starts; the restart gate
     // only sees it once main has read its working footer. Keep awake reports
     // main's view, so waiting for it closes that gap.

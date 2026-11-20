@@ -220,7 +220,7 @@ test("a workspace counts its agents in its number, says what needs you in one li
         expect(fresh).toBeTruthy();
         panes.push(await startAgent(page, fresh!, scripts[i]));
       }
-      await expect(row(page, "ws-a").getByTestId("workspace-agent-count")).toHaveText("3", { timeout: 20_000 });
+      await expect(row(page, "ws-a")).toHaveAttribute("data-agent-count", "3", { timeout: 20_000 });
       for (const paneId of panes) await prompt(page, paneId, "go");
     });
 
@@ -229,13 +229,11 @@ test("a workspace counts its agents in its number, says what needs you in one li
       // Look elsewhere, as you would while they work.
       await row(page, "ws-b").evaluate((element) => (element as HTMLElement).click());
       await expect(row(page, "ws-b")).toHaveAttribute("data-active", "true");
-      const count = row(page, "ws-a").getByTestId("workspace-agent-count");
-      await expect(count).toHaveText("2/3", { timeout: 20_000 });
-      await expect(count).toHaveAttribute("aria-label", "2 of 3 agents working");
+      await expect(row(page, "ws-a")).toHaveAttribute("data-agent-count", "2/3", { timeout: 20_000 });
       await expect(summary).toHaveText("1 needs you", { timeout: 20_000 });
       await expect(summary.locator('[data-part="needs-you"]')).toHaveText("1 needs you");
       await expect(summary).toHaveAttribute("data-needs-you", "true");
-      // Hover says who needs you and why; counting agents is the number's job.
+      // Hover says who needs you and why; it never tallies agents.
       await expect(summary).toHaveAttribute("title", /needs you: Allow npm test\?/);
       await expect(summary).not.toHaveAttribute("title", /working|idle/);
       await expect(children(page, "ws-a")).toHaveCount(0);

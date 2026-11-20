@@ -51,6 +51,8 @@ async function prepare(): Promise<Fixture> {
   for (const [key, value] of Object.entries(process.env)) if (value !== undefined) base[key] = value;
   delete base.ELECTRON_RUN_AS_NODE;
   delete base.ELECTRON_RENDERER_URL;
+  // An agent's own shell runs this suite with integration off; the panes here need it.
+  delete base.SPARK_NO_SHELL_INTEGRATION;
   const gitEnv = { ...base, GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: "1" };
 
   execFileSync("git", ["init", "-q", "-b", "main", repo], { env: gitEnv });
@@ -189,7 +191,8 @@ setTimeout(() => process.exit(0), 170000);
   );
   const shell = join(binDir, "bash");
   // Codara reads PATH from a login shell; the fake gh must win there too.
-  await writeExecutable(shell, `#!/bin/sh\nexport PATH='${binDir}':"$PATH"\nexec /bin/bash --noprofile --norc "$@"\n`);
+  // No --norc: Codara's shell integration loads, so a running command shows.
+  await writeExecutable(shell, `#!/bin/sh\nexport PATH='${binDir}':"$PATH"\nexec /bin/bash --noprofile "$@"\n`);
 
   const before = new Date(Date.now() - 60_000).toISOString();
   const copy = (id: string, cwd: string, branch: string) => ({
@@ -235,7 +238,6 @@ setTimeout(() => process.exit(0), 170000);
       SPARK_HOME_DIR: home,
       SPARK_USER_DATA_DIR: home,
       SPARK_SKIP_LEGACY_MIGRATION: "1",
-      SPARK_NO_SHELL_INTEGRATION: "1",
       SPARK_ALLOW_MULTI: "1",
       SPARK_E2E_PR_WATCH_TICK_MS: "1000",
       CODARA_CHROME_LINK: "0",
@@ -313,19 +315,50 @@ test("worktrees hang under their project with their PR and their agent", async (
       const line = row(page, "wt-agent").getByTestId("worktree-agent-line");
       await expect(line).toHaveAttribute("data-state", "working", { timeout: 20_000 });
       await expect(line).toContainText("Parser rewrite, tests next", { timeout: 10_000 });
-      // The project's number covers its worktrees' agents; its line does not
-      // repeat that count (DESIGN.md, "One home for agent counts").
-      const count = row(page, "ws-app").getByTestId("workspace-agent-count");
-      await expect(count).toHaveText("1/1");
-      await expect(count).toHaveAttribute("data-working", "true");
-      await expect(count).toHaveAttribute("aria-label", "1 of 1 agent working, 1 in worktree");
+      // The project's census covers its worktrees' agents; its line does not
+      // repeat a count (DESIGN.md, "One home for agent counts").
+      await expect(row(page, "ws-app")).toHaveAttribute("data-agent-count", "1/1");
       await expect(row(page, "ws-app").getByTestId("workspace-agents-summary")).toHaveCount(0);
       const order = await children(page, "ws-app")
         .locator(":scope > [data-workspace-id]")
         .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-workspace-id")));
       expect(order).toEqual(["wt-agent", "wt-pr", "wt-idle"]);
+    });
+
+    await test.step("each row counts its own tabs and how many run; a row without one stays quiet", async () => {
+      const newTerminal = process.platform === "darwin" ? "Meta+t" : "Control+t";
+      const tabs = (workspaceId: string) => row(page, workspaceId).getByTestId("workspace-tab-count");
+      // A new workspace opens on a draft chat; the agent's terminal is the second tab.
+      await expect(tabs("wt-agent")).toHaveText("1/2");
+      await page.keyboard.press(newTerminal);
+      await expect(tabs("wt-agent")).toHaveText("1/3", { timeout: 10_000 });
+      await expect(tabs("wt-agent")).toHaveAttribute("aria-label", "1 of 3 tabs running");
+      await expect(tabs("wt-agent")).toHaveAttribute("data-running", "true");
       await row(page, "ws-other").click();
+      await expect(row(page, "ws-other")).toHaveAttribute("data-active", "true");
+      await expect(tabs("ws-other")).toHaveText("2");
+      await expect(tabs("ws-other")).toHaveAttribute("aria-label", "2 tabs open");
+      // Hidden now, the worktree's agent keeps its tab running.
+      await expect(tabs("wt-agent")).toHaveText("1/3");
+      for (const id of ["wt-pr", "wt-idle", "ws-app"]) await expect(tabs(id)).toHaveCount(0);
       await shots(page, "rail-worktrees");
+    });
+
+    await test.step("a shell running a command makes its tab run, also while its workspace is hidden", async () => {
+      const tabs = row(page, "ws-other").getByTestId("workspace-tab-count");
+      const pane = page.locator("[data-terminal-pane-id]:visible").first();
+      await page.getByRole("tab", { name: /terminals/i }).evaluate((tab) => (tab as HTMLElement).click());
+      await expect(pane).toBeVisible({ timeout: 10_000 });
+      const input = pane.locator(".xterm-helper-textarea");
+      await input.focus();
+      await input.pressSequentially("sleep 20", { delay: 2 });
+      await input.press("Enter");
+      await expect(tabs).toHaveText("1/2", { timeout: 10_000 });
+      await row(page, "wt-agent").click();
+      await expect(row(page, "wt-agent")).toHaveAttribute("data-active", "true");
+      await expect(tabs).toHaveText("1/2");
+      await expect(tabs).toHaveText("2", { timeout: 30_000 });
+      await row(page, "ws-other").click();
     });
 
     await test.step("a click anywhere on the row opens the project; the chevron only folds it", async () => {
@@ -338,9 +371,9 @@ test("worktrees hang under their project with their PR and their agent", async (
       await expect(toggle).toHaveAttribute("aria-expanded", "false");
       await expect(children(page, "ws-app")).toHaveCount(0);
       await expect(row(page, "ws-other")).toHaveAttribute("data-active", "true");
-      // Folded, the project still says what works inside it.
-      await expect(row(page, "ws-app").getByTestId("workspace-agent-count")).toHaveText("1/1");
-      await expect(row(page, "ws-app").getByTestId("workspace-agent-count")).toHaveAttribute("data-working", "true");
+      // Folded, the project still says what works inside it: its tile keeps the working ring.
+      await expect(row(page, "ws-app").getByTestId("workspace-icon-tile")).toHaveClass(/is-working/);
+      await expect(row(page, "ws-app")).toHaveAttribute("data-agent-count", "1/1");
       await expect(row(page, "ws-app")).toHaveAttribute("aria-busy", "true");
       await toggle.click();
       await row(page, "wt-idle").getByTestId("worktree-agent-line").click();

@@ -164,6 +164,9 @@ interface RailProps {
   // the quiet count at the row's right edge; zero hides it. Memoized by App
   // like the maps above.
   agentsByWorkspaceId?: Record<string, { total: number; working: number; sleeping?: number }>;
+  // Per-workspace tabs and how many run (tabs/railTabCount): the number at
+  // the row's right edge, top-level and nested rows alike; zero tabs hides it.
+  tabCountsByWorkspaceId?: Record<string, { open: number; running: number }>;
   // Current git branch per workspace for the row subtitle; null/absent hides it.
   branchByWorkspaceId?: Record<string, string | null>;
   // Merge and folder state of each copy-branch workspace (useWorktreeRailStates):
@@ -835,6 +838,8 @@ function WorkspaceRail(props: RailProps) {
     agentTotal: props.agentsByWorkspaceId?.[w.id]?.total ?? 0,
     agentWorking: props.agentsByWorkspaceId?.[w.id]?.working ?? 0,
     agentSleeping: props.agentsByWorkspaceId?.[w.id]?.sleeping ?? 0,
+    tabsOpen: props.tabCountsByWorkspaceId?.[w.id]?.open ?? 0,
+    tabsRunning: props.tabCountsByWorkspaceId?.[w.id]?.running ?? 0,
     branch: props.branchByWorkspaceId?.[w.id] ?? null,
     missing: missingWorkspaceIds.has(w.id) || props.worktreeByWorkspaceId?.[w.id]?.missing === true,
     worktree: props.worktreeByWorkspaceId?.[w.id] ?? null,
@@ -2053,14 +2058,16 @@ interface RowProps {
   dragOffset?: number;
   tone?: ChatStatusTone | null;
   working?: boolean;
-  /** Agent sessions this workspace holds right now, idle included; 0 hides the count. */
+  /** Agent sessions this workspace holds right now, idle included (a project's covers its worktrees). */
   agentTotal?: number;
-  /** How many of those are mid-turn; brightens the count. */
+  /** How many of those are mid-turn; marks the row busy. */
   agentWorking?: number;
   /** How many of those Codara stopped to save memory (agent hibernation). */
   agentSleeping?: number;
-  /** A project's row: how many of its counted agents work in its worktrees. */
-  agentInWorktrees?: number;
+  /** Tabs open in this workspace's own tab bar; 0 hides the count. */
+  tabsOpen?: number;
+  /** How many of those run something now; brightens the count. */
+  tabsRunning?: number;
   /** Current git branch (or short hash when detached); null hides the subtitle. */
   branch?: string | null;
   /** The workspace's folder is not on disk right now (moved/renamed/unmounted). */
@@ -2156,7 +2163,6 @@ function WorkspaceFamily({
       const props = childProps.get(worktree.id)!;
       return { total: props.agentTotal, working: props.agentWorking, sleeping: props.agentSleeping };
     }),
-    [...family.active, ...family.merged],
   );
   const expandable = family.own.length > 0 || worktrees.length > 0 || external.length > 0;
   const open = useRailFold(project.id, worktrees.length > 0 || external.length > 0) && expandable;
@@ -2173,10 +2179,11 @@ function WorkspaceFamily({
     <>
       <WorkspaceRow
         {...projectProps}
+        // Folded, the tile's working ring still shows an agent working in a worktree.
+        working={projectProps.working || familyCount.working > 0}
         agentTotal={familyCount.total}
         agentWorking={familyCount.working}
         agentSleeping={familyCount.sleeping}
-        agentInWorktrees={familyCount.inWorktrees}
         fold={{ expandable, open, onToggle: () => setRailFold(project.id, !open) }}
         rollupLines={family.all}
       />
@@ -2235,7 +2242,8 @@ function WorkspaceRow({
   agentTotal = 0,
   agentWorking = 0,
   agentSleeping = 0,
-  agentInWorktrees = 0,
+  tabsOpen = 0,
+  tabsRunning = 0,
   branch = null,
   missing = false,
   worktree = null,
@@ -2461,6 +2469,10 @@ function WorkspaceRow({
       // agent working in a folded worktree still marks the project busy.
       aria-busy={working || agentWorking > 0}
       data-agent-working={working ? "true" : undefined}
+      // The agent census the number showed before it counted tabs, as data
+      // for the specs and inspectors that follow agents ("1/3", "3").
+      data-agent-count={agentTotal > 0 ? (agentWorking > 0 ? `${agentWorking}/${agentTotal}` : String(agentTotal)) : undefined}
+      data-agent-sleeping={agentSleeping > 0 ? String(agentSleeping) : undefined}
       data-copy-branch={ws.copyBranch ? "true" : undefined}
       style={{
         display: "flex",
@@ -2794,14 +2806,8 @@ function WorkspaceRow({
           </div>
         )}
 
-        {agentTotal > 0 && !editing && !nested && (
-          <AgentCount
-            total={agentTotal}
-            working={agentWorking}
-            sleeping={agentSleeping}
-            inWorktrees={agentInWorktrees}
-            accent={accent}
-          />
+        {tabsOpen > 0 && !editing && (
+          <TabCount open={tabsOpen} running={tabsRunning} sleeping={agentSleeping} accent={accent} />
         )}
 
         {!editing && (canCleanUp || canRemoveFromRail) && (rowHover || cleaning || moreFocus) && (
@@ -3260,31 +3266,18 @@ function RowMenuItem({
   );
 }
 
-// "N agents working" pill at a workspace row's right edge. Deliberately unlike
-// the folder header's bare muted count (that one says how many workspaces a
-// folder holds): this reads in the workspace's own accent, on a tinted pill,
-// with a small live dot in front of the number. The dot is static; the
-// workspace color dot at the row's left already animates while work is live,
-// and two spinners on one row would fight for attention.
-// The row's agent census as "working over total": a muted "3" when the
-// workspace holds three idle agent sessions (Cora managers and workers plus
-// every manual Claude Code / Codex / Grok pane), and "1/3" in the workspace
-// accent the moment one of them is mid-turn. Same 10px tabular type as the
-// folder header's member count; the slash and the row placement keep the two
-// apart, and no glyph or chip is drawn so the rail stays quiet.
-// It is the row's one agent count: the line under the name no longer repeats
-// it (DESIGN.md, "One home for agent counts"). A project's number covers its
-// worktrees too, and its label says how many of those agents work there.
-function AgentCount(props: { total: number; working: number; sleeping?: number; inWorktrees?: number; accent: string }) {
-  const { total, working, sleeping = 0, inWorktrees = 0, accent } = props;
-  const base =
-    working > 0
-      ? `${working} of ${total} agent${total === 1 ? "" : "s"} working`
-      : `${total} agent${total === 1 ? "" : "s"} idle`;
+// The row's tabs as "running over open" (DESIGN.md, "Tab counts in the
+// rail"): a muted "3" while none of its three tabs runs, "1/3" in the
+// workspace accent while one does. Same 10px tabular type as the folder
+// header's member count; the slash and the row placement keep the two apart,
+// and no glyph or chip is drawn so the rail stays quiet. Every row counts
+// only its own workspace's tabs: a worktree's tabs show on its nested row.
+function TabCount(props: { open: number; running: number; sleeping?: number; accent: string }) {
+  const { open, running, sleeping = 0, accent } = props;
+  const tabs = `tab${open === 1 ? "" : "s"}`;
   const label = [
-    base,
-    sleeping > 0 ? `${sleeping} sleeping` : null,
-    inWorktrees > 0 ? `${inWorktrees} in worktree${inWorktrees === 1 ? "" : "s"}` : null,
+    running > 0 ? `${running} of ${open} ${tabs} running` : `${open} ${tabs} open`,
+    sleeping > 0 ? `${sleeping} agent${sleeping === 1 ? "" : "s"} sleeping` : null,
   ]
     .filter(Boolean)
     .join(", ");
@@ -3293,13 +3286,12 @@ function AgentCount(props: { total: number; working: number; sleeping?: number; 
       role="status"
       title={label}
       aria-label={label}
-      data-testid="workspace-agent-count"
-      data-working={working > 0 ? "true" : "false"}
-      data-sleeping={sleeping > 0 ? String(sleeping) : undefined}
+      data-testid="workspace-tab-count"
+      data-running={running > 0 ? "true" : "false"}
       style={{
         flex: "0 0 auto",
         marginRight: 2,
-        color: working > 0 ? accent : "var(--muted-2)",
+        color: running > 0 ? accent : "var(--muted-2)",
         fontSize: 10,
         fontWeight: 600,
         fontVariantNumeric: "tabular-nums",
@@ -3308,13 +3300,13 @@ function AgentCount(props: { total: number; working: number; sleeping?: number; 
         transition: "color 240ms ease",
       }}
     >
-      {working > 0 ? (
+      {running > 0 ? (
         <>
-          {working}
-          <span style={{ color: "var(--muted-2)" }}>/{total}</span>
+          {running}
+          <span style={{ color: "var(--muted-2)" }}>/{open}</span>
         </>
       ) : (
-        total
+        open
       )}
     </span>
   );

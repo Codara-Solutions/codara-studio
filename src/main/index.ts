@@ -331,6 +331,8 @@ function liveMainWebContents(): WebContents | null {
   return wc.isDestroyed() ? null : wc;
 }
 
+pty.setShellBusySink((change) => liveMainWebContents()?.send("pty:shell-busy", change));
+
 function sendWindowState(win: BrowserWindow): void {
   if (win.webContents.isDestroyed()) return;
   win.webContents.send("window:state-changed", {
