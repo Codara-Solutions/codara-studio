@@ -17,11 +17,14 @@ timestamps, so the same sources always give the same bytes. Bump `version` in
 
 ## Listing
 
-- Name: Codara
+- Name: Codara Studio (the manifest `name`; `short_name` stays "Codara", which
+  is what the toolbar and the popup show)
 - Summary (132 characters max): Let the agents you run in Codara use the
   browser tabs you share, with your signed-in sessions.
 - Category: Developer Tools
 - Language: English
+- Small promo tile (440x280 PNG): `store/promo-tile-440x280.png`. Without
+  it the store search shows the icon alone in a white box.
 - Icons: `icons/icon-128.png` (store icon). Screenshots (1280x800, up to
   five) are taken headless at release time: the agent's pointer and Stop on
   a page, the popup light and dark, and Codara's connect card.

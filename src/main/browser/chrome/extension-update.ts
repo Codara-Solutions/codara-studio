@@ -15,7 +15,7 @@ import { cpSync, existsSync, readdirSync, readFileSync, realpathSync, renameSync
 import { join, relative, sep } from "node:path";
 
 /** What the store zip leaves out (extensions/chrome/build/pack.mjs DEV_FILES); the copy leaves out the same. */
-export const EXTENSION_DEV_FILES = new Set(["build", "test", "dist", "package.json", ".gitignore", "README.md", "STORE.md"]);
+export const EXTENSION_DEV_FILES = new Set(["build", "test", "dist", "store", "package.json", ".gitignore", "README.md", "STORE.md"]);
 
 function isDevFile(rel: string): boolean {
   return EXTENSION_DEV_FILES.has(rel.split(/[\\/]/)[0] ?? "");
