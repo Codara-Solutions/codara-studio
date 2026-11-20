@@ -2,7 +2,7 @@ import React, { useState } from "react";
 
 import { extensionUpdateNotice, NOT_FROM_CODARA_FOLDER, type ChromeLinkBrowserState, type ChromeLinkIncompatibleExtension } from "@shared/chrome-link";
 import { SettingRow, SettingsSection, ToggleRow } from "../settings/SettingsPrimitives";
-import ChromeConnectCard, { CHROME_STORE_URL } from "./ChromeConnectCard";
+import ChromeConnectCard, { CHROME_STORE_ID, CHROME_STORE_URL } from "./ChromeConnectCard";
 import KeepAgentsInChromeRow from "./KeepAgentsInChromeRow";
 import { formatWhen, useChromeLink } from "./useChromeLink";
 import "./chrome-link.css";
@@ -220,10 +220,10 @@ export default function ChromeLinkSection(): React.ReactElement | null {
             ))}
           </div>
         ) : null}
-        {state.browsers.length > 0 ? (
+        {state.browsers.some((browser) => browser.extensionId === CHROME_STORE_ID) ? (
           <p className="chrome-connect__d">
             Working well for you?{" "}
-            <button type="button" className="chrome-connect__link" onClick={() => void window.spark.openInSystemBrowser(`${CHROME_STORE_URL}/reviews`)}>
+            <button type="button" className="chrome-connect__link" onClick={() => void run(() => window.spark.openInSystemBrowser(`${CHROME_STORE_URL}/reviews`))}>
               Leave a review in the Chrome Web Store
             </button>
           </p>

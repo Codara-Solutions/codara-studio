@@ -12,7 +12,8 @@ import "./chrome-connect.css";
  * which Edge and Brave install from too. "Load unpacked instead" keeps the
  * folder route for a browser that cannot use the store, and for development.
  */
-export const CHROME_STORE_URL = "https://chromewebstore.google.com/detail/naefnckhpahogojgfpgbhaomphahamfh";
+export const CHROME_STORE_ID = "naefnckhpahogojgfpgbhaomphahamfh";
+export const CHROME_STORE_URL = `https://chromewebstore.google.com/detail/${CHROME_STORE_ID}`;
 export type ChromeInstallRoute = { kind: "unpacked" } | { kind: "store"; url: string };
 export const CHROME_INSTALL_ROUTE: ChromeInstallRoute = { kind: "store", url: CHROME_STORE_URL };
 
