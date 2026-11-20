@@ -30,13 +30,56 @@ const RESERVED: Record<LaunchArgRuntime, readonly string[]> = {
   codex: ["resume", "exec"],
   grok: ["--session-id", "-s", "--resume", "-r", "--continue", "-c", "--single", "-p", "--output-format"],
   pi: ["--session", "--resume", "-r", "--continue", "-c", "--print", "-p", "--mode"],
-  // Codara runs agy only interactively, for the person at the keyboard: the
-  // print and stream modes and remote control are never added to a launch.
-  antigravity: [
-    "--continue", "-c", "--conversation", "--print", "-p", "--prompt", "--output-format", "--input-format",
-    "--json-schema", "--print-timeout", "--remote-control", "--remote-agent",
-  ],
+  // agy is checked against an allowlist instead (ANTIGRAVITY_FLAGS below).
+  antigravity: [],
 };
+/**
+ * The only agy flags Settings may add (`agy --help`, 1.5.13), and whether
+ * each takes a value. agy parses flags the Go way: `-flag` is `--flag`,
+ * `--flag=value` works, and the first plain word starts a subcommand (`acp`,
+ * `remote-control`). Codara starts agy only for the person at the keyboard,
+ * so print, stream, prompt, resume, settings and remote flags stay out, as
+ * does any plain word that is not the one value of the flag before it.
+ */
+const ANTIGRAVITY_FLAGS: ReadonlyMap<string, boolean> = new Map([
+  ["mode", true],
+  ["model", true],
+  ["effort", true],
+  ["agent", true],
+  ["add-dir", true],
+  ["project", true],
+  ["log-file", true],
+  ["new-project", false],
+  ["sandbox", false],
+  ["dangerously-skip-permissions", false],
+]);
+
+function checkAntigravityArgs(argv: readonly string[]): void {
+  const allowed = [...ANTIGRAVITY_FLAGS.keys()].map((name) => `--${name}`).join(", ");
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    const match = /^--?([a-z][a-z-]*)(?:=([\s\S]*))?$/.exec(arg);
+    const takesValue = match ? ANTIGRAVITY_FLAGS.get(match[1]) : undefined;
+    if (!match || takesValue === undefined) {
+      const shown = arg.startsWith("-") ? arg.split("=")[0] : `"${arg}"`;
+      throw new LaunchArgsError(`${shown} cannot be added for Antigravity. Allowed: ${allowed}.`);
+    }
+    const [, name, inline] = match;
+    if (!takesValue) {
+      if (inline !== undefined) throw new LaunchArgsError(`--${name} takes no value.`);
+      continue;
+    }
+    if (inline !== undefined) {
+      if (!inline) throw new LaunchArgsError(`--${name} needs a value.`);
+      continue;
+    }
+    const value = argv[index + 1];
+    if (value === undefined || value === "" || value.startsWith("-")) {
+      throw new LaunchArgsError(`--${name} needs a value right after it.`);
+    }
+    index += 1;
+  }
+}
 /**
  * Options that take every following word as another value. The Settings
  * flags sit right before what the user types after the command, so the
@@ -104,6 +147,7 @@ export function checkLaunchArgs(runtime: LaunchArgRuntime, text: string): Launch
     if (argv.length && !argv[0].startsWith("-")) {
       throw new LaunchArgsError(`Start with a flag, such as --verbose. "${argv[0]}" would be read as a prompt or a command.`);
     }
+    if (runtime === "antigravity") checkAntigravityArgs(argv);
     for (let index = 0; index < argv.length; index += 1) {
       const arg = argv[index];
       const flag = arg.includes("=") && arg.startsWith("--") ? arg.slice(0, arg.indexOf("=")) : arg;

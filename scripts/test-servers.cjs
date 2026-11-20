@@ -833,12 +833,24 @@ async function main() {
       ["grok", "-c", /set by Codara/],
       ["codex", `-c mcp_servers."codara-studio".command=x`, /set by Codara/],
       ["pi", "--mode rpc", /set by Codara/],
-      // agy runs only interactively: no print, stream or remote modes.
-      ["antigravity", "--print", /set by Codara/],
-      ["antigravity", "-p", /set by Codara/],
-      ["antigravity", "--output-format=stream-json", /set by Codara/],
-      ["antigravity", "--remote-control", /set by Codara/],
-      ["antigravity", "--continue", /set by Codara/],
+      // agy runs only interactively, from an allowlist: Go's flag parsing
+      // takes -flag as --flag and =value forms, and a plain word after a
+      // switch would start a subcommand.
+      ...[
+        "--print", "-print", "-p", "--p", "-p=true", "--prompt", "-prompt", "--prompt-interactive", "-i",
+        "--continue", "-continue", "-c", "--c", "-c=true", "-conversation=abc", "--conversation abc",
+        "--output-format=stream-json", "-output-format=stream-json", "-input-format=stream-json",
+        "--remote-control", "-remote-control", "-remote-agent", "--json-schema x.json", "--print-timeout=5s",
+        `--settings '{"a":1}'`, "--disable-slash-commands", "---mode plan", "--mode=plan --",
+      ].map((text) => ["antigravity", text, /cannot be added for Antigravity/]),
+      ["antigravity", "--sandbox acp", /"acp" cannot be added/],
+      ["antigravity", "--mode plan acp", /"acp" cannot be added/],
+      ["antigravity", "--sandbox remote-control start", /"remote-control" cannot be added/],
+      ["antigravity", "-- acp", /-- cannot be added/],
+      ["antigravity", "--mode", /needs a value right after it/],
+      ["antigravity", "--mode -p", /needs a value right after it/],
+      ["antigravity", "--model=", /needs a value/],
+      ["antigravity", "--sandbox=true", /takes no value/],
       ["claude", "--add-dir ../shared", /--add-dir=\.\.\/shared/],
       ["claude", `--verbose --allowedTools "Bash(git:*)"`, /one value per flag/],
       ["claude", "--disallowed-tools Bash --model opus", /one value per flag/],
@@ -856,6 +868,10 @@ async function main() {
     // The = form ends a variadic option at one value, so a typed prompt stays the prompt.
     assert.deepEqual(launch.checkLaunchArgs("claude", `--add-dir=../shared --add-dir=../b --allowedTools="Bash(git:*)"`).argv, ["--add-dir=../shared", "--add-dir=../b", "--allowedTools=Bash(git:*)"]);
     assert.deepEqual(launch.checkLaunchArgs("codex", "--image=shot.png").argv, ["--image=shot.png"]);
+    assert.deepEqual(
+      launch.checkLaunchArgs("antigravity", `-mode=plan --model gemini --effort high --add-dir ../b --sandbox --dangerously-skip-permissions --new-project --agent "my agent" --log-file=/tmp/a.log --project p`).ok,
+      true,
+    );
   });
 
   await check("launch arguments reach each launch and the typed-command files, nothing else", async () => {
@@ -897,6 +913,15 @@ async function main() {
     assert.deepEqual(typed("grok"), ["--disable-web-search"]);
     assert.deepEqual(typed("pi"), ["--thinking", "high"]);
     assert.deepEqual(typed("agy"), ["--mode", "plan"]);
+    // A settings file edited by hand gets no further at launch than in Settings.
+    fs.writeFileSync(
+      path.join(CODARA, "agent-launch-args.json"),
+      JSON.stringify({ version: 1, args: { antigravity: "--mode plan -print hi" }, claudeChrome: false }),
+    );
+    launch.resetLaunchArgsCacheForTests();
+    assert.deepEqual(launch.plainAgentLaunchArgs("antigravity", { userArgs: [] }), []);
+    await launch.writeShellArgsFiles();
+    assert.deepEqual(typed("agy"), [], "a hand-edited agy flag reached the typed-command file");
 
     await launch.saveLaunchArgsSettings({ args: { claude: "--no-chrome" }, claudeChrome: true });
     assert.ok(!launch.claudeLaunchArgs({ userArgs: [] }).includes("--chrome"), "--chrome next to --no-chrome");
