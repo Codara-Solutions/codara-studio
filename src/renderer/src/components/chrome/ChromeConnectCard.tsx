@@ -8,13 +8,13 @@ import "./chrome-link.css";
 import "./chrome-connect.css";
 
 /**
- * How the extension gets into the browser. Today the user loads Codara's
- * folder unpacked. Once the Chrome Web Store listing is live, a "store" route
- * with its URL turns the Add step into one "Add from Chrome Web Store"
- * button; the other steps and every check stay as they are.
+ * How the extension gets into the browser: the Chrome Web Store listing,
+ * which Edge and Brave install from too. "Load unpacked instead" keeps the
+ * folder route for a browser that cannot use the store, and for development.
  */
+export const CHROME_STORE_URL = "https://chromewebstore.google.com/detail/naefnckhpahogojgfpgbhaomphahamfh";
 export type ChromeInstallRoute = { kind: "unpacked" } | { kind: "store"; url: string };
-export const CHROME_INSTALL_ROUTE: ChromeInstallRoute = { kind: "unpacked" };
+export const CHROME_INSTALL_ROUTE: ChromeInstallRoute = { kind: "store", url: CHROME_STORE_URL };
 
 /**
  * How the add-on gets into Firefox. Today the user loads Codara's folder as a

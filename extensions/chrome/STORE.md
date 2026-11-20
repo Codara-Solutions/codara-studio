@@ -1,7 +1,9 @@
 # Chrome Web Store and Edge Add-ons
 
-The extension is prepared for the stores but not published. Publishing is a
-manual step in each store's dashboard.
+The extension is published in the Chrome Web Store:
+https://chromewebstore.google.com/detail/naefnckhpahogojgfpgbhaomphahamfh
+(Settings, Browser opens it). Each upload is a manual step in the store's
+dashboard; the Edge Add-ons store has no listing.
 
 ## Build the upload
 

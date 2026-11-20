@@ -124,6 +124,9 @@ for (const theme of ["codara-daylight", "codara-classic"] as const) {
 
       // And back: Chrome's steps are as they were.
       await browsers.getByRole("button", { name: "Chrome, Edge, Brave" }).click();
+      await expect(card.locator(".chrome-connect__h")).toHaveText("Add Codara to your browser");
+      await expect(card.getByRole("button", { name: "Add from Chrome Web Store" })).toBeVisible();
+      await card.getByRole("button", { name: "Load unpacked instead" }).click();
       await expect(card.locator(".chrome-connect__h")).toHaveText("Add the extension to your browser");
       await expect(card).toContainText("chrome://extensions");
     } finally {
