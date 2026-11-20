@@ -35,11 +35,12 @@ const RESERVED: Record<LaunchArgRuntime, readonly string[]> = {
 };
 /**
  * The only agy flags Settings may add (`agy --help`, 1.5.13), and whether
- * each takes a value. agy parses flags the Go way: `-flag` is `--flag`,
- * `--flag=value` works, and the first plain word starts a subcommand (`acp`,
- * `remote-control`). Codara starts agy only for the person at the keyboard,
- * so print, stream, prompt, resume, settings and remote flags stay out, as
- * does any plain word that is not the one value of the flag before it.
+ * each takes a value. agy parses flags the Go way: `-flag` is `--flag` and
+ * the first plain word starts a subcommand (`acp`, `remote-control`), so a
+ * value is written `--name=value` and no separate word is ever let through,
+ * whatever agy's own flag types turn out to be. Codara starts agy only for
+ * the person at the keyboard: print, stream, prompt, resume, settings and
+ * remote flags stay out.
  */
 const ANTIGRAVITY_FLAGS: ReadonlyMap<string, boolean> = new Map([
   ["mode", true],
@@ -55,9 +56,13 @@ const ANTIGRAVITY_FLAGS: ReadonlyMap<string, boolean> = new Map([
 ]);
 
 function checkAntigravityArgs(argv: readonly string[]): void {
-  const allowed = [...ANTIGRAVITY_FLAGS.keys()].map((name) => `--${name}`).join(", ");
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
+  const allowed = [...ANTIGRAVITY_FLAGS].map(([name, value]) => (value ? `--${name}=...` : `--${name}`)).join(", ");
+  for (const arg of argv) {
+    // Windows PowerShell 5.1 passes a " inside an argument unescaped, and a
+    // trailing \ escapes the closing quote: either would split the argument.
+    if (arg.includes('"') || arg.endsWith("\\")) {
+      throw new LaunchArgsError(`${arg.split("=")[0]}: a value cannot contain " or end with \\.`);
+    }
     const match = /^--?([a-z][a-z-]*)(?:=([\s\S]*))?$/.exec(arg);
     const takesValue = match ? ANTIGRAVITY_FLAGS.get(match[1]) : undefined;
     if (!match || takesValue === undefined) {
@@ -65,19 +70,8 @@ function checkAntigravityArgs(argv: readonly string[]): void {
       throw new LaunchArgsError(`${shown} cannot be added for Antigravity. Allowed: ${allowed}.`);
     }
     const [, name, inline] = match;
-    if (!takesValue) {
-      if (inline !== undefined) throw new LaunchArgsError(`--${name} takes no value.`);
-      continue;
-    }
-    if (inline !== undefined) {
-      if (!inline) throw new LaunchArgsError(`--${name} needs a value.`);
-      continue;
-    }
-    const value = argv[index + 1];
-    if (value === undefined || value === "" || value.startsWith("-")) {
-      throw new LaunchArgsError(`--${name} needs a value right after it.`);
-    }
-    index += 1;
+    if (!takesValue && inline !== undefined) throw new LaunchArgsError(`--${name} takes no value.`);
+    if (takesValue && !inline) throw new LaunchArgsError(`Write --${name}=value, with the value after =.`);
   }
 }
 /**

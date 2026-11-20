@@ -844,13 +844,20 @@ async function main() {
         `--settings '{"a":1}'`, "--disable-slash-commands", "---mode plan", "--mode=plan --",
       ].map((text) => ["antigravity", text, /cannot be added for Antigravity/]),
       ["antigravity", "--sandbox acp", /"acp" cannot be added/],
-      ["antigravity", "--mode plan acp", /"acp" cannot be added/],
+      ["antigravity", "--mode=plan acp", /"acp" cannot be added/],
       ["antigravity", "--sandbox remote-control start", /"remote-control" cannot be added/],
       ["antigravity", "-- acp", /-- cannot be added/],
-      ["antigravity", "--mode", /needs a value right after it/],
-      ["antigravity", "--mode -p", /needs a value right after it/],
-      ["antigravity", "--model=", /needs a value/],
+      // A value goes after =, never as a separate word: whatever agy's flag
+      // types are, no plain word can reach it as a subcommand.
+      ["antigravity", "--mode", /Write --mode=value/],
+      ["antigravity", "--model x", /Write --model=value/],
+      ["antigravity", "--model=", /Write --model=value/],
+      ["antigravity", "--new-project --model acp", /Write --model=value/],
+      ["antigravity", "--new-project acp", /"acp" cannot be added/],
       ["antigravity", "--sandbox=true", /takes no value/],
+      // Windows PowerShell 5.1 would split these arguments.
+      ["antigravity", `--model='x" acp "y'`, /cannot contain "/],
+      ["antigravity", `--add-dir='C:\\a b\\'`, /end with \\/],
       ["claude", "--add-dir ../shared", /--add-dir=\.\.\/shared/],
       ["claude", `--verbose --allowedTools "Bash(git:*)"`, /one value per flag/],
       ["claude", "--disallowed-tools Bash --model opus", /one value per flag/],
@@ -869,7 +876,7 @@ async function main() {
     assert.deepEqual(launch.checkLaunchArgs("claude", `--add-dir=../shared --add-dir=../b --allowedTools="Bash(git:*)"`).argv, ["--add-dir=../shared", "--add-dir=../b", "--allowedTools=Bash(git:*)"]);
     assert.deepEqual(launch.checkLaunchArgs("codex", "--image=shot.png").argv, ["--image=shot.png"]);
     assert.deepEqual(
-      launch.checkLaunchArgs("antigravity", `-mode=plan --model gemini --effort high --add-dir ../b --sandbox --dangerously-skip-permissions --new-project --agent "my agent" --log-file=/tmp/a.log --project p`).ok,
+      launch.checkLaunchArgs("antigravity", `-mode=plan --model=gemini --effort=high --add-dir='C:\\a b' --sandbox --dangerously-skip-permissions --new-project --agent="my agent" --log-file=/tmp/a.log -project=p`).ok,
       true,
     );
   });
@@ -894,7 +901,7 @@ async function main() {
         codex: "--search",
         grok: "--disable-web-search",
         pi: "--thinking high",
-        antigravity: "--mode plan",
+        antigravity: "--mode=plan",
       },
       claudeChrome: true,
     });
@@ -906,17 +913,17 @@ async function main() {
     assert.deepEqual(launch.plainAgentLaunchArgs("grok", { userArgs: ["login"] }), []);
     assert.deepEqual(launch.plainAgentLaunchArgs("pi", { userArgs: [] }), ["--thinking", "high"]);
     assert.deepEqual(launch.plainAgentLaunchArgs("pi", { userArgs: ["install", "x"] }), []);
-    assert.deepEqual(launch.plainAgentLaunchArgs("antigravity", { userArgs: [] }), ["--mode", "plan"]);
+    assert.deepEqual(launch.plainAgentLaunchArgs("antigravity", { userArgs: [] }), ["--mode=plan"]);
     assert.deepEqual(launch.plainAgentLaunchArgs("antigravity", { userArgs: ["mcp", "list"] }), []);
     const typed = (cli) => fs.readFileSync(path.join(dir, cli, "args.txt"), "utf8").split("\n").filter(Boolean);
     assert.deepEqual(typed("claude").slice(-2), ["--verbose", "--chrome"]);
     assert.deepEqual(typed("grok"), ["--disable-web-search"]);
     assert.deepEqual(typed("pi"), ["--thinking", "high"]);
-    assert.deepEqual(typed("agy"), ["--mode", "plan"]);
+    assert.deepEqual(typed("agy"), ["--mode=plan"]);
     // A settings file edited by hand gets no further at launch than in Settings.
     fs.writeFileSync(
       path.join(CODARA, "agent-launch-args.json"),
-      JSON.stringify({ version: 1, args: { antigravity: "--mode plan -print hi" }, claudeChrome: false }),
+      JSON.stringify({ version: 1, args: { antigravity: "--mode=plan -print hi" }, claudeChrome: false }),
     );
     launch.resetLaunchArgsCacheForTests();
     assert.deepEqual(launch.plainAgentLaunchArgs("antigravity", { userArgs: [] }), []);

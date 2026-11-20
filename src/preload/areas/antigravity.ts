@@ -6,4 +6,5 @@ import { ipcRenderer } from "electron";
 
 export const antigravityApi = {
   installed: (): Promise<boolean> => ipcRenderer.invoke("antigravity:installed"),
+  runsInPane: (paneId: string): Promise<boolean> => ipcRenderer.invoke("antigravity:runs-in-pane", paneId),
 };

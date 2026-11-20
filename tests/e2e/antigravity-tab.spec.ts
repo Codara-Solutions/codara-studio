@@ -77,13 +77,23 @@ test("Antigravity opens in its own tab, shows its state, and comes back after a 
     await expect.poll(() => readStarts(fixture), { timeout: 30_000 }).toHaveLength(1);
     const [start] = await readStarts(fixture);
     expect(start.cwd).toBe(fixture.workspaceDir);
-    expect(start.args).toEqual(["--mode", "plan"]);
+    expect(start.args).toEqual(["--mode=plan"]);
 
     const chip = page.getByRole("status", { name: /^ANTIGRAVITY / });
     await expect(chip).toBeVisible({ timeout: 20_000 });
     await expect(tab.locator('[data-agent-runtime="antigravity"]')).toBeVisible({ timeout: 20_000 });
     await expect(page.getByRole("status", { name: "ANTIGRAVITY ready" })).toBeVisible({ timeout: 30_000 });
     await page.screenshot({ path: join(fixture.shots, "antigravity-3-tab.png") });
+
+    // A plain shell that only prints agy's command marker runs no agy, so it
+    // must not come back as an Antigravity pane after the restart.
+    await page.getByRole("tab", { name: /terminals/i }).evaluate((node) => (node as HTMLElement).click());
+    const shell = page.locator(".xterm-helper-textarea:visible").first();
+    await shell.focus();
+    await shell.pressSequentially(String.raw`printf '\033]633;E;agy\007'`, { delay: 2 });
+    await shell.press("Enter");
+    await page.waitForTimeout(3_000);
+    await tab.evaluate((node) => (node as HTMLElement).click());
 
     // Quit with agy running, then open again: the tab resumes agy's latest
     // conversation in the same folder.
@@ -96,8 +106,10 @@ test("Antigravity opens in its own tab, shows its state, and comes back after a 
     await expect.poll(() => readStarts(fixture), { timeout: 45_000 }).toHaveLength(2);
     const resumed = (await readStarts(fixture))[1];
     expect(resumed.cwd).toBe(fixture.workspaceDir);
-    expect(resumed.args).toEqual(["--mode", "plan", "--continue"]);
-    await expect(page.getByRole("status", { name: /^ANTIGRAVITY / })).toBeVisible({ timeout: 20_000 });
+    expect(resumed.args).toEqual(["--mode=plan", "--continue"]);
+    await expect(page.getByRole("status", { name: /^ANTIGRAVITY / }).first()).toBeVisible({ timeout: 20_000 });
+    await page.waitForTimeout(8_000);
+    expect(await readStarts(fixture), "the shell that only printed the marker started agy").toHaveLength(2);
   } finally {
     await app?.close();
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
@@ -173,7 +185,7 @@ async function prepareFixture(defaultShots: string): Promise<Fixture> {
   await writeFile(join(userDataDir, "spark-preferences.json"), JSON.stringify({ restoreAgentSessions: true }), "utf8");
   await writeFile(
     join(userDataDir, "agent-launch-args.json"),
-    JSON.stringify({ version: 1, args: { antigravity: "--mode plan" }, claudeChrome: false }),
+    JSON.stringify({ version: 1, args: { antigravity: "--mode=plan" }, claudeChrome: false }),
     "utf8",
   );
   return { root, homeDir, userDataDir, workspaceDir, binDir, logFile: join(root, "agy-starts.jsonl"), shots };

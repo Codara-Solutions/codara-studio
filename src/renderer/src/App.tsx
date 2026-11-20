@@ -6835,16 +6835,28 @@ export default function App() {
       if (state.running && state.runtime === "antigravity" && leaf.agentSession?.runtime !== "antigravity") {
         // agy has no session id Codara can read; the pane only needs its
         // folder to come back with `agy --continue` after a restart. The
-        // agent running now replaces an earlier one's pointer.
+        // agent running now replaces an earlier one's pointer, once main has
+        // seen a real agy process (printed text alone saves nothing).
         const cwd = leaf.cwd ?? paneRuntimeRef.current.get(paneId)?.cwd;
         if (cwd) {
-          t.setLeafAgentSession(tabId, paneId, {
-            runtime: "antigravity",
-            sessionId: ANTIGRAVITY_CONTINUE_SESSION_ID,
-            cwd,
-            capturedAt: new Date().toISOString(),
-            active: true,
-          });
+          void (async () => {
+            for (let attempt = 0; attempt < 10; attempt += 1) {
+              if (attempt > 0) await new Promise((done) => window.setTimeout(done, 1_000));
+              if (!(await window.spark.antigravity?.runsInPane(paneId).catch(() => false))) continue;
+              const tNow = tabsRef.current;
+              const tabNow = tNow.tabs.find((item) => item.id === tabId);
+              const leafNow = tabNow?.kind === "terminal" ? findLeafByPaneId(tabNow.root, paneId) : null;
+              if (!leafNow || leafNow.agentSession?.runtime === "antigravity") return;
+              tNow.setLeafAgentSession(tabId, paneId, {
+                runtime: "antigravity",
+                sessionId: ANTIGRAVITY_CONTINUE_SESSION_ID,
+                cwd,
+                capturedAt: new Date().toISOString(),
+                active: true,
+              });
+              return;
+            }
+          })();
         }
       } else if (
         state.running &&

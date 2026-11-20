@@ -22,7 +22,6 @@ export const ANTIGRAVITY_LAUNCH_COMMAND = "agy";
 // conversation. The pointer's id is this fixed word.
 export const ANTIGRAVITY_CONTINUE_SESSION_ID = "continue";
 
-/** The vendor's install command, for a machine without `agy`. */
 // `agy --continue` reopens agy's latest conversation, and agy does not say
 // whether "latest" is per folder. Until it does, one Antigravity pane per app
 // run reopens it; any other pane starts a new conversation instead of a
@@ -39,6 +38,7 @@ export function antigravityRestoreCommand(paneId: string): { command: string; no
       };
 }
 
+/** The vendor's install command, for a machine without `agy`. */
 export function antigravityInstallCommand(platform: string): string {
   return platform === "win32"
     ? "irm https://antigravity.google/cli/install.ps1 | iex"
