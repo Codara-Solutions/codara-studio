@@ -77,6 +77,28 @@ async function main() {
     assert.equal(cli.claimAntigravityContinue("pane-a"), true);
     assert.equal(cli.claimAntigravityContinue("pane-b"), false, "two panes reopen the same conversation");
     assert.equal(cli.claimAntigravityContinue("pane-a"), true, "the first pane lost it on its own restart");
+    // A restart after a pane's process died only checks the claim.
+    assert.equal(cli.claimAntigravityContinue("pane-b", false), false, "pane B's restart reopens pane A's conversation");
+    assert.equal(cli.claimAntigravityContinue("pane-a", false), true);
+    // A pane closed before it ran agy gives the claim back; only its holder can.
+    cli.releaseAntigravityContinue("pane-b");
+    assert.equal(cli.claimAntigravityContinue("pane-a", false), true, "another pane released the holder's claim");
+    cli.releaseAntigravityContinue("pane-a");
+    assert.equal(cli.claimAntigravityContinue("pane-c", false), false, "a check took the free claim");
+    assert.equal(cli.claimAntigravityContinue("pane-c"), true, "a released claim was not free again");
+
+    // The window takes the claim only for the restore after a restart, and
+    // gives it back when that pane never runs agy.
+    const session = fs.readFileSync(path.join(ROOT, "src/renderer/src/components/Terminal/useTerminalSession.ts"), "utf8");
+    const plans = [...session.matchAll(/await computeResumePlan\(([^)]*)\)/g)].map((match) => match[1]);
+    assert.deepEqual(
+      plans.filter((args) => args.includes('"take"')),
+      ['restore, sessionId, "take"'],
+      "only the restore after a restart may take the claim",
+    );
+    assert.equal(plans.length, 3, "a new resume path must decide whether it takes the claim");
+    const releases = session.match(/releaseAntigravityClaim\(\);/g) ?? [];
+    assert.ok(releases.length >= 4, "the claim is released when the pane closes first, the spawn fails or nothing ran");
 
     console.log("PASS antigravity-cli: install lookup, agy process check, one --continue per run");
 

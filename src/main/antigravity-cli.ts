@@ -54,15 +54,28 @@ export async function antigravityRunsInPane(paneId: string): Promise<boolean> {
 // here rather than in the window, so a reload does not hand it out twice.
 let continuePane: string | null = null;
 
-export function claimAntigravityContinue(paneId: string): boolean {
-  continuePane ??= paneId;
+/**
+ * Whether this pane may run `agy --continue`. A restore after a restart
+ * takes the claim when it is free; a restart after the pane's process died
+ * only checks it, so it never reopens another pane's latest conversation.
+ */
+export function claimAntigravityContinue(paneId: string, take = true): boolean {
+  if (take) continuePane ??= paneId;
   return continuePane === paneId;
 }
 
+/** Gives the claim back when its pane never started agy (closed first, or the spawn failed). */
+export function releaseAntigravityContinue(paneId: string): void {
+  if (continuePane === paneId) continuePane = null;
+}
+
 export function registerAntigravityIpc(handle: IpcHandle): void {
-  handle("antigravity:claim-continue", (_e, paneId: unknown) =>
-    typeof paneId === "string" && paneId.length > 0 ? claimAntigravityContinue(paneId) : false,
+  handle("antigravity:claim-continue", (_e, paneId: unknown, take: unknown) =>
+    typeof paneId === "string" && paneId.length > 0 ? claimAntigravityContinue(paneId, take !== false) : false,
   );
+  handle("antigravity:release-continue", (_e, paneId: unknown) => {
+    if (typeof paneId === "string") releaseAntigravityContinue(paneId);
+  });
   handle("antigravity:status", (_e, fresh: unknown) => antigravityStatus(fresh === true));
   handle("antigravity:runs-in-pane", (_e, paneId: unknown) =>
     typeof paneId === "string" ? antigravityRunsInPane(paneId) : false,

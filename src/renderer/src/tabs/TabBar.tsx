@@ -2311,6 +2311,16 @@ type PickerAccent = "shell" | "claude" | "codex" | "grok" | "pi" | "antigravity"
 function AntigravityPickerRow({ onLaunch }: { onLaunch: () => void }) {
   const [status, setStatus] = useState<{ installed: boolean; onPath: boolean; dir: string | null } | null>(null);
   const [copied, setCopied] = useState(false);
+  // The row unmounts when the menu closes; a lookup that ends after that
+  // (Escape while waiting) opens nothing, and a second click waits its turn.
+  const mounted = useRef(true);
+  const checking = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   useEffect(() => {
     let live = true;
     window.spark.antigravity
@@ -2346,17 +2356,25 @@ function AntigravityPickerRow({ onLaunch }: { onLaunch: () => void }) {
             return;
           }
           // Installed since the menu opened? Ask again before copying.
+          if (checking.current) return;
+          checking.current = true;
           void window.spark.antigravity
             ?.status(true)
             .then((fresh) => {
+              if (!mounted.current) return;
               setStatus(fresh);
               if (fresh.installed) {
                 onLaunch();
                 return;
               }
-              return navigator.clipboard?.writeText(command).then(() => setCopied(true));
+              return navigator.clipboard?.writeText(command).then(() => {
+                if (mounted.current) setCopied(true);
+              });
             })
-            .catch(() => undefined);
+            .catch(() => undefined)
+            .finally(() => {
+              checking.current = false;
+            });
         }}
       />
       {missing && (

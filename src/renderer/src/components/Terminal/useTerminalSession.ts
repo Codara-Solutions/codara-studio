@@ -247,6 +247,8 @@ interface ResumePlan {
   fallbackNotice: string | null;
   // Replacement pointer to persist (fresh Claude self-heal), else null.
   fallbackSession: TerminalAgentSession | null;
+  // True when this plan took the one-per-run `agy --continue` claim.
+  tookAntigravityClaim?: boolean;
 }
 
 // Heal a pane's restore pointer from the SessionStart hook trail before any
@@ -275,12 +277,18 @@ async function fetchSessionStartHeal(
 // silently losing the conversation to a fresh session), and return the command
 // + self-heal bookkeeping. Shared by the boot-once restore path and the in-place
 // death re-arm path. The pure branch choice lives in decideResume (resume-policy).
-async function computeResumePlan(restore: TerminalAgentSession, paneId: string): Promise<ResumePlan> {
+async function computeResumePlan(
+  restore: TerminalAgentSession,
+  paneId: string,
+  antigravityClaim: "take" | "check" = "check",
+): Promise<ResumePlan> {
   if (restore.runtime === "antigravity") {
     // agy keeps its conversations to itself and Codara never reads them, so
     // there is nothing to probe: `agy --continue` reopens its latest one, in
-    // one pane per run (main keeps who has it).
-    const continues = (await window.spark.antigravity?.claimContinue(paneId).catch(() => false)) ?? false;
+    // one pane per run (main keeps who has it). Only the restore after a
+    // restart takes the claim; a restart after the process died checks it.
+    const take = antigravityClaim === "take";
+    const continues = (await window.spark.antigravity?.claimContinue(paneId, take).catch(() => false)) ?? false;
     const { command, notice } = antigravityRestoreCommand(continues);
     logRestore(`plan antigravity pane=${paneId} cwd=${restore.cwd} -> ${command}`);
     return {
@@ -290,6 +298,7 @@ async function computeResumePlan(restore: TerminalAgentSession, paneId: string):
       fallbackNotice: notice,
       // The pointer stays: agy runs again in this pane either way.
       fallbackSession: notice ? restore : null,
+      tookAntigravityClaim: take && continues,
     };
   }
   const probe = await window.spark.agentSession
@@ -3452,6 +3461,15 @@ export function useTerminalSession({
       let resumeIsFreshFallback = false;
       let fallbackNotice: string | null = null;
       let fallbackSession: TerminalAgentSession | null = null;
+      // The one-per-run `agy --continue` claim this restore took. Given back
+      // when the pane never runs it: closed before its spawn, or the spawn
+      // failed or did not deliver the command.
+      let heldAntigravityClaim = false;
+      const releaseAntigravityClaim = () => {
+        if (!heldAntigravityClaim) return;
+        heldAntigravityClaim = false;
+        void window.spark.antigravity?.releaseContinue(sessionId).catch(() => undefined);
+      };
       // Set when the restore gate below was entered; consumeBootResume fires
       // the owner callback at most once no matter which exit path runs.
       let bootResumeEntered = false;
@@ -3538,7 +3556,8 @@ export function useTerminalSession({
           // computeResumePlan owns the probe → repair/self-heal/clear decision;
           // it is shared verbatim with the in-place death re-arm below.
           if (restore.active !== false) {
-            const plan = await computeResumePlan(restore, sessionId);
+            const plan = await computeResumePlan(restore, sessionId, "take");
+            heldAntigravityClaim = plan.tookAntigravityClaim === true;
             restore = adoptPlanSession(restore, plan);
             resumeCommand = plan.resumeCommand;
             resumeIsFreshFallback = plan.resumeIsFreshFallback;
@@ -3561,7 +3580,10 @@ export function useTerminalSession({
           }
         }
       }
-      if (disposed) return;
+      if (disposed) {
+        releaseAntigravityClaim();
+        return;
+      }
 
       // A pane reopened after Codara restarted shows the output it had
       // before, ahead of anything its new shell or resumed agent draws. Main
@@ -3576,7 +3598,10 @@ export function useTerminalSession({
         !inputBlockedRef.current
       ) {
         await replayPersistedScrollback(term, sessionId, scrollbackLineLimitRef.current);
-        if (disposed) return;
+        if (disposed) {
+          releaseAntigravityClaim();
+          return;
+        }
       }
 
       // Spawn the PTY. We pass the pre-fit cols/rows so the shell starts at
@@ -3689,6 +3714,7 @@ export function useTerminalSession({
         }
       } catch (err) {
         term.write(`\r\n\x1b[31mfailed to spawn: ${(err as Error).message}\x1b[0m\r\n`);
+        releaseAntigravityClaim();
         if (!disposed) {
           onAgentStateRef.current?.({ runtime: null, running: false, exitConfirmed: true });
         }
@@ -3709,6 +3735,8 @@ export function useTerminalSession({
       // unaffected: it never had anything to deliver.
       if (sleepingAtMount) term.options.disableStdin = true;
       const resumeUndelivered = resumeCommand !== null && !startupCommandHandled;
+      // Attached to a live session: whatever runs there keeps the claim.
+      if (resumeUndelivered && !attachedExistingSession) releaseAntigravityClaim();
       if (bootResumeEntered || resumeCommand !== null) {
         logRestore(
           `pane=${sessionId} spawn: delivered=${startupCommandHandled} attached=${attachedExistingSession}` +

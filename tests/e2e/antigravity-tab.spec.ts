@@ -71,6 +71,7 @@ test("Antigravity opens in its own tab, shows its state, and comes back after a 
     // the row asks again and starts agy.
     await writeFile(join(fixture.binDir, "agy"), FAKE_AGY, { mode: 0o755 });
     row = await openPickerRow(page);
+    await expect(row, "the menu searched again within 30 s").toHaveAttribute("data-installed", "false");
     await row.getByRole("button", { name: /Antigravity worker/ }).click();
 
     const tab = page.locator("[data-tab-id]").filter({ hasText: "Antigravity" });
@@ -160,6 +161,7 @@ test("with resume after a restart off, agy does not come back", async ({}, testI
     app = await launch(fixture);
     page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
+    await expect(page.locator("[data-tab-id]").filter({ hasText: "Antigravity" })).toBeVisible({ timeout: 20_000 });
     await page.waitForTimeout(10_000);
     expect(await readStarts(fixture), "agy came back with resume after a restart off").toHaveLength(1);
   } finally {
