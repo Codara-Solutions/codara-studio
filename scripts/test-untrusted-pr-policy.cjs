@@ -207,7 +207,7 @@ async function main() {
     );
     assert.match(
       ptySpawnHandler,
-      /if \(parseManualAgentStartupCommand\(args\.startupCommand\)\) \{[\s\S]{0,500}const state = await loadState\(\)/,
+      /if \(\s*parseManualAgentStartupCommand\(args\.startupCommand\) \|\|\s*startupCommandRunsUserAgent\(args\.startupCommand\)\s*\) \{[\s\S]{0,500}const state = await loadState\(\)/,
       "recognized agent autoruns must load authoritative state without making plain shells depend on it",
     );
     assert.match(
@@ -248,6 +248,15 @@ async function main() {
       ptyManager,
       /if \(parsedStartup\) \{[\s\S]{0,700}assertManualAgentLaunchAllowed/,
       "plain shells must remain available because only recognized agent autoruns are gated",
+    );
+    const userAgentGate = ptyManager.indexOf(
+      "} else if (startupCommandRunsUserAgent(opts.startupCommand)) {",
+      manualAgentGate,
+    );
+    assert.ok(
+      userAgentGate > manualAgentGate &&
+        ptyManager.indexOf("assertManualAgentLaunchAllowed(opts.projectPolicyMode)", userAgentGate) < accountResolution,
+      "the user's own agy and pi are refused in a PR checkout before anything starts",
     );
 
     const runtime = source("src/main/orchestration/pi-runtime.ts");

@@ -41,6 +41,7 @@ import {
   formatManualAgentStartup,
   parseManualAgentStartupCommand,
   startupCommandRunsClaude,
+  startupCommandRunsUserAgent,
 } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
 import { buildCodexCliSharedEnvironment } from "./orchestration/codex-cli-profile-execution";
@@ -777,6 +778,9 @@ async function spawnWithSessionLock(
     // before profile resolution, Codex trust writes, hook installation, or
     // process spawn. Plain shells have no parsed startup and remain available;
     // fenced Pi PR reviews run in main and use display-only PTYs.
+    assertManualAgentLaunchAllowed(opts.projectPolicyMode);
+  } else if (startupCommandRunsUserAgent(opts.startupCommand)) {
+    // The user's own agy and pi, typed into the shell, read the same files.
     assertManualAgentLaunchAllowed(opts.projectPolicyMode);
   }
 
