@@ -795,7 +795,17 @@ const AGY_SIGNED_OUT =
   "\x1b[4G\x1b[94;1m\u2191/\u2193\x1b[90;22m Navigate \u00b7 \x1b[94;1menter\x1b[90;22m Select\x1b[m\n";
 check("antigravity is a public runtime", ap.coercePublicRuntime("antigravity"), "antigravity");
 check("antigravity start screen banner", ap.sniffRuntime(AGY_SIGNED_OUT), "antigravity");
-check("antigravity banner reaches the live sniff", ap.sniffLiveRuntime(AGY_SIGNED_OUT), "antigravity");
+// Screen text alone never arms an Antigravity pane: a git log or grep can
+// print the greeting. The typed command or the agy process does.
+check("antigravity greeting alone does not arm the live sniff", ap.sniffLiveRuntime(AGY_SIGNED_OUT), null);
+check("antigravity greeting alone does not promote a generic arm", ap.promoteGenericArm(AGY_SIGNED_OUT, 0, 10_000), null);
+check("git log naming the CLI does not arm a pane", ap.sniffLiveRuntime("commit 3e01\n    feat: Welcome to the Antigravity CLI tab\n"), null);
+check(
+  "a typed agy promotes a generic arm",
+  ap.promoteGenericArm("\x1b]633;E;agy --mode plan\x07" + AGY_SIGNED_OUT, 0, 10_000),
+  "antigravity",
+);
+check("screen text still arms the other agents", ap.screenPublicRuntime("claude"), "claude");
 check("antigravity start screen keeps its UI present", ap.agentUiPresent("antigravity", AGY_SIGNED_OUT), true);
 check("antigravity sign-in picker needs you", ap.classifyTail("antigravity", AGY_SIGNED_OUT), "blocked");
 check("antigravity permission dialog needs you", ap.classifyTail("antigravity", "Requesting permission for:\n  rm -rf build\n> Yes, allow tool call\n  No, deny tool call"), "blocked");

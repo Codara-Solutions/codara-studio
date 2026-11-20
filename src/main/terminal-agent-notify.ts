@@ -8,6 +8,7 @@ import {
   PI_EXIT_LINE_RE,
   runtimeFromCommandLine,
   runtimeFromProcessCommand,
+  screenPublicRuntime,
   sniffLiveRuntime,
   sniffRuntime,
   stripAnsi,
@@ -1917,7 +1918,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
   } else if (!w.runtime || w.lastEmittedState === null) {
     const window = w.ring.slice(-(decoded.length + SNIFF_OVERLAP));
     const banner = sniffRuntime(window);
-    let sniffed = banner ? coercePublicRuntime(banner) : null;
+    let sniffed = screenPublicRuntime(banner);
     if (!sniffed) sniffed = sniffLiveRuntime(w.ring.slice(-2048));
     if (sniffed) identifyRuntime(w, sniffed, "banner");
   }

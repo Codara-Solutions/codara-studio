@@ -54,6 +54,18 @@ export function coercePublicRuntime(runtime: AgentRuntime): PublicAgentRuntime |
   return KNOWN_PUBLIC_RUNTIMES.has(runtime) ? (runtime as PublicAgentRuntime) : null;
 }
 
+/**
+ * The public runtime screen text alone may arm a pane as. Antigravity is
+ * left out: any shell can print agy's greeting (a git log, a grep in this
+ * repository), and an armed pane raises alerts and saves a pointer that
+ * starts `agy --continue` after a restart. Only the typed `agy` command or
+ * a running agy process makes a pane an Antigravity one.
+ */
+export function screenPublicRuntime(runtime: AgentRuntime | null): PublicAgentRuntime | null {
+  const known = runtime ? coercePublicRuntime(runtime) : null;
+  return known === "antigravity" ? null : known;
+}
+
 // Pi's startup header line followed by its key-hint line. Through 0.87 the
 // header reads `pi v0.85.1`; from 0.99 it is a two-row block logo with the
 // version beside its top row and the hint beside its bottom row
@@ -238,7 +250,7 @@ const PI_LIVE_IDENTITY: RegExp[] = [
 
 export function sniffLiveRuntime(text: string): PublicAgentRuntime | null {
   const fromBanner = sniffRuntime(text);
-  if (fromBanner) return coercePublicRuntime(fromBanner);
+  if (fromBanner) return screenPublicRuntime(fromBanner);
   const stripped = stripAnsi(text);
   for (const re of CLAUDE_LIVE_IDENTITY) {
     if (re.test(stripped)) return "claude";
@@ -394,8 +406,10 @@ export function promoteGenericArm(
 ): PublicAgentRuntime | null {
   if (budget <= 0) return null;
   const fresh = ring.slice(Math.max(0, ringFrom));
-  const sniffed = sniffOsc633CommandRuntime(fresh) ?? sniffRuntime(fresh);
-  if (sniffed) return coercePublicRuntime(sniffed);
+  const typed = sniffOsc633CommandRuntime(fresh);
+  if (typed) return coercePublicRuntime(typed);
+  const banner = sniffRuntime(fresh);
+  if (banner) return screenPublicRuntime(banner);
   return sniffLiveRuntime(fresh);
 }
 
