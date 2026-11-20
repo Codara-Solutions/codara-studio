@@ -3448,6 +3448,7 @@ export function registerIpc(): void {
   handle("pty:exists", async (_e, args: { id: string }) => {
     return pty.exists(args.id);
   });
+  handle("pty:shellBusyIds", async () => pty.shellBusyIds());
   handle("pty:resourceSnapshot", async () => {
     return pty.resourceSnapshot();
   });

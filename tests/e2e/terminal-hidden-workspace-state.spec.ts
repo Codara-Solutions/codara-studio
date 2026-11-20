@@ -188,11 +188,11 @@ test("Codex stays ready during draft editing and working through partial repaint
       await expect(working).toBeVisible();
     }
     await expect(ready).toBeVisible({ timeout: 15_000 });
-    const count = page.locator('[data-workspace-id="ws-a"]').getByTestId("workspace-agent-count");
-    await expect(count).toHaveText("1");
+    const count = page.locator('[data-workspace-id="ws-a"]');
+    await expect(count).toHaveAttribute("data-agent-count", "1");
     await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
     await page.waitForTimeout(3000);
-    await expect(count).toHaveText("1");
+    await expect(count).toHaveAttribute("data-agent-count", "1");
   } finally {
     await app?.close();
   }
@@ -233,11 +233,11 @@ test("silent Codex is detected without a banner or saved session", async () => {
     await input.press("Enter");
     await expect(page.getByRole("status", { name: "CODEX ready" })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole("status", { name: "CODEX working" })).toHaveCount(0);
-    const count = page.locator('[data-workspace-id="ws-a"]').getByTestId("workspace-agent-count");
-    await expect(count).toHaveText("1");
+    const count = page.locator('[data-workspace-id="ws-a"]');
+    await expect(count).toHaveAttribute("data-agent-count", "1");
     await input.press("Control+c");
     await expect(page.getByRole("status", { name: "CODEX ready" })).toHaveCount(0, { timeout: 15_000 });
-    await expect(count).toHaveCount(0, { timeout: 15_000 });
+    await expect(count).not.toHaveAttribute("data-agent-count", { timeout: 15_000 });
   } finally {
     await app?.close();
   }
@@ -272,10 +272,10 @@ test("Claude completion stays ready through status-line repaints and workspace c
     await expect(page.getByRole("status", { name: "CLAUDE working" })).toBeVisible();
     await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 10_000 });
     const row = page.locator('[data-workspace-id="ws-a"]');
-    await expect(row.getByTestId("workspace-agent-count")).toHaveText("1");
+    await expect(row).toHaveAttribute("data-agent-count", "1");
     await page.locator('[data-workspace-id="ws-b"]').evaluate(element => (element as HTMLElement).click());
     await page.waitForTimeout(4000);
-    await expect(row.getByTestId("workspace-agent-count")).toHaveText("1");
+    await expect(row).toHaveAttribute("data-agent-count", "1");
     await row.evaluate(element => (element as HTMLElement).click());
     await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible();
     await expect(page.getByRole("status", { name: "CLAUDE working" })).toHaveCount(0);
@@ -369,9 +369,7 @@ test(`cold-restored Claude appears in the workspace count while ${phase}`, async
     await expect(page.getByRole("status", { name: phase === "working" ? "CLAUDE working" : "CLAUDE ready" })).toBeVisible({
       timeout: 15_000,
     });
-    const count = workspaceA.getByTestId("workspace-agent-count");
-    await expect(count).toHaveText(phase === "working" ? "1/1" : "1");
-    await expect(count).toHaveAttribute("aria-label", phase === "working" ? "1 of 1 agent working" : "1 agent idle");
+    await expect(workspaceA).toHaveAttribute("data-agent-count", phase === "working" ? "1/1" : "1");
     // The number is the row's one agent count: no line under the name repeats it.
     await expect(workspaceA.getByTestId("workspace-agents-summary")).toHaveCount(0);
     await expect(workspaceA).toHaveAttribute("aria-busy", String(phase === "working"));

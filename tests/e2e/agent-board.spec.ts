@@ -276,7 +276,7 @@ test("a terminal agent in another workspace is answered from the Agents view", a
       await input.pressSequentially(`${call}"${process.execPath}" "${fixture.fakeClaude}"`, { delay: 2 });
       await input.press("Enter");
       // Main has identified the agent once the workspace counts it.
-      await expect(page.locator('[data-workspace-id="ws-a"]').getByTestId("workspace-agent-count")).toHaveText("1", {
+      await expect(page.locator('[data-workspace-id="ws-a"]')).toHaveAttribute("data-agent-count", "1", {
         timeout: 15_000,
       });
       paneId = (await page.locator("[data-terminal-pane-id]:visible").first().getAttribute("data-terminal-pane-id")) ?? "";
@@ -467,7 +467,7 @@ test("opening a row from another workspace goes there and says where you are", a
       const call = process.platform === "win32" ? "& " : "";
       await input.pressSequentially(`${call}"${process.execPath}" "${fixture.busyClaude}"`, { delay: 2 });
       await input.press("Enter");
-      await expect(page.locator('[data-workspace-id="ws-a"]').getByTestId("workspace-agent-count")).toHaveText("1", {
+      await expect(page.locator('[data-workspace-id="ws-a"]')).toHaveAttribute("data-agent-count", "1", {
         timeout: 15_000,
       });
       await input.pressSequentially("keep going", { delay: 2 });
@@ -508,7 +508,7 @@ test("an agent whose turn ended with background work still running is not ready"
   const fixture = await prepare();
   const { app, page } = await launch(fixture);
   try {
-    const count = page.locator('[data-workspace-id="ws-a"]').getByTestId("workspace-agent-count");
+    const count = page.locator('[data-workspace-id="ws-a"]');
     const input = page.locator(".xterm-helper-textarea:visible").first();
     let paneId = "";
     await test.step("its turn ends while a background agent it started still runs", async () => {
@@ -517,7 +517,7 @@ test("an agent whose turn ended with background work still running is not ready"
       const call = process.platform === "win32" ? "& " : "";
       await input.pressSequentially(`${call}"${process.execPath}" "${fixture.backgroundClaude}"`, { delay: 2 });
       await input.press("Enter");
-      await expect(count).toHaveText("1", { timeout: 15_000 });
+      await expect(count).toHaveAttribute("data-agent-count", "1", { timeout: 15_000 });
       paneId = (await page.locator("[data-terminal-pane-id]:visible").first().getAttribute("data-terminal-pane-id")) ?? "";
       expect(paneId).toBeTruthy();
       await input.pressSequentially("review the parser in the background", { delay: 2 });
@@ -527,7 +527,9 @@ test("an agent whose turn ended with background work still running is not ready"
     await test.step("the pane, the rail and the Agents view say it works in the background", async () => {
       await expect(page.getByRole("status", { name: "CLAUDE working in background" })).toBeVisible({ timeout: 15_000 });
       await expect(page.getByRole("status", { name: "CLAUDE ready" })).toHaveCount(0);
-      await expect(count).toHaveAttribute("data-working", "true");
+      await expect(count).toHaveAttribute("data-agent-count", "1/1");
+      // Its tab runs while the agent works in the background.
+      await expect(count.getByTestId("workspace-tab-count")).toHaveAttribute("data-running", "true");
       await viewTab(page, "Agents").click();
       const agent = card(page, `pane:${paneId}`);
       await expect(agent).toHaveAttribute("data-agent-bucket", "working", { timeout: 15_000 });
@@ -542,7 +544,8 @@ test("an agent whose turn ended with background work still running is not ready"
       await input.pressSequentially("wrap it up", { delay: 2 });
       await input.press("Enter");
       await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 15_000 });
-      await expect(count).toHaveAttribute("data-working", "false");
+      await expect(count).toHaveAttribute("data-agent-count", "1");
+      await expect(count.getByTestId("workspace-tab-count")).toHaveAttribute("data-running", "false");
       await viewTab(page, "Agents").click();
       await expect(card(page, `pane:${paneId}`)).toHaveAttribute("data-agent-bucket", "done", { timeout: 15_000 });
       await expect(card(page, `pane:${paneId}`)).toHaveAttribute("data-agent-shelf", "inbox");

@@ -313,18 +313,32 @@ test("worktrees hang under their project with their PR and their agent", async (
       const line = row(page, "wt-agent").getByTestId("worktree-agent-line");
       await expect(line).toHaveAttribute("data-state", "working", { timeout: 20_000 });
       await expect(line).toContainText("Parser rewrite, tests next", { timeout: 10_000 });
-      // The project's number covers its worktrees' agents; its line does not
-      // repeat that count (DESIGN.md, "One home for agent counts").
-      const count = row(page, "ws-app").getByTestId("workspace-agent-count");
-      await expect(count).toHaveText("1/1");
-      await expect(count).toHaveAttribute("data-working", "true");
-      await expect(count).toHaveAttribute("aria-label", "1 of 1 agent working, 1 in worktree");
+      // The project's census covers its worktrees' agents; its line does not
+      // repeat a count (DESIGN.md, "One home for agent counts").
+      await expect(row(page, "ws-app")).toHaveAttribute("data-agent-count", "1/1");
       await expect(row(page, "ws-app").getByTestId("workspace-agents-summary")).toHaveCount(0);
       const order = await children(page, "ws-app")
         .locator(":scope > [data-workspace-id]")
         .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-workspace-id")));
       expect(order).toEqual(["wt-agent", "wt-pr", "wt-idle"]);
+    });
+
+    await test.step("each row counts its own tabs and how many run; a row without one stays quiet", async () => {
+      const newTerminal = process.platform === "darwin" ? "Meta+t" : "Control+t";
+      const tabs = (workspaceId: string) => row(page, workspaceId).getByTestId("workspace-tab-count");
+      // A new workspace opens on a draft chat; the agent's terminal is the second tab.
+      await expect(tabs("wt-agent")).toHaveText("1/2");
+      await page.keyboard.press(newTerminal);
+      await expect(tabs("wt-agent")).toHaveText("1/3", { timeout: 10_000 });
+      await expect(tabs("wt-agent")).toHaveAttribute("aria-label", "1 of 3 tabs running");
+      await expect(tabs("wt-agent")).toHaveAttribute("data-running", "true");
       await row(page, "ws-other").click();
+      await expect(row(page, "ws-other")).toHaveAttribute("data-active", "true");
+      await expect(tabs("ws-other")).toHaveText("2");
+      await expect(tabs("ws-other")).toHaveAttribute("aria-label", "2 tabs open");
+      // Hidden now, the worktree's agent keeps its tab running.
+      await expect(tabs("wt-agent")).toHaveText("1/3");
+      for (const id of ["wt-pr", "wt-idle", "ws-app"]) await expect(tabs(id)).toHaveCount(0);
       await shots(page, "rail-worktrees");
     });
 
@@ -339,8 +353,7 @@ test("worktrees hang under their project with their PR and their agent", async (
       await expect(children(page, "ws-app")).toHaveCount(0);
       await expect(row(page, "ws-other")).toHaveAttribute("data-active", "true");
       // Folded, the project still says what works inside it.
-      await expect(row(page, "ws-app").getByTestId("workspace-agent-count")).toHaveText("1/1");
-      await expect(row(page, "ws-app").getByTestId("workspace-agent-count")).toHaveAttribute("data-working", "true");
+      await expect(row(page, "ws-app")).toHaveAttribute("data-agent-count", "1/1");
       await expect(row(page, "ws-app")).toHaveAttribute("aria-busy", "true");
       await toggle.click();
       await row(page, "wt-idle").getByTestId("worktree-agent-line").click();

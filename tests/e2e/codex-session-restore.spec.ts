@@ -64,8 +64,8 @@ test("Codex captures a delayed transcript, follows a session switch, and resumes
     await expect.poll(async () => (await fixture.launches()).filter((entry) => entry[0] === "resume").at(-1)?.[1],
       { timeout: 20_000 }).toBe(SECOND);
     const restoredPage = await app.firstWindow();
-    await expect(restoredPage.locator('[data-workspace-id="ws-restore"]').getByTestId("workspace-agent-count"))
-      .toHaveText("1", { timeout: 15_000 });
+    await expect(restoredPage.locator('[data-workspace-id="ws-restore"]'))
+      .toHaveAttribute("data-agent-count", "1", { timeout: 15_000 });
   } finally {
     await app?.close();
   }
@@ -106,8 +106,8 @@ test("cold app startup counts every restored agent before visiting another works
       }));
     }, { workspace: fixture.workspace, first: FIRST, second: SECOND, firstPath: fixture.firstPath, secondPath: fixture.secondPath });
     await page.reload();
-    await expect(page.locator('[data-workspace-id="ws-restore"]').getByTestId("workspace-agent-count"))
-      .toHaveText("1/2", { timeout: 20_000 });
+    await expect(page.locator('[data-workspace-id="ws-restore"]'))
+      .toHaveAttribute("data-agent-count", "1/2", { timeout: 20_000 });
     await page.locator('[data-workspace-id="ws-other"]').evaluate(element => (element as HTMLElement).click());
     await app.close();
     app = null;
@@ -116,11 +116,10 @@ test("cold app startup counts every restored agent before visiting another works
     const restoredPage = await app.firstWindow();
     const row = restoredPage.locator('[data-workspace-id="ws-restore"]');
     await expect.poll(async () => (await fixture.launches()).length, { timeout: 20_000 }).toBe(before + 2);
-    await expect(row.getByTestId("workspace-agent-count")).toHaveText("1/2", { timeout: 15_000 });
-    await expect(row.getByTestId("workspace-agent-count")).toHaveAttribute("aria-label", "1 of 2 agents working");
+    await expect(row).toHaveAttribute("data-agent-count", "1/2", { timeout: 15_000 });
     await restoredPage.locator('[data-workspace-id="ws-other"]').evaluate(element => (element as HTMLElement).click());
-    await expect(row.getByTestId("workspace-agent-count")).toHaveText("1/2");
-    await expect(restoredPage.locator('[data-workspace-id="ws-other"]').getByTestId("workspace-agent-count")).toHaveCount(0);
+    await expect(row).toHaveAttribute("data-agent-count", "1/2");
+    await expect(restoredPage.locator('[data-workspace-id="ws-other"]')).not.toHaveAttribute("data-agent-count");
   } finally {
     await app?.close();
   }
@@ -237,8 +236,8 @@ test("restart restores hidden Claude and leaves a closed Claude conversation clo
     app = await electron.launch({ args: ["."], env: fixture.env });
     await expect.poll(async () => (await fixture.launches()).length, { timeout: 20_000 }).toBe(before + 1);
     expect((await fixture.launches()).at(-1)).toContain(FIRST);
-    await expect((await app.firstWindow()).locator('[data-workspace-id="ws-restore"]').getByTestId("workspace-agent-count"))
-      .toHaveText("1", { timeout: 10_000 });
+    await expect((await app.firstWindow()).locator('[data-workspace-id="ws-restore"]'))
+      .toHaveAttribute("data-agent-count", "1", { timeout: 10_000 });
     await (await app.firstWindow()).waitForTimeout(3000);
     expect((await fixture.launches()).length).toBe(before + 1);
   } finally {
