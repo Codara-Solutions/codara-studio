@@ -55,13 +55,13 @@ assert.match(
 );
 assert.match(
   source,
-  /webContents\.on\("destroyed", \(\) => \{[\s\S]*clearUnresponsiveRecoveryTimer\(windowForEvents\.webContents\)/,
-  "destroying a renderer must disarm its unresponsive timer",
+  /onMainWebContentsDestroyed\(windowForEvents, \{[\s\S]*clearUnresponsiveTimer: clearUnresponsiveRecoveryTimer,/,
+  "destroying a renderer must disarm its unresponsive timer (test-main-window-teardown.cjs runs that handler)",
 );
 assert.match(
   source,
-  /unresponsiveTimerOwner !== owner[\s\S]*mainWindow\?\.webContents !== owner/,
-  "a stale unresponsive callback must never crash a replacement renderer",
+  /unresponsiveTimerOwner !== owner[\s\S]*liveMainWebContents\(\) !== owner/,
+  "a stale unresponsive callback must never crash a replacement renderer, nor read a destroyed window",
 );
 assert.match(
   source,
