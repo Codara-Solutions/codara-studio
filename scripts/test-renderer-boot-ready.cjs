@@ -55,13 +55,22 @@ assert.match(
 );
 assert.match(
   source,
-  /webContents\.on\("destroyed", \(\) => \{[\s\S]*clearUnresponsiveRecoveryTimer\(windowForEvents\.webContents\)/,
-  "destroying a renderer must disarm its unresponsive timer",
+  /onMainWebContentsDestroyed\(windowContents, \{[\s\S]*clearUnresponsiveTimer: clearUnresponsiveRecoveryTimer,/,
+  "destroying a renderer must disarm its unresponsive timer (test-main-window-teardown.cjs runs that handler)",
+);
+const createWindowSource = source.slice(
+  source.indexOf("function createWindow(): void {"),
+  source.indexOf("app.whenReady()"),
+);
+assert.deepEqual(
+  createWindowSource.split("\n").filter((line) => line.includes("windowForEvents.webContents")).map((line) => line.trim()),
+  ["const windowContents = windowForEvents.webContents;"],
+  "createWindow reads the window's WebContents once, while the window is alive: its handlers can run after the window is destroyed, when that read throws",
 );
 assert.match(
   source,
-  /unresponsiveTimerOwner !== owner[\s\S]*mainWindow\?\.webContents !== owner/,
-  "a stale unresponsive callback must never crash a replacement renderer",
+  /unresponsiveTimerOwner !== owner[\s\S]*liveMainWebContents\(\) !== owner/,
+  "a stale unresponsive callback must never crash a replacement renderer, nor read a destroyed window",
 );
 assert.match(
   source,
