@@ -92,13 +92,12 @@ assert.equal(
   "agy --continue",
 );
 assert.equal(launches.buildAgentForkCommand("antigravity", "continue"), null, "agy has no fork Codara can name");
-// One Antigravity pane per run reopens agy's latest conversation; another
-// starts a new one, and the first keeps --continue when it restarts again.
-assert.deepEqual(launches.antigravityRestoreCommand("pane-a"), { command: "agy --continue", notice: null });
-const secondAgy = launches.antigravityRestoreCommand("pane-b");
+// The pane main lets claim it reopens agy's latest conversation; another
+// starts a new one (the claim itself: scripts/test-antigravity-cli.cjs).
+assert.deepEqual(launches.antigravityRestoreCommand(true), { command: "agy --continue", notice: null });
+const secondAgy = launches.antigravityRestoreCommand(false);
 assert.equal(secondAgy.command, "agy", "a second Antigravity pane reopened the same conversation");
 assert.match(secondAgy.notice, /another Antigravity tab/);
-assert.equal(launches.antigravityRestoreCommand("pane-a").command, "agy --continue");
 assert.match(launches.antigravityInstallCommand("linux"), /^curl -fsSL https:\/\/antigravity\.google\/cli\/install\.sh \| bash$/);
 assert.match(launches.antigravityInstallCommand("win32"), /^irm https:\/\/antigravity\.google\/cli\/install\.ps1 \| iex$/);
 

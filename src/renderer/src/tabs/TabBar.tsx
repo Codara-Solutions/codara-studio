@@ -2309,14 +2309,14 @@ type PickerAccent = "shell" | "claude" | "codex" | "grok" | "pi" | "antigravity"
 // the install command and a click copies it, instead of starting a shell
 // that cannot find the command.
 function AntigravityPickerRow({ onLaunch }: { onLaunch: () => void }) {
-  const [installed, setInstalled] = useState<boolean | null>(null);
+  const [status, setStatus] = useState<{ installed: boolean; onPath: boolean; dir: string | null } | null>(null);
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     let live = true;
     window.spark.antigravity
-      ?.installed()
+      ?.status()
       .then((value) => {
-        if (live) setInstalled(value);
+        if (live) setStatus(value);
       })
       .catch(() => undefined);
     return () => {
@@ -2324,9 +2324,11 @@ function AntigravityPickerRow({ onLaunch }: { onLaunch: () => void }) {
     };
   }, []);
   const command = antigravityInstallCommand(/Win/i.test(navigator.platform) ? "win32" : navigator.platform);
-  const missing = installed === false;
+  const missing = status?.installed === false;
+  const offPath = status?.installed === true && !status.onPath;
+  const noteStyle = { padding: "0 12px 8px 44px", fontSize: 11, lineHeight: 1.45, color: "var(--ink-dim)" } as const;
   return (
-    <div data-testid="antigravity-worker-row" data-installed={installed === null ? "unknown" : String(installed)}>
+    <div data-testid="antigravity-worker-row" data-installed={status === null ? "unknown" : String(status.installed)}>
       <PickerItem
         label="Antigravity worker"
         glyph={<RuntimeGlyph runtime="antigravity" />}
@@ -2343,17 +2345,22 @@ function AntigravityPickerRow({ onLaunch }: { onLaunch: () => void }) {
             onLaunch();
             return;
           }
-          void navigator.clipboard
-            ?.writeText(command)
-            .then(() => setCopied(true))
+          // Installed since the menu opened? Ask again before copying.
+          void window.spark.antigravity
+            ?.status(true)
+            .then((fresh) => {
+              setStatus(fresh);
+              if (fresh.installed) {
+                onLaunch();
+                return;
+              }
+              return navigator.clipboard?.writeText(command).then(() => setCopied(true));
+            })
             .catch(() => undefined);
         }}
       />
       {missing && (
-        <div
-          role="note"
-          style={{ padding: "0 12px 8px 44px", fontSize: 11, lineHeight: 1.45, color: "var(--ink-dim)" }}
-        >
+        <div role="note" style={noteStyle}>
           Antigravity's <code className="spark-mono">agy</code> is not on this computer. Install it in a terminal
           with:
           <code
@@ -2362,6 +2369,12 @@ function AntigravityPickerRow({ onLaunch }: { onLaunch: () => void }) {
           >
             {command}
           </code>
+        </div>
+      )}
+      {offPath && (
+        <div role="note" style={noteStyle}>
+          <code className="spark-mono">agy</code> is in {status.dir}, which your shell's PATH does not include. If
+          the tab says command not found, add that folder to PATH.
         </div>
       )}
     </div>

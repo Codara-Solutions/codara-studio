@@ -1518,7 +1518,8 @@ export function terminalAgentHibernationEvidence(paneId: string): AgentHibernati
     excluded: w.excluded,
     disposing: w.disposing,
     attached: w.attached,
-    // Antigravity panes never sleep: no restore pointer brings one back yet.
+    // Antigravity panes never sleep: waking one would run `agy --continue`,
+    // which reopens agy's latest conversation, not necessarily this pane's.
     runtime: w.runtime === "antigravity" ? null : w.runtime,
     state: w.state,
     chipState: w.lastEmittedState,

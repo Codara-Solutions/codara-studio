@@ -5,6 +5,10 @@
 import { ipcRenderer } from "electron";
 
 export const antigravityApi = {
-  installed: (): Promise<boolean> => ipcRenderer.invoke("antigravity:installed"),
+  /** Whether agy is installed; `fresh` skips the short cache of a miss. */
+  status: (fresh = false): Promise<{ installed: boolean; onPath: boolean; dir: string | null }> =>
+    ipcRenderer.invoke("antigravity:status", fresh),
+  /** True for the one pane per app run that may reopen agy's latest conversation. */
+  claimContinue: (paneId: string): Promise<boolean> => ipcRenderer.invoke("antigravity:claim-continue", paneId),
   runsInPane: (paneId: string): Promise<boolean> => ipcRenderer.invoke("antigravity:runs-in-pane", paneId),
 };

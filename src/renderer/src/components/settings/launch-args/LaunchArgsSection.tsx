@@ -120,7 +120,7 @@ export function LaunchArgsSection() {
   return (
     <SettingsSection
       title="Startup flags"
-      description="Applied to each launch from Codara only. Nothing is written to a CLI's own settings. Sessions already running keep the flags they started with."
+      description="Applied to each launch from Codara only. Nothing is written to a CLI's own settings. Sessions already running keep the flags they started with. A CLI typed in a fish or cmd terminal runs without them."
     >
       <ToggleRow
         title="Connect to Chrome"

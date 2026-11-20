@@ -22,15 +22,13 @@ export const ANTIGRAVITY_LAUNCH_COMMAND = "agy";
 // conversation. The pointer's id is this fixed word.
 export const ANTIGRAVITY_CONTINUE_SESSION_ID = "continue";
 
-// `agy --continue` reopens agy's latest conversation, and agy does not say
-// whether "latest" is per folder. Until it does, one Antigravity pane per app
-// run reopens it; any other pane starts a new conversation instead of a
-// second copy of the same one. The same pane keeps it when it restarts again.
-let antigravityContinuePane: string | null = null;
-
-export function antigravityRestoreCommand(paneId: string): { command: string; notice: string | null } {
-  antigravityContinuePane ??= paneId;
-  return antigravityContinuePane === paneId
+/**
+ * The command that brings an Antigravity pane back. Only the pane main lets
+ * claim it (one per app run, see src/main/antigravity-cli.ts) reopens agy's
+ * latest conversation; any other starts a new one instead of a second copy.
+ */
+export function antigravityRestoreCommand(continues: boolean): { command: string; notice: string | null } {
+  return continues
     ? { command: `${ANTIGRAVITY_LAUNCH_COMMAND} --continue`, notice: null }
     : {
         command: ANTIGRAVITY_LAUNCH_COMMAND,

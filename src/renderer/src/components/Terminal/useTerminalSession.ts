@@ -279,8 +279,9 @@ async function computeResumePlan(restore: TerminalAgentSession, paneId: string):
   if (restore.runtime === "antigravity") {
     // agy keeps its conversations to itself and Codara never reads them, so
     // there is nothing to probe: `agy --continue` reopens its latest one, in
-    // one pane per run (antigravityRestoreCommand).
-    const { command, notice } = antigravityRestoreCommand(paneId);
+    // one pane per run (main keeps who has it).
+    const continues = (await window.spark.antigravity?.claimContinue(paneId).catch(() => false)) ?? false;
+    const { command, notice } = antigravityRestoreCommand(continues);
     logRestore(`plan antigravity pane=${paneId} cwd=${restore.cwd} -> ${command}`);
     return {
       session: restore,
