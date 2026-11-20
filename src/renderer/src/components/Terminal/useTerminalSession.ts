@@ -53,6 +53,7 @@ import {
 } from "./osc-handlers";
 import { buildTerminalTheme } from "./terminalTheme";
 import {
+  antigravityRestoreCommand,
   buildAgentResumeCommand,
   buildClaudeLaunch,
   buildGrokLaunch,
@@ -274,17 +275,20 @@ async function fetchSessionStartHeal(
 // silently losing the conversation to a fresh session), and return the command
 // + self-heal bookkeeping. Shared by the boot-once restore path and the in-place
 // death re-arm path. The pure branch choice lives in decideResume (resume-policy).
-async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumePlan> {
+async function computeResumePlan(restore: TerminalAgentSession, paneId: string): Promise<ResumePlan> {
   if (restore.runtime === "antigravity") {
     // agy keeps its conversations to itself and Codara never reads them, so
-    // there is nothing to probe: `agy --continue` reopens its latest one.
-    logRestore(`plan antigravity cwd=${restore.cwd} -> continue`);
+    // there is nothing to probe: `agy --continue` reopens its latest one, in
+    // one pane per run (antigravityRestoreCommand).
+    const { command, notice } = antigravityRestoreCommand(paneId);
+    logRestore(`plan antigravity pane=${paneId} cwd=${restore.cwd} -> ${command}`);
     return {
       session: restore,
-      resumeCommand: buildAgentResumeCommand(restore),
-      resumeIsFreshFallback: false,
-      fallbackNotice: null,
-      fallbackSession: null,
+      resumeCommand: command,
+      resumeIsFreshFallback: notice !== null,
+      fallbackNotice: notice,
+      // The pointer stays: agy runs again in this pane either way.
+      fallbackSession: notice ? restore : null,
     };
   }
   const probe = await window.spark.agentSession
@@ -3189,7 +3193,7 @@ export function useTerminalSession({
           onResumeFallbackRef.current?.(healed);
         }
         logRestore(`pane=${sessionId} in-place re-arm after pty death (${session.runtime} id=${session.sessionId})`);
-        const plan = await computeResumePlan(session);
+        const plan = await computeResumePlan(session, sessionId);
         if (disposed) return;
         session = adoptPlanSession(session, plan);
         if (!plan.resumeCommand) {
@@ -3276,7 +3280,7 @@ export function useTerminalSession({
               onResumeFallbackRef.current?.(healed);
             }
           }
-          const plan = session ? await computeResumePlan(session) : null;
+          const plan = session ? await computeResumePlan(session, sessionId) : null;
           if (disposed) return;
           if (session && plan) session = adoptPlanSession(session, plan);
           const command = plan?.resumeCommand ?? null;
@@ -3533,7 +3537,7 @@ export function useTerminalSession({
           // computeResumePlan owns the probe → repair/self-heal/clear decision;
           // it is shared verbatim with the in-place death re-arm below.
           if (restore.active !== false) {
-            const plan = await computeResumePlan(restore);
+            const plan = await computeResumePlan(restore, sessionId);
             restore = adoptPlanSession(restore, plan);
             resumeCommand = plan.resumeCommand;
             resumeIsFreshFallback = plan.resumeIsFreshFallback;

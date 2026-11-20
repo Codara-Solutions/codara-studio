@@ -23,6 +23,22 @@ export const ANTIGRAVITY_LAUNCH_COMMAND = "agy";
 export const ANTIGRAVITY_CONTINUE_SESSION_ID = "continue";
 
 /** The vendor's install command, for a machine without `agy`. */
+// `agy --continue` reopens agy's latest conversation, and agy does not say
+// whether "latest" is per folder. Until it does, one Antigravity pane per app
+// run reopens it; any other pane starts a new conversation instead of a
+// second copy of the same one. The same pane keeps it when it restarts again.
+let antigravityContinuePane: string | null = null;
+
+export function antigravityRestoreCommand(paneId: string): { command: string; notice: string | null } {
+  antigravityContinuePane ??= paneId;
+  return antigravityContinuePane === paneId
+    ? { command: `${ANTIGRAVITY_LAUNCH_COMMAND} --continue`, notice: null }
+    : {
+        command: ANTIGRAVITY_LAUNCH_COMMAND,
+        notice: "another Antigravity tab reopened agy's latest conversation; this one starts a new one",
+      };
+}
+
 export function antigravityInstallCommand(platform: string): string {
   return platform === "win32"
     ? "irm https://antigravity.google/cli/install.ps1 | iex"
