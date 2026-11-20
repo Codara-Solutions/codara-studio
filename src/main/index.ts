@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { broadcastGitRemoteUpdated, registerIpc, setTrayHook } from "./ipc";
 import { isTrustedOnSender, registerTrustedMainWindow } from "./main-window-trust";
+import { onMainWebContentsDestroyed } from "./main-window-teardown";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { disposeAllConnections } from "./remote/connections";
@@ -318,6 +319,17 @@ let desktopCommandSocket: DesktopCommandSocket | null = null;
 // `close` handler knows to actually close instead of hiding to the tray.
 let isQuitting = false;
 let tray: Tray | null = null;
+
+// `mainWindow` keeps pointing at a window that went away on its own (a lost
+// Wayland connection, a closed window on the way to quit), and reading
+// `webContents` from a destroyed BrowserWindow throws. Timers, quit steps and
+// async callbacks go through this instead.
+function liveMainWebContents(): WebContents | null {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return null;
+  const wc = win.webContents;
+  return wc.isDestroyed() ? null : wc;
+}
 
 function sendWindowState(win: BrowserWindow): void {
   if (win.webContents.isDestroyed()) return;
@@ -723,8 +735,8 @@ function armBootWatchdog(): void {
 // deactivate running agents' restore pointers as their shells die (which would
 // drop the boot-once resume and reopen panes as plain shells). Best-effort.
 function signalRendererBeforeQuit(activeAgentPaneIds?: string[]): void {
-  const wc = mainWindow?.webContents;
-  if (!wc || wc.isDestroyed()) return;
+  const wc = liveMainWebContents();
+  if (!wc) return;
   try {
     wc.send("app:before-quit", {
       activeAgentPaneIds: activeAgentPaneIds ?? activeTerminalAgentPaneIds(),
@@ -903,6 +915,9 @@ function createWindow(): void {
   });
 
   const windowForEvents = mainWindow;
+  // Read once while the window is alive: the handlers below can run after the
+  // window itself is destroyed, when reading the window's WebContents throws.
+  const windowContents = windowForEvents.webContents;
 
   // Wire the privileged-IPC sender gate to this window BEFORE the initial
   // load below. The gate trusts a channel only when the sender is this
@@ -961,7 +976,7 @@ function createWindow(): void {
   // Some Wayland compositors (COSMIC 1.10) never paint a window that has not
   // been mapped yet, so ready-to-show never fires and the app would run with
   // no window at all. Once the page has loaded, show it anyway.
-  windowForEvents.webContents.once("did-finish-load", showFirstTime);
+  windowContents.once("did-finish-load", showFirstTime);
 
   // Close-to-tray: only hide when the tray actually exists AND the user has
   // opted into background running. The live-tray precondition is a deliberate
@@ -1006,7 +1021,7 @@ function createWindow(): void {
   });
 
   const openLinkFromMainWindow = (url: string) => {
-    void openLinkFromApp(url, mainWindow?.webContents);
+    void openLinkFromApp(url, windowContents);
   };
 
   // Navigation guard for the privileged main window. The allowlist is derived
@@ -1101,13 +1116,10 @@ function createWindow(): void {
     return { action: "deny" };
   });
 
-  mainWindow.webContents.on("destroyed", () => {
-    clearUnresponsiveRecoveryTimer(windowForEvents.webContents);
-    // Renderer destruction can happen during workspace switches, reloads, or
-    // crashes. Keep PTY processes alive so TerminalView can reattach when the
-    // pane remounts; explicit pane close / app quit still kills them.
-    pty.detachForWebContents(windowForEvents.webContents);
-    fsWatcher.disposeForWebContents(windowForEvents.webContents);
+  onMainWebContentsDestroyed(windowContents, {
+    clearUnresponsiveTimer: clearUnresponsiveRecoveryTimer,
+    detachTerminals: pty.detachForWebContents,
+    disposeWatchers: fsWatcher.disposeForWebContents,
   });
 
   // Renderer process crash (the "everything goes black" symptom, classically
@@ -1115,8 +1127,8 @@ function createWindow(): void {
   // Auto-recover by reloading — PTYs live in main, so the reloaded page
   // re-hydrates and reattaches/resumes each pane. 'clean-exit' is our own
   // reload/destroy, so don't fight it.
-  windowForEvents.webContents.on("render-process-gone", (_e, details) => {
-    clearUnresponsiveRecoveryTimer(windowForEvents.webContents);
+  windowContents.on("render-process-gone", (_e, details) => {
+    clearUnresponsiveRecoveryTimer(windowContents);
     markRendererNotReady();
     logMain("crash", `renderer process gone: ${details.reason} (exitCode ${details.exitCode})`);
     if (details.reason === "clean-exit") return;
@@ -1125,10 +1137,10 @@ function createWindow(): void {
   // Renderer wedged (JS main thread blocked). Give it a grace period to recover
   // on its own; if it's still stuck, force a crash (→ render-process-gone →
   // reload). Cleared the moment it becomes responsive again.
-  windowForEvents.webContents.on("unresponsive", () => {
+  windowContents.on("unresponsive", () => {
     logMain("crash", "renderer unresponsive");
     if (unresponsiveTimer) return;
-    const owner = windowForEvents.webContents;
+    const owner = windowContents;
     unresponsiveTimerOwner = owner;
     unresponsiveTimer = setTimeout(() => {
       if (unresponsiveTimerOwner !== owner) return;
@@ -1136,7 +1148,7 @@ function createWindow(): void {
       unresponsiveTimerOwner = null;
       // Never let a delayed callback belonging to an old window crash the
       // replacement renderer created by an earlier recovery.
-      if (mainWindow?.webContents !== owner || owner.isDestroyed()) return;
+      if (liveMainWebContents() !== owner) return;
       logMain("crash", "renderer still unresponsive after grace; forcing recovery");
       try {
         // Fires render-process-gone(reason:'crashed'), which recovers. If it
@@ -1148,8 +1160,8 @@ function createWindow(): void {
     }, 5000);
     unresponsiveTimer.unref();
   });
-  windowForEvents.webContents.on("responsive", () => {
-    clearUnresponsiveRecoveryTimer(windowForEvents.webContents);
+  windowContents.on("responsive", () => {
+    clearUnresponsiveRecoveryTimer(windowContents);
   });
   // Boot watchdog: arm on this window's own main-frame document navigations,
   // and only those. did-start-loading is frame-tree-wide, so a preview
@@ -1164,7 +1176,7 @@ function createWindow(): void {
   // renderer already signalled ready. The initial loadURL, recoverRenderer's
   // reload, and dev-server full reloads are all cross-document main-frame
   // navigations, so all of them still arm.
-  windowForEvents.webContents.on("did-start-navigation", (details) => {
+  windowContents.on("did-start-navigation", (details) => {
     if (!details.isMainFrame || details.isSameDocument) return;
     rendererReadyForCurrentLoad = false;
     markRendererNotReady();
@@ -1174,12 +1186,12 @@ function createWindow(): void {
     // So are Explorer watches: the new document arms the roots it shows, and a
     // root it no longer shows would otherwise stay watched until the window
     // closes.
-    fsWatcher.disposeForWebContents(windowForEvents.webContents);
+    fsWatcher.disposeForWebContents(windowContents);
   });
   // The page itself failed to load (dead dev server, missing asset). Retry via
   // the same escalation ladder after a short delay — an immediate reload against
   // a dead server would just fail again in a tight loop.
-  windowForEvents.webContents.on(
+  windowContents.on(
     "did-fail-load",
     (_e, errorCode, errorDescription, _validatedURL, isMainFrame) => {
       if (!isMainFrame || errorCode === -3 /* ERR_ABORTED: reload/navigation race */) return;
@@ -1496,9 +1508,7 @@ app.whenReady().then(async () => {
       dir: codaraHome(),
       log: (line) => logMain("restore", line),
       broadcast: (rec) => {
-        const wc = mainWindow?.webContents;
-        if (!wc || wc.isDestroyed()) return;
-        wc.send("agentSession:started", rec);
+        liveMainWebContents()?.send("agentSession:started", rec);
       },
     });
   } catch (err) {
