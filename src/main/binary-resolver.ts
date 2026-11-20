@@ -105,6 +105,20 @@ export async function resolveBinary(name: string): Promise<string | null> {
   return found;
 }
 
+/**
+ * The lookup for a CLI that is not an npm package (no `npm prefix -g`
+ * shell-out), uncached. `onPath` says whether the user's login-shell PATH,
+ * as read at app start, finds it: a terminal pane's shell needs that to run
+ * it by name.
+ */
+export async function findBinaryOutsideNpm(name: string): Promise<{ path: string; onPath: boolean } | null> {
+  await getEnrichedPath();
+  const onPath = await probeWhichWhere(name);
+  if (onPath) return { path: onPath, onPath: true };
+  const elsewhere = await probeCommonDirs(name);
+  return elsewhere ? { path: elsewhere, onPath: false } : null;
+}
+
 // ---------------------------------------------------------------------------
 // Probe 1: which / where with enriched PATH.
 // ---------------------------------------------------------------------------

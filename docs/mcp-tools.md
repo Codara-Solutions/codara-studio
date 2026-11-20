@@ -41,15 +41,18 @@ Every runtime gets the same tool set for the same kind of session;
 same server command and environment.
 
 **Startup flags** (Settings > Accounts) adds flags of your own to each Claude
-Code, Codex, Grok or Pi launch from Codara, after Codara's own, and nowhere
-else: they are kept in `<codara home>/agent-launch-args.json` and never written
+Code, Codex, Grok, Pi or Antigravity (`agy`) launch from Codara, after
+Codara's own, and nowhere else: they are kept in `<codara home>/agent-launch-args.json` and never written
 into a CLI's config. A field takes flags only, quoted values allowed; shell
 syntax (`;`, `|`, `$(...)`, backticks) and the flags Codara sets itself
 (`--settings`, `--mcp-config`, `--resume` and the like, Codex's
 `mcp_servers.codara-studio` and `notify` keys) are refused. **Connect to
 Chrome** starts Claude Code with `--chrome`, its own link to your Chrome. Codex,
 Grok and Pi have no such flag; they reach a browser through Codara's browser
-tools and the Chrome extension.
+tools and the Chrome extension. Antigravity takes only its interactive flags,
+each value after `=` (`--mode=plan`, `--model=...`, `--sandbox`), since agy
+reads a separate word as a subcommand. The flags reach a CLI typed in a zsh,
+bash or PowerShell pane; a fish or cmd pane runs it without them.
 
 The managed entries carry a version marker; when it changes, Codara rewrites
 them on the next launch. The Codex entry also sets `tool_timeout_sec = 660`

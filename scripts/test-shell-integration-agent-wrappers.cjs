@@ -56,7 +56,7 @@ fs.writeFileSync(path.join(ARGS_DIR, "claude", "args.txt"), ["--settings", SETTI
 fs.writeFileSync(path.join(ARGS_DIR, "codex", "args.txt"), ["-c", CODEX_MCP, "-c", CODEX_NOTIFY, ""].join("\n"));
 fs.writeFileSync(path.join(ARGS_DIR, "grok", "args.txt"), ["--disable-web-search", ""].join("\n"));
 fs.writeFileSync(path.join(ARGS_DIR, "pi", "args.txt"), ["--thinking", "high", ""].join("\n"));
-fs.writeFileSync(path.join(ARGS_DIR, "agy", "args.txt"), ["--mode", "plan", ""].join("\n"));
+fs.writeFileSync(path.join(ARGS_DIR, "agy", "args.txt"), ["--mode=plan", ""].join("\n"));
 
 // The fakes print @@<name><US>arg<US>arg...@@ on one line; the unit separator
 // never appears in a test argument or in an echoed command line.
@@ -176,7 +176,7 @@ const PLAIN = [
 
 const PLAIN_COMMANDS = [
   "grok 'fix the bug'", "grok login", "grok --help", "pi --model m", "pi install pkg", "pi",
-  "agy", "agy --model m", "agy mcp list", "agy --help",
+  "agy", "agy --model m", "agy mcp list", "agy --help", "agy --version", "agy -v",
 ];
 
 const PLAIN_EXPECTED = [
@@ -186,15 +186,17 @@ const PLAIN_EXPECTED = [
   ["pi", "--thinking", "high", "--model", "m"],
   ["pi", "install", "pkg"],
   ["pi", "--thinking", "high"],
-  ["agy", "--mode", "plan"],
-  ["agy", "--mode", "plan", "--model", "m"],
+  ["agy", "--mode=plan"],
+  ["agy", "--mode=plan", "--model", "m"],
   ["agy", "mcp", "list"],
   ["agy", "--help"],
+  ["agy", "--version"],
+  ["agy", "-v"],
 ];
 
 const PLAIN_AS_IS = [
   ["grok", "fix the bug"], ["grok", "login"], ["grok", "--help"], ["pi", "--model", "m"], ["pi", "install", "pkg"], ["pi"],
-  ["agy"], ["agy", "--model", "m"], ["agy", "mcp", "list"], ["agy", "--help"],
+  ["agy"], ["agy", "--model", "m"], ["agy", "mcp", "list"], ["agy", "--help"], ["agy", "--version"], ["agy", "-v"],
 ];
 
 const SHELLS = [];
