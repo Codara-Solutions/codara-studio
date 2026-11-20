@@ -197,6 +197,7 @@ import { isRecording } from "./shortcuts/recording";
 import { IS_MAC } from "./shortcuts/platform";
 import { usePreferences } from "./preferences/usePreferences";
 import {
+  ANTIGRAVITY_LAUNCH_COMMAND,
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
   GROK_LAUNCH_COMMAND,
@@ -5115,6 +5116,14 @@ export default function App() {
     () => launchNewWorkerTab(PI_LAUNCH_COMMAND),
     [launchNewWorkerTab],
   );
+  // The user's own `agy`, typed into a new tab's shell like `pi`; the tab is
+  // named for it so it reads as Antigravity before the TUI has painted.
+  const openAntigravityWorker = useCallback(() => {
+    tabsRef.current.newTerminalTab(resolveWorkerLaunchCwd() ?? undefined, ANTIGRAVITY_LAUNCH_COMMAND, {
+      title: "Antigravity",
+      color: agentBrandColor("antigravity"),
+    });
+  }, [resolveWorkerLaunchCwd]);
 
   // Resuming a past session: Settings' session list and the session picker.
   // The session opens in a new terminal tab of the workspace that holds
@@ -7164,6 +7173,7 @@ export default function App() {
               onNewCodexWorker={openCodexWorker}
               onNewGrokWorker={openGrokWorker}
               onNewPiWorker={openPiWorker}
+              onNewAntigravityWorker={openAntigravityWorker}
               onOpenSessionPicker={openSessionPicker}
               onNewChat={handleNewChat}
               onOpenBoardCardRun={handleOpenBoardCardRun}
@@ -7790,6 +7800,7 @@ interface WorkspaceProps {
   onNewCodexWorker: () => void;
   onNewGrokWorker: () => void;
   onNewPiWorker: () => void;
+  onNewAntigravityWorker: () => void;
   onOpenSessionPicker: () => void;
   onNewChat: () => void;
   // "Open chat" on a Cora Board card with a live run — App's run-selection
@@ -7847,6 +7858,7 @@ const Workspace = React.memo(function Workspace({
   onNewCodexWorker,
   onNewGrokWorker,
   onNewPiWorker,
+  onNewAntigravityWorker,
   onOpenSessionPicker,
   onNewChat,
   onOpenBoardCardRun,
@@ -8583,6 +8595,7 @@ const Workspace = React.memo(function Workspace({
         onNewCodexWorker={onNewCodexWorker}
         onNewGrokWorker={onNewGrokWorker}
         onNewPiWorker={onNewPiWorker}
+        onNewAntigravityWorker={onNewAntigravityWorker}
         onOpenSessionPicker={onOpenSessionPicker}
         onNewChat={onNewChat}
         onRenameChat={onRenameChat}

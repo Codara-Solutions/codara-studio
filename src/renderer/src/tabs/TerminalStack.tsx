@@ -2980,7 +2980,7 @@ interface ChipTone {
 }
 
 function workerBrandColor(worker: TerminalLeafWorker): string {
-  if (worker.runtime === "pi") return agentBrandColor("pi");
+  if (worker.runtime === "pi" || worker.runtime === "antigravity") return agentBrandColor(worker.runtime);
   const runtime = agentBrandRuntime(worker.runtime);
   return runtime ? agentBrandColor(runtime) : "var(--accent)";
 }
@@ -3177,7 +3177,9 @@ function WorkerPaneHeader({
         ? "Codex"
         : worker.runtime === "grok"
           ? "Grok"
-          : null;
+          : worker.runtime === "antigravity"
+            ? "Antigravity"
+            : null;
   const harnessLabel =
     worker.harness === "pi" ? (runtimeLabel ? `Pi · ${runtimeLabel}` : "Pi") : runtimeLabel;
   // Name the MODEL, not the harness. Under Pi every worker runs the same

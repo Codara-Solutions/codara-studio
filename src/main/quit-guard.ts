@@ -51,6 +51,7 @@ const RUNTIME_LABELS: Record<TerminalAgentMidTurn["runtime"], string> = {
   codex: "Codex",
   grok: "Grok",
   pi: "Pi",
+  antigravity: "Antigravity",
 };
 
 // Past this many terminal groups the rest collapse into one count, so a

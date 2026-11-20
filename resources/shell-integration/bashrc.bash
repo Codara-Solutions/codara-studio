@@ -211,6 +211,7 @@ _spark_agent_exec() {
     claude:-v|claude:--version|claude:-h|claude:--help|\
     grok:agent|grok:clone|grok:completions|grok:cursor-worker|grok:dashboard|grok:doctor|grok:du|grok:disk-usage|grok:export|grok:help|grok:inspect|grok:leader|grok:login|grok:logout|grok:mcp|grok:memory|grok:models|grok:plugin|grok:sessions|grok:setup|grok:trace|grok:update|grok:usage|grok:version|grok:v|grok:worktree|grok:wrap|grok:-h|grok:--help|grok:-v|grok:-V|grok:--version|\
     pi:-h|pi:--help|pi:-v|pi:--version|pi:[!-]*|\
+    agy:-h|agy:--help|agy:[!-]*|\
     codex:login|codex:logout|codex:mcp|codex:completion|codex:update|codex:doctor|codex:sandbox|codex:debug|codex:apply|codex:plugin|codex:app-server|codex:remote-control|codex:agents|codex:--version|codex:-V|codex:--help|codex:-h)
       command "$cli" "$@"
       return ;;
@@ -242,12 +243,15 @@ if [ -n "${SPARK_AGENT_ARGS_DIR-}" ]; then
   if ! declare -F codex >/dev/null 2>&1; then
     function codex { _spark_agent_exec codex "$@"; }
   fi
-  # grok and pi get only the flags set in Settings > Accounts > Startup flags.
+  # grok, pi and agy get only the flags set in Settings > Accounts > Startup flags.
   if ! declare -F grok >/dev/null 2>&1; then
     function grok { _spark_agent_exec grok "$@"; }
   fi
   if ! declare -F pi >/dev/null 2>&1; then
     function pi { _spark_agent_exec pi "$@"; }
+  fi
+  if ! declare -F agy >/dev/null 2>&1; then
+    function agy { _spark_agent_exec agy "$@"; }
   fi
 fi
 

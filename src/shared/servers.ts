@@ -124,7 +124,7 @@ export interface StatusSnapshot {
 }
 
 /** Runtimes whose launches take extra arguments from Settings. */
-export const LAUNCH_ARG_RUNTIMES = ["claude", "codex", "grok", "pi"] as const;
+export const LAUNCH_ARG_RUNTIMES = ["claude", "codex", "grok", "pi", "antigravity"] as const;
 export type LaunchArgRuntime = (typeof LAUNCH_ARG_RUNTIMES)[number];
 
 export interface LaunchArgsSettings {

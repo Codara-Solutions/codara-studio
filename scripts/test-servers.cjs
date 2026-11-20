@@ -833,6 +833,12 @@ async function main() {
       ["grok", "-c", /set by Codara/],
       ["codex", `-c mcp_servers."codara-studio".command=x`, /set by Codara/],
       ["pi", "--mode rpc", /set by Codara/],
+      // agy runs only interactively: no print, stream or remote modes.
+      ["antigravity", "--print", /set by Codara/],
+      ["antigravity", "-p", /set by Codara/],
+      ["antigravity", "--output-format=stream-json", /set by Codara/],
+      ["antigravity", "--remote-control", /set by Codara/],
+      ["antigravity", "--continue", /set by Codara/],
       ["claude", "--add-dir ../shared", /--add-dir=\.\.\/shared/],
       ["claude", `--verbose --allowedTools "Bash(git:*)"`, /one value per flag/],
       ["claude", "--disallowed-tools Bash --model opus", /one value per flag/],
@@ -867,7 +873,13 @@ async function main() {
 
     await assert.rejects(launch.saveLaunchArgsSettings({ args: { claude: "--verbose && curl x" }, claudeChrome: false }), /claude: /);
     await launch.saveLaunchArgsSettings({
-      args: { claude: "--verbose", codex: "--search", grok: "--disable-web-search", pi: "--thinking high" },
+      args: {
+        claude: "--verbose",
+        codex: "--search",
+        grok: "--disable-web-search",
+        pi: "--thinking high",
+        antigravity: "--mode plan",
+      },
       claudeChrome: true,
     });
     await launch.writeShellArgsFiles();
@@ -878,10 +890,13 @@ async function main() {
     assert.deepEqual(launch.plainAgentLaunchArgs("grok", { userArgs: ["login"] }), []);
     assert.deepEqual(launch.plainAgentLaunchArgs("pi", { userArgs: [] }), ["--thinking", "high"]);
     assert.deepEqual(launch.plainAgentLaunchArgs("pi", { userArgs: ["install", "x"] }), []);
+    assert.deepEqual(launch.plainAgentLaunchArgs("antigravity", { userArgs: [] }), ["--mode", "plan"]);
+    assert.deepEqual(launch.plainAgentLaunchArgs("antigravity", { userArgs: ["mcp", "list"] }), []);
     const typed = (cli) => fs.readFileSync(path.join(dir, cli, "args.txt"), "utf8").split("\n").filter(Boolean);
     assert.deepEqual(typed("claude").slice(-2), ["--verbose", "--chrome"]);
     assert.deepEqual(typed("grok"), ["--disable-web-search"]);
     assert.deepEqual(typed("pi"), ["--thinking", "high"]);
+    assert.deepEqual(typed("agy"), ["--mode", "plan"]);
 
     await launch.saveLaunchArgsSettings({ args: { claude: "--no-chrome" }, claudeChrome: true });
     assert.ok(!launch.claudeLaunchArgs({ userArgs: [] }).includes("--chrome"), "--chrome next to --no-chrome");

@@ -364,6 +364,7 @@ export async function writeShellArgsFiles(): Promise<void> {
   await writeIfChanged(join(state.dir, "codex", "args.txt"), argsFile(codexLaunchArgs({ userArgs: [] })));
   await writeIfChanged(join(state.dir, "grok", "args.txt"), argsFile(plainAgentLaunchArgs("grok", { userArgs: [] })));
   await writeIfChanged(join(state.dir, "pi", "args.txt"), argsFile(plainAgentLaunchArgs("pi", { userArgs: [] })));
+  await writeIfChanged(join(state.dir, "agy", "args.txt"), argsFile(plainAgentLaunchArgs("antigravity", { userArgs: [] })));
 }
 
 let bootPass: Promise<unknown> = Promise.resolve();
@@ -456,14 +457,18 @@ export function codexLaunchArgs(input: {
 }
 
 /**
- * The arguments Codara inserts after `grok` or `pi`: only what Settings adds
- * (their tool wiring is not on the command line). A subcommand, help or
- * version goes through untouched. Grok takes a prompt as its first word, so
- * only its listed subcommands pass; Pi's subcommands are not listed here, so
- * any first word that is not a flag passes. The shell wrappers in
- * resources/shell-integration apply the same rule to a typed command.
+ * The arguments Codara inserts after `grok`, `pi` or `agy`: only what
+ * Settings adds (their tool wiring is not on the command line). A
+ * subcommand, help or version goes through untouched. Grok takes a prompt as
+ * its first word, so only its listed subcommands pass; Pi's and agy's
+ * subcommands are not listed here, so any first word that is not a flag
+ * passes. The shell wrappers in resources/shell-integration apply the same
+ * rule to a typed command.
  */
-export function plainAgentLaunchArgs(runtime: "grok" | "pi", input: { userArgs: readonly string[] }): string[] {
+export function plainAgentLaunchArgs(
+  runtime: "grok" | "pi" | "antigravity",
+  input: { userArgs: readonly string[] },
+): string[] {
   const first = input.userArgs[0];
   if (first !== undefined) {
     if (PLAIN_PASS_THROUGH.has(first)) return [];

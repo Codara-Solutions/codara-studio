@@ -44,6 +44,7 @@
   --agent-codex: oklch(0.74 0.13 175);
   --agent-grok: oklch(0.82 0.18 128);
   --agent-pi: oklch(0.74 0.14 300);
+  --agent-antigravity: oklch(0.72 0.13 255);
 
   /* Fallback glyph color for a background-created terminal after its live
      runtime mark is gone. Agent activity never tints the whole tab. */
@@ -541,6 +542,7 @@
   --agent-codex: oklch(0.50 0.13 175);
   --agent-grok: oklch(0.48 0.16 128);
   --agent-pi: oklch(0.50 0.15 300);
+  --agent-antigravity: oklch(0.50 0.15 255);
 }
 
 /* The system-activity metric hues stepped darker for bright paper. */

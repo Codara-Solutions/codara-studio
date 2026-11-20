@@ -16,8 +16,8 @@
 //   - a function the user defined in their rc file is never replaced, and an
 //     alias that runs the CLI itself still goes through the wrapper,
 //   - without SPARK_AGENT_ARGS_DIR, or with no args file, the CLI runs as is,
-//   - `grok` and `pi` get the Startup flags from their own args file, and
-//     their subcommands, help and version pass through.
+//   - `grok`, `pi` and `agy` get the Startup flags from their own args file,
+//     and their subcommands, help and version pass through.
 //
 //   node scripts/test-shell-integration-agent-wrappers.cjs
 
@@ -47,7 +47,7 @@ for (const dir of [
   USER_HOME,
   BIN,
   EMPTY_ARGS_DIR,
-  ...["claude", "codex", "grok", "pi"].map((cli) => path.join(ARGS_DIR, cli)),
+  ...["claude", "codex", "grok", "pi", "agy"].map((cli) => path.join(ARGS_DIR, cli)),
 ]) {
   fs.mkdirSync(dir, { recursive: true });
 }
@@ -56,10 +56,11 @@ fs.writeFileSync(path.join(ARGS_DIR, "claude", "args.txt"), ["--settings", SETTI
 fs.writeFileSync(path.join(ARGS_DIR, "codex", "args.txt"), ["-c", CODEX_MCP, "-c", CODEX_NOTIFY, ""].join("\n"));
 fs.writeFileSync(path.join(ARGS_DIR, "grok", "args.txt"), ["--disable-web-search", ""].join("\n"));
 fs.writeFileSync(path.join(ARGS_DIR, "pi", "args.txt"), ["--thinking", "high", ""].join("\n"));
+fs.writeFileSync(path.join(ARGS_DIR, "agy", "args.txt"), ["--mode", "plan", ""].join("\n"));
 
 // The fakes print @@<name><US>arg<US>arg...@@ on one line; the unit separator
 // never appears in a test argument or in an echoed command line.
-for (const name of ["claude", "codex", "grok", "pi"]) {
+for (const name of ["claude", "codex", "grok", "pi", "agy"]) {
   const file = path.join(BIN, name);
   fs.writeFileSync(
     file,
@@ -101,7 +102,7 @@ function pass(name) {
 
 function parseCalls(output) {
   const calls = [];
-  for (const match of output.matchAll(/@@(claude|codex|grok|pi|userfn)((?:\u001f[^@\n]*)*)@@/g)) {
+  for (const match of output.matchAll(/@@(claude|codex|grok|pi|agy|userfn)((?:\u001f[^@\n]*)*)@@/g)) {
     calls.push([match[1], ...(match[2] ? match[2].split(SEP).slice(1) : [])]);
   }
   return calls;
@@ -173,7 +174,10 @@ const PLAIN = [
   ["claude", "fix the failing test"],
 ];
 
-const PLAIN_COMMANDS = ["grok 'fix the bug'", "grok login", "grok --help", "pi --model m", "pi install pkg", "pi"];
+const PLAIN_COMMANDS = [
+  "grok 'fix the bug'", "grok login", "grok --help", "pi --model m", "pi install pkg", "pi",
+  "agy", "agy --model m", "agy mcp list", "agy --help",
+];
 
 const PLAIN_EXPECTED = [
   ["grok", "--disable-web-search", "fix the bug"],
@@ -182,9 +186,16 @@ const PLAIN_EXPECTED = [
   ["pi", "--thinking", "high", "--model", "m"],
   ["pi", "install", "pkg"],
   ["pi", "--thinking", "high"],
+  ["agy", "--mode", "plan"],
+  ["agy", "--mode", "plan", "--model", "m"],
+  ["agy", "mcp", "list"],
+  ["agy", "--help"],
 ];
 
-const PLAIN_AS_IS = [["grok", "fix the bug"], ["grok", "login"], ["grok", "--help"], ["pi", "--model", "m"], ["pi", "install", "pkg"], ["pi"]];
+const PLAIN_AS_IS = [
+  ["grok", "fix the bug"], ["grok", "login"], ["grok", "--help"], ["pi", "--model", "m"], ["pi", "install", "pkg"], ["pi"],
+  ["agy"], ["agy", "--model", "m"], ["agy", "mcp", "list"], ["agy", "--help"],
+];
 
 const SHELLS = [];
 if (fs.existsSync("/bin/bash")) {
@@ -268,10 +279,10 @@ async function shellScenarios(shell) {
   pass(`${shell.label}: an alias that runs claude itself still gets Codara's flags`);
 
   output = await runShell(shell.exe, shell.args, baseEnv({ ...shell.env, SPARK_AGENT_ARGS_DIR: ARGS_DIR }), PLAIN_COMMANDS.join("\n"));
-  assert.deepEqual(parseCalls(output), PLAIN_EXPECTED, `${shell.label}: grok and pi\n${output}`);
+  assert.deepEqual(parseCalls(output), PLAIN_EXPECTED, `${shell.label}: grok, pi and agy\n${output}`);
   output = await runShell(shell.exe, shell.args, baseEnv({ ...shell.env }), PLAIN_COMMANDS.join("\n"));
-  assert.deepEqual(parseCalls(output), PLAIN_AS_IS, `${shell.label}: grok and pi without args dir\n${output}`);
-  pass(`${shell.label}: grok and pi get their Startup flags, subcommands pass through`);
+  assert.deepEqual(parseCalls(output), PLAIN_AS_IS, `${shell.label}: grok, pi and agy without args dir\n${output}`);
+  pass(`${shell.label}: grok, pi and agy get their Startup flags, subcommands pass through`);
 }
 
 function pwshScenarios() {
@@ -325,10 +336,10 @@ function pwshScenarios() {
     return `${result.stdout}${result.stderr}`;
   };
   output = plain({ SPARK_AGENT_ARGS_DIR: ARGS_DIR });
-  assert.deepEqual(parseCalls(output), PLAIN_EXPECTED, `pwsh: grok and pi\n${output}`);
+  assert.deepEqual(parseCalls(output), PLAIN_EXPECTED, `pwsh: grok, pi and agy\n${output}`);
   output = plain({});
-  assert.deepEqual(parseCalls(output), PLAIN_AS_IS, `pwsh: grok and pi without args dir\n${output}`);
-  pass("pwsh: grok and pi get their Startup flags, subcommands pass through");
+  assert.deepEqual(parseCalls(output), PLAIN_AS_IS, `pwsh: grok, pi and agy without args dir\n${output}`);
+  pass("pwsh: grok, pi and agy get their Startup flags, subcommands pass through");
 }
 
 function sourcePins() {

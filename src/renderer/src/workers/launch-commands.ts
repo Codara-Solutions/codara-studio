@@ -13,6 +13,17 @@ export const GROK_LAUNCH_COMMAND = "grok --yolo";
 // does not claim `pi`): it is typed into an ordinary shell, whose prompt
 // markers tell Codara when Pi exits.
 export const PI_LAUNCH_COMMAND = "pi";
+// Google's Antigravity CLI runs the same way: the user's own `agy` with their
+// own Google sign-in, typed into an ordinary shell, Settings' startup flags
+// added by the pane's `agy` function. Codara never runs it non-interactively.
+export const ANTIGRAVITY_LAUNCH_COMMAND = "agy";
+
+/** The vendor's install command, for a machine without `agy`. */
+export function antigravityInstallCommand(platform: string): string {
+  return platform === "win32"
+    ? "irm https://antigravity.google/cli/install.ps1 | iex"
+    : "curl -fsSL https://antigravity.google/cli/install.sh | bash";
+}
 
 // Runtimes whose CLI sessions Codara can capture + restore across app restarts.
 export type AgentSessionRuntime = "claude" | "codex" | "grok" | "pi";

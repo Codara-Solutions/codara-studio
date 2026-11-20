@@ -1,6 +1,6 @@
 // Extra startup arguments per agent runtime, from Settings. They ride on the
 // command line of each launch Codara makes (and of a `claude`, `codex`,
-// `grok` or `pi` typed in a Codara pane, through the args files the pane
+// `grok`, `pi` or `agy` typed in a Codara pane, through the args files the pane
 // functions read), never in ~/.claude, ~/.codex, ~/.grok or any CLI config.
 // The text is split into argv here, once: nothing a user types is ever run
 // by a shell, and anything that would need one is refused.
@@ -30,6 +30,12 @@ const RESERVED: Record<LaunchArgRuntime, readonly string[]> = {
   codex: ["resume", "exec"],
   grok: ["--session-id", "-s", "--resume", "-r", "--continue", "-c", "--single", "-p", "--output-format"],
   pi: ["--session", "--resume", "-r", "--continue", "-c", "--print", "-p", "--mode"],
+  // Codara runs agy only interactively, for the person at the keyboard: the
+  // print and stream modes and remote control are never added to a launch.
+  antigravity: [
+    "--continue", "-c", "--conversation", "--print", "-p", "--prompt", "--output-format", "--input-format",
+    "--json-schema", "--print-timeout", "--remote-control", "--remote-agent",
+  ],
 };
 /**
  * Options that take every following word as another value. The Settings
@@ -42,6 +48,7 @@ const VARIADIC: Record<LaunchArgRuntime, readonly string[]> = {
   codex: ["-i", "--image"],
   grok: [],
   pi: [],
+  antigravity: [],
 };
 // Codex takes config overrides as -c key=value; Codara's own keys stay its own.
 const CODEX_RESERVED_KEYS = /^\s*(?:mcp_servers\s*\.\s*(?:codara-studio\b|"codara-studio"|'codara-studio')|notify\s*=|tui\s*\.\s*notifications\s*=)/;

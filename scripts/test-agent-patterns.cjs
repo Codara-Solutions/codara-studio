@@ -770,6 +770,10 @@ for (const [command, expected] of [
   ["node /opt/homebrew/bin/pi --session abc", "pi"],
   ["pi-hole status", null],
   ["pip install requests", null],
+  // Antigravity is one native binary named agy.
+  ["/home/u/.local/bin/agy --continue", "antigravity"],
+  ["agy", "antigravity"],
+  ["agyctl status", null],
   // The shell hosting the agent names it in -c but is not the agent.
   ["/bin/zsh -f -ic claude --resume abc; exec zsh -i", null],
   ["bash -lc codex", null],
@@ -781,6 +785,25 @@ for (const [command, expected] of [
 ]) {
   check(`process command → runtime: ${command || "(empty)"}`, ap.runtimeFromProcessCommand(command), expected);
 }
+
+// ── Antigravity (`agy`): the user's own CLI, public for terminal tracking ──
+// The signed-out start screen of agy 1.5.13, from a live pty capture with no
+// network (cursor moves and colors kept as agy paints them).
+const AGY_SIGNED_OUT =
+  "\x1b[?1049h\x1b[H\x1b[2J\n\n Welcome to the \x1b[38;5;69mAntigravity CLI\x1b[m. You are currently not signed in.\r\n\n" +
+  " Select login method:\r\n > 1. Google OAuth\n\x1b[4G2. Use a Google Cloud project\n\n" +
+  "\x1b[4G\x1b[94;1m\u2191/\u2193\x1b[90;22m Navigate \u00b7 \x1b[94;1menter\x1b[90;22m Select\x1b[m\n";
+check("antigravity is a public runtime", ap.coercePublicRuntime("antigravity"), "antigravity");
+check("antigravity start screen banner", ap.sniffRuntime(AGY_SIGNED_OUT), "antigravity");
+check("antigravity banner reaches the live sniff", ap.sniffLiveRuntime(AGY_SIGNED_OUT), "antigravity");
+check("antigravity start screen keeps its UI present", ap.agentUiPresent("antigravity", AGY_SIGNED_OUT), true);
+check("antigravity sign-in picker needs you", ap.classifyTail("antigravity", AGY_SIGNED_OUT), "blocked");
+check("antigravity permission dialog needs you", ap.classifyTail("antigravity", "Requesting permission for:\n  rm -rf build\n> Yes, allow tool call\n  No, deny tool call"), "blocked");
+check("antigravity interrupt hint is working", ap.classifyTail("antigravity", "  Generating  (esc to interrupt)"), "working");
+check("antigravity idle prompt is not working", ap.classifyTail("antigravity", "> \n ? for shortcuts"), null);
+check("the product name alone does not arm a pane", ap.sniffRuntime("cat notes.md\nTry Antigravity on the new repo"), null);
+check("typed agy is antigravity", ap.runtimeFromCommandLine("agy --mode plan"), "antigravity");
+check("typed agy through a path is antigravity", ap.runtimeFromCommandLine("/home/u/.local/bin/agy"), "antigravity");
 
 process.exitCode = failures === 0 ? 0 : 1;
 console.log(failures === 0 ? "\nAll agent-pattern checks passed." : `\n${failures} check(s) FAILED.`);

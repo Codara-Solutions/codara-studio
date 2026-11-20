@@ -47,8 +47,8 @@ function Global:__Spark-AgentExec {
     } else {
         @('-h', '--help', '-v', '--version')
     }
-    # Pi's subcommands are not listed, so any first word that is not a flag runs it untouched.
-    if ($cli -eq 'pi' -and $first -ne '' -and -not $first.StartsWith('-')) { $passThrough = @($first) }
+    # Pi's and agy's subcommands are not listed, so any first word that is not a flag runs it untouched.
+    if (($cli -eq 'pi' -or $cli -eq 'agy') -and $first -ne '' -and -not $first.StartsWith('-')) { $passThrough = @($first) }
     $extra = @()
     $file = if ($env:SPARK_AGENT_ARGS_DIR) { Join-Path (Join-Path $env:SPARK_AGENT_ARGS_DIR $cli) 'args.txt' } else { $null }
     if ($file -and ($passThrough -cnotcontains $first) -and [System.IO.File]::Exists($file)) {
@@ -83,12 +83,15 @@ if ($env:SPARK_AGENT_ARGS_DIR) {
     if (-not (Get-Command -Name codex -CommandType Function, Alias -ErrorAction SilentlyContinue)) {
         function Global:codex { __Spark-AgentExec 'codex' $args }
     }
-    # grok and pi get only the flags set in Settings > Accounts > Startup flags.
+    # grok, pi and agy get only the flags set in Settings > Accounts > Startup flags.
     if (-not (Get-Command -Name grok -CommandType Function, Alias -ErrorAction SilentlyContinue)) {
         function Global:grok { __Spark-AgentExec 'grok' $args }
     }
     if (-not (Get-Command -Name pi -CommandType Function, Alias -ErrorAction SilentlyContinue)) {
         function Global:pi { __Spark-AgentExec 'pi' $args }
+    }
+    if (-not (Get-Command -Name agy -CommandType Function, Alias -ErrorAction SilentlyContinue)) {
+        function Global:agy { __Spark-AgentExec 'agy' $args }
     }
 }
 

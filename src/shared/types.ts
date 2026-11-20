@@ -2125,9 +2125,9 @@ export interface PreferencesChange<K extends PrefKey = PrefKey> {
 export type AgentRuntimeKind = AgentFamilyRuntime;
 
 // An agent CLI a terminal pane can run and Codara tracks: the account
-// families plus Pi, which a pane runs as the user's own `pi` with no Codara
-// account behind it.
-export type TerminalAgentRuntime = AgentFamilyRuntime | "pi";
+// families plus Pi and Antigravity, which a pane runs as the user's own `pi`
+// or `agy` with no Codara account behind it.
+export type TerminalAgentRuntime = AgentFamilyRuntime | "pi" | "antigravity";
 
 export type WorkerSessionRuntime = WorkerSessionFamily;
 

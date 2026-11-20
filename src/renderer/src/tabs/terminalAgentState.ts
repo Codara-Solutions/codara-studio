@@ -8,7 +8,7 @@ type LiveAgentRuntime = TerminalAgentRuntime;
 function liveAgentRuntime(
   value: string | null | undefined,
 ): LiveAgentRuntime | null {
-  return value === "claude" || value === "codex" || value === "grok" || value === "pi"
+  return value === "claude" || value === "codex" || value === "grok" || value === "pi" || value === "antigravity"
     ? value
     : null;
 }

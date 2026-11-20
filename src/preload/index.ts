@@ -65,6 +65,7 @@ import { cosTasksApi } from "./areas/cos-tasks";
 import { skillOriginsApi } from "./areas/skill-origins";
 import { terminalScrollbackApi } from "./areas/terminal-scrollback";
 import { agentHibernationApi } from "./areas/agent-hibernation";
+import { antigravityApi } from "./areas/antigravity";
 import { worktreeCleanupApi } from "./areas/worktree-cleanup";
 import { crossWorkspaceApi } from "./areas/cross-workspace";
 import { tabActionsApi } from "./areas/tab-actions";
@@ -1929,6 +1930,7 @@ const api = {
   gitFix: gitFixApi,
   diagnostics: diagnosticsApi,
   agentHibernation: agentHibernationApi,
+  antigravity: antigravityApi,
   worktreeSetup: worktreeSetupApi,
   workerFeed: workerFeedApi,
   share: shareApi,

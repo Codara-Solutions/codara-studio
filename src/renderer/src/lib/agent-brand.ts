@@ -7,11 +7,15 @@ import { AGENT_FAMILIES, isAgentRuntimeKind, type AgentFamilyId } from "@shared/
 
 export type AgentBrandRuntime = AgentFamilyId;
 
-export function agentBrandColor(runtime: AgentBrandRuntime | "pi"): string {
+// Pi and Antigravity are the user's own CLIs, not account families, but they
+// get a fixed brand color the same way.
+export type AgentTerminalBrand = AgentBrandRuntime | "pi" | "antigravity";
+
+export function agentBrandColor(runtime: AgentTerminalBrand): string {
   return `var(--agent-${runtime})`;
 }
 
-export function agentBrandTone(runtime: AgentBrandRuntime | "pi" | "shell"): {
+export function agentBrandTone(runtime: AgentTerminalBrand | "shell"): {
   color: string;
   background: string;
   border: string;

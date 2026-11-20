@@ -534,6 +534,7 @@ import {
   trackTerminalScrollbackPanes,
 } from "./terminal-scrollback";
 import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
+import { registerAntigravityIpc } from "./antigravity-cli";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
 import { registerCrossWorkspaceIpc } from "./cross-workspace-ipc";
 import { registerTabActionIpc } from "./tab-action-ipc";
@@ -4454,6 +4455,7 @@ export function registerIpc(): void {
   registerReviewIpc(handle);
   registerTerminalScrollbackIpc(handle);
   registerAgentHibernationIpc(handle);
+  registerAntigravityIpc(handle);
   registerWorktreeCleanupIpc(handle);
   registerCrossWorkspaceIpc(handle);
   registerTabActionIpc(handle);
