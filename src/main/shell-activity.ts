@@ -26,3 +26,21 @@ export function chunkShellActivity(chunk: Buffer): ShellActivity {
   if (!chunk.includes("\x1b]133;") && !chunk.includes("\x1b]633;")) return null;
   return shellActivity(chunk);
 }
+
+// Long enough for any A/B/C marker and a D with its exit code.
+const SHELL_CARRY_BYTES = 16;
+
+/**
+ * The activity a chunk reports, also catching a marker that started in the
+ * previous chunk's last bytes (`carry`), and the carry for the next chunk.
+ * A marker wholly inside the chunk is later than one across the join, so it
+ * wins; the join is scanned only when the chunk itself holds none.
+ */
+export function scanShellChunk(chunk: Buffer, carry: Buffer | null): { activity: ShellActivity; carry: Buffer } {
+  let activity = chunkShellActivity(chunk);
+  if (activity === null && carry && carry.length > 0) {
+    activity = chunkShellActivity(Buffer.concat([carry, chunk.subarray(0, SHELL_CARRY_BYTES * 2)]));
+  }
+  const tail = chunk.length >= SHELL_CARRY_BYTES ? chunk : Buffer.concat([carry ?? Buffer.alloc(0), chunk]);
+  return { activity, carry: Buffer.from(tail.subarray(Math.max(0, tail.length - SHELL_CARRY_BYTES))) };
+}

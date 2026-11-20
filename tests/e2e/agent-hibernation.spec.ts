@@ -66,6 +66,7 @@ test("an idle Claude pane in a background workspace sleeps and resumes when open
     // Stopped for real, and the workspace still counts it, as asleep.
     await expect.poll(() => isAlive(first[0].pid), { timeout: 10_000 }).toBe(false);
     await expect(workspaceA).toHaveAttribute("data-agent-sleeping", "1");
+    await expect(workspaceA.getByTestId("workspace-tab-count")).toHaveAttribute("aria-label", /, 1 agent sleeping$/);
     expect(logs.some((line) => line.includes(`pane=${PANE_ID} claude is sleeping`))).toBe(true);
 
     // Opening the workspace resumes the same session in the same pane.

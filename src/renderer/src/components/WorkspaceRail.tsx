@@ -2163,7 +2163,6 @@ function WorkspaceFamily({
       const props = childProps.get(worktree.id)!;
       return { total: props.agentTotal, working: props.agentWorking, sleeping: props.agentSleeping };
     }),
-    [...family.active, ...family.merged],
   );
   const expandable = family.own.length > 0 || worktrees.length > 0 || external.length > 0;
   const open = useRailFold(project.id, worktrees.length > 0 || external.length > 0) && expandable;
@@ -2180,6 +2179,8 @@ function WorkspaceFamily({
     <>
       <WorkspaceRow
         {...projectProps}
+        // Folded, the tile's working ring still shows an agent working in a worktree.
+        working={projectProps.working || familyCount.working > 0}
         agentTotal={familyCount.total}
         agentWorking={familyCount.working}
         agentSleeping={familyCount.sleeping}
@@ -2805,7 +2806,9 @@ function WorkspaceRow({
           </div>
         )}
 
-        {tabsOpen > 0 && !editing && <TabCount open={tabsOpen} running={tabsRunning} accent={accent} />}
+        {tabsOpen > 0 && !editing && (
+          <TabCount open={tabsOpen} running={tabsRunning} sleeping={agentSleeping} accent={accent} />
+        )}
 
         {!editing && (canCleanUp || canRemoveFromRail) && (rowHover || cleaning || moreFocus) && (
           <RowQuickAction
@@ -3269,10 +3272,15 @@ function RowMenuItem({
 // header's member count; the slash and the row placement keep the two apart,
 // and no glyph or chip is drawn so the rail stays quiet. Every row counts
 // only its own workspace's tabs: a worktree's tabs show on its nested row.
-function TabCount(props: { open: number; running: number; accent: string }) {
-  const { open, running, accent } = props;
+function TabCount(props: { open: number; running: number; sleeping?: number; accent: string }) {
+  const { open, running, sleeping = 0, accent } = props;
   const tabs = `tab${open === 1 ? "" : "s"}`;
-  const label = running > 0 ? `${running} of ${open} ${tabs} running` : `${open} ${tabs} open`;
+  const label = [
+    running > 0 ? `${running} of ${open} ${tabs} running` : `${open} ${tabs} open`,
+    sleeping > 0 ? `${sleeping} agent${sleeping === 1 ? "" : "s"} sleeping` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
   return (
     <span
       role="status"

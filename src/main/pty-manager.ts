@@ -79,7 +79,7 @@ import { mintPaneSocketCapability } from "./agent-socket-capabilities";
 import { pretrustClaudeFolder } from "./claude-pretrust";
 import { paneHelperBinDir, withPaneHelperOnPath } from "./pane-helper";
 import { continueForegroundJob } from "./terminal-foreground";
-import { chunkShellActivity } from "./shell-activity";
+import { scanShellChunk } from "./shell-activity";
 import {
   beginPosixPtyTreeTeardown,
   capturePosixPtyTree,
@@ -215,6 +215,9 @@ interface Session {
   // The shell last reported a running command (OSC 133/633 C, not yet D).
   // The rail counts the pane's tab as running while it is set.
   shellBusy?: boolean;
+  // The previous chunk's last bytes, so a marker split across two chunks
+  // is still seen.
+  shellCarry?: Buffer;
   nativeCodexProfileId?: string;
   releaseNativeCodexProfileLease?: () => void;
   nativeClaudeProfileId?: string;
@@ -742,6 +745,8 @@ async function spawnWithSessionLock(
       existing.attached = true;
       existing.detachedBacklog = [];
       existing.detachedBacklogBytes = 0;
+      // A replacement renderer may have missed the change while detached.
+      if (existing.shellBusy) shellBusySink?.({ id: existing.id, busy: true });
       const snapshot = tailSnapshot(existing);
       if (snapshot) {
         try {
@@ -1818,14 +1823,20 @@ function waitForPromptReady(id: string, timeoutMs: number): Promise<void> {
 }
 
 // Pushed only on a change, so a pane costs nothing while its shell idles or
-// its command keeps printing. A marker split across two chunks is missed; the
-// next prompt or command corrects it.
+// its command keeps printing. It goes to the main window, never through the
+// session's own sink: a renderer recovery clears that sink for every pane,
+// hidden workspaces' included, and their changes must still reach the rail.
+type ShellBusySink = (change: { id: string; busy: boolean }) => void;
+let shellBusySink: ShellBusySink | null = null;
+
+export function setShellBusySink(sink: ShellBusySink | null): void {
+  shellBusySink = sink;
+}
+
 function setShellBusy(s: Session, busy: boolean): void {
   if ((s.shellBusy ?? false) === busy) return;
   s.shellBusy = busy;
-  if (s.webContents && !s.webContents.isDestroyed()) {
-    s.webContents.send("pty:shell-busy", { id: s.id, busy });
-  }
+  shellBusySink?.({ id: s.id, busy });
 }
 
 /** Panes whose shell is running a command now, for a renderer that just loaded. */
@@ -1858,8 +1869,9 @@ function enqueueData(id: string, data: string | Buffer): void {
   // advances tailHead (nulling the slot so the Buffer is released) instead of
   // shift()ing, which would re-index every one of the ~95k live entries; the
   // consumed prefix is compacted away in one slice once it grows large.
-  const activity = chunkShellActivity(chunk);
-  if (activity !== null) setShellBusy(s, activity === "running");
+  const scan = scanShellChunk(chunk, s.shellCarry ?? null);
+  s.shellCarry = scan.carry;
+  if (scan.activity !== null) setShellBusy(s, scan.activity === "running");
   s.tail.push(chunk);
   s.tailBytes += chunk.length;
   while (tailLiveCount(s) > 1) {
@@ -3116,5 +3128,7 @@ function killNow(id: string): void {
   s.detachedBacklogBytes = 0;
   releaseNativeProfileSessionLeases(s);
   revokePaneAccess(s);
+  // A same-id respawn starts a fresh shell; the rail must not keep the old one busy.
+  setShellBusy(s, false);
   sessions.delete(id);
 }

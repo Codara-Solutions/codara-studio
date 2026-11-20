@@ -186,24 +186,16 @@ export interface RailAgentCount {
   sleeping: number;
 }
 
-export interface RailFamilyAgentCount extends RailAgentCount {
-  /** Of `total`, the agents that show on one of the project's worktree rows. */
-  inWorktrees: number;
-}
-
 /**
- * The number on a project's row: its own agents plus every worktree's, merged
- * ones included, so a folded project still shows that agents work inside it.
- * It is the one place the rail counts agents (DESIGN.md, "One home for agent
- * counts"); the family's roll-up line no longer does. `inWorktrees` counts
- * the agents buildRailFamily put on worktree rows, so an agent of the
- * project's own pane that works in the worktree it created counts there too.
+ * A project's agent census: its own agents plus every worktree's, merged ones
+ * included, so a folded project stays busy (`aria-busy`, the tile's working
+ * ring) while an agent works inside it. The number at the row's edge counts
+ * tabs instead (DESIGN.md, "Tab counts in the rail").
  */
 export function railFamilyAgentCount(
   project: Partial<RailAgentCount> | undefined,
   worktrees: ReadonlyArray<Partial<RailAgentCount> | undefined>,
-  worktreeRows: ReadonlyArray<Pick<RailFamilyChild, "agents">> = [],
-): RailFamilyAgentCount {
+): RailAgentCount {
   const sum: RailAgentCount = {
     total: project?.total ?? 0,
     working: project?.working ?? 0,
@@ -214,6 +206,5 @@ export function railFamilyAgentCount(
     sum.working += count?.working ?? 0;
     sum.sleeping += count?.sleeping ?? 0;
   }
-  const keys = new Set(worktreeRows.flatMap((row) => row.agents.map((line) => line.key)));
-  return { ...sum, inWorktrees: Math.min(keys.size, sum.total) };
+  return sum;
 }

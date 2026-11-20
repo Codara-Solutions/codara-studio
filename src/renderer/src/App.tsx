@@ -1514,9 +1514,9 @@ export default function App() {
   // change; the first read covers a renderer that loaded after them.
   const [busyShellPaneIds, setBusyShellPaneIds] = useState<ReadonlySet<string>>(() => new Set());
   useEffect(() => {
-    let changed = false;
+    const heard = new Set<string>();
     const apply = ({ id, busy }: { id: string; busy: boolean }) => {
-      changed = true;
+      heard.add(id);
       setBusyShellPaneIds((current) => {
         if (current.has(id) === busy) return current;
         const next = new Set(current);
@@ -1526,8 +1526,10 @@ export default function App() {
       });
     };
     const off = window.spark.pty.onShellBusy?.(apply);
+    // An event that arrived before the read is newer than it.
     void window.spark.pty.shellBusyIds?.().then((ids) => {
-      if (!changed && ids.length > 0) setBusyShellPaneIds(new Set(ids));
+      const fresh = ids.filter((id) => !heard.has(id));
+      if (fresh.length > 0) setBusyShellPaneIds((current) => new Set([...current, ...fresh]));
     }).catch(() => undefined);
     return () => off?.();
   }, []);

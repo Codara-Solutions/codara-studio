@@ -740,8 +740,8 @@ An agent terminal (Claude Code, Codex, Grok or Pi) that finished its turn and
 sits untouched in a workspace you are not looking at is stopped after the
 time set in Settings, Sessions, **Let idle agents sleep**
 (`agentHibernationMinutes`: Off, 15, 30, 60 or 120 minutes; 30 by default).
-Its output stays in the pane, a **Sleeping** chip marks it, and the rail's
-agent count says how many agents are asleep. Open the pane again and the
+Its output stays in the pane, a **Sleeping** chip marks it, and the hover
+text on the rail's tab count says how many agents are asleep. Open the pane again and the
 agent resumes its exact session in place.
 
 Codara only lets an agent sleep when all of these hold, and keeps it running

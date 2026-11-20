@@ -644,15 +644,19 @@ work is open.
   CLI is open. Browsers and editors never run.
 - Each row counts its own workspace's tabs; a project does not add its
   worktrees' tabs. The tooltip and accessible name say it in words: "1 of 3
-  tabs running", "3 tabs open".
-- A workspace not opened since the app started has no live tabs and shows
-  no number. The row stays busy (`aria-busy`) while any agent of its family
-  works, as before.
+  tabs running", "3 tabs open", plus ", 1 agent sleeping" while an agent of
+  the row sleeps.
+- A workspace shows a number once its tabs are live: opened since the app
+  started, or holding an agent session restored at launch. Others show none.
+- A folded project still says an agent works in one of its worktrees: the
+  row stays busy (`aria-busy`) and its tile keeps the working ring.
 
 ## One home for agent counts (2026-10)
 
 Superseded on 2026-11-20 by "Tab counts in the rail": the number counts
-tabs. The line rules below still hold.
+tabs. The first rule's family census now drives the project's busy state
+and working ring, not a number; the rules about the line under the name
+still hold.
 
 **Chosen:** B, number only. The number at a workspace row's right edge is the
 one place the rail counts agents: a muted "3" while they are idle, "1/3" in
