@@ -370,11 +370,11 @@ test(`cold-restored Claude appears in the workspace count while ${phase}`, async
       timeout: 15_000,
     });
     await expect(workspaceA).toHaveAttribute("data-agent-count", phase === "working" ? "1/1" : "1");
-    // The number is the row's one agent count: no line under the name repeats it.
+    // The census has no line under the name that repeats it.
     await expect(workspaceA.getByTestId("workspace-agents-summary")).toHaveCount(0);
     await expect(workspaceA).toHaveAttribute("aria-busy", String(phase === "working"));
     await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
-    await expect(count).toHaveText(phase === "working" ? "1/1" : "1");
+    await expect(workspaceA).toHaveAttribute("data-agent-count", phase === "working" ? "1/1" : "1");
   } finally {
     await app?.close();
   }
