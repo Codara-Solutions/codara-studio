@@ -55,8 +55,17 @@ assert.match(
 );
 assert.match(
   source,
-  /onMainWebContentsDestroyed\(windowForEvents, \{[\s\S]*clearUnresponsiveTimer: clearUnresponsiveRecoveryTimer,/,
+  /onMainWebContentsDestroyed\(windowContents, \{[\s\S]*clearUnresponsiveTimer: clearUnresponsiveRecoveryTimer,/,
   "destroying a renderer must disarm its unresponsive timer (test-main-window-teardown.cjs runs that handler)",
+);
+const createWindowSource = source.slice(
+  source.indexOf("function createWindow(): void {"),
+  source.indexOf("app.whenReady()"),
+);
+assert.deepEqual(
+  createWindowSource.split("\n").filter((line) => line.includes("windowForEvents.webContents")).map((line) => line.trim()),
+  ["const windowContents = windowForEvents.webContents;"],
+  "createWindow reads the window's WebContents once, while the window is alive: its handlers can run after the window is destroyed, when that read throws",
 );
 assert.match(
   source,

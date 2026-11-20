@@ -1,4 +1,4 @@
-import type { BrowserWindow, WebContents } from "electron";
+import type { WebContents } from "electron";
 
 export interface MainWebContentsCleanup {
   clearUnresponsiveTimer(owner: WebContents): void;
@@ -9,10 +9,9 @@ export interface MainWebContentsCleanup {
 // When the window goes away under the app (a lost Wayland connection, for
 // one), Electron destroys the BrowserWindow before its WebContents emits
 // `destroyed`, and reading `win.webContents` then throws "Object has been
-// destroyed". So the WebContents is read once, while the window is alive, and
-// the clean-up keys off that object.
-export function onMainWebContentsDestroyed(win: BrowserWindow, cleanup: MainWebContentsCleanup): void {
-  const contents = win.webContents;
+// destroyed". So this takes the WebContents itself, read by the caller while
+// the window was alive, and never sees the window.
+export function onMainWebContentsDestroyed(contents: WebContents, cleanup: MainWebContentsCleanup): void {
   contents.on("destroyed", () => {
     cleanup.clearUnresponsiveTimer(contents);
     // Renderer destruction can happen during workspace switches, reloads, or

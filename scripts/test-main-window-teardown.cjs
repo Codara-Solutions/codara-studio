@@ -7,7 +7,8 @@
 // detaches the PTYs and disposes the file watchers, all for that WebContents,
 // and does not throw. Electron's `win.webContents` getter throws "Object has
 // been destroyed" once the window is destroyed; the fake window below does
-// the same.
+// the same. The WebContents is read while the window is alive, as
+// createWindow does, and the helper is never handed the window.
 //
 //   node scripts/test-main-window-teardown.cjs
 
@@ -63,7 +64,7 @@ async function main() {
     {
       const { win, contents } = fakeWindow();
       const { calls, cleanup } = recordingCleanup();
-      onMainWebContentsDestroyed(win, cleanup);
+      onMainWebContentsDestroyed(win.webContents, cleanup);
       win.destroy();
       assert.throws(() => win.webContents, /Object has been destroyed/, "the fake window behaves like Electron's");
       assert.doesNotThrow(() => contents.emit("destroyed"), "the destroyed handler must not read the destroyed window");
@@ -78,7 +79,7 @@ async function main() {
     {
       const { win, contents } = fakeWindow();
       const { calls, cleanup } = recordingCleanup();
-      onMainWebContentsDestroyed(win, cleanup);
+      onMainWebContentsDestroyed(win.webContents, cleanup);
       contents.emit("destroyed");
       assert.equal(calls.length, 3, "a WebContents destroyed while its window is still alive is cleaned up too");
       for (const [name, owner] of calls) assert.equal(owner, contents, `${name} gets the window's own WebContents`);

@@ -916,7 +916,7 @@ function createWindow(): void {
 
   const windowForEvents = mainWindow;
   // Read once while the window is alive: the handlers below can run after the
-  // window itself is destroyed, when `windowForEvents.webContents` throws.
+  // window itself is destroyed, when reading the window's WebContents throws.
   const windowContents = windowForEvents.webContents;
 
   // Wire the privileged-IPC sender gate to this window BEFORE the initial
@@ -1021,7 +1021,7 @@ function createWindow(): void {
   });
 
   const openLinkFromMainWindow = (url: string) => {
-    void openLinkFromApp(url, mainWindow?.webContents);
+    void openLinkFromApp(url, windowContents);
   };
 
   // Navigation guard for the privileged main window. The allowlist is derived
@@ -1116,7 +1116,7 @@ function createWindow(): void {
     return { action: "deny" };
   });
 
-  onMainWebContentsDestroyed(windowForEvents, {
+  onMainWebContentsDestroyed(windowContents, {
     clearUnresponsiveTimer: clearUnresponsiveRecoveryTimer,
     detachTerminals: pty.detachForWebContents,
     disposeWatchers: fsWatcher.disposeForWebContents,
