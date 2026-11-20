@@ -17,6 +17,10 @@ export const PI_LAUNCH_COMMAND = "pi";
 // own Google sign-in, typed into an ordinary shell, Settings' startup flags
 // added by the pane's `agy` function. Codara never runs it non-interactively.
 export const ANTIGRAVITY_LAUNCH_COMMAND = "agy";
+// An Antigravity pane's restore pointer has no conversation id: Codara never
+// reads agy's own files, and agy's `--continue` reopens its latest
+// conversation. The pointer's id is this fixed word.
+export const ANTIGRAVITY_CONTINUE_SESSION_ID = "continue";
 
 /** The vendor's install command, for a machine without `agy`. */
 export function antigravityInstallCommand(platform: string): string {
@@ -26,7 +30,7 @@ export function antigravityInstallCommand(platform: string): string {
 }
 
 // Runtimes whose CLI sessions Codara can capture + restore across app restarts.
-export type AgentSessionRuntime = "claude" | "codex" | "grok" | "pi";
+export type AgentSessionRuntime = "claude" | "codex" | "grok" | "pi" | "antigravity";
 
 /** A past session to resume in a new terminal tab of its workspace. */
 export interface AgentSessionResumeRequest {
@@ -130,5 +134,6 @@ export function buildAgentResumeCommand(session: {
   if (session.runtime === "claude") return buildClaudeResumeCommand(session.sessionId);
   if (session.runtime === "grok") return buildGrokResumeCommand(session.sessionId);
   if (session.runtime === "pi") return buildPiResumeCommand(session.sessionId);
+  if (session.runtime === "antigravity") return `${ANTIGRAVITY_LAUNCH_COMMAND} --continue`;
   return buildCodexResumeCommand(session.sessionId);
 }

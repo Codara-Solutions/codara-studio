@@ -71,7 +71,7 @@ export function relocateResumePointer<P extends AgentSessionPointer>(
 // Structural twin of tabs/types.ts TerminalAgentSession, redeclared here so
 // this module stays dep-free for the node test harnesses.
 export interface AgentSessionPointer {
-  runtime: "claude" | "codex" | "grok" | "pi";
+  runtime: "claude" | "codex" | "grok" | "pi" | "antigravity";
   nativeClaudeProfileId?: string;
   nativeCodexProfileId?: string;
   nativeGrokProfileId?: string;

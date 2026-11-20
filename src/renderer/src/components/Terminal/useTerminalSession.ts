@@ -275,6 +275,18 @@ async function fetchSessionStartHeal(
 // + self-heal bookkeeping. Shared by the boot-once restore path and the in-place
 // death re-arm path. The pure branch choice lives in decideResume (resume-policy).
 async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumePlan> {
+  if (restore.runtime === "antigravity") {
+    // agy keeps its conversations to itself and Codara never reads them, so
+    // there is nothing to probe: `agy --continue` reopens its latest one.
+    logRestore(`plan antigravity cwd=${restore.cwd} -> continue`);
+    return {
+      session: restore,
+      resumeCommand: buildAgentResumeCommand(restore),
+      resumeIsFreshFallback: false,
+      fallbackNotice: null,
+      fallbackSession: null,
+    };
+  }
   const probe = await window.spark.agentSession
     .probe({
       runtime: restore.runtime,
@@ -3582,7 +3594,14 @@ export function useTerminalSession({
       // spam before the banner, and (critically) it lets pwsh take the
       // startup command over args in main — race-free delivery, no pwsh
       // spawn-lock queueing.
-      const agentPane = resumeCommand !== null || isAgentSessionLaunchCommand(cmd);
+      // An Antigravity restore in bash or zsh keeps it: `agy --continue` then
+      // goes through the shell's `agy` function, which adds the Startup flags
+      // as for a new launch. Other shells could not take the command over
+      // their arguments with it, so there it resumes without those flags.
+      const integratedResume =
+        agentSessionRef.current?.runtime === "antigravity" && (shell.family === "bash" || shell.family === "zsh");
+      const agentPane =
+        (resumeCommand !== null && !integratedResume) || isAgentSessionLaunchCommand(cmd);
       const spawnEnv = agentPane
         ? { ...(extraEnv ?? {}), SPARK_NO_SHELL_INTEGRATION: "1" }
         : extraEnv;
@@ -3657,7 +3676,8 @@ export function useTerminalSession({
             restoredRuntime === "claude" ||
             restoredRuntime === "codex" ||
             restoredRuntime === "grok" ||
-            restoredRuntime === "pi"
+            restoredRuntime === "pi" ||
+            restoredRuntime === "antigravity"
           ) {
             setAgentRunning(restoredRuntime);
           }

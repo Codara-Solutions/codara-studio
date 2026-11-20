@@ -83,6 +83,17 @@ assert.equal(
   launches.buildAgentResumeCommand({ runtime: "grok", sessionId: "g" }),
   "grok --yolo --resume g",
 );
+// Antigravity starts like Pi, typed into an integrated shell, and comes back
+// with agy's own --continue: Codara has no conversation id of agy's to name.
+assert.equal(launches.runtimeFromAgentSessionLaunchCommand(launches.ANTIGRAVITY_LAUNCH_COMMAND), null);
+assert.equal(launches.ANTIGRAVITY_LAUNCH_COMMAND, "agy");
+assert.equal(
+  launches.buildAgentResumeCommand({ runtime: "antigravity", sessionId: launches.ANTIGRAVITY_CONTINUE_SESSION_ID }),
+  "agy --continue",
+);
+assert.equal(launches.buildAgentForkCommand("antigravity", "continue"), null, "agy has no fork Codara can name");
+assert.match(launches.antigravityInstallCommand("linux"), /^curl -fsSL https:\/\/antigravity\.google\/cli\/install\.sh \| bash$/);
+assert.match(launches.antigravityInstallCommand("win32"), /^irm https:\/\/antigravity\.google\/cli\/install\.ps1 \| iex$/);
 
 for (const runtime of ["claude", "codex"]) {
   const worker = state.createManualAgentLaunchWorker(runtime, `pane-${runtime}`);
@@ -179,6 +190,11 @@ assert.equal(
   state.liveTerminalRuntime({ ...liveWorker, runtime: "pi" }),
   "pi",
   "a live Pi chip paints the Pi mark on its tab",
+);
+assert.equal(
+  state.liveTerminalRuntime({ ...liveWorker, runtime: "antigravity" }),
+  "antigravity",
+  "a live Antigravity chip paints the Antigravity mark on its tab",
 );
 assert.equal(
   state.liveTerminalRuntime({

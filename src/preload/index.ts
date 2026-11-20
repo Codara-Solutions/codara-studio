@@ -1473,7 +1473,7 @@ const api = {
         tabId: string;
         tabTitle: string;
         excluded: boolean;
-        runtimeHint?: "claude" | "codex" | "grok" | "pi" | null;
+        runtimeHint?: "claude" | "codex" | "grok" | "pi" | "antigravity" | null;
       }>;
     }): Promise<TerminalAgentStatePayload[]> => ipcRenderer.invoke("terminalNotify:sync", input),
     // Level-triggered recovery for renderer reload/cold hydration. Live events

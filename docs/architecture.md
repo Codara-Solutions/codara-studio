@@ -57,7 +57,7 @@ ends. The shell files come from the app and are started with it. Your own
 `~/.zshrc`, `~/.bashrc` and PowerShell profile are never edited.
 
 `terminal-agent-notify.ts` also reads every pane's raw output. It recognizes
-Claude Code, Codex, Grok and Pi from their banners and footers
+Claude Code, Codex, Grok, Pi and Antigravity from their banners and footers
 (`src/shared/agent-patterns.ts`), tracks working, blocked and idle, and
 raises "finished" and "needs you" notifications. This runs in main rather
 than in the renderer because the renderer cannot see hidden panes.
