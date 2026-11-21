@@ -15,7 +15,7 @@ export const EXTENSION_DIR = resolve(dirname(fileURLToPath(import.meta.url)), ".
 // Development files that are not part of the extension Chrome loads. The
 // packaged app's copy (package.json extraResources) and the folder Settings
 // prepares (src/main/browser/chrome/index.ts) leave out the same ones.
-export const DEV_FILES = Object.freeze(["build", "test", "dist", "package.json", "README.md", "STORE.md", ".gitignore"]);
+export const DEV_FILES = Object.freeze(["build", "test", "dist", "store", "package.json", "README.md", "STORE.md", ".gitignore"]);
 const EXCLUDED = new Set(DEV_FILES);
 
 /** The extension's files, relative to its folder, in a stable order. */

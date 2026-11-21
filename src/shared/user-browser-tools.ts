@@ -50,7 +50,7 @@ export const FIREFOX_CDP_EVENTS: readonly string[] = Object.freeze([
 
 /** How the extension reaches each browser today: not a tool, the first row of the table. */
 export const USER_BROWSER_DISTRIBUTION: { chrome: string; firefox: string } = {
-  chrome: "Loaded unpacked from Settings, Browser (a Chrome Web Store listing is prepared).",
+  chrome: "Installed from the Chrome Web Store (Settings, Browser opens the listing), or loaded unpacked from Codara's folder.",
   firefox:
     "A developer install only: loaded from about:debugging (Load Temporary Add-on), and loaded again after each Firefox restart, which removes it. Firefox Developer Edition, Nightly or ESR can keep it once their signature requirement is turned off (xpinstall.signatures.required; https://extensionworkshop.com/documentation/publish/signing-and-distribution-overview/). It is not on addons.mozilla.org: Mozilla allows the userScripts API it runs on for user script managers only.",
 };

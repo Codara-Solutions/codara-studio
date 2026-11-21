@@ -337,6 +337,7 @@
           "!build/**",
           "!test/**",
           "!dist/**",
+          "!store/**",
           "!package.json",
           "!.gitignore",
           "!README.md",

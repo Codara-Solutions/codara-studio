@@ -67,10 +67,11 @@ for (const theme of ["codara-daylight", "codara-classic"] as const) {
       await expect(card).toHaveAttribute("data-chrome-connect", "add");
       await expect(card).toContainText("Chrome, Edge, Brave and other Chromium browsers, or Firefox 153 and later.");
 
-      // Chrome's steps first, as before; Firefox's one click away.
+      // Chrome first, from the store; Firefox one click away.
       const browsers = card.getByRole("group", { name: "Your browser" });
       await expect(browsers.getByRole("button", { name: "Chrome, Edge, Brave" })).toHaveAttribute("aria-pressed", "true");
-      await expect(card).toContainText("chrome://extensions");
+      await expect(card.getByRole("button", { name: "Add from Chrome Web Store" })).toBeVisible();
+      await expect(card).not.toContainText("chrome://extensions");
       // The Chrome steps beside them, to compare.
       for (const width of WIDTHS) {
         await codara.setViewportSize({ width, height: 860 });
@@ -124,6 +125,9 @@ for (const theme of ["codara-daylight", "codara-classic"] as const) {
 
       // And back: Chrome's steps are as they were.
       await browsers.getByRole("button", { name: "Chrome, Edge, Brave" }).click();
+      await expect(card.locator(".chrome-connect__h")).toHaveText("Add Codara to your browser");
+      await expect(card.getByRole("button", { name: "Add from Chrome Web Store" })).toBeVisible();
+      await card.getByRole("button", { name: "Load unpacked instead" }).click();
       await expect(card.locator(".chrome-connect__h")).toHaveText("Add the extension to your browser");
       await expect(card).toContainText("chrome://extensions");
     } finally {

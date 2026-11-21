@@ -87,9 +87,13 @@ test("the connect card walks from Add to Pair to Share a tab on what Codara sees
     const firstRun = codara.locator(".onboarding-browser [data-chrome-connect]");
     await expect(firstRun).toHaveAttribute("data-chrome-connect", "add");
     await expect(firstRun).toContainText("Chrome, Edge, Brave and other Chromium browsers, or Firefox 153 and later.");
-    await expect(firstRun.getByRole("button", { name: "Reveal folder" })).toBeVisible();
+    // The store first; the folder route is one click away.
+    await expect(firstRun.getByRole("button", { name: "Add from Chrome Web Store" })).toBeVisible();
+    await expect(firstRun.getByRole("button", { name: "Reveal folder" })).toHaveCount(0);
     await expect(firstRun.locator('li[aria-current="step"]')).toHaveText("1Add");
     await expect(firstRun.getByRole("status")).toContainText("Waiting for the extension");
+    await firstRun.getByRole("button", { name: "Load unpacked instead" }).click();
+    await expect(firstRun.getByRole("button", { name: "Reveal folder" })).toBeVisible();
     await expect(firstRun.getByRole("button", { name: "Copy", exact: true })).toBeVisible();
 
     browser = await chromium.launchPersistentContext(profile, {
@@ -236,6 +240,7 @@ test("with the link off, or no free port, the card says why instead of showing t
         await expect(card.getByRole("alert")).not.toBeEmpty();
         await expect(card.getByRole("list", { name: "Steps" })).toHaveCount(0);
         await expect(card.getByRole("button", { name: "Reveal folder" })).toHaveCount(0);
+        await expect(card.getByRole("button", { name: "Add from Chrome Web Store" })).toHaveCount(0);
         if (item.name === "busy") {
           const state = await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.state());
           expect(state.port).toBeNull();
