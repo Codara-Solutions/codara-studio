@@ -9,6 +9,7 @@ import {
   useState,
   type RefObject,
 } from "react";
+import { DEFAULT_PAGE_BACKDROP, PAGE_BACKDROP_PROBE, pageBackdrop } from "./pageBackdrop";
 import { isFreshPartition } from "@shared/browser-partition";
 import { captureFrameDataUrl, holdPreviewCapturePaint, withPreviewCapturePaint } from "./capturePaint";
 import AgentPresence from "./agent-presence/AgentPresence";
@@ -334,7 +335,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       webview.style.width = "100%";
       webview.style.height = "100%";
       webview.style.border = "0";
-      webview.style.background = "white";
+      webview.style.background = DEFAULT_PAGE_BACKDROP;
       webview.src = initialUrl;
       appliedUrlRef.current = initialUrl;
       host.appendChild(webview);
@@ -353,6 +354,15 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       domReadyRef.current = true;
       if (tabIdRef.current) noteTabReady(tabIdRef.current);
       setDomReady(true);
+      // A page with no background of its own gets its canvas colour behind it
+      // (pageBackdrop.ts): dark for a dark-scheme text or JSON page.
+      wv.style.background = DEFAULT_PAGE_BACKDROP;
+      wv.executeJavaScript?.(PAGE_BACKDROP_PROBE, false).then(
+        (probe) => {
+          if (webviewRef.current === wv) wv.style.background = pageBackdrop(probe);
+        },
+        () => undefined,
+      );
       setCanGoBack(wv.canGoBack?.() ?? false);
       setCanGoForward(wv.canGoForward?.() ?? false);
       try {
