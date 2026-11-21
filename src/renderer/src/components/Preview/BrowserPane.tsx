@@ -343,6 +343,24 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     }
 
     const wv = webview;
+    // Each ask gets a number, so an answer about an earlier page, or one
+    // asked before the scheme changed again, is dropped.
+    let backdropAsk = 0;
+    const probeBackdrop = () => {
+      const ask = ++backdropAsk;
+      const settle = (colour: string) => {
+        if (ask === backdropAsk && webviewRef.current === wv) wv.style.background = colour;
+      };
+      const asked = wv.executeJavaScript?.(PAGE_BACKDROP_PROBE, false);
+      if (!asked) return settle(DEFAULT_PAGE_BACKDROP);
+      asked.then((probe) => settle(pageBackdrop(probe)), () => settle(DEFAULT_PAGE_BACKDROP));
+    };
+    // A bare page follows the system scheme, so its canvas changes with it.
+    const systemScheme = window.matchMedia("(prefers-color-scheme: dark)");
+    const onSystemScheme = () => {
+      if (domReadyRef.current) probeBackdrop();
+    };
+    systemScheme.addEventListener("change", onSystemScheme);
     const onDomReady = () => {
       if (
         webviewRef.current !== wv ||
@@ -356,13 +374,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       setDomReady(true);
       // A page with no background of its own gets its canvas colour behind it
       // (pageBackdrop.ts): dark for a dark-scheme text or JSON page.
-      wv.style.background = DEFAULT_PAGE_BACKDROP;
-      wv.executeJavaScript?.(PAGE_BACKDROP_PROBE, false).then(
-        (probe) => {
-          if (webviewRef.current === wv) wv.style.background = pageBackdrop(probe);
-        },
-        () => undefined,
-      );
+      probeBackdrop();
       setCanGoBack(wv.canGoBack?.() ?? false);
       setCanGoForward(wv.canGoForward?.() ?? false);
       try {
@@ -381,6 +393,9 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       }
     };
     const onDidNavigate = (e: { url: string }) => {
+      // A new page starts on the default; its own answer comes at dom-ready.
+      backdropAsk += 1;
+      wv.style.background = DEFAULT_PAGE_BACKDROP;
       setCurrentUrl(e.url);
       setCanGoBack(wv.canGoBack?.() ?? false);
       setCanGoForward(wv.canGoForward?.() ?? false);
@@ -448,6 +463,8 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       // Detach our listeners; intentionally do NOT remove the webview
       // element itself. We want it to survive visibility toggles — the
       // element is dropped when the host div unmounts with the component.
+      backdropAsk += 1;
+      systemScheme.removeEventListener("change", onSystemScheme);
       wv.removeEventListener("dom-ready", onDomReady);
       wv.removeEventListener("did-navigate", onDidNavigate);
       wv.removeEventListener("did-navigate-in-page", onDidNavigateInPage);

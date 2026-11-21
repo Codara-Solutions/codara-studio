@@ -18,10 +18,13 @@ export interface PageBackdropProbe {
 }
 
 /**
- * Runs in the page. It reads the canvas colour from a detached-looking probe
- * element that is removed at once, so the page's DOM is the same afterwards.
+ * Runs in the page and never throws (null instead). It reads the canvas
+ * colour from a probe element added to the root and removed in the same
+ * task: the page ends as it began, though its mutation observers see one
+ * add and one remove. The element is an XHTML one by name, so XML and SVG
+ * documents get an element with a style too.
  */
-export const PAGE_BACKDROP_PROBE = `(() => {
+export const PAGE_BACKDROP_PROBE = `(() => { try {
   const clear = (el) => {
     if (!el) return true;
     const bg = getComputedStyle(el);
@@ -32,13 +35,14 @@ export const PAGE_BACKDROP_PROBE = `(() => {
     return parts.length === 4 && Number(parts[3]) === 0;
   };
   const root = document.documentElement;
-  const probe = document.createElement("div");
+  if (!root) return null;
+  const probe = document.createElementNS("http://www.w3.org/1999/xhtml", "div");
   probe.style.cssText = "position:absolute;width:0;height:0;visibility:hidden;background-color:Canvas";
   root.appendChild(probe);
   const canvas = getComputedStyle(probe).backgroundColor;
   probe.remove();
   return { bare: clear(root) && clear(document.body), canvas };
-})()`;
+} catch { return null; } })()`;
 
 /** The pane colour for a probed page; anything unexpected keeps the default. */
 export function pageBackdrop(probe: unknown): string {

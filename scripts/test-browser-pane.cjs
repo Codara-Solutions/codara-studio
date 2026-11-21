@@ -54,9 +54,9 @@ function backdrop() {
   for (const odd of [null, undefined, "x", {}, { bare: true }, { bare: true, canvas: "url(x)" }, { bare: true, canvas: "red; position: fixed" }, { bare: "yes", canvas: "rgb(1, 2, 3)" }]) {
     assert.equal(pageBackdrop(odd), DEFAULT_PAGE_BACKDROP, `an unexpected probe keeps the default: ${JSON.stringify(odd)}`);
   }
-  // The probe is one expression that parses, and leaves no element behind.
-  assert.doesNotThrow(() => new Function(`return ${PAGE_BACKDROP_PROBE}`));
-  assert.match(PAGE_BACKDROP_PROBE, /probe\.remove\(\)/);
+  // The probe is one expression, and a page it cannot read gives null, not a throw
+  // (here: no document at all). The real pages are in tests/e2e/browser-page-backdrop.spec.ts.
+  assert.equal(new Function(`return ${PAGE_BACKDROP_PROBE}`)(), null);
 }
 backdrop();
 
