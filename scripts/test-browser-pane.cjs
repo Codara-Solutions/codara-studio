@@ -41,7 +41,24 @@ const lib = bundle(`
   export * from "./tabs-memory/sleepPolicy";
   export { isLoadableUrl, normalizeUrl, serverForUrl, serverUrl } from "./toolbar/address";
   export { localFilePath } from "@shared/local-file-address";
+  export { DEFAULT_PAGE_BACKDROP, PAGE_BACKDROP_PROBE, pageBackdrop } from "./pageBackdrop";
 `);
+
+// What shows behind a page that paints no background (pageBackdrop.ts): its
+// canvas colour, so a dark-scheme text page is light text on dark, not on white.
+function backdrop() {
+  const { DEFAULT_PAGE_BACKDROP, PAGE_BACKDROP_PROBE, pageBackdrop } = lib;
+  assert.equal(pageBackdrop({ bare: true, canvas: "rgb(18, 18, 18)" }), "rgb(18, 18, 18)", "a bare dark-scheme page gets its canvas");
+  assert.equal(pageBackdrop({ bare: true, canvas: "rgb(255, 255, 255)" }), "rgb(255, 255, 255)");
+  assert.equal(pageBackdrop({ bare: false, canvas: "rgb(18, 18, 18)" }), DEFAULT_PAGE_BACKDROP, "a page with its own background keeps the default");
+  for (const odd of [null, undefined, "x", {}, { bare: true }, { bare: true, canvas: "url(x)" }, { bare: true, canvas: "red; position: fixed" }, { bare: "yes", canvas: "rgb(1, 2, 3)" }]) {
+    assert.equal(pageBackdrop(odd), DEFAULT_PAGE_BACKDROP, `an unexpected probe keeps the default: ${JSON.stringify(odd)}`);
+  }
+  // The probe is one expression, and a page it cannot read gives null, not a throw
+  // (here: no document at all). The real pages are in tests/e2e/browser-page-backdrop.spec.ts.
+  assert.equal(new Function(`return ${PAGE_BACKDROP_PROBE}`)(), null);
+}
+backdrop();
 
 const MIN = 60_000;
 const NOW = 1_800_000_000_000;
