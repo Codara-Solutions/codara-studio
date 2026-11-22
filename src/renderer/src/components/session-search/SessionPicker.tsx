@@ -741,7 +741,7 @@ export default function SessionPicker({
                   ) : query.trim() ? (
                     <>
                       <p>No sessions match “{query.trim()}”.</p>
-                      {searchedAgents.some(summaryOnly) ? (
+                      {activeAgents.some(summaryOnly) ? (
                         <p className="ss-empty__sub">Antigravity sessions are searched by title and preview only.</p>
                       ) : null}
                       {effectiveScope !== "all" ? (

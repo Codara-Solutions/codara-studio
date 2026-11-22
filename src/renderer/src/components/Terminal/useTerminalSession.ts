@@ -61,6 +61,7 @@ import {
   isAgentSessionLaunchCommand,
   PI_LAUNCH_COMMAND,
 } from "../../workers/launch-commands";
+import { antigravityConversationsNamedElsewhere } from "../../workers/antigravity-panes";
 import type { TerminalAgentSession, TerminalLeafHibernation } from "../../tabs/types";
 import { isAgentHibernationRuntime } from "@shared/agent-hibernation";
 import { isSafeSessionId } from "@shared/session-search";
@@ -301,7 +302,10 @@ async function computeResumePlan(
     // (main keeps who has it). Only the restore after a restart takes the
     // claim; a restart after the process died checks it.
     const take = antigravityClaim === "take";
-    const continues = (await window.spark.antigravity?.claimContinue(paneId, take).catch(() => false)) ?? false;
+    // A pane that names agy's latest conversation reopens it itself.
+    const named = antigravityConversationsNamedElsewhere(paneId);
+    const continues =
+      (await window.spark.antigravity?.claimContinue(paneId, take, named, restore.cwd).catch(() => false)) ?? false;
     const { command, notice } = antigravityRestoreCommand(continues);
     logRestore(`plan antigravity pane=${paneId} cwd=${restore.cwd} -> ${command}`);
     return {

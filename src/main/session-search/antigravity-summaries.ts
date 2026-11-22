@@ -4,11 +4,13 @@
 // read: not raw_summary, not its full-text table, not the per-conversation
 // databases, and never its sign-in or settings. agy itself is never run.
 
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { isSafeSessionId } from "@shared/session-search";
+import { isSafeSessionId } from "../../shared/session-search";
 
 export const ANTIGRAVITY_SUMMARY_DB = "conversation_summaries.db";
 
@@ -48,6 +50,26 @@ export interface SummaryDatabase {
 
 export function antigravityCliDir(home: string = homedir()): string {
   return join(home, ".gemini", "antigravity-cli");
+}
+
+type SqliteOpen = new (path: string, options?: { readOnly?: boolean }) => SummaryDatabase;
+
+function sqliteDatabase(): SqliteOpen {
+  const builtin = (process as unknown as { getBuiltinModule?: (id: string) => unknown }).getBuiltinModule;
+  const sqlite = (builtin?.("node:sqlite") ?? createRequire(__filename)("node:sqlite")) as { DatabaseSync: SqliteOpen };
+  return sqlite.DatabaseSync;
+}
+
+/**
+ * Opens agy's database without writing beside it. A read-only open of a WAL
+ * database still creates its -wal and -shm files, so while agy has none open
+ * the file is read as immutable. While agy runs, its WAL holds the newest
+ * rows and a read-only open shares it, as any reader does.
+ */
+export function openSummaryDatabase(dbPath: string): SummaryDatabase {
+  const DatabaseSync = sqliteDatabase();
+  if (existsSync(`${dbPath}-wal`)) return new DatabaseSync(dbPath, { readOnly: true });
+  return new DatabaseSync(`${pathToFileURL(dbPath).href}?immutable=1`, { readOnly: true });
 }
 
 /**
@@ -105,7 +127,7 @@ function clip(value: unknown): string {
  */
 export function readAntigravitySummaries(
   dbPath: string,
-  openReadOnly: (path: string) => SummaryDatabase,
+  openReadOnly: (path: string) => SummaryDatabase = openSummaryDatabase,
 ): AntigravityConversation[] {
   const db = openReadOnly(dbPath);
   try {
@@ -137,4 +159,49 @@ export function readAntigravitySummaries(
   } finally {
     db.close();
   }
+}
+
+/** agy's conversations now, or null when its database cannot be read. */
+export function currentAntigravityConversations(): AntigravityConversation[] | null {
+  try {
+    return readAntigravitySummaries(join(antigravityCliDir(), ANTIGRAVITY_SUMMARY_DB));
+  } catch {
+    return null;
+  }
+}
+
+function sameFolder(a: string | null, b: string | null): boolean {
+  return a !== null && b !== null && resolve(a) === resolve(b);
+}
+
+/**
+ * The conversation a pane started as a new agy session is in: the only
+ * conversation of its folder changed since it started that no other pane
+ * names. Null while there is none, or more than one, to choose from.
+ */
+export function paneConversation(
+  conversations: readonly AntigravityConversation[],
+  pane: { cwd: string; since: number; named: readonly string[] },
+): string | null {
+  const candidates = conversations.filter(
+    (item) =>
+      sameFolder(item.cwd, pane.cwd) && item.lastAt !== null && item.lastAt >= pane.since && !pane.named.includes(item.id),
+  );
+  return candidates.length === 1 ? candidates[0].id : null;
+}
+
+/**
+ * Whether `agy --continue` could reopen a conversation another pane already
+ * names. agy does not say whether "latest" is per folder, so both the latest
+ * overall and the latest of the pane's folder count.
+ */
+export function continueReopensNamed(
+  conversations: readonly AntigravityConversation[],
+  cwd: string | null,
+  named: readonly string[],
+): boolean {
+  const newest = (items: readonly AntigravityConversation[]) =>
+    items.reduce<AntigravityConversation | null>((best, item) => ((item.lastAt ?? 0) > (best?.lastAt ?? -1) ? item : best), null);
+  const latest = [newest(conversations), cwd ? newest(conversations.filter((item) => sameFolder(item.cwd, cwd))) : null];
+  return latest.some((item) => item !== null && named.includes(item.id));
 }

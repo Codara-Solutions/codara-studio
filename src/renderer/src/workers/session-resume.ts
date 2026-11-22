@@ -6,6 +6,7 @@ import { isSafeSessionId } from "@shared/session-search";
 import { collectLeaves } from "../tabs/paneTree";
 import type { Tab, TerminalAgentSession } from "../tabs/types";
 import {
+  ANTIGRAVITY_CONTINUE_SESSION_ID,
   buildAgentForkCommand,
   buildAgentResumeCommand,
   type AgentSessionResumeRequest,
@@ -108,4 +109,29 @@ export function findOpenSessionPane(
     }
   }
   return null;
+}
+
+/**
+ * The Antigravity conversations panes other than `paneId` name by id. A new
+ * pane must not take one of them as its own, and `agy --continue` must not
+ * reopen one: two agy processes on one conversation would both write it.
+ */
+export function antigravityConversationsNamed(
+  layouts: readonly { tabs: readonly Tab[] }[],
+  paneId: string | null,
+): string[] {
+  const ids = new Set<string>();
+  for (const layout of layouts) {
+    for (const tab of layout.tabs) {
+      if (tab.kind !== "terminal") continue;
+      for (const leaf of collectLeaves(tab.root)) {
+        const session = leaf.agentSession;
+        if (leaf.paneId === paneId || session?.runtime !== "antigravity") continue;
+        if (session.sessionId !== ANTIGRAVITY_CONTINUE_SESSION_ID && isSafeSessionId(session.sessionId)) {
+          ids.add(session.sessionId);
+        }
+      }
+    }
+  }
+  return [...ids];
 }

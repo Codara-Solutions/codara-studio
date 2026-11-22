@@ -8,9 +8,15 @@ export const antigravityApi = {
   /** Whether agy is installed; `fresh` skips the short cache of a miss. */
   status: (fresh = false): Promise<{ installed: boolean; onPath: boolean; dir: string | null }> =>
     ipcRenderer.invoke("antigravity:status", fresh),
-  /** True for the one pane per app run that may reopen agy's latest conversation; `take` false only checks. */
-  claimContinue: (paneId: string, take = true): Promise<boolean> =>
-    ipcRenderer.invoke("antigravity:claim-continue", paneId, take),
+  /**
+   * True for the one pane per app run that may reopen agy's latest conversation; `take` false only checks.
+   * `named` are the conversations other panes reopen by id, which this one must not reopen too.
+   */
+  claimContinue: (paneId: string, take = true, named: string[] = [], cwd: string | null = null): Promise<boolean> =>
+    ipcRenderer.invoke("antigravity:claim-continue", paneId, take, named, cwd),
+  /** The id of the conversation a new agy pane in `cwd`, started at `since`, is in; null until one is clear. */
+  paneConversation: (cwd: string, since: number, named: string[]): Promise<string | null> =>
+    ipcRenderer.invoke("antigravity:pane-conversation", cwd, since, named),
   releaseContinue: (paneId: string): Promise<void> => ipcRenderer.invoke("antigravity:release-continue", paneId),
   runsInPane: (paneId: string): Promise<boolean> => ipcRenderer.invoke("antigravity:runs-in-pane", paneId),
 };

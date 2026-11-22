@@ -339,6 +339,8 @@ test("the pane's + menu offers history and stays in its tab; chords keep their s
       await page.getByTitle("Add pane…").first().dispatchEvent("click");
       await page.getByRole("menu", { name: "Add terminal pane" }).getByText("Claude worker", { exact: true }).click();
       await expect(row(picker, IDS.rollout)).toBeVisible({ timeout: 30_000 });
+      // Keys pressed before the box has focus go to the terminal instead.
+      await expect(picker.getByRole("combobox")).toBeFocused();
     };
 
     await openFromPane();

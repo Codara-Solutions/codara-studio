@@ -85,7 +85,7 @@ interface SqlDatabase {
   close(): void;
 }
 
-type SqliteModule = { DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => SqlDatabase };
+type SqliteModule = { DatabaseSync: new (path: string) => SqlDatabase };
 
 function loadSqlite(): SqliteModule {
   const builtin = (process as unknown as { getBuiltinModule?: (id: string) => unknown }).getBuiltinModule;
@@ -475,9 +475,7 @@ export class SessionIndex {
         // One database, not a folder of transcripts: each conversation is an
         // entry of its own that changes when its summary row does.
         const dbPath = join(root.dir, ANTIGRAVITY_SUMMARY_DB);
-        const { DatabaseSync } = loadSqlite();
-        const summaries = readAntigravitySummaries(dbPath, (path) => new DatabaseSync(path, { readOnly: true }));
-        for (const summary of summaries) {
+        for (const summary of readAntigravitySummaries(dbPath)) {
           out.push({
             agent: root.agent,
             path: `${dbPath}#${summary.id}`,
@@ -873,9 +871,14 @@ export class SessionIndex {
     let fileRow: number | null = row ? num(row.id) : null;
     if (fileRow !== null) this.deleteFileMessages(fileRow);
     fileRow = this.saveFile(fileRow, file, sessionRow, file.size, file.size, state, false);
-    const text = summary.preview || summary.title;
-    if (text) this.insertMessage(sessionRow, fileRow, { role: "assistant", text, at: summary.lastAt });
+    if (summary.preview) this.insertMessage(sessionRow, fileRow, { role: "assistant", text: summary.preview, at: summary.lastAt });
     this.updateSession(sessionRow, state, file, summary.title || null);
+    // A conversation with a title and no preview has no message, and still lists.
+    if (summary.title) {
+      this.stmt(
+        "UPDATE sessions SET message_count = 1, last_at = COALESCE(last_at, ?), started_at = COALESCE(started_at, ?) WHERE id = ? AND message_count = 0",
+      ).run(summary.lastAt, summary.lastAt, sessionRow);
+    }
     this.commit();
     return { bytes: 0, reset: true, skippedLines: 0 };
   }

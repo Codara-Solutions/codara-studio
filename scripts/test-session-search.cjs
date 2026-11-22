@@ -892,6 +892,7 @@ async function antigravityTests(m, work) {
     index.search({ query, agents: ["antigravity"], scopeKeys: null, limit: 50, offset: 0, now: Date.now(), snippetTokens: 10, ...extra }).hits;
   const bytes = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
   const before = [bytes(dbPath), bytes(`${dbPath}-wal`)];
+  let cli2;
 
   await check("Antigravity: top-level conversations from the summary table, read only, WAL included", async () => {
     await index.sync([root], agents, noPause);
@@ -904,8 +905,15 @@ async function antigravityTests(m, work) {
     assert.equal(heron.lastAt, Date.parse("2026-01-01T10:30:00.123Z"));
     assert.deepEqual(heron.matches.map((match) => match.kind), ["name", "assistant"], "title and preview both match");
     assert.deepEqual(search("lock").map((hit) => hit.sessionId), [ids.heron], "the preview is searchable");
-    assert.deepEqual(search("kestrel").map((hit) => hit.cwd), ["/work/other"], "a title without a preview still lists");
-    assert.deepEqual(search("rawsecretword"), [], "raw_summary is never read");
+    const [kestrel] = search("kestrel");
+    assert.equal(kestrel.cwd, "/work/other", "a title without a preview still lists");
+    assert.deepEqual(kestrel.matches.map((match) => match.kind), ["name"], "no title copied in as a preview");
+    const asked = [];
+    m.readAntigravitySummaries(dbPath, (file) => {
+      const db = m.openSummaryDatabase(file);
+      return { prepare: (sql) => (asked.push(sql), db.prepare(sql)), close: () => db.close() };
+    });
+    assert.ok(asked.length > 0 && asked.every((sql) => !/raw_summary|\*/.test(sql)), "raw_summary is never selected");
     assert.deepEqual(search("", { scopeKeys: ["/work/agy"] }).map((hit) => hit.sessionId), [ids.heron]);
     assert.equal(index.preview(`antigravity:${ids.heron}`, 6, 1500).messages[0].text, "We moved the heron cache behind one lock");
     assert.deepEqual([bytes(dbPath), bytes(`${dbPath}-wal`)], before, "agy's database and its WAL are unchanged");
@@ -920,6 +928,36 @@ async function antigravityTests(m, work) {
     assert.deepEqual(search("kestrel"), []);
   });
   cli.close();
+
+  await check("Antigravity: with agy closed nothing is written beside its database, and a vanished one keeps the rows", async () => {
+    const listing = () => fs.readdirSync(agyDir).sort();
+    assert.deepEqual(listing(), [m.ANTIGRAVITY_SUMMARY_DB], "the closed writer checkpointed its WAL");
+    cli2 = new DatabaseSync(dbPath);
+    cli2.prepare("UPDATE conversation_summaries SET preview = ? WHERE conversation_id = ?").run("The heron cache now has a lock per shard", ids.heron);
+    cli2.close();
+    await index.sync([root], agents, noPause);
+    assert.deepEqual(search("shard").map((hit) => hit.sessionId), [ids.heron]);
+    assert.deepEqual(listing(), [m.ANTIGRAVITY_SUMMARY_DB], "no -wal or -shm appeared");
+    fs.renameSync(dbPath, `${dbPath}.away`);
+    await index.sync([root], agents, noPause);
+    assert.deepEqual(search("heron").map((hit) => hit.sessionId), [ids.heron], "a database that vanished keeps the rows");
+    fs.renameSync(`${dbPath}.away`, dbPath);
+  });
+
+  await check("Antigravity: a new pane learns its conversation only when one is clear, and --continue skips a named one", () => {
+    const row = (id, cwd, lastAt) => ({ id, title: "", preview: "", steps: 1, lastAt, cwd });
+    const list = [row("a", "/w", 100), row("b", "/w", 200), row("c", "/other", 300)];
+    assert.equal(m.paneConversation(list, { cwd: "/w", since: 150, named: [] }), "b");
+    assert.equal(m.paneConversation(list, { cwd: "/w/", since: 50, named: ["a"] }), "b", "another pane's conversation is not this one's");
+    assert.equal(m.paneConversation(list, { cwd: "/w", since: 50, named: [] }), null, "two to choose from: keep waiting");
+    assert.equal(m.paneConversation(list, { cwd: "/w", since: 250, named: [] }), null);
+    assert.equal(m.continueReopensNamed(list, "/w", ["c"]), true, "the latest overall");
+    assert.equal(m.continueReopensNamed(list, "/w", ["b"]), true, "the latest of the folder");
+    assert.equal(m.continueReopensNamed(list, "/w", ["a"]), false);
+    const leaf = (paneId, sessionId) => ({ kind: "leaf", paneId, agentSession: { runtime: "antigravity", sessionId, cwd: "/w", capturedAt: "now" } });
+    const layouts = [{ tabs: [{ id: "t", kind: "terminal", root: { kind: "split", a: leaf("p1", "conv-1"), b: { kind: "split", a: leaf("p2", "continue"), b: leaf("p3", "conv-3") } } }] }];
+    assert.deepEqual(m.antigravityConversationsNamed(layouts, "p3").sort(), ["conv-1"]);
+  });
 
   await check("Antigravity: a missing database or a table of another shape lists nothing and fails nothing", async () => {
     const empty = path.join(work, "agy-empty");
