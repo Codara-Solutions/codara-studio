@@ -12301,6 +12301,45 @@ async function queuedTypedSkillCommand(run: RunState, messages: readonly HumanRu
   return typed.some((message) => runsSkill(message.message.trim(), skillNames));
 }
 
+/** The same routing as a message sent to a finished direct chat
+ *  (addRunMessage): work the direct worker cannot serve, a skill the user
+ *  typed, or "always verify edits" goes to the manager. */
+async function queuedDirectInputNeedsManager(run: RunState, queued: readonly HumanRunMessage[]): Promise<boolean> {
+  return (
+    (await queuedTypedSkillCommand(run, queued)) ||
+    queued.some((message) => followUpNeedsManager(message.message)) ||
+    (await loadSettings()).coraAlwaysVerifyEdits === true
+  );
+}
+
+function isFinishedDirectChat(run: RunState): boolean {
+  return run.executionMode === "direct" && !run.automationId && !run.workflow && isTerminalRunStatus(run.status);
+}
+
+/**
+ * A finished direct chat's queue: the next pass, or the manager for input the
+ * direct lane cannot serve. Both commits re-check the run, so two callers
+ * racing on one queue start it once (the loser's claim finds nothing and
+ * throws QUEUED_DIRECT_MESSAGE_GONE).
+ */
+async function startFinishedDirectChatQueue(run: RunState, queued: readonly HumanRunMessage[]): Promise<RunState> {
+  if (await queuedDirectInputNeedsManager(run, queued)) {
+    // Queued input the direct worker cannot serve (a typed skill, delegation,
+    // a pick-first gate, always-verify): the chat moves to the manager, as
+    // addRunMessage does for a follow-up typed into a finished direct chat.
+    return escalateDirectChatForQueuedInput(run, { reason: "queued_input_needs_manager" });
+  }
+  return addDirectIteration({
+    runId: run.id,
+    prompt: renderBundledManagerInput([...queued]),
+    model: await directChatPassModel(run),
+    effort: run.chatEffort ?? "medium",
+    queuedMessageIds: queued.map((message) => message.id),
+    access: "full",
+    freshPass: true,
+  });
+}
+
 /** Hand a finished direct chat with queued input to the manager, which takes
  *  the queue on its next turn. */
 async function escalateDirectChatForQueuedInput(
@@ -12358,33 +12397,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     return requireRun(run.id);
   }
   const queuedDirectMessages = queuedManagerInputMessages(run);
-  if (
-    run.executionMode === "direct" &&
-    !run.automationId &&
-    isTerminalRunStatus(run.status) &&
-    queuedDirectMessages.length > 0 &&
-    (await queuedTypedSkillCommand(run, queuedDirectMessages))
-  ) {
-    // A skill the user typed while the direct worker ran: only the manager's
-    // Pi session runs skills, so the chat moves to it (as addRunMessage does
-    // for a follow-up typed into a finished direct chat).
-    return escalateDirectChatForQueuedInput(run);
-  }
-  if (
-    run.executionMode === "direct" &&
-    !run.automationId &&
-    isTerminalRunStatus(run.status) &&
-    queuedDirectMessages.length > 0
-  ) {
-    return addDirectIteration({
-      runId: run.id,
-      prompt: renderBundledManagerInput(queuedDirectMessages),
-      model: await directChatPassModel(run),
-      effort: run.chatEffort ?? "medium",
-      queuedMessageIds: queuedDirectMessages.map((message) => message.id),
-      access: "full",
-      freshPass: true,
-    });
+  // A paused direct chat resumes below: its pass settles and the hand-off
+  // sends the queue (finalizeDirectRun).
+  if (isFinishedDirectChat(run) && queuedDirectMessages.length > 0) {
+    return startFinishedDirectChatQueue(run, queuedDirectMessages);
   }
   if (run.managerTurnRecovery) {
     if (run.managerTurnRecovery.state === "resuming") return run;
@@ -13218,6 +13234,31 @@ export async function addRunMessage(
     // will claim the message itself.
     scheduleQueuedSteeringFollowup(updated);
   }
+  // The direct chat finished between the first read above and this commit
+  // (its settle saw an empty queue), so no pass or hand-off will read this
+  // message: the queue starts the next pass, as Resume does.
+  if (input.author === "user" && input.kind === "note" && !input.skipDirectDispatch && isFinishedDirectChat(updated)) {
+    const latest = await requireRun(updated.id);
+    const queued = queuedManagerInputMessages(latest);
+    if (isFinishedDirectChat(latest) && queued.some((entry) => entry.id === messageId)) {
+      try {
+        return await startFinishedDirectChatQueue(latest, queued);
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        // Another send or Send now started the queue first.
+        if (error === QUEUED_DIRECT_MESSAGE_GONE) return requireRun(updated.id);
+        // The message is recorded; its queue row keeps Send now for a retry.
+        await appendEvent({
+          workspaceId: updated.workspaceId,
+          runId: updated.id,
+          type: "run.auto_resume_failed",
+          message: `Starting the next pass after a message failed: ${error}`,
+          payload: { messageId, error },
+        }).catch(() => undefined);
+        return requireRun(updated.id);
+      }
+    }
+  }
   // A paused run has no manager turn to queue behind, so neither branch above
   // fires and the message would sit unread until the user pressed Resume.
   // Sending IS resuming — see scheduleResumeForUserMessage for what that
@@ -13456,14 +13497,7 @@ async function handOffDirectChatQueue(runId: string, depth = 0): Promise<void> {
       await endDirectChatHandOff(run.id, depth);
       return;
     }
-    // The same routing as a message sent to a finished direct chat
-    // (addRunMessage): work the direct worker cannot serve, a skill the user
-    // typed, or "always verify edits" goes to the manager.
-    const needsManager =
-      (await queuedTypedSkillCommand(run, queued)) ||
-      queued.some((message) => followUpNeedsManager(message.message)) ||
-      (await loadSettings()).coraAlwaysVerifyEdits === true;
-    if (needsManager) {
+    if (await queuedDirectInputNeedsManager(run, queued)) {
       const escalated = await escalateDirectChatForQueuedInput(run, { fromHandOff: true, reason: "queued_input_needs_manager" });
       // Taken back before the manager could take it: the chat ends.
       if (escalated.executionMode === "direct") await endDirectChatHandOff(run.id, depth);

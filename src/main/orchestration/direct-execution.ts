@@ -13,24 +13,26 @@ const STUDIO_SURFACE_REQUEST =
 
 // The direct lane is one worker on one model that cannot start helpers, so a
 // request that hands parts of the work to other agents or to several named
-// models needs the manager. Two model names given work count when one of them
-// is handed it with "use", "have" or "let" ("use astra for the hard task and
-// sol for the rest", "have opus write the parser and sonnet the tests"); a
-// single model, or two models merely mentioned ("codex on linux and claude on
-// mac both crash"), does not.
+// models needs the manager. Two models count when both are handed work: two
+// "use/have/let <model> <work>" assignments, or one plus "and <model> <work>"
+// ("use astra for the hard task and sol for the rest", "have opus write the
+// parser and sonnet write the tests"). One model, or models merely mentioned
+// ("codex on linux and claude on mac both crash", "sonnet writes bad code,
+// claude does better: use claude for this"), does not.
 const WORKER_MODEL_NAME =
   "(?:opus|sonnet|haiku|fable|astra|sol|terra|luna|grok|gemini|codex|claude|gpt[-\\w.]*)";
 const MODEL_WORK = "(?:for|on|to (?:do|handle|take)|write|writes|build|builds|do|does|handle|handles|take|takes|review|reviews|implement|implements|fix|fixes)";
-const MODEL_ASSIGNED = new RegExp(`\\b(?:use|have|let)\\s+(${WORKER_MODEL_NAME})\\s+${MODEL_WORK}\\b`, "i");
-const MODEL_GIVEN_WORK = new RegExp(`\\b(${WORKER_MODEL_NAME})\\s+${MODEL_WORK}\\b`, "gi");
+const MODEL_ASSIGNED = new RegExp(`\\b(?:use|have|let)\\s+(${WORKER_MODEL_NAME})\\s+${MODEL_WORK}\\b`, "gi");
+const MODEL_ALSO_ASSIGNED = new RegExp(`\\band\\s+(${WORKER_MODEL_NAME})\\s+${MODEL_WORK}\\b`, "gi");
 const AGENT_COUNT = "(?:two|three|four|five|\\d+|multiple|several|separate|parallel|some|a few)";
 const DELEGATION_REQUEST = new RegExp(
   [
     // spawn / spin up / launch sub-agents or N agents
     `\\b(?:spawn|spin up|launch|start|dispatch)\\s+(?:(?:a|an|one|the|${AGENT_COUNT}|helper)\\s+){0,2}(?:sub[- ]?agents?|helper agents?|agents in parallel|workers in parallel)\\b`,
     `\\b(?:spawn|spin up|launch|start|dispatch)\\s+${AGENT_COUNT}\\s+(?:agents|workers)\\b`,
-    // use N sub-agents (never "use the sub-agent API")
+    // use (N) sub-agents (never "use the sub-agent API")
     `\\buse\\s+${AGENT_COUNT}\\s+(?:sub[- ]?agents|helper agents|agents)\\b`,
+    `\\buse\\s+(?:sub[- ]?agents|helper agents)\\b`,
     // delegate / hand off / split the work
     `\\b(?:delegate(?: (?:it|this|them|the work|tasks?))? to|hand (?:it|this|them|the work) (?:off )?to|split (?:it|this|the work) (?:across|between|among))\\s+(?:(?:a|an|the|${AGENT_COUNT}|helper)\\s+){0,2}(?:sub[- ]?agents?|helper agents?|agents|workers|models)\\b`,
     `\\b(?:a )?different models? (?:for|per) (?:each|every|the) (?:task|part|step|piece)s?\\b`,
@@ -46,7 +48,8 @@ const DELEGATION_REQUEST = new RegExp(
 const CHOICE_NOUN = "(?:options|choices|alternatives|approaches|variants|versions|mock-?ups|designs|directions|layouts|drafts|takes)";
 const APPROVAL_GATE_REQUEST = new RegExp(
   [
-    `\\b(?:show|give|present|offer|propose|make|draft|sketch|mock up|build|create|write)\\s+(?:me\\s+)?(?:\\d+|two|three|four|five|some|a few|several|multiple|a couple of)\\s+(?:\\w+\\s+){0,2}?${CHOICE_NOUN}\\b`,
+    // "build two layouts: mobile and desktop" is work, not a choice
+    `\\b(?:show|give|present|offer|propose)\\s+(?:me\\s+)?(?:\\d+|two|three|four|five|some|a few|several|multiple|a couple of)\\s+(?:\\w+\\s+){0,2}?${CHOICE_NOUN}\\b`,
     `\\b(?:show|give|present|offer|propose)\\s+me\\s+(?:the\\s+|your\\s+)?(?:\\w+\\s+){0,2}?${CHOICE_NOUN}\\b[^.?!]{0,80}?\\b(?:before|first|to (?:choose|pick|decide)|and I(?:'ll| will)? (?:pick|choose|decide))\\b`,
     `\\b${CHOICE_NOUN}\\s+(?:for me\\s+)?to\\s+(?:choose|pick|decide)\\b`,
     // the user picks: "and I decide which one", "I'll pick one"
@@ -55,7 +58,7 @@ const APPROVAL_GATE_REQUEST = new RegExp(
     // the build waits on the user
     `\\bonly\\b[^.?!]{0,80}?\\b(?:once|after|when)\\s+I\\s+(?:approve|confirm|decide|choose|pick|sign off|say go|give the go)\\b`,
     `\\b(?:don't|do not|never)\\b[^.?!]{0,80}?\\buntil\\s+I\\s+(?:approve|confirm|decide|choose|pick|sign off|say)\\b`,
-    `\\b(?:once|after|when)\\s+I\\s+(?:approve|sign off|say go|give the go)\\b[^.?!]{0,40}?\\b(?:build|implement|start|apply|proceed|go ahead)\\b`,
+    `\\b(?:once|after|when)\\s+I\\s+(?:approve|sign off|say go|give the go)\\b[^.?!]{0,40}?\\b(?:you|then)\\s+(?:can\\s+)?(?:build|implement|start|apply|proceed|go ahead)\\b`,
     `\\b(?:wait for|get|ask for)\\s+my\\s+(?:approval|go[- ]ahead|ok|okay|sign[- ]off|decision|choice)\\b`,
     `\\bwait for me\\b`,
     `\\bbefore (?:you )?(?:build|start|implement|change|touch|writ)(?:e|ing)?\\s+anything\\b`,
@@ -66,9 +69,10 @@ const APPROVAL_GATE_REQUEST = new RegExp(
 /** Work the direct worker cannot do: delegate to other agents or models, or wait for the user's pick. */
 function needsManagerFeatures(text: string): boolean {
   if (DELEGATION_REQUEST.test(text) || APPROVAL_GATE_REQUEST.test(text)) return true;
-  if (!MODEL_ASSIGNED.test(text)) return false;
-  const named = new Set([...text.matchAll(MODEL_GIVEN_WORK)].map((match) => match[1].toLowerCase()));
-  return named.size >= 2;
+  const assigned = [...text.matchAll(MODEL_ASSIGNED)].map((match) => match[1].toLowerCase());
+  if (assigned.length === 0) return false;
+  const also = [...text.matchAll(MODEL_ALSO_ASSIGNED)].map((match) => match[1].toLowerCase());
+  return new Set([...assigned, ...also]).size >= 2;
 }
 
 // A slash command naming a loaded skill (`/ceo`, `/skill:verify`) runs it, and
