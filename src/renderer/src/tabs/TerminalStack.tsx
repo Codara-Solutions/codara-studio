@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
-import { KeepAwakeButton, SleepingPaneCard, SleepingPaneChip } from "../components/Terminal/AgentSleepControls";
+import { KeepAwakeButton, SleepingPaneChip } from "../components/Terminal/AgentSleepControls";
 import type { TerminalLeafHibernation } from "./types";
 import {
   overlayStartupCommand,
@@ -77,6 +77,9 @@ import {
   workerSessionsRuntime,
 } from "../workers/launch-commands";
 import { offerWorkerSessions } from "../components/session-search/sessionSearchStore";
+
+// Only a sleeping pane shows it, so it stays out of the startup bundle.
+const SleepingPaneCard = React.lazy(() => import("../components/Terminal/SleepingPaneCard"));
 
 // TerminalStack hosts every terminal tab in the workspace. Each tab carries a
 // recursive PaneNode tree — leaves are PTY-backed panes, splits are
@@ -1383,11 +1386,13 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               />
             ) : null}
             {!placeOffScreen && !workerTerminal && !overlay && leaf.hibernation ? (
-              <SleepingPaneCard
-                hibernation={leaf.hibernation}
-                onResume={bundle.onResumeRequest}
-                onResumeKeepRunning={bundle.onResumeKeepRunning}
-              />
+              <React.Suspense fallback={null}>
+                <SleepingPaneCard
+                  hibernation={leaf.hibernation}
+                  onResume={bundle.onResumeRequest}
+                  onResumeKeepRunning={bundle.onResumeKeepRunning}
+                />
+              </React.Suspense>
             ) : null}
           </div>
         );
