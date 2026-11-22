@@ -257,6 +257,38 @@ assert.equal(seenSpark?.runId, "run-1", "a Cora worker keeps its run");
 assert.equal(seenSpark?.runtimeState, "error", "a running-screen sighting does not clear a Cora worker's crash");
 assert.equal(state.workerForRunningAgent(null, null, "pane-vim"), undefined, "vim sprouts no chip");
 
+// ── Main names the agent; screen text only guesses ──
+// Antigravity printed Claude Code's mode line, the pane's chip read CLAUDE
+// WORKING, and main's process check names agy.
+const guessedClaude = { ...state.createManualAgentLaunchWorker("claude", "pane-agy"), runtimeState: "working" };
+const relabelled = state.applyTerminalAgentState(guessedClaude, "idle", { runtime: "antigravity", paneId: "pane-agy" });
+assert.equal(relabelled?.runtime, "antigravity", "main's runtime replaces the screen's guess");
+assert.equal(relabelled?.runtimeState, "idle", "the relabelled chip takes main's state, not Claude's");
+assert.equal(relabelled?.workerTaskId, guessedClaude.workerTaskId, "the pane keeps its worker identity");
+assert.equal(relabelled?.source, "manual");
+assert.equal(state.liveTerminalRuntime(relabelled), "antigravity", "the tab and the agent board read Antigravity");
+assert.equal(
+  state.applyTerminalAgentState(relabelled, "launching", { runtime: "antigravity", paneId: "pane-agy" })?.runtimeState,
+  "idle",
+  "the same runtime still merges states",
+);
+assert.equal(
+  state.applyTerminalAgentState(guessedClaude, "idle", { runtime: null, paneId: "pane-agy" })?.runtime,
+  "claude",
+  "a state with no runtime leaves the label alone",
+);
+assert.equal(
+  state.applyTerminalAgentState(guessedClaude, "done", { runtime: "antigravity", paneId: "pane-agy" }),
+  null,
+  "done still removes a manual chip",
+);
+const coraWorker = { ...liveWorker, source: "spark", runId: "run-2", runtime: "codex", state: "running", runtimeState: "working" };
+const coraAfter = state.applyTerminalAgentState(coraWorker, "idle", { runtime: "claude", paneId: "pane-live" });
+assert.equal(coraAfter?.runtime, "codex", "a Cora worker's agent is the one its run launched");
+assert.equal(coraAfter?.runId, "run-2");
+assert.equal(state.applyTerminalAgentState(deadManual, "idle", { runtime: "antigravity", paneId: "pane-live" }), deadManual,
+  "a dead pty is not relabelled either");
+
 console.log(
   "PASS terminal agent launch identity, detector-confirmed injectability, and monotonic readiness state",
 );

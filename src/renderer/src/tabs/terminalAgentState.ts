@@ -56,10 +56,16 @@ export function mergeTerminalRuntimeState(
  * for a turn that failed (a usage limit, an API error) while the agent keeps
  * running, and the agent's next state replaces it like any other, or a pane
  * working again reads failed for the rest of its session.
+ *
+ * The agent main names replaces a manual worker's: the renderer can name it
+ * from screen text, which another agent may have printed, while main checks
+ * the process that runs in the pane. A Cora worker's agent is the one its run
+ * launched, and its run metadata and crash rule stay as they are.
  */
 export function applyTerminalAgentState(
   existing: TerminalLeafWorker,
   incoming: RuntimeState,
+  report: { runtime: string | null; paneId: string } | null = null,
 ): TerminalLeafWorker | null {
   if (existing.runtimeState === "error" && existing.agentRunning === false) return existing;
   if (incoming === "done") {
@@ -67,6 +73,11 @@ export function applyTerminalAgentState(
       return existing.agentRunning === false ? existing : { ...existing, agentRunning: false };
     }
     return null;
+  }
+  const reported = report ? liveAgentRuntime(report.runtime) : null;
+  if (report && reported && reported !== existing.runtime && existing.source === "manual") {
+    const relabelled = workerForRunningAgent(existing, reported, report.paneId);
+    if (relabelled) return { ...relabelled, runtimeState: incoming };
   }
   const runtimeState = mergeTerminalRuntimeState(existing.runtimeState, incoming);
   return existing.runtimeState === runtimeState ? existing : { ...existing, runtimeState };

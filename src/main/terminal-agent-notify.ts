@@ -5,6 +5,8 @@ import {
   classifyTail,
   coercePublicRuntime,
   countTeammateEvents,
+  isPassThroughProcessCommand,
+  isShellProcessCommand,
   PI_EXIT_LINE_RE,
   runtimeFromCommandLine,
   runtimeFromProcessCommand,
@@ -19,7 +21,7 @@ import * as pty from "./pty-manager";
 import { CodexTerminalScreen } from "./codex-terminal-screen";
 import { CodexRolloutTail, type CodexRolloutEvent } from "./codex-rollout-tail";
 import { latestSessionStart } from "./agent-session-registry";
-import { descendantProcessesWithCommands } from "./owned-process-tree";
+import { descendantProcessesWithCommands, type OwnedProcessIdentity } from "./owned-process-tree";
 import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify";
 import { nudgeUsageRefresh } from "./orchestration/usage-activity-refresh";
 import { signalAgentBoardChanged } from "./agent-board-signal";
@@ -381,7 +383,10 @@ export function syncTerminalNotifyPanes(input: {
       existing.tabTitle = String(entry.tabTitle ?? "Terminal");
       existing.excluded = Boolean(entry.excluded);
       existing.runtimeHint = knownRuntimeHint(entry.runtimeHint);
-      if (!existing.runtime && existing.runtimeHint) existing.runtime = existing.runtimeHint;
+      if (!existing.runtime && existing.runtimeHint) {
+        existing.runtime = existing.runtimeHint;
+        existing.runtimeFromScreen = false;
+      }
       if (!existing.attached) attach(existing);
       continue;
     }
@@ -523,6 +528,7 @@ function attach(w: PaneWatcher): void {
     w.ring = "";
     w.carry = "";
     w.runtime = w.runtimeHint;
+    w.runtimeFromScreen = false;
     resetAgentSession(w);
     w.lastOutputAt = 0;
     w.lastEmittedState = null;
@@ -1224,6 +1230,7 @@ export function noteTerminalHookEvent(
   w.lastHookEventAt = now;
   if (!w.signals.hooks) {
     w.signals.hooks = true;
+    w.runtimeFromScreen = false;
     tanLog(`pane=${w.paneId} Claude hooks active`);
   }
   const agentId = stringField(payload, "agent_id");
@@ -1779,6 +1786,7 @@ function handleProgramStatus(w: PaneWatcher, report: ProgramStatusReport, now: n
   if (reported && w.runtime && reported !== w.runtime) return;
   if (!w.signals.programStatus) {
     w.signals.programStatus = true;
+    w.runtimeFromScreen = false;
     tanLog(`pane=${w.paneId} program status active (${app || "unknown app"})`);
   }
   const previous = w.lastProgramState;
@@ -2165,6 +2173,7 @@ function markAgentExited(w: PaneWatcher, now: number, reason: string): void {
   emitPaneState(w, "done");
   w.lastEmittedState = null;
   w.runtime = null;
+  w.runtimeFromScreen = false;
   resetAgentSession(w);
   w.agentProcSeen = false;
   w.agentProcGone = false;
@@ -2178,6 +2187,49 @@ function clearCodexScreen(w: PaneWatcher): void {
   w.codexIdleSince = null;
   w.codexAwaitingIdle = false;
   w.codexTitleBlocked = false;
+}
+
+// The shallowest process the agent table can name.
+function outermostAgentProcess(
+  below: readonly OwnedProcessIdentity[],
+): { proc: OwnedProcessIdentity; runtime: PublicAgentRuntime } | null {
+  let found: { proc: OwnedProcessIdentity; runtime: PublicAgentRuntime } | null = null;
+  for (const proc of below) {
+    const runtime = runtimeFromProcessCommand(proc.command);
+    if (runtime && (!found || proc.depth < found.proc.depth)) found = { proc, runtime };
+  }
+  return found;
+}
+
+// Whether every process between the pane's shell and `proc` is a shell or a
+// launcher that only runs the command it was given. Anything else is a
+// program of its own (an agent the table cannot name) that started `proc`.
+function launchedByShell(below: readonly OwnedProcessIdentity[], proc: OwnedProcessIdentity): boolean {
+  const byPid = new Map(below.map((entry) => [entry.pid, entry]));
+  const visited = new Set<number>();
+  let parent = byPid.get(proc.parentPid);
+  while (parent && !visited.has(parent.pid)) {
+    visited.add(parent.pid);
+    if (!isShellProcessCommand(parent.command) && !isPassThroughProcessCommand(parent.command)) return false;
+    parent = byPid.get(parent.parentPid);
+  }
+  return true;
+}
+
+// The process tree names the pane's agent. Presence is not a turn, so the
+// chip starts ready.
+function adoptProcessRuntime(w: PaneWatcher, runtime: PublicAgentRuntime): void {
+  identifyRuntime(w, runtime, "process tree");
+  w.agentProcSeen = true;
+  emitPaneState(w, "idle");
+  if (runtime !== "codex") return;
+  const dimensions = pty.sessionDimensions(w.paneId);
+  const recent = pty.readTailChunks(w.paneId, BOOTSTRAP_TAIL_BYTES) ?? [];
+  if (!dimensions || recent.length === 0) return;
+  w.codexScreen = new CodexTerminalScreen(dimensions.cols, dimensions.rows, () => {
+    w.codexAwaitingIdle = false;
+  });
+  for (const chunk of recent) w.codexScreen.write(chunk);
 }
 
 // Recover missed launches even when an idle agent emits no more output, and
@@ -2205,55 +2257,40 @@ function checkAgentProcess(w: PaneWatcher, now: number): boolean {
         pty.sessionPid(w.paneId) !== rootPid ||
         w.runtime !== runtime
       ) return;
+      // Prefer the outer agent over a different CLI it launched as a worker.
+      const outer = outermostAgentProcess(below);
       if (!runtime) {
-        // Prefer the outer agent over a different CLI it launched as a worker.
-        for (const proc of [...below].sort((a, b) => a.depth - b.depth)) {
-          const detected = runtimeFromProcessCommand(proc.command);
-          if (!detected) continue;
-          identifyRuntime(w, detected, "process tree");
-          w.agentProcSeen = true;
-          emitPaneState(w, "idle");
-          if (detected === "codex") {
-            const dimensions = pty.sessionDimensions(w.paneId);
-            const recent = pty.readTailChunks(w.paneId, BOOTSTRAP_TAIL_BYTES) ?? [];
-            if (dimensions && recent.length > 0) {
-              w.codexScreen = new CodexTerminalScreen(dimensions.cols, dimensions.rows, () => {
-                w.codexAwaitingIdle = false;
-              });
-              for (const chunk of recent) w.codexScreen.write(chunk);
-            }
-          }
-          return;
-        }
+        if (outer) adoptProcessRuntime(w, outer.runtime);
         return;
       }
-      const present = below.some((proc) => runtimeFromProcessCommand(proc.command) === runtime);
-      if (present) {
+      const own = below.filter((proc) => runtimeFromProcessCommand(proc.command) === runtime);
+      if (
+        w.runtimeFromScreen &&
+        !hasTrustedSignals(w) &&
+        outer &&
+        outer.runtime !== runtime &&
+        own.every((proc) => proc.depth > outer.proc.depth) &&
+        launchedByShell(below, outer.proc)
+      ) {
+        // The screen named an agent that is not the one the user started: that
+        // agent printed the text (Antigravity quoting Claude Code's banner or
+        // mode line), or runs it as a tool. The process is the fact. Only an
+        // agent the shell started counts, so an agent this table cannot name
+        // by its process keeps its label over a CLI it started.
+        tanLog(`pane=${w.paneId} screen said ${runtime}, process tree says ${outer.runtime}`);
+        adoptProcessRuntime(w, outer.runtime);
+        return;
+      }
+      if (own.length > 0) {
         if (!w.agentProcSeen) tanLog(`pane=${w.paneId} ${runtime} process seen under pid ${rootPid}`);
         w.agentProcSeen = true;
-        w.runtimeFromScreen = false;
+        if (outer?.runtime === runtime) w.runtimeFromScreen = false;
         // A restored runtime hint can bypass banner discovery entirely.
         if (w.lastEmittedState === null) {
           emitPaneState(w, w.state === "failed" ? "error" : w.state);
         }
       } else if (w.agentProcSeen) {
         w.agentProcGone = true;
-      } else if (w.runtimeFromScreen && below.length > 0) {
-        // The screen named an agent that does not run here while another one
-        // is the shell's own child: that agent printed the text (Antigravity
-        // quoting Claude Code's banner or mode line). The process is the
-        // fact. Only a top-level child counts, so an agent this table cannot
-        // name by its process keeps its label over a CLI it started.
-        const top = Math.min(...below.map((proc) => proc.depth));
-        const owner = below
-          .filter((proc) => proc.depth === top)
-          .map((proc) => runtimeFromProcessCommand(proc.command))
-          .find((detected) => detected && detected !== runtime);
-        if (owner) {
-          identifyRuntime(w, owner, "process tree");
-          w.agentProcSeen = true;
-          emitPaneState(w, "idle");
-        }
       }
     })
     .catch(() => undefined)

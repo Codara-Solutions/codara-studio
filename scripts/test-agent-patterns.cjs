@@ -786,6 +786,23 @@ for (const [command, expected] of [
   check(`process command → runtime: ${command || "(empty)"}`, ap.runtimeFromProcessCommand(command), expected);
 }
 
+// Between the pane's shell and the agent it started: shells and launchers
+// that only run the command they were given, never a program of their own.
+for (const [command, shell, passThrough] of [
+  ["-zsh", true, false],
+  ["bash /home/u/bin/ai", true, false],
+  ["/usr/bin/env FOO=1 agy", false, true],
+  ["script -q /dev/null", false, true],
+  ["op run -- agy", false, true],
+  ["mise exec -- codex", false, true],
+  ["/usr/bin/time -v claude", false, true],
+  ["node /opt/unknown-agent/cli.js", false, false],
+  ["tmux new-session", false, false],
+]) {
+  check(`shell process: ${command}`, ap.isShellProcessCommand(command), shell);
+  check(`pass-through launcher: ${command}`, ap.isPassThroughProcessCommand(command), passThrough);
+}
+
 // ── Antigravity (`agy`): the user's own CLI, public for terminal tracking ──
 // The signed-out start screen of agy 1.5.13, from a live pty capture with no
 // network (cursor moves and colors kept as agy paints them).
