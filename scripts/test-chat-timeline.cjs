@@ -1881,6 +1881,16 @@ async function main() {
     const loom = directChat({ automationId: "auto-1" });
     assert.equal(T.isDirectChatRun(loom), false, "a Loom keeps its steps and rail");
     assert.equal(T.railWorkers(loom).length, 2);
+    const workflow = directChat({ workflow: { script: "x" } });
+    assert.equal(T.isDirectChatRun(workflow), false, "a workflow keeps its steps and rail");
+  });
+
+  test("Send now is offered on managed and direct chats, never on a Loom or a workflow", () => {
+    assert.equal(T.offersSendNow({ executionMode: "managed" }), true);
+    assert.equal(T.offersSendNow({}), true);
+    assert.equal(T.offersSendNow({ executionMode: "direct" }), true);
+    assert.equal(T.offersSendNow({ executionMode: "direct", automationId: "auto-1" }), false);
+    assert.equal(T.offersSendNow({ executionMode: "direct", workflow: { script: "x" } }), false);
   });
 
   console.log(`\n${passed} chat timeline contract tests passed`);

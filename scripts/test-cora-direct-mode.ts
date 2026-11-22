@@ -163,6 +163,13 @@ try {
     "Draft two layouts and I decide which one.",
     "Plan the change and only implement it once I approve.",
     "Wait for my approval before touching the database code.",
+    "spin up 3 subagents",
+    "have opus write the parser and sonnet write the tests",
+    "make 3 versions, I'll pick one",
+    "Propose 2 designs, wait for me",
+    "show me some options of changes to the onboarding, then I decide, and once I approve you build it",
+    "use astra for the hard task and sol for the simpler tasks",
+    "Don't change anything until I confirm the plan.",
   ]) {
     assert.equal(await shouldUseDirectExecution({ cwd: root, prompt }), false, `stays with the manager: ${prompt}`);
     assert.equal(followUpNeedsManager(prompt), true, `a follow-up goes to the manager: ${prompt}`);
@@ -177,6 +184,17 @@ try {
     "Show the alternatives list sorted by name.",
     "Fix the dialog so I can pick a file.",
     "Run the tests with two workers in jest config.",
+    "show me the options in the config file",
+    "Show me the designs folder",
+    "show me the choices array in settings.ts",
+    "Crash happens when I pick a file",
+    "Fix the bug when I approve a PR",
+    "after I confirm the dialog the page reloads",
+    "Add a dropdown so I can pick which theme",
+    "the rail crashes with sub-agents",
+    "Run the subagent tests",
+    "Use the sub-agent API in agent-socket.ts",
+    "codex on linux and claude on mac both crash",
   ]) {
     assert.equal(await shouldUseDirectExecution({ cwd: root, prompt }), true, `stays direct: ${prompt}`);
     assert.equal(followUpNeedsManager(prompt), false, `a follow-up stays direct: ${prompt}`);

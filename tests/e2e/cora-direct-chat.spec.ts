@@ -128,10 +128,23 @@ test("a direct chat reads as one chat: Send now, raw output Back, one diff tab",
     await expect(panel.locator("[data-worker-raw-log]")).toBeVisible();
     await expect(bar.getByRole("button", { name: /^Back to (?!Main)/ })).toBeVisible();
     if (proof) await shot(page, join(shots, "after-raw-output-1280-dark.png"));
+    // Back names the worker it returns to.
+    await expect(bar.getByRole("button", { name: /^Back to / })).toContainText("Also cover the empty list.");
     await page.keyboard.press("Escape");
     await expect(panel.locator("[data-worker-raw-log]")).toHaveCount(0);
     await expect(bar).toBeVisible();
     expect(await panel.evaluate((node) => node.contains(document.activeElement))).toBe(true);
+    // Leaving by the log's own "Back to chat" unmounts the focused button:
+    // focus must stay in the view, so Esc still climbs.
+    await page.getByRole("button", { name: "More worker actions" }).click();
+    await page.getByRole("menuitem", { name: /Raw terminal output/ }).click();
+    const backToChat = panel.getByRole("button", { name: "Back to chat" });
+    await backToChat.focus();
+    await page.keyboard.press("Enter");
+    await expect(panel.locator("[data-worker-raw-log]")).toHaveCount(0);
+    expect(await page.evaluate(() => document.activeElement !== document.body)).toBe(true);
+    expect(await panel.evaluate((node) => node.contains(document.activeElement))).toBe(true);
+    await expect(bar).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(bar).toHaveCount(0);
     await expect(turns.nth(1).getByRole("button", { name: /^Details/ })).toBeFocused();

@@ -228,24 +228,31 @@ export function RawLog({
   runId,
   attemptId,
   title,
+  running = false,
   onClose,
 }: {
   runId: string;
   attemptId: string;
   title: string;
+  /** The worker is still at work: the output is read again every 2 s. */
+  running?: boolean;
   onClose: () => void;
 }) {
   const [log, setLog] = useState<{ text: string; truncated: boolean } | null | undefined>(undefined);
   useEffect(() => {
     let live = true;
-    window.spark.orchestration
-      .readWorkerLog(runId, attemptId)
-      .then((value) => live && setLog(value))
-      .catch(() => live && setLog(null));
+    const read = () =>
+      window.spark.orchestration
+        .readWorkerLog(runId, attemptId)
+        .then((value) => live && setLog(value))
+        .catch(() => live && setLog((current) => current ?? null));
+    void read();
+    const timer = running ? window.setInterval(read, 2000) : undefined;
     return () => {
       live = false;
+      if (timer !== undefined) window.clearInterval(timer);
     };
-  }, [runId, attemptId]);
+  }, [runId, attemptId, running]);
   return (
     <section className="cora-worker-log" aria-label={`Raw terminal output of ${title}`}>
       <div className="cora-worker-report__head">

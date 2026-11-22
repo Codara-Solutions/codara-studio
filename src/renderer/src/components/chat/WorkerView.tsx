@@ -73,8 +73,19 @@ export default function WorkerView({
       return;
     }
     setShowLog(false);
-    if (!rootRef.current?.contains(document.activeElement)) rootRef.current?.focus({ preventScroll: true });
   }, [showLog, onBack]);
+  // Leaving the raw output unmounts what had focus (the log, its "Back to
+  // chat"): focus goes to the view, so the next Esc still climbs to Main.
+  const logWasOpen = useRef(false);
+  useEffect(() => {
+    if (logWasOpen.current && !showLog) {
+      const active = document.activeElement;
+      if (!active || active === document.body || !rootRef.current?.contains(active)) {
+        rootRef.current?.focus({ preventScroll: true });
+      }
+    }
+    logWasOpen.current = showLog;
+  }, [showLog]);
   const onKeyDown = (event: React.KeyboardEvent) => {
     // A menu or popover inside the view closes on its own Escape first.
     if (event.key !== "Escape" || event.defaultPrevented || menuOpen || event.nativeEvent.isComposing) return;
@@ -153,7 +164,13 @@ export default function WorkerView({
       {showLog ? (
         <div className="cora-worker-view__scroll cora-conversation" data-worker-raw-log>
           <div style={CONVERSATION_COLUMN_STYLE} className="cora-worker-view__column">
-            <RawLog runId={run.id} attemptId={attempt.id} title={worker.title} onClose={back} />
+            <RawLog
+              runId={run.id}
+              attemptId={attempt.id}
+              title={worker.title}
+              running={state === "running"}
+              onClose={back}
+            />
           </div>
         </div>
       ) : (
@@ -273,18 +290,19 @@ function WorkerBar({
         aria-label={inLog ? `Back to ${worker?.title ?? "the worker"}` : "Back to Main"}
       >
         <BarChevron direction="left" />
-        Main
+        {inLog ? <span className="cora-worker-bar__back-label">{worker?.title ?? "Worker"}</span> : "Main"}
       </button>
       <BarChevron direction="right" muted />
-      {worker && <ActivityIcon state={ICON_FOR_STATE[state]} color={state === "done" ? "var(--ok)" : undefined} />}
-      <span className="cora-worker-bar__title" aria-current={inLog ? undefined : "page"}>
-        {worker?.title ?? "Worker"}
-      </span>
-      {inLog && (
+      {/* In the raw output, Back names the worker it returns to. */}
+      {inLog ? (
+        <span className="cora-worker-bar__title" aria-current="page">
+          Raw output
+        </span>
+      ) : (
         <>
-          <BarChevron direction="right" muted />
+          {worker && <ActivityIcon state={ICON_FOR_STATE[state]} color={state === "done" ? "var(--ok)" : undefined} />}
           <span className="cora-worker-bar__title" aria-current="page">
-            Raw output
+            {worker?.title ?? "Worker"}
           </span>
         </>
       )}

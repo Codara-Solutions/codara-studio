@@ -128,15 +128,25 @@ export function isAutomationRun(run: RunState): boolean {
 /**
  * A direct chat: one Pi worker does each turn and no manager runs. It reads
  * as a plain chat (DESIGN.md, "Direct chats"): no step cards, no rail, its
- * worker never listed beside Cora. A Loom run is direct too, but keeps them.
+ * worker never listed beside Cora. A Loom or a workflow is direct too, but
+ * keeps them.
  */
 export function isDirectChatRun(run: RunState): boolean {
-  return run.executionMode === "direct" && !run.automationId;
+  return run.executionMode === "direct" && !run.automationId && !run.workflow;
 }
 
 /** The workers the chat's agents rail lists: none for a direct chat. */
 export function railWorkers(run: RunState): ChatWorker[] {
   return isDirectChatRun(run) ? [] : listChatWorkers(run);
+}
+
+/**
+ * Whether a queued message offers Send now. A Loom or a workflow takes its
+ * messages through its own driver, so Send now could only fail there; a
+ * managed chat and a direct chat (which stops its worker) both serve it.
+ */
+export function offersSendNow(run: Pick<RunState, "executionMode" | "automationId" | "workflow">): boolean {
+  return !(run.executionMode === "direct" && (Boolean(run.automationId) || Boolean(run.workflow)));
 }
 
 // A queued task has no attempt metadata yet, so derive its launch target.

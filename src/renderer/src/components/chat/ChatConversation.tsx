@@ -10,8 +10,8 @@ import { makeId } from "@shared/ids";
 import {
   buildChatTimeline,
   findOpenQuestion,
-  isAutomationRun,
   isToolRowTicking,
+  offersSendNow,
   runtimeLabel,
   resumedByMessageId,
   stepStatusColor,
@@ -426,7 +426,7 @@ export default function ChatConversation({
                         completionVerdict={completionVerdict}
                         runBlocked={run.status === "blocked"}
                         failureCardShown={retryableCallId !== null}
-                        sendNowOffered={!isAutomationRun(run)}
+                        sendNowOffered={offersSendNow(run)}
                         findCurrent={context.findCurrentIndex === index}
                       />
                     ) : item?.kind === "tool" ? (
@@ -950,7 +950,7 @@ const MessageTurn = React.memo(function MessageTurn({
   runBlocked: boolean;
   /** The run is parked on a failed turn whose card offers Retry. */
   failureCardShown: boolean;
-  /** A Loom run's loop driver takes its messages; Send now could only fail there. */
+  /** offersSendNow: a Loom or workflow takes messages through its own driver. */
   sendNowOffered: boolean;
   /** Find landed on this message, so a collapsed one must open. */
   findCurrent: boolean;
