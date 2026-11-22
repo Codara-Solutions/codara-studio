@@ -527,7 +527,24 @@ async function testRendererHelpers(board) {
     sleepingCard,
   );
   check("a sleeping card counts from when it fell asleep", sleepingCard?.since === sleptAt);
-  check("opening a sleeping card goes to its pane", sleepingCard?.target.type === "terminal" && sleepingCard.target.paneId === "s1");
+  check(
+    "opening a sleeping card goes to its pane and asks for the agent back",
+    sleepingCard?.target.type === "terminal" && sleepingCard.target.paneId === "s1" && sleepingCard.target.resume === true,
+    sleepingCard?.target,
+  );
+  const awakeBoard = board.buildAgentBoard({
+    now: NOW,
+    workspaces: WORKSPACES,
+    layoutPanes: sleepingPanes.map(({ sleepingSince: _since, ...pane }) => pane),
+    activity: [activity({ paneId: "s1", workspaceId: "ws-b", tabId: "t7", runtime: "codex", state: "working" })],
+    runs: [],
+  });
+  const awakeCard = awakeBoard.working.find((card) => card.key === "pane:s1");
+  check(
+    "a running agent's card never asks for a resume",
+    awakeCard?.target.type === "terminal" && awakeCard.target.resume === undefined,
+    awakeCard?.target,
+  );
 
   check("a Cora tool reads name and target", helpers.describeCoraTool("Bash", { command: "npm test" }) === "Bash: npm test");
   check("an MCP tool loses its server prefix", helpers.describeCoraTool("mcp__codara-studio__codara_terminal_run", {}) === "terminal_run");

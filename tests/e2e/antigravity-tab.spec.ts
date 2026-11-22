@@ -263,6 +263,8 @@ async function openPickerRow(page: Page) {
 async function startNewFromPicker(page: Page) {
   const picker = page.getByRole("dialog", { name: "Antigravity sessions" });
   await expect(picker.getByTestId("session-picker-new")).toHaveClass(/is-selected/, { timeout: 15_000 });
+  // The search box takes focus a frame after the picker mounts, and Enter is its key.
+  await expect(picker.getByRole("combobox")).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(picker).toHaveCount(0);
 }

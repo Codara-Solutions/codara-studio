@@ -741,8 +741,15 @@ sits untouched in a workspace you are not looking at is stopped after the
 time set in Settings, Sessions, **Let idle agents sleep**
 (`agentHibernationMinutes`: Off, 15, 30, 60 or 120 minutes; 30 by default).
 Its output stays in the pane, a **Sleeping** chip marks it, and the hover
-text on the rail's tab count says how many agents are asleep. Open the pane again and the
-agent resumes its exact session in place.
+text on the rail's tab count says how many agents are asleep.
+
+A sleeping pane shows a card at its bottom edge with which agent sleeps and
+since when. Nothing comes back by itself, not even when you open its
+workspace: press **Resume** on the card, or Enter or any letter in the pane,
+and the agent resumes its exact session in place (the key is not typed into
+the agent). **Resume and keep running** does the same and pins the pane
+awake. Opening its card in the Agents view resumes it too. If the resume
+fails, the card says why and offers it again.
 
 Codara only lets an agent sleep when all of these hold, and keeps it running
 whenever it cannot tell:
@@ -762,9 +769,10 @@ Cora's worker panes and phone panes never sleep. A sleeping pane that is
 still asleep when you quit counts as a running agent, so **Resume running
 agent sessions when Codara reopens** brings it back too. If the window
 reloads while an agent sleeps, its pane stays asleep, still shows what the
-agent last printed, and resumes when you open it. Sending a selection or a
-screenshot to a sleeping agent is refused with a note to open its pane
-first, so nothing is pasted into a pane with no agent to read it.
+agent last printed, and resumes when you ask. Sending a selection or a
+screenshot to a sleeping agent is refused with a note to open its pane and
+press Resume first, so nothing is pasted into a pane with no agent to read
+it.
 
 To see why an agent did or did not sleep, look for `[agent-hibernation]` in
 `logs/main.log` (included in **Export diagnostics**). Each pane gets one line

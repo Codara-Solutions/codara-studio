@@ -63,7 +63,7 @@ import {
 } from "../../workers/launch-commands";
 import { antigravityConversationsNamedElsewhere } from "../../workers/antigravity-panes";
 import type { TerminalAgentSession, TerminalLeafHibernation } from "../../tabs/types";
-import { isAgentHibernationRuntime } from "@shared/agent-hibernation";
+import { isAgentHibernationRuntime, isSleepResumeKey } from "@shared/agent-hibernation";
 import { isSafeSessionId } from "@shared/session-search";
 import {
   adoptLiveSessionAccount,
@@ -199,8 +199,8 @@ const autoResumeAttempts = new Map<string, number[]>();
 // Panes that already printed the "previous session available" hint this app
 // run — the hint fires once per pane, not on every workspace-switch remount.
 const resumeHintShown = new Set<string>();
-// A sleeping pane (agent hibernation) wakes this long after it comes on
-// screen, so a workspace the user only flicks past stays asleep.
+// A sleeping pane (agent hibernation) the user asked to resume while it was
+// off screen wakes this long after it comes on screen.
 const WAKE_DELAY_MS = 450;
 
 // Screen modes per live session (alternate screen, bracketed paste, mouse
@@ -639,14 +639,20 @@ interface Options {
   onBootResumeConsumed?: () => void;
   // Agent hibernation (lib/agentHibernation.ts): Codara stopped this pane's
   // idle agent to save memory. A pane that mounts sleeping does not spawn a
-  // shell; once it is on screen it resumes the agent's session in place.
-  hibernated?: boolean;
+  // shell; it resumes the agent's session in place only once the user asked
+  // (resumeRequested) and the pane is on screen.
+  hibernation?: TerminalLeafHibernation | null;
   // The sleeping pane is running again (resumed, or a plain shell when the
   // session could not be resumed), so the owner clears the leaf's mark.
   onWoke?: () => void;
-  // Main says this pane's agent sleeps although the leaf carries no mark (the
-  // window reloaded while it slept), so the owner marks the leaf.
+  // The pane's agent sleeps although the leaf carries no mark (the window
+  // reloaded while it slept, or the stop landed as the user reached the
+  // pane), so the owner marks the leaf.
   onAsleep?: (hibernation: TerminalLeafHibernation) => void;
+  // Enter or a printable key in the sleeping pane: the user wants it back.
+  onResumeRequest?: () => void;
+  // The resume did not happen; the card says why and offers it again.
+  onWakeFailed?: (message: string) => void;
 }
 
 export interface TerminalSessionApi {
@@ -706,10 +712,14 @@ export function useTerminalSession({
   onResumeUnavailable,
   onResumeFallback,
   onBootResumeConsumed,
-  hibernated = false,
+  hibernation = null,
   onWoke,
   onAsleep,
+  onResumeRequest,
+  onWakeFailed,
 }: Options): TerminalSessionApi {
+  const hibernated = Boolean(hibernation);
+  const resumeRequested = hibernation?.resumeRequested === true;
   // Latest-value ref so the input/resize closures (captured once per
   // sessionId) see the freshest readOnly flag without re-running the
   // expensive xterm setup effect.
@@ -770,12 +780,18 @@ export function useTerminalSession({
   // The `hibernated` prop is the leaf's mirror of it, for the UI.
   const hibernatedRef = useRef(hibernated);
   hibernatedRef.current = hibernated;
+  const hibernationRef = useRef(hibernation);
+  hibernationRef.current = hibernation;
   const sleepingRef = useRef(false);
   const wakeRef = useRef<(() => void) | null>(null);
   const onWokeRef = useRef(onWoke);
   onWokeRef.current = onWoke;
   const onAsleepRef = useRef(onAsleep);
   onAsleepRef.current = onAsleep;
+  const onResumeRequestRef = useRef(onResumeRequest);
+  onResumeRequestRef.current = onResumeRequest;
+  const onWakeFailedRef = useRef(onWakeFailed);
+  onWakeFailedRef.current = onWakeFailed;
 
   const detectedRef = useRef<string | null>(null);
   // Latest-callback refs so the effect can run exactly once per `sessionId`
@@ -1493,6 +1509,14 @@ export function useTerminalSession({
       });
 
       term.attachCustomKeyEventHandler((event) => {
+        // A sleeping pane has no process to read keys. Enter or a printable
+        // key asks for the agent back and is swallowed (the shell that comes
+        // up must not see it); app shortcuts still go through.
+        if (sleepingRef.current && !readOnlyRef.current && !inputBlockedRef.current && isSleepResumeKey(event)) {
+          if (event.type === "keydown" && !event.repeat) onResumeRequestRef.current?.();
+          event.preventDefault();
+          return false;
+        }
         if (event.type !== "keydown") return true;
         // Cmd/Ctrl+F → open inline find overlay. Checked before the
         // copy/paste branch since that one bails on metaKey. A full-screen
@@ -3320,9 +3344,10 @@ export function useTerminalSession({
         }
       };
 
-      // Agent hibernation: bring a sleeping pane back once it is on screen.
-      // Same delivery as the death re-arm above (a same-id spawn whose shell
-      // runs the resume as its first action), but never gated on the restore
+      // Agent hibernation: bring a sleeping pane back once the user asked for
+      // it (its card's Resume, Enter in the pane) and it is on screen. Same
+      // delivery as the death re-arm above (a same-id spawn whose shell runs
+      // the resume as its first action), but never gated on the restore
       // preference: Codara stopped this agent itself and owes the user its
       // session back. When the session cannot be resumed the pane still
       // comes back as a working shell with a one-line notice.
@@ -3402,7 +3427,10 @@ export function useTerminalSession({
           onWokeRef.current?.();
           refitAndResizeRef.current?.();
         } catch (err) {
-          term.write(`\r\n\x1b[31mcouldn't wake this pane: ${(err as Error).message}\x1b[0m\r\n`);
+          const message = (err as Error)?.message || "unknown error";
+          term.write(`\r\n\x1b[31mcouldn't wake this pane: ${message}\x1b[0m\r\n`);
+          // The pane is still asleep; the card offers Resume again.
+          if (sleepingRef.current) onWakeFailedRef.current?.(message);
         } finally {
           waking = false;
         }
@@ -3412,12 +3440,6 @@ export function useTerminalSession({
       cleanups.push(() => {
         if (wakeRef.current === wake) wakeRef.current = null;
       });
-      const scheduleWake = () => {
-        const timer = window.setTimeout(() => {
-          if (!disposed && visibleRef.current) void wakeFromSleep();
-        }, WAKE_DELAY_MS);
-        cleanups.push(() => window.clearTimeout(timer));
-      };
 
       const offExit = window.spark.pty.onExit(sessionId, (info) => {
         if (info.hibernated) {
@@ -3425,9 +3447,15 @@ export function useTerminalSession({
           // user should read as one: keep the output, say how it comes back.
           sleepingRef.current = true;
           term.options.disableStdin = true;
-          term.write(`\r\n\x1b[2m[sleeping to save memory: opening this pane resumes it]\x1b[0m\r\n`);
+          term.write(`\r\n\x1b[2m[asleep to save memory: press Resume or Enter to continue]\x1b[0m\r\n`);
           onExitRef.current?.(info);
-          if (visibleRef.current) scheduleWake();
+          // The leaf may not carry its mark yet (the stop landed as the user
+          // reached the pane); without one there would be no card to resume
+          // from. The owner keeps a mark that is already there.
+          const runtime = agentSessionRef.current?.runtime;
+          if (!hibernatedRef.current && runtime && isAgentHibernationRuntime(runtime)) {
+            onAsleepRef.current?.({ runtime, sleptAt: Date.now() });
+          }
           return;
         }
         // `info.sanctioned` is set by pty-manager for teardowns Codara asked
@@ -3537,7 +3565,7 @@ export function useTerminalSession({
       let registryBootResume = false;
       // A pane that mounts while its agent sleeps (agent hibernation) has no
       // pty to spawn or attach to: it shows its saved output and waits for
-      // wakeFromSleep, which resumes the session once the pane is on screen.
+      // wakeFromSleep, which resumes the session once the user asks.
       let sleepingAtMount =
         hibernatedRef.current && !readOnlyRef.current && !inputBlockedRef.current;
       // Main remembers which panes sleep and keeps what they printed (the
@@ -4170,7 +4198,13 @@ export function useTerminalSession({
         armClaudeRefusalWatch(agentSessionRef.current?.cwd ?? agentSession.cwd);
       }
 
-      if (sleepingRef.current && visibleRef.current) scheduleWake();
+      // A Resume pressed while this mount was still under way.
+      if (sleepingRef.current && visibleRef.current && hibernationRef.current?.resumeRequested) {
+        const timer = window.setTimeout(() => {
+          if (!disposed && visibleRef.current) wakeRef.current?.();
+        }, WAKE_DELAY_MS);
+        cleanups.push(() => window.clearTimeout(timer));
+      }
     };
 
     return () => {
@@ -4322,16 +4356,16 @@ export function useTerminalSession({
     }
   }, [visible]);
 
-  // Agent hibernation: a sleeping pane resumes once it is on screen. The pty
-  // exit and the sleeping mount schedule the same wake for a pane that is
-  // already visible; this covers a pane revealed later.
+  // Agent hibernation: a sleeping pane resumes only once the user asked for
+  // it (Resume, Enter) and it is on screen. Showing it alone never does:
+  // opening a workspace full of sleeping agents must not relaunch them all.
   useEffect(() => {
-    if (!visible || !(hibernated || sleepingRef.current)) return;
+    if (!visible || !resumeRequested || !(hibernated || sleepingRef.current)) return;
     const timer = window.setTimeout(() => {
       if (visibleRef.current) wakeRef.current?.();
     }, WAKE_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [visible, hibernated]);
+  }, [visible, hibernated, resumeRequested]);
 
   // Let the newly selected workspace paint once, then coalesce and enqueue its
   // hidden output. requestAnimationFrame + a zero-delay task is intentional:

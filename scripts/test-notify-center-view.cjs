@@ -350,6 +350,7 @@ function harness(statusFor) {
   const navigate = R.createNavigateTo({
     selectRun: (runId, ws) => calls.push(["run", runId, ws]),
     focusTerminal: (t) => calls.push(["terminal", t.paneId]),
+    resumePane: (paneId) => calls.push(["resume", paneId]),
     openAutomation: (t) => calls.push(["automation", t.jobId, t.runId, t.workspaceId]),
     openWorkspace: (ws, panel) => calls.push(["workspace", ws, panel]),
     describeTarget: statusFor,
@@ -362,6 +363,12 @@ test("a live target opens exactly", () => {
   const { navigate, calls } = harness(() => ({ state: "live" }));
   assert.equal(navigate({ type: "terminal", workspaceId: "w1", tabId: "t", paneId: "p1" }), "opened");
   assert.deepEqual(calls, [["terminal", "p1"]]);
+});
+
+test("a target that says resume also asks the sleeping pane for its agent back", () => {
+  const { navigate, calls } = harness(() => ({ state: "live" }));
+  assert.equal(navigate({ type: "terminal", workspaceId: "w1", tabId: "t", paneId: "p1", resume: true }), "opened");
+  assert.deepEqual(calls, [["terminal", "p1"], ["resume", "p1"]]);
 });
 
 test("a closed pane opens its workspace and says so", () => {

@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
 // Agent hibernation end to end: a finished Claude pane in a background
-// workspace is stopped after the idle time and resumed with `--resume` when
-// the user opens its workspace again, or on the next launch when Codara quit
-// while it slept. A pane pinned "Keep running" and a pane whose agent runs a
+// workspace is stopped after the idle time and resumed with `--resume` only
+// when the user asks (Resume on its card, Enter in the pane), or on the next
+// launch when Codara quit while it slept. Opening its workspace alone
+// launches nothing. A pane pinned "Keep running" and a pane whose agent runs a
 // command (a dev server) are never stopped.
 //
 // The fake `claude` is a Node script so the process census sees it the way
@@ -40,7 +41,15 @@ interface Launch {
   args: string[];
 }
 
-test("an idle Claude pane in a background workspace sleeps and resumes when opened", async () => {
+const sleepingCard = (page: Page) =>
+  page.locator(`[data-terminal-pane-id="${PANE_ID}"]`).getByTestId("pane-sleeping-card");
+
+async function expectNoLaunchFor(fixture: Fixture, count: number, ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+  expect((await readLaunches(fixture)).length).toBe(count);
+}
+
+test("an idle Claude pane in a background workspace sleeps, shows its card, and resumes only on Resume", async () => {
   test.setTimeout(90_000);
   const fixture = await prepareFixture("plain");
   const { app, page, logs } = await launch(fixture);
@@ -69,13 +78,20 @@ test("an idle Claude pane in a background workspace sleeps and resumes when open
     await expect(workspaceA.getByTestId("workspace-tab-count")).toHaveAttribute("aria-label", /, 1 agent sleeping$/);
     expect(logs.some((line) => line.includes(`pane=${PANE_ID} claude is sleeping`))).toBe(true);
 
-    // Opening the workspace resumes the same session in the same pane.
+    // Opening the workspace shows the card and launches nothing.
     await workspaceA.evaluate((row) => (row as HTMLElement).click());
+    await expect(sleepingCard(page)).toBeVisible();
+    await expect(sleepingCard(page).getByTestId("pane-sleeping-title")).toHaveText("Claude Code session");
+    await expectNoLaunchFor(fixture, 1, TICK_MS * 3);
+
+    // Resume brings the same session back in the same pane.
+    await sleepingCard(page).getByTestId("pane-resume").click();
     const launches = await waitForLaunches(fixture, 2);
     expect(launches[1].args).toEqual(expect.arrayContaining(["--resume", SESSION_ID]));
     expect(launches[1].pid).not.toBe(first[0].pid);
     await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });
     await expect(page.getByTestId("pane-sleeping-chip")).toHaveCount(0);
+    await expect(page.getByTestId("pane-sleeping-card")).toHaveCount(0);
     await expect(workspaceA).not.toHaveAttribute("data-agent-sleeping");
     expect(
       await terminalNode.evaluate(
@@ -131,7 +147,14 @@ test("an agent restored into a background workspace at launch can sleep too", as
     });
     await expect.poll(() => isAlive(first.pid), { timeout: 10_000 }).toBe(false);
 
+    // Shown, it stays asleep; Enter in the pane is the user asking for it.
     await page.locator('[data-workspace-id="ws-a"]').evaluate((row) => (row as HTMLElement).click());
+    await expect(sleepingCard(page)).toBeVisible();
+    await expectNoLaunchFor(fixture, 1, TICK_MS * 2);
+    await page.locator(`[data-terminal-pane-id="${PANE_ID}"] .xterm`).first().click();
+    await page.keyboard.press("Shift");
+    await expectNoLaunchFor(fixture, 1, 500);
+    await page.keyboard.press("Enter");
     const launches = await waitForLaunches(fixture, 2);
     expect(launches[1].args).toEqual(expect.arrayContaining(["--resume", SESSION_ID]));
     await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });
@@ -144,7 +167,7 @@ test("an agent restored into a background workspace at launch can sleep too", as
   }
 });
 
-test("a pane asleep when the window reloads stays asleep and resumes when opened", async () => {
+test("a pane asleep when the window reloads stays asleep and resumes on Resume", async () => {
   test.setTimeout(120_000);
   const fixture = await prepareFixture("plain");
   const { app, page, logs } = await launch(fixture);
@@ -169,6 +192,9 @@ test("a pane asleep when the window reloads stays asleep and resumes when opened
     await page.reload();
     await page.waitForLoadState("domcontentloaded");
     await page.locator('[data-workspace-id="ws-a"]').evaluate((row) => (row as HTMLElement).click());
+    await expect(sleepingCard(page)).toBeVisible({ timeout: 20_000 });
+    await expectNoLaunchFor(fixture, 1, TICK_MS * 2);
+    await sleepingCard(page).getByTestId("pane-resume").click();
     const launches = await waitForLaunches(fixture, 2);
     expect(launches[1].args).toEqual(expect.arrayContaining(["--resume", SESSION_ID]));
     await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });

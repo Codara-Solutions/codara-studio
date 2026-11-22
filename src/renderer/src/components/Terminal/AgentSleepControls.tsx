@@ -1,7 +1,8 @@
 // Pane chrome for agent hibernation (lib/agentHibernation.ts): the calm
 // "Sleeping" chip a pane shows while Codara has its idle agent stopped, and
 // the "Keep running" pin in the pane toolbar. Both are part of the pane, not
-// floating layers, so they stay solid (no glass).
+// floating layers, so they stay solid (no glass). The card with Resume is
+// SleepingPaneCard.tsx, loaded only once a pane sleeps.
 
 import type { TerminalLeafHibernation } from "../../tabs/types";
 

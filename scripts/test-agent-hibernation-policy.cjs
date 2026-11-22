@@ -224,6 +224,20 @@ async function main() {
   const awakeIdle = leaf("p3", { agentSession: session({ active: true }) });
   check("an awake pane the quit snapshot did not list is still inactive", tabs.markTerminalAgentSessionsActive(awakeIdle, new Set()).agentSession?.active === false);
 
+  // ── Waking: which keys in a sleeping pane ask for the agent back ──
+  const resumeKey = shared.isSleepResumeKey;
+  check("Enter asks for the agent back", resumeKey({ key: "Enter" }));
+  check("a letter, a space and an accented letter do too", resumeKey({ key: "a" }) && resumeKey({ key: " " }) && resumeKey({ key: "é" }));
+  check("an emoji is one character", resumeKey({ key: "😀" }));
+  check(
+    "named keys do not",
+    !["Shift", "Control", "Escape", "Tab", "ArrowUp", "F5", "PageDown", "Backspace"].some((key) => resumeKey({ key })),
+  );
+  check(
+    "app shortcuts do not",
+    !resumeKey({ key: "k", ctrlKey: true }) && !resumeKey({ key: "k", metaKey: true }) && !resumeKey({ key: "Enter", altKey: true }),
+  );
+
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);
     process.exit(1);
