@@ -4565,11 +4565,12 @@ export interface WorkerAttempt {
    */
   piSessionId?: string;
   /**
-   * Set when the attempt ended because the run was paused or the app closed,
-   * not because of anything the worker did. Such an attempt's session may be
-   * continued with follow_up_of even though its task never finished.
+   * Set when the attempt ended because the run was paused, the app closed, or
+   * Send now stopped a direct chat's turn for the queued messages, not because
+   * of anything the worker did. Such an attempt's session may be continued
+   * with follow_up_of even though its task never finished.
    */
-  interruptedBy?: "pause" | "app_restart";
+  interruptedBy?: "pause" | "app_restart" | "send_now";
   /**
    * Context occupancy at session finish: the newest message's input +
    * cacheRead + cacheWrite, a gauge over the last provider request (same

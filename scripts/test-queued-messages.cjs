@@ -1718,6 +1718,76 @@ async function main() {
     /isQuestionInactiveError\([\s\S]{0,400}addRunMessage\(/.test(composerSource),
   );
 
+  // ── 7. direct chat Send now ─────────────────────────────────────────────
+  // A direct chat has no manager turn: one Pi worker does the pass. Send now
+  // stops that worker (marked a Send now stop, never a failure), and the next
+  // pass starts with every queued message, each delivered exactly once. A
+  // message queued while a pass runs also goes on its own when the pass ends.
+  // Driven by the scripted Pi worker (CODARA_FAKE_PI_WORKERS).
+  process.env.CODARA_FAKE_PI_WORKERS = "1";
+  const directCwd = fs.mkdtempSync(path.join(HOME, "direct-ws-"));
+  const startDirect = (note) =>
+    runStore.startAutopilot({
+      workspaceId: WS,
+      workspaceName: "direct",
+      cwd: directCwd,
+      initialUserNote: note,
+      executionStrategy: "direct",
+      chatModel: "gpt-5.6-sol",
+      chatMode: "auto",
+    });
+  const liveAttempt = (runId) =>
+    readRun(runId).workerAttempts.find((entry) => ["prompt_ready", "launching", "running", "finishing"].includes(entry.status));
+  const direct = await startDirect("Rename the counter. FAKE_DELAY_MS=600000");
+  check("a direct chat starts in direct mode", direct.executionMode === "direct", direct.executionMode);
+  check("its first pass is running", await waitFor(() => liveAttempt(direct.id)?.status === "running", 8000),
+    JSON.stringify(readRun(direct.id).workerAttempts.map((entry) => entry.status)));
+  const DIRECT_Q = "Also cover the empty list. FAKE_DELAY_MS=200";
+  await runStore.addRunMessage({ runId: direct.id, author: "user", kind: "note", message: DIRECT_Q });
+  const queuedDirect = readRun(direct.id).humanMessages.find((entry) => entry.message === DIRECT_Q);
+  check("a message sent mid-pass is queued", queuedDirect?.deliveryState === "queued", queuedDirect?.deliveryState);
+  const firstAttemptId = liveAttempt(direct.id)?.id;
+  let directSendNowError = null;
+  await runStore.deliverQueuedMessagesNow(direct.id).catch((error) => {
+    directSendNowError = error;
+  });
+  check("Send now on a direct chat does not throw", directSendNowError === null, String(directSendNowError));
+  const secondPassDone = await waitFor(() => {
+    const state = readRun(direct.id);
+    return state.status === "complete" && state.workerAttempts.length === 2;
+  }, 10000);
+  const directAfter = readRun(direct.id);
+  check("the next pass ran and the chat settled complete", secondPassDone,
+    JSON.stringify({ status: directAfter.status, attempts: directAfter.workerAttempts.map((entry) => entry.status) }));
+  const stopped = directAfter.workerAttempts.find((entry) => entry.id === firstAttemptId);
+  check("the stopped pass is a Send now stop, not a failure",
+    stopped?.status === "cancelled" && stopped?.interruptedBy === "send_now",
+    JSON.stringify({ status: stopped?.status, interruptedBy: stopped?.interruptedBy }));
+  const secondTask = directAfter.workerTasks.find((entry) => entry.id === directAfter.workerAttempts[1]?.workerTaskId);
+  check("the queued message is in the next pass's prompt exactly once",
+    (secondTask?.description.split(DIRECT_Q).length ?? 0) - 1 === 1,
+    secondTask?.description.slice(-200));
+  const deliveredDirect = directAfter.humanMessages.find((entry) => entry.id === queuedDirect?.id);
+  check("the queued message is acknowledged", deliveredDirect?.deliveryState === "acknowledged", deliveredDirect?.deliveryState);
+  check("no failure note was left for the stopped pass",
+    !directAfter.humanMessages.some((entry) => entry.author !== "user" && /fail/i.test(entry.message ?? "")),
+    JSON.stringify(directAfter.humanMessages.filter((entry) => entry.author !== "user").map((entry) => entry.message)));
+
+  // Without Send now, a message queued during a pass goes once the pass ends.
+  const handOff = await startDirect("Read the readme. FAKE_DELAY_MS=600");
+  await waitFor(() => liveAttempt(handOff.id)?.status === "running", 8000);
+  const HANDOFF_Q = "Then list the scripts. FAKE_DELAY_MS=100";
+  await runStore.addRunMessage({ runId: handOff.id, author: "user", kind: "note", message: HANDOFF_Q });
+  const handedOff = await waitFor(() => {
+    const state = readRun(handOff.id);
+    return state.status === "complete" && state.workerAttempts.length === 2;
+  }, 10000);
+  const handOffAfter = readRun(handOff.id);
+  check("a message queued during a pass goes on its own when the pass ends", handedOff,
+    JSON.stringify({ status: handOffAfter.status, attempts: handOffAfter.workerAttempts.map((entry) => entry.status) }));
+  check("both passes succeeded", handOffAfter.workerAttempts.every((entry) => entry.status === "succeeded"));
+  delete process.env.CODARA_FAKE_PI_WORKERS;
+
   const conversationSource = fs.readFileSync(CHAT_CONVERSATION_TSX, "utf8");
   check(
     "queued rows render the Unqueue control wired to cancelQueuedMessage",
@@ -1730,8 +1800,12 @@ async function main() {
     /item\.intent === "steer" \|\| \(item\.deliveryAttempts \?\? 0\) > 0/.test(conversationSource),
   );
   check(
+    "Send now is offered on a direct chat and never on a Loom, whose loop driver takes its messages",
+    conversationSource.includes("sendNowOffered={!isAutomationRun(run)}"),
+  );
+  check(
     "Send now is hidden while the run waits on an answer",
-    conversationSource.includes("{queued && !runBlocked && <SendNowControl runId={runId} />}") &&
+    conversationSource.includes("{queued && !runBlocked && sendNowOffered && <SendNowControl runId={runId} />}") &&
       conversationSource.includes("Delivered with your answer"),
   );
 

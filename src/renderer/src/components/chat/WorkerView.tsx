@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RunState } from "@shared/types";
 import AnchoredMenu from "./composer/AnchoredMenu";
-import { ActivityIcon, type ActivityIconState } from "./ChatConversation";
+import { ActivityIcon, CONVERSATION_COLUMN_STYLE, type ActivityIconState } from "./ChatConversation";
 import { listChatWorkers, runtimeLabel, type ChatWorker } from "./timeline";
-import WorkerChat from "./WorkerChat";
+import WorkerChat, { RawLog } from "./WorkerChat";
 import {
   canMessageWorker,
   neighbourWorker,
@@ -19,6 +19,8 @@ import "./worker-view.css";
 // Going inside a Cora worker (DESIGN.md, "Cora worker view"): the worker's own
 // chat replaces Main's, drawn with Main's own rows. A slim bar says where you
 // are; Back or Esc returns to Main, which stayed mounted and kept its scroll.
+// Raw terminal output is one level deeper, in this same view: Back or Esc
+// there returns to the worker's chat first.
 
 const ICON_FOR_STATE: Record<WorkerViewState, ActivityIconState> = {
   queued: "hollow",
@@ -36,15 +38,12 @@ export default function WorkerView({
   workerId,
   onBack,
   onSelectWorker,
-  onOpenTerminal,
   onAskCora,
 }: {
   run: RunState;
   workerId: string;
   onBack: () => void;
   onSelectWorker: (workerId: string) => void;
-  /** Focuses the worker's terminal pane; false when it has none. */
-  onOpenTerminal?: (workerTaskId: string) => boolean;
   /** Back to Main with the composer holding this text. */
   onAskCora: (text: string) => void;
 }) {
@@ -65,18 +64,29 @@ export default function WorkerView({
     setMenuOpen(false);
   }, [workerId]);
 
+  // One level up: from the raw output to the worker's chat, from there to
+  // Main. Opening the raw output never leaves this view (a terminal tab
+  // elsewhere had no way back here), so Back always has somewhere to go.
+  const back = useCallback(() => {
+    if (!showLog) {
+      onBack();
+      return;
+    }
+    setShowLog(false);
+    if (!rootRef.current?.contains(document.activeElement)) rootRef.current?.focus({ preventScroll: true });
+  }, [showLog, onBack]);
   const onKeyDown = (event: React.KeyboardEvent) => {
     // A menu or popover inside the view closes on its own Escape first.
     if (event.key !== "Escape" || event.defaultPrevented || menuOpen || event.nativeEvent.isComposing) return;
     const target = event.target as HTMLElement | null;
     if (target?.closest('[role="menu"], [role="dialog"], [role="listbox"]')) return;
     event.preventDefault();
-    onBack();
+    back();
   };
   // Focus can drop to the page itself (an arrow that just went disabled, a
   // click on plain text outside the view's focusable root): Esc still leaves.
-  const backRef = useRef(onBack);
-  backRef.current = onBack;
+  const backRef = useRef(back);
+  backRef.current = back;
   const menuOpenRef = useRef(menuOpen);
   menuOpenRef.current = menuOpen;
   useEffect(() => {
@@ -127,7 +137,8 @@ export default function WorkerView({
         workers={workers}
         state={state}
         ping={ping}
-        onBack={onBack}
+        onBack={back}
+        inLog={showLog}
         onSelectWorker={onSelectWorker}
         menu={
           <WorkerMenu
@@ -135,21 +146,19 @@ export default function WorkerView({
             onOpenChange={setMenuOpen}
             runId={run.id}
             attemptId={attempt.id}
-            onShowLog={() => {
-              if (!worker.taskId || !onOpenTerminal?.(worker.taskId)) setShowLog(true);
-            }}
+            onShowLog={() => setShowLog(true)}
           />
         }
       />
-      <WorkerChat
-        key={attempt.id}
-        run={run}
-        worker={worker}
-        attemptId={attempt.id}
-        state={state}
-        showLog={showLog}
-        onCloseLog={() => setShowLog(false)}
-      />
+      {showLog ? (
+        <div className="cora-worker-view__scroll cora-conversation" data-worker-raw-log>
+          <div style={CONVERSATION_COLUMN_STYLE} className="cora-worker-view__column">
+            <RawLog runId={run.id} attemptId={attempt.id} title={worker.title} onClose={back} />
+          </div>
+        </div>
+      ) : (
+        <WorkerChat key={attempt.id} run={run} attemptId={attempt.id} state={state} />
+      )}
       {state === "running" || state === "queued" ? (
         <WorkerComposer
           key={`composer:${attempt.id}`}
@@ -221,6 +230,7 @@ function WorkerBar({
   elapsed,
   ping,
   onBack,
+  inLog = false,
   onSelectWorker,
   menu,
 }: {
@@ -231,6 +241,8 @@ function WorkerBar({
   elapsed: string | null;
   ping: string | null;
   onBack: () => void;
+  /** The raw output is open: Back returns to the worker's chat. */
+  inLog?: boolean;
   onSelectWorker: (workerId: string) => void;
   menu: React.ReactNode;
 }) {
@@ -253,15 +265,29 @@ function WorkerBar({
   const next = worker ? neighbourWorker(workers, worker.id, 1) : null;
   return (
     <nav className="cora-worker-bar" aria-label="Worker">
-      <button ref={backRef} type="button" className="cora-worker-bar__back" onClick={onBack} aria-label="Back to Main">
+      <button
+        ref={backRef}
+        type="button"
+        className="cora-worker-bar__back"
+        onClick={onBack}
+        aria-label={inLog ? `Back to ${worker?.title ?? "the worker"}` : "Back to Main"}
+      >
         <BarChevron direction="left" />
         Main
       </button>
       <BarChevron direction="right" muted />
       {worker && <ActivityIcon state={ICON_FOR_STATE[state]} color={state === "done" ? "var(--ok)" : undefined} />}
-      <span className="cora-worker-bar__title" aria-current="page">
+      <span className="cora-worker-bar__title" aria-current={inLog ? undefined : "page"}>
         {worker?.title ?? "Worker"}
       </span>
+      {inLog && (
+        <>
+          <BarChevron direction="right" muted />
+          <span className="cora-worker-bar__title" aria-current="page">
+            Raw output
+          </span>
+        </>
+      )}
       <span className="cora-worker-bar__meta">
         {worker ? <span>· {workerModelLabel(worker.model, runtimeLabel(worker.runtime))}</span> : null}
         <span>

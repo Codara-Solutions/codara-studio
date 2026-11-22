@@ -11,7 +11,6 @@ import {
   USER_BUBBLE_STYLE,
 } from "./ChatConversation";
 import Markdown from "./Markdown";
-import type { ChatWorker } from "./timeline";
 import {
   foldFinishedWorker,
   workerElapsed,
@@ -32,18 +31,12 @@ import "./worker-chat.css";
 
 export default function WorkerChat({
   run,
-  worker,
   attemptId,
   state,
-  showLog,
-  onCloseLog,
 }: {
   run: RunState;
-  worker: ChatWorker;
   attemptId: string;
   state: WorkerViewState;
-  showLog: boolean;
-  onCloseLog: () => void;
 }) {
   const feed = useWorkerFeed(run.id, attemptId);
   const rows = useMemo(() => workerRows(foldWorkerFeed(feed)), [feed]);
@@ -158,8 +151,6 @@ export default function WorkerChat({
         )}
 
         {report && <WorkerReportView report={report} />}
-
-        {showLog && <RawLog runId={run.id} attemptId={attemptId} onClose={onCloseLog} title={worker.title} />}
       </div>
     </div>
   );
@@ -233,7 +224,7 @@ function WorkerReportView({ report }: { report: WorkerReport }) {
   );
 }
 
-function RawLog({
+export function RawLog({
   runId,
   attemptId,
   title,
@@ -260,7 +251,7 @@ function RawLog({
       <div className="cora-worker-report__head">
         Raw terminal output
         <button type="button" className="cora-worker-log__hide" onClick={onClose}>
-          Hide
+          Back to chat
         </button>
       </div>
       <pre>
