@@ -108,7 +108,12 @@ async function main() {
       assert.equal(cli.claimAntigravityContinue("pane-c", true, ["conv-older"], "/w"), true);
       cli.releaseAntigravityContinue("pane-c");
       assert.equal(cli.claimAntigravityContinue("pane-d", true, ["conv-latest"], "/w"), false, "the restore reopened a named conversation");
-      assert.equal(cli.claimAntigravityContinue("pane-e"), true, "a refused take kept the claim");
+      assert.equal(cli.claimAntigravityContinue("pane-e"), false, "a refused take left the claim free for a later pane");
+      assert.equal(cli.claimAntigravityContinue("pane-d", false, ["conv-latest"], "/w"), false, "the refused pane continued into a named conversation");
+      assert.equal(cli.claimAntigravityContinue("pane-d", false, ["conv-older"], "/w"), true, "the refused pane lost its own later restart");
+      cli.releaseAntigravityContinue("pane-d");
+      assert.equal(cli.claimAntigravityContinue("pane-e"), true, "a released claim was not free again");
+      cli.releaseAntigravityContinue("pane-e");
     } finally {
       process.env.HOME = realHome;
     }

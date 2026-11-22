@@ -936,7 +936,7 @@ export default function SessionPicker({
                 ) : selectedLive ? (
                   <p className="sp-detail__notice" role="status" data-testid="session-picker-live">
                     {liveNoticeKey === selected.key
-                      ? "This conversation is open in another Antigravity tab"
+                      ? "Antigravity marks this conversation as busy. If no tab is running it, copy its id from the ⋯ menu and run agy --conversation <id>."
                       : "agy is working in this conversation now, so it is not resumed a second time."}
                   </p>
                 ) : isGone(selected) ? (

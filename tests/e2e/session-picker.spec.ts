@@ -866,7 +866,7 @@ test("the Pi and Antigravity rows show their own sessions first, as the others d
     await expect(openElsewhere).toBeVisible();
     await expect(agy.getByRole("combobox")).toBeFocused();
     await page.keyboard.press("Enter");
-    await expect(agy.getByTestId("session-picker-live")).toHaveText("This conversation is open in another Antigravity tab");
+    await expect(agy.getByTestId("session-picker-live")).toHaveText("Antigravity marks this conversation as busy. If no tab is running it, copy its id from the ⋯ menu and run agy --conversation <id>.");
     await expect(agy).toBeVisible();
     await shoot("antigravity-live", agy);
     expect(await launchCommands(app)).toHaveLength(3);

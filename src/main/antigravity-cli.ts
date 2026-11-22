@@ -70,7 +70,9 @@ let continuePane: string | null = null;
  * only checks it, so it never reopens another pane's latest conversation.
  * Neither continues when agy's latest conversation is one another pane
  * names by id (`named`, from every workspace's tabs, saved ones included):
- * that pane reopens it itself. A refused take leaves the claim free.
+ * that pane reopens it itself. A refused take still uses up the claim: the
+ * refused pane starts a new conversation, which becomes agy's latest, and a
+ * pane restored later would otherwise continue into it.
  */
 export function claimAntigravityContinue(
   paneId: string,
@@ -84,7 +86,10 @@ export function claimAntigravityContinue(
   // the latest conversation can change while the pane holds the claim.
   if (named.length > 0) {
     const conversations = currentAntigravityConversations();
-    if (conversations && continueReopensNamed(conversations, cwd, named)) return false;
+    if (conversations && continueReopensNamed(conversations, cwd, named)) {
+      if (take) continuePane = paneId;
+      return false;
+    }
   }
   continuePane = paneId;
   return true;
