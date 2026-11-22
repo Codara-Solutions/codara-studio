@@ -103,9 +103,15 @@ test("a direct chat: Send now mid-turn, and Back from raw output", async ({}, te
 
     // Raw output is one level deeper inside the worker view, and each Esc
     // climbs one level with focus kept in the chat.
-    // Settled step cards are folded: open the second turn's card.
-    await panel.getByRole("button", { name: /^Step 2/ }).click();
-    const row = panel.locator("[data-worker-row]").last();
+    // Settled step cards are folded: open the second turn's card. A card
+    // seen live folds on its settle, and one clicked before its worker is
+    // listed does not open, so click until its worker row shows.
+    const rows = panel.locator("[data-worker-row]");
+    await expect(async () => {
+      if ((await rows.count()) === 0) await panel.getByRole("button", { name: /^Step 2/ }).click();
+      await expect(rows.last()).toBeVisible({ timeout: 2_000 });
+    }).toPass({ timeout: 20_000 });
+    const row = rows.last();
     const rowId = await row.getAttribute("data-worker-row");
     await row.click();
     const bar = page.getByRole("navigation", { name: "Worker" });
