@@ -22,8 +22,8 @@ function sleptAgo(sleptAt: number, now: number): string {
 }
 
 /**
- * The card a sleeping pane shows at its bottom edge: which agent sleeps,
- * since when, and Resume. Docked rather than covering the pane, so the
+ * The card a sleeping pane shows at its bottom edge: what the session was
+ * about, since when it sleeps, and Resume. Docked rather than covering the pane, so the
  * agent's last output stays readable and scrollable above it. Solid like the
  * rest of the pane's chrome.
  */
@@ -48,7 +48,8 @@ export default function SleepingPaneCard({
   }, []);
   const waking = hibernation.resumeRequested === true;
   const name = RUNTIME_NAME[hibernation.runtime] ?? "Agent";
-  const title = `${name} session`;
+  const title = hibernation.summary?.title ?? `${name} session`;
+  const detail = hibernation.summary?.detail ?? null;
   const meta = `Fell asleep ${sleptAgo(hibernation.sleptAt, Date.now())}`;
   const stop = (event: React.SyntheticEvent) => event.stopPropagation();
   return (
@@ -92,6 +93,15 @@ export default function SleepingPaneCard({
         >
           {title}
         </div>
+        {!compact && detail ? (
+          <div
+            data-testid="pane-sleeping-detail"
+            title={detail}
+            style={{ fontSize: 11.5, color: "var(--ink-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {detail}
+          </div>
+        ) : null}
         <div
           style={{
             fontFamily: "var(--font-mono)",

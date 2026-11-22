@@ -113,7 +113,12 @@ export function useAgentHibernation(input: Input): void {
       if (!stillCandidate(candidate)) return;
       skippedRef.current.delete(candidate.paneId);
       const result = await api
-        .hibernate({ paneId: candidate.paneId, runtime: session.runtime, placement: candidate.placement })
+        .hibernate({
+          paneId: candidate.paneId,
+          runtime: session.runtime,
+          placement: candidate.placement,
+          transcriptPath: probe.transcriptPath ?? session.transcriptPath ?? undefined,
+        })
         .catch(() => null);
       // Marked whatever the user did meanwhile: the agent is stopped either
       // way, and the card is how the user gets it back.
@@ -121,6 +126,7 @@ export function useAgentHibernation(input: Input): void {
         latestRef.current.markPaneAsleep(candidate.paneId, {
           runtime: session.runtime,
           sleptAt: result.sleptAt,
+          summary: result.summary,
         });
       }
     };

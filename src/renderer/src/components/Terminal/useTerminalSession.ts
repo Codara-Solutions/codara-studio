@@ -3590,7 +3590,7 @@ export function useTerminalSession({
           if (!sleepingAtMount) {
             sleepingAtMount = true;
             logRestore(`pane=${sessionId} mounts asleep (${asleep.runtime}), marked from main`);
-            onAsleepRef.current?.({ runtime: asleep.runtime, sleptAt: asleep.sleptAt });
+            onAsleepRef.current?.({ runtime: asleep.runtime, sleptAt: asleep.sleptAt, summary: asleep.summary });
           }
         } else if (sleepingAtMount && hibernationRef.current) {
           // Marked asleep by the layout but unknown to main: a pane that was
@@ -3599,7 +3599,7 @@ export function useTerminalSession({
           const mark = hibernationRef.current;
           logRestore(`pane=${sessionId} restored asleep (${mark.runtime})`);
           void window.spark.agentHibernation
-            ?.restoredAsleep?.({ paneId: sessionId, runtime: mark.runtime, sleptAt: mark.sleptAt })
+            ?.restoredAsleep?.({ paneId: sessionId, runtime: mark.runtime, sleptAt: mark.sleptAt, summary: mark.summary ?? null })
             .catch(() => undefined);
         }
       }

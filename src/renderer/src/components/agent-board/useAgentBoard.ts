@@ -70,6 +70,7 @@ export function layoutAgentPanes(layouts: readonly AgentBoardLayout[]): AgentBoa
           ...(leaf.worker?.runtimeState ? { state: leaf.worker.runtimeState } : {}),
           ...(leafAccountId(leaf, runtime) ? { accountProfileId: leafAccountId(leaf, runtime) } : {}),
           ...(sleeping ? { sleepingSince: sleeping.sleptAt } : {}),
+          ...(sleeping?.summary?.title ? { sleepingTitle: sleeping.summary.title } : {}),
         });
       }
     }

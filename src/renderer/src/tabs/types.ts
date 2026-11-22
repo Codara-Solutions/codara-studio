@@ -7,6 +7,7 @@
 // owns the active id. Mounting is the contract that keeps editor cursors,
 // terminal PTYs, and dev-server iframes alive across tab switches.
 
+import type { AgentSleepSummary } from "@shared/agent-hibernation";
 import type { TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import type {
   FsEntry,
@@ -69,6 +70,8 @@ export interface EditorTab extends BaseTab {
 export interface TerminalLeafHibernation {
   runtime: "claude" | "codex" | "grok" | "pi";
   sleptAt: number;
+  // The card's line about the session, when main found one.
+  summary?: AgentSleepSummary | null;
   // The user asked for the agent back (Resume, Enter): the pane resumes it
   // once on screen. Showing a sleeping pane alone never resumes it.
   resumeRequested?: boolean;
@@ -81,6 +84,7 @@ export interface TerminalLeafHibernation {
 export interface TerminalLeafRestoreAsleep {
   runtime: "claude" | "codex" | "grok" | "pi";
   sleptAt: number;
+  summary?: AgentSleepSummary | null;
 }
 
 // Durable pointer to a Claude/Codex CLI session detected in a terminal leaf,

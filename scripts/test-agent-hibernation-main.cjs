@@ -36,7 +36,7 @@ const harnessPlugin = (stubNotifier) => ({
     build.onResolve(
       {
         filter:
-          /^(electron|\.\/e2e-background|\.\/pty-manager|\.\/preferences-store|\.\/system-metrics|\.\/notify|\.\/agent-session-registry|\.\/orchestration\/usage-activity-refresh|\.\/owned-process-tree-stub|\.\/remote-access\/studio-terminal-share)$/,
+          /^(electron|\.\/e2e-background|\.\/pty-manager|\.\/preferences-store|\.\/system-metrics|\.\/workspace-status|\.\/notify|\.\/agent-session-registry|\.\/orchestration\/usage-activity-refresh|\.\/owned-process-tree-stub|\.\/remote-access\/studio-terminal-share)$/,
       },
       (args) => ({ path: args.path, namespace: "stub" }),
     );
@@ -54,6 +54,11 @@ const harnessPlugin = (stubNotifier) => ({
             contents: init + "export async function loadPreferences(){ return globalThis.__AH.prefs; }\n",
             loader: "js",
           };
+        case "./workspace-status":
+          return {
+            contents: init + "export function paneAgentNote(id){ return globalThis.__AH.notes?.[id] ?? null; }\n",
+            loader: "js",
+          };
         case "./system-metrics":
           return {
             contents:
@@ -67,7 +72,7 @@ const harnessPlugin = (stubNotifier) => ({
             loader: "js",
           };
         case "./agent-session-registry":
-          return { contents: "export function latestSessionStart(){ return null; }\n", loader: "js" };
+          return { contents: init + "export function latestSessionStart(id){ return globalThis.__AH.starts?.[id] ?? null; }\n", loader: "js" };
         case "./orchestration/usage-activity-refresh":
           return { contents: "export function nudgeUsageRefresh() {}\n", loader: "js" };
         case "./terminal-agent-notify":
@@ -75,6 +80,7 @@ const harnessPlugin = (stubNotifier) => ({
             contents:
               init +
               "export function terminalAgentHibernationEvidence(){ return null; }\n" +
+              "export function terminalAgentActivitySnapshot(){ return globalThis.__AH.activity ?? []; }\n" +
               "export function terminalPanePlacement(id){ return globalThis.__AH.placed?.has(id) ? { workspaceId: 'ws', tabId: 't' } : null; }\n",
             loader: "js",
           };
@@ -701,7 +707,7 @@ async function main() {
     await ah.hibernateAgentPane(request(), sleeps.deps);
     check(
       "a sleep says how long the pane was idle and what the census cost",
-      lines.length === 1 && lines[0] === "pane=pane-1 claude is sleeping (background-workspace, idle 1800s, census 3 processes in 0ms)",
+      lines.length === 1 && lines[0] === "pane=pane-1 claude is sleeping (background-workspace, idle 1800s, census 3 processes in 0ms, card none)",
       lines,
     );
 
@@ -715,9 +721,77 @@ async function main() {
     check(
       "a sleep under memory pressure names the level",
       lines.length === 1 &&
-        lines[0] === "pane=pane-1 claude is sleeping (background-workspace, idle 600s, memory low, census 3 processes in 0ms)",
+        lines[0] === "pane=pane-1 claude is sleeping (background-workspace, idle 600s, memory low, census 3 processes in 0ms, card none)",
       lines,
     );
+
+    // The card's line: asked for before the stop, handed back with the sleep
+    // and kept for a pane that mounts later. Only its source is logged.
+    ah.resetAgentHibernationForTests();
+    lines.length = 0;
+    const order = [];
+    const summary = { title: "Fix the zebra parser", detail: "now add the tests", source: "ai-title" };
+    const told = makeDeps({
+      log: (line) => lines.push(line),
+      describe: async (_paneId, _runtime, probed) => {
+        order.push(`describe:${probed}`);
+        return summary;
+      },
+      stop: async () => {
+        order.push("stop");
+        return true;
+      },
+    });
+    H.live = new Set();
+    H.placed = new Set(["pane-1"]);
+    let slept = await ah.hibernateAgentPane(request({ transcriptPath: "/t/s.jsonl" }), told.deps);
+    check(
+      "a sleep comes back with the card's line, read before the stop",
+      slept.ok === true && JSON.stringify(slept.summary) === JSON.stringify(summary) && order.join(",") === "describe:/t/s.jsonl,stop",
+      { slept, order },
+    );
+    check(
+      "the log names where the line came from, never the line",
+      lines.length === 1 && lines[0].endsWith(", card ai-title)") && !lines[0].includes("zebra"),
+      lines,
+    );
+    const mounted = ah.takeSleepingPane("pane-1", true);
+    check("a pane mounting asleep gets the same line", JSON.stringify(mounted?.summary) === JSON.stringify(summary), mounted);
+
+    ah.resetAgentHibernationForTests();
+    const unreadable = makeDeps({
+      describe: async () => {
+        throw new Error("unreadable");
+      },
+    });
+    slept = await ah.hibernateAgentPane(request(), unreadable.deps);
+    check("a line that cannot be read never stops the sleep", slept.ok === true && slept.summary === null, slept);
+
+    ah.resetAgentHibernationForTests();
+    const refused = makeDeps({ describe: async () => summary, stopResult: undefined });
+    refused.state.stopResult = false;
+    slept = await ah.hibernateAgentPane(request(), refused.deps);
+    check("a failed stop hands back no line", slept.ok === false && slept.reason === "stop-failed", slept);
+
+    ah.resetAgentHibernationForTests();
+    check(
+      "a pane restored asleep keeps its line, cut to the card's limits",
+      ah.registerRestoredAsleep({
+        paneId: "pane-r",
+        runtime: "claude",
+        sleptAt: NOW - MIN,
+        summary: { title: `  ${"t".repeat(300)}`, detail: "x", source: "prompt" },
+      }) === true &&
+        ah.takeSleepingPane("pane-r", true)?.summary?.title.length === 120,
+    );
+    ah.resetAgentHibernationForTests();
+    check(
+      "a malformed line on a restored pane is dropped, the pane still sleeps",
+      ah.registerRestoredAsleep({ paneId: "pane-r", runtime: "claude", sleptAt: NOW - MIN, summary: { title: 5, source: "x" } }) === true &&
+        ah.takeSleepingPane("pane-r", true)?.summary === null,
+    );
+    H.live = undefined;
+    H.placed = undefined;
 
     // A workspace with its own time, or set to Never.
     ah.resetAgentHibernationForTests();

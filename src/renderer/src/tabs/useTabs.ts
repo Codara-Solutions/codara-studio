@@ -6,7 +6,7 @@ import {
   type FsEntry,
 } from "@shared/types";
 import { sanitizeTerminalAgentOwner, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
-import { isAgentHibernationRuntime } from "@shared/agent-hibernation";
+import { isAgentHibernationRuntime, validSleepSummary } from "@shared/agent-hibernation";
 import { makeId } from "@shared/ids";
 import { SPLIT_TITLE_BASE, TERMINAL_TITLE_BASE } from "@shared/tab-default-titles";
 import { basename } from "../path-utils";
@@ -739,7 +739,11 @@ export function cleanupTransientTerminalState(node: PaneNode): void {
       if (restoreAsleep && restoreAsleep.runtime === session.runtime && session.sessionId) {
         // Asleep at quit: it mounts asleep with its card and resumes only
         // when the user asks, so it never earns the eager boot resume.
-        node.hibernation = { runtime: restoreAsleep.runtime, sleptAt: restoreAsleep.sleptAt };
+        node.hibernation = {
+          runtime: restoreAsleep.runtime,
+          sleptAt: restoreAsleep.sleptAt,
+          summary: restoreAsleep.summary ?? null,
+        };
         delete node.bootResume;
       } else if (session.active === true) node.bootResume = true;
       else delete node.bootResume;
@@ -883,7 +887,12 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
       delete rest.agentSession;
     } else if (hibernation && hibernation.runtime === session.runtime) {
       // Asleep now: the next launch mounts it asleep (cleanupTransientTerminalState).
-      rest.restoreAsleep = { runtime: hibernation.runtime, sleptAt: hibernation.sleptAt };
+      const summary = validSleepSummary(hibernation.summary);
+      rest.restoreAsleep = {
+        runtime: hibernation.runtime,
+        sleptAt: hibernation.sleptAt,
+        ...(summary ? { summary } : {}),
+      };
     }
     return rest;
   }
@@ -902,7 +911,8 @@ export function validatedRestoreAsleep(value: unknown): TerminalLeafRestoreAslee
   if (typeof candidate.sleptAt !== "number" || !Number.isFinite(candidate.sleptAt) || candidate.sleptAt <= 0) {
     return null;
   }
-  return { runtime: candidate.runtime, sleptAt: candidate.sleptAt };
+  const summary = validSleepSummary(candidate.summary);
+  return { runtime: candidate.runtime, sleptAt: candidate.sleptAt, ...(summary ? { summary } : {}) };
 }
 
 // localStorage is user-editable and older builds wrote partially captured
