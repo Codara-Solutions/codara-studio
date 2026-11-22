@@ -2043,6 +2043,11 @@ export function useTerminalSession({
       // only has regex tables for those three. Non-first-party runtimes still
       // fire onAgentState (running=true) but skip the poller.
       let activeRuntime: PublicAgentRuntime | null = null;
+      // The runtime came from the typed command or a restored session pointer.
+      // Otherwise it was read off the screen, which another agent can print
+      // (Antigravity painting Claude Code's mode line), and main's name for
+      // the pane, checked against its process tree, replaces it.
+      let activeRuntimeFromLaunch = false;
       // Separate input-routing memory from the chip/running phase. Ctrl+C can
       // end the active turn (so the chip must clear) while leaving an agent TUI
       // focused on its prompt; Shift+Enter should still insert a TUI newline
@@ -2164,7 +2169,9 @@ export function useTerminalSession({
       let stateTimer: number | null = null;
       let pendingState: RuntimeState | null = null;
       let confirmedState: RuntimeState | null = null;
-      let authoritativeAgentState: { runtime: string; state: RuntimeState } | null = null;
+      // `fromScreen`: main read the runtime off the screen too, and it can be
+      // stale (main stops reading the screen once it has named the agent).
+      let authoritativeAgentState: { runtime: PublicAgentRuntime; state: RuntimeState; fromScreen: boolean } | null = null;
       let idleSinceMs: number | null = null;
       // D4 (stale-footer false "working"): Claude/Codex leave their last footer
       // frame frozen on screen after a turn ends; classifyTail keeps matching
@@ -2471,7 +2478,8 @@ export function useTerminalSession({
         stateTimer = window.setInterval(tickStatePoller, STATE_POLL_MS);
       };
 
-      const promoteAgentRuntime = (runtime: PublicAgentRuntime) => {
+      const promoteAgentRuntime = (runtime: PublicAgentRuntime, fromLaunch = false) => {
+        activeRuntimeFromLaunch = fromLaunch;
         markRecentAgentInput(runtime);
         agentRunningRef.current = true;
         onAgentStateRef.current?.({ runtime, running: true });
@@ -2480,13 +2488,24 @@ export function useTerminalSession({
         genericArmRingFrom = 0;
         genericArmBudget = 0;
       };
-      const setAgentRunning = (runtime: AgentRuntime | null) => {
-        const publicRuntime = runtime ? coercePublicRuntime(runtime) : null;
+      const setAgentRunning = (runtime: AgentRuntime | null, fromLaunch = false) => {
+        let publicRuntime = runtime ? coercePublicRuntime(runtime) : null;
+        // Main may have found the pane's agent process before its text reached here.
+        if (
+          publicRuntime &&
+          !fromLaunch &&
+          authoritativeAgentState &&
+          !authoritativeAgentState.fromScreen &&
+          authoritativeAgentState.state !== "done"
+        ) {
+          publicRuntime = authoritativeAgentState.runtime;
+        }
         if (agentPhase === "agent") {
-          if (!activeRuntime && publicRuntime) promoteAgentRuntime(publicRuntime);
+          if (!activeRuntime && publicRuntime) promoteAgentRuntime(publicRuntime, fromLaunch);
           return;
         }
         agentPhase = "agent";
+        activeRuntimeFromLaunch = fromLaunch && publicRuntime !== null;
         agentPhaseRevision += 1;
         // A fresh launch/relaunch re-arms re-detection: any prior post-exit
         // suppression latch is now stale, and so is a pending exit confirmation.
@@ -2582,6 +2601,7 @@ export function useTerminalSession({
         authoritativeAgentState = null;
         agentStateRevision += 1;
         activeRuntime = null;
+        activeRuntimeFromLaunch = false;
         stopStatePoller();
         agentPhase = "idle";
         agentTextRing = "";
@@ -2646,7 +2666,7 @@ export function useTerminalSession({
           const cmdLine = unescapeOsc633(data.slice(2));
           const runtime = runtimeFromCommandLine(cmdLine);
           if (runtime === "claude" || runtime === "codex") {
-            setAgentRunning(runtime);
+            setAgentRunning(runtime, true);
           }
           return false;
         }
@@ -2668,11 +2688,29 @@ export function useTerminalSession({
       // (now-disposed) hook.
       cleanups.push(() => stopStatePoller());
       let agentStateRevision = 0;
-      const observeAgentState = (state: { paneId: string; runtime: string | null; state: RuntimeState }) => {
+      const observeAgentState = (
+        state: { paneId: string; runtime: string | null; state: RuntimeState; runtimeFromScreen?: boolean },
+      ) => {
         if (disposed || state.paneId !== sessionId) return;
         agentStateRevision += 1;
-        authoritativeAgentState = state.runtime === "codex" || state.runtime === "claude" || state.runtime === "pi"
-          ? { runtime: state.runtime, state: state.state } : null;
+        const mainRuntime: PublicAgentRuntime | null =
+          state.runtime === "codex" || state.runtime === "claude" || state.runtime === "pi" || state.runtime === "antigravity"
+            ? state.runtime : null;
+        const fromScreen = state.runtimeFromScreen === true;
+        authoritativeAgentState = mainRuntime ? { runtime: mainRuntime, state: state.state, fromScreen } : null;
+        // A guess of main's never replaces this pane's own name: main may still
+        // name an agent that exited where it could not see it (a remote host,
+        // tmux) while the screen now shows another.
+        if (
+          mainRuntime &&
+          agentPhase === "agent" &&
+          (activeRuntime === null || (!activeRuntimeFromLaunch && !fromScreen && mainRuntime !== activeRuntime)) &&
+          state.state !== "done"
+        ) {
+          // Restarts the poller with the new runtime's classifier and tells
+          // the pane's worker its agent changed.
+          promoteAgentRuntime(mainRuntime);
+        }
         // Main's "done" for these means the TUI is gone (prompt marker or the
         // process tree), which a Pi pane without shell integration, as after a
         // restore, cannot show the renderer any other way.
@@ -2864,10 +2902,10 @@ export function useTerminalSession({
           // marker split across chunks avoids stripping and matching the whole
           // ring on every chunk of a busy shell.
           const sniffWindow = agentTextRing.slice(-(chunkText.length + AGENT_SNIFF_OVERLAP));
-          const runtime =
-            sniffOsc633CommandRuntime(sniffWindow) ?? sniffLiveRuntime(sniffWindow);
+          const typed = sniffOsc633CommandRuntime(sniffWindow);
+          const runtime = typed ?? sniffLiveRuntime(sniffWindow);
           if (runtime) {
-            setAgentRunning(runtime);
+            setAgentRunning(runtime, typed !== null);
           } else if (chunkText.includes("\x1b[?1049h")) {
             // Generic alt-screen TUI fallback. Every Ink-based CLI
             // (Claude / Codex) and every classic fullscreen tool
@@ -3378,8 +3416,8 @@ export function useTerminalSession({
             // the chip settles from the new process instead of keeping
             // whatever it last confirmed for the stopped one.
             const wokeRuntime = coercePublicRuntime((plan.fallbackSession ?? session).runtime);
-            if (agentPhase === "agent" && wokeRuntime) promoteAgentRuntime(wokeRuntime);
-            else setAgentRunning((plan.fallbackSession ?? session).runtime);
+            if (agentPhase === "agent" && wokeRuntime) promoteAgentRuntime(wokeRuntime, true);
+            else setAgentRunning((plan.fallbackSession ?? session).runtime, true);
           } else if (command && !spawnResult.attached) {
             term.write(`\x1b[2m[couldn't resume automatically: run ${command}]\x1b[0m\r\n`);
           } else if (!command && plan?.fallbackNotice) {
@@ -3754,7 +3792,7 @@ export function useTerminalSession({
             restoredRuntime === "pi" ||
             restoredRuntime === "antigravity"
           ) {
-            setAgentRunning(restoredRuntime);
+            setAgentRunning(restoredRuntime, true);
           }
         }
       } catch (err) {

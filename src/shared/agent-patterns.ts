@@ -359,20 +359,62 @@ const AGENT_PROCESS_BASENAME_RE = /^(?:(claude|codex|grok)(?:[-.][\w.-]*)?|(pi))
 // A running agent script shows its interpreter first ("node …/codex.js"),
 // which never appears in a typed launch command, hence the wider set here.
 const AGENT_PROCESS_WRAPPERS = new Set([...AGENT_LAUNCH_WRAPPERS, "node", "nodejs", "python", "python3"]);
+const SHELL_PROCESS_RE = /^(?:-?(?:zsh|bash|sh|fish|pwsh|powershell|cmd))(?:\.exe)?$/;
+// Programs that set up an environment, a recorder or a timer and then run the
+// command they were given (`op run -- agy`, `mise exec -- codex`, `script -q`).
+// What runs under them is still the user's own launch.
+// bun and deno are left out: like node, they run programs of their own.
+const PASS_THROUGH_LAUNCHERS = new Set([
+  "npx",
+  "pnpm",
+  "yarn",
+  "bunx",
+  "npm",
+  "env",
+  "time",
+  "script",
+  "op",
+  "mise",
+  "direnv",
+  "nix",
+  "nix-shell",
+  "poetry",
+  "nice",
+  "nohup",
+  "stdbuf",
+  "timeout",
+  "caffeinate",
+]);
+
+function processBasename(token: string): string {
+  return token.toLowerCase().split(/[/\\]/).pop() ?? "";
+}
+
+function processProgram(command: string): string {
+  const first = command.trim().split(/\s+/, 1)[0] ?? "";
+  return processBasename(first);
+}
+
+export function isShellProcessCommand(command: string): boolean {
+  return SHELL_PROCESS_RE.test(processProgram(command));
+}
+
+export function isPassThroughProcessCommand(command: string): boolean {
+  return PASS_THROUGH_LAUNCHERS.has(processProgram(command).replace(/\.exe$/, ""));
+}
+
 export function runtimeFromProcessCommand(command: string): PublicAgentRuntime | null {
   const tokens = command.trim().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return null;
-  const basename = (token: string): string =>
-    token.toLowerCase().split(/[/\\]/).pop() ?? "";
-  const first = basename(tokens[0]);
+  const first = processBasename(tokens[0]);
   // A shell wrapper (`/bin/zsh -ic "claude …"`) names the agent in its
   // arguments but is not the agent process; the real one is its child.
-  if (/^(?:-?(?:zsh|bash|sh|fish|pwsh|powershell|cmd))(?:\.exe)?$/.test(first)) return null;
+  if (SHELL_PROCESS_RE.test(first)) return null;
   const candidates = AGENT_PROCESS_WRAPPERS.has(first.replace(/\.exe$/, ""))
     ? tokens.slice(1).filter((token) => !token.startsWith("-"))
     : [tokens[0]];
   for (const token of candidates) {
-    const name = basename(token).replace(/\.(?:js|cjs|mjs|exe)$/, "");
+    const name = processBasename(token).replace(/\.(?:js|cjs|mjs|exe)$/, "");
     const match = AGENT_PROCESS_BASENAME_RE.exec(name);
     if (match) return (match[1] ?? match[2] ?? "antigravity") as PublicAgentRuntime;
   }

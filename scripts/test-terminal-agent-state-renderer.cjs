@@ -14,31 +14,56 @@ function between(start, end) {
 // Run the real event adapter and reporter without mounting an Electron window.
 const reporter = between("const reportRuntimeState =", "const stopStatePoller =");
 const observer = between("const observeAgentState =", "const offAgentState =");
+const arming = between("const promoteAgentRuntime =", "const resetAgentPhase =");
 const harness = esbuild.transformSync(`
-  module.exports = function (runtime = "codex", readOnly = false) {
+  module.exports = function (runtime = "codex", readOnly = false, fromLaunch = false) {
     let disposed = false;
-    let activeRuntime = runtime;
+    let activeRuntime = null;
+    let activeRuntimeFromLaunch = false;
+    let agentPhase = "idle";
+    let agentPhaseRevision = 0;
     let agentStateRevision = 0;
     let authoritativeAgentState = null;
+    let redetectSuppressedAfterExit = false;
+    let agentMarkerCarry = "";
+    let agentTextRing = "";
+    let genericArmRingFrom = 0;
+    let genericArmBudget = 0;
+    const POST_ARM_PROMOTE_BUDGET_BYTES = 4096;
     const sessionId = "pane";
     const states = [];
     const reports = [];
     const exits = [];
+    const agents = [];
+    const pollers = [];
     const readOnlyRef = { current: readOnly };
+    const agentRunningRef = { current: false };
     const onRuntimeStateRef = { current: state => states.push(state) };
+    const onAgentStateRef = { current: state => agents.push(state) };
     const window = { spark: { terminalState: { report: value => reports.push(value) } } };
-    const resetAgentPhase = value => { exits.push(value); activeRuntime = null; };
+    const resetAgentPhase = value => { exits.push(value); activeRuntime = null; agentPhase = "idle"; };
+    const markRecentAgentInput = () => {};
+    const cancelAltScreenExitConfirm = () => {};
+    const coercePublicRuntime = value =>
+      ["claude", "codex", "grok", "pi", "antigravity"].includes(value) ? value : null;
+    const startStatePoller = value => { activeRuntime = value; pollers.push(value); };
     ${reporter}
+    ${arming}
     ${observer}
-    return { states, reports, exits, observe: observeAgentState, report: reportRuntimeState,
-      dispose: () => { disposed = true; } };
+    if (runtime) setAgentRunning(runtime, fromLaunch);
+    states.length = 0;
+    reports.length = 0;
+    agents.length = 0;
+    pollers.length = 0;
+    return { states, reports, exits, agents, pollers, observe: observeAgentState, report: reportRuntimeState,
+      arm: setAgentRunning, runtime: () => activeRuntime, dispose: () => { disposed = true; } };
   };
 `, { loader: "ts", format: "cjs", target: "node22" });
 const compiled = { exports: {} };
 new Function("module", harness.code)(compiled);
 const createHarness = compiled.exports;
 
-for (const runtime of ["codex", "claude", "pi"]) {
+for (const runtime of ["codex", "claude", "pi", "antigravity"]) {
   const adapter = createHarness(runtime);
   const event = state => ({ paneId: "pane", runtime, state });
   adapter.observe(event("idle"));
@@ -74,6 +99,48 @@ assert.deepEqual(pi.exits, [{ exitSignal: true }], "main's done clears a Pi agen
 const claude = createHarness("claude");
 claude.observe({ paneId: "pane", runtime: "claude", state: "done" });
 assert.deepEqual(claude.exits, [], "Claude keeps relying on its own exit signals");
+
+// Antigravity printed Claude Code's mode line, so the pane armed as Claude
+// from its screen and Claude's classifier saw a working turn. Main's process
+// check names agy: the pane follows it, poller and worker included.
+const relabel = createHarness("claude");
+relabel.report("working");
+relabel.observe({ paneId: "pane", runtime: "antigravity", state: "launching" });
+relabel.observe({ paneId: "pane", runtime: "antigravity", state: "idle" });
+assert.equal(relabel.runtime(), "antigravity", "main's runtime replaces one read off the screen");
+assert.deepEqual(relabel.pollers, ["antigravity"], "the poller restarts with Antigravity's classifier");
+assert.deepEqual(relabel.agents, [{ runtime: "antigravity", running: true }], "the pane's worker is told its agent changed");
+assert.equal(relabel.states.at(-1), "idle");
+relabel.report("working");
+assert.equal(relabel.states.at(-1), "idle", "main's state drives an Antigravity pane");
+
+// A runtime from the typed command or a restored session pointer is not a
+// guess: a different name from main does not replace it.
+const launched = createHarness("antigravity", false, true);
+launched.observe({ paneId: "pane", runtime: "claude", state: "idle" });
+assert.equal(launched.runtime(), "antigravity", "a launched agent keeps its name");
+assert.deepEqual(launched.pollers, []);
+
+// Main named the agent before its text reached the renderer.
+const early = createHarness(null);
+early.observe({ paneId: "pane", runtime: "antigravity", state: "idle" });
+early.arm("claude");
+assert.equal(early.runtime(), "antigravity", "a screen guess yields to main's earlier name");
+assert.deepEqual(early.agents.at(-1), { runtime: "antigravity", running: true });
+// Main's own screen guess can be stale: in an SSH pane or tmux it never saw
+// Claude quit, and the screen now shows Codex. The pane keeps Codex.
+const stale = createHarness("codex");
+stale.observe({ paneId: "pane", runtime: "claude", state: "idle", runtimeFromScreen: true });
+assert.equal(stale.runtime(), "codex", "main's screen guess does not replace the pane's own name");
+assert.deepEqual(stale.pollers, [], "Claude's reader does not take over");
+const staleEarly = createHarness(null);
+staleEarly.observe({ paneId: "pane", runtime: "claude", state: "idle", runtimeFromScreen: true });
+staleEarly.arm("codex");
+assert.equal(staleEarly.runtime(), "codex", "a stale guess of main's does not rename a later screen sniff");
+const earlyLaunch = createHarness(null);
+earlyLaunch.observe({ paneId: "pane", runtime: "antigravity", state: "idle" });
+earlyLaunch.arm("codex", true);
+assert.equal(earlyLaunch.runtime(), "codex", "a typed launch is a new agent");
 
 // Shift+Enter: Pi reads ESC CR as Alt+Enter (queue follow-up, which submits
 // an idle draft), so an agent newline in a Pi pane is LF (its Ctrl+J).

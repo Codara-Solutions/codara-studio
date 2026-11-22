@@ -2878,7 +2878,11 @@ export default function App() {
             runtimeState: payload.state,
           };
         }
-        return applyTerminalAgentState(existing, payload.state);
+        return applyTerminalAgentState(existing, payload.state, {
+          runtime: payload.runtime,
+          paneId: payload.paneId,
+          runtimeFromScreen: payload.runtimeFromScreen,
+        });
       },
     );
   }, [setTerminalPaneWorking, setTerminalPaneAgent]);

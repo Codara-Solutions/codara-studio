@@ -172,6 +172,59 @@ test("with resume after a restart off, agy does not come back", async ({}, testI
   }
 });
 
+// agy paints a mode line that reads like Claude Code's, and the launch below
+// carries no command marker that names it, so the pane first reads as Claude
+// from its screen. Main's process check names agy and the chip follows.
+const FAKE_AGY_QUOTING_CLAUDE = `#!/usr/bin/env node
+process.stdout.write("\\r\\n Antigravity\\r\\n \\u23f8 plan mode on (shift+tab to cycle)\\r\\n > ");
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+process.stdin.resume();
+process.stdin.on("data", (data) => {
+  if (data.includes(3) || data.includes(4)) process.exit(0);
+});
+`;
+const START_AFTER_CLAUDE_TEXT = `#!/bin/sh
+printf 'Claude Code v2.1.261\\r\\n \\342\\217\\270 plan mode on (shift+tab to cycle)\\r\\n'
+sleep 4
+exec agy
+`;
+
+test("a pane whose screen reads as Claude takes the name of the agent that runs in it", async ({}, testInfo) => {
+  test.setTimeout(90_000);
+  const fixture = await prepareFixture(testInfo.outputPath("shots"));
+  await writeFile(join(fixture.binDir, "agy"), FAKE_AGY_QUOTING_CLAUDE, { mode: 0o755 });
+  await writeFile(join(fixture.binDir, "start-later"), START_AFTER_CLAUDE_TEXT, { mode: 0o755 });
+  let app: ElectronApplication | null = null;
+  try {
+    app = await launch(fixture);
+    const page = await app.firstWindow();
+    await page.setViewportSize({ width: 1280, height: 820 });
+    await page.waitForLoadState("domcontentloaded");
+    await page.getByRole("tab", { name: /terminals/i }).evaluate((node) => (node as HTMLElement).click());
+    const shell = page.locator(".xterm-helper-textarea:visible").first();
+    await expect(shell).toBeAttached({ timeout: 20_000 });
+    await shell.focus();
+    await shell.pressSequentially("start-later", { delay: 2 });
+    await shell.press("Enter");
+
+    await expect(page.getByRole("status", { name: /^CLAUDE / })).toBeVisible({ timeout: 15_000 });
+    await page.screenshot({ path: join(fixture.shots, "screen-named-1-claude.png") });
+    await expect(page.getByRole("status", { name: /^ANTIGRAVITY / })).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator('[data-tab-id] [data-agent-runtime="antigravity"]').first()).toBeVisible({ timeout: 10_000 });
+    // The label holds: Claude's mode line stays on screen, and nothing turns
+    // the pane back.
+    for (let sample = 0; sample < 10; sample += 1) {
+      await expect(page.getByRole("status", { name: /^CLAUDE / })).toHaveCount(0);
+      await expect(page.getByRole("status", { name: /^ANTIGRAVITY / })).toBeVisible();
+      await page.waitForTimeout(500);
+    }
+    await page.screenshot({ path: join(fixture.shots, "screen-named-2-antigravity.png") });
+  } finally {
+    await app?.close();
+    await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
 async function launch(fixture: Fixture): Promise<ElectronApplication> {
   const {
     ELECTRON_RUN_AS_NODE: _electronRunAsNode,
@@ -210,6 +263,8 @@ async function openPickerRow(page: Page) {
 async function startNewFromPicker(page: Page) {
   const picker = page.getByRole("dialog", { name: "Antigravity sessions" });
   await expect(picker.getByTestId("session-picker-new")).toHaveClass(/is-selected/, { timeout: 15_000 });
+  // The search box takes focus a frame after the picker mounts, and Enter is its key.
+  await expect(picker.getByRole("combobox")).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(picker).toHaveCount(0);
 }
