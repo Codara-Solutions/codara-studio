@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { runtimeFromProcessCommand } from "@shared/agent-patterns";
 import type { AgentHibernationRuntime } from "@shared/agent-hibernation";
+import { commandRunsCodaraMcpServer } from "@shared/codara-mcp-server";
 import { commandRunsNativeCli } from "./orchestration/native-cli-process-shutdown";
 import { listProcessesWithCommands, processStartMs } from "./owned-process-tree";
 
@@ -37,9 +38,13 @@ export type CensusVerdict =
     };
 
 // MCP servers and other helpers an agent starts on launch come up within a
-// few seconds of it. A process that appears later was started by the agent
-// doing work (or by the user) and may be anything, a dev server included.
-export const AGENT_BOOT_WINDOW_MS = 20_000;
+// minute of it. A process that appears later was started by the agent doing
+// work (or by the user) and may be anything, a dev server included. Measured
+// on Windows while seven restored agents booted at once: `npx` and `pipx` MCP
+// servers came up to 32 s after the agent, so 20 s refused every pane. Tool
+// shells are refused at any age, so the wider window only admits processes
+// that are not running a command for the user.
+export const AGENT_BOOT_WINDOW_MS = 60_000;
 // `ps -o lstart` has one-second resolution, so a child can read as starting
 // up to a second BEFORE its parent.
 const START_SLACK_MS = 1_500;
@@ -54,6 +59,10 @@ const CLAUDE_TOOL_SHELL_RE = /shell-snapshots[\\/]snapshot-/i;
 // A login shell running a command string (`bash -lc "npm run dev"`) is how
 // agents run tool commands. Launchers like `npm exec` use a plain `sh -c`.
 const LOGIN_COMMAND_SHELL_RE = /^\s*\S*(?:zsh|bash|sh|dash|ksh|fish)(?:\.exe)?\s+(?:-\w*l\w*c\w*|-\w*c\w*l\w*|--login\s+-\w*c)\b/i;
+// Claude Code's PowerShell tool on Windows: `cmd.exe /d /s /c ""…\chcp.com"
+// 65001 >nul & "…\pwsh.exe" …"`. The code page switch is what tells it apart
+// from the `cmd /c npx …` an MCP server is started with, which must not count.
+const WINDOWS_POWERSHELL_TOOL_RE = /chcp(?:\.com)?"?\s+65001\b[\s\S]*\b(?:pwsh|powershell)(?:\.exe)?\b/i;
 // npm-installed CLIs on Windows run as `node …\@scope\pkg\cli.js`.
 const PACKAGE_PATHS: Record<AgentHibernationRuntime, RegExp> = {
   claude: /[\\/]@anthropic-ai[\\/]claude-code[\\/]/i,
@@ -100,8 +109,24 @@ function isShellProcess(command: string): boolean {
   return SHELL_NAME_RE.test(executableName(command));
 }
 
-function isToolShell(command: string): boolean {
-  return CLAUDE_TOOL_SHELL_RE.test(command) || LOGIN_COMMAND_SHELL_RE.test(command);
+export function isToolShell(command: string): boolean {
+  return (
+    CLAUDE_TOOL_SHELL_RE.test(command) ||
+    LOGIN_COMMAND_SHELL_RE.test(command) ||
+    WINDOWS_POWERSHELL_TOOL_RE.test(command)
+  );
+}
+
+// What a refusal names: the program and its age, never its arguments, which
+// can carry tokens and end up in the log.
+function describeProcess(entry: CensusProcess, agentStart: number | null): string {
+  const name = executableName(entry.command) || "?";
+  let age = "";
+  if (entry.startMs !== null && agentStart !== null) {
+    const seconds = Math.round((entry.startMs - agentStart) / 1000);
+    age = ` ${seconds < 0 ? "-" : "+"}${Math.abs(seconds)}s`;
+  }
+  return `${entry.pid} ${name}${age}`;
 }
 
 /**
@@ -187,13 +212,18 @@ export function classifyPaneProcessTree(
     if (entry.pid === agent.pid || chain.has(entry.pid)) continue;
     if (underAgent.has(entry.pid)) {
       if (isToolShell(entry.command)) {
-        return { ok: false, reason: "other-processes", detail: `tool shell ${entry.pid}` };
+        return { ok: false, reason: "other-processes", detail: `tool shell ${describeProcess(entry, agentStart)}` };
       }
+      // Codara's own MCP server holds no user work and starts no process, but
+      // Claude Code connects it lazily, often a minute or more after boot.
+      // Only the server itself is exempt from the clock: anything under it is
+      // judged like any other child.
+      if (commandRunsCodaraMcpServer(entry.command)) continue;
       if (entry.startMs === null) {
         return { ok: false, reason: "process-list-unavailable", detail: `start of ${entry.pid} unknown` };
       }
       if (entry.startMs < agentStart - START_SLACK_MS || entry.startMs > agentStart + bootWindowMs) {
-        return { ok: false, reason: "other-processes", detail: `late child ${entry.pid}` };
+        return { ok: false, reason: "other-processes", detail: `late child ${describeProcess(entry, agentStart)}` };
       }
       continue;
     }
@@ -201,7 +231,7 @@ export function classifyPaneProcessTree(
     // a shell whose own children are all such helpers.
     if (isHelperProcess(entry.command)) continue;
     if (isShellProcess(entry.command) && onlyHelpersBelow(entry.pid, children)) continue;
-    return { ok: false, reason: "other-processes", detail: `sibling ${entry.pid}` };
+    return { ok: false, reason: "other-processes", detail: `sibling ${describeProcess(entry, agentStart)}` };
   }
   return { ok: true, agentPid: agent.pid, members: tree.length };
 }
