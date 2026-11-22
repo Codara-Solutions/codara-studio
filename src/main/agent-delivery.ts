@@ -36,7 +36,7 @@ export interface AgentDeliveryDeps {
   /**
    * Whether a process runs in the pane to take the paste. A pane can exist
    * without one: agent hibernation stops an idle agent and leaves the pane
-   * asleep until it is opened, and the pty layer drops writes to it.
+   * asleep until the user resumes it, and the pty layer drops writes to it.
    */
   paneRunning?(paneId: string): boolean;
   runWorkspace(runId: string): Promise<string | null>;
@@ -178,7 +178,7 @@ export function createAgentDelivery(deps: AgentDeliveryDeps): AgentDelivery {
           throw new AgentDeliveryError("That terminal is closed or belongs to another workspace.");
         }
         if (deps.paneRunning && !deps.paneRunning(target.paneId)) {
-          throw new AgentDeliveryError("Nothing is running in that terminal right now. Open it, then send again.");
+          throw new AgentDeliveryError("Nothing is running in that terminal right now. Open it and press Resume, then send again.");
         }
       } else if (target?.kind === "chat") {
         if (await deps.runWorkspace(target.runId) !== workspaceId) {

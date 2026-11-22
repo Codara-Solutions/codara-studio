@@ -113,7 +113,7 @@ export function paneDestinations(
         sublabel: sleeping ? "asleep" : focused ? "focused" : agent ? undefined : "no agent detected",
         group: "agents",
         ...(sleeping
-          ? { disabled: true, disabledReason: "This agent is asleep. Open its terminal to wake it, then send." }
+          ? { disabled: true, disabledReason: "This agent is asleep. Open its terminal and press Resume, then send." }
           : {}),
       });
     }

@@ -97,13 +97,17 @@ interface Props {
   // Fires once the boot restore was attempted (any outcome) so the owner can
   // clear the leaf's `bootResume` marker.
   onBootResumeConsumed?: () => void;
-  // Agent hibernation: the leaf says this pane's agent sleeps; the pane
-  // resumes it once on screen and then reports onWoke.
-  hibernated?: boolean;
+  // Agent hibernation: the leaf's sleeping mark. The pane resumes the agent
+  // once the user asked (resumeRequested) and it is on screen, then reports
+  // onWoke.
+  hibernation?: TerminalLeafHibernation | null;
   onWoke?: () => void;
-  // Main says the pane's agent sleeps though the leaf has no mark (a window
-  // reload while it slept): the owner marks the leaf.
+  // The pane's agent sleeps though the leaf has no mark (a window reload
+  // while it slept): the owner marks the leaf.
   onAsleep?: (hibernation: TerminalLeafHibernation) => void;
+  // Enter or a printable key in the sleeping pane.
+  onResumeRequest?: () => void;
+  onWakeFailed?: (message: string) => void;
 }
 
 // Far enough past any display edge that no part of the pane intersects the
@@ -145,9 +149,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onResumeUnavailable,
       onResumeFallback,
       onBootResumeConsumed,
-      hibernated,
+      hibernation,
       onWoke,
       onAsleep,
+      onResumeRequest,
+      onWakeFailed,
     },
     ref,
   ) {
@@ -189,9 +195,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onResumeUnavailable,
       onResumeFallback,
       onBootResumeConsumed,
-      hibernated,
+      hibernation,
       onWoke,
       onAsleep,
+      onResumeRequest,
+      onWakeFailed,
     });
 
     // A pane that leaves the screen takes its link menu with it.

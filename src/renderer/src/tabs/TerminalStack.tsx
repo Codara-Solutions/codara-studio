@@ -78,6 +78,9 @@ import {
 } from "../workers/launch-commands";
 import { offerWorkerSessions } from "../components/session-search/sessionSearchStore";
 
+// Only a sleeping pane shows it, so it stays out of the startup bundle.
+const SleepingPaneCard = React.lazy(() => import("../components/Terminal/SleepingPaneCard"));
+
 // TerminalStack hosts every terminal tab in the workspace. Each tab carries a
 // recursive PaneNode tree — leaves are PTY-backed panes, splits are
 // horizontal/vertical pairs separated by a draggable handle.
@@ -200,6 +203,10 @@ interface Props {
   onPaneWoke?: (tabId: TabId, paneId: string) => void;
   onPaneAsleep?: (tabId: TabId, paneId: string, hibernation: TerminalLeafHibernation) => void;
   onPaneKeepAwake?: (tabId: TabId, paneId: string, keepAwake: boolean) => void;
+  // The user asked for a sleeping pane's agent back (its card, Enter in the
+  // pane), optionally pinning it awake; or that resume failed.
+  onPaneResumeRequest?: (tabId: TabId, paneId: string, keepRunning: boolean) => void;
+  onPaneWakeFailed?: (tabId: TabId, paneId: string, message: string) => void;
   // Run-owned worker terminals are an observation surface by default. This
   // returns to the owning run canvas without tearing down the xterm or its PTY.
   onBackToRuns: () => void;
@@ -230,6 +237,9 @@ type Bundle = {
   onWoke: () => void;
   onAsleep: (hibernation: TerminalLeafHibernation) => void;
   onKeepAwake: (keepAwake: boolean) => void;
+  onResumeRequest: () => void;
+  onResumeKeepRunning: () => void;
+  onWakeFailed: (message: string) => void;
 };
 
 // React.memo: with the useTabs API object now memoized, TerminalStack's
@@ -267,6 +277,8 @@ function TerminalStack({
   onPaneWoke,
   onPaneAsleep,
   onPaneKeepAwake,
+  onPaneResumeRequest,
+  onPaneWakeFailed,
   onBackToRuns,
 }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
@@ -309,6 +321,10 @@ function TerminalStack({
   asleepRef.current = onPaneAsleep;
   const keepAwakeRef = useRef(onPaneKeepAwake);
   keepAwakeRef.current = onPaneKeepAwake;
+  const resumeRequestRef = useRef(onPaneResumeRequest);
+  resumeRequestRef.current = onPaneResumeRequest;
+  const wakeFailedRef = useRef(onPaneWakeFailed);
+  wakeFailedRef.current = onPaneWakeFailed;
   useEffect(() => {
     detectedRef.current = onDetectedUrl;
     sparkOpenRef.current = onSparkOpen;
@@ -452,6 +468,9 @@ function TerminalStack({
           onWoke: () => wokeRef.current?.(tabId, paneId),
           onAsleep: (hibernation) => asleepRef.current?.(tabId, paneId, hibernation),
           onKeepAwake: (keepAwake) => keepAwakeRef.current?.(tabId, paneId, keepAwake),
+          onResumeRequest: () => resumeRequestRef.current?.(tabId, paneId, false),
+          onResumeKeepRunning: () => resumeRequestRef.current?.(tabId, paneId, true),
+          onWakeFailed: (message) => wakeFailedRef.current?.(tabId, paneId, message),
         };
         bundles.current.set(key, b);
       }
@@ -1281,9 +1300,11 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 leaf.worker?.nativeGrokProfileId
               }
               bootResume={leaf.bootResume === true}
-              hibernated={Boolean(leaf.hibernation)}
+              hibernation={leaf.hibernation ?? null}
               onWoke={bundle.onWoke}
               onAsleep={bundle.onAsleep}
+              onResumeRequest={bundle.onResumeRequest}
+              onWakeFailed={bundle.onWakeFailed}
               // Hidden under an overlay: it keeps its size and buffer but can
               // neither take the keyboard nor refit, and revealing it again
               // when the overlay's command exits hands the focus back, but
@@ -1341,7 +1362,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               </div>
             ) : null}
             {!placeOffScreen && !workerTerminal && leaf.hibernation ? (
-              <SleepingPaneChip hibernation={leaf.hibernation} waking={visible} />
+              <SleepingPaneChip hibernation={leaf.hibernation} waking={leaf.hibernation.resumeRequested === true} />
             ) : !placeOffScreen && !workerTerminal && workerChip ? (
               <WorkerChip worker={workerChip} />
             ) : null}
@@ -1363,6 +1384,15 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                     : null
                 }
               />
+            ) : null}
+            {!placeOffScreen && !workerTerminal && !overlay && leaf.hibernation ? (
+              <React.Suspense fallback={null}>
+                <SleepingPaneCard
+                  hibernation={leaf.hibernation}
+                  onResume={bundle.onResumeRequest}
+                  onResumeKeepRunning={bundle.onResumeKeepRunning}
+                />
+              </React.Suspense>
             ) : null}
           </div>
         );

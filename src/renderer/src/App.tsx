@@ -875,11 +875,20 @@ export default function App() {
 
   // Agent hibernation: stop finished, untouched agent terminals in background
   // workspaces after the idle time set in Settings (lib/useAgentHibernation.ts).
+  const updatePaneHibernation = tabs.updatePaneHibernation;
+  const patchSleepingPane = tabs.patchPaneHibernation;
+  // The pane's own exit may have marked it already, and the user may have
+  // pressed Resume on that mark: the sleep's answer merges into it.
+  const markPaneHibernation = useCallback(
+    (paneId: string, hibernation: TerminalLeafHibernation | null) =>
+      updatePaneHibernation(paneId, (current) => (hibernation ? { ...(current ?? {}), ...hibernation } : null)),
+    [updatePaneHibernation],
+  );
   useAgentHibernation({
     activeWorkspaceId: tabs.tabsWorkspaceId,
     inactiveLayouts: tabs.inactiveWorkspaceLayouts,
     minutes: preferences.agentHibernationMinutes,
-    setPaneHibernation: tabs.setPaneHibernation,
+    setPaneHibernation: markPaneHibernation,
   });
 
   // One shared git status/log poll per active workspace — feeds the Source
@@ -3339,6 +3348,7 @@ export default function App() {
             workspaceId ?? globalRuns.runsRef.current.find((run) => run.id === runId)?.workspaceId,
           ),
         focusTerminal: focusTerminalTarget,
+        resumePane: (paneId) => patchSleepingPane(paneId, { resumeRequested: true, wakeError: null }),
         openAutomation: openAutomationTarget,
         openWorkspace: openWorkspacePanel,
         describeTarget: describeNotifyTarget,
@@ -3348,6 +3358,7 @@ export default function App() {
       handleSelectRunAnywhere,
       globalRuns.runsRef,
       focusTerminalTarget,
+      patchSleepingPane,
       openAutomationTarget,
       openWorkspacePanel,
       describeNotifyTarget,
@@ -6629,7 +6640,7 @@ export default function App() {
       if (!leaf) return;
       // Agent hibernation stopped this agent on the user's behalf: its session
       // stays the pane's running one and its chip stays as it was. The pane
-      // resumes it when shown (useTerminalSession wakeFromSleep).
+      // resumes it when the user asks (useTerminalSession wakeFromSleep).
       if (info?.hibernated) return;
       if (isCleanShellExit(leaf, info)) {
         // No reseed: a fresh shell would hand back the terminal that just
@@ -7989,6 +8000,8 @@ const Workspace = React.memo(function Workspace({
     setLeafAgentSession,
     setLeafBootResumeConsumed,
     setPaneHibernation,
+    patchPaneHibernation,
+    updatePaneHibernation: updateLeafHibernation,
     setLeafKeepAwake,
     flushWorkspaceScrollbackNow,
     moveTabInStrip,
@@ -8651,19 +8664,35 @@ const Workspace = React.memo(function Workspace({
     },
     [setLeafBootResumeConsumed],
   );
-  // Agent hibernation. A pane wakes only while on screen, but the clear is
-  // workspace-agnostic so a wake that finishes after a switch still lands.
+  // Agent hibernation. A pane wakes only while on screen and after the user
+  // asked, but the clear is workspace-agnostic so a wake that finishes after
+  // a switch still lands.
   const handlePaneWoke = useCallback(
     (_tabId: string, paneId: string) => setPaneHibernation(paneId, null),
     [setPaneHibernation],
   );
+  // A pane that finds itself asleep keeps a mark that is already there: it
+  // may carry a Resume the user just pressed.
   const handlePaneAsleep = useCallback(
-    (_tabId: string, paneId: string, hibernation: TerminalLeafHibernation) => setPaneHibernation(paneId, hibernation),
-    [setPaneHibernation],
+    (_tabId: string, paneId: string, hibernation: TerminalLeafHibernation) =>
+      updateLeafHibernation(paneId, (current) => current ?? hibernation),
+    [updateLeafHibernation],
   );
   const handlePaneKeepAwake = useCallback(
     (tabId: string, paneId: string, keepAwake: boolean) => setLeafKeepAwake(tabId, paneId, keepAwake),
     [setLeafKeepAwake],
+  );
+  const handlePaneResumeRequest = useCallback(
+    (tabId: string, paneId: string, keepRunning: boolean) => {
+      if (keepRunning) setLeafKeepAwake(tabId, paneId, true);
+      patchPaneHibernation(paneId, { resumeRequested: true, wakeError: null });
+    },
+    [patchPaneHibernation, setLeafKeepAwake],
+  );
+  const handlePaneWakeFailed = useCallback(
+    (_tabId: string, paneId: string, message: string) =>
+      patchPaneHibernation(paneId, { resumeRequested: false, wakeError: message }),
+    [patchPaneHibernation],
   );
   const handleWhiteboardSavedAs = useCallback(
     (id: TabId, path: string) => tabs.saveWhiteboardTabAs(id, entryFromPath(path)),
@@ -8849,6 +8878,8 @@ const Workspace = React.memo(function Workspace({
                 onPaneWoke={handlePaneWoke}
                 onPaneAsleep={handlePaneAsleep}
                 onPaneKeepAwake={isActive ? handlePaneKeepAwake : noopTerminalCb}
+                onPaneResumeRequest={handlePaneResumeRequest}
+                onPaneWakeFailed={handlePaneWakeFailed}
                 onBackToRuns={isActive ? handleBackToRuns : noopTerminalCb}
               />
             </div>
