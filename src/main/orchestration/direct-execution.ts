@@ -11,6 +11,30 @@ const MANAGED_REQUEST =
 const STUDIO_SURFACE_REQUEST =
   /\b(?:whiteboard|kanban|board|automations?|loom|schedul(?:e|ed|ing)|cron(?:tab|job)?|recurring|nightly|hourly|every (?:day|night|hour|morning|evening|week|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d+\s*(?:min(?:ute)?s?|hours?|days?)))\b/i;
 
+// The direct lane is one worker on one model that cannot start helpers, so a
+// request that hands parts of the work to other agents or to several named
+// models needs the manager. Two model names each given work ("astra for the
+// hard task and sol for the rest") count; one model, or "use X for Y" about
+// anything that is not a model, does not.
+const WORKER_MODEL_NAME =
+  "(?:opus|sonnet|haiku|fable|astra|sol|terra|luna|grok|gemini|codex|claude|gpt[-\\w.]*)";
+const MODEL_GIVEN_WORK = new RegExp(`\\b(${WORKER_MODEL_NAME})\\s+(?:for|on|to (?:do|handle|take))\\b`, "gi");
+const DELEGATION_REQUEST =
+  /\b(?:(?:spawn|launch|start|use|run|dispatch|with|delegate(?: (?:it|this|them|the work|tasks?))? to|hand (?:it|this|them|the work) (?:off )?to|split (?:it|this|the work) (?:across|between|among))\s+(?:(?:a|some|the|multiple|several|two|three|four|five|\d+|separate|parallel|helper)\s+){0,2}(?:sub[- ]?agents?|helper agents?|agents in parallel|(?:two|three|four|five|\d+|multiple|several|separate) agents)|(?:spawn|launch|start|delegate(?: (?:it|this|them|the work|tasks?))? to)\s+(?:two|three|four|five|\d+|multiple|several|separate) workers|(?:a )?different models? (?:for|per) (?:each|every|the) (?:task|part|step|piece)s?)\b/i;
+
+// A worker cannot stop and wait for the user, so a request that asks to see
+// options first, or to hold the build until the user picks or approves, needs
+// the manager's question tool.
+const APPROVAL_GATE_REQUEST =
+  /\b(?:(?:show|give|present|offer|propose)\s+me\s+(?:\w+\s+){0,2}?(?:options|choices|alternatives|approaches|variants|mock-?ups|designs|directions)|(?:options|choices|alternatives|approaches|variants)\s+(?:for me\s+)?to\s+(?:choose|pick|decide)(?:\s+from|\s+between)?|(?:once|after|when|until)\s+I\s+(?:approve|confirm|decide|choose|pick|sign off|say go|give the go)|(?:wait for|get|ask for)\s+my\s+(?:approval|go[- ]ahead|ok|okay|sign[- ]off|decision|choice)|(?:and|then|so|so that)\s+I\s+(?:can\s+|will\s+|'ll\s+)?(?:decide|choose|pick)(?=\s*(?:[.,;:!?)]|$|\s+(?:which|one|between|from|the best|before|first))))/i;
+
+/** Work the direct worker cannot do: delegate to other agents or models, or wait for the user's pick. */
+function needsManagerFeatures(text: string): boolean {
+  if (DELEGATION_REQUEST.test(text) || APPROVAL_GATE_REQUEST.test(text)) return true;
+  const named = new Set([...text.matchAll(MODEL_GIVEN_WORK)].map((match) => match[1].toLowerCase()));
+  return named.size >= 2;
+}
+
 // A slash command naming a loaded skill (`/ceo`, `/skill:verify`) runs it, and
 // only the manager's Pi session expands skills the user invokes. The same
 // first-line rule as the manager's header (user-commands.ts), so a message
@@ -29,7 +53,13 @@ const SOCIAL_REQUEST = /^(?:(?:hi|hello|hey|yo|sup|what(?:'s| is) up|good (?:mor
  */
 export function followUpNeedsManager(prompt: string, skillNames?: ReadonlySet<string>): boolean {
   const text = prompt.trim();
-  return text.length > 4_000 || runsSkill(text, skillNames) || MANAGED_REQUEST.test(text) || STUDIO_SURFACE_REQUEST.test(text);
+  return (
+    text.length > 4_000 ||
+    runsSkill(text, skillNames) ||
+    MANAGED_REQUEST.test(text) ||
+    STUDIO_SURFACE_REQUEST.test(text) ||
+    needsManagerFeatures(text)
+  );
 }
 
 export function isConversationalRequest(prompt: string): boolean {
@@ -80,5 +110,6 @@ export async function shouldUseDirectExecution(
   if (isConversationalRequest(prompt)) return false;
   if (prompt.length > 4_000 || runsSkill(prompt, input.skillNames) || MANAGED_REQUEST.test(prompt)) return false;
   if (STUDIO_SURFACE_REQUEST.test(prompt)) return false;
+  if (needsManagerFeatures(prompt)) return false;
   return true;
 }
