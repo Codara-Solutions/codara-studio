@@ -1,8 +1,8 @@
 # Agent session search
 
 Codara keeps a local index of what you and your agents said in past Claude
-Code, Codex, Grok, Pi and Cora sessions, so you can find a conversation by
-its words and pick it up where it stopped. The code is in
+Code, Codex, Grok, Pi, Antigravity and Cora sessions, so you can find a
+conversation by its words and pick it up where it stopped. The code is in
 `src/main/session-search/` (the index and its thread), the renderer side in
 `src/renderer/src/components/session-search/`, and the types both share in
 `src/shared/session-search.ts`.
@@ -49,8 +49,10 @@ file manager).
 picker: the list on the left, and on the right the highlighted session's
 agent, model, folder, branch, length and the end of its conversation.
 
-Clicking Claude, Codex or Grok in a + menu opens the same picker, showing that
-agent's sessions under a **New session** row. Enter starts a new session;
+Clicking any worker in a + menu (Claude, Codex, Grok, Pi or Antigravity)
+opens the same picker, showing that agent's sessions under a **New session**
+row. **Open Pi worker sessions...** and its Claude, Codex and Grok siblings
+are the same picker as commands you can bind. Enter starts a new session;
 press Down to pick an earlier one, and Enter resumes it. The worker starts
 without the picker when session search is off, when Settings leaves that agent
 out, and on a remote workspace, since the index only holds this computer's
@@ -98,7 +100,15 @@ them:
 | Codex | `~/.codex/sessions/` and `~/.codex/archived_sessions/` (or `CODEX_HOME`) |
 | Grok | `~/.grok/sessions/` (or `GROK_HOME`) |
 | Pi | `~/.pi/agent/sessions/` |
+| Antigravity | one table, `conversation_summaries`, of `~/.gemini/antigravity-cli/conversation_summaries.db`, opened read only |
 | Cora | the chats in Codara's own `runs/` folder |
+
+Antigravity is the exception: Codara reads none of its transcripts. From
+agy's own summary of each top-level conversation it keeps the title, the
+preview and the first workspace folder, so an Antigravity session is found
+by its title and preview only. Resuming one types
+`agy --conversation <id>` into a new tab. When the database is missing or
+its table has another shape, the picker offers only a new session.
 
 From each session it keeps the text of your messages and the agents'
 replies, the title, the first prompt, the folder, the git branch when the

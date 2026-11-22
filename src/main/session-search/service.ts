@@ -42,6 +42,7 @@ import { codaraHome } from "../codara-home";
 import type { IpcHandle } from "../ipc";
 import { getPreferenceCached, loadPreferences, onPreferenceChange, setPreference } from "../preferences-store";
 import { provideAgentSessionSearch, type AgentSessionSearch } from "../preview-tools/session-search";
+import { antigravityCliDir } from "./antigravity-summaries";
 import type { IndexSessionRecord, IndexStats, SessionSourceRoot } from "./session-index";
 import { isSessionLabelKey, SessionLabelStore } from "./session-labels";
 import type { IndexPace, SessionIndexJob, SessionIndexMessage } from "./session-index-worker";
@@ -132,6 +133,8 @@ export async function resolveSessionRoots(): Promise<SessionSourceRoot[]> {
   }
   const { piAgentDir } = await import("../pi-session-tracker");
   candidates.push({ agent: "pi", dir: join(piAgentDir(), "sessions") });
+  // The folder of agy's summary database; the index reads that one file.
+  candidates.push({ agent: "antigravity", dir: antigravityCliDir() });
   candidates.push({ agent: "cora", dir: join(codaraHome(), "runs") });
 
   const roots: SessionSourceRoot[] = [];

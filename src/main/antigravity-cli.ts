@@ -2,7 +2,9 @@
 // binary and their own Google sign-in, started typed into a pane's shell like
 // `pi`. Codara only asks whether the binary is there, so the new-tab menu can
 // show the install command instead of a shell's "command not found". It never
-// runs agy itself and never reads agy's own files.
+// runs agy itself. Of agy's own files it reads one table, read only: the
+// conversation list in conversation_summaries.db, which the session picker
+// offers (session-search/antigravity-summaries.ts). Nothing else.
 
 import { dirname } from "node:path";
 

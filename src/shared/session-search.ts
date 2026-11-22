@@ -3,21 +3,30 @@
 // needs (the FTS query a typed search becomes, the snippet markers, the
 // progress line). The index itself is src/main/session-search/.
 
-export type SessionSearchAgent = "claude" | "codex" | "grok" | "pi" | "cora";
+export type SessionSearchAgent = "claude" | "codex" | "grok" | "pi" | "antigravity" | "cora";
 
 export const SESSION_SEARCH_AGENTS: readonly SessionSearchAgent[] = [
   "claude",
   "codex",
   "grok",
   "pi",
+  "antigravity",
   "cora",
 ];
+
+/**
+ * The agents Codara indexed before it learned of the others. A saved list
+ * that names no `knownAgents` was made from these, so an agent outside them
+ * was never turned off and starts on.
+ */
+const FIRST_SESSION_SEARCH_AGENTS: readonly SessionSearchAgent[] = ["claude", "codex", "grok", "pi", "cora"];
 
 export const SESSION_SEARCH_AGENT_LABEL: Readonly<Record<SessionSearchAgent, string>> = {
   claude: "Claude",
   codex: "Codex",
   grok: "Grok",
   pi: "Pi",
+  antigravity: "Antigravity",
   cora: "Cora",
 };
 
@@ -41,6 +50,8 @@ export interface SessionSearchPreferences {
   enabled: boolean;
   /** The agents whose sessions are indexed. */
   agents: SessionSearchAgent[];
+  /** Every agent the saved `agents` list could name; one added since starts on. */
+  knownAgents: SessionSearchAgent[];
   /** The one-time "Indexing your agent sessions" dialog was shown. */
   introSeen: boolean;
   /**
@@ -53,18 +64,21 @@ export interface SessionSearchPreferences {
 export const DEFAULT_SESSION_SEARCH_PREFERENCES: SessionSearchPreferences = {
   enabled: true,
   agents: [...SESSION_SEARCH_AGENTS],
+  knownAgents: [...SESSION_SEARCH_AGENTS],
   introSeen: false,
   agentToolScope: "project",
 };
 
 export function normalizeSessionSearchPreferences(raw: unknown): SessionSearchPreferences {
   const src = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const known: readonly unknown[] = Array.isArray(src.knownAgents) ? src.knownAgents : FIRST_SESSION_SEARCH_AGENTS;
   const agents = Array.isArray(src.agents)
-    ? SESSION_SEARCH_AGENTS.filter((agent) => (src.agents as unknown[]).includes(agent))
+    ? SESSION_SEARCH_AGENTS.filter((agent) => (src.agents as unknown[]).includes(agent) || !known.includes(agent))
     : [...DEFAULT_SESSION_SEARCH_PREFERENCES.agents];
   return {
     enabled: typeof src.enabled === "boolean" ? src.enabled : DEFAULT_SESSION_SEARCH_PREFERENCES.enabled,
     agents,
+    knownAgents: [...SESSION_SEARCH_AGENTS],
     introSeen: src.introSeen === true,
     agentToolScope: src.agentToolScope === "all" ? "all" : "project",
   };

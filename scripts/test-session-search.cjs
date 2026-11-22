@@ -1,6 +1,7 @@
 // Agent session search: the transcript parsers, the SQLite index (first
 // build, incremental appends, rewrites, removals, copies, cut-short passes,
-// scope filters) and the resume command a found session opens with.
+// scope filters), Antigravity's summary database read only, and the resume
+// command a found session opens with.
 //
 //   node scripts/test-session-search.cjs
 //
@@ -39,9 +40,10 @@ async function load(work) {
         'export * from "./src/main/session-search/session-labels";',
         'export * from "./src/main/session-search/transcript-parsers";',
         'export * from "./src/main/session-search/jsonl-reader";',
+        'export * from "./src/main/session-search/antigravity-summaries";',
         'export * from "./src/shared/session-search";',
         'export * from "./src/renderer/src/workers/session-resume";',
-        'export { buildAgentForkCommand, buildAgentResumeCommand, runtimeFromAgentSessionLaunchCommand } from "./src/renderer/src/workers/launch-commands";',
+        'export { buildAgentForkCommand, buildAgentResumeCommand, runtimeFromAgentSessionLaunchCommand, workerSessionsRuntime } from "./src/renderer/src/workers/launch-commands";',
       ].join("\n"),
       resolveDir: ROOT,
       loader: "ts",
@@ -117,6 +119,7 @@ async function main() {
     await indexTests(m, work);
     await cutShortPassTest(m, work);
     await pickerTests(m, work);
+    await antigravityTests(m, work);
     console.log(`\n${passed} session search checks passed`);
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
@@ -299,7 +302,9 @@ async function helperTests(m) {
     assert.equal(m.relativeAge(Date.now() - 3 * 3_600_000, Date.now()), "3h ago");
     const prefs = m.normalizeSessionSearchPreferences({ enabled: false, agents: ["codex", "nope"], agentToolScope: "everything" });
     assert.equal(prefs.enabled, false);
-    assert.deepEqual(prefs.agents, ["codex"]);
+    assert.deepEqual(prefs.agents, ["codex", "antigravity"], "a list saved before Antigravity existed never turned it off");
+    const known = m.normalizeSessionSearchPreferences({ agents: ["codex"], knownAgents: m.SESSION_SEARCH_AGENTS });
+    assert.deepEqual(known.agents, ["codex"], "once the list could name it, leaving it out turns it off");
     assert.equal(prefs.agentToolScope, "project");
     assert.deepEqual(m.normalizeSessionSearchPreferences(undefined), m.DEFAULT_SESSION_SEARCH_PREFERENCES);
   });
@@ -313,6 +318,7 @@ async function resumeTests(m) {
       codex: `codex resume ${id} --yolo`,
       grok: `grok --yolo --resume ${id}`,
       pi: `pi --session ${id}`,
+      antigravity: `agy --conversation ${id}`,
     };
     for (const [runtime, command] of Object.entries(expected)) {
       const launch = m.sessionResumeLaunch({ runtime, cwd: "/work/alpha", sessionId: id }, "2026-01-01T00:00:00.000Z");
@@ -323,6 +329,17 @@ async function resumeTests(m) {
     }
     assert.equal(m.sessionResumeLaunch({ runtime: "claude", cwd: "/w", sessionId: "x; rm -rf ~" }, ""), null);
     assert.equal(m.sessionResumeLaunch({ runtime: "codex", cwd: "/w", sessionId: "--yolo" }, ""), null);
+    assert.equal(m.sessionResumeLaunch({ runtime: "antigravity", cwd: "/w", sessionId: "-p hi" }, ""), null);
+    assert.equal(m.buildAgentResumeCommand({ runtime: "antigravity", sessionId: "continue" }), "agy --continue", "a new pane's pointer");
+  });
+
+  await check("Worker rows: Pi offers its sessions like Claude, Codex and Grok; a shell offers none", () => {
+    assert.equal(m.workerSessionsRuntime("pi"), "pi");
+    assert.equal(m.workerSessionsRuntime("claude --dangerously-skip-permissions"), "claude");
+    assert.equal(m.workerSessionsRuntime("codex --yolo"), "codex");
+    assert.equal(m.workerSessionsRuntime("grok --yolo"), "grok");
+    assert.equal(m.workerSessionsRuntime(undefined), null);
+    assert.equal(m.workerSessionsRuntime("pip install x"), null);
   });
 
   await check("Resume: the session's own workspace, else the deepest local one holding its folder", () => {
@@ -842,6 +859,94 @@ async function pickerTests(m, work) {
     assert.ok(find({ kind: "split", a: leaf({ paneId: "p0", agentSession: null }), b: leaf({ hibernation: { at: 1 } }) }));
     assert.equal(m.findOpenSessionPane(layout(leaf({ hibernation: { at: 1 } })), "codex", id), null);
   });
+}
+
+// agy's own schema for its summary table, as `sqlite3 .schema` prints it.
+const AGY_SUMMARY_SCHEMA =
+  "CREATE TABLE `conversation_summaries` (`conversation_id` text,`title` text NOT NULL DEFAULT \"\",`preview` text NOT NULL DEFAULT \"\",`step_count` integer NOT NULL DEFAULT 0,`last_modified_time` datetime NOT NULL,`workspace_uris` text NOT NULL,`status` text NOT NULL DEFAULT \"\",`source` text NOT NULL DEFAULT \"\",`project_id` text NOT NULL DEFAULT \"\",`agent_name` text NOT NULL DEFAULT \"\",`parent_conversation_id` text NOT NULL DEFAULT \"\",`nesting_depth` integer NOT NULL DEFAULT 0,`battle_id` text NOT NULL DEFAULT \"\",`winning_conversation_id` text NOT NULL DEFAULT \"\",`not_fully_idle` numeric NOT NULL DEFAULT false,`killed` numeric NOT NULL DEFAULT false,`last_user_input_time` datetime NOT NULL,`last_user_input_step_index` integer NOT NULL DEFAULT -1,`app_data_dir` text NOT NULL DEFAULT \"\",`raw_summary` blob,`group_id` text NOT NULL DEFAULT \"\",PRIMARY KEY (`conversation_id`));";
+
+async function antigravityTests(m, work) {
+  const { DatabaseSync } = require("node:sqlite");
+  const ids = { heron: uuid(), kestrel: uuid(), child: uuid() };
+  const agyDir = path.join(work, "agy-home", ".gemini", "antigravity-cli");
+  fs.mkdirSync(agyDir, { recursive: true });
+  const dbPath = path.join(agyDir, m.ANTIGRAVITY_SUMMARY_DB);
+  // The CLI's own connection stays open with its changes still in the WAL, as while agy runs.
+  const cli = new DatabaseSync(dbPath);
+  cli.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;");
+  cli.exec(AGY_SUMMARY_SCHEMA);
+  const insert = cli.prepare(`INSERT INTO conversation_summaries
+    (conversation_id, title, preview, step_count, last_modified_time, workspace_uris, parent_conversation_id, nesting_depth, last_user_input_time, raw_summary)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  const row = (id, title, preview, time, uris, parent = "", depth = 0) =>
+    insert.run(id, title, preview, 12, time, uris, parent, depth, time, Buffer.from("rawsecretword"));
+  row(ids.heron, "Refactor the heron cache", "We moved the heron cache behind one lock", "2026-01-01 10:30:00.123456789+00:00", '["file:///work/agy"]');
+  row(ids.kestrel, "Kestrel notes", "", "2026-01-01T09:00:00Z", "/work/other");
+  row(ids.child, "Child heron task", "a subagent", "2026-01-01 10:31:00+00:00", '["file:///work/agy"]', ids.heron, 1);
+  row("x; rm -rf ~", "Unsafe heron", "never typed", "2026-01-01 10:32:00+00:00", "/work/agy");
+  row("continue", "Continue heron", "the pointer word", "2026-01-01 10:33:00+00:00", "/work/agy");
+  const root = { agent: "antigravity", dir: agyDir };
+  const agents = new Set(m.SESSION_SEARCH_AGENTS);
+  const index = await m.SessionIndex.open(path.join(work, "agy-index", "sessions.sqlite"), "linux");
+  const search = (query, extra = {}) =>
+    index.search({ query, agents: ["antigravity"], scopeKeys: null, limit: 50, offset: 0, now: Date.now(), snippetTokens: 10, ...extra }).hits;
+  const bytes = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const before = [bytes(dbPath), bytes(`${dbPath}-wal`)];
+
+  await check("Antigravity: top-level conversations from the summary table, read only, WAL included", async () => {
+    await index.sync([root], agents, noPause);
+    assert.equal(index.stats().byAgent.antigravity.sessions, 2, "the child, the unsafe id and the pointer word are left out");
+    const [heron] = search("heron");
+    assert.equal(search("heron").length, 1);
+    assert.equal(heron.sessionId, ids.heron);
+    assert.equal(heron.title, "Refactor the heron cache");
+    assert.equal(heron.cwd, "/work/agy");
+    assert.equal(heron.lastAt, Date.parse("2026-01-01T10:30:00.123Z"));
+    assert.deepEqual(heron.matches.map((match) => match.kind), ["name", "assistant"], "title and preview both match");
+    assert.deepEqual(search("lock").map((hit) => hit.sessionId), [ids.heron], "the preview is searchable");
+    assert.deepEqual(search("kestrel").map((hit) => hit.cwd), ["/work/other"], "a title without a preview still lists");
+    assert.deepEqual(search("rawsecretword"), [], "raw_summary is never read");
+    assert.deepEqual(search("", { scopeKeys: ["/work/agy"] }).map((hit) => hit.sessionId), [ids.heron]);
+    assert.equal(index.preview(`antigravity:${ids.heron}`, 6, 1500).messages[0].text, "We moved the heron cache behind one lock");
+    assert.deepEqual([bytes(dbPath), bytes(`${dbPath}-wal`)], before, "agy's database and its WAL are unchanged");
+    assert.equal((await index.sync([root], agents, noPause)).filesRead, 0, "an unchanged row is not read again");
+  });
+
+  await check("Antigravity: a renamed conversation is read again, a removed one leaves", async () => {
+    cli.prepare("UPDATE conversation_summaries SET title = ? WHERE conversation_id = ?").run("Heron cache, part two", ids.heron);
+    cli.prepare("DELETE FROM conversation_summaries WHERE conversation_id = ?").run(ids.kestrel);
+    await index.sync([root], agents, noPause);
+    assert.equal(search("heron")[0].title, "Heron cache, part two");
+    assert.deepEqual(search("kestrel"), []);
+  });
+  cli.close();
+
+  await check("Antigravity: a missing database or a table of another shape lists nothing and fails nothing", async () => {
+    const empty = path.join(work, "agy-empty");
+    const odd = path.join(work, "agy-odd");
+    fs.mkdirSync(empty, { recursive: true });
+    fs.mkdirSync(odd, { recursive: true });
+    const other = new DatabaseSync(path.join(odd, m.ANTIGRAVITY_SUMMARY_DB));
+    other.exec("CREATE TABLE conversation_summaries (id TEXT, name TEXT); INSERT INTO conversation_summaries VALUES ('a', 'heron');");
+    other.close();
+    const fresh = await m.SessionIndex.open(path.join(work, "agy-index-2", "sessions.sqlite"), "linux");
+    for (const dir of [empty, odd]) await fresh.sync([{ agent: "antigravity", dir }], agents, noPause);
+    assert.equal(fresh.stats().byAgent.antigravity, undefined);
+    assert.equal(fs.existsSync(path.join(empty, m.ANTIGRAVITY_SUMMARY_DB)), false, "a missing database is not created");
+    fresh.close();
+  });
+
+  await check("Antigravity: summary times and workspace folders in the shapes agy may write", () => {
+    assert.equal(m.parseSummaryTime("2026-01-01 10:30:00.5+01:00"), Date.parse("2026-01-01T09:30:00.500Z"));
+    assert.equal(m.parseSummaryTime("2026-01-01 10:30:00 +0100"), Date.parse("2026-01-01T09:30:00.000Z"));
+    assert.equal(m.parseSummaryTime(1_767_000_000), 1_767_000_000_000);
+    assert.equal(m.parseSummaryTime("yesterday"), null);
+    assert.equal(m.summaryWorkspaceFolder('["file:///work/a%20b", "file:///work/c"]'), "/work/a b");
+    assert.equal(m.summaryWorkspaceFolder("https://example.com,/work/d"), "/work/d");
+    assert.equal(m.summaryWorkspaceFolder(""), null);
+    assert.equal(m.antigravityCliDir("/home/x"), path.join("/home/x", ".gemini", "antigravity-cli"));
+  });
+  index.close();
 }
 
 main().catch((err) => {

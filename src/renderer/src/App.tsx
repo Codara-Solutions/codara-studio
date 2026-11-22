@@ -5159,15 +5159,22 @@ export default function App() {
     [handleNewWorkerPane, resolveWorkerLaunchCwd],
   );
   const openPiWorker = useCallback(
-    () => launchNewWorkerTab(PI_LAUNCH_COMMAND),
-    [launchNewWorkerTab],
+    () => offerWorkerTab("pi", PI_LAUNCH_COMMAND),
+    [offerWorkerTab],
   );
   // The user's own `agy`, typed into a new tab's shell like `pi`; the tab is
   // named for it so it reads as Antigravity before the TUI has painted.
   const openAntigravityWorker = useCallback(() => {
-    tabsRef.current.newTerminalTab(resolveWorkerLaunchCwd() ?? undefined, ANTIGRAVITY_LAUNCH_COMMAND, {
-      title: "Antigravity",
-      color: agentBrandColor("antigravity"),
+    const cwd = resolveWorkerLaunchCwd();
+    offerWorkerSessions({
+      runtime: "antigravity",
+      cwd,
+      placement: "tab",
+      startNew: () =>
+        tabsRef.current.newTerminalTab(cwd ?? undefined, ANTIGRAVITY_LAUNCH_COMMAND, {
+          title: "Antigravity",
+          color: agentBrandColor("antigravity"),
+        }),
     });
   }, [resolveWorkerLaunchCwd]);
 
@@ -5180,11 +5187,12 @@ export default function App() {
   const launchSessionResume = useCallback((request: AgentSessionResumeRequest) => {
     const launch = (request.fork ? sessionForkLaunch : sessionResumeLaunch)(request, new Date().toISOString());
     if (!launch) return;
+    const title = request.title ?? (request.runtime === "antigravity" ? "Antigravity" : undefined);
     tabsRef.current.newTerminalTab(request.cwd, launch.command, {
       agentSession: launch.pointer,
       manualAgentRuntime: request.runtime,
       color: workerTabBrandColor(request.runtime),
-      ...(request.title ? { title: request.title } : {}),
+      ...(title ? { title } : {}),
     });
   }, []);
 
@@ -6258,6 +6266,7 @@ export default function App() {
       "worker.claudeSessions": () => offerWorkerPane("claude", CLAUDE_LAUNCH_COMMAND),
       "worker.codexSessions": () => offerWorkerPane("codex", CODEX_LAUNCH_COMMAND),
       "worker.grokSessions": () => offerWorkerPane("grok", GROK_LAUNCH_COMMAND),
+      "worker.piSessions": () => offerWorkerPane("pi", PI_LAUNCH_COMMAND),
       "tab.close": () => {
         if (!activeVisibleTabId) return;
         const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);

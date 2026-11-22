@@ -79,6 +79,54 @@ async function writeCodexSession(fixture: Fixture, cwd: string, id: string, user
   await writeFile(join(dir, `rollout-2026-08-03T12-00-00-${id}.jsonl`), lines.map((line) => `${JSON.stringify(line)}\n`).join(""), "utf8");
 }
 
+async function writePiSession(fixture: Fixture, id: string, user: string, reply: string, minutesAgo: number) {
+  const dir = join(fixture.homeDir, ".pi", "agent", "sessions", "--sample-shop--");
+  await mkdir(dir, { recursive: true });
+  const text = (value: string) => [{ type: "text", text: value }];
+  const lines = [
+    { type: "session", id, cwd: fixture.workspaceDir, timestamp: at(minutesAgo) },
+    { type: "message", timestamp: at(minutesAgo), message: { role: "user", content: text(user) } },
+    { type: "message", timestamp: at(minutesAgo - 1), message: { role: "assistant", content: text(reply) } },
+  ];
+  await writeFile(join(dir, `2026-08-03T12-00-00-000Z_${id}.jsonl`), lines.map((line) => `${JSON.stringify(line)}\n`).join(""), "utf8");
+}
+
+type SummaryDb = { exec(sql: string): void; prepare(sql: string): { run(...values: unknown[]): unknown }; close(): void };
+
+// agy's own conversation list, in its own schema, with made-up conversations.
+async function writeAntigravitySummaries(fixture: Fixture, rows: [string, string, string, number][]) {
+  const dir = join(fixture.homeDir, ".gemini", "antigravity-cli");
+  await mkdir(dir, { recursive: true });
+  const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: new (path: string) => SummaryDb };
+  const db = new DatabaseSync(join(dir, "conversation_summaries.db"));
+  db.exec(
+    "CREATE TABLE `conversation_summaries` (`conversation_id` text,`title` text NOT NULL DEFAULT \"\",`preview` text NOT NULL DEFAULT \"\",`step_count` integer NOT NULL DEFAULT 0,`last_modified_time` datetime NOT NULL,`workspace_uris` text NOT NULL,`status` text NOT NULL DEFAULT \"\",`source` text NOT NULL DEFAULT \"\",`project_id` text NOT NULL DEFAULT \"\",`agent_name` text NOT NULL DEFAULT \"\",`parent_conversation_id` text NOT NULL DEFAULT \"\",`nesting_depth` integer NOT NULL DEFAULT 0,`battle_id` text NOT NULL DEFAULT \"\",`winning_conversation_id` text NOT NULL DEFAULT \"\",`not_fully_idle` numeric NOT NULL DEFAULT false,`killed` numeric NOT NULL DEFAULT false,`last_user_input_time` datetime NOT NULL,`last_user_input_step_index` integer NOT NULL DEFAULT -1,`app_data_dir` text NOT NULL DEFAULT \"\",`raw_summary` blob,`group_id` text NOT NULL DEFAULT \"\",PRIMARY KEY (`conversation_id`));",
+  );
+  const insert = db.prepare(
+    "INSERT INTO conversation_summaries (conversation_id, title, preview, step_count, last_modified_time, workspace_uris, last_user_input_time) VALUES (?, ?, ?, 8, ?, ?, ?)",
+  );
+  for (const [id, title, preview, minutesAgo] of rows) {
+    const when = at(minutesAgo).replace("T", " ").replace("Z", "+00:00");
+    insert.run(id, title, preview, when, JSON.stringify([`file://${fixture.workspaceDir}`]), when);
+  }
+  db.close();
+}
+
+async function setTheme(page: Page, mode: "light" | "dark") {
+  const themeId = mode === "light" ? "codara-daylight" : "codara-classic";
+  await page.evaluate(
+    ([value, id]) => {
+      const root = document.documentElement;
+      root.classList.remove("light", "dark", "theme-codara-daylight", "theme-codara-classic");
+      root.classList.add(value, `theme-${id}`);
+      root.dataset.theme = id;
+      root.dataset.themeMode = value;
+      root.style.setProperty("color-scheme", value);
+    },
+    [mode, themeId] as const,
+  );
+}
+
 async function writeFakeCli(path: string, launchLog: string) {
   await writeFile(
     path,
@@ -716,6 +764,91 @@ test("screenshots in light and dark", async () => {
     }
   } finally {
     await app?.close().catch(() => undefined);
+    await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("the Pi and Antigravity rows show their own sessions first, as the others do", async () => {
+  test.setTimeout(150_000);
+  const fixture = await prepareFixture();
+  const PI = "ffffffff-6666-4666-8666-666666666666";
+  const AGY = { labels: "99999999-7777-4777-8777-777777777777", refunds: "88888888-8888-4888-8888-888888888888" };
+  await writePiSession(fixture, PI, "Sort the pelican stickers by size", "Sorted, smallest first.", 40);
+  await writeAntigravitySummaries(fixture, [
+    [AGY.labels, "Shipping label redesign", "Moved the barcode above the address block", 25],
+    [AGY.refunds, "Refund email wording", "Shorter subject line, the amount comes first", 60 * 26],
+  ]);
+  await writeFakeCli(join(fixture.binDir, "pi"), fixture.launchLog);
+  await writeFakeCli(join(fixture.binDir, "agy"), fixture.launchLog);
+  let app: ElectronApplication | null = null;
+  try {
+    const launched = await launch(fixture);
+    app = launched.app;
+    const { page } = launched;
+    await page.waitForTimeout(500);
+    await recordLaunchCommands(app);
+    const addTab = page.getByRole("button", { name: "New tab" }).first();
+    const openAntigravity = async () => {
+      await addTab.click();
+      const menuRow = page.getByTestId("antigravity-worker-row");
+      await expect(menuRow).toHaveAttribute("data-installed", "true", { timeout: 20_000 });
+      await menuRow.getByRole("button", { name: /Antigravity worker/ }).click();
+    };
+
+    // Pi: its own sessions under New session, and Enter starts a new one.
+    await addTab.click();
+    await page.getByText("Pi worker", { exact: true }).click();
+    const pi = page.getByRole("dialog", { name: "Pi sessions" });
+    await expect(row(pi, PI, "pi")).toBeVisible({ timeout: 30_000 });
+    await expect(row(pi, IDS.rollout)).toHaveCount(0);
+    await expect(pi.getByTestId("session-picker-new")).toHaveClass(/is-selected/);
+    await page.keyboard.press("Enter");
+    await expect(pi).toHaveCount(0);
+    await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBe(1);
+    expect((await launchCommands(app))[0]).toMatch(/^pi\b/);
+    expect((await launchCommands(app))[0]).not.toContain("--session");
+
+    // Antigravity: agy's own list, searched by title and preview, newest first.
+    await openAntigravity();
+    const agy = page.getByRole("dialog", { name: "Antigravity sessions" });
+    await expect(row(agy, AGY.labels, "antigravity")).toBeVisible({ timeout: 30_000 });
+    await expect(row(agy, AGY.refunds, "antigravity")).toBeVisible();
+    await expect(agy.getByRole("combobox")).toHaveAttribute("placeholder", "Search titles and previews");
+    if (SHOTS) {
+      for (const [width, height] of [[720, 480], [1280, 800]] as const) {
+        await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]?.setSize(size[0], size[1]), [width, height]);
+        for (const mode of ["light", "dark"] as const) {
+          await setTheme(page, mode);
+          await page.waitForTimeout(400);
+          await page.screenshot({ path: join(SHOTS, `antigravity-offer-${width}-${mode}.png`) });
+        }
+      }
+    }
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBe(2);
+    expect((await launchCommands(app))[1]).toMatch(/^agy\b/);
+    expect((await launchCommands(app))[1]).not.toContain("--conversation");
+
+    // A word of the preview finds the conversation, and Enter resumes it by its id.
+    await openAntigravity();
+    await expect(row(agy, AGY.labels, "antigravity")).toBeVisible({ timeout: 30_000 });
+    await agy.getByRole("combobox").fill("barcode");
+    await expect(row(agy, AGY.labels, "antigravity")).toHaveAttribute("aria-selected", "true");
+    await expect(row(agy, AGY.refunds, "antigravity")).toHaveCount(0);
+    await expect(agy.getByTestId("session-picker-matches")).toContainText("Preview");
+    await expect(agy.getByRole("button", { name: "Whole transcript" })).toHaveCount(0);
+    if (SHOTS) {
+      for (const mode of ["light", "dark"] as const) {
+        await setTheme(page, mode);
+        await page.waitForTimeout(400);
+        await page.screenshot({ path: join(SHOTS, `antigravity-search-${mode}.png`) });
+      }
+    }
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBe(3);
+    expect((await launchCommands(app))[2]).toContain(`agy --conversation ${AGY.labels}`);
+  } finally {
+    await app?.close();
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
   }
 });
