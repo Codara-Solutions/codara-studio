@@ -158,6 +158,7 @@ for (const [id, runtime, command] of [
   ["worker.claudeSessions", "claude", "CLAUDE_LAUNCH_COMMAND"],
   ["worker.codexSessions", "codex", "CODEX_LAUNCH_COMMAND"],
   ["worker.grokSessions", "grok", "GROK_LAUNCH_COMMAND"],
+  ["worker.piSessions", "pi", "PI_LAUNCH_COMMAND"],
 ]) {
   assert.match(shortcutCommands, new RegExp(`\\| "${id}"`));
   assert.ok(app.includes(`"${id}": () => offerWorkerPane("${runtime}", ${command})`), `${id} must have an App handler`);
@@ -176,6 +177,7 @@ for (const [runtime, command] of [
   ["Claude", "CLAUDE_LAUNCH_COMMAND"],
   ["Codex", "CODEX_LAUNCH_COMMAND"],
   ["Grok", "GROK_LAUNCH_COMMAND"],
+  ["Pi", "PI_LAUNCH_COMMAND"],
 ]) {
   assert.ok(
     app.includes(`() => offerWorkerTab("${runtime.toLowerCase()}", ${command})`) &&
@@ -183,9 +185,11 @@ for (const [runtime, command] of [
     `the tab-strip ${runtime} row must offer past sessions before a new tab`,
   );
 }
-assert.ok(
-  app.includes("() => launchNewWorkerTab(PI_LAUNCH_COMMAND)") && app.includes("onNewPiWorker={openPiWorker}"),
-  "the tab-strip Pi row must start a new session in its own tab",
+// Every + worker row opens the picker first, Antigravity's too (DESIGN.md, "Session picker").
+assert.match(
+  app,
+  /const openAntigravityWorker = useCallback\(\(\) => \{[\s\S]*?offerWorkerSessions\(\{\s*runtime: "antigravity"/,
+  "the tab-strip Antigravity row must offer past sessions before a new tab",
 );
 assert.match(
   terminalStack,

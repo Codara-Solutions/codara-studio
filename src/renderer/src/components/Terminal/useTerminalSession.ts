@@ -53,6 +53,7 @@ import {
 } from "./osc-handlers";
 import { buildTerminalTheme } from "./terminalTheme";
 import {
+  ANTIGRAVITY_CONTINUE_SESSION_ID,
   antigravityRestoreCommand,
   buildAgentResumeCommand,
   buildClaudeLaunch,
@@ -60,8 +61,10 @@ import {
   isAgentSessionLaunchCommand,
   PI_LAUNCH_COMMAND,
 } from "../../workers/launch-commands";
+import { antigravityConversationsNamedElsewhere } from "../../workers/antigravity-panes";
 import type { TerminalAgentSession, TerminalLeafHibernation } from "../../tabs/types";
 import { isAgentHibernationRuntime } from "@shared/agent-hibernation";
+import { isSafeSessionId } from "@shared/session-search";
 import {
   adoptLiveSessionAccount,
   canAutoResume,
@@ -282,13 +285,27 @@ async function computeResumePlan(
   paneId: string,
   antigravityClaim: "take" | "check" = "check",
 ): Promise<ResumePlan> {
+  if (
+    restore.runtime === "antigravity" &&
+    restore.sessionId !== ANTIGRAVITY_CONTINUE_SESSION_ID &&
+    isSafeSessionId(restore.sessionId)
+  ) {
+    // Resumed from the session picker: the pane names its conversation, so
+    // it reopens that one and needs no claim on agy's latest.
+    const resumeCommand = buildAgentResumeCommand(restore);
+    logRestore(`plan antigravity pane=${paneId} cwd=${restore.cwd} -> ${resumeCommand}`);
+    return { session: restore, resumeCommand, resumeIsFreshFallback: false, fallbackNotice: null, fallbackSession: null };
+  }
   if (restore.runtime === "antigravity") {
-    // agy keeps its conversations to itself and Codara never reads them, so
-    // there is nothing to probe: `agy --continue` reopens its latest one, in
-    // one pane per run (main keeps who has it). Only the restore after a
-    // restart takes the claim; a restart after the process died checks it.
+    // Codara reads no transcript of agy's, so there is nothing to probe:
+    // `agy --continue` reopens its latest conversation, in one pane per run
+    // (main keeps who has it). Only the restore after a restart takes the
+    // claim; a restart after the process died checks it.
     const take = antigravityClaim === "take";
-    const continues = (await window.spark.antigravity?.claimContinue(paneId, take).catch(() => false)) ?? false;
+    // A pane that names agy's latest conversation reopens it itself.
+    const named = antigravityConversationsNamedElsewhere(paneId);
+    const continues =
+      (await window.spark.antigravity?.claimContinue(paneId, take, named, restore.cwd).catch(() => false)) ?? false;
     const { command, notice } = antigravityRestoreCommand(continues);
     logRestore(`plan antigravity pane=${paneId} cwd=${restore.cwd} -> ${command}`);
     return {

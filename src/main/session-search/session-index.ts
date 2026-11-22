@@ -1,5 +1,7 @@
 // The agent session index: a SQLite FTS5 database under Codara's own home,
-// built from the agent CLIs' transcripts, which it only ever reads.
+// built from the agent CLIs' transcripts, which it only ever reads. Antigravity
+// keeps no transcript Codara reads; its conversations come from agy's own
+// summary table (antigravity-summaries.ts), opened read only.
 //
 // It runs on the session index thread (session-index-worker.ts), never on
 // the main thread, and is written to be gentle:
@@ -20,6 +22,7 @@ import { basename, dirname, join, sep } from "node:path";
 
 import {
   buildFtsMatch,
+  isSessionSearchAgent,
   sessionCwdKey,
   SNIPPET_MARK_END,
   SNIPPET_MARK_START,
@@ -33,6 +36,7 @@ import {
   type SessionTranscriptMessage,
 } from "@shared/session-search";
 import { ROLLOUT_FILENAME_UUID_RE } from "../orchestration/codex-sessions";
+import { ANTIGRAVITY_SUMMARY_DB, readAntigravitySummaries, type AntigravityConversation } from "./antigravity-summaries";
 import { endsWithNewlineAt, readJsonlLines } from "./jsonl-reader";
 import {
   LINE_PARSERS,
@@ -107,6 +111,8 @@ interface DiscoveredFile {
   mtimeMs: number;
   ino: string;
   root: string;
+  /** Antigravity: the conversation's summary row, which is all the index reads of it. */
+  summary?: AntigravityConversation;
 }
 
 /** Pauses between slices of work; throws to abandon the pass. */
@@ -197,10 +203,19 @@ export function sessionKey(agent: SessionSearchAgent, sessionId: string): string
 export function parseSessionKey(key: string): { agent: SessionSearchAgent; sessionId: string } | null {
   const colon = key.indexOf(":");
   if (colon <= 0) return null;
-  const agent = key.slice(0, colon) as SessionSearchAgent;
+  const agent = key.slice(0, colon);
   const sessionId = key.slice(colon + 1);
-  if (!["claude", "codex", "grok", "pi", "cora"].includes(agent) || !sessionId) return null;
+  if (!isSessionSearchAgent(agent) || !sessionId) return null;
   return { agent, sessionId };
+}
+
+/** What a summary row says, so a changed title or preview reads the row again. */
+function summaryFingerprint(summary: AntigravityConversation): string {
+  let hash = 2166136261;
+  for (const char of `${summary.title}\n${summary.preview}\n${summary.cwd ?? ""}`) {
+    hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+  }
+  return `summary:${(hash >>> 0).toString(36)}`;
 }
 
 // ── The index ─────────────────────────────────────────────────────────────
@@ -456,6 +471,25 @@ export class SessionIndex {
           await add(join(root.dir, run.name, "run.json"), run.name);
         }
         return;
+      case "antigravity": {
+        // One database, not a folder of transcripts: each conversation is an
+        // entry of its own that changes when its summary row does.
+        const dbPath = join(root.dir, ANTIGRAVITY_SUMMARY_DB);
+        for (const summary of readAntigravitySummaries(dbPath)) {
+          out.push({
+            agent: root.agent,
+            path: `${dbPath}#${summary.id}`,
+            sessionId: summary.id,
+            size: summary.steps,
+            mtimeMs: summary.lastAt ?? 0,
+            ino: summaryFingerprint(summary),
+            root: root.dir,
+            summary,
+          });
+          if (out.length % 200 === 0) await pacer.checkpoint();
+        }
+        return;
+      }
     }
   }
 
@@ -690,6 +724,7 @@ export class SessionIndex {
     if (unchanged) return { bytes: 0, reset: false, skippedLines: 0 };
 
     if (file.agent === "cora") return this.indexCoraRun(file, row ?? null);
+    if (file.summary) return this.indexAntigravitySummary(file, file.summary, row ?? null);
 
     const sameFile = row !== undefined && row.ino === file.ino;
     const grown = sameFile && file.size >= num(row.size) && num(row.offset) <= file.size;
@@ -725,7 +760,7 @@ export class SessionIndex {
     const titleFor = () =>
       file.agent === "codex" ? (codexTitles.get(file.sessionId.toLowerCase()) ?? null) : null;
 
-    const parse = LINE_PARSERS[file.agent as Exclude<SessionSearchAgent, "cora">];
+    const parse = LINE_PARSERS[file.agent as keyof typeof LINE_PARSERS];
     const pending: IndexedMessage[] = [];
     let sliceBytes = 0;
     let rejected = false;
@@ -821,6 +856,31 @@ export class SessionIndex {
     this.updateSession(sessionRow, state, file, null, run.workspaceId);
     this.commit();
     return { bytes: file.size, reset: true, skippedLines: 0 };
+  }
+
+  /** A summary row is the whole record: its preview is the one message, read again whenever the row changes. */
+  private indexAntigravitySummary(
+    file: DiscoveredFile,
+    summary: AntigravityConversation,
+    row: Row | null,
+  ): { bytes: number; reset: boolean; skippedLines: number } {
+    const state = initialTranscriptState();
+    state.cwd = summary.cwd;
+    this.begin();
+    const sessionRow = this.sessionRow("antigravity", file.sessionId);
+    let fileRow: number | null = row ? num(row.id) : null;
+    if (fileRow !== null) this.deleteFileMessages(fileRow);
+    fileRow = this.saveFile(fileRow, file, sessionRow, file.size, file.size, state, false);
+    if (summary.preview) this.insertMessage(sessionRow, fileRow, { role: "assistant", text: summary.preview, at: summary.lastAt });
+    this.updateSession(sessionRow, state, file, summary.title || null);
+    // A conversation with a title and no preview has no message, and still lists.
+    if (summary.title) {
+      this.stmt(
+        "UPDATE sessions SET message_count = 1, last_at = COALESCE(last_at, ?), started_at = COALESCE(started_at, ?) WHERE id = ? AND message_count = 0",
+      ).run(summary.lastAt, summary.lastAt, sessionRow);
+    }
+    this.commit();
+    return { bytes: 0, reset: true, skippedLines: 0 };
   }
 
   private async removeVanished(
