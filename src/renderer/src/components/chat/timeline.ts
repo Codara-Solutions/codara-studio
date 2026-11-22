@@ -389,7 +389,7 @@ export type ChatTimelineItem =
       workers: ChatWorker[];
       at: string;
       /** A direct chat's turn: drawn as Cora's work for the message, never as a step card. */
-      direct?: { runId: string; awaitingAnswer?: boolean };
+      direct?: { runId: string; awaitingAnswer?: boolean; stopped?: boolean };
     };
 
 /**
@@ -609,7 +609,10 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   // A turn waits for the user only while its question is open: the answer
   // starts a new pass, and this one then reads as finished.
   const awaitingAnswer = run.status === "blocked" && findOpenQuestion(run) !== null;
-  const directItems: { runId: string; awaitingAnswer?: boolean }[] = [];
+  // A run the user stopped (Stop pauses it) stopped its last turn, whatever
+  // the step's saved status or the killed worker's own status says.
+  const stoppedByUser = run.status === "paused" || run.status === "cancelled";
+  const directItems: { runId: string; awaitingAnswer?: boolean; stopped?: boolean }[] = [];
   orderedSteps.forEach((step, i) => {
     const stepTasks = workers.filter((worker) => worker.task.stepId === step.id);
     const stepWorkers: ChatWorker[] = stepTasks.map((worker) => chatWorker(worker, modelOptions));
@@ -630,6 +633,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   });
   const lastDirect = directItems[directItems.length - 1];
   if (awaitingAnswer && lastDirect) lastDirect.awaitingAnswer = true;
+  if (stoppedByUser && lastDirect) lastDirect.stopped = true;
 
   // Strictly chronological, queued or not (the Claude Code model): a message
   // typed mid-turn renders in place, marked "Queued", with the work that

@@ -14,7 +14,7 @@ import {
   type StepItem,
 } from "./ChatConversation";
 import DirectMessageRow from "./DirectMessageRow";
-import { directTurnState } from "./direct-turn-state";
+import { directPassStateWithoutWorker, directTurnState } from "./direct-turn-state";
 import { isToolRowTicking, runtimeLabel, toolDurationLabel } from "./timeline";
 import { workerRows, type WorkerRow } from "./worker-view";
 
@@ -27,15 +27,18 @@ import { workerRows, type WorkerRow } from "./worker-view";
 export default function DirectTurnWork({ item, runId }: { item: StepItem; runId: string }) {
   const worker = item.workers[0] ?? null;
   const row = React.useContext(StepWorkerRowsContext).get(worker?.id ?? "");
-  useNowTick(1000, row ? isToolRowTicking(row) : false);
+  const stoppedByUser = item.direct?.stopped === true;
+  // A stopped turn's clock stops with it, whatever its saved row says.
+  useNowTick(1000, row && !stoppedByUser ? isToolRowTicking(row) : false);
   const openWorker = React.useContext(WorkerOpenContext);
   const feed = useWorkerFeed(runId, worker?.attemptId ?? null);
   const rows = useMemo(() => workerRows(foldWorkerFeed(feed)), [feed]);
   const [opened, setOpened] = useRememberedOpen(`direct:${item.id}`);
   const [allFiles, setAllFiles] = React.useState(false);
   if (!worker) return <DirectTurnWithoutWorker item={item} />;
-  const state = directTurnState(worker, row?.tone, item.direct?.awaitingAnswer === true);
-  const elapsed = row ? toolDurationLabel(row) : null;
+  const state = directTurnState(worker, row?.tone, item.direct?.awaitingAnswer === true, stoppedByUser);
+  // A row still saved as running would keep counting: a stopped turn shows none.
+  const elapsed = row && !(stoppedByUser && state === "stopped") ? toolDurationLabel(row) : null;
   // Only a turn that finished well folds; a stopped or failed one stays open.
   const foldable = state === "done" && rows.length > 0;
   const showRows = state === "done" ? opened : true;
@@ -147,18 +150,7 @@ function DirectWorkRow({ row, live }: { row: WorkerRow; live: boolean }) {
 // A pass whose worker is not listed: read from the step, so a pass that
 // failed or was stopped before its worker existed never reads "Starting".
 function DirectTurnWithoutWorker({ item }: { item: StepItem }) {
-  const settled =
-    item.status === "failed"
-      ? "Failed"
-      : item.status === "skipped"
-        ? "Stopped"
-        : item.status === "complete" || item.status === "completed_unverified"
-          ? "Worked"
-          : item.status === "blocked" && !item.direct?.awaitingAnswer
-            ? "Stopped"
-            : null;
-  const waiting = item.status === "blocked" && item.direct?.awaitingAnswer === true;
-  const state = settled === "Failed" ? "failed" : settled === "Worked" ? "done" : settled ? "stopped" : waiting ? "blocked" : "starting";
+  const state = directPassStateWithoutWorker(item.status, item.direct);
   return (
     <SparkTurn>
       <div className="cora-direct-turn" data-direct-turn={item.id} data-direct-state={state}>
@@ -169,7 +161,7 @@ function DirectTurnWithoutWorker({ item }: { item: StepItem }) {
           </div>
         ) : (
           <div className="cora-turn-head" style={state === "failed" ? { color: "var(--danger)" } : undefined}>
-            {waiting ? "Waiting for your answer" : settled}
+            {DIRECT_HEAD_WITHOUT_WORKER[state]}
           </div>
         )}
       </div>
@@ -178,6 +170,13 @@ function DirectTurnWithoutWorker({ item }: { item: StepItem }) {
 }
 
 const DIRECT_FILES_SHOWN = 5;
+
+const DIRECT_HEAD_WITHOUT_WORKER: Record<string, string> = {
+  done: "Worked",
+  stopped: "Stopped",
+  failed: "Failed",
+  blocked: "Waiting for your answer",
+};
 
 const DIRECT_META_STYLE: React.CSSProperties = {
   display: "flex",

@@ -178,6 +178,20 @@ test("a direct chat reads as one chat: Send now, raw output Back, one diff tab",
     await openFromChat("LICENSE");
     await expect(diffTabs).toHaveCount(2);
     await expect(diffTabs.nth(1)).toContainText("LICENSE");
+
+    // Stop mid-turn: the turn reads "Stopped" (muted, no live dot, not
+    // "Failed"), whatever its saved step says, and the composer offers Resume.
+    await page.getByRole("tab", { name: "Cora" }).last().dispatchEvent("click");
+    await composer.fill("Then add a docs note. FAKE_DELAY_MS=600000");
+    await composer.press("Enter");
+    await expect(turns).toHaveCount(3);
+    await expect(turns.nth(2)).toHaveAttribute("data-direct-state", "running", { timeout: 10_000 });
+    await page.getByRole("button", { name: "Stop Cora" }).click();
+    await expect(turns.nth(2)).toHaveAttribute("data-direct-state", "stopped", { timeout: 10_000 });
+    await expect(turns.nth(2).locator(".cora-turn-head").first()).toHaveText("Stopped");
+    await expect(turns.nth(2).locator(".cora-turn-head--live")).toHaveCount(0);
+    await expect(turns.nth(2)).not.toContainText("Failed");
+    await expect(panel.getByRole("button", { name: "Resume", exact: true })).toBeVisible();
   } finally {
     await app?.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true }).catch(() => undefined);

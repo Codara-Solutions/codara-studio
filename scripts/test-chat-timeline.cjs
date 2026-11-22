@@ -31,7 +31,7 @@ async function loadContract() {
     stdin: {
       contents:
         `export * from ${JSON.stringify(TIMELINE)};\n` +
-        `export { directTurnState } from ${JSON.stringify(path.join(path.dirname(TIMELINE), "direct-turn-state.ts"))};\n` +
+        `export { directPassStateWithoutWorker, directTurnState } from ${JSON.stringify(path.join(path.dirname(TIMELINE), "direct-turn-state.ts"))};\n` +
         `export { waitForWorkersTaskIds } from ${JSON.stringify(TOOL_LABELS)};\n` +
         // The run graph's own projection: the chip, the chat row and the graph
         // node must agree on what counts as a running worker.
@@ -1924,6 +1924,38 @@ async function main() {
     assert.equal(T.isDirectPassStep(state, [{ loomNodeId: "w0", followUpOfTaskId: "task-d2" }]), false);
     assert.equal(T.isDirectPassStep(state, [{ loomNodeId: "w0" }]), true);
     assert.equal(T.isDirectPassStep({ executionMode: "direct", automationId: "a" }, [{ loomNodeId: "w0" }]), false);
+  });
+
+  test("a turn the user stopped reads Stopped, whatever its saved step and worker say", () => {
+    // The state Stop leaves (run-mwrvontf-o1twgl): the run paused by the
+    // user, the step still saved as running, the worker failed with the Pi
+    // runtime stopped under it.
+    const stopped = directChat({
+      status: "paused",
+      autopilot: { status: "paused", lastAction: "paused_by_user", stopReason: "Paused by user", updatedAt: at(70) },
+    });
+    stopped.steps[1] = { ...stopped.steps[1], status: "running" };
+    stopped.workerTasks[1] = { ...stopped.workerTasks[1], status: "failed" };
+    stopped.workerAttempts[1] = { ...stopped.workerAttempts[1], status: "failed", exitCode: 1, error: "Pi worker runtime stopped." };
+    const steps = T.buildChatTimeline(stopped).filter((item) => item.kind === "step");
+    assert.equal(steps[1].direct.stopped, true, "the last turn is the one Stop stopped");
+    assert.equal(steps[0].direct.stopped, undefined, "an earlier, finished turn is not");
+    const worker = steps[1].workers[0];
+    assert.equal(worker.status, "failed");
+    assert.equal(T.directTurnState(worker, "failed", false, true), "stopped", "not red Failed");
+    assert.equal(T.directTurnState({ status: "running" }, "live", false, true), "stopped", "no spinner for a worker still saved as running");
+    assert.equal(T.directTurnState({ status: "cancelled" }, undefined, false, true), "stopped");
+    assert.equal(T.directTurnState({ status: "accepted" }, undefined, false, true), "done", "a turn that finished keeps its fold");
+    // A pass stopped before its worker existed.
+    assert.equal(T.directPassStateWithoutWorker("running", { stopped: true }), "stopped", "never Starting with a live dot");
+    assert.equal(T.directPassStateWithoutWorker("queued", { stopped: true }), "stopped");
+    assert.equal(T.directPassStateWithoutWorker("running", {}), "starting");
+    assert.equal(T.directPassStateWithoutWorker("failed", {}), "failed");
+    assert.equal(T.directPassStateWithoutWorker("blocked", { awaitingAnswer: true }), "blocked");
+    assert.equal(T.directPassStateWithoutWorker("complete", { stopped: true }), "done");
+    // A cancelled run stopped its turn too; a running one did not.
+    assert.equal(T.buildChatTimeline(directChat({ status: "cancelled" })).filter((item) => item.kind === "step")[1].direct.stopped, true);
+    assert.equal(T.buildChatTimeline(directChat({ status: "running" })).filter((item) => item.kind === "step")[1].direct.stopped, undefined);
   });
 
   test("a turn waits for an answer only while its question is open", () => {
