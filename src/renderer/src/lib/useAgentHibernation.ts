@@ -1,78 +1,93 @@
 // Agent hibernation timer (see lib/agentHibernation.ts for the pure part and
-// src/main/agent-hibernation.ts for the decision). Once per tick it walks the
-// background workspaces that have been out of view for the idle period, and
-// for each candidate pane: heals the session pointer from the SessionStart
-// trail, checks the session can be resumed, then asks main to stop the agent.
-// Main answers no for anything it cannot confirm; the pane is asked again on
-// a later tick. A pane main stopped is marked sleeping on its leaf, which the
-// pane itself reads to resume on reveal.
+// src/main/agent-hibernation.ts for the decision). Once per tick it walks
+// every workspace's agent panes except the one with the keyboard, and for
+// each candidate: heals the session pointer
+// from the SessionStart trail, checks the session can be resumed, then asks
+// main to stop the agent. Main answers no for anything it cannot confirm; the
+// pane is asked again on a later tick. A pane main stopped is marked sleeping
+// on its leaf, which paints its card; only the user's Resume brings it back.
+//
+// It also tells main which panes the user is looking at: every pane of the
+// active tab when the view changes, so a pane just shown is not stopped by a
+// decision already under way.
 
-import { useEffect, useRef, useState } from "react";
-import type { AgentHibernationPolicy } from "@shared/agent-hibernation";
+import { useEffect, useMemo, useRef } from "react";
 import { isAgentHibernationRuntime } from "@shared/agent-hibernation";
 import { decideResume, mergeSessionStart, type ResumeProbe } from "../components/Terminal/resume-policy";
-import type { TerminalLeafHibernation } from "../tabs/types";
+import type { Tab, TerminalLeafHibernation } from "../tabs/types";
 import type { WorkspaceTerminalLayout } from "../tabs/useTabs";
-import { hibernationCandidates, updateHiddenSince, type HibernationCandidate } from "./agentHibernation";
+import {
+  focusedTerminalPaneId,
+  hibernationCandidates,
+  visibleTerminalPaneIds,
+  type HibernationCandidate,
+} from "./agentHibernation";
 
 interface Input {
   activeWorkspaceId: string | null;
+  activeTabs: readonly Tab[];
+  activeTabId: string | null;
   inactiveLayouts: ReadonlyArray<WorkspaceTerminalLayout>;
-  // The Settings value; only used to notice a change and re-read the policy.
-  minutes: number | undefined;
-  setPaneHibernation: (paneId: string, hibernation: TerminalLeafHibernation | null) => void;
+  // Any change to the settings: only used to wake the loop up at once.
+  settingsKey: string;
+  // Mark a pane asleep, keeping what its pane already put on the mark (a
+  // Resume pressed as the stop landed).
+  markPaneAsleep: (paneId: string, hibernation: TerminalLeafHibernation) => void;
 }
+
+const FIRST_SWEEP_MS = 15_000;
+const DEFAULT_TICK_MS = 60_000;
 
 export function useAgentHibernation(input: Input): void {
   const latestRef = useRef(input);
   latestRef.current = input;
-  const hiddenSinceRef = useRef(new Map<string, number>());
-  const [policy, setPolicy] = useState<AgentHibernationPolicy | null>(null);
+  // The renderer's own reasons not to ask, logged once per pane and reason.
+  const skippedRef = useRef(new Map<string, string>());
+
+  const focusedPaneId = useMemo(
+    () => focusedTerminalPaneId(input.activeTabs, input.activeTabId),
+    [input.activeTabs, input.activeTabId],
+  );
+  const focusedRef = useRef(focusedPaneId);
+  focusedRef.current = focusedPaneId;
+
+  // Shown panes restart their idle clock in main.
+  const visibleKey = useMemo(
+    () => visibleTerminalPaneIds(input.activeTabs, input.activeTabId).join("\n"),
+    [input.activeTabs, input.activeTabId],
+  );
+  useEffect(() => {
+    const ids = visibleKey ? visibleKey.split("\n") : [];
+    if (ids.length > 0) window.spark.agentHibernation?.touched?.(ids.slice(0, 64));
+  }, [visibleKey, input.activeWorkspaceId]);
 
   useEffect(() => {
-    updateHiddenSince(
-      hiddenSinceRef.current,
-      input.activeWorkspaceId,
-      input.inactiveLayouts.map((layout) => layout.workspaceId),
-      Date.now(),
-    );
-  }, [input.activeWorkspaceId, input.inactiveLayouts]);
-
-  useEffect(() => {
-    let cancelled = false;
     const api = window.spark.agentHibernation;
     if (!api) return;
-    api
-      .policy()
-      .then((next) => {
-        if (!cancelled) setPolicy(next);
-      })
-      .catch(() => {
-        if (!cancelled) setPolicy(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [input.minutes]);
-
-  useEffect(() => {
-    if (!policy || !(policy.idleMs > 0)) return;
-    const idleMs = policy.idleMs;
     let stopped = false;
     let running = false;
+    let timer: number | null = null;
 
-    const stillHidden = (workspaceId: string): boolean =>
-      !stopped && latestRef.current.activeWorkspaceId !== workspaceId;
+    const skip = (paneId: string, reason: string): void => {
+      if (skippedRef.current.get(paneId) === reason) return;
+      skippedRef.current.set(paneId, reason);
+      if (skippedRef.current.size > 500) skippedRef.current.clear();
+      api.log?.(`pane=${paneId} not asked: ${reason}`);
+    };
+
+    const stillCandidate = (candidate: HibernationCandidate): boolean =>
+      !stopped && candidate.paneId !== focusedRef.current;
 
     const tryOne = async (candidate: HibernationCandidate): Promise<void> => {
-      const api = window.spark.agentHibernation;
-      if (!api) return;
-      // The pointer can lag an in-TUI /resume or /clear made while the
-      // workspace was hidden; the hook trail in main has the exact id.
+      // The pointer can lag an in-TUI /resume or /clear made while the pane
+      // was out of view; the hook trail in main has the exact id.
       const start = await window.spark.agentSession.latestStart?.(candidate.paneId).catch(() => null);
       const session = mergeSessionStart(candidate.session, start ?? null) ?? candidate.session;
-      if (!isAgentHibernationRuntime(session.runtime) || session.active === false) return;
-      if (!stillHidden(candidate.workspaceId)) return;
+      if (!isAgentHibernationRuntime(session.runtime) || session.active === false) {
+        skip(candidate.paneId, "pointer inactive");
+        return;
+      }
+      if (!stillCandidate(candidate)) return;
       const probe = (await window.spark.agentSession
         .probe({
           runtime: session.runtime,
@@ -86,49 +101,75 @@ export function useAgentHibernation(input: Input): void {
         .catch(() => null)) as ResumeProbe | null;
       // Only a session that resumes as it is. A transcript that needs repair
       // or is gone would wake up as something else, so that agent stays awake.
-      if (!probe || decideResume(probe, session.runtime).kind !== "resume") return;
-      const hiddenSince = hiddenSinceRef.current.get(candidate.workspaceId);
-      if (hiddenSince === undefined || !stillHidden(candidate.workspaceId)) return;
+      if (!probe) {
+        skip(candidate.paneId, "probe failed");
+        return;
+      }
+      const plan = decideResume(probe, session.runtime).kind;
+      if (plan !== "resume") {
+        skip(candidate.paneId, `resume plan ${plan}`);
+        return;
+      }
+      if (!stillCandidate(candidate)) return;
+      skippedRef.current.delete(candidate.paneId);
       const result = await api
-        .hibernate({
-          paneId: candidate.paneId,
-          runtime: session.runtime,
-          hiddenForMs: Date.now() - hiddenSince,
-        })
+        .hibernate({ paneId: candidate.paneId, runtime: session.runtime, placement: candidate.placement })
         .catch(() => null);
-      // Marked only while the workspace is still out of view. A pane the user
-      // returned to in the meantime got the exit too and wakes on its own.
-      if (result?.ok && latestRef.current.activeWorkspaceId !== candidate.workspaceId) {
-        latestRef.current.setPaneHibernation(candidate.paneId, {
+      // Marked whatever the user did meanwhile: the agent is stopped either
+      // way, and the card is how the user gets it back.
+      if (result?.ok) {
+        latestRef.current.markPaneAsleep(candidate.paneId, {
           runtime: session.runtime,
           sleptAt: result.sleptAt,
         });
       }
     };
 
-    const sweep = async (): Promise<void> => {
-      const now = Date.now();
-      for (const layout of latestRef.current.inactiveLayouts) {
-        const hiddenSince = hiddenSinceRef.current.get(layout.workspaceId);
-        if (hiddenSince === undefined || now - hiddenSince < idleMs) continue;
-        for (const candidate of hibernationCandidates(layout.workspaceId, layout.tabs)) {
-          if (!stillHidden(layout.workspaceId)) break;
-          await tryOne(candidate);
-        }
+    const sweep = async (): Promise<number> => {
+      const policy = await api.policy().catch(() => null);
+      if (!policy) return DEFAULT_TICK_MS;
+      if (!(policy.idleMs > 0)) return Math.max(1_000, policy.tickMs);
+      const current = latestRef.current;
+      const layouts = [
+        ...(current.activeWorkspaceId ? [{ workspaceId: current.activeWorkspaceId, tabs: current.activeTabs }] : []),
+        ...current.inactiveLayouts.filter((layout) => layout.workspaceId !== current.activeWorkspaceId),
+      ];
+      const candidates = hibernationCandidates(layouts, {
+        activeWorkspaceId: current.activeWorkspaceId,
+        activeTabId: current.activeTabId,
+        focusedPaneId: focusedRef.current,
+      });
+      for (const candidate of candidates) {
+        if (stopped) break;
+        if (!stillCandidate(candidate)) continue;
+        await tryOne(candidate);
       }
+      return Math.max(1_000, policy.tickMs);
     };
 
-    const tick = () => {
+    const schedule = (ms: number): void => {
+      if (stopped) return;
+      timer = window.setTimeout(tick, ms);
+    };
+    const tick = (): void => {
       if (running || stopped) return;
       running = true;
-      void sweep().finally(() => {
-        running = false;
-      });
+      void sweep()
+        .catch(() => DEFAULT_TICK_MS)
+        .then((next) => {
+          running = false;
+          schedule(next);
+        });
     };
-    const timer = window.setInterval(tick, Math.max(1_000, policy.tickMs));
+    // The first sweep waits for the policy's own tick when it is shorter
+    // (the e2e runner), else a quarter minute, so boot is left alone.
+    void api
+      .policy()
+      .then((policy) => schedule(Math.min(FIRST_SWEEP_MS, Math.max(1_000, policy.tickMs))))
+      .catch(() => schedule(FIRST_SWEEP_MS));
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      if (timer !== null) window.clearTimeout(timer);
     };
-  }, [policy]);
+  }, [input.settingsKey]);
 }

@@ -1,14 +1,15 @@
 // Agent hibernation, renderer side (pure part). Finished, untouched agent
-// terminals in background workspaces are stopped after the idle time set in
-// Settings, and resumed when the user opens the pane again. Main makes the
-// decision (src/main/agent-hibernation.ts); this module picks which panes to
-// ask about and gives the rest of the UI (rail, Agents view) one way to read
-// the sleeping state off a layout. useAgentHibernation.ts runs the timer.
+// terminals are stopped after the idle time set in Settings, and resumed
+// when the user asks for them.
+// Main makes the decision (src/main/agent-hibernation.ts); this module picks
+// which panes to ask about and gives the rest of the UI (rail, Agents view)
+// one way to read the sleeping state off a layout. useAgentHibernation.ts
+// runs the timer.
 //
 // Dep-free on purpose (no React, no window) so the node test harness
 // scripts/test-agent-hibernation-policy.cjs can bundle it.
 
-import { isAgentHibernationRuntime } from "@shared/agent-hibernation";
+import { isAgentHibernationRuntime, type AgentHibernationPlacement } from "@shared/agent-hibernation";
 import { collectLeaves } from "../tabs/paneTree";
 import type { Tab, TerminalAgentSession, TerminalLeaf } from "../tabs/types";
 
@@ -17,6 +18,14 @@ export interface HibernationCandidate {
   tabId: string;
   paneId: string;
   session: TerminalAgentSession;
+  placement: AgentHibernationPlacement;
+}
+
+/** What is on screen: the workspace shown, its active tab and the pane with the keyboard. */
+export interface HibernationView {
+  activeWorkspaceId: string | null;
+  activeTabId: string | null;
+  focusedPaneId: string | null;
 }
 
 /** True while Codara has this pane's agent stopped to save memory. */
@@ -36,6 +45,18 @@ export function sleepingPaneIds(tabs: readonly Tab[]): string[] {
   return ids;
 }
 
+/** The pane that has the keyboard: the active pane of the active terminal tab. */
+export function focusedTerminalPaneId(tabs: readonly Tab[], activeTabId: string | null): string | null {
+  const tab = tabs.find((candidate) => candidate.id === activeTabId);
+  return tab && tab.kind === "terminal" ? tab.activePaneId ?? null : null;
+}
+
+/** The panes of the active tab: on screen right now, so shown (and touched). */
+export function visibleTerminalPaneIds(tabs: readonly Tab[], activeTabId: string | null): string[] {
+  const tab = tabs.find((candidate) => candidate.id === activeTabId);
+  return tab && tab.kind === "terminal" ? collectLeaves(tab.root).map((leaf) => leaf.paneId) : [];
+}
+
 // Chip states that say the agent is in the middle of something. Main judges
 // from its own evidence anyway; this only saves it a pointless request.
 // "launching" is left out on purpose: a restored pane's leaf keeps it after
@@ -43,9 +64,10 @@ export function sleepingPaneIds(tabs: readonly Tab[]): string[] {
 const BUSY_CHIP_STATES = new Set(["working", "background", "blocked", "stalled", "error"]);
 
 /**
- * Panes in a background workspace that are worth asking main about: a
- * user-run agent (not a Cora worker, not a phone pane) whose session Codara
- * can resume, not pinned awake and not already sleeping.
+ * Panes worth asking main about, in every workspace: a user-run agent (not a
+ * Cora worker, not a phone pane) whose session Codara can resume, not pinned
+ * awake, not already sleeping, and not the pane the user is typing in.
+ * Background workspaces come first, then hidden tabs, then visible panes.
  *
  * A restored pane's one-shot `bootResume` marker does not exclude it: a pane
  * restored into a hidden workspace keeps that marker until the workspace is
@@ -56,45 +78,32 @@ const BUSY_CHIP_STATES = new Set(["working", "background", "blocked", "stalled",
  * second time.
  */
 export function hibernationCandidates(
-  workspaceId: string,
-  tabs: readonly Tab[],
+  layouts: ReadonlyArray<{ workspaceId: string; tabs: readonly Tab[] }>,
+  view: HibernationView,
 ): HibernationCandidate[] {
   const out: HibernationCandidate[] = [];
-  for (const tab of tabs) {
-    if (tab.kind !== "terminal" || tab.scope?.kind === "workers") continue;
-    for (const leaf of collectLeaves(tab.root)) {
-      const session = leaf.agentSession;
-      if (!session?.sessionId || session.active !== true) continue;
-      if (!isAgentHibernationRuntime(session.runtime)) continue;
-      if (leaf.keepAwake === true || leaf.hibernation) continue;
-      if (leaf.origin?.kind === "phone") continue;
-      if (leaf.worker?.source === "spark") continue;
-      if (leaf.worker?.runtimeState && BUSY_CHIP_STATES.has(leaf.worker.runtimeState)) continue;
-      out.push({ workspaceId, tabId: tab.id, paneId: leaf.paneId, session });
+  for (const layout of layouts) {
+    const shown = layout.workspaceId === view.activeWorkspaceId;
+    for (const tab of layout.tabs) {
+      if (tab.kind !== "terminal" || tab.scope?.kind === "workers") continue;
+      const placement: AgentHibernationPlacement = !shown
+        ? "background-workspace"
+        : tab.id === view.activeTabId
+          ? "visible"
+          : "hidden-tab";
+      for (const leaf of collectLeaves(tab.root)) {
+        if (shown && leaf.paneId === view.focusedPaneId) continue;
+        const session = leaf.agentSession;
+        if (!session?.sessionId || session.active !== true) continue;
+        if (!isAgentHibernationRuntime(session.runtime)) continue;
+        if (leaf.keepAwake === true || leaf.hibernation) continue;
+        if (leaf.origin?.kind === "phone") continue;
+        if (leaf.worker?.source === "spark") continue;
+        if (leaf.worker?.runtimeState && BUSY_CHIP_STATES.has(leaf.worker.runtimeState)) continue;
+        out.push({ workspaceId: layout.workspaceId, tabId: tab.id, paneId: leaf.paneId, session, placement });
+      }
     }
   }
-  return out;
-}
-
-/**
- * Keep "hidden since" stamps per workspace: the active one has none, a
- * workspace that just left the screen gets `now`, and workspaces that no
- * longer exist are forgotten. Mutates and returns `stamps`.
- */
-export function updateHiddenSince(
-  stamps: Map<string, number>,
-  activeWorkspaceId: string | null,
-  inactiveWorkspaceIds: readonly string[],
-  now: number,
-): Map<string, number> {
-  const live = new Set<string>();
-  for (const id of inactiveWorkspaceIds) {
-    if (id === activeWorkspaceId) continue;
-    live.add(id);
-    if (!stamps.has(id)) stamps.set(id, now);
-  }
-  for (const id of [...stamps.keys()]) {
-    if (!live.has(id)) stamps.delete(id);
-  }
-  return stamps;
+  const order: Record<AgentHibernationPlacement, number> = { "background-workspace": 0, "hidden-tab": 1, visible: 2 };
+  return out.sort((a, b) => order[a.placement] - order[b.placement]);
 }

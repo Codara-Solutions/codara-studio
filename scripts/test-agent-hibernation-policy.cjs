@@ -79,6 +79,7 @@ const idleEvidence = (extra = {}) => ({
   teammatesActive: 0,
   codexAwaitingIdle: false,
   lastUserInputAt: 1_000,
+  lastComposerEditAt: 1_000,
   lastSubmitAt: 1_000,
   lastOutputAt: 2_000,
   ...extra,
@@ -136,19 +137,29 @@ async function main() {
   check("an unannounced turn keeps it awake", judge(idleEvidence({ turnActive: true }), "claude") === "agent-busy");
   check("a pending done keeps it awake", judge(idleEvidence({ pendingDone: true }), "claude") === "agent-busy");
   check("codex between outcome and idle composer stays awake", judge(idleEvidence({ runtime: "codex", codexAwaitingIdle: true }), "codex") === "agent-busy");
-  check("typed but unsent text keeps it awake", judge(idleEvidence({ lastUserInputAt: 5_000, lastSubmitAt: 1_000 }), "claude") === "unsent-input");
+  check(
+    "typed but unsent text keeps it awake",
+    judge(idleEvidence({ lastUserInputAt: 5_000, lastComposerEditAt: 5_000, lastSubmitAt: 1_000 }), "claude") === "unsent-input",
+  );
+  check(
+    "a key after the submit that leaves no text (Esc, an arrow) may sleep",
+    judge(idleEvidence({ lastUserInputAt: 5_000, lastComposerEditAt: 1_000, lastSubmitAt: 1_000 }), "claude") === null,
+  );
 
   // ── Idle clock ──
   const clock = shared.judgeIdleClock;
   const MIN = 60_000;
-  check("quiet long enough and hidden long enough: may sleep", clock({ now: 100 * MIN, idleMs: 30 * MIN, hiddenForMs: 40 * MIN, activityAt: [10 * MIN, 50 * MIN] }) === null);
-  check("off never sleeps", clock({ now: 100 * MIN, idleMs: 0, hiddenForMs: 99 * MIN, activityAt: [] }) === "off");
-  check("hidden too briefly stays awake", clock({ now: 100 * MIN, idleMs: 30 * MIN, hiddenForMs: 10 * MIN, activityAt: [] }) === "hidden-too-short");
-  check("recent activity stays awake", clock({ now: 100 * MIN, idleMs: 30 * MIN, hiddenForMs: 40 * MIN, activityAt: [10 * MIN, 90 * MIN] }) === "not-idle-long-enough");
-  check("a stamp from the future stays awake", clock({ now: 100 * MIN, idleMs: 30 * MIN, hiddenForMs: 40 * MIN, activityAt: [200 * MIN] }) === "not-idle-long-enough");
-  check("an unknown hidden time stays awake", clock({ now: 100 * MIN, idleMs: 30 * MIN, hiddenForMs: NaN, activityAt: [] }) === "hidden-too-short");
+  check("quiet long enough: may sleep", clock({ now: 100 * MIN, idleMs: 30 * MIN, activityAt: [10 * MIN, 50 * MIN] }) === null);
+  check("off never sleeps", clock({ now: 100 * MIN, idleMs: 0, activityAt: [] }) === "off");
+  check("a pane nothing ever happened in may sleep", clock({ now: 100 * MIN, idleMs: 30 * MIN, activityAt: [] }) === null);
+  check("recent activity stays awake", clock({ now: 100 * MIN, idleMs: 30 * MIN, activityAt: [10 * MIN, 90 * MIN] }) === "not-idle-long-enough");
+  check("a stamp from the future stays awake", clock({ now: 100 * MIN, idleMs: 30 * MIN, activityAt: [200 * MIN] }) === "not-idle-long-enough");
+  check(
+    "a pane shown or touched a moment ago stays awake",
+    clock({ now: 100 * MIN, idleMs: 30 * MIN, activityAt: [10 * MIN, 99 * MIN] }) === "not-idle-long-enough",
+  );
 
-  // ── Candidates in a background layout ──
+  // ── Candidates: every pane but the one with the keyboard ──
   const layout = [
     terminalTab(
       "t1",
@@ -188,23 +199,60 @@ async function main() {
     terminalTab("t3", leaf("p-worker-tab", { agentSession: session({ sessionId: "s10" }) }), { scope: { kind: "workers", runId: "r" } }),
     { id: "chat", kind: "chat", title: "Chat" },
   ];
-  const candidates = lib.hibernationCandidates("ws-b", layout).map((c) => c.paneId);
+  const background = { activeWorkspaceId: "ws-a", activeTabId: null, focusedPaneId: null };
+  const inBackground = lib.hibernationCandidates([{ workspaceId: "ws-b", tabs: layout }], background);
+  const candidates = inBackground.map((c) => c.paneId);
   check(
     "only unpinned, awake, user-run agents with a running session are candidates",
     JSON.stringify(candidates) === JSON.stringify(["p-ok", "p-boot", "p-codex"]),
     candidates,
   );
-  check("a candidate carries its workspace and tab", lib.hibernationCandidates("ws-b", layout)[0].workspaceId === "ws-b" && lib.hibernationCandidates("ws-b", layout)[0].tabId === "t1");
+  check(
+    "a candidate carries its workspace, tab and placement",
+    inBackground[0].workspaceId === "ws-b" && inBackground[0].tabId === "t1" && inBackground[0].placement === "background-workspace",
+    inBackground[0],
+  );
+  // The same layout on screen, tab t2 active with the keyboard in p-codex.
+  const shown = lib.hibernationCandidates(
+    [
+      { workspaceId: "ws-b", tabs: layout },
+      { workspaceId: "ws-c", tabs: [terminalTab("t9", leaf("p-far", { agentSession: session({ sessionId: "s11" }) }))] },
+    ],
+    { activeWorkspaceId: "ws-b", activeTabId: "t2", focusedPaneId: "p-codex" },
+  );
+  check(
+    "the pane with the keyboard is never a candidate, the panes beside it are",
+    !shown.some((c) => c.paneId === "p-codex") && shown.some((c) => c.paneId === "p-boot" && c.placement === "visible"),
+    shown,
+  );
+  check(
+    "a pane in another tab of the shown workspace is a hidden-tab candidate",
+    shown.find((c) => c.paneId === "p-ok")?.placement === "hidden-tab",
+    shown,
+  );
+  check(
+    "background workspaces are asked first, then hidden tabs, then visible panes",
+    JSON.stringify(shown.map((c) => c.placement)) === JSON.stringify(["background-workspace", "hidden-tab", "visible"]),
+    shown.map((c) => [c.paneId, c.placement]),
+  );
+  check(
+    "the same pane id in a background workspace is not taken for the focused one",
+    lib
+      .hibernationCandidates([{ workspaceId: "ws-b", tabs: layout }], { activeWorkspaceId: "ws-a", activeTabId: "t2", focusedPaneId: "p-ok" })
+      .some((c) => c.paneId === "p-ok"),
+  );
+  check(
+    "the focused pane is the active pane of the active terminal tab",
+    lib.focusedTerminalPaneId([terminalTab("t1", leaf("p1"), { activePaneId: "p1" }), { id: "chat", kind: "chat", title: "Chat" }], "t1") === "p1" &&
+      lib.focusedTerminalPaneId([terminalTab("t1", leaf("p1"), { activePaneId: "p1" }), { id: "chat", kind: "chat", title: "Chat" }], "chat") === null,
+  );
+  check(
+    "every pane of the active tab counts as shown",
+    JSON.stringify(lib.visibleTerminalPaneIds(layout, "t1")) === JSON.stringify(["p-ok", "p-pinned", "p-sleeping"]),
+  );
   check("sleeping panes are counted for the rail", JSON.stringify(lib.sleepingPaneIds(layout)) === JSON.stringify(["p-sleeping"]));
   check("isLeafSleeping reads the mark", lib.isLeafSleeping({ hibernation: { runtime: "pi", sleptAt: 1 } }) && !lib.isLeafSleeping({}));
 
-  const stamps = new Map();
-  lib.updateHiddenSince(stamps, "ws-a", ["ws-b", "ws-c"], 100);
-  check("workspaces leaving the screen get a stamp", stamps.get("ws-b") === 100 && stamps.get("ws-c") === 100 && !stamps.has("ws-a"));
-  lib.updateHiddenSince(stamps, "ws-b", ["ws-a", "ws-c"], 200);
-  check("the shown workspace loses its stamp, a kept stamp is not reset", !stamps.has("ws-b") && stamps.get("ws-a") === 200 && stamps.get("ws-c") === 100);
-  lib.updateHiddenSince(stamps, "ws-b", ["ws-a"], 300);
-  check("a removed workspace is forgotten", !stamps.has("ws-c") && stamps.get("ws-a") === 200);
 
   // ── Persist, hydration, quit snapshot ──
   const sleeping = leaf("p1", { agentSession: session({ active: true }), hibernation: { runtime: "claude", sleptAt: 5 }, keepAwake: true });

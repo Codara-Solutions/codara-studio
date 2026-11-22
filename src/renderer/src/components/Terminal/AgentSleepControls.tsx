@@ -120,7 +120,7 @@ export function SleepingPaneChip({
 
 /**
  * The pane toolbar's "Keep running" pin. Pressed, the pane's agent is never
- * stopped by hibernation, however long it sits in a background workspace.
+ * stopped by hibernation, however long it sits untouched.
  */
 export function KeepAwakeButton({
   pinned,

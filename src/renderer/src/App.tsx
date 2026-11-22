@@ -873,22 +873,25 @@ export default function App() {
     preferences.restoreAgentSessions === true,
   );
 
-  // Agent hibernation: stop finished, untouched agent terminals in background
-  // workspaces after the idle time set in Settings (lib/useAgentHibernation.ts).
+  // Agent hibernation: stop finished, untouched agent terminals (any pane but
+  // the one with the keyboard) after the idle time set in Settings
+  // (lib/useAgentHibernation.ts).
   const updatePaneHibernation = tabs.updatePaneHibernation;
   const patchSleepingPane = tabs.patchPaneHibernation;
   // The pane's own exit may have marked it already, and the user may have
   // pressed Resume on that mark: the sleep's answer merges into it.
-  const markPaneHibernation = useCallback(
-    (paneId: string, hibernation: TerminalLeafHibernation | null) =>
-      updatePaneHibernation(paneId, (current) => (hibernation ? { ...(current ?? {}), ...hibernation } : null)),
+  const markPaneAsleep = useCallback(
+    (paneId: string, hibernation: TerminalLeafHibernation) =>
+      updatePaneHibernation(paneId, (current) => ({ ...(current ?? {}), ...hibernation })),
     [updatePaneHibernation],
   );
   useAgentHibernation({
     activeWorkspaceId: tabs.tabsWorkspaceId,
+    activeTabs: tabs.tabs,
+    activeTabId: tabs.activeId,
     inactiveLayouts: tabs.inactiveWorkspaceLayouts,
-    minutes: preferences.agentHibernationMinutes,
-    setPaneHibernation: markPaneHibernation,
+    settingsKey: String(preferences.agentHibernationMinutes),
+    markPaneAsleep,
   });
 
   // One shared git status/log poll per active workspace — feeds the Source
