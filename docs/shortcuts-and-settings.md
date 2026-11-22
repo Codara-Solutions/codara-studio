@@ -753,7 +753,7 @@ whenever it cannot tell:
 - its session can be resumed exactly as it is;
 - nothing else runs in the pane: no dev server or other program you started,
   and no command the agent started after it launched (the MCP servers it
-  starts at launch do not count);
+  starts in its first minute do not count, and Codara's own tools never do);
 - the pane is not pinned with **Keep running** (the sun button in the pane's
   toolbar, shown on agent panes);
 - no paired phone has the pane open (Remote Access).

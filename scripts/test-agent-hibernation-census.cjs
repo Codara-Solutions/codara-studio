@@ -245,6 +245,89 @@ async function main() {
     check("an agent that exits without answering is unknown", (await listConsolePids(shellPid, silent)) === null);
   }
 
+  // ── Boot window, Codara's own MCP server, Windows tool shells ──
+  const { AGENT_BOOT_WINDOW_MS, isToolShell } = require(outfile);
+  check("the boot window is one minute", AGENT_BOOT_WINDOW_MS === 60_000, AGENT_BOOT_WINDOW_MS);
+  const codaraMcp = (pid, parentPid, offset) =>
+    proc(
+      pid,
+      parentPid,
+      offset,
+      "\"C:\\Users\\me\\AppData\\Local\\Programs\\spark-agent\\Codara Studio.exe\" C:\\Users\\me\\AppData\\Local\\Programs\\spark-agent\\resources\\codara-studio-mcp\\server.js",
+    );
+  verdict = classifyPaneProcessTree([...windows, codaraMcp(510, 502, 96_000)], 500, "claude");
+  check("Codara's own MCP server connected a minute and a half late may sleep", verdict.ok === true, verdict);
+  verdict = classifyPaneProcessTree(
+    [...windows, codaraMcp(510, 502, 96_000), proc(511, 510, 20 * 60_000, "node worker.js")],
+    500,
+    "claude",
+  );
+  check("a late process under Codara's MCP server still keeps the pane awake", !verdict.ok && /late child 511/.test(verdict.detail ?? ""), verdict);
+  verdict = classifyPaneProcessTree([...windows, codaraMcp(510, 500, 96_000)], 500, "claude");
+  check("Codara's MCP server beside the agent instead of under it is a sibling", !verdict.ok && /sibling 510/.test(verdict.detail ?? ""), verdict);
+  verdict = classifyPaneProcessTree(
+    [...base, proc(140, 101, 90_000, "/Applications/Codara Studio.app/Contents/MacOS/Codara Studio /Applications/Codara Studio.app/Contents/Resources/codara-studio-mcp/server.js")],
+    100,
+    "claude",
+  );
+  check("macOS: Codara's MCP server with unquoted spaces is recognized", verdict.ok === true, verdict);
+  verdict = classifyPaneProcessTree([...base, proc(141, 101, 90_000, "node /home/u/my-codara-studio-mcp-fork/server.js")], 100, "claude");
+  check("a folder that only contains the name is not Codara's server", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree([...windows, proc(512, 502, 32_000, "pipx run analytics-mcp")], 500, "claude");
+  check("a user MCP server 32 s after the agent is boot", verdict.ok === true, verdict);
+  verdict = classifyPaneProcessTree([...windows, proc(513, 502, 61_000, "node C:\\srv\\mcp\\index.js --token=secret")], 500, "claude");
+  check(
+    "a child past the boot window keeps the pane awake, named without its arguments",
+    !verdict.ok && verdict.detail === "late child 513 node +61s",
+    verdict,
+  );
+  const psTool =
+    "C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"\"C:\\WINDOWS\\System32\\chcp.com\" 65001 >nul & \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoProfile -Command \"npm run dev\"\"";
+  verdict = classifyPaneProcessTree([...windows, proc(514, 502, 2_000, psTool)], 500, "claude");
+  check("Claude's PowerShell tool on Windows keeps the pane awake, even at boot", !verdict.ok && /^tool shell 514/.test(verdict.detail ?? ""), verdict);
+  check(
+    "the PowerShell tool with Windows PowerShell 5 and lower case is a tool shell",
+    isToolShell("c:\\windows\\system32\\cmd.exe /d /s /c \"\"c:\\windows\\system32\\chcp.com\" 65001 >nul & \"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -Command x\""),
+  );
+  check(
+    "an MCP server started through cmd /c npx is not a tool shell",
+    !isToolShell("C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"npx ^\"-y^\" ^\"@upstash/context7-mcp@latest^\"\""),
+  );
+  check(
+    "Claude's Git Bash tool shell with Windows paths is a tool shell",
+    isToolShell("\"C:\\Program Files\\Git\\bin\\bash.exe\" -c \"source /c/Users/me/.claude/shell-snapshots/snapshot-bash-1.sh && eval 'npm test'\""),
+  );
+  verdict = classifyPaneProcessTree([...windows, proc(515, 502, 9 * 60_000, "C:\\Windows\\system32\\cmd.exe /d /s /c npm run dev")], 500, "claude");
+  check("a late cmd.exe is a late child, not a tool shell", !verdict.ok && /^late child 515/.test(verdict.detail ?? ""), verdict);
+
+  // ── Real trees from a Windows 11 machine (scripts/fixtures/agent-hibernation) ──
+  const golden = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "fixtures", "agent-hibernation", "win11-claude-panes.json"), "utf8"),
+  );
+  const fromFixture = (rows) => rows.map((row) => proc(row.pid, row.parentPid, row.startOffsetMs, row.command));
+  const rich = fromFixture(golden.withMcpServers);
+  const richRoot = golden.withMcpServers[0].pid;
+  const richAgent = golden.withMcpServers[1].pid;
+  verdict = classifyPaneProcessTree(rich, richRoot, "claude");
+  check(
+    "real tree: claude.exe with npx, pipx, uv and Codara MCP servers may sleep",
+    verdict.ok === true && verdict.agentPid === richAgent,
+    verdict,
+  );
+  verdict = classifyPaneProcessTree(rich, richRoot, "claude", { bootWindowMs: 20_000 });
+  check("real tree: the old 20 s window refused it as a late child", !verdict.ok && /^late child/.test(verdict.detail ?? ""), verdict);
+  verdict = classifyPaneProcessTree([...rich, proc(99_001, richAgent, 5 * 60_000, psTool)], richRoot, "claude");
+  check("real tree plus a PowerShell tool command stays awake", !verdict.ok && /^tool shell/.test(verdict.detail ?? ""), verdict);
+  verdict = classifyPaneProcessTree(
+    [...rich, proc(99_002, richAgent, 10 * 60_000, "\"C:\\Program Files\\nodejs\\node.exe\" node_modules\\vite\\bin\\vite.js")],
+    richRoot,
+    "claude",
+  );
+  check("real tree plus a late dev server stays awake", !verdict.ok && /^late child 99002 node\.exe/.test(verdict.detail ?? ""), verdict);
+  const late = fromFixture(golden.lateCodaraMcp);
+  verdict = classifyPaneProcessTree(late, golden.lateCodaraMcp[0].pid, "claude");
+  check("real tree: Codara's MCP server at +95 s may sleep", verdict.ok === true, verdict);
+
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);
     process.exit(1);
