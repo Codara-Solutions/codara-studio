@@ -890,7 +890,7 @@ export default function App() {
     activeTabs: tabs.tabs,
     activeTabId: tabs.activeId,
     inactiveLayouts: tabs.inactiveWorkspaceLayouts,
-    settingsKey: String(preferences.agentHibernationMinutes),
+    settingsKey: `${preferences.agentHibernationMinutes}|${JSON.stringify(preferences.agentHibernationWorkspaces ?? {})}`,
     markPaneAsleep,
   });
 

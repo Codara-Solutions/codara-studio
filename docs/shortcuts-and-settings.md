@@ -738,8 +738,9 @@ config). Agents without those fall back to reading the screen.
 
 An agent terminal (Claude Code, Codex, Grok or Pi) that finished its turn and
 sits untouched is stopped after the time set in Settings, Sessions, **Let
-idle agents sleep** (`agentHibernationMinutes`: Off, 15, 30, 60 or 120
-minutes; 30 by default). This covers every pane except the one you are
+idle agents sleep** (`agentHibernationMinutes`: any whole number of
+minutes from 0, which is off, to 720; 30 by default, with Off, 15, 30, 60
+and 120 as quick picks). This covers every pane except the one you are
 typing in: panes in other workspaces, in other tabs, and panes beside yours
 in a split.
 Its output stays in the pane, a **Sleeping** chip marks it, and the hover
@@ -769,10 +770,18 @@ whenever it cannot tell:
   toolbar, shown on agent panes);
 - no paired phone has the pane open (Remote Access).
 
+A workspace can have its own time. Under **Idle agents per workspace**
+(`agentHibernationWorkspaces`) each workspace follows the default, never
+lets its agents sleep, or uses its own number of minutes; a workspace with
+its own time lets its agents sleep even while the default is Off. The
+workspace's menu in the sidebar has **Agents never sleep here** for the same
+thing.
+
 While the computer is low on memory, idle agents sleep sooner: after 10
 minutes when less than 12% of its memory is available, and after 3 minutes
-under 5%, whenever that is sooner than your setting. Every other rule above
-still has to hold, and an agent never sleeps later because of it. Turn off
+under 5%, whenever that is sooner than the workspace's time. Every other rule above
+still has to hold, an agent never sleeps later because of it, and a
+workspace set to Never is left alone. Turn off
 **Shorter idle time when memory is low** (`agentHibernationSoonerWhenLow`, on by
 default) to keep your setting's time whatever the memory.
 

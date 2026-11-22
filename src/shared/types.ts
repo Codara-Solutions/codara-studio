@@ -1473,6 +1473,9 @@ export interface AppPreferences {
   // untouched agent terminal may sit before Codara stops it to save memory;
   // its pane then shows a card and Resume brings the session back. 0 = off.
   agentHibernationMinutes?: number;
+  // Per-workspace exceptions to agentHibernationMinutes: workspace id to
+  // minutes, 0 meaning agents in that workspace never sleep.
+  agentHibernationWorkspaces?: Record<string, number>;
   // Default on: while physical memory is low, idle agents sleep sooner
   // (AGENT_HIBERNATION_PRESSURE_IDLE_MS).
   agentHibernationSoonerWhenLow?: boolean;
@@ -1691,6 +1694,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   restoreTerminalOutput: true,
   // DEFAULT_AGENT_HIBERNATION_MINUTES in shared/agent-hibernation.ts.
   agentHibernationMinutes: 30,
+  agentHibernationWorkspaces: {},
   agentHibernationSoonerWhenLow: true,
   relayPhoneAnswers: false,
   // DEFAULT_RELAY_ANSWER_ASSISTANT in shared/session-relay.ts.

@@ -9,8 +9,8 @@ import { delimiter, join } from "node:path";
 // time, shows a card, and comes back with `--resume` only when the user asks
 // (Resume on its card, Enter in the pane); opening its workspace alone
 // launches nothing. A pane asleep when Codara quits comes back asleep. The
-// pane with the keyboard, a pane pinned "Keep running" and a pane whose agent
-// runs a command are never stopped.
+// pane with the keyboard, a pane pinned "Keep running", a pane whose agent
+// runs a command and a workspace set to Never are never stopped.
 //
 // The fake `claude` is a Node script, so the process census sees it the way it
 // sees the real CLI: on POSIX "node …/claude --resume <id>", on Windows
@@ -37,6 +37,7 @@ interface FixtureOptions {
   activeWorkspaceId?: string;
   // A split in ws-a: the agent pane and a plain shell that has the keyboard.
   withShellPane?: boolean;
+  prefs?: Record<string, unknown>;
 }
 
 interface Fixture {
@@ -274,6 +275,24 @@ test("Keep running stops a pane from sleeping", async () => {
     await expect(page.getByTestId("pane-sleeping-chip")).toHaveCount(0);
     expect(isAlive(first.pid)).toBe(true);
     expect(logs.some((line) => line.includes("is sleeping"))).toBe(false);
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
+test("a workspace set to Never keeps its agents running", async () => {
+  test.setTimeout(TEST_TIMEOUT);
+  const fixture = await prepareFixture("plain", { prefs: { agentHibernationWorkspaces: { "ws-a": 0 } } });
+  const { app, page, logs } = await launch(fixture);
+  try {
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 30_000 });
+    const [first] = await waitForLaunches(fixture, 1);
+    await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
+    await page.waitForTimeout(IDLE_MS * 3 + TICK_MS * 4);
+    await expect(page.getByTestId("pane-sleeping-chip")).toHaveCount(0);
+    expect(isAlive(first.pid)).toBe(true);
+    expect(logs.some((line) => line.includes("is sleeping")), logs.join("\n")).toBe(false);
   } finally {
     await app.close();
     await cleanup(fixture);
@@ -544,7 +563,7 @@ setInterval(() => {}, 1 << 30);
   );
   await writeFile(
     join(userDataDir, "spark-preferences.json"),
-    JSON.stringify({ restoreAgentSessions: true, agentHibernationMinutes: 15 }),
+    JSON.stringify({ restoreAgentSessions: true, agentHibernationMinutes: 15, ...(options.prefs ?? {}) }),
     "utf8",
   );
   await writeFile(

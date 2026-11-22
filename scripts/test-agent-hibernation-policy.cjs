@@ -106,7 +106,40 @@ async function main() {
   check("app preferences default matches", types.DEFAULT_PREFERENCES.agentHibernationMinutes === DEFAULT_AGENT_HIBERNATION_MINUTES);
   check("Off survives", norm(0) === 0);
   check("each preset survives", [15, 30, 60, 120].every((m) => norm(m) === m));
-  check("anything else falls back to the default", [7, -1, "30", null, NaN, 1e9].every((m) => norm(m) === 30));
+  check("any whole number of minutes survives", norm(7) === 7 && norm(45) === 45 && norm(720) === 720);
+  check("minutes are rounded and kept between 0 and 720", norm(7.6) === 8 && norm(-1) === 0 && norm(1e9) === 720);
+  check("anything that is not a number falls back to the default", ["30", null, NaN, Infinity, {}].every((m) => norm(m) === 30));
+
+  // ── Per-workspace exceptions ──
+  const normWs = shared.normalizeAgentHibernationWorkspaces;
+  check(
+    "exceptions keep each workspace's minutes, 0 meaning never",
+    JSON.stringify(normWs({ a: 0, b: 45, c: 9999 })) === JSON.stringify({ a: 0, b: 45, c: 720 }),
+    normWs({ a: 0, b: 45, c: 9999 }),
+  );
+  check(
+    "malformed exceptions are dropped, never turned into a default",
+    JSON.stringify(normWs({ a: "15", b: null, c: NaN, "": 5, ["x".repeat(300)]: 5 })) === "{}" &&
+      JSON.stringify(normWs(null)) === "{}" &&
+      JSON.stringify(normWs([15])) === "{}" &&
+      JSON.stringify(normWs("x")) === "{}",
+  );
+  check("app preferences start with no exceptions", JSON.stringify(types.DEFAULT_PREFERENCES.agentHibernationWorkspaces) === "{}");
+  const somePolicy = { idleMs: 30 * 60_000, workspaceIdleMs: { never: 0, quick: 5 * 60_000 }, tickMs: 60_000, memoryLevel: "ok" };
+  check(
+    "a workspace's own time wins over the default",
+    shared.policyIdleMs(somePolicy, "quick") === 5 * 60_000 &&
+      shared.policyIdleMs(somePolicy, "never") === 0 &&
+      shared.policyIdleMs(somePolicy, "other") === 30 * 60_000 &&
+      shared.policyIdleMs(somePolicy, null) === 30 * 60_000,
+  );
+  check(
+    "hibernation is on while the default or any workspace's time is",
+    shared.anyAgentHibernation(somePolicy) &&
+      shared.anyAgentHibernation({ ...somePolicy, idleMs: 0 }) &&
+      !shared.anyAgentHibernation({ ...somePolicy, idleMs: 0, workspaceIdleMs: { never: 0 } }) &&
+      !shared.anyAgentHibernation({ ...somePolicy, idleMs: 0, workspaceIdleMs: {} }),
+  );
 
   // ── Notifier evidence ──
   const judge = shared.judgeAgentEvidence;

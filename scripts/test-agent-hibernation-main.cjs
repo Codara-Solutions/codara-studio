@@ -168,7 +168,7 @@ function makeDeps(overrides = {}) {
   };
   const deps = {
     now: () => NOW,
-    policy: async () => ({ idleMs: 30 * MIN, tickMs: MIN, memoryLevel: "ok" }),
+    policy: async () => ({ idleMs: 30 * MIN, workspaceIdleMs: {}, tickMs: MIN, memoryLevel: "ok" }),
     session: () => (state.session ? { ...state.session } : null),
     evidence: () => (state.evidence ? { ...state.evidence } : null),
     listProcesses: async () => {
@@ -230,7 +230,7 @@ async function main() {
   check("a malformed request is refused", r.result.reason === "bad-request" && r.calls.stop.length === 0);
   r = await run(undefined, { paneId: "p", runtime: "bash", placement: "visible" });
   check("an unknown runtime is refused", r.result.reason === "bad-request");
-  r = await run((t) => { t.deps.policy = async () => ({ idleMs: 0, tickMs: MIN, memoryLevel: "ok" }); });
+  r = await run((t) => { t.deps.policy = async () => ({ idleMs: 0, workspaceIdleMs: {}, tickMs: MIN, memoryLevel: "ok" }); });
   check("the setting turned off refuses everything", r.result.reason === "off" && r.calls.list === 0);
   r = await run((t) => { t.state.session = null; });
   check("no live pty: refused", r.result.reason === "no-session");
@@ -559,6 +559,43 @@ async function main() {
   H.memory = null;
   policy = await ah.currentHibernationPolicy();
   check("an unreadable memory reading is no pressure", policy.idleMs === 30 * MIN && policy.memoryLevel === "ok", policy);
+  // Per-workspace times.
+  ah.resetMemoryLevelForTests();
+  H.memory = { totalBytes: 32 * GB, availableBytes: 16 * GB };
+  H.prefs = { agentHibernationMinutes: 30, agentHibernationWorkspaces: { a: 0, b: 45, c: "x" } };
+  policy = await ah.currentHibernationPolicy();
+  check(
+    "the policy carries each workspace's own idle time",
+    policy.idleMs === 30 * MIN && JSON.stringify(policy.workspaceIdleMs) === JSON.stringify({ a: 0, b: 45 * MIN }),
+    policy,
+  );
+  H.prefs = { agentHibernationMinutes: 0, agentHibernationWorkspaces: { b: 45 } };
+  policy = await ah.currentHibernationPolicy();
+  check(
+    "with the default Off a workspace's own time still stands",
+    policy.idleMs === 0 && policy.workspaceIdleMs.b === 45 * MIN,
+    policy,
+  );
+  H.prefs = { agentHibernationMinutes: 0, agentHibernationWorkspaces: { a: 0 } };
+  const readsNever = H.memoryReads;
+  policy = await ah.currentHibernationPolicy();
+  check(
+    "Off everywhere reads no memory",
+    policy.idleMs === 0 && policy.workspaceIdleMs.a === 0 && H.memoryReads === readsNever,
+    policy,
+  );
+  ah.resetMemoryLevelForTests();
+  H.memory = { totalBytes: 32 * GB, availableBytes: 3 * GB };
+  H.prefs = { agentHibernationMinutes: 30, agentHibernationWorkspaces: { a: 0, b: 45, quick: 5 } };
+  policy = await ah.currentHibernationPolicy();
+  check(
+    "pressure shortens a workspace's time too, and leaves Never and shorter times alone",
+    policy.workspaceIdleMs.a === 0 && policy.workspaceIdleMs.b === 10 * MIN && policy.workspaceIdleMs.quick === 5 * MIN,
+    policy,
+  );
+  H.prefs = { agentHibernationMinutes: 30 };
+  ah.resetMemoryLevelForTests();
+  H.memory = null;
   process.env.CODARA_E2E_HIBERNATION_IDLE_MS = "2000";
   policy = await ah.currentHibernationPolicy();
   check("the e2e override is ignored outside the e2e runner", policy.idleMs === 30 * MIN);
@@ -672,7 +709,7 @@ async function main() {
     lines.length = 0;
     const pressed = makeDeps({
       log: (line) => lines.push(line),
-      policy: async () => ({ idleMs: 10 * MIN, tickMs: MIN, memoryLevel: "low" }),
+      policy: async () => ({ idleMs: 10 * MIN, workspaceIdleMs: {}, tickMs: MIN, memoryLevel: "low" }),
     });
     await ah.hibernateAgentPane(request(), pressed.deps);
     check(
@@ -682,9 +719,63 @@ async function main() {
       lines,
     );
 
+    // A workspace with its own time, or set to Never.
     ah.resetAgentHibernationForTests();
     lines.length = 0;
-    const off = makeDeps({ log: (line) => lines.push(line), policy: async () => ({ idleMs: 0, tickMs: MIN, memoryLevel: "ok" }) });
+    const inWorkspace = (workspaceId, workspaceIdleMs, idleMs = 30 * MIN) =>
+      makeDeps({
+        log: (line) => lines.push(line),
+        placement: () => ({ workspaceId }),
+        policy: async () => ({ idleMs, workspaceIdleMs, tickMs: MIN, memoryLevel: "ok" }),
+      });
+    const never = inWorkspace("ws-never", { "ws-never": 0 });
+    let verdict = await ah.hibernateAgentPane(request(), never.deps);
+    check(
+      "a workspace set to Never keeps its agents awake without a process listing",
+      verdict.ok === false && verdict.reason === "exempt" && never.calls.list === 0 && never.calls.stop.length === 0,
+      verdict,
+    );
+    await ah.hibernateAgentPane(request(), never.deps);
+    check(
+      "and says so once",
+      lines.length === 1 && lines[0] === "pane=pane-1 stays awake: exempt (workspace ws-never never sleeps)",
+      lines,
+    );
+
+    ah.resetAgentHibernationForTests();
+    lines.length = 0;
+    // The pane was idle for 60 minutes: under its workspace's 2 hours it
+    // stays awake, though the default 30 minutes have long passed.
+    const slower = inWorkspace("ws-slow", { "ws-slow": 120 * MIN });
+    verdict = await ah.hibernateAgentPane(request(), slower.deps);
+    check(
+      "a workspace's longer time holds a pane the default would let sleep",
+      verdict.ok === false && verdict.reason === "not-idle-long-enough" && /needs 7200s/.test(verdict.detail ?? ""),
+      verdict,
+    );
+
+    ah.resetAgentHibernationForTests();
+    lines.length = 0;
+    const own = inWorkspace("ws-own", { "ws-own": 45 * MIN }, 0);
+    verdict = await ah.hibernateAgentPane(request(), own.deps);
+    check(
+      "a workspace with its own time sleeps while the default is Off",
+      verdict.ok === true && own.calls.stop.length === 1 && /idle 2700s/.test(lines[0] ?? ""),
+      { verdict, lines },
+    );
+    ah.resetAgentHibernationForTests();
+    lines.length = 0;
+    const elsewhere = inWorkspace("ws-other", { "ws-own": 45 * MIN }, 0);
+    verdict = await ah.hibernateAgentPane(request(), elsewhere.deps);
+    check(
+      "while the others stay off, silently",
+      verdict.ok === false && verdict.reason === "off" && lines.length === 0,
+      { verdict, lines },
+    );
+
+    ah.resetAgentHibernationForTests();
+    lines.length = 0;
+    const off = makeDeps({ log: (line) => lines.push(line), policy: async () => ({ idleMs: 0, workspaceIdleMs: {}, tickMs: MIN, memoryLevel: "ok" }) });
     await ah.hibernateAgentPane(request(), off.deps);
     check("nothing is logged while the setting is off", lines.length === 0, lines);
   }
