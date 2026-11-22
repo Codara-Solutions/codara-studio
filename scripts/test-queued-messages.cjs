@@ -110,7 +110,7 @@ export async function disposeManagerSessions(runId) {
   await globalThis.__coraDisposeHook?.(runId);
 }`;
 
-const PI_RUNTIME_STUB = `export async function listCodaraPiSkillNames() { return new Set(); }
+const PI_RUNTIME_STUB = `export async function listCodaraPiSkillNames(cwd) { await globalThis.__coraSkillNamesHook?.(cwd); return new Set(); }
 export async function resolveCodaraPiExecutionAccount() {
   return {
     accountProfileId: "3f9a1c72-6b0e-4a2d-9c11-5e7d8a4b2f10",
@@ -1672,7 +1672,8 @@ async function main() {
   check(
     "Resume drains a persisted queued direct-chat turn instead of duplicating it",
     /queuedDirectMessages = queuedManagerInputMessages\(run\)/.test(storeSource) &&
-      /queuedMessageIds: queuedDirectMessages\.map/.test(storeSource) &&
+      /startFinishedDirectChatQueue\(run, queuedDirectMessages\)/.test(storeSource) &&
+      /queuedMessageIds: queued\.map/.test(storeSource) &&
       /renderBundledManagerInput\(directInputMessages\)/.test(storeSource),
   );
   const sharedTypesSource = fs.readFileSync(SHARED_TYPES_TS, "utf8");
@@ -1718,6 +1719,336 @@ async function main() {
     /isQuestionInactiveError\([\s\S]{0,400}addRunMessage\(/.test(composerSource),
   );
 
+  // ── 7. direct chat Send now ─────────────────────────────────────────────
+  // A direct chat has no manager turn: one Pi worker does the pass. Send now
+  // stops that worker (marked a Send now stop, never a failure), and the next
+  // pass starts with every queued message, each delivered exactly once. A
+  // message queued while a pass runs also goes on its own when the pass ends.
+  // Driven by the scripted Pi worker (CODARA_FAKE_PI_WORKERS).
+  process.env.CODARA_FAKE_PI_WORKERS = "1";
+  const directCwd = fs.mkdtempSync(path.join(HOME, "direct-ws-"));
+  const startDirect = (note) =>
+    runStore.startAutopilot({
+      workspaceId: WS,
+      workspaceName: "direct",
+      cwd: directCwd,
+      initialUserNote: note,
+      executionStrategy: "direct",
+      chatModel: "gpt-5.6-sol",
+      chatMode: "auto",
+    });
+  const liveAttempt = (runId) =>
+    readRun(runId).workerAttempts.find((entry) => ["prompt_ready", "launching", "running", "finishing"].includes(entry.status));
+  const direct = await startDirect("Rename the counter. FAKE_DELAY_MS=600000");
+  check("a direct chat starts in direct mode", direct.executionMode === "direct", direct.executionMode);
+  check("its first pass is running", await waitFor(() => liveAttempt(direct.id)?.status === "running", 8000),
+    JSON.stringify(readRun(direct.id).workerAttempts.map((entry) => entry.status)));
+  const DIRECT_Q = "Also cover the empty list. FAKE_DELAY_MS=200";
+  await runStore.addRunMessage({ runId: direct.id, author: "user", kind: "note", message: DIRECT_Q });
+  const queuedDirect = readRun(direct.id).humanMessages.find((entry) => entry.message === DIRECT_Q);
+  check("a message sent mid-pass is queued", queuedDirect?.deliveryState === "queued", queuedDirect?.deliveryState);
+  const firstAttemptId = liveAttempt(direct.id)?.id;
+  let directSendNowError = null;
+  await runStore.deliverQueuedMessagesNow(direct.id).catch((error) => {
+    directSendNowError = error;
+  });
+  check("Send now on a direct chat does not throw", directSendNowError === null, String(directSendNowError));
+  const secondPassDone = await waitFor(() => {
+    const state = readRun(direct.id);
+    return state.status === "complete" && state.workerAttempts.length === 2;
+  }, 10000);
+  const directAfter = readRun(direct.id);
+  check("the next pass ran and the chat settled complete", secondPassDone,
+    JSON.stringify({ status: directAfter.status, attempts: directAfter.workerAttempts.map((entry) => entry.status) }));
+  const stopped = directAfter.workerAttempts.find((entry) => entry.id === firstAttemptId);
+  check("the stopped pass is a Send now stop, not a failure",
+    stopped?.status === "cancelled" && stopped?.interruptedBy === "send_now",
+    JSON.stringify({ status: stopped?.status, interruptedBy: stopped?.interruptedBy }));
+  const secondTask = directAfter.workerTasks.find((entry) => entry.id === directAfter.workerAttempts[1]?.workerTaskId);
+  check("the queued message is in the next pass's prompt exactly once",
+    (secondTask?.description.split(DIRECT_Q).length ?? 0) - 1 === 1,
+    secondTask?.description.slice(-200));
+  const deliveredDirect = directAfter.humanMessages.find((entry) => entry.id === queuedDirect?.id);
+  check("the queued message is acknowledged", deliveredDirect?.deliveryState === "acknowledged", deliveredDirect?.deliveryState);
+  check("no failure note was left for the stopped pass",
+    !directAfter.humanMessages.some((entry) => entry.author !== "user" && /fail/i.test(entry.message ?? "")),
+    JSON.stringify(directAfter.humanMessages.filter((entry) => entry.author !== "user").map((entry) => entry.message)));
+
+  // Without Send now, a message queued during a pass goes once the pass ends.
+  const handOff = await startDirect("Read the readme. FAKE_DELAY_MS=600");
+  await waitFor(() => liveAttempt(handOff.id)?.status === "running", 8000);
+  const HANDOFF_Q = "Then list the scripts. FAKE_DELAY_MS=100";
+  await runStore.addRunMessage({ runId: handOff.id, author: "user", kind: "note", message: HANDOFF_Q });
+  const handedOff = await waitFor(() => {
+    const state = readRun(handOff.id);
+    return state.status === "complete" && state.workerAttempts.length === 2;
+  }, 10000);
+  const handOffAfter = readRun(handOff.id);
+  check("a message queued during a pass goes on its own when the pass ends", handedOff,
+    JSON.stringify({ status: handOffAfter.status, attempts: handOffAfter.workerAttempts.map((entry) => entry.status) }));
+  check("both passes succeeded", handOffAfter.workerAttempts.every((entry) => entry.status === "succeeded"));
+  // A message the direct worker cannot serve, queued during a pass, goes to
+  // the manager when the pass ends, as it would sent to a finished chat.
+  const escalate = await startDirect("Read the readme again. FAKE_DELAY_MS=600");
+  await waitFor(() => liveAttempt(escalate.id)?.status === "running", 8000);
+  const ESCALATE_Q = "Spawn sub-agents to fix each failing file.";
+  await runStore.addRunMessage({ runId: escalate.id, author: "user", kind: "note", message: ESCALATE_Q });
+  const escalated = await waitFor(() => readRun(escalate.id).executionMode === "managed", 10000);
+  const escalateAfter = readRun(escalate.id);
+  check("a queued delegation request goes to the manager after the pass", escalated,
+    JSON.stringify({ mode: escalateAfter.executionMode, status: escalateAfter.status }));
+  check("no direct pass was given the delegation request",
+    !escalateAfter.workerTasks.some((task) => task.description.includes(ESCALATE_Q)));
+  check("the manager got the queued request",
+    await waitFor(() => callsFor(escalate.id).some((call) => call.prompt.includes(ESCALATE_Q)), 8000));
+
+  // "Always verify edits" sends every queued message to the manager too.
+  const settingsBefore = runStore.loadSettings();
+  const verifySettings = await settingsBefore;
+  await runStore.saveSettings(runStore.normalizeSettings({ ...verifySettings, coraAlwaysVerifyEdits: true }));
+  const verify = await startDirect("Read the readme once more. FAKE_DELAY_MS=600");
+  await waitFor(() => liveAttempt(verify.id)?.status === "running", 8000);
+  await runStore.addRunMessage({ runId: verify.id, author: "user", kind: "note", message: "Then rename the counter." });
+  check("with always-verify on, a queued message goes to the manager after the pass",
+    await waitFor(() => readRun(verify.id).executionMode === "managed", 10000),
+    readRun(verify.id).executionMode);
+  await runStore.saveSettings(runStore.normalizeSettings({ ...verifySettings, coraAlwaysVerifyEdits: false }));
+
+  // Fixtures for the settle path (settleRecoveredDirectAttempt finalizes a
+  // pass whose attempt is already terminal).
+  const settledDirect = (id, attemptExtra, reportStatus, extra = {}) => {
+    const reportPath = path.join(HOME, "runs", id, "report.json");
+    fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+    if (reportStatus) {
+      fs.writeFileSync(reportPath, JSON.stringify({
+        status: reportStatus, summary: "Renamed the counter and the tests pass.",
+        files_changed: [], commands_run: [], tests: [], proof: [], risks: [], followups: [], handoff: [],
+      }));
+    }
+    return writeRun(pausedRun(id, {
+      status: "running",
+      executionMode: "direct",
+      cwd: directCwd,
+      settingsSnapshot: { workspaceCwd: directCwd },
+      chatModel: "gpt-5.6-sol",
+      autopilot: { status: "running", updatedAt: PAUSED_AT },
+      sparkCalls: [],
+      steps: [{
+        id: `${id}-step`, runId: id, index: 1, title: "Rename", goal: "g", kind: "worker_batch", status: "running",
+        plannedAgents: [], acceptanceCriteria: [], verificationCommands: [], workerTaskIds: [`${id}-task`],
+        createdAt: PAUSED_AT, updatedAt: PAUSED_AT,
+      }],
+      workerTasks: [{
+        id: `${id}-task`, runId: id, stepId: `${id}-step`, title: "Rename", description: "Rename the counter.",
+        runtimePreference: "pi", status: "running", allowedPaths: [], forbiddenPaths: [], expectedOutputs: [],
+        verificationCommands: [], canRunParallel: false, conflictsWith: [], createdBy: "spark",
+        createdAt: PAUSED_AT, updatedAt: PAUSED_AT,
+      }],
+      workerAttempts: [{
+        id: `${id}-attempt`, runId: id, workerTaskId: `${id}-task`, attemptNumber: 1, runtime: "pi",
+        model: "gpt-5.6-sol", cwd: directCwd, startedAt: PAUSED_AT, finishedAt: PAUSED_AT,
+        ...(reportStatus ? { finalReportPath: reportPath } : {}),
+        ...attemptExtra,
+      }],
+      ...extra,
+    }));
+  };
+
+  // Send now while the worker is finishing: it is not stopped, its answer
+  // stands, and the hand-off sends the queue after it.
+  const finishingId = settledDirect("run-direct-finishing", { status: "finishing", finishedAt: undefined }, null, {
+    humanMessages: [{
+      id: "msg-f", runId: "run-direct-finishing", author: "user", kind: "note", message: "And the docs.",
+      attachments: [], createdAt: PAUSED_AT, deliveryState: "queued", intent: "steer", conversationEpoch: 1,
+    }],
+  });
+  await runStore.deliverQueuedMessagesNow(finishingId);
+  const finishingAttempt = readRun(finishingId).workerAttempts[0];
+  check("Send now leaves a finishing worker alone",
+    finishingAttempt.status === "finishing" && !finishingAttempt.interruptedBy,
+    JSON.stringify({ status: finishingAttempt.status, interruptedBy: finishingAttempt.interruptedBy }));
+
+  // A worker that exits 0 after Send now stopped it keeps its turn and reply.
+  const lateId = settledDirect("run-direct-late-finish", { status: "succeeded", interruptedBy: "send_now", exitCode: 0 }, "complete");
+  await runStore.settleRecoveredDirectAttempt(lateId, `${lateId}-attempt`);
+  const late = readRun(lateId);
+  check("a worker that finished after Send now keeps its turn",
+    late.workerTasks[0].status === "accepted" && late.status === "complete",
+    JSON.stringify({ task: late.workerTasks[0].status, status: late.status }));
+  check("its reply is posted",
+    late.humanMessages.some((message) => message.author === "spark" && message.message.includes("Renamed the counter")));
+
+  // A message sent while the pass settles is read when the settle commits,
+  // so it starts the next pass instead of waiting in a finished chat.
+  // The settle reads the run, then its report; reading the report is held
+  // until the message has landed, so it lands in that gap, before the settle
+  // commits.
+  const raceId = settledDirect("run-direct-settle-race", { status: "succeeded", exitCode: 0 }, "complete");
+  const raceReport = readRun(raceId).workerAttempts[0].finalReportPath;
+  const fsPromises = require("node:fs/promises");
+  const realReadFile = fsPromises.readFile;
+  const reportHeld = gate();
+  let reportRead = false;
+  fsPromises.readFile = async (file, ...rest) => {
+    if (file === raceReport && !reportRead) {
+      reportRead = true;
+      await reportHeld.opened;
+    }
+    return realReadFile.call(fsPromises, file, ...rest);
+  };
+  const RACE_Q = "Also update the changelog. FAKE_DELAY_MS=100";
+  const settling = runStore.settleRecoveredDirectAttempt(raceId, `${raceId}-attempt`);
+  check("the settle is reading the report", await waitFor(() => reportRead, 4000));
+  await runStore.addRunMessage({ runId: raceId, author: "user", kind: "note", message: RACE_Q });
+  check("the message queued while the pass was settling",
+    readRun(raceId).humanMessages.find((message) => message.message === RACE_Q)?.deliveryState === "queued");
+  reportHeld.open();
+  await settling;
+  fsPromises.readFile = realReadFile;
+  const raceDone = await waitFor(() => {
+    const state = readRun(raceId);
+    return state.workerTasks.some((task) => task.description.includes(RACE_Q));
+  }, 10000);
+  const raceAfter = readRun(raceId);
+  check("the settle itself handed the queue on, so the chat never read as finished",
+    readEvents(raceId).some((event) => event.type === "direct_run.queue_handoff"),
+    JSON.stringify(readEvents(raceId).map((event) => event.type)));
+  check("a message sent while a pass settles starts the next pass", raceDone,
+    JSON.stringify({ status: raceAfter.status, queued: raceAfter.humanMessages.map((m) => m.deliveryState) }));
+  if (!raceDone) console.log(JSON.stringify({ events: readEvents(raceId).map((e) => `${e.type}: ${e.message}`).slice(-12), stop: raceAfter.autopilot, tasks: raceAfter.workerTasks.map((t) => t.description.slice(-80)), msgs: raceAfter.humanMessages.map((m) => `${m.author}:${m.message.slice(0,60)}`) }, null, 1));
+  check("that message is not left queued", await waitFor(() =>
+    !readRun(raceId).humanMessages.some((message) => message.deliveryState === "queued"), 10000));
+
+  // The other side of that race: the message is read while the pass still
+  // runs but recorded after the settle committed "complete" with an empty
+  // queue. Its attachment copy is held until the settle has committed.
+  const lateMsgId = settledDirect("run-direct-late-message", { status: "succeeded", exitCode: 0 }, "complete");
+  const lateSource = path.join(HOME, "late-note.txt");
+  fs.writeFileSync(lateSource, "notes");
+  const realStat = fsPromises.stat;
+  const statHeld = gate();
+  let statReached = false;
+  fsPromises.stat = async (file, ...rest) => {
+    if (file === lateSource && !statReached) {
+      statReached = true;
+      await statHeld.opened;
+    }
+    return realStat.call(fsPromises, file, ...rest);
+  };
+  const LATE_Q = "Also add a test for the empty list. FAKE_DELAY_MS=100";
+  const lateSending = runStore.addRunMessage({
+    runId: lateMsgId, author: "user", kind: "note", message: LATE_Q,
+    attachments: [{ sourcePath: lateSource, kind: "file" }],
+  });
+  check("the message was read while the pass still ran", await waitFor(() => statReached, 4000));
+  await runStore.settleRecoveredDirectAttempt(lateMsgId, `${lateMsgId}-attempt`);
+  check("the settle committed first and found no queue", readRun(lateMsgId).status === "complete", readRun(lateMsgId).status);
+  statHeld.open();
+  await lateSending;
+  fsPromises.stat = realStat;
+  check("a message recorded after the chat finished starts the next pass", await waitFor(() =>
+    readRun(lateMsgId).workerTasks.some((task) => task.description.includes(LATE_Q)), 10000),
+  JSON.stringify({ status: readRun(lateMsgId).status, msgs: readRun(lateMsgId).humanMessages.map((m) => m.deliveryState) }));
+  check("and is not left queued", await waitFor(() =>
+    !readRun(lateMsgId).humanMessages.some((message) => message.deliveryState === "queued"), 10000));
+
+  // Send now on a paused direct chat (its worker gone) resumes it, and the
+  // queue reaches a pass.
+  const PAUSED_Q = "Rename it back. FAKE_DELAY_MS=100";
+  const pausedDirectId = settledDirect("run-direct-paused", { status: "cancelled", interruptedBy: "pause" }, null, {
+    status: "paused",
+    autopilot: { status: "paused", lastAction: "paused_by_user", stopReason: "Paused by user", updatedAt: PAUSED_AT },
+    humanMessages: [{
+      id: "msg-p", runId: "run-direct-paused", author: "user", kind: "note", message: PAUSED_Q,
+      attachments: [], createdAt: PAUSED_AT, deliveryState: "queued", intent: "steer", conversationEpoch: 1,
+    }],
+  });
+  let pausedSendNowError = null;
+  await runStore.deliverQueuedMessagesNow(pausedDirectId).catch((error) => {
+    pausedSendNowError = error;
+  });
+  check("Send now on a paused direct chat does not throw", pausedSendNowError === null, String(pausedSendNowError));
+  check("Send now on a paused direct chat resumes it into a pass with the queue", await waitFor(() => {
+    const state = readRun(pausedDirectId);
+    return state.workerTasks.some((task) => task.description.includes(PAUSED_Q)) && state.status === "complete";
+  }, 10000), JSON.stringify({ status: readRun(pausedDirectId).status, attempts: readRun(pausedDirectId).workerAttempts.map((a) => a.status) }));
+  check("the paused chat's queued message is delivered",
+    readRun(pausedDirectId).humanMessages.find((message) => message.id === "msg-p")?.deliveryState === "acknowledged");
+
+  // Resume on a finished direct chat routes its queue like the hand-off: a
+  // delegation request goes to the manager, not to another direct pass.
+  const resumeEscalateId = settledDirect("run-direct-resume-escalate", { status: "succeeded", exitCode: 0 }, "complete", {
+    status: "complete",
+    autopilot: { status: "idle", lastAction: "direct_run_finalized", updatedAt: PAUSED_AT },
+    humanMessages: [{
+      id: "msg-r", runId: "run-direct-resume-escalate", author: "user", kind: "note",
+      message: "Use sub-agents to fix each failing file", attachments: [], createdAt: PAUSED_AT,
+      deliveryState: "queued", intent: "steer", conversationEpoch: 1,
+    }],
+  });
+  await runStore.resumeRun({ runId: resumeEscalateId });
+  check("Resume sends a finished direct chat's delegation request to the manager",
+    readRun(resumeEscalateId).executionMode === "managed" && readRun(resumeEscalateId).workerTasks.length === 1,
+    JSON.stringify({ mode: readRun(resumeEscalateId).executionMode, tasks: readRun(resumeEscalateId).workerTasks.length }));
+
+  // A message taken back between the hand-off's read and its claim: nothing
+  // is left to send, so the chat ends "complete", not "failed". The typed
+  // slash command makes the hand-off look up skills, which is where it waits
+  // while the message is unqueued.
+  const takenBackId = settledDirect("run-direct-taken-back", { status: "succeeded", exitCode: 0 }, "complete", {
+    humanMessages: [{
+      id: "msg-t", runId: "run-direct-taken-back", author: "user", kind: "note", message: "/notaskill tidy the docs",
+      typedByUser: true, attachments: [], createdAt: PAUSED_AT, deliveryState: "queued", intent: "steer", conversationEpoch: 1,
+    }],
+  });
+  let unqueuedInGap = false;
+  globalThis.__coraSkillNamesHook = async () => {
+    if (unqueuedInGap) return;
+    unqueuedInGap = true;
+    await runStore.cancelQueuedMessage({ runId: takenBackId, messageId: "msg-t" });
+  };
+  await runStore.settleRecoveredDirectAttempt(takenBackId, `${takenBackId}-attempt`);
+  delete globalThis.__coraSkillNamesHook;
+  const takenBack = readRun(takenBackId);
+  check("the message was unqueued between the read and the claim", unqueuedInGap && !takenBack.humanMessages.some((m) => m.id === "msg-t"));
+  check("a hand-off whose message was taken back ends complete", takenBack.status === "complete",
+    JSON.stringify({ status: takenBack.status, stop: takenBack.autopilot?.stopReason }));
+  check("and posts no failure note",
+    !takenBack.humanMessages.some((message) => message.author === "spark" && /could not start/i.test(message.message)));
+
+  // A launch that throws after the claim: the chat fails and says so.
+  const launchFailId = settledDirect("run-direct-launch-fails", { status: "succeeded", exitCode: 0 }, "complete", {
+    humanMessages: [{
+      id: "msg-l", runId: "run-direct-launch-fails", author: "user", kind: "note", message: "Then rename the file.",
+      attachments: [], createdAt: PAUSED_AT, deliveryState: "queued", intent: "steer", conversationEpoch: 1,
+    }],
+  });
+  // The launch breaks after the claim: writing the pass's new step fails.
+  const launchFailDir = path.join(HOME, "runs", launchFailId);
+  const realWriteFile = fsPromises.writeFile;
+  let launchBroke = false;
+  fsPromises.writeFile = async (file, data, ...rest) => {
+    if (!launchBroke && String(file).startsWith(`${launchFailDir}${path.sep}run.json`) && typeof data === "string") {
+      const draft = JSON.parse(data);
+      const claimed = draft.humanMessages?.find((m) => m.id === "msg-l")?.deliveryState === "acknowledged";
+      if (claimed && draft.steps?.length === 2) {
+        launchBroke = true;
+        throw new Error("disk full");
+      }
+    }
+    return realWriteFile.call(fsPromises, file, data, ...rest);
+  };
+  await runStore.settleRecoveredDirectAttempt(launchFailId, `${launchFailId}-attempt`).catch(() => undefined);
+  fsPromises.writeFile = realWriteFile;
+  const launchFailed = readRun(launchFailId);
+  check("the launch broke after the claim", launchBroke);
+  check("a launch that throws after the claim leaves the chat failed", launchFailed.status === "failed",
+    JSON.stringify({ status: launchFailed.status, stop: launchFailed.autopilot?.stopReason }));
+  check("and says so in the chat",
+    launchFailed.humanMessages.some((message) => message.author === "spark" && message.message.startsWith("I could not start on your next message")),
+    JSON.stringify(launchFailed.humanMessages.map((m) => `${m.author}: ${m.message.slice(0, 80)}`)));
+  delete process.env.CODARA_FAKE_PI_WORKERS;
+
   const conversationSource = fs.readFileSync(CHAT_CONVERSATION_TSX, "utf8");
   check(
     "queued rows render the Unqueue control wired to cancelQueuedMessage",
@@ -1731,7 +2062,7 @@ async function main() {
   );
   check(
     "Send now is hidden while the run waits on an answer",
-    conversationSource.includes("{queued && !runBlocked && <SendNowControl runId={runId} />}") &&
+    conversationSource.includes("{queued && !runBlocked && sendNowOffered && <SendNowControl runId={runId} />}") &&
       conversationSource.includes("Delivered with your answer"),
   );
 

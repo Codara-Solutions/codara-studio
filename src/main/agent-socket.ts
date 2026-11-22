@@ -5202,7 +5202,9 @@ async function handleOrchestratorSpawnWorkers(
               ? "an app restart"
               : resumePlan.sourceAttempt.interruptedBy === "pause"
                 ? "a pause"
-                : "the turn time limit"
+                : resumePlan.sourceAttempt.interruptedBy === "send_now"
+                  ? "Send now"
+                  : "the turn time limit"
           }. ` +
           "The new prompt lands as the next turn of that worker's session; its edits so far are on disk.",
       );

@@ -918,8 +918,12 @@ the worker view reuses.
   it are user bubbles and never fold. A worker never gets a renderer of its
   own.
 - The terminal is a fallback behind a menu ("Raw terminal output", for output
-  the chat can't draw), never a primary button in Cora's chat. The board, Runs
-  and terminal agents outside the chat keep their terminals.
+  the chat can't draw), never a primary button in Cora's chat. It opens one
+  level deeper inside the worker view, never in another tab: Back (named
+  after the worker) or Esc returns to the worker's chat, and the next one to
+  Main. It is the worker's output read back, refreshed every 2 s while it
+  runs; it takes no input. The live pane stays in the run's terminal tab, and
+  the board, Runs and terminal agents outside the chat keep their terminals.
 - Main stays mounted underneath while you are inside a worker, so Back or Esc
   returns to exactly where you were, and focus goes back to the row you opened.
 - One slim bar says where you are: Main, the worker, its model, its state and

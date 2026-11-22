@@ -1820,6 +1820,14 @@ async function main() {
       "load normalization must not re-synthesize the suppressed options");
   });
 
+  test("Send now is offered on managed and direct chats, never on a Loom or a workflow", () => {
+    assert.equal(T.offersSendNow({ executionMode: "managed" }), true);
+    assert.equal(T.offersSendNow({}), true);
+    assert.equal(T.offersSendNow({ executionMode: "direct" }), true);
+    assert.equal(T.offersSendNow({ executionMode: "direct", automationId: "auto-1" }), false);
+    assert.equal(T.offersSendNow({ executionMode: "direct", workflow: { script: "x" } }), false);
+  });
+
   console.log(`\n${passed} chat timeline contract tests passed`);
 }
 

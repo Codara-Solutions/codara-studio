@@ -1251,7 +1251,11 @@ export async function messageWorkerAttempt(
  * other provider, or allowed to fail its step. A launch still starting backs
  * out at its next checkpoint instead of starting Pi.
  */
-export async function stopWorkerAttempt(runId: string, attemptId: string): Promise<RunState> {
+export async function stopWorkerAttempt(
+  runId: string,
+  attemptId: string,
+  options?: { sendNow?: boolean },
+): Promise<RunState> {
   const run = await requireRun(runId);
   const attempt = run.workerAttempts.find((item) => item.id === attemptId);
   if (!attempt) throw new Error(`Worker attempt not found: ${attemptId}`);
@@ -1260,14 +1264,15 @@ export async function stopWorkerAttempt(runId: string, attemptId: string): Promi
   if (launching) launching.aborted = true;
   const stopped = await commitRunChange(run, {
     type: "worker_attempt.stopped_by_user",
-    message: "Worker stopped by the user",
+    message: options?.sendNow ? "Worker stopped so the queued messages go now" : "Worker stopped by the user",
     workerTaskId: attempt.workerTaskId,
-    payload: { attemptId },
+    payload: { attemptId, ...(options?.sendNow ? { sendNow: true } : {}) },
     mutate: (draft, timestamp) => {
       const target = draft.workerAttempts.find((item) => item.id === attemptId);
       if (!target || ATTEMPT_TERMINAL_STATUSES.has(target.status)) return false;
       target.status = "cancelled";
-      target.error = target.error ?? "Stopped by the user.";
+      target.error = target.error ?? (options?.sendNow ? DIRECT_SEND_NOW_STOP : "Stopped by the user.");
+      if (options?.sendNow) target.interruptedBy = "send_now";
       target.finishedAt = target.finishedAt ?? timestamp;
       const task = draft.workerTasks.find((item) => item.id === target.workerTaskId);
       if (task && !["accepted", "failed", "cancelled", "blocked"].includes(task.status)) {
@@ -1583,6 +1588,9 @@ function chatTitleFromInput(input: StartAutopilotInput): string {
 }
 
 async function resolveDirectWorkerModel(chipModel: string | undefined): Promise<string | undefined> {
+  // The direct-chat e2e drives scripted workers (runFakePiWorkerSession) on a
+  // profile with no account, so the chip's model is taken as it is.
+  if (process.env.CODARA_FAKE_PI_WORKERS === "1" && chipModel) return chipModel;
   const { connected } = await coraWorkerModelAvailability(await loadSettings());
   return pickDirectWorkerModel(chipModel, connected);
 }
@@ -2607,7 +2615,7 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
   });
   if (requestedQueuedIds.length > 0) {
     if (claimedQueuedMessageIds.length === 0) {
-      throw new Error("The queued direct-run message was removed before Cora could resume it.");
+      throw new Error(QUEUED_DIRECT_MESSAGE_GONE);
     }
     directInputMessageIds = claimedQueuedMessageIds;
   }
@@ -2666,6 +2674,8 @@ interface DirectNodeLaunch {
 // the wave is behaviorally identical to the pre-graph single-task launch — the
 // prompt is the already-assembled entry string, rendered with empty upstream
 // context (renderNodePrompt no-op).
+const QUEUED_DIRECT_MESSAGE_GONE = "The queued direct-run message was removed before Cora could resume it.";
+
 async function launchDirectIterationTask(opts: {
   runId: string;
   cwd: string;
@@ -3600,6 +3610,9 @@ async function deriveAttemptSummary(
 // holds the run open for the user; it is never coerced to complete. No report +
 // clean exit counts as success (the CLI may have answered a trivial pass without
 // writing the report).
+// Why a direct chat's worker stopped when Send now cut its turn short.
+const DIRECT_SEND_NOW_STOP = "Stopped so your next message goes now.";
+
 function mapDirectOutcome(
   reportStatus: WorkerReport["status"] | undefined,
   attemptStatus: WorkerAttemptStatus,
@@ -4015,6 +4028,32 @@ async function finalizeDirectRun(runId: string): Promise<void> {
     if (hasBlockedSibling) committedStatus = "blocked";
   }
 
+  // A direct chat (not a Loom) whose pass settled with messages queued during
+  // it goes straight on with them: the run stays "running" and the next pass
+  // starts right after this commit, so the chat never flashes done or failed
+  // in between. Whether anything is queued is read inside the commit, on the
+  // run as it is then, so a message sent while this pass settled is not left
+  // queued in a finished chat. A pass Send now stopped with nothing left
+  // queued (taken back meanwhile) ends as cancelled: the user stopped it,
+  // nothing failed.
+  const directChat = !run.automationId;
+  const handOffEligible =
+    directChat &&
+    !stayingLive &&
+    !activationCapHit &&
+    !stepFailed &&
+    committedStatus !== "blocked";
+  // A Send now stop is one that wrote no usable report and did not succeed: a
+  // worker that finished anyway keeps its turn and its reply.
+  const stoppedBySendNow = (s: (typeof settled)[number]) =>
+    s.attempt.interruptedBy === "send_now" &&
+    s.attempt.status !== "succeeded" &&
+    s.reportStatus !== "complete" &&
+    s.reportStatus !== "partial";
+  const sendNowOnly = directChat && settled.length > 0 && settled.every(stoppedBySendNow);
+  let handOff = false;
+  let finalStatus: RunStatus = committedStatus;
+
   // FIX 3(c) — duplicate-question dedupe. A node that settles "blocked" again
   // with the SAME question (e.g. an idempotent finalize re-entry, or a co-blocked
   // sibling whose state is re-walked) must NOT push a second identical question
@@ -4073,6 +4112,12 @@ async function finalizeDirectRun(runId: string): Promise<void> {
         return false;
       }
       if (isTerminalRunStatus(draft.status)) return false;
+      handOff = handOffEligible && queuedManagerInputMessages(draft).length > 0;
+      finalStatus = handOff
+        ? "running"
+        : sendNowOnly && !stayingLive && committedStatus === "failed"
+          ? "cancelled"
+          : committedStatus;
       for (const s of settled) {
         // A node electing to RELAUNCH (bounded retry) is NOT settled here: it
         // stays running and is re-launched right after this commit (which bumps
@@ -4081,9 +4126,16 @@ async function finalizeDirectRun(runId: string): Promise<void> {
         // owns the next attempt's transcript).
         const eff = effOf(s.nodeId);
         if (eff === "relaunch") continue;
+        const sendNowStop = directChat && stoppedBySendNow(s);
         const t = draft.workerTasks.find((x) => x.id === s.attempt.workerTaskId);
         if (t) {
-          t.status = eff === "succeeded" ? "accepted" : eff === "blocked" ? "blocked" : "failed";
+          t.status = sendNowStop
+            ? "cancelled"
+            : eff === "succeeded"
+              ? "accepted"
+              : eff === "blocked"
+                ? "blocked"
+                : "failed";
           t.updatedAt = timestamp;
         }
         const step = t?.stepId ? draft.steps.find((x) => x.id === t.stepId) : undefined;
@@ -4121,7 +4173,9 @@ async function finalizeDirectRun(runId: string): Promise<void> {
         const priorNote = priorBlockedNote.get(s.nodeId);
         const isDuplicateQuestion =
           eff === "blocked" && priorNote?.status === "blocked" && priorNote.message === s.summary;
-        if (!isDuplicateQuestion) {
+        // A turn Send now stopped wrote no answer; its work shows as stopped
+        // and the next pass replies.
+        if (!isDuplicateQuestion && !sendNowStop) {
           const messageId = makeId("msg");
           draft.humanMessages.push({
             id: messageId,
@@ -4277,26 +4331,40 @@ async function finalizeDirectRun(runId: string): Promise<void> {
       // RUNNING — the next wave (or the retry attempt) is launched right after
       // this commit. TERMINALIZE (sink reached / failed / blocked): flip to the
       // aggregate terminal status as the pre-graph code did.
-      draft.status = committedStatus;
+      draft.status = finalStatus;
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
-        status: stayingLive
+        status: stayingLive || handOff
           ? "running"
-          : committedStatus === "complete"
+          : finalStatus === "complete" || finalStatus === "cancelled"
             ? "idle"
-            : committedStatus === "blocked"
+            : finalStatus === "blocked"
               ? "blocked"
               : "failed",
         lastAction: advancing
           ? "direct_run_wave_advanced"
           : relaunching
             ? "direct_run_node_retried"
-            : "direct_run_finalized",
+            : handOff
+              ? "direct_queue_handoff"
+              : "direct_run_finalized",
         updatedAt: timestamp,
       };
       draft.updatedAt = timestamp;
     },
   });
+
+  if (handOff) {
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId,
+      type: "direct_run.queue_handoff",
+      message: "Direct chat pass settled; its queued messages start the next pass",
+      payload: { attemptIds: settled.map((s) => s.attempt.id) },
+    }).catch(() => undefined);
+    await handOffDirectChatQueue(runId);
+    return;
+  }
 
   // RELAUNCH: a bounded per-node retry — re-run the unsatisfied node(s) IN PLACE
   // at the SAME layer (not a graph advance). The commit above left the run
@@ -12216,16 +12284,63 @@ async function queuedTypedSkillCommand(run: RunState, messages: readonly HumanRu
   return typed.some((message) => runsSkill(message.message.trim(), skillNames));
 }
 
+/** The same routing as a message sent to a finished direct chat
+ *  (addRunMessage): work the direct worker cannot serve, a skill the user
+ *  typed, or "always verify edits" goes to the manager. */
+async function queuedDirectInputNeedsManager(run: RunState, queued: readonly HumanRunMessage[]): Promise<boolean> {
+  return (
+    (await queuedTypedSkillCommand(run, queued)) ||
+    queued.some((message) => followUpNeedsManager(message.message)) ||
+    (await loadSettings()).coraAlwaysVerifyEdits === true
+  );
+}
+
+function isFinishedDirectChat(run: RunState): boolean {
+  return run.executionMode === "direct" && !run.automationId && !run.workflow && isTerminalRunStatus(run.status);
+}
+
+/**
+ * A finished direct chat's queue: the next pass, or the manager for input the
+ * direct lane cannot serve. Both commits re-check the run, so two callers
+ * racing on one queue start it once (the loser's claim finds nothing and
+ * throws QUEUED_DIRECT_MESSAGE_GONE).
+ */
+async function startFinishedDirectChatQueue(run: RunState, queued: readonly HumanRunMessage[]): Promise<RunState> {
+  if (await queuedDirectInputNeedsManager(run, queued)) {
+    // Queued input the direct worker cannot serve (a typed skill, delegation,
+    // a pick-first gate, always-verify): the chat moves to the manager, as
+    // addRunMessage does for a follow-up typed into a finished direct chat.
+    return escalateDirectChatForQueuedInput(run, { reason: "queued_input_needs_manager" });
+  }
+  return addDirectIteration({
+    runId: run.id,
+    prompt: renderBundledManagerInput([...queued]),
+    model: await directChatPassModel(run),
+    effort: run.chatEffort ?? "medium",
+    queuedMessageIds: queued.map((message) => message.id),
+    access: "full",
+    freshPass: true,
+  });
+}
+
 /** Hand a finished direct chat with queued input to the manager, which takes
  *  the queue on its next turn. */
-async function escalateDirectChatForQueuedInput(run: RunState): Promise<RunState> {
+async function escalateDirectChatForQueuedInput(
+  run: RunState,
+  options?: { fromHandOff?: boolean; reason?: string },
+): Promise<RunState> {
   let escalated = false;
   const updated = await commitRunChange(run, {
     type: "run.escalated_to_manager",
-    message: "Cora's manager takes over this chat for a skill the user typed",
-    payload: { reason: "typed_skill_command" },
+    message: "Cora's manager takes over this chat for queued messages the direct lane cannot serve",
+    payload: { reason: options?.reason ?? "typed_skill_command" },
     mutate: (draft, timestamp) => {
-      if (draft.executionMode !== "direct" || !isTerminalRunStatus(draft.status)) return false;
+      if (draft.executionMode !== "direct") return false;
+      // A pass hand-off keeps the run "running" with no worker live.
+      const settled = options?.fromHandOff
+        ? draft.status === "running" && !draft.workerAttempts.some((attempt) => !DIRECT_ATTEMPT_TERMINAL.has(attempt.status))
+        : isTerminalRunStatus(draft.status);
+      if (!settled) return false;
       if (queuedManagerInputMessages(draft).length === 0) return false;
       escalated = true;
       draft.executionMode = "managed";
@@ -12265,33 +12380,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     return requireRun(run.id);
   }
   const queuedDirectMessages = queuedManagerInputMessages(run);
-  if (
-    run.executionMode === "direct" &&
-    !run.automationId &&
-    isTerminalRunStatus(run.status) &&
-    queuedDirectMessages.length > 0 &&
-    (await queuedTypedSkillCommand(run, queuedDirectMessages))
-  ) {
-    // A skill the user typed while the direct worker ran: only the manager's
-    // Pi session runs skills, so the chat moves to it (as addRunMessage does
-    // for a follow-up typed into a finished direct chat).
-    return escalateDirectChatForQueuedInput(run);
-  }
-  if (
-    run.executionMode === "direct" &&
-    !run.automationId &&
-    isTerminalRunStatus(run.status) &&
-    queuedDirectMessages.length > 0
-  ) {
-    return addDirectIteration({
-      runId: run.id,
-      prompt: renderBundledManagerInput(queuedDirectMessages),
-      model: await directChatPassModel(run),
-      effort: run.chatEffort ?? "medium",
-      queuedMessageIds: queuedDirectMessages.map((message) => message.id),
-      access: "full",
-      freshPass: true,
-    });
+  // A paused direct chat resumes below: its pass settles and the hand-off
+  // sends the queue (finalizeDirectRun).
+  if (isFinishedDirectChat(run) && queuedDirectMessages.length > 0) {
+    return startFinishedDirectChatQueue(run, queuedDirectMessages);
   }
   if (run.managerTurnRecovery) {
     if (run.managerTurnRecovery.state === "resuming") return run;
@@ -13125,6 +13217,31 @@ export async function addRunMessage(
     // will claim the message itself.
     scheduleQueuedSteeringFollowup(updated);
   }
+  // The direct chat finished between the first read above and this commit
+  // (its settle saw an empty queue), so no pass or hand-off will read this
+  // message: the queue starts the next pass, as Resume does.
+  if (input.author === "user" && input.kind === "note" && !input.skipDirectDispatch && isFinishedDirectChat(updated)) {
+    const latest = await requireRun(updated.id);
+    const queued = queuedManagerInputMessages(latest);
+    if (isFinishedDirectChat(latest) && queued.some((entry) => entry.id === messageId)) {
+      try {
+        return await startFinishedDirectChatQueue(latest, queued);
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        // Another send or Send now started the queue first.
+        if (error === QUEUED_DIRECT_MESSAGE_GONE) return requireRun(updated.id);
+        // The message is recorded; its queue row keeps Send now for a retry.
+        await appendEvent({
+          workspaceId: updated.workspaceId,
+          runId: updated.id,
+          type: "run.auto_resume_failed",
+          message: `Starting the next pass after a message failed: ${error}`,
+          payload: { messageId, error },
+        }).catch(() => undefined);
+        return requireRun(updated.id);
+      }
+    }
+  }
   // A paused run has no manager turn to queue behind, so neither branch above
   // fires and the message would sit unread until the user pressed Resume.
   // Sending IS resuming — see scheduleResumeForUserMessage for what that
@@ -13262,7 +13379,10 @@ async function interruptForSendNow(runId: string): Promise<void> {
 export async function deliverQueuedMessagesNow(runId: string): Promise<RunState> {
   const run = await requireRun(runId);
   if (run.executionMode === "direct") {
-    throw new Error("Direct runs deliver messages through their loop driver.");
+    if (run.automationId || run.workflow) {
+      throw new Error("A Loom or workflow run takes messages through its own driver.");
+    }
+    return deliverDirectChatQueueNow(run);
   }
   // The queue emptied in the meantime: the scheduler already claimed it, which
   // is what the user asked for, so this is not an error.
@@ -13310,6 +13430,136 @@ export async function deliverQueuedMessagesNow(runId: string): Promise<RunState>
       }).catch(() => undefined);
     });
   return run;
+}
+
+/**
+ * Send now in a direct chat. Its turn is one worker, so the turn stops by
+ * stopping that worker; the pass then settles as stopped and finalizeDirectRun
+ * hands the queue to the next pass (handOffDirectChatQueue). The stopped
+ * worker's input was delivered and its edits stay; each queued message is
+ * claimed once, by that next pass.
+ */
+async function deliverDirectChatQueueNow(run: RunState): Promise<RunState> {
+  if (queuedManagerInputMessages(run).length === 0) return run;
+  if (run.status === "blocked") {
+    throw new Error("Cora is waiting for your answer. Queued messages are delivered with it.");
+  }
+  // A paused or finished chat has no turn to stop: resuming it sends the queue.
+  if (run.status === "paused" || isTerminalRunStatus(run.status)) return resumeRun({ runId: run.id });
+  // Only a worker still at work is stopped. One already finishing has its
+  // answer: it settles, and the hand-off sends the queue right after.
+  const live = run.workerAttempts.filter((attempt) => DIRECT_SEND_NOW_STOPPABLE.has(attempt.status));
+  if (live.length === 0) return run;
+  await appendEvent({
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    type: "run.queued_flush_requested",
+    message: "User asked for queued messages to be delivered now",
+    payload: { conversationEpoch: conversationEpoch(run), attemptIds: live.map((attempt) => attempt.id) },
+  }).catch(() => undefined);
+  for (const attempt of live) await stopWorkerAttempt(run.id, attempt.id, { sendNow: true });
+  return requireRun(run.id);
+}
+
+const DIRECT_SEND_NOW_STOPPABLE = new Set<WorkerAttemptStatus>(["prompt_ready", "launching", "running"]);
+
+/**
+ * The next pass of a direct chat, carrying every message queued during the
+ * pass that just settled. finalizeDirectRun keeps the run "running" when it
+ * owes this, so the chat never reads as finished (or failed, after Send now)
+ * between the two passes.
+ */
+async function handOffDirectChatQueue(runId: string, depth = 0): Promise<void> {
+  let claimed = false;
+  try {
+    const run = await requireRun(runId);
+    if (run.status !== "running") return;
+    if (run.workerAttempts.some((attempt) => !DIRECT_ATTEMPT_TERMINAL.has(attempt.status))) return;
+    const queued = queuedManagerInputMessages(run);
+    if (queued.length === 0) {
+      await endDirectChatHandOff(run.id, depth);
+      return;
+    }
+    if (await queuedDirectInputNeedsManager(run, queued)) {
+      const escalated = await escalateDirectChatForQueuedInput(run, { fromHandOff: true, reason: "queued_input_needs_manager" });
+      // Taken back before the manager could take it: the chat ends.
+      if (escalated.executionMode === "direct") await endDirectChatHandOff(run.id, depth);
+      return;
+    }
+    claimed = true;
+    await addDirectIteration({
+      runId: run.id,
+      prompt: renderBundledManagerInput(queued),
+      model: await directChatPassModel(run),
+      effort: run.chatEffort ?? "medium",
+      queuedMessageIds: queued.map((message) => message.id),
+      access: "full",
+      freshPass: true,
+    });
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    // Unqueued between the read and the claim: nothing is left to send.
+    if (error === QUEUED_DIRECT_MESSAGE_GONE) {
+      await endDirectChatHandOff(runId, depth).catch(() => undefined);
+      return;
+    }
+    const run = await getRun(runId);
+    if (!run) return;
+    await commitRunChange(run, {
+      type: "run.queued_flush_failed",
+      message: `Starting the next pass with the queued messages failed: ${error}`,
+      payload: { error, claimed },
+      mutate: (draft, timestamp) => {
+        if (draft.status !== "running") return false;
+        if (draft.workerAttempts.some((attempt) => !DIRECT_ATTEMPT_TERMINAL.has(attempt.status))) return false;
+        draft.status = "failed";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+          status: "failed",
+          lastAction: "direct_run_finalized",
+          stopReason: error,
+          updatedAt: timestamp,
+        };
+        // Said in the chat, not only in the run's stop reason.
+        draft.humanMessages.push({
+          id: makeId("msg"),
+          runId: draft.id,
+          author: "spark",
+          kind: "note",
+          message: `I could not start on your next message: ${error}`,
+          createdAt: timestamp,
+        });
+        draft.updatedAt = timestamp;
+      },
+    }).catch(() => undefined);
+  }
+}
+
+/** A hand-off found nothing left to send (taken back meanwhile): the chat ends. */
+async function endDirectChatHandOff(runId: string, depth: number): Promise<void> {
+  const run = await requireRun(runId);
+  const ended = await commitRunChange(run, {
+    type: "direct_run.queue_handoff_empty",
+    message: "Direct chat pass ended; its queued messages were taken back",
+    payload: {},
+    mutate: (draft, timestamp) => {
+      if (draft.status !== "running") return false;
+      if (draft.workerAttempts.some((attempt) => !DIRECT_ATTEMPT_TERMINAL.has(attempt.status))) return false;
+      if (queuedManagerInputMessages(draft).length > 0) return false;
+      draft.status = "complete";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "idle",
+        lastAction: "direct_run_finalized",
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+  // A message queued meanwhile: hand off again (bounded) rather than leave it.
+  if (ended.status === "running" && queuedManagerInputMessages(ended).length > 0 && depth < 3) {
+    await handOffDirectChatQueue(runId, depth + 1);
+  }
 }
 
 // Per-run task chain. Checkpoint creation parents each new git commit to the
@@ -21882,7 +22132,10 @@ async function runFakePiWorkerSession({
   paths: WorkerArtifactPaths;
   command: string;
 }): Promise<{ exitCode: number; error?: string }> {
-  const delay = Math.min(15 * 60_000, Number(/FAKE_DELAY_MS=(\d+)/.exec(task.description)?.[1] ?? 300));
+  // The last one wins: a direct chat's later turn carries the earlier
+  // requests (and their delays) as context above its own.
+  const delays = [...task.description.matchAll(/FAKE_DELAY_MS=(\d+)/g)];
+  const delay = Math.min(15 * 60_000, Number(delays.at(-1)?.[1] ?? 300));
   if (!(await markAttemptRunning(run.id, task.id, attemptId, new Date().toISOString()))) {
     return { exitCode: 1, error: "Fake Pi worker was cancelled before it started." };
   }

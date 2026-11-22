@@ -11,6 +11,7 @@ import {
   buildChatTimeline,
   findOpenQuestion,
   isToolRowTicking,
+  offersSendNow,
   runtimeLabel,
   resumedByMessageId,
   stepStatusColor,
@@ -424,6 +425,7 @@ export default function ChatConversation({
                         completionVerdict={completionVerdict}
                         runBlocked={run.status === "blocked"}
                         failureCardShown={retryableCallId !== null}
+                        sendNowOffered={offersSendNow(run)}
                         findCurrent={context.findCurrentIndex === index}
                       />
                     ) : item?.kind === "tool" ? (
@@ -933,6 +935,7 @@ const MessageTurn = React.memo(function MessageTurn({
   completionVerdict,
   runBlocked,
   failureCardShown,
+  sendNowOffered,
   findCurrent,
 }: {
   item: MessageItem;
@@ -944,6 +947,8 @@ const MessageTurn = React.memo(function MessageTurn({
   runBlocked: boolean;
   /** The run is parked on a failed turn whose card offers Retry. */
   failureCardShown: boolean;
+  /** offersSendNow: a Loom or workflow takes messages through its own driver. */
+  sendNowOffered: boolean;
   /** Find landed on this message, so a collapsed one must open. */
   findCurrent: boolean;
 }) {
@@ -1017,7 +1022,7 @@ const MessageTurn = React.memo(function MessageTurn({
               the queue with it; Send now there would only race that answer. */}
           {!failureCardShown && (
             <>
-              {queued && !runBlocked && <SendNowControl runId={runId} />}
+              {queued && !runBlocked && sendNowOffered && <SendNowControl runId={runId} />}
               {queued && runBlocked && (
                 <span style={USER_TIME_STYLE}>Delivered with your answer</span>
               )}
