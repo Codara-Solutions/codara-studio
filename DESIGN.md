@@ -937,6 +937,30 @@ the worker view reuses.
 - Colour means state, as in the chat: running, done and failed use the status
   tokens; nothing else in the bar is tinted.
 
+## Direct chats (2026-11)
+
+**Chosen:** a direct chat (one Pi worker does each turn, no manager) reads as
+one plain chat with Pi. Etienne asked for it on 2026-11-22: Cora should be "a
+UI interface of PI basically! made better but light weight".
+
+**Rules it implies:**
+
+- Each turn is drawn as Cora's own turn under the message it answers, with the
+  same rows and fold as a managed turn ("Working for Ns", then "Worked for
+  Ns"). No step card, no "Step N", no generated title or goal, no worker row.
+- One quiet line under the turn keeps the facts: model, changed files with
+  +/- (each opens its diff), and Details, which goes inside the worker for its
+  brief, report and raw output.
+- A stopped or failed turn stays open and says so ("Stopped after 4s").
+- The direct worker is not an agent beside Cora: no agents rail, no worker
+  count under the composer. A Loom run is direct too but keeps both.
+- A message sent mid-turn queues. Send now stops the turn and starts the next
+  one with every queued message, each sent once; without it, the queue goes
+  on its own when the turn ends. A control that can only fail is not offered.
+- A turn is named after its message, wherever a name shows (Runs, the worker
+  bar).
+- The chat's changed files share one diff tab, even once a split pinned it.
+
 ## Cora agents rail (2026-11)
 
 **Chosen:** option 2, "Collapsible agents rail". Etienne picked it on

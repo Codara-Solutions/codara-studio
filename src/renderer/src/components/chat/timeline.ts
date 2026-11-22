@@ -125,6 +125,20 @@ export function isAutomationRun(run: RunState): boolean {
   return run.executionMode === "direct" && Boolean(run.automationId);
 }
 
+/**
+ * A direct chat: one Pi worker does each turn and no manager runs. It reads
+ * as a plain chat (DESIGN.md, "Direct chats"): no step cards, no rail, its
+ * worker never listed beside Cora. A Loom run is direct too, but keeps them.
+ */
+export function isDirectChatRun(run: RunState): boolean {
+  return run.executionMode === "direct" && !run.automationId;
+}
+
+/** The workers the chat's agents rail lists: none for a direct chat. */
+export function railWorkers(run: RunState): ChatWorker[] {
+  return isDirectChatRun(run) ? [] : listChatWorkers(run);
+}
+
 // A queued task has no attempt metadata yet, so derive its launch target.
 function pendingAttemptModel(task: WorkerTask, modelOptions: WorkerModelOptions): string {
   return workerModelLabel(
@@ -330,6 +344,8 @@ export type ChatTimelineItem =
       status: StepStatus;
       workers: ChatWorker[];
       at: string;
+      /** A direct chat's turn: drawn as Cora's work for the message, never as a step card. */
+      direct?: { runId: string };
     };
 
 /**
@@ -546,6 +562,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   }
 
   const orderedSteps = [...run.steps].sort((a, b) => a.index - b.index);
+  const directChat = isDirectChatRun(run);
   orderedSteps.forEach((step, i) => {
     const stepWorkers: ChatWorker[] = workers
       .filter((worker) => worker.task.stepId === step.id)
@@ -559,6 +576,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       status: step.status,
       workers: stepWorkers,
       at: step.createdAt,
+      ...(directChat ? { direct: { runId: run.id } } : {}),
     });
   });
 

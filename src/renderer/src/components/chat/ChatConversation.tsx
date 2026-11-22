@@ -50,13 +50,14 @@ import {
 } from "../../lib/useRunExecutionRecord";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { useEarlyListReveal } from "./list-reveal";
+const DirectTurnWork = React.lazy(() => import("./DirectTurn"));
 
 // The conversation stream for one chat. Renders human messages, Cora's own
 // model/context activity, and worker steps as one ordered chat timeline.
 
 type MessageItem = Extract<ChatTimelineItem, { kind: "message" }>;
-type ToolItem = Extract<ChatTimelineItem, { kind: "tool" }>;
-type StepItem = Extract<ChatTimelineItem, { kind: "step" }>;
+export type ToolItem = Extract<ChatTimelineItem, { kind: "tool" }>;
+export type StepItem = Extract<ChatTimelineItem, { kind: "step" }>;
 type ActivityGroupItem = {
   kind: "activity-group";
   id: string;
@@ -94,11 +95,11 @@ const WorkerWaitContext = React.createContext<
 // Goes inside a worker: the panel swaps this conversation for the worker's own
 // chat. Takes the row's logical worker id. A context for the same reason as
 // WorkerWaitContext: worker rows sit inside memoized step cards.
-const WorkerOpenContext = React.createContext<((workerId: string) => void) | null>(null);
+export const WorkerOpenContext = React.createContext<((workerId: string) => void) | null>(null);
 
 // The standalone worker rows folded into step cards (see foldStepWorkers),
 // keyed by logical worker id. A context for the same reason as above.
-const StepWorkerRowsContext = React.createContext<Map<string, ToolItem>>(new Map());
+export const StepWorkerRowsContext = React.createContext<Map<string, ToolItem>>(new Map());
 
 export default function ChatConversation({
   run,
@@ -652,6 +653,8 @@ function conversationRowSearchText(
 ): string {
   if (item.kind === "message") return item.text;
   if (item.kind === "step") {
+    // A direct turn shows none of its step's title or goal.
+    if (item.direct) return "";
     return [item.title, item.goal, ...item.workers.map((worker) => worker.title)].join("\n");
   }
   const tools = item.kind === "activity-group" ? item.items : [item];
@@ -2297,6 +2300,18 @@ function fileUrl(path: string): string {
 // dot, sentence-case title with the index as plain muted text, inline goal,
 // and a right-aligned worker progress. No card, no chips.
 const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
+  // Its own chunk, shared with the worker view: only direct chats load it.
+  if (item.direct) {
+    return (
+      <React.Suspense fallback={null}>
+        <DirectTurnWork item={item} runId={item.direct.runId} />
+      </React.Suspense>
+    );
+  }
+  return <ManagedStepCard item={item} />;
+});
+
+const ManagedStepCard = React.memo(function ManagedStepCard({ item }: { item: StepItem }) {
   const live =
     item.status === "running" ||
     item.status === "planning" ||
@@ -2813,7 +2828,7 @@ function AssistantSettledTurn({
 // must survive that, or a row would change height as it scrolls back in.
 const rememberedOpen = new Set<string>();
 
-function useRememberedOpen(key: string): [boolean, (open: boolean) => void] {
+export function useRememberedOpen(key: string): [boolean, (open: boolean) => void] {
   const [open, setOpen] = useState(() => rememberedOpen.has(key));
   const set = useCallback((next: boolean) => {
     if (next) rememberedOpen.add(key);
@@ -3936,7 +3951,7 @@ function SparkMark() {
 // One Cora turn. Assistant prose sits directly on the conversation canvas;
 // only user turns use message bubbles. Status tags remain available for live,
 // blocked, and repeated turns without adding a permanent speaker chrome row.
-function SparkTurn({
+export function SparkTurn({
   children,
   tag,
   repeatCount,

@@ -5,10 +5,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// A direct chat: one Pi worker does each turn, no manager. Driven with
-// scripted workers (CODARA_FAKE_PI_WORKERS): a second message sent mid-run
-// goes with Send now, and Raw output inside the worker view steps back one
-// level per Esc.
+// A direct chat (DESIGN.md, "Direct chats"): one Pi worker does each turn and
+// the chat reads as a plain chat. Driven with scripted workers
+// (CODARA_FAKE_PI_WORKERS): a second message sent mid-run goes with Send now,
+// Raw output inside the worker view steps back one level per Esc, and the
+// chat's changed files share one diff tab.
 // SPARK_DIRECT_CHAT_SHOTS=<dir> also saves the proof screenshots.
 
 async function shot(page: Page, path: string): Promise<void> {
@@ -16,7 +17,7 @@ async function shot(page: Page, path: string): Promise<void> {
   await page.getByTestId("cora-panel").screenshot({ path });
 }
 
-test("a direct chat: Send now mid-turn, and Back from raw output", async ({}, testInfo) => {
+test("a direct chat reads as one chat: Send now, raw output Back, one diff tab", async ({}, testInfo) => {
   test.setTimeout(120_000);
   const root = await mkdtemp(join(tmpdir(), "codara-direct-chat-"));
   const userDataDir = join(root, "user-data");
@@ -77,9 +78,15 @@ test("a direct chat: Send now mid-turn, and Back from raw output", async ({}, te
     await page.getByRole("button", { name: "Open chat history" }).last().dispatchEvent("click");
     await page.getByRole("option").filter({ hasText: "Rename the counter" }).dispatchEvent("click");
     const panel = page.getByTestId("cora-panel");
-    const runState = () => page.evaluate((id) => window.spark.orchestration.getRun(id), run.id);
-    await expect.poll(async () => (await runState())?.workerAttempts[0]?.status, { timeout: 15_000 }).toBe("running");
-    await expect(panel.locator("[data-worker-row]").first()).toBeVisible({ timeout: 15_000 });
+    const turns = panel.locator("[data-direct-turn]");
+    await expect(turns.first()).toHaveAttribute("data-direct-state", "running", { timeout: 15_000 });
+    await expect(turns.first()).toContainText("The readme names the project.");
+
+    // No step card, no generated title or goal, no worker row, no rail.
+    await expect(panel.getByText(/^Step \d/)).toHaveCount(0);
+    await expect(panel.getByText("Execute the instruction directly")).toHaveCount(0);
+    await expect(panel.locator(".cora-step-worker-open")).toHaveCount(0);
+    await expect(page.getByRole("toolbar", { name: /^Agents: / })).toHaveCount(0);
 
     // A second message mid-run waits, and Send now stops the turn and sends it.
     const composer = page.getByRole("textbox", { name: "Message Cora" }).last();
@@ -87,51 +94,60 @@ test("a direct chat: Send now mid-turn, and Back from raw output", async ({}, te
     await composer.press("Enter");
     const sendNow = panel.getByRole("button", { name: "Send queued messages now" });
     await expect(sendNow).toBeVisible({ timeout: 10_000 });
-    if (proof) await shot(page, join(shots, "queued-1280-dark.png"));
+    if (proof) await shot(page, join(shots, "after-queued-1280-dark.png"));
     await sendNow.click();
-    await expect.poll(async () => {
-      const state = await runState();
-      return `${state?.status} ${state?.workerAttempts.map((attempt) => attempt.status).join(",")}`;
-    }, { timeout: 20_000 }).toBe("complete cancelled,succeeded");
-    const settled = await runState();
-    expect(settled?.workerAttempts[0]?.interruptedBy).toBe("send_now");
-    const sent = settled?.humanMessages.filter((message) => message.message.startsWith("Also cover the empty list."));
-    expect(sent?.map((message) => message.deliveryState)).toEqual(["acknowledged"]);
-    await expect(sendNow).toHaveCount(0);
+    await expect(turns).toHaveCount(2, { timeout: 20_000 });
+    await expect(turns.first()).toHaveAttribute("data-direct-state", "stopped");
+    await expect(turns.nth(1)).toHaveAttribute("data-direct-state", "done", { timeout: 20_000 });
     await expect(panel.getByText("Also cover the empty list. FAKE_DELAY_MS=300", { exact: true })).toHaveCount(1);
-    if (proof) await shot(page, join(shots, "sent-1280-dark.png"));
+    await expect(sendNow).toHaveCount(0);
+    const status = await page.evaluate((id) => window.spark.orchestration.getRun(id).then((r) => r?.status), run.id);
+    expect(status).toBe("complete");
+    await expect(turns.nth(1)).toContainText("Sol");
+    await expect(turns.nth(1).getByRole("button", { name: "Open changes for src/example.ts" })).toBeVisible({ timeout: 10_000 });
 
-    // Raw output is one level deeper inside the worker view, and each Esc
-    // climbs one level with focus kept in the chat.
-    // Settled step cards are folded: open the second turn's card.
-    await panel.getByRole("button", { name: /^Step 2/ }).click();
-    const row = panel.locator("[data-worker-row]").last();
-    const rowId = await row.getAttribute("data-worker-row");
-    await row.click();
+    if (proof) {
+      for (const [width, height] of [[1280, 900], [720, 900]] as const) {
+        await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]?.setSize(size[0], size[1]), [width, height]);
+        for (const [theme, label] of [["codara-classic", "dark"], ["codara-daylight", "light"]] as const) {
+          await page.evaluate((value) => window.spark.preferences.set("theme", value), theme);
+          await shot(page, join(shots, `after-chat-${width}-${label}.png`));
+        }
+      }
+      await page.evaluate(() => window.spark.preferences.set("theme", "codara-classic"));
+      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1280, 900));
+    }
+
+    // Details goes inside the worker; Raw output is one level deeper, and
+    // each Esc climbs one level with focus kept in the chat.
+    await turns.nth(1).getByRole("button", { name: /^Details/ }).click();
     const bar = page.getByRole("navigation", { name: "Worker" });
     await expect(bar).toBeVisible();
     await page.getByRole("button", { name: "More worker actions" }).click();
     await page.getByRole("menuitem", { name: /Raw terminal output/ }).click();
     await expect(panel.locator("[data-worker-raw-log]")).toBeVisible();
     await expect(bar.getByRole("button", { name: /^Back to (?!Main)/ })).toBeVisible();
-    if (proof) {
-      for (const [width, height] of [[1280, 900], [720, 900]] as const) {
-        await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]?.setSize(size[0], size[1]), [width, height]);
-        for (const [theme, label] of [["codara-classic", "dark"], ["codara-daylight", "light"]] as const) {
-          await page.evaluate((value) => window.spark.preferences.set("theme", value), theme);
-          await shot(page, join(shots, `raw-output-${width}-${label}.png`));
-        }
-      }
-      await page.evaluate(() => window.spark.preferences.set("theme", "codara-classic"));
-      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1280, 900));
-    }
+    if (proof) await shot(page, join(shots, "after-raw-output-1280-dark.png"));
     await page.keyboard.press("Escape");
     await expect(panel.locator("[data-worker-raw-log]")).toHaveCount(0);
     await expect(bar).toBeVisible();
     expect(await panel.evaluate((node) => node.contains(document.activeElement))).toBe(true);
     await page.keyboard.press("Escape");
     await expect(bar).toHaveCount(0);
-    await expect(panel.locator(`[data-worker-row="${rowId}"]`)).toBeFocused();
+    await expect(turns.nth(1).getByRole("button", { name: /^Details/ })).toBeFocused();
+
+    // The chat's changed files share one diff tab, even once a split or a
+    // double-click pinned it.
+    const diffTabs = page.getByRole("tab", { name: /\(Working Tree\)/ });
+    await turns.nth(1).getByRole("button", { name: "Open changes for src/example.ts" }).click();
+    await expect(diffTabs).toHaveCount(1);
+    await diffTabs.first().dblclick();
+    await page.getByRole("tab", { name: "Cora" }).last().dispatchEvent("click");
+    await page.evaluate(() =>
+      window.dispatchEvent(new CustomEvent("spark:open-diff", { detail: { path: "README.md" } })),
+    );
+    await expect(diffTabs).toHaveCount(1);
+    await expect(diffTabs.first()).toContainText("README.md");
   } finally {
     await app?.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true }).catch(() => undefined);

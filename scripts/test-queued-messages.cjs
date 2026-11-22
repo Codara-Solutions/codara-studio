@@ -1769,6 +1769,9 @@ async function main() {
     secondTask?.description.slice(-200));
   const deliveredDirect = directAfter.humanMessages.find((entry) => entry.id === queuedDirect?.id);
   check("the queued message is acknowledged", deliveredDirect?.deliveryState === "acknowledged", deliveredDirect?.deliveryState);
+  check("the next pass is named after its message, not 'Cora follow-up N'",
+    directAfter.steps.length === 2 && directAfter.steps[1].title.startsWith("Also cover the empty list"),
+    JSON.stringify(directAfter.steps.map((entry) => entry.title)));
   check("no failure note was left for the stopped pass",
     !directAfter.humanMessages.some((entry) => entry.author !== "user" && /fail/i.test(entry.message ?? "")),
     JSON.stringify(directAfter.humanMessages.filter((entry) => entry.author !== "user").map((entry) => entry.message)));

@@ -1606,7 +1606,7 @@ export interface UseTabsApi {
   openDiffTab: (
     path: string,
     staged: boolean,
-    options?: { focus?: boolean; pin?: boolean },
+    options?: { focus?: boolean; pin?: boolean; reuse?: TabId | null },
   ) => TabId;
   // Open (or focus) a file's diff within a specific commit — a read-only
   // workbench tab keyed by (path, commitHash), opened from CommitDetail.
@@ -3948,7 +3948,7 @@ export function useTabs(
     (
       path: string,
       staged: boolean,
-      options?: { focus?: boolean; pin?: boolean },
+      options?: { focus?: boolean; pin?: boolean; reuse?: TabId | null },
     ): TabId => {
       let outId: TabId | null = null;
       setTabs((curr) => {
@@ -3956,6 +3956,21 @@ export function useTabs(
           (t): t is DiffTab =>
             t.kind === "diff" && !t.commitHash && t.path === path && t.staged === staged,
         );
+        // The tab this caller opened last (the chat's changed files): swap
+        // its file even after a split pinned it, so the chat never piles up
+        // a pill per click. Its place in the layout and pin state stay.
+        const own = !existing && options?.reuse
+          ? curr.find((t): t is DiffTab => t.id === options.reuse && t.kind === "diff" && !t.review)
+          : undefined;
+        if (own) {
+          outId = own.id;
+          if (options?.focus !== false) setActiveId(own.id);
+          return curr.map((t) =>
+            t.id === own.id && t.kind === "diff"
+              ? { ...t, title: basename(path), path, staged, commitHash: undefined }
+              : t,
+          );
+        }
         if (existing) {
           outId = existing.id;
           if (options?.focus !== false) setActiveId(existing.id);

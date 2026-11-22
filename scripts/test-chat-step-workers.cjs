@@ -23,8 +23,14 @@ const read = (...segments) => fs.readFileSync(path.join(ROOT, ...segments), "utf
 const conversation = read("src/renderer/src/components/chat/ChatConversation.tsx");
 const panel = read("src/renderer/src/components/chat/ChatPanel.tsx");
 
-const stepCard = conversation.match(/const StepCard = React\.memo\(function StepCard[\s\S]*?\n\}\);/);
-assert.ok(stepCard, "StepCard not found");
+// A direct chat's pass is Cora's own turn, never a step card (DESIGN.md,
+// "Direct chats"); every other step keeps the card below.
+assert.match(
+  conversation,
+  /const StepCard = React\.memo\(function StepCard\(\{ item \}: \{ item: StepItem \}\) \{[\s\S]{0,200}?if \(item\.direct\) \{[\s\S]{0,120}?<DirectTurnWork item=\{item\} runId=\{item\.direct\.runId\} \/>[\s\S]{0,80}?\}\s*return <ManagedStepCard item=\{item\} \/>;/,
+);
+const stepCard = conversation.match(/const ManagedStepCard = React\.memo\(function ManagedStepCard[\s\S]*?\n\}\);/);
+assert.ok(stepCard, "ManagedStepCard not found");
 assert.match(stepCard[0], /const \[open, setOpen\] = useState\(live\);/);
 assert.match(
   stepCard[0],

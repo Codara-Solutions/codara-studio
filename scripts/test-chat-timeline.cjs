@@ -1820,6 +1820,69 @@ async function main() {
       "load normalization must not re-synthesize the suppressed options");
   });
 
+  // A direct chat (DESIGN.md, "Direct chats"): two messages, each answered
+  // by one direct pass. The timeline reads message, work, message, work; each
+  // pass is marked direct so it draws as Cora's turn, not a step card; and
+  // the rail lists nothing, while a managed chat or a Loom keeps its rail.
+  const directChat = (extra = {}) => {
+    const passTask = (n) => task(`task-d${n}`, {
+      stepId: `step-d${n}`,
+      title: n === 1 ? "Rename the counter" : "Also cover the empty list",
+      runtimePreference: "pi",
+      status: "accepted",
+      createdAt: at(30 + n * 10),
+    });
+    const passAttempt = (n) => attempt(`attempt-d${n}`, `task-d${n}`, {
+      runtime: "pi",
+      model: "gpt-5.6-sol",
+      status: "succeeded",
+      exitCode: 0,
+      startedAt: at(31 + n * 10),
+      finishedAt: at(35 + n * 10),
+    });
+    const passStep = (n) => ({
+      ...step(`step-d${n}`, n, n === 1 ? "Rename the counter" : "Also cover the empty list", "completed", [`task-d${n}`]),
+      goal: "Execute the instruction directly and write an evidence-backed final report.",
+      createdAt: at(31 + n * 10),
+    });
+    const message = (n, text) => ({
+      id: `msg-d${n}`, runId: "run-1", author: "user", kind: "note", message: text,
+      createdAt: at(30 + n * 10), deliveryState: "acknowledged",
+    });
+    return run([{ tasks: [passTask(1), passTask(2)], attempts: [passAttempt(1), passAttempt(2)] }], {
+      executionMode: "direct",
+      status: "complete",
+      steps: [passStep(1), passStep(2)],
+      humanMessages: [message(1, "Rename the counter"), message(2, "Also cover the empty list")],
+      ...extra,
+    });
+  };
+
+  test("a two-message direct chat reads message, work, message, work", () => {
+    const state = directChat();
+    assert.equal(T.isDirectChatRun(state), true);
+    const items = T.buildChatTimeline(state);
+    const flow = items
+      .filter((item) => item.kind === "step" || (item.kind === "message" && item.author === "user"))
+      .map((item) => (item.kind === "step" ? `work:${item.id}` : `user:${item.text ?? item.message}`));
+    assert.deepEqual(flow, ["user:Rename the counter", "work:step-d1", "user:Also cover the empty list", "work:step-d2"]);
+    for (const item of items.filter((entry) => entry.kind === "step")) {
+      assert.deepEqual(item.direct, { runId: "run-1" }, "a direct pass draws as Cora's turn");
+      assert.equal(item.workers.length, 1);
+    }
+  });
+
+  test("the agents rail is hidden for a direct chat and unchanged for a managed one", () => {
+    assert.deepEqual(T.railWorkers(directChat()), []);
+    const managed = directChat({ executionMode: undefined });
+    assert.equal(T.isDirectChatRun(managed), false);
+    assert.equal(T.railWorkers(managed).length, 2);
+    assert.equal(T.buildChatTimeline(managed).some((item) => item.kind === "step" && item.direct), false);
+    const loom = directChat({ automationId: "auto-1" });
+    assert.equal(T.isDirectChatRun(loom), false, "a Loom keeps its steps and rail");
+    assert.equal(T.railWorkers(loom).length, 2);
+  });
+
   console.log(`\n${passed} chat timeline contract tests passed`);
 }
 
