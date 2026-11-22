@@ -70,6 +70,7 @@ export type CommandId =
   | "worker.claudeSessions"
   | "worker.codexSessions"
   | "worker.grokSessions"
+  | "worker.piSessions"
   | "agent.cycleModel"
   | "agent.cycleEffort"
   | "agent.openModelPicker"
@@ -524,6 +525,12 @@ export const COMMANDS: Command[] = [
   {
     id: "worker.grokSessions",
     label: "Open Grok worker sessions…",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.piSessions",
+    label: "Open Pi worker sessions…",
     group: "Workers",
     defaultChords: [],
   },

@@ -128,6 +128,7 @@ import {
   sameWorkerMeta,
   savedLayoutHoldsWork,
   savedLayoutFilePaths,
+  savedLayoutTabs,
 } from "./tabs/useTabs";
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useAgentHibernation } from "./lib/useAgentHibernation";
@@ -214,6 +215,7 @@ import {
   sessionResumeLaunch,
   workspaceForSessionFolder,
 } from "./workers/session-resume";
+import { publishAntigravityLayouts } from "./workers/antigravity-panes";
 import { agentBrandColor, agentBrandRuntime } from "./lib/agent-brand";
 import { applyWorkspaceAccent } from "./lib/workspace-accent";
 import { useTheme } from "./theme/theme-context";
@@ -4420,6 +4422,16 @@ export default function App() {
   });
   const jumpSourcesRef = useRef(jumpSources);
   jumpSourcesRef.current = jumpSources;
+  // Every pane's tabs for the Antigravity restore guard: the loaded layouts,
+  // then the saved ones of workspaces not loaded yet.
+  publishAntigravityLayouts(() => {
+    const loaded = jumpSourcesRef.current().layouts;
+    const loadedIds = new Set(loaded.map((layout) => layout.workspaceId));
+    const saved = workspacesRef.current
+      .filter((workspace) => !loadedIds.has(workspace.id))
+      .map((workspace) => ({ tabs: savedLayoutTabs(workspace.id) }));
+    return [...loaded, ...saved];
+  });
   railWorkspaceHeldRef.current = (workspaceId, folders = []) => {
     if (!booted || workspaceId === activeId) return true;
     const layout =
@@ -4662,7 +4674,8 @@ export default function App() {
   const activeCwdRef = useRef<string | null>(activeWorkspace?.cwd ?? null);
   activeCwdRef.current = activeWorkspace?.cwd ?? null;
   const pendingReviewWorkspaceRef = useRef<string | null>(null);
-  const handleOpenDiffForPath = useCallback((absolutePath: string) => {
+  // Chat file links ('spark:open-diff') share one diff tab (useTabs keeps it).
+  const handleOpenDiffForPath = useCallback((absolutePath: string, fromChat = false) => {
     const cwd = activeCwdRef.current;
     if (!cwd || !absolutePath) return;
     const base = cwd.replace(/[\\/]+$/, "");
@@ -4670,7 +4683,7 @@ export default function App() {
     if (absolutePath.toLowerCase().startsWith(base.toLowerCase())) {
       rel = absolutePath.slice(base.length).replace(/^[\\/]+/, "");
     }
-    tabsRef.current.openDiffTab(rel.replace(/\\/g, "/"), false);
+    tabsRef.current.openDiffTab(rel.replace(/\\/g, "/"), false, fromChat ? { fromChat: true } : undefined);
   }, []);
 
   // Result cards use window events so the deeply nested chat renderer stays
@@ -4690,7 +4703,7 @@ export default function App() {
     };
     const openDiff = (event: Event) => {
       const path = (event as CustomEvent<{ path?: string }>).detail?.path;
-      if (path) handleOpenDiffForPath(path);
+      if (path) handleOpenDiffForPath(path, true);
     };
     // The Source Control header and the Markdown preview's notes bar open the review tab.
     const openReview = (event: Event) => {
@@ -5159,15 +5172,22 @@ export default function App() {
     [handleNewWorkerPane, resolveWorkerLaunchCwd],
   );
   const openPiWorker = useCallback(
-    () => launchNewWorkerTab(PI_LAUNCH_COMMAND),
-    [launchNewWorkerTab],
+    () => offerWorkerTab("pi", PI_LAUNCH_COMMAND),
+    [offerWorkerTab],
   );
   // The user's own `agy`, typed into a new tab's shell like `pi`; the tab is
   // named for it so it reads as Antigravity before the TUI has painted.
   const openAntigravityWorker = useCallback(() => {
-    tabsRef.current.newTerminalTab(resolveWorkerLaunchCwd() ?? undefined, ANTIGRAVITY_LAUNCH_COMMAND, {
-      title: "Antigravity",
-      color: agentBrandColor("antigravity"),
+    const cwd = resolveWorkerLaunchCwd();
+    offerWorkerSessions({
+      runtime: "antigravity",
+      cwd,
+      placement: "tab",
+      startNew: () =>
+        tabsRef.current.newTerminalTab(cwd ?? undefined, ANTIGRAVITY_LAUNCH_COMMAND, {
+          title: "Antigravity",
+          color: agentBrandColor("antigravity"),
+        }),
     });
   }, [resolveWorkerLaunchCwd]);
 
@@ -5180,11 +5200,12 @@ export default function App() {
   const launchSessionResume = useCallback((request: AgentSessionResumeRequest) => {
     const launch = (request.fork ? sessionForkLaunch : sessionResumeLaunch)(request, new Date().toISOString());
     if (!launch) return;
+    const title = request.title ?? (request.runtime === "antigravity" ? "Antigravity" : undefined);
     tabsRef.current.newTerminalTab(request.cwd, launch.command, {
       agentSession: launch.pointer,
       manualAgentRuntime: request.runtime,
       color: workerTabBrandColor(request.runtime),
-      ...(request.title ? { title: request.title } : {}),
+      ...(title ? { title } : {}),
     });
   }, []);
 
@@ -6258,6 +6279,7 @@ export default function App() {
       "worker.claudeSessions": () => offerWorkerPane("claude", CLAUDE_LAUNCH_COMMAND),
       "worker.codexSessions": () => offerWorkerPane("codex", CODEX_LAUNCH_COMMAND),
       "worker.grokSessions": () => offerWorkerPane("grok", GROK_LAUNCH_COMMAND),
+      "worker.piSessions": () => offerWorkerPane("pi", PI_LAUNCH_COMMAND),
       "tab.close": () => {
         if (!activeVisibleTabId) return;
         const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);

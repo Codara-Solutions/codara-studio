@@ -87,6 +87,37 @@ async function main() {
     assert.equal(cli.claimAntigravityContinue("pane-c", false), false, "a check took the free claim");
     assert.equal(cli.claimAntigravityContinue("pane-c"), true, "a released claim was not free again");
 
+    // Never --continue onto a conversation another pane names by id: agy's
+    // latest, overall or in the pane's folder, read from its summary table.
+    const home = path.join(dir, "home");
+    const agyDir = path.join(home, ".gemini", "antigravity-cli");
+    fs.mkdirSync(agyDir, { recursive: true });
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(path.join(agyDir, "conversation_summaries.db"));
+    db.exec(
+      "CREATE TABLE conversation_summaries (conversation_id text PRIMARY KEY, title text, preview text, step_count integer, last_modified_time datetime, workspace_uris text, parent_conversation_id text, nesting_depth integer)",
+    );
+    const add = db.prepare("INSERT INTO conversation_summaries VALUES (?, '', '', 1, ?, ?, '', 0)");
+    add.run("conv-latest", "2026-11-22 10:00:00+00:00", JSON.stringify(["file:///w"]));
+    add.run("conv-older", "2026-11-21 10:00:00+00:00", JSON.stringify(["file:///w"]));
+    db.close();
+    const realHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      assert.equal(cli.claimAntigravityContinue("pane-c", false, ["conv-latest"], "/w"), false, "the restart after the process died reopened a named conversation");
+      assert.equal(cli.claimAntigravityContinue("pane-c", true, ["conv-older"], "/w"), true);
+      cli.releaseAntigravityContinue("pane-c");
+      assert.equal(cli.claimAntigravityContinue("pane-d", true, ["conv-latest"], "/w"), false, "the restore reopened a named conversation");
+      assert.equal(cli.claimAntigravityContinue("pane-e"), false, "a refused take left the claim free for a later pane");
+      assert.equal(cli.claimAntigravityContinue("pane-d", false, ["conv-latest"], "/w"), false, "the refused pane continued into a named conversation");
+      assert.equal(cli.claimAntigravityContinue("pane-d", false, ["conv-older"], "/w"), true, "the refused pane lost its own later restart");
+      cli.releaseAntigravityContinue("pane-d");
+      assert.equal(cli.claimAntigravityContinue("pane-e"), true, "a released claim was not free again");
+      cli.releaseAntigravityContinue("pane-e");
+    } finally {
+      process.env.HOME = realHome;
+    }
+
     // The window takes the claim only for the restore after a restart, and
     // gives it back when that pane never runs agy.
     const session = fs.readFileSync(path.join(ROOT, "src/renderer/src/components/Terminal/useTerminalSession.ts"), "utf8");
