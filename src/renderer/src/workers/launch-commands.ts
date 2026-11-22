@@ -17,9 +17,10 @@ export const PI_LAUNCH_COMMAND = "pi";
 // own Google sign-in, typed into an ordinary shell, Settings' startup flags
 // added by the pane's `agy` function. Codara never runs it non-interactively.
 export const ANTIGRAVITY_LAUNCH_COMMAND = "agy";
-// An Antigravity pane's restore pointer has no conversation id: Codara never
-// reads agy's own files, and agy's `--continue` reopens its latest
-// conversation. The pointer's id is this fixed word.
+// A new Antigravity pane's restore pointer has no conversation id: agy picks
+// it, and `--continue` reopens its latest conversation. The pointer's id is
+// this fixed word. A pane resumed from the session picker keeps the
+// conversation's own id, which `--conversation` reopens.
 export const ANTIGRAVITY_CONTINUE_SESSION_ID = "continue";
 
 /**
@@ -32,7 +33,8 @@ export function antigravityRestoreCommand(continues: boolean): { command: string
     ? { command: `${ANTIGRAVITY_LAUNCH_COMMAND} --continue`, notice: null }
     : {
         command: ANTIGRAVITY_LAUNCH_COMMAND,
-        notice: "another Antigravity tab reopened agy's latest conversation; this one starts a new one",
+        notice:
+          "another Antigravity tab has agy's latest conversation, so this one starts a new one; to reopen this tab's conversation, pick it from + > Antigravity worker",
       };
 }
 
@@ -126,6 +128,18 @@ export function buildPiResumeCommand(sessionId: string): string {
   return `${PI_LAUNCH_COMMAND} --session ${sessionId}`;
 }
 
+export function buildAntigravityResumeCommand(sessionId: string): string {
+  return sessionId === ANTIGRAVITY_CONTINUE_SESSION_ID
+    ? `${ANTIGRAVITY_LAUNCH_COMMAND} --continue`
+    : `${ANTIGRAVITY_LAUNCH_COMMAND} --conversation ${sessionId}`;
+}
+
+/** The agent whose past sessions a worker launch command offers first, or null for a shell. */
+export function workerSessionsRuntime(command: string | undefined | null): AgentSessionRuntime | null {
+  if (command?.trim() === PI_LAUNCH_COMMAND) return "pi";
+  return runtimeFromAgentSessionLaunchCommand(command);
+}
+
 // Forks keep the source transcript as it is. Claude and Grok take the new id
 // up front; Codex mints its own, which disk discovery finds as for a fresh
 // launch. Null for Pi, whose fork is not verified.
@@ -148,6 +162,6 @@ export function buildAgentResumeCommand(session: {
   if (session.runtime === "claude") return buildClaudeResumeCommand(session.sessionId);
   if (session.runtime === "grok") return buildGrokResumeCommand(session.sessionId);
   if (session.runtime === "pi") return buildPiResumeCommand(session.sessionId);
-  if (session.runtime === "antigravity") return `${ANTIGRAVITY_LAUNCH_COMMAND} --continue`;
+  if (session.runtime === "antigravity") return buildAntigravityResumeCommand(session.sessionId);
   return buildCodexResumeCommand(session.sessionId);
 }

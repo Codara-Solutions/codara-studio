@@ -66,7 +66,7 @@ export default function SessionSearchSettings() {
   return (
     <SettingsSection
       title="Agent session search"
-      description="Search what you and your agents said in past Claude, Codex, Grok, Pi and Cora sessions, from the Sessions view in the rail. Codara reads the transcripts the agents already keep and never changes them. Only messages are indexed, never tool output, and the index stays on this computer."
+      description="Search what you and your agents said in past Claude, Codex, Grok, Pi, Antigravity and Cora sessions, from the Sessions view in the rail. Codara reads the transcripts the agents already keep and never changes them. Only messages are indexed, never tool output, and the index stays on this computer. Antigravity sessions are listed from agy's own conversation list, by title and preview only."
     >
       <ToggleRow
         title="Search agent sessions"

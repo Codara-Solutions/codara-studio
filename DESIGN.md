@@ -837,10 +837,18 @@ conversation (your words in a bubble, the reply without one).
   so typing never needs a click back into the box.
 - The end of the conversation shows first, pinned to the bottom of the pane: it
   is what tells you whether this is the session you meant.
-- A Claude, Codex or Grok row in a + menu opens the picker for that agent first,
-  because seeing past sessions when opening a worker is the point. **New session**
-  is the default: Enter starts one, so it costs one key, and a session is only
-  resumed on purpose. A chord bound to "New ... worker pane" never shows it.
+- Every worker row in a + menu (Claude, Codex, Grok, Pi, Antigravity) opens the
+  picker for that agent first, because seeing past sessions when opening a worker
+  is the point. **New session** is the default: Enter starts one, so it costs one
+  key, and a session is only resumed on purpose. A chord bound to "New ... worker
+  pane" never shows it. A new worker row follows the same rule;
+  `scripts/test-native-cli-account-wiring.cjs` checks the tab strip's rows.
+- Antigravity keeps no transcript Codara reads. Its rows come from agy's own
+  summary table, read only: a title, a preview and a folder. The box says it
+  searches titles and previews, and a row offers no transcript, fork or delete.
+  A conversation agy marks as not fully idle is worked on by an agy elsewhere:
+  its row says "Open in Antigravity" and Enter only says so, never starting a
+  second agy on it.
 - The picker is the one place for past sessions. The rail's Sessions tab is gone:
   a small history button beside the Workspaces and Agents switch opens the picker
   on the current workspace, and that opening does not change the remembered

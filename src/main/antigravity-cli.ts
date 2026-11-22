@@ -2,15 +2,25 @@
 // binary and their own Google sign-in, started typed into a pane's shell like
 // `pi`. Codara only asks whether the binary is there, so the new-tab menu can
 // show the install command instead of a shell's "command not found". It never
-// runs agy itself and never reads agy's own files.
+// runs agy itself. Of agy's own files it reads one table, read only: the
+// conversation list in conversation_summaries.db, which the session picker
+// offers, marks as open where agy says it is not fully idle, and the restore
+// guard checks (session-search/antigravity-summaries.ts).
+// Nothing else.
 
 import { dirname } from "node:path";
 
 import { runtimeFromProcessCommand } from "../shared/agent-patterns";
+import { isSafeSessionId } from "../shared/session-search";
 import { findBinaryOutsideNpm } from "./binary-resolver";
 import type { IpcHandle } from "./ipc";
 import { descendantProcessesWithCommands } from "./owned-process-tree";
 import { sessionPid } from "./pty-manager";
+import {
+  continueReopensNamed,
+  currentAntigravityConversations,
+  currentLiveAntigravityConversations,
+} from "./session-search/antigravity-summaries";
 
 export const ANTIGRAVITY_BINARY = "agy";
 
@@ -58,10 +68,35 @@ let continuePane: string | null = null;
  * Whether this pane may run `agy --continue`. A restore after a restart
  * takes the claim when it is free; a restart after the pane's process died
  * only checks it, so it never reopens another pane's latest conversation.
+ * Neither continues when agy's latest conversation is one another pane
+ * names by id (`named`, from every workspace's tabs, saved ones included):
+ * that pane reopens it itself. A refused take still uses up the claim: the
+ * refused pane starts a new conversation, which becomes agy's latest, and a
+ * pane restored later would otherwise continue into it.
  */
-export function claimAntigravityContinue(paneId: string, take = true): boolean {
-  if (take) continuePane ??= paneId;
-  return continuePane === paneId;
+export function claimAntigravityContinue(
+  paneId: string,
+  take = true,
+  named: readonly string[] = [],
+  cwd: string | null = null,
+): boolean {
+  const holder = take ? (continuePane ?? paneId) : continuePane;
+  if (holder !== paneId) return false;
+  // Checked on every continue, the restart after the process died included:
+  // the latest conversation can change while the pane holds the claim.
+  if (named.length > 0) {
+    const conversations = currentAntigravityConversations();
+    if (conversations && continueReopensNamed(conversations, cwd, named)) {
+      if (take) continuePane = paneId;
+      return false;
+    }
+  }
+  continuePane = paneId;
+  return true;
+}
+
+function namedIds(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter(isSafeSessionId).slice(0, 200) : [];
 }
 
 /** Gives the claim back when its pane never started agy (closed first, or the spawn failed). */
@@ -70,8 +105,11 @@ export function releaseAntigravityContinue(paneId: string): void {
 }
 
 export function registerAntigravityIpc(handle: IpcHandle): void {
-  handle("antigravity:claim-continue", (_e, paneId: unknown, take: unknown) =>
-    typeof paneId === "string" && paneId.length > 0 ? claimAntigravityContinue(paneId, take !== false) : false,
+  handle("antigravity:live-conversations", () => currentLiveAntigravityConversations());
+  handle("antigravity:claim-continue", (_e, paneId: unknown, take: unknown, named: unknown, cwd: unknown) =>
+    typeof paneId === "string" && paneId.length > 0
+      ? claimAntigravityContinue(paneId, take !== false, namedIds(named), typeof cwd === "string" ? cwd : null)
+      : false,
   );
   handle("antigravity:release-continue", (_e, paneId: unknown) => {
     if (typeof paneId === "string") releaseAntigravityContinue(paneId);

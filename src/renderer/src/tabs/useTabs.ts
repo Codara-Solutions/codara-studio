@@ -599,6 +599,23 @@ export function savedLayoutFilePaths(workspaceId: string): string[] {
   }
 }
 
+/**
+ * A workspace's saved tabs as stored, for checks that span workspaces not
+ * loaded yet (which Antigravity conversations their panes name). A layout
+ * that cannot be read gives none.
+ */
+export function savedLayoutTabs(workspaceId: string): Tab[] {
+  const key = storageKey(workspaceId);
+  if (!key) return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return [];
+    return migratePersisted(JSON.parse(raw) as PersistedShape)?.tabs ?? [];
+  } catch {
+    return [];
+  }
+}
+
 function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number): PersistedShape | null {
   const key = storageKey(workspaceId);
   if (!key) return null;
