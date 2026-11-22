@@ -126,6 +126,55 @@ export function isAutomationRun(run: RunState): boolean {
 }
 
 /**
+ * A direct chat: one Pi worker does each turn and no manager runs. It reads
+ * as a plain chat (DESIGN.md, "Direct chats"): no step cards, no rail, its
+ * worker never listed beside Cora. A Loom or a workflow is direct too, but
+ * keeps them.
+ */
+export function isDirectChatRun(run: RunState): boolean {
+  return run.executionMode === "direct" && !run.automationId && !run.workflow;
+}
+
+/** A step drawn as a direct turn: a direct pass with at most its one worker
+ *  (none yet reads "Starting"). Anything else keeps the step card. */
+export function rendersAsDirectTurn(item: { direct?: unknown; workers: readonly unknown[] }): boolean {
+  return Boolean(item.direct) && item.workers.length <= 1;
+}
+
+/** What Find searches in a direct turn: the line it draws from memory (the
+ *  model and the changed files). Its worker's steps load from the feed. */
+export function directTurnSearchText(workers: readonly Pick<ChatWorker, "model" | "runtime" | "diff">[]): string {
+  return workers
+    .flatMap((worker) => [
+      workerModelLabel(worker.model, runtimeLabel(worker.runtime)),
+      ...(worker.diff?.files.map((file) => file.path) ?? []),
+    ])
+    .join("\n");
+}
+
+/**
+ * A step that is one pass of a direct chat, drawn as Cora's own turn and
+ * never listed as an agent. Decided per step, so a chat the manager took over
+ * keeps its earlier turns: one task that is a pass's node (the run store's
+ * test) on a run with no automation or workflow, and not a corrective rework,
+ * which copies the node but is the manager's step. A direct chat's pass whose
+ * worker is not created yet is one too.
+ */
+export function isDirectPassStep(
+  run: Pick<RunState, "automationId" | "workflow" | "executionMode">,
+  stepTasks: readonly Pick<WorkerTask, "loomNodeId" | "followUpOfTaskId">[],
+): boolean {
+  if (run.automationId || run.workflow) return false;
+  if (stepTasks.length === 0) return run.executionMode === "direct";
+  return stepTasks.length === 1 && Boolean(stepTasks[0].loomNodeId) && !stepTasks[0].followUpOfTaskId;
+}
+
+/** The workers the chat's agents rail lists: never a direct pass's. */
+export function railWorkers(run: RunState): ChatWorker[] {
+  return listChatWorkers(run, { skipDirectPasses: true });
+}
+
+/**
  * Whether a queued message offers Send now. A Loom or a workflow takes its
  * messages through its own driver, so Send now could only fail there; a
  * managed chat and a direct chat (which stops its worker) both serve it.
@@ -339,6 +388,8 @@ export type ChatTimelineItem =
       status: StepStatus;
       workers: ChatWorker[];
       at: string;
+      /** A direct chat's turn: drawn as Cora's work for the message, never as a step card. */
+      direct?: { runId: string; awaitingAnswer?: boolean; stopped?: boolean };
     };
 
 /**
@@ -555,10 +606,19 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   }
 
   const orderedSteps = [...run.steps].sort((a, b) => a.index - b.index);
+  // A turn waits for the user only while its question is open: the answer
+  // starts a new pass, and this one then reads as finished.
+  const awaitingAnswer = run.status === "blocked" && findOpenQuestion(run) !== null;
+  // A run the user stopped (Stop pauses it) stopped its last turn, whatever
+  // the step's saved status or the killed worker's own status says.
+  const stoppedByUser = run.status === "paused" || run.status === "cancelled";
+  const directItems: { runId: string; awaitingAnswer?: boolean; stopped?: boolean }[] = [];
   orderedSteps.forEach((step, i) => {
-    const stepWorkers: ChatWorker[] = workers
-      .filter((worker) => worker.task.stepId === step.id)
-      .map((worker) => chatWorker(worker, modelOptions));
+    const stepTasks = workers.filter((worker) => worker.task.stepId === step.id);
+    const stepWorkers: ChatWorker[] = stepTasks.map((worker) => chatWorker(worker, modelOptions));
+    const directPass = isDirectPassStep(run, stepTasks.map((worker) => worker.task));
+    const direct = directPass ? { runId: run.id } : undefined;
+    if (direct) directItems.push(direct);
     items.push({
       kind: "step",
       id: step.id,
@@ -568,8 +628,12 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       status: step.status,
       workers: stepWorkers,
       at: step.createdAt,
+      ...(direct ? { direct } : {}),
     });
   });
+  const lastDirect = directItems[directItems.length - 1];
+  if (awaitingAnswer && lastDirect) lastDirect.awaitingAnswer = true;
+  if (stoppedByUser && lastDirect) lastDirect.stopped = true;
 
   // Strictly chronological, queued or not (the Claude Code model): a message
   // typed mid-turn renders in place, marked "Queued", with the work that
@@ -645,7 +709,7 @@ function chatWorker(worker: LogicalWorker, modelOptions: WorkerModelOptions): Ch
 }
 
 /** Every worker of the chat in step-card order: what the worker view's arrows step through. */
-export function listChatWorkers(run: RunState): ChatWorker[] {
+export function listChatWorkers(run: RunState, options?: { skipDirectPasses?: boolean }): ChatWorker[] {
   const modelOptions: WorkerModelOptions = {
     isAutomationRun: isAutomationRun(run),
     isDirectRun: run.executionMode === "direct" && !run.automationId,
@@ -653,11 +717,11 @@ export function listChatWorkers(run: RunState): ChatWorker[] {
   const workers = logicalWorkers(run);
   return [...run.steps]
     .sort((a, b) => a.index - b.index)
-    .flatMap((step) =>
-      workers
-        .filter((worker) => worker.task.stepId === step.id)
-        .map((worker) => chatWorker(worker, modelOptions)),
-    );
+    .flatMap((step) => {
+      const stepWorkers = workers.filter((worker) => worker.task.stepId === step.id);
+      if (options?.skipDirectPasses && isDirectPassStep(run, stepWorkers.map((worker) => worker.task))) return [];
+      return stepWorkers.map((worker) => chatWorker(worker, modelOptions));
+    });
 }
 
 // Two copies close enough in time to be one send, on the pre-sort pass's own

@@ -213,16 +213,16 @@ function model(rail) {
   const activity = new Map([
     ["att-toast", { runId: "r", attemptId: "att-toast", seq: 1, at: at(190), step: { kind: "tool", tool: "Bash", target: "npm test -- merged-fold" } }],
   ]);
-  const items = rail.railWorkers(run, workers, activity, now);
+  const items = rail.railItems(run, workers, activity, now);
   const byId = Object.fromEntries(items.map((item) => [item.worker.id, item]));
   check("a finished worker's time is how long it ran", byId.read.state === "done" && byId.read.elapsed === "1m 30s", byId.read.elapsed);
   check("a running worker shows what it is doing", byId.toast.activity === "Run command · npm test -- merged-fold", byId.toast.activity);
   check("a failed worker shows its reason's first line", byId.light.reason === "typecheck, 2 errors", byId.light.reason);
   check("a model reads as people say it, from the attempt when the row has none", byId.toast.model === "Opus 5.5", byId.toast.model);
-  const labelled = rail.railWorkers(run, [{ ...workers[1], model: "claude-opus-5" }], activity, now)[0];
+  const labelled = rail.railItems(run, [{ ...workers[1], model: "claude-opus-5" }], activity, now)[0];
   check("the row's model wins over the attempt's", labelled.model === "Opus 5", labelled.model);
   const noModelRun = { ...run, workerAttempts: run.workerAttempts.map((attempt) => ({ ...attempt, model: undefined })) };
-  const bare = rail.railWorkers(noModelRun, [workers[1]], activity, now)[0];
+  const bare = rail.railItems(noModelRun, [workers[1]], activity, now)[0];
   check("no model anywhere falls back to the runtime's name", bare.model === "Claude", bare.model);
   check(
     "a mark reads name-free: model, state, time and step",

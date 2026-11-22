@@ -3524,6 +3524,43 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   outline-offset: -1px;
 }
 
+/* A direct chat's quiet line under its turn: model, changed files, Details. */
+.cora-direct-turn__file,
+.cora-direct-turn__details {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0 -4px;
+  padding: 1px 4px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+.cora-direct-turn__file > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.cora-direct-turn__file:hover,
+.cora-direct-turn__details:hover {
+  background: var(--hover);
+  color: var(--ink-dim);
+}
+.cora-direct-turn__file:focus-visible,
+.cora-direct-turn__details:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 .cora-turn {
   position: relative;
 }

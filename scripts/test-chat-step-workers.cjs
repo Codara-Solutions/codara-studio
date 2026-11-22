@@ -23,8 +23,12 @@ const read = (...segments) => fs.readFileSync(path.join(ROOT, ...segments), "utf
 const conversation = read("src/renderer/src/components/chat/ChatConversation.tsx");
 const panel = read("src/renderer/src/components/chat/ChatPanel.tsx");
 
-const stepCard = conversation.match(/const StepCard = React\.memo\(function StepCard[\s\S]*?\n\}\);/);
-assert.ok(stepCard, "StepCard not found");
+// Which steps draw as a direct turn is behaviour-tested on the timeline's
+// rendersAsDirectTurn (test-chat-timeline.cjs); this only pins that StepCard
+// asks it.
+assert.ok(conversation.includes("if (item.direct && rendersAsDirectTurn(item)) {"), "StepCard routes through rendersAsDirectTurn");
+const stepCard = conversation.match(/const ManagedStepCard = React\.memo\(function ManagedStepCard[\s\S]*?\n\}\);/);
+assert.ok(stepCard, "ManagedStepCard not found");
 assert.match(stepCard[0], /const \[open, setOpen\] = useState\(live\);/);
 assert.match(
   stepCard[0],

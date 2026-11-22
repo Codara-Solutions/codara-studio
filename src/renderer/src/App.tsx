@@ -4685,7 +4685,8 @@ export default function App() {
   const activeCwdRef = useRef<string | null>(activeWorkspace?.cwd ?? null);
   activeCwdRef.current = activeWorkspace?.cwd ?? null;
   const pendingReviewWorkspaceRef = useRef<string | null>(null);
-  const handleOpenDiffForPath = useCallback((absolutePath: string) => {
+  // Chat file links ('spark:open-diff') share one diff tab (useTabs keeps it).
+  const handleOpenDiffForPath = useCallback((absolutePath: string, fromChat = false) => {
     const cwd = activeCwdRef.current;
     if (!cwd || !absolutePath) return;
     const base = cwd.replace(/[\\/]+$/, "");
@@ -4693,7 +4694,7 @@ export default function App() {
     if (absolutePath.toLowerCase().startsWith(base.toLowerCase())) {
       rel = absolutePath.slice(base.length).replace(/^[\\/]+/, "");
     }
-    tabsRef.current.openDiffTab(rel.replace(/\\/g, "/"), false);
+    tabsRef.current.openDiffTab(rel.replace(/\\/g, "/"), false, fromChat ? { fromChat: true } : undefined);
   }, []);
 
   // Result cards use window events so the deeply nested chat renderer stays
@@ -4713,7 +4714,7 @@ export default function App() {
     };
     const openDiff = (event: Event) => {
       const path = (event as CustomEvent<{ path?: string }>).detail?.path;
-      if (path) handleOpenDiffForPath(path);
+      if (path) handleOpenDiffForPath(path, true);
     };
     // The Source Control header and the Markdown preview's notes bar open the review tab.
     const openReview = (event: Event) => {
