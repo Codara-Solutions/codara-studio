@@ -24,7 +24,7 @@ import {
 } from "@shared/types";
 import { normalizeKeepAwakeMode } from "@shared/keep-awake";
 import { normalizeQuickCommands, normalizeTerminalRightClick } from "@shared/quick-commands";
-import { normalizeAgentHibernationMinutes } from "@shared/agent-hibernation";
+import { normalizeAgentHibernationMinutes, normalizeAgentHibernationWorkspaces } from "@shared/agent-hibernation";
 import { RELAY_SENDER_MAX_CHARS } from "@shared/session-relay";
 import { normalizeSessionSearchPreferences } from "@shared/session-search";
 import { normalizeForecastIdeas } from "@shared/usage-forecast";
@@ -365,6 +365,7 @@ function normalize(
     // Agent hibernation: one of the Settings presets (0 = off); anything else
     // falls back to the default.
     agentHibernationMinutes: normalizeAgentHibernationMinutes(src.agentHibernationMinutes),
+    agentHibernationWorkspaces: normalizeAgentHibernationWorkspaces(src.agentHibernationWorkspaces),
     agentHibernationSoonerWhenLow:
       typeof src.agentHibernationSoonerWhenLow === "boolean"
         ? src.agentHibernationSoonerWhenLow

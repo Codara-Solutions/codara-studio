@@ -12,7 +12,7 @@
 // decision already under way.
 
 import { useEffect, useMemo, useRef } from "react";
-import { isAgentHibernationRuntime } from "@shared/agent-hibernation";
+import { anyAgentHibernation, isAgentHibernationRuntime, policyIdleMs } from "@shared/agent-hibernation";
 import { decideResume, mergeSessionStart, type ResumeProbe } from "../components/Terminal/resume-policy";
 import type { Tab, TerminalLeafHibernation } from "../tabs/types";
 import type { WorkspaceTerminalLayout } from "../tabs/useTabs";
@@ -128,7 +128,7 @@ export function useAgentHibernation(input: Input): void {
     const sweep = async (): Promise<number> => {
       const policy = await api.policy().catch(() => null);
       if (!policy) return DEFAULT_TICK_MS;
-      if (!(policy.idleMs > 0)) return Math.max(1_000, policy.tickMs);
+      if (!anyAgentHibernation(policy)) return Math.max(1_000, policy.tickMs);
       const current = latestRef.current;
       const layouts = [
         ...(current.activeWorkspaceId ? [{ workspaceId: current.activeWorkspaceId, tabs: current.activeTabs }] : []),
@@ -142,6 +142,8 @@ export function useAgentHibernation(input: Input): void {
       for (const candidate of candidates) {
         if (stopped) break;
         if (!stillCandidate(candidate)) continue;
+        // A workspace whose agents never sleep is not asked about at all.
+        if (!(policyIdleMs(policy, candidate.workspaceId) > 0)) continue;
         await tryOne(candidate);
       }
       return Math.max(1_000, policy.tickMs);

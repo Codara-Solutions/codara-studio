@@ -23,6 +23,7 @@ import WorkspaceIconPicker from "./WorkspaceIconPicker";
 import { WorkspaceStatusLine } from "./workspace-status/WorkspaceStatusChip";
 import { WorkspaceAgentsLine } from "./workspace-status/WorkspaceAgentsLine";
 import { useAgentLinesOf } from "./workspace-status/agentLinesStore";
+import { AgentSleepMenuItem } from "./rail/AgentSleepMenuItem";
 import { Chevron, ExternalWorktreeRow, WorkspaceChildren, WorktreeAgentLine } from "./rail/WorkspaceChildren";
 import { CleanUpHoldsConfirm, RailCleanUpNotices, useRailCleanUp, type RailCleanUpEntry } from "./rail/RailCleanUp";
 import { setRailFold, useRailFold } from "./rail/railFolds";
@@ -2949,6 +2950,13 @@ function WorkspaceRow({
                   setStatusPickerOpen(true);
                 }}
               />
+              {menuOpen && !ws.remote ? (
+                <AgentSleepMenuItem
+                  workspaceId={ws.id}
+                  onDone={() => setMenuOpen(false)}
+                  render={(item) => <RowMenuItem label={item.label} onClick={item.onClick} />}
+                />
+              ) : null}
               {statusEntry && (
                 <RowMenuItem
                   label="Clear status"

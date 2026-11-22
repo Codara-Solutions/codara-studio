@@ -61,10 +61,12 @@ import { isRecording } from "../shortcuts/recording";
 import { useOpenAiFastMode } from "../lib/useOpenAiFastMode";
 import { FAST_MODE_COST_NOTE } from "@shared/fast-mode";
 import {
+  AGENT_HIBERNATION_MAX_MINUTES,
   AGENT_HIBERNATION_PRESETS,
   AGENT_HIBERNATION_PRESSURE_IDLE_MS,
   normalizeAgentHibernationMinutes,
 } from "@shared/agent-hibernation";
+import { formatIdleMinutes, IdleMinutesField, WorkspaceIdleTimes } from "./settings/IdleAgentsControls";
 import { DEFAULT_RELAY_ANSWER_ASSISTANT, RELAY_SENDER_MAX_CHARS } from "@shared/session-relay";
 import {
   UsageEntryBody,
@@ -3318,23 +3320,39 @@ function SessionsSettings({
             title="Let idle agents sleep"
             desc={
               hibernationMinutes === 0
-                ? "Agents keep running however long they wait."
-                : `${presetHint(AGENT_HIBERNATION_PRESETS, hibernationMinutes) ?? ""} A finished agent you are not typing in stops after this long to free its memory. Press Resume in its pane to bring it back. Agents waiting for you, pinned with Keep running, or sharing a pane with another program stay awake.`
+                ? "Agents keep running however long they wait, except in workspaces with their own time below."
+                : `A finished agent you are not typing in stops after ${formatIdleMinutes(hibernationMinutes)} to free its memory. Press Resume in its pane to bring it back. Agents waiting for you, pinned with Keep running, or sharing a pane with another program stay awake.`
             }
             control={
-              <Segmented
-                ariaLabel="Let idle agents sleep after"
-                options={AGENT_HIBERNATION_PRESETS}
-                value={hibernationMinutes}
-                onChange={(next) => void setPreference("agentHibernationMinutes", next)}
-              />
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                <IdleMinutesField
+                  value={hibernationMinutes}
+                  label={`Let idle agents sleep after this many minutes (0 to ${AGENT_HIBERNATION_MAX_MINUTES}, 0 is off)`}
+                  onChange={(next) => void setPreference("agentHibernationMinutes", next)}
+                />
+                <Segmented
+                  ariaLabel="Let idle agents sleep after"
+                  options={AGENT_HIBERNATION_PRESETS}
+                  value={hibernationMinutes}
+                  onChange={(next) => void setPreference("agentHibernationMinutes", next)}
+                />
+              </span>
             }
           />
         ) : null}
-        {hydrated && hibernationMinutes > 0 ? (
+        {hydrated ? (
+          <SettingRow
+            title="Idle agents per workspace"
+            desc="A workspace can keep its agents running, or let them sleep sooner or later than the time above. The workspace's menu in the sidebar has Agents never sleep here too."
+            stacked
+          >
+            <WorkspaceIdleTimes preferences={preferences} setPreference={setPreference} />
+          </SettingRow>
+        ) : null}
+        {hydrated && (hibernationMinutes > 0 || Object.values(preferences.agentHibernationWorkspaces ?? {}).some((own) => own > 0)) ? (
           <ToggleRow
             title="Shorter idle time when memory is low"
-            desc={`When this computer runs low on memory, idle agents sleep after ${AGENT_HIBERNATION_PRESSURE_IDLE_MS.low / 60_000} minutes, and after ${AGENT_HIBERNATION_PRESSURE_IDLE_MS.critical / 60_000} when it is almost full, if that is sooner than the time above.`}
+            desc={`When this computer runs low on memory, idle agents sleep after ${AGENT_HIBERNATION_PRESSURE_IDLE_MS.low / 60_000} minutes, and after ${AGENT_HIBERNATION_PRESSURE_IDLE_MS.critical / 60_000} when it is almost full, if that is sooner than their own time. Workspaces set to Never are left alone.`}
             {...bindToggle("agentHibernationSoonerWhenLow", preferences, setPreference)}
           />
         ) : null}

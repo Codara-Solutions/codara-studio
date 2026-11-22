@@ -10,7 +10,8 @@
 
 export type AgentHibernationRuntime = "claude" | "codex" | "grok" | "pi";
 
-// Settings choices, in minutes. 0 turns hibernation off.
+// Quick picks shown next to the minutes field in Settings. Any whole number
+// of minutes from 0 (off) to AGENT_HIBERNATION_MAX_MINUTES is valid.
 export const AGENT_HIBERNATION_PRESETS: ReadonlyArray<{
   value: number;
   label: string;
@@ -26,11 +27,32 @@ export const AGENT_HIBERNATION_MINUTE_PRESETS: readonly number[] = AGENT_HIBERNA
   (preset) => preset.value,
 );
 export const DEFAULT_AGENT_HIBERNATION_MINUTES = 30;
+export const AGENT_HIBERNATION_MAX_MINUTES = 720;
 
+function clampMinutes(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.min(AGENT_HIBERNATION_MAX_MINUTES, Math.max(0, Math.round(value)));
+}
+
+/** Whole minutes from 0 (off) to the maximum; anything that is not a number is the default. */
 export function normalizeAgentHibernationMinutes(value: unknown): number {
-  return typeof value === "number" && AGENT_HIBERNATION_MINUTE_PRESETS.includes(value)
-    ? value
-    : DEFAULT_AGENT_HIBERNATION_MINUTES;
+  return clampMinutes(value) ?? DEFAULT_AGENT_HIBERNATION_MINUTES;
+}
+
+/**
+ * Per-workspace exceptions: workspace id to minutes, 0 meaning agents there
+ * never sleep. A workspace without an entry follows the global setting.
+ * Malformed entries are dropped, never turned into a default.
+ */
+export function normalizeAgentHibernationWorkspaces(value: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return out;
+  for (const [workspaceId, minutes] of Object.entries(value as Record<string, unknown>)) {
+    if (!workspaceId || workspaceId.length > 256) continue;
+    const clamped = clampMinutes(minutes);
+    if (clamped !== null) out[workspaceId] = clamped;
+  }
+  return out;
 }
 
 export function isAgentHibernationRuntime(value: unknown): value is AgentHibernationRuntime {
@@ -51,6 +73,7 @@ export interface AgentHibernationRequest {
 
 export type AgentHibernationRefusal =
   | "off"
+  | "exempt"
   | "bad-request"
   | "in-flight"
   | "no-session"
@@ -140,8 +163,21 @@ export function nextMemoryLevel(
 export interface AgentHibernationPolicy {
   // 0 = off. Already the shorter of the setting and the memory level's floor.
   idleMs: number;
+  // The same, for each workspace with its own time; 0 = its agents never sleep.
+  workspaceIdleMs: Readonly<Record<string, number>>;
   tickMs: number;
   memoryLevel: AgentMemoryLevel;
+}
+
+/** The idle time the policy gives one workspace; 0 = its agents never sleep. */
+export function policyIdleMs(policy: AgentHibernationPolicy, workspaceId: string | null): number {
+  const own = workspaceId ? policy.workspaceIdleMs[workspaceId] : undefined;
+  return typeof own === "number" ? own : policy.idleMs;
+}
+
+/** True when any workspace can have a sleeping agent at all. */
+export function anyAgentHibernation(policy: AgentHibernationPolicy): boolean {
+  return policy.idleMs > 0 || Object.values(policy.workspaceIdleMs).some((idleMs) => idleMs > 0);
 }
 
 // ── Agent-state evidence (from the terminal agent notifier) ─────────────────

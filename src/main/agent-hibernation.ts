@@ -7,8 +7,9 @@
 // pinned awake and which session each pane can resume. Main decides. It
 // re-checks everything it can see itself and stops the pane only when all of
 // these hold:
-//   - the setting is on and the pane is a local PTY that still exists, and
-//     no paired phone has it open (Remote Access);
+//   - the setting is on for the pane's workspace (its own time, or the
+//     global one) and the pane is a local PTY that still exists, and no
+//     paired phone has it open (Remote Access);
 //   - the terminal agent notifier says the agent's turn ended, nothing is
 //     pending, it is not waiting on the user and no typed text is unsent;
 //   - nothing happened in the pane for the idle time (the setting's, or a
@@ -41,6 +42,8 @@ import {
   judgeIdleClock,
   nextMemoryLevel,
   normalizeAgentHibernationMinutes,
+  normalizeAgentHibernationWorkspaces,
+  policyIdleMs,
   type AgentMemoryLevel,
   type AgentHibernationEvidence,
   type AgentHibernationPolicy,
@@ -79,6 +82,8 @@ export interface AgentHibernationDeps {
   policy: () => Promise<AgentHibernationPolicy>;
   session: (paneId: string) => pty.HibernationSessionInfo | null;
   evidence: (paneId: string) => AgentHibernationEvidence | null;
+  // Which workspace the pane is in, as the renderer last reported it.
+  placement?: (paneId: string) => { workspaceId: string } | null;
   listProcesses: () => Promise<CensusProcess[] | null>;
   // Every process holding the pane's terminal (POSIX tty, Windows console).
   terminalPids: (pane: { pid: number; ttyPath: string | null }) => Promise<number[] | null>;
@@ -135,15 +140,23 @@ async function currentMemoryLevel(now: number): Promise<AgentMemoryLevel> {
 export async function currentHibernationPolicy(): Promise<AgentHibernationPolicy> {
   const prefs = await loadPreferences();
   const minutes = normalizeAgentHibernationMinutes(prefs.agentHibernationMinutes);
+  const exceptions = Object.entries(normalizeAgentHibernationWorkspaces(prefs.agentHibernationWorkspaces));
+  if (minutes === 0 && !exceptions.some(([, own]) => own > 0)) {
+    const workspaceIdleMs = Object.fromEntries(exceptions.map(([workspaceId]) => [workspaceId, 0]));
+    return { idleMs: 0, workspaceIdleMs, tickMs: DEFAULT_TICK_MS, memoryLevel: "ok" };
+  }
   const tickMs = e2eOverrideMs("CODARA_E2E_HIBERNATION_TICK_MS") ?? DEFAULT_TICK_MS;
-  if (minutes === 0) return { idleMs: 0, tickMs: DEFAULT_TICK_MS, memoryLevel: "ok" };
-  const idleMs = e2eOverrideMs("CODARA_E2E_HIBERNATION_IDLE_MS") ?? minutes * MINUTE_MS;
   // The memory is not read at all with the preference off.
-  if (prefs.agentHibernationSoonerWhenLow === false) return { idleMs, tickMs, memoryLevel: "ok" };
-  const level = await currentMemoryLevel(Date.now());
+  const level = prefs.agentHibernationSoonerWhenLow === false ? "ok" : await currentMemoryLevel(Date.now());
+  const override = e2eOverrideMs("CODARA_E2E_HIBERNATION_IDLE_MS");
   const pressure = e2eOverrideMs("CODARA_E2E_HIBERNATION_PRESSURE_IDLE_MS");
+  const idleFor = (own: number): number =>
+    own > 0
+      ? idleMsUnderPressure(override ?? own * MINUTE_MS, level, pressure ? { low: pressure, critical: pressure } : undefined)
+      : 0;
   return {
-    idleMs: idleMsUnderPressure(idleMs, level, pressure ? { low: pressure, critical: pressure } : undefined),
+    idleMs: idleFor(minutes),
+    workspaceIdleMs: Object.fromEntries(exceptions.map(([workspaceId, own]) => [workspaceId, idleFor(own)])),
     tickMs,
     memoryLevel: level,
   };
@@ -161,6 +174,7 @@ const defaultDeps: AgentHibernationDeps = {
   policy: currentHibernationPolicy,
   session: (paneId) => pty.hibernationSessionInfo(paneId),
   evidence: (paneId) => terminalAgentHibernationEvidence(paneId),
+  placement: (paneId) => terminalPanePlacement(paneId),
   listProcesses: () => listCensusProcesses(),
   terminalPids: (pane) => listPaneTerminalPids(pane),
   stop: (paneId, generationId) => pty.hibernate(paneId, generationId, STOP_GRACE_MS),
@@ -420,11 +434,20 @@ export async function hibernateAgentPane(
   const request = validRequest(input);
   if (!request) return { ok: false, reason: "bad-request" };
   const policy = await deps.policy();
-  if (!(policy.idleMs > 0)) return { ok: false, reason: "off" };
+  const workspaceId = deps.placement?.(request.paneId)?.workspaceId ?? null;
+  const idleMs = policyIdleMs(policy, workspaceId);
+  if (!(idleMs > 0)) {
+    // Off everywhere says nothing; a workspace set to Never while others
+    // sleep is worth one line.
+    if (!(policy.idleMs > 0)) return { ok: false, reason: "off" };
+    const exempt: AgentHibernationResult = { ok: false, reason: "exempt", detail: `workspace ${workspaceId} never sleeps` };
+    noteVerdict(request.paneId, exempt, deps, "");
+    return exempt;
+  }
   if (inFlight.has(request.paneId)) return { ok: false, reason: "in-flight" };
   inFlight.add(request.paneId);
   try {
-    const decided = await decide(request, deps, policy);
+    const decided = await decide(request, deps, { ...policy, idleMs });
     const result = "result" in decided ? decided.result : decided;
     noteVerdict(request.paneId, result, deps, "context" in decided ? decided.context : "");
     return result;
