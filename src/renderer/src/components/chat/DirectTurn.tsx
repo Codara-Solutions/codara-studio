@@ -13,21 +13,11 @@ import {
   useRememberedOpen,
   WorkerOpenContext,
   type StepItem,
-  type ToolItem,
 } from "./ChatConversation";
 import Markdown from "./Markdown";
-import { isToolRowTicking, runtimeLabel, toolDurationLabel, type ChatWorker } from "./timeline";
+import { directTurnState } from "./direct-turn-state";
+import { isToolRowTicking, runtimeLabel, toolDurationLabel } from "./timeline";
 import { workerRows, type WorkerRow } from "./worker-view";
-
-type DirectTurnState = "starting" | "running" | "done" | "stopped" | "failed";
-
-function directTurnState(worker: ChatWorker, row: ToolItem | undefined): DirectTurnState {
-  if (worker.status === "accepted") return "done";
-  if (worker.status === "cancelled") return "stopped";
-  if (worker.status === "failed" || worker.status === "blocked" || row?.tone === "failed") return "failed";
-  if (row?.tone === "live" || worker.status === "running" || worker.runtimeState === "working") return "running";
-  return "starting";
-}
 
 // A direct chat's turn (DESIGN.md, "Direct chats"): its one Pi worker's steps
 // drawn as Cora's own work for the message, as a managed turn's are. No step
@@ -43,8 +33,19 @@ export default function DirectTurnWork({ item, runId }: { item: StepItem; runId:
   const feed = useWorkerFeed(runId, worker?.attemptId ?? null);
   const rows = useMemo(() => workerRows(foldWorkerFeed(feed)), [feed]);
   const [opened, setOpened] = useRememberedOpen(`direct:${item.id}`);
-  if (!worker) return null;
-  const state = directTurnState(worker, row);
+  if (!worker) {
+    return (
+      <SparkTurn>
+        <div className="cora-direct-turn" data-direct-turn={item.id} data-direct-state="starting">
+          <div className="cora-turn-head cora-turn-head--live">
+            <ActivityIcon state="dot" color="var(--accent)" />
+            <span>Starting</span>
+          </div>
+        </div>
+      </SparkTurn>
+    );
+  }
+  const state = directTurnState(worker, row?.tone);
   const elapsed = row ? toolDurationLabel(row) : null;
   // Only a turn that finished well folds; a stopped or failed one stays open.
   const foldable = state === "done" && rows.length > 0;
@@ -71,6 +72,8 @@ export default function DirectTurnWork({ item, runId }: { item: StepItem; runId:
             type="button"
             className="cora-turn-head cora-turn-head--fold"
             aria-expanded={opened}
+            // Ten turns must not share one button name.
+            aria-label={`${elapsed ? `Worked for ${elapsed}` : "Worked"}: ${item.title}`}
             onClick={() => setOpened(!opened)}
           >
             {elapsed ? `Worked for ${elapsed}` : "Worked"}
@@ -78,7 +81,9 @@ export default function DirectTurnWork({ item, runId }: { item: StepItem; runId:
           </button>
         ) : (
           <div className="cora-turn-head" style={state === "failed" ? { color: "var(--danger)" } : undefined}>
-            {state === "stopped"
+            {state === "blocked"
+              ? "Waiting for your answer"
+              : state === "stopped"
               ? `Stopped${elapsed ? ` after ${elapsed}` : ""}`
               : state === "failed"
                 ? `Failed${elapsed ? ` after ${elapsed}` : ""}`
@@ -117,7 +122,7 @@ export default function DirectTurnWork({ item, runId }: { item: StepItem; runId:
               className="cora-direct-turn__details"
               // Back from the worker view returns focus here.
               data-worker-row={worker.id}
-              aria-label="Details: brief, report and raw output"
+              aria-label={`Details of ${item.title}: brief, report and raw output`}
               onClick={() => openWorker(worker.id)}
             >
               Details
@@ -132,6 +137,17 @@ export default function DirectTurnWork({ item, runId }: { item: StepItem; runId:
 function DirectWorkRow({ row, live }: { row: WorkerRow; live: boolean }) {
   if (row.kind === "turn") return <TurnSegments segments={liveTurnSegments(row.blocks)} live={live} />;
   if (row.kind === "message") {
+    // Studio's own word to the worker (a report it asked again for) is a
+    // quiet note, labelled as the worker view labels it; only the user's
+    // messages are bubbles.
+    if (row.from === "cora") {
+      return (
+        <div className="cora-direct-turn__note" data-worker-message="cora" style={{ fontSize: 12, color: "var(--muted)" }}>
+          <span style={{ fontWeight: 600 }}>Codara: </span>
+          {row.text}
+        </div>
+      );
+    }
     return (
       <div style={{ alignSelf: "flex-end", maxWidth: "80%", ...USER_BUBBLE_STYLE }}>
         <Markdown text={row.text} />

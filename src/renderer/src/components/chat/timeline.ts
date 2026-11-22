@@ -135,6 +135,23 @@ export function isDirectChatRun(run: RunState): boolean {
   return run.executionMode === "direct" && !run.automationId && !run.workflow;
 }
 
+/** A step drawn as a direct turn: a direct pass with at most its one worker
+ *  (none yet reads "Starting"). Anything else keeps the step card. */
+export function rendersAsDirectTurn(item: { direct?: unknown; workers: readonly unknown[] }): boolean {
+  return Boolean(item.direct) && item.workers.length <= 1;
+}
+
+/** What Find searches in a direct turn: the line it draws from memory (the
+ *  model and the changed files). Its worker's steps load from the feed. */
+export function directTurnSearchText(workers: readonly Pick<ChatWorker, "model" | "runtime" | "diff">[]): string {
+  return workers
+    .flatMap((worker) => [
+      workerModelLabel(worker.model, runtimeLabel(worker.runtime)),
+      ...(worker.diff?.files.map((file) => file.path) ?? []),
+    ])
+    .join("\n");
+}
+
 /** The workers the chat's agents rail lists: none for a direct chat. */
 export function railWorkers(run: RunState): ChatWorker[] {
   return isDirectChatRun(run) ? [] : listChatWorkers(run);
@@ -572,11 +589,19 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   }
 
   const orderedSteps = [...run.steps].sort((a, b) => a.index - b.index);
-  const directChat = isDirectChatRun(run);
+  // A direct pass is decided per step, so a chat the manager took over keeps
+  // its earlier direct turns: one worker whose task is a pass's node, on a
+  // run with no automation or workflow (the same test as the run store's).
+  // A direct chat's pass whose worker is not created yet is one too.
+  const passRun = !run.automationId && !run.workflow;
   orderedSteps.forEach((step, i) => {
-    const stepWorkers: ChatWorker[] = workers
-      .filter((worker) => worker.task.stepId === step.id)
-      .map((worker) => chatWorker(worker, modelOptions));
+    const stepTasks = workers.filter((worker) => worker.task.stepId === step.id);
+    const stepWorkers: ChatWorker[] = stepTasks.map((worker) => chatWorker(worker, modelOptions));
+    const directPass =
+      passRun &&
+      (stepTasks.length === 1
+        ? Boolean(stepTasks[0].task.loomNodeId)
+        : stepTasks.length === 0 && run.executionMode === "direct");
     items.push({
       kind: "step",
       id: step.id,
@@ -586,7 +611,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       status: step.status,
       workers: stepWorkers,
       at: step.createdAt,
-      ...(directChat ? { direct: { runId: run.id } } : {}),
+      ...(directPass ? { direct: { runId: run.id } } : {}),
     });
   });
 

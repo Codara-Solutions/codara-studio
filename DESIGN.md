@@ -953,7 +953,13 @@ UI interface of PI basically! made better but light weight".
 - One quiet line under the turn keeps the facts: model, changed files with
   +/- (each opens its diff), and Details, which goes inside the worker for its
   brief, report and raw output.
-- A stopped or failed turn stays open and says so ("Stopped after 4s").
+- A stopped or failed turn stays open and says so ("Stopped after 4s"). A
+  worker that asks a question is not a failure: its turn stays open and reads
+  "Waiting for your answer", never red.
+- Inside a turn only the user's messages are bubbles; Studio's own word to
+  the worker is a quiet "Codara:" note.
+- A chat the manager took over keeps its earlier turns as they were; its new
+  work, and the rail, come back as the manager's.
 - The direct worker is not an agent beside Cora: no agents rail, no worker
   count under the composer. A Loom run is direct too but keeps both.
 - A message sent mid-turn queues. Send now stops the turn and starts the next
@@ -961,7 +967,10 @@ UI interface of PI basically! made better but light weight".
   on its own when the turn ends. A control that can only fail is not offered.
 - A turn is named after its message, wherever a name shows (Runs, the worker
   bar).
-- The chat's changed files share one diff tab, even once a split pinned it.
+- The chat's changed files share one diff tab while it is still theirs: a
+  working-tree preview showing the file the chat put there. Once the user
+  pins it, docks it in a split or moves it to another file or commit, it is
+  theirs, and the chat opens one new tab beside it.
 
 ## Cora agents rail (2026-11)
 

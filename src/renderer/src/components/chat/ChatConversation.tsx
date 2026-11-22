@@ -9,9 +9,11 @@ import type {
 import { makeId } from "@shared/ids";
 import {
   buildChatTimeline,
+  directTurnSearchText,
   findOpenQuestion,
   isToolRowTicking,
   offersSendNow,
+  rendersAsDirectTurn,
   runtimeLabel,
   resumedByMessageId,
   stepStatusColor,
@@ -654,7 +656,7 @@ function conversationRowSearchText(
   if (item.kind === "message") return item.text;
   if (item.kind === "step") {
     // A direct turn shows none of its step's title or goal.
-    if (item.direct) return "";
+    if (item.direct && rendersAsDirectTurn(item)) return directTurnSearchText(item.workers);
     return [item.title, item.goal, ...item.workers.map((worker) => worker.title)].join("\n");
   }
   const tools = item.kind === "activity-group" ? item.items : [item];
@@ -2301,7 +2303,7 @@ function fileUrl(path: string): string {
 // and a right-aligned worker progress. No card, no chips.
 const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
   // Its own chunk, shared with the worker view: only direct chats load it.
-  if (item.direct) {
+  if (item.direct && rendersAsDirectTurn(item)) {
     return (
       <React.Suspense fallback={null}>
         <DirectTurnWork item={item} runId={item.direct.runId} />

@@ -4662,9 +4662,7 @@ export default function App() {
   const activeCwdRef = useRef<string | null>(activeWorkspace?.cwd ?? null);
   activeCwdRef.current = activeWorkspace?.cwd ?? null;
   const pendingReviewWorkspaceRef = useRef<string | null>(null);
-  // Chat file links ('spark:open-diff') share one diff tab: a split pins a
-  // preview, and each later click would otherwise add another pill.
-  const chatDiffTabRef = useRef<TabId | null>(null);
+  // Chat file links ('spark:open-diff') share one diff tab (useTabs keeps it).
   const handleOpenDiffForPath = useCallback((absolutePath: string, fromChat = false) => {
     const cwd = activeCwdRef.current;
     if (!cwd || !absolutePath) return;
@@ -4673,12 +4671,7 @@ export default function App() {
     if (absolutePath.toLowerCase().startsWith(base.toLowerCase())) {
       rel = absolutePath.slice(base.length).replace(/^[\\/]+/, "");
     }
-    const id = tabsRef.current.openDiffTab(
-      rel.replace(/\\/g, "/"),
-      false,
-      fromChat ? { reuse: chatDiffTabRef.current } : undefined,
-    );
-    if (fromChat) chatDiffTabRef.current = id;
+    tabsRef.current.openDiffTab(rel.replace(/\\/g, "/"), false, fromChat ? { fromChat: true } : undefined);
   }, []);
 
   // Result cards use window events so the deeply nested chat renderer stays

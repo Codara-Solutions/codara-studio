@@ -120,6 +120,10 @@ test("a direct chat reads as one chat: Send now, raw output Back, one diff tab",
 
     // Details goes inside the worker; Raw output is one level deeper, and
     // each Esc climbs one level with focus kept in the chat.
+    // Each turn's buttons carry its title, so ten turns are not ten "Details".
+    await expect(turns.nth(1).getByRole("button", { name: /^Details/ })).toHaveAccessibleName(
+      /^Details of Also cover the empty list/,
+    );
     await turns.nth(1).getByRole("button", { name: /^Details/ }).click();
     const bar = page.getByRole("navigation", { name: "Worker" });
     await expect(bar).toBeVisible();
@@ -149,18 +153,27 @@ test("a direct chat reads as one chat: Send now, raw output Back, one diff tab",
     await expect(bar).toHaveCount(0);
     await expect(turns.nth(1).getByRole("button", { name: /^Details/ })).toBeFocused();
 
-    // The chat's changed files share one diff tab, even once a split or a
-    // double-click pinned it.
+    // The chat's changed files share one diff tab while it is still theirs.
+    // Once the user pins it, the chat leaves it alone and opens one new tab
+    // beside it, which it then reuses.
     const diffTabs = page.getByRole("tab", { name: /\(Working Tree\)/ });
+    const openFromChat = (file: string) =>
+      page.evaluate((path) => window.dispatchEvent(new CustomEvent("spark:open-diff", { detail: { path } })), file);
     await turns.nth(1).getByRole("button", { name: "Open changes for src/example.ts" }).click();
     await expect(diffTabs).toHaveCount(1);
-    await diffTabs.first().dblclick();
     await page.getByRole("tab", { name: "Cora" }).last().dispatchEvent("click");
-    await page.evaluate(() =>
-      window.dispatchEvent(new CustomEvent("spark:open-diff", { detail: { path: "README.md" } })),
-    );
+    await openFromChat("README.md");
     await expect(diffTabs).toHaveCount(1);
     await expect(diffTabs.first()).toContainText("README.md");
+    await diffTabs.first().dblclick();
+    await page.getByRole("tab", { name: "Cora" }).last().dispatchEvent("click");
+    await openFromChat("src/other.ts");
+    await expect(diffTabs).toHaveCount(2);
+    await expect(diffTabs.first()).toContainText("README.md");
+    await page.getByRole("tab", { name: "Cora" }).last().dispatchEvent("click");
+    await openFromChat("LICENSE");
+    await expect(diffTabs).toHaveCount(2);
+    await expect(diffTabs.nth(1)).toContainText("LICENSE");
   } finally {
     await app?.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true }).catch(() => undefined);

@@ -31,6 +31,7 @@ async function loadContract() {
     stdin: {
       contents:
         `export * from ${JSON.stringify(TIMELINE)};\n` +
+        `export { directTurnState } from ${JSON.stringify(path.join(path.dirname(TIMELINE), "direct-turn-state.ts"))};\n` +
         `export { waitForWorkersTaskIds } from ${JSON.stringify(TOOL_LABELS)};\n` +
         // The run graph's own projection: the chip, the chat row and the graph
         // node must agree on what counts as a running worker.
@@ -1830,6 +1831,7 @@ async function main() {
       title: n === 1 ? "Rename the counter" : "Also cover the empty list",
       runtimePreference: "pi",
       status: "accepted",
+      loomNodeId: "w0",
       createdAt: at(30 + n * 10),
     });
     const passAttempt = (n) => attempt(`attempt-d${n}`, `task-d${n}`, {
@@ -1849,7 +1851,11 @@ async function main() {
       id: `msg-d${n}`, runId: "run-1", author: "user", kind: "note", message: text,
       createdAt: at(30 + n * 10), deliveryState: "acknowledged",
     });
-    return run([{ tasks: [passTask(1), passTask(2)], attempts: [passAttempt(1), passAttempt(2)] }], {
+    const tasks = extra.managerTasks
+      ? [passTask(1), passTask(2)].map(({ loomNodeId, ...rest }) => rest)
+      : [passTask(1), passTask(2)];
+    delete extra.managerTasks;
+    return run([{ tasks, attempts: [passAttempt(1), passAttempt(2)] }], {
       executionMode: "direct",
       status: "complete",
       steps: [passStep(1), passStep(2)],
@@ -1874,15 +1880,69 @@ async function main() {
 
   test("the agents rail is hidden for a direct chat and unchanged for a managed one", () => {
     assert.deepEqual(T.railWorkers(directChat()), []);
-    const managed = directChat({ executionMode: undefined });
+    const managed = directChat({ executionMode: undefined, managerTasks: true });
     assert.equal(T.isDirectChatRun(managed), false);
     assert.equal(T.railWorkers(managed).length, 2);
     assert.equal(T.buildChatTimeline(managed).some((item) => item.kind === "step" && item.direct), false);
     const loom = directChat({ automationId: "auto-1" });
     assert.equal(T.isDirectChatRun(loom), false, "a Loom keeps its steps and rail");
     assert.equal(T.railWorkers(loom).length, 2);
+    assert.equal(T.buildChatTimeline(loom).some((item) => item.kind === "step" && item.direct), false);
     const workflow = directChat({ workflow: { script: "x" } });
     assert.equal(T.isDirectChatRun(workflow), false, "a workflow keeps its steps and rail");
+    assert.equal(T.railWorkers(workflow).length, 2, "a workflow lists its workers on the rail");
+    assert.equal(T.buildChatTimeline(workflow).some((item) => item.kind === "step" && item.direct), false,
+      "a workflow's steps stay step cards");
+  });
+
+  test("a chat the manager took over keeps its earlier direct turns, and its rail returns", () => {
+    const escalated = directChat({ executionMode: "managed", status: "running" });
+    assert.equal(T.isDirectChatRun(escalated), false);
+    assert.equal(T.railWorkers(escalated).length, 2);
+    const steps = T.buildChatTimeline(escalated).filter((item) => item.kind === "step");
+    assert.equal(steps.length, 2);
+    assert.ok(steps.every((item) => item.direct && T.rendersAsDirectTurn(item)), "earlier passes stay direct turns");
+  });
+
+  test("a direct step draws as a direct turn only with at most its one worker", () => {
+    assert.equal(T.rendersAsDirectTurn({ direct: { runId: "r" }, workers: [{}] }), true);
+    assert.equal(T.rendersAsDirectTurn({ direct: { runId: "r" }, workers: [] }), true, "no worker yet reads Starting");
+    assert.equal(T.rendersAsDirectTurn({ direct: { runId: "r" }, workers: [{}, {}] }), false, "two workers keep the step card");
+    assert.equal(T.rendersAsDirectTurn({ workers: [{}] }), false);
+    // A step whose pass has two workers is not marked direct at all.
+    const state = directChat();
+    state.workerTasks[1] = { ...state.workerTasks[1], stepId: "step-d1" };
+    const first = T.buildChatTimeline(state).find((item) => item.kind === "step" && item.id === "step-d1");
+    assert.equal(first.workers.length, 2);
+    assert.equal(first.direct, undefined);
+    // A direct chat's pass whose worker is not created yet is a direct turn.
+    const starting = directChat({ status: "running" });
+    starting.steps.push({ ...starting.steps[1], id: "step-d3", index: 3, workerTaskIds: [] });
+    const third = T.buildChatTimeline(starting).find((item) => item.kind === "step" && item.id === "step-d3");
+    assert.deepEqual(third.direct, { runId: "run-1" });
+  });
+
+  test("a direct turn's head: done, stopped, failed, waiting for an answer, working", () => {
+    assert.equal(T.directTurnState({ status: "accepted" }), "done");
+    assert.equal(T.directTurnState({ status: "cancelled" }), "stopped");
+    assert.equal(T.directTurnState({ status: "failed" }), "failed");
+    assert.equal(T.directTurnState({ status: "running" }, "failed"), "failed");
+    assert.equal(T.directTurnState({ status: "blocked" }), "blocked", "a worker asking a question is not a failure");
+    assert.equal(T.directTurnState({ status: "blocked" }, "failed"), "blocked");
+    assert.equal(T.directTurnState({ status: "running" }), "running");
+    assert.equal(T.directTurnState({ status: "queued", runtimeState: "working" }), "running");
+    assert.equal(T.directTurnState({ status: "queued" }, "live"), "running");
+    assert.equal(T.directTurnState({ status: "queued" }), "starting");
+  });
+
+  test("Find searches what a direct turn draws: its model and changed files", () => {
+    const text = T.directTurnSearchText([{
+      model: "gpt-5.6-sol", runtime: "pi",
+      diff: { fileCount: 2, files: [{ path: "src/example.ts", additions: 1, deletions: 1 }, { path: "README.md", additions: 2, deletions: 0 }] },
+    }]);
+    assert.match(text, /src\/example\.ts/);
+    assert.match(text, /README\.md/);
+    assert.match(text, /Sol/i);
   });
 
   test("Send now is offered on managed and direct chats, never on a Loom or a workflow", () => {
