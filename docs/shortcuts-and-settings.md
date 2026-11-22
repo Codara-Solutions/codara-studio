@@ -746,8 +746,11 @@ in a split.
 Its output stays in the pane, a **Sleeping** chip marks it, and the hover
 text on the rail's tab count says how many agents are asleep.
 
-A sleeping pane shows a card at its bottom edge with which agent sleeps and
-since when. Nothing comes back by itself, not even when you open its
+A sleeping pane shows a card at its bottom edge with what the session was
+about and since when it sleeps. The line is the name you gave the session
+(`/rename`), else the title the agent gave it, the note it posted on the
+rail, or your last message; under it, the last thing you asked. It is read
+once, when the agent stops, and is never written to the log. Nothing comes back by itself, not even when you open its
 workspace: press **Resume** on the card, or Enter or any letter in the pane,
 and the agent resumes its exact session in place (the key is not typed into
 the agent). **Resume and keep running** does the same and pins the pane

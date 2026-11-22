@@ -59,6 +59,11 @@ function agentNotes(): AgentNoteBook {
   return notes;
 }
 
+/** The note a pane's agent posted on the rail, for agent hibernation's card. */
+export function paneAgentNote(paneId: string): string | null {
+  return notes?.get(paneNoteKey(paneId))?.entry.note ?? null;
+}
+
 function workspaceStatusStore(): WorkspaceStatusStore {
   if (store) return store;
   store = createWorkspaceStatusStore({ file: join(codaraHome(), "workspace-status.json") });

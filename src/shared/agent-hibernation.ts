@@ -69,6 +69,9 @@ export interface AgentHibernationRequest {
   paneId: string;
   runtime: AgentHibernationRuntime;
   placement: AgentHibernationPlacement;
+  // The session's transcript as the resume probe found it: read for the
+  // card's line only, and only when the hook trail names none.
+  transcriptPath?: string;
 }
 
 export type AgentHibernationRefusal =
@@ -91,8 +94,59 @@ export type AgentHibernationRefusal =
   | "process-list-unavailable"
   | "stop-failed";
 
+/**
+ * One line about what a sleeping session was doing, for its card. `title` is
+ * the session's name or its subject, `detail` the last thing asked of it.
+ * Kept in memory and on the pane only: never logged.
+ */
+export interface AgentSleepSummary {
+  title: string;
+  detail: string | null;
+  source: "custom-title" | "ai-title" | "agent-note" | "prompt" | "first-prompt" | "tab-title";
+}
+
+export const AGENT_SLEEP_TITLE_MAX = 120;
+export const AGENT_SLEEP_DETAIL_MAX = 180;
+
+const SLEEP_SUMMARY_SOURCES: ReadonlyArray<AgentSleepSummary["source"]> = [
+  "custom-title",
+  "ai-title",
+  "agent-note",
+  "prompt",
+  "first-prompt",
+  "tab-title",
+];
+
+/** A summary of exactly the shape main writes, cut to its limits; anything else is null. */
+export function validSleepSummary(value: unknown): AgentSleepSummary | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<AgentSleepSummary>;
+  if (typeof candidate.title !== "string" || !candidate.title.trim()) return null;
+  if (!SLEEP_SUMMARY_SOURCES.includes(candidate.source as AgentSleepSummary["source"])) return null;
+  const title = oneLine(candidate.title, AGENT_SLEEP_TITLE_MAX);
+  if (!title) return null;
+  return {
+    title,
+    detail:
+      typeof candidate.detail === "string" && candidate.detail.trim()
+        ? oneLine(candidate.detail, AGENT_SLEEP_DETAIL_MAX)
+        : null,
+    source: candidate.source as AgentSleepSummary["source"],
+  };
+}
+
+/** Collapse text to one clean line of at most `max` characters. */
+export function oneLine(text: string, max: number): string {
+  const clean = text
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return clean.length > max ? `${clean.slice(0, Math.max(1, max - 1)).trimEnd()}…` : clean;
+}
+
 export type AgentHibernationResult =
-  | { ok: true; sleptAt: number }
+  | { ok: true; sleptAt: number; summary: AgentSleepSummary | null }
   | { ok: false; reason: AgentHibernationRefusal; detail?: string };
 
 /**
@@ -106,6 +160,7 @@ export interface AgentSleepingPane {
   runtime: AgentHibernationRuntime;
   sleptAt: number;
   output: Uint8Array | null;
+  summary: AgentSleepSummary | null;
 }
 
 /** A pane that was asleep when Codara quit and comes back asleep (restoreAsleep). */
@@ -113,6 +168,7 @@ export interface AgentRestoredAsleepPane {
   paneId: string;
   runtime: AgentHibernationRuntime;
   sleptAt: number;
+  summary: AgentSleepSummary | null;
 }
 
 // ── Memory pressure ─────────────────────────────────────────────────────────

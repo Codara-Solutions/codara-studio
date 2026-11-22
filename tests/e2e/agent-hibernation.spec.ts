@@ -38,6 +38,8 @@ interface FixtureOptions {
   // A split in ws-a: the agent pane and a plain shell that has the keyboard.
   withShellPane?: boolean;
   prefs?: Record<string, unknown>;
+  // The title Claude Code gave the session, as its transcript records it.
+  aiTitle?: string;
 }
 
 interface Fixture {
@@ -76,7 +78,7 @@ async function expectNoLaunchFor(fixture: Fixture, count: number, ms: number): P
 
 test("an idle Claude pane in a background workspace sleeps, shows its card, and resumes only on Resume", async () => {
   test.setTimeout(TEST_TIMEOUT);
-  const fixture = await prepareFixture("plain");
+  const fixture = await prepareFixture("plain", { aiTitle: "Fix the zebra parser" });
   const { app, page, logs } = await launch(fixture);
   try {
     await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 30_000 });
@@ -104,7 +106,9 @@ test("an idle Claude pane in a background workspace sleeps, shows its card, and 
     // Opening the workspace shows the card and launches nothing.
     await workspaceA.evaluate((row) => (row as HTMLElement).click());
     await expect(sleepingCard(page)).toBeVisible();
-    await expect(sleepingCard(page).getByTestId("pane-sleeping-title")).toHaveText("Claude Code session");
+    await expect(sleepingCard(page).getByTestId("pane-sleeping-title"), logs.join("\n")).toHaveText("Fix the zebra parser");
+    // The line is the user's content: it never reaches the log.
+    expect(logs.some((line) => line.includes("zebra"))).toBe(false);
     await expectNoLaunchFor(fixture, 1, TICK_MS * 3);
 
     // Resume brings the same session back in the same pane.
@@ -556,11 +560,11 @@ setInterval(() => {}, 1 << 30);
     await chmod(fakeClaude, 0o755);
   }
 
-  await writeFile(
-    join(claudeProjectDir, `${SESSION_ID}.jsonl`),
-    '{"type":"user","message":{"role":"user","content":"hello"}}\n',
-    "utf8",
-  );
+  const transcript = [
+    JSON.stringify({ type: "user", message: { role: "user", content: "hello" } }),
+    ...(options.aiTitle ? [JSON.stringify({ type: "ai-title", aiTitle: options.aiTitle, sessionId: SESSION_ID })] : []),
+  ].join("\n");
+  await writeFile(join(claudeProjectDir, `${SESSION_ID}.jsonl`), `${transcript}\n`, "utf8");
   await writeFile(
     join(userDataDir, "spark-preferences.json"),
     JSON.stringify({ restoreAgentSessions: true, agentHibernationMinutes: 15, ...(options.prefs ?? {}) }),

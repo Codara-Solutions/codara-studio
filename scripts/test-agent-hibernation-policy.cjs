@@ -393,6 +393,50 @@ async function main() {
   );
   check("pressure never turns hibernation on", under(0, "critical") === 0);
 
+  // ── The card's line ──
+  const validSummary = shared.validSleepSummary;
+  check(
+    "a summary of the shape main writes is kept",
+    JSON.stringify(validSummary({ title: "Fix the parser", detail: "add tests", source: "ai-title" })) ===
+      JSON.stringify({ title: "Fix the parser", detail: "add tests", source: "ai-title" }),
+  );
+  check(
+    "its text is one clean line, cut to the card's limits",
+    validSummary({ title: `a\n\x1b[31mb\x1b[0m ${"c".repeat(300)}`, detail: " ", source: "prompt" })?.title.length === 120 &&
+      validSummary({ title: "a\nb", detail: " ", source: "prompt" })?.title === "a b" &&
+      validSummary({ title: "a", detail: " ", source: "prompt" })?.detail === null,
+  );
+  check(
+    "anything else is no summary",
+    [null, "x", {}, { title: "", source: "prompt" }, { title: "a", source: "made-up" }, { title: 5, source: "prompt" }].every(
+      (value) => validSummary(value) === null,
+    ),
+  );
+  const named = leaf("p-sum", {
+    agentSession: session({ active: true }),
+    hibernation: { runtime: "claude", sleptAt: 7, summary: { title: "Fix the parser", detail: null, source: "custom-title" } },
+  });
+  const namedPersisted = JSON.parse(JSON.stringify(tabs.stripTransientPaneState(named, true)));
+  check(
+    "a pane asleep at quit keeps its line on disk",
+    namedPersisted.restoreAsleep?.summary?.title === "Fix the parser",
+    namedPersisted,
+  );
+  tabs.cleanupTransientTerminalState(namedPersisted);
+  check(
+    "and comes back asleep with it",
+    namedPersisted.hibernation?.summary?.title === "Fix the parser" && namedPersisted.hibernation.summary.source === "custom-title",
+    namedPersisted,
+  );
+  const tampered = JSON.parse(JSON.stringify(tabs.stripTransientPaneState(named, true)));
+  tampered.restoreAsleep.summary = { title: "x", source: "made-up" };
+  tabs.cleanupTransientTerminalState(tampered);
+  check(
+    "a line that is not main's shape is dropped, the pane still comes back asleep",
+    tampered.hibernation?.runtime === "claude" && !tampered.hibernation.summary,
+    tampered,
+  );
+
   // ── Waking: which keys in a sleeping pane ask for the agent back ──
   const resumeKey = shared.isSleepResumeKey;
   check("Enter asks for the agent back", resumeKey({ key: "Enter" }));

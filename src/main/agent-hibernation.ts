@@ -21,13 +21,19 @@
 // Anything unclear refuses. The renderer simply asks again on its next tick.
 // Every verdict lands in <codaraHome>/logs/main.log once per change.
 
+import { latestSessionStart } from "./agent-session-registry";
+import { describeSleepingAgent } from "./agent-sleep-summary";
 import { E2E_BACKGROUND } from "./e2e-background";
 import { logMain } from "./file-log";
 import type { IpcHandle } from "./ipc";
 import * as pty from "./pty-manager";
 import { loadPreferences } from "./preferences-store";
 import { readAvailableMemory } from "./system-metrics";
-import { terminalAgentHibernationEvidence, terminalPanePlacement } from "./terminal-agent-notify";
+import {
+  terminalAgentActivitySnapshot,
+  terminalAgentHibernationEvidence,
+  terminalPanePlacement,
+} from "./terminal-agent-notify";
 import { studioPaneWatchedFromPhone } from "./remote-access/studio-terminal-share";
 import {
   classifyPaneProcessTree,
@@ -44,6 +50,7 @@ import {
   normalizeAgentHibernationMinutes,
   normalizeAgentHibernationWorkspaces,
   policyIdleMs,
+  validSleepSummary,
   type AgentMemoryLevel,
   type AgentHibernationEvidence,
   type AgentHibernationPolicy,
@@ -52,6 +59,7 @@ import {
   type AgentHibernationResult,
   type AgentRestoredAsleepPane,
   type AgentSleepingPane,
+  type AgentSleepSummary,
 } from "@shared/agent-hibernation";
 
 const MINUTE_MS = 60_000;
@@ -74,6 +82,9 @@ const MAX_SLEEPING_OUTPUT_BYTES = 2 * 1024 * 1024;
 // A pane restored asleep at launch is known to main before the renderer has
 // placed it (terminalPanePlacement); it is not dropped for that meanwhile.
 const RESTORED_PLACEMENT_GRACE_MS = 120_000;
+// The card's line is read from the transcript after the stop; the stop never
+// waits on it longer than this.
+const SUMMARY_TIMEOUT_MS = 1_500;
 // Memory is read at most this often; the level keeps between reads.
 const MEMORY_READ_MS = 15_000;
 
@@ -93,6 +104,13 @@ export interface AgentHibernationDeps {
   watchedOnPhone?: (paneId: string) => boolean;
   // What the pane printed, kept for its sleeping view (see pty.sleepOutput).
   sleepOutput?: (paneId: string) => { tail: Buffer | null; unsent: Buffer | null } | null;
+  // The card's line. Called before the stop, while the notifier still holds
+  // the session's last prompt; awaited after it.
+  describe?: (
+    paneId: string,
+    runtime: AgentHibernationRequest["runtime"],
+    probedTranscriptPath: string | null,
+  ) => Promise<AgentSleepSummary | null>;
 }
 
 // e2e only: the suite cannot wait half an hour. Honored only when the app
@@ -169,6 +187,56 @@ export function resetMemoryLevelForTests(level: AgentMemoryLevel = "ok"): void {
   memoryRead = null;
 }
 
+// The rail note module pulls in the workspace status store; it is loaded only
+// when a pane actually goes to sleep.
+async function paneAgentNote(paneId: string): Promise<string | null> {
+  try {
+    const { paneAgentNote: read } = await import("./workspace-status");
+    return read(paneId);
+  } catch {
+    return null;
+  }
+}
+
+function describePane(
+  paneId: string,
+  runtime: AgentHibernationRequest["runtime"],
+  probedTranscriptPath: string | null,
+): Promise<AgentSleepSummary | null> {
+  // Read now, before the stop: the notifier forgets the session's last prompt
+  // once the agent is gone.
+  const activity = terminalAgentActivitySnapshot().find((entry) => entry.paneId === paneId) ?? null;
+  const start = latestSessionStart(paneId);
+  // A session resumed without a SessionStart on record (hooks off, an older
+  // CLI) still has the transcript the renderer's resume probe found.
+  const transcriptPath = (start && start.runtime === runtime ? start.transcriptPath : null) ?? probedTranscriptPath;
+  return paneAgentNote(paneId).then((agentNote) =>
+    describeSleepingAgent({
+      runtime,
+      transcriptPath,
+      notifierPrompt: activity?.prompt ?? null,
+      agentNote,
+      tabTitle: activity?.tabTitle ?? null,
+    }),
+  );
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      },
+    );
+  });
+}
+
 const defaultDeps: AgentHibernationDeps = {
   now: () => Date.now(),
   policy: currentHibernationPolicy,
@@ -181,6 +249,7 @@ const defaultDeps: AgentHibernationDeps = {
   log: (line) => logMain("agent-hibernation", line),
   watchedOnPhone: (paneId) => studioPaneWatchedFromPhone(paneId),
   sleepOutput: (paneId) => pty.sleepOutput(paneId, MAX_SLEEPING_OUTPUT_BYTES),
+  describe: describePane,
 };
 
 const inFlight = new Set<string>();
@@ -194,6 +263,7 @@ interface SleepingEntry {
   sleptAt: number;
   tail: Buffer | null;
   unsent: Buffer | null;
+  summary: AgentSleepSummary | null;
   // Restored asleep at launch: kept without a placement until this time.
   placementGraceUntil: number;
   offExit: (() => void) | null;
@@ -326,6 +396,7 @@ export function takeSleepingPane(paneId: string, freshView = false): AgentSleepi
     // A copy with its own exact-size buffer: a view could carry the rest of
     // a pooled ArrayBuffer across IPC.
     output: output ? new Uint8Array(output) : null,
+    summary: entry.summary,
   };
 }
 
@@ -348,6 +419,7 @@ export function registerRestoredAsleep(input: unknown, now = Date.now()): boolea
     sleptAt,
     tail: null,
     unsent: null,
+    summary: validSleepSummary(value.summary),
     placementGraceUntil: now + RESTORED_PLACEMENT_GRACE_MS,
     offExit: null,
   };
@@ -367,7 +439,16 @@ function validRequest(input: unknown): AgentHibernationRequest | null {
   }
   if (!isAgentHibernationRuntime(value.runtime)) return null;
   if (!PLACEMENTS.has(value.placement as AgentHibernationPlacement)) return null;
-  return { paneId: value.paneId, runtime: value.runtime, placement: value.placement as AgentHibernationPlacement };
+  const transcriptPath =
+    typeof value.transcriptPath === "string" && value.transcriptPath.length > 0 && value.transcriptPath.length <= 4096
+      ? value.transcriptPath
+      : undefined;
+  return {
+    paneId: value.paneId,
+    runtime: value.runtime,
+    placement: value.placement as AgentHibernationPlacement,
+    ...(transcriptPath ? { transcriptPath } : {}),
+  };
 }
 
 type Judged =
@@ -517,17 +598,26 @@ async function decide(
     sleptAt,
     tail: kept?.tail ?? null,
     unsent: kept?.unsent ?? null,
+    summary: null,
     placementGraceUntil: 0,
     offExit: null,
   };
   sleeping.set(request.paneId, entry);
   forgetAtNextExit(request.paneId, entry);
+  const described = deps.describe
+    ? deps.describe(request.paneId, request.runtime, request.transcriptPath ?? null).catch(() => null)
+    : Promise.resolve(null);
   const stopped = await deps.stop(request.paneId, first.session.generationId);
   if (!stopped) {
     forget(request.paneId, entry);
     return { ok: false, reason: "stop-failed" };
   }
-  return { result: { ok: true, sleptAt }, context };
+  entry.summary = await withTimeout(described, SUMMARY_TIMEOUT_MS, null);
+  // Where the line came from, never the line: it is the user's content.
+  return {
+    result: { ok: true, sleptAt, summary: entry.summary },
+    context: `${context.replace(/\)$/, "")}, card ${entry.summary?.source ?? "none"})`,
+  };
 }
 
 /** Register this area's channels with the trusted-sender `handle`. */

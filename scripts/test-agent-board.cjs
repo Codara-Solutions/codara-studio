@@ -527,6 +527,18 @@ async function testRendererHelpers(board) {
     sleepingCard,
   );
   check("a sleeping card counts from when it fell asleep", sleepingCard?.since === sleptAt);
+  const titledBoard = board.buildAgentBoard({
+    now: NOW,
+    workspaces: WORKSPACES,
+    layoutPanes: sleepingPanes.map((pane) => ({ ...pane, sleepingTitle: "Fix the zebra parser" })),
+    activity: [activity({ paneId: "s1", workspaceId: "ws-b", tabId: "t7", runtime: "codex", state: "working" })],
+    runs: [],
+  });
+  check(
+    "a sleeping card is titled with what its session was about",
+    titledBoard.done.find((card) => card.key === "pane:s1")?.title === "Fix the zebra parser",
+    titledBoard.done,
+  );
   check(
     "opening a sleeping card goes to its pane and asks for the agent back",
     sleepingCard?.target.type === "terminal" && sleepingCard.target.paneId === "s1" && sleepingCard.target.resume === true,

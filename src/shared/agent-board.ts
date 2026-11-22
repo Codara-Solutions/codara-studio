@@ -88,6 +88,8 @@ export interface AgentBoardLayoutPane {
    * hibernation); absent while it runs. Opening its card resumes it.
    */
   sleepingSince?: number;
+  /** The sleeping session's line (its title or last prompt), when known. */
+  sleepingTitle?: string;
 }
 
 export interface AgentBoardWorkspace {
@@ -492,6 +494,7 @@ interface MergedPane {
   activity: TerminalAgentActivity | null;
   accountProfileId: string | null;
   sleepingSince: number | null;
+  sleepingTitle: string | null;
 }
 
 function mergePanes(input: AgentBoardInput): MergedPane[] {
@@ -507,6 +510,7 @@ function mergePanes(input: AgentBoardInput): MergedPane[] {
       activity: null,
       accountProfileId: pane.accountProfileId ?? null,
       sleepingSince: pane.sleepingSince ?? null,
+      sleepingTitle: pane.sleepingTitle ?? null,
     });
   }
   for (const activity of input.activity ?? []) {
@@ -525,6 +529,7 @@ function mergePanes(input: AgentBoardInput): MergedPane[] {
       // Only the renderer's layout knows a pane sleeps: main's notifier keeps
       // the last state it saw before Codara stopped the agent.
       sleepingSince: layout?.sleepingSince ?? null,
+      sleepingTitle: layout?.sleepingTitle ?? null,
     });
   }
   return [...merged.values()];
@@ -601,7 +606,11 @@ function sleepingCard(pane: MergedPane, workspace: AgentBoardWorkspace, input: A
     runtime: pane.runtime,
     agentLabel: agentBoardRuntimeLabel(pane.runtime),
     account: (pane.accountProfileId && input.accountLabels?.[pane.accountProfileId]) || null,
-    title: pane.activity?.prompt ?? (agentBoardLine(pane.tabTitle, 120) || agentBoardRuntimeLabel(pane.runtime)),
+    title:
+      agentBoardLine(pane.sleepingTitle, 120) ||
+      pane.activity?.prompt ||
+      agentBoardLine(pane.tabTitle, 120) ||
+      agentBoardRuntimeLabel(pane.runtime),
     tabTitle: agentBoardLine(pane.tabTitle, 120),
     message: SLEEPING_MESSAGE,
     tool: null,
