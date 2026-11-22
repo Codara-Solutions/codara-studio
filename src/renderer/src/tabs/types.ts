@@ -76,6 +76,13 @@ export interface TerminalLeafHibernation {
   wakeError?: string | null;
 }
 
+// What a pane asleep at quit keeps on disk so it comes back asleep, with its
+// card, instead of relaunching its agent (see TerminalLeaf.restoreAsleep).
+export interface TerminalLeafRestoreAsleep {
+  runtime: "claude" | "codex" | "grok" | "pi";
+  sleptAt: number;
+}
+
 // Durable pointer to a Claude/Codex CLI session detected in a terminal leaf,
 // whether it came from Codara's launcher or a command typed by the user.
 // Persisted with the tab layout so a reopen can relaunch the same conversation
@@ -205,10 +212,13 @@ export interface TerminalLeaf {
   bootResume?: boolean;
   // Runtime-only: Codara stopped this pane's idle agent to save memory (agent
   // hibernation, lib/agentHibernation.ts); the pane shows a card and resumes
-  // the agent when the user asks. Never written to localStorage; at quit a
-  // sleeping pane counts as a running agent, so the opt-in relaunch restore
-  // resumes it.
+  // the agent when the user asks. Never written to localStorage as is.
   hibernation?: TerminalLeafHibernation | null;
+  // Durable, written only with the restore preference: the pane was asleep
+  // when Codara quit, so the next launch mounts it asleep (hibernation with
+  // its card) instead of relaunching the agent. Its agentSession stays the
+  // session that Resume brings back.
+  restoreAsleep?: TerminalLeafRestoreAsleep;
   // The user pinned this pane awake: agent hibernation never stops it.
   keepAwake?: boolean;
   // Runtime-only frozen account for a phone-created Claude pane before its

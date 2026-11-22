@@ -266,6 +266,65 @@ async function main() {
   tabs.cleanupTransientTerminalState(hydrated);
   check("hydration drops a stray sleeping mark and a malformed pin", !("hibernation" in hydrated) && !("keepAwake" in hydrated));
 
+  // A pane asleep at quit comes back asleep.
+  check(
+    "with restore on, persist writes that the pane was asleep",
+    JSON.stringify(persisted.restoreAsleep) === JSON.stringify({ runtime: "claude", sleptAt: 5 }),
+    persisted.restoreAsleep,
+  );
+  check("with restore off, it does not", !("restoreAsleep" in persistedOff), persistedOff);
+  const requested = tabs.stripTransientPaneState(
+    leaf("p1", { agentSession: session({ active: true }), hibernation: { runtime: "claude", sleptAt: 5, resumeRequested: true, wakeError: "boom" } }),
+    true,
+  );
+  check(
+    "a pending Resume and a wake error are not written",
+    JSON.stringify(requested.restoreAsleep) === JSON.stringify({ runtime: "claude", sleptAt: 5 }),
+    requested.restoreAsleep,
+  );
+  const woken = tabs.stripTransientPaneState({ ...persisted }, true);
+  check("a pane that woke loses the record at the next persist", !("restoreAsleep" in woken), woken);
+  const otherAgent = tabs.stripTransientPaneState(
+    leaf("p1", { agentSession: session({ runtime: "codex", active: true }), hibernation: { runtime: "claude", sleptAt: 5 } }),
+    true,
+  );
+  check("a mark for another agent than the pane's session is not written", !("restoreAsleep" in otherAgent), otherAgent);
+
+  const relaunched = JSON.parse(JSON.stringify(persisted));
+  tabs.cleanupTransientTerminalState(relaunched);
+  check(
+    "hydration mounts it asleep, with no eager resume and no leftover record",
+    relaunched.hibernation?.runtime === "claude" &&
+      relaunched.hibernation.sleptAt === 5 &&
+      !("bootResume" in relaunched) &&
+      !("restoreAsleep" in relaunched) &&
+      relaunched.agentSession?.sessionId,
+    relaunched,
+  );
+  const running = JSON.parse(JSON.stringify(tabs.stripTransientPaneState(leaf("p4", { agentSession: session({ active: true }) }), true)));
+  tabs.cleanupTransientTerminalState(running);
+  check("a pane that was running at quit still restores eagerly", running.bootResume === true && !("hibernation" in running), running);
+  for (const [name, bad] of [
+    ["a string", "asleep"],
+    ["an unknown agent", { runtime: "antigravity", sleptAt: 5 }],
+    ["no time", { runtime: "claude" }],
+    ["a time that is not a number", { runtime: "claude", sleptAt: "5" }],
+    ["another agent than the session's", { runtime: "codex", sleptAt: 5 }],
+  ]) {
+    const node = JSON.parse(JSON.stringify(persisted));
+    node.restoreAsleep = bad;
+    tabs.cleanupTransientTerminalState(node);
+    check(
+      `a malformed record (${name}) is dropped and the pane restores as it would have`,
+      !("hibernation" in node) && !("restoreAsleep" in node) && node.bootResume === true,
+      node,
+    );
+  }
+  const noSession = JSON.parse(JSON.stringify(persisted));
+  delete noSession.agentSession;
+  tabs.cleanupTransientTerminalState(noSession);
+  check("a record without a session to resume is dropped", !("hibernation" in noSession) && !("restoreAsleep" in noSession), noSession);
+
   const asleepAtQuit = leaf("p2", { agentSession: session({ active: false }), hibernation: { runtime: "claude", sleptAt: 5 } });
   const marked = tabs.markTerminalAgentSessionsActive(asleepAtQuit, new Set());
   check("a pane asleep at quit counts as a running agent for relaunch restore", marked.agentSession?.active === true);

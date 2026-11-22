@@ -468,6 +468,37 @@ async function main() {
     await ah.hibernateAgentPane(request(), makeDeps().deps);
     check("a pane that runs again is awake", ah.agentPaneAsleep("pane-1") === false);
     check("an unknown pane is not asleep", ah.agentPaneAsleep("nope") === false && ah.takeSleepingPane("nope") === null);
+
+    // A pane restored asleep at launch: the renderer tells main.
+    ah.resetAgentHibernationForTests();
+    H.live = new Set();
+    H.placed = new Set();
+    check("a restored sleeping pane is recorded", ah.registerRestoredAsleep({ paneId: "r1", runtime: "codex", sleptAt: 1234 }) === true);
+    check(
+      "it is asleep for delivery and the quit census before the renderer has placed it",
+      ah.agentPaneAsleep("r1") === true && ah.sleepingAgentPanes().get("r1") === "codex",
+    );
+    const restored = ah.takeSleepingPane("r1", true);
+    check(
+      "a reloaded window finds it asleep since the time it fell asleep, with no output to replay",
+      restored && restored.runtime === "codex" && restored.sleptAt === 1234 && restored.output === null,
+      restored,
+    );
+    H.exits.get("r1")?.({ exitCode: 0 });
+    check("its record ends when the session that woke it exits", ah.agentPaneAsleep("r1") === false);
+    ah.registerRestoredAsleep({ paneId: "r2", runtime: "claude", sleptAt: 1 }, Date.now() - 121_000);
+    check("a restored pane the renderer never placed is dropped after the grace time", ah.agentPaneAsleep("r2") === false);
+    ah.registerRestoredAsleep({ paneId: "r3", runtime: "claude", sleptAt: 1 }, Date.now() - 121_000);
+    H.placed = new Set(["r3"]);
+    check("a placed one stays asleep past it", ah.agentPaneAsleep("r3") === true);
+    H.live = new Set(["r4"]);
+    check("a pane that already runs is not recorded", ah.registerRestoredAsleep({ paneId: "r4", runtime: "claude", sleptAt: 1 }) === false);
+    check(
+      "malformed records are refused",
+      [null, "r5", {}, { paneId: "", runtime: "claude" }, { paneId: "r5", runtime: "antigravity" }, { paneId: "x".repeat(257), runtime: "claude" }].every(
+        (input) => ah.registerRestoredAsleep(input) === false,
+      ),
+    );
     H.live = undefined;
     H.placed = undefined;
     ah.resetAgentHibernationForTests();

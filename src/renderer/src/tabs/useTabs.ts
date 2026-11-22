@@ -6,6 +6,7 @@ import {
   type FsEntry,
 } from "@shared/types";
 import { sanitizeTerminalAgentOwner, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
+import { isAgentHibernationRuntime } from "@shared/agent-hibernation";
 import { makeId } from "@shared/ids";
 import { SPLIT_TITLE_BASE, TERMINAL_TITLE_BASE } from "@shared/tab-default-titles";
 import { basename } from "../path-utils";
@@ -42,6 +43,7 @@ import type {
   TerminalLeafOrigin,
   TerminalLeafWorker,
   TerminalLeafHibernation,
+  TerminalLeafRestoreAsleep,
   TerminalSplit,
   TerminalTab,
   UsageTab,
@@ -711,8 +713,11 @@ export function cleanupTransientTerminalState(node: PaneNode): void {
     delete node.origin;
     delete node.openedBy;
     delete node.nativeClaudeProfileId;
-    // A sleeping pane is process state of the run that put it to sleep.
+    // A sleeping pane is process state of the run that put it to sleep; one
+    // that was asleep at quit comes back asleep through restoreAsleep below.
     delete node.hibernation;
+    const restoreAsleep = validatedRestoreAsleep(node.restoreAsleep);
+    delete node.restoreAsleep;
     if (node.keepAwake !== true) delete node.keepAwake;
     // Scrollback is durable here: when the restore preference is off,
     // persist() already stripped it, so whatever survived to hydration is
@@ -731,7 +736,12 @@ export function cleanupTransientTerminalState(node: PaneNode): void {
     const session = validatedTerminalAgentSession(node.agentSession);
     if (session) {
       node.agentSession = session;
-      if (session.active === true) node.bootResume = true;
+      if (restoreAsleep && restoreAsleep.runtime === session.runtime && session.sessionId) {
+        // Asleep at quit: it mounts asleep with its card and resumes only
+        // when the user asks, so it never earns the eager boot resume.
+        node.hibernation = { runtime: restoreAsleep.runtime, sleptAt: restoreAsleep.sleptAt };
+        delete node.bootResume;
+      } else if (session.active === true) node.bootResume = true;
       else delete node.bootResume;
     } else {
       delete node.agentSession;
@@ -850,6 +860,7 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
       !("nativeClaudeProfileId" in node) &&
       !("bootResume" in node) &&
       !("hibernation" in node) &&
+      !("restoreAsleep" in node) &&
       !dropProcessState
     ) {
       return node;
@@ -861,20 +872,37 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
       openedBy: _openedBy,
       nativeClaudeProfileId: _nativeClaudeProfileId,
       bootResume: _bootResume,
-      hibernation: _hibernation,
+      hibernation,
       ...rest
     } = node;
+    delete rest.restoreAsleep;
     if (!keepAgentState) {
       delete rest.scrollback;
       delete rest.agentSession;
     } else if (!session) {
       delete rest.agentSession;
+    } else if (hibernation && hibernation.runtime === session.runtime) {
+      // Asleep now: the next launch mounts it asleep (cleanupTransientTerminalState).
+      rest.restoreAsleep = { runtime: hibernation.runtime, sleptAt: hibernation.sleptAt };
     }
     return rest;
   }
   const a = stripTransientPaneState(node.a, keepAgentState);
   const b = stripTransientPaneState(node.b, keepAgentState);
   return a === node.a && b === node.b ? node : { ...node, a, b };
+}
+
+// localStorage is user-editable: a restoreAsleep that is not exactly the
+// shape persist writes is dropped, and the pane restores as it would without
+// one.
+export function validatedRestoreAsleep(value: unknown): TerminalLeafRestoreAsleep | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<TerminalLeafRestoreAsleep>;
+  if (!isAgentHibernationRuntime(candidate.runtime)) return null;
+  if (typeof candidate.sleptAt !== "number" || !Number.isFinite(candidate.sleptAt) || candidate.sleptAt <= 0) {
+    return null;
+  }
+  return { runtime: candidate.runtime, sleptAt: candidate.sleptAt };
 }
 
 // localStorage is user-editable and older builds wrote partially captured
@@ -997,7 +1025,9 @@ export async function healColdTerminalAgentSessions(
   if (node.kind === "leaf") {
     const start = await lookup(node.paneId).catch(() => null);
     const session = mergeSessionStart(node.agentSession, start);
-    return session ? { ...node, agentSession: session, bootResume: session.active === true } : node;
+    // A pane restored asleep keeps waiting for the user's Resume: the healed
+    // pointer must not hand it the eager boot resume back.
+    return session ? { ...node, agentSession: session, bootResume: session.active === true && !node.hibernation } : node;
   }
   const [a, b] = await Promise.all([healColdTerminalAgentSessions(node.a, lookup), healColdTerminalAgentSessions(node.b, lookup)]);
   return a === node.a && b === node.b ? node : { ...node, a, b };
