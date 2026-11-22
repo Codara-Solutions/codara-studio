@@ -29,6 +29,10 @@ test("a direct chat reads as one chat: Send now, raw output Back, one diff tab",
   const git = (...args: string[]) =>
     execFileSync("git", ["-c", "user.name=e2e", "-c", "user.email=e2e@example.invalid", ...args], { cwd: workspaceDir });
   git("init", "-q");
+  // The app's checkpoint commit, which the turn's changed files are measured
+  // from, needs an identity; CI runners have no global one.
+  git("config", "user.name", "e2e");
+  git("config", "user.email", "e2e@example.invalid");
   git("add", ".");
   git("commit", "-q", "-m", "fixture");
   await writeFile(
