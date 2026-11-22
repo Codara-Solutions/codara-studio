@@ -92,10 +92,56 @@ export interface AgentRestoredAsleepPane {
   sleptAt: number;
 }
 
+// ── Memory pressure ─────────────────────────────────────────────────────────
+
+export type AgentMemoryLevel = "ok" | "low" | "critical";
+
+// Under memory pressure an idle agent sleeps sooner, never later. Each try
+// costs a full process listing (a PowerShell CIM query on Windows), so the
+// floors stay in minutes: the agent is already idle, a little longer costs
+// nothing the machine cannot spare.
+export const AGENT_HIBERNATION_PRESSURE_IDLE_MS: Readonly<Record<Exclude<AgentMemoryLevel, "ok">, number>> = {
+  low: 10 * 60_000,
+  critical: 3 * 60_000,
+};
+
+/** The idle time under this memory level: the setting's, or the level's floor when that is sooner. */
+export function idleMsUnderPressure(
+  idleMs: number,
+  memoryLevel: AgentMemoryLevel,
+  floors: Readonly<Record<Exclude<AgentMemoryLevel, "ok">, number>> = AGENT_HIBERNATION_PRESSURE_IDLE_MS,
+): number {
+  if (!(idleMs > 0) || memoryLevel === "ok") return idleMs;
+  const floor = floors[memoryLevel];
+  return typeof floor === "number" && floor > 0 ? Math.min(idleMs, floor) : idleMs;
+}
+
+// Entry and exit thresholds, as shares of physical memory still available.
+// The entry points match the title bar's meter (memoryLevelFor); leaving a
+// level needs a few points more, so a machine that hovers at the line does
+// not flip between idle times on every tick.
+const MEMORY_ENTER = { low: 0.12, critical: 0.05 } as const;
+const MEMORY_LEAVE = { low: 0.15, critical: 0.07 } as const;
+
+export function nextMemoryLevel(
+  previous: AgentMemoryLevel,
+  reading: { totalBytes: number; availableBytes: number } | null,
+): AgentMemoryLevel {
+  if (!reading || !(reading.totalBytes > 0) || !Number.isFinite(reading.availableBytes)) return "ok";
+  const share = Math.max(0, reading.availableBytes) / reading.totalBytes;
+  if (share < MEMORY_ENTER.critical) return "critical";
+  if (previous === "critical" && share < MEMORY_LEAVE.critical) return "critical";
+  if (share < MEMORY_ENTER.low) return "low";
+  if (previous !== "ok" && share < MEMORY_LEAVE.low) return "low";
+  return "ok";
+}
+
 /** The policy main answers with, so the renderer can pace its nominations. */
 export interface AgentHibernationPolicy {
-  idleMs: number; // 0 = off
+  // 0 = off. Already the shorter of the setting and the memory level's floor.
+  idleMs: number;
   tickMs: number;
+  memoryLevel: AgentMemoryLevel;
 }
 
 // ── Agent-state evidence (from the terminal agent notifier) ─────────────────

@@ -60,7 +60,11 @@ import { IS_MAC } from "../shortcuts/platform";
 import { isRecording } from "../shortcuts/recording";
 import { useOpenAiFastMode } from "../lib/useOpenAiFastMode";
 import { FAST_MODE_COST_NOTE } from "@shared/fast-mode";
-import { AGENT_HIBERNATION_PRESETS, normalizeAgentHibernationMinutes } from "@shared/agent-hibernation";
+import {
+  AGENT_HIBERNATION_PRESETS,
+  AGENT_HIBERNATION_PRESSURE_IDLE_MS,
+  normalizeAgentHibernationMinutes,
+} from "@shared/agent-hibernation";
 import { DEFAULT_RELAY_ANSWER_ASSISTANT, RELAY_SENDER_MAX_CHARS } from "@shared/session-relay";
 import {
   UsageEntryBody,
@@ -3325,6 +3329,13 @@ function SessionsSettings({
                 onChange={(next) => void setPreference("agentHibernationMinutes", next)}
               />
             }
+          />
+        ) : null}
+        {hydrated && hibernationMinutes > 0 ? (
+          <ToggleRow
+            title="Shorter idle time when memory is low"
+            desc={`When this computer runs low on memory, idle agents sleep after ${AGENT_HIBERNATION_PRESSURE_IDLE_MS.low / 60_000} minutes, and after ${AGENT_HIBERNATION_PRESSURE_IDLE_MS.critical / 60_000} when it is almost full, if that is sooner than the time above.`}
+            {...bindToggle("agentHibernationSoonerWhenLow", preferences, setPreference)}
           />
         ) : null}
       </SettingsSection>

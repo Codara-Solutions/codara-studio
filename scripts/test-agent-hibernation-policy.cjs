@@ -331,6 +331,35 @@ async function main() {
   const awakeIdle = leaf("p3", { agentSession: session({ active: true }) });
   check("an awake pane the quit snapshot did not list is still inactive", tabs.markTerminalAgentSessionsActive(awakeIdle, new Set()).agentSession?.active === false);
 
+  // ── Memory pressure ──
+  const GB = 1024 ** 3;
+  const at = (share) => ({ totalBytes: 32 * GB, availableBytes: share * 32 * GB });
+  const level = shared.nextMemoryLevel;
+  check("plenty of memory is ok", level("ok", at(0.4)) === "ok");
+  check("under 12% available is low", level("ok", at(0.11)) === "low");
+  check("under 5% available is critical", level("ok", at(0.04)) === "critical" && level("low", at(0.04)) === "critical");
+  check("low holds until 15% is available again", level("low", at(0.14)) === "low" && level("low", at(0.16)) === "ok");
+  check("13% never enters low from ok", level("ok", at(0.13)) === "ok");
+  check(
+    "critical holds until 7%, then falls to low, not ok",
+    level("critical", at(0.06)) === "critical" && level("critical", at(0.08)) === "low",
+  );
+  check(
+    "an unreadable memory reading is ok, never pressure",
+    level("critical", null) === "ok" &&
+      level("low", { totalBytes: 0, availableBytes: 0 }) === "ok" &&
+      level("low", { totalBytes: GB, availableBytes: NaN }) === "ok",
+  );
+  const under = shared.idleMsUnderPressure;
+  check("no pressure keeps the setting's idle time", under(30 * MIN, "ok") === 30 * MIN);
+  check("low memory lets an agent sleep after 10 minutes", under(30 * MIN, "low") === 10 * MIN);
+  check("critical memory lets an agent sleep after 3 minutes", under(30 * MIN, "critical") === 3 * MIN);
+  check(
+    "pressure never makes an agent sleep later than the setting",
+    under(2 * MIN, "low") === 2 * MIN && under(2 * MIN, "critical") === 2 * MIN,
+  );
+  check("pressure never turns hibernation on", under(0, "critical") === 0);
+
   // ── Waking: which keys in a sleeping pane ask for the agent back ──
   const resumeKey = shared.isSleepResumeKey;
   check("Enter asks for the agent back", resumeKey({ key: "Enter" }));

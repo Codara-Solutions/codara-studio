@@ -62,6 +62,7 @@ export const PREFERENCE_TOGGLES = {
   quickOpenAnywhere: defaultOn("quickOpenAnywhere"),
   restoreAgentSessions: defaultOff("restoreAgentSessions"),
   restoreTerminalOutput: defaultOn("restoreTerminalOutput"),
+  agentHibernationSoonerWhenLow: defaultOn("agentHibernationSoonerWhenLow"),
   machinesEnabled: defaultOn("machinesEnabled"),
   keepAgentsInYourChrome: defaultOn("keepAgentsInYourChrome"),
   usageForecast: defaultOn("usageForecast"),

@@ -11,7 +11,8 @@
 //     no paired phone has it open (Remote Access);
 //   - the terminal agent notifier says the agent's turn ended, nothing is
 //     pending, it is not waiting on the user and no typed text is unsent;
-//   - nothing happened in the pane for the idle time: no input, no output,
+//   - nothing happened in the pane for the idle time (the setting's, or a
+//     shorter one while the computer is low on memory): no input, no output,
 //     and the user did not show or touch it (noteAgentPanesTouched);
 //   - the pane's process tree is only the shell, the agent and what the agent
 //     started at boot (agent-hibernation-census.ts), so no dev server, watcher
@@ -24,6 +25,7 @@ import { logMain } from "./file-log";
 import type { IpcHandle } from "./ipc";
 import * as pty from "./pty-manager";
 import { loadPreferences } from "./preferences-store";
+import { readAvailableMemory } from "./system-metrics";
 import { terminalAgentHibernationEvidence, terminalPanePlacement } from "./terminal-agent-notify";
 import { studioPaneWatchedFromPhone } from "./remote-access/studio-terminal-share";
 import {
@@ -33,10 +35,13 @@ import {
   type CensusProcess,
 } from "./agent-hibernation-census";
 import {
+  idleMsUnderPressure,
   isAgentHibernationRuntime,
   judgeAgentEvidence,
   judgeIdleClock,
+  nextMemoryLevel,
   normalizeAgentHibernationMinutes,
+  type AgentMemoryLevel,
   type AgentHibernationEvidence,
   type AgentHibernationPolicy,
   type AgentHibernationPlacement,
@@ -66,6 +71,8 @@ const MAX_SLEEPING_OUTPUT_BYTES = 2 * 1024 * 1024;
 // A pane restored asleep at launch is known to main before the renderer has
 // placed it (terminalPanePlacement); it is not dropped for that meanwhile.
 const RESTORED_PLACEMENT_GRACE_MS = 120_000;
+// Memory is read at most this often; the level keeps between reads.
+const MEMORY_READ_MS = 15_000;
 
 export interface AgentHibernationDeps {
   now: () => number;
@@ -91,16 +98,62 @@ function e2eOverrideMs(name: string): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+function e2eMemoryLevel(): AgentMemoryLevel | null {
+  if (!E2E_BACKGROUND) return null;
+  const value = process.env.CODARA_E2E_MEMORY_LEVEL;
+  return value === "ok" || value === "low" || value === "critical" ? value : null;
+}
+
+let memoryLevel: AgentMemoryLevel = "ok";
+let memoryReadAt = 0;
+let memoryRead: Promise<AgentMemoryLevel> | null = null;
+
+async function currentMemoryLevel(now: number): Promise<AgentMemoryLevel> {
+  const forced = e2eMemoryLevel();
+  if (forced) return forced;
+  if (now - memoryReadAt < MEMORY_READ_MS) return memoryLevel;
+  memoryRead ??= readAvailableMemory()
+    .catch(() => null)
+    .then((reading) => {
+      const next = nextMemoryLevel(memoryLevel, reading);
+      if (next !== memoryLevel) {
+        const share = reading ? Math.round((reading.availableBytes / reading.totalBytes) * 100) : null;
+        logMain("agent-hibernation", `memory ${memoryLevel} -> ${next}${share === null ? "" : ` (${share}% available)`}`);
+      }
+      memoryLevel = next;
+      memoryReadAt = Date.now();
+      return next;
+    })
+    .finally(() => {
+      memoryRead = null;
+    });
+  return memoryRead;
+}
+
 // Read through loadPreferences, never a possibly cold cache: a cold cache
 // answers with the default (on) for a user who turned the setting off.
 export async function currentHibernationPolicy(): Promise<AgentHibernationPolicy> {
   const prefs = await loadPreferences();
   const minutes = normalizeAgentHibernationMinutes(prefs.agentHibernationMinutes);
-  if (minutes === 0) return { idleMs: 0, tickMs: DEFAULT_TICK_MS };
+  const tickMs = e2eOverrideMs("CODARA_E2E_HIBERNATION_TICK_MS") ?? DEFAULT_TICK_MS;
+  if (minutes === 0) return { idleMs: 0, tickMs: DEFAULT_TICK_MS, memoryLevel: "ok" };
+  const idleMs = e2eOverrideMs("CODARA_E2E_HIBERNATION_IDLE_MS") ?? minutes * MINUTE_MS;
+  // The memory is not read at all with the preference off.
+  if (prefs.agentHibernationSoonerWhenLow === false) return { idleMs, tickMs, memoryLevel: "ok" };
+  const level = await currentMemoryLevel(Date.now());
+  const pressure = e2eOverrideMs("CODARA_E2E_HIBERNATION_PRESSURE_IDLE_MS");
   return {
-    idleMs: e2eOverrideMs("CODARA_E2E_HIBERNATION_IDLE_MS") ?? minutes * MINUTE_MS,
-    tickMs: e2eOverrideMs("CODARA_E2E_HIBERNATION_TICK_MS") ?? DEFAULT_TICK_MS,
+    idleMs: idleMsUnderPressure(idleMs, level, pressure ? { low: pressure, critical: pressure } : undefined),
+    tickMs,
+    memoryLevel: level,
   };
+}
+
+/** Tests only: forget the memory level read so far. */
+export function resetMemoryLevelForTests(level: AgentMemoryLevel = "ok"): void {
+  memoryLevel = level;
+  memoryReadAt = 0;
+  memoryRead = null;
 }
 
 const defaultDeps: AgentHibernationDeps = {
@@ -366,12 +419,12 @@ export async function hibernateAgentPane(
 ): Promise<AgentHibernationResult> {
   const request = validRequest(input);
   if (!request) return { ok: false, reason: "bad-request" };
-  const { idleMs, tickMs } = await deps.policy();
-  if (!(idleMs > 0)) return { ok: false, reason: "off" };
+  const policy = await deps.policy();
+  if (!(policy.idleMs > 0)) return { ok: false, reason: "off" };
   if (inFlight.has(request.paneId)) return { ok: false, reason: "in-flight" };
   inFlight.add(request.paneId);
   try {
-    const decided = await decide(request, deps, idleMs, tickMs);
+    const decided = await decide(request, deps, policy);
     const result = "result" in decided ? decided.result : decided;
     noteVerdict(request.paneId, result, deps, "context" in decided ? decided.context : "");
     return result;
@@ -384,8 +437,7 @@ export async function hibernateAgentPane(
 async function decide(
   request: AgentHibernationRequest,
   deps: AgentHibernationDeps,
-  idleMs: number,
-  tickMs: number,
+  { idleMs, tickMs, memoryLevel: level }: AgentHibernationPolicy,
 ): Promise<AgentHibernationResult | { result: AgentHibernationResult; context: string }> {
   const first = judgeNow(request, deps, idleMs);
   if (!first.ok) return first.result;
@@ -428,7 +480,7 @@ async function decide(
   if (second.session.generationId !== first.session.generationId) {
     return { ok: false, reason: "no-session", detail: "respawned while judged" };
   }
-  const context = `${request.runtime} is sleeping (${request.placement}, idle ${Math.round(idleMs / 1000)}s, census ${processes.length} processes in ${deps.now() - now}ms)`;
+  const context = `${request.runtime} is sleeping (${request.placement}, idle ${Math.round(idleMs / 1000)}s${level === "ok" ? "" : `, memory ${level}`}, census ${processes.length} processes in ${deps.now() - now}ms)`;
   // Recorded before the stop: the pty leaves pty-manager's table as the
   // stop begins, so an app quit during the stop's grace period must already
   // find this pane among the sleeping ones, or the relaunch restore would

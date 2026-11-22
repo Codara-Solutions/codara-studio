@@ -36,7 +36,7 @@ const harnessPlugin = (stubNotifier) => ({
     build.onResolve(
       {
         filter:
-          /^(electron|\.\/e2e-background|\.\/pty-manager|\.\/preferences-store|\.\/notify|\.\/agent-session-registry|\.\/orchestration\/usage-activity-refresh|\.\/owned-process-tree-stub|\.\/remote-access\/studio-terminal-share)$/,
+          /^(electron|\.\/e2e-background|\.\/pty-manager|\.\/preferences-store|\.\/system-metrics|\.\/notify|\.\/agent-session-registry|\.\/orchestration\/usage-activity-refresh|\.\/owned-process-tree-stub|\.\/remote-access\/studio-terminal-share)$/,
       },
       (args) => ({ path: args.path, namespace: "stub" }),
     );
@@ -52,6 +52,13 @@ const harnessPlugin = (stubNotifier) => ({
         case "./preferences-store":
           return {
             contents: init + "export async function loadPreferences(){ return globalThis.__AH.prefs; }\n",
+            loader: "js",
+          };
+        case "./system-metrics":
+          return {
+            contents:
+              init +
+              "export async function readAvailableMemory(){ globalThis.__AH.memoryReads = (globalThis.__AH.memoryReads ?? 0) + 1; return globalThis.__AH.memory ?? null; }\n",
             loader: "js",
           };
         case "./remote-access/studio-terminal-share":
@@ -161,7 +168,7 @@ function makeDeps(overrides = {}) {
   };
   const deps = {
     now: () => NOW,
-    policy: async () => ({ idleMs: 30 * MIN, tickMs: MIN }),
+    policy: async () => ({ idleMs: 30 * MIN, tickMs: MIN, memoryLevel: "ok" }),
     session: () => (state.session ? { ...state.session } : null),
     evidence: () => (state.evidence ? { ...state.evidence } : null),
     listProcesses: async () => {
@@ -223,7 +230,7 @@ async function main() {
   check("a malformed request is refused", r.result.reason === "bad-request" && r.calls.stop.length === 0);
   r = await run(undefined, { paneId: "p", runtime: "bash", placement: "visible" });
   check("an unknown runtime is refused", r.result.reason === "bad-request");
-  r = await run((t) => { t.deps.policy = async () => ({ idleMs: 0, tickMs: MIN }); });
+  r = await run((t) => { t.deps.policy = async () => ({ idleMs: 0, tickMs: MIN, memoryLevel: "ok" }); });
   check("the setting turned off refuses everything", r.result.reason === "off" && r.calls.list === 0);
   r = await run((t) => { t.state.session = null; });
   check("no live pty: refused", r.result.reason === "no-session");
@@ -512,6 +519,46 @@ async function main() {
   policy = await ah.currentHibernationPolicy();
   check("Off gives a zero idle time", policy.idleMs === 0);
   H.prefs = { agentHibernationMinutes: 30 };
+  // Memory pressure: the policy's idle time is the level's floor when that
+  // is sooner than the setting.
+  const GB = 1024 ** 3;
+  ah.resetMemoryLevelForTests();
+  H.memory = { totalBytes: 32 * GB, availableBytes: 16 * GB };
+  policy = await ah.currentHibernationPolicy();
+  check("plenty of memory keeps the setting's idle time", policy.idleMs === 30 * MIN && policy.memoryLevel === "ok", policy);
+  ah.resetMemoryLevelForTests();
+  H.memory = { totalBytes: 32 * GB, availableBytes: 3 * GB };
+  policy = await ah.currentHibernationPolicy();
+  check("low memory gives the 10 minute idle time", policy.idleMs === 10 * MIN && policy.memoryLevel === "low", policy);
+  const readsBefore = H.memoryReads;
+  H.memory = { totalBytes: 32 * GB, availableBytes: 16 * GB };
+  policy = await ah.currentHibernationPolicy();
+  check(
+    "the level keeps between reads",
+    policy.memoryLevel === "low" && H.memoryReads === readsBefore,
+    { policy, reads: H.memoryReads },
+  );
+  ah.resetMemoryLevelForTests();
+  H.memory = { totalBytes: 32 * GB, availableBytes: 1 * GB };
+  policy = await ah.currentHibernationPolicy();
+  check("critical memory gives the 3 minute idle time", policy.idleMs === 3 * MIN && policy.memoryLevel === "critical", policy);
+  H.prefs = { agentHibernationMinutes: 30, agentHibernationSoonerWhenLow: false };
+  ah.resetMemoryLevelForTests();
+  const readsOff = H.memoryReads;
+  policy = await ah.currentHibernationPolicy();
+  check(
+    "with the preference off the setting's idle time holds and memory is not read",
+    policy.idleMs === 30 * MIN && policy.memoryLevel === "ok" && H.memoryReads === readsOff,
+    policy,
+  );
+  H.prefs = { agentHibernationMinutes: 0 };
+  policy = await ah.currentHibernationPolicy();
+  check("pressure never turns hibernation on", policy.idleMs === 0 && H.memoryReads === readsOff, policy);
+  H.prefs = { agentHibernationMinutes: 30 };
+  ah.resetMemoryLevelForTests();
+  H.memory = null;
+  policy = await ah.currentHibernationPolicy();
+  check("an unreadable memory reading is no pressure", policy.idleMs === 30 * MIN && policy.memoryLevel === "ok", policy);
   process.env.CODARA_E2E_HIBERNATION_IDLE_MS = "2000";
   policy = await ah.currentHibernationPolicy();
   check("the e2e override is ignored outside the e2e runner", policy.idleMs === 30 * MIN);
@@ -623,7 +670,21 @@ async function main() {
 
     ah.resetAgentHibernationForTests();
     lines.length = 0;
-    const off = makeDeps({ log: (line) => lines.push(line), policy: async () => ({ idleMs: 0, tickMs: MIN }) });
+    const pressed = makeDeps({
+      log: (line) => lines.push(line),
+      policy: async () => ({ idleMs: 10 * MIN, tickMs: MIN, memoryLevel: "low" }),
+    });
+    await ah.hibernateAgentPane(request(), pressed.deps);
+    check(
+      "a sleep under memory pressure names the level",
+      lines.length === 1 &&
+        lines[0] === "pane=pane-1 claude is sleeping (background-workspace, idle 600s, memory low, census 3 processes in 0ms)",
+      lines,
+    );
+
+    ah.resetAgentHibernationForTests();
+    lines.length = 0;
+    const off = makeDeps({ log: (line) => lines.push(line), policy: async () => ({ idleMs: 0, tickMs: MIN, memoryLevel: "ok" }) });
     await ah.hibernateAgentPane(request(), off.deps);
     check("nothing is logged while the setting is off", lines.length === 0, lines);
   }
