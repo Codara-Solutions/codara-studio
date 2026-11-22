@@ -329,6 +329,18 @@ async function main() {
   }));
   check("cold workspace recovers a missing Codex pointer", cold.a.agentSession?.runtime === "codex" && cold.a.bootResume === true);
   check("cold workspace does not mount a closed Claude session", cold.b.agentSession?.active === false && cold.b.bootResume === false);
+  const coldAsleep = await healColdTerminalAgentSessions(
+    leaf("asleep-pane", { agentSession: session({ active: true }), hibernation: { runtime: "claude", sleptAt: 5 } }),
+    async paneId => ({
+      paneId, runtime: "claude", sessionId: "11111111-1111-4111-8111-111111111111",
+      cwd: "/project", timestamp: "2026-09-06T10:00:00Z", active: true, restoreOnBoot: true,
+    }),
+  );
+  check(
+    "a pane restored asleep keeps its healed pointer but earns no eager resume",
+    coldAsleep.agentSession?.active === true && coldAsleep.bootResume === false && coldAsleep.hibernation?.runtime === "claude",
+    coldAsleep,
+  );
 
   const clean = leaf("q2", { cwd: "/clean" });
   check("persist(off) preserves clean leaf identity", stripTransientPaneState(clean) === clean);

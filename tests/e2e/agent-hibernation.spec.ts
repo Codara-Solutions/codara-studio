@@ -104,7 +104,7 @@ test("an idle Claude pane in a background workspace sleeps, shows its card, and 
   }
 });
 
-test("a pane still asleep when Codara quits resumes its session on the next launch", async () => {
+test("a pane still asleep when Codara quits comes back asleep and resumes on Resume", async () => {
   test.setTimeout(120_000);
   const fixture = await prepareFixture("plain");
   let { app, page, logs } = await launch(fixture);
@@ -118,11 +118,16 @@ test("a pane still asleep when Codara quits resumes its session on the next laun
     });
     await expect.poll(() => isAlive(first.pid), { timeout: 10_000 }).toBe(false);
 
-    // Quit with the agent asleep: no agent process runs in the pane, yet it
-    // must count as a running session for the relaunch restore.
+    // Quit with the agent asleep: the relaunch must keep its session but
+    // launch nothing for it. The pane comes back asleep, with its card.
     await app.close();
     ({ app, page, logs } = await launch(fixture, { seed: false }));
     await page.locator('[data-workspace-id="ws-a"]').evaluate((row) => (row as HTMLElement).click());
+    await expect(sleepingCard(page)).toBeVisible({ timeout: 30_000 });
+    await expectNoLaunchFor(fixture, 1, TICK_MS * 4);
+    expect(logs.some((line) => line.includes(`pane=${PANE_ID} claude restored asleep`)), logs.join("\n")).toBe(true);
+
+    await sleepingCard(page).getByTestId("pane-resume").click();
     const launches = await waitForLaunches(fixture, 2);
     expect(launches[1].args).toEqual(expect.arrayContaining(["--resume", SESSION_ID]));
     await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });

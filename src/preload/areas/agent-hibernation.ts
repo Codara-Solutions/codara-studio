@@ -8,6 +8,7 @@ import type {
   AgentHibernationPolicy,
   AgentHibernationRequest,
   AgentHibernationResult,
+  AgentRestoredAsleepPane,
   AgentSleepingPane,
 } from "@shared/agent-hibernation";
 
@@ -24,6 +25,9 @@ export const agentHibernationApi = {
    */
   sleepingPane: (paneId: string, options: { freshView: boolean }): Promise<AgentSleepingPane | null> =>
     ipcRenderer.invoke("agentHibernation:sleepingPane", paneId, options),
+  /** A pane restored asleep at launch: main records it as sleeping. */
+  restoredAsleep: (pane: AgentRestoredAsleepPane): Promise<boolean> =>
+    ipcRenderer.invoke("agentHibernation:restoredAsleep", pane),
   /** The user showed or touched these panes: their idle clock starts over. */
   touched: (paneIds: string[]): void => ipcRenderer.send("agentHibernation:touched", paneIds),
   /** One line for main.log about a pane the renderer did not nominate. */

@@ -769,9 +769,11 @@ whenever it cannot tell:
   toolbar, shown on agent panes);
 - no paired phone has the pane open (Remote Access).
 
-Cora's worker panes and phone panes never sleep. A sleeping pane that is
-still asleep when you quit counts as a running agent, so **Resume running
-agent sessions when Codara reopens** brings it back too. If the window
+Cora's worker panes and phone panes never sleep. A pane that is still asleep
+when you quit comes back asleep, with its card, when **Resume running agent
+sessions when Codara reopens** is on: nothing is launched for it until you
+press Resume, while the agents that were running at quit resume as before.
+With that setting off its session is not kept, like any other. If the window
 reloads while an agent sleeps, its pane stays asleep, still shows what the
 agent last printed, and resumes when you ask. Sending a selection or a
 screenshot to a sleeping agent is refused with a note to open its pane and

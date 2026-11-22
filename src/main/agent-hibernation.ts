@@ -42,6 +42,7 @@ import {
   type AgentHibernationPlacement,
   type AgentHibernationRequest,
   type AgentHibernationResult,
+  type AgentRestoredAsleepPane,
   type AgentSleepingPane,
 } from "@shared/agent-hibernation";
 
@@ -62,6 +63,9 @@ const CENSUS_BACKOFF_TICKS = 5;
 // mounts again with an empty xterm (the stop drops pty-manager's tail and
 // backlog). Bounded per pane; the newest output wins.
 const MAX_SLEEPING_OUTPUT_BYTES = 2 * 1024 * 1024;
+// A pane restored asleep at launch is known to main before the renderer has
+// placed it (terminalPanePlacement); it is not dropped for that meanwhile.
+const RESTORED_PLACEMENT_GRACE_MS = 120_000;
 
 export interface AgentHibernationDeps {
   now: () => number;
@@ -123,6 +127,8 @@ interface SleepingEntry {
   sleptAt: number;
   tail: Buffer | null;
   unsent: Buffer | null;
+  // Restored asleep at launch: kept without a placement until this time.
+  placementGraceUntil: number;
   offExit: (() => void) | null;
 }
 const sleeping = new Map<string, SleepingEntry>();
@@ -188,8 +194,8 @@ export function noteAgentPanesTouched(paneIds: readonly string[], now = Date.now
 
 /**
  * The panes still asleep, for the quit census (src/main/index.ts): their
- * agent was stopped by Codara, not by the user, so the opt-in relaunch
- * restore must treat them as running sessions.
+ * agent was stopped by Codara, not by the user, so the session must not be
+ * dropped at the relaunch.
  */
 export function sleepingAgentPanes(): Map<string, AgentHibernationRequest["runtime"]> {
   const out = new Map<string, AgentHibernationRequest["runtime"]>();
@@ -203,7 +209,8 @@ export function sleepingAgentPanes(): Map<string, AgentHibernationRequest["runti
 function sleepingEntry(paneId: string): SleepingEntry | null {
   const entry = sleeping.get(paneId);
   if (!entry) return null;
-  if (pty.hasSession(paneId) || !terminalPanePlacement(paneId)) {
+  const unplaced = !terminalPanePlacement(paneId) && Date.now() >= entry.placementGraceUntil;
+  if (pty.hasSession(paneId) || unplaced) {
     forget(paneId, entry);
     return null;
   }
@@ -253,6 +260,34 @@ export function takeSleepingPane(paneId: string, freshView = false): AgentSleepi
     // a pooled ArrayBuffer across IPC.
     output: output ? new Uint8Array(output) : null,
   };
+}
+
+/**
+ * A pane that was asleep when Codara quit comes back asleep: the renderer
+ * mounts it with its card and no process, and tells main, so delivery, the
+ * quit census and a window reload treat it as the sleeping pane it is.
+ */
+export function registerRestoredAsleep(input: unknown, now = Date.now()): boolean {
+  if (!input || typeof input !== "object") return false;
+  const value = input as Partial<AgentRestoredAsleepPane>;
+  if (typeof value.paneId !== "string" || !value.paneId || value.paneId.length > 256) return false;
+  if (!isAgentHibernationRuntime(value.runtime)) return false;
+  if (pty.hasSession(value.paneId)) return false;
+  const sleptAt = typeof value.sleptAt === "number" && Number.isFinite(value.sleptAt) ? value.sleptAt : now;
+  const previous = sleeping.get(value.paneId);
+  if (previous) forget(value.paneId, previous);
+  const entry: SleepingEntry = {
+    runtime: value.runtime,
+    sleptAt,
+    tail: null,
+    unsent: null,
+    placementGraceUntil: now + RESTORED_PLACEMENT_GRACE_MS,
+    offExit: null,
+  };
+  sleeping.set(value.paneId, entry);
+  forgetAtNextExit(value.paneId, entry);
+  logMain("agent-hibernation", `pane=${value.paneId} ${value.runtime} restored asleep`);
+  return true;
 }
 
 const PLACEMENTS: ReadonlySet<AgentHibernationPlacement> = new Set(["visible", "hidden-tab", "background-workspace"]);
@@ -407,6 +442,7 @@ async function decide(
     sleptAt,
     tail: kept?.tail ?? null,
     unsent: kept?.unsent ?? null,
+    placementGraceUntil: 0,
     offExit: null,
   };
   sleeping.set(request.paneId, entry);
@@ -428,6 +464,7 @@ export function registerAgentHibernationIpc(handle: IpcHandle): void {
       ? takeSleepingPane(paneId, (options as { freshView?: unknown } | null)?.freshView === true)
       : null,
   );
+  handle("agentHibernation:restoredAsleep", (_event, input: unknown) => registerRestoredAsleep(input));
 }
 
 /** The renderer's fire-and-forget channels (touches and its own skips). */

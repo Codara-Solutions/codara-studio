@@ -3592,6 +3592,15 @@ export function useTerminalSession({
             logRestore(`pane=${sessionId} mounts asleep (${asleep.runtime}), marked from main`);
             onAsleepRef.current?.({ runtime: asleep.runtime, sleptAt: asleep.sleptAt });
           }
+        } else if (sleepingAtMount && hibernationRef.current) {
+          // Marked asleep by the layout but unknown to main: a pane that was
+          // asleep when Codara quit (restoreAsleep). Main records it so
+          // delivery refuses it and a reload or a quit keeps it asleep.
+          const mark = hibernationRef.current;
+          logRestore(`pane=${sessionId} restored asleep (${mark.runtime})`);
+          void window.spark.agentHibernation
+            ?.restoredAsleep?.({ paneId: sessionId, runtime: mark.runtime, sleptAt: mark.sleptAt })
+            .catch(() => undefined);
         }
       }
       if (sleepingAtMount) sleepingRef.current = true;

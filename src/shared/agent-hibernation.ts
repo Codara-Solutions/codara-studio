@@ -85,6 +85,13 @@ export interface AgentSleepingPane {
   output: Uint8Array | null;
 }
 
+/** A pane that was asleep when Codara quit and comes back asleep (restoreAsleep). */
+export interface AgentRestoredAsleepPane {
+  paneId: string;
+  runtime: AgentHibernationRuntime;
+  sleptAt: number;
+}
+
 /** The policy main answers with, so the renderer can pace its nominations. */
 export interface AgentHibernationPolicy {
   idleMs: number; // 0 = off
