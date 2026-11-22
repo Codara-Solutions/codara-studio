@@ -474,7 +474,6 @@ export default function ChatPanel({
                 workerId={insideWorker}
                 onBack={leaveBack}
                 onSelectWorker={setInsideWorker}
-                onOpenTerminal={onOpenBoardWorkerTerminal}
                 onAskCora={(text) => {
                   setInsideWorker(null);
                   window.requestAnimationFrame(() => {

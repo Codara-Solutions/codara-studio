@@ -11,7 +11,6 @@ import {
   USER_BUBBLE_STYLE,
 } from "./ChatConversation";
 import Markdown from "./Markdown";
-import type { ChatWorker } from "./timeline";
 import {
   foldFinishedWorker,
   workerElapsed,
@@ -32,18 +31,12 @@ import "./worker-chat.css";
 
 export default function WorkerChat({
   run,
-  worker,
   attemptId,
   state,
-  showLog,
-  onCloseLog,
 }: {
   run: RunState;
-  worker: ChatWorker;
   attemptId: string;
   state: WorkerViewState;
-  showLog: boolean;
-  onCloseLog: () => void;
 }) {
   const feed = useWorkerFeed(run.id, attemptId);
   const rows = useMemo(() => workerRows(foldWorkerFeed(feed)), [feed]);
@@ -158,8 +151,6 @@ export default function WorkerChat({
         )}
 
         {report && <WorkerReportView report={report} />}
-
-        {showLog && <RawLog runId={run.id} attemptId={attemptId} onClose={onCloseLog} title={worker.title} />}
       </div>
     </div>
   );
@@ -233,34 +224,41 @@ function WorkerReportView({ report }: { report: WorkerReport }) {
   );
 }
 
-function RawLog({
+export function RawLog({
   runId,
   attemptId,
   title,
+  running = false,
   onClose,
 }: {
   runId: string;
   attemptId: string;
   title: string;
+  /** The worker is still at work: the output is read again every 2 s. */
+  running?: boolean;
   onClose: () => void;
 }) {
   const [log, setLog] = useState<{ text: string; truncated: boolean } | null | undefined>(undefined);
   useEffect(() => {
     let live = true;
-    window.spark.orchestration
-      .readWorkerLog(runId, attemptId)
-      .then((value) => live && setLog(value))
-      .catch(() => live && setLog(null));
+    const read = () =>
+      window.spark.orchestration
+        .readWorkerLog(runId, attemptId)
+        .then((value) => live && setLog(value))
+        .catch(() => live && setLog((current) => current ?? null));
+    void read();
+    const timer = running ? window.setInterval(read, 2000) : undefined;
     return () => {
       live = false;
+      if (timer !== undefined) window.clearInterval(timer);
     };
-  }, [runId, attemptId]);
+  }, [runId, attemptId, running]);
   return (
     <section className="cora-worker-log" aria-label={`Raw terminal output of ${title}`}>
       <div className="cora-worker-report__head">
         Raw terminal output
         <button type="button" className="cora-worker-log__hide" onClick={onClose}>
-          Hide
+          Back to chat
         </button>
       </div>
       <pre>

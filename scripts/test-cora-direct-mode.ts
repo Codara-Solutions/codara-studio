@@ -148,6 +148,69 @@ try {
   assert.equal(followUpNeedsManager("run this every night"), true);
   assert.equal(followUpNeedsManager("thanks!"), false);
   assert.equal(followUpNeedsManager("also fix the typo in utils.ts"), false);
+
+  // A direct worker is one model that cannot start helpers or stop to ask, so
+  // delegation to agents or several models, and a "let me pick first" gate,
+  // go to the manager, as a first message and as a follow-up.
+  for (const prompt of [
+    "Build the settings page. Use astra for the hard task and sol for the simpler tasks.",
+    "Use opus for the parser and sonnet on the tests.",
+    "Spawn sub-agents to fix each failing file.",
+    "Delegate the work to three agents and merge their results.",
+    "Use a different model for each task.",
+    "Show me 3 options for the landing page before you build anything.",
+    "Give me some options to choose from, then build the one I pick.",
+    "Draft two layouts and I decide which one.",
+    "Plan the change and only implement it once I approve.",
+    "Wait for my approval before touching the database code.",
+    "spin up 3 subagents",
+    "have opus write the parser and sonnet write the tests",
+    "make 3 versions, I'll pick one",
+    "Propose 2 designs, wait for me",
+    "show me some options of changes to the onboarding, then I decide, and once I approve you build it",
+    "use astra for the hard task and sol for the simpler tasks",
+    "Don't change anything until I confirm the plan.",
+    "Use sub-agents to fix each failing file",
+    "use subagents for this",
+    "Plan it, and once I approve you can build it.",
+    "Use claude for the backend and codex for the frontend.",
+  ]) {
+    assert.equal(await shouldUseDirectExecution({ cwd: root, prompt }), false, `stays with the manager: ${prompt}`);
+    assert.equal(followUpNeedsManager(prompt), true, `a follow-up goes to the manager: ${prompt}`);
+  }
+  for (const prompt of [
+    "Fix the options menu so it closes on Escape.",
+    "Add a setting that lets me choose the theme.",
+    "The approve button does nothing when I click it.",
+    "Use flexbox for the header and grid for the cards.",
+    "Fix the subagent count in the rail.",
+    "Use sol for this fix.",
+    "Show the alternatives list sorted by name.",
+    "Fix the dialog so I can pick a file.",
+    "Run the tests with two workers in jest config.",
+    "show me the options in the config file",
+    "Show me the designs folder",
+    "show me the choices array in settings.ts",
+    "Crash happens when I pick a file",
+    "Fix the bug when I approve a PR",
+    "after I confirm the dialog the page reloads",
+    "Add a dropdown so I can pick which theme",
+    "the rail crashes with sub-agents",
+    "Run the subagent tests",
+    "Use the sub-agent API in agent-socket.ts",
+    "codex on linux and claude on mac both crash",
+    "Create two versions of the API: v1 and v2",
+    "Build two layouts: mobile and desktop",
+    "Write 2 drafts of the release notes",
+    "make some options in the config optional",
+    "Make two versions of the logo, one dark one light",
+    "Fix the bug where when I approve the PR, the build starts",
+    "When I sign off the build starts twice",
+    "sonnet writes bad code, claude does better: use claude for this",
+  ]) {
+    assert.equal(await shouldUseDirectExecution({ cwd: root, prompt }), true, `stays direct: ${prompt}`);
+    assert.equal(followUpNeedsManager(prompt), false, `a follow-up stays direct: ${prompt}`);
+  }
 } finally {
   await fs.rm(root, { recursive: true, force: true });
 }

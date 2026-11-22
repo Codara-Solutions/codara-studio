@@ -125,6 +125,15 @@ export function isAutomationRun(run: RunState): boolean {
   return run.executionMode === "direct" && Boolean(run.automationId);
 }
 
+/**
+ * Whether a queued message offers Send now. A Loom or a workflow takes its
+ * messages through its own driver, so Send now could only fail there; a
+ * managed chat and a direct chat (which stops its worker) both serve it.
+ */
+export function offersSendNow(run: Pick<RunState, "executionMode" | "automationId" | "workflow">): boolean {
+  return !(run.executionMode === "direct" && (Boolean(run.automationId) || Boolean(run.workflow)));
+}
+
 // A queued task has no attempt metadata yet, so derive its launch target.
 function pendingAttemptModel(task: WorkerTask, modelOptions: WorkerModelOptions): string {
   return workerModelLabel(
