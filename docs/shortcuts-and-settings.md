@@ -797,7 +797,8 @@ sessions when Codara reopens** is on: nothing is launched for it until you
 press Resume, while the agents that were running at quit resume as before.
 With that setting off its session is not kept, like any other. If the window
 reloads while an agent sleeps, its pane stays asleep, still shows what the
-agent last printed, and resumes when you ask. Sending a selection or a
+agent last printed, and resumes when you ask, whether or not that setting
+is on. Sending a selection or a
 screenshot to a sleeping agent is refused with a note to open its pane and
 press Resume first, so nothing is pasted into a pane with no agent to read
 it.

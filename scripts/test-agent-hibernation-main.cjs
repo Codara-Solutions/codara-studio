@@ -771,6 +771,30 @@ async function main() {
     );
     check("and a pane mounting later is told the same", ah.takeSleepingPane("pane-1", true)?.freedBytes === 300 * 1024 * 1024);
 
+    // The session pointer: kept as handed over, for a reloaded pane that has none.
+    ah.resetAgentHibernationForTests();
+    const pointer = { runtime: "claude", sessionId: "abc", cwd: "/w", capturedAt: "2026-01-01T00:00:00.000Z", active: true };
+    const keeps = makeDeps();
+    await ah.hibernateAgentPane(request({ session: pointer }), keeps.deps);
+    check(
+      "main hands a mounting pane the session pointer it fell asleep with",
+      JSON.stringify(ah.takeSleepingPane("pane-1", true)?.session) === JSON.stringify(pointer),
+    );
+    for (const [name, bad] of [
+      ["an array", [1]],
+      ["a string", "x"],
+      ["an oversized object", { blob: "x".repeat(40_000) }],
+    ]) {
+      ah.resetAgentHibernationForTests();
+      const drops = makeDeps();
+      const answer = await ah.hibernateAgentPane(request({ session: bad }), drops.deps);
+      check(
+        `${name} is not kept as a pointer, and the pane still sleeps`,
+        answer.ok === true && ah.takeSleepingPane("pane-1", true)?.session === null,
+        answer,
+      );
+    }
+
     ah.resetAgentHibernationForTests();
     const unreadable = makeDeps({
       describe: async () => {
