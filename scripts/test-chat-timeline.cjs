@@ -1895,13 +1895,54 @@ async function main() {
       "a workflow's steps stay step cards");
   });
 
-  test("a chat the manager took over keeps its earlier direct turns, and its rail returns", () => {
+  test("a chat the manager took over keeps its earlier direct turns, never listed on the rail", () => {
     const escalated = directChat({ executionMode: "managed", status: "running" });
     assert.equal(T.isDirectChatRun(escalated), false);
-    assert.equal(T.railWorkers(escalated).length, 2);
+    assert.equal(T.railWorkers(escalated).length, 0, "the plain turns' workers are not agents");
     const steps = T.buildChatTimeline(escalated).filter((item) => item.kind === "step");
     assert.equal(steps.length, 2);
     assert.ok(steps.every((item) => item.direct && T.rendersAsDirectTurn(item)), "earlier passes stay direct turns");
+    // The manager's first worker is listed, and only it.
+    escalated.workerTasks.push(task("task-m1", { stepId: "step-m1", title: "Fix each failing file", runtimePreference: "pi", status: "running", createdAt: at(80) }));
+    escalated.steps.push({ ...step("step-m1", 3, "Fix the failing files", "running", ["task-m1"]), createdAt: at(80) });
+    assert.deepEqual(T.railWorkers(escalated).map((worker) => worker.id), ["task-m1"]);
+    const managerStep = T.buildChatTimeline(escalated).find((item) => item.kind === "step" && item.id === "step-m1");
+    assert.equal(managerStep.direct, undefined, "the manager's step keeps its card");
+  });
+
+  test("a corrective rework that copies the pass's node keeps its step card", () => {
+    const state = directChat({ executionMode: "managed", status: "running" });
+    state.workerTasks.push(task("task-fix", {
+      stepId: "step-fix", title: "Rework the counter", runtimePreference: "pi", status: "running",
+      loomNodeId: "w0", followUpOfTaskId: "task-d2", createdAt: at(80),
+    }));
+    state.steps.push({ ...step("step-fix", 3, "Rework the counter", "running", ["task-fix"]), createdAt: at(80) });
+    const rework = T.buildChatTimeline(state).find((item) => item.kind === "step" && item.id === "step-fix");
+    assert.equal(rework.direct, undefined);
+    assert.equal(rework.title, "Rework the counter");
+    assert.deepEqual(T.railWorkers(state).map((worker) => worker.id), ["task-fix"]);
+    assert.equal(T.isDirectPassStep(state, [{ loomNodeId: "w0", followUpOfTaskId: "task-d2" }]), false);
+    assert.equal(T.isDirectPassStep(state, [{ loomNodeId: "w0" }]), true);
+    assert.equal(T.isDirectPassStep({ executionMode: "direct", automationId: "a" }, [{ loomNodeId: "w0" }]), false);
+  });
+
+  test("a turn waits for an answer only while its question is open", () => {
+    const question = {
+      id: "msg-q", runId: "run-1", author: "spark", kind: "question", message: "Which list should I cover?",
+      createdAt: at(60), deliveryState: "acknowledged",
+    };
+    const blocked = directChat({ status: "blocked" });
+    blocked.humanMessages.push(question);
+    const waiting = T.buildChatTimeline(blocked).filter((item) => item.kind === "step");
+    assert.equal(waiting[1].direct.awaitingAnswer, true, "the last turn waits");
+    assert.equal(waiting[0].direct.awaitingAnswer, undefined, "an earlier turn does not");
+    const answered = directChat({ status: "running" });
+    answered.humanMessages.push(question, {
+      id: "msg-a", runId: "run-1", author: "user", kind: "answer", message: "The empty one.",
+      answersMessageId: "msg-q", createdAt: at(61), deliveryState: "acknowledged",
+    });
+    assert.ok(T.buildChatTimeline(answered).every((item) => item.kind !== "step" || !item.direct.awaitingAnswer));
+    assert.equal(T.directTurnState({ status: "blocked" }, undefined, false), "done", "after the answer it reads as finished");
   });
 
   test("a direct step draws as a direct turn only with at most its one worker", () => {
@@ -1927,8 +1968,8 @@ async function main() {
     assert.equal(T.directTurnState({ status: "cancelled" }), "stopped");
     assert.equal(T.directTurnState({ status: "failed" }), "failed");
     assert.equal(T.directTurnState({ status: "running" }, "failed"), "failed");
-    assert.equal(T.directTurnState({ status: "blocked" }), "blocked", "a worker asking a question is not a failure");
-    assert.equal(T.directTurnState({ status: "blocked" }, "failed"), "blocked");
+    assert.equal(T.directTurnState({ status: "blocked" }, undefined, true), "blocked", "a worker asking a question is not a failure");
+    assert.equal(T.directTurnState({ status: "blocked" }, "failed", true), "blocked");
     assert.equal(T.directTurnState({ status: "running" }), "running");
     assert.equal(T.directTurnState({ status: "queued", runtimeState: "working" }), "running");
     assert.equal(T.directTurnState({ status: "queued" }, "live"), "running");

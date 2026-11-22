@@ -2721,7 +2721,7 @@ function directTurnTitle(message: string): string | undefined {
   if (text.length <= 52) return text;
   const cut = text.slice(0, 49);
   const lastSpace = cut.lastIndexOf(" ");
-  return `${(lastSpace > 24 ? cut.slice(0, lastSpace) : cut).trimEnd()}...`;
+  return `${(lastSpace > 24 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
 }
 
 // Shared tail of both direct entry points: synthesize ONE step for the wave,

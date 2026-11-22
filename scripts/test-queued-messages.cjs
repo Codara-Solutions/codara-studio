@@ -1954,6 +1954,9 @@ async function main() {
   JSON.stringify({ status: readRun(lateMsgId).status, msgs: readRun(lateMsgId).humanMessages.map((m) => m.deliveryState) }));
   check("and is not left queued", await waitFor(() =>
     !readRun(lateMsgId).humanMessages.some((message) => message.deliveryState === "queued"), 10000));
+  check("a long message names its turn up to a word, with one ellipsis character",
+    readRun(lateMsgId).steps.at(-1)?.title === "Also add a test for the empty list.\u2026",
+    readRun(lateMsgId).steps.at(-1)?.title);
 
   // Send now on a paused direct chat (its worker gone) resumes it, and the
   // queue reaches a pass.

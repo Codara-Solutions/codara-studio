@@ -104,7 +104,7 @@ test("a direct chat reads as one chat: Send now, raw output Back, one diff tab",
     const status = await page.evaluate((id) => window.spark.orchestration.getRun(id).then((r) => r?.status), run.id);
     expect(status).toBe("complete");
     await expect(turns.nth(1)).toContainText("Sol");
-    await expect(turns.nth(1).getByRole("button", { name: "Open changes for src/example.ts" })).toBeVisible({ timeout: 10_000 });
+    await expect(turns.nth(1).getByRole("button", { name: /^Open changes for src\/example\.ts in Also cover the empty list/ })).toBeVisible({ timeout: 10_000 });
 
     if (proof) {
       for (const [width, height] of [[1280, 900], [720, 900]] as const) {
@@ -159,7 +159,7 @@ test("a direct chat reads as one chat: Send now, raw output Back, one diff tab",
     const diffTabs = page.getByRole("tab", { name: /\(Working Tree\)/ });
     const openFromChat = (file: string) =>
       page.evaluate((path) => window.dispatchEvent(new CustomEvent("spark:open-diff", { detail: { path } })), file);
-    await turns.nth(1).getByRole("button", { name: "Open changes for src/example.ts" }).click();
+    await turns.nth(1).getByRole("button", { name: /^Open changes for src\/example\.ts in Also cover the empty list/ }).click();
     await expect(diffTabs).toHaveCount(1);
     await page.getByRole("tab", { name: "Cora" }).last().dispatchEvent("click");
     await openFromChat("README.md");

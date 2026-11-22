@@ -958,19 +958,21 @@ UI interface of PI basically! made better but light weight".
   "Waiting for your answer", never red.
 - Inside a turn only the user's messages are bubbles; Studio's own word to
   the worker is a quiet "Codara:" note.
-- A chat the manager took over keeps its earlier turns as they were; its new
-  work, and the rail, come back as the manager's.
 - The direct worker is not an agent beside Cora: no agents rail, no worker
   count under the composer. A Loom run is direct too but keeps both.
+- A chat the manager took over keeps its earlier turns as they were, still
+  not listed as agents; the rail appears with the manager's first worker.
+- A turn reads "Waiting for your answer" only while its question is open.
+  A turn of many files lists five and a "+N more" toggle.
 - A message sent mid-turn queues. Send now stops the turn and starts the next
   one with every queued message, each sent once; without it, the queue goes
   on its own when the turn ends. A control that can only fail is not offered.
 - A turn is named after its message, wherever a name shows (Runs, the worker
   bar).
-- The chat's changed files share one diff tab while it is still theirs: a
-  working-tree preview showing the file the chat put there. Once the user
-  pins it, docks it in a split or moves it to another file or commit, it is
-  theirs, and the chat opens one new tab beside it.
+- The chat's changed files share one diff tab, the shared preview slot.
+  Only pinning it (a double-click, or docking it in a split) or turning it
+  into a commit diff makes it the user's; the chat then opens one new tab
+  beside it and shares that one.
 
 ## Cora agents rail (2026-11)
 

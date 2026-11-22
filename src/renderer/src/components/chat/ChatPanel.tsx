@@ -13,7 +13,7 @@ import RunIdChip from "../RunIdChip";
 import ChatConversation from "./ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
 import CopyBranchWelcome from "./CopyBranchWelcome";
-import { describeRunStatus, isDirectChatRun, railWorkers, statusToneColor } from "./timeline";
+import { describeRunStatus, railWorkers, statusToneColor } from "./timeline";
 import { retryableFailedCallId } from "./failed-turn";
 import WelcomeAutomations from "./WelcomeAutomations";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
@@ -180,9 +180,9 @@ export default function ChatPanel({
     });
   }, [insideWorker]);
   // The agents rail: on the chat's left edge whenever the chat has workers,
-  // in Main and inside a worker alike. A direct chat's only worker is the one
-  // doing Cora's own turns, so it has no rail (DESIGN.md, "Direct chats").
-  const directChat = activeRun !== null && isDirectChatRun(activeRun);
+  // in Main and inside a worker alike. A direct pass's worker is the one
+  // doing Cora's own turn, so it is never listed (DESIGN.md, "Direct chats");
+  // a chat with only those has no rail and no worker count either.
   const hasWorkers = useMemo(() => (activeRun ? railWorkers(activeRun).length > 0 : false), [activeRun]);
   // The bar's Back passes its click event: never read it as keepFocus.
   const leaveBack = useCallback(() => leaveWorker(false), [leaveWorker]);
@@ -466,7 +466,7 @@ export default function ChatPanel({
               disabled={!workspace && !activeRun}
               // A direct chat shows its turn's work in the conversation, so
               // the composer does not count its worker either.
-              workersOnRail={showRail || directChat}
+              workersOnRail={showRail || !hasWorkers}
               onStartChat={onStartChat}
               onForcePauseRun={onForcePauseRun}
             />

@@ -82,7 +82,7 @@ export function workerFailureReason(attempt: WorkerAttempt | null): string | nul
   return line.length <= 90 ? line : `${line.slice(0, 89)}…`;
 }
 
-export function railWorkers(
+export function railItems(
   run: RunState,
   workers: readonly ChatWorker[],
   activity: ReadonlyMap<string, WorkerActivity>,
