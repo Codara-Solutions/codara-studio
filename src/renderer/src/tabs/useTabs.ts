@@ -1546,6 +1546,14 @@ export interface UseTabsApi {
   // Agent hibernation: mark a pane sleeping (or awake again, with null),
   // wherever it lives: the visible workspace or a background one.
   setPaneHibernation: (paneId: string, hibernation: TerminalLeafHibernation | null) => void;
+  // Merge into a sleeping pane's mark (a Resume request, a wake error); a
+  // pane that is not asleep is left alone.
+  patchPaneHibernation: (paneId: string, patch: Partial<TerminalLeafHibernation>) => void;
+  // The general form: the next mark from the current one (null = awake).
+  updatePaneHibernation: (
+    paneId: string,
+    next: (current: TerminalLeafHibernation | null) => TerminalLeafHibernation | null,
+  ) => void;
   // The pane's "Keep running" pin: agent hibernation never stops a pinned pane.
   setLeafKeepAwake: (tabId: TabId, paneId: string, keepAwake: boolean) => void;
   // Rename a leaf's paneId. The caller must dispose the old PTY when it is
@@ -3443,14 +3451,16 @@ export function useTabs(
     [],
   );
 
-  const setPaneHibernation = useCallback(
-    (paneId: string, hibernation: TerminalLeafHibernation | null) => {
+  const updatePaneHibernation = useCallback(
+    (paneId: string, next: (current: TerminalLeafHibernation | null) => TerminalLeafHibernation | null) => {
       const updateTabs = (currentTabs: Tab[]): Tab[] => {
         let changed = false;
         const nextTabs = currentTabs.map((tab) => {
           if (tab.kind !== "terminal") return tab;
           const leaf = findLeaf(tab.root, paneId);
-          if (!leaf || (leaf.hibernation ?? null) === hibernation) return tab;
+          if (!leaf) return tab;
+          const hibernation = next(leaf.hibernation ?? null);
+          if ((leaf.hibernation ?? null) === hibernation) return tab;
           const root = setLeafField(tab.root, paneId, "hibernation", hibernation);
           if (root === tab.root) return tab;
           changed = true;
@@ -3480,6 +3490,19 @@ export function useTabs(
       }
     },
     [],
+  );
+
+  const setPaneHibernation = useCallback(
+    (paneId: string, hibernation: TerminalLeafHibernation | null) => updatePaneHibernation(paneId, () => hibernation),
+    [updatePaneHibernation],
+  );
+
+  // Only a pane that is asleep takes the patch: a Resume pressed as the pane
+  // wakes on its own must not mark an awake pane.
+  const patchPaneHibernation = useCallback(
+    (paneId: string, patch: Partial<TerminalLeafHibernation>) =>
+      updatePaneHibernation(paneId, (current) => (current ? { ...current, ...patch } : current)),
+    [updatePaneHibernation],
   );
 
   const setLeafKeepAwake = useCallback(
@@ -4619,6 +4642,8 @@ export function useTabs(
       setLeafAgentSession,
       setLeafBootResumeConsumed,
       setPaneHibernation,
+      patchPaneHibernation,
+      updatePaneHibernation,
       setLeafKeepAwake,
       renameLeaf,
       addPaneInTab,

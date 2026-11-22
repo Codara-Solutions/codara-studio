@@ -85,7 +85,7 @@ export interface AgentBoardLayoutPane {
   accountProfileId?: string;
   /**
    * When Codara stopped this pane's idle agent to save memory (agent
-   * hibernation); absent while it runs. Opening the pane resumes it.
+   * hibernation); absent while it runs. Opening its card resumes it.
    */
   sleepingSince?: number;
 }
@@ -609,7 +609,8 @@ function sleepingCard(pane: MergedPane, workspace: AgentBoardWorkspace, input: A
     since: pane.sleepingSince ?? 0,
     unseen: input.unseenPanes?.[pane.paneId] === "complete",
     sleeping: true,
-    target: { type: "terminal", workspaceId: pane.workspaceId, tabId: pane.tabId, paneId: pane.paneId },
+    // Opening a sleeping card is the user asking for the agent back.
+    target: { type: "terminal", workspaceId: pane.workspaceId, tabId: pane.tabId, paneId: pane.paneId, resume: true },
     reply: null,
   };
 }

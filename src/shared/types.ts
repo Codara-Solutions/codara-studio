@@ -2003,7 +2003,9 @@ export type NotifyKind =
 // Control section so the fetched commits are on screen.
 export type NavigationTarget =
   | { type: "run"; runId: string; workspaceId?: string }
-  | { type: "terminal"; workspaceId: string; tabId: string; paneId: string }
+  // `resume`: the pane's agent sleeps (agent hibernation) and opening it is
+  // the user's request to bring it back (the Agents view's sleeping card).
+  | { type: "terminal"; workspaceId: string; tabId: string; paneId: string; resume?: boolean }
   | { type: "automation"; jobId: string; runId?: string; workspaceId?: string }
   | { type: "workspace"; workspaceId: string; panel?: "git" | "notifications" };
 

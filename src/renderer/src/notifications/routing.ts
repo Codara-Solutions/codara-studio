@@ -11,6 +11,9 @@ export type AutomationTarget = Extract<NavigationTarget, { type: "automation" }>
 export interface NavigationHandlers {
   selectRun: (runId: string, workspaceId?: string) => void;
   focusTerminal: (target: TerminalAgentTarget) => void;
+  // Ask a sleeping agent pane for its agent back (agent hibernation): a
+  // target that says `resume` is the user's explicit request.
+  resumePane?: (paneId: string) => void;
   // Switch to the automation's workspace and open its Automations hub on the
   // automation, or on the workflow run when the target names one.
   openAutomation: (target: AutomationTarget) => void;
@@ -72,6 +75,7 @@ export function createNavigateTo(handlers: NavigationHandlers): NavigateTo {
           tabId: target.tabId,
           paneId: target.paneId,
         });
+        if (target.resume === true) handlers.resumePane?.(target.paneId);
         break;
       case "automation":
         handlers.openAutomation(target);

@@ -176,3 +176,23 @@ export function judgeIdleClock(clock: AgentHibernationClock): AgentHibernationRe
   if (newest > clock.now) return "not-idle-long-enough";
   return clock.now - newest >= clock.idleMs ? null : "not-idle-long-enough";
 }
+
+// ── Waking ──────────────────────────────────────────────────────────────────
+
+/**
+ * A key pressed in a sleeping pane that asks for its agent back: Enter or a
+ * printable character, without Ctrl, Cmd or Alt (those are app shortcuts).
+ * The key itself is swallowed: the agent is not running to read it.
+ */
+export function isSleepResumeKey(event: {
+  key: string;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  altKey?: boolean;
+}): boolean {
+  if (event.ctrlKey || event.metaKey || event.altKey) return false;
+  if (event.key === "Enter") return true;
+  // One printable character ("a", " ", "é"); named keys ("Shift", "F5",
+  // "ArrowUp") are longer than one code point.
+  return [...event.key].length === 1 && !/[\u0000-\u001f\u007f]/.test(event.key);
+}

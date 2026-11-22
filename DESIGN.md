@@ -1111,3 +1111,31 @@ the existing `InlineMessage` for anything that happened.
 - Messages are one sentence that says what happened and what is true now
   ("Claude Code 2.1.328 failed its version check, so Codara put 2.1.327
   back."), warn for a roll back, danger only when the tool may be broken.
+
+## Sleeping agent panes (2026-11)
+
+**Chosen:** a sleeping agent pane keeps its output and shows a solid card
+docked at its bottom edge: which agent sleeps, since when, **Resume** and
+**Resume and keep running**. The calm top-left **Sleeping** chip stays. The
+pane comes back only when the user asks (the card, Enter or a letter in the
+pane, the Agents view card), never just by being shown.
+
+**Why:** the first version woke a sleeping pane as soon as it was on screen,
+the way a sleeping browser tab reloads. That fits a tab, which costs little to
+wake. An agent costs a 200 to 500 MB process and seconds of start-up, and
+opening a workspace with ten sleeping agents started ten at once: the memory
+spike the feature exists to avoid.
+
+**References:** Chrome's memory saver, macOS App Nap, and the browser pane's
+own sleeping tab card (`bp-asleep`).
+
+**Rules:**
+
+- Docked at the bottom, not over the middle: the agent's last output stays
+  readable and scrollable above it.
+- Solid (`--panel-2`, `--rule`, `--lift-hi`), like the rest of a pane's
+  chrome; no glass.
+- One primary action, Resume. The secondary pins the pane awake as it
+  resumes. Under about 420 px the card keeps the title and Resume only.
+- The waking key is swallowed, never typed into the shell that comes up.
+- A failed resume stays on the card, in the danger color, with Try again.
