@@ -127,6 +127,7 @@ export function useAgentHibernation(input: Input): void {
           runtime: session.runtime,
           sleptAt: result.sleptAt,
           summary: result.summary,
+          freedBytes: result.freedBytes,
         });
       }
     };

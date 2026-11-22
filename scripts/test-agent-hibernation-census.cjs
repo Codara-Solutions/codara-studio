@@ -202,7 +202,26 @@ async function main() {
     Array.isArray(parsed) && parsed.length === 2 && parsed[1].startMs === null && parsed[1].command === "conhost.exe",
     parsed,
   );
-  check("a single row object parses too", parseWindowsCensusList(JSON.stringify({ ProcessId: 5, ParentProcessId: 4 }))?.length === 1);
+  // ── Freed memory ──
+  const withMemory = windows.map((p, i) => ({ ...p, memoryBytes: (i + 1) * 1024 * 1024 }));
+  verdict = classifyPaneProcessTree(withMemory, 500, "claude");
+  check("the verdict sums the memory of the pane's whole tree", verdict.ok === true && verdict.memoryBytes === 6 * 1024 * 1024, verdict);
+  verdict = classifyPaneProcessTree(windows, 500, "claude");
+  check("no memory column means no memory figure", verdict.ok === true && verdict.memoryBytes === null, verdict);
+  verdict = classifyPaneProcessTree([withMemory[0], windows[1], withMemory[2]], 500, "claude");
+  check("one process without a figure means no total, never a partial one", verdict.ok === true && verdict.memoryBytes === null, verdict);
+  const parsedMemory = parseWindowsCensusList(
+    JSON.stringify([
+      { ProcessId: 10, ParentProcessId: 4, CommandLine: "pwsh.exe", WorkingSetSize: 4096 },
+      { ProcessId: 11, ParentProcessId: 10, WorkingSetSize: null },
+    ]),
+  );
+  check(
+    "the Windows listing carries each process's working set",
+    parsedMemory?.[0].memoryBytes === 4096 && parsedMemory?.[1].memoryBytes === null,
+    parsedMemory,
+  );
+  check("a single row object parses too",parseWindowsCensusList(JSON.stringify({ ProcessId: 5, ParentProcessId: 4 }))?.length === 1);
   check("garbage is unknown, not empty", parseWindowsCensusList("not json") === null);
 
   // ── Terminal holders ──

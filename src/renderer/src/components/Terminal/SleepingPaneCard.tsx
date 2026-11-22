@@ -21,6 +21,12 @@ function sleptAgo(sleptAt: number, now: number): string {
   return `${Math.round(hours / 24)} days ago`;
 }
 
+function freedText(bytes: number | null | undefined): string | null {
+  if (typeof bytes !== "number" || !(bytes > 0)) return null;
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB freed` : `${Math.round(mb)} MB freed`;
+}
+
 /**
  * The card a sleeping pane shows at its bottom edge: what the session was
  * about, since when it sleeps, and Resume. Docked rather than covering the pane, so the
@@ -50,7 +56,9 @@ export default function SleepingPaneCard({
   const name = RUNTIME_NAME[hibernation.runtime] ?? "Agent";
   const title = hibernation.summary?.title ?? `${name} session`;
   const detail = hibernation.summary?.detail ?? null;
-  const meta = `Fell asleep ${sleptAgo(hibernation.sleptAt, Date.now())}`;
+  const meta = [`Fell asleep ${sleptAgo(hibernation.sleptAt, Date.now())}`, freedText(hibernation.freedBytes)]
+    .filter(Boolean)
+    .join(" · ");
   const stop = (event: React.SyntheticEvent) => event.stopPropagation();
   return (
     <div

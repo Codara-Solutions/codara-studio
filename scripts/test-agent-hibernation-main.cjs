@@ -707,7 +707,7 @@ async function main() {
     await ah.hibernateAgentPane(request(), sleeps.deps);
     check(
       "a sleep says how long the pane was idle and what the census cost",
-      lines.length === 1 && lines[0] === "pane=pane-1 claude is sleeping (background-workspace, idle 1800s, census 3 processes in 0ms, card none)",
+      lines.length === 1 && lines[0] === "pane=pane-1 claude is sleeping (background-workspace, idle 1800s, census 3 processes in 0ms, freed unknown, card none)",
       lines,
     );
 
@@ -721,7 +721,7 @@ async function main() {
     check(
       "a sleep under memory pressure names the level",
       lines.length === 1 &&
-        lines[0] === "pane=pane-1 claude is sleeping (background-workspace, idle 600s, memory low, census 3 processes in 0ms, card none)",
+        lines[0] === "pane=pane-1 claude is sleeping (background-workspace, idle 600s, memory low, census 3 processes in 0ms, freed unknown, card none)",
       lines,
     );
 
@@ -755,8 +755,21 @@ async function main() {
       lines.length === 1 && lines[0].endsWith(", card ai-title)") && !lines[0].includes("zebra"),
       lines,
     );
+    check("a listing without a memory column frees an unknown amount", slept.ok === true && slept.freedBytes === null, slept);
     const mounted = ah.takeSleepingPane("pane-1", true);
     check("a pane mounting asleep gets the same line", JSON.stringify(mounted?.summary) === JSON.stringify(summary), mounted);
+
+    ah.resetAgentHibernationForTests();
+    lines.length = 0;
+    const weighed = makeDeps({ log: (line) => lines.push(line) });
+    weighed.state.processes = weighed.state.processes.map((p) => ({ ...p, memoryBytes: 100 * 1024 * 1024 }));
+    slept = await ah.hibernateAgentPane(request(), weighed.deps);
+    check(
+      "a sleep says how much memory the pane's processes held",
+      slept.ok === true && slept.freedBytes === 300 * 1024 * 1024 && lines[0]?.includes(", freed 300 MB, "),
+      { slept, lines },
+    );
+    check("and a pane mounting later is told the same", ah.takeSleepingPane("pane-1", true)?.freedBytes === 300 * 1024 * 1024);
 
     ah.resetAgentHibernationForTests();
     const unreadable = makeDeps({
