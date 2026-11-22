@@ -947,6 +947,42 @@ the worker view reuses.
 - Colour means state, as in the chat: running, done and failed use the status
   tokens; nothing else in the bar is tinted.
 
+## Direct chats (2026-11)
+
+**Chosen:** a direct chat (one Pi worker does each turn, no manager) reads as
+one plain chat with Pi. Etienne asked for it on 2026-11-22: Cora should be "a
+UI interface of PI basically! made better but light weight".
+
+**Rules it implies:**
+
+- Each turn is drawn as Cora's own turn under the message it answers, with the
+  same rows and fold as a managed turn ("Working for Ns", then "Worked for
+  Ns"). No step card, no "Step N", no generated title or goal, no worker row.
+- One quiet line under the turn keeps the facts: model, changed files with
+  +/- (each opens its diff), and Details, which goes inside the worker for its
+  brief, report and raw output.
+- A stopped or failed turn stays open and says so ("Stopped after 4s"); the
+  turn Stop interrupts reads "Stopped" with no live dot, never "Failed". A
+  worker that asks a question is not a failure: its turn stays open and reads
+  "Waiting for your answer", never red.
+- Inside a turn only the user's messages are bubbles; Studio's own word to
+  the worker is a quiet "Codara:" note.
+- The direct worker is not an agent beside Cora: no agents rail, no worker
+  count under the composer. A Loom run is direct too but keeps both.
+- A chat the manager took over keeps its earlier turns as they were, still
+  not listed as agents; the rail appears with the manager's first worker.
+- A turn reads "Waiting for your answer" only while its question is open.
+  A turn of many files lists five and a "+N more" toggle.
+- A message sent mid-turn queues. Send now stops the turn and starts the next
+  one with every queued message, each sent once; without it, the queue goes
+  on its own when the turn ends. A control that can only fail is not offered.
+- A turn is named after its message, wherever a name shows (Runs, the worker
+  bar).
+- The chat's changed files share one diff tab, the shared preview slot.
+  Only pinning it (a double-click, or docking it in a split) or turning it
+  into a commit diff makes it the user's; the chat then opens one new tab
+  beside it and shares that one.
+
 ## Cora agents rail (2026-11)
 
 **Chosen:** option 2, "Collapsible agents rail". Etienne picked it on

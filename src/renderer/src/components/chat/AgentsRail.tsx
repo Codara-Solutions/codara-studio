@@ -14,8 +14,8 @@ import {
 import type { RunState } from "@shared/types";
 import { useWorkerActivity } from "../../lib/useWorkerActivity";
 import { ActivityIcon, ChevronGlyph, type ActivityIconState } from "./ChatConversation";
-import { railGroups, railMarks, railSummary, railWorkerLine, railWorkers, type RailWorker } from "./agents-rail";
-import { listChatWorkers } from "./timeline";
+import { railGroups, railMarks, railSummary, railItems, railWorkerLine, type RailWorker } from "./agents-rail";
+import { railWorkers } from "./timeline";
 import type { WorkerViewState } from "./worker-view";
 import "./agents-rail.css";
 
@@ -73,7 +73,8 @@ export default function AgentsRail({
   onOpenMain,
   suspended = false,
 }: Props): JSX.Element | null {
-  const workers = useMemo(() => listChatWorkers(run), [run]);
+  // Never a direct pass's worker: that is Cora's own turn (DESIGN.md).
+  const workers = useMemo(() => railWorkers(run), [run]);
   const activity = useWorkerActivity(run.id, !suspended);
   const listId = useId();
   const [open, setOpen] = useState(false);
@@ -87,7 +88,7 @@ export default function AgentsRail({
 
   const anyRunning = workers.some((worker) => worker.status === "running");
   const now = useNow(anyRunning && (open || tip !== null), run);
-  const items = useMemo(() => railWorkers(run, workers, activity, now), [run, workers, activity, now]);
+  const items = useMemo(() => railItems(run, workers, activity, now), [run, workers, activity, now]);
   const { marks, more } = railMarks(items, insideId);
   const summary = railSummary(items);
   const running = items.filter((item) => item.state === "running").length;

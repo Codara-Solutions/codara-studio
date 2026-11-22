@@ -2637,6 +2637,12 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
     runId: run.id,
     cwd,
     passNumber,
+    // A direct chat's turn is named after the message it answers, never a
+    // generated "follow-up N" (the chat does not show it; Runs and the
+    // worker view do).
+    title: run.automationId
+      ? undefined
+      : directTurnTitle(directInputMessages.at(-1)?.message ?? input.prompt),
     prompt: directPrompt,
     model: input.model,
     effort: input.effort,
@@ -2680,6 +2686,7 @@ async function launchDirectIterationTask(opts: {
   runId: string;
   cwd: string;
   passNumber: number; // 1-based
+  title?: string;
   prompt: string;
   model: string;
   effort?: AgentEffortLevel;
@@ -2703,8 +2710,18 @@ async function launchDirectIterationTask(opts: {
         // collab is intentionally omitted: a single-node launch has no peers.
       },
     ],
-    { vars: opts.vars, freshPass: opts.freshPass },
+    { vars: opts.vars, freshPass: opts.freshPass, title: opts.title },
   );
+}
+
+/** A direct chat turn's name: its message, cut like a chat title. */
+function directTurnTitle(message: string): string | undefined {
+  const text = message.trim().replace(/\s+/g, " ");
+  if (!text) return undefined;
+  if (text.length <= 52) return text;
+  const cut = text.slice(0, 49);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > 24 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
 }
 
 // Shared tail of both direct entry points: synthesize ONE step for the wave,
@@ -2747,6 +2764,8 @@ async function launchDirectNodeTasks(
     // board paints them), fed to this wave's {{node:<id>}} / {{incoming}}, and
     // each step leaves its transcript note. Empty/absent on every pre-v3 path.
     preResolved?: PreResolvedNode[];
+    // A direct chat turn's own name (directTurnTitle); Looms keep "Loom pass N".
+    title?: string;
   },
 ): Promise<RunState> {
   if (nodes.length === 0) throw new Error("launchDirectNodeTasks requires at least one node.");
@@ -2818,9 +2837,7 @@ async function launchDirectNodeTasks(
 
   const passTitle = run.automationId
     ? `Loom pass ${passNumber}`
-    : passNumber === 1
-      ? run.title
-      : `Cora follow-up ${passNumber}`;
+    : _opts?.title ?? (passNumber === 1 ? run.title : `Cora follow-up ${passNumber}`);
   // Later waves get a user note per node so the transcript shows what each
   // downstream worker was asked (the entry points already noted layer 0).
   if (_opts?.addPromptNotes) {
@@ -22179,6 +22196,14 @@ async function runFakePiWorkerSession({
       return { exitCode: 1, error: "typecheck, 2 errors" };
     }
     feed.result("fake-test", "12 passing", false);
+    // A real change when the fixture has the file, so the chat's changed
+    // files and their diff tab can be exercised end to end.
+    const fixture = workspaceCwdFromRun(run);
+    if (fixture) {
+      const file = join(fixture, "src", "example.ts");
+      const before = await fs.readFile(file, "utf8").catch(() => null);
+      if (before !== null) await fs.writeFile(file, before.replace(/\bcount\b/g, "total"), "utf8");
+    }
     feed.tool("fake-edit", "edit", { path: "src/example.ts", oldText: "count", newText: "total" });
     feed.result("fake-edit", "Edited src/example.ts", false);
     feed.textDelta(`Done: ${task.title}. One file changed and the tests pass.`);
