@@ -4,8 +4,9 @@
 // show the install command instead of a shell's "command not found". It never
 // runs agy itself. Of agy's own files it reads one table, read only: the
 // conversation list in conversation_summaries.db, which the session picker
-// offers and which names the conversation a new agy pane is in
-// (session-search/antigravity-summaries.ts). Nothing else.
+// offers, marks as open where agy says it is not fully idle, and the restore
+// guard checks (session-search/antigravity-summaries.ts).
+// Nothing else.
 
 import { dirname } from "node:path";
 
@@ -18,7 +19,7 @@ import { sessionPid } from "./pty-manager";
 import {
   continueReopensNamed,
   currentAntigravityConversations,
-  paneConversation,
+  currentLiveAntigravityConversations,
 } from "./session-search/antigravity-summaries";
 
 export const ANTIGRAVITY_BINARY = "agy";
@@ -67,8 +68,9 @@ let continuePane: string | null = null;
  * Whether this pane may run `agy --continue`. A restore after a restart
  * takes the claim when it is free; a restart after the pane's process died
  * only checks it, so it never reopens another pane's latest conversation.
- * Nor does a claim that would reopen a conversation another pane names by
- * id (`named`), which that pane reopens itself.
+ * Neither continues when agy's latest conversation is one another pane
+ * names by id (`named`, from every workspace's tabs, saved ones included):
+ * that pane reopens it itself. A refused take leaves the claim free.
  */
 export function claimAntigravityContinue(
   paneId: string,
@@ -76,12 +78,16 @@ export function claimAntigravityContinue(
   named: readonly string[] = [],
   cwd: string | null = null,
 ): boolean {
-  if (take && continuePane === null && named.length > 0) {
+  const holder = take ? (continuePane ?? paneId) : continuePane;
+  if (holder !== paneId) return false;
+  // Checked on every continue, the restart after the process died included:
+  // the latest conversation can change while the pane holds the claim.
+  if (named.length > 0) {
     const conversations = currentAntigravityConversations();
     if (conversations && continueReopensNamed(conversations, cwd, named)) return false;
   }
-  if (take) continuePane ??= paneId;
-  return continuePane === paneId;
+  continuePane = paneId;
+  return true;
 }
 
 function namedIds(value: unknown): string[] {
@@ -94,18 +100,12 @@ export function releaseAntigravityContinue(paneId: string): void {
 }
 
 export function registerAntigravityIpc(handle: IpcHandle): void {
+  handle("antigravity:live-conversations", () => currentLiveAntigravityConversations());
   handle("antigravity:claim-continue", (_e, paneId: unknown, take: unknown, named: unknown, cwd: unknown) =>
     typeof paneId === "string" && paneId.length > 0
       ? claimAntigravityContinue(paneId, take !== false, namedIds(named), typeof cwd === "string" ? cwd : null)
       : false,
   );
-  // A pane started as a new agy session learns its conversation's id from
-  // agy's summary table, so the session picker sees it open.
-  handle("antigravity:pane-conversation", (_e, cwd: unknown, since: unknown, named: unknown) => {
-    if (typeof cwd !== "string" || !cwd || typeof since !== "number" || !Number.isFinite(since)) return null;
-    const conversations = currentAntigravityConversations();
-    return conversations ? paneConversation(conversations, { cwd, since, named: namedIds(named) }) : null;
-  });
   handle("antigravity:release-continue", (_e, paneId: unknown) => {
     if (typeof paneId === "string") releaseAntigravityContinue(paneId);
   });

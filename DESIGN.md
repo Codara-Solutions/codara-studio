@@ -846,6 +846,9 @@ conversation (your words in a bubble, the reply without one).
 - Antigravity keeps no transcript Codara reads. Its rows come from agy's own
   summary table, read only: a title, a preview and a folder. The box says it
   searches titles and previews, and a row offers no transcript, fork or delete.
+  A conversation agy marks as not fully idle is worked on by an agy elsewhere:
+  its row says "Open in Antigravity" and Enter only says so, never starting a
+  second agy on it.
 - The picker is the one place for past sessions. The rail's Sessions tab is gone:
   a small history button beside the Workspaces and Agents switch opens the picker
   on the current workspace, and that opening does not change the remembered

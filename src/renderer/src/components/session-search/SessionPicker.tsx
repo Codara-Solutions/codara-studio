@@ -192,6 +192,28 @@ export default function SessionPicker({
   const answerKey = `${query}\n${effectiveScope}\n${agentsKey}\n${scopeCwd ?? ""}`;
   const selected = hits.find((hit) => hit.key === selectedKey) ?? null;
   const selectedOpen = selected ? (host.isSessionOpen?.(selected) ?? false) : false;
+  // Antigravity conversations a running agy works in now (agy marks them not
+  // fully idle). A pane here that names one is "open"; any other agy has it,
+  // so resuming would start a second agy on the same conversation.
+  const antigravityOn = enabledAgents.includes("antigravity");
+  const [liveAntigravity, setLiveAntigravity] = useState<ReadonlySet<string>>(() => new Set());
+  const [liveNoticeKey, setLiveNoticeKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!antigravityOn) return;
+    let current = true;
+    void window.spark.antigravity
+      ?.liveConversations()
+      .then((ids) => {
+        if (current) setLiveAntigravity(new Set(ids));
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [antigravityOn]);
+  const liveElsewhere = (hit: SessionSearchHit) =>
+    hit.agent === "antigravity" && liveAntigravity.has(hit.sessionId) && !host.isSessionOpen?.(hit);
+  const selectedLive = selected ? liveElsewhere(selected) : false;
   const selectedKeyRef = useRef(selectedKey);
   selectedKeyRef.current = selectedKey;
 
@@ -390,6 +412,10 @@ export default function SessionPicker({
   };
 
   const primary = (hit: SessionSearchHit) => {
+    if (liveElsewhere(hit)) {
+      setLiveNoticeKey(hit.key);
+      return;
+    }
     if (isGone(hit) && !host.isSessionOpen?.(hit)) {
       showTranscript(
         hit,
@@ -907,6 +933,12 @@ export default function SessionPicker({
                 </dl>
                 {selectedOpen ? (
                   <p className="sp-detail__notice">Open in a tab now, so resuming goes there.</p>
+                ) : selectedLive ? (
+                  <p className="sp-detail__notice" role="status" data-testid="session-picker-live">
+                    {liveNoticeKey === selected.key
+                      ? "This conversation is open in another Antigravity tab"
+                      : "agy is working in this conversation now, so it is not resumed a second time."}
+                  </p>
                 ) : isGone(selected) ? (
                   <p className="sp-detail__notice">
                     Its folder is no longer on this computer, so it can be read but not resumed.
@@ -974,13 +1006,15 @@ export default function SessionPicker({
                   <button type="button" className="spark-btn is-primary" onClick={() => primary(selected)}>
                     {selected.agent === "cora"
                       ? "Open chat"
-                      : selectedOpen
-                        ? "Go to its tab"
-                        : isGone(selected)
-                          ? "View transcript"
-                          : resumesInPane(selected)
-                            ? "Resume in a new pane"
-                            : "Resume in a new tab"}
+                      : selectedLive
+                        ? "Open in Antigravity"
+                        : selectedOpen
+                          ? "Go to its tab"
+                          : isGone(selected)
+                            ? "View transcript"
+                            : resumesInPane(selected)
+                              ? "Resume in a new pane"
+                              : "Resume in a new tab"}
                     <kbd className="spark-kbd sp-actions__kbd">Enter</kbd>
                   </button>
                   {canFork(selected) ? (
@@ -993,7 +1027,7 @@ export default function SessionPicker({
                       Fork
                     </button>
                   ) : null}
-                  {!selectedOpen && !resumesInPane(selected) && host.canSplitSession?.(selected) ? (
+                  {!selectedOpen && !selectedLive && !resumesInPane(selected) && host.canSplitSession?.(selected) ? (
                     <button
                       type="button"
                       className="spark-btn"

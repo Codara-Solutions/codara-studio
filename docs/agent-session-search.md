@@ -107,8 +107,11 @@ Antigravity is the exception: Codara reads none of its transcripts. From
 agy's own summary of each top-level conversation it keeps the title, the
 preview and the first workspace folder, so an Antigravity session is found
 by its title and preview only. Resuming one types
-`agy --conversation <id>` into a new tab. When the database is missing or
-its table has another shape, the picker offers only a new session.
+`agy --conversation <id>` into a new tab. A conversation agy is working in
+right now (agy marks it not fully idle) is not resumed a second time: its
+row says "Open in Antigravity" and Enter only tells you it is open in
+another Antigravity tab. When the database is missing or its table has
+another shape, the picker offers only a new session.
 
 From each session it keeps the text of your messages and the agents'
 replies, the title, the first prompt, the folder, the git branch when the

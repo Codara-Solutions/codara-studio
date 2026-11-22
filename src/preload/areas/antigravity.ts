@@ -14,9 +14,9 @@ export const antigravityApi = {
    */
   claimContinue: (paneId: string, take = true, named: string[] = [], cwd: string | null = null): Promise<boolean> =>
     ipcRenderer.invoke("antigravity:claim-continue", paneId, take, named, cwd),
-  /** The id of the conversation a new agy pane in `cwd`, started at `since`, is in; null until one is clear. */
-  paneConversation: (cwd: string, since: number, named: string[]): Promise<string | null> =>
-    ipcRenderer.invoke("antigravity:pane-conversation", cwd, since, named),
+
   releaseContinue: (paneId: string): Promise<void> => ipcRenderer.invoke("antigravity:release-continue", paneId),
   runsInPane: (paneId: string): Promise<boolean> => ipcRenderer.invoke("antigravity:runs-in-pane", paneId),
+  /** The conversations a running agy works in now (agy marks them not fully idle). */
+  liveConversations: (): Promise<string[]> => ipcRenderer.invoke("antigravity:live-conversations"),
 };

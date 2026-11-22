@@ -128,6 +128,7 @@ import {
   sameWorkerMeta,
   savedLayoutHoldsWork,
   savedLayoutFilePaths,
+  savedLayoutTabs,
 } from "./tabs/useTabs";
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useAgentHibernation } from "./lib/useAgentHibernation";
@@ -208,7 +209,6 @@ import {
   runtimeFromAgentSessionLaunchCommand,
 } from "./workers/launch-commands";
 import {
-  antigravityConversationsNamed,
   findOpenSessionPane,
   hasWorkspaceFolder,
   sessionForkLaunch,
@@ -4422,7 +4422,16 @@ export default function App() {
   });
   const jumpSourcesRef = useRef(jumpSources);
   jumpSourcesRef.current = jumpSources;
-  publishAntigravityLayouts(() => jumpSourcesRef.current().layouts);
+  // Every pane's tabs for the Antigravity restore guard: the loaded layouts,
+  // then the saved ones of workspaces not loaded yet.
+  publishAntigravityLayouts(() => {
+    const loaded = jumpSourcesRef.current().layouts;
+    const loadedIds = new Set(loaded.map((layout) => layout.workspaceId));
+    const saved = workspacesRef.current
+      .filter((workspace) => !loadedIds.has(workspace.id))
+      .map((workspace) => ({ tabs: savedLayoutTabs(workspace.id) }));
+    return [...loaded, ...saved];
+  });
   railWorkspaceHeldRef.current = (workspaceId, folders = []) => {
     if (!booted || workspaceId === activeId) return true;
     const layout =
@@ -6727,35 +6736,6 @@ export default function App() {
   // lifecycle in the run store, but the terminal chip still follows the
   // foreground process: when Claude/Codex returns to the shell prompt, the
   // pane stops advertising an active agent.
-  // A new agy pane's pointer says only "continue". While agy runs, its
-  // conversation id is learnt from agy's own summary table, so the session
-  // picker goes to this pane instead of starting a second agy on it, and a
-  // restart reopens this conversation. Asked at most every 15 s per pane.
-  const antigravityLearnAtRef = useRef(new Map<string, number>());
-  const learnAntigravityConversation = useCallback(
-    (tabId: string, paneId: string, pointer: TerminalAgentSession) => {
-      const now = Date.now();
-      if (now - (antigravityLearnAtRef.current.get(paneId) ?? 0) < 15_000) return;
-      antigravityLearnAtRef.current.set(paneId, now);
-      const since = Date.parse(pointer.capturedAt) - 2_000;
-      if (!pointer.cwd || !Number.isFinite(since)) return;
-      const named = antigravityConversationsNamed(jumpSourcesRef.current().layouts, paneId);
-      void window.spark.antigravity
-        ?.paneConversation(pointer.cwd, since, named)
-        .then((conversationId) => {
-          if (!conversationId) return;
-          const t = tabsRef.current;
-          const tab = t.tabs.find((item) => item.id === tabId);
-          const leaf = tab?.kind === "terminal" ? findLeafByPaneId(tab.root, paneId) : null;
-          if (leaf?.agentSession?.runtime !== "antigravity") return;
-          if (leaf.agentSession.sessionId !== ANTIGRAVITY_CONTINUE_SESSION_ID) return;
-          t.setLeafAgentSession(tabId, paneId, { ...leaf.agentSession, sessionId: conversationId });
-        })
-        .catch(() => undefined);
-    },
-    [],
-  );
-
   const onTerminalPaneAgentState = useCallback(
     (
       tabId: string,
@@ -6918,14 +6898,6 @@ export default function App() {
       //   in the same pane within 90s of the previous pointer's capture can
       //   leave the old sessionId blessed as active. Narrow window; the mild
       //   failure is that restore opens that pane's previous conversation.
-      if (
-        state.running &&
-        state.runtime === "antigravity" &&
-        leaf.agentSession?.runtime === "antigravity" &&
-        leaf.agentSession.sessionId === ANTIGRAVITY_CONTINUE_SESSION_ID
-      ) {
-        learnAntigravityConversation(tabId, paneId, leaf.agentSession);
-      }
       if (state.running && state.runtime === "antigravity" && leaf.agentSession?.runtime !== "antigravity") {
         // agy has no session id Codara can read; the pane only needs its
         // folder to come back with `agy --continue` after a restart. The

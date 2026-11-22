@@ -33,7 +33,8 @@ export function antigravityRestoreCommand(continues: boolean): { command: string
     ? { command: `${ANTIGRAVITY_LAUNCH_COMMAND} --continue`, notice: null }
     : {
         command: ANTIGRAVITY_LAUNCH_COMMAND,
-        notice: "another Antigravity tab reopened agy's latest conversation; this one starts a new one",
+        notice:
+          "another Antigravity tab has agy's latest conversation, so this one starts a new one; to reopen this tab's conversation, pick it from + > Antigravity worker",
       };
 }
 

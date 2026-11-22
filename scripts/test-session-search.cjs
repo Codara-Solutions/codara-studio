@@ -929,34 +929,48 @@ async function antigravityTests(m, work) {
   });
   cli.close();
 
-  await check("Antigravity: with agy closed nothing is written beside its database, and a vanished one keeps the rows", async () => {
+  await check("Antigravity: with agy closed or crashed nothing is written beside its database, live rows come from not_fully_idle, and a vanished one keeps the rows", async () => {
     const listing = () => fs.readdirSync(agyDir).sort();
     assert.deepEqual(listing(), [m.ANTIGRAVITY_SUMMARY_DB], "the closed writer checkpointed its WAL");
     cli2 = new DatabaseSync(dbPath);
     cli2.prepare("UPDATE conversation_summaries SET preview = ? WHERE conversation_id = ?").run("The heron cache now has a lock per shard", ids.heron);
+    cli2.prepare("UPDATE conversation_summaries SET not_fully_idle = 1 WHERE conversation_id IN (?, ?)").run(ids.heron, ids.child);
     cli2.close();
     await index.sync([root], agents, noPause);
     assert.deepEqual(search("shard").map((hit) => hit.sessionId), [ids.heron]);
+    assert.deepEqual(m.readLiveAntigravityConversations(dbPath), [ids.heron], "top-level conversations only");
     assert.deepEqual(listing(), [m.ANTIGRAVITY_SUMMARY_DB], "no -wal or -shm appeared");
+    // A crashed agy can leave a -wal and no -shm: still read as immutable.
+    fs.writeFileSync(`${dbPath}-wal`, "");
+    assert.deepEqual(m.readLiveAntigravityConversations(dbPath), [ids.heron]);
+    await index.sync([root], agents, noPause);
+    assert.deepEqual(listing(), [m.ANTIGRAVITY_SUMMARY_DB, `${m.ANTIGRAVITY_SUMMARY_DB}-wal`], "no -shm appeared, the -wal is left as it was");
+    assert.equal(fs.statSync(`${dbPath}-wal`).size, 0);
+    fs.rmSync(`${dbPath}-wal`);
     fs.renameSync(dbPath, `${dbPath}.away`);
     await index.sync([root], agents, noPause);
     assert.deepEqual(search("heron").map((hit) => hit.sessionId), [ids.heron], "a database that vanished keeps the rows");
     fs.renameSync(`${dbPath}.away`, dbPath);
   });
 
-  await check("Antigravity: a new pane learns its conversation only when one is clear, and --continue skips a named one", () => {
+  await check("Antigravity: --continue skips a conversation another pane names, saved layouts count, folders fold case on Windows", () => {
     const row = (id, cwd, lastAt) => ({ id, title: "", preview: "", steps: 1, lastAt, cwd });
     const list = [row("a", "/w", 100), row("b", "/w", 200), row("c", "/other", 300)];
-    assert.equal(m.paneConversation(list, { cwd: "/w", since: 150, named: [] }), "b");
-    assert.equal(m.paneConversation(list, { cwd: "/w/", since: 50, named: ["a"] }), "b", "another pane's conversation is not this one's");
-    assert.equal(m.paneConversation(list, { cwd: "/w", since: 50, named: [] }), null, "two to choose from: keep waiting");
-    assert.equal(m.paneConversation(list, { cwd: "/w", since: 250, named: [] }), null);
     assert.equal(m.continueReopensNamed(list, "/w", ["c"]), true, "the latest overall");
     assert.equal(m.continueReopensNamed(list, "/w", ["b"]), true, "the latest of the folder");
     assert.equal(m.continueReopensNamed(list, "/w", ["a"]), false);
+    assert.equal(m.continueReopensNamed(list, "/w", []), false);
     const leaf = (paneId, sessionId) => ({ kind: "leaf", paneId, agentSession: { runtime: "antigravity", sessionId, cwd: "/w", capturedAt: "now" } });
-    const layouts = [{ tabs: [{ id: "t", kind: "terminal", root: { kind: "split", a: leaf("p1", "conv-1"), b: { kind: "split", a: leaf("p2", "continue"), b: leaf("p3", "conv-3") } } }] }];
-    assert.deepEqual(m.antigravityConversationsNamed(layouts, "p3").sort(), ["conv-1"]);
+    const layouts = [
+      { tabs: [{ id: "t", kind: "terminal", root: { kind: "split", a: leaf("p1", "conv-1"), b: { kind: "split", a: leaf("p2", "continue"), b: leaf("p3", "conv-3") } } }] },
+      // A workspace not loaded yet, from its saved layout.
+      { tabs: [{ id: "u", kind: "terminal", root: leaf("p4", "conv-4") }] },
+    ];
+    assert.deepEqual(m.antigravityConversationsNamed(layouts, "p3").sort(), ["conv-1", "conv-4"]);
+    assert.equal(m.sameFolder("C:\\Work\\App", "c:\\work\\app", "win32"), true);
+    assert.equal(m.sameFolder("/work/App", "/work/app", "linux"), false);
+    assert.equal(m.sameFolder("/work/app/", "/work/app", "linux"), true);
+    assert.equal(m.sameFolder(null, "/work/app"), false);
   });
 
   await check("Antigravity: a missing database or a table of another shape lists nothing and fails nothing", async () => {

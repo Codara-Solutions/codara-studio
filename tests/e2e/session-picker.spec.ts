@@ -94,7 +94,7 @@ async function writePiSession(fixture: Fixture, id: string, user: string, reply:
 type SummaryDb = { exec(sql: string): void; prepare(sql: string): { run(...values: unknown[]): unknown }; close(): void };
 
 // agy's own conversation list, in its own schema, with made-up conversations.
-async function writeAntigravitySummaries(fixture: Fixture, rows: [string, string, string, number][]) {
+async function writeAntigravitySummaries(fixture: Fixture, rows: [string, string, string, number, boolean?][]) {
   const dir = join(fixture.homeDir, ".gemini", "antigravity-cli");
   await mkdir(dir, { recursive: true });
   const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: new (path: string) => SummaryDb };
@@ -103,11 +103,11 @@ async function writeAntigravitySummaries(fixture: Fixture, rows: [string, string
     "CREATE TABLE `conversation_summaries` (`conversation_id` text,`title` text NOT NULL DEFAULT \"\",`preview` text NOT NULL DEFAULT \"\",`step_count` integer NOT NULL DEFAULT 0,`last_modified_time` datetime NOT NULL,`workspace_uris` text NOT NULL,`status` text NOT NULL DEFAULT \"\",`source` text NOT NULL DEFAULT \"\",`project_id` text NOT NULL DEFAULT \"\",`agent_name` text NOT NULL DEFAULT \"\",`parent_conversation_id` text NOT NULL DEFAULT \"\",`nesting_depth` integer NOT NULL DEFAULT 0,`battle_id` text NOT NULL DEFAULT \"\",`winning_conversation_id` text NOT NULL DEFAULT \"\",`not_fully_idle` numeric NOT NULL DEFAULT false,`killed` numeric NOT NULL DEFAULT false,`last_user_input_time` datetime NOT NULL,`last_user_input_step_index` integer NOT NULL DEFAULT -1,`app_data_dir` text NOT NULL DEFAULT \"\",`raw_summary` blob,`group_id` text NOT NULL DEFAULT \"\",PRIMARY KEY (`conversation_id`));",
   );
   const insert = db.prepare(
-    "INSERT INTO conversation_summaries (conversation_id, title, preview, step_count, last_modified_time, workspace_uris, last_user_input_time) VALUES (?, ?, ?, 8, ?, ?, ?)",
+    "INSERT INTO conversation_summaries (conversation_id, title, preview, step_count, last_modified_time, workspace_uris, last_user_input_time, not_fully_idle) VALUES (?, ?, ?, 8, ?, ?, ?, ?)",
   );
-  for (const [id, title, preview, minutesAgo] of rows) {
+  for (const [id, title, preview, minutesAgo, live] of rows) {
     const when = at(minutesAgo).replace("T", " ").replace("Z", "+00:00");
-    insert.run(id, title, preview, when, JSON.stringify([`file://${fixture.workspaceDir}`]), when);
+    insert.run(id, title, preview, when, JSON.stringify([`file://${fixture.workspaceDir}`]), when, live ? 1 : 0);
   }
   db.close();
 }
@@ -774,11 +774,17 @@ test("the Pi and Antigravity rows show their own sessions first, as the others d
   test.setTimeout(150_000);
   const fixture = await prepareFixture();
   const PI = "ffffffff-6666-4666-8666-666666666666";
-  const AGY = { labels: "99999999-7777-4777-8777-777777777777", refunds: "88888888-8888-4888-8888-888888888888" };
+  const AGY = {
+    labels: "99999999-7777-4777-8777-777777777777",
+    refunds: "88888888-8888-4888-8888-888888888888",
+    live: "77777777-9999-4999-8999-999999999999",
+  };
   await writePiSession(fixture, PI, "Sort the pelican stickers by size", "Sorted, smallest first.", 40);
   await writeAntigravitySummaries(fixture, [
     [AGY.labels, "Shipping label redesign", "Moved the barcode above the address block", 25],
     [AGY.refunds, "Refund email wording", "Shorter subject line, the amount comes first", 60 * 26],
+    // agy works in this one now, in a window of its own.
+    [AGY.live, "Tide table import", "Reading the harbour tide tables", 60 * 30, true],
   ]);
   await writeFakeCli(join(fixture.binDir, "pi"), fixture.launchLog);
   await writeFakeCli(join(fixture.binDir, "agy"), fixture.launchLog);
@@ -850,6 +856,42 @@ test("the Pi and Antigravity rows show their own sessions first, as the others d
     await page.keyboard.press("Enter");
     await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBe(3);
     expect((await launchCommands(app))[2]).toContain(`agy --conversation ${AGY.labels}`);
+
+    // A conversation agy is working in now is not resumed a second time.
+    await openAntigravity();
+    await expect(row(agy, AGY.live, "antigravity")).toBeVisible({ timeout: 30_000 });
+    await agy.getByRole("combobox").fill("harbour");
+    await expect(row(agy, AGY.live, "antigravity")).toHaveAttribute("aria-selected", "true");
+    const openElsewhere = agy.getByRole("button", { name: /Open in Antigravity/ });
+    await expect(openElsewhere).toBeVisible();
+    await expect(agy.getByRole("combobox")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(agy.getByTestId("session-picker-live")).toHaveText("This conversation is open in another Antigravity tab");
+    await expect(agy).toBeVisible();
+    await shoot("antigravity-live", agy);
+    expect(await launchCommands(app)).toHaveLength(3);
+
+    // With the Antigravity chip on, a search with no match says what is searched.
+    const hint = agy.getByText("Antigravity sessions are searched by title and preview only.");
+    await agy.getByRole("combobox").fill("zeppelin");
+    await expect(agy.getByText(/No sessions match/)).toBeVisible({ timeout: 30_000 });
+    await expect(hint).toBeVisible();
+    // Escape clears a search first, then closes.
+    await agy.getByRole("combobox").fill("");
+    await page.keyboard.press("Escape");
+    await expect(agy).toHaveCount(0);
+
+    // With only Pi's chip on, it does not.
+    await addTab.click();
+    await page.getByText("Pi worker", { exact: true }).click();
+    await expect(row(pi, PI, "pi")).toBeVisible({ timeout: 30_000 });
+    await pi.getByRole("combobox").fill("zeppelin");
+    await expect(pi.getByText(/No sessions match/)).toBeVisible({ timeout: 30_000 });
+    await expect(pi.getByText("Antigravity sessions are searched by title and preview only.")).toHaveCount(0);
+    await pi.getByRole("combobox").fill("");
+    await page.keyboard.press("Escape");
+    await expect(pi).toHaveCount(0);
+    expect(await launchCommands(app)).toHaveLength(3);
   } finally {
     await app?.close();
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);

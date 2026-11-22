@@ -62,19 +62,24 @@ function sqliteDatabase(): SqliteOpen {
 
 /**
  * Opens agy's database without writing beside it. A read-only open of a WAL
- * database still creates its -wal and -shm files, so while agy has none open
- * the file is read as immutable. While agy runs, its WAL holds the newest
- * rows and a read-only open shares it, as any reader does.
+ * database still creates its -wal and -shm files, so unless both are there
+ * already (agy has it open) the file is read as immutable: that covers agy
+ * closed, and a crashed agy that left only a -wal. While agy runs, its WAL
+ * holds the newest rows and a read-only open shares it, as any reader does.
+ * A read that fails while agy changes the file throws, and the caller keeps
+ * what it read last.
  */
 export function openSummaryDatabase(dbPath: string): SummaryDatabase {
   const DatabaseSync = sqliteDatabase();
-  if (existsSync(`${dbPath}-wal`)) return new DatabaseSync(dbPath, { readOnly: true });
+  if (existsSync(`${dbPath}-wal`) && existsSync(`${dbPath}-shm`)) return new DatabaseSync(dbPath, { readOnly: true });
   return new DatabaseSync(`${pathToFileURL(dbPath).href}?immutable=1`, { readOnly: true });
 }
 
 /**
  * Go's sqlite drivers write times as "2006-01-02 15:04:05.999999999-07:00";
  * an epoch number in seconds or milliseconds is taken too. Null when neither.
+ * A time written without a zone is read as UTC, which is what Go's drivers
+ * write when they leave the zone out.
  */
 export function parseSummaryTime(value: unknown): number | null {
   if (typeof value === "number" || typeof value === "bigint") {
@@ -170,24 +175,11 @@ export function currentAntigravityConversations(): AntigravityConversation[] | n
   }
 }
 
-function sameFolder(a: string | null, b: string | null): boolean {
-  return a !== null && b !== null && resolve(a) === resolve(b);
-}
-
-/**
- * The conversation a pane started as a new agy session is in: the only
- * conversation of its folder changed since it started that no other pane
- * names. Null while there is none, or more than one, to choose from.
- */
-export function paneConversation(
-  conversations: readonly AntigravityConversation[],
-  pane: { cwd: string; since: number; named: readonly string[] },
-): string | null {
-  const candidates = conversations.filter(
-    (item) =>
-      sameFolder(item.cwd, pane.cwd) && item.lastAt !== null && item.lastAt >= pane.since && !pane.named.includes(item.id),
-  );
-  return candidates.length === 1 ? candidates[0].id : null;
+/** Folders compare as the file system does: without case on Windows. */
+export function sameFolder(a: string | null, b: string | null, platform: NodeJS.Platform = process.platform): boolean {
+  if (a === null || b === null) return false;
+  const fold = (path: string) => (platform === "win32" ? resolve(path).toLowerCase() : resolve(path));
+  return fold(a) === fold(b);
 }
 
 /**
@@ -204,4 +196,39 @@ export function continueReopensNamed(
     items.reduce<AntigravityConversation | null>((best, item) => ((item.lastAt ?? 0) > (best?.lastAt ?? -1) ? item : best), null);
   const latest = [newest(conversations), cwd ? newest(conversations.filter((item) => sameFolder(item.cwd, cwd))) : null];
   return latest.some((item) => item !== null && named.includes(item.id));
+}
+
+/**
+ * The top-level conversations agy marks as not fully idle: a running agy is
+ * working in them now. Only `not_fully_idle` is read for this; agy's
+ * `status` text has no documented values. Empty when the column is missing.
+ */
+export function readLiveAntigravityConversations(
+  dbPath: string,
+  openReadOnly: (path: string) => SummaryDatabase = openSummaryDatabase,
+): string[] {
+  const db = openReadOnly(dbPath);
+  try {
+    const present = new Set(db.prepare("PRAGMA table_info(conversation_summaries)").all().map((row) => row.name));
+    if (!present.has("not_fully_idle") || !present.has("nesting_depth")) return [];
+    return db
+      .prepare(
+        `SELECT conversation_id FROM conversation_summaries
+         WHERE nesting_depth = 0 AND not_fully_idle IN (1, 'true', 'TRUE') LIMIT ?`,
+      )
+      .all(MAX_CONVERSATIONS)
+      .map((row) => row.conversation_id)
+      .filter((id): id is string => isSafeSessionId(id) && id !== CONTINUE_WORD);
+  } finally {
+    db.close();
+  }
+}
+
+/** The conversations a running agy works in now; empty when the database cannot be read. */
+export function currentLiveAntigravityConversations(): string[] {
+  try {
+    return readLiveAntigravityConversations(join(antigravityCliDir(), ANTIGRAVITY_SUMMARY_DB));
+  } catch {
+    return [];
+  }
 }
