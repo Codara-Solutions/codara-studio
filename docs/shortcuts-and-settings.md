@@ -774,6 +774,12 @@ screenshot to a sleeping agent is refused with a note to open its pane and
 press Resume first, so nothing is pasted into a pane with no agent to read
 it.
 
+To see why an agent did or did not sleep, look for `[agent-hibernation]` in
+`logs/main.log` (included in **Export diagnostics**). Each pane gets one line
+when its answer changes: `is sleeping`, or `stays awake:` with the rule that
+held it, such as how long ago it last printed or which other program runs in
+it. Programs are named without their arguments.
+
 ### The notification center
 
 The bell in the title bar keeps every alert, including the ones you did not
