@@ -127,6 +127,16 @@ early.observe({ paneId: "pane", runtime: "antigravity", state: "idle" });
 early.arm("claude");
 assert.equal(early.runtime(), "antigravity", "a screen guess yields to main's earlier name");
 assert.deepEqual(early.agents.at(-1), { runtime: "antigravity", running: true });
+// Main's own screen guess can be stale: in an SSH pane or tmux it never saw
+// Claude quit, and the screen now shows Codex. The pane keeps Codex.
+const stale = createHarness("codex");
+stale.observe({ paneId: "pane", runtime: "claude", state: "idle", runtimeFromScreen: true });
+assert.equal(stale.runtime(), "codex", "main's screen guess does not replace the pane's own name");
+assert.deepEqual(stale.pollers, [], "Claude's reader does not take over");
+const staleEarly = createHarness(null);
+staleEarly.observe({ paneId: "pane", runtime: "claude", state: "idle", runtimeFromScreen: true });
+staleEarly.arm("codex");
+assert.equal(staleEarly.runtime(), "codex", "a stale guess of main's does not rename a later screen sniff");
 const earlyLaunch = createHarness(null);
 earlyLaunch.observe({ paneId: "pane", runtime: "antigravity", state: "idle" });
 earlyLaunch.arm("codex", true);

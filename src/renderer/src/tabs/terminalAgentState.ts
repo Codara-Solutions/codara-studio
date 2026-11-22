@@ -57,15 +57,17 @@ export function mergeTerminalRuntimeState(
  * running, and the agent's next state replaces it like any other, or a pane
  * working again reads failed for the rest of its session.
  *
- * The agent main names replaces a manual worker's: the renderer can name it
- * from screen text, which another agent may have printed, while main checks
- * the process that runs in the pane. A Cora worker's agent is the one its run
- * launched, and its run metadata and crash rule stay as they are.
+ * The agent main names replaces a manual worker's when main did not read it
+ * off the screen: the renderer can name it from screen text, which another
+ * agent may have printed, while main checked the process that runs in the
+ * pane. Main's own screen guess can be stale and never replaces it. A Cora
+ * worker's agent is the one its run launched, and its run metadata and crash
+ * rule stay as they are.
  */
 export function applyTerminalAgentState(
   existing: TerminalLeafWorker,
   incoming: RuntimeState,
-  report: { runtime: string | null; paneId: string } | null = null,
+  report: { runtime: string | null; paneId: string; runtimeFromScreen?: boolean } | null = null,
 ): TerminalLeafWorker | null {
   if (existing.runtimeState === "error" && existing.agentRunning === false) return existing;
   if (incoming === "done") {
@@ -75,7 +77,7 @@ export function applyTerminalAgentState(
     return null;
   }
   const reported = report ? liveAgentRuntime(report.runtime) : null;
-  if (report && reported && reported !== existing.runtime && existing.source === "manual") {
+  if (report && reported && !report.runtimeFromScreen && reported !== existing.runtime && existing.source === "manual") {
     const relabelled = workerForRunningAgent(existing, reported, report.paneId);
     if (relabelled) return { ...relabelled, runtimeState: incoming };
   }

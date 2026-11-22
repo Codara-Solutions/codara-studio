@@ -363,8 +363,13 @@ const SHELL_PROCESS_RE = /^(?:-?(?:zsh|bash|sh|fish|pwsh|powershell|cmd))(?:\.ex
 // Programs that set up an environment, a recorder or a timer and then run the
 // command they were given (`op run -- agy`, `mise exec -- codex`, `script -q`).
 // What runs under them is still the user's own launch.
+// bun and deno are left out: like node, they run programs of their own.
 const PASS_THROUGH_LAUNCHERS = new Set([
-  ...AGENT_LAUNCH_WRAPPERS,
+  "npx",
+  "pnpm",
+  "yarn",
+  "bunx",
+  "npm",
   "env",
   "time",
   "script",

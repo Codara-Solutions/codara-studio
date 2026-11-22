@@ -954,6 +954,7 @@ async function main() {
   T.pids.set("p17", 1017);
   T.pids.set("p18", 1018);
   T.pids.set("p19", 1019);
+  T.pids.set("p20", 1020);
   T.processes.set(1014, agyUnder(1014, 2014));
   T.processes.set(1015, [
     { pid: 2016, parentPid: 2015, depth: 2, command: "codex" },
@@ -973,6 +974,11 @@ async function main() {
   ]);
   T.processes.set(1018, agyUnder(1018, 2027));
   T.processes.set(1019, agyUnder(1019, 2028));
+  // agy's `claude -p` tool call fires Claude hooks with the pane's id.
+  T.processes.set(1020, [
+    { pid: 2030, parentPid: 2029, depth: 2, command: "claude -p review the plan" },
+    { pid: 2029, parentPid: 1020, depth: 1, command: "agy" },
+  ]);
   mod.syncTerminalNotifyPanes({
     workspaceId: "recovery",
     workspaceName: "Recovery",
@@ -987,12 +993,16 @@ async function main() {
       { paneId: "p17", tabId: "t17", tabTitle: "Antigravity behind launchers", excluded: false },
       { paneId: "p18", tabId: "t18", tabTitle: "Claude hooks", excluded: false },
       { paneId: "p19", tabId: "t19", tabTitle: "Claude program status", excluded: false },
+      { paneId: "p20", tabId: "t20", tabTitle: "Antigravity with a hooked claude", excluded: false },
     ],
   });
   const claudeBanner = "Claude Code v2.1.261\r\n";
-  for (const paneId of ["p14", "p15", "p16", "p17", "p18", "p19"]) feed(paneId, claudeBanner);
-  // Trusted signals confirm the screen's name.
+  for (const paneId of ["p14", "p15", "p16", "p17", "p18", "p19", "p20"]) feed(paneId, claudeBanner);
+  check("a runtime read off the screen is sent as a guess",
+    T.chips.findLast((chip) => chip.paneId === "p14")?.runtimeFromScreen === true);
+  // Trusted signals confirm the screen's name while no claude process is found.
   mod.noteTerminalHookEvent("p18", "SessionStart", { session_id: "18181818-aaaa", source: "startup" });
+  mod.noteTerminalHookEvent("p20", "SessionStart", { session_id: "20202020-aaaa", source: "startup" });
   feed("p19", "\x1b]7501;state=idle:app=claude-code\x1b\\");
   const readsBefore = T.processReads.length;
   const completedChecks = (pid) => T.processReads.slice(readsBefore).filter((read) => read === pid).length;
@@ -1007,6 +1017,9 @@ async function main() {
   };
   check("a pane running agy is relabelled Antigravity after its screen showed Claude Code's banner",
     await waitForRuntime("p14", "antigravity"));
+  check("a runtime from the process tree is not sent as a guess",
+    T.chips.findLast((chip) => chip.paneId === "p14")?.runtimeFromScreen === false &&
+      mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p14")?.runtimeFromScreen === false);
   const relabelledAt = T.chips.length;
   // Claude's classifier calls these frames working; Antigravity's does not.
   feed("p14", "\x1b[2K\x1b[G✻ Pouncing… (3s · ↓ 1 tokens)");
@@ -1020,6 +1033,8 @@ async function main() {
     await waitForRuntime("p16", "antigravity"));
   check("launchers between the shell and the agent do not hide it",
     await waitForRuntime("p17", "antigravity"));
+  check("hooks from a claude below the agent the shell started do not keep the screen's name",
+    await waitForRuntime("p20", "antigravity"));
   const checksDeadline = Date.now() + 8000;
   while (Date.now() < checksDeadline && [1015, 1018, 1019].some((pid) => completedChecks(pid) < 2)) await sleep(100);
   check("the process tree was read twice for the panes that keep their label",

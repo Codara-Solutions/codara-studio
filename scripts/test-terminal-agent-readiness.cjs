@@ -282,6 +282,15 @@ assert.equal(
   null,
   "done still removes a manual chip",
 );
+assert.equal(
+  state.applyTerminalAgentState(
+    { ...guessedClaude, runtime: "codex" },
+    "idle",
+    { runtime: "claude", paneId: "pane-agy", runtimeFromScreen: true },
+  )?.runtime,
+  "codex",
+  "main's own screen guess, possibly stale, leaves the label alone",
+);
 const coraWorker = { ...liveWorker, source: "spark", runId: "run-2", runtime: "codex", state: "running", runtimeState: "working" };
 const coraAfter = state.applyTerminalAgentState(coraWorker, "idle", { runtime: "claude", paneId: "pane-live" });
 assert.equal(coraAfter?.runtime, "codex", "a Cora worker's agent is the one its run launched");

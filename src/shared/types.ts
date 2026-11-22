@@ -1754,6 +1754,9 @@ export interface TerminalAgentStatePayload {
   paneId: string;
   runtime: TerminalAgentRuntime | null;
   state: RuntimeState;
+  // The notifier read `runtime` off the screen and no process has confirmed
+  // it. The renderer keeps its own name for the pane over such a guess.
+  runtimeFromScreen?: boolean;
 }
 
 // A pty session's exit, as delivered to the renderer (`pty:exit:<id>`) and to

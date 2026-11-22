@@ -1230,7 +1230,6 @@ export function noteTerminalHookEvent(
   w.lastHookEventAt = now;
   if (!w.signals.hooks) {
     w.signals.hooks = true;
-    w.runtimeFromScreen = false;
     tanLog(`pane=${w.paneId} Claude hooks active`);
   }
   const agentId = stringField(payload, "agent_id");
@@ -2216,6 +2215,16 @@ function launchedByShell(below: readonly OwnedProcessIdentity[], proc: OwnedProc
   return true;
 }
 
+// Whether the pane's own signals confirm a runtime read off the screen. Hooks
+// reach the pane from any claude in it, a `claude -p` another agent runs as a
+// tool included, so they confirm it only until a process of that agent is
+// found, which the process tree can then place.
+function signalsConfirmScreen(w: PaneWatcher, ownProcessSeen: boolean): boolean {
+  if (w.signals.programStatus) return true;
+  if (w.runtime === "codex" && codexHasStructuredDone(w)) return true;
+  return w.signals.hooks && !ownProcessSeen;
+}
+
 // The process tree names the pane's agent. Presence is not a turn, so the
 // chip starts ready.
 function adoptProcessRuntime(w: PaneWatcher, runtime: PublicAgentRuntime): void {
@@ -2266,7 +2275,7 @@ function checkAgentProcess(w: PaneWatcher, now: number): boolean {
       const own = below.filter((proc) => runtimeFromProcessCommand(proc.command) === runtime);
       if (
         w.runtimeFromScreen &&
-        !hasTrustedSignals(w) &&
+        !signalsConfirmScreen(w, own.length > 0 || w.agentProcSeen) &&
         outer &&
         outer.runtime !== runtime &&
         own.every((proc) => proc.depth > outer.proc.depth) &&
@@ -2398,6 +2407,7 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
     paneId: w.paneId,
     runtime: w.runtime,
     state: chipState,
+    runtimeFromScreen: w.runtimeFromScreen,
   });
 }
 
@@ -2430,6 +2440,7 @@ export function terminalAgentStateSnapshot(workspaceId?: string): TerminalAgentS
       paneId: w.paneId,
       runtime: w.runtime,
       state: w.lastEmittedState,
+      runtimeFromScreen: w.runtimeFromScreen,
     });
   }
   return out;

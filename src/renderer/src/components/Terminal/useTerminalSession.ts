@@ -2128,7 +2128,9 @@ export function useTerminalSession({
       let stateTimer: number | null = null;
       let pendingState: RuntimeState | null = null;
       let confirmedState: RuntimeState | null = null;
-      let authoritativeAgentState: { runtime: PublicAgentRuntime; state: RuntimeState } | null = null;
+      // `fromScreen`: main read the runtime off the screen too, and it can be
+      // stale (main stops reading the screen once it has named the agent).
+      let authoritativeAgentState: { runtime: PublicAgentRuntime; state: RuntimeState; fromScreen: boolean } | null = null;
       let idleSinceMs: number | null = null;
       // D4 (stale-footer false "working"): Claude/Codex leave their last footer
       // frame frozen on screen after a turn ends; classifyTail keeps matching
@@ -2447,8 +2449,14 @@ export function useTerminalSession({
       };
       const setAgentRunning = (runtime: AgentRuntime | null, fromLaunch = false) => {
         let publicRuntime = runtime ? coercePublicRuntime(runtime) : null;
-        // Main may have named the pane's agent before its text reached here.
-        if (publicRuntime && !fromLaunch && authoritativeAgentState && authoritativeAgentState.state !== "done") {
+        // Main may have found the pane's agent process before its text reached here.
+        if (
+          publicRuntime &&
+          !fromLaunch &&
+          authoritativeAgentState &&
+          !authoritativeAgentState.fromScreen &&
+          authoritativeAgentState.state !== "done"
+        ) {
           publicRuntime = authoritativeAgentState.runtime;
         }
         if (agentPhase === "agent") {
@@ -2639,17 +2647,23 @@ export function useTerminalSession({
       // (now-disposed) hook.
       cleanups.push(() => stopStatePoller());
       let agentStateRevision = 0;
-      const observeAgentState = (state: { paneId: string; runtime: string | null; state: RuntimeState }) => {
+      const observeAgentState = (
+        state: { paneId: string; runtime: string | null; state: RuntimeState; runtimeFromScreen?: boolean },
+      ) => {
         if (disposed || state.paneId !== sessionId) return;
         agentStateRevision += 1;
         const mainRuntime: PublicAgentRuntime | null =
           state.runtime === "codex" || state.runtime === "claude" || state.runtime === "pi" || state.runtime === "antigravity"
             ? state.runtime : null;
-        authoritativeAgentState = mainRuntime ? { runtime: mainRuntime, state: state.state } : null;
+        const fromScreen = state.runtimeFromScreen === true;
+        authoritativeAgentState = mainRuntime ? { runtime: mainRuntime, state: state.state, fromScreen } : null;
+        // A guess of main's never replaces this pane's own name: main may still
+        // name an agent that exited where it could not see it (a remote host,
+        // tmux) while the screen now shows another.
         if (
           mainRuntime &&
           agentPhase === "agent" &&
-          (activeRuntime === null || (!activeRuntimeFromLaunch && mainRuntime !== activeRuntime)) &&
+          (activeRuntime === null || (!activeRuntimeFromLaunch && !fromScreen && mainRuntime !== activeRuntime)) &&
           state.state !== "done"
         ) {
           // Restarts the poller with the new runtime's classifier and tells

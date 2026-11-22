@@ -798,6 +798,10 @@ for (const [command, shell, passThrough] of [
   ["/usr/bin/time -v claude", false, true],
   ["node /opt/unknown-agent/cli.js", false, false],
   ["tmux new-session", false, false],
+  // Interpreters running a program of their own.
+  ["bun run /opt/agent/index.ts", false, false],
+  ["deno run -A agent.ts", false, false],
+  ["npx @openai/codex", false, true],
 ]) {
   check(`shell process: ${command}`, ap.isShellProcessCommand(command), shell);
   check(`pass-through launcher: ${command}`, ap.isPassThroughProcessCommand(command), passThrough);

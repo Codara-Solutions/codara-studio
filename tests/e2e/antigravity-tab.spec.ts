@@ -208,8 +208,14 @@ test("a pane whose screen reads as Claude takes the name of the agent that runs 
     await expect(page.getByRole("status", { name: /^CLAUDE / })).toBeVisible({ timeout: 15_000 });
     await page.screenshot({ path: join(fixture.shots, "screen-named-1-claude.png") });
     await expect(page.getByRole("status", { name: /^ANTIGRAVITY / })).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByRole("status", { name: /^CLAUDE / })).toHaveCount(0);
     await expect(page.locator('[data-tab-id] [data-agent-runtime="antigravity"]').first()).toBeVisible({ timeout: 10_000 });
+    // The label holds: Claude's mode line stays on screen, and nothing turns
+    // the pane back.
+    for (let sample = 0; sample < 10; sample += 1) {
+      await expect(page.getByRole("status", { name: /^CLAUDE / })).toHaveCount(0);
+      await expect(page.getByRole("status", { name: /^ANTIGRAVITY / })).toBeVisible();
+      await page.waitForTimeout(500);
+    }
     await page.screenshot({ path: join(fixture.shots, "screen-named-2-antigravity.png") });
   } finally {
     await app?.close();
