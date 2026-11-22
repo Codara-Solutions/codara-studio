@@ -953,7 +953,8 @@ UI interface of PI basically! made better but light weight".
 - One quiet line under the turn keeps the facts: model, changed files with
   +/- (each opens its diff), and Details, which goes inside the worker for its
   brief, report and raw output.
-- A stopped or failed turn stays open and says so ("Stopped after 4s"). A
+- A stopped or failed turn stays open and says so ("Stopped after 4s"); the
+  turn Stop interrupts reads "Stopped" with no live dot, never "Failed". A
   worker that asks a question is not a failure: its turn stays open and reads
   "Waiting for your answer", never red.
 - Inside a turn only the user's messages are bubbles; Studio's own word to
