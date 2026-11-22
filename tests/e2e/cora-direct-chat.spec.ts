@@ -125,10 +125,23 @@ test("a direct chat: Send now mid-turn, and Back from raw output", async ({}, te
       await page.evaluate(() => window.spark.preferences.set("theme", "codara-classic"));
       await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1280, 900));
     }
+    // Back names the worker it returns to.
+    await expect(bar.getByRole("button", { name: /^Back to / })).toContainText("Cora follow-up 2");
     await page.keyboard.press("Escape");
     await expect(panel.locator("[data-worker-raw-log]")).toHaveCount(0);
     await expect(bar).toBeVisible();
     expect(await panel.evaluate((node) => node.contains(document.activeElement))).toBe(true);
+    // Leaving by the log's own "Back to chat" unmounts the focused button:
+    // focus must stay in the view, so Esc still climbs.
+    await page.getByRole("button", { name: "More worker actions" }).click();
+    await page.getByRole("menuitem", { name: /Raw terminal output/ }).click();
+    const backToChat = panel.getByRole("button", { name: "Back to chat" });
+    await backToChat.focus();
+    await page.keyboard.press("Enter");
+    await expect(panel.locator("[data-worker-raw-log]")).toHaveCount(0);
+    expect(await page.evaluate(() => document.activeElement !== document.body)).toBe(true);
+    expect(await panel.evaluate((node) => node.contains(document.activeElement))).toBe(true);
+    await expect(bar).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(bar).toHaveCount(0);
     await expect(panel.locator(`[data-worker-row="${rowId}"]`)).toBeFocused();
