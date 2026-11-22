@@ -170,6 +170,10 @@ try {
     "show me some options of changes to the onboarding, then I decide, and once I approve you build it",
     "use astra for the hard task and sol for the simpler tasks",
     "Don't change anything until I confirm the plan.",
+    "Use sub-agents to fix each failing file",
+    "use subagents for this",
+    "Plan it, and once I approve you can build it.",
+    "Use claude for the backend and codex for the frontend.",
   ]) {
     assert.equal(await shouldUseDirectExecution({ cwd: root, prompt }), false, `stays with the manager: ${prompt}`);
     assert.equal(followUpNeedsManager(prompt), true, `a follow-up goes to the manager: ${prompt}`);
@@ -195,6 +199,14 @@ try {
     "Run the subagent tests",
     "Use the sub-agent API in agent-socket.ts",
     "codex on linux and claude on mac both crash",
+    "Create two versions of the API: v1 and v2",
+    "Build two layouts: mobile and desktop",
+    "Write 2 drafts of the release notes",
+    "make some options in the config optional",
+    "Make two versions of the logo, one dark one light",
+    "Fix the bug where when I approve the PR, the build starts",
+    "When I sign off the build starts twice",
+    "sonnet writes bad code, claude does better: use claude for this",
   ]) {
     assert.equal(await shouldUseDirectExecution({ cwd: root, prompt }), true, `stays direct: ${prompt}`);
     assert.equal(followUpNeedsManager(prompt), false, `a follow-up stays direct: ${prompt}`);
