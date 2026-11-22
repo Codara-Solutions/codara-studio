@@ -82,12 +82,25 @@ function pickLaunchableBinary(matches: readonly string[]): string | null {
   return best ?? matches[0];
 }
 
+// e2e only: the suite's fake CLI (CODARA_E2E_BIN_CLAUDE and the like),
+// honored only when the e2e runner launched the app (SPARK_E2E_BACKGROUND=1).
+// On Windows the user's registry PATH is part of every lookup, and a real
+// `claude.exe` there outranks the suite's `claude.cmd`; without this the suite
+// would resume a fake session id with the developer's own CLI.
+function e2eBinaryOverride(name: string): string | null {
+  if (process.env.SPARK_E2E_BACKGROUND !== "1" || !/^[a-z][a-z0-9-]*$/.test(name)) return null;
+  const value = process.env[`CODARA_E2E_BIN_${name.toUpperCase().replace(/-/g, "_")}`];
+  return value && value.trim() ? value.trim() : null;
+}
+
 /**
  * Returns the absolute path to a binary on this machine, or null if it
  * isn't installed in any known location.
  */
 export async function resolveBinary(name: string): Promise<string | null> {
   if (!name || typeof name !== "string") return null;
+  const e2e = e2eBinaryOverride(name);
+  if (e2e) return e2e;
   if (cache.has(name)) return cache.get(name) ?? null;
 
   // Ensure the enriched PATH is computed before we probe — `whichWhere`
