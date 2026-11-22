@@ -74,7 +74,7 @@ import {
   CODEX_LAUNCH_COMMAND,
   GROK_LAUNCH_COMMAND,
   PI_LAUNCH_COMMAND,
-  runtimeFromAgentSessionLaunchCommand,
+  workerSessionsRuntime,
 } from "../workers/launch-commands";
 import { offerWorkerSessions } from "../components/session-search/sessionSearchStore";
 
@@ -2544,8 +2544,8 @@ function PaneToolbar({
           paneCwd={paneCwd}
           onPick={(command, cwd) => {
             setMenuOpen(false);
-            const runtime = runtimeFromAgentSessionLaunchCommand(command);
-            if (runtime === "claude" || runtime === "codex" || runtime === "grok") {
+            const runtime = workerSessionsRuntime(command);
+            if (runtime) {
               offerWorkerSessions({
                 runtime,
                 cwd: cwd ?? paneCwd ?? null,

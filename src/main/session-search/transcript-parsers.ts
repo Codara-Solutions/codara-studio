@@ -420,7 +420,7 @@ export function coraRunCwd(firstEventLine: string): string | null {
   return payload ? str(payload.cwd) : null;
 }
 
-export const LINE_PARSERS: Readonly<Record<Exclude<SessionSearchAgent, "cora">, LineParser>> = {
+export const LINE_PARSERS: Readonly<Record<Exclude<SessionSearchAgent, "cora" | "antigravity">, LineParser>> = {
   claude: parseClaudeLine,
   codex: parseCodexLine,
   grok: parseGrokLine,

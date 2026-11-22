@@ -73,6 +73,7 @@ test("Antigravity opens in its own tab, shows its state, and comes back after a 
     row = await openPickerRow(page);
     await expect(row, "the menu searched again within 30 s").toHaveAttribute("data-installed", "false");
     await row.getByRole("button", { name: /Antigravity worker/ }).click();
+    await startNewFromPicker(page);
 
     const tab = page.locator("[data-tab-id]").filter({ hasText: "Antigravity" });
     await expect(tab).toBeVisible({ timeout: 15_000 });
@@ -153,6 +154,7 @@ test("with resume after a restart off, agy does not come back", async ({}, testI
     const row = await openPickerRow(page);
     await expect(row).toHaveAttribute("data-installed", "true", { timeout: 20_000 });
     await row.getByRole("button", { name: /Antigravity worker/ }).click();
+    await startNewFromPicker(page);
     await expect.poll(() => readStarts(fixture), { timeout: 30_000 }).toHaveLength(1);
     await expect(page.getByRole("status", { name: "ANTIGRAVITY ready" })).toBeVisible({ timeout: 30_000 });
     await page.waitForTimeout(3_000);
@@ -202,6 +204,14 @@ async function openPickerRow(page: Page) {
   const row = page.getByTestId("antigravity-worker-row");
   await expect(row).toBeVisible({ timeout: 15_000 });
   return row;
+}
+
+// The row shows agy's past conversations first (none here); Enter starts a new one.
+async function startNewFromPicker(page: Page) {
+  const picker = page.getByRole("dialog", { name: "Antigravity sessions" });
+  await expect(picker.getByTestId("session-picker-new")).toHaveClass(/is-selected/, { timeout: 15_000 });
+  await page.keyboard.press("Enter");
+  await expect(picker).toHaveCount(0);
 }
 
 async function readLog(fixture: Fixture): Promise<Array<{ cwd?: string; args?: string[]; exit?: true }>> {

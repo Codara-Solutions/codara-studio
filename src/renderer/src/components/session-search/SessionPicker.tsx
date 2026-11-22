@@ -48,7 +48,7 @@ import "./session-search.css";
 // highlighted conversation. One box searches names and what either side said,
 // and each result says which of those matched. Opened from the + menu and its
 // chord, the rail's button (on this workspace), the jump palette (on what was
-// typed there), and in front of a Claude, Codex or Grok worker being opened.
+// typed there), and in front of every worker a + menu opens.
 // There, nothing is selected at first and Enter starts the worker, so history
 // never costs more than one key and a session is only resumed on purpose.
 
@@ -63,9 +63,13 @@ const MENU_Z_INDEX = 130;
 const canDelete = (hit: SessionSearchHit) => hit.agent === "claude" || hit.agent === "codex" || hit.agent === "grok";
 const canFork = (hit: SessionSearchHit) => canDelete(hit) && hit.cwdExists;
 const isGone = (hit: SessionSearchHit) => hit.agent !== "cora" && !hit.cwdExists;
+// Of an Antigravity conversation Codara reads only agy's summary row: its
+// title and a preview. There is no transcript to show or reveal.
+const summaryOnly = (agent: SessionSearchAgent) => agent === "antigravity";
 
 function matchLabel(kind: SessionMatchKind, agent: SessionSearchAgent): string {
   if (kind === "name") return "Name";
+  if (summaryOnly(agent)) return "Preview";
   return kind === "user" ? "You" : SESSION_SEARCH_AGENT_LABEL[agent];
 }
 
@@ -188,6 +192,28 @@ export default function SessionPicker({
   const answerKey = `${query}\n${effectiveScope}\n${agentsKey}\n${scopeCwd ?? ""}`;
   const selected = hits.find((hit) => hit.key === selectedKey) ?? null;
   const selectedOpen = selected ? (host.isSessionOpen?.(selected) ?? false) : false;
+  // Antigravity conversations a running agy works in now (agy marks them not
+  // fully idle). A pane here that names one is "open"; any other agy has it,
+  // so resuming would start a second agy on the same conversation.
+  const antigravityOn = enabledAgents.includes("antigravity");
+  const [liveAntigravity, setLiveAntigravity] = useState<ReadonlySet<string>>(() => new Set());
+  const [liveNoticeKey, setLiveNoticeKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!antigravityOn) return;
+    let current = true;
+    void window.spark.antigravity
+      ?.liveConversations()
+      .then((ids) => {
+        if (current) setLiveAntigravity(new Set(ids));
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [antigravityOn]);
+  const liveElsewhere = (hit: SessionSearchHit) =>
+    hit.agent === "antigravity" && liveAntigravity.has(hit.sessionId) && !host.isSessionOpen?.(hit);
+  const selectedLive = selected ? liveElsewhere(selected) : false;
   const selectedKeyRef = useRef(selectedKey);
   selectedKeyRef.current = selectedKey;
 
@@ -386,6 +412,10 @@ export default function SessionPicker({
   };
 
   const primary = (hit: SessionSearchHit) => {
+    if (liveElsewhere(hit)) {
+      setLiveNoticeKey(hit.key);
+      return;
+    }
     if (isGone(hit) && !host.isSessionOpen?.(hit)) {
       showTranscript(
         hit,
@@ -604,8 +634,8 @@ export default function SessionPicker({
       <div className="ss-empty sp-off">
         <p>Agent session search is off.</p>
         <p className="ss-empty__sub">
-          Turn it on to search what you and your agents said in past Claude, Codex, Grok, Pi and Cora sessions. The
-          index stays on this computer.
+          Turn it on to search what you and your agents said in past Claude, Codex, Grok, Pi, Antigravity and Cora
+          sessions. The index stays on this computer.
         </p>
         <button
           type="button"
@@ -620,6 +650,10 @@ export default function SessionPicker({
 
   const sessionsNoun =
     activeAgents.length === 1 ? `${SESSION_SEARCH_AGENT_LABEL[activeAgents[0]]} sessions` : "agent sessions";
+  // Antigravity conversations are found by title and preview only, and the box says so.
+  const searchedAgents = activeAgents.length > 0 ? activeAgents : enabledAgents;
+  const summariesOnly = searchedAgents.length > 0 && searchedAgents.every(summaryOnly);
+  const searchHint = summariesOnly ? "Search titles and previews" : "Search names and what was said";
   let lastHeading: string | null = null;
   const firstBuildRunning = status.firstBuild && (indexing || status.phase === "paused");
 
@@ -634,11 +668,11 @@ export default function SessionPicker({
                 type="text"
                 role="combobox"
                 className="sp-search"
-                aria-label="Search session names and what was said"
+                aria-label={summariesOnly ? "Search session titles and previews" : "Search session names and what was said"}
                 aria-expanded
                 aria-controls="sp-listbox"
                 aria-activedescendant={selected ? `sp-row-${selected.key}` : undefined}
-                placeholder="Search names and what was said"
+                placeholder={searchHint}
                 spellCheck={false}
                 value={query}
                 onChange={(event) => setQuery(event.currentTarget.value)}
@@ -733,6 +767,9 @@ export default function SessionPicker({
                   ) : query.trim() ? (
                     <>
                       <p>No sessions match “{query.trim()}”.</p>
+                      {activeAgents.some(summaryOnly) ? (
+                        <p className="ss-empty__sub">Antigravity sessions are searched by title and preview only.</p>
+                      ) : null}
                       {effectiveScope !== "all" ? (
                         <button type="button" className="ss-link" onClick={() => setScope("all")}>
                           Search every project
@@ -876,17 +913,19 @@ export default function SessionPicker({
                       <dd>{selected.branch}</dd>
                     </div>
                   ) : null}
-                  <div>
-                    <dt>Length</dt>
-                    <dd>
-                      {[
-                        `${selected.messageCount} ${selected.messageCount === 1 ? "message" : "messages"}`,
-                        sessionLengthLabel(selected.startedAt, selected.lastAt),
-                      ]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </dd>
-                  </div>
+                  {summaryOnly(selected.agent) ? null : (
+                    <div>
+                      <dt>Length</dt>
+                      <dd>
+                        {[
+                          `${selected.messageCount} ${selected.messageCount === 1 ? "message" : "messages"}`,
+                          sessionLengthLabel(selected.startedAt, selected.lastAt),
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </dd>
+                    </div>
+                  )}
                   <div>
                     <dt>Last</dt>
                     <dd>{relativeAge(selected.lastAt, now) || "unknown"}</dd>
@@ -894,6 +933,12 @@ export default function SessionPicker({
                 </dl>
                 {selectedOpen ? (
                   <p className="sp-detail__notice">Open in a tab now, so resuming goes there.</p>
+                ) : selectedLive ? (
+                  <p className="sp-detail__notice" role="status" data-testid="session-picker-live">
+                    {liveNoticeKey === selected.key
+                      ? "Antigravity marks this conversation as busy. If no tab is running it, copy its id from the ⋯ menu and run agy --conversation <id>."
+                      : "agy is working in this conversation now, so it is not resumed a second time."}
+                  </p>
                 ) : isGone(selected) ? (
                   <p className="sp-detail__notice">
                     Its folder is no longer on this computer, so it can be read but not resumed.
@@ -961,13 +1006,15 @@ export default function SessionPicker({
                   <button type="button" className="spark-btn is-primary" onClick={() => primary(selected)}>
                     {selected.agent === "cora"
                       ? "Open chat"
-                      : selectedOpen
-                        ? "Go to its tab"
-                        : isGone(selected)
-                          ? "View transcript"
-                          : resumesInPane(selected)
-                            ? "Resume in a new pane"
-                            : "Resume in a new tab"}
+                      : selectedLive
+                        ? "Open in Antigravity"
+                        : selectedOpen
+                          ? "Go to its tab"
+                          : isGone(selected)
+                            ? "View transcript"
+                            : resumesInPane(selected)
+                              ? "Resume in a new pane"
+                              : "Resume in a new tab"}
                     <kbd className="spark-kbd sp-actions__kbd">Enter</kbd>
                   </button>
                   {canFork(selected) ? (
@@ -980,7 +1027,7 @@ export default function SessionPicker({
                       Fork
                     </button>
                   ) : null}
-                  {!selectedOpen && !resumesInPane(selected) && host.canSplitSession?.(selected) ? (
+                  {!selectedOpen && !selectedLive && !resumesInPane(selected) && host.canSplitSession?.(selected) ? (
                     <button
                       type="button"
                       className="spark-btn"
@@ -991,9 +1038,11 @@ export default function SessionPicker({
                     </button>
                   ) : null}
                   <span className="sp-actions__gap" />
-                  <button type="button" className="spark-btn" onClick={() => showTranscript(selected, null)}>
-                    Whole transcript
-                  </button>
+                  {summaryOnly(selected.agent) ? null : (
+                    <button type="button" className="spark-btn" onClick={() => showTranscript(selected, null)}>
+                      Whole transcript
+                    </button>
+                  )}
                   <button
                     ref={moreRef}
                     type="button"
@@ -1050,7 +1099,9 @@ export default function SessionPicker({
               },
               { label: "Rename", run: () => setRenaming(true) },
               { label: "Copy session id", run: () => void copySessionId(selected.sessionId).then(setNote) },
-              { label: "Reveal transcript", run: () => void revealSessionTranscript(selected.key).then(setNote) },
+              ...(summaryOnly(selected.agent)
+                ? []
+                : [{ label: "Reveal transcript", run: () => void revealSessionTranscript(selected.key).then(setNote) }]),
             ].map((item) => (
               <button
                 key={item.label}

@@ -112,8 +112,9 @@ interface Props {
   // aimed at the visible chat composer. Run-scoped listeners (chat.usage
   // token accumulation) intentionally keep running so totals stay accurate.
   suspendGlobalEvents?: boolean;
-  // The chat's agents rail shows its workers: the "2 workers running" line
-  // then stays off, so the count lives in one place.
+  // The chat's agents rail shows its workers, or a direct chat draws its one
+  // worker as Cora's own turn: the "2 workers running" line then stays off,
+  // so the count lives in one place (or nowhere).
   workersOnRail?: boolean;
   onStartChat: (
     message: string,

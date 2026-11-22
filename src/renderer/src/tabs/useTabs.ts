@@ -10,6 +10,7 @@ import { makeId } from "@shared/ids";
 import { SPLIT_TITLE_BASE, TERMINAL_TITLE_BASE } from "@shared/tab-default-titles";
 import { basename } from "../path-utils";
 import { tabFilePaths } from "./tabsShowingPath";
+import { planDiffTabOpen, type ChatDiffTab } from "./diffTabOpen";
 import {
   collectLeaves,
   findLeaf,
@@ -593,6 +594,23 @@ export function savedLayoutFilePaths(workspaceId: string): string[] {
     if (!raw) return [];
     const parsed = migratePersisted(JSON.parse(raw) as PersistedShape);
     return parsed ? tabFilePaths(parsed.tabs) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A workspace's saved tabs as stored, for checks that span workspaces not
+ * loaded yet (which Antigravity conversations their panes name). A layout
+ * that cannot be read gives none.
+ */
+export function savedLayoutTabs(workspaceId: string): Tab[] {
+  const key = storageKey(workspaceId);
+  if (!key) return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return [];
+    return migratePersisted(JSON.parse(raw) as PersistedShape)?.tabs ?? [];
   } catch {
     return [];
   }
@@ -1606,7 +1624,7 @@ export interface UseTabsApi {
   openDiffTab: (
     path: string,
     staged: boolean,
-    options?: { focus?: boolean; pin?: boolean },
+    options?: { focus?: boolean; pin?: boolean; fromChat?: boolean },
   ) => TabId;
   // Open (or focus) a file's diff within a specific commit — a read-only
   // workbench tab keyed by (path, commitHash), opened from CommitDetail.
@@ -3944,61 +3962,28 @@ export function useTabs(
   // Open (or focus) a changed file's diff tab. Existence check + setActiveId
   // both run INSIDE the updater (same double-click race note as
   // openAutomationsTab above).
+  // The diff tab the chat's changed-file links share (diffTabOpen.ts). Set
+  // inside the updater, from the state the open really landed on.
+  const chatDiffTabRef = useRef<ChatDiffTab | null>(null);
   const openDiffTab = useCallback(
     (
       path: string,
       staged: boolean,
-      options?: { focus?: boolean; pin?: boolean },
+      options?: { focus?: boolean; pin?: boolean; fromChat?: boolean },
     ): TabId => {
       let outId: TabId | null = null;
       setTabs((curr) => {
-        const existing = curr.find(
-          (t): t is DiffTab =>
-            t.kind === "diff" && !t.commitHash && t.path === path && t.staged === staged,
-        );
-        if (existing) {
-          outId = existing.id;
-          if (options?.focus !== false) setActiveId(existing.id);
-          if (options?.pin && existing.preview) {
-            return curr.map((t) =>
-              t.id === existing.id && t.kind === "diff" ? { ...t, preview: false } : t,
-            );
-          }
-          return curr;
-        }
-        // Reuse the shared preview diff slot (working-tree or commit flavor):
-        // swap its payload instead of stacking a new pill per clicked row.
-        const reusable = curr.find(
-          (t): t is DiffTab => t.kind === "diff" && Boolean(t.preview),
-        );
-        if (reusable) {
-          outId = reusable.id;
-          if (options?.focus !== false) setActiveId(reusable.id);
-          return curr.map((t) =>
-            t.id === reusable.id && t.kind === "diff"
-              ? {
-                  ...t,
-                  title: basename(path),
-                  path,
-                  staged,
-                  commitHash: undefined,
-                  preview: !options?.pin,
-                }
-              : t,
-          );
-        }
-        const id = makeId("diff");
-        outId = id;
-        const tab: DiffTab = {
-          id,
-          kind: "diff",
-          title: basename(path),
+        const plan = planDiffTabOpen(
+          curr,
           path,
           staged,
-          preview: !options?.pin,
-        };
-        if (options?.focus !== false) setActiveId(id);
-        return [...curr, tab];
+          { pin: options?.pin, fromChat: options?.fromChat, chat: chatDiffTabRef.current },
+          () => makeId("diff") as TabId,
+        );
+        outId = plan.id;
+        if (plan.chat) chatDiffTabRef.current = plan.chat;
+        if (options?.focus !== false) setActiveId(plan.id);
+        return plan.tabs;
       });
       return (outId ?? makeId("diff")) as TabId;
     },

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { SessionSearchHit, SessionSearchScope } from "@shared/session-search";
+import type { SessionSearchAgent, SessionSearchHit, SessionSearchScope } from "@shared/session-search";
 
 // What App hands the session picker (the active workspace and how to open a
 // session), and how the rail asks App to open it. Kept in a store rather than
@@ -23,7 +23,7 @@ export interface SessionSearchHost {
 
 /** A worker the user is opening: its past sessions come first, and the picker's default starts it. */
 export interface WorkerSessionsOffer {
-  runtime: "claude" | "codex" | "grok";
+  runtime: Exclude<SessionSearchAgent, "cora">;
   cwd: string | null;
   /** Where resuming lands: the surface that was asked decides, as starting new does. */
   placement: "tab" | "pane";
