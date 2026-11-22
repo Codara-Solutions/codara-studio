@@ -570,6 +570,8 @@ async function main() {
   );
   feed("s1", "\x1b]7501;state=idle:app=claude-code\x1b\\Claude Code v2.1.296\r\n");
   check("7501: a report identifies Claude", mod.terminalAgentStateSnapshot().find((c) => c.paneId === "s1")?.runtime === "claude");
+  check("7501: a name confirmed only by the agent's own report is still sent as a guess",
+    mod.terminalAgentStateSnapshot().find((c) => c.paneId === "s1")?.runtimeFromScreen === true);
   const before7501 = alertCount();
   mod.noteTerminalUserInput("s1", "add a test\r");
   feed("s1", "\x1b]7501;state=working:app=claude-code:progress=10\x1b\\");

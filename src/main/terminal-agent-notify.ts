@@ -1784,8 +1784,9 @@ function handleProgramStatus(w: PaneWatcher, report: ProgramStatusReport, now: n
   if (!w.runtime && reported) identifyRuntime(w, reported, "program status");
   if (reported && w.runtime && reported !== w.runtime) return;
   if (!w.signals.programStatus) {
+    // The report arrives through the terminal like screen text, so the name
+    // stays a guess: over ssh or docker exec nothing here sees the agent quit.
     w.signals.programStatus = true;
-    w.runtimeFromScreen = false;
     tanLog(`pane=${w.paneId} program status active (${app || "unknown app"})`);
   }
   const previous = w.lastProgramState;
@@ -1858,7 +1859,7 @@ function identifyRuntime(w: PaneWatcher, runtime: PublicAgentRuntime, why: strin
   // the session's trusted signals; a launched command is a new session.
   const sameSession = w.runtime === runtime && why !== "command marker";
   w.runtime = runtime;
-  w.runtimeFromScreen = why === "banner";
+  w.runtimeFromScreen = why === "banner" || why === "program status";
   w.agentProcSeen = false;
   w.agentProcGone = false;
   w.lastAgentProcCheckAt = 0;
