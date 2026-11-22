@@ -1,0 +1,259 @@
+{
+  "_comment": "Real Claude Code pane trees from a Windows 11 machine running Codara Studio 2.1.0, captured with Get-CimInstance Win32_Process. User name, session ids and a private repository name are replaced. startOffsetMs is relative to claude.exe. Before the census fix both trees were refused as a late child (the second because of Codara's own MCP server at +95 s, the first because of MCP servers past 20 s).",
+  "withMcpServers": [
+    {
+      "pid": 19492,
+      "parentPid": 28220,
+      "startOffsetMs": -1199,
+      "memoryBytes": 12275712,
+      "command": "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoLogo -NoProfile -NoExit -Command \"& 'C:\\Users\\me\\.local\\bin\\claude.exe' '--settings' 'C:\\Users\\me\\.devhome\\Codara\\integrations\\claude\\settings.json' '--mcp-config=C:\\Users\\me\\.devhome\\Codara\\integrations\\claude\\mcp-studio.json' '--dangerously-skip-permissions'\""
+    },
+    {
+      "pid": 39924,
+      "parentPid": 19492,
+      "startOffsetMs": 0,
+      "memoryBytes": 408055808,
+      "command": "\"C:\\Users\\me\\.local\\bin\\claude.exe\" --settings C:\\Users\\me\\.devhome\\Codara\\integrations\\claude\\settings.json --mcp-config=C:\\Users\\me\\.devhome\\Codara\\integrations\\claude\\mcp-studio.json --dangerously-skip-permissions"
+    },
+    {
+      "pid": 24908,
+      "parentPid": 39924,
+      "startOffsetMs": 4764,
+      "memoryBytes": 909312,
+      "command": "C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"npx ^\"-y^\" ^\"notebooklm-mcp@latest^\"\""
+    },
+    {
+      "pid": 41660,
+      "parentPid": 39924,
+      "startOffsetMs": 4828,
+      "memoryBytes": 499712,
+      "command": "C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"npx ^\"-y^\" ^\"mcp-discord^\"\""
+    },
+    {
+      "pid": 37336,
+      "parentPid": 39924,
+      "startOffsetMs": 4871,
+      "memoryBytes": 638976,
+      "command": "C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"npx ^\"-y^\" ^\"@upstash/context7-mcp@latest^\"\""
+    },
+    {
+      "pid": 20492,
+      "parentPid": 39924,
+      "startOffsetMs": 24864,
+      "memoryBytes": 2113536,
+      "command": "node \"C:/Users/me/Archivos/Escritorio/Codara Repos/private-platform/mcp/node_modules/tsx/dist/cli.mjs\" \"C:/Users/me/Archivos/Escritorio/Codara Repos/private-platform/mcp/src/bin/stdio.ts\""
+    },
+    {
+      "pid": 45184,
+      "parentPid": 39924,
+      "startOffsetMs": 25461,
+      "memoryBytes": 6017024,
+      "command": "C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"npx ^\"-y^\" ^\"dataforseo-mcp-server^\"\""
+    },
+    {
+      "pid": 25244,
+      "parentPid": 39924,
+      "startOffsetMs": 32160,
+      "memoryBytes": 1101824,
+      "command": "pipx run analytics-mcp"
+    },
+    {
+      "pid": 30304,
+      "parentPid": 39924,
+      "startOffsetMs": 32726,
+      "memoryBytes": 3858432,
+      "command": "\"C:\\Users\\me\\AppData\\Local\\Programs\\spark-agent\\Codara Studio.exe\" C:\\Users\\me\\AppData\\Local\\Programs\\spark-agent\\resources\\codara-studio-mcp\\server.js"
+    },
+    {
+      "pid": 3436,
+      "parentPid": 24908,
+      "startOffsetMs": 4821,
+      "memoryBytes": 585728,
+      "command": "\\??\\C:\\WINDOWS\\system32\\conhost.exe 0x4"
+    },
+    {
+      "pid": 24736,
+      "parentPid": 24908,
+      "startOffsetMs": 6786,
+      "memoryBytes": 2646016,
+      "command": "\"C:\\Program Files\\nodejs\\\\node.exe\"  \"C:\\Program Files\\nodejs\\\\node_modules\\npm\\bin\\npx-cli.js\" \"-y\" \"notebooklm-mcp@latest\""
+    },
+    {
+      "pid": 26828,
+      "parentPid": 41660,
+      "startOffsetMs": 4867,
+      "memoryBytes": 659456,
+      "command": "\\??\\C:\\WINDOWS\\system32\\conhost.exe 0x4"
+    },
+    {
+      "pid": 37252,
+      "parentPid": 41660,
+      "startOffsetMs": 6779,
+      "memoryBytes": 4055040,
+      "command": "\"C:\\Program Files\\nodejs\\\\node.exe\"  \"C:\\Program Files\\nodejs\\\\node_modules\\npm\\bin\\npx-cli.js\" \"-y\" \"mcp-discord\""
+    },
+    {
+      "pid": 42236,
+      "parentPid": 37336,
+      "startOffsetMs": 4914,
+      "memoryBytes": 626688,
+      "command": "\\??\\C:\\WINDOWS\\system32\\conhost.exe 0x4"
+    },
+    {
+      "pid": 31716,
+      "parentPid": 37336,
+      "startOffsetMs": 6809,
+      "memoryBytes": 638976,
+      "command": "\"C:\\Program Files\\nodejs\\\\node.exe\"  \"C:\\Program Files\\nodejs\\\\node_modules\\npm\\bin\\npx-cli.js\" \"-y\" \"@upstash/context7-mcp@latest\""
+    },
+    {
+      "pid": 7696,
+      "parentPid": 20492,
+      "startOffsetMs": 24892,
+      "memoryBytes": 6799360,
+      "command": "\\??\\C:\\WINDOWS\\system32\\conhost.exe 0x4"
+    },
+    {
+      "pid": 14156,
+      "parentPid": 20492,
+      "startOffsetMs": 25264,
+      "memoryBytes": 225280,
+      "command": "\"C:\\Program Files\\nodejs\\node.exe\" --require \"C:\\Users\\me\\Archivos\\Escritorio\\Codara Repos\\private-platform\\mcp\\node_modules\\.pnpm\\tsx@4.22.3\\node_modules\\tsx\\dist\\preflight.cjs\" --import file:///C:/Users/me/Archivos/Escritorio/Codara%20Repos/private-platform/mcp/node_modules/.pnpm/tsx@4.22.3/node_modules/tsx/dist/loader.mjs \"C:/Users/me/Archivos/Escritorio/Codara Repos/private-platform/mcp/src/bin/stdio.ts\""
+    },
+    {
+      "pid": 2424,
+      "parentPid": 45184,
+      "startOffsetMs": 25490,
+      "memoryBytes": 6836224,
+      "command": "\\??\\C:\\WINDOWS\\system32\\conhost.exe 0x4"
+    },
+    {
+      "pid": 29372,
+      "parentPid": 45184,
+      "startOffsetMs": 25833,
+      "memoryBytes": 1691648,
+      "command": "\"C:\\Program Files\\nodejs\\\\node.exe\"  \"C:\\Program Files\\nodejs\\\\node_modules\\npm\\bin\\npx-cli.js\" \"-y\" \"dataforseo-mcp-server\""
+    },
+    {
+      "pid": 29888,
+      "parentPid": 25244,
+      "startOffsetMs": 32182,
+      "memoryBytes": 6799360,
+      "command": "\\??\\C:\\WINDOWS\\system32\\conhost.exe 0x4"
+    },
+    {
+      "pid": 44016,
+      "parentPid": 25244,
+      "startOffsetMs": 32277,
+      "memoryBytes": 2142208,
+      "command": "\"C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python312\\python.exe\"  \"C:\\Users\\me\\appdata\\roaming\\python\\python312\\scripts\\pipx.exe\" run analytics-mcp"
+    },
+    {
+      "pid": 29748,
+      "parentPid": 24736,
+      "startOffsetMs": 22489,
+      "memoryBytes": 548864,
+      "command": "C:\\WINDOWS\\system32\\cmd.exe /d /s /c notebooklm-mcp"
+    },
+    {
+      "pid": 44476,
+      "parentPid": 37252,
+      "startOffsetMs": 22763,
+      "memoryBytes": 540672,
+      "command": "C:\\WINDOWS\\system32\\cmd.exe /d /s /c mcp-discord"
+    },
+    {
+      "pid": 28688,
+      "parentPid": 31716,
+      "startOffsetMs": 22528,
+      "memoryBytes": 593920,
+      "command": "C:\\WINDOWS\\system32\\cmd.exe /d /s /c context7-mcp"
+    },
+    {
+      "pid": 3636,
+      "parentPid": 29372,
+      "startOffsetMs": 30917,
+      "memoryBytes": 1581056,
+      "command": "C:\\WINDOWS\\system32\\cmd.exe /d /s /c dataforseo-mcp-server"
+    },
+    {
+      "pid": 40368,
+      "parentPid": 44016,
+      "startOffsetMs": 33667,
+      "memoryBytes": 962560,
+      "command": "C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python39\\Scripts\\uv.EXE tool run --python C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python312\\python.exe analytics-mcp"
+    },
+    {
+      "pid": 37740,
+      "parentPid": 29748,
+      "startOffsetMs": 22642,
+      "memoryBytes": 5906432,
+      "command": "\"node\"   \"C:\\Users\\me\\AppData\\Local\\npm-cache\\_npx\\0d29dd9f4e472da9\\node_modules\\.bin\\\\..\\notebooklm-mcp\\dist\\index.js\" "
+    },
+    {
+      "pid": 20616,
+      "parentPid": 44476,
+      "startOffsetMs": 22913,
+      "memoryBytes": 14692352,
+      "command": "\"node\"   \"C:\\Users\\me\\AppData\\Local\\npm-cache\\_npx\\44614756367a08d5\\node_modules\\.bin\\\\..\\mcp-discord\\build\\index.js\" "
+    },
+    {
+      "pid": 43700,
+      "parentPid": 28688,
+      "startOffsetMs": 22660,
+      "memoryBytes": 3670016,
+      "command": "\"node\"   \"C:\\Users\\me\\AppData\\Local\\npm-cache\\_npx\\c35ab75beed40a3c\\node_modules\\.bin\\\\..\\@upstash\\context7-mcp\\dist\\index.js\" "
+    },
+    {
+      "pid": 1692,
+      "parentPid": 3636,
+      "startOffsetMs": 30981,
+      "memoryBytes": 1953792,
+      "command": "\"node\"   \"C:\\Users\\me\\AppData\\Local\\npm-cache\\_npx\\787bcb63918aaa21\\node_modules\\.bin\\\\..\\dataforseo-mcp-server\\dist\\index.js\" "
+    },
+    {
+      "pid": 32856,
+      "parentPid": 40368,
+      "startOffsetMs": 35307,
+      "memoryBytes": 770048,
+      "command": "\"C:\\Users\\me\\AppData\\Local\\uv\\cache\\archive-v0\\cluwqNdt4fYL6vCioHtQo\\Scripts\\analytics-mcp.exe\""
+    },
+    {
+      "pid": 17968,
+      "parentPid": 32856,
+      "startOffsetMs": 35343,
+      "memoryBytes": 638976,
+      "command": "\"C:\\Users\\me\\AppData\\Local\\uv\\cache\\archive-v0\\cluwqNdt4fYL6vCioHtQo\\Scripts\\python.exe\" \"C:\\Users\\me\\AppData\\Local\\uv\\cache\\archive-v0\\cluwqNdt4fYL6vCioHtQo\\Scripts\\analytics-mcp.exe\""
+    },
+    {
+      "pid": 8020,
+      "parentPid": 17968,
+      "startOffsetMs": 35382,
+      "memoryBytes": 3399680,
+      "command": "\"C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python312\\python.exe\" \"C:\\Users\\me\\AppData\\Local\\uv\\cache\\archive-v0\\cluwqNdt4fYL6vCioHtQo\\Scripts\\analytics-mcp.exe\""
+    }
+  ],
+  "lateCodaraMcp": [
+    {
+      "pid": 18660,
+      "parentPid": 28220,
+      "startOffsetMs": -3196,
+      "memoryBytes": 12206080,
+      "command": "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoLogo -NoProfile -NoExit -Command \"& 'C:\\Users\\me\\.local\\bin\\claude.exe' '--settings' 'C:\\Users\\me\\.devhome\\Codara\\integrations\\claude\\settings.json' '--mcp-config=C:\\Users\\me\\.devhome\\Codara\\integrations\\claude\\mcp-studio.json' '--dangerously-skip-permissions' '--resume' '00000000-0000-4000-8000-000000000000'\""
+    },
+    {
+      "pid": 37456,
+      "parentPid": 18660,
+      "startOffsetMs": 0,
+      "memoryBytes": 211456000,
+      "command": "\"C:\\Users\\me\\.local\\bin\\claude.exe\" --settings C:\\Users\\me\\.devhome\\Codara\\integrations\\claude\\settings.json --mcp-config=C:\\Users\\me\\.devhome\\Codara\\integrations\\claude\\mcp-studio.json --dangerously-skip-permissions --resume 00000000-0000-4000-8000-000000000000"
+    },
+    {
+      "pid": 39892,
+      "parentPid": 37456,
+      "startOffsetMs": 94647,
+      "memoryBytes": 8568832,
+      "command": "\"C:\\Users\\me\\AppData\\Local\\Programs\\spark-agent\\Codara Studio.exe\" C:\\Users\\me\\AppData\\Local\\Programs\\spark-agent\\resources\\codara-studio-mcp\\server.js"
+    }
+  ]
+}

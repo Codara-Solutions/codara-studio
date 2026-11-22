@@ -753,7 +753,7 @@ whenever it cannot tell:
 - its session can be resumed exactly as it is;
 - nothing else runs in the pane: no dev server or other program you started,
   and no command the agent started after it launched (the MCP servers it
-  starts at launch do not count);
+  starts in its first minute do not count, and Codara's own tools never do);
 - the pane is not pinned with **Keep running** (the sun button in the pane's
   toolbar, shown on agent panes);
 - no paired phone has the pane open (Remote Access).
@@ -765,6 +765,12 @@ reloads while an agent sleeps, its pane stays asleep, still shows what the
 agent last printed, and resumes when you open it. Sending a selection or a
 screenshot to a sleeping agent is refused with a note to open its pane
 first, so nothing is pasted into a pane with no agent to read it.
+
+To see why an agent did or did not sleep, look for `[agent-hibernation]` in
+`logs/main.log` (included in **Export diagnostics**). Each pane gets one line
+when its answer changes: `is sleeping`, or `stays awake:` with the rule that
+held it, such as how long ago it last printed or which other program runs in
+it. Programs are named without their arguments.
 
 ### The notification center
 

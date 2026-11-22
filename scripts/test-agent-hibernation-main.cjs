@@ -473,6 +473,61 @@ async function main() {
   notify.noteTerminalUserInput("n1", "\x1b[I");
   check("a focus report is not typing", notify.terminalAgentHibernationEvidence("n1").lastUserInputAt === ev.lastUserInputAt);
 
+  // ── The log: one line per change of verdict ──
+  {
+    ah.resetAgentHibernationForTests();
+    const lines = [];
+    const t = makeDeps({ log: (line) => lines.push(line) });
+    t.state.session = { ...t.state.session, lastOutputAt: NOW - 5 * MIN };
+    await ah.hibernateAgentPane(request(), t.deps);
+    t.state.session = { ...t.state.session, lastOutputAt: NOW - 6 * MIN };
+    const again = await ah.hibernateAgentPane(request(), t.deps);
+    check(
+      "a refusal repeated on the next tick is logged once, with the stamp that held it",
+      lines.length === 1 && lines[0] === "pane=pane-1 stays awake: not-idle-long-enough (pty output 300s ago, needs 1800s)",
+      lines,
+    );
+    check("the caller still gets the fresh detail", again.detail === "pty output 360s ago, needs 1800s", again);
+
+    t.state.session = { ...t.state.session, lastOutputAt: NOW - 60 * MIN };
+    t.state.processes = [...t.state.processes, { pid: 103, parentPid: 101, startMs: NOW - 10 * MIN, command: "node /srv/app/dev.js --token=secret" }];
+    await ah.hibernateAgentPane(request(), t.deps);
+    await ah.hibernateAgentPane(request(), t.deps);
+    check(
+      "a change of verdict is logged, once, without the process's arguments",
+      lines.length === 2 && /^pane=pane-1 stays awake: other-processes \(/.test(lines[1]) && !lines[1].includes("secret"),
+      lines,
+    );
+
+    ah.resetAgentHibernationForTests();
+    lines.length = 0;
+    const failing = makeDeps({ log: (line) => lines.push(line) });
+    failing.state.stopResult = false;
+    await ah.hibernateAgentPane(request(), failing.deps);
+    await ah.hibernateAgentPane(request(), failing.deps);
+    check(
+      "a failed stop is logged every time",
+      lines.length === 2 && lines.every((line) => line === "pane=pane-1 stays awake: stop-failed"),
+      lines,
+    );
+
+    ah.resetAgentHibernationForTests();
+    lines.length = 0;
+    const sleeps = makeDeps({ log: (line) => lines.push(line) });
+    await ah.hibernateAgentPane(request(), sleeps.deps);
+    check(
+      "a sleep says how long the pane was idle and what the census cost",
+      lines.length === 1 && lines[0] === "pane=pane-1 claude is sleeping (idle 1800s, census 3 processes in 0ms)",
+      lines,
+    );
+
+    ah.resetAgentHibernationForTests();
+    lines.length = 0;
+    const off = makeDeps({ log: (line) => lines.push(line), policy: async () => ({ idleMs: 0, tickMs: MIN }) });
+    await ah.hibernateAgentPane(request(), off.deps);
+    check("nothing is logged while the setting is off", lines.length === 0, lines);
+  }
+
   const alertsBefore = H.alerts.length;
   const chipsBefore = H.chips.length;
   H.exits.get("n1")?.({ exitCode: 1, signal: 1, sanctioned: true, hibernated: true });
