@@ -1,6 +1,7 @@
 // Agent hibernation: shared policy for stopping finished, untouched agent
-// terminals (Claude Code, Codex, Grok, Pi) in background workspaces, and
-// resuming them when the user opens the pane again.
+// terminals (Claude Code, Codex, Grok, Pi) to give their memory back, and
+// resuming them when the user asks for it (the pane's Resume button, Enter in
+// the pane, or the Agents view).
 //
 // Main owns the decision to stop a process (src/main/agent-hibernation.ts);
 // the renderer only nominates candidates and paints the sleeping pane. Every
@@ -36,13 +37,16 @@ export function isAgentHibernationRuntime(value: unknown): value is AgentHiberna
   return value === "claude" || value === "codex" || value === "grok" || value === "pi";
 }
 
+// Where the pane was when the renderer asked: for the log only, main judges
+// the same way wherever it is. The pane with the keyboard focus is never
+// nominated.
+export type AgentHibernationPlacement = "visible" | "hidden-tab" | "background-workspace";
+
 /** What the renderer asks main to do for one pane. */
 export interface AgentHibernationRequest {
   paneId: string;
   runtime: AgentHibernationRuntime;
-  // How long the pane's workspace has been out of view, as the renderer
-  // measured it. Main still applies its own idle clock on top.
-  hiddenForMs: number;
+  placement: AgentHibernationPlacement;
 }
 
 export type AgentHibernationRefusal =
@@ -52,7 +56,6 @@ export type AgentHibernationRefusal =
   | "no-session"
   | "remote"
   | "watched-on-phone"
-  | "hidden-too-short"
   | "not-idle-long-enough"
   | "not-watched"
   | "runtime-mismatch"
@@ -105,10 +108,11 @@ export interface AgentHibernationEvidence {
   backgroundRunning: number;
   teammatesActive: number;
   codexAwaitingIdle: boolean;
-  // Last key the user sent, and the last time one of those keys was a
-  // submit. A key after the last submit means text may sit unsent in the
-  // agent's input box.
+  // Last key the user sent, the last key that could have put text in the
+  // agent's input box, and the last time one of those keys was a submit. An
+  // edit after the last submit means text may sit unsent in the box.
   lastUserInputAt: number;
+  lastComposerEditAt: number;
   lastSubmitAt: number;
   lastOutputAt: number;
 }
@@ -147,7 +151,7 @@ export function judgeAgentEvidence(
   ) {
     return "agent-busy";
   }
-  if (evidence.lastUserInputAt > evidence.lastSubmitAt) return "unsent-input";
+  if (evidence.lastComposerEditAt > evidence.lastSubmitAt) return "unsent-input";
   return null;
 }
 
@@ -156,17 +160,13 @@ export function judgeAgentEvidence(
 export interface AgentHibernationClock {
   now: number;
   idleMs: number;
-  hiddenForMs: number;
-  // Every moment something happened in or to the pane. The newest one starts
-  // the idle period.
+  // Every moment something happened in or to the pane (output, input, the
+  // user showing or touching it). The newest one starts the idle period.
   activityAt: readonly number[];
 }
 
 export function judgeIdleClock(clock: AgentHibernationClock): AgentHibernationRefusal | null {
   if (!(clock.idleMs > 0)) return "off";
-  if (!Number.isFinite(clock.hiddenForMs) || clock.hiddenForMs < clock.idleMs) {
-    return "hidden-too-short";
-  }
   let newest = 0;
   for (const at of clock.activityAt) {
     if (Number.isFinite(at) && at > newest) newest = at;

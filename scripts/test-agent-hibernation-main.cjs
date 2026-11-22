@@ -148,6 +148,7 @@ function makeDeps(overrides = {}) {
       teammatesActive: 0,
       codexAwaitingIdle: false,
       lastUserInputAt: NOW - 90 * MIN,
+      lastComposerEditAt: NOW - 90 * MIN,
       lastSubmitAt: NOW - 90 * MIN,
       lastOutputAt: NOW - 60 * MIN,
     },
@@ -183,7 +184,7 @@ function makeDeps(overrides = {}) {
   return { deps, state, calls };
 }
 
-const request = (extra = {}) => ({ paneId: "pane-1", runtime: "claude", hiddenForMs: 45 * MIN, ...extra });
+const request = (extra = {}) => ({ paneId: "pane-1", runtime: "claude", placement: "background-workspace", ...extra });
 
 async function main() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-hibernation-main-"));
@@ -207,7 +208,7 @@ async function main() {
 
   // ── The decision ──
   let r = await run();
-  check("an idle, finished, lone agent in a long-hidden pane sleeps", r.result.ok === true && r.result.sleptAt === NOW, r.result);
+  check("an idle, finished, lone agent sleeps", r.result.ok === true && r.result.sleptAt === NOW, r.result);
   check("the stop is fenced on the judged generation", r.calls.stop.length === 1 && r.calls.stop[0].generationId === "gen-1", r.calls.stop);
 
   H.live = new Set();
@@ -218,9 +219,9 @@ async function main() {
   H.live = undefined;
   H.placed = undefined;
 
-  r = await run(undefined, { paneId: "", runtime: "claude", hiddenForMs: 1 });
+  r = await run(undefined, { paneId: "", runtime: "claude", placement: "visible" });
   check("a malformed request is refused", r.result.reason === "bad-request" && r.calls.stop.length === 0);
-  r = await run(undefined, { paneId: "p", runtime: "bash", hiddenForMs: 1 });
+  r = await run(undefined, { paneId: "p", runtime: "bash", placement: "visible" });
   check("an unknown runtime is refused", r.result.reason === "bad-request");
   r = await run((t) => { t.deps.policy = async () => ({ idleMs: 0, tickMs: MIN }); });
   check("the setting turned off refuses everything", r.result.reason === "off" && r.calls.list === 0);
@@ -232,14 +233,53 @@ async function main() {
   check("a working agent stays awake without listing processes", r.result.reason === "agent-busy" && r.calls.list === 0);
   r = await run((t) => { t.state.evidence.chipState = "blocked"; });
   check("an agent waiting for an answer stays awake", r.result.reason === "waiting-on-user");
-  r = await run((t) => { t.state.evidence.lastUserInputAt = NOW - 80 * MIN; });
+  r = await run((t) => {
+    t.state.evidence.lastUserInputAt = NOW - 80 * MIN;
+    t.state.evidence.lastComposerEditAt = NOW - 80 * MIN;
+  });
   check("text typed after the last submit keeps it awake", r.result.reason === "unsent-input");
+  r = await run((t) => { t.state.evidence.lastUserInputAt = NOW - 80 * MIN; });
+  check("a key after the last submit that leaves no text does not", r.result.ok === true, r.result);
   r = await run((t) => { t.state.session.lastOutputAt = NOW - 5 * MIN; });
   check("recent output keeps it awake", r.result.reason === "not-idle-long-enough");
   r = await run((t) => { t.state.session.lastInputAt = NOW - 5 * MIN; });
   check("recent input keeps it awake", r.result.reason === "not-idle-long-enough");
-  r = await run(undefined, request({ hiddenForMs: 5 * MIN }));
-  check("a workspace hidden only briefly keeps it awake", r.result.reason === "hidden-too-short");
+  r = await run(undefined, { paneId: "pane-1", runtime: "claude", placement: "somewhere" });
+  check("an unknown placement is a bad request", r.result.reason === "bad-request", r.result);
+  r = await run(undefined, { paneId: "pane-1", runtime: "claude", hiddenForMs: 45 * MIN });
+  check("a request in the old shape is a bad request", r.result.reason === "bad-request", r.result);
+  for (const placement of ["visible", "hidden-tab", "background-workspace"]) {
+    r = await run(undefined, request({ placement }));
+    check(`a quiet pane may sleep wherever it is (${placement})`, r.result.ok === true, r.result);
+  }
+  {
+    ah.resetAgentHibernationForTests();
+    const t = makeDeps();
+    ah.noteAgentPanesTouched(["pane-1"], NOW - 5 * MIN);
+    const touched = await ah.hibernateAgentPane(request({ placement: "visible" }), t.deps);
+    check(
+      "a pane the user showed or touched five minutes ago stays awake, and says why",
+      touched.reason === "not-idle-long-enough" && touched.detail === "shown or touched 300s ago, needs 1800s" && t.calls.list === 0,
+      touched,
+    );
+    ah.noteAgentPanesTouched(["pane-1"], NOW - 31 * MIN);
+    const quiet = await ah.hibernateAgentPane(request({ placement: "visible" }), t.deps);
+    check("a touch older than the idle time no longer holds it", quiet.ok === true, quiet);
+    ah.resetAgentHibernationForTests();
+    const other = makeDeps();
+    ah.noteAgentPanesTouched(["pane-2", "", 7], NOW);
+    check("a touch on another pane does not hold this one", (await ah.hibernateAgentPane(request(), other.deps)).ok === true);
+    ah.resetAgentHibernationForTests();
+    const viaChannel = makeDeps();
+    ah.onAgentHibernationMessage("touched", ["pane-1"]);
+    check(
+      "the renderer's touched message reaches the idle clock",
+      (await ah.hibernateAgentPane(request(), viaChannel.deps)).reason !== undefined,
+    );
+    ah.onAgentHibernationMessage("touched", "pane-1");
+    ah.onAgentHibernationMessage("touched", new Array(65).fill("pane-1"));
+    check("a malformed touched message is ignored", true);
+  }
   r = await run((t) => { t.state.processes = null; });
   check("no process listing: stays awake", r.result.reason === "process-list-unavailable" && r.calls.stop.length === 0);
   r = await run((t) => { t.state.terminalPids = null; });
@@ -269,7 +309,7 @@ async function main() {
   });
   check("a pane respawned while listing is not stopped", r.result.reason === "no-session" && r.calls.stop.length === 0);
   r = await run((t) => {
-    t.state.duringList = (s) => { s.evidence = { ...s.evidence, lastUserInputAt: NOW, lastSubmitAt: NOW }; };
+    t.state.duringList = (s) => { s.evidence = { ...s.evidence, lastUserInputAt: NOW, lastComposerEditAt: NOW, lastSubmitAt: NOW }; };
   });
   check("input that arrives while listing keeps it awake", r.result.reason === "not-idle-long-enough" && r.calls.stop.length === 0);
   r = await run((t) => { t.state.stopResult = false; });
@@ -466,10 +506,39 @@ async function main() {
   check("an excluded pane says so", notify.terminalAgentHibernationEvidence("nx")?.excluded === true);
   notify.noteTerminalUserInput("n1", "hel");
   ev = notify.terminalAgentHibernationEvidence("n1");
-  check("keys without Enter leave unsent text", ev.lastUserInputAt > ev.lastSubmitAt, ev);
+  check("keys without Enter leave unsent text", ev.lastComposerEditAt > ev.lastSubmitAt, ev);
   notify.noteTerminalUserInput("n1", "lo\r");
   ev = notify.terminalAgentHibernationEvidence("n1");
-  check("Enter sends it", ev.lastUserInputAt === ev.lastSubmitAt && ev.lastSubmitAt > 0, ev);
+  check("Enter sends it", ev.lastComposerEditAt === ev.lastSubmitAt && ev.lastSubmitAt > 0, ev);
+  for (const [name, keys] of [
+    ["a lone Esc", "\x1b"],
+    ["Ctrl+C", "\x03"],
+    ["Backspace", "\x7f"],
+    ["Delete", "\x1b[3~"],
+    ["Left and Right", "\x1b[D\x1b[C"],
+    ["Home and End", "\x1b[H\x1bOF"],
+    ["Page Up and Page Down", "\x1b[5~\x1b[6~"],
+    ["Shift+Left", "\x1b[1;2D"],
+  ]) {
+    const before = notify.terminalAgentHibernationEvidence("n1");
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    notify.noteTerminalUserInput("n1", keys);
+    const after = notify.terminalAgentHibernationEvidence("n1");
+    check(
+      `${name} after the submit counts as input but leaves no unsent text`,
+      after.lastUserInputAt > before.lastUserInputAt && after.lastComposerEditAt === before.lastComposerEditAt,
+      { before: before.lastComposerEditAt, after: after.lastComposerEditAt },
+    );
+  }
+  {
+    const before = notify.terminalAgentHibernationEvidence("n1");
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    notify.noteTerminalUserInput("n1", "\x1b[A");
+    const after = notify.terminalAgentHibernationEvidence("n1");
+    check("Up recalls an earlier prompt, so it can leave text", after.lastComposerEditAt > before.lastComposerEditAt, after);
+    notify.noteTerminalUserInput("n1", "\r");
+  }
+  ev = notify.terminalAgentHibernationEvidence("n1");
   notify.noteTerminalUserInput("n1", "\x1b[I");
   check("a focus report is not typing", notify.terminalAgentHibernationEvidence("n1").lastUserInputAt === ev.lastUserInputAt);
 
@@ -517,7 +586,7 @@ async function main() {
     await ah.hibernateAgentPane(request(), sleeps.deps);
     check(
       "a sleep says how long the pane was idle and what the census cost",
-      lines.length === 1 && lines[0] === "pane=pane-1 claude is sleeping (idle 1800s, census 3 processes in 0ms)",
+      lines.length === 1 && lines[0] === "pane=pane-1 claude is sleeping (background-workspace, idle 1800s, census 3 processes in 0ms)",
       lines,
     );
 

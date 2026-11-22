@@ -1470,8 +1470,8 @@ export interface AppPreferences {
   // is restored after a quit, an update or a crash. Off deletes it all.
   restoreTerminalOutput?: boolean;
   // Agent hibernation (src/main/agent-hibernation.ts): minutes a finished,
-  // untouched agent terminal in a background workspace may sit before Codara
-  // stops it to save memory; opening the pane resumes it. 0 = off.
+  // untouched agent terminal may sit before Codara stops it to save memory;
+  // its pane then shows a card and Resume brings the session back. 0 = off.
   agentHibernationMinutes?: number;
   // Opt-in (default off): an answer the user gave an outside assistant on
   // their phone may be typed into a session waiting at its prompt without

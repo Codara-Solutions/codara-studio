@@ -242,8 +242,11 @@ interface PaneWatcher {
   // since; null otherwise.
   screenIdleSince: number | null;
   lastUserInputAt: number;
-  // The last of those inputs that was a submit (Enter). A key after it means
-  // text may sit unsent in the agent's input box (agent hibernation).
+  // The last of those inputs that could have put text in the agent's input
+  // box (see NO_TEXT_KEYS_RE).
+  lastComposerEditAt: number;
+  // The last of those inputs that was a submit (Enter). An edit after it
+  // means text may sit unsent in the agent's input box (agent hibernation).
   lastSubmitAt: number;
   lastInterruptKeyAt: number;
   lastHookEventAt: number;
@@ -419,6 +422,7 @@ export function syncTerminalNotifyPanes(input: {
       completedTurnPending: false,
       screenIdleSince: null,
       lastUserInputAt: 0,
+      lastComposerEditAt: 0,
       lastSubmitAt: 0,
       lastInterruptKeyAt: 0,
       lastHookEventAt: 0,
@@ -1104,6 +1108,17 @@ function isSubmit(data: string): boolean {
   return /\r/.test(data.replace(PASTE_RE, "").replace(/\x1b\r/g, ""));
 }
 
+// Keys that cannot put text into an agent's input box: a lone Esc, Ctrl+C,
+// Backspace and Delete, Left/Right, Home/End and PageUp/PageDown (with or
+// without modifiers). Up and Down are not here: they recall earlier prompts
+// into the box. Text typed before any of these still counts as unsent.
+const NO_TEXT_KEYS_RE =
+  /^(?:\x1b|\x03|\x7f|\x08|\x1b\[3~|\x1b(?:\[(?:1;\d+)?|O)[CDHF]|\x1b\[(?:[1478]|5|6)(?:;\d+)?~)+$/;
+
+function canLeaveText(data: string | undefined): boolean {
+  return data === undefined || !NO_TEXT_KEYS_RE.test(data);
+}
+
 // User keystrokes / injected input reached this pane's pty. A submit starts a
 // turn; other keys only matter as answers to a prompt or as an interrupt.
 // `data` undefined means an injected prompt that was submitted.
@@ -1115,6 +1130,7 @@ export function noteTerminalUserInput(paneId: string, data?: string): void {
   if (!w || w.excluded) return;
   const now = Date.now();
   w.lastUserInputAt = now;
+  if (canLeaveText(data)) w.lastComposerEditAt = now;
   if (data !== undefined && (data === "\x1b" || data.includes("\x03"))) {
     w.lastInterruptKeyAt = now;
   }
@@ -1540,6 +1556,7 @@ export function terminalAgentHibernationEvidence(paneId: string): AgentHibernati
     teammatesActive: w.teammatesActive,
     codexAwaitingIdle: w.codexAwaitingIdle,
     lastUserInputAt: w.lastUserInputAt,
+    lastComposerEditAt: w.lastComposerEditAt,
     lastSubmitAt: w.lastSubmitAt,
     lastOutputAt: w.lastOutputAt,
   };

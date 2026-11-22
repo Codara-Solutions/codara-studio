@@ -533,7 +533,7 @@ import {
   setTerminalScrollbackEnabled,
   trackTerminalScrollbackPanes,
 } from "./terminal-scrollback";
-import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
+import { agentPaneAsleep, onAgentHibernationMessage, registerAgentHibernationIpc } from "./agent-hibernation";
 import { registerAntigravityIpc } from "./antigravity-cli";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
 import { registerCrossWorkspaceIpc } from "./cross-workspace-ipc";
@@ -3397,7 +3397,7 @@ export function registerIpc(): void {
   // or queued for an agent to pull. Each send carries its own workspace; the
   // service refuses a pane or chat that belongs to another one.
   handle("agent:deliver", async (_e, request: AgentDeliveryRequest): Promise<AgentDeliveryResult> => {
-    // A sleeping agent's pane spawns only when the user opens it: no point
+    // A sleeping agent's pane spawns only when the user resumes it: no point
     // waiting for it, the service refuses the send right away.
     if (request?.target?.kind === "pane" && !agentPaneAsleep(request.target.paneId)) {
       await awaitPendingSpawn(request.target.paneId);
@@ -3710,6 +3710,16 @@ export function registerIpc(): void {
   ipcMain.on("agentSession:logRestore", (e, line: string) => {
     if (!isTrustedOnSender(e, "agentSession:logRestore")) return;
     if (typeof line === "string" && line.length < 2048) logMain("restore", line);
+  });
+  // Agent hibernation's fire-and-forget channels: panes the user showed or
+  // touched (they restart the idle clock) and the renderer's own skips.
+  ipcMain.on("agentHibernation:touched", (e, paneIds: unknown) => {
+    if (!isTrustedOnSender(e, "agentHibernation:touched")) return;
+    onAgentHibernationMessage("touched", paneIds);
+  });
+  ipcMain.on("agentHibernation:log", (e, line: unknown) => {
+    if (!isTrustedOnSender(e, "agentHibernation:log")) return;
+    onAgentHibernationMessage("log", line);
   });
 
   // Newest SessionStart hook record for a pane (see agent-session-registry.ts).

@@ -240,7 +240,12 @@ type Bundle = {
   onResumeRequest: () => void;
   onResumeKeepRunning: () => void;
   onWakeFailed: (message: string) => void;
+  // A click, a scroll or a key in the pane: its idle clock starts over.
+  onTouched: () => void;
 };
+
+// Touches are reported to main at most this often per pane.
+const TOUCH_REPORT_MS = 5_000;
 
 // React.memo: with the useTabs API object now memoized, TerminalStack's
 // props only change when the tab list / active id / callbacks genuinely
@@ -325,6 +330,7 @@ function TerminalStack({
   resumeRequestRef.current = onPaneResumeRequest;
   const wakeFailedRef = useRef(onPaneWakeFailed);
   wakeFailedRef.current = onPaneWakeFailed;
+  const lastTouchReportRef = useRef(new Map<string, number>());
   useEffect(() => {
     detectedRef.current = onDetectedUrl;
     sparkOpenRef.current = onSparkOpen;
@@ -471,6 +477,13 @@ function TerminalStack({
           onResumeRequest: () => resumeRequestRef.current?.(tabId, paneId, false),
           onResumeKeepRunning: () => resumeRequestRef.current?.(tabId, paneId, true),
           onWakeFailed: (message) => wakeFailedRef.current?.(tabId, paneId, message),
+          onTouched: () => {
+            const now = Date.now();
+            const last = lastTouchReportRef.current.get(paneId) ?? 0;
+            if (now - last < TOUCH_REPORT_MS) return;
+            lastTouchReportRef.current.set(paneId, now);
+            window.spark.agentHibernation?.touched?.([paneId]);
+          },
         };
         bundles.current.set(key, b);
       }
@@ -1154,6 +1167,9 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
             data-terminal-pane-id={leaf.paneId}
             aria-hidden={placeOffScreen ? true : undefined}
             onMouseDown={bundle.onActivate}
+            onPointerDownCapture={bundle.onTouched}
+            onWheelCapture={bundle.onTouched}
+            onKeyDownCapture={bundle.onTouched}
             onDragEnter={(event) => {
               if (!acceptsTerminalPane(event)) return;
               event.preventDefault();

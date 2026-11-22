@@ -1,16 +1,18 @@
-// Agent hibernation, main side: stop a finished, untouched agent terminal in
-// a background workspace to give its memory back, and let the renderer resume
-// it (`--resume`) when the user opens the pane again.
+// Agent hibernation, main side: stop a finished, untouched agent terminal to
+// give its memory back, and let the renderer resume it (`--resume`) when the
+// user asks for it (the pane's Resume button, Enter in the pane).
 //
 // The renderer nominates panes (src/renderer/src/lib/agentHibernation.ts): it
-// knows which workspace is on screen, which panes are pinned awake and which
-// session each pane can resume. Main decides. It re-checks everything it can
-// see itself and stops the pane only when all of these hold:
+// knows which pane has the keyboard focus (never nominated), which panes are
+// pinned awake and which session each pane can resume. Main decides. It
+// re-checks everything it can see itself and stops the pane only when all of
+// these hold:
 //   - the setting is on and the pane is a local PTY that still exists, and
 //     no paired phone has it open (Remote Access);
 //   - the terminal agent notifier says the agent's turn ended, nothing is
 //     pending, it is not waiting on the user and no typed text is unsent;
-//   - nothing happened in the pane (input or output) for the idle period;
+//   - nothing happened in the pane for the idle time: no input, no output,
+//     and the user did not show or touch it (noteAgentPanesTouched);
 //   - the pane's process tree is only the shell, the agent and what the agent
 //     started at boot (agent-hibernation-census.ts), so no dev server, watcher
 //     or tool command can be caught in the stop.
@@ -37,6 +39,7 @@ import {
   normalizeAgentHibernationMinutes,
   type AgentHibernationEvidence,
   type AgentHibernationPolicy,
+  type AgentHibernationPlacement,
   type AgentHibernationRequest,
   type AgentHibernationResult,
   type AgentSleepingPane,
@@ -154,6 +157,8 @@ const censusBackoff = new Map<string, { generationId: string; until: number; res
 // The last verdict logged per pane, so a refusal repeated every tick is
 // logged once.
 const lastLogged = new Map<string, string>();
+// When the user last showed or touched each pane (noteAgentPanesTouched).
+const touchedAt = new Map<string, number>();
 
 /** Tests only: forget every pane's in-memory hibernation state. */
 export function resetAgentHibernationForTests(): void {
@@ -161,6 +166,24 @@ export function resetAgentHibernationForTests(): void {
   for (const [paneId, entry] of [...sleeping]) forget(paneId, entry);
   censusBackoff.clear();
   lastLogged.clear();
+  touchedAt.clear();
+}
+
+/**
+ * The user showed or touched these panes (focus, a click, a scroll, a tab or
+ * workspace switch onto them). Each counts as activity on the idle clock, so
+ * a pane the user just reached is not stopped by a decision already running.
+ */
+export function noteAgentPanesTouched(paneIds: readonly string[], now = Date.now()): void {
+  for (const paneId of paneIds) {
+    if (typeof paneId === "string" && paneId.length > 0 && paneId.length <= 256) touchedAt.set(paneId, now);
+  }
+  if (touchedAt.size > 2_000) {
+    // Panes come and go; keep the newest stamps only.
+    const newest = [...touchedAt].sort((a, b) => b[1] - a[1]).slice(0, 1_000);
+    touchedAt.clear();
+    for (const [paneId, at] of newest) touchedAt.set(paneId, at);
+  }
 }
 
 /**
@@ -232,6 +255,8 @@ export function takeSleepingPane(paneId: string, freshView = false): AgentSleepi
   };
 }
 
+const PLACEMENTS: ReadonlySet<AgentHibernationPlacement> = new Set(["visible", "hidden-tab", "background-workspace"]);
+
 function validRequest(input: unknown): AgentHibernationRequest | null {
   if (!input || typeof input !== "object") return null;
   const value = input as Partial<AgentHibernationRequest>;
@@ -239,10 +264,8 @@ function validRequest(input: unknown): AgentHibernationRequest | null {
     return null;
   }
   if (!isAgentHibernationRuntime(value.runtime)) return null;
-  if (typeof value.hiddenForMs !== "number" || !Number.isFinite(value.hiddenForMs) || value.hiddenForMs < 0) {
-    return null;
-  }
-  return { paneId: value.paneId, runtime: value.runtime, hiddenForMs: value.hiddenForMs };
+  if (!PLACEMENTS.has(value.placement as AgentHibernationPlacement)) return null;
+  return { paneId: value.paneId, runtime: value.runtime, placement: value.placement as AgentHibernationPlacement };
 }
 
 type Judged =
@@ -250,7 +273,7 @@ type Judged =
   | { ok: false; result: AgentHibernationResult };
 
 // The idle clock's stamps, in the order judgeNow lists them.
-const STAMP_NAMES = ["started", "pty input", "pty output", "agent input", "agent output"] as const;
+const STAMP_NAMES = ["started", "pty input", "pty output", "agent input", "agent output", "shown or touched"] as const;
 
 function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, idleMs: number): Judged {
   const session = deps.session(request.paneId);
@@ -269,8 +292,9 @@ function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, 
     session.lastOutputAt,
     evidence?.lastUserInputAt ?? 0,
     evidence?.lastOutputAt ?? 0,
+    touchedAt.get(request.paneId) ?? 0,
   ];
-  const clockRefusal = judgeIdleClock({ now, idleMs, hiddenForMs: request.hiddenForMs, activityAt });
+  const clockRefusal = judgeIdleClock({ now, idleMs, activityAt });
   if (clockRefusal === "not-idle-long-enough") {
     let newest = 0;
     for (let index = 1; index < activityAt.length; index += 1) {
@@ -369,7 +393,7 @@ async function decide(
   if (second.session.generationId !== first.session.generationId) {
     return { ok: false, reason: "no-session", detail: "respawned while judged" };
   }
-  const context = `${request.runtime} is sleeping (idle ${Math.round(idleMs / 1000)}s, census ${processes.length} processes in ${deps.now() - now}ms)`;
+  const context = `${request.runtime} is sleeping (${request.placement}, idle ${Math.round(idleMs / 1000)}s, census ${processes.length} processes in ${deps.now() - now}ms)`;
   // Recorded before the stop: the pty leaves pty-manager's table as the
   // stop begins, so an app quit during the stop's grace period must already
   // find this pane among the sleeping ones, or the relaunch restore would
@@ -404,4 +428,15 @@ export function registerAgentHibernationIpc(handle: IpcHandle): void {
       ? takeSleepingPane(paneId, (options as { freshView?: unknown } | null)?.freshView === true)
       : null,
   );
+}
+
+/** The renderer's fire-and-forget channels (touches and its own skips). */
+export function onAgentHibernationMessage(channel: "touched" | "log", payload: unknown): void {
+  if (channel === "touched") {
+    if (Array.isArray(payload) && payload.length <= 64) noteAgentPanesTouched(payload.filter((id) => typeof id === "string"));
+    return;
+  }
+  if (typeof payload === "string" && payload.length > 0 && payload.length < 512) {
+    logMain("agent-hibernation", `renderer: ${payload}`);
+  }
 }

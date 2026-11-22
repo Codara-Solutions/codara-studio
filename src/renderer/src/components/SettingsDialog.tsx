@@ -3314,8 +3314,8 @@ function SessionsSettings({
             title="Let idle agents sleep"
             desc={
               hibernationMinutes === 0
-                ? "Agents in background workspaces keep running however long they wait."
-                : `${presetHint(AGENT_HIBERNATION_PRESETS, hibernationMinutes) ?? ""} A finished agent in a background workspace stops after this long to free its memory, and resumes when you open its pane. Agents waiting for you, pinned with Keep running, or sharing a pane with another program stay awake.`
+                ? "Agents keep running however long they wait."
+                : `${presetHint(AGENT_HIBERNATION_PRESETS, hibernationMinutes) ?? ""} A finished agent you are not typing in stops after this long to free its memory. Press Resume in its pane to bring it back. Agents waiting for you, pinned with Keep running, or sharing a pane with another program stay awake.`
             }
             control={
               <Segmented

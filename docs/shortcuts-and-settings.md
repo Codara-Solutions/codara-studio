@@ -321,7 +321,7 @@ The pages:
 | Shared pages | The links you shared from the editor: copy one, change when it expires, or delete it (see [share-links.md](./share-links.md)). |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
 | Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and **Open Capability Center** and **Worker models** buttons, which close Settings and open the Capability Center on MCP servers or on worker models. |
-| Sessions | Turn agent session search on or off and choose what it indexes (see [agent-session-search.md](./agent-session-search.md)), browse and resume Claude and Codex sessions from any local project, choose whether running agent sessions (Claude Code, Codex, Grok, Pi and Antigravity panes; Antigravity with `agy --continue`) resume when Codara reopens, whether terminal panes keep their output across restarts (**Keep terminal output across restarts**, on by default), and how long an idle agent in a background workspace may wait before it sleeps (**Let idle agents sleep**, see below). |
+| Sessions | Turn agent session search on or off and choose what it indexes (see [agent-session-search.md](./agent-session-search.md)), browse and resume Claude and Codex sessions from any local project, choose whether running agent sessions (Claude Code, Codex, Grok, Pi and Antigravity panes; Antigravity with `agy --continue`) resume when Codara reopens, whether terminal panes keep their output across restarts (**Keep terminal output across restarts**, on by default), and how long an idle agent may wait before it sleeps (**Let idle agents sleep**, see below). |
 | Machines | Whether agents on SSH machines run in tmux there so they keep working when Codara quits or the connection drops, and whether a new machine's key is confirmed first (**Keep agents running on SSH machines**, on by default, needs tmux 2.1 or newer on the machine; an agent typed by hand into a remote shell is not covered). Then this computer and every SSH host with status, CPU, memory, free disk, load, installed CLIs and running agents: Connect, Disconnect, **Add a machine**, Show an agent's pane, Stop an agent no pane shows, and **Trust the new key** when a machine's key changed. With the setting on, the Add pane menu's **Where** row starts a pane on another connected machine. |
 | Remote access | Turn phone access on, pair a device, and revoke paired devices (see [remote-access.md](./remote-access.md)). |
 | Keybindings | Rebind or unbind every command above. |
@@ -737,9 +737,11 @@ config). Agents without those fall back to reading the screen.
 ### Idle agents sleep
 
 An agent terminal (Claude Code, Codex, Grok or Pi) that finished its turn and
-sits untouched in a workspace you are not looking at is stopped after the
-time set in Settings, Sessions, **Let idle agents sleep**
-(`agentHibernationMinutes`: Off, 15, 30, 60 or 120 minutes; 30 by default).
+sits untouched is stopped after the time set in Settings, Sessions, **Let
+idle agents sleep** (`agentHibernationMinutes`: Off, 15, 30, 60 or 120
+minutes; 30 by default). This covers every pane except the one you are
+typing in: panes in other workspaces, in other tabs, and panes beside yours
+in a split.
 Its output stays in the pane, a **Sleeping** chip marks it, and the hover
 text on the rail's tab count says how many agents are asleep.
 
@@ -755,8 +757,10 @@ Codara only lets an agent sleep when all of these hold, and keeps it running
 whenever it cannot tell:
 
 - the agent's turn ended, it is not waiting for an answer, and there is no
-  text you typed but did not send;
-- nothing was typed into or printed by the pane for the whole idle time;
+  text you typed but did not send (Esc, the arrows left and right and
+  Backspace after your last message do not count as text);
+- nothing was typed into or printed by the pane for the whole idle time,
+  and you did not open, click or scroll it in that time;
 - its session can be resumed exactly as it is;
 - nothing else runs in the pane: no dev server or other program you started,
   and no command the agent started after it launched (the MCP servers it
