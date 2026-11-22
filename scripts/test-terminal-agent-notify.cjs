@@ -945,6 +945,45 @@ async function main() {
   check("process arguments mentioning Codex do not create a chip", !T.chips.some((chip) => chip.paneId === "p11"));
   feed("p12", "› Review this branch\r\ngpt-6-astra high fast · ~/src\r\n");
   check("GPT-6 footer recovers Codex without a startup banner", mod.terminalAgentStateSnapshot().some((chip) => chip.paneId === "p12" && chip.runtime === "codex"));
+  // Screen text is a guess: Antigravity printing Claude Code's banner must
+  // not turn its pane into a Claude one, and the process corrects the label.
+  T.pids.set("p14", 1014);
+  T.pids.set("p15", 1015);
+  T.processes.set(1014, [{ pid: 2014, depth: 1, command: "agy" }]);
+  T.processes.set(1015, [
+    { pid: 2015, depth: 1, command: "node /opt/unknown-agent/cli.js" },
+    { pid: 2016, depth: 2, command: "codex" },
+  ]);
+  mod.syncTerminalNotifyPanes({
+    workspaceId: "recovery",
+    workspaceName: "Recovery",
+    panes: [
+      { paneId: "p10", tabId: "t10", tabTitle: "Silent Codex", excluded: false },
+      { paneId: "p11", tabId: "t11", tabTitle: "Plain shell", excluded: false },
+      { paneId: "p12", tabId: "t12", tabTitle: "Footer only", excluded: false },
+      { paneId: "p13", tabId: "t13", tabTitle: "Rendered Codex", excluded: false },
+      { paneId: "p14", tabId: "t14", tabTitle: "Antigravity quoting Claude", excluded: false },
+      { paneId: "p15", tabId: "t15", tabTitle: "Unnamed agent with a child", excluded: false },
+    ],
+  });
+  feed("p14", "Claude Code v2.1.261\r\n");
+  feed("p15", "Claude Code v2.1.261\r\n");
+  const waitForRuntime = async (paneId, runtime) => {
+    const deadline = Date.now() + 6000;
+    while (Date.now() < deadline) {
+      const found = mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === paneId);
+      if (found?.runtime === runtime) return true;
+      await sleep(50);
+    }
+    return false;
+  };
+  check("a pane running agy is relabelled Antigravity after its screen showed Claude Code's banner",
+    await waitForRuntime("p14", "antigravity"));
+  check("the relabelled pane never reported a working turn",
+    !T.chips.some((chip) => chip.paneId === "p14" && chip.state === "working"));
+  await sleep(1500);
+  check("a screen-named agent keeps its label over a CLI started below an unnamed top-level process",
+    mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p15")?.runtime === "claude");
   T.processes.set(1010, []);
   await waitForState("p10", "done");
   check("recovered Codex clears when its process exits", !mod.terminalAgentStateSnapshot().some((chip) => chip.paneId === "p10"));

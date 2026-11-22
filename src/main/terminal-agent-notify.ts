@@ -288,6 +288,9 @@ interface PaneWatcher {
   // stream. Heuristic panes only: with hooks the Stop payload is exact.
   teammatesActive: number;
   agentProcSeen: boolean;
+  // The runtime was read off the screen and no process has confirmed it yet.
+  // Screen text is a guess: one agent can print another's banner or footer.
+  runtimeFromScreen: boolean;
   lastAgentProcCheckAt: number;
   agentProcGone: boolean;
   agentProcCheckInflight: boolean;
@@ -439,6 +442,7 @@ export function syncTerminalNotifyPanes(input: {
       codexRolloutSince: 0,
       teammatesActive: 0,
       agentProcSeen: false,
+      runtimeFromScreen: false,
       lastAgentProcCheckAt: 0,
       agentProcGone: false,
       agentProcCheckInflight: false,
@@ -1847,6 +1851,7 @@ function identifyRuntime(w: PaneWatcher, runtime: PublicAgentRuntime, why: strin
   // the session's trusted signals; a launched command is a new session.
   const sameSession = w.runtime === runtime && why !== "command marker";
   w.runtime = runtime;
+  w.runtimeFromScreen = why === "banner";
   w.agentProcSeen = false;
   w.agentProcGone = false;
   w.lastAgentProcCheckAt = 0;
@@ -2226,12 +2231,29 @@ function checkAgentProcess(w: PaneWatcher, now: number): boolean {
       if (present) {
         if (!w.agentProcSeen) tanLog(`pane=${w.paneId} ${runtime} process seen under pid ${rootPid}`);
         w.agentProcSeen = true;
+        w.runtimeFromScreen = false;
         // A restored runtime hint can bypass banner discovery entirely.
         if (w.lastEmittedState === null) {
           emitPaneState(w, w.state === "failed" ? "error" : w.state);
         }
       } else if (w.agentProcSeen) {
         w.agentProcGone = true;
+      } else if (w.runtimeFromScreen && below.length > 0) {
+        // The screen named an agent that does not run here while another one
+        // is the shell's own child: that agent printed the text (Antigravity
+        // quoting Claude Code's banner or mode line). The process is the
+        // fact. Only a top-level child counts, so an agent this table cannot
+        // name by its process keeps its label over a CLI it started.
+        const top = Math.min(...below.map((proc) => proc.depth));
+        const owner = below
+          .filter((proc) => proc.depth === top)
+          .map((proc) => runtimeFromProcessCommand(proc.command))
+          .find((detected) => detected && detected !== runtime);
+        if (owner) {
+          identifyRuntime(w, owner, "process tree");
+          w.agentProcSeen = true;
+          emitPaneState(w, "idle");
+        }
       }
     })
     .catch(() => undefined)
