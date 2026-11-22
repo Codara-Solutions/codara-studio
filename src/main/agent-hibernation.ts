@@ -15,8 +15,10 @@
 //     started at boot (agent-hibernation-census.ts), so no dev server, watcher
 //     or tool command can be caught in the stop.
 // Anything unclear refuses. The renderer simply asks again on its next tick.
+// Every verdict lands in <codaraHome>/logs/main.log once per change.
 
 import { E2E_BACKGROUND } from "./e2e-background";
+import { logMain } from "./file-log";
 import type { IpcHandle } from "./ipc";
 import * as pty from "./pty-manager";
 import { loadPreferences } from "./preferences-store";
@@ -102,7 +104,7 @@ const defaultDeps: AgentHibernationDeps = {
   listProcesses: () => listCensusProcesses(),
   terminalPids: (pane) => listPaneTerminalPids(pane),
   stop: (paneId, generationId) => pty.hibernate(paneId, generationId, STOP_GRACE_MS),
-  log: (line) => console.log(`[agent-hibernation] ${line}`),
+  log: (line) => logMain("agent-hibernation", line),
   watchedOnPhone: (paneId) => studioPaneWatchedFromPhone(paneId),
   sleepOutput: (paneId) => pty.sleepOutput(paneId, MAX_SLEEPING_OUTPUT_BYTES),
 };
@@ -149,12 +151,16 @@ function forgetAtNextExit(paneId: string, entry: SleepingEntry): void {
 // Census refusals per pane, reused until `until` while the pane keeps the
 // same process generation (see CENSUS_BACKOFF_TICKS).
 const censusBackoff = new Map<string, { generationId: string; until: number; result: AgentHibernationResult }>();
+// The last verdict logged per pane, so a refusal repeated every tick is
+// logged once.
+const lastLogged = new Map<string, string>();
 
 /** Tests only: forget every pane's in-memory hibernation state. */
 export function resetAgentHibernationForTests(): void {
   inFlight.clear();
   for (const [paneId, entry] of [...sleeping]) forget(paneId, entry);
   censusBackoff.clear();
+  lastLogged.clear();
 }
 
 /**
@@ -216,7 +222,7 @@ export function takeSleepingPane(paneId: string, freshView = false): AgentSleepi
   const output = freshView ? entry.tail : entry.unsent;
   entry.unsent = null;
   // The size only: the output itself is the user's terminal content.
-  console.log(`[agent-hibernation] pane=${paneId} mounts asleep (${output?.byteLength ?? 0} bytes of output kept)`);
+  logMain("agent-hibernation", `pane=${paneId} mounts asleep (${output?.byteLength ?? 0} bytes of output kept)`);
   return {
     runtime: entry.runtime,
     sleptAt: entry.sleptAt,
@@ -243,6 +249,9 @@ type Judged =
   | { ok: true; session: pty.HibernationSessionInfo }
   | { ok: false; result: AgentHibernationResult };
 
+// The idle clock's stamps, in the order judgeNow lists them.
+const STAMP_NAMES = ["started", "pty input", "pty output", "agent input", "agent output"] as const;
+
 function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, idleMs: number): Judged {
   const session = deps.session(request.paneId);
   if (!session) return { ok: false, result: { ok: false, reason: "no-session" } };
@@ -253,20 +262,43 @@ function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, 
   const evidence = deps.evidence(request.paneId);
   const stateRefusal = judgeAgentEvidence(evidence, request.runtime);
   if (stateRefusal) return { ok: false, result: { ok: false, reason: stateRefusal } };
-  const clockRefusal = judgeIdleClock({
-    now: deps.now(),
-    idleMs,
-    hiddenForMs: request.hiddenForMs,
-    activityAt: [
-      session.createdAt,
-      session.lastInputAt,
-      session.lastOutputAt,
-      evidence?.lastUserInputAt ?? 0,
-      evidence?.lastOutputAt ?? 0,
-    ],
-  });
+  const now = deps.now();
+  const activityAt = [
+    session.createdAt,
+    session.lastInputAt,
+    session.lastOutputAt,
+    evidence?.lastUserInputAt ?? 0,
+    evidence?.lastOutputAt ?? 0,
+  ];
+  const clockRefusal = judgeIdleClock({ now, idleMs, hiddenForMs: request.hiddenForMs, activityAt });
+  if (clockRefusal === "not-idle-long-enough") {
+    let newest = 0;
+    for (let index = 1; index < activityAt.length; index += 1) {
+      if (activityAt[index] > activityAt[newest]) newest = index;
+    }
+    const ago = Math.max(0, Math.round((now - activityAt[newest]) / 1000));
+    const detail = `${STAMP_NAMES[newest]} ${ago}s ago, needs ${Math.round(idleMs / 1000)}s`;
+    return { ok: false, result: { ok: false, reason: clockRefusal, detail } };
+  }
   if (clockRefusal) return { ok: false, result: { ok: false, reason: clockRefusal } };
   return { ok: true, session };
+}
+
+// One line per change of verdict; a sleep or a failed stop always logs. The
+// not-idle detail carries ages that change every tick, so only the reason
+// counts as a change there.
+function noteVerdict(paneId: string, result: AgentHibernationResult, deps: AgentHibernationDeps, context: string): void {
+  if (result.ok) {
+    lastLogged.delete(paneId);
+    deps.log(`pane=${paneId} ${context}`);
+    return;
+  }
+  if (result.reason === "in-flight") return;
+  const key = result.reason === "not-idle-long-enough" ? result.reason : `${result.reason}|${result.detail ?? ""}`;
+  if (result.reason !== "stop-failed" && lastLogged.get(paneId) === key) return;
+  lastLogged.set(paneId, key);
+  if (lastLogged.size > 2_000) lastLogged.clear();
+  deps.log(`pane=${paneId} stays awake: ${result.reason}${result.detail ? ` (${result.detail})` : ""}`);
 }
 
 export async function hibernateAgentPane(
@@ -280,73 +312,87 @@ export async function hibernateAgentPane(
   if (inFlight.has(request.paneId)) return { ok: false, reason: "in-flight" };
   inFlight.add(request.paneId);
   try {
-    const first = judgeNow(request, deps, idleMs);
-    if (!first.ok) return first.result;
-
-    const now = deps.now();
-    for (const [paneId, held] of censusBackoff) {
-      if (held.until <= now) censusBackoff.delete(paneId);
-    }
-    const held = censusBackoff.get(request.paneId);
-    if (held && held.generationId === first.session.generationId) return held.result;
-    censusBackoff.delete(request.paneId);
-    const holdCensus = (result: AgentHibernationResult): AgentHibernationResult => {
-      censusBackoff.set(request.paneId, {
-        generationId: first.session.generationId,
-        until: now + Math.max(1_000, tickMs) * CENSUS_BACKOFF_TICKS,
-        result,
-      });
-      return result;
-    };
-
-    const processes = await deps.listProcesses();
-    if (!processes) return holdCensus({ ok: false, reason: "process-list-unavailable" });
-    // An unknown terminal answers null: without it, a process holding the
-    // pane's terminal from outside its tree could not be seen.
-    const terminalPids = await deps.terminalPids({ pid: first.session.pid, ttyPath: first.session.ttyPath });
-    if (!terminalPids) return holdCensus({ ok: false, reason: "process-list-unavailable" });
-    const census = classifyPaneProcessTree(processes, first.session.pid, request.runtime, {
-      terminalPids,
-    });
-    if (!census.ok) {
-      deps.log(`pane=${request.paneId} stays awake: ${census.reason}${census.detail ? ` (${census.detail})` : ""}`);
-      return holdCensus({ ok: false, reason: census.reason, ...(census.detail ? { detail: census.detail } : {}) });
-    }
-
-    // The listing took time. Judge again from fresh state, and fence the stop
-    // on the exact process generation that was judged.
-    const second = judgeNow(request, deps, idleMs);
-    if (!second.ok) return second.result;
-    if (second.session.generationId !== first.session.generationId) {
-      return { ok: false, reason: "no-session" };
-    }
-    // Recorded before the stop: the pty leaves pty-manager's table as the
-    // stop begins, so an app quit during the stop's grace period must already
-    // find this pane among the sleeping ones, or the relaunch restore would
-    // drop its session.
-    const sleptAt = deps.now();
-    const previous = sleeping.get(request.paneId);
-    if (previous) forget(request.paneId, previous);
-    const kept = deps.sleepOutput?.(request.paneId) ?? null;
-    const entry: SleepingEntry = {
-      runtime: request.runtime,
-      sleptAt,
-      tail: kept?.tail ?? null,
-      unsent: kept?.unsent ?? null,
-      offExit: null,
-    };
-    sleeping.set(request.paneId, entry);
-    forgetAtNextExit(request.paneId, entry);
-    const stopped = await deps.stop(request.paneId, first.session.generationId);
-    if (!stopped) {
-      forget(request.paneId, entry);
-      return { ok: false, reason: "stop-failed" };
-    }
-    deps.log(`pane=${request.paneId} ${request.runtime} is sleeping`);
-    return { ok: true, sleptAt };
+    const decided = await decide(request, deps, idleMs, tickMs);
+    const result = "result" in decided ? decided.result : decided;
+    noteVerdict(request.paneId, result, deps, "context" in decided ? decided.context : "");
+    return result;
   } finally {
     inFlight.delete(request.paneId);
   }
+}
+
+// A sleep comes back with the line its log entry describes it by.
+async function decide(
+  request: AgentHibernationRequest,
+  deps: AgentHibernationDeps,
+  idleMs: number,
+  tickMs: number,
+): Promise<AgentHibernationResult | { result: AgentHibernationResult; context: string }> {
+  const first = judgeNow(request, deps, idleMs);
+  if (!first.ok) return first.result;
+
+  const now = deps.now();
+  for (const [paneId, held] of censusBackoff) {
+    if (held.until <= now) censusBackoff.delete(paneId);
+  }
+  const held = censusBackoff.get(request.paneId);
+  if (held && held.generationId === first.session.generationId) return held.result;
+  censusBackoff.delete(request.paneId);
+  const holdCensus = (result: AgentHibernationResult): AgentHibernationResult => {
+    censusBackoff.set(request.paneId, {
+      generationId: first.session.generationId,
+      until: now + Math.max(1_000, tickMs) * CENSUS_BACKOFF_TICKS,
+      result,
+    });
+    return result;
+  };
+
+  const processes = await deps.listProcesses();
+  if (!processes) return holdCensus({ ok: false, reason: "process-list-unavailable", detail: "process listing failed" });
+  // An unknown terminal answers null: without it, a process holding the
+  // pane's terminal from outside its tree could not be seen.
+  const terminalPids = await deps.terminalPids({ pid: first.session.pid, ttyPath: first.session.ttyPath });
+  if (!terminalPids) {
+    return holdCensus({ ok: false, reason: "process-list-unavailable", detail: "terminal holders unreadable" });
+  }
+  const census = classifyPaneProcessTree(processes, first.session.pid, request.runtime, {
+    terminalPids,
+  });
+  if (!census.ok) {
+    return holdCensus({ ok: false, reason: census.reason, ...(census.detail ? { detail: census.detail } : {}) });
+  }
+
+  // The listing took time. Judge again from fresh state, and fence the stop
+  // on the exact process generation that was judged.
+  const second = judgeNow(request, deps, idleMs);
+  if (!second.ok) return second.result;
+  if (second.session.generationId !== first.session.generationId) {
+    return { ok: false, reason: "no-session", detail: "respawned while judged" };
+  }
+  const context = `${request.runtime} is sleeping (idle ${Math.round(idleMs / 1000)}s, census ${processes.length} processes in ${deps.now() - now}ms)`;
+  // Recorded before the stop: the pty leaves pty-manager's table as the
+  // stop begins, so an app quit during the stop's grace period must already
+  // find this pane among the sleeping ones, or the relaunch restore would
+  // drop its session.
+  const sleptAt = deps.now();
+  const previous = sleeping.get(request.paneId);
+  if (previous) forget(request.paneId, previous);
+  const kept = deps.sleepOutput?.(request.paneId) ?? null;
+  const entry: SleepingEntry = {
+    runtime: request.runtime,
+    sleptAt,
+    tail: kept?.tail ?? null,
+    unsent: kept?.unsent ?? null,
+    offExit: null,
+  };
+  sleeping.set(request.paneId, entry);
+  forgetAtNextExit(request.paneId, entry);
+  const stopped = await deps.stop(request.paneId, first.session.generationId);
+  if (!stopped) {
+    forget(request.paneId, entry);
+    return { ok: false, reason: "stop-failed" };
+  }
+  return { result: { ok: true, sleptAt }, context };
 }
 
 /** Register this area's channels with the trusted-sender `handle`. */
