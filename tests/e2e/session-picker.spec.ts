@@ -788,6 +788,21 @@ test("the Pi and Antigravity rows show their own sessions first, as the others d
     await page.waitForTimeout(500);
     await recordLaunchCommands(app);
     const addTab = page.getByRole("button", { name: "New tab" }).first();
+    // At the window's minimum size and its default one, light and dark.
+    const shoot = async (name: string, picker: Locator) => {
+      if (SHOTS) {
+        for (const [width, height] of [[720, 480], [1280, 800]] as const) {
+          await app!.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]?.setSize(size[0], size[1]), [width, height]);
+          for (const mode of ["light", "dark"] as const) {
+            await setTheme(page, mode);
+            await page.waitForTimeout(400);
+            await page.screenshot({ path: join(SHOTS, `${name}-${width}-${mode}.png`) });
+          }
+        }
+      }
+      // Enter belongs to the box, which takes the keyboard a frame after opening.
+      await expect(picker.getByRole("combobox")).toBeFocused();
+    };
     const openAntigravity = async () => {
       await addTab.click();
       const menuRow = page.getByTestId("antigravity-worker-row");
@@ -802,6 +817,7 @@ test("the Pi and Antigravity rows show their own sessions first, as the others d
     await expect(row(pi, PI, "pi")).toBeVisible({ timeout: 30_000 });
     await expect(row(pi, IDS.rollout)).toHaveCount(0);
     await expect(pi.getByTestId("session-picker-new")).toHaveClass(/is-selected/);
+    await shoot("pi-offer", pi);
     await page.keyboard.press("Enter");
     await expect(pi).toHaveCount(0);
     await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBe(1);
@@ -814,16 +830,7 @@ test("the Pi and Antigravity rows show their own sessions first, as the others d
     await expect(row(agy, AGY.labels, "antigravity")).toBeVisible({ timeout: 30_000 });
     await expect(row(agy, AGY.refunds, "antigravity")).toBeVisible();
     await expect(agy.getByRole("combobox")).toHaveAttribute("placeholder", "Search titles and previews");
-    if (SHOTS) {
-      for (const [width, height] of [[720, 480], [1280, 800]] as const) {
-        await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]?.setSize(size[0], size[1]), [width, height]);
-        for (const mode of ["light", "dark"] as const) {
-          await setTheme(page, mode);
-          await page.waitForTimeout(400);
-          await page.screenshot({ path: join(SHOTS, `antigravity-offer-${width}-${mode}.png`) });
-        }
-      }
-    }
+    await shoot("antigravity-offer", agy);
     await page.keyboard.press("Enter");
     await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBe(2);
     expect((await launchCommands(app))[1]).toMatch(/^agy\b/);
@@ -837,13 +844,7 @@ test("the Pi and Antigravity rows show their own sessions first, as the others d
     await expect(row(agy, AGY.refunds, "antigravity")).toHaveCount(0);
     await expect(agy.getByTestId("session-picker-matches")).toContainText("Preview");
     await expect(agy.getByRole("button", { name: "Whole transcript" })).toHaveCount(0);
-    if (SHOTS) {
-      for (const mode of ["light", "dark"] as const) {
-        await setTheme(page, mode);
-        await page.waitForTimeout(400);
-        await page.screenshot({ path: join(SHOTS, `antigravity-search-${mode}.png`) });
-      }
-    }
+    await shoot("antigravity-search", agy);
     await page.keyboard.press("Enter");
     await expect.poll(async () => (await launchCommands(app!)).length, { timeout: 30_000 }).toBe(3);
     expect((await launchCommands(app))[2]).toContain(`agy --conversation ${AGY.labels}`);
