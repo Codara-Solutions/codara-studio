@@ -280,6 +280,33 @@ test("Keep running stops a pane from sleeping", async () => {
   }
 });
 
+test("critical memory lets an idle agent sleep sooner than the setting", async () => {
+  test.setTimeout(TEST_TIMEOUT);
+  const fixture = await prepareFixture("plain");
+  // The setting's idle time never elapses in this test; only the pressure
+  // floor can let the pane sleep.
+  const { app, page, logs } = await launch(fixture, {
+    env: {
+      CODARA_E2E_HIBERNATION_IDLE_MS: String(10 * 60_000),
+      CODARA_E2E_HIBERNATION_PRESSURE_IDLE_MS: String(IDLE_MS),
+      CODARA_E2E_MEMORY_LEVEL: "critical",
+    },
+  });
+  try {
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 30_000 });
+    const [first] = await waitForLaunches(fixture, 1);
+    await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
+    await expectAsleep(page, logs, first);
+    expect(
+      logs.some((line) => line.includes("is sleeping") && line.includes("memory critical")),
+      logs.join("\n"),
+    ).toBe(true);
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
 test("a pane whose agent runs a command stays awake", async () => {
   test.setTimeout(TEST_TIMEOUT);
   const fixture = await prepareFixture("dev-server");
@@ -314,7 +341,7 @@ test("a pane whose agent runs a command stays awake", async () => {
 
 async function launch(
   fixture: Fixture,
-  { seed = true }: { seed?: boolean } = {},
+  { seed = true, env = {} }: { seed?: boolean; env?: Record<string, string> } = {},
 ): Promise<{ app: ElectronApplication; page: Page; logs: string[] }> {
   const fixtureShell = join(fixture.binDir, "bash");
   if (!WINDOWS) {
@@ -339,6 +366,7 @@ async function launch(
       CODARA_E2E_BIN_CLAUDE: fixture.fakeClaude,
       CODARA_E2E_HIBERNATION_IDLE_MS: String(IDLE_MS),
       CODARA_E2E_HIBERNATION_TICK_MS: String(TICK_MS),
+      ...env,
     },
   });
   const logs: string[] = [];

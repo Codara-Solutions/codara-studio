@@ -365,6 +365,10 @@ function normalize(
     // Agent hibernation: one of the Settings presets (0 = off); anything else
     // falls back to the default.
     agentHibernationMinutes: normalizeAgentHibernationMinutes(src.agentHibernationMinutes),
+    agentHibernationSoonerWhenLow:
+      typeof src.agentHibernationSoonerWhenLow === "boolean"
+        ? src.agentHibernationSoonerWhenLow
+        : DEFAULT_PREFERENCES.agentHibernationSoonerWhenLow,
     // Opt-in: only a stored true types phone answers in without Send.
     relayPhoneAnswers: src.relayPhoneAnswers === true,
     relayAnswerAssistant:

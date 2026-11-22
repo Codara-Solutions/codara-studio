@@ -332,6 +332,31 @@ async function sampleMacMemory(): Promise<MemoryReading | null> {
   };
 }
 
+/**
+ * Physical memory and how much of it is available, read cheaply: no typeperf
+ * stream, no GPU sampler, so agent hibernation can ask on every tick whether
+ * the title bar's meter is open or not. Windows' free memory is what the meter
+ * counts as available; macOS uses the same vm_stat reading as the meter (free
+ * memory there leaves out reclaimable cache); Linux reads MemAvailable.
+ */
+export async function readAvailableMemory(): Promise<{ totalBytes: number; availableBytes: number } | null> {
+  const total = totalmem();
+  if (!(total > 0)) return null;
+  if (process.platform === "darwin") {
+    const reading = await sampleMacMemory().catch(() => null);
+    if (!reading || reading.usedBytes === null) return null;
+    return { totalBytes: total, availableBytes: Math.max(0, total - Math.min(total, reading.usedBytes)) };
+  }
+  if (process.platform === "linux") {
+    const text = readSmallFile("/proc/meminfo");
+    const memory = text ? parseMeminfo(text) : null;
+    if (memory && memory.totalBytes > 0) {
+      return { totalBytes: memory.totalBytes, availableBytes: Math.min(memory.totalBytes, memory.availableBytes) };
+    }
+  }
+  return { totalBytes: total, availableBytes: freemem() };
+}
+
 /** The Windows machine counters and GPU engines share one typeperf stream. */
 class WindowsMachineCounters implements GpuSampler {
   private readonly stream: TypeperfStream;

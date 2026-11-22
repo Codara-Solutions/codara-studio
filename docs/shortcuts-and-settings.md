@@ -769,6 +769,13 @@ whenever it cannot tell:
   toolbar, shown on agent panes);
 - no paired phone has the pane open (Remote Access).
 
+While the computer is low on memory, idle agents sleep sooner: after 10
+minutes when less than 12% of its memory is available, and after 3 minutes
+under 5%, whenever that is sooner than your setting. Every other rule above
+still has to hold, and an agent never sleeps later because of it. Turn off
+**Shorter idle time when memory is low** (`agentHibernationSoonerWhenLow`, on by
+default) to keep your setting's time whatever the memory.
+
 Cora's worker panes and phone panes never sleep. A pane that is still asleep
 when you quit comes back asleep, with its card, when **Resume running agent
 sessions when Codara reopens** is on: nothing is launched for it until you
@@ -784,7 +791,9 @@ To see why an agent did or did not sleep, look for `[agent-hibernation]` in
 `logs/main.log` (included in **Export diagnostics**). Each pane gets one line
 when its answer changes: `is sleeping`, or `stays awake:` with the rule that
 held it, such as how long ago it last printed or which other program runs in
-it. Programs are named without their arguments.
+it. Programs are named without their arguments. A change of memory level is
+logged too (`memory ok -> low (9% available)`), and a sleep under pressure
+names the level.
 
 ### The notification center
 

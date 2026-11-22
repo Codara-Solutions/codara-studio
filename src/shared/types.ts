@@ -1473,6 +1473,9 @@ export interface AppPreferences {
   // untouched agent terminal may sit before Codara stops it to save memory;
   // its pane then shows a card and Resume brings the session back. 0 = off.
   agentHibernationMinutes?: number;
+  // Default on: while physical memory is low, idle agents sleep sooner
+  // (AGENT_HIBERNATION_PRESSURE_IDLE_MS).
+  agentHibernationSoonerWhenLow?: boolean;
   // Opt-in (default off): an answer the user gave an outside assistant on
   // their phone may be typed into a session waiting at its prompt without
   // Send (session.relay mode "answer", src/main/session-relay). Only from the
@@ -1688,6 +1691,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   restoreTerminalOutput: true,
   // DEFAULT_AGENT_HIBERNATION_MINUTES in shared/agent-hibernation.ts.
   agentHibernationMinutes: 30,
+  agentHibernationSoonerWhenLow: true,
   relayPhoneAnswers: false,
   // DEFAULT_RELAY_ANSWER_ASSISTANT in shared/session-relay.ts.
   relayAnswerAssistant: "Grok Bot",
