@@ -43,6 +43,7 @@ import { holdUntilRendererReady, isRendererReady, isStartingUp, onRendererNotRea
 export type TerminalOpName =
   | "create"
   | "destroy"
+  | "closePane"
   | "resize"
   | "list"
   | "agentCounts"
@@ -288,7 +289,7 @@ export async function requestTerminalOp<T = unknown>(
 // the renderer has answered every one of them (a timed-out one included, up
 // to LATE_WINDOW_MS) and then sent its panes again. Until then callers fall
 // back to the round trip.
-const MUTATING_OPS: ReadonlySet<TerminalOpName> = new Set(["create", "destroy", "group", "tabAct"]);
+const MUTATING_OPS: ReadonlySet<TerminalOpName> = new Set(["create", "destroy", "closePane", "group", "tabAct"]);
 const MAX_INVENTORY_ENTRIES = 5_000;
 export interface StudioTerminalInventoryEntry {
   paneId: string;

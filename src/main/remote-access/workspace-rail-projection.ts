@@ -125,7 +125,10 @@ function pickBetterStatus(
   if (rankDiff !== 0) return rankDiff < 0 ? candidate : current;
   const sinceDiff = (candidate.since ?? 0) - (current.since ?? 0);
   if (sinceDiff !== 0) return sinceDiff > 0 ? candidate : current;
-  return !current.note && candidate.note ? candidate : current;
+  if (Boolean(candidate.note) !== Boolean(current.note)) return candidate.note ? candidate : current;
+  const labelCmp = (candidate.label ?? "").localeCompare(current.label ?? "");
+  if (labelCmp !== 0) return labelCmp < 0 ? candidate : current;
+  return (candidate.note ?? "").localeCompare(current.note ?? "") < 0 ? candidate : current;
 }
 
 export interface RemoteWorkspaceRailEnrichmentInput {
@@ -183,7 +186,9 @@ function buildAgentStatusByWorkspace(
 
   for (const entry of agentStates) {
     seenPaneIds.add(entry.paneId);
-    recordPane(entry.paneId, entry.workspaceId, entry.state, entry.runtime, activityByPane.get(entry.paneId));
+    const activity = activityByPane.get(entry.paneId);
+    if (!entry.runtime && !activity && !agentNotes[paneNoteKey(entry.paneId)]) continue;
+    recordPane(entry.paneId, entry.workspaceId, entry.state, entry.runtime, activity);
   }
   for (const activity of agentActivities) {
     if (!seenPaneIds.has(activity.paneId)) {
@@ -284,10 +289,12 @@ export function enrichRemoteWorkspaces(input: RemoteWorkspaceRailEnrichmentInput
   }
 
   // Pass 2: spend only the remaining headroom on optional rail metadata.
+  const keptIds = new Set(keptBase.map(({ base }) => base.id));
   let extraBudget = Math.max(0, input.budgetBytes - reservedBytes);
   return keptBase.map(({ base, baseBytes }) => {
     const workspace = workspaceById.get(base.id);
-    const parentWorkspaceId = tree.parentOf.get(base.id);
+    const rawParent = tree.parentOf.get(base.id);
+    const parentWorkspaceId = rawParent && keptIds.has(rawParent) ? rawParent : undefined;
     const pullRequest = prByWorkspace.get(base.id);
     const worktree = workspace ? sanitizeWorktree(workspace, pullRequest) : undefined;
     const agentStatus = agentStatusByWorkspace.get(base.id);

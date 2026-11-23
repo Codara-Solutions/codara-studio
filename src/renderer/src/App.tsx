@@ -89,6 +89,7 @@ import { browserFullScreen } from "./components/Preview/fullScreen";
 import { setBrowserWorkspaceNames } from "./components/Preview/tabs-memory/browserTabs";
 import {
   setCloseAgentTerminalFn,
+  setCloseShareableTerminalPaneFn,
   setCreateAgentTerminalFn,
   setListDeliverablePanesFn,
   setListShareableStudioTerminalsFn,
@@ -5937,8 +5938,12 @@ export default function App() {
               ...(tab.group ? { group: tab.group.name, groupId: tab.group.id } : {}),
               ...(leaf.agentOwner ? { agentOwner: leaf.agentOwner } : {}),
               // Preserve all five agent runtimes (including pi and antigravity)
-              // so paired phones render the matching engine identity.
-              profile: leaf.agentSession?.runtime ?? leaf.worker?.runtime ?? "shell",
+              // so paired phones render the matching engine identity. Prefer an
+              // active agent session over stale worker or inactive session metadata.
+              profile:
+                leaf.agentSession?.active === true
+                  ? leaf.agentSession.runtime
+                  : leaf.worker?.runtime ?? leaf.agentSession?.runtime ?? "shell",
             });
           });
         }
@@ -6056,11 +6061,27 @@ export default function App() {
       // prune effect below retired its entry. Do not close the old tab id:
       // after a move/split it may now contain unrelated desktop panes.
     });
+    setCloseShareableTerminalPaneFn(({ workspaceId, paneId }) => {
+      const layout = workspaceLayouts().find((entry) => entry.workspaceId === workspaceId);
+      if (!layout) return { closed: false };
+      for (const tab of layout.tabs) {
+        if (tab.kind !== "terminal") continue;
+        const leaf = findLeafByPaneId(tab.root, paneId);
+        if (!leaf || isDockLeaf(leaf)) continue;
+        if (leaf.origin || (leaf.worker && leaf.worker.source !== "manual")) {
+          return { closed: false };
+        }
+        tabs.closeTerminalPaneInWorkspace(workspaceId, tab.id, paneId);
+        return { closed: true };
+      }
+      return { closed: false };
+    });
     return () => {
       setListShareableStudioTerminalsFn(null);
       setListDeliverablePanesFn(null);
       setCreateAgentTerminalFn(null);
       setCloseAgentTerminalFn(null);
+      setCloseShareableTerminalPaneFn(null);
     };
   }, [tabs, activeWorkspace?.cwd, activeWorkspace?.id, home, validWorkspaceIds]);
 

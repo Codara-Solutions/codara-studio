@@ -151,6 +151,7 @@ import {
 } from "../worker-sessions";
 import {
   lookupIndexedSession,
+  scopeKeysFor,
   searchSessions,
   withSessionNames,
 } from "../session-search/service";
@@ -272,6 +273,8 @@ import { projectRemoteFleetOverview } from "./fleet-overview";
 import { projectRemoteNativeCliAccounts } from "./native-cli-account-projection";
 import { projectRemoteSubscriptionProfiles } from "./subscription-profile-projection";
 import {
+  allowedLocalScopeKeys,
+  isSameOrUnderCwdKey,
   projectRemoteSessionSearchResult,
   SESSION_SEARCH_DEFAULT_LIMIT,
   verifyRemoteResumeSession,
@@ -467,21 +470,18 @@ export function getRemoteAccessService(): RemoteAccessService {
       attachWorkerTerminal: attachRemoteWorkerTerminal,
       studioTerminalLeases: new StudioTerminalShareStore({
         onTerminalsChanged: scheduleTerminalsChangedPush,
-        closeDesktopTab: async ({ workspaceId, desktopTabId }) => {
-          if (!desktopTabId) return;
-          try {
-            await requestTerminalOp(
-              "tabAct",
-              { action: "close", workspaceId, tabIds: [desktopTabId] },
-              { timeoutMs: 5_000 },
-            );
-          } catch (err) {
-            logMain(
-              "remote-access",
-              `studio terminal tab close failed for ${desktopTabId}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
+        closeDesktopTab: async ({ workspaceId, desktopPaneId }) => {
+          if (!desktopPaneId) {
+            throw new Error("That Studio terminal cannot be closed remotely.");
+          }
+          await requireLocalWorkspace(workspaceId);
+          const result = await requestTerminalOp<{ closed?: boolean }>(
+            "closePane",
+            { workspaceId, paneId: desktopPaneId },
+            { timeoutMs: 5_000 },
+          );
+          if (result?.closed !== true && pty.exists(desktopPaneId)) {
+            throw new Error("That Studio terminal could not be closed.");
           }
         },
         log: (line) => logMain("remote-access", line),
@@ -606,10 +606,31 @@ async function searchSessionsForRemote(
   }
   const scope = input.scope ?? (cwd ? "workspace" : "all");
   if ((scope === "workspace" || scope === "project") && !cwd) {
-    throw new Error("A local workspace is required for this search scope.");
+    throw Object.assign(new Error("A local workspace is required for this search scope."), {
+      remoteSafe: true,
+    });
   }
-  const [raw, localWorkspaces] = await Promise.all([
-    searchSessions({
+  const localWorkspaces = await localWorkspaceDescriptorsForRemote();
+  const localKeys = allowedLocalScopeKeys(localWorkspaces);
+  let scopeKeys: string[];
+  let allowedWorkspaceIds: string[] | undefined;
+  let includeUnboundAntigravity = false;
+  if (scope === "all") {
+    scopeKeys = localKeys;
+    allowedWorkspaceIds = localWorkspaces.map((ws) => ws.id);
+    includeUnboundAntigravity = true;
+  } else if (scope === "project") {
+    const projectKeys = (await scopeKeysFor("project", cwd)) ?? [];
+    // Bound project scope strictly to registered local workspaces so removed
+    // or external worktrees cannot leak non-workspace transcripts.
+    scopeKeys = projectKeys.filter((key) =>
+      localKeys.some((rootKey) => isSameOrUnderCwdKey(key, rootKey)),
+    );
+  } else {
+    scopeKeys = ((await scopeKeysFor("workspace", cwd)) ?? []).filter((key) => key !== "/");
+  }
+  const raw = await searchSessions(
+    {
       query: input.query ?? "",
       scope,
       cwd,
@@ -617,9 +638,10 @@ async function searchSessionsForRemote(
       limit: input.limit ?? SESSION_SEARCH_DEFAULT_LIMIT,
       offset: input.offset ?? 0,
       pinnedFirst: true,
-    }),
-    localWorkspaceDescriptorsForRemote(),
-  ]);
+    },
+    undefined,
+    { scopeKeys, allowedWorkspaceIds, includeUnboundAntigravity },
+  );
   return projectRemoteSessionSearchResult(
     raw,
     localWorkspaces,
@@ -3980,18 +4002,20 @@ async function createRemoteTerminal(
       : null;
   let verifiedResumeSessionId: string | undefined;
   if (request.resumeSessionId) {
-    const localWorkspaces = await localWorkspaceDescriptorsForRemote();
+    const { findPiSessionFile } = await import("../pi-session-tracker");
     const verified = await verifyRemoteResumeSession({
       profile: request.profile,
       resumeSessionId: request.resumeSessionId,
       cwd: cwd.path,
-      localWorkspaces,
+      workspaceRoot: root,
       claudeStateDir: nativeClaudeExecution?.env.CLAUDE_CONFIG_DIR ?? null,
       listWorkerSessions: (runtime, sessionCwd, opts) =>
         listLocalWorkerSessions(runtime, sessionCwd, opts),
+      findPiSessionFile: (sessionCwd, sessionId) =>
+        findPiSessionFile(sessionCwd, sessionId),
       lookupIndexedSession: (agent, sessionId) =>
         lookupIndexedSession(agent, sessionId),
-      searchSessions: (query) => searchSessions(query),
+      canonicalizePath: (p) => realpath(resolve(p)).catch(() => null),
     });
     if (!verified) {
       throw new Error(

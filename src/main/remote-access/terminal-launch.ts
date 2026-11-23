@@ -1,3 +1,4 @@
+import { isSafeSessionId } from "@shared/session-search";
 import type { RemoteTerminalProfile } from "./terminal-profiles";
 
 // What a phone-created terminal runs for each profile. These must stay the
@@ -9,6 +10,15 @@ export function remoteTerminalLaunchCommand(
   profile: RemoteTerminalProfile,
   resumeSessionId?: string,
 ): string | undefined {
+  if (resumeSessionId !== undefined) {
+    if (
+      profile === "shell" ||
+      !isSafeSessionId(resumeSessionId) ||
+      (profile === "antigravity" && resumeSessionId === "continue")
+    ) {
+      throw new Error("Invalid remote terminal resume session id.");
+    }
+  }
   switch (profile) {
     case "claude":
       return resumeSessionId

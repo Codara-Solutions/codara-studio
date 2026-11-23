@@ -269,6 +269,20 @@ async function main() {
         tight.length === baseInfos.length && tightBytes <= baseBytes + 20,
         { count: tight.length, expected: baseInfos.length, tightBytes, budget: baseBytes + 20 },
       );
+
+      // NIT 3: dangling parentWorkspaceId cleared when parent is absent, and
+      // idle rows with runtime: null & no activity/note are skipped.
+      const childOnly = railProj.enrichRemoteWorkspaces({
+        workspaces: [workspaces[0], workspaces[1]],
+        baseInfos: [baseInfos[1]],
+        agentStates: [{ workspaceId: "ws-wt-open", tabId: "t9", paneId: "p9", runtime: null, state: "idle" }],
+        budgetBytes: 384 * 1024,
+      });
+      check(
+        "enrichRemoteWorkspaces strips dangling parentWorkspaceId and skips runtime-less agentStates rows",
+        childOnly.length === 1 && childOnly[0].parentWorkspaceId === undefined && childOnly[0].agentStatus === undefined,
+        childOnly,
+      );
     }
 
     // 2. sessions.search param validation & hit sanitization
@@ -295,6 +309,14 @@ async function main() {
         { validDefault, validFull },
       );
 
+      check(
+        "safeCwdBasename rejects SSH paths and URL schemes",
+        sessionRemote.safeCwdBasename("ssh://prod/srv/app") === undefined &&
+          sessionRemote.safeCwdBasename("file:///Users/alice/.ssh") === undefined &&
+          sessionRemote.safeCwdBasename("https://example.com/repo") === undefined &&
+          sessionRemote.safeCwdBasename("/Users/alice/dev/codara-studio") === "codara-studio",
+      );
+
       const projected = sessionRemote.projectRemoteSessionSearchResult(
         {
           hits: [
@@ -304,9 +326,22 @@ async function main() {
               snippetRole: "assistant", model: "claude-opus", messageCount: 14, startedAt: 1700000000000,
             }),
             makeSearchHit({
+              agent: "antigravity", sessionId: "conv-unbound", title: "Unbound chat",
+              snippet: "General question", snippetRole: "user", cwd: null,
+              messageCount: 3, lastAt: 1700000600000,
+            }),
+            makeSearchHit({
               agent: "antigravity", sessionId: "conv-outside", title: "Outside project chat",
               snippet: "Discussed secret path", snippetRole: "user", cwd: "/Users/alice/private/secret-folder",
               messageCount: 3, lastAt: 1700000600000,
+            }),
+            makeSearchHit({
+              agent: "claude", sessionId: "sess-ssh", title: "Remote SSH session",
+              cwd: "ssh://box/srv/app", workspaceId: "ws-ssh", messageCount: 2,
+            }),
+            makeSearchHit({
+              agent: "cora", sessionId: "cora-ssh", title: "Remote Cora run",
+              cwd: null, workspaceId: "ws-ssh", messageCount: 2,
             }),
             makeSearchHit({ agent: "antigravity", sessionId: "continue", title: "Synthetic continue pointer" }),
             makeSearchHit({ agent: "claude", sessionId: "bad;id", title: "Unsafe id" }),
@@ -325,7 +360,7 @@ async function main() {
 
       const serialized = JSON.stringify(projected);
       check(
-        "projectRemoteSessionSearchResult redacts host paths, strips snippet markers/controls, resolves only local workspaces, and skips unsafe ids",
+        "projectRemoteSessionSearchResult excludes non-workspace/SSH hits, keeps unbound antigravity, and redacts host paths",
         projected.hits.length === 2 &&
           projected.hits[0].workspaceId === "ws-studio" &&
           projected.hits[0].workspaceName === "Codara Studio" &&
@@ -335,11 +370,12 @@ async function main() {
           projected.hits[0].snippet.length <= 240 &&
           !projected.hits[0].snippet.includes("\u0001") &&
           !projected.hits[0].snippet.includes("\u0002") &&
+          projected.hits[1].sessionId === "conv-unbound" &&
           projected.hits[1].workspaceId === undefined &&
-          projected.hits[1].workspaceName === undefined &&
-          projected.hits[1].cwdLabel === "secret-folder" &&
+          projected.hits[1].cwdLabel === undefined &&
           !serialized.includes("/Users/alice") &&
-          !serialized.includes("private") &&
+          !serialized.includes("secret-folder") &&
+          !serialized.includes("ws-ssh") &&
           projected.totalIndexed === 42 &&
           projected.enabled === true &&
           projected.indexing === false,
@@ -363,79 +399,93 @@ async function main() {
         "darwin",
       );
       check(
-        "projectRemoteSessionSearchResult stops at wire byte budget and marks hasMore=true",
+        "projectRemoteSessionSearchResult strictly respects wire byte budget and marks hasMore=true",
         tinyBudget.hits.length > 0 &&
           tinyBudget.hits.length < 10 &&
           tinyBudget.hasMore === true &&
           tinyBudget.indexing === true &&
-          Buffer.byteLength(JSON.stringify(tinyBudget), "utf8") <= 1400,
-        { count: tinyBudget.hits.length, hasMore: tinyBudget.hasMore },
+          Buffer.byteLength(JSON.stringify(tinyBudget), "utf8") <= 1200,
+        { count: tinyBudget.hits.length, bytes: Buffer.byteLength(JSON.stringify(tinyBudget), "utf8") },
       );
     }
 
-    // 3. 5-agent resume session ownership verification
+    // 3. 5-agent resume session ownership verification (strict workspace & account scope)
     {
-      const localWorkspaces = [
-        { id: "ws-main", name: "Studio", cwd: "/work/studio" },
-        { id: "ws-wt", name: "Worktree", cwd: "/work/worktrees/feat" },
-      ];
       const diskByRuntime = {
         claude: [{ sessionId: "claude-local-1" }],
         codex: [{ sessionId: "codex-local-1" }],
         grok: [{ sessionId: "grok-local-1" }],
       };
       const indexedByKey = new Map([
-        ["claude:claude-project-2", { agent: "claude", sessionId: "claude-project-2", cwd: "/work/worktrees/feat" }],
+        ["claude:claude-other-account", { agent: "claude", sessionId: "claude-other-account", cwd: "/work/studio" }],
+        ["claude:claude-other-ws", { agent: "claude", sessionId: "claude-other-ws", cwd: "/work/worktrees/feat" }],
+        ["codex:codex-sub", { agent: "codex", sessionId: "codex-sub", cwd: "/work/studio/packages/a" }],
+        ["codex:codex-other-ws", { agent: "codex", sessionId: "codex-other-ws", cwd: "/work/worktrees/feat" }],
         ["codex:codex-outside", { agent: "codex", sessionId: "codex-outside", cwd: "/etc/secret" }],
-        ["grok:grok-indexed-1", { agent: "grok", sessionId: "grok-indexed-1", cwd: "/work/studio/sub" }],
-        ["pi:pi-sess-1", { agent: "pi", sessionId: "pi-sess-1", cwd: "/work/studio" }],
-        ["pi:pi-outside", { agent: "pi", sessionId: "pi-outside", cwd: "/tmp/other" }],
-        ["antigravity:agy-conv-1", { agent: "antigravity", sessionId: "agy-conv-1", cwd: "/work/studio" }],
+        ["grok:grok-exact", { agent: "grok", sessionId: "grok-exact", cwd: "/work/studio" }],
+        ["grok:grok-sub", { agent: "grok", sessionId: "grok-sub", cwd: "/work/studio/sub" }],
+        ["grok:grok-other-ws", { agent: "grok", sessionId: "grok-other-ws", cwd: "/work/worktrees/feat" }],
+        ["pi:pi-exact", { agent: "pi", sessionId: "pi-exact", cwd: "/work/studio" }],
+        ["pi:pi-sub", { agent: "pi", sessionId: "pi-sub", cwd: "/work/studio/sub" }],
+        ["pi:pi-other-ws", { agent: "pi", sessionId: "pi-other-ws", cwd: "/work/worktrees/feat" }],
+        ["antigravity:agy-conv-1", { agent: "antigravity", sessionId: "agy-conv-1", cwd: "/work/studio/sub" }],
         ["antigravity:agy-unbound", { agent: "antigravity", sessionId: "agy-unbound", cwd: null }],
-        ["antigravity:agy-outside", { agent: "antigravity", sessionId: "agy-outside", cwd: "/Users/other" }],
+        ["antigravity:agy-other-ws", { agent: "antigravity", sessionId: "agy-other-ws", cwd: "/work/worktrees/feat" }],
       ]);
       const verify = (profile, resumeSessionId) =>
         sessionRemote.verifyRemoteResumeSession({
-          profile, resumeSessionId, cwd: "/work/studio", localWorkspaces,
+          profile,
+          resumeSessionId,
+          cwd: "/work/studio",
+          workspaceRoot: "/work/studio",
+          claudeStateDir: "/home/u/.claude-work",
           listWorkerSessions: async (runtime) => diskByRuntime[runtime] ?? [],
+          findPiSessionFile: async (_cwd, id) => (id === "pi-disk-1" ? "/home/u/.pi/session.jsonl" : null),
           lookupIndexedSession: async (agent, id) => indexedByKey.get(`${agent}:${id}`) ?? null,
           platform: "linux",
         });
 
       const okCases = await Promise.all([
         verify("claude", "claude-local-1"),
-        verify("claude", "claude-project-2"),
         verify("codex", "codex-local-1"),
+        verify("codex", "codex-sub"),
         verify("grok", "grok-local-1"),
-        verify("grok", "grok-indexed-1"),
-        verify("pi", "pi-sess-1"),
+        verify("grok", "grok-exact"),
+        verify("pi", "pi-disk-1"),
+        verify("pi", "pi-exact"),
         verify("antigravity", "agy-conv-1"),
         verify("antigravity", "agy-unbound"),
       ]);
       const badCases = await Promise.all([
+        verify("claude", "claude-other-account"),
+        verify("claude", "claude-other-ws"),
+        verify("codex", "codex-other-ws"),
         verify("codex", "codex-outside"),
-        verify("pi", "pi-outside"),
-        verify("antigravity", "agy-outside"),
+        verify("grok", "grok-sub"),
+        verify("grok", "grok-other-ws"),
+        verify("pi", "pi-sub"),
+        verify("pi", "pi-other-ws"),
+        verify("antigravity", "agy-other-ws"),
         verify("antigravity", "continue"),
-        verify("claude", "pi-sess-1"),
+        verify("claude", "pi-exact"),
         verify("pi", "nonexistent-session"),
         verify("shell", "claude-local-1"),
         verify("claude", "abc; touch /tmp/pwn"),
       ]);
 
       check(
-        "verifyRemoteResumeSession accepts verified local and indexed sessions across all 5 agent runtimes",
+        "verifyRemoteResumeSession accepts verified workspace-scoped sessions across all 5 agent runtimes",
         okCases.every((v) => typeof v === "string" && v.length > 0),
         okCases,
       );
       check(
-        "verifyRemoteResumeSession rejects outside-workspace sessions, wrong agent, synthetic continue, unknown ids, shell, and injection shapes",
+        "verifyRemoteResumeSession rejects cross-workspace, cross-account Claude, wrong agent, synthetic continue, and injection shapes",
         badCases.every((v) => v === null),
         badCases,
       );
     }
 
-    // 4. sessions.search RPC dispatch and per-device rate limiting via RemoteAccessService
+    // 4. sessions.search RPC dispatch, error redaction, and per-device rate limiting
     {
       let nextId = 1;
       const callOn = async (stream, method, params) => {
@@ -444,6 +494,31 @@ async function main() {
         for (let i = 0; i < 6; i += 1) await flush();
         return stream.outbox.find((frame) => frame.id === id);
       };
+
+      const errStream = makeFakeStream(rpc, 49);
+      void new rpc.RpcSession(errStream, {
+        device: { publicKey: "pk", name: "Studio", role: "computer", version: "0.0.0" },
+        listWorkspaces: async () => [],
+        searchSessions: async (input) => {
+          if (input.workspaceId === "missing-ws") throw new Error("Unknown workspace: missing-ws");
+          throw new Error("SQLITE_ERROR: /Users/alice/.codara/search.db corrupted");
+        },
+        createTerminal: async () => { throw new Error("not used"); },
+      });
+      await callOn(errStream, "hello", {
+        protocol: rpc.RPC_PROTOCOL_VERSION,
+        device: { publicKey: "phone", name: "Phone", role: "phone", version: "1" },
+      });
+      const unknownWsErr = await callOn(errStream, "sessions.search", { scope: "workspace", workspaceId: "missing-ws" });
+      const redactedErr = await callOn(errStream, "sessions.search", { query: "boom" });
+      check(
+        "sessions.search maps Unknown workspace and redacts unexpected internal errors",
+        unknownWsErr?.error?.code === "unknown-workspace" &&
+          redactedErr?.error?.code === "internal" &&
+          redactedErr.error.message === "Could not search sessions." &&
+          !redactedErr.error.message.includes("SQLITE"),
+        { unknownWsErr, redactedErr },
+      );
 
       let clock = Date.parse("2026-11-23T15:00:00.000Z");
       let searchCalls = 0;
@@ -511,12 +586,17 @@ async function main() {
     {
       const previewRpcSource = fs.readFileSync(path.join(ROOT, "src", "renderer", "src", "components", "Preview", "previewRpc.ts"), "utf8");
       const productionSource = fs.readFileSync(path.join(ROOT, "src", "main", "remote-access", "production.ts"), "utf8");
+      const appSource = fs.readFileSync(path.join(ROOT, "src", "renderer", "src", "App.tsx"), "utf8");
       check(
-        "previewRpc honors fresh: true for new tabs and production wires closeDesktopTab via tabAct close",
+        "previewRpc honors fresh: true and closeDesktopTab uses single-pane closePane with workspace & shareability checks",
         previewRpcSource.includes("const fresh = params.fresh === true;") &&
           previewRpcSource.includes("fresh ? { fresh: true } : undefined") &&
           productionSource.includes("closeDesktopTab:") &&
-          productionSource.includes('{ action: "close", workspaceId, tabIds: [desktopTabId] }'),
+          productionSource.includes("await requireLocalWorkspace(workspaceId);") &&
+          productionSource.includes('"closePane"') &&
+          !productionSource.includes('{ action: "close", workspaceId, tabIds: [desktopTabId] }') &&
+          appSource.includes("setCloseShareableTerminalPaneFn(") &&
+          appSource.includes("tabs.closeTerminalPaneInWorkspace(workspaceId, tab.id, paneId)"),
       );
     }
   } finally {

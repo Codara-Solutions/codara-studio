@@ -120,6 +120,21 @@ async function main() {
       phone.remoteTerminalLaunchCommand("shell") === undefined,
     );
     check(
+      "remoteTerminalLaunchCommand refuses shell resume, unsafe ids, and antigravity continue in depth",
+      [
+        ["shell", sessionId],
+        ["claude", "abc; rm -rf /"],
+        ["antigravity", "continue"],
+      ].every(([p, id]) => {
+        try {
+          phone.remoteTerminalLaunchCommand(p, id);
+          return false;
+        } catch {
+          return true;
+        }
+      }),
+    );
+    check(
       "Pi and Antigravity are labelled for the desktop tab title",
       phone.remoteTerminalProfileLabel("pi") === "Pi" &&
         phone.remoteTerminalProfileLabel("antigravity") === "Antigravity" &&

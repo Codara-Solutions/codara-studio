@@ -24,7 +24,7 @@ export interface RemoteTerminalLeaseDescriptor {
   sequence: number;
   nextInputSequence: number;
   expiresAt?: number;
-  /** Studio terminals are borrowed: closing the phone view never kills them. */
+  /** Studio terminals mirror desktop panes; when closeable is true, close removes that pane. */
   origin?: "phone" | "studio";
   closeable?: boolean;
 }
@@ -95,7 +95,7 @@ export interface RemoteTerminalLeaseStore {
     subscriberId: string,
     attachmentId: string,
     requestId: string,
-  ): void;
+  ): void | Promise<void>;
   revokeOwner(ownerKey: string): void;
   shutdown(): void;
 }

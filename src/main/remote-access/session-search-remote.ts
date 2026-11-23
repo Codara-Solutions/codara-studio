@@ -31,6 +31,7 @@ export const SESSION_SEARCH_MAX_BRANCH_CHARS = 160;
 export const SESSION_SEARCH_MAX_MODEL_CHARS = 120;
 
 const ANTIGRAVITY_CONTINUE_WORD = "continue";
+const URL_SCHEME_PREFIX_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
 
 export type RemoteSessionSearchAgent = SessionSearchAgent;
 export type RemoteSessionSearchScope = SessionSearchScope;
@@ -101,13 +102,15 @@ function cleanText(value: unknown, maxChars: number): string | undefined {
   return points.length <= maxChars ? cleaned : `${points.slice(0, Math.max(0, maxChars - 1)).join("").trimEnd()}\u2026`;
 }
 
-// Extract only the terminal path segment so arbitrary host paths never cross the wire.
+// Extract only the terminal local path segment; refuse SSH and any URL scheme.
 export function safeCwdBasename(cwd: string | null | undefined): string | undefined {
   if (typeof cwd !== "string") return undefined;
-  const trimmed = cwd.replace(/[\\/]+$/g, "");
-  if (!trimmed) return undefined;
-  const lastSlash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  const segment = lastSlash >= 0 ? trimmed.slice(lastSlash + 1) : trimmed;
+  const trimmed = cwd.trim();
+  if (!trimmed || isRemotePath(trimmed) || URL_SCHEME_PREFIX_RE.test(trimmed)) return undefined;
+  const stripped = trimmed.replace(/[\\/]+$/g, "");
+  if (!stripped) return undefined;
+  const lastSlash = Math.max(stripped.lastIndexOf("/"), stripped.lastIndexOf("\\"));
+  const segment = lastSlash >= 0 ? stripped.slice(lastSlash + 1) : stripped;
   if (!segment || /^[A-Za-z]:$/.test(segment)) return undefined;
   return cleanText(segment, SESSION_SEARCH_MAX_CWD_LABEL_CHARS);
 }
@@ -185,11 +188,12 @@ function buildLocalWorkspaceIndex(workspaces: readonly LocalWorkspaceDescriptor[
   const byCwdKey = new Map<string, LocalWorkspaceDescriptor>();
   const cwdKeys: string[] = [];
   for (const ws of workspaces) {
-    if (!ws?.id || !ws.cwd || isRemotePath(ws.cwd)) continue;
+    if (!ws?.id || !ws.cwd || isRemotePath(ws.cwd) || URL_SCHEME_PREFIX_RE.test(ws.cwd)) continue;
     byId.set(ws.id, ws);
     for (const candidatePath of [ws.cwd, ws.realCwd]) {
-      if (!candidatePath || isRemotePath(candidatePath)) continue;
+      if (!candidatePath || isRemotePath(candidatePath) || URL_SCHEME_PREFIX_RE.test(candidatePath)) continue;
       const key = sessionCwdKey(candidatePath, platform);
+      if (key === "/") continue;
       if (!byCwdKey.has(key)) {
         byCwdKey.set(key, ws);
         cwdKeys.push(key);
@@ -200,7 +204,15 @@ function buildLocalWorkspaceIndex(workspaces: readonly LocalWorkspaceDescriptor[
   return { byId, byCwdKey, cwdKeys };
 }
 
-function isSameOrUnderCwdKey(candidateKey: string, rootKey: string): boolean {
+/** Normalized folder keys for local workspaces, excluding SSH and bare root. */
+export function allowedLocalScopeKeys(
+  localWorkspaces: readonly LocalWorkspaceDescriptor[],
+  platform: string = process.platform,
+): string[] {
+  return buildLocalWorkspaceIndex(localWorkspaces, platform).cwdKeys;
+}
+
+export function isSameOrUnderCwdKey(candidateKey: string, rootKey: string): boolean {
   return candidateKey === rootKey || candidateKey.startsWith(rootKey.endsWith("/") ? rootKey : `${rootKey}/`);
 }
 
@@ -210,10 +222,9 @@ function resolveWorkspaceForHit(
   platform: string,
 ): LocalWorkspaceDescriptor | undefined {
   if (hit.workspaceId) {
-    const direct = index.byId.get(hit.workspaceId);
-    if (direct) return direct;
+    return index.byId.get(hit.workspaceId);
   }
-  if (!hit.cwd || isRemotePath(hit.cwd)) return undefined;
+  if (!hit.cwd || isRemotePath(hit.cwd) || URL_SCHEME_PREFIX_RE.test(hit.cwd)) return undefined;
   const key = sessionCwdKey(hit.cwd, platform);
   const exact = index.byCwdKey.get(key);
   if (exact) return exact;
@@ -229,7 +240,11 @@ function posInt(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
 }
 
-/** Projects internal SessionSearchResult into a bounded, path-sanitized wire DTO. */
+/**
+ * Projects an internal SessionSearchResult into a bounded, path-sanitized wire
+ * DTO strictly limited to known local workspaces (plus unbound Antigravity
+ * chats with cwd === null). SSH and non-workspace transcripts are excluded.
+ */
 export function projectRemoteSessionSearchResult(
   raw: SessionSearchResult,
   localWorkspaces: readonly LocalWorkspaceDescriptor[],
@@ -239,12 +254,25 @@ export function projectRemoteSessionSearchResult(
   const index = buildLocalWorkspaceIndex(localWorkspaces, platform);
   const hits: RemoteSessionSearchHit[] = [];
   let hasMore = raw.hasMore === true;
-  let usedBytes = 256;
+  const tookMs = nonNegInt(raw.tookMs);
+  const enabled = raw.status?.enabled === true;
+  const indexing = raw.status?.phase === "indexing";
+  const totalIndexed = nonNegInt(raw.status?.sessions);
+  let usedBytes = Buffer.byteLength(
+    JSON.stringify({ hits: [], hasMore: true, tookMs, enabled, indexing, totalIndexed }),
+    "utf8",
+  );
 
   for (const hit of raw.hits) {
     if (!hit || !isSessionSearchAgent(hit.agent) || !isSafeSessionId(hit.sessionId)) continue;
     if (hit.agent === "antigravity" && hit.sessionId === ANTIGRAVITY_CONTINUE_WORD) continue;
+    if (hit.cwd && (isRemotePath(hit.cwd) || URL_SCHEME_PREFIX_RE.test(hit.cwd))) continue;
+    if (hit.workspaceId && !index.byId.has(hit.workspaceId)) continue;
+
     const workspace = resolveWorkspaceForHit(hit, index, platform);
+    const isUnboundAntigravity = hit.agent === "antigravity" && !hit.cwd && !hit.workspaceId;
+    if (!workspace && !isUnboundAntigravity) continue;
+
     const title = cleanText(hit.title, SESSION_SEARCH_MAX_TITLE_CHARS) ?? "Untitled session";
     const originalTitle = cleanText(hit.originalTitle, SESSION_SEARCH_MAX_TITLE_CHARS);
     const branch = cleanText(hit.branch, SESSION_SEARCH_MAX_BRANCH_CHARS);
@@ -278,7 +306,7 @@ export function projectRemoteSessionSearchResult(
       ...(lastAt !== undefined ? { lastAt } : {}),
     };
 
-    const bytes = Buffer.byteLength(JSON.stringify(projected), "utf8") + 1;
+    const bytes = Buffer.byteLength(JSON.stringify(projected), "utf8") + (hits.length > 0 ? 1 : 0);
     if (usedBytes + bytes > budgetBytes) {
       hasMore = true;
       break;
@@ -287,14 +315,7 @@ export function projectRemoteSessionSearchResult(
     usedBytes += bytes;
   }
 
-  return {
-    hits,
-    hasMore,
-    tookMs: nonNegInt(raw.tookMs),
-    enabled: raw.status?.enabled === true,
-    indexing: raw.status?.phase === "indexing",
-    totalIndexed: nonNegInt(raw.status?.sessions),
-  };
+  return { hits, hasMore, tookMs, enabled, indexing, totalIndexed };
 }
 
 export type RemoteResumableProfile = Exclude<RemoteTerminalProfile, "shell">;
@@ -306,70 +327,116 @@ export function isRemoteResumableProfile(profile: RemoteTerminalProfile): profil
 export interface VerifyRemoteResumeSessionInput {
   profile: RemoteTerminalProfile;
   resumeSessionId: string;
+  /** Target terminal directory inside the requested workspace. */
   cwd: string;
-  localWorkspaces: readonly LocalWorkspaceDescriptor[];
+  /** Canonical root of the requested local workspace. */
+  workspaceRoot: string;
   claudeStateDir?: string | null;
   listWorkerSessions: (
     runtime: "claude" | "codex" | "grok",
     cwd: string,
     opts?: { claudeStateDir?: string | null },
   ) => Promise<ReadonlyArray<{ sessionId: string }>>;
+  findPiSessionFile?: (cwd: string, sessionId: string) => Promise<string | null>;
   lookupIndexedSession?: (
     agent: SessionSearchAgent,
     sessionId: string,
   ) => Promise<{ agent: SessionSearchAgent; sessionId: string; cwd: string | null } | null>;
-  searchSessions?: (input: {
-    query: string;
-    scope: SessionSearchScope;
-    cwd: string | null;
-    agents: SessionSearchAgent[];
-    limit: number;
-  }) => Promise<Pick<SessionSearchResult, "hits">>;
+  canonicalizePath?: (p: string) => Promise<string | null>;
   platform?: string;
 }
 
+async function canonicalCwdKey(
+  rawPath: string,
+  platform: string,
+  canonicalize?: (p: string) => Promise<string | null>,
+): Promise<string | null> {
+  if (!rawPath || isRemotePath(rawPath) || URL_SCHEME_PREFIX_RE.test(rawPath)) return null;
+  const canonical = canonicalize ? (await canonicalize(rawPath)) ?? rawPath : rawPath;
+  if (!canonical || isRemotePath(canonical) || URL_SCHEME_PREFIX_RE.test(canonical)) return null;
+  return sessionCwdKey(canonical, platform);
+}
+
 /**
- * Verifies that `resumeSessionId` is syntactically safe and refers to a real
- * session owned by a known local workspace before passing it to a launch command.
+ * Verifies that `resumeSessionId` is syntactically safe and belongs to the
+ * requested workspace and active account before passing it to a launch command.
  */
 export async function verifyRemoteResumeSession(input: VerifyRemoteResumeSessionInput): Promise<string | null> {
   if (!isRemoteResumableProfile(input.profile) || !isSafeSessionId(input.resumeSessionId)) return null;
   if (input.profile === "antigravity" && input.resumeSessionId === ANTIGRAVITY_CONTINUE_WORD) return null;
 
-  if (input.profile === "claude" || input.profile === "codex" || input.profile === "grok") {
-    const listed = await input.listWorkerSessions(
-      input.profile,
-      input.cwd,
-      input.profile === "claude" && input.claudeStateDir !== undefined ? { claudeStateDir: input.claudeStateDir } : undefined,
-    );
-    const directMatch = listed.find((session) => session.sessionId === input.resumeSessionId);
-    if (directMatch) return directMatch.sessionId;
-  }
-
-  let indexed: { agent: SessionSearchAgent; sessionId: string; cwd: string | null } | null = null;
-  if (input.lookupIndexedSession) {
-    indexed = await input.lookupIndexedSession(input.profile, input.resumeSessionId);
-  }
-  if (!indexed && input.searchSessions) {
-    const found = await input.searchSessions({
-      query: "",
-      scope: "all",
-      cwd: null,
-      agents: [input.profile],
-      limit: 100,
-    });
-    const hit = found.hits.find((c) => c.agent === input.profile && c.sessionId === input.resumeSessionId);
-    if (hit) indexed = { agent: hit.agent, sessionId: hit.sessionId, cwd: hit.cwd };
-  }
-  if (!indexed || indexed.agent !== input.profile || indexed.sessionId !== input.resumeSessionId) return null;
-
   const platform = input.platform ?? process.platform;
-  const workspaceIndex = buildLocalWorkspaceIndex(input.localWorkspaces, platform);
-  if (indexed.cwd) {
-    if (isRemotePath(indexed.cwd)) return null;
-    const hitKey = sessionCwdKey(indexed.cwd, platform);
-    return workspaceIndex.cwdKeys.some((rootKey) => isSameOrUnderCwdKey(hitKey, rootKey)) ? indexed.sessionId : null;
+  const cwdKey = await canonicalCwdKey(input.cwd, platform, input.canonicalizePath);
+  const workspaceRootKey = await canonicalCwdKey(input.workspaceRoot, platform, input.canonicalizePath);
+  if (!cwdKey || !workspaceRootKey || !isSameOrUnderCwdKey(cwdKey, workspaceRootKey)) return null;
+
+  // Claude strictly uses the active native Claude profile's state dir so multi-
+  // account transcripts in the global index can never cross account boundaries.
+  if (input.profile === "claude") {
+    const listed = await input.listWorkerSessions("claude", input.cwd, {
+      claudeStateDir: input.claudeStateDir ?? null,
+    });
+    return listed.some((session) => session.sessionId === input.resumeSessionId)
+      ? input.resumeSessionId
+      : null;
   }
-  // Antigravity summaries can legitimately omit workspace_uris for unbound chats.
-  return input.profile === "antigravity" ? indexed.sessionId : null;
+
+  // Pi checks the cwd's session bucket on disk first, falling back only to an
+  // exact canonical cwd match in the index.
+  if (input.profile === "pi") {
+    if (input.findPiSessionFile) {
+      const file = await input.findPiSessionFile(input.cwd, input.resumeSessionId).catch(() => null);
+      if (file) return input.resumeSessionId;
+    }
+    const indexed = await input.lookupIndexedSession?.("pi", input.resumeSessionId);
+    if (!indexed || indexed.agent !== "pi" || indexed.sessionId !== input.resumeSessionId || !indexed.cwd) {
+      return null;
+    }
+    const indexedKey = await canonicalCwdKey(indexed.cwd, platform, input.canonicalizePath);
+    return indexedKey === cwdKey ? indexed.sessionId : null;
+  }
+
+  // Grok checks disk sessions for input.cwd first, falling back only to an
+  // exact canonical cwd match in the index.
+  if (input.profile === "grok") {
+    const listed = await input.listWorkerSessions("grok", input.cwd);
+    if (listed.some((session) => session.sessionId === input.resumeSessionId)) {
+      return input.resumeSessionId;
+    }
+    const indexed = await input.lookupIndexedSession?.("grok", input.resumeSessionId);
+    if (!indexed || indexed.agent !== "grok" || indexed.sessionId !== input.resumeSessionId || !indexed.cwd) {
+      return null;
+    }
+    const indexedKey = await canonicalCwdKey(indexed.cwd, platform, input.canonicalizePath);
+    return indexedKey === cwdKey ? indexed.sessionId : null;
+  }
+
+  // Codex checks disk sessions for input.cwd first, falling back to an indexed
+  // session whose canonical cwd sits inside the requested workspace root.
+  if (input.profile === "codex") {
+    const listed = await input.listWorkerSessions("codex", input.cwd);
+    if (listed.some((session) => session.sessionId === input.resumeSessionId)) {
+      return input.resumeSessionId;
+    }
+    const indexed = await input.lookupIndexedSession?.("codex", input.resumeSessionId);
+    if (!indexed || indexed.agent !== "codex" || indexed.sessionId !== input.resumeSessionId || !indexed.cwd) {
+      return null;
+    }
+    const indexedKey = await canonicalCwdKey(indexed.cwd, platform, input.canonicalizePath);
+    return indexedKey !== null && isSameOrUnderCwdKey(indexedKey, workspaceRootKey)
+      ? indexed.sessionId
+      : null;
+  }
+
+  // Antigravity requires an indexed conversation whose cwd sits inside the
+  // requested workspace root (or cwd === null for unbound conversations).
+  const indexed = await input.lookupIndexedSession?.("antigravity", input.resumeSessionId);
+  if (!indexed || indexed.agent !== "antigravity" || indexed.sessionId !== input.resumeSessionId) {
+    return null;
+  }
+  if (indexed.cwd === null) return indexed.sessionId;
+  const indexedKey = await canonicalCwdKey(indexed.cwd, platform, input.canonicalizePath);
+  return indexedKey !== null && isSameOrUnderCwdKey(indexedKey, workspaceRootKey)
+    ? indexed.sessionId
+    : null;
 }

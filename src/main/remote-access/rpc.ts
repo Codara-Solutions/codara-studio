@@ -4489,7 +4489,7 @@ export class RpcSession {
               );
               return;
             }
-            this.terminalLeaseStoreFor(p.terminalId).close(
+            await this.terminalLeaseStoreFor(p.terminalId).close(
               this.terminalLeaseOwnerKey(),
               p.terminalId,
               this.terminalLeaseSubscriberId,
@@ -4767,12 +4767,29 @@ export class RpcSession {
             this.replyError(id, "rate-limited", "Session search requests are arriving too quickly. Try again shortly.");
             return;
           }
-          const result = await this.services.searchSessions(parsed);
-          if (jsonUtf8Bytes(result) > MAX_FRAME_BYTES - 4096) {
-            this.replyError(id, "message-too-large", "Session search results exceeded the remote transfer limit.");
-            return;
+          try {
+            const result = await this.services.searchSessions(parsed);
+            if (jsonUtf8Bytes(result) > MAX_FRAME_BYTES - 4096) {
+              this.replyError(id, "message-too-large", "Session search results exceeded the remote transfer limit.");
+              return;
+            }
+            this.reply(id, result);
+          } catch (err) {
+            const raw = err instanceof Error ? err.message : "";
+            const cleaned = raw.replace(/[\r\n\t]+/g, " ").replace(/[\x00-\x1f\x7f]/g, "").trim();
+            if (/^Unknown workspace:/i.test(cleaned)) {
+              this.replyError(id, "unknown-workspace", cleaned.slice(0, 240));
+            } else if (
+              Boolean(err) &&
+              typeof err === "object" &&
+              (err as { remoteSafe?: unknown }).remoteSafe === true &&
+              cleaned
+            ) {
+              this.replyError(id, "internal", cleaned.slice(0, 240));
+            } else {
+              this.replyError(id, "internal", "Could not search sessions.");
+            }
           }
-          this.reply(id, result);
           return;
         }
         default:

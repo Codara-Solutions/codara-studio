@@ -846,6 +846,8 @@ async function main() {
                   { id: "tab-1", workspaceId: "ws-1", title: "App", url: "https://localhost:3000/app" },
                   { id: "tab-other", workspaceId: "ws-2", title: "Other", url: "https://localhost:3001/" },
                   { id: "tab-file", workspaceId: "ws-1", title: "Local", url: "file:///etc/passwd" },
+                  { id: "tab-asleep", workspaceId: "ws-1", title: "Asleep", url: "https://localhost:3002/", asleep: true },
+                  { id: "tab-nourl", workspaceId: "ws-1", title: "Blank", url: "" },
                 ],
               };
             }
@@ -862,10 +864,26 @@ async function main() {
       const errOpenScheme = await expectReject(ctrl.openPreviewTab({ workspaceId: "ws-1", url: "javascript:alert(1)" }));
       const errOpenFile = await expectReject(ctrl.openPreviewTab({ workspaceId: "ws-1", url: "file:///etc/passwd" }));
       const errOpenBadWs = await expectReject(ctrl.openPreviewTab({ workspaceId: "bad-ws", url: "https://localhost:3000/" }));
+      const redirectClosed = [];
       const { ctrl: redirectCtrl } = makeController({
-        deps: { requestPreviewOp: async (op) => (op === "navigate" ? { tabId: "tab-redir", url: "file:///etc/shadow", title: "shadow" } : { tabs: [] }) },
+        deps: {
+          requestPreviewOp: async (op, params) => {
+            if (op === "navigate") return { tabId: "tab-redir", url: "file:///etc/shadow", title: "shadow" };
+            if (op === "close") { redirectClosed.push(params); return { ok: true, closed: true }; }
+            return { tabs: [] };
+          },
+        },
       });
       const errOpenRedirect = await expectReject(redirectCtrl.openPreviewTab({ workspaceId: "ws-1", url: "https://localhost:3000/" }));
+      const { ctrl: capCtrl } = makeController({
+        deps: {
+          requestPreviewOp: async (op) =>
+            op === "list"
+              ? { tabs: Array.from({ length: policy.MAX_REMOTE_PREVIEW_TABS }, (_, i) => ({ id: `t-${i}`, workspaceId: "ws-1", url: "https://localhost:3000/" })) }
+              : { tabId: "should-not-open" },
+        },
+      });
+      const errOpenCap = await expectReject(capCtrl.openPreviewTab({ workspaceId: "ws-1", url: "https://localhost:3000/" }));
       const { ctrl: leakedOpenCtrl } = makeController({
         deps: { requestPreviewOp: async () => { throw new Error("Failed opening /Users/me/secret.html via codara_preview_navigate"); } },
       });
@@ -875,9 +893,11 @@ async function main() {
       const errCloseOtherWs = await expectReject(ctrl.closePreviewTab({ workspaceId: "ws-1", tabId: "tab-other" }));
       const errCloseMissing = await expectReject(ctrl.closePreviewTab({ workspaceId: "ws-1", tabId: "tab-missing" }));
       const errCloseFile = await expectReject(ctrl.closePreviewTab({ workspaceId: "ws-1", tabId: "tab-file" }));
+      const errCloseAsleep = await expectReject(ctrl.closePreviewTab({ workspaceId: "ws-1", tabId: "tab-asleep" }));
+      const errCloseNoUrl = await expectReject(ctrl.closePreviewTab({ workspaceId: "ws-1", tabId: "tab-nourl" }));
 
       check(
-        "openPreviewTab strips credentials, enforces http/https, passes fresh: true, and redacts raw bridge errors",
+        "openPreviewTab strips credentials, enforces cap/schemes, cleans up redirected orphans, and redacts raw errors",
         opened.tabId === "tab-new" && opened.workspaceId === "ws-1" &&
           opened.url === "https://localhost:3000/home" && opened.title === "https://localhost:3000/home" &&
           !opened.title.includes("secret") && openOps.length === 1 &&
@@ -886,16 +906,20 @@ async function main() {
           errOpenFile?.message === controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED &&
           errOpenBadWs?.message === "Unknown workspace: bad-ws" &&
           errOpenRedirect?.message === controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED &&
+          redirectClosed.length === 1 && redirectClosed[0].tabId === "tab-redir" &&
+          errOpenCap?.message === controllerMod.ERR_PREVIEW_TAB_LIMIT &&
           errOpenLeaked?.message === controllerMod.ERR_PREVIEW_UNAVAILABLE &&
           !errOpenLeaked.message.includes("secret.html"),
       );
       check(
-        "closePreviewTab verifies workspace ownership via list and blocks cross-workspace, unknown, or disallowed-scheme closes",
+        "closePreviewTab enforces awake/allowed/owned tab checks and rejects sleeping or missing-URL tabs",
         closed.closed === true && closeOps.length === 1 &&
           closeOps[0].workspaceId === "ws-1" && closeOps[0].tabId === "tab-1" &&
           errCloseOtherWs?.message === controllerMod.ERR_PREVIEW_TAB_UNAVAILABLE &&
           errCloseMissing?.message === controllerMod.ERR_PREVIEW_TAB_UNAVAILABLE &&
-          errCloseFile?.message === controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED,
+          errCloseFile?.message === controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED &&
+          errCloseAsleep?.message === controllerMod.ERR_PREVIEW_TAB_UNAVAILABLE &&
+          errCloseNoUrl?.message === controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED,
       );
 
       const rpcOpenCalls = [];
@@ -956,7 +980,8 @@ async function main() {
     check(
       "App.tsx shares manual desktop workers, preserves all 5 agent profiles, and StudioTerminalShareStore normalizes via isRemoteTerminalProfile",
       shareSection.includes('if (leaf.origin || (leaf.worker && leaf.worker.source !== "manual")) return;') &&
-        shareSection.includes('profile: leaf.agentSession?.runtime ?? leaf.worker?.runtime ?? "shell"') &&
+        shareSection.includes("leaf.agentSession?.active === true") &&
+        shareSection.includes('leaf.worker?.runtime ?? leaf.agentSession?.runtime ?? "shell"') &&
         !/leaf\.agentSession\?\.runtime === "pi"[\s\S]*\?\s*"shell"/.test(shareSection) &&
         shareStoreSource.includes('isRemoteTerminalProfile(item.profile) ? item.profile : "shell"'),
     );

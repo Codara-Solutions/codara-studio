@@ -2,6 +2,7 @@ import { KeyedSerialQueue } from "./cora-policy";
 import {
   encodeBoundedPreviewJpeg,
   mapNormalizedPreviewClick,
+  MAX_REMOTE_PREVIEW_TABS,
   projectRemotePreviewTabs,
   REMOTE_PREVIEW_VIEWPORTS,
   sanitizeRemotePreviewTitle,
@@ -33,6 +34,7 @@ export const ERR_PREVIEW_SCHEME_DISALLOWED = "Only http and https browser previe
 export const ERR_PREVIEW_TAB_CLOSED = "Browser preview tab is no longer open.";
 export const ERR_PREVIEW_VIEWPORT_UNREADY = "Browser preview viewport is not ready.";
 export const ERR_PREVIEW_FRAME_TOO_LARGE = "Browser preview frame exceeded the remote transfer limit.";
+export const ERR_PREVIEW_TAB_LIMIT = "Too many browser preview tabs are already open in this workspace.";
 
 export class RemotePreviewError extends Error {
   readonly remoteSafe = true;
@@ -141,6 +143,7 @@ export function createRemotePreviewController<
   TWebContents extends PreviewWebContentsLike = PreviewWebContentsLike,
 >(deps: RemotePreviewControllerDeps<TWebContents>): RemotePreviewController {
   const tabOps = new KeyedSerialQueue();
+  const workspaceOpenOps = new KeyedSerialQueue();
   const viewportModes = new Map<string, RemotePreviewViewportMode>();
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? (() => new Date());
@@ -267,74 +270,61 @@ export function createRemotePreviewController<
       if (!safeUrl) {
         throw new RemotePreviewError(ERR_PREVIEW_SCHEME_DISALLOWED);
       }
-      const raw = await runBridgeCall("tab", () =>
-        deps.requestPreviewOp<{
-          tabId?: unknown;
-          url?: unknown;
-          title?: unknown;
-          loading?: unknown;
-        }>(
-          "navigate",
-          { workspaceId: input.workspaceId, url: safeUrl, fresh: true },
-          { timeoutMs: OPEN_TIMEOUT_MS },
-        ),
-      );
-      const tabId = typeof raw?.tabId === "string" ? raw.tabId.trim() : "";
-      if (!tabId || tabId.length > 128) {
-        throw new RemotePreviewError(ERR_PREVIEW_UNAVAILABLE);
-      }
-      const rawUrl = typeof raw?.url === "string" ? raw.url.trim() : "";
-      const finalUrl = rawUrl ? sanitizeRemotePreviewUrl(rawUrl) : safeUrl;
-      if (!finalUrl) {
-        throw new RemotePreviewError(ERR_PREVIEW_SCHEME_DISALLOWED);
-      }
-      const title = sanitizeRemotePreviewTitle(raw?.title, finalUrl, raw?.url);
-      return {
-        tabId,
-        workspaceId: input.workspaceId,
-        title,
-        url: finalUrl,
-        loading: raw?.loading === true,
-        canGoBack: false,
-        canGoForward: false,
-        updatedAt: now().toISOString(),
-      };
+      return workspaceOpenOps.run(input.workspaceId, async () => {
+        const listed = await runBridgeCall("list", () =>
+          deps.requestPreviewOp<{ tabs?: unknown[] }>("list", { workspaceId: input.workspaceId }, { timeoutMs: LIST_TIMEOUT_MS }),
+        );
+        const existingCount = Array.isArray(listed?.tabs)
+          ? listed.tabs.filter(
+              (raw) =>
+                Boolean(raw) &&
+                typeof raw === "object" &&
+                !Array.isArray(raw) &&
+                (raw as Record<string, unknown>).workspaceId === input.workspaceId,
+            ).length
+          : 0;
+        if (existingCount >= MAX_REMOTE_PREVIEW_TABS) {
+          throw new RemotePreviewError(ERR_PREVIEW_TAB_LIMIT);
+        }
+        const raw = await runBridgeCall("tab", () =>
+          deps.requestPreviewOp<{ tabId?: unknown; url?: unknown; title?: unknown; loading?: unknown }>(
+            "navigate",
+            { workspaceId: input.workspaceId, url: safeUrl, fresh: true },
+            { timeoutMs: OPEN_TIMEOUT_MS },
+          ),
+        );
+        const tabId = typeof raw?.tabId === "string" ? raw.tabId.trim() : "";
+        if (!tabId || tabId.length > 128) {
+          throw new RemotePreviewError(ERR_PREVIEW_UNAVAILABLE);
+        }
+        const rawUrl = typeof raw?.url === "string" ? raw.url.trim() : "";
+        const finalUrl = rawUrl ? sanitizeRemotePreviewUrl(rawUrl) : safeUrl;
+        if (!finalUrl) {
+          await deps
+            .requestPreviewOp("close", { workspaceId: input.workspaceId, tabId }, { timeoutMs: CLOSE_TIMEOUT_MS })
+            .catch(() => undefined);
+          throw new RemotePreviewError(ERR_PREVIEW_SCHEME_DISALLOWED);
+        }
+        const title = sanitizeRemotePreviewTitle(raw?.title, finalUrl, raw?.url);
+        return {
+          tabId,
+          workspaceId: input.workspaceId,
+          title,
+          url: finalUrl,
+          loading: raw?.loading === true,
+          canGoBack: false,
+          canGoForward: false,
+          updatedAt: now().toISOString(),
+        };
+      });
     },
 
     async closePreviewTab(input: { workspaceId: string; tabId: string }): Promise<{ closed: true }> {
       await deps.requireLocalWorkspace(input.workspaceId);
       return tabOps.run(input.tabId, async () => {
-        // Verify ownership within this workspace via list before issuing close
-        // so callers cannot close tabs in another workspace or probe arbitrary ids.
-        const listed = await runBridgeCall("tab", () =>
-          deps.requestPreviewOp<{ tabs?: unknown[] }>(
-            "list",
-            { workspaceId: input.workspaceId },
-            { timeoutMs: LIST_TIMEOUT_MS },
-          ),
-        );
-        const rawTabs = Array.isArray(listed?.tabs) ? listed.tabs : [];
-        const match = rawTabs.find((raw) => {
-          if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
-          const entry = raw as Record<string, unknown>;
-          return (
-            entry.workspaceId === input.workspaceId &&
-            typeof entry.id === "string" &&
-            entry.id.trim() === input.tabId
-          );
-        }) as Record<string, unknown> | undefined;
-        if (!match) {
-          throw new RemotePreviewError(ERR_PREVIEW_TAB_UNAVAILABLE);
-        }
-        if (match.url !== undefined && !sanitizeRemotePreviewUrl(match.url)) {
-          throw new RemotePreviewError(ERR_PREVIEW_SCHEME_DISALLOWED);
-        }
+        await assertAwakeAllowedTab(input.workspaceId, input.tabId);
         await runBridgeCall("tab", () =>
-          deps.requestPreviewOp(
-            "close",
-            { workspaceId: input.workspaceId, tabId: input.tabId },
-            { timeoutMs: CLOSE_TIMEOUT_MS },
-          ),
+          deps.requestPreviewOp("close", { workspaceId: input.workspaceId, tabId: input.tabId }, { timeoutMs: CLOSE_TIMEOUT_MS }),
         );
         viewportModes.delete(input.tabId);
         return { closed: true };

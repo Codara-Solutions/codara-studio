@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isRemotePath } from "@shared/remote";
 
 import * as pty from "../pty-manager";
 import { noteTerminalUserInput } from "../terminal-agent-notify";
@@ -87,12 +88,17 @@ export function studioPaneWatchedFromPhone(paneId: string): boolean {
 }
 
 /**
- * Read/write mirrors for terminals the user opened in Studio itself. The PTY
- * stays desktop-owned: detach and close only remove a phone subscriber, and a
- * phone resize is deliberately ignored so it cannot reflow the desktop TUI.
+ * Read/write mirrors for terminals the user opened in Studio itself. Detach
+ * only removes a phone subscriber, and phone resize is ignored so desktop TUI
+ * geometry stays authoritative. When `closeDesktopTab` is wired, explicit
+ * `close` from an attached phone closes only that backing desktop pane.
  */
 export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
   private readonly records = new Map<string, SharedStudioTerminal>();
+  // Panes currently closing or awaiting PTY teardown after a successful remote
+  // close, so concurrent inventory syncs cannot resurrect a dying pane.
+  private readonly closingPaneIds = new Set<string>();
+  private readonly closingPromises = new Map<string, Promise<void>>();
 
   constructor(private readonly options: StudioTerminalShareOptions = {}) {
     liveStores.add(new WeakRef(this));
@@ -250,38 +256,54 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
     // Desktop geometry remains authoritative for a borrowed terminal.
   }
 
-  close(
+  async close(
     ownerKey: string,
     terminalId: string,
     subscriberId: string,
     attachmentId: string,
     _requestId: string,
-  ): void {
+  ): Promise<void> {
     // Validate the caller's live attachment before detaching or closing so an
-    // unattached or stale client cannot close a desktop Studio tab.
+    // unattached or stale client cannot close a desktop Studio pane.
     const record = this.requireAttached(terminalId, subscriberId, attachmentId);
-    const { workspaceId, desktopTabId, desktopPaneId } = record.descriptor;
-    this.detach(ownerKey, terminalId, subscriberId, attachmentId);
     const closeDesktopTab = this.options.closeDesktopTab;
-    if (!closeDesktopTab) return;
-    try {
-      void Promise.resolve(
-        closeDesktopTab({ workspaceId, desktopTabId, desktopPaneId }),
-      ).catch((err) => {
-        this.options.log?.(
-          `studio terminal desktop tab close failed for ${terminalId}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      });
-    } catch (err) {
-      this.options.log?.(
-        `studio terminal desktop tab close threw for ${terminalId}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+    if (!closeDesktopTab) {
+      this.detach(ownerKey, terminalId, subscriberId, attachmentId);
+      return;
     }
-    this.recordExit(record);
+    const { workspaceId, desktopTabId, desktopPaneId } = record.descriptor;
+    const paneId = record.paneId;
+    const inFlight = this.closingPromises.get(paneId);
+    if (inFlight) {
+      await inFlight;
+      this.detach(ownerKey, terminalId, subscriberId, attachmentId);
+      return;
+    }
+    this.closingPaneIds.add(paneId);
+    const closeTask = (async () => {
+      try {
+        await closeDesktopTab({ workspaceId, desktopTabId, desktopPaneId });
+      } catch (err) {
+        if (pty.exists(paneId)) {
+          this.closingPaneIds.delete(paneId);
+          throw err;
+        }
+        // The PTY already exited while closing; finish teardown cleanly.
+      }
+      if (!pty.exists(paneId)) {
+        this.closingPaneIds.delete(paneId);
+      }
+      this.detach(ownerKey, terminalId, subscriberId, attachmentId);
+      this.recordExit(record);
+    })();
+    this.closingPromises.set(paneId, closeTask);
+    try {
+      await closeTask;
+    } finally {
+      if (this.closingPromises.get(paneId) === closeTask) {
+        this.closingPromises.delete(paneId);
+      }
+    }
   }
 
   revokeOwner(_ownerKey: string): void {
@@ -289,6 +311,8 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
   }
 
   shutdown(): void {
+    this.closingPaneIds.clear();
+    this.closingPromises.clear();
     for (const record of [...this.records.values()]) this.removeRecord(record);
   }
 
@@ -297,8 +321,18 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
     const resources = new Map(
       pty.resourceSnapshot().sessions.map((session) => [session.id, session]),
     );
+    for (const paneId of [...this.closingPaneIds]) {
+      if (!pty.exists(paneId)) this.closingPaneIds.delete(paneId);
+    }
     for (const item of inventory) {
       if (!item || typeof item.paneId !== "string" || !pty.exists(item.paneId)) {
+        continue;
+      }
+      if (this.closingPaneIds.has(item.paneId)) continue;
+      if (
+        resources.get(item.paneId)?.remote === true ||
+        (typeof item.cwd === "string" && isRemotePath(item.cwd))
+      ) {
         continue;
       }
       const terminalId = this.terminalIdForPane(item.paneId);
