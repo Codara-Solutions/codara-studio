@@ -131,8 +131,8 @@ test("an idle Claude pane in a background workspace sleeps, shows its card, and 
     // memory test and the unit tests pin the figure itself): the card says
     // what the log says, and nothing when the log has no figure.
     const sleptLine = logs.find((line) => line.includes(`pane=${PANE_ID} claude is sleeping`)) ?? "";
-    if (/freed \d+ MB/.test(sleptLine)) await expect(sleepingCard(page)).toContainText(/\d+ MB freed/);
-    else await expect(sleepingCard(page)).not.toContainText(/MB freed/);
+    if (/freed \d+ MB/.test(sleptLine)) await expect(sleepingCard(page)).toContainText(/freed \d+ MB/);
+    else await expect(sleepingCard(page)).not.toContainText(/freed \d+ MB/);
     await expectNoLaunchFor(fixture, 1, TICK_MS * 3);
 
     // Resume brings the same session back in the same pane.
@@ -199,7 +199,8 @@ test("an agent restored into a background workspace at launch can sleep too", as
     await page.locator('[data-workspace-id="ws-a"]').evaluate((row) => (row as HTMLElement).click());
     await expect(sleepingCard(page)).toBeVisible();
     await expectNoLaunchFor(fixture, 1, TICK_MS * 2);
-    await pane(page).locator(".xterm").first().click();
+    // Off the centred pill: the scrim lets the click reach the terminal.
+    await pane(page).locator(".xterm").first().click({ position: { x: 24, y: 24 } });
     await page.keyboard.press("Shift");
     await expectNoLaunchFor(fixture, 1, 500);
     await page.keyboard.press("Enter");
@@ -553,6 +554,74 @@ test("Sleep now says why it leaves an agent running, then puts it to sleep at on
   }
 });
 
+test("a sleeping pane shows the moon and one pill centred at any size, and Shift+click resumes and keeps it running", { tag: "@ci" }, async () => {
+  test.setTimeout(TEST_TIMEOUT);
+  const fixture = await prepareFixture("repaint", { hooks: true, withShellPane: true });
+  const { app, page, logs } = await launch(fixture, { env: { CODARA_E2E_HIBERNATION_IDLE_MS: String(60 * 60_000) } });
+  const shots = process.env.CODARA_E2E_SLEEP_NOW_SHOTS;
+  try {
+    const [first] = await waitForLaunches(fixture, 1);
+    const sleepNow = pane(page).getByRole("button", { name: "Sleep now" });
+    await expect(sleepNow).toBeAttached({ timeout: 30_000 });
+    // Until its first hook arrives the agent is known from its screen alone,
+    // and Sleep now leaves it running while it repaints: press again, as a
+    // user would, until it sleeps.
+    await expect(async () => {
+      if ((await sleepingChip(page).count()) === 0) await sleepNow.evaluate((button) => (button as HTMLElement).click());
+      await expect(sleepingChip(page)).toHaveAttribute("aria-label", "CLAUDE sleeping", { timeout: 3_000 });
+    }).toPass({ timeout: 30_000 });
+    expect(
+      logs.filter((line) => line.includes(`pane=${PANE_ID} Sleep now refused:`)).every((line) => /recent-output \(output \d+s ago\)|in-flight/.test(line)),
+      logs.join("\n"),
+    ).toBe(true);
+    await expectAsleep(page, logs, first);
+    await expect(sleepingCard(page)).toBeVisible();
+
+    // The output stays under a scrim that lets the wheel through.
+    const scrim = pane(page).getByTestId("pane-sleeping-scrim");
+    await expect(scrim).toHaveCSS("pointer-events", "none");
+
+    const offCentre = async () => {
+      const box = await pane(page).boundingBox();
+      const card = await sleepingCard(page).boundingBox();
+      const pill = await pane(page).getByTestId("pane-sleeping-pill").boundingBox();
+      if (!box || !card || !pill) throw new Error("no boxes");
+      return {
+        width: box.width,
+        x: Math.abs(card.x + card.width / 2 - (box.x + box.width / 2)),
+        y: Math.abs(card.y + card.height / 2 - (box.y + box.height / 2)),
+        pillX: Math.abs(pill.x + pill.width / 2 - (box.x + box.width / 2)),
+      };
+    };
+    const atFirst = await offCentre();
+    expect(Math.max(atFirst.x, atFirst.y, atFirst.pillX), JSON.stringify(atFirst)).toBeLessThanOrEqual(2);
+    if (shots) await shootBothThemes(page, shots, "pill-split");
+
+    // Another size: the window changes, the pane with it, the pill follows.
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1100, 760));
+    await expect
+      .poll(async () => Math.abs((await offCentre()).width - atFirst.width), { timeout: 10_000 })
+      .toBeGreaterThan(50);
+    await page.waitForTimeout(300);
+    const atSecond = await offCentre();
+    expect(Math.max(atSecond.x, atSecond.y, atSecond.pillX), JSON.stringify(atSecond)).toBeLessThanOrEqual(2);
+    if (shots) await shootBothThemes(page, shots, "pill-split-larger");
+
+    // Shift+click on Resume: resumes and pins Keep running.
+    const resume = sleepingCard(page).getByTestId("pane-resume");
+    await expect(resume).toHaveAttribute("title", "Resume. Shift+click: resume and never let it sleep on its own");
+    await resume.click({ modifiers: ["Shift"] });
+    await waitForLaunches(fixture, 2);
+    await expect(sleepingCard(page)).toHaveCount(0, { timeout: 30_000 });
+    await expect(pane(page).getByRole("button", { name: "Keep running" })).toHaveAttribute("aria-pressed", "true", {
+      timeout: 15_000,
+    });
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
 test("a sleeping agent's whole process tree is gone and the memory it held is reported", { tag: "@ci" }, async () => {
   test.setTimeout(TEST_TIMEOUT);
   // The agent pane sits beside a shell that has the keyboard, so it sleeps
@@ -583,7 +652,12 @@ test("a sleeping agent's whole process tree is gone and the memory it held is re
     const line = logs.find((entry) => entry.includes(`pane=${PANE_ID} claude is sleeping`)) ?? "";
     const freedMb = Number(/freed (\d+) MB/.exec(line)?.[1] ?? 0);
     expect(freedMb, line).toBeGreaterThanOrEqual(AGENT_HOLD_MB + CHILD_HOLD_MB);
-    await expect(sleepingCard(page)).toContainText(/\d+ MB freed/);
+    // The pane is a half split: the pill may leave the figure out, its
+    // tooltip never does.
+    const pill = pane(page).getByTestId("pane-sleeping-pill");
+    await expect
+      .poll(async () => `${await pill.textContent()} ${(await pill.getAttribute("title")) ?? ""}`)
+      .toContain(`freed ${freedMb} MB`);
 
     // What Studio itself keeps for the sleeping pane: main does not grow by
     // more than noise (the census once left ~150 MB of buffers there).
