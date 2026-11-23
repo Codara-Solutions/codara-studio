@@ -66,6 +66,20 @@ import {
 } from "./remote-cora-contract";
 import type { RemoteWorkerTerminalControlStore } from "./worker-terminal-controls";
 import { MAX_REMOTE_TERMINALS_PER_DEVICE } from "./terminal-leases";
+import {
+  isValidRemotePreviewInteractAction,
+  type RemotePreviewInteractAction,
+  type RemotePreviewScreenshot,
+  type RemotePreviewTab,
+  type RemotePreviewViewportMode,
+} from "./preview-policy";
+
+export type {
+  RemotePreviewInteractAction,
+  RemotePreviewScreenshot,
+  RemotePreviewTab,
+  RemotePreviewViewportMode,
+};
 
 /* -------------------------------------------------------------------------- */
 /* Wire types (mirror of codara-mobile src/lib/remote/types.ts)               */
@@ -1247,7 +1261,13 @@ export interface RemoteTerminalHandle {
 
 // A server-owned launch profile: the phone names one, Studio picks the
 // command (terminal-launch.ts), so no command line ever crosses the wire.
-export type RemoteTerminalProfile = "shell" | "claude" | "codex" | "grok" | "pi";
+export type RemoteTerminalProfile =
+  | "shell"
+  | "claude"
+  | "codex"
+  | "grok"
+  | "pi"
+  | "antigravity";
 
 const REMOTE_TERMINAL_PROFILES: readonly string[] = [
   "shell",
@@ -1255,9 +1275,10 @@ const REMOTE_TERMINAL_PROFILES: readonly string[] = [
   "codex",
   "grok",
   "pi",
+  "antigravity",
 ] satisfies readonly RemoteTerminalProfile[];
 
-function isRemoteTerminalProfile(value: unknown): value is RemoteTerminalProfile {
+export function isRemoteTerminalProfile(value: unknown): value is RemoteTerminalProfile {
   return typeof value === "string" && REMOTE_TERMINAL_PROFILES.includes(value);
 }
 
@@ -1527,6 +1548,19 @@ export interface RemoteRpcServices {
   beginImageUpload?(
     input: RemoteImageUploadRequest,
   ): Promise<RemoteImageUploadHandle>;
+  listPreviewTabs?(workspaceId: string): Promise<RemotePreviewTab[]>;
+  capturePreviewScreenshot?(input: {
+    workspaceId: string;
+    tabId: string;
+  }): Promise<RemotePreviewScreenshot>;
+  interactPreviewTab?(input: {
+    workspaceId: string;
+    tabId: string;
+    action: RemotePreviewInteractAction;
+  }): Promise<RemotePreviewScreenshot>;
+  // Spends one browser preview action from the authenticated phone's budget;
+  // false when it is empty. Keyed by the Noise peer key in RemoteAccessService.
+  allowPreviewAction?(): boolean;
   attachWorkerTerminal?(
     request: RemoteWorkerTerminalOpenRequest,
   ): Promise<RemoteTerminalHandle>;
@@ -4437,6 +4471,172 @@ export class RpcSession {
             this.reply(id, {});
           });
           return;
+        case "preview.list": {
+          if (!this.services.listPreviewTabs) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Browser preview is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown };
+          if (
+            !isPlainRecord(params) ||
+            !hasExactlyKeys(params, ["workspaceId"]) ||
+            !isBoundedString(p.workspaceId, 256)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "preview.list needs workspaceId.",
+            );
+            return;
+          }
+          try {
+            const tabs = await this.services.listPreviewTabs(p.workspaceId);
+            const result = { tabs };
+            if (jsonUtf8Bytes(result) > MAX_FRAME_BYTES - 4096) {
+              this.replyError(
+                id,
+                "message-too-large",
+                "Browser preview tab list exceeded the remote transfer limit.",
+              );
+              return;
+            }
+            this.reply(id, result);
+          } catch (err) {
+            this.replyPreviewError(
+              id,
+              err,
+              "Could not list browser preview tabs.",
+            );
+          }
+          return;
+        }
+        case "preview.screenshot": {
+          if (!this.services.capturePreviewScreenshot) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Browser preview is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            tabId?: unknown;
+          };
+          if (
+            !isPlainRecord(params) ||
+            !hasExactlyKeys(params, ["workspaceId", "tabId"]) ||
+            !isBoundedString(p.workspaceId, 256) ||
+            !isBoundedString(p.tabId, 128)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "preview.screenshot needs workspaceId and tabId.",
+            );
+            return;
+          }
+          if (
+            this.services.allowPreviewAction &&
+            !this.services.allowPreviewAction()
+          ) {
+            this.replyError(
+              id,
+              "rate-limited",
+              "Browser preview requests are arriving too quickly. Try again shortly.",
+            );
+            return;
+          }
+          try {
+            const result = await this.services.capturePreviewScreenshot({
+              workspaceId: p.workspaceId,
+              tabId: p.tabId,
+            });
+            if (jsonUtf8Bytes(result) > MAX_FRAME_BYTES - 4096) {
+              this.replyError(
+                id,
+                "message-too-large",
+                "Browser preview frame exceeded the remote transfer limit.",
+              );
+              return;
+            }
+            this.reply(id, result);
+          } catch (err) {
+            this.replyPreviewError(
+              id,
+              err,
+              "Could not capture the browser preview.",
+            );
+          }
+          return;
+        }
+        case "preview.interact": {
+          if (!this.services.interactPreviewTab) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Browser preview is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            tabId?: unknown;
+            action?: unknown;
+          };
+          if (
+            !isPlainRecord(params) ||
+            !hasExactlyKeys(params, ["workspaceId", "tabId", "action"]) ||
+            !isBoundedString(p.workspaceId, 256) ||
+            !isBoundedString(p.tabId, 128) ||
+            !isValidRemotePreviewInteractAction(p.action)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "preview.interact needs workspaceId, tabId, and a valid action.",
+            );
+            return;
+          }
+          if (
+            this.services.allowPreviewAction &&
+            !this.services.allowPreviewAction()
+          ) {
+            this.replyError(
+              id,
+              "rate-limited",
+              "Browser preview requests are arriving too quickly. Try again shortly.",
+            );
+            return;
+          }
+          try {
+            const result = await this.services.interactPreviewTab({
+              workspaceId: p.workspaceId,
+              tabId: p.tabId,
+              action: p.action,
+            });
+            if (jsonUtf8Bytes(result) > MAX_FRAME_BYTES - 4096) {
+              this.replyError(
+                id,
+                "message-too-large",
+                "Browser preview frame exceeded the remote transfer limit.",
+              );
+              return;
+            }
+            this.reply(id, result);
+          } catch (err) {
+            this.replyPreviewError(
+              id,
+              err,
+              "Could not interact with the browser preview.",
+            );
+          }
+          return;
+        }
         default:
           this.replyError(id, "unknown-method", `Unknown method: ${method}`);
           return;
@@ -5416,6 +5616,24 @@ export class RpcSession {
     const owned = this.services.terminalLeases;
     if (!owned) throw new Error("Terminal reconnection is not available.");
     return owned;
+  }
+
+  private replyPreviewError(
+    id: number,
+    err: unknown,
+    fallback: string,
+  ): void {
+    const raw = err instanceof Error ? err.message : "";
+    const cleaned = raw
+      .replace(/[\r\n\t]+/g, " ")
+      .replace(/[\x00-\x1f\x7f]/g, "")
+      .trim();
+    const message = cleaned ? cleaned.slice(0, 240) : fallback;
+    if (/^Unknown workspace:/i.test(message)) {
+      this.replyError(id, "unknown-workspace", message);
+      return;
+    }
+    this.replyError(id, "internal", message);
   }
 
   private withTerminal(

@@ -11,7 +11,7 @@ import { readGitHubReviewPage, submitGitHubReview } from "../github-review";
 // remote-access/ allowed to import the rest of the main process; everything
 // else stays plain Node so tests and the e2e harness can run it directly.
 
-import { BrowserWindow, app, shell } from "electron";
+import { BrowserWindow, app, nativeImage, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { open, readdir, realpath } from "node:fs/promises";
@@ -141,6 +141,8 @@ import {
   onStudioTerminalInventoryChanged,
   requestTerminalOp,
 } from "../terminal-bridge";
+import { requestPreviewOp } from "../preview-bridge";
+import { resolvePreviewGuest } from "../browser/preview-guest";
 import {
   deleteWorkerSession as deleteLocalWorkerSession,
   listWorkerSessions as listLocalWorkerSessions,
@@ -192,6 +194,18 @@ import {
   remoteTerminalLaunchCommand,
   remoteTerminalProfileLabel,
 } from "./terminal-launch";
+import {
+  encodeBoundedPreviewJpeg,
+  mapNormalizedPreviewClick,
+  MAX_REMOTE_PREVIEW_TITLE_BYTES,
+  projectRemotePreviewTabs,
+  REMOTE_PREVIEW_VIEWPORTS,
+  sanitizeRemotePreviewUrl,
+  type RemotePreviewInteractAction,
+  type RemotePreviewScreenshot,
+  type RemotePreviewTab,
+  type RemotePreviewViewportMode,
+} from "./preview-policy";
 import {
   isStudioExplorerIgnoredDirectory,
   phoneWorkspaceRefusal,
@@ -273,6 +287,9 @@ let workspaceMutation: Promise<void> = Promise.resolve();
 const coraRunMutations = new KeyedSerialQueue();
 const fileMutations = new KeyedSerialQueue();
 const capabilityMutations = new KeyedSerialQueue();
+const previewTabOps = new KeyedSerialQueue();
+const MAX_PREVIEW_VIEWPORT_MODES = 256;
+const previewViewportModes = new Map<string, RemotePreviewViewportMode>();
 let lastRemoteImagePruneAt = 0;
 
 // DTO budgets deliberately leave generous headroom under the 1 MiB frame
@@ -413,6 +430,9 @@ export function getRemoteAccessService(): RemoteAccessService {
       registerNotifications: registerNotificationsForRemote,
       listNotificationHistory: (devicePublicKey) => getPhoneNotifyStore().listHistory(devicePublicKey),
       beginImageUpload: beginImageUploadForRemote,
+      listPreviewTabs: listPreviewTabsForRemote,
+      capturePreviewScreenshot: capturePreviewScreenshotForRemote,
+      interactPreviewTab: interactPreviewTabForRemote,
       attachWorkerTerminal: attachRemoteWorkerTerminal,
       studioTerminalLeases: new StudioTerminalShareStore({
         onTerminalsChanged: scheduleTerminalsChangedPush,
@@ -4043,4 +4063,230 @@ async function createRemoteTerminal(
     },
     close: closeVisibleTerminal,
   };
+}
+
+function rememberPreviewViewportMode(
+  tabId: string,
+  mode: RemotePreviewViewportMode,
+): void {
+  previewViewportModes.delete(tabId);
+  previewViewportModes.set(tabId, mode);
+  while (previewViewportModes.size > MAX_PREVIEW_VIEWPORT_MODES) {
+    const oldest = previewViewportModes.keys().next().value;
+    if (typeof oldest !== "string") break;
+    previewViewportModes.delete(oldest);
+  }
+}
+
+async function listPreviewTabsForRemote(
+  workspaceId: string,
+): Promise<RemotePreviewTab[]> {
+  await requireLocalWorkspace(workspaceId);
+  const result = await requestPreviewOp<{ tabs?: unknown[] }>(
+    "list",
+    { workspaceId },
+    { timeoutMs: 5_000 },
+  );
+  return projectRemotePreviewTabs(
+    Array.isArray(result?.tabs) ? result.tabs : [],
+    workspaceId,
+    previewViewportModes,
+  );
+}
+
+async function captureSanitizedPreviewTab(
+  workspaceId: string,
+  tabId: string,
+): Promise<RemotePreviewScreenshot> {
+  const { wc, info } = await resolvePreviewGuest({ tabId, workspaceId });
+  if (info.workspaceId !== workspaceId) {
+    throw new Error("Browser tab is not in this workspace.");
+  }
+  const preUrl = sanitizeRemotePreviewUrl(wc.getURL() || info.url);
+  if (!preUrl) {
+    throw new Error(
+      "Only http and https browser preview tabs can be viewed remotely.",
+    );
+  }
+  const raw = await requestPreviewOp<{
+    dataUrl: string;
+    url?: string;
+    title?: string;
+  }>(
+    "screenshot",
+    { tabId, workspaceId },
+    { timeoutMs: 12_000 },
+  );
+  // Post-capture URL check defends against a tab navigating off http/https
+  // between guest resolution and frame capture.
+  const liveUrl = !wc.isDestroyed() ? wc.getURL() : "";
+  const finalUrl = sanitizeRemotePreviewUrl(raw?.url || liveUrl || preUrl);
+  if (!finalUrl || (liveUrl && !sanitizeRemotePreviewUrl(liveUrl))) {
+    throw new Error(
+      "Only http and https browser preview tabs can be viewed remotely.",
+    );
+  }
+  if (
+    !raw ||
+    typeof raw.dataUrl !== "string" ||
+    !raw.dataUrl.startsWith("data:image/")
+  ) {
+    throw new Error("Browser preview capture returned no image data.");
+  }
+  const image = nativeImage.createFromDataURL(raw.dataUrl);
+  const encoded = encodeBoundedPreviewJpeg(image);
+  let loading = false;
+  let canGoBack = false;
+  let canGoForward = false;
+  let liveTitle = "";
+  if (!wc.isDestroyed()) {
+    loading = wc.isLoading();
+    canGoBack = wc.navigationHistory.canGoBack();
+    canGoForward = wc.navigationHistory.canGoForward();
+    liveTitle = wc.getTitle() || "";
+  }
+  const rawTitle =
+    (typeof raw.title === "string" && raw.title.trim()) ||
+    liveTitle.trim() ||
+    finalUrl;
+  const viewportMode = previewViewportModes.get(tabId);
+  return {
+    tabId,
+    workspaceId,
+    title: truncateUtf8(rawTitle, MAX_REMOTE_PREVIEW_TITLE_BYTES),
+    url: finalUrl,
+    loading,
+    canGoBack,
+    canGoForward,
+    ...(viewportMode ? { viewportMode } : {}),
+    screenshotDataUrl: encoded.dataUrl,
+    width: encoded.width,
+    height: encoded.height,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function capturePreviewScreenshotForRemote(input: {
+  workspaceId: string;
+  tabId: string;
+}): Promise<RemotePreviewScreenshot> {
+  await requireLocalWorkspace(input.workspaceId);
+  return previewTabOps.run(input.tabId, () =>
+    captureSanitizedPreviewTab(input.workspaceId, input.tabId),
+  );
+}
+
+async function interactPreviewTabForRemote(input: {
+  workspaceId: string;
+  tabId: string;
+  action: RemotePreviewInteractAction;
+}): Promise<RemotePreviewScreenshot> {
+  await requireLocalWorkspace(input.workspaceId);
+  return previewTabOps.run(input.tabId, async () => {
+    const { wc, info } = await resolvePreviewGuest({
+      tabId: input.tabId,
+      workspaceId: input.workspaceId,
+    });
+    if (info.workspaceId !== input.workspaceId) {
+      throw new Error("Browser tab is not in this workspace.");
+    }
+    const preUrl = sanitizeRemotePreviewUrl(wc.getURL() || info.url);
+    if (!preUrl) {
+      throw new Error(
+        "Only http and https browser preview tabs can be viewed remotely.",
+      );
+    }
+    switch (input.action.kind) {
+      case "click": {
+        const maybeGetBounds = (
+          wc as { getBounds?: () => { width: number; height: number } }
+        ).getBounds;
+        const fallbackBounds =
+          typeof maybeGetBounds === "function" ? maybeGetBounds.call(wc) : null;
+        const viewport =
+          info.viewport &&
+          info.viewport.width > 0 &&
+          info.viewport.height > 0
+            ? info.viewport
+            : fallbackBounds &&
+                fallbackBounds.width > 0 &&
+                fallbackBounds.height > 0
+              ? fallbackBounds
+              : null;
+        if (!viewport) {
+          throw new Error("Browser viewport size is unavailable.");
+        }
+        const point = mapNormalizedPreviewClick(
+          input.action.x,
+          input.action.y,
+          viewport.width,
+          viewport.height,
+        );
+        const zoom = wc.getZoomFactor() || 1;
+        const x = Math.round(point.x * zoom);
+        const y = Math.round(point.y * zoom);
+        wc.sendInputEvent({ type: "mouseMove", x, y });
+        wc.sendInputEvent({
+          type: "mouseDown",
+          x,
+          y,
+          button: "left",
+          clickCount: 1,
+        });
+        wc.sendInputEvent({
+          type: "mouseUp",
+          x,
+          y,
+          button: "left",
+          clickCount: 1,
+        });
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 180));
+        break;
+      }
+      case "reload": {
+        let timer: NodeJS.Timeout | undefined;
+        let finish = (): void => {};
+        const waitForSettle = new Promise<void>((resolvePromise) => {
+          let settled = false;
+          finish = (): void => {
+            if (settled) return;
+            settled = true;
+            resolvePromise();
+          };
+          timer = setTimeout(finish, 1_500);
+          wc.once("did-stop-loading", finish);
+          wc.once("did-fail-load", finish);
+          wc.once("destroyed", finish);
+        });
+        try {
+          if (!wc.isDestroyed()) wc.reload();
+          else finish();
+          await waitForSettle;
+        } finally {
+          if (timer) clearTimeout(timer);
+          wc.removeListener("did-stop-loading", finish);
+          wc.removeListener("did-fail-load", finish);
+          wc.removeListener("destroyed", finish);
+        }
+        break;
+      }
+      case "viewport": {
+        const size = REMOTE_PREVIEW_VIEWPORTS[input.action.mode];
+        await requestPreviewOp(
+          "resize",
+          {
+            tabId: input.tabId,
+            workspaceId: input.workspaceId,
+            width: size.width,
+            height: size.height,
+          },
+          { timeoutMs: 8_000 },
+        );
+        rememberPreviewViewportMode(input.tabId, input.action.mode);
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+        break;
+      }
+    }
+    return captureSanitizedPreviewTab(input.workspaceId, input.tabId);
+  });
 }

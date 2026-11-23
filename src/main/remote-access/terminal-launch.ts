@@ -22,6 +22,8 @@ export function remoteTerminalLaunchCommand(
       return "grok --yolo";
     case "pi":
       return "pi";
+    case "antigravity":
+      return "agy";
     case "shell":
       return undefined;
   }
@@ -37,6 +39,8 @@ export function remoteTerminalProfileLabel(profile: RemoteTerminalProfile): stri
       return "Grok";
     case "pi":
       return "Pi";
+    case "antigravity":
+      return "Antigravity";
     case "shell":
       return "Terminal";
   }

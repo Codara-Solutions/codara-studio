@@ -102,6 +102,7 @@ async function main() {
       ["codex", sessionId, desktop.buildCodexResumeCommand(sessionId)],
       ["grok", undefined, desktop.GROK_LAUNCH_COMMAND],
       ["pi", undefined, desktop.PI_LAUNCH_COMMAND],
+      ["antigravity", undefined, desktop.ANTIGRAVITY_LAUNCH_COMMAND],
     ];
     for (const [profile, resume, expected] of pairs) {
       const actual = phone.remoteTerminalLaunchCommand(profile, resume);
@@ -116,8 +117,9 @@ async function main() {
       phone.remoteTerminalLaunchCommand("shell") === undefined,
     );
     check(
-      "Pi is labelled for the desktop tab title",
+      "Pi and Antigravity are labelled for the desktop tab title",
       phone.remoteTerminalProfileLabel("pi") === "Pi" &&
+        phone.remoteTerminalProfileLabel("antigravity") === "Antigravity" &&
         phone.remoteTerminalProfileLabel("shell") === "Terminal",
     );
 
@@ -163,6 +165,12 @@ async function main() {
       pi?.ok === true && created.at(-1)?.profile === "pi",
       pi,
     );
+    const antigravity = await create({ profile: "antigravity" });
+    check(
+      "terminal.create accepts the antigravity profile",
+      antigravity?.ok === true && created.at(-1)?.profile === "antigravity",
+      antigravity,
+    );
     for (const profile of ["shell", "claude", "codex", "grok"]) {
       const reply = await create({ profile });
       check(
@@ -171,7 +179,7 @@ async function main() {
         reply,
       );
     }
-    for (const profile of ["bash", "pi --yolo", "claude --dangerously-skip-permissions", ""]) {
+    for (const profile of ["bash", "pi --yolo", "agy --continue", "claude --dangerously-skip-permissions", ""]) {
       const before = created.length;
       const reply = await create({ profile });
       check(
@@ -185,6 +193,12 @@ async function main() {
       "a Pi terminal cannot ask Studio to resume a session",
       piResume?.error?.code === "invalid-params",
       piResume,
+    );
+    const antigravityResume = await create({ profile: "antigravity", resumeSessionId: "session-1" });
+    check(
+      "an Antigravity terminal cannot ask Studio to resume a session",
+      antigravityResume?.error?.code === "invalid-params",
+      antigravityResume,
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
