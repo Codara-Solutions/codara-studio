@@ -372,7 +372,7 @@ async function main() {
   r = await run((t) => {
     t.state.duringList = (s) => { s.session = { ...s.session, generationId: "gen-2" }; };
   });
-  check("a pane respawned while listing is not stopped", r.result.reason === "no-session" && r.calls.stop.length === 0);
+  check("a pane respawned while listing is not stopped", r.result.reason === "respawned" && r.calls.stop.length === 0);
   r = await run((t) => {
     t.state.duringList = (s) => { s.evidence = { ...s.evidence, lastUserInputAt: NOW, lastComposerEditAt: NOW, lastSubmitAt: NOW }; };
   });
@@ -484,6 +484,116 @@ async function main() {
       s.describe(T0 + 7 * 24 * 60 * MIN + MARGIN - 1) !== null && s.describe(T0 + 7 * 24 * 60 * MIN + MARGIN) === null,
     );
     check("cron: nonsense", fire("every day", T0) === null && fire("61 * * * *", T0) === null);
+  }
+
+  // ── Sleep now (manual) ──
+  {
+    const manual = (extra = {}) => request({ placement: "visible", manual: true, ...extra });
+    const fresh = (t) => {
+      t.state.session = { ...t.state.session, lastInputAt: NOW - 5_000, lastOutputAt: NOW - 1_000 };
+      Object.assign(t.state.evidence, {
+        lastUserInputAt: NOW - 5_000,
+        lastComposerEditAt: NOW - 5_000,
+        lastSubmitAt: NOW - 5_000,
+        lastOutputAt: NOW - 1_000,
+        structured: true,
+        settledAt: NOW - 5_000,
+      });
+    };
+    r = await run(fresh, manual());
+    check("Sleep now skips the idle clock", r.result.ok === true && r.calls.stop.length === 1, r.result);
+    r = await run(fresh);
+    check("the timer still waits for the clock", r.result.ok === false && r.calls.stop.length === 0, r.result);
+    r = await run((t) => { t.deps.policy = async () => ({ idleMs: 0, workspaceIdleMs: {}, tickMs: MIN, memoryLevel: "ok" }); }, manual());
+    check("Sleep now works with hibernation off", r.result.ok === true, r.result);
+    r = await run((t) => { t.deps.policy = async () => ({ idleMs: 30 * MIN, workspaceIdleMs: { w1: 0 }, tickMs: MIN, memoryLevel: "ok" }); t.deps.placement = () => ({ workspaceId: "w1" }); }, manual());
+    check("Sleep now works in a workspace set to Never", r.result.ok === true, r.result);
+    r = await run((t) => { t.state.evidence.state = "working"; t.state.evidence.chipState = "working"; t.state.evidence.turnActive = true; }, manual());
+    check("Sleep now leaves a working agent running", r.result.reason === "agent-busy" && r.calls.stop.length === 0, r.result);
+    r = await run((t) => { t.state.evidence.lastComposerEditAt = NOW - 1_000; }, manual());
+    check("Sleep now leaves unsent text alone", r.result.reason === "unsent-input" && r.calls.stop.length === 0, r.result);
+    r = await run((t) => { t.state.processes = [...t.state.processes, { pid: 103, parentPid: 100, startMs: NOW - 300 * MIN, command: "node vite" }]; }, manual());
+    check("Sleep now refuses another program in the terminal", r.result.reason === "other-processes" && r.calls.stop.length === 0, r.result);
+    r = await run((t) => { t.state.session = { ...t.state.session, remote: true }; }, manual());
+    check("Sleep now refuses a remote pane", r.result.reason === "remote" && r.calls.stop.length === 0, r.result);
+    // Known only from its screen: a working frame the patterns missed looks
+    // like idle output, so output in the last seconds keeps it running.
+    r = await run((t) => { fresh(t); Object.assign(t.state.evidence, { structured: false, settledAt: 0 }); }, manual());
+    check(
+      "Sleep now leaves a screen-only agent that printed a moment ago running",
+      r.result.reason === "recent-output" && /^output 1s ago$/.test(r.result.detail ?? "") && r.calls.stop.length === 0,
+      r.result,
+    );
+    r = await run((t) => {
+      fresh(t);
+      Object.assign(t.state.evidence, { structured: false, settledAt: 0, lastOutputAt: NOW - 10_000 });
+      t.state.session = { ...t.state.session, lastOutputAt: NOW - 10_000 };
+    }, manual());
+    check("and puts it to sleep once it has been quiet a few seconds", r.result.ok === true, r.result);
+
+    // A held census verdict is not reused: the dev server may have ended.
+    ah.resetAgentHibernationForTests();
+    const t = makeDeps();
+    const lone = t.state.processes;
+    t.state.processes = [...lone, { pid: 103, parentPid: 100, startMs: NOW - 300 * MIN, command: "node vite" }];
+    await ah.hibernateAgentPane(request(), t.deps);
+    t.state.processes = lone;
+    const now = await ah.hibernateAgentPane(manual(), t.deps);
+    check("Sleep now takes a fresh census", now.ok === true && t.calls.list === 2, { now, list: t.calls.list });
+
+    // The timer's decision in flight: Sleep now waits for it.
+    ah.resetAgentHibernationForTests();
+    const w = makeDeps();
+    let release;
+    w.deps.listProcesses = () => new Promise((resolve) => { release = () => resolve(w.state.processes); });
+    const timer = ah.hibernateAgentPane(request(), w.deps);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const pressed = ah.hibernateAgentPane(manual(), w.deps);
+    release();
+    const [timerResult, pressedResult] = await Promise.all([timer, pressed]);
+    check(
+      "Sleep now during the timer's decision answers with its sleep, one stop",
+      timerResult.ok === true && pressedResult.ok === true && w.calls.stop.length === 1,
+      { timerResult, pressedResult, stops: w.calls.stop.length },
+    );
+
+    // A timer request that starts while Sleep now reads the settings: Sleep
+    // now still sees it and waits for it, one decision, one stop.
+    ah.resetAgentHibernationForTests();
+    const raced = makeDeps();
+    const policyOf = raced.deps.policy;
+    let policyCalls = 0;
+    raced.deps.policy = async () => {
+      policyCalls += 1;
+      if (policyCalls === 1) await new Promise((resolve) => setTimeout(resolve, 20));
+      return policyOf();
+    };
+    // The timer's census is still running when Sleep now's read returns.
+    const listOf = raced.deps.listProcesses;
+    raced.deps.listProcesses = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return listOf();
+    };
+    const byHand = ah.hibernateAgentPane(manual(), raced.deps);
+    const byTimer = ah.hibernateAgentPane(request(), raced.deps);
+    const [handResult, timerOutcome] = await Promise.all([byHand, byTimer]);
+    check(
+      "a timer request during Sleep now's settings read is waited for, not raced",
+      handResult.ok === true && timerOutcome.ok === true && raced.calls.stop.length === 1,
+      { handResult, timerOutcome, stops: raced.calls.stop.length },
+    );
+
+    const said = [];
+    ah.resetAgentHibernationForTests();
+    const logged = makeDeps({ log: (line) => said.push(line) });
+    logged.state.evidence.lastComposerEditAt = NOW - 1_000;
+    await ah.hibernateAgentPane(manual(), logged.deps);
+    await ah.hibernateAgentPane(manual(), logged.deps);
+    check("each refusal of Sleep now is logged", said.length === 2 && said[0] === "pane=pane-1 Sleep now refused: unsent-input", said);
+    said.length = 0;
+    logged.state.evidence.lastComposerEditAt = NOW - 90 * MIN;
+    await ah.hibernateAgentPane(manual(), logged.deps);
+    check("and a sleep by hand says so", /^pane=pane-1 claude is sleeping \(visible, Sleep now, census/.test(said[0] ?? ""), said);
   }
 
   // ── Census backoff ──
@@ -869,11 +979,29 @@ async function main() {
     notify.noteTerminalHookEvent("n2", "PreToolUse", { session_id: "s-1", tool_name: "Bash", tool_input: { command: "ls" } });
     notify.noteTerminalHookEvent("n2", "Notification", { session_id: "s-1", notification_type: "permission_prompt", message: "ok?" });
     await new Promise((resolve) => setTimeout(resolve, 2));
+    const asked = notify.terminalAgentHibernationEvidence("n2");
+    notify.noteTerminalUserInput("n2", "2");
+    ev = notify.terminalAgentHibernationEvidence("n2");
+    check(
+      "a key that answers a dialog is input, not text in the box",
+      asked.state === "blocked" && ev.lastUserInputAt > asked.lastUserInputAt && ev.lastComposerEditAt === asked.lastComposerEditAt,
+      { asked, ev },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 2));
     notify.noteTerminalUserInput("n2", "\x03");
     ev = notify.terminalAgentHibernationEvidence("n2");
     check("Ctrl+C in a permission dialog clears nothing", ev.lastComposerClearAt < ev.lastComposerEditAt, ev);
     notify.noteTerminalHookEvent("n2", "PostToolUse", { session_id: "s-1", tool_name: "Bash" });
     notify.noteTerminalHookEvent("n2", "Stop", { session_id: "s-1" });
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const answered = notify.terminalAgentHibernationEvidence("n2");
+    notify.noteTerminalUserInput("n2", "then this");
+    ev = notify.terminalAgentHibernationEvidence("n2");
+    check(
+      "once the dialog is gone, typing is text in the box again",
+      answered.state !== "blocked" && ev.lastComposerEditAt > answered.lastComposerEditAt,
+      { answered, ev },
+    );
   }
   {
     // Work scheduled for later: a /loop's ScheduleWakeup and cron jobs leave

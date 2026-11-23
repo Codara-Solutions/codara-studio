@@ -1194,6 +1194,35 @@ own sleeping tab card (`bp-asleep`).
 - The waking key is swallowed, never typed into the shell that comes up.
 - A failed resume stays on the card, in the danger color, with Try again.
 
+**Sleep now (2026-11-23):** the pane toolbar has a moon button, **Sleep now**,
+just left of the sun (Keep running). The owner asked for it on 2026-11-23:
+"we should add an icon here to manually make them go to sleep! and making
+them go to sleep should save memory! not use more!" It stops the pane's agent
+at once and the pane shows its card, as the idle timer would.
+
+- Only on a pane holding a resumable session of an agent that can sleep
+  (Claude, Codex, Grok, Pi) and not asleep already; never on a Cora worker or
+  a phone pane.
+- No idle clock, no idle-time setting and no Keep running pin: the user
+  asked. Every other refusal stands (working, waiting for an answer, unsent
+  text in the box, another program in the terminal, open on the phone,
+  remote). An agent read from its screen alone must have printed nothing for
+  5 seconds ("It printed something a moment ago. Try again in a few
+  seconds."): a working frame the patterns miss looks idle.
+- A refusal is never silent: one solid line under the toolbar for six
+  seconds, one complete plain sentence with no fixed prefix and a way out
+  where there is one ("Its box may hold text you did not send. Send it, or
+  clear it with Ctrl+C, then try again."; never a reason code), the same words on the button's
+  tooltip, and an always-mounted status region for screen readers. Same
+  surface as the card (`--panel-2`, `--rule`).
+- After a sleep the focus moves to the card's Resume (the button it came from
+  is gone); a held Enter's key repeats do not press it.
+- A pane pinned Keep running can be put to sleep by hand; the pin stays, so
+  once resumed it is never put to sleep by the timer.
+- Same 20 px `spark-icon-btn` as the sun, `aria-label="Sleep now"`, reachable
+  with Tab like every toolbar button. Not in the Agents view menu yet: that
+  menu has no sleep entries to sit beside.
+
 ## Closing a working agent (2026-11)
 
 **Chosen:** closing a terminal tab or pane whose agent is working asks first,

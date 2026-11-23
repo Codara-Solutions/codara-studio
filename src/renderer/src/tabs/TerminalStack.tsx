@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
-import { KeepAwakeButton, SleepingPaneChip } from "../components/Terminal/AgentSleepControls";
+import { KeepAwakeButton, SleepingPaneChip, SleepNowAnnouncer, SleepNowButton, SleepNowNotice } from "../components/Terminal/AgentSleepControls";
+import { isAgentHibernationRuntime, sleepNowRefusalMessage } from "@shared/agent-hibernation";
+import { requestAgentSleep } from "../lib/requestAgentSleep";
 import type { TerminalLeafHibernation } from "./types";
 import {
   overlayStartupCommand,
@@ -201,7 +203,9 @@ interface Props {
   // Agent hibernation (lib/agentHibernation.ts): a sleeping pane came back,
   // and the user flipped a pane's "Keep running" pin.
   onPaneWoke?: (tabId: TabId, paneId: string) => void;
-  onPaneAsleep?: (tabId: TabId, paneId: string, hibernation: TerminalLeafHibernation) => void;
+  // fillOnly: Sleep now's answer, which fills an existing mark and never
+  // creates one (the user may have resumed the pane meanwhile).
+  onPaneAsleep?: (tabId: TabId, paneId: string, hibernation: TerminalLeafHibernation, fillOnly?: boolean) => void;
   onPaneKeepAwake?: (tabId: TabId, paneId: string, keepAwake: boolean) => void;
   // The user asked for a sleeping pane's agent back (its card, Enter in the
   // pane), optionally pinning it awake; or that resume failed.
@@ -236,6 +240,7 @@ type Bundle = {
   onBootResumeConsumed: () => void;
   onWoke: () => void;
   onAsleep: (hibernation: TerminalLeafHibernation) => void;
+  onSleepAnswer: (hibernation: TerminalLeafHibernation) => void;
   onKeepAwake: (keepAwake: boolean) => void;
   onResumeRequest: () => void;
   onResumeKeepRunning: () => void;
@@ -473,6 +478,7 @@ function TerminalStack({
           onBootResumeConsumed: () => bootResumeConsumedRef.current(tabId, paneId),
           onWoke: () => wokeRef.current?.(tabId, paneId),
           onAsleep: (hibernation) => asleepRef.current?.(tabId, paneId, hibernation),
+          onSleepAnswer: (hibernation) => asleepRef.current?.(tabId, paneId, hibernation, true),
           onKeepAwake: (keepAwake) => keepAwakeRef.current?.(tabId, paneId, keepAwake),
           onResumeRequest: () => resumeRequestRef.current?.(tabId, paneId, false),
           onResumeKeepRunning: () => resumeRequestRef.current?.(tabId, paneId, true),
@@ -1399,6 +1405,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                     ? { pinned: leaf.keepAwake === true, onToggle: () => bundle.onKeepAwake(leaf.keepAwake !== true) }
                     : null
                 }
+                sleepNow={sleepNowFor(leaf, bundle)}
               />
             ) : null}
             {!placeOffScreen && !workerTerminal && !overlay && leaf.hibernation ? (
@@ -2411,6 +2418,52 @@ function ResizeIntersectionGrip({
   );
 }
 
+/**
+ * Sleep now for a pane holding a resumable session of an agent hibernation
+ * supports that is not asleep yet (a Cora worker and a phone pane never sleep
+ * by hand either). A pane pinned Keep running may be put to sleep too: the
+ * user asked, and the pin stays for when it is resumed. Resolves with the
+ * refusal in words, or null once the pane sleeps.
+ */
+function sleepNowFor(leaf: TerminalLeaf, bundle: Bundle): PaneToolbarProps["sleepNow"] {
+  const session = leaf.agentSession;
+  if (!session?.sessionId || session.active !== true || !isAgentHibernationRuntime(session.runtime)) return null;
+  if (leaf.hibernation || leaf.origin?.kind === "phone" || leaf.worker?.source === "spark") return null;
+  const runtime = session.runtime;
+  return {
+    onSleep: async () => {
+      const outcome = await requestAgentSleep({ paneId: leaf.paneId, session, placement: "visible", manual: true });
+      if (!outcome) return sleepNowRefusalMessage("stop-failed", runtime);
+      if (outcome.ok) {
+        bundle.onSleepAnswer(outcome.hibernation);
+        return null;
+      }
+      return sleepNowRefusalMessage(outcome.reason, isAgentHibernationRuntime(outcome.runtime) ? outcome.runtime : runtime);
+    },
+  };
+}
+
+// After Sleep now the button is gone and the focus with it: hand it to the
+// sleeping card's Resume, so the keyboard stays in the pane. Only when the
+// focus is nowhere else (the user may have moved on while main decided).
+function focusResumeWhenShown(pane: HTMLElement): void {
+  const startedAt = performance.now();
+  const step = () => {
+    const active = document.activeElement;
+    if (active && active !== document.body && !pane.contains(active)) return;
+    const resume = pane.querySelector<HTMLButtonElement>('[data-testid="pane-resume"]');
+    if (resume) {
+      resume.focus({ preventScroll: true });
+      return;
+    }
+    if (performance.now() - startedAt < 2_000) window.requestAnimationFrame(step);
+  };
+  step();
+}
+
+// How long Sleep now's refusal stays in the pane.
+const SLEEP_NOW_NOTICE_MS = 6_000;
+
 interface PaneToolbarProps {
   dragPayload: TerminalPaneDragPayload;
   onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null, cwd?: string) => void;
@@ -2425,6 +2478,8 @@ interface PaneToolbarProps {
   visible: boolean;
   // Agent panes only: the "Keep running" pin (agent hibernation).
   keepAwake?: { pinned: boolean; onToggle: () => void } | null;
+  // Agent panes that can sleep: "Sleep now" (sleepNowFor).
+  sleepNow?: { onSleep: () => Promise<string | null> } | null;
 }
 
 function PaneToolbar({
@@ -2439,8 +2494,33 @@ function PaneToolbar({
   isZoomed,
   visible,
   keepAwake = null,
+  sleepNow = null,
 }: PaneToolbarProps) {
   const stop = (e: React.MouseEvent | React.PointerEvent) => e.stopPropagation();
+  const [sleeping, setSleeping] = useState(false);
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const sleepNowRef = useRef(sleepNow);
+  sleepNowRef.current = sleepNow;
+  useEffect(() => {
+    if (!refusal) return;
+    const timer = window.setTimeout(() => setRefusal(null), SLEEP_NOW_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [refusal]);
+  const onSleepNow = useCallback(() => {
+    const action = sleepNowRef.current;
+    if (!action) return;
+    const pane = wrapRef.current?.closest<HTMLElement>("[data-terminal-pane-id]") ?? null;
+    setRefusal(null);
+    setSleeping(true);
+    void action
+      .onSleep()
+      .catch(() => "It could not be put to sleep. Try again.")
+      .then((message) => {
+        setSleeping(false);
+        setRefusal(message);
+        if (message === null && pane) focusResumeWhenShown(pane);
+      });
+  }, []);
   const [menuOpen, setMenuOpen] = useState(false);
   // Declarative hover state drives the toolbar's rest/hover opacity from one
   // Pill visibility is CSS-owned (.spark-pane-toolbar hover-reveal); no
@@ -2510,102 +2590,107 @@ function PaneToolbar({
   }, [menuOpen]);
 
   return (
-    <div
-      ref={wrapRef}
-      onMouseDown={stop}
-      onPointerDown={stop}
-      // Solid in every mode (.spark-pane-toolbar): it is part of the pane,
-      // not a layer opened over it, and a backdrop filter here re-sampled the
-      // terminal on every frame. Visibility is CSS-owned too: hidden at rest,
-      // revealed while the pane is hovered / a button holds focus / the
-      // add-pane menu is open, so the pill never crowds a prompt's
-      // right-aligned segment while the user is just reading or typing.
-      className="spark-pane-toolbar"
-      data-menu-open={menuOpen ? "true" : undefined}
-      style={{
-        position: "absolute",
-        top: 6,
-        right: 8,
-        display: "flex",
-        gap: 2,
-        padding: 2,
-        // 8px pill, concentric with the 10px pane card and the 6px chrome
-        // buttons it groups.
-        borderRadius: 8,
-        zIndex: 5,
-      }}
-    >
-      <PaneDragHandle payload={dragPayload} />
-      <span
-        aria-hidden
+    <>
+      <div
+        ref={wrapRef}
+        onMouseDown={stop}
+        onPointerDown={stop}
+        // Solid in every mode (.spark-pane-toolbar): it is part of the pane,
+        // not a layer opened over it, and a backdrop filter here re-sampled the
+        // terminal on every frame. Visibility is CSS-owned too: hidden at rest,
+        // revealed while the pane is hovered / a button holds focus / the
+        // add-pane menu is open, so the pill never crowds a prompt's
+        // right-aligned segment while the user is just reading or typing.
+        className="spark-pane-toolbar"
+        data-menu-open={menuOpen ? "true" : undefined}
         style={{
-          width: 1,
-          alignSelf: "stretch",
-          margin: "2px 1px",
-          background: "color-mix(in oklab, var(--rule-soft) 70%, transparent)",
+          position: "absolute",
+          top: 6,
+          right: 8,
+          display: "flex",
+          gap: 2,
+          padding: 2,
+          // 8px pill, concentric with the 10px pane card and the 6px chrome
+          // buttons it groups.
+          borderRadius: 8,
+          zIndex: 5,
         }}
-      />
-      <ToolbarButton
-        ref={plusRef}
-        title="Add pane…"
-        onClick={() => setMenuOpen((open) => !open)}
-        active={menuOpen}
-        hasPopup
       >
-        <PlusIcon size={12} />
-      </ToolbarButton>
-      <span
-        aria-hidden
-        style={{
-          width: 1,
-          alignSelf: "stretch",
-          margin: "2px 1px",
-          background: "color-mix(in oklab, var(--rule-soft) 70%, transparent)",
-        }}
-      />
-      <ToolbarButton title="Copy terminal context" onClick={onCopyContext}>
-        <TerminalContextGlyph size={12} />
-      </ToolbarButton>
-      <ToolbarButton title="Split right (Ctrl+\\)" onClick={onSplitRight}>
-        <SplitRightIcon size={12} />
-      </ToolbarButton>
-      <ToolbarButton title="Split down (Ctrl+Shift+\\)" onClick={onSplitDown}>
-        <SplitDownIcon size={12} />
-      </ToolbarButton>
-      <ToolbarButton
-        title={isZoomed ? "Restore pane (Ctrl+Shift+Z)" : "Zoom pane (Ctrl+Shift+Z)"}
-        onClick={onToggleZoom}
-        active={isZoomed}
-      >
-        <ZoomPaneIcon size={12} zoomed={isZoomed} />
-      </ToolbarButton>
-      {keepAwake ? <KeepAwakeButton pinned={keepAwake.pinned} onToggle={keepAwake.onToggle} /> : null}
-      <ToolbarButton title="Close pane" onClick={onClose} danger>
-        <CloseIcon size={12} />
-      </ToolbarButton>
-      {menuOpen && menuPosition && createPortal(
-        <AddPaneMenu
-          ref={menuRef}
-          position={menuPosition}
-          paneCwd={paneCwd}
-          onPick={(command, cwd) => {
-            setMenuOpen(false);
-            const runtime = workerSessionsRuntime(command);
-            if (runtime) {
-              offerWorkerSessions({
-                runtime,
-                cwd: cwd ?? paneCwd ?? null,
-                placement: "pane",
-                startNew: () => onSmartAdd(command, undefined, cwd),
-              });
-            } else {
-              onSmartAdd(command, undefined, cwd);
-            }
+        <PaneDragHandle payload={dragPayload} />
+        <span
+          aria-hidden
+          style={{
+            width: 1,
+            alignSelf: "stretch",
+            margin: "2px 1px",
+            background: "color-mix(in oklab, var(--rule-soft) 70%, transparent)",
           }}
-        />,
-        document.body,
-      )}
-    </div>
+        />
+        <ToolbarButton
+          ref={plusRef}
+          title="Add pane…"
+          onClick={() => setMenuOpen((open) => !open)}
+          active={menuOpen}
+          hasPopup
+        >
+          <PlusIcon size={12} />
+        </ToolbarButton>
+        <span
+          aria-hidden
+          style={{
+            width: 1,
+            alignSelf: "stretch",
+            margin: "2px 1px",
+            background: "color-mix(in oklab, var(--rule-soft) 70%, transparent)",
+          }}
+        />
+        <ToolbarButton title="Copy terminal context" onClick={onCopyContext}>
+          <TerminalContextGlyph size={12} />
+        </ToolbarButton>
+        <ToolbarButton title="Split right (Ctrl+\\)" onClick={onSplitRight}>
+          <SplitRightIcon size={12} />
+        </ToolbarButton>
+        <ToolbarButton title="Split down (Ctrl+Shift+\\)" onClick={onSplitDown}>
+          <SplitDownIcon size={12} />
+        </ToolbarButton>
+        <ToolbarButton
+          title={isZoomed ? "Restore pane (Ctrl+Shift+Z)" : "Zoom pane (Ctrl+Shift+Z)"}
+          onClick={onToggleZoom}
+          active={isZoomed}
+        >
+          <ZoomPaneIcon size={12} zoomed={isZoomed} />
+        </ToolbarButton>
+        {sleepNow ? <SleepNowButton busy={sleeping} refusal={refusal} onSleep={onSleepNow} /> : null}
+        {keepAwake ? <KeepAwakeButton pinned={keepAwake.pinned} onToggle={keepAwake.onToggle} /> : null}
+        <ToolbarButton title="Close pane" onClick={onClose} danger>
+          <CloseIcon size={12} />
+        </ToolbarButton>
+        {menuOpen && menuPosition && createPortal(
+          <AddPaneMenu
+            ref={menuRef}
+            position={menuPosition}
+            paneCwd={paneCwd}
+            onPick={(command, cwd) => {
+              setMenuOpen(false);
+              const runtime = workerSessionsRuntime(command);
+              if (runtime) {
+                offerWorkerSessions({
+                  runtime,
+                  cwd: cwd ?? paneCwd ?? null,
+                  placement: "pane",
+                  startNew: () => onSmartAdd(command, undefined, cwd),
+                });
+              } else {
+                onSmartAdd(command, undefined, cwd);
+              }
+            }}
+          />,
+          document.body,
+        )}
+      </div>
+      {refusal && !sleeping ? <SleepNowNotice message={refusal} onDismiss={() => setRefusal(null)} /> : null}
+      <SleepNowAnnouncer message={sleeping ? null : refusal} />
+    </>
   );
 }
 

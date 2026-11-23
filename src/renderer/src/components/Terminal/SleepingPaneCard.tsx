@@ -132,7 +132,7 @@ export default function SleepingPaneCard({
             className="spark-btn"
             data-testid="pane-resume-keep-running"
             disabled={waking}
-            title="Resume and never let this agent sleep again"
+            title="Resume and never let this agent sleep on its own"
             onClick={(event) => {
               event.stopPropagation();
               onResumeKeepRunning();
@@ -146,6 +146,11 @@ export default function SleepingPaneCard({
           className="spark-btn is-primary"
           data-testid="pane-resume"
           disabled={waking}
+          onKeyDown={(event) => {
+            // The focus lands here right after Sleep now: an Enter still
+            // held from that press must not wake the agent at once.
+            if (event.key === "Enter" && event.repeat) event.preventDefault();
+          }}
           onClick={(event) => {
             event.stopPropagation();
             onResume();

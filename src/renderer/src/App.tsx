@@ -138,6 +138,7 @@ import { railTabCount, type RailTabCount } from "./tabs/railTabCount";
 import { closeOthersTargets } from "./tabs/closeConfirm";
 import { CloseAgentConfirmHost, confirmUserClose, setCloseConfirmWorkingPanes } from "./tabs/CloseAgentConfirm";
 import type { TerminalLeafHibernation } from "./tabs/types";
+import { fillSleepMark } from "@shared/agent-hibernation";
 import { useChatSurfaces } from "./tabs/chatSurfaces";
 import {
   createNavigateTo,
@@ -8725,9 +8726,15 @@ const Workspace = React.memo(function Workspace({
   );
   // A pane that finds itself asleep keeps a mark that is already there: it
   // may carry a Resume the user just pressed.
+  // The pane's own hibernated exit marks it first, bare; Sleep now's answer
+  // (fillOnly) lands after it and only fills in the card's line and the
+  // memory freed (fillSleepMark). An existing mark keeps its time and
+  // anything the user put on it (Resume).
   const handlePaneAsleep = useCallback(
-    (_tabId: string, paneId: string, hibernation: TerminalLeafHibernation) =>
-      updateLeafHibernation(paneId, (current) => current ?? hibernation),
+    (_tabId: string, paneId: string, hibernation: TerminalLeafHibernation, fillOnly?: boolean) =>
+      updateLeafHibernation(paneId, (current) =>
+        current || fillOnly ? fillSleepMark(current, hibernation) : hibernation,
+      ),
     [updateLeafHibernation],
   );
   const handlePaneKeepAwake = useCallback(

@@ -470,6 +470,46 @@ async function main() {
     !resumeKey({ key: "k", ctrlKey: true }) && !resumeKey({ key: "k", metaKey: true }) && !resumeKey({ key: "Enter", altKey: true }),
   );
 
+  // ── Sleep now's refusals, in words ──
+  const said = shared.sleepNowRefusalMessage;
+  const reasons = [
+    "off", "exempt", "bad-request", "in-flight", "remote", "not-watched", "runtime-mismatch", "agent-busy",
+    "waiting-on-user", "unsent-input", "scheduled-work", "unknown-state", "not-idle-long-enough", "watched-on-phone",
+    "process-list-unavailable", "no-agent-process", "other-processes", "no-session", "stop-failed", "cannot-resume",
+    "recent-output", "respawned",
+  ];
+  check("every refusal has a sentence", reasons.every((reason) => /^[A-Z].+\.$/.test(said(reason, "claude"))), reasons.map((x) => said(x, "claude")));
+  check(
+    "unsent text is named, with a way out",
+    said("unsent-input", "claude") === "Its box may hold text you did not send. Send it, or clear it with Ctrl+C, then try again.",
+  );
+  check("output a moment ago is its own sentence", said("recent-output", "claude") === "It printed something a moment ago. Try again in a few seconds.");
+  check("a terminal that restarted is said plainly", said("respawned", "claude") === "This terminal just restarted. Try again.");
+  check("another agent in the terminal is said plainly", said("runtime-mismatch", "claude") === "Another agent is running in this terminal now.");
+  check("a scheduled wake-up is named", said("scheduled-work", "claude") === "It has a scheduled wake-up, so it keeps running.");
+  check("the agent is named", said("agent-busy", "codex") === "Codex is still working, so it was not put to sleep.");
+  check("an agent that is gone is said plainly", said("no-agent-process", "claude") === "Claude is not running here.");
+  check("a session that may not resume", said("cannot-resume", "claude") === "Codara could not confirm this session can be resumed, so it keeps running.");
+  check("each one is a whole sentence, no fixed prefix", reasons.every((reason) => !/^Still running/.test(said(reason, "claude"))));
+  check("a refusal this build does not know is still a sentence, without its code", said("brand-new", "claude") === "Claude could not be put to sleep. Try again.", said("brand-new", "claude"));
+  check("no code words reach the user", reasons.every((reason) => !said(reason, "pi").includes(reason)));
+
+  // ── Sleep now's late answer at a pane's mark ──
+  {
+    const fill = shared.fillSleepMark;
+    const answer = { summary: { lastRequest: "ship it" }, freedBytes: 240 * 1024 * 1024 };
+    check("no mark (the user resumed meanwhile): the answer creates none", fill(null, answer) === null);
+    const bare = { runtime: "claude", sleptAt: 5, resumeRequested: true };
+    const filled = fill(bare, answer);
+    check(
+      "a mark gets the card's line and the memory freed, and keeps the rest",
+      filled.summary === answer.summary && filled.freedBytes === answer.freedBytes && filled.sleptAt === 5 && filled.resumeRequested === true,
+      filled,
+    );
+    check("what the mark has wins", fill({ ...bare, freedBytes: 1 }, answer).freedBytes === 1);
+    check("nothing new: the same mark, no re-render", fill(filled, answer) === filled);
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);
     process.exit(1);
