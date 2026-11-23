@@ -333,6 +333,7 @@ const SCALAR_FIELDS = [
   "workspaceId",
   "workspaceName",
   "workspaceColor",
+  "workspaceOwnColor",
   "workspaceIcon",
   "runtime",
   "agentLabel",

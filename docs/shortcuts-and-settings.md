@@ -892,24 +892,25 @@ Workspaces list shows, the **Agents** side of the switch counts the agents
 waiting on you. Creating or renaming a workspace or a folder switches back
 to **Workspaces**, where you type its name.
 
-The Agents view is an inbox, after T3 Code's thread list. On top are the
-agents that need you or finished: a terminal agent waiting at a permission
-prompt or a question, one that stopped with an error, Cora chats that asked
-you something or are paused, terminal agents back at their prompt, and Cora
-chats that finished, failed or were cancelled in the last 12 hours. Under
-them are three shelves with their counts; click one to fold or open it (the
-folding is remembered):
+The Agents view is an inbox, after T3 Code's thread list. Every agent sits
+under one of four headings, in this order, each with its count; click one
+to fold or open it (the folding is remembered):
 
+- **Needs you**: a terminal agent waiting at a permission prompt or a
+  question, one that stopped with an error, and Cora chats that asked you
+  something or are paused. Its count is the switch's badge.
 - **Working**: terminal agents in a turn and Cora chats that are planning,
   working or reviewing, including automation runs and board cards while they
-  work. Open until you fold it.
-- **Snoozed**: agents you snoozed, until their time. A question or a new
-  failure wakes one early; a finished turn does not.
-- **Settled**: agents you put away, one line each. One comes back by itself
-  when it does something new: starts working, asks something, or finishes a
-  turn you have not seen.
+  work.
+- **Done**: terminal agents back at their prompt, and Cora chats that
+  finished, failed or were cancelled in the last 12 hours.
+- **Settled**: agents you put away, one line each, folded until you open
+  it. One comes back by itself when it does something new: starts working,
+  asks something, or finishes a turn you have not seen.
 
-Each row has three lines: the workspace, the title (your last prompt when
+Each row has three lines: the workspace, with its icon in the workspace's
+colour as the Workspaces list draws it (a workspace with no colour keeps a
+grey icon), the title (your last prompt when
 the agent's hooks report it, otherwise its tab, or a name you gave it), and
 the branch with its pull request (#61 with ✓, ✕ or a dot for its checks).
 When a finished agent has an open pull request the row adds its +/- line
@@ -921,14 +922,13 @@ Codara stopped to save memory (see [Idle agents sleep](#idle-agents-sleep))
 stays with the finished ones; opening it resumes it.
 
 Point at a row, or reach it with the keyboard, and the top right turns into
-**Snooze** (1 hour, 3 hours, this evening, tomorrow 09:00 or next Monday
-09:00) and **Settle**. When a workspace's pull request is merged, its
-finished agents settle themselves. After a settle or a snooze the bottom of
-the list says so with **Ctrl+Z to undo** (⌘Z on a Mac) for a few seconds.
+**Settle**. When a workspace's pull request is merged, its finished agents
+settle themselves. After a settle the bottom of the list says so with
+**Ctrl+Z to undo** (⌘Z on a Mac) for a few seconds.
 
 Right-click a row for **Open**, **Merge PR** (only while the pull request is
-open and its checks pass), **Settle**, **Snooze**, **Pin** (pinned rows stay
-on top), **Rename**, **Mark unread**, **Copy link** (the pull request's)
+open and its checks pass), **Settle**, **Pin** (pinned rows stay on top of
+their section), **Rename**, **Mark unread**, **Copy link** (the pull request's)
 and **Delete** (closes a terminal agent's pane or deletes a Cora chat, after
 you confirm). Merge PR reads GitHub again first. Into main, master or the
 repository's default branch it shows the same confirmation as the Git panel;
@@ -938,9 +938,10 @@ Clicking a row, or Enter on it, switches to its workspace and opens its pane
 or chat, where you answer it: a terminal agent's prompts are menus that take
 keys, so Codara never pastes into them.
 
-Keys: Left and Right move between **Workspaces** and **Agents**; in the list, Up and Down (or Home and End) move between rows,
-E settles the row in focus, the menu key or Shift+F10 opens its menu, and
-Ctrl+Z (⌘Z) takes back the last settle or snooze.
+Keys: Left and Right move between **Workspaces** and **Agents**; in the
+list, Up and Down (or Home and End) move between rows in the headings'
+order, E settles the row in focus, the menu key or Shift+F10 opens its
+menu, and Ctrl+Z (⌘Z) takes back the last settle.
 
 ### Check first and missed runs
 

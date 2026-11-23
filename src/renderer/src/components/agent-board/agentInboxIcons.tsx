@@ -49,13 +49,6 @@ export const WorkingIcon = ({ size }: { size?: number }) => (
   </Icon>
 );
 
-export const ClockIcon = ({ size }: { size?: number }) => (
-  <Icon size={size}>
-    <circle cx="12" cy="12" r="10" />
-    <path d="M12 6v6l4 2" />
-  </Icon>
-);
-
 export const CheckIcon = ({ size }: { size?: number }) => (
   <Icon size={size}>
     <path d="M20 6 9 17l-5-5" />
@@ -111,11 +104,5 @@ export const OpenIcon = ({ size }: { size?: number }) => (
 export const ChevronRightIcon = ({ size }: { size?: number }) => (
   <Icon size={size}>
     <path d="m9 18 6-6-6-6" />
-  </Icon>
-);
-
-export const ChevronLeftIcon = ({ size }: { size?: number }) => (
-  <Icon size={size}>
-    <path d="m15 18-6-6 6-6" />
   </Icon>
 );
