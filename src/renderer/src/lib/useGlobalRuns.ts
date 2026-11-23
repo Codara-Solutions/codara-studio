@@ -43,6 +43,8 @@ export function useGlobalRuns(booted: boolean): {
   const refresh = async (): Promise<void> => {
     try {
       const next = await window.spark.orchestration.listRuns();
+      // A caller that awaits refresh() reads the ref next, before any re-render.
+      runsRef.current = next;
       setRuns(next);
       setLoaded(true);
     } catch {

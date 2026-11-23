@@ -21,7 +21,16 @@ import { usePreferences } from "../../preferences/usePreferences";
 import { keyBelongsToOtherModal } from "../../shortcuts/modal-keys";
 import AnchoredMenu from "../chat/composer/AnchoredMenu";
 import { PencilIcon, PinIcon, ReloadIcon } from "../icons";
+import { unwrapIpcError } from "../../lib/ipc-error";
 import SessionAgentMark from "./SessionAgentMark";
+import {
+  CORA_RUN_KIND_LABEL,
+  coraDeleteBlock,
+  coraDeleteConfirm,
+  coraPrimary,
+  coraRunFacts,
+  type CoraRunFacts,
+} from "./cora-runs";
 import { SnippetText, TermsText } from "./SessionHighlight";
 import SessionTranscriptDialog from "./SessionTranscriptDialog";
 import { copySessionId, revealSessionTranscript } from "./session-actions";
@@ -60,8 +69,8 @@ const PAGE_KEY_ROWS = 8;
 const MATCH_LEAD_CHARS = 90;
 const MENU_Z_INDEX = 130;
 
-const canDelete = (hit: SessionSearchHit) => hit.agent === "claude" || hit.agent === "codex" || hit.agent === "grok";
-const canFork = (hit: SessionSearchHit) => canDelete(hit) && hit.cwdExists;
+const deletesTranscript = (hit: SessionSearchHit) => hit.agent === "claude" || hit.agent === "codex" || hit.agent === "grok";
+const canFork = (hit: SessionSearchHit) => deletesTranscript(hit) && hit.cwdExists;
 const isGone = (hit: SessionSearchHit) => hit.agent !== "cora" && !hit.cwdExists;
 // Of an Antigravity conversation Codara reads only agy's summary row: its
 // title and a preview. There is no transcript to show or reveal.
@@ -155,7 +164,10 @@ export default function SessionPicker({
   const [menuOpen, setMenuOpen] = useState(false);
   // The session a confirm is for and the files that check found for it: kept
   // together, because the selection can move while the check runs.
-  const [deleting, setDeleting] = useState<{ hit: SessionSearchHit; session: WorkerSessionSummary } | null>(null);
+  // A Cora run has no session file: its run is deleted, so `session` is null.
+  const [deleting, setDeleting] = useState<{ hit: SessionSearchHit; session: WorkerSessionSummary | null } | null>(null);
+  // What the selected Cora row is, read from its run: the index only has its words.
+  const [coraInfo, setCoraInfo] = useState<{ key: string; facts: CoraRunFacts } | null>(null);
   const [busy, setBusy] = useState(false);
   const [transcript, setTranscript] = useState<{ hit: SessionSearchHit; notice: string | null } | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -214,6 +226,9 @@ export default function SessionPicker({
   const liveElsewhere = (hit: SessionSearchHit) =>
     hit.agent === "antigravity" && liveAntigravity.has(hit.sessionId) && !host.isSessionOpen?.(hit);
   const selectedLive = selected ? liveElsewhere(selected) : false;
+  const selectedCora = selected?.agent === "cora" && coraInfo?.key === selected.key ? coraInfo.facts : null;
+  const coraNext = selectedCora ? coraPrimary(selectedCora) : null;
+  const coraBlock = selectedCora?.exists ? coraDeleteBlock(selectedCora) : null;
   const selectedKeyRef = useRef(selectedKey);
   selectedKeyRef.current = selectedKey;
 
@@ -371,6 +386,32 @@ export default function SessionPicker({
     };
   }, [selectedKey]);
 
+  // Undefined when the run could not be read: opening then goes the way it always did.
+  const loadCoraFacts = useCallback(
+    async (hit: SessionSearchHit): Promise<CoraRunFacts | undefined> => {
+      const run = await window.spark.orchestration.getRun(hit.sessionId).catch(() => undefined);
+      if (run === undefined) return undefined;
+      // Null is "could not list the Looms", which blocks Delete rather than reading as "no Loom".
+      const loomOwned = !!run?.automationId && !run.workflow;
+      const jobs = loomOwned ? await window.spark.scheduler.list().catch(() => null) : [];
+      return coraRunFacts(run, jobs, host.isSessionOpen?.(hit) ?? false);
+    },
+    [host],
+  );
+
+  const selectedHit = selected?.agent === "cora" ? selected : null;
+  useEffect(() => {
+    if (!selectedHit) return;
+    let alive = true;
+    void loadCoraFacts(selectedHit).then((facts) => {
+      if (alive && facts) setCoraInfo({ key: selectedHit.key, facts });
+    });
+    return () => {
+      alive = false;
+    };
+    // The row's key is its identity; a refreshed hit object for the same run reads nothing new.
+  }, [selectedHit?.key, loadCoraFacts]);
+
   // The end of the conversation is the part worth seeing first.
   useLayoutEffect(() => {
     if (tailRef.current) tailRef.current.scrollTop = tailRef.current.scrollHeight;
@@ -411,7 +452,18 @@ export default function SessionPicker({
     if (offer) finish(offer.startNew);
   };
 
+  const openCora = async (hit: SessionSearchHit) => {
+    const facts = coraInfo?.key === hit.key ? coraInfo.facts : await loadCoraFacts(hit);
+    const next = facts ? coraPrimary(facts) : null;
+    if (next?.action === "view") showTranscript(hit, next.notice);
+    else finish(() => host.openSession?.(hit));
+  };
+
   const primary = (hit: SessionSearchHit) => {
+    if (hit.agent === "cora") {
+      void openCora(hit);
+      return;
+    }
     if (liveElsewhere(hit)) {
       setLiveNoticeKey(hit.key);
       return;
@@ -561,12 +613,33 @@ export default function SessionPicker({
     focusSearch();
   };
 
+  const forgetDeleted = async (hit: SessionSearchHit, message: string) => {
+    deletedRef.current.add(hit.key);
+    await window.spark.sessionSearch.setLabel(hit.key, { name: null, pinned: false }).catch(() => undefined);
+    const index = hits.findIndex((row) => row.key === hit.key);
+    const rest = hits.filter((row) => row.key !== hit.key);
+    setHits(rest);
+    setSelectedKey((rest[index] ?? rest[index - 1])?.key ?? null);
+    setNote(message);
+    void window.spark.sessionSearch.refresh(true).then(publishSessionSearchStatus, () => undefined);
+    bumpSessionLabels();
+  };
+
   // Delete can only remove what Settings' session list resolves, which leaves
   // out archived sessions and other accounts' homes. Found out before asking,
   // so nobody confirms a delete that cannot happen.
   const askToDelete = async (hit: SessionSearchHit) => {
     setBusy(true);
     try {
+      if (hit.agent === "cora") {
+        const facts = await loadCoraFacts(hit);
+        if (selectedKeyRef.current !== hit.key) return;
+        const block = facts ? coraDeleteBlock(facts) : "Could not read this run";
+        if (facts) setCoraInfo({ key: hit.key, facts });
+        if (block) setNote(block);
+        else setDeleting({ hit, session: null });
+        return;
+      }
       const sessions = await window.spark.agentSession.listAll();
       if (selectedKeyRef.current !== hit.key) return;
       const session = sessions.find((item) => item.runtime === hit.agent && item.sessionId === hit.sessionId);
@@ -579,9 +652,27 @@ export default function SessionPicker({
     }
   };
 
-  const deleteSession = async ({ hit, session }: { hit: SessionSearchHit; session: WorkerSessionSummary }) => {
+  // Read again at the last moment: the run may have started working since the confirm opened.
+  const deleteCoraRun = async (hit: SessionSearchHit): Promise<string | null> => {
+    const facts = await loadCoraFacts(hit);
+    const block = facts ? coraDeleteBlock(facts) : "Could not read this run";
+    if (block) {
+      if (facts) setCoraInfo({ key: hit.key, facts });
+      setNote(block);
+      return null;
+    }
+    await window.spark.orchestration.deleteRun(hit.sessionId, { refuseLive: true });
+    return "Run deleted";
+  };
+
+  const deleteSession = async ({ hit, session }: { hit: SessionSearchHit; session: WorkerSessionSummary | null }) => {
     setBusy(true);
     try {
+      if (!session) {
+        const done = await deleteCoraRun(hit);
+        if (done) await forgetDeleted(hit, done);
+        return;
+      }
       const result = await window.spark.agentSession.delete({
         runtime: session.runtime,
         nativeClaudeProfileId: session.nativeClaudeProfileId,
@@ -592,17 +683,9 @@ export default function SessionPicker({
         transcriptPath: session.transcriptPath,
         memoryScope: "none",
       });
-      deletedRef.current.add(hit.key);
-      await window.spark.sessionSearch.setLabel(hit.key, { name: null, pinned: false }).catch(() => undefined);
-      const index = hits.findIndex((row) => row.key === hit.key);
-      const rest = hits.filter((row) => row.key !== hit.key);
-      setHits(rest);
-      setSelectedKey((rest[index] ?? rest[index - 1])?.key ?? null);
-      setNote(result.warnings.length > 0 ? result.warnings.join(" ") : "Session deleted");
-      void window.spark.sessionSearch.refresh(true).then(publishSessionSearchStatus, () => undefined);
-      bumpSessionLabels();
+      await forgetDeleted(hit, result.warnings.length > 0 ? result.warnings.join(" ") : "Session deleted");
     } catch (err) {
-      setNote(err instanceof Error ? err.message : "Could not delete this session");
+      setNote(unwrapIpcError(err) || "Could not delete this session");
     } finally {
       setBusy(false);
       setDeleting(null);
@@ -895,6 +978,12 @@ export default function SessionPicker({
                   </div>
                 ) : null}
                 <dl className="sp-facts">
+                  {selectedCora?.exists ? (
+                    <div>
+                      <dt>Kind</dt>
+                      <dd data-testid="session-picker-kind">{CORA_RUN_KIND_LABEL[selectedCora.kind]}</dd>
+                    </div>
+                  ) : null}
                   <div>
                     <dt>Agent</dt>
                     <dd>
@@ -931,7 +1020,13 @@ export default function SessionPicker({
                     <dd>{relativeAge(selected.lastAt, now) || "unknown"}</dd>
                   </div>
                 </dl>
-                {selectedOpen ? (
+                {selected.agent === "cora" ? (
+                  coraNext?.action === "view" || coraBlock ? (
+                    <p className="sp-detail__notice" data-testid="session-picker-cora-notice">
+                      {[coraNext?.action === "view" ? coraNext.notice : "", coraBlock ?? ""].filter(Boolean).join(" ")}
+                    </p>
+                  ) : null
+                ) : selectedOpen ? (
                   <p className="sp-detail__notice">Open in a tab now, so resuming goes there.</p>
                 ) : selectedLive ? (
                   <p className="sp-detail__notice" role="status" data-testid="session-picker-live">
@@ -979,7 +1074,13 @@ export default function SessionPicker({
 
               {deleting?.hit.key === selected.key ? (
                 <footer className="sp-actions sp-actions--confirm" data-testid="session-picker-confirm-delete">
-                  <span className="sp-actions__ask">Delete this session's transcript from this computer?</span>
+                  <span className="sp-actions__ask">
+                    {deleting.session
+                      ? "Delete this session's transcript from this computer?"
+                      : selectedCora
+                        ? coraDeleteConfirm(selectedCora)
+                        : "Deletes this run and its saved output from this computer."}
+                  </span>
                   <button
                     ref={cancelDeleteRef}
                     type="button"
@@ -1005,7 +1106,7 @@ export default function SessionPicker({
                 <footer className="sp-actions">
                   <button type="button" className="spark-btn is-primary" onClick={() => primary(selected)}>
                     {selected.agent === "cora"
-                      ? "Open chat"
+                      ? (coraNext?.label ?? "Open")
                       : selectedLive
                         ? "Open in Antigravity"
                         : selectedOpen
@@ -1116,7 +1217,7 @@ export default function SessionPicker({
                 {item.label}
               </button>
             ))}
-            {canDelete(selected) && !selectedOpen ? (
+            {(deletesTranscript(selected) && !selectedOpen) || (selectedCora?.exists && !coraBlock) ? (
               <button
                 type="button"
                 role="menuitem"

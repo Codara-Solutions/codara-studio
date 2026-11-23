@@ -1,6 +1,6 @@
 import { expect, test, type ElectronApplication, type Locator, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
-import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, appendFile, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -110,6 +110,52 @@ async function writeAntigravitySummaries(fixture: Fixture, rows: [string, string
     insert.run(id, title, preview, when, JSON.stringify([`file://${fixture.workspaceDir}`]), when, live ? 1 : 0);
   }
   db.close();
+}
+
+// A Cora run as the run store saves it: a chat, or a Loom pass when `automationId` is set.
+async function writeCoraRun(
+  fixture: Fixture,
+  id: string,
+  title: string,
+  turns: [string, string],
+  minutesAgo: number,
+  extra: Record<string, unknown> = {},
+) {
+  const dir = join(fixture.userDataDir, "runs", id);
+  await mkdir(dir, { recursive: true });
+  const when = at(minutesAgo);
+  const message = (author: string, text: string, n: number) => ({
+    id: `${id}-m${n}`,
+    runId: id,
+    author,
+    kind: "note",
+    message: text,
+    createdAt: at(minutesAgo - n),
+  });
+  const run = {
+    id,
+    workspaceId: "ws-picker",
+    title,
+    status: "complete",
+    settingsSnapshot: { workspaceCwd: fixture.workspaceDir },
+    artifactDir: dir,
+    createdAt: when,
+    updatedAt: when,
+    conversationEpoch: 0,
+    plans: [],
+    steps: [],
+    workerTasks: [],
+    workerAttempts: [],
+    checkpoints: [],
+    assumptions: [],
+    sparkCalls: [],
+    humanMessages: [message("user", turns[0], 0), message("spark", turns[1], 1)],
+    chatBackend: "pi",
+    chatMode: "auto",
+    ...extra,
+  };
+  await writeFile(join(dir, "events.jsonl"), `${JSON.stringify({ type: "run.started", runId: id, timestamp: when, payload: { cwd: fixture.workspaceDir } })}\n`, "utf8");
+  await writeFile(join(dir, "run.json"), JSON.stringify(run), "utf8");
 }
 
 async function setTheme(page: Page, mode: "light" | "dark") {
@@ -894,6 +940,236 @@ test("the Pi and Antigravity rows show their own sessions first, as the others d
     expect(await launchCommands(app)).toHaveLength(3);
   } finally {
     await app?.close();
+    await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("Cora rows: a chat opens as its chat, a Loom pass in Automations or read here, and a finished pass can be deleted", async () => {
+  test.setTimeout(180_000);
+  const fixture = await prepareFixture();
+  const RUNS = {
+    chat: "run-picker-chat",
+    pass: "run-picker-pass-listed",
+    orphan: "run-picker-pass-orphan",
+    running: "run-picker-pass-running",
+    held: "run-picker-pass-held",
+  };
+  const loom = { automationId: "loom-picker", executionMode: "direct" };
+  await writeCoraRun(fixture, RUNS.chat, "Pelican stock check", ["Count the pelican stickers left in stock", "Forty two, in two boxes."], 30);
+  await writeCoraRun(fixture, RUNS.pass, "Loom: Daily digest - pass 2", ["Summarize the heron commits of the day", "Three heron commits, all docs."], 50, loom);
+  // Finished, but its paused Loom adds its next pass to this same run.
+  await writeCoraRun(fixture, RUNS.held, "Loom: Nightly tidy - pass 1", ["Tidy the kestrel fixtures", "Tidied two kestrel fixtures."], 70, {
+    ...loom,
+    automationId: "loom-held",
+  });
+  // Its Loom was deleted long ago, so nothing but the picker shows it.
+  await writeCoraRun(fixture, RUNS.orphan, "Loom: Release notes - pass 1", ["Draft the osprey release notes", "Drafted the osprey notes."], 60 * 24 * 90, {
+    ...loom,
+    automationId: "loom-deleted",
+    status: "failed",
+  });
+  await writeFile(
+    join(fixture.userDataDir, "scheduler.json"),
+    JSON.stringify({
+      jobs: [
+        {
+          id: "loom-picker",
+          name: "Daily digest",
+          trigger: { kind: "cron", expr: "0 9 * * *" },
+          enabled: false,
+          input: { workspaceId: "ws-picker", workspaceName: "sample-shop", cwd: fixture.workspaceDir, initialUserNote: "", chatMode: "execute" },
+          loop: { kind: "once", stop: {} },
+          prompt: { template: "Summarize the heron commits of the day" },
+          worker: { model: "claude-opus-5", effort: "medium" },
+          state: { status: "idle", iteration: 0 },
+          history: [
+            { iteration: 1, runId: RUNS.pass, startedAt: at(50), finishedAt: at(48), status: "complete", summary: "Three heron commits, all docs." },
+            { iteration: 2, runId: RUNS.running, startedAt: at(2), status: "running" },
+          ],
+          createdAt: at(60 * 24 * 2),
+        },
+        {
+          id: "loom-held",
+          name: "Nightly tidy",
+          trigger: { kind: "cron", expr: "0 2 * * *" },
+          enabled: false,
+          input: { workspaceId: "ws-picker", workspaceName: "sample-shop", cwd: fixture.workspaceDir, initialUserNote: "", chatMode: "execute" },
+          loop: { kind: "count", count: 3, stop: {} },
+          prompt: { template: "Tidy the kestrel fixtures" },
+          worker: { model: "claude-opus-5", effort: "medium" },
+          state: { status: "paused", iteration: 1, currentRunId: RUNS.held },
+          history: [{ iteration: 0, runId: RUNS.held, startedAt: at(70), finishedAt: at(68), status: "complete", summary: "Tidied two kestrel fixtures." }],
+          createdAt: at(60 * 24 * 2),
+        },
+      ],
+    }),
+    "utf8",
+  );
+  let app: ElectronApplication | null = null;
+  try {
+    const launched = await launch(fixture);
+    app = launched.app;
+    const { page } = launched;
+    await page.setViewportSize({ width: 1280, height: 800 }).catch(() => undefined);
+    await page.waitForTimeout(500);
+    // Written after start, so the restart repair that settles orphaned passes never sees it.
+    await writeCoraRun(fixture, RUNS.running, "Loom: Daily digest - pass 3", ["Summarize the egret commits of the day", "Reading the egret commits."], 2, {
+      ...loom,
+      status: "running",
+      workerAttempts: [{ id: "attempt-running", taskId: "task-running", status: "running", createdAt: at(2), updatedAt: at(1) }],
+    });
+
+    let picker = await openWithChord(page);
+    await picker.getByRole("tablist", { name: "Sessions from" }).getByRole("tab", { name: "All" }).click();
+    await picker.getByRole("group", { name: "Agent" }).getByRole("button", { name: "Cora" }).click();
+    await picker.getByTestId("session-picker-refresh").click();
+    await expect(picker.locator("[data-session-row]")).toHaveCount(5, { timeout: 30_000 });
+    const detail = picker.getByTestId("session-picker-detail");
+    const more = picker.getByRole("button", { name: "More actions" });
+    const deleteItem = page.getByRole("menuitem", { name: "Delete…" });
+    const search = picker.getByRole("combobox");
+    // Scope and agent choices are remembered, so a reopened picker lists the same rows.
+    const reopen = async () => {
+      picker = await openWithChord(page);
+      await expect(picker.locator("[data-session-row]").first()).toBeVisible({ timeout: 30_000 });
+      await expect(picker.getByRole("combobox")).toBeFocused();
+    };
+
+    // A pass its Loom still lists: says what it is, opens in Automations, and can be deleted.
+    await row(picker, RUNS.pass, "cora").click();
+    await expect(detail.getByTestId("session-picker-kind")).toHaveText("Loom pass");
+    await expect(picker.getByRole("button", { name: /^Open pass in Automations/ })).toBeVisible();
+    await more.click();
+    await expect(deleteItem).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(deleteItem).toHaveCount(0);
+
+    // A pass that is working: no Delete, and the row says why.
+    await row(picker, RUNS.running, "cora").click();
+    await expect(picker.getByTestId("session-picker-cora-notice")).toContainText("Working now");
+    await more.click();
+    await expect(page.getByRole("menuitem", { name: "Copy session id" })).toBeVisible();
+    await expect(deleteItem).toHaveCount(0);
+    await page.keyboard.press("Escape");
+
+    // A finished pass its Loom still holds: no Delete, and main refuses it too.
+    await row(picker, RUNS.held, "cora").click();
+    await expect(picker.getByTestId("session-picker-cora-notice")).toContainText("Its Loom is still using this run. Stop the Loom first.");
+    await more.click();
+    await expect(page.getByRole("menuitem", { name: "Copy session id" })).toBeVisible();
+    await expect(deleteItem).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    const refused = await page.evaluate(async (ids) => {
+      const spark = (window as unknown as { spark: { orchestration: { deleteRun: (id: string, options?: { refuseLive?: boolean }) => Promise<void> } } }).spark;
+      const attempt = (id: string) => spark.orchestration.deleteRun(id, { refuseLive: true }).then(() => "deleted", (err: Error) => err.message);
+      return [await attempt(ids[0]), await attempt(ids[1]), await attempt("../outside")];
+    }, [RUNS.held, RUNS.running]);
+    expect(refused[0]).toContain("Its Loom is still using this run");
+    expect(refused[1]).toContain("Working now");
+    expect(refused[2]).toContain("Not a run id");
+    await access(join(fixture.userDataDir, "runs", RUNS.held, "run.json"));
+    await access(join(fixture.userDataDir, "runs", RUNS.running, "run.json"));
+
+    // A run the app's run list has not loaded yet still opens where it is shown, not in an empty chat.
+    await row(picker, RUNS.running, "cora").click();
+    await expect(picker.getByRole("button", { name: /^Open pass in Automations/ })).toBeVisible();
+    await expect(search).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(picker).toHaveCount(0);
+    await expect(page.locator(`[data-history-run="${RUNS.running}"]`)).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("Loom: Daily digest - pass 3")).toBeVisible({ timeout: 15_000 });
+    await reopen();
+
+    // A pass whose Loom is gone: read here, and its whole transcript is there.
+    await row(picker, RUNS.orphan, "cora").click();
+    await expect(detail.getByTestId("session-picker-kind")).toHaveText("Loom pass");
+    await expect(picker.getByTestId("session-picker-cora-notice")).toContainText("Its Loom was deleted");
+    await expect(picker.getByRole("button", { name: /^View/ })).toBeVisible();
+    await picker.getByRole("button", { name: "Whole transcript" }).click();
+    const transcript = page.getByTestId("session-transcript");
+    await expect(transcript).toContainText("Draft the osprey release notes");
+    await expect(transcript).toContainText("Drafted the osprey notes.");
+    await page.keyboard.press("Escape");
+    await expect(transcript).toHaveCount(0);
+    await expect(search).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(transcript).toContainText("Its Loom was deleted");
+    await expect(transcript).toContainText("Draft the osprey release notes");
+    await page.keyboard.press("Escape");
+    await expect(transcript).toHaveCount(0);
+
+    // Delete it: the confirm says what goes, and the run and its row are gone.
+    await more.click();
+    await deleteItem.click();
+    const confirm = picker.getByTestId("session-picker-confirm-delete");
+    await expect(confirm).toContainText(
+      "Deletes this run and its saved output from this computer, with what Cora learned from it. Its other passes stay.",
+    );
+    if (SHOTS) {
+      for (const mode of ["light", "dark"] as const) {
+        await setTheme(page, mode);
+        await page.waitForTimeout(400);
+        await page.screenshot({ path: join(SHOTS, `cora-delete-confirm-${mode}.png`) });
+      }
+    }
+    await confirm.getByRole("button", { name: "Delete" }).click();
+    await expect(picker.getByRole("status")).toContainText("Run deleted", { timeout: 15_000 });
+    await expect(row(picker, RUNS.orphan, "cora")).toHaveCount(0, { timeout: 15_000 });
+    await expect(access(join(fixture.userDataDir, "runs", RUNS.orphan))).rejects.toThrow();
+    await access(join(fixture.userDataDir, "runs", RUNS.pass, "run.json"));
+    const jobs = JSON.parse(await readFile(join(fixture.userDataDir, "scheduler.json"), "utf8")).jobs;
+    expect(jobs.map((job: { id: string }) => job.id)).toEqual(["loom-picker", "loom-held"]);
+
+    // The index forgets it too: a fresh picker, which hides nothing itself, does not find it.
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+    await reopen();
+    await picker.getByRole("combobox").fill("osprey");
+    await expect(picker.getByText(/No sessions match/)).toBeVisible({ timeout: 30_000 });
+    await picker.getByRole("combobox").fill("");
+    await expect(row(picker, RUNS.pass, "cora")).toBeVisible({ timeout: 30_000 });
+
+    if (SHOTS) {
+      await row(picker, RUNS.pass, "cora").click();
+      await expect(detail.getByTestId("session-picker-kind")).toHaveText("Loom pass");
+      for (const mode of ["light", "dark"] as const) {
+        await setTheme(page, mode);
+        await page.waitForTimeout(400);
+        await page.screenshot({ path: join(SHOTS, `cora-loom-pass-${mode}.png`) });
+      }
+      await row(picker, RUNS.running, "cora").click();
+      await expect(picker.getByTestId("session-picker-cora-notice")).toBeVisible();
+      for (const mode of ["light", "dark"] as const) {
+        await setTheme(page, mode);
+        await page.waitForTimeout(400);
+        await page.screenshot({ path: join(SHOTS, `cora-running-pass-${mode}.png`) });
+      }
+    }
+
+    // The listed pass opens in Automations, its run open in the Loom's history.
+    await row(picker, RUNS.pass, "cora").click();
+    await expect(search).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(picker).toHaveCount(0);
+    const historyRow = page.locator(`[data-history-run="${RUNS.pass}"]`);
+    await expect(historyRow).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("button", { name: "Close peek" })).toBeVisible();
+    // The peek is the pass's own read-only view; its header names the run.
+    await expect(page.getByText("Loom: Daily digest - pass 2")).toBeVisible({ timeout: 15_000 });
+    if (SHOTS) await page.screenshot({ path: join(SHOTS, "cora-pass-opened.png") });
+
+    // A chat opens as its chat.
+    picker = await openWithChord(page);
+    await picker.getByRole("combobox").fill("pelican stickers");
+    await expect(row(picker, RUNS.chat, "cora")).toHaveAttribute("aria-selected", "true", { timeout: 30_000 });
+    await expect(picker.getByTestId("session-picker-kind")).toHaveText("Cora chat");
+    await expect(picker.getByRole("button", { name: /^(Open chat|Go to its tab)/ })).toBeVisible();
+    await expect(picker.getByRole("combobox")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(picker).toHaveCount(0);
+    await expect(page.getByText("Count the pelican stickers left in stock").first()).toBeVisible({ timeout: 30_000 });
+  } finally {
+    await app?.close().catch(() => undefined);
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
   }
 });

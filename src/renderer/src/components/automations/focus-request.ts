@@ -12,22 +12,28 @@
 // user navigated away) from replaying a stale focus on a much later mount.
 const PENDING_TTL_MS = 15_000;
 
-let pendingAutomationId: string | null = null;
+/** An automation to show, and optionally one of its passes to open in its history. */
+export interface AutomationFocus {
+  automationId: string;
+  runId: string | null;
+}
+
+let pendingAutomation: AutomationFocus | null = null;
 let pendingAt = 0;
 
-export function requestAutomationFocus(automationId: string): void {
-  pendingAutomationId = automationId;
+export function requestAutomationFocus(automationId: string, runId: string | null = null): void {
+  pendingAutomation = { automationId, runId };
   pendingAt = Date.now();
   window.dispatchEvent(
-    new CustomEvent("spark:open-automation", { detail: { automationId } }),
+    new CustomEvent("spark:open-automation", { detail: { automationId, runId } }),
   );
 }
 
-export function consumePendingAutomationFocus(): string | null {
-  const id = pendingAutomationId;
-  pendingAutomationId = null;
-  if (id === null || Date.now() - pendingAt > PENDING_TTL_MS) return null;
-  return id;
+export function consumePendingAutomationFocus(): AutomationFocus | null {
+  const focus = pendingAutomation;
+  pendingAutomation = null;
+  if (focus === null || Date.now() - pendingAt > PENDING_TTL_MS) return null;
+  return focus;
 }
 
 // The same two channels for a workflow run: the hub opens its Workflows
