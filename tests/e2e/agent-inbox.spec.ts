@@ -437,7 +437,7 @@ test("the Agents tab is an inbox with sections, settle, undo and merge", async (
       await expect(settle).toBeVisible();
       await expect(row(page, "p-usage").getByRole("button", { name: /^Snooze/ })).toHaveCount(0);
       await expect(row(page, "p-usage").locator(".agent-inbox-row__status")).toBeHidden();
-      await railShot(page, "agents-hover.png", { height: 260 });
+      if (SHOTS) await row(page, "p-usage").screenshot({ path: join(SHOTS, "agents-hover.png") });
     });
 
     await test.step("the menu offers Merge only for a ready pull request", async () => {
@@ -534,6 +534,18 @@ test("the Agents tab is an inbox with sections, settle, undo and merge", async (
       for (const mode of ["dark", "light"] as const) {
         await setTheme(page, mode);
         await railShot(page, `agents-view-${mode}.png`);
+      }
+      if (SHOTS) {
+        // The open row's surface and a hovered row, where the tinted tiles
+        // sit on the strongest backgrounds the view draws.
+        await row(page, "p-pr30").evaluate((element) => element.classList.add("is-active"));
+        await row(page, "p-invoice").locator("[data-agent-card-open]").hover();
+        for (const mode of ["dark", "light"] as const) {
+          await setTheme(page, mode);
+          await railShot(page, `agents-states-${mode}.png`, { height: 220 });
+        }
+        await row(page, "p-pr30").evaluate((element) => element.classList.remove("is-active"));
+        await page.mouse.move(0, 0);
       }
       await setTheme(page, "dark");
     });

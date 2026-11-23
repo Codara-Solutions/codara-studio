@@ -485,12 +485,14 @@ test("opening a row from another workspace goes there and says where you are", a
       await expect(card(page, `run:${RUN_ID}`).locator(".agent-inbox-row__status")).toHaveText("Input");
     });
 
-    await test.step("project tiles are monochrome: no workspace colour on any row", async () => {
-      const tiles = await page
-        .locator(".agent-inbox-row__tile")
-        .evaluateAll((nodes) => nodes.map((node) => `${getComputedStyle(node).color} ${getComputedStyle(node).backgroundColor}`));
-      expect(tiles.length).toBeGreaterThanOrEqual(2);
-      expect(new Set(tiles).size).toBe(1);
+    await test.step("each project tile wears its workspace's colour", async () => {
+      const tileColor = async (workspaceId: string) =>
+        page
+          .locator(`[data-agent-workspace="${workspaceId}"] .agent-inbox-row__tile`)
+          .first()
+          .evaluate((node) => getComputedStyle(node).color);
+      expect(await tileColor("ws-a")).toBe("rgb(52, 211, 195)");
+      expect(await tileColor("ws-b")).toBe("rgb(120, 168, 255)");
     });
 
     await test.step("opening the beta row switches workspace and names it", async () => {
