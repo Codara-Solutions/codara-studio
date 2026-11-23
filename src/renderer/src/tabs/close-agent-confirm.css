@@ -1,10 +1,11 @@
 /* Closing a working agent (DESIGN.md). The explorer's and the rail's confirm
    layout on a solid surface: it asks over a live terminal, so nothing behind
-   it may show through. */
+   it may show through. Above the app's dialogs (1000 to 1300): Ctrl+W can
+   arrive while one of them is open. */
 .close-agent-confirm-scrim {
   position: fixed;
   inset: 0;
-  z-index: 140;
+  z-index: 1400;
   background: var(--modal-scrim);
   display: flex;
   align-items: center;

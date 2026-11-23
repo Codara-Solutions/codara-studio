@@ -12,7 +12,7 @@ import "./close-agent-confirm.css";
 
 interface Pending {
   text: CloseConfirmText;
-  close: () => void;
+  close: (confirmed: boolean) => void;
 }
 
 let pending: Pending | null = null;
@@ -29,12 +29,19 @@ export function setCloseConfirmWorkingPanes(read: () => Readonly<Record<string, 
   workingPaneIds = read;
 }
 
-/** Runs close now, or once the user confirms when it would stop a working agent. */
-export function confirmUserClose(tabs: readonly Tab[], targets: readonly CloseTarget[], close: () => void): void {
+/**
+ * Runs close now (confirmed false), or once the user confirms (true) when it
+ * would stop a working agent.
+ */
+export function confirmUserClose(
+  tabs: readonly Tab[],
+  targets: readonly CloseTarget[],
+  close: (confirmed: boolean) => void,
+): void {
   if (pending) return;
   const text = closeConfirmText(closingAgents(tabs, targets, workingPaneIds()));
   if (!text) {
-    close();
+    close(false);
     return;
   }
   publish({ text, close });
@@ -124,7 +131,7 @@ function CloseAgentConfirm({ pending: request }: { pending: Pending }) {
             className="spark-btn is-danger"
             onClick={() => {
               publish(null);
-              request.close();
+              request.close(true);
             }}
           >
             Close

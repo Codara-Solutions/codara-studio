@@ -115,7 +115,9 @@ export function closeConfirmText(agents: readonly ClosingAgent[]): CloseConfirmT
   }
   return {
     title: `Close ${agents.length} working agents?`,
-    text: "They are still working and their work will stop.",
+    text: agents.every((agent) => agent.state === "waiting")
+      ? "They are waiting for your answer and their work will stop."
+      : "They are still working and their work will stop.",
     items: agents.map((agent) =>
       `${capitalized(agentName(agent))} in ${agent.tabTitle}${agent.state === "waiting" ? " (waiting for you)" : ""}`,
     ),

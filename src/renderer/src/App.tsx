@@ -6335,7 +6335,18 @@ export default function App() {
       },
       "tab.closeOthers": () => {
         const keepId = activeVisibleTabId;
-        if (keepId) confirmUserClose(tabs.tabs, closeOthersTargets(tabs.tabs, keepId), () => tabs.closeOthers(keepId));
+        if (!keepId) return;
+        // A confirmed close stops only the tabs the question listed, never one
+        // that opened while it was asked.
+        const targets = closeOthersTargets(tabs.tabs, keepId);
+        confirmUserClose(tabs.tabs, targets, (confirmed) => {
+          if (!confirmed) {
+            tabs.closeOthers(keepId);
+            return;
+          }
+          for (const target of targets) tabs.closeTab(target.tabId);
+          if (tabsRef.current.tabs.some((tab) => tab.id === keepId)) tabs.setActiveTab(keepId);
+        });
       },
       "tab.cycleNext": () => {
         // Tabs folded into a collapsed group are skipped, as in Chrome.

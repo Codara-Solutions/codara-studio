@@ -151,6 +151,15 @@ test("closing a working agent asks first; an idle one closes at once", async () 
     await expect(dialog).toHaveCount(0);
     await expect(tabs).toHaveCount(2);
 
+    // Close other tabs from the idle tab asks about the working one.
+    await tabs.nth(0).click();
+    await page.keyboard.press(`${modKey("Alt")}+t`);
+    await expect(dialog).toHaveAccessibleName(/^Close Claude in .+\?$/);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(tabs).toHaveCount(2);
+    await tabs.nth(1).click();
+
     // Enter on the focused Close button closes the tab and stops the agent.
     await page.keyboard.press(modKey("w"));
     await expect(dialog).toBeVisible();

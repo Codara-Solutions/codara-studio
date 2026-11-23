@@ -129,6 +129,15 @@ test("a bulk close names how many agents would stop and lists them", ({ mod }) =
   assert.deepEqual(mod.closeOthersTargets(tabs, "missing"), []);
 });
 
+test("a bulk close where every agent waits on the user says so", ({ mod }) => {
+  const tabs = [
+    terminal("api", leaf("a", { worker: agent("blocked") })),
+    terminal("web", leaf("w", { worker: agent("blocked", { runtime: "codex" }) })),
+  ];
+  const text = mod.closeConfirmText(mod.closingAgents(tabs, tabs.map((tab) => ({ tabId: tab.id }))));
+  assert.equal(text.text, "They are waiting for your answer and their work will stop.");
+});
+
 async function main() {
   const { mod, cleanup } = await load();
   let failed = 0;
