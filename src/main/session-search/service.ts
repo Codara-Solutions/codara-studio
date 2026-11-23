@@ -725,6 +725,16 @@ async function sessionRecord(key: unknown): Promise<IndexSessionRecord | null> {
   return call<IndexSessionRecord | null>({ type: "session", key });
 }
 
+export async function lookupIndexedSession(
+  agent: SessionSearchAgent,
+  sessionId: string,
+): Promise<{ agent: SessionSearchAgent; sessionId: string; cwd: string | null } | null> {
+  const record = await sessionRecord(`${agent}:${sessionId}`).catch(() => null);
+  return record && record.agent === agent && record.sessionId === sessionId
+    ? { agent: record.agent, sessionId: record.sessionId, cwd: record.cwd ?? null }
+    : null;
+}
+
 /** The transcript file, only when it sits inside a folder the index reads. */
 async function verifiedTranscriptPath(record: IndexSessionRecord): Promise<string | null> {
   if (!record.transcriptPath) return null;

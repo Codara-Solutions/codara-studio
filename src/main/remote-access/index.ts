@@ -65,6 +65,10 @@ import {
   PREVIEW_ACTION_BURST,
   PREVIEW_ACTION_REFILL_MS,
 } from "./preview-policy";
+import {
+  SESSION_SEARCH_BURST,
+  SESSION_SEARCH_REFILL_MS,
+} from "./session-search-remote";
 import { stableRemoteAccessPortCandidates } from "./stable-port";
 import {
   RemoteTerminalLeaseRegistry,
@@ -102,7 +106,12 @@ const MAX_TOTAL_SESSIONS = 16;
 // derive the session keys to send a real hello, so it never becomes proven;
 // this deadline is what stops such phantom sessions from lingering.
 const SESSION_HELLO_DEADLINE_MS = 15_000;
-export { PREVIEW_ACTION_BURST, PREVIEW_ACTION_REFILL_MS };
+export {
+  PREVIEW_ACTION_BURST,
+  PREVIEW_ACTION_REFILL_MS,
+  SESSION_SEARCH_BURST,
+  SESSION_SEARCH_REFILL_MS,
+};
 // cora.send budget per paired device: 20 at once, then one every 3 seconds.
 export const CORA_SEND_BURST = 20;
 export const CORA_SEND_REFILL_MS = 3_000;
@@ -203,8 +212,11 @@ export interface RemoteAccessDeps {
   listNotificationHistory?: (devicePublicKey: string) => Promise<RemotePhoneNotification[]>;
   beginImageUpload?: RemoteRpcServices["beginImageUpload"];
   listPreviewTabs?: RemoteRpcServices["listPreviewTabs"];
+  openPreviewTab?: RemoteRpcServices["openPreviewTab"];
+  closePreviewTab?: RemoteRpcServices["closePreviewTab"];
   capturePreviewScreenshot?: RemoteRpcServices["capturePreviewScreenshot"];
   interactPreviewTab?: RemoteRpcServices["interactPreviewTab"];
+  searchSessions?: RemoteRpcServices["searchSessions"];
   attachWorkerTerminal?: RemoteRpcServices["attachWorkerTerminal"];
   createTerminal(
     request: RemoteTerminalCreateRequest,
@@ -283,6 +295,9 @@ export class RemoteAccessService {
   // Remote preview captures and interactions render Chromium frames; bound
   // them per paired device so reconnecting cannot reset the bucket.
   private readonly previewActionLimiter: DeviceRateLimiter;
+  // Remote session searches query the SQLite FTS worker; bound them per
+  // paired device so reconnecting cannot reset the bucket.
+  private readonly sessionSearchLimiter: DeviceRateLimiter;
 
   constructor(private readonly deps: RemoteAccessDeps) {
     this.devices = new PairedDeviceStore(deps.remoteDir);
@@ -294,6 +309,11 @@ export class RemoteAccessService {
     this.previewActionLimiter = new DeviceRateLimiter({
       burst: PREVIEW_ACTION_BURST,
       refillMs: PREVIEW_ACTION_REFILL_MS,
+      now: deps.now,
+    });
+    this.sessionSearchLimiter = new DeviceRateLimiter({
+      burst: SESSION_SEARCH_BURST,
+      refillMs: SESSION_SEARCH_REFILL_MS,
       now: deps.now,
     });
     this.terminalLeases = new RemoteTerminalLeaseRegistry({
@@ -767,6 +787,7 @@ export class RemoteAccessService {
     this.workerTerminalControls.revokeOwner(publicKeyB64);
     this.coraSendLimiter.forget(publicKeyB64);
     this.previewActionLimiter.forget(publicKeyB64);
+    this.sessionSearchLimiter.forget(publicKeyB64);
     const sessions = this.sessions.get(publicKeyB64);
     if (sessions) {
       for (const session of sessions) {
@@ -1092,9 +1113,13 @@ export class RemoteAccessService {
         : undefined,
       beginImageUpload: this.deps.beginImageUpload,
       listPreviewTabs: this.deps.listPreviewTabs,
+      openPreviewTab: this.deps.openPreviewTab,
+      closePreviewTab: this.deps.closePreviewTab,
       capturePreviewScreenshot: this.deps.capturePreviewScreenshot,
       interactPreviewTab: this.deps.interactPreviewTab,
       allowPreviewAction: () => this.previewActionLimiter.take(keyB64),
+      searchSessions: this.deps.searchSessions,
+      allowSessionSearch: () => this.sessionSearchLimiter.take(keyB64),
       attachWorkerTerminal: this.deps.attachWorkerTerminal,
       terminalLeases: this.terminalLeases,
       studioTerminalLeases: this.deps.studioTerminalLeases,

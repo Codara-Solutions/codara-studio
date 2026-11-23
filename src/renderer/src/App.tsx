@@ -5925,7 +5925,9 @@ export default function App() {
           forEachTerminalLeaf(tab.root, (leaf) => {
             // Phone-owned panes are already durable terminal leases, and Cora
             // workers already have their purpose-built graph terminal surface.
-            if (leaf.origin || leaf.worker) return;
+            // Manual desktop agent tabs stay shareable so already-open agent
+            // sessions appear immediately on paired phones.
+            if (leaf.origin || (leaf.worker && leaf.worker.source !== "manual")) return;
             shared.push({
               paneId: leaf.paneId,
               tabId: tab.id,
@@ -5936,7 +5938,7 @@ export default function App() {
               ...(leaf.agentOwner ? { agentOwner: leaf.agentOwner } : {}),
               // Preserve all five agent runtimes (including pi and antigravity)
               // so paired phones render the matching engine identity.
-              profile: leaf.agentSession?.runtime ?? "shell",
+              profile: leaf.agentSession?.runtime ?? leaf.worker?.runtime ?? "shell",
             });
           });
         }

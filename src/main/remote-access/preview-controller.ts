@@ -21,6 +21,8 @@ const MAX_PREVIEW_VIEWPORT_MODES = 256;
 const LIST_TIMEOUT_MS = 5_000;
 const SCREENSHOT_TIMEOUT_MS = 12_000;
 const RESIZE_TIMEOUT_MS = 8_000;
+const OPEN_TIMEOUT_MS = 20_000;
+const CLOSE_TIMEOUT_MS = 8_000;
 const CLICK_SETTLE_MS = 180;
 const VIEWPORT_SETTLE_MS = 150;
 const RELOAD_SETTLE_MS = 1_500;
@@ -80,7 +82,7 @@ export interface RemotePreviewControllerDeps<
 > {
   requireLocalWorkspace(workspaceId: string): Promise<unknown>;
   requestPreviewOp<T = unknown>(
-    op: "list" | "screenshot" | "resize",
+    op: "list" | "screenshot" | "resize" | "navigate" | "close",
     params: Record<string, unknown>,
     opts?: { timeoutMs?: number },
   ): Promise<T>;
@@ -94,6 +96,8 @@ export interface RemotePreviewControllerDeps<
 
 export interface RemotePreviewController {
   listPreviewTabs(workspaceId: string): Promise<RemotePreviewTab[]>;
+  openPreviewTab(input: { workspaceId: string; url: string }): Promise<RemotePreviewTab>;
+  closePreviewTab(input: { workspaceId: string; tabId: string }): Promise<{ closed: true }>;
   capturePreviewScreenshot(input: { workspaceId: string; tabId: string }): Promise<RemotePreviewScreenshot>;
   interactPreviewTab(input: {
     workspaceId: string;
@@ -255,6 +259,86 @@ export function createRemotePreviewController<
         deps.requestPreviewOp<{ tabs?: unknown[] }>("list", { workspaceId }, { timeoutMs: LIST_TIMEOUT_MS }),
       );
       return projectRemotePreviewTabs(Array.isArray(result?.tabs) ? result.tabs : [], workspaceId, viewportModes);
+    },
+
+    async openPreviewTab(input: { workspaceId: string; url: string }): Promise<RemotePreviewTab> {
+      await deps.requireLocalWorkspace(input.workspaceId);
+      const safeUrl = sanitizeRemotePreviewUrl(input.url);
+      if (!safeUrl) {
+        throw new RemotePreviewError(ERR_PREVIEW_SCHEME_DISALLOWED);
+      }
+      const raw = await runBridgeCall("tab", () =>
+        deps.requestPreviewOp<{
+          tabId?: unknown;
+          url?: unknown;
+          title?: unknown;
+          loading?: unknown;
+        }>(
+          "navigate",
+          { workspaceId: input.workspaceId, url: safeUrl, fresh: true },
+          { timeoutMs: OPEN_TIMEOUT_MS },
+        ),
+      );
+      const tabId = typeof raw?.tabId === "string" ? raw.tabId.trim() : "";
+      if (!tabId || tabId.length > 128) {
+        throw new RemotePreviewError(ERR_PREVIEW_UNAVAILABLE);
+      }
+      const rawUrl = typeof raw?.url === "string" ? raw.url.trim() : "";
+      const finalUrl = rawUrl ? sanitizeRemotePreviewUrl(rawUrl) : safeUrl;
+      if (!finalUrl) {
+        throw new RemotePreviewError(ERR_PREVIEW_SCHEME_DISALLOWED);
+      }
+      const title = sanitizeRemotePreviewTitle(raw?.title, finalUrl, raw?.url);
+      return {
+        tabId,
+        workspaceId: input.workspaceId,
+        title,
+        url: finalUrl,
+        loading: raw?.loading === true,
+        canGoBack: false,
+        canGoForward: false,
+        updatedAt: now().toISOString(),
+      };
+    },
+
+    async closePreviewTab(input: { workspaceId: string; tabId: string }): Promise<{ closed: true }> {
+      await deps.requireLocalWorkspace(input.workspaceId);
+      return tabOps.run(input.tabId, async () => {
+        // Verify ownership within this workspace via list before issuing close
+        // so callers cannot close tabs in another workspace or probe arbitrary ids.
+        const listed = await runBridgeCall("tab", () =>
+          deps.requestPreviewOp<{ tabs?: unknown[] }>(
+            "list",
+            { workspaceId: input.workspaceId },
+            { timeoutMs: LIST_TIMEOUT_MS },
+          ),
+        );
+        const rawTabs = Array.isArray(listed?.tabs) ? listed.tabs : [];
+        const match = rawTabs.find((raw) => {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+          const entry = raw as Record<string, unknown>;
+          return (
+            entry.workspaceId === input.workspaceId &&
+            typeof entry.id === "string" &&
+            entry.id.trim() === input.tabId
+          );
+        }) as Record<string, unknown> | undefined;
+        if (!match) {
+          throw new RemotePreviewError(ERR_PREVIEW_TAB_UNAVAILABLE);
+        }
+        if (match.url !== undefined && !sanitizeRemotePreviewUrl(match.url)) {
+          throw new RemotePreviewError(ERR_PREVIEW_SCHEME_DISALLOWED);
+        }
+        await runBridgeCall("tab", () =>
+          deps.requestPreviewOp(
+            "close",
+            { workspaceId: input.workspaceId, tabId: input.tabId },
+            { timeoutMs: CLOSE_TIMEOUT_MS },
+          ),
+        );
+        viewportModes.delete(input.tabId);
+        return { closed: true };
+      });
     },
 
     async capturePreviewScreenshot(input: { workspaceId: string; tabId: string }): Promise<RemotePreviewScreenshot> {

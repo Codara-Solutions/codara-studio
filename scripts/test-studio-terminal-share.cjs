@@ -399,6 +399,81 @@ async function main() {
     },
   );
 
+  await test(
+    "closeDesktopTab marks descriptors closeable, requires live attachment, and closes cleanly",
+    async () => {
+      const pty = fakePtyManager();
+      globalThis.__studioSharePty = pty;
+      const inventory = [inventoryItem("pane-close", { tabId: "tab-close", workspaceId: "ws-close", profile: "claude" })];
+      globalThis.__studioShareBridge = {
+        requestTerminalOp: async () => inventory,
+      };
+      pty.open("pane-close", ["ready"]);
+      const closedCalls = [];
+      const changedPings = [];
+      const logs = [];
+      const store = new StudioTerminalShareStore({
+        onTerminalsChanged: () => changedPings.push("ping"),
+        closeDesktopTab: async (descriptor) => {
+          closedCalls.push(descriptor);
+        },
+        log: (line) => logs.push(line),
+      });
+
+      const listed = await store.list("phone-a");
+      assert.equal(listed.length, 1);
+      assert.equal(listed[0].closeable, true);
+
+      const sinkA = subscriber();
+      const sinkB = subscriber();
+      const attachedA = store.attach("phone-a", "studio-pane-close", 0, "sub-a", sinkA.callbacks);
+      store.attach("phone-b", "studio-pane-close", 0, "sub-b", sinkB.callbacks);
+
+      // Unattached caller or stale attachment must be rejected without closing.
+      assert.throws(
+        () => store.close("phone-a", "studio-pane-close", "sub-unknown", attachedA.attachmentId, "req-bad-1"),
+        /attachment is no longer current/i,
+      );
+      assert.throws(
+        () => store.close("phone-a", "studio-pane-close", "sub-a", "wrong-attachment", "req-bad-2"),
+        /attachment is no longer current/i,
+      );
+      assert.equal(closedCalls.length, 0);
+      assert.equal(changedPings.length, 0);
+
+      // Valid attached close detaches the caller, requests desktop tab close,
+      // ends the shared record, and notifies any other attached subscriber.
+      store.close("phone-a", "studio-pane-close", "sub-a", attachedA.attachmentId, "req-close-1");
+      assert.deepEqual(closedCalls, [
+        { workspaceId: "ws-close", desktopTabId: "tab-close", desktopPaneId: "pane-close" },
+      ]);
+      assert.equal(changedPings.length, 1);
+      assert.equal(sinkA.events.some((event) => event.type === "exit"), false);
+      assert.equal(sinkB.events.some((event) => event.type === "exit"), true);
+      assert.equal(studioPaneWatchedFromPhone("pane-close"), false);
+
+      // A failing closeDesktopTab callback logs cleanly without crashing.
+      pty.open("pane-fail");
+      const failStore = new StudioTerminalShareStore({
+        closeDesktopTab: async () => {
+          throw new Error("tab already closed");
+        },
+        log: (line) => logs.push(line),
+      });
+      globalThis.__studioShareBridge = {
+        requestTerminalOp: async () => [inventoryItem("pane-fail")],
+      };
+      await failStore.list("phone-a");
+      const attFail = failStore.attach("phone-a", "studio-pane-fail", 0, "sub-fail", subscriber().callbacks);
+      failStore.close("phone-a", "studio-pane-fail", "sub-fail", attFail.attachmentId, "req-fail");
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(logs.some((line) => line.includes("tab already closed")), true);
+
+      store.shutdown();
+      failStore.shutdown();
+    },
+  );
+
   console.log(`${passed} studio-terminal-share tests passed.`);
 }
 

@@ -19,11 +19,17 @@ export function remoteTerminalLaunchCommand(
         ? `codex resume ${resumeSessionId} --yolo`
         : "codex --yolo";
     case "grok":
-      return "grok --yolo";
+      return resumeSessionId
+        ? `grok --yolo --resume ${resumeSessionId}`
+        : "grok --yolo";
     case "pi":
-      return "pi";
+      return resumeSessionId
+        ? `pi --session ${resumeSessionId}`
+        : "pi";
     case "antigravity":
-      return "agy";
+      return resumeSessionId
+        ? `agy --conversation ${resumeSessionId}`
+        : "agy";
     case "shell":
       return undefined;
   }

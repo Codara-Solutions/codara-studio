@@ -161,6 +161,7 @@ export interface IndexSessionRecord {
   agent: SessionSearchAgent;
   sessionId: string;
   transcriptPath: string | null;
+  cwd?: string | null;
 }
 
 type Row = Record<string, unknown>;
@@ -1086,9 +1087,14 @@ export class SessionIndex {
   session(key: string): IndexSessionRecord | null {
     const parsed = parseSessionKey(key);
     if (!parsed) return null;
-    const row = this.stmt("SELECT transcript FROM sessions WHERE agent = ? AND session_id = ?").get(parsed.agent, parsed.sessionId);
+    const row = this.stmt("SELECT transcript, cwd FROM sessions WHERE agent = ? AND session_id = ?").get(parsed.agent, parsed.sessionId);
     if (!row) return null;
-    return { agent: parsed.agent, sessionId: parsed.sessionId, transcriptPath: strOrNull(row.transcript) };
+    return {
+      agent: parsed.agent,
+      sessionId: parsed.sessionId,
+      transcriptPath: strOrNull(row.transcript),
+      cwd: strOrNull(row.cwd),
+    };
   }
 
   /** The session's messages as indexed, oldest first, for a read-only view. */

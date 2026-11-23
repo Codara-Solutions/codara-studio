@@ -52,6 +52,14 @@ export interface StudioTerminalShareOptions {
   // store surfaces it here and the service turns it into a terminals.changed
   // push. Attached subscribers still get their sequenced onExit regardless.
   onTerminalsChanged?: () => void;
+  // Close the desktop tab backing a shared Studio terminal when an attached
+  // phone explicitly closes it. Omitted when running in detach-only mode,
+  // which keeps descriptors marked closeable: false.
+  closeDesktopTab?: (descriptor: {
+    workspaceId: string;
+    desktopTabId?: string;
+    desktopPaneId?: string;
+  }) => Promise<void> | void;
   // Where a failed inventory read is reported. The phone's list then falls
   // back to the last inventory this store synchronised rather than failing.
   log?: (line: string) => void;
@@ -249,7 +257,31 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
     attachmentId: string,
     _requestId: string,
   ): void {
+    // Validate the caller's live attachment before detaching or closing so an
+    // unattached or stale client cannot close a desktop Studio tab.
+    const record = this.requireAttached(terminalId, subscriberId, attachmentId);
+    const { workspaceId, desktopTabId, desktopPaneId } = record.descriptor;
     this.detach(ownerKey, terminalId, subscriberId, attachmentId);
+    const closeDesktopTab = this.options.closeDesktopTab;
+    if (!closeDesktopTab) return;
+    try {
+      void Promise.resolve(
+        closeDesktopTab({ workspaceId, desktopTabId, desktopPaneId }),
+      ).catch((err) => {
+        this.options.log?.(
+          `studio terminal desktop tab close failed for ${terminalId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    } catch (err) {
+      this.options.log?.(
+        `studio terminal desktop tab close threw for ${terminalId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    this.recordExit(record);
   }
 
   revokeOwner(_ownerKey: string): void {
@@ -301,7 +333,7 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
         sequence: 0,
         nextInputSequence: 1,
         origin: "studio",
-        closeable: false,
+        closeable: Boolean(this.options.closeDesktopTab),
       };
       const record = {} as SharedStudioTerminal;
       record.paneId = item.paneId;

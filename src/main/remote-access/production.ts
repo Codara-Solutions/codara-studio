@@ -128,7 +128,11 @@ import {
 import { getPreferenceCached, getPreferenceSync } from "../preferences-store";
 import * as pty from "../pty-manager";
 import { toolUpdating } from "../agent-cli-updates/launch-guard";
-import { noteTerminalUserInput } from "../terminal-agent-notify";
+import {
+  noteTerminalUserInput,
+  terminalAgentActivitySnapshot,
+  terminalAgentStateSnapshot,
+} from "../terminal-agent-notify";
 import { codaraHome } from "../codara-home";
 import {
   loadSettings,
@@ -145,7 +149,11 @@ import {
   deleteWorkerSession as deleteLocalWorkerSession,
   listWorkerSessions as listLocalWorkerSessions,
 } from "../worker-sessions";
-import { withSessionNames } from "../session-search/service";
+import {
+  lookupIndexedSession,
+  searchSessions,
+  withSessionNames,
+} from "../session-search/service";
 import {
   RemoteAccessService,
   type RemoteTerminalCreateRequest,
@@ -242,6 +250,8 @@ import type {
   RemoteWorkspaceOrganization,
   RemoteWorkerSessionDeleteResult,
   RemoteWorkerSessionInfo,
+  RemoteSessionSearchRequest,
+  RemoteSessionSearchResult,
   RemoteCoraChangedEvent,
   RemoteCoraResumeAccount,
   RemoteCoraResumeResult,
@@ -261,6 +271,11 @@ import { createCoraChangedCoalescer } from "./cora-change-coalescer";
 import { projectRemoteFleetOverview } from "./fleet-overview";
 import { projectRemoteNativeCliAccounts } from "./native-cli-account-projection";
 import { projectRemoteSubscriptionProfiles } from "./subscription-profile-projection";
+import {
+  projectRemoteSessionSearchResult,
+  SESSION_SEARCH_DEFAULT_LIMIT,
+  verifyRemoteResumeSession,
+} from "./session-search-remote";
 
 let singleton: RemoteAccessService | null = null;
 let stateSavedSubscriptionInstalled = false;
@@ -440,13 +455,35 @@ export function getRemoteAccessService(): RemoteAccessService {
       beginImageUpload: beginImageUploadForRemote,
       listPreviewTabs: async (workspaceId) =>
         (await getRemotePreviewController()).listPreviewTabs(workspaceId),
+      openPreviewTab: async (input) =>
+        (await getRemotePreviewController()).openPreviewTab(input),
+      closePreviewTab: async (input) =>
+        (await getRemotePreviewController()).closePreviewTab(input),
       capturePreviewScreenshot: async (input) =>
         (await getRemotePreviewController()).capturePreviewScreenshot(input),
       interactPreviewTab: async (input) =>
         (await getRemotePreviewController()).interactPreviewTab(input),
+      searchSessions: searchSessionsForRemote,
       attachWorkerTerminal: attachRemoteWorkerTerminal,
       studioTerminalLeases: new StudioTerminalShareStore({
         onTerminalsChanged: scheduleTerminalsChangedPush,
+        closeDesktopTab: async ({ workspaceId, desktopTabId }) => {
+          if (!desktopTabId) return;
+          try {
+            await requestTerminalOp(
+              "tabAct",
+              { action: "close", workspaceId, tabIds: [desktopTabId] },
+              { timeoutMs: 5_000 },
+            );
+          } catch (err) {
+            logMain(
+              "remote-access",
+              `studio terminal tab close failed for ${desktopTabId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        },
         log: (line) => logMain("remote-access", line),
       }),
       createTerminal: createRemoteTerminal,
@@ -518,18 +555,76 @@ export function initRemoteAccessAtBoot(): void {
 // this transport is paired to this computer, not transitively to another host.
 async function listWorkspacesForRemote(): Promise<RemoteWorkspaceInfo[]> {
   const state = await loadState();
-  const result: RemoteWorkspaceInfo[] = [];
-  let usedBytes = 2;
-  for (const workspace of state.workspaces) {
-    if (result.length >= MAX_REMOTE_WORKSPACES) break;
-    if (isRemotePath(workspace.cwd)) continue;
-    const info = await workspaceInfo(workspace);
-    const bytes = Buffer.byteLength(JSON.stringify(info), "utf8") + 1;
-    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
-    result.push(info);
-    usedBytes += bytes;
+  const localWorkspaces = state.workspaces
+    .filter((workspace) => !isRemotePath(workspace.cwd))
+    .slice(0, MAX_REMOTE_WORKSPACES);
+  const baseInfos: RemoteWorkspaceInfo[] = [];
+  for (const workspace of localWorkspaces) {
+    baseInfos.push(await workspaceInfo(workspace));
   }
-  return result;
+  const [railProj, prWatch, wsStatus] = await Promise.all([
+    import("./workspace-rail-projection"),
+    import("../github-ci-watch"),
+    import("../workspace-status"),
+  ]);
+  return railProj.enrichRemoteWorkspaces({
+    workspaces: localWorkspaces,
+    baseInfos,
+    railOrder: state.workspaceRailOrder ?? [],
+    pullRequests: prWatch.pullRequestWatchEntries(),
+    agentStates: terminalAgentStateSnapshot(),
+    agentActivities: terminalAgentActivitySnapshot(),
+    agentNotes: wsStatus.listAgentNotesSnapshot(),
+    maxWorkspaces: MAX_REMOTE_WORKSPACES,
+    budgetBytes: COLLECTION_BUDGET_BYTES,
+  });
+}
+
+async function localWorkspaceDescriptorsForRemote(): Promise<
+  Array<{ id: string; name: string; cwd: string; realCwd?: string }>
+> {
+  const state = await loadState();
+  return Promise.all(
+    state.workspaces
+      .filter((workspace) => !isRemotePath(workspace.cwd))
+      .map(async (workspace) => ({
+        id: workspace.id,
+        name: workspace.name,
+        cwd: workspace.cwd,
+        realCwd: await realpath(resolve(workspace.cwd)).catch(() => undefined),
+      })),
+  );
+}
+
+async function searchSessionsForRemote(
+  input: RemoteSessionSearchRequest,
+): Promise<RemoteSessionSearchResult> {
+  let cwd: string | null = null;
+  if (input.workspaceId) {
+    const { root } = await requireLocalWorkspace(input.workspaceId);
+    cwd = root;
+  }
+  const scope = input.scope ?? (cwd ? "workspace" : "all");
+  if ((scope === "workspace" || scope === "project") && !cwd) {
+    throw new Error("A local workspace is required for this search scope.");
+  }
+  const [raw, localWorkspaces] = await Promise.all([
+    searchSessions({
+      query: input.query ?? "",
+      scope,
+      cwd,
+      agents: input.agents ?? null,
+      limit: input.limit ?? SESSION_SEARCH_DEFAULT_LIMIT,
+      offset: input.offset ?? 0,
+      pinnedFirst: true,
+    }),
+    localWorkspaceDescriptorsForRemote(),
+  ]);
+  return projectRemoteSessionSearchResult(
+    raw,
+    localWorkspaces,
+    COLLECTION_BUDGET_BYTES,
+  );
 }
 
 async function getFleetOverviewForRemote(): Promise<RemoteFleetOverviewProjection> {
@@ -3879,37 +3974,35 @@ async function createRemoteTerminal(
     directory: true,
     rejectSymlinks: true,
   });
-  const resumableRuntime =
-    request.profile === "claude" || request.profile === "codex"
-      ? request.profile
-      : null;
   const nativeClaudeExecution =
     request.profile === "claude"
       ? await resolveNewNativeClaudeProfile()
       : null;
-  const resumeSession =
-    request.resumeSessionId && resumableRuntime
-      ? (
-          await listLocalWorkerSessions(resumableRuntime, cwd.path, {
-            ...(nativeClaudeExecution
-              ? {
-                  claudeStateDir:
-                    nativeClaudeExecution.env.CLAUDE_CONFIG_DIR ?? null,
-                }
-              : {}),
-          })
-        ).find(
-          (session) => session.sessionId === request.resumeSessionId,
-        )
-      : null;
-  if (request.resumeSessionId && !resumeSession) {
-    throw new Error(
-      "That worker session is no longer resumable in this workspace.",
-    );
+  let verifiedResumeSessionId: string | undefined;
+  if (request.resumeSessionId) {
+    const localWorkspaces = await localWorkspaceDescriptorsForRemote();
+    const verified = await verifyRemoteResumeSession({
+      profile: request.profile,
+      resumeSessionId: request.resumeSessionId,
+      cwd: cwd.path,
+      localWorkspaces,
+      claudeStateDir: nativeClaudeExecution?.env.CLAUDE_CONFIG_DIR ?? null,
+      listWorkerSessions: (runtime, sessionCwd, opts) =>
+        listLocalWorkerSessions(runtime, sessionCwd, opts),
+      lookupIndexedSession: (agent, sessionId) =>
+        lookupIndexedSession(agent, sessionId),
+      searchSessions: (query) => searchSessions(query),
+    });
+    if (!verified) {
+      throw new Error(
+        "That worker session is no longer resumable in this workspace.",
+      );
+    }
+    verifiedResumeSessionId = verified;
   }
   const command = remoteTerminalLaunchCommand(
     request.profile,
-    resumeSession?.sessionId,
+    verifiedResumeSessionId,
   );
   const profileLabel = remoteTerminalProfileLabel(request.profile);
   const title =

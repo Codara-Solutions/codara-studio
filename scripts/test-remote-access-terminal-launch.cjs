@@ -101,8 +101,11 @@ async function main() {
       ["codex", undefined, desktop.CODEX_LAUNCH_COMMAND],
       ["codex", sessionId, desktop.buildCodexResumeCommand(sessionId)],
       ["grok", undefined, desktop.GROK_LAUNCH_COMMAND],
+      ["grok", sessionId, desktop.buildGrokResumeCommand(sessionId)],
       ["pi", undefined, desktop.PI_LAUNCH_COMMAND],
+      ["pi", sessionId, desktop.buildPiResumeCommand(sessionId)],
       ["antigravity", undefined, desktop.ANTIGRAVITY_LAUNCH_COMMAND],
+      ["antigravity", sessionId, desktop.buildAntigravityResumeCommand(sessionId)],
     ];
     for (const [profile, resume, expected] of pairs) {
       const actual = phone.remoteTerminalLaunchCommand(profile, resume);
@@ -188,18 +191,46 @@ async function main() {
         reply,
       );
     }
-    const piResume = await create({ profile: "pi", resumeSessionId: "session-1" });
+    for (const profile of ["claude", "codex", "grok", "pi", "antigravity"]) {
+      const reply = await create({ profile, resumeSessionId: "session-1" });
+      check(
+        `terminal.create accepts resumeSessionId for ${profile}`,
+        reply?.ok === true &&
+          created.at(-1)?.profile === profile &&
+          created.at(-1)?.resumeSessionId === "session-1",
+        reply,
+      );
+      if (reply?.ok && reply.result?.terminalId) {
+        await call("terminal.close", { terminalId: reply.result.terminalId });
+      }
+    }
+    const shellResume = await create({ profile: "shell", resumeSessionId: "session-1" });
     check(
-      "a Pi terminal cannot ask Studio to resume a session",
-      piResume?.error?.code === "invalid-params",
-      piResume,
+      "a shell terminal cannot ask Studio to resume a session",
+      shellResume?.error?.code === "invalid-params",
+      shellResume,
     );
-    const antigravityResume = await create({ profile: "antigravity", resumeSessionId: "session-1" });
+    const missingProfileResume = await create({ resumeSessionId: "session-1" });
     check(
-      "an Antigravity terminal cannot ask Studio to resume a session",
-      antigravityResume?.error?.code === "invalid-params",
-      antigravityResume,
+      "terminal.create refuses resumeSessionId when profile is omitted",
+      missingProfileResume?.error?.code === "invalid-params",
+      missingProfileResume,
     );
+    const antigravityContinue = await create({ profile: "antigravity", resumeSessionId: "continue" });
+    check(
+      "antigravity refuses the synthetic continue word as resumeSessionId",
+      antigravityContinue?.error?.code === "invalid-params",
+      antigravityContinue,
+    );
+    for (const badId of ["", "../etc/passwd", "abc; rm -rf /", "-leading-dash", "a".repeat(129)]) {
+      const before = created.length;
+      const reply = await create({ profile: "claude", resumeSessionId: badId });
+      check(
+        `terminal.create refuses unsafe resumeSessionId ${JSON.stringify(badId)}`,
+        reply?.error?.code === "invalid-params" && created.length === before,
+        reply,
+      );
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
