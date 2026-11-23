@@ -154,8 +154,9 @@ export function oneLine(text: string, max: number): string {
 }
 
 export type AgentHibernationResult =
-  // freedBytes: the memory the pane's processes held when they were stopped;
-  // null where the process listing has no memory column (macOS, Linux).
+  // freedBytes: the memory the pane's processes held when they were stopped
+  // (Windows: working sets; Linux: proportional set sizes; macOS: RSS);
+  // null only when it could not be read for every one of them.
   | { ok: true; sleptAt: number; summary: AgentSleepSummary | null; freedBytes: number | null }
   | { ok: false; reason: AgentHibernationRefusal; detail?: string };
 
@@ -266,12 +267,22 @@ export interface AgentHibernationEvidence {
   teammatesActive: number;
   codexAwaitingIdle: boolean;
   // Last key the user sent, the last key that could have put text in the
-  // agent's input box, and the last time one of those keys was a submit. An
-  // edit after the last submit means text may sit unsent in the box.
+  // agent's input box, and the last time one of those keys was a submit (or
+  // a Ctrl+C that empties the box). An edit after the last submit means text
+  // may sit unsent in the box.
   lastUserInputAt: number;
   lastComposerEditAt: number;
   lastSubmitAt: number;
   lastOutputAt: number;
+  // The agent reports its state through a structured channel (Claude Code's
+  // hooks, or the OSC 7501 program status), not only through what its screen
+  // looks like. Optional: an older main omits it, which counts as false.
+  structured?: boolean;
+  // The last moment anything in the agent's state moved: a chip change, a
+  // turn starting or ending, a hook event, background work draining. Output
+  // after it with nothing else moving is the TUI repainting (a status line,
+  // a clock), not the agent doing anything. 0 when unknown.
+  settledAt?: number;
 }
 
 /**
@@ -310,6 +321,21 @@ export function judgeAgentEvidence(
   }
   if (evidence.lastComposerEditAt > evidence.lastSubmitAt) return "unsent-input";
   return null;
+}
+
+/**
+ * Whether the pane's output may restart the idle clock. An agent whose idle
+ * state comes from a structured channel and has not moved since it settled
+ * can only be repainting its own screen (Claude Code's status line every
+ * `refreshInterval`, a clock, a spinner in the title): that output is left
+ * off the clock, and the settle moment counts in its place. Called only once
+ * judgeAgentEvidence found nothing busy, so a working, blocked or background
+ * agent never gets here. Screen-only evidence keeps every byte on the clock:
+ * there a missed working frame would look exactly like a repaint.
+ */
+export function outputRestartsIdleClock(evidence: AgentHibernationEvidence | null): boolean {
+  if (!evidence || evidence.structured !== true) return true;
+  return !(typeof evidence.settledAt === "number" && Number.isFinite(evidence.settledAt) && evidence.settledAt > 0);
 }
 
 // ── Idle clock ──────────────────────────────────────────────────────────────

@@ -125,11 +125,56 @@ interface ProcReader {
   readBytes(path: string): Promise<Buffer>;
   readdir(path: string): Promise<string[]>;
 }
+// /proc files report a size of 0, so fs.readFile reads each one into a fresh
+// 64 KiB buffer. A full listing reads two per process, all at once: on a
+// machine with a thousand processes that put about 150 MB of buffers in the
+// main process at a time (measured during an agent sleep's census), which
+// stayed until the next full collection. These read into a small buffer that
+// grows only for a long file, and the listing reads a few processes at a time.
+const PROC_READ_START_BYTES = 4096;
+const PROC_READ_CONCURRENCY = 32;
+
+export async function readProcFile(path: string): Promise<Buffer> {
+  const handle = await fsp.open(path, "r");
+  try {
+    let buffer = Buffer.allocUnsafe(PROC_READ_START_BYTES);
+    let length = 0;
+    for (;;) {
+      if (length === buffer.length) {
+        const grown = Buffer.allocUnsafe(buffer.length * 2);
+        buffer.copy(grown, 0, 0, length);
+        buffer = grown;
+      }
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    return buffer.subarray(0, length);
+  } finally {
+    await handle.close();
+  }
+}
+
 const systemProcReader: ProcReader = {
-  readText: (path) => fsp.readFile(path, "utf8"),
-  readBytes: (path) => fsp.readFile(path),
+  readText: async (path) => (await readProcFile(path)).toString("utf8"),
+  readBytes: (path) => readProcFile(path),
   readdir: (path) => fsp.readdir(path),
 };
+
+/** `items` mapped through `fn`, at most `limit` at a time, in order. */
+async function mapLimited<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      out[index] = await fn(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
 let procReader: ProcReader = systemProcReader;
 
 /** Tests only: replace some /proc reads (null restores the real ones). */
@@ -221,9 +266,8 @@ async function linuxProcessTable(): Promise<readonly ListedProcess[] | null> {
     return null;
   }
   const boot = await linuxBootSeconds();
-  const rows = await Promise.all(
-    names.filter((name) => /^\d+$/.test(name)).map(Number).filter(safePid).map((pid) => readLinuxProcess(pid, boot)),
-  );
+  const pids = names.filter((name) => /^\d+$/.test(name)).map(Number).filter(safePid);
+  const rows = await mapLimited(pids, PROC_READ_CONCURRENCY, (pid) => readLinuxProcess(pid, boot));
   if (rows.includes(UNKNOWN)) return null;
   const listed = rows.filter((row): row is ListedProcess => row !== null && row !== UNKNOWN);
   return listed.length === 0 ? null : listed;

@@ -31,7 +31,17 @@ const SLEEP_TIMEOUT = WINDOWS ? 60_000 : 25_000;
 const TEST_TIMEOUT = WINDOWS ? 180_000 : 90_000;
 const RELAUNCH_TEST_TIMEOUT = WINDOWS ? 240_000 : 120_000;
 
-type Mode = "plain" | "dev-server";
+// plain: prints its prompt once and stays quiet. dev-server: also runs a long
+// command the way Claude Code's shell tool does. repaint: repaints a status
+// line every second the way Claude Code's statusLine refreshInterval does,
+// takes typed text into its box, and turns a submit into a short turn.
+// working: starts a turn at launch and never ends it, painting its spinner.
+// memory: holds a fixed buffer and starts an MCP-like child holding another.
+type Mode = "plain" | "dev-server" | "repaint" | "working" | "memory";
+
+// What the memory fake and its child hold, filled so every page is resident.
+const AGENT_HOLD_MB = 160;
+const CHILD_HOLD_MB = 64;
 
 interface FixtureOptions {
   activeWorkspaceId?: string;
@@ -40,6 +50,9 @@ interface FixtureOptions {
   prefs?: Record<string, unknown>;
   // The title Claude Code gave the session, as its transcript records it.
   aiTitle?: string;
+  // The fake reports its turns through Claude Code's hooks, as codara-hook.py
+  // drops them in <codara home>/hooks.
+  hooks?: boolean;
 }
 
 interface Fixture {
@@ -56,6 +69,8 @@ interface Fixture {
 
 interface Launch {
   pid: number;
+  // The pane's shell, which ran the fake.
+  ppid?: number;
   args: string[];
 }
 
@@ -370,6 +385,158 @@ test("a pane whose agent runs a command stays awake", async () => {
   }
 });
 
+test("an idle Claude with hooks sleeps although its status line repaints every second", async () => {
+  test.setTimeout(TEST_TIMEOUT);
+  const fixture = await prepareFixture("repaint", { hooks: true });
+  const { app, page, logs } = await launch(fixture);
+  try {
+    const [first] = await waitForLaunches(fixture, 1);
+    await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
+    await expectAsleep(page, logs, first);
+    // It slept on the clock of its state, not of its screen.
+    expect(logs.some((line) => line.includes(`pane=${PANE_ID} stays awake: not-idle-long-enough (pty output`)), logs.join("\n")).toBe(false);
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
+test("without hooks or program status, a repainting screen keeps the agent awake", async () => {
+  test.setTimeout(TEST_TIMEOUT);
+  // Screen-only evidence: a repaint cannot be told from a working frame the
+  // notifier missed, so every byte stays on the clock.
+  const fixture = await prepareFixture("repaint");
+  const { app, page, logs } = await launch(fixture);
+  try {
+    const [first] = await waitForLaunches(fixture, 1);
+    await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
+    await page.waitForTimeout(IDLE_MS * 3 + TICK_MS * 4);
+    await expect(page.getByTestId("pane-sleeping-chip")).toHaveCount(0);
+    expect(isAlive(first.pid)).toBe(true);
+    expect(logs.some((line) => /stays awake: not-idle-long-enough \((pty|agent) output/.test(line)), logs.join("\n")).toBe(true);
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
+test("a working Claude that paints its spinner never sleeps", async () => {
+  test.setTimeout(TEST_TIMEOUT);
+  const fixture = await prepareFixture("working", { hooks: true });
+  const { app, page, logs } = await launch(fixture);
+  try {
+    const [first] = await waitForLaunches(fixture, 1);
+    await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
+    // Its working chip keeps the renderer from asking; main would refuse it
+    // as agent-busy anyway (scripts/test-agent-hibernation-main.cjs).
+    await page.waitForTimeout(IDLE_MS * 3 + TICK_MS * 4);
+    await expect(page.getByTestId("pane-sleeping-chip")).toHaveCount(0);
+    expect(isAlive(first.pid)).toBe(true);
+    expect(logs.some((line) => line.includes("is sleeping")), logs.join("\n")).toBe(false);
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
+test("unsent text keeps a repainting Claude awake until Ctrl+C empties its box", async () => {
+  test.setTimeout(TEST_TIMEOUT);
+  const fixture = await prepareFixture("repaint", { hooks: true, withShellPane: true });
+  const { app, page, logs } = await launch(fixture);
+  try {
+    const [first] = await waitForLaunches(fixture, 1);
+    // Type into the agent's box without sending it, then give the keyboard
+    // back to the shell pane beside it.
+    await pane(page).locator(".xterm-host").dispatchEvent("mousedown", { button: 0 });
+    await expect(pane(page).locator(".xterm-helper-textarea")).toBeFocused();
+    await page.keyboard.type("half a thought");
+    await pane(page, SHELL_PANE_ID).locator(".xterm-host").dispatchEvent("mousedown", { button: 0 });
+    await expect
+      .poll(() => logs.some((line) => line.includes(`pane=${PANE_ID} stays awake: unsent-input`)) || logs.join("\n"), {
+        timeout: SLEEP_TIMEOUT,
+      })
+      .toBe(true);
+    await page.waitForTimeout(IDLE_MS + TICK_MS * 2);
+    await expect(page.getByTestId("pane-sleeping-chip")).toHaveCount(0);
+    expect(isAlive(first.pid)).toBe(true);
+
+    // Ctrl+C empties the box: nothing is unsent any more, so it sleeps.
+    await pane(page).locator(".xterm-host").dispatchEvent("mousedown", { button: 0 });
+    await expect(pane(page).locator(".xterm-helper-textarea")).toBeFocused();
+    await page.keyboard.press("Control+C");
+    await pane(page, SHELL_PANE_ID).locator(".xterm-host").dispatchEvent("mousedown", { button: 0 });
+    await expectAsleep(page, logs, first);
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
+test("a sleeping agent's whole process tree is gone and the memory it held is reported", async () => {
+  test.setTimeout(TEST_TIMEOUT);
+  // The agent pane sits beside a shell that has the keyboard, so it sleeps
+  // in place: no workspace switch muddies Studio's own figures. The idle
+  // time is long enough to measure Studio's drift without a sleep first.
+  const fixture = await prepareFixture("memory", { withShellPane: true });
+  const { app, page, logs } = await launch(fixture, { env: { CODARA_E2E_HIBERNATION_IDLE_MS: "20000" } });
+  try {
+    const [first] = await waitForLaunches(fixture, 1);
+    const childPid = await waitForChildPid(fixture);
+    const tree = [first.pid, childPid, ...(WINDOWS || !first.ppid ? [] : [first.ppid])];
+    for (const pid of tree) expect(isAlive(pid)).toBe(true);
+    await page.waitForTimeout(3_000);
+    const start = await studioMemory(app);
+    await page.waitForTimeout(6_000);
+    const before = await studioMemory(app);
+    expect(isAlive(first.pid), "slept before the baseline was taken").toBe(true);
+
+    await expect(sleepingChip(page), logs.join("\n")).toHaveAttribute("aria-label", "CLAUDE sleeping", { timeout: 40_000 });
+    // No leftover: the agent, its MCP-like child and the pane's shell.
+    for (const pid of tree) await expect.poll(() => isAlive(pid), { timeout: 15_000 }).toBe(false);
+    const line = logs.find((entry) => entry.includes(`pane=${PANE_ID} claude is sleeping`)) ?? "";
+    const freedMb = Number(/freed (\d+) MB/.exec(line)?.[1] ?? 0);
+    expect(freedMb, line).toBeGreaterThanOrEqual(AGENT_HOLD_MB + CHILD_HOLD_MB);
+    await expect(sleepingCard(page)).toContainText(/\d+ MB freed/);
+
+    // What Studio itself keeps for the sleeping pane: main does not grow by
+    // more than noise (the census once left ~150 MB of buffers there).
+    await page.waitForTimeout(3_000);
+    const after = await studioMemory(app);
+    console.log(
+      `[memory] agent tree freed ${freedMb} MB; Studio (MB) start ${JSON.stringify(start)} before ${JSON.stringify(before)} after ${JSON.stringify(after)}`,
+    );
+    expect(after.mainHeap - before.mainHeap, JSON.stringify({ start, before, after })).toBeLessThan(30);
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
+// Studio's own processes, in MB: main's resident set, and the working set of
+// every Electron process (main, renderer, GPU, utility) together.
+// mainHeap is main's JS heap plus the native memory its objects hold (its
+// buffers), read as it stands: no collection is forced, so garbage the sleep
+// leaves behind shows too. It once held ~150 MB of /proc read buffers.
+async function studioMemory(
+  app: ElectronApplication,
+): Promise<{ main: number; mainHeap: number; renderer: number; all: number; heapUsed: number; external: number; arrayBuffers: number }> {
+  return app.evaluate(({ app: electronApp }) => {
+    const metrics = electronApp.getAppMetrics();
+    const mb = (bytes: number) => Math.round(bytes / (1024 * 1024));
+    const usage = process.memoryUsage();
+    const renderer = metrics.filter((entry) => entry.type === "Tab").reduce((sum, entry) => sum + entry.memory.workingSetSize, 0);
+    return {
+      main: mb(usage.rss),
+      mainHeap: mb(usage.heapUsed + usage.external),
+      heapUsed: mb(usage.heapUsed),
+      external: mb(usage.external),
+      arrayBuffers: mb(usage.arrayBuffers),
+      renderer: mb(renderer * 1024),
+      all: mb(metrics.reduce((sum, entry) => sum + entry.memory.workingSetSize, 0) * 1024),
+    };
+  });
+}
+
 async function launch(
   fixture: Fixture,
   { seed = true, env = {} }: { seed?: boolean; env?: Record<string, string> } = {},
@@ -551,10 +718,60 @@ const { spawn } = require("node:child_process");
 const tool = spawn("/bin/sh", ["-c", ". " + ${JSON.stringify(join(claudeConfigDir, "shell-snapshots", "snapshot-sh-1.sh"))} + " 2>/dev/null; sleep 600"], { stdio: "ignore" });
 fs.writeFileSync(${JSON.stringify(childPidFile)}, String(tool.pid));
 `;
+  const hooksDir = join(userDataDir, "hooks");
+  const hook = options.hooks
+    ? `const hook = (hookName, payload) => {
+  const file = require("node:path").join(${JSON.stringify(hooksDir)}, require("node:crypto").randomUUID() + ".json");
+  const body = JSON.stringify({ hookName, timestamp: new Date().toISOString(), paneId: process.env.SPARK_PANE_ID || "", payload: { session_id: ${JSON.stringify(SESSION_ID)}, ...payload } });
+  fs.mkdirSync(${JSON.stringify(hooksDir)}, { recursive: true });
+  fs.writeFileSync(file + ".tmp", body);
+  fs.renameSync(file + ".tmp", file);
+};
+setTimeout(() => hook("SessionStart", { source: "resume" }), 300);
+`
+    : "const hook = () => {};\n";
+  const behaviour =
+    mode === "repaint"
+      ? `
+let ticks = 0;
+setInterval(() => process.stdout.write("\\x1b7\\x1b[20;1H\\x1b[2K  ctx 41% | " + new Date().toISOString().slice(11, 19) + " | " + ++ticks + "\\x1b8"), 1000);
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+process.stdin.resume();
+process.stdin.on("data", (data) => {
+  const text = data.toString();
+  // Ctrl+C with text in the box empties it, as Claude Code does.
+  if (text === "\\x03") return void process.stdout.write("\\r\\x1b[2K\\u276f ");
+  if (text.includes("\\r")) {
+    hook("UserPromptSubmit", { prompt: "done" });
+    process.stdout.write("\\r\\n");
+    return void setTimeout(() => {
+      process.stdout.write("Done.\\r\\n\\u276f ");
+      hook("Stop", { last_assistant_message: "Done." });
+    }, 300);
+  }
+  process.stdout.write(text);
+});
+`
+      : mode === "working"
+        ? `
+setTimeout(() => hook("UserPromptSubmit", { prompt: "build it" }), 600);
+let seconds = 0;
+setTimeout(() => setInterval(() => process.stdout.write("\\r\\x1b[2K\\u273b Working\\u2026 (" + ++seconds + "s \\u00b7 esc to interrupt)"), 1000), 800);
+`
+        : mode === "memory"
+          ? `
+const hold = Buffer.alloc(${AGENT_HOLD_MB} * 1024 * 1024, 1);
+const mcp = require("node:child_process").spawn(process.execPath, ["-e", "const held = Buffer.alloc(${CHILD_HOLD_MB} * 1024 * 1024, 1); setInterval(() => { held[0] += 1; }, 1 << 30);"], { stdio: "ignore" });
+fs.writeFileSync(${JSON.stringify(childPidFile)}, String(mcp.pid));
+setInterval(() => { hold[0] += 1; }, 1 << 30);
+`
+          : "";
   const body = `const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(launchLog)}, JSON.stringify({ pid: process.pid, args: process.argv.slice(2) }) + "\\n");
+fs.appendFileSync(${JSON.stringify(launchLog)}, JSON.stringify({ pid: process.pid, ppid: process.ppid, args: process.argv.slice(2) }) + "\\n");
+${hook}
 ${devServer}
 process.stdout.write("Claude Code v2.1.261\\r\\n\\u276f \\r\\n? for shortcuts\\r\\n");
+${behaviour}
 setInterval(() => {}, 1 << 30);
 `;
   let fakeClaude: string;

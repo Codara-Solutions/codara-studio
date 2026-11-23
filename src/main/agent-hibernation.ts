@@ -14,7 +14,10 @@
 //     pending, it is not waiting on the user and no typed text is unsent;
 //   - nothing happened in the pane for the idle time (the setting's, or a
 //     shorter one while the computer is low on memory): no input, no output,
-//     and the user did not show or touch it (noteAgentPanesTouched);
+//     and the user did not show or touch it (noteAgentPanesTouched). When
+//     the agent reports its state through hooks or program status and that
+//     state has not moved since it settled, its output is the TUI repainting
+//     (Claude Code's status line) and does not count; the settle does;
 //   - the pane's process tree is only the shell, the agent and what the agent
 //     started at boot (agent-hibernation-census.ts), so no dev server, watcher
 //     or tool command can be caught in the stop.
@@ -39,6 +42,7 @@ import {
   classifyPaneProcessTree,
   listCensusProcesses,
   listPaneTerminalPids,
+  readTreeMemoryBytes,
   type CensusProcess,
 } from "./agent-hibernation-census";
 import {
@@ -49,6 +53,7 @@ import {
   nextMemoryLevel,
   normalizeAgentHibernationMinutes,
   normalizeAgentHibernationWorkspaces,
+  outputRestartsIdleClock,
   policyIdleMs,
   validSleepSummary,
   type AgentMemoryLevel,
@@ -88,6 +93,9 @@ const RESTORED_PLACEMENT_GRACE_MS = 120_000;
 const SUMMARY_TIMEOUT_MS = 1_500;
 // Memory is read at most this often; the level keeps between reads.
 const MEMORY_READ_MS = 15_000;
+// Reading what the pane's processes hold (agent-hibernation-census.ts) is a
+// few /proc reads; the sleep never waits on it longer than this.
+const TREE_MEMORY_TIMEOUT_MS = 2_000;
 
 export interface AgentHibernationDeps {
   now: () => number;
@@ -99,6 +107,9 @@ export interface AgentHibernationDeps {
   listProcesses: () => Promise<CensusProcess[] | null>;
   // Every process holding the pane's terminal (POSIX tty, Windows console).
   terminalPids: (pane: { pid: number; ttyPath: string | null }) => Promise<number[] | null>;
+  // What these processes hold in memory, for a listing without a memory
+  // column (POSIX); null when it cannot be read for all of them.
+  treeMemory?: (pids: readonly number[]) => Promise<number | null>;
   stop: (paneId: string, generationId: string) => Promise<boolean>;
   log: (line: string) => void;
   // A paired phone has the pane open (Remote Access): it is on a screen.
@@ -250,6 +261,7 @@ const defaultDeps: AgentHibernationDeps = {
   placement: (paneId) => terminalPanePlacement(paneId),
   listProcesses: () => listCensusProcesses(),
   terminalPids: (pane) => listPaneTerminalPids(pane),
+  treeMemory: (pids) => readTreeMemoryBytes(pids),
   stop: (paneId, generationId) => pty.hibernate(paneId, generationId, STOP_GRACE_MS),
   log: (line) => logMain("agent-hibernation", line),
   watchedOnPhone: (paneId) => studioPaneWatchedFromPhone(paneId),
@@ -305,8 +317,10 @@ function forgetAtNextExit(paneId: string, entry: SleepingEntry): void {
 // same process generation (see CENSUS_BACKOFF_TICKS).
 const censusBackoff = new Map<string, { generationId: string; until: number; result: AgentHibernationResult }>();
 // The last verdict logged per pane, so a refusal repeated every tick is
-// logged once.
-const lastLogged = new Map<string, string>();
+// logged once (and again each VERDICT_RELOG_MS): when it was logged last, and
+// since when the pane has been kept awake for that reason.
+const lastLogged = new Map<string, { key: string; at: number; since: number }>();
+const VERDICT_RELOG_MS = 60 * MINUTE_MS;
 // When the user last showed or touched each pane (noteAgentPanesTouched).
 const touchedAt = new Map<string, number>();
 
@@ -483,9 +497,6 @@ type Judged =
   | { ok: true; session: pty.HibernationSessionInfo }
   | { ok: false; result: AgentHibernationResult };
 
-// The idle clock's stamps, in the order judgeNow lists them.
-const STAMP_NAMES = ["started", "pty input", "pty output", "agent input", "agent output", "shown or touched"] as const;
-
 function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, idleMs: number): Judged {
   const session = deps.session(request.paneId);
   if (!session) return { ok: false, result: { ok: false, reason: "no-session" } };
@@ -497,14 +508,26 @@ function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, 
   const stateRefusal = judgeAgentEvidence(evidence, request.runtime);
   if (stateRefusal) return { ok: false, result: { ok: false, reason: stateRefusal } };
   const now = deps.now();
-  const activityAt = [
-    session.createdAt,
-    session.lastInputAt,
-    session.lastOutputAt,
-    evidence?.lastUserInputAt ?? 0,
-    evidence?.lastOutputAt ?? 0,
-    touchedAt.get(request.paneId) ?? 0,
+  // The idle clock: the newest of these starts the idle period. With
+  // structured evidence of a settled agent (outputRestartsIdleClock), the
+  // pane's output is its TUI repainting and stays off the clock, and so does
+  // the pty's raw input stamp, which also counts the terminal's own replies
+  // to queries in that output; the notifier's input stamp counts only the
+  // user's keys and Codara's sends.
+  const withOutput = outputRestartsIdleClock(evidence);
+  const stamps: Array<[string, number]> = [
+    ["started", session.createdAt],
+    ["agent input", evidence?.lastUserInputAt ?? 0],
+    ["shown or touched", touchedAt.get(request.paneId) ?? 0],
+    ...(withOutput
+      ? ([
+          ["pty input", session.lastInputAt],
+          ["pty output", session.lastOutputAt],
+          ["agent output", evidence?.lastOutputAt ?? 0],
+        ] as Array<[string, number]>)
+      : ([["agent state", evidence?.settledAt ?? 0]] as Array<[string, number]>)),
   ];
+  const activityAt = stamps.map(([, at]) => at);
   const clockRefusal = judgeIdleClock({ now, idleMs, activityAt });
   if (clockRefusal === "not-idle-long-enough") {
     let newest = 0;
@@ -512,7 +535,7 @@ function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, 
       if (activityAt[index] > activityAt[newest]) newest = index;
     }
     const ago = Math.max(0, Math.round((now - activityAt[newest]) / 1000));
-    const detail = `${STAMP_NAMES[newest]} ${ago}s ago, needs ${Math.round(idleMs / 1000)}s`;
+    const detail = `${stamps[newest][0]} ${ago}s ago, needs ${Math.round(idleMs / 1000)}s`;
     return { ok: false, result: { ok: false, reason: clockRefusal, detail } };
   }
   if (clockRefusal) return { ok: false, result: { ok: false, reason: clockRefusal } };
@@ -521,7 +544,9 @@ function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, 
 
 // One line per change of verdict; a sleep or a failed stop always logs. The
 // not-idle detail carries ages that change every tick, so only the reason
-// counts as a change there.
+// counts as a change there. A pane kept awake for the same reason is logged
+// again once an hour with the detail of the moment, so a pane that never
+// sleeps says why in the log of any day, not only on the line that started it.
 function noteVerdict(paneId: string, result: AgentHibernationResult, deps: AgentHibernationDeps, context: string): void {
   if (result.ok) {
     lastLogged.delete(paneId);
@@ -530,10 +555,18 @@ function noteVerdict(paneId: string, result: AgentHibernationResult, deps: Agent
   }
   if (result.reason === "in-flight") return;
   const key = result.reason === "not-idle-long-enough" ? result.reason : `${result.reason}|${result.detail ?? ""}`;
-  if (result.reason !== "stop-failed" && lastLogged.get(paneId) === key) return;
-  lastLogged.set(paneId, key);
+  const now = deps.now();
+  const previous = lastLogged.get(paneId);
+  const same = previous?.key === key;
+  if (result.reason !== "stop-failed" && same && now - previous.at < VERDICT_RELOG_MS) return;
+  const since = same ? previous.since : now;
+  lastLogged.set(paneId, { key, at: now, since });
   if (lastLogged.size > 2_000) lastLogged.clear();
-  deps.log(`pane=${paneId} stays awake: ${result.reason}${result.detail ? ` (${result.detail})` : ""}`);
+  const parts = [
+    result.detail,
+    same && result.reason !== "stop-failed" ? `still, for ${Math.round((now - since) / MINUTE_MS)} min` : null,
+  ].filter(Boolean);
+  deps.log(`pane=${paneId} stays awake: ${result.reason}${parts.length > 0 ? ` (${parts.join(", ")})` : ""}`);
 }
 
 export async function hibernateAgentPane(
@@ -613,6 +646,11 @@ async function decide(
     return { ok: false, reason: "no-session", detail: "respawned while judged" };
   }
   const context = `${request.runtime} is sleeping (${request.placement}, idle ${Math.round(idleMs / 1000)}s${level === "ok" ? "" : `, memory ${level}`}, census ${processes.length} processes in ${deps.now() - now}ms)`;
+  // The POSIX listing carries no memory: read it now for the processes the
+  // stop is about to end, while they still hold it.
+  const freedBytes =
+    census.memoryBytes ??
+    (deps.treeMemory ? await withTimeout(deps.treeMemory(census.pids).catch(() => null), TREE_MEMORY_TIMEOUT_MS, null) : null);
   // Recorded before the stop: the pty leaves pty-manager's table as the
   // stop begins, so an app quit during the stop's grace period must already
   // find this pane among the sleeping ones, or the relaunch restore would
@@ -627,7 +665,7 @@ async function decide(
     tail: kept?.tail ?? null,
     unsent: kept?.unsent ?? null,
     summary: null,
-    freedBytes: census.memoryBytes,
+    freedBytes,
     session: request.session ?? null,
     placementGraceUntil: 0,
     offExit: null,

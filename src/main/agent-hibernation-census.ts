@@ -19,7 +19,7 @@ import { runtimeFromProcessCommand } from "@shared/agent-patterns";
 import type { AgentHibernationRuntime } from "@shared/agent-hibernation";
 import { commandRunsCodaraMcpServer } from "@shared/codara-mcp-server";
 import { commandRunsNativeCli } from "./orchestration/native-cli-process-shutdown";
-import { listProcessesWithCommands, processStartMs } from "./owned-process-tree";
+import { listProcessesWithCommands, processStartMs, readProcFile } from "./owned-process-tree";
 
 export interface CensusProcess {
   pid: number;
@@ -33,8 +33,9 @@ export interface CensusProcess {
 
 export type CensusVerdict =
   // memoryBytes: what the pane's whole tree holds, the memory a stop gives
-  // back; null when the listing had no memory column.
-  | { ok: true; agentPid: number; members: number; memoryBytes: number | null }
+  // back; null when the listing had no memory column (POSIX: the caller then
+  // reads it for `pids`, the pane's shell and everything under it).
+  | { ok: true; agentPid: number; members: number; memoryBytes: number | null; pids: number[] }
   | {
       ok: false;
       reason: "process-list-unavailable" | "no-agent-process" | "other-processes";
@@ -246,7 +247,13 @@ export function classifyPaneProcessTree(
     }
     memoryBytes += bytes;
   }
-  return { ok: true, agentPid: agent.pid, members: tree.length, memoryBytes };
+  return {
+    ok: true,
+    agentPid: agent.pid,
+    members: tree.length,
+    memoryBytes,
+    pids: [rootPid, ...tree.map((entry) => entry.pid)],
+  };
 }
 
 function onlyHelpersBelow(pid: number, children: Map<number, CensusProcess[]>): boolean {
@@ -447,6 +454,84 @@ export async function listTerminalPids(
     return pids;
   } catch {
     return null;
+  }
+}
+
+// ── Memory of the pane's tree (POSIX) ───────────────────────────────────────
+// The POSIX listing has no memory column, so the sleep reads it for the few
+// processes it is about to stop. Linux: each one's proportional set size
+// (smaps_rollup "Pss"), which splits pages the processes share (the node
+// binary under the agent and its MCP servers) instead of counting them once
+// per process, so the sum is what the stop gives back; VmRSS when the
+// rollup cannot be read. Elsewhere: `ps -o rss`.
+
+/** Kilobytes in a /proc line such as "Pss:  123456 kB"; null when absent. */
+export function procKbField(text: string, field: string): number | null {
+  const match = new RegExp(`^${field}:\\s+(\\d+)\\s+kB`, "m").exec(text);
+  const kb = match ? Number(match[1]) : NaN;
+  return Number.isFinite(kb) && kb >= 0 ? kb : null;
+}
+
+/** Sum of `ps -o pid=,rss=` rows (kB) for the listed pids; null when a row is unreadable. */
+export function parsePsRss(output: string): number | null {
+  let kb = 0;
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+    if (!match) return null;
+    kb += Number(match[2]);
+  }
+  return kb * 1024;
+}
+
+async function linuxProcessMemoryBytes(pid: number, read: (path: string) => Promise<string>): Promise<number | null> {
+  for (const [file, field] of [
+    ["smaps_rollup", "Pss"],
+    ["status", "VmRSS"],
+  ] as const) {
+    try {
+      const kb = procKbField(await read(`/proc/${pid}/${file}`), field);
+      // A kernel thread or zombie has no VmRSS line: it holds nothing.
+      if (kb !== null) return kb * 1024;
+      if (file === "status") return 0;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      // Gone since the listing: it holds nothing any more.
+      if (code === "ENOENT" || code === "ESRCH") return 0;
+    }
+  }
+  return null;
+}
+
+/**
+ * What the processes `pids` hold in memory, in bytes; null when it cannot be
+ * read for every one of them (never a partial sum presented as the whole).
+ */
+export async function readTreeMemoryBytes(
+  pids: readonly number[],
+  options: { platform?: NodeJS.Platform; read?: (path: string) => Promise<string> } = {},
+): Promise<number | null> {
+  const unique = [...new Set(pids)].filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+  if (unique.length === 0) return null;
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") return null;
+  if (platform === "linux") {
+    const read = options.read ?? (async (path: string) => (await readProcFile(path)).toString("utf8"));
+    const sizes = await Promise.all(unique.map((pid) => linuxProcessMemoryBytes(pid, read)));
+    return sizes.some((size) => size === null) ? null : sizes.reduce<number>((sum, size) => sum + (size ?? 0), 0);
+  }
+  try {
+    const { stdout } = await execFileAsync("ps", ["-o", "pid=,rss=", "-p", unique.join(",")], {
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 256 * 1024,
+    });
+    return parsePsRss(stdout);
+  } catch (error) {
+    // `ps -p` exits 1 when none of the pids is left: nothing is held.
+    const code = (error as { code?: unknown }).code;
+    const stdout = (error as { stdout?: unknown }).stdout;
+    return code === 1 && typeof stdout === "string" && !stdout.trim() ? 0 : null;
   }
 }
 

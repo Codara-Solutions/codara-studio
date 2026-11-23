@@ -109,6 +109,14 @@ async function main() {
         JSON.stringify({ parentPid: 7, startTicks: 12345, name: "a (b) c" }),
     );
     check("a mangled stat line is refused", mod.parseProcStat("42 no parens") === null);
+    {
+      // The small-buffer reader: a size-0 /proc file and a file longer than
+      // its first buffer both come back whole.
+      const cmdline = await mod.readProcFile("/proc/self/cmdline");
+      check("a /proc file reads whole", cmdline.equals(require("node:fs").readFileSync("/proc/self/cmdline")));
+      const long = await mod.readProcFile(path.join(__dirname, "..", "package.json"));
+      check("a file longer than the first buffer reads whole", long.equals(require("node:fs").readFileSync(path.join(__dirname, "..", "package.json"))));
+    }
     const tree = spawn("sh", ["-c", "sleep 6 & sleep 6; wait"], { stdio: "ignore" });
     try {
       await sleep(400);

@@ -192,6 +192,15 @@ async function main() {
     clock({ now: 100 * MIN, idleMs: 30 * MIN, activityAt: [10 * MIN, 99 * MIN] }) === "not-idle-long-enough",
   );
 
+  // ── Output on the clock ──
+  const restarts = shared.outputRestartsIdleClock;
+  check("no evidence: output counts", restarts(null) === true);
+  check("screen-only evidence: output counts", restarts(idleEvidence({ structured: false, settledAt: 5_000 })) === true);
+  check("an older main without the fields: output counts", restarts(idleEvidence()) === true);
+  check("structured but never settled: output counts", restarts(idleEvidence({ structured: true, settledAt: 0 })) === true);
+  check("structured with a bad stamp: output counts", restarts(idleEvidence({ structured: true, settledAt: Number.NaN })) === true);
+  check("structured and settled: the repaint is left off", restarts(idleEvidence({ structured: true, settledAt: 5_000 })) === false);
+
   // ── Candidates: every pane but the one with the keyboard ──
   const layout = [
     terminalTab(

@@ -265,6 +265,56 @@ async function main() {
     r = await run(undefined, request({ placement }));
     check(`a quiet pane may sleep wherever it is (${placement})`, r.result.ok === true, r.result);
   }
+
+  // ── A settled agent that repaints (Claude Code's status line) ──
+  const repainting = (t, extra = {}) => {
+    t.state.session.lastOutputAt = NOW - 1_000;
+    t.state.session.lastInputAt = NOW - 1_000; // the terminal's replies to the repaint's queries
+    Object.assign(t.state.evidence, { lastOutputAt: NOW - 1_000, structured: true, settledAt: NOW - 45 * MIN }, extra);
+  };
+  r = await run((t) => repainting(t));
+  check("a settled agent with hooks sleeps although its status line repaints", r.result.ok === true, r.result);
+  r = await run((t) => repainting(t, { structured: false }));
+  check(
+    "screen-only evidence keeps every byte on the clock",
+    r.result.reason === "not-idle-long-enough" && /^pty input|^pty output/.test(r.result.detail),
+    r.result,
+  );
+  r = await run((t) => repainting(t, { settledAt: 0 }));
+  check("an unknown settle moment keeps output on the clock", r.result.reason === "not-idle-long-enough", r.result);
+  r = await run((t) => repainting(t, { settledAt: NOW - 5 * MIN }));
+  check(
+    "a state that moved recently (a turn ended, a hook fired) restarts the clock",
+    r.result.reason === "not-idle-long-enough" && r.result.detail === "agent state 300s ago, needs 1800s",
+    r.result,
+  );
+  r = await run((t) => repainting(t, { lastUserInputAt: NOW - 2 * MIN, lastSubmitAt: NOW - 2 * MIN, lastComposerEditAt: NOW - 2 * MIN }));
+  check(
+    "the user's own keys still restart it",
+    r.result.reason === "not-idle-long-enough" && r.result.detail === "agent input 120s ago, needs 1800s",
+    r.result,
+  );
+  r = await run((t) => repainting(t, { state: "working", chipState: "working" }));
+  check("a working agent that repaints stays awake", r.result.reason === "agent-busy", r.result);
+  r = await run((t) => repainting(t, { chipState: "blocked" }));
+  check("a waiting agent that repaints stays awake", r.result.reason === "waiting-on-user", r.result);
+  r = await run((t) => repainting(t, { backgroundRunning: 1 }));
+  check("background work that repaints stays awake", r.result.reason === "agent-busy", r.result);
+  r = await run((t) => repainting(t, { lastComposerEditAt: NOW - 50 * MIN, lastSubmitAt: NOW - 55 * MIN, lastUserInputAt: NOW - 50 * MIN }));
+  check("unsent text in a repainting agent keeps it awake", r.result.reason === "unsent-input", r.result);
+  r = await run((t) => {
+    repainting(t);
+    t.state.processes = [...t.state.processes, { pid: 103, parentPid: 101, startMs: NOW - 10 * MIN, command: "bash -c 'source /x/shell-snapshots/snapshot-zsh-1.sh; npm run dev'" }];
+  });
+  check("a command the agent left running keeps a repainting agent awake", r.result.reason === "other-processes", r.result);
+  {
+    ah.resetAgentHibernationForTests();
+    const t = makeDeps();
+    repainting(t);
+    ah.noteAgentPanesTouched(["pane-1"], NOW - 2 * MIN);
+    const touched = await ah.hibernateAgentPane(request(), t.deps);
+    check("a pane the user showed still restarts it", touched.reason === "not-idle-long-enough" && /^shown or touched/.test(touched.detail), touched);
+  }
   {
     ah.resetAgentHibernationForTests();
     const t = makeDeps();
@@ -662,6 +712,56 @@ async function main() {
   ev = notify.terminalAgentHibernationEvidence("n1");
   notify.noteTerminalUserInput("n1", "\x1b[I");
   check("a focus report is not typing", notify.terminalAgentHibernationEvidence("n1").lastUserInputAt === ev.lastUserInputAt);
+  for (const [name, keys] of [
+    ["Shift+Tab (permission mode)", "\x1b[Z"],
+    ["Ctrl+O (transcript)", "\x0f"],
+    ["Ctrl+T (task list)", "\x14"],
+    ["Ctrl+L (redraw)", "\x0c"],
+  ]) {
+    const before = notify.terminalAgentHibernationEvidence("n1");
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    notify.noteTerminalUserInput("n1", keys);
+    const after = notify.terminalAgentHibernationEvidence("n1");
+    check(`${name} puts no text in the box`, after.lastComposerEditAt === before.lastComposerEditAt, after);
+  }
+  {
+    notify.noteTerminalUserInput("n1", "half a thought");
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const typed = notify.terminalAgentHibernationEvidence("n1");
+    check("typed text is unsent", typed.lastComposerEditAt > typed.lastSubmitAt, typed);
+    notify.noteTerminalUserInput("n1", "\x03");
+    const cleared = notify.terminalAgentHibernationEvidence("n1");
+    check("Ctrl+C empties Claude's box: nothing is unsent", cleared.lastComposerEditAt <= cleared.lastSubmitAt, cleared);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    notify.noteTerminalUserInput("n1", "more");
+    const again = notify.terminalAgentHibernationEvidence("n1");
+    check("text typed after the Ctrl+C is unsent again", again.lastComposerEditAt > again.lastSubmitAt, again);
+    notify.noteTerminalUserInput("n1", "abc\x03");
+    const mixed = notify.terminalAgentHibernationEvidence("n1");
+    check("a Ctrl+C sent together with text is not taken as a clear", mixed.lastComposerEditAt > mixed.lastSubmitAt, mixed);
+    notify.noteTerminalUserInput("n1", "\x03");
+  }
+  {
+    // A settled Claude with hooks: a hook moves the settle moment, its
+    // status line repainting does not.
+    ev = notify.terminalAgentHibernationEvidence("n2");
+    check("no hook yet: screen-only evidence", ev.structured === false, ev);
+    notify.noteTerminalHookEvent("n2", "SessionStart", { session_id: "s-1" });
+    ev = notify.terminalAgentHibernationEvidence("n2");
+    check("a hook makes the evidence structured", ev.structured === true && ev.settledAt > 0, ev);
+    const settled = ev.settledAt;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    H.taps.get("n2")?.(Buffer.from("\x1b7\x1b[40;1H\x1b[2K  Opus 4.7 | ctx 41% | 18:02:11\x1b8"));
+    ev = notify.terminalAgentHibernationEvidence("n2");
+    check(
+      "a status line repaint is output but leaves the settle moment",
+      ev.settledAt === settled && ev.lastOutputAt > settled && ev.state === "idle",
+      ev,
+    );
+    notify.noteTerminalHookEvent("n2", "UserPromptSubmit", { session_id: "s-1", prompt: "go" });
+    ev = notify.terminalAgentHibernationEvidence("n2");
+    check("a turn starting moves it", ev.settledAt > settled && ev.turnActive === true, ev);
+  }
 
   // ── The log: one line per change of verdict ──
   {
@@ -724,6 +824,49 @@ async function main() {
         lines[0] === "pane=pane-1 claude is sleeping (background-workspace, idle 600s, memory low, census 3 processes in 0ms, freed unknown, card none)",
       lines,
     );
+
+    // A pane kept awake for the same reason is said again once an hour.
+    ah.resetAgentHibernationForTests();
+    lines.length = 0;
+    let clock = NOW;
+    const held = makeDeps({ log: (line) => lines.push(line), now: () => clock });
+    held.state.evidence.state = "working";
+    held.state.evidence.chipState = "working";
+    for (let minute = 0; minute <= 125; minute += 1) {
+      clock = NOW + minute * MIN;
+      await ah.hibernateAgentPane(request(), held.deps);
+    }
+    check(
+      "the same refusal is logged again each hour, with how long it has held",
+      lines.length === 3 &&
+        lines[0] === "pane=pane-1 stays awake: agent-busy" &&
+        lines[1] === "pane=pane-1 stays awake: agent-busy (still, for 60 min)" &&
+        lines[2] === "pane=pane-1 stays awake: agent-busy (still, for 120 min)",
+      lines,
+    );
+
+    // POSIX listings carry no memory: the sleep reads the tree's own.
+    ah.resetAgentHibernationForTests();
+    lines.length = 0;
+    const asked = [];
+    const measured = makeDeps({
+      log: (line) => lines.push(line),
+      treeMemory: async (pids) => {
+        asked.push(pids);
+        return 412 * 1024 * 1024;
+      },
+    });
+    const freed = await ah.hibernateAgentPane(request(), measured.deps);
+    check(
+      "the memory of the pane's shell, agent and MCP servers is read before the stop",
+      freed.ok === true && freed.freedBytes === 412 * 1024 * 1024 && JSON.stringify(asked) === "[[100,101,102]]",
+      { freed, asked },
+    );
+    check("and logged", /freed 412 MB, card none\)$/.test(lines[0] ?? ""), lines);
+    ah.resetAgentHibernationForTests();
+    const noFigure = makeDeps({ treeMemory: async () => null });
+    const unknown = await ah.hibernateAgentPane(request(), noFigure.deps);
+    check("an unreadable tree still sleeps, its figure unknown", unknown.ok === true && unknown.freedBytes === null, unknown);
 
     // The card's line: asked for before the stop, handed back with the sleep
     // and kept for a pane that mounts later. Only its source is logged.

@@ -248,6 +248,9 @@ interface PaneWatcher {
   // The last of those inputs that was a submit (Enter). An edit after it
   // means text may sit unsent in the agent's input box (agent hibernation).
   lastSubmitAt: number;
+  // The last Ctrl+C that emptied the box (ctrlCEmptiesComposer): text typed
+  // before it is gone, not unsent.
+  lastComposerClearAt: number;
   lastInterruptKeyAt: number;
   lastHookEventAt: number;
   // Claude tool calls announced by PreToolUse and not yet answered by
@@ -424,6 +427,7 @@ export function syncTerminalNotifyPanes(input: {
       lastUserInputAt: 0,
       lastComposerEditAt: 0,
       lastSubmitAt: 0,
+      lastComposerClearAt: 0,
       lastInterruptKeyAt: 0,
       lastHookEventAt: 0,
       pendingToolCalls: 0,
@@ -1110,13 +1114,22 @@ function isSubmit(data: string): boolean {
 
 // Keys that cannot put text into an agent's input box: a lone Esc, Ctrl+C,
 // Backspace and Delete, Left/Right, Home/End and PageUp/PageDown (with or
-// without modifiers). Up and Down are not here: they recall earlier prompts
-// into the box. Text typed before any of these still counts as unsent.
+// without modifiers), and the agents' view toggles: Shift+Tab (Claude Code's
+// permission mode), Ctrl+O (transcript), Ctrl+T (task list) and Ctrl+L
+// (redraw). Up and Down are not here: they recall earlier prompts into the
+// box. Text typed before any of these still counts as unsent.
 const NO_TEXT_KEYS_RE =
-  /^(?:\x1b|\x03|\x7f|\x08|\x1b\[3~|\x1b(?:\[(?:1;\d+)?|O)[CDHF]|\x1b\[(?:[1478]|5|6)(?:;\d+)?~)+$/;
+  /^(?:\x1b|\x03|\x7f|\x08|\x0c|\x0f|\x14|\x1b\[Z|\x1b\[3~|\x1b(?:\[(?:1;\d+)?|O)[CDHF]|\x1b\[(?:[1478]|5|6)(?:;\d+)?~)+$/;
 
 function canLeaveText(data: string | undefined): boolean {
   return data === undefined || !NO_TEXT_KEYS_RE.test(data);
+}
+
+// Ctrl+C with text in the box empties it in Claude Code, Codex and Pi (a
+// second press on an empty box quits). Grok's composer is not known to, so
+// its unsent text stays unsent.
+function ctrlCEmptiesComposer(w: PaneWatcher, data: string | undefined): boolean {
+  return data === "\x03" && (w.runtime === "claude" || w.runtime === "codex" || w.runtime === "pi");
 }
 
 // User keystrokes / injected input reached this pane's pty. A submit starts a
@@ -1131,6 +1144,7 @@ export function noteTerminalUserInput(paneId: string, data?: string): void {
   const now = Date.now();
   w.lastUserInputAt = now;
   if (canLeaveText(data)) w.lastComposerEditAt = now;
+  if (ctrlCEmptiesComposer(w, data)) w.lastComposerClearAt = now;
   if (data !== undefined && (data === "\x1b" || data.includes("\x03"))) {
     w.lastInterruptKeyAt = now;
   }
@@ -1557,8 +1571,20 @@ export function terminalAgentHibernationEvidence(paneId: string): AgentHibernati
     codexAwaitingIdle: w.codexAwaitingIdle,
     lastUserInputAt: w.lastUserInputAt,
     lastComposerEditAt: w.lastComposerEditAt,
-    lastSubmitAt: w.lastSubmitAt,
+    // A box emptied by Ctrl+C holds nothing unsent, as after a submit.
+    lastSubmitAt: Math.max(w.lastSubmitAt, w.lastComposerClearAt),
     lastOutputAt: w.lastOutputAt,
+    // Hooks speak for Claude only; a program status report for any agent.
+    structured: (w.signals.hooks && w.runtime === "claude") || w.signals.programStatus,
+    settledAt: Math.max(
+      w.activity.stateSince,
+      w.lastTurnStartedAt,
+      w.lastTurnEnd?.at ?? 0,
+      w.lastHookEventAt,
+      w.lastWorkingAt,
+      w.backgroundDrainedAt,
+      w.lastSubmitAt,
+    ),
   };
 }
 
