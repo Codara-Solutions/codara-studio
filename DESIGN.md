@@ -1168,31 +1168,49 @@ the existing `InlineMessage` for anything that happened.
 
 ## Sleeping agent panes (2026-11)
 
-**Chosen:** a sleeping agent pane keeps its output and shows a solid card
-docked at its bottom edge: which agent sleeps, since when, **Resume** and
-**Resume and keep running**. The calm top-left **Sleeping** chip stays. The
-pane comes back only when the user asks (the card, Enter or a letter in the
-pane, the Agents view card), never just by being shown.
+**Chosen (2026-11-23):** a sleeping agent pane reads as asleep at a glance;
+its output is secondary. The output is faded right back by a solid scrim of
+the pane's own background (`--bg` at 84%, no blur, no glass). Centred on the
+pane at any size (CSS centring on the pane box, so splits and resizing follow
+on their own) sits a stack: a round moon badge (46 px, `--panel-2`, `--rule`,
+the moon in `--accent`) above one pill (fully rounded, `--panel-2`, `--rule`,
+`--lift-hi`) holding the session's title in semibold, then in `--ink-dim`
+"· asleep 2 h · freed 412 MB", then the primary **Resume**, pill-shaped. The
+calm top-left **Sleeping** chip stays. The pane comes back only when the user
+asks (Resume, Enter or a letter in the pane, the Agents view card), never just
+by being shown.
 
-**Why:** the first version woke a sleeping pane as soon as it was on screen,
-the way a sleeping browser tab reloads. That fits a tab, which costs little to
-wake. An agent costs a 200 to 500 MB process and seconds of start-up, and
-opening a workspace with ten sleeping agents started ten at once: the memory
-spike the feature exists to avoid.
+The owner, 2026-11-23, on the card docked at the bottom: "instead of this we
+can put something nicer in the middle of the terminal no matter what size it
+is we calculate the middle!" Between mock-ups: "mix between quiet screen and
+sleeping pill", then "1 but can you make the moon be above in the middle?"
+
+**Why sleeping waits for the user:** the first version woke a sleeping pane as
+soon as it was on screen, the way a sleeping browser tab reloads. That fits a
+tab, which costs little to wake. An agent costs a 200 to 500 MB process and
+seconds of start-up, and opening a workspace with ten sleeping agents started
+ten at once: the memory spike the feature exists to avoid.
 
 **References:** Chrome's memory saver, macOS App Nap, and the browser pane's
 own sleeping tab card (`bp-asleep`).
 
 **Rules:**
 
-- Docked at the bottom, not over the middle: the agent's last output stays
-  readable and scrollable above it.
-- Solid (`--panel-2`, `--rule`, `--lift-hi`), like the rest of a pane's
-  chrome; no glass.
-- One primary action, Resume. The secondary pins the pane awake as it
-  resumes. Under about 420 px the card keeps the title and Resume only.
+- The scrim takes no pointer events: the wheel still scrolls the output under
+  it. Text under it cannot be selected while the pane sleeps.
+- One visible action, Resume. Resume and keep running has no button of its
+  own: Shift+click or Shift+Enter on Resume, named in its tooltip ("Resume.
+  Shift+click: resume and never let it sleep again"). The toolbar's Keep
+  running sun still pins it after a resume.
+- The last request is the pill's tooltip, not a second line.
+- Narrow panes drop from the right: the memory freed (under 380 px), then how
+  long it sleeps (under 300 px); a long title ellipsizes. Under 260 px the pill
+  holds only Resume, the title moves to the pill's tooltip, and the moon stays
+  above.
+- Waking: the button reads "Resuming…" and is disabled. A failed resume
+  replaces the dim part with "Could not resume: <reason>" in `--danger`, and
+  the button reads "Try again".
 - The waking key is swallowed, never typed into the shell that comes up.
-- A failed resume stays on the card, in the danger color, with Try again.
 
 **Sleep now (2026-11-23):** the pane toolbar has a moon button, **Sleep now**,
 just left of the sun (Keep running). The owner asked for it on 2026-11-23:

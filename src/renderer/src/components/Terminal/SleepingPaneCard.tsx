@@ -1,10 +1,14 @@
-// The card a sleeping agent pane shows (agent hibernation). Its own module so
-// the renderer loads it only once a pane actually sleeps, not at startup.
+// What a sleeping agent pane shows (agent hibernation): its output faded back
+// behind a solid scrim and, centred on the pane at any size, the moon above
+// one pill with the session's title, how long it sleeps, the memory freed and
+// Resume. Its own module so the renderer loads it only once a pane actually
+// sleeps, not at startup.
 
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { TerminalLeafHibernation } from "../../tabs/types";
 import { MoonIcon } from "./AgentSleepControls";
+
 const RUNTIME_NAME: Record<TerminalLeafHibernation["runtime"], string> = {
   claude: "Claude Code",
   codex: "Codex",
@@ -12,26 +16,34 @@ const RUNTIME_NAME: Record<TerminalLeafHibernation["runtime"], string> = {
   pi: "Pi",
 };
 
-function sleptAgo(sleptAt: number, now: number): string {
+export const RESUME_TITLE = "Resume. Shift+click: resume and never let it sleep again";
+
+// Pane widths (px) under which the pill drops a part: the memory freed, then
+// how long it sleeps, then everything but Resume.
+const DROP_FREED_BELOW = 380;
+const DROP_ASLEEP_BELOW = 300;
+const RESUME_ONLY_BELOW = 260;
+
+function sleptFor(sleptAt: number, now: number): string {
   const minutes = Math.max(0, Math.round((now - sleptAt) / 60_000));
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 1) return "asleep just now";
+  if (minutes < 60) return `asleep ${minutes} min`;
   const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours} h ago`;
-  return `${Math.round(hours / 24)} days ago`;
+  if (hours < 48) return `asleep ${hours} h`;
+  return `asleep ${Math.round(hours / 24)} days`;
 }
 
 function freedText(bytes: number | null | undefined): string | null {
   if (typeof bytes !== "number" || !(bytes > 0)) return null;
   const mb = bytes / (1024 * 1024);
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB freed` : `${Math.round(mb)} MB freed`;
+  return mb >= 1024 ? `freed ${(mb / 1024).toFixed(1)} GB` : `freed ${Math.round(mb)} MB`;
 }
 
 /**
- * The card a sleeping pane shows at its bottom edge: what the session was
- * about, since when it sleeps, and Resume. Docked rather than covering the pane, so the
- * agent's last output stays readable and scrollable above it. Solid like the
- * rest of the pane's chrome.
+ * A sleeping pane reads as asleep at a glance; its output is secondary. The
+ * scrim takes no pointer events, so the wheel still scrolls the output under
+ * it (text under it cannot be selected while it sleeps). Solid like the rest
+ * of the pane's chrome: no blur, no glass.
  */
 export default function SleepingPaneCard({
   hibernation,
@@ -43,12 +55,11 @@ export default function SleepingPaneCard({
   onResumeKeepRunning: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  // A narrow split keeps the title and Resume only.
-  const [compact, setCompact] = useState(false);
+  const [width, setWidth] = useState(Number.POSITIVE_INFINITY);
   useEffect(() => {
     const node = ref.current;
     if (!node || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(([entry]) => setCompact((entry?.contentRect.width ?? 0) < 420));
+    const observer = new ResizeObserver(([entry]) => setWidth(entry?.contentRect.width ?? 0));
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
@@ -56,109 +67,149 @@ export default function SleepingPaneCard({
   const name = RUNTIME_NAME[hibernation.runtime] ?? "Agent";
   const title = hibernation.summary?.title ?? `${name} session`;
   const detail = hibernation.summary?.detail ?? null;
-  const meta = [`Fell asleep ${sleptAgo(hibernation.sleptAt, Date.now())}`, freedText(hibernation.freedBytes)]
-    .filter(Boolean)
-    .join(" · ");
+  const resumeOnly = width < RESUME_ONLY_BELOW;
+  const asleep = sleptFor(hibernation.sleptAt, Date.now());
+  const freed = freedText(hibernation.freedBytes);
+  const parts = [width < DROP_ASLEEP_BELOW ? null : asleep, width < DROP_FREED_BELOW ? null : freed].filter(Boolean);
+  // What a narrow pill leaves out is still on its tooltip.
+  const tooltip = [
+    resumeOnly ? title : null,
+    parts.length < [asleep, freed].filter(Boolean).length ? [asleep, freed].filter(Boolean).join(" · ") : null,
+    detail,
+  ].filter(Boolean);
+  const failed = hibernation.wakeError ? `Could not resume: ${hibernation.wakeError}` : null;
   const stop = (event: React.SyntheticEvent) => event.stopPropagation();
+  const resume = (keepRunning: boolean) => (keepRunning ? onResumeKeepRunning() : onResume());
   return (
-    <div
-      ref={ref}
-      className="spark-fade-in"
-      role="group"
-      aria-label={`${name} asleep: ${title}`}
-      data-testid="pane-sleeping-card"
-      data-waking={waking ? "true" : "false"}
-      onMouseDown={stop}
-      onPointerDown={stop}
-      style={{
-        position: "absolute",
-        left: 10,
-        right: 10,
-        bottom: 10,
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: compact ? "8px 10px" : "10px 12px",
-        borderRadius: 10,
-        background: "var(--panel-2)",
-        border: "1px solid var(--rule)",
-        boxShadow: "var(--lift-hi), 0 0 0 1px var(--rule-soft)",
-        color: "var(--ink)",
-        zIndex: 6,
-        animationDuration: "var(--motion-fast)",
-      }}
-    >
-      {!compact ? (
-        <span style={{ display: "inline-flex", color: "var(--muted)", flex: "none" }}>
-          <MoonIcon size={16} />
-        </span>
-      ) : null}
-      <div style={{ minWidth: 0, flex: 1, display: "grid", gap: 2 }}>
+    <>
+      <div
+        aria-hidden
+        data-testid="pane-sleeping-scrim"
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: "color-mix(in oklab, var(--bg) 84%, transparent)",
+          pointerEvents: "none",
+          zIndex: 4,
+        }}
+      />
+      <div
+        ref={ref}
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "grid",
+          placeItems: "center",
+          padding: 16,
+          pointerEvents: "none",
+          zIndex: 6,
+        }}
+      >
         <div
-          data-testid="pane-sleeping-title"
-          title={title}
-          style={{ fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-        >
-          {title}
-        </div>
-        {!compact && detail ? (
-          <div
-            data-testid="pane-sleeping-detail"
-            title={detail}
-            style={{ fontSize: 11.5, color: "var(--ink-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-          >
-            {detail}
-          </div>
-        ) : null}
-        <div
+          className="spark-fade-in"
+          role="group"
+          aria-label={`${name} asleep: ${title}`}
+          data-testid="pane-sleeping-card"
+          data-waking={waking ? "true" : "false"}
+          onMouseDown={stop}
+          onPointerDown={stop}
           style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            letterSpacing: "0.04em",
-            color: hibernation.wakeError ? "var(--danger)" : "var(--muted)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
+            display: "grid",
+            justifyItems: "center",
+            gap: 12,
+            maxWidth: "100%",
+            minWidth: 0,
+            pointerEvents: "auto",
+            animationDuration: "var(--motion-fast)",
           }}
-          title={hibernation.wakeError ?? undefined}
         >
-          {hibernation.wakeError ? `Could not resume: ${hibernation.wakeError}` : waking ? "Resuming…" : `${meta} · Enter resumes`}
-        </div>
-      </div>
-      <div style={{ display: "flex", gap: 6, flex: "none" }}>
-        {!compact ? (
-          <button
-            type="button"
-            className="spark-btn"
-            data-testid="pane-resume-keep-running"
-            disabled={waking}
-            title="Resume and never let this agent sleep on its own"
-            onClick={(event) => {
-              event.stopPropagation();
-              onResumeKeepRunning();
+          <div
+            data-testid="pane-sleeping-moon"
+            style={{
+              width: 46,
+              height: 46,
+              borderRadius: "50%",
+              display: "grid",
+              placeItems: "center",
+              background: "var(--panel-2)",
+              border: "1px solid var(--rule)",
+              boxShadow: "var(--lift-hi), 0 0 0 1px var(--rule-soft)",
+              color: "var(--accent)",
             }}
           >
-            Resume and keep running
-          </button>
-        ) : null}
-        <button
-          type="button"
-          className="spark-btn is-primary"
-          data-testid="pane-resume"
-          disabled={waking}
-          onKeyDown={(event) => {
-            // The focus lands here right after Sleep now: an Enter still
-            // held from that press must not wake the agent at once.
-            if (event.key === "Enter" && event.repeat) event.preventDefault();
-          }}
-          onClick={(event) => {
-            event.stopPropagation();
-            onResume();
-          }}
-        >
-          {waking ? "Resuming…" : hibernation.wakeError ? "Try again" : "Resume"}
-        </button>
+            <MoonIcon size={21} />
+          </div>
+          <div
+            data-testid="pane-sleeping-pill"
+            title={tooltip.join("\n") || undefined}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              maxWidth: "100%",
+              minWidth: 0,
+              padding: resumeOnly ? 6 : "6px 6px 6px 16px",
+              borderRadius: 999,
+              background: "var(--panel-2)",
+              border: "1px solid var(--rule)",
+              boxShadow: "var(--lift-hi), 0 0 0 1px var(--rule-soft)",
+              color: "var(--ink)",
+            }}
+          >
+            {!resumeOnly ? (
+              <span
+                style={{
+                  minWidth: 0,
+                  fontSize: 12.5,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <span data-testid="pane-sleeping-title" style={{ fontWeight: 600 }}>
+                  {title}
+                </span>
+                {failed ? (
+                  <span data-testid="pane-sleeping-error" style={{ color: "var(--danger)" }}>
+                    {` · ${failed}`}
+                  </span>
+                ) : parts.length > 0 ? (
+                  <span data-testid="pane-sleeping-meta" style={{ color: "var(--ink-dim)" }}>
+                    {` · ${parts.join(" · ")}`}
+                  </span>
+                ) : null}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              className="spark-btn is-primary"
+              data-testid="pane-resume"
+              disabled={waking}
+              title={RESUME_TITLE}
+              aria-keyshortcuts="Shift+Enter"
+              onKeyDown={(event) => {
+                // The focus lands here right after Sleep now: an Enter still
+                // held from that press must not wake the agent at once.
+                if (event.key === "Enter" && event.repeat) {
+                  event.preventDefault();
+                  return;
+                }
+                if (event.key !== "Enter" || !event.shiftKey) return;
+                event.preventDefault();
+                event.stopPropagation();
+                resume(true);
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                resume(event.shiftKey);
+              }}
+              style={{ borderRadius: 999, flex: "none" }}
+            >
+              {waking ? "Resuming…" : failed ? "Try again" : "Resume"}
+            </button>
+          </div>
+        </div>
       </div>
-    </div>
+    </>
   );
 }
