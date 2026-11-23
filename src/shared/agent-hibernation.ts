@@ -69,6 +69,10 @@ export interface AgentHibernationRequest {
   paneId: string;
   runtime: AgentHibernationRuntime;
   placement: AgentHibernationPlacement;
+  // The user pressed Sleep now: no idle clock and no idle-time setting (it
+  // works with hibernation off and in a workspace set to Never), but every
+  // refusal about the agent's state and the pane's processes holds.
+  manual?: boolean;
   // The session's transcript as the resume probe found it: read for the
   // card's line only, and only when the hook trail names none.
   transcriptPath?: string;
@@ -354,6 +358,56 @@ export function judgeAgentEvidence(
 export function outputRestartsIdleClock(evidence: AgentHibernationEvidence | null): boolean {
   if (!evidence || evidence.structured !== true) return true;
   return !(typeof evidence.settledAt === "number" && Number.isFinite(evidence.settledAt) && evidence.settledAt > 0);
+}
+
+// ── Sleep now ───────────────────────────────────────────────────────────────
+
+const RUNTIME_NAMES: Record<AgentHibernationRuntime, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  grok: "Grok",
+  pi: "Pi",
+};
+
+/**
+ * Why Sleep now left the agent running, in the words the pane shows. Every
+ * refusal has a sentence: the button never fails without saying why.
+ */
+export function sleepNowRefusalMessage(reason: AgentHibernationRefusal | "cannot-resume", runtime: AgentHibernationRuntime): string {
+  const name = RUNTIME_NAMES[runtime] ?? "The agent";
+  switch (reason) {
+    case "agent-busy":
+      return `${name} is still working.`;
+    case "waiting-on-user":
+      return `${name} is waiting for your answer.`;
+    case "unsent-input":
+      return `There is unsent text in its box.`;
+    case "scheduled-work":
+      return "It has a scheduled wake-up.";
+    case "other-processes":
+      return "Another program is running in this terminal.";
+    case "watched-on-phone":
+      return "It is open on your phone.";
+    case "remote":
+      return "Agents on another machine cannot sleep.";
+    case "no-session":
+    case "no-agent-process":
+      return `${name} is not running in this terminal.`;
+    case "cannot-resume":
+      return `Its session could not be resumed afterwards, so ${name} keeps running.`;
+    case "in-flight":
+      return "It is already being put to sleep.";
+    case "stop-failed":
+      return `${name} could not be stopped. Try again.`;
+    case "process-list-unavailable":
+      return "Codara could not check what runs in this terminal. Try again.";
+    case "not-watched":
+    case "runtime-mismatch":
+    case "unknown-state":
+      return `Codara cannot tell what ${name} is doing yet. Try again in a moment.`;
+    default:
+      return `${name} could not be put to sleep. Try again.`;
+  }
 }
 
 // ── Idle clock ──────────────────────────────────────────────────────────────

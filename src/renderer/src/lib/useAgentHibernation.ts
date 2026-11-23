@@ -1,9 +1,8 @@
 // Agent hibernation timer (see lib/agentHibernation.ts for the pure part and
 // src/main/agent-hibernation.ts for the decision). Once per tick it walks
 // every workspace's agent panes except the one with the keyboard, and for
-// each candidate: heals the session pointer
-// from the SessionStart trail, checks the session can be resumed, then asks
-// main to stop the agent. Main answers no for anything it cannot confirm; the
+// each candidate asks main to stop the agent (requestAgentSleep.ts, which
+// first checks the session can be resumed). Main answers no for anything it cannot confirm; the
 // pane is asked again on a later tick. A pane main stopped is marked sleeping
 // on its leaf, which paints its card; only the user's Resume brings it back.
 //
@@ -12,8 +11,7 @@
 // decision already under way.
 
 import { useEffect, useMemo, useRef } from "react";
-import { anyAgentHibernation, isAgentHibernationRuntime, policyIdleMs } from "@shared/agent-hibernation";
-import { decideResume, mergeSessionStart, type ResumeProbe } from "../components/Terminal/resume-policy";
+import { anyAgentHibernation, policyIdleMs } from "@shared/agent-hibernation";
 import type { Tab, TerminalLeafHibernation } from "../tabs/types";
 import type { WorkspaceTerminalLayout } from "../tabs/useTabs";
 import {
@@ -22,6 +20,7 @@ import {
   visibleTerminalPaneIds,
   type HibernationCandidate,
 } from "./agentHibernation";
+import { requestAgentSleep } from "./requestAgentSleep";
 
 interface Input {
   activeWorkspaceId: string | null;
@@ -79,58 +78,22 @@ export function useAgentHibernation(input: Input): void {
       !stopped && candidate.paneId !== focusedRef.current;
 
     const tryOne = async (candidate: HibernationCandidate): Promise<void> => {
-      // The pointer can lag an in-TUI /resume or /clear made while the pane
-      // was out of view; the hook trail in main has the exact id.
-      const start = await window.spark.agentSession.latestStart?.(candidate.paneId).catch(() => null);
-      const session = mergeSessionStart(candidate.session, start ?? null) ?? candidate.session;
-      if (!isAgentHibernationRuntime(session.runtime) || session.active === false) {
-        skip(candidate.paneId, "pointer inactive");
+      const outcome = await requestAgentSleep({
+        paneId: candidate.paneId,
+        session: candidate.session,
+        placement: candidate.placement,
+        stillWanted: () => stillCandidate(candidate),
+      });
+      if (!outcome) return;
+      if (!outcome.ok) {
+        if (outcome.skip) skip(candidate.paneId, outcome.skip);
+        else skippedRef.current.delete(candidate.paneId);
         return;
       }
-      if (!stillCandidate(candidate)) return;
-      const probe = (await window.spark.agentSession
-        .probe({
-          runtime: session.runtime,
-          sessionId: session.sessionId,
-          cwd: session.cwd,
-          transcriptPath: session.transcriptPath ?? undefined,
-          nativeCodexProfileId: session.nativeCodexProfileId,
-          nativeClaudeProfileId: session.nativeClaudeProfileId,
-          nativeGrokProfileId: session.nativeGrokProfileId,
-        })
-        .catch(() => null)) as ResumeProbe | null;
-      // Only a session that resumes as it is. A transcript that needs repair
-      // or is gone would wake up as something else, so that agent stays awake.
-      if (!probe) {
-        skip(candidate.paneId, "probe failed");
-        return;
-      }
-      const plan = decideResume(probe, session.runtime).kind;
-      if (plan !== "resume") {
-        skip(candidate.paneId, `resume plan ${plan}`);
-        return;
-      }
-      if (!stillCandidate(candidate)) return;
       skippedRef.current.delete(candidate.paneId);
-      const result = await api
-        .hibernate({
-          paneId: candidate.paneId,
-          runtime: session.runtime,
-          placement: candidate.placement,
-          transcriptPath: probe.transcriptPath ?? session.transcriptPath ?? undefined,
-          session: { ...session },
-        })
-        .catch(() => null);
       // Marked whatever the user did meanwhile: the agent is stopped either
       // way, and the card is how the user gets it back.
-      if (result?.ok) {
-        latestRef.current.markPaneAsleep(candidate.paneId, {
-          runtime: session.runtime,
-          sleptAt: result.sleptAt,
-          summary: result.summary,
-          freedBytes: result.freedBytes,
-        });
-      }
+      latestRef.current.markPaneAsleep(candidate.paneId, outcome.hibernation);
     };
 
     const sweep = async (): Promise<number> => {

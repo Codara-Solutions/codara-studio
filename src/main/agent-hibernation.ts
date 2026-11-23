@@ -269,7 +269,9 @@ const defaultDeps: AgentHibernationDeps = {
   describe: describePane,
 };
 
-const inFlight = new Set<string>();
+// The decision running for each pane. A timer's request that finds one is
+// refused (it asks again next tick); Sleep now waits for it instead.
+const inFlight = new Map<string, Promise<AgentHibernationResult>>();
 // Panes this run put to sleep: the agent each held, when, and what the pane
 // printed (its newest raw output, and what a paused view never received). A
 // pane leaves the list when it is seen running again or closed
@@ -488,6 +490,7 @@ function validRequest(input: unknown): AgentHibernationRequest | null {
     paneId: value.paneId,
     runtime: value.runtime,
     placement: value.placement as AgentHibernationPlacement,
+    ...(value.manual === true ? { manual: true } : {}),
     ...(transcriptPath ? { transcriptPath } : {}),
     ...(session ? { session } : {}),
   };
@@ -510,6 +513,9 @@ function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, 
     const detail = stateRefusal === "scheduled-work" ? evidence?.scheduledWork : null;
     return { ok: false, result: { ok: false, reason: stateRefusal, ...(detail ? { detail } : {}) } };
   }
+  // Sleep now: the user asked for it, so how long the pane was quiet does
+  // not matter; everything above and the census still do.
+  if (request.manual) return { ok: true, session };
   const now = deps.now();
   // The idle clock: the newest of these starts the idle period. With
   // structured evidence of a settled agent (outputRestartsIdleClock), the
@@ -578,6 +584,7 @@ export async function hibernateAgentPane(
 ): Promise<AgentHibernationResult> {
   const request = validRequest(input);
   if (!request) return { ok: false, reason: "bad-request" };
+  if (request.manual) return sleepNow(request, deps);
   const policy = await deps.policy();
   const workspaceId = deps.placement?.(request.paneId)?.workspaceId ?? null;
   const idleMs = policyIdleMs(policy, workspaceId);
@@ -590,15 +597,50 @@ export async function hibernateAgentPane(
     return exempt;
   }
   if (inFlight.has(request.paneId)) return { ok: false, reason: "in-flight" };
-  inFlight.add(request.paneId);
-  try {
+  return runDecision(request.paneId, async () => {
     const decided = await decide(request, deps, { ...policy, idleMs });
     const result = "result" in decided ? decided.result : decided;
     noteVerdict(request.paneId, result, deps, "context" in decided ? decided.context : "");
     return result;
-  } finally {
-    inFlight.delete(request.paneId);
+  });
+}
+
+function runDecision(paneId: string, run: () => Promise<AgentHibernationResult>): Promise<AgentHibernationResult> {
+  const running = run().finally(() => {
+    if (inFlight.get(paneId) === running) inFlight.delete(paneId);
+  });
+  inFlight.set(paneId, running);
+  return running;
+}
+
+/**
+ * The pane toolbar's Sleep now: stop this pane's agent at once. No idle
+ * clock, no idle-time setting and no rule about the pane being on screen,
+ * but every refusal about the agent and the pane's processes stands, the
+ * census is taken fresh, and each refusal is logged and handed back for the
+ * pane to say in words.
+ */
+async function sleepNow(request: AgentHibernationRequest, deps: AgentHibernationDeps): Promise<AgentHibernationResult> {
+  // A decision already running for the pane (the timer's) settles first; if
+  // it put the pane to sleep, that is the answer.
+  const running = inFlight.get(request.paneId);
+  if (running) {
+    const earlier = await running.catch(() => null);
+    if (earlier?.ok) return earlier;
+    if (inFlight.has(request.paneId)) return { ok: false, reason: "in-flight" };
   }
+  const policy = await deps.policy();
+  return runDecision(request.paneId, async () => {
+    const decided = await decide(request, deps, policy);
+    const result = "result" in decided ? decided.result : decided;
+    if (result.ok) {
+      lastLogged.delete(request.paneId);
+      deps.log(`pane=${request.paneId} ${"context" in decided ? decided.context : ""}`);
+    } else {
+      deps.log(`pane=${request.paneId} Sleep now refused: ${result.reason}${result.detail ? ` (${result.detail})` : ""}`);
+    }
+    return result;
+  });
 }
 
 // A sleep comes back with the line its log entry describes it by.
@@ -615,7 +657,9 @@ async function decide(
     if (held.until <= now) censusBackoff.delete(paneId);
   }
   const held = censusBackoff.get(request.paneId);
-  if (held && held.generationId === first.session.generationId) return held.result;
+  // Sleep now takes a fresh census: the program that kept the pane awake a
+  // few ticks ago may have ended since.
+  if (held && held.generationId === first.session.generationId && !request.manual) return held.result;
   censusBackoff.delete(request.paneId);
   const holdCensus = (result: AgentHibernationResult): AgentHibernationResult => {
     censusBackoff.set(request.paneId, {
@@ -657,7 +701,10 @@ async function decide(
   if (second.session.generationId !== first.session.generationId) {
     return { ok: false, reason: "no-session", detail: "respawned while judged" };
   }
-  const context = `${request.runtime} is sleeping (${request.placement}, idle ${Math.round(idleMs / 1000)}s${level === "ok" ? "" : `, memory ${level}`}, census ${processes.length} processes in ${deps.now() - now}ms)`;
+  const why = request.manual
+    ? "Sleep now"
+    : `idle ${Math.round(idleMs / 1000)}s${level === "ok" ? "" : `, memory ${level}`}`;
+  const context = `${request.runtime} is sleeping (${request.placement}, ${why}, census ${processes.length} processes in ${deps.now() - now}ms)`;
   // Recorded before the stop: the pty leaves pty-manager's table as the
   // stop begins, so an app quit during the stop's grace period must already
   // find this pane among the sleeping ones, or the relaunch restore would

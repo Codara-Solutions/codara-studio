@@ -8725,9 +8725,20 @@ const Workspace = React.memo(function Workspace({
   );
   // A pane that finds itself asleep keeps a mark that is already there: it
   // may carry a Resume the user just pressed.
+  // The pane's own hibernated exit marks it first, bare; Sleep now's answer
+  // lands after it and fills in the card's line and the memory freed. An
+  // existing mark keeps its time and anything the user put on it (Resume).
   const handlePaneAsleep = useCallback(
     (_tabId: string, paneId: string, hibernation: TerminalLeafHibernation) =>
-      updateLeafHibernation(paneId, (current) => current ?? hibernation),
+      updateLeafHibernation(paneId, (current) =>
+        current
+          ? {
+              ...current,
+              summary: current.summary ?? hibernation.summary,
+              freedBytes: current.freedBytes ?? hibernation.freedBytes,
+            }
+          : hibernation,
+      ),
     [updateLeafHibernation],
   );
   const handlePaneKeepAwake = useCallback(

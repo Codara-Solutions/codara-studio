@@ -127,11 +127,10 @@ test("an idle Claude pane in a background workspace sleeps, shows its card, and 
     await expect(sleepingCard(page).getByTestId("pane-sleeping-title"), logs.join("\n")).toHaveText("Fix the zebra parser");
     // The line is the user's content: it never reaches the log.
     expect(logs.some((line) => line.includes("zebra"))).toBe(false);
-    // Only the Windows process listing says what the pane's processes held.
-    if (WINDOWS) {
-      await expect(sleepingCard(page)).toContainText(/\d+ MB freed/);
-      expect(logs.some((line) => /is sleeping .*freed [1-9]\d* MB/.test(line)), logs.join("\n")).toBe(true);
-    }
+    // What the pane's processes held: Windows lists it, elsewhere the tree
+    // is read before the stop.
+    await expect(sleepingCard(page)).toContainText(/\d+ MB freed/);
+    expect(logs.some((line) => /is sleeping .*freed [1-9]\d* MB/.test(line)), logs.join("\n")).toBe(true);
     await expectNoLaunchFor(fixture, 1, TICK_MS * 3);
 
     // Resume brings the same session back in the same pane.
@@ -475,6 +474,65 @@ test("unsent text keeps a repainting Claude awake until Ctrl+C empties its box",
   }
 });
 
+test("Sleep now says why it leaves an agent running, then puts it to sleep at once and keeps the pin", async () => {
+  test.setTimeout(TEST_TIMEOUT);
+  const fixture = await prepareFixture("repaint", { hooks: true });
+  // An idle time the test never reaches: only the button can put it to sleep,
+  // and the pane keeps the keyboard throughout.
+  const { app, page, logs } = await launch(fixture, { env: { CODARA_E2E_HIBERNATION_IDLE_MS: String(60 * 60_000) } });
+  const shots = process.env.CODARA_E2E_SLEEP_NOW_SHOTS;
+  try {
+    const [first] = await waitForLaunches(fixture, 1);
+    const sleepNow = pane(page).getByRole("button", { name: "Sleep now" });
+    await expect(sleepNow).toHaveAttribute("title", "Sleep now: stops this agent and frees its memory. Resume brings it back.", {
+      timeout: 30_000,
+    });
+    const pin = pane(page).getByRole("button", { name: "Keep running" });
+    await pin.evaluate((button) => (button as HTMLElement).click());
+    await expect(pin).toHaveAttribute("aria-pressed", "true");
+    if (shots) {
+      await pane(page).hover();
+      await shootBothThemes(page, shots, "sleep-now-button");
+    }
+
+    // Unsent text in the agent's box: refused, and said in words.
+    await pane(page).locator(".xterm-host").dispatchEvent("mousedown", { button: 0 });
+    await expect(pane(page).locator(".xterm-helper-textarea")).toBeFocused();
+    await page.keyboard.type("half a thought");
+    await page.waitForTimeout(300);
+    await sleepNow.evaluate((button) => (button as HTMLElement).click());
+    const notice = pane(page).getByTestId("pane-sleep-now-notice");
+    await expect(notice, logs.join("\n")).toHaveText("Still running: There is unsent text in its box.", { timeout: 15_000 });
+    await expect(sleepNow).toHaveAttribute("title", "Sleep now: There is unsent text in its box.");
+    if (shots) {
+      await pane(page).hover();
+      await shootBothThemes(page, shots, "sleep-now-refused");
+    }
+    expect(isAlive(first.pid)).toBe(true);
+    expect(logs.some((line) => line.includes(`pane=${PANE_ID} Sleep now refused: unsent-input`)), logs.join("\n")).toBe(true);
+
+    // Ctrl+C empties the box; Sleep now then stops it at once, although the
+    // pane has the keyboard and the idle time is an hour away.
+    await page.keyboard.press("Control+C");
+    await page.waitForTimeout(300);
+    await sleepNow.evaluate((button) => (button as HTMLElement).click());
+    await expectAsleep(page, logs, first);
+    await expect(sleepingCard(page)).toBeVisible();
+    await expect(sleepNow).toHaveCount(0);
+    expect(logs.some((line) => line.includes(`pane=${PANE_ID} claude is sleeping (visible, Sleep now,`)), logs.join("\n")).toBe(true);
+    if (shots) await shootBothThemes(page, shots, "sleep-now-asleep");
+
+    // The pin was kept: resumed, the agent is pinned Keep running again.
+    await sleepingCard(page).getByTestId("pane-resume").click();
+    await waitForLaunches(fixture, 2);
+    await expect(sleepingCard(page)).toHaveCount(0, { timeout: 30_000 });
+    await expect(pin).toHaveAttribute("aria-pressed", "true", { timeout: 15_000 });
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
 test("a sleeping agent's whole process tree is gone and the memory it held is reported", { tag: "@ci" }, async () => {
   test.setTimeout(TEST_TIMEOUT);
   // The agent pane sits beside a shell that has the keyboard, so it sleeps
@@ -526,6 +584,29 @@ test("a sleeping agent's whole process tree is gone and the memory it held is re
 // mainHeap is main's JS heap plus the native memory its objects hold (its
 // buffers), read as it stands: no collection is forced, so garbage the sleep
 // leaves behind shows too. It once held ~150 MB of /proc read buffers.
+// Proof screenshots for a look change (CODARA_E2E_SLEEP_NOW_SHOTS=<folder>),
+// in the dark and the light theme.
+async function shootBothThemes(page: Page, folder: string, name: string): Promise<void> {
+  for (const [mode, themeId] of [
+    ["dark", "codara-classic"],
+    ["light", "codara-daylight"],
+  ] as const) {
+    await page.evaluate(
+      ([mode, themeId]) => {
+        const root = document.documentElement;
+        root.classList.remove("light", "dark", "theme-codara-daylight", "theme-codara-classic");
+        root.classList.add(mode, `theme-${themeId}`);
+        root.dataset.theme = themeId;
+        root.dataset.themeMode = mode;
+        root.style.setProperty("color-scheme", mode);
+      },
+      [mode, themeId] as const,
+    );
+    await page.waitForTimeout(250);
+    await page.screenshot({ path: join(folder, `${name}-${mode}.png`) });
+  }
+}
+
 async function studioMemory(
   app: ElectronApplication,
 ): Promise<{ main: number; mainHeap: number; renderer: number; all: number; heapUsed: number; external: number; arrayBuffers: number }> {

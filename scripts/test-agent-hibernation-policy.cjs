@@ -470,6 +470,19 @@ async function main() {
     !resumeKey({ key: "k", ctrlKey: true }) && !resumeKey({ key: "k", metaKey: true }) && !resumeKey({ key: "Enter", altKey: true }),
   );
 
+  // ── Sleep now's refusals, in words ──
+  const said = shared.sleepNowRefusalMessage;
+  const reasons = [
+    "off", "exempt", "bad-request", "in-flight", "remote", "not-watched", "runtime-mismatch", "agent-busy",
+    "waiting-on-user", "unsent-input", "scheduled-work", "unknown-state", "not-idle-long-enough", "watched-on-phone",
+    "process-list-unavailable", "no-agent-process", "other-processes", "no-session", "stop-failed", "cannot-resume",
+  ];
+  check("every refusal has a sentence", reasons.every((reason) => /^[A-Z].+\.$/.test(said(reason, "claude"))), reasons.map((x) => said(x, "claude")));
+  check("unsent text is named", said("unsent-input", "claude") === "There is unsent text in its box.");
+  check("a scheduled wake-up is named", said("scheduled-work", "claude") === "It has a scheduled wake-up.");
+  check("the agent is named", said("agent-busy", "codex") === "Codex is still working.");
+  check("no code words reach the user", reasons.every((reason) => !said(reason, "pi").includes(reason)));
+
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);
     process.exit(1);
