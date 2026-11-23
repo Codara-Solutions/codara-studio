@@ -459,11 +459,13 @@ export async function listTerminalPids(
 
 // ── Memory of the pane's tree (POSIX) ───────────────────────────────────────
 // The POSIX listing has no memory column, so the sleep reads it for the few
-// processes it is about to stop. Linux: each one's proportional set size
-// (smaps_rollup "Pss"), which splits pages the processes share (the node
-// binary under the agent and its MCP servers) instead of counting them once
-// per process, so the sum is what the stop gives back; VmRSS when the
-// rollup cannot be read. Elsewhere: `ps -o rss`.
+// processes it is about to stop. Linux: each one's proportional set size of
+// anonymous and shared memory (smaps_rollup "Pss_Anon" + "Pss_Shmem"). Pss
+// splits pages the processes share (heap pages a fork shares) instead of
+// counting them once per process, and file-backed pages (the node binary,
+// its libraries) are left out: they stay in the page cache after the stop,
+// so they are not given back. Older kernels: the whole Pss; then the status
+// file's RssAnon + RssShmem, then VmRSS. Elsewhere: `ps -o rss`.
 
 /** Kilobytes in a /proc line such as "Pss:  123456 kB"; null when absent. */
 export function procKbField(text: string, field: string): number | null {
@@ -484,14 +486,22 @@ export function parsePsRss(output: string): number | null {
   return kb * 1024;
 }
 
+// Kilobytes the stop gives back, from one /proc file's text; null when the
+// file has none of the fields.
+function freedKb(file: "smaps_rollup" | "status", text: string): number | null {
+  const sum = (a: string, b: string): number | null => {
+    const first = procKbField(text, a);
+    return first === null ? null : first + (procKbField(text, b) ?? 0);
+  };
+  if (file === "smaps_rollup") return sum("Pss_Anon", "Pss_Shmem") ?? procKbField(text, "Pss");
+  return sum("RssAnon", "RssShmem") ?? procKbField(text, "VmRSS");
+}
+
 async function linuxProcessMemoryBytes(pid: number, read: (path: string) => Promise<string>): Promise<number | null> {
-  for (const [file, field] of [
-    ["smaps_rollup", "Pss"],
-    ["status", "VmRSS"],
-  ] as const) {
+  for (const file of ["smaps_rollup", "status"] as const) {
     try {
-      const kb = procKbField(await read(`/proc/${pid}/${file}`), field);
-      // A kernel thread or zombie has no VmRSS line: it holds nothing.
+      const kb = freedKb(file, await read(`/proc/${pid}/${file}`));
+      // A kernel thread or zombie has no memory lines: it holds nothing.
       if (kb !== null) return kb * 1024;
       if (file === "status") return 0;
     } catch (error) {

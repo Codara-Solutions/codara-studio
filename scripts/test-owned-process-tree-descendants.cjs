@@ -114,6 +114,10 @@ async function main() {
       // its first buffer both come back whole.
       const cmdline = await mod.readProcFile("/proc/self/cmdline");
       check("a /proc file reads whole", cmdline.equals(require("node:fs").readFileSync("/proc/self/cmdline")));
+      // The census reads ~1,000 processes x 2 files: fs.promises.readFile
+      // gave each a 64 KiB buffer and left ~150 MB of them in main until a
+      // garbage collection. A short file keeps its small first buffer.
+      check("a short /proc file costs one small buffer, not 64 KiB", cmdline.buffer.byteLength <= 4096, cmdline.buffer.byteLength);
       const long = await mod.readProcFile(path.join(__dirname, "..", "package.json"));
       check("a file longer than the first buffer reads whole", long.equals(require("node:fs").readFileSync(path.join(__dirname, "..", "package.json"))));
     }

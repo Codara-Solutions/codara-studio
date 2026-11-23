@@ -506,7 +506,10 @@ function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, 
   }
   const evidence = deps.evidence(request.paneId);
   const stateRefusal = judgeAgentEvidence(evidence, request.runtime);
-  if (stateRefusal) return { ok: false, result: { ok: false, reason: stateRefusal } };
+  if (stateRefusal) {
+    const detail = stateRefusal === "scheduled-work" ? evidence?.scheduledWork : null;
+    return { ok: false, result: { ok: false, reason: stateRefusal, ...(detail ? { detail } : {}) } };
+  }
   const now = deps.now();
   // The idle clock: the newest of these starts the idle period. With
   // structured evidence of a settled agent (outputRestartsIdleClock), the
@@ -638,19 +641,23 @@ async function decide(
     return holdCensus({ ok: false, reason: census.reason, ...(census.detail ? { detail: census.detail } : {}) });
   }
 
+  // The POSIX listing carries no memory: read it for the processes the stop
+  // would end, while they still hold it. Before the re-check below, never
+  // after it: nothing may be awaited between that re-check and the stop.
+  const freedBytes =
+    census.memoryBytes ??
+    (deps.treeMemory ? await withTimeout(deps.treeMemory(census.pids).catch(() => null), TREE_MEMORY_TIMEOUT_MS, null) : null);
+
   // The listing took time. Judge again from fresh state, and fence the stop
-  // on the exact process generation that was judged.
+  // on the exact process generation that was judged. From here to the stop
+  // runs in one tick: a prompt sent meanwhile (a session message, Cora, the
+  // phone) is either seen here or arrives after the pane is marked asleep.
   const second = judgeNow(request, deps, idleMs);
   if (!second.ok) return second.result;
   if (second.session.generationId !== first.session.generationId) {
     return { ok: false, reason: "no-session", detail: "respawned while judged" };
   }
   const context = `${request.runtime} is sleeping (${request.placement}, idle ${Math.round(idleMs / 1000)}s${level === "ok" ? "" : `, memory ${level}`}, census ${processes.length} processes in ${deps.now() - now}ms)`;
-  // The POSIX listing carries no memory: read it now for the processes the
-  // stop is about to end, while they still hold it.
-  const freedBytes =
-    census.memoryBytes ??
-    (deps.treeMemory ? await withTimeout(deps.treeMemory(census.pids).catch(() => null), TREE_MEMORY_TIMEOUT_MS, null) : null);
   // Recorded before the stop: the pty leaves pty-manager's table as the
   // stop begins, so an app quit during the stop's grace period must already
   // find this pane among the sleeping ones, or the relaunch restore would

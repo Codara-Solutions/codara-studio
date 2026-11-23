@@ -204,6 +204,8 @@ async function main() {
   process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }));
   const ah = await bundle(dir, path.join(MAIN_DIR, "agent-hibernation.ts"), "agent-hibernation", true);
   const notify = await bundle(dir, path.join(MAIN_DIR, "terminal-agent-notify.ts"), "terminal-agent-notify");
+  const shared = await bundle(dir, path.join(MAIN_DIR, "..", "shared", "agent-hibernation.ts"), "shared-agent-hibernation");
+  const scheduledWork = await bundle(dir, path.join(MAIN_DIR, "agent-scheduled-work.ts"), "agent-scheduled-work");
   const H = globalThis.__AH;
 
   let failures = 0;
@@ -400,6 +402,23 @@ async function main() {
     release();
     const firstResult = await first;
     check("one decision per pane at a time", second.reason === "in-flight" && firstResult.ok === true && t.calls.stop.length === 1);
+  }
+
+  r = await run((t) => { t.state.evidence.scheduledWork = "a wake-up within 30 min"; });
+  check(
+    "a scheduled wake-up keeps the agent, and the log says what it waits for",
+    r.result.reason === "scheduled-work" && r.result.detail === "a wake-up within 30 min" && r.calls.stop.length === 0,
+    r.result,
+  );
+
+  // ── When a ScheduleWakeup fires ──
+  {
+    const at = scheduledWork.scheduledWakeAt;
+    check("a delay in seconds", at({ delaySeconds: 600 }, NOW) === NOW + 600_000);
+    check("a delay in minutes", at({ minutes: 5 }, NOW) === NOW + 300_000);
+    check("a delay in milliseconds", at({ delayMs: 9_000 }, NOW) === NOW + 9_000);
+    check("a time", at({ at: "2026-11-23T20:00:00Z" }, NOW) === Date.parse("2026-11-23T20:00:00Z"));
+    check("nothing readable", at({ prompt: "go" }, NOW) === null && at(null, NOW) === null);
   }
 
   // ── Census backoff ──
@@ -664,6 +683,8 @@ async function main() {
     panes: [
       { paneId: "n1", tabId: "t", tabTitle: "T", excluded: false, runtimeHint: "claude" },
       { paneId: "n2", tabId: "t", tabTitle: "T", excluded: false, runtimeHint: "claude" },
+      { paneId: "n3", tabId: "t", tabTitle: "T", excluded: false, runtimeHint: "claude" },
+      { paneId: "n4", tabId: "t", tabTitle: "T", excluded: false, runtimeHint: "claude" },
       { paneId: "nx", tabId: "w", tabTitle: "workers", excluded: true },
     ],
   });
@@ -724,22 +745,33 @@ async function main() {
     const after = notify.terminalAgentHibernationEvidence("n1");
     check(`${name} puts no text in the box`, after.lastComposerEditAt === before.lastComposerEditAt, after);
   }
+  // The unsent-text rule, as judgeAgentEvidence reads it (the policy test
+  // covers the judge itself).
+  const unsent = (e) => e.lastComposerEditAt > Math.max(e.lastSubmitAt, e.lastComposerClearAt ?? 0);
+  // A Claude at its prompt with no turn open: the only state where Ctrl+C
+  // empties the box.
+  notify.noteTerminalHookEvent("n3", "SessionStart", { session_id: "s-3", source: "startup" });
   {
-    notify.noteTerminalUserInput("n1", "half a thought");
+    notify.noteTerminalUserInput("n3", "half a thought");
     await new Promise((resolve) => setTimeout(resolve, 2));
-    const typed = notify.terminalAgentHibernationEvidence("n1");
-    check("typed text is unsent", typed.lastComposerEditAt > typed.lastSubmitAt, typed);
-    notify.noteTerminalUserInput("n1", "\x03");
-    const cleared = notify.terminalAgentHibernationEvidence("n1");
-    check("Ctrl+C empties Claude's box: nothing is unsent", cleared.lastComposerEditAt <= cleared.lastSubmitAt, cleared);
+    const typed = notify.terminalAgentHibernationEvidence("n3");
+    check("typed text is unsent", unsent(typed), typed);
+    notify.noteTerminalUserInput("n3", "\x03");
+    const cleared = notify.terminalAgentHibernationEvidence("n3");
+    check("Ctrl+C at Claude's idle prompt empties its box: nothing is unsent", !unsent(cleared), cleared);
+    check(
+      "but the submit stamp other features guard drafts with stays raw",
+      cleared.lastSubmitAt === typed.lastSubmitAt && cleared.lastComposerClearAt > cleared.lastSubmitAt,
+      cleared,
+    );
     await new Promise((resolve) => setTimeout(resolve, 2));
-    notify.noteTerminalUserInput("n1", "more");
-    const again = notify.terminalAgentHibernationEvidence("n1");
-    check("text typed after the Ctrl+C is unsent again", again.lastComposerEditAt > again.lastSubmitAt, again);
-    notify.noteTerminalUserInput("n1", "abc\x03");
-    const mixed = notify.terminalAgentHibernationEvidence("n1");
-    check("a Ctrl+C sent together with text is not taken as a clear", mixed.lastComposerEditAt > mixed.lastSubmitAt, mixed);
-    notify.noteTerminalUserInput("n1", "\x03");
+    notify.noteTerminalUserInput("n3", "more");
+    const again = notify.terminalAgentHibernationEvidence("n3");
+    check("text typed after the Ctrl+C is unsent again", unsent(again), again);
+    notify.noteTerminalUserInput("n3", "abc\x03");
+    const mixed = notify.terminalAgentHibernationEvidence("n3");
+    check("a Ctrl+C sent together with text is not taken as a clear", unsent(mixed), mixed);
+    notify.noteTerminalUserInput("n3", "\x03");
   }
   {
     // A settled Claude with hooks: a hook moves the settle moment, its
@@ -761,6 +793,80 @@ async function main() {
     notify.noteTerminalHookEvent("n2", "UserPromptSubmit", { session_id: "s-1", prompt: "go" });
     ev = notify.terminalAgentHibernationEvidence("n2");
     check("a turn starting moves it", ev.settledAt > settled && ev.turnActive === true, ev);
+
+    // Ctrl+C during a turn interrupts; a draft typed meanwhile can survive it.
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    notify.noteTerminalUserInput("n2", "next idea");
+    notify.noteTerminalUserInput("n2", "\x03");
+    ev = notify.terminalAgentHibernationEvidence("n2");
+    check("Ctrl+C during a turn clears nothing", ev.lastComposerClearAt < ev.lastComposerEditAt, ev);
+    // In a permission dialog it dismisses the dialog, not the draft.
+    notify.noteTerminalHookEvent("n2", "PreToolUse", { session_id: "s-1", tool_name: "Bash", tool_input: { command: "ls" } });
+    notify.noteTerminalHookEvent("n2", "Notification", { session_id: "s-1", notification_type: "permission_prompt", message: "ok?" });
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    notify.noteTerminalUserInput("n2", "\x03");
+    ev = notify.terminalAgentHibernationEvidence("n2");
+    check("Ctrl+C in a permission dialog clears nothing", ev.lastComposerClearAt < ev.lastComposerEditAt, ev);
+    notify.noteTerminalHookEvent("n2", "PostToolUse", { session_id: "s-1", tool_name: "Bash" });
+    notify.noteTerminalHookEvent("n2", "Stop", { session_id: "s-1" });
+  }
+  {
+    // Work scheduled for later: a /loop's ScheduleWakeup and cron jobs leave
+    // no process and no background task, yet the agent must stay up for them.
+    const hook = (name, extra) => notify.noteTerminalHookEvent("n3", name, { session_id: "s-3", ...extra });
+    const tool = (tool_name, tool_input, tool_response) => {
+      hook("PreToolUse", { tool_name, tool_input });
+      hook("PostToolUse", { tool_name, tool_input, tool_response });
+    };
+    const scheduled = () => notify.terminalAgentHibernationEvidence("n3").scheduledWork;
+    const judged = () => shared.judgeAgentEvidence({ ...notify.terminalAgentHibernationEvidence("n3"), chipState: "idle" }, "claude");
+    check("nothing scheduled at first", scheduled() === null && judged() !== "scheduled-work", scheduled());
+    tool("ScheduleWakeup", { delaySeconds: 1800, prompt: "check CI", reason: "waiting on CI" });
+    check("a wake-up in 30 minutes keeps the pane awake", /^a wake-up within 3[12] min$/.test(scheduled() ?? "") && judged() === "scheduled-work", scheduled());
+    hook("SessionEnd", {});
+    check("the session's end ends it", scheduled() === null, scheduled());
+    tool("ScheduleWakeup", { prompt: "later" });
+    check("a wake-up whose time cannot be read keeps it awake", scheduled() === "a wake-up at an unknown time", scheduled());
+    hook("SessionStart", { source: "startup" });
+    tool("CronCreate", { cron: "*/30 * * * *", prompt: "poll" }, { id: "cron-7a" });
+    check("a cron job keeps it awake", scheduled() === "a cron job" && judged() === "scheduled-work", scheduled());
+    tool("CronDelete", { id: "cron-7a" });
+    check("until it is deleted", scheduled() === null, scheduled());
+    hook("PreToolUse", { tool_name: "CronCreate", tool_input: { cron: "0 * * * *" } });
+    hook("PostToolUseFailure", { tool_name: "CronCreate", tool_input: { cron: "0 * * * *" } });
+    check("a cron that failed to be created keeps nothing", scheduled() === null, scheduled());
+  }
+  {
+    // A startup dialog no hook announces (an MCP server approval): kept
+    // awake until the user answers it.
+    notify.noteTerminalHookEvent("n4", "SessionStart", { session_id: "s-4", source: "startup" });
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    notify.noteTerminalUserInput("n4", "draft");
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    H.taps.get("n4")?.(Buffer.from("\r\n New MCP server found in .mcp.json: tools\r\n ❯ 1. Use this and all future MCP servers in this project\r\n"));
+    let e = notify.terminalAgentHibernationEvidence("n4");
+    check(
+      "a dialog on screen with no tool call waiting keeps the pane awake",
+      e.screenDialog === true && shared.judgeAgentEvidence({ ...e, chipState: "idle" }, "claude") === "waiting-on-user",
+      e,
+    );
+    notify.noteTerminalUserInput("n4", "\x03");
+    e = notify.terminalAgentHibernationEvidence("n4");
+    check("Ctrl+C there dismisses the dialog, not the draft", e.lastComposerClearAt < e.lastComposerEditAt && e.screenDialog === false, e);
+  }
+  {
+    // A background subagent runs inside the agent's own process: only the
+    // hook's task list shows it, and it keeps the pane awake.
+    notify.noteTerminalHookEvent("n3", "Stop", {
+      session_id: "s-3",
+      background_tasks: [{ id: "a1", type: "local_agent", status: "running", description: "review" }],
+    });
+    const e = notify.terminalAgentHibernationEvidence("n3");
+    check(
+      "a background subagent keeps the pane awake",
+      e.backgroundRunning > 0 && shared.judgeAgentEvidence({ ...e, chipState: "idle" }, "claude") === "agent-busy",
+      e,
+    );
   }
 
   // ── The log: one line per change of verdict ──
@@ -867,6 +973,38 @@ async function main() {
     const noFigure = makeDeps({ treeMemory: async () => null });
     const unknown = await ah.hibernateAgentPane(request(), noFigure.deps);
     check("an unreadable tree still sleeps, its figure unknown", unknown.ok === true && unknown.freedBytes === null, unknown);
+
+    // A prompt sent while the memory is read keeps the agent: the re-check
+    // comes after the read.
+    ah.resetAgentHibernationForTests();
+    const sent = makeDeps({
+      treeMemory: async () => {
+        Object.assign(sent.state.evidence, { state: "working", chipState: "working", turnActive: true, lastSubmitAt: NOW });
+        return 300 * 1024 * 1024;
+      },
+    });
+    const kept = await ah.hibernateAgentPane(request(), sent.deps);
+    check("a prompt sent during the memory read keeps the pane awake", kept.ok === false && sent.calls.stop.length === 0, kept);
+
+    // Nothing is awaited between the last look at the pane and the stop: a
+    // microtask queued at that look has not run when the stop is called.
+    ah.resetAgentHibernationForTests();
+    let yielded = false;
+    let yieldedAtStop = null;
+    const fenced = makeDeps({ treeMemory: async () => 300 * 1024 * 1024 });
+    const look = fenced.deps.evidence;
+    fenced.deps.evidence = (...args) => {
+      yielded = false;
+      queueMicrotask(() => { yielded = true; });
+      return look(...args);
+    };
+    const stopAfter = fenced.deps.stop;
+    fenced.deps.stop = async (...args) => {
+      yieldedAtStop = yielded;
+      return stopAfter(...args);
+    };
+    const fencedResult = await ah.hibernateAgentPane(request(), fenced.deps);
+    check("the re-check and the stop run in one tick", fencedResult.ok === true && yieldedAtStop === false, { fencedResult, yieldedAtStop });
 
     // The card's line: asked for before the stop, handed back with the sleep
     // and kept for a pane that mounts later. Only its source is logged.

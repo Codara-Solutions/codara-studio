@@ -363,8 +363,9 @@ async function main() {
   check("an odd ps row is unreadable, not skipped", parsePsRss("100 2048\nzombie\n") === null);
   const procFiles = {
     "/proc/100/smaps_rollup": "Rss: 5000 kB\nPss: 4000 kB\n",
-    "/proc/101/smaps_rollup": "Rss: 300000 kB\nPss: 290000 kB\n",
+    "/proc/101/smaps_rollup": "Rss: 300000 kB\nPss: 290000 kB\nPss_Anon: 250000 kB\nPss_File: 39000 kB\nPss_Shmem: 1000 kB\n",
     "/proc/102/status": "Name: node\nVmRSS: 50000 kB\n",
+    "/proc/105/status": "Name: node\nVmRSS: 70000 kB\nRssAnon: 60000 kB\nRssFile: 10000 kB\nRssShmem: 0 kB\n",
     "/proc/104/status": "Name: kworker\n",
   };
   const fakeRead = (errors = {}) => async (file) => {
@@ -378,10 +379,10 @@ async function main() {
     error.code = file.endsWith("smaps_rollup") ? "EACCES" : "ENOENT";
     throw error;
   };
-  let bytes = await readTreeMemoryBytes([100, 101, 102, 103, 104, 101], { platform: "linux", read: fakeRead() });
+  let bytes = await readTreeMemoryBytes([100, 101, 102, 103, 104, 105, 101], { platform: "linux", read: fakeRead() });
   check(
-    "Linux: Pss where the rollup reads, VmRSS where not, gone or kernel-only processes hold nothing",
-    bytes === (4000 + 290000 + 50000) * 1024,
+    "Linux: anonymous + shared Pss (not the page cache's file pages), the whole Pss on an older kernel, RssAnon + RssShmem or VmRSS where the rollup cannot be read, gone or kernel-only processes hold nothing",
+    bytes === (4000 + 250000 + 1000 + 50000 + 60000) * 1024,
     bytes,
   );
   bytes = await readTreeMemoryBytes([100, 102], { platform: "linux", read: fakeRead({ "/proc/102/status": "EACCES" }) });

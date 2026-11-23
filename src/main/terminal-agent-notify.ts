@@ -26,6 +26,7 @@ import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify"
 import { nudgeUsageRefresh } from "./orchestration/usage-activity-refresh";
 import { signalAgentBoardChanged } from "./agent-board-signal";
 import { BackgroundWork, claudeBackgroundPaths, probeBackgroundFiles } from "./agent-background-work";
+import { ScheduledWork } from "./agent-scheduled-work";
 import { nextWorkingSince, type TerminalAgentActivity } from "@shared/agent-board";
 import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 import type { AgentHibernationEvidence } from "@shared/agent-hibernation";
@@ -249,8 +250,16 @@ interface PaneWatcher {
   // means text may sit unsent in the agent's input box (agent hibernation).
   lastSubmitAt: number;
   // The last Ctrl+C that emptied the box (ctrlCEmptiesComposer): text typed
-  // before it is gone, not unsent.
+  // before it is gone, not unsent. Read by agent hibernation only; every
+  // other draft guard reads lastSubmitAt as it is.
   lastComposerClearAt: number;
+  // A ScheduleWakeup or cron job the Claude session set up (hooks): the agent
+  // waits for its next tick and must not be stopped between ticks.
+  scheduled: ScheduledWork;
+  // A dialog on screen in a hook-owned Claude with no tool call waiting (an
+  // MCP server approval at startup, a trust prompt): no hook announces it.
+  // Open until the user presses a key or a turn starts.
+  screenDialogAt: number;
   lastInterruptKeyAt: number;
   lastHookEventAt: number;
   // Claude tool calls announced by PreToolUse and not yet answered by
@@ -428,6 +437,8 @@ export function syncTerminalNotifyPanes(input: {
       lastComposerEditAt: 0,
       lastSubmitAt: 0,
       lastComposerClearAt: 0,
+      scheduled: new ScheduledWork(),
+      screenDialogAt: 0,
       lastInterruptKeyAt: 0,
       lastHookEventAt: 0,
       pendingToolCalls: 0,
@@ -1126,10 +1137,25 @@ function canLeaveText(data: string | undefined): boolean {
 }
 
 // Ctrl+C with text in the box empties it in Claude Code, Codex and Pi (a
-// second press on an empty box quits). Grok's composer is not known to, so
-// its unsent text stays unsent.
+// second press on an empty box quits), but only while the agent sits at its
+// prompt. During a turn it interrupts and in a dialog it dismisses, and a
+// draft can survive either, so then it clears nothing. Grok's composer is not
+// known to clear, so its unsent text stays unsent.
 function ctrlCEmptiesComposer(w: PaneWatcher, data: string | undefined): boolean {
-  return data === "\x03" && (w.runtime === "claude" || w.runtime === "codex" || w.runtime === "pi");
+  if (data !== "\x03") return false;
+  if (w.runtime !== "claude" && w.runtime !== "codex" && w.runtime !== "pi") return false;
+  return (
+    w.state === "idle" &&
+    w.lastEmittedState !== "blocked" &&
+    !turnActive(w) &&
+    w.pendingToolCalls === 0 &&
+    w.pendingDone === null &&
+    !screenDialogOpen(w)
+  );
+}
+
+function screenDialogOpen(w: PaneWatcher): boolean {
+  return w.screenDialogAt > Math.max(w.lastUserInputAt, w.lastTurnStartedAt);
 }
 
 // User keystrokes / injected input reached this pane's pty. A submit starts a
@@ -1142,9 +1168,12 @@ export function noteTerminalUserInput(paneId: string, data?: string): void {
   const w = watchers.get(paneId);
   if (!w || w.excluded) return;
   const now = Date.now();
+  // Judged before this key counts as input: it may be the one that answers
+  // a dialog, and a Ctrl+C there dismisses the dialog, not the draft.
+  const clears = ctrlCEmptiesComposer(w, data);
   w.lastUserInputAt = now;
   if (canLeaveText(data)) w.lastComposerEditAt = now;
-  if (ctrlCEmptiesComposer(w, data)) w.lastComposerClearAt = now;
+  if (clears) w.lastComposerClearAt = now;
   if (data !== undefined && (data === "\x1b" || data.includes("\x03"))) {
     w.lastInterruptKeyAt = now;
   }
@@ -1301,6 +1330,8 @@ export function noteTerminalHookEvent(
       const tool = hookToolName(payload);
       const input = payload?.tool_input ?? payload?.toolInput;
       w.pendingToolCalls += 1;
+      const scheduledNote = w.scheduled.toolStarted(tool, input, now);
+      if (scheduledNote) tanLog(`pane=${w.paneId} ${scheduledNote}`);
       w.lastToolDetail = describeToolCall(tool, input);
       noteActivity(w, { tool: w.lastToolDetail });
       if (!agentId) {
@@ -1324,6 +1355,12 @@ export function noteTerminalHookEvent(
     case "PostToolUse":
     case "PostToolUseFailure":
       w.pendingToolCalls = Math.max(0, w.pendingToolCalls - 1);
+      w.scheduled.toolFinished(
+        hookToolName(payload),
+        payload?.tool_input ?? payload?.toolInput,
+        payload?.tool_response ?? payload?.toolResponse,
+        hookName === "PostToolUseFailure",
+      );
       // The board shows the tool running now, not the last one that ran.
       if (w.pendingToolCalls === 0 && w.activity.tool !== null) noteActivity(w, { tool: null });
       if (w.signals.programStatus) return;
@@ -1366,6 +1403,7 @@ export function noteTerminalHookEvent(
       closeTurnSilently(w, now, `session ${source || "start"}`);
       w.turn = null;
       w.pendingToolCalls = 0;
+      w.scheduled.clear();
       noteActivity(w, { tool: null });
       followBackgroundSession(w, sessionId, now);
       w.hookFollowUp = false;
@@ -1374,6 +1412,7 @@ export function noteTerminalHookEvent(
     case "SessionEnd":
       closeTurnSilently(w, now, "session end");
       w.pendingToolCalls = 0;
+      w.scheduled.clear();
       // The session's background work ends with it.
       if (sessionId && sessionId === w.backgroundSessionId) {
         clearBackground(w);
@@ -1571,8 +1610,10 @@ export function terminalAgentHibernationEvidence(paneId: string): AgentHibernati
     codexAwaitingIdle: w.codexAwaitingIdle,
     lastUserInputAt: w.lastUserInputAt,
     lastComposerEditAt: w.lastComposerEditAt,
-    // A box emptied by Ctrl+C holds nothing unsent, as after a submit.
-    lastSubmitAt: Math.max(w.lastSubmitAt, w.lastComposerClearAt),
+    lastSubmitAt: w.lastSubmitAt,
+    lastComposerClearAt: w.lastComposerClearAt,
+    scheduledWork: w.scheduled.describe(Date.now()),
+    screenDialog: screenDialogOpen(w),
     lastOutputAt: w.lastOutputAt,
     // Hooks speak for Claude only; a program status report for any agent.
     structured: (w.signals.hooks && w.runtime === "claude") || w.signals.programStatus,
@@ -2087,6 +2128,12 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       if (!hookOwned || w.pendingToolCalls > 0) {
         if (w.state !== "blocked") tanLog(`pane=${w.paneId} screen shows a prompt (was ${w.state})`);
         needsYou(w, now, hookOwned && w.lastToolDetail ? `Permission for ${w.lastToolDetail}` : null, "screen prompt");
+      } else if (!turnActive(w)) {
+        // Not a needs-you (it may be transcript text), but enough to keep
+        // hibernation off the pane until the user answers or a turn starts:
+        // a startup dialog has no hook of its own.
+        if (!screenDialogOpen(w)) tanLog(`pane=${w.paneId} screen shows a dialog with no tool call waiting`);
+        w.screenDialogAt = now;
       }
     } else if (cls === "working") {
       enterWorking(w, now);

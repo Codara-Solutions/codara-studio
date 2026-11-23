@@ -5,6 +5,9 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
+// CI (ci-linux.yml) runs the tests tagged @ci: the quick ones that cover the
+// idle clock, unsent text and the memory a sleep gives back.
+//
 // Agent hibernation end to end: an idle Claude pane is stopped after the idle
 // time, shows a card, and comes back with `--resume` only when the user asks
 // (Resume on its card, Enter in the pane); opening its workspace alone
@@ -385,7 +388,7 @@ test("a pane whose agent runs a command stays awake", async () => {
   }
 });
 
-test("an idle Claude with hooks sleeps although its status line repaints every second", async () => {
+test("an idle Claude with hooks sleeps although its status line repaints every second", { tag: "@ci" }, async () => {
   test.setTimeout(TEST_TIMEOUT);
   const fixture = await prepareFixture("repaint", { hooks: true });
   const { app, page, logs } = await launch(fixture);
@@ -420,7 +423,7 @@ test("without hooks or program status, a repainting screen keeps the agent awake
   }
 });
 
-test("a working Claude that paints its spinner never sleeps", async () => {
+test("a working Claude that paints its spinner never sleeps", { tag: "@ci" }, async () => {
   test.setTimeout(TEST_TIMEOUT);
   const fixture = await prepareFixture("working", { hooks: true });
   const { app, page, logs } = await launch(fixture);
@@ -439,7 +442,7 @@ test("a working Claude that paints its spinner never sleeps", async () => {
   }
 });
 
-test("unsent text keeps a repainting Claude awake until Ctrl+C empties its box", async () => {
+test("unsent text keeps a repainting Claude awake until Ctrl+C empties its box", { tag: "@ci" }, async () => {
   test.setTimeout(TEST_TIMEOUT);
   const fixture = await prepareFixture("repaint", { hooks: true, withShellPane: true });
   const { app, page, logs } = await launch(fixture);
@@ -472,13 +475,19 @@ test("unsent text keeps a repainting Claude awake until Ctrl+C empties its box",
   }
 });
 
-test("a sleeping agent's whole process tree is gone and the memory it held is reported", async () => {
+test("a sleeping agent's whole process tree is gone and the memory it held is reported", { tag: "@ci" }, async () => {
   test.setTimeout(TEST_TIMEOUT);
   // The agent pane sits beside a shell that has the keyboard, so it sleeps
   // in place: no workspace switch muddies Studio's own figures. The idle
   // time is long enough to measure Studio's drift without a sleep first.
   const fixture = await prepareFixture("memory", { withShellPane: true });
-  const { app, page, logs } = await launch(fixture, { env: { CODARA_E2E_HIBERNATION_IDLE_MS: "20000" } });
+  // Main's garbage collector runs before each reading, so only what Studio
+  // keeps counts (the census's read buffers are pinned by a unit check in
+  // test-owned-process-tree-descendants.cjs).
+  const { app, page, logs } = await launch(fixture, {
+    env: { CODARA_E2E_HIBERNATION_IDLE_MS: "20000" },
+    args: ["--js-flags=--expose-gc"],
+  });
   try {
     const [first] = await waitForLaunches(fixture, 1);
     const childPid = await waitForChildPid(fixture);
@@ -521,6 +530,9 @@ async function studioMemory(
   app: ElectronApplication,
 ): Promise<{ main: number; mainHeap: number; renderer: number; all: number; heapUsed: number; external: number; arrayBuffers: number }> {
   return app.evaluate(({ app: electronApp }) => {
+    const gc = (globalThis as { gc?: () => void }).gc;
+    if (!gc) throw new Error("main runs without --expose-gc: its heap figures would depend on when it last collected");
+    gc();
     const metrics = electronApp.getAppMetrics();
     const mb = (bytes: number) => Math.round(bytes / (1024 * 1024));
     const usage = process.memoryUsage();
@@ -539,7 +551,7 @@ async function studioMemory(
 
 async function launch(
   fixture: Fixture,
-  { seed = true, env = {} }: { seed?: boolean; env?: Record<string, string> } = {},
+  { seed = true, env = {}, args = [] }: { seed?: boolean; env?: Record<string, string>; args?: string[] } = {},
 ): Promise<{ app: ElectronApplication; page: Page; logs: string[] }> {
   const fixtureShell = join(fixture.binDir, "bash");
   if (!WINDOWS) {
@@ -547,7 +559,7 @@ async function launch(
     await chmod(fixtureShell, 0o755);
   }
   const app = await electron.launch({
-    args: ["."],
+    args: [...args, "."],
     env: {
       ...process.env,
       CODEX_HOME: join(fixture.userDataDir, "codex-home"),

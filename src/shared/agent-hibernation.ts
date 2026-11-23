@@ -96,6 +96,7 @@ export type AgentHibernationRefusal =
   | "agent-busy"
   | "waiting-on-user"
   | "unsent-input"
+  | "scheduled-work"
   | "unknown-state"
   | "no-agent-process"
   | "other-processes"
@@ -155,7 +156,8 @@ export function oneLine(text: string, max: number): string {
 
 export type AgentHibernationResult =
   // freedBytes: the memory the pane's processes held when they were stopped
-  // (Windows: working sets; Linux: proportional set sizes; macOS: RSS);
+  // (Windows: working sets; Linux: anonymous and shared proportional set
+  // sizes, not the page cache; macOS: RSS);
   // null only when it could not be read for every one of them.
   | { ok: true; sleptAt: number; summary: AgentSleepSummary | null; freedBytes: number | null }
   | { ok: false; reason: AgentHibernationRefusal; detail?: string };
@@ -267,12 +269,21 @@ export interface AgentHibernationEvidence {
   teammatesActive: number;
   codexAwaitingIdle: boolean;
   // Last key the user sent, the last key that could have put text in the
-  // agent's input box, and the last time one of those keys was a submit (or
-  // a Ctrl+C that empties the box). An edit after the last submit means text
-  // may sit unsent in the box.
+  // agent's input box, and the last time one of those keys was a submit. An
+  // edit after the last submit means text may sit unsent in the box. Other
+  // features read lastSubmitAt as their draft guard, so it stays raw.
   lastUserInputAt: number;
   lastComposerEditAt: number;
   lastSubmitAt: number;
+  // The last Ctrl+C that emptied the box while the agent sat at its prompt:
+  // for hibernation's unsent-text rule only. Optional: an older main omits it.
+  lastComposerClearAt?: number;
+  // What the session scheduled for later (a ScheduleWakeup, cron jobs), in a
+  // few words for the log; null or absent when nothing is.
+  scheduledWork?: string | null;
+  // A dialog on the screen of a hook-owned agent that no hook announced (an
+  // MCP server approval, a trust prompt), not answered yet.
+  screenDialog?: boolean;
   lastOutputAt: number;
   // The agent reports its state through a structured channel (Claude Code's
   // hooks, or the OSC 7501 program status), not only through what its screen
@@ -297,11 +308,16 @@ export function judgeAgentEvidence(
     return "not-watched";
   }
   if (evidence.runtime !== expected) return "runtime-mismatch";
-  if (evidence.state === "blocked" || evidence.chipState === "blocked") return "waiting-on-user";
+  if (evidence.state === "blocked" || evidence.chipState === "blocked" || evidence.screenDialog === true) {
+    return "waiting-on-user";
+  }
   if (evidence.state !== "idle") return "agent-busy";
   // Its turn ended but work it started still runs and will wake it; stopping
   // the agent would kill that work.
   if (evidence.chipState === "background" || evidence.backgroundRunning > 0) return "agent-busy";
+  // A /loop waiting for its next tick, or a cron job: no process shows it,
+  // and stopping the agent would end the loop without a word.
+  if (evidence.scheduledWork) return "scheduled-work";
   // "launching" is the chip of an agent that started and never ran a turn
   // since: a resumed session the user has not typed into yet keeps it for
   // good, because only a turn's end moves the chip to idle. With the state
@@ -319,7 +335,9 @@ export function judgeAgentEvidence(
   ) {
     return "agent-busy";
   }
-  if (evidence.lastComposerEditAt > evidence.lastSubmitAt) return "unsent-input";
+  if (evidence.lastComposerEditAt > Math.max(evidence.lastSubmitAt, evidence.lastComposerClearAt ?? 0)) {
+    return "unsent-input";
+  }
   return null;
 }
 

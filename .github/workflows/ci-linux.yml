@@ -74,6 +74,11 @@ jobs:
           tests/e2e/browser-page-backdrop.spec.ts
           tests/e2e/cora-direct-chat.spec.ts
           tests/e2e/close-agent-confirm.spec.ts
+      # Agent hibernation's quick cases (tagged @ci, under a minute): an idle
+      # Claude sleeps although its status line repaints, a working one and
+      # one with unsent text do not, and the sleep frees its whole tree.
+      - name: E2E, agent hibernation
+        run: npx playwright test tests/e2e/agent-hibernation.spec.ts --grep @ci
       # The Firefox extension's e2e on the current Firefox and on ESR 153, the
       # oldest it supports. Mozilla's own builds, unpacked: no snap, so the
       # throwaway profile in /tmp is the one Firefox opens.
