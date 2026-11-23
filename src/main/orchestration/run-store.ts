@@ -1418,7 +1418,10 @@ async function deleteRunUnlessLive(runId: string): Promise<void> {
     .then(async () => {
       const latest = await requireRun(runId);
       const { listJobs } = await import("./scheduler");
+      // A running workflow script writes progress through this same queue,
+      // and discard waits for the script to end: deleting it here could hang.
       const inFlight =
+        (!!latest.workflow && !!workflowRunControls?.isActive(runId)) ||
         activeWorkersForRun(runId).length > 0 ||
         [...activeAutopilotCycles.keys()].some((key) => key.startsWith(`${runId}:`)) ||
         activeAutopilotPlans.has(runId) ||
@@ -2104,6 +2107,8 @@ export interface WorkflowRunControls {
   cancel(runId: string, reason: string): Promise<void>;
   /** The run is being deleted: end its script without touching run state. */
   discard(runId: string): Promise<void>;
+  /** Its script is running in this session. */
+  isActive(runId: string): boolean;
 }
 
 let workflowRunControls: WorkflowRunControls | null = null;

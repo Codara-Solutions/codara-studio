@@ -1015,6 +1015,7 @@ export async function installWorkflowDriver(): Promise<void> {
     resume: (runId) => resumeWorkflowRun(runId),
     cancel: (runId, reason) => cancelWorkflowRun(runId, reason),
     discard: (runId) => discardWorkflowRun(runId),
+    isActive: (runId) => isWorkflowRunActive(runId),
   });
 }
 

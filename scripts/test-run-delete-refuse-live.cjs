@@ -4,7 +4,9 @@
 // adds its next pass to that run, which reads as finished in between). A
 // finished run nobody holds is deleted, and so is a held one by a plain
 // deleteRun, which the chat list and Settings keep using. The IPC handler only
-// takes ids of the run-store's own shape.
+// takes ids of the run-store's own shape. A workflow run whose script is
+// still going is refused before discard, which would wait on that script
+// while the script waits on the run's queue the delete holds.
 //
 //   node scripts/test-run-delete-refuse-live.cjs
 //
@@ -134,6 +136,7 @@ async function main() {
     workerAttempts: [{ id: "attempt-1", taskId: "task-1", status: "running", createdAt: NOW, updatedAt: NOW }],
   });
   const finished = writeRun("run-finished");
+  const workflow = writeRun("run-workflow", { automationId: undefined, status: "paused", workflow: { name: "w" } });
 
   fs.mkdirSync(CACHE, { recursive: true });
   const outfile = path.join(CACHE, "run-store.cjs");
@@ -168,6 +171,29 @@ async function main() {
 
   const finishedRefusal = await refusal(() => runStore.deleteRun(finished, { refuseLive: true }));
   check("a finished run nobody holds is deleted", finishedRefusal === null && !exists(finished), finishedRefusal);
+
+  const discarded = [];
+  let scriptActive = true;
+  runStore.setWorkflowRunControls({
+    stop: async () => {},
+    resume: async () => {},
+    cancel: async () => {},
+    discard: async (id) => {
+      discarded.push(id);
+    },
+    isActive: (id) => id === workflow && scriptActive,
+  });
+  const workflowRefusal = await refusal(() => runStore.deleteRun(workflow, { refuseLive: true }));
+  check("a workflow run whose script is going is refused", /Working now/.test(workflowRefusal ?? ""), workflowRefusal);
+  check("a refused workflow run is untouched and never discarded", exists(workflow) && discarded.length === 0);
+  scriptActive = false;
+  const settledWorkflow = await refusal(() => runStore.deleteRun(workflow, { refuseLive: true }));
+  check(
+    "a workflow run whose script ended is deleted",
+    settledWorkflow === null && !exists(workflow) && discarded.join() === workflow,
+    settledWorkflow,
+  );
+  runStore.setWorkflowRunControls(null);
 
   const plainRefusal = await refusal(() => runStore.deleteRun(held));
   check("a plain delete keeps today's behaviour", plainRefusal === null && !exists(held), plainRefusal);
