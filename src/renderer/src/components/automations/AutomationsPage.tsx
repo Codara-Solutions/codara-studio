@@ -49,7 +49,7 @@ import {
   type RecentRun,
   type RunMark,
 } from "./inbox-model";
-import { consumePendingAutomationFocus, consumePendingWorkflowRunFocus } from "./focus-request";
+import { consumePendingAutomationFocus, consumePendingWorkflowRunFocus, type AutomationFocus } from "./focus-request";
 import { reportViewedAutomation } from "../../notifications/viewed-automation";
 import WorkflowsView from "../workflows/WorkflowsView";
 import { LoomIcon, WORKER_TONE } from "./flow/FlowNodes";
@@ -272,7 +272,11 @@ export default function AutomationsPage({
   // to create the tab first. The request is staged, not applied inline: on a
   // fresh mount jobs is still [] and the selection-keeper effect would wipe a
   // premature setSelectedId, so it waits for the first list load below.
-  const [focusRequest, setFocusRequest] = useState<string | null>(null);
+  // `listed` once the list was read again for it: a jump that switched
+  // workspaces can arrive before this page's list caught up.
+  const [focusRequest, setFocusRequest] = useState<(AutomationFocus & { listed?: boolean }) | null>(null);
+  // A new object per ask, so asking for the same pass again opens it again.
+  const [focusPass, setFocusPass] = useState<{ runId: string } | null>(null);
   useEffect(() => {
     const pending = consumePendingAutomationFocus();
     if (pending !== null) setFocusRequest(pending);
@@ -280,8 +284,10 @@ export default function AutomationsPage({
       // Clear the one-shot slot too; it holds this same id, and leaving it
       // would replay the jump on the page's next mount.
       consumePendingAutomationFocus();
-      const id = (event as CustomEvent<{ automationId?: unknown }>).detail?.automationId;
-      if (typeof id === "string") setFocusRequest(id);
+      const detail = (event as CustomEvent<{ automationId?: unknown; runId?: unknown }>).detail;
+      if (typeof detail?.automationId === "string") {
+        setFocusRequest({ automationId: detail.automationId, runId: typeof detail.runId === "string" ? detail.runId : null });
+      }
     };
     window.addEventListener("spark:open-automation", handler);
     return () => window.removeEventListener("spark:open-automation", handler);
@@ -308,15 +314,24 @@ export default function AutomationsPage({
   const clearWorkflowFocus = useCallback(() => setWorkflowFocus(null), []);
   useEffect(() => {
     if (focusRequest === null || loading) return;
+    if (!jobs.some((j) => j.id === focusRequest.automationId)) {
+      if (!focusRequest.listed) {
+        const asked = focusRequest;
+        void refresh().finally(() => setFocusRequest((current) => (current === asked ? { ...asked, listed: true } : current)));
+        return;
+      }
+      // Deleted (or another workspace's) automation: nothing to focus.
+      setFocusRequest(null);
+      return;
+    }
     setFocusRequest(null);
-    // Deleted (or another workspace's) automation: nothing to focus.
-    if (!jobs.some((j) => j.id === focusRequest)) return;
     // Leaving an in-flight create/edit draft is deliberate: the user
     // explicitly asked for this automation. Drafts are ephemeral by design.
     switchSubTab("looms");
     setMode({ kind: "view" });
-    setSelectedId(focusRequest);
-  }, [focusRequest, loading, jobs, switchSubTab]);
+    setSelectedId(focusRequest.automationId);
+    setFocusPass(focusRequest.runId ? { runId: focusRequest.runId } : null);
+  }, [focusRequest, loading, jobs, switchSubTab, refresh]);
 
   const selected = useMemo(() => jobs.find((j) => j.id === selectedId) ?? null, [jobs, selectedId]);
 
@@ -783,6 +798,7 @@ export default function AutomationsPage({
               ) : (
                 <AutomationDetail
                   job={selected}
+                  focusPass={focusPass}
                   liveRun={liveRun}
                   workers={boardWorkers}
                   heroShown={active && !boardOpen}
@@ -970,6 +986,7 @@ const AutomationRow = React.memo(function AutomationRow({
 
 function AutomationDetail({
   job,
+  focusPass,
   liveRun,
   workers,
   heroShown,
@@ -989,6 +1006,8 @@ function AutomationDetail({
   onAskCora,
 }: {
   job: ScheduledJob;
+  /** A pass to open in the history, asked for from elsewhere. */
+  focusPass?: { runId: string } | null;
   liveRun: RunState | null;
   // This automation's workers only (live + briefly-lingering exited ones).
   workers: AutomationWorkerInfo[];
@@ -1102,7 +1121,7 @@ function AutomationDetail({
       )}
 
       <Section label="Runs" count={job.history.length + (job.skips?.length ?? 0)}>
-        <HistoryTimeline jobId={job.id} history={job.history} skips={job.skips} liveRunId={job.state.currentRunId} onOpenLiveBoard={onOpenLiveBoard} nowMs={nowMs} />
+        <HistoryTimeline jobId={job.id} history={job.history} skips={job.skips} liveRunId={job.state.currentRunId} focusPass={focusPass} onOpenLiveBoard={onOpenLiveBoard} nowMs={nowMs} />
       </Section>
 
       <Section label="How it runs">
@@ -1585,6 +1604,7 @@ function HistoryTimeline({
   history,
   skips,
   liveRunId,
+  focusPass,
   onOpenLiveBoard,
   nowMs,
 }: {
@@ -1592,6 +1612,7 @@ function HistoryTimeline({
   history: AutomationRunRecord[];
   skips?: AutomationSkipRecord[];
   liveRunId?: string;
+  focusPass?: { runId: string } | null;
   onOpenLiveBoard: () => void;
   nowMs: number;
 }): React.ReactElement {
@@ -1600,13 +1621,24 @@ function HistoryTimeline({
   // expand both records together.
   const [expanded, setExpanded] = useState<string | null>(null);
   const [peekRunId, setPeekRunId] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const record = focusPass ? history.find((rec) => rec.runId === focusPass.runId) : undefined;
+    if (!record) return;
+    setExpanded(`${record.iteration}-${record.runId}`);
+    setPeekRunId(record.runId);
+    window.requestAnimationFrame(() =>
+      listRef.current?.querySelector(`[data-history-run="${CSS.escape(record.runId)}"]`)?.scrollIntoView({ block: "center" }),
+    );
+    // Only a new ask opens a pass; history refreshing under it must not reopen one the user closed.
+  }, [focusPass]);
 
   if (history.length === 0 && !skips?.length) {
     return <div className="automation-quiet">No runs yet.</div>;
   }
   const rows = mergeTimeline(history, skips);
   return (
-    <div style={{ display: "flex", flexDirection: "column" }}>
+    <div ref={listRef} style={{ display: "flex", flexDirection: "column" }}>
       {rows.map((rec) => {
         if ("skip" in rec) return <SkippedHistoryRow key={`skip-${rec.skip.id}`} jobId={jobId} skip={rec.skip} />;
         const recKey = `${rec.iteration}-${rec.runId}`;
@@ -1618,6 +1650,7 @@ function HistoryTimeline({
             {/* The row's hover/rule live on this wrapper so the copy control
                 can sit beside the accordion button instead of inside it. */}
             <div
+              data-history-run={rec.runId}
               style={{
                 display: "flex",
                 alignItems: "center",

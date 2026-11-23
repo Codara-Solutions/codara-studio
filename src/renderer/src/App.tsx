@@ -57,6 +57,7 @@ import {
   type SessionSearchRequest,
   type WorkerSessionsOffer,
 } from "./components/session-search/sessionSearchStore";
+import { runShownInTab } from "./components/session-search/cora-runs";
 import { isSafeSessionId, normalizeSessionSearchPreferences, type SessionSearchHit } from "@shared/session-search";
 import StatusBar from "./components/StatusBar";
 import SearchPanel from "./components/Search/SearchPanel";
@@ -1301,6 +1302,7 @@ export default function App() {
           current ? pruneAwayDigest(current, runId) : current,
         );
         if (target?.workflow) requestWorkflowRunFocus(runId);
+        else if (target?.automationId) requestAutomationFocus(target.automationId, runId);
         tabsRef.current.openAutomationsTab();
         return;
       }
@@ -1331,9 +1333,9 @@ export default function App() {
       setAwayDigest((current) =>
         current ? pruneAwayDigest(current, pending.runId) : current,
       );
-      if (globalRuns.runsRef.current.find((run) => run.id === pending.runId)?.workflow) {
-        requestWorkflowRunFocus(pending.runId);
-      }
+      const target = globalRuns.runsRef.current.find((run) => run.id === pending.runId);
+      if (target?.workflow) requestWorkflowRunFocus(pending.runId);
+      else if (target?.automationId) requestAutomationFocus(target.automationId, pending.runId);
       tabsRef.current.openAutomationsTab();
       return;
     }
@@ -5289,12 +5291,18 @@ export default function App() {
 
   const workspaceJumpRef = useRef(workspaceJump);
   workspaceJumpRef.current = workspaceJump;
+  const refreshGlobalRunsRef = useRef(globalRuns.refresh);
+  refreshGlobalRunsRef.current = globalRuns.refresh;
   // The session picker opens what it found through here. A session already running in a pane is gone to, not resumed
   // a second time: two agents on one transcript would corrupt it.
   const openSearchedSession = useCallback(
     (hit: SessionSearchHit) => {
       if (hit.agent === "cora") {
-        handleSelectRunAnywhere(hit.sessionId, hit.workspaceId ?? undefined);
+        const select = () => handleSelectRunAnywhere(hit.sessionId, hit.workspaceId ?? undefined);
+        // Where a run opens depends on what it is, so a run this list has not
+        // seen yet would land in an empty chat.
+        if (globalRuns.runsRef.current.some((run) => run.id === hit.sessionId)) select();
+        else void refreshGlobalRunsRef.current().then(select);
         return;
       }
       if (!hit.cwd) return;
@@ -5310,7 +5318,7 @@ export default function App() {
         ...(hit.originalTitle ? { title: hit.title } : {}),
       });
     },
-    [handleSelectRunAnywhere, resumeAgentSession],
+    [handleSelectRunAnywhere, resumeAgentSession, globalRuns.runsRef],
   );
   const forkSearchedSession = useCallback(
     (hit: SessionSearchHit) => {
@@ -5344,7 +5352,9 @@ export default function App() {
   );
   const isSearchedSessionOpen = useCallback(
     (hit: SessionSearchHit) =>
-      hit.agent !== "cora" && !!findOpenSessionPane(jumpSourcesRef.current().layouts, hit.agent, hit.sessionId),
+      hit.agent === "cora"
+        ? runShownInTab(jumpSourcesRef.current().layouts, hit.sessionId)
+        : !!findOpenSessionPane(jumpSourcesRef.current().layouts, hit.agent, hit.sessionId),
     [],
   );
   const sessionSearchCwd = activeWorkspace && !activeWorkspace.remote ? activeWorkspace.cwd : null;
