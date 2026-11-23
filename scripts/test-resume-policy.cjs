@@ -34,6 +34,7 @@ async function main() {
     mergeSessionStart,
     adoptLiveSessionAccount,
     relocateResumePointer,
+    refreshCodexTranscriptPath,
   } = require(outfile);
 
   let failures = 0;
@@ -91,6 +92,44 @@ async function main() {
     "codex missing transcript → clear",
     decideResume({ exists: false }, "codex").kind === "clear",
   );
+  // A probe that failed knows nothing about the session: it keeps the
+  // pointer for every runtime instead of clearing or replacing it.
+  for (const runtime of ["codex", "claude", "grok", "pi"]) {
+    check(
+      `${runtime} probe error → keep the pointer`,
+      decideResume({ exists: false, error: "Native Codex shell-snapshot root cannot be a symbolic link." }, runtime).kind === "keep",
+    );
+  }
+  const rolloutPtr = {
+    runtime: "codex",
+    sessionId: "01a20385-d477-74a0-9e33-f3df6306fb1e",
+    cwd: "/w",
+    capturedAt: "2026-11-22T14:50:32.000Z",
+    active: true,
+  };
+  const foundRollout = "/h/.codex/sessions/2026/11/22/rollout-2026-11-22T19-20-03-01a20385-d477-74a0-9e33-f3df6306fb1e_01a2047c-9506-7701-891c-609b4d962adb.jsonl";
+  check(
+    "codex: a rollout found by id fills a missing path",
+    refreshCodexTranscriptPath(rolloutPtr, { exists: true, resumable: true, transcriptPath: foundRollout })?.transcriptPath === foundRollout,
+  );
+  check(
+    "codex: a found rollout replaces a stale path",
+    refreshCodexTranscriptPath({ ...rolloutPtr, transcriptPath: "/old.jsonl" }, { exists: true, transcriptPath: foundRollout })?.transcriptPath === foundRollout,
+  );
+  check(
+    "codex: the same path changes nothing",
+    refreshCodexTranscriptPath({ ...rolloutPtr, transcriptPath: foundRollout }, { exists: true, transcriptPath: foundRollout }) === null,
+  );
+  check(
+    "codex: a missing or failed probe changes nothing",
+    refreshCodexTranscriptPath(rolloutPtr, { exists: false }) === null &&
+      refreshCodexTranscriptPath(rolloutPtr, { exists: false, error: "x", transcriptPath: foundRollout }) === null,
+  );
+  check(
+    "only Codex pointers are refreshed",
+    refreshCodexTranscriptPath({ ...rolloutPtr, runtime: "claude" }, { exists: true, transcriptPath: foundRollout }) === null,
+  );
+
   // A missing transcript can't be repaired even if the flag leaks in.
   check(
     "claude missing+repairable → fresh (not repair)",

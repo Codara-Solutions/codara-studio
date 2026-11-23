@@ -1425,6 +1425,7 @@ const api = {
       sessionId: string;
       cwd: string;
       transcriptPath?: string;
+      capturedAt?: string;
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
       nativeGrokProfileId?: string;

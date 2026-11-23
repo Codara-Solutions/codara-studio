@@ -20,6 +20,9 @@ export interface ResumeProbe {
   // pointer's cwd names, and this is the directory that maps to it (the
   // session's start cwd). Present only when it differs from the probed cwd.
   cwd?: string;
+  // The check itself failed (main threw, or the IPC did): nothing is known
+  // about the session, so the pointer must survive untouched.
+  error?: string;
 }
 
 export type ResumeDecision =
@@ -32,7 +35,9 @@ export type ResumeDecision =
   | { kind: "fresh" }
   // Codex, not resumable → clear the pointer, leave a plain shell (Codex can't
   // force a session id, so there's nothing deterministic to relaunch).
-  | { kind: "clear" };
+  | { kind: "clear" }
+  // The probe failed → keep the pointer as it is and say how to retry.
+  | { kind: "keep" };
 
 // Map a probe result to the action to take. Split out of computeResumePlan so
 // the branch choice is unit-testable against synthetic probe results with no
@@ -41,12 +46,28 @@ export function decideResume(
   probe: ResumeProbe,
   runtime: "claude" | "codex" | "grok" | "pi",
 ): ResumeDecision {
+  if (probe.error) return { kind: "keep" };
   const resumable = probe.exists && probe.resumable !== false;
   if (resumable) {
     if (runtime === "claude" && probe.repairable === true) return { kind: "repair-resume" };
     return { kind: "resume" };
   }
   return runtime === "codex" ? { kind: "clear" } : { kind: "fresh" };
+}
+
+/**
+ * Point a Codex restore pointer at the rollout the probe found by session id
+ * when it differs from the stored one (missing, another home's spelling, or
+ * an earlier segment), so later probes and the sleep card read the live file.
+ * Returns null when nothing changes.
+ */
+export function refreshCodexTranscriptPath<P extends AgentSessionPointer>(
+  pointer: P,
+  probe: ResumeProbe,
+): P | null {
+  if (pointer.runtime !== "codex" || !probe.exists || probe.error) return null;
+  if (!probe.transcriptPath || probe.transcriptPath === pointer.transcriptPath) return null;
+  return { ...pointer, transcriptPath: probe.transcriptPath };
 }
 
 /**

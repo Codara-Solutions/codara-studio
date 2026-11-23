@@ -1,6 +1,6 @@
 import { lstatSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { isCodaraManagedCliPath } from "./codara-managed-cli-roots";
 
 function samePath(left: string, right: string): boolean {
@@ -95,6 +95,20 @@ function assertSharedNodeAllowingManagedLink(
   if (expected === "directory" ? !real.isDirectory() : !real.isFile()) {
     throw new Error(`${label} must be a ${expected}.`);
   }
+  // Codara links each name to the same name in the System home
+  // (ensureCodexManagedHome); a link planted anywhere else is not its own.
+  let linksToSystemHome = false;
+  try {
+    linksToSystemHome = samePath(
+      realpathSync(path),
+      realpathSync(join(legacyPersonalCodexHome(), basename(path))),
+    );
+  } catch {
+    linksToSystemHome = false;
+  }
+  if (!linksToSystemHome) {
+    throw new Error(`${label} links outside the System Codex home.`);
+  }
   return true;
 }
 
@@ -150,9 +164,10 @@ export function resolveCodexHomePaths(
   const historyPath = join(homeDir, "history.jsonl");
   const memoriesRoot = join(homeDir, "memories");
   const shellSnapshotsRoot = join(homeDir, "shell_snapshots");
-  // config/sessions/history/memories are shared-state names inside managed
-  // homes and may legitimately be Codara's own links; shell_snapshots is
-  // per-account and keeps the strict rule.
+  // A managed home links every top-level name of the System home except its
+  // private ones (CODEX_PRIVATE_STATE_NAMES), so these may legitimately be
+  // Codara's own links there. Refusing one fails every session lookup for
+  // that account, which once made restore drop live Codex sessions.
   assertSharedNodeAllowingManagedLink(
     homeDir,
     configPath,
@@ -177,7 +192,8 @@ export function resolveCodexHomePaths(
     "Native Codex memories root",
     "directory",
   );
-  assertExistingNodeNotSymlink(
+  assertSharedNodeAllowingManagedLink(
+    homeDir,
     shellSnapshotsRoot,
     "Native Codex shell-snapshot root",
     "directory",

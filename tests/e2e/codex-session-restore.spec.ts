@@ -1,11 +1,15 @@
-import { test, expect, type ElectronApplication } from "@playwright/test";
+import { test, expect, type ElectronApplication, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
-import { chmod, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 
 const FIRST = "11111111-1111-4111-8111-111111111111";
 const SECOND = "22222222-2222-4222-8222-222222222222";
+// Lives only in a continuation segment in another day folder, the shape a
+// long Codex conversation takes on disk.
+const THIRD = "33333333-3333-4333-8333-333333333333";
+const GONE = "44444444-4444-4444-8444-444444444444";
 
 test("a sanctioned exit does not auto-resume a running Codex conversation", async () => {
   test.skip(process.platform === "win32", "Fixture uses a Unix CLI wrapper.");
@@ -124,6 +128,123 @@ test("cold app startup counts every restored agent before visiting another works
     await app?.close();
   }
 });
+
+for (const pointer of ["no-path", "stale-path"] as const) {
+  test(`Codex finds its conversation by id after a restart when the pointer has ${pointer === "no-path" ? "no transcript path" : "a stale transcript path"}`, async () => {
+    test.skip(process.platform === "win32", "Fixture uses a Unix CLI wrapper.");
+    test.setTimeout(60_000);
+    const fixture = await prepare();
+    let app: ElectronApplication | null = null;
+    try {
+      app = await electron.launch({ args: ["."], env: fixture.env });
+      const page = await app.firstWindow();
+      await page.waitForLoadState("domcontentloaded");
+      await seedCodexPane(page, fixture.workspace, {
+        sessionId: THIRD,
+        ...(pointer === "stale-path" ? { transcriptPath: fixture.firstPath.replace(FIRST, THIRD) } : {}),
+      });
+      await page.reload();
+      await expect.poll(async () => (await fixture.launches()).filter((entry) => entry[0] === "resume").at(-1)?.[1],
+        { timeout: 20_000 }).toBe(THIRD);
+      await expect(page.getByRole("status", { name: "CODEX ready" })).toBeVisible({ timeout: 10_000 });
+      await expect.poll(() => readFile(join(fixture.userData, "logs", "main.log"), "utf8"))
+        .toContain(`plan codex id=${THIRD} cwd=${fixture.workspace} probe(exists=true resumable=true repairable=-) -> resume (rollout found by id`);
+    } finally {
+      await app?.close();
+    }
+  });
+}
+
+test("a Codex session whose files are gone says so with its id instead of opening a silent shell", async () => {
+  test.skip(process.platform === "win32", "Fixture uses a Unix CLI wrapper.");
+  test.setTimeout(60_000);
+  const fixture = await prepare();
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({ args: ["."], env: fixture.env });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await seedCodexPane(page, fixture.workspace, { sessionId: GONE });
+    await page.reload();
+    // The pane prints the same notice its restore log line records.
+    await expect.poll(() => readFile(join(fixture.userData, "logs", "main.log"), "utf8"), { timeout: 20_000 })
+      .toContain(`pane=restore-pane notice: Codex session ${GONE} was not found on this computer`);
+    expect((await fixture.launches()).filter((entry) => entry[0] === "resume")).toEqual([]);
+  } finally {
+    await app?.close();
+  }
+});
+
+test("a Codex check that fails at boot keeps the pointer and says how to retry", async () => {
+  test.skip(process.platform === "win32", "Fixture uses a Unix CLI wrapper.");
+  test.setTimeout(60_000);
+  const fixture = await prepare();
+  // A Codex home that is a symbolic link is refused, so the check throws.
+  const linkedHome = join(dirname(fixture.workspace), "codex-home-link");
+  await symlink(fixture.env.CODEX_HOME, linkedHome, "dir");
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({ args: ["."], env: { ...fixture.env, CODEX_HOME: linkedHome } });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await seedCodexPane(page, fixture.workspace, { sessionId: THIRD });
+    await page.reload();
+    await expect.poll(() => readFile(join(fixture.userData, "logs", "main.log"), "utf8"), { timeout: 20_000 })
+      .toMatch(new RegExp(`plan codex id=${THIRD} .* -> keep error=`));
+    await expect.poll(() => readFile(join(fixture.userData, "logs", "main.log"), "utf8"))
+      .toContain(`pane=restore-pane notice: couldn't check codex session ${THIRD}`);
+    await page.waitForTimeout(1_500);
+    const kept = await page.evaluate(() => JSON.parse(localStorage.getItem("spark.tabs:ws-restore") ?? "{}"));
+    expect(kept.tabs?.[0]?.root?.agentSession?.sessionId).toBe(THIRD);
+    expect(kept.tabs?.[0]?.root?.agentSession?.active).toBe(true);
+    expect((await fixture.launches()).filter((entry) => entry[0] === "resume")).toEqual([]);
+  } finally {
+    await app?.close();
+  }
+});
+
+test("a Codex pane asleep at quit comes back asleep and resumes by id on Resume", async () => {
+  test.skip(process.platform === "win32", "Fixture uses a Unix CLI wrapper.");
+  test.setTimeout(60_000);
+  const fixture = await prepare();
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({ args: ["."], env: fixture.env });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await seedCodexPane(page, fixture.workspace, { sessionId: THIRD, asleep: true });
+    await page.reload();
+    const pane = page.locator('[data-terminal-pane-id="restore-pane"]');
+    await expect(pane.getByTestId("pane-sleeping-card")).toBeVisible({ timeout: 20_000 });
+    await page.waitForTimeout(3_000);
+    expect(await fixture.launches()).toEqual([]);
+    await pane.getByTestId("pane-resume").click();
+    await expect.poll(async () => (await fixture.launches()).filter((entry) => entry[0] === "resume").at(-1)?.[1],
+      { timeout: 20_000 }).toBe(THIRD);
+    await expect(page.getByRole("status", { name: "CODEX ready" })).toBeVisible({ timeout: 10_000 });
+  } finally {
+    await app?.close();
+  }
+});
+
+// A restored Codex pane as a relaunch hydrates it: no SessionStart record, so
+// the probe has only the pointer to go on.
+async function seedCodexPane(
+  page: Page,
+  workspace: string,
+  pointer: { sessionId: string; transcriptPath?: string; asleep?: boolean },
+): Promise<void> {
+  await page.addInitScript(({ workspace, pointer }) => {
+    localStorage.setItem("spark.tabs:ws-restore", JSON.stringify({ v: 6, tabs: [{
+      id: "restore-terminal", kind: "terminal", title: "terminals", activePaneId: "restore-pane",
+      root: { kind: "leaf", paneId: "restore-pane", cwd: workspace,
+        agentSession: { runtime: "codex", sessionId: pointer.sessionId, cwd: workspace,
+          ...(pointer.transcriptPath ? { transcriptPath: pointer.transcriptPath } : {}),
+          active: true, capturedAt: "2026-09-01T00:00:00Z" },
+        ...(pointer.asleep ? { restoreAsleep: { runtime: "codex", sleptAt: Date.parse("2026-09-01T00:10:00Z") } } : {}) },
+    }], activeId: "restore-terminal" }));
+  }, { workspace, pointer });
+}
 
 for (const pointer of ["missing", "stale", "wrong-runtime", "closed"] as const) {
   test(pointer === "closed" ? "Codex keeps an intentionally closed conversation closed" : `Codex restores the process-bound conversation with a ${pointer} renderer pointer`, async () => {
@@ -260,6 +381,14 @@ async function prepare() {
       base_instructions: { text: "CLI instructions. ".repeat(2000) } } }) +
       "\n" + JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "fixture ".repeat(200) } }) + "\n");
   }
+  const segmentDay = join(codexHome, "sessions", "2026", "08", "02");
+  await mkdir(segmentDay, { recursive: true });
+  const thirdPath = join(segmentDay, `rollout-2026-08-02T09-00-00-${THIRD}_55555555-5555-4555-8555-555555555555.jsonl`);
+  await writeFile(thirdPath, JSON.stringify({ type: "session_meta", payload: { id: THIRD, cwd: workspace, source: "cli",
+    timestamp: "2026-08-02T09:00:00Z" } }) + "\n" + JSON.stringify({ type: "event_msg", payload: { type: "user_message",
+    message: "fixture ".repeat(200) } }) + "\n");
+  // Older than every other rollout, so discovery never binds it to a new launch.
+  await utimes(thirdPath, new Date("2026-08-02T09:00:00Z"), new Date("2026-08-02T09:00:00Z"));
   const launchLog = join(root, "launches.jsonl");
   const startupReplies = join(root, "terminal-replies.txt");
   const script = join(bin, "codex.js");
@@ -275,7 +404,7 @@ async function prepare() {
       else if (args.length > 0 || !/^--config=/.test(argv[i])) args.push(argv[i]);
     }
     fs.appendFileSync(${JSON.stringify(launchLog)}, JSON.stringify([...args, "cwd:" + process.cwd()]) + "\\n");
-    const paths = ${JSON.stringify({ [FIRST]: firstPath, [SECOND]: secondPath })};
+    const paths = ${JSON.stringify({ [FIRST]: firstPath, [SECOND]: secondPath, [THIRD]: thirdPath })};
     let current;
     const show = () => process.stdout.write("\\x1b[2J\\x1b[HOpenAI Codex (v0.153.4)\\r\\n" +
       (process.env.SPARK_TEST_CODEX_SECOND_WORKING === "1" && args[1] === ${JSON.stringify(SECOND)}
