@@ -4,10 +4,10 @@
  * Design source: T3 Code's thread sidebar (github.com/pingdotgg/t3code, MIT,
  * by Theo / Ping Labs): three-line rows with no box, a status word top right,
  * Working and Settled shelves, Settle on hover, a merged pull request that
- * settles itself, and undo as one quiet line in the footer. The look and the behaviour follow T3 Code; this code is
- * Codara's own. Merge PR in the menu is our addition, and so are the Needs
- * you and Done headings: every row sits under a heading whose count is its
- * rows. See DESIGN.md, "Agents tab".
+ * settles itself, and undo as one quiet line in the footer. The look and the
+ * behaviour follow T3 Code; this code is Codara's own. Merge PR in the menu
+ * is our addition, and so are the Needs you and Done headings: every row
+ * sits under a heading whose count is its rows. See DESIGN.md, "Agents tab".
  */
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
