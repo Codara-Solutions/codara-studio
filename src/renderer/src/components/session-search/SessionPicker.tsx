@@ -21,13 +21,14 @@ import { usePreferences } from "../../preferences/usePreferences";
 import { keyBelongsToOtherModal } from "../../shortcuts/modal-keys";
 import AnchoredMenu from "../chat/composer/AnchoredMenu";
 import { PencilIcon, PinIcon, ReloadIcon } from "../icons";
+import { unwrapIpcError } from "../../lib/ipc-error";
 import SessionAgentMark from "./SessionAgentMark";
 import {
   CORA_RUN_KIND_LABEL,
   coraDeleteBlock,
+  coraDeleteConfirm,
   coraPrimary,
   coraRunFacts,
-  coraRunKind,
   type CoraRunFacts,
 } from "./cora-runs";
 import { SnippetText, TermsText } from "./SessionHighlight";
@@ -390,8 +391,9 @@ export default function SessionPicker({
     async (hit: SessionSearchHit): Promise<CoraRunFacts | undefined> => {
       const run = await window.spark.orchestration.getRun(hit.sessionId).catch(() => undefined);
       if (run === undefined) return undefined;
-      const hubOwned = run !== null && coraRunKind(run) !== "chat" && !run.workflow;
-      const jobs = hubOwned ? await window.spark.scheduler.list().catch(() => null) : null;
+      // Null is "could not list the Looms", which blocks Delete rather than reading as "no Loom".
+      const loomOwned = !!run?.automationId && !run.workflow;
+      const jobs = loomOwned ? await window.spark.scheduler.list().catch(() => null) : [];
       return coraRunFacts(run, jobs, host.isSessionOpen?.(hit) ?? false);
     },
     [host],
@@ -659,7 +661,7 @@ export default function SessionPicker({
       setNote(block);
       return null;
     }
-    await window.spark.orchestration.deleteRun(hit.sessionId);
+    await window.spark.orchestration.deleteRun(hit.sessionId, { refuseLive: true });
     return "Run deleted";
   };
 
@@ -683,7 +685,7 @@ export default function SessionPicker({
       });
       await forgetDeleted(hit, result.warnings.length > 0 ? result.warnings.join(" ") : "Session deleted");
     } catch (err) {
-      setNote(err instanceof Error ? err.message : "Could not delete this session");
+      setNote(unwrapIpcError(err) || "Could not delete this session");
     } finally {
       setBusy(false);
       setDeleting(null);
@@ -1075,11 +1077,9 @@ export default function SessionPicker({
                   <span className="sp-actions__ask">
                     {deleting.session
                       ? "Delete this session's transcript from this computer?"
-                      : `Deletes this run and its saved output from this computer.${
-                          selectedCora && selectedCora.kind !== "chat"
-                            ? ` Its ${selectedCora.kind === "loom-pass" ? "Loom" : "automation"} and other passes stay.`
-                            : ""
-                        }`}
+                      : selectedCora
+                        ? coraDeleteConfirm(selectedCora)
+                        : "Deletes this run and its saved output from this computer."}
                   </span>
                   <button
                     ref={cancelDeleteRef}

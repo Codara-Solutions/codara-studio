@@ -1,16 +1,24 @@
-import type { RunState, ScheduledJob, WorkerAttemptStatus } from "@shared/types";
+import { LOOM_HOLDS_RUN, RUN_IS_WORKING, loomHoldsRun, runHasLiveWork } from "@shared/run-delete-guard";
+import type { RunState, ScheduledJob } from "@shared/types";
 import type { Tab } from "../../tabs/types";
 
 // What a Cora row in the session picker is, where opening it lands, and
 // whether it may be deleted from there. The index only knows a run's words;
 // these facts come from the run itself, read when the row is selected.
 
-export type CoraRunKind = "chat" | "loom-pass" | "automation-run";
+export type CoraRunKind = "chat" | "loom-pass" | "automation-run" | "workflow-run";
 
 export const CORA_RUN_KIND_LABEL: Record<CoraRunKind, string> = {
   chat: "Cora chat",
   "loom-pass": "Loom pass",
   "automation-run": "Automation run",
+  "workflow-run": "Workflow run",
+};
+
+const OWNER_NOUN: Record<Exclude<CoraRunKind, "chat">, string> = {
+  "loom-pass": "Loom",
+  "automation-run": "automation",
+  "workflow-run": "workflow",
 };
 
 export interface CoraRunFacts {
@@ -25,6 +33,12 @@ export interface CoraRunFacts {
   shownInHub: boolean;
   /** The Loom or automation that ran it still exists. */
   ownerExists: boolean;
+  /** A Loom still holds it as its current run: a later pass would be added to it. */
+  heldByLoom: boolean;
+  /** Its Loom's list could not be read, so whether a Loom holds it is unknown. */
+  loomsUnknown: boolean;
+  /** How many passes of its Loom's history ran in this one run (a Loom reuses its run across a cycle). */
+  passCount: number;
 }
 
 export type CoraPrimary =
@@ -32,20 +46,12 @@ export type CoraPrimary =
   | { action: "open-hub"; label: string }
   | { action: "view"; label: string; notice: string };
 
-const ACTIVE_ATTEMPTS = new Set<WorkerAttemptStatus>(["preparing", "prompt_ready", "launching", "running", "finishing"]);
-const WORKING = new Set<RunState["status"]>(["planning", "running", "reviewing"]);
-
 type RunShape = Pick<RunState, "automationId" | "workflow" | "executionMode">;
 
 export function coraRunKind(run: RunShape): CoraRunKind {
-  if (run.workflow) return "automation-run";
+  if (run.workflow) return "workflow-run";
   if (run.automationId) return run.executionMode === "direct" ? "loom-pass" : "automation-run";
   return "chat";
-}
-
-export function runHasLiveWork(run: Pick<RunState, "status" | "workerAttempts">): boolean {
-  if (WORKING.has(run.status)) return true;
-  return (run.workerAttempts ?? []).some((attempt) => ACTIVE_ATTEMPTS.has(attempt.status));
 }
 
 /** A tab in any workspace's saved layout that shows this run. */
@@ -60,17 +66,30 @@ export function runShownInTab(layouts: readonly { tabs: readonly Tab[] }[], runI
   );
 }
 
+/** `jobs` is null when the Looms could not be listed. */
 export function coraRunFacts(
   run: RunState | null,
-  jobs: readonly Pick<ScheduledJob, "id" | "history">[] | null,
+  jobs: readonly Pick<ScheduledJob, "id" | "history" | "state">[] | null,
   openInTab: boolean,
 ): CoraRunFacts {
-  if (!run) return { kind: "chat", exists: false, live: false, openInTab, shownInHub: false, ownerExists: false };
+  const none = { heldByLoom: false, loomsUnknown: false, passCount: 0 };
+  if (!run) return { kind: "chat", exists: false, live: false, openInTab, shownInHub: false, ownerExists: false, ...none };
   const kind = coraRunKind(run);
   const owner = jobs?.find((job) => job.id === run.automationId);
+  const passCount = owner?.history.filter((record) => record.runId === run.id).length ?? 0;
   // The Workflows view lists every workflow run; a Loom shows only the passes its history keeps.
-  const shownInHub = kind !== "chat" && (!!run.workflow || !!owner?.history.some((record) => record.runId === run.id));
-  return { kind, exists: true, live: runHasLiveWork(run), openInTab, shownInHub, ownerExists: !!run.workflow || !!owner };
+  const shownInHub = kind === "workflow-run" || (kind !== "chat" && passCount > 0);
+  return {
+    kind,
+    exists: true,
+    live: runHasLiveWork(run),
+    openInTab,
+    shownInHub,
+    ownerExists: kind === "workflow-run" || !!owner,
+    heldByLoom: !!jobs && loomHoldsRun(jobs, run.id),
+    loomsUnknown: !!run.automationId && kind !== "workflow-run" && jobs === null,
+    passCount,
+  };
 }
 
 export function coraPrimary(facts: CoraRunFacts): CoraPrimary {
@@ -85,20 +104,37 @@ export function coraPrimary(facts: CoraRunFacts): CoraPrimary {
   if (facts.shownInHub) {
     return { action: "open-hub", label: facts.kind === "loom-pass" ? "Open pass in Automations" : "Open run in Automations" };
   }
-  const owner = facts.kind === "loom-pass" ? "Loom" : "automation";
+  const owner = OWNER_NOUN[facts.kind];
   return {
     action: "view",
     label: "View",
-    notice: facts.ownerExists
-      ? `Its ${owner} no longer lists it in its history, so it is shown here, read only.`
-      : `Its ${owner} was deleted, so it is shown here, read only.`,
+    notice: facts.loomsUnknown
+      ? "Its Loom could not be read, so it is shown here, read only."
+      : facts.ownerExists
+        ? `Its ${owner} no longer lists it in its history, so it is shown here, read only.`
+        : `Its ${owner} was deleted, so it is shown here, read only.`,
   };
 }
 
 /** Why the picker does not offer Delete for this run, or null when it does. */
 export function coraDeleteBlock(facts: CoraRunFacts): string | null {
   if (!facts.exists) return "Already gone from this computer.";
-  if (facts.live) return "Working now, so it can't be deleted. Stop it first.";
+  if (facts.live) return RUN_IS_WORKING;
+  if (facts.heldByLoom) return LOOM_HOLDS_RUN;
+  if (facts.loomsUnknown) return "Could not read its Loom, so it is not deleted from here.";
   if (facts.openInTab) return "Open in a tab now, so it can't be deleted here. Close that tab first.";
   return null;
+}
+
+/** What the confirm says goes, and what stays. */
+export function coraDeleteConfirm(facts: CoraRunFacts): string {
+  const learned = "with what Cora learned from";
+  if (facts.kind === "chat") return `Deletes this chat and its saved output from this computer, ${learned} it.`;
+  const owner = OWNER_NOUN[facts.kind];
+  if (facts.passCount > 1) {
+    return `Deletes these ${facts.passCount} passes, which ran in this one run, and their saved output from this computer, ${learned} them. Its ${owner} stays.`;
+  }
+  const others = facts.kind === "workflow-run" ? "other runs" : "other passes";
+  const stays = facts.ownerExists ? `Its ${owner} and its ${others} stay.` : `Its ${others} stay.`;
+  return `Deletes this run and its saved output from this computer, ${learned} it. ${stays}`;
 }

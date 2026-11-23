@@ -88,7 +88,8 @@ when the row is selected, so its detail says what it is under **Kind**:
 |---|---|---|
 | Cora chat | A chat you had with Cora | **Open chat**, or **Go to its tab** when a tab shows it |
 | Loom pass | One pass of a Loom (`automationId`, run directly by one worker) | **Open pass in Automations**: the Loom, with that pass open in its history and its run peeked |
-| Automation run | A pass of an older managed automation, or a workflow run | **Open run in Automations** |
+| Automation run | A pass of an older managed automation | **Open run in Automations** |
+| Workflow run | A run a workflow script drove | **Open run in Automations**, on its Workflows view |
 
 A pass its Loom no longer lists (the Loom was deleted, or **Remove** took the
 pass out of its history) has nowhere else to be shown: the button reads
@@ -96,16 +97,30 @@ pass out of its history) has nowhere else to be shown: the button reads
 saying why. So does a run whose folder is already gone. **Whole transcript**
 works for every Cora row.
 
-The **...** menu offers **Delete...** for a Cora run that is finished and not
-shown in a tab. A run that is working (planning, running, reviewing, or
-stopped with a worker still going) or open in a tab (its chat, its Runs tab or
-its workers' tab) has no Delete, and the detail says why. The confirm reads
-"Deletes this run and its saved output from this computer", and for a pass
-adds that its Loom and other passes stay. The run is read again just before
-deleting, in case it started working meanwhile.
+The **...** menu offers **Delete...** for a Cora run that is finished, that
+no Loom still uses, and that no tab shows. These have no Delete, and the
+detail says why:
+
+- a run that is working: planning, running, reviewing, or stopped with a
+  worker still going;
+- a run a Loom holds as its current run. Unless a Loom isolates its passes,
+  every pass of a cycle runs in the same run, which reads as finished between
+  passes, and a paused Loom or one waiting on your answer keeps it too.
+  Deleting it would stop the Loom, so stop the Loom first. When the Looms
+  cannot be listed, Delete is not offered either;
+- a run open in a tab: its chat, its Runs tab or its workers' tab.
+
+The confirm says what goes: "Deletes this run and its saved output from this
+computer, with what Cora learned from it", then that its Loom and its other
+passes stay. When several passes of a Loom ran in this one run, it says
+"Deletes these N passes". The picker reads the run again just before
+deleting, and main checks the same rule once more in the run's own queue
+(`deleteRun(runId, { refuseLive: true })`), so a pass that starts in the
+meantime is refused, not cut off. A refusal says why in the status line.
 
 Delete is the run store's own delete (`orchestration:deleteRun`, the one the
-chat list and Settings, All runs use). It removes the run's folder
+chat list and Settings, All runs use without that check; the handler only
+takes ids of the run store's own `run-...` shape). It removes the run's folder
 (`run.json`, its event log, prompts, worker logs and saved output), the run's
 own checkpoint refs in its repository, its outcome record and quotes in
 learned memory, and the throwaway sandbox worktrees its own workers used. It
