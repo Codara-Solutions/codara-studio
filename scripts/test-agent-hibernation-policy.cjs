@@ -162,6 +162,8 @@ async function main() {
   check("no chip state yet: stays awake", judge(idleEvidence({ chipState: null }), "claude") === "unknown-state");
   check("a pending tool call keeps it awake", judge(idleEvidence({ pendingToolCalls: 1 }), "claude") === "agent-busy");
   check("background tasks keep it awake", judge(idleEvidence({ backgroundRunning: 2 }), "claude") === "agent-busy");
+  check("a scheduled wake-up keeps it awake", judge(idleEvidence({ scheduledWork: "a wake-up by 20:31" }), "claude") === "scheduled-work");
+  check("nothing scheduled says nothing", judge(idleEvidence({ scheduledWork: null }), "claude") === null);
   check(
     "a chip working in the background keeps it awake",
     judge(idleEvidence({ chipState: "background" }), "claude") === "agent-busy",
@@ -178,6 +180,14 @@ async function main() {
     "a key after the submit that leaves no text (Esc, an arrow) may sleep",
     judge(idleEvidence({ lastUserInputAt: 5_000, lastComposerEditAt: 1_000, lastSubmitAt: 1_000 }), "claude") === null,
   );
+  check(
+    "a box emptied by Ctrl+C at the prompt holds nothing unsent",
+    judge(idleEvidence({ lastComposerEditAt: 5_000, lastSubmitAt: 1_000, lastComposerClearAt: 6_000 }), "claude") === null,
+  );
+  check(
+    "text typed after that Ctrl+C is unsent again",
+    judge(idleEvidence({ lastComposerEditAt: 7_000, lastSubmitAt: 1_000, lastComposerClearAt: 6_000 }), "claude") === "unsent-input",
+  );
 
   // ── Idle clock ──
   const clock = shared.judgeIdleClock;
@@ -191,6 +201,15 @@ async function main() {
     "a pane shown or touched a moment ago stays awake",
     clock({ now: 100 * MIN, idleMs: 30 * MIN, activityAt: [10 * MIN, 99 * MIN] }) === "not-idle-long-enough",
   );
+
+  // ── Output on the clock ──
+  const restarts = shared.outputRestartsIdleClock;
+  check("no evidence: output counts", restarts(null) === true);
+  check("screen-only evidence: output counts", restarts(idleEvidence({ structured: false, settledAt: 5_000 })) === true);
+  check("an older main without the fields: output counts", restarts(idleEvidence()) === true);
+  check("structured but never settled: output counts", restarts(idleEvidence({ structured: true, settledAt: 0 })) === true);
+  check("structured with a bad stamp: output counts", restarts(idleEvidence({ structured: true, settledAt: Number.NaN })) === true);
+  check("structured and settled: the repaint is left off", restarts(idleEvidence({ structured: true, settledAt: 5_000 })) === false);
 
   // ── Candidates: every pane but the one with the keyboard ──
   const layout = [

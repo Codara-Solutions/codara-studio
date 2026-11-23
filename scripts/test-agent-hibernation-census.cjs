@@ -58,6 +58,9 @@ async function main() {
     listPaneTerminalPids,
     listConsolePids,
     consolePidsFromAgentMessage,
+    procKbField,
+    parsePsRss,
+    readTreeMemoryBytes,
   } = require(outfile);
 
   let failures = 0;
@@ -346,6 +349,50 @@ async function main() {
   const late = fromFixture(golden.lateCodaraMcp);
   verdict = classifyPaneProcessTree(late, golden.lateCodaraMcp[0].pid, "claude");
   check("real tree: Codara's MCP server at +95 s may sleep", verdict.ok === true, verdict);
+
+  // ── What the pane's tree holds (POSIX) ──
+  verdict = classifyPaneProcessTree(base, 100, "claude");
+  check(
+    "a tree that may sleep names every pid the stop ends, and nothing else",
+    verdict.ok === true && JSON.stringify([...verdict.pids].sort((a, b) => a - b)) === "[100,101,102,103,104,105]" && verdict.memoryBytes === null,
+    verdict,
+  );
+  check("a /proc kB field is read", procKbField("Rss:  2048 kB\nPss:   1536 kB\n", "Pss") === 1536);
+  check("a missing /proc field is null", procKbField("Rss:  2048 kB\n", "Pss") === null);
+  check("ps rss rows are summed in bytes", parsePsRss("  100  2048\n  101 409600\n") === (2048 + 409600) * 1024);
+  check("an odd ps row is unreadable, not skipped", parsePsRss("100 2048\nzombie\n") === null);
+  const procFiles = {
+    "/proc/100/smaps_rollup": "Rss: 5000 kB\nPss: 4000 kB\n",
+    "/proc/101/smaps_rollup": "Rss: 300000 kB\nPss: 290000 kB\nPss_Anon: 250000 kB\nPss_File: 39000 kB\nPss_Shmem: 1000 kB\n",
+    "/proc/102/status": "Name: node\nVmRSS: 50000 kB\n",
+    "/proc/105/status": "Name: node\nVmRSS: 70000 kB\nRssAnon: 60000 kB\nRssFile: 10000 kB\nRssShmem: 0 kB\n",
+    "/proc/104/status": "Name: kworker\n",
+  };
+  const fakeRead = (errors = {}) => async (file) => {
+    if (errors[file]) {
+      const error = new Error(errors[file]);
+      error.code = errors[file];
+      throw error;
+    }
+    if (file in procFiles) return procFiles[file];
+    const error = new Error("ENOENT");
+    error.code = file.endsWith("smaps_rollup") ? "EACCES" : "ENOENT";
+    throw error;
+  };
+  let bytes = await readTreeMemoryBytes([100, 101, 102, 103, 104, 105, 101], { platform: "linux", read: fakeRead() });
+  check(
+    "Linux: anonymous + shared Pss (not the page cache's file pages), the whole Pss on an older kernel, RssAnon + RssShmem or VmRSS where the rollup cannot be read, gone or kernel-only processes hold nothing",
+    bytes === (4000 + 250000 + 1000 + 50000 + 60000) * 1024,
+    bytes,
+  );
+  bytes = await readTreeMemoryBytes([100, 102], { platform: "linux", read: fakeRead({ "/proc/102/status": "EACCES" }) });
+  check("Linux: one unreadable process makes the figure unknown, never a partial sum", bytes === null, bytes);
+  check("Windows reads its figure from the listing instead", (await readTreeMemoryBytes([100], { platform: "win32" })) === null);
+  check("no pids, no figure", (await readTreeMemoryBytes([], { platform: "linux", read: fakeRead() })) === null);
+  if (process.platform === "linux") {
+    const own = await readTreeMemoryBytes([process.pid]);
+    check("this process's own memory reads as a real figure", typeof own === "number" && own > 10 * 1024 * 1024, own);
+  }
 
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);

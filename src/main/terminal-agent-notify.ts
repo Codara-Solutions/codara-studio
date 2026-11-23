@@ -26,6 +26,7 @@ import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify"
 import { nudgeUsageRefresh } from "./orchestration/usage-activity-refresh";
 import { signalAgentBoardChanged } from "./agent-board-signal";
 import { BackgroundWork, claudeBackgroundPaths, probeBackgroundFiles } from "./agent-background-work";
+import { ScheduledWork } from "./agent-scheduled-work";
 import { nextWorkingSince, type TerminalAgentActivity } from "@shared/agent-board";
 import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 import type { AgentHibernationEvidence } from "@shared/agent-hibernation";
@@ -248,6 +249,25 @@ interface PaneWatcher {
   // The last of those inputs that was a submit (Enter). An edit after it
   // means text may sit unsent in the agent's input box (agent hibernation).
   lastSubmitAt: number;
+  // The last Ctrl+C that emptied the box (ctrlCEmptiesComposer): text typed
+  // before it is gone, not unsent. Read by agent hibernation only; every
+  // other draft guard reads lastSubmitAt as it is.
+  lastComposerClearAt: number;
+  // A ScheduleWakeup or cron job the Claude session set up (hooks): the agent
+  // waits for its next tick and must not be stopped between ticks.
+  scheduled: ScheduledWork;
+  // The session those holds belong to, as its SessionStart named it.
+  scheduledSession: string | null;
+  // A dialog on screen in a hook-owned Claude with no tool call waiting (an
+  // MCP server approval at startup): no hook announces it. Noticed only in
+  // the startup window (dialogWindowUntil), when it was first seen; open
+  // until a key, a turn, the prompt's footer or SCREEN_DIALOG_HOLD_MS.
+  screenDialogAt: number;
+  // From a SessionStart(startup) until the prompt's footer is drawn, at most
+  // STARTUP_DIALOG_WINDOW_MS: the only time a dialog-looking screen in a
+  // hook-owned pane is taken for a dialog. Any other time it is transcript
+  // text (claude --resume prints the whole transcript at every relaunch).
+  dialogWindowUntil: number;
   lastInterruptKeyAt: number;
   lastHookEventAt: number;
   // Claude tool calls announced by PreToolUse and not yet answered by
@@ -424,6 +444,11 @@ export function syncTerminalNotifyPanes(input: {
       lastUserInputAt: 0,
       lastComposerEditAt: 0,
       lastSubmitAt: 0,
+      lastComposerClearAt: 0,
+      scheduled: new ScheduledWork(),
+      scheduledSession: null,
+      screenDialogAt: 0,
+      dialogWindowUntil: 0,
       lastInterruptKeyAt: 0,
       lastHookEventAt: 0,
       pendingToolCalls: 0,
@@ -625,6 +650,10 @@ function resetAgentSession(w: PaneWatcher): void {
   w.hookFollowUp = false;
   clearBackground(w);
   w.backgroundSessionId = null;
+  // Another agent in this pane inherits nothing the last one scheduled.
+  w.scheduled.clear();
+  w.scheduledSession = null;
+  w.dialogWindowUntil = 0;
   w.lastProgramState = null;
   w.lastTurnEnd = null;
   w.codexAnnouncedTurnIds = [];
@@ -1110,13 +1139,50 @@ function isSubmit(data: string): boolean {
 
 // Keys that cannot put text into an agent's input box: a lone Esc, Ctrl+C,
 // Backspace and Delete, Left/Right, Home/End and PageUp/PageDown (with or
-// without modifiers). Up and Down are not here: they recall earlier prompts
-// into the box. Text typed before any of these still counts as unsent.
+// without modifiers), and the agents' view toggles: Shift+Tab (Claude Code's
+// permission mode), Ctrl+O (transcript), Ctrl+T (task list) and Ctrl+L
+// (redraw). Up and Down are not here: they recall earlier prompts into the
+// box. Text typed before any of these still counts as unsent.
 const NO_TEXT_KEYS_RE =
-  /^(?:\x1b|\x03|\x7f|\x08|\x1b\[3~|\x1b(?:\[(?:1;\d+)?|O)[CDHF]|\x1b\[(?:[1478]|5|6)(?:;\d+)?~)+$/;
+  /^(?:\x1b|\x03|\x7f|\x08|\x0c|\x0f|\x14|\x1b\[Z|\x1b\[3~|\x1b(?:\[(?:1;\d+)?|O)[CDHF]|\x1b\[(?:[1478]|5|6)(?:;\d+)?~)+$/;
 
 function canLeaveText(data: string | undefined): boolean {
   return data === undefined || !NO_TEXT_KEYS_RE.test(data);
+}
+
+// Ctrl+C with text in the box empties it in Claude Code, Codex and Pi (a
+// second press on an empty box quits), but only while the agent sits at its
+// prompt. During a turn it interrupts and in a dialog it dismisses, and a
+// draft can survive either, so then it clears nothing. Grok's composer is not
+// known to clear, so its unsent text stays unsent.
+function ctrlCEmptiesComposer(w: PaneWatcher, data: string | undefined): boolean {
+  if (data !== "\x03") return false;
+  if (w.runtime !== "claude" && w.runtime !== "codex" && w.runtime !== "pi") return false;
+  return (
+    w.state === "idle" &&
+    w.lastEmittedState !== "blocked" &&
+    !turnActive(w) &&
+    w.pendingToolCalls === 0 &&
+    w.pendingDone === null &&
+    !screenDialogOpen(w)
+  );
+}
+
+// A startup dialog holds a pane this long at most: sleeping one loses
+// nothing (the dialog comes back on --resume), so it never holds for good.
+const SCREEN_DIALOG_HOLD_MS = 10 * 60_000;
+const STARTUP_DIALOG_WINDOW_MS = 2 * 60_000;
+// Claude Code's footer under its input box (agent-patterns.ts's UI anchors
+// without the launch banner): only drawn while the prompt is up.
+const CLAUDE_PROMPT_FOOTER_RE =
+  /\?\s*for\s*shortcuts|shift\s*\+?\s*tab\s*to\s*cycle|\b(?:manual|auto|plan)\s*mode\s*on\b|\baccept\s*edits\s*on\b|\bbypass\s*permissions\s*on\b/i;
+
+function screenDialogOpen(w: PaneWatcher, now = Date.now()): boolean {
+  return (
+    w.screenDialogAt > 0 &&
+    w.screenDialogAt > Math.max(w.lastUserInputAt, w.lastTurnStartedAt) &&
+    now - w.screenDialogAt < SCREEN_DIALOG_HOLD_MS
+  );
 }
 
 // User keystrokes / injected input reached this pane's pty. A submit starts a
@@ -1129,8 +1195,12 @@ export function noteTerminalUserInput(paneId: string, data?: string): void {
   const w = watchers.get(paneId);
   if (!w || w.excluded) return;
   const now = Date.now();
+  // Judged before this key counts as input: it may be the one that answers
+  // a dialog, and a Ctrl+C there dismisses the dialog, not the draft.
+  const clears = ctrlCEmptiesComposer(w, data);
   w.lastUserInputAt = now;
   if (canLeaveText(data)) w.lastComposerEditAt = now;
+  if (clears) w.lastComposerClearAt = now;
   if (data !== undefined && (data === "\x1b" || data.includes("\x03"))) {
     w.lastInterruptKeyAt = now;
   }
@@ -1287,6 +1357,8 @@ export function noteTerminalHookEvent(
       const tool = hookToolName(payload);
       const input = payload?.tool_input ?? payload?.toolInput;
       w.pendingToolCalls += 1;
+      const scheduledNote = w.scheduled.toolStarted(tool, input, now);
+      if (scheduledNote) tanLog(`pane=${w.paneId} ${scheduledNote}`);
       w.lastToolDetail = describeToolCall(tool, input);
       noteActivity(w, { tool: w.lastToolDetail });
       if (!agentId) {
@@ -1310,6 +1382,16 @@ export function noteTerminalHookEvent(
     case "PostToolUse":
     case "PostToolUseFailure":
       w.pendingToolCalls = Math.max(0, w.pendingToolCalls - 1);
+      {
+        const scheduledNote = w.scheduled.toolFinished(
+          hookToolName(payload),
+          payload?.tool_input ?? payload?.toolInput,
+          payload?.tool_response ?? payload?.toolResponse,
+          hookName === "PostToolUseFailure",
+          now,
+        );
+        if (scheduledNote) tanLog(`pane=${w.paneId} ${scheduledNote}`);
+      }
       // The board shows the tool running now, not the last one that ran.
       if (w.pendingToolCalls === 0 && w.activity.tool !== null) noteActivity(w, { tool: null });
       if (w.signals.programStatus) return;
@@ -1334,6 +1416,7 @@ export function noteTerminalHookEvent(
     case "Stop":
     case "StopFailure":
       if (agentId) return;
+      w.scheduled.turnEnded();
       handleClaudeStop(w, now, hookName, payload);
       return;
     case "SubagentStop":
@@ -1352,6 +1435,19 @@ export function noteTerminalHookEvent(
       closeTurnSilently(w, now, `session ${source || "start"}`);
       w.turn = null;
       w.pendingToolCalls = 0;
+      // A resume of the same session restores its cron jobs (Claude Code's
+      // scheduled-tasks docs) but not a pending wake-up: keep the crons held.
+      // After /clear the same process may keep its wake-ups and crons (not
+      // checked on the real CLI), so they stay. Any other start has nothing
+      // scheduled. Every hold kept here still ends on its own.
+      if (source === "resume" && sessionId && (w.scheduledSession === null || w.scheduledSession === sessionId)) {
+        w.scheduled.resumed();
+      } else if (source !== "clear") {
+        w.scheduled.clear();
+      }
+      w.scheduledSession = sessionId ?? null;
+      w.screenDialogAt = 0;
+      w.dialogWindowUntil = source === "startup" || source === "" ? now + STARTUP_DIALOG_WINDOW_MS : 0;
       noteActivity(w, { tool: null });
       followBackgroundSession(w, sessionId, now);
       w.hookFollowUp = false;
@@ -1360,6 +1456,7 @@ export function noteTerminalHookEvent(
     case "SessionEnd":
       closeTurnSilently(w, now, "session end");
       w.pendingToolCalls = 0;
+      w.scheduled.clear();
       // The session's background work ends with it.
       if (sessionId && sessionId === w.backgroundSessionId) {
         clearBackground(w);
@@ -1558,7 +1655,21 @@ export function terminalAgentHibernationEvidence(paneId: string): AgentHibernati
     lastUserInputAt: w.lastUserInputAt,
     lastComposerEditAt: w.lastComposerEditAt,
     lastSubmitAt: w.lastSubmitAt,
+    lastComposerClearAt: w.lastComposerClearAt,
+    scheduledWork: w.scheduled.describe(Date.now()),
+    screenDialog: screenDialogOpen(w),
     lastOutputAt: w.lastOutputAt,
+    // Hooks speak for Claude only; a program status report for any agent.
+    structured: (w.signals.hooks && w.runtime === "claude") || w.signals.programStatus,
+    settledAt: Math.max(
+      w.activity.stateSince,
+      w.lastTurnStartedAt,
+      w.lastTurnEnd?.at ?? 0,
+      w.lastHookEventAt,
+      w.lastWorkingAt,
+      w.backgroundDrainedAt,
+      w.lastSubmitAt,
+    ),
   };
 }
 
@@ -2050,6 +2161,14 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       }
     }
 
+    // Claude's prompt footer is up: no startup dialog is on screen, and none
+    // comes. The launch banner is not enough, it is drawn above a dialog too.
+    if (w.runtime === "claude" && (w.dialogWindowUntil > 0 || w.screenDialogAt > 0) && CLAUDE_PROMPT_FOOTER_RE.test(plain.slice(fresh))) {
+      if (w.screenDialogAt > 0) tanLog(`pane=${w.paneId} prompt is up: the startup dialog is gone`);
+      w.dialogWindowUntil = 0;
+      w.screenDialogAt = 0;
+    }
+
     // Only pattern matches that END in the freshly arrived bytes count.
     const cls =
       applyProblem || w.codexScreen || programOwned
@@ -2061,6 +2180,12 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       if (!hookOwned || w.pendingToolCalls > 0) {
         if (w.state !== "blocked") tanLog(`pane=${w.paneId} screen shows a prompt (was ${w.state})`);
         needsYou(w, now, hookOwned && w.lastToolDetail ? `Permission for ${w.lastToolDetail}` : null, "screen prompt");
+      } else if (!turnActive(w) && now < w.dialogWindowUntil && !screenDialogOpen(w, now)) {
+        // Not a needs-you, but enough to keep hibernation off the pane for a
+        // while: a startup dialog (MCP server approval) has no hook of its
+        // own. Only in the startup window: later it is transcript text.
+        tanLog(`pane=${w.paneId} screen shows a startup dialog with no tool call waiting`);
+        w.screenDialogAt = now;
       }
     } else if (cls === "working") {
       enterWorking(w, now);
