@@ -554,7 +554,7 @@ test("Sleep now says why it leaves an agent running, then puts it to sleep at on
   }
 });
 
-test("a sleeping pane shows the moon and one pill centred at any size, and Shift+click resumes and keeps it running", async () => {
+test("a sleeping pane shows the moon and one pill centred at any size, and Shift+click resumes and keeps it running", { tag: "@ci" }, async () => {
   test.setTimeout(TEST_TIMEOUT);
   const fixture = await prepareFixture("repaint", { hooks: true, withShellPane: true });
   const { app, page, logs } = await launch(fixture, { env: { CODARA_E2E_HIBERNATION_IDLE_MS: String(60 * 60_000) } });
@@ -563,7 +563,17 @@ test("a sleeping pane shows the moon and one pill centred at any size, and Shift
     const [first] = await waitForLaunches(fixture, 1);
     const sleepNow = pane(page).getByRole("button", { name: "Sleep now" });
     await expect(sleepNow).toBeAttached({ timeout: 30_000 });
-    await sleepNow.evaluate((button) => (button as HTMLElement).click());
+    // Until its first hook arrives the agent is known from its screen alone,
+    // and Sleep now leaves it running while it repaints: press again, as a
+    // user would, until it sleeps.
+    await expect(async () => {
+      if ((await sleepingChip(page).count()) === 0) await sleepNow.evaluate((button) => (button as HTMLElement).click());
+      await expect(sleepingChip(page)).toHaveAttribute("aria-label", "CLAUDE sleeping", { timeout: 3_000 });
+    }).toPass({ timeout: 30_000 });
+    expect(
+      logs.filter((line) => line.includes(`pane=${PANE_ID} Sleep now refused:`)).every((line) => /agent-busy \(output \d+s ago\)|in-flight/.test(line)),
+      logs.join("\n"),
+    ).toBe(true);
     await expectAsleep(page, logs, first);
     await expect(sleepingCard(page)).toBeVisible();
 

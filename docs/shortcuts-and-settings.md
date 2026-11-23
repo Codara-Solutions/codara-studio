@@ -746,19 +746,25 @@ in a split.
 Its output stays in the pane, a **Sleeping** chip marks it, and the hover
 text on the rail's tab count says how many agents are asleep.
 
-A sleeping pane shows a card at its bottom edge with what the session was
-about and since when it sleeps. The line is the name you gave the session
-(`/rename`), else the title the agent gave it, the note it posted on the
-rail, or your last message; under it, the last thing you asked. It is read
-once, when the agent stops, and is never written to the log. The card
-also says how much memory the stop gave back (what the pane's processes
-held when they were stopped; on Linux their own memory, not files the
-system keeps cached), and the log line has the same figure. Nothing comes back by itself, not even when you open its
-workspace: press **Resume** on the card, or Enter or any letter in the pane,
-and the agent resumes its exact session in place (the key is not typed into
-the agent). **Resume and keep running** does the same and pins the pane
-awake. Opening its card in the Agents view resumes it too. If the resume
-fails, the card says why and offers it again.
+A sleeping pane fades its output behind a solid scrim (the wheel still
+scrolls it, and its text can still be selected) and shows, centred on the
+pane at any size, a moon above one pill: what the session was about, since
+when it sleeps, how much memory the stop gave back, and **Resume**. The
+title is the name you gave the session (`/rename`), else the title the
+agent gave it, the note it posted on the rail, or your last message; the
+last thing you asked is the pill's hover text. It is read once, when the
+agent stops, and is never written to the log. A narrow pane drops parts of
+the pill (they stay in its hover text), down to Resume alone. The memory
+figure is what the pane's processes held when they were stopped (on Linux
+their own memory, not files the system keeps cached); the log line has the
+same figure.
+
+Nothing comes back by itself, not even when you open its workspace: press
+**Resume**, or Enter or any letter in the pane, and the agent resumes its
+exact session in place (the key is not typed into the agent). Shift+click or
+Shift+Enter on **Resume** does the same and pins the pane **Keep running**.
+Opening its card in the Agents view resumes it too. If the resume fails,
+the pill says why and offers it again.
 
 **Sleep now**, the moon button in an agent pane's toolbar, puts that agent
 to sleep at once: no idle time, even in the pane you are typing in, with

@@ -1173,7 +1173,7 @@ its output is secondary. The output is faded right back by a solid scrim of
 the pane's own background (`--bg` at 84%, no blur, no glass). Centred on the
 pane at any size (CSS centring on the pane box, so splits and resizing follow
 on their own) sits a stack: a round moon badge (46 px, `--panel-2`, `--rule`,
-the moon in `--accent`) above one pill (fully rounded, `--panel-2`, `--rule`,
+the moon in `--accent-text`, which keeps its contrast on light themes) above one pill (fully rounded, `--panel-2`, `--rule`,
 `--lift-hi`) holding the session's title in semibold, then in `--ink-dim`
 "· asleep 2 h · freed 412 MB", then the primary **Resume**, pill-shaped. The
 calm top-left **Sleeping** chip stays. The pane comes back only when the user
@@ -1197,19 +1197,26 @@ own sleeping tab card (`bp-asleep`).
 **Rules:**
 
 - The scrim takes no pointer events: the wheel still scrolls the output under
-  it. Text under it cannot be selected while the pane sleeps.
+  it, and its text can still be selected and copied.
 - One visible action, Resume. Resume and keep running has no button of its
   own: Shift+click or Shift+Enter on Resume, named in its tooltip ("Resume.
   Shift+click: resume and never let it sleep again"). The toolbar's Keep
   running sun still pins it after a resume.
 - The last request is the pill's tooltip, not a second line.
-- Narrow panes drop from the right: the memory freed (under 380 px), then how
-  long it sleeps (under 300 px); a long title ellipsizes. Under 260 px the pill
-  holds only Resume, the title moves to the pill's tooltip, and the moon stays
-  above.
-- Waking: the button reads "Resuming…" and is disabled. A failed resume
-  replaces the dim part with "Could not resume: <reason>" in `--danger`, and
-  the button reads "Try again".
+- Narrow panes drop from the right, measured on the pane's own box: the
+  memory freed (under 380 px), then how long it sleeps (under 300 px); a long
+  title ellipsizes (isolated, so a right-to-left title does not reorder the
+  pill). Under 260 px the pill holds only Resume, the title moves to the
+  pill's tooltip, and the moon stays above. What a narrow pill drops is on
+  its tooltip.
+- Short panes (under 140 px high) drop the moon, and the pill keeps clear of
+  the Sleeping chip in the top-left corner.
+- Waking: the button reads "Resuming…" and is disabled. A failed resume shows
+  "Could not resume: <reason>" in place of the title (the danger colour
+  halfway to `--ink`, weight 500: 4.5:1 or better on the pill in every
+  theme), and the button reads "Try again". The tooltip always has the full
+  reason, the title and the last request; under 260 px a small `--danger` dot
+  stands in for the words, and the reason is in the tooltip and the label.
 - The waking key is swallowed, never typed into the shell that comes up.
 
 **Sleep now (2026-11-23):** the pane toolbar has a moon button, **Sleep now**,
