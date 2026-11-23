@@ -3590,7 +3590,12 @@ export function useTerminalSession({
           if (!sleepingAtMount) {
             sleepingAtMount = true;
             logRestore(`pane=${sessionId} mounts asleep (${asleep.runtime}), marked from main`);
-            onAsleepRef.current?.({ runtime: asleep.runtime, sleptAt: asleep.sleptAt, summary: asleep.summary });
+            onAsleepRef.current?.({
+              runtime: asleep.runtime,
+              sleptAt: asleep.sleptAt,
+              summary: asleep.summary,
+              freedBytes: asleep.freedBytes,
+            });
           }
         } else if (sleepingAtMount && hibernationRef.current) {
           // Marked asleep by the layout but unknown to main: a pane that was

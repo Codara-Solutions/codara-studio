@@ -221,6 +221,10 @@ function describePane(
   );
 }
 
+function formatMb(bytes: number | null): string {
+  return typeof bytes === "number" ? `${Math.round(bytes / (1024 * 1024))} MB` : "unknown";
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(fallback), ms);
@@ -264,6 +268,7 @@ interface SleepingEntry {
   tail: Buffer | null;
   unsent: Buffer | null;
   summary: AgentSleepSummary | null;
+  freedBytes: number | null;
   // Restored asleep at launch: kept without a placement until this time.
   placementGraceUntil: number;
   offExit: (() => void) | null;
@@ -397,6 +402,7 @@ export function takeSleepingPane(paneId: string, freshView = false): AgentSleepi
     // a pooled ArrayBuffer across IPC.
     output: output ? new Uint8Array(output) : null,
     summary: entry.summary,
+    freedBytes: entry.freedBytes,
   };
 }
 
@@ -420,6 +426,7 @@ export function registerRestoredAsleep(input: unknown, now = Date.now()): boolea
     tail: null,
     unsent: null,
     summary: validSleepSummary(value.summary),
+    freedBytes: null,
     placementGraceUntil: now + RESTORED_PLACEMENT_GRACE_MS,
     offExit: null,
   };
@@ -599,6 +606,7 @@ async function decide(
     tail: kept?.tail ?? null,
     unsent: kept?.unsent ?? null,
     summary: null,
+    freedBytes: census.memoryBytes,
     placementGraceUntil: 0,
     offExit: null,
   };
@@ -615,8 +623,8 @@ async function decide(
   entry.summary = await withTimeout(described, SUMMARY_TIMEOUT_MS, null);
   // Where the line came from, never the line: it is the user's content.
   return {
-    result: { ok: true, sleptAt, summary: entry.summary },
-    context: `${context.replace(/\)$/, "")}, card ${entry.summary?.source ?? "none"})`,
+    result: { ok: true, sleptAt, summary: entry.summary, freedBytes: entry.freedBytes },
+    context: `${context.replace(/\)$/, "")}, freed ${formatMb(entry.freedBytes)}, card ${entry.summary?.source ?? "none"})`,
   };
 }
 

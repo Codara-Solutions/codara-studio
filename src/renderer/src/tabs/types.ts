@@ -72,6 +72,8 @@ export interface TerminalLeafHibernation {
   sleptAt: number;
   // The card's line about the session, when main found one.
   summary?: AgentSleepSummary | null;
+  // The memory the stop gave back, where the platform reports it.
+  freedBytes?: number | null;
   // The user asked for the agent back (Resume, Enter): the pane resumes it
   // once on screen. Showing a sleeping pane alone never resumes it.
   resumeRequested?: boolean;

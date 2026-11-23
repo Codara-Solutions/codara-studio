@@ -27,10 +27,14 @@ export interface CensusProcess {
   // Epoch ms, or null when the platform did not say.
   startMs: number | null;
   command: string;
+  // Resident memory in bytes, when the listing carries it (Windows only).
+  memoryBytes?: number | null;
 }
 
 export type CensusVerdict =
-  | { ok: true; agentPid: number; members: number }
+  // memoryBytes: what the pane's whole tree holds, the memory a stop gives
+  // back; null when the listing had no memory column.
+  | { ok: true; agentPid: number; members: number; memoryBytes: number | null }
   | {
       ok: false;
       reason: "process-list-unavailable" | "no-agent-process" | "other-processes";
@@ -233,7 +237,16 @@ export function classifyPaneProcessTree(
     if (isShellProcess(entry.command) && onlyHelpersBelow(entry.pid, children)) continue;
     return { ok: false, reason: "other-processes", detail: `sibling ${describeProcess(entry, agentStart)}` };
   }
-  return { ok: true, agentPid: agent.pid, members: tree.length };
+  let memoryBytes: number | null = 0;
+  for (const entry of [byPid.get(rootPid)!, ...tree]) {
+    const bytes = entry.memoryBytes;
+    if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) {
+      memoryBytes = null;
+      break;
+    }
+    memoryBytes += bytes;
+  }
+  return { ok: true, agentPid: agent.pid, members: tree.length, memoryBytes };
 }
 
 function onlyHelpersBelow(pid: number, children: Map<number, CensusProcess[]>): boolean {
@@ -282,9 +295,11 @@ export function parseWindowsCensusList(output: string): CensusProcess[] | null {
     if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(parentPid) || parentPid < 0) {
       continue;
     }
+    const workingSet = Number(record.WorkingSetSize);
     out.push({
       pid,
       parentPid,
+      memoryBytes: Number.isFinite(workingSet) && workingSet >= 0 && record.WorkingSetSize !== null ? workingSet : null,
       startMs: parseWindowsCreationDate(record.CreationDate),
       // Protected processes report no command line; fall back to the image
       // name so the classifier still sees what it is.
@@ -310,7 +325,7 @@ async function listWindowsCensus(): Promise<CensusProcess[] | null> {
         "-Command",
         [
           "Get-CimInstance Win32_Process",
-          "Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine,Name",
+          "Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine,Name,WorkingSetSize",
           "ConvertTo-Json -Compress",
         ].join(" | "),
       ],

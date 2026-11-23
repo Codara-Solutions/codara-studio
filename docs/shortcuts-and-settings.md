@@ -750,7 +750,10 @@ A sleeping pane shows a card at its bottom edge with what the session was
 about and since when it sleeps. The line is the name you gave the session
 (`/rename`), else the title the agent gave it, the note it posted on the
 rail, or your last message; under it, the last thing you asked. It is read
-once, when the agent stops, and is never written to the log. Nothing comes back by itself, not even when you open its
+once, when the agent stops, and is never written to the log. On Windows
+the card also says how much memory the stop gave back (what the pane's
+processes held when they were stopped), and the log line has the same
+figure. Nothing comes back by itself, not even when you open its
 workspace: press **Resume** on the card, or Enter or any letter in the pane,
 and the agent resumes its exact session in place (the key is not typed into
 the agent). **Resume and keep running** does the same and pins the pane

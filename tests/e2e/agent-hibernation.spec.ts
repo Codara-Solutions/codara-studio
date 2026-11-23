@@ -109,6 +109,11 @@ test("an idle Claude pane in a background workspace sleeps, shows its card, and 
     await expect(sleepingCard(page).getByTestId("pane-sleeping-title"), logs.join("\n")).toHaveText("Fix the zebra parser");
     // The line is the user's content: it never reaches the log.
     expect(logs.some((line) => line.includes("zebra"))).toBe(false);
+    // Only the Windows process listing says what the pane's processes held.
+    if (WINDOWS) {
+      await expect(sleepingCard(page)).toContainText(/\d+ MB freed/);
+      expect(logs.some((line) => /is sleeping .*freed [1-9]\d* MB/.test(line)), logs.join("\n")).toBe(true);
+    }
     await expectNoLaunchFor(fixture, 1, TICK_MS * 3);
 
     // Resume brings the same session back in the same pane.

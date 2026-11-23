@@ -146,7 +146,9 @@ export function oneLine(text: string, max: number): string {
 }
 
 export type AgentHibernationResult =
-  | { ok: true; sleptAt: number; summary: AgentSleepSummary | null }
+  // freedBytes: the memory the pane's processes held when they were stopped;
+  // null where the process listing has no memory column (macOS, Linux).
+  | { ok: true; sleptAt: number; summary: AgentSleepSummary | null; freedBytes: number | null }
   | { ok: false; reason: AgentHibernationRefusal; detail?: string };
 
 /**
@@ -161,6 +163,7 @@ export interface AgentSleepingPane {
   sleptAt: number;
   output: Uint8Array | null;
   summary: AgentSleepSummary | null;
+  freedBytes: number | null;
 }
 
 /** A pane that was asleep when Codara quit and comes back asleep (restoreAsleep). */
