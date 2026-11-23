@@ -1203,12 +1203,16 @@ at once and the pane shows its card, as the idle timer would.
 - Only on a pane holding a resumable session of an agent that can sleep
   (Claude, Codex, Grok, Pi) and not asleep already; never on a Cora worker or
   a phone pane.
-- No idle clock, no idle-time setting and no on-screen rule: the user asked.
-  Every other refusal stands (working, waiting for an answer, unsent text in
-  the box, another program in the terminal, open on the phone, remote).
+- No idle clock, no idle-time setting and no Keep running pin: the user
+  asked. Every other refusal stands (working, waiting for an answer, unsent
+  text in the box, another program in the terminal, open on the phone,
+  remote). An agent read from its screen alone must have printed nothing for
+  5 seconds ("It printed something a moment ago. Try again in a few
+  seconds."): a working frame the patterns miss looks idle.
 - A refusal is never silent: one solid line under the toolbar for six
-  seconds, one complete plain sentence with no fixed prefix ("There is unsent
-  text in its box, so it keeps running."), the same words on the button's
+  seconds, one complete plain sentence with no fixed prefix and a way out
+  where there is one ("Its box may hold text you did not send. Send it, or
+  clear it with Ctrl+C, then try again."; never a reason code), the same words on the button's
   tooltip, and an always-mounted status region for screen readers. Same
   surface as the card (`--panel-2`, `--rule`).
 - After a sleep the focus moves to the card's Resume (the button it came from

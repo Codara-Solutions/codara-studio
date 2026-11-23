@@ -372,7 +372,7 @@ async function main() {
   r = await run((t) => {
     t.state.duringList = (s) => { s.session = { ...s.session, generationId: "gen-2" }; };
   });
-  check("a pane respawned while listing is not stopped", r.result.reason === "no-session" && r.calls.stop.length === 0);
+  check("a pane respawned while listing is not stopped", r.result.reason === "respawned" && r.calls.stop.length === 0);
   r = await run((t) => {
     t.state.duringList = (s) => { s.evidence = { ...s.evidence, lastUserInputAt: NOW, lastComposerEditAt: NOW, lastSubmitAt: NOW }; };
   });
@@ -521,7 +521,7 @@ async function main() {
     r = await run((t) => { fresh(t); Object.assign(t.state.evidence, { structured: false, settledAt: 0 }); }, manual());
     check(
       "Sleep now leaves a screen-only agent that printed a moment ago running",
-      r.result.reason === "agent-busy" && /^output 1s ago$/.test(r.result.detail ?? "") && r.calls.stop.length === 0,
+      r.result.reason === "recent-output" && /^output 1s ago$/.test(r.result.detail ?? "") && r.calls.stop.length === 0,
       r.result,
     );
     r = await run((t) => {
@@ -979,11 +979,29 @@ async function main() {
     notify.noteTerminalHookEvent("n2", "PreToolUse", { session_id: "s-1", tool_name: "Bash", tool_input: { command: "ls" } });
     notify.noteTerminalHookEvent("n2", "Notification", { session_id: "s-1", notification_type: "permission_prompt", message: "ok?" });
     await new Promise((resolve) => setTimeout(resolve, 2));
+    const asked = notify.terminalAgentHibernationEvidence("n2");
+    notify.noteTerminalUserInput("n2", "2");
+    ev = notify.terminalAgentHibernationEvidence("n2");
+    check(
+      "a key that answers a dialog is input, not text in the box",
+      asked.state === "blocked" && ev.lastUserInputAt > asked.lastUserInputAt && ev.lastComposerEditAt === asked.lastComposerEditAt,
+      { asked, ev },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 2));
     notify.noteTerminalUserInput("n2", "\x03");
     ev = notify.terminalAgentHibernationEvidence("n2");
     check("Ctrl+C in a permission dialog clears nothing", ev.lastComposerClearAt < ev.lastComposerEditAt, ev);
     notify.noteTerminalHookEvent("n2", "PostToolUse", { session_id: "s-1", tool_name: "Bash" });
     notify.noteTerminalHookEvent("n2", "Stop", { session_id: "s-1" });
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const answered = notify.terminalAgentHibernationEvidence("n2");
+    notify.noteTerminalUserInput("n2", "then this");
+    ev = notify.terminalAgentHibernationEvidence("n2");
+    check(
+      "once the dialog is gone, typing is text in the box again",
+      answered.state !== "blocked" && ev.lastComposerEditAt > answered.lastComposerEditAt,
+      { answered, ev },
+    );
   }
   {
     // Work scheduled for later: a /loop's ScheduleWakeup and cron jobs leave

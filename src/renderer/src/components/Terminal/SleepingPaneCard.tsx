@@ -132,7 +132,7 @@ export default function SleepingPaneCard({
             className="spark-btn"
             data-testid="pane-resume-keep-running"
             disabled={waking}
-            title="Resume and never let this agent sleep again"
+            title="Resume and never let this agent sleep on its own"
             onClick={(event) => {
               event.stopPropagation();
               onResumeKeepRunning();

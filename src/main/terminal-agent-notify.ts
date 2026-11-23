@@ -1198,8 +1198,12 @@ export function noteTerminalUserInput(paneId: string, data?: string): void {
   // Judged before this key counts as input: it may be the one that answers
   // a dialog, and a Ctrl+C there dismisses the dialog, not the draft.
   const clears = ctrlCEmptiesComposer(w, data);
+  // A key pressed while a dialog is up answers the dialog and puts nothing
+  // in the input box. Text typed into a dialog's own field goes with the
+  // dialog, which holds the pane as waiting-on-user while it is up.
+  const answersDialog = w.state === "blocked" || screenDialogOpen(w, now);
   w.lastUserInputAt = now;
-  if (canLeaveText(data)) w.lastComposerEditAt = now;
+  if (canLeaveText(data) && !answersDialog) w.lastComposerEditAt = now;
   if (clears) w.lastComposerClearAt = now;
   if (data !== undefined && (data === "\x1b" || data.includes("\x03"))) {
     w.lastInterruptKeyAt = now;

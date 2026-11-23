@@ -235,8 +235,9 @@ function describePane(
   );
 }
 
+// Agrees with the card, which shows no figure unless some memory was freed.
 function formatMb(bytes: number | null): string {
-  return typeof bytes === "number" ? `${Math.round(bytes / (1024 * 1024))} MB` : "unknown";
+  return typeof bytes === "number" && bytes > 0 ? `${Math.round(bytes / (1024 * 1024))} MB` : "unknown";
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
@@ -525,7 +526,7 @@ function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, 
       const lastOutput = Math.max(session.lastOutputAt, evidence?.lastOutputAt ?? 0);
       if (now - lastOutput < MANUAL_QUIET_MS) {
         const detail = `output ${Math.max(0, Math.round((now - lastOutput) / 1000))}s ago`;
-        return { ok: false, result: { ok: false, reason: "agent-busy", detail } };
+        return { ok: false, result: { ok: false, reason: "recent-output", detail } };
       }
     }
     return { ok: true, session };
@@ -714,7 +715,7 @@ async function decide(
   const second = judgeNow(request, deps, idleMs);
   if (!second.ok) return second.result;
   if (second.session.generationId !== first.session.generationId) {
-    return { ok: false, reason: "no-session", detail: "respawned while judged" };
+    return { ok: false, reason: "respawned", detail: "respawned while judged" };
   }
   const why = request.manual
     ? "Sleep now"

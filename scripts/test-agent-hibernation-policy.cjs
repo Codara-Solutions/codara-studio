@@ -476,15 +476,22 @@ async function main() {
     "off", "exempt", "bad-request", "in-flight", "remote", "not-watched", "runtime-mismatch", "agent-busy",
     "waiting-on-user", "unsent-input", "scheduled-work", "unknown-state", "not-idle-long-enough", "watched-on-phone",
     "process-list-unavailable", "no-agent-process", "other-processes", "no-session", "stop-failed", "cannot-resume",
+    "recent-output", "respawned",
   ];
   check("every refusal has a sentence", reasons.every((reason) => /^[A-Z].+\.$/.test(said(reason, "claude"))), reasons.map((x) => said(x, "claude")));
-  check("unsent text is named", said("unsent-input", "claude") === "There is unsent text in its box, so it keeps running.");
+  check(
+    "unsent text is named, with a way out",
+    said("unsent-input", "claude") === "Its box may hold text you did not send. Send it, or clear it with Ctrl+C, then try again.",
+  );
+  check("output a moment ago is its own sentence", said("recent-output", "claude") === "It printed something a moment ago. Try again in a few seconds.");
+  check("a terminal that restarted is said plainly", said("respawned", "claude") === "This terminal just restarted. Try again.");
+  check("another agent in the terminal is said plainly", said("runtime-mismatch", "claude") === "Another agent is running in this terminal now.");
   check("a scheduled wake-up is named", said("scheduled-work", "claude") === "It has a scheduled wake-up, so it keeps running.");
   check("the agent is named", said("agent-busy", "codex") === "Codex is still working, so it was not put to sleep.");
   check("an agent that is gone is said plainly", said("no-agent-process", "claude") === "Claude is not running here.");
   check("a session that may not resume", said("cannot-resume", "claude") === "Codara could not confirm this session can be resumed, so it keeps running.");
   check("each one is a whole sentence, no fixed prefix", reasons.every((reason) => !/^Still running/.test(said(reason, "claude"))));
-  check("a refusal this build does not know is still a sentence", /^Claude could not be put to sleep .*Try again\.$/.test(said("brand-new", "claude")), said("brand-new", "claude"));
+  check("a refusal this build does not know is still a sentence, without its code", said("brand-new", "claude") === "Claude could not be put to sleep. Try again.", said("brand-new", "claude"));
   check("no code words reach the user", reasons.every((reason) => !said(reason, "pi").includes(reason)));
 
   // ── Sleep now's late answer at a pane's mark ──

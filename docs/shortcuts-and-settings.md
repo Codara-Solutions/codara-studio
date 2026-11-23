@@ -762,25 +762,31 @@ fails, the card says why and offers it again.
 
 **Sleep now**, the moon button in an agent pane's toolbar, puts that agent
 to sleep at once: no idle time, even in the pane you are typing in, with
-**Let idle agents sleep** off, or in a workspace set to Never. Every other
-rule below still holds. When one keeps the agent running, a line under the
-toolbar says why for six seconds (for example "There is unsent text in its
-box, so it keeps running."), and the button's hover text says the same.
-After the sleep the keyboard focus moves to the card's **Resume**. A pane
-pinned **Keep running** can be put to sleep this way too, and is still
-pinned when it resumes.
+**Let idle agents sleep** off, or in a workspace set to Never. Every rule
+below except the idle time and **Keep running** still holds. An agent Codara
+reads only from its screen (no hook has reported from it yet) must also have
+printed nothing for 5 seconds, since a frame of work can look like an idle
+prompt. When a rule keeps the agent running, a line under the toolbar says
+why for six seconds (for example "Its box may hold text you did not send.
+Send it, or clear it with Ctrl+C, then try again."), and the button's hover
+text says the same. After the sleep the keyboard focus moves to the card's
+**Resume**. A pane pinned **Keep running** can be put to sleep this way
+too, and is still pinned when it resumes.
 
 Codara only lets an agent sleep when all of these hold, and keeps it running
 whenever it cannot tell:
 
 - the agent's turn ended, it is not waiting for an answer, and there is no
   text you typed but did not send (Esc, the arrows left and right and
-  Backspace after your last message do not count as text, and Ctrl+C at
-  Claude's, Codex's or Pi's prompt empties the box);
+  Backspace after your last message do not count as text, nor do keys that
+  answer a dialog, and Ctrl+C at Claude's, Codex's or Pi's prompt empties
+  the box);
 - nothing is scheduled: a Claude Code `/loop` wake-up holds its pane until
-  a little after the wake-up time (an hour at most), a cron job until it is
-  deleted or fires (a week at most), and a dialog at startup (an MCP server
-  approval) for up to 10 minutes;
+  a little after the wake-up time (an hour at most), a repeating cron job
+  until it is deleted (a week at most), a one-time cron job until two
+  minutes after it fires (a week at most, or 24 hours when its time cannot
+  be read), and a dialog at startup (an MCP server approval) for up to 10
+  minutes;
 - nothing was typed into or printed by the pane for the whole idle time,
   and you did not open, click or scroll it in that time;
 - its session can be resumed exactly as it is;

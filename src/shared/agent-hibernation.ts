@@ -92,12 +92,17 @@ export type AgentHibernationRefusal =
   | "bad-request"
   | "in-flight"
   | "no-session"
+  // The pane's process restarted between the two looks at it.
+  | "respawned"
   | "remote"
   | "watched-on-phone"
   | "not-idle-long-enough"
   | "not-watched"
   | "runtime-mismatch"
   | "agent-busy"
+  // Sleep now on an agent known only from its screen: it printed in the last
+  // seconds, which may be a working frame the screen patterns missed.
+  | "recent-output"
   | "waiting-on-user"
   | "unsent-input"
   | "scheduled-work"
@@ -397,10 +402,13 @@ export function sleepNowRefusalMessage(reason: AgentHibernationRefusal | "cannot
   switch (reason) {
     case "agent-busy":
       return `${name} is still working, so it was not put to sleep.`;
+    case "recent-output":
+      return "It printed something a moment ago. Try again in a few seconds.";
     case "waiting-on-user":
       return `${name} is waiting for your answer, so it keeps running.`;
     case "unsent-input":
-      return "There is unsent text in its box, so it keeps running.";
+      // Typing is seen, not the box itself: the text may be gone already.
+      return "Its box may hold text you did not send. Send it, or clear it with Ctrl+C, then try again.";
     case "scheduled-work":
       return "It has a scheduled wake-up, so it keeps running.";
     case "other-processes":
@@ -412,6 +420,10 @@ export function sleepNowRefusalMessage(reason: AgentHibernationRefusal | "cannot
     case "no-session":
     case "no-agent-process":
       return `${name} is not running here.`;
+    case "respawned":
+      return "This terminal just restarted. Try again.";
+    case "runtime-mismatch":
+      return "Another agent is running in this terminal now.";
     case "cannot-resume":
       return "Codara could not confirm this session can be resumed, so it keeps running.";
     case "in-flight":
@@ -421,7 +433,6 @@ export function sleepNowRefusalMessage(reason: AgentHibernationRefusal | "cannot
     case "process-list-unavailable":
       return "Codara could not check what runs in this terminal. Try again.";
     case "not-watched":
-    case "runtime-mismatch":
     case "unknown-state":
       return `Codara cannot tell what ${name} is doing yet. Try again in a moment.`;
     // Never a manual request's answer (Sleep now skips the policy and the
@@ -432,9 +443,11 @@ export function sleepNowRefusalMessage(reason: AgentHibernationRefusal | "cannot
     case "bad-request":
       return `${name} could not be put to sleep. Try again.`;
     default: {
-      // A new refusal must be given its own sentence here.
+      // A new refusal must be given its own sentence here. One from a newer
+      // main than this renderer gets the plain sentence, never its code.
       const unhandled: never = reason;
-      return `${name} could not be put to sleep (${String(unhandled)}). Try again.`;
+      void unhandled;
+      return `${name} could not be put to sleep. Try again.`;
     }
   }
 }

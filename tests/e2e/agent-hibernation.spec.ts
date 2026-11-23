@@ -508,7 +508,7 @@ test("Sleep now says why it leaves an agent running, then puts it to sleep at on
     await page.waitForTimeout(300);
     await pane(page).hover();
     await sleepNow.click();
-    const said = "There is unsent text in its box, so it keeps running.";
+    const said = "Its box may hold text you did not send. Send it, or clear it with Ctrl+C, then try again.";
     const notice = pane(page).getByTestId("pane-sleep-now-notice");
     await expect(notice, logs.join("\n")).toHaveText(said, { timeout: 15_000 });
     // Screen readers hear it from a region that was there all along.
