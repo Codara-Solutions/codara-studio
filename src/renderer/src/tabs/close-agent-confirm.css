@@ -1,0 +1,62 @@
+/* Closing a working agent (DESIGN.md). The explorer's and the rail's confirm
+   layout on a solid surface: it asks over a live terminal, so nothing behind
+   it may show through. */
+.close-agent-confirm-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 140;
+  background: var(--modal-scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.close-agent-confirm {
+  width: 340px;
+  max-width: 100%;
+  max-height: 70vh;
+  border-radius: 10px;
+  padding: 16px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-family: var(--font-sans);
+  border: 1px solid var(--rule);
+  background: var(--panel);
+  box-shadow: 0 24px 64px oklch(0 0 0 / 0.35), 0 2px 8px oklch(0 0 0 / 0.18);
+}
+:root[data-theme-mode="light"] .close-agent-confirm {
+  border-color: color-mix(in oklab, var(--ink) 12%, transparent);
+  box-shadow: 0 24px 64px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
+}
+
+.close-agent-confirm-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.close-agent-confirm-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+}
+
+.close-agent-confirm-list {
+  margin: 0;
+  padding: 0 0 0 16px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.close-agent-confirm-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}

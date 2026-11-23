@@ -1175,3 +1175,31 @@ own sleeping tab card (`bp-asleep`).
   resumes. Under about 420 px the card keeps the title and Resume only.
 - The waking key is swallowed, never typed into the shell that comes up.
 - A failed resume stays on the card, in the danger color, with Try again.
+
+## Closing a working agent (2026-11)
+
+**Chosen:** closing a terminal tab or pane whose agent is working asks first,
+in a small centered dialog on a solid surface (`--panel`, `--rule`, a deep
+shadow; the explorer's and the rail's confirm layout, no glass): "Close Claude
+in api? It is still working and its work will stop." with Cancel and Close
+(`spark-btn is-danger`). The owner asked for it on 2026-11-23, after Ctrl+W
+closed an agent mid-turn without a word.
+
+**Rules:**
+
+- Working is what the tab chip, the Agents view and the rail's running count
+  already read (`terminalAgentPlacement` over the pane's worker, then main's
+  working flag): mid-turn, in the background, quiet, plus waiting for the
+  user's answer ("It is waiting for your answer and its work will stop.").
+  Idle, finished, starting and sleeping agents, plain shells and every other
+  tab close at once, as before.
+- Cancel has the focus; Escape and a click on the scrim cancel; Enter on a
+  focused Close confirms; Tab stays on the two buttons.
+- Every user close gesture asks: the shortcut, the tab's ×, middle click,
+  Close other tabs, closing a split pane, closing a tab group and deleting a
+  workspace. A bulk close asks once: "Close 2 working agents?" with one line
+  per agent.
+- Closes that are not the user's gesture never ask: an agent's `codara_tab`
+  or `codara_terminal_close`, worktree removal, a shell that exits. Quit keeps
+  its own native prompt for live work.
+- No "don't ask again" and no setting.
