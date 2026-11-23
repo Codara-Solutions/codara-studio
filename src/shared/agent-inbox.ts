@@ -1,14 +1,13 @@
 // The Agents tab as an inbox, after T3 Code's thread sidebar
 // (github.com/pingdotgg/t3code, MIT, by Theo / Ping Labs): every agent sits
-// under one heading, Needs you, Done, Working, Snoozed or Settled.
-// The behaviour follows T3 Code's (settle, snooze presets, a merged pull
-// request settles itself, a request for the user ends a snooze early); the
-// code is Codara's own.
+// under one heading, Needs you, Working, Done or Settled (AGENT_INBOX_SECTIONS).
+// The behaviour follows T3 Code's (settle, a merged pull request settles
+// itself); the code is Codara's own.
 //
-// Pure and shared so the shelves, the snooze clock, auto-settle and undo are
-// testable without the app (scripts/test-agent-inbox.cjs). The board
-// (agent-board.ts) says where each agent stands; this file adds what the user
-// decided about it, which the renderer keeps in localStorage.
+// Pure and shared so the sections, auto-settle and undo are testable without
+// the app (scripts/test-agent-inbox.cjs). The board (agent-board.ts) says
+// where each agent stands; this file adds what the user decided about it,
+// which the renderer keeps in localStorage.
 
 import { formatAgentSpan, type AgentBoardCard, type AgentBoardModel } from "./agent-board";
 import type { PullRequestWatchState } from "./pull-request-watch";
@@ -27,15 +26,9 @@ export interface AgentInboxSettle {
   auto?: string;
 }
 
-export interface AgentInboxSnooze {
-  at: number;
-  until: number;
-}
-
 /** What the user decided about each agent, by board card key. */
 export interface AgentInboxPrefs {
   settled: Record<string, AgentInboxSettle>;
-  snoozed: Record<string, AgentInboxSnooze>;
   pinned: Record<string, number>;
   names: Record<string, string>;
   unread: Record<string, number>;
@@ -48,7 +41,7 @@ export interface AgentInboxPrefs {
 }
 
 export function emptyAgentInboxPrefs(): AgentInboxPrefs {
-  return { settled: {}, snoozed: {}, pinned: {}, names: {}, unread: {}, autoSettled: {} };
+  return { settled: {}, pinned: {}, names: {}, unread: {}, autoSettled: {} };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -69,7 +62,11 @@ function capped<T>(entries: [string, T][], at: (value: T) => number): Record<str
   return Object.fromEntries(entries.slice(0, MAX_RECORDS));
 }
 
-/** Stored prefs, with anything malformed or older than the TTL left out. */
+/**
+ * Stored prefs, with anything malformed or older than the TTL left out. Keys
+ * this version no longer keeps (`snoozed`, from before snooze was removed)
+ * are ignored, so the next save drops them.
+ */
 export function parseAgentInboxPrefs(raw: unknown, now: number): AgentInboxPrefs {
   const prefs = emptyAgentInboxPrefs();
   if (!isRecord(raw)) return prefs;
@@ -82,15 +79,6 @@ export function parseAgentInboxPrefs(raw: unknown, now: number): AgentInboxPrefs
     settled.push([key, typeof value.auto === "string" ? { at, auto: value.auto.slice(0, 300) } : { at }]);
   }
   prefs.settled = capped(settled, (value) => value.at);
-  const snoozed: [string, AgentInboxSnooze][] = [];
-  for (const [key, value] of Object.entries(isRecord(raw.snoozed) ? raw.snoozed : {})) {
-    if (!validKey(key) || !isRecord(value)) continue;
-    const at = finite(value.at);
-    const until = finite(value.until);
-    if (at === null || until === null || !fresh(at)) continue;
-    snoozed.push([key, { at, until }]);
-  }
-  prefs.snoozed = capped(snoozed, (value) => value.at);
   const stamps = (field: unknown): Record<string, number> => {
     const out: [string, number][] = [];
     for (const [key, value] of Object.entries(isRecord(field) ? field : {})) {
@@ -168,11 +156,6 @@ export function agentActedSince(card: AgentBoardCard, at: number): boolean {
 }
 
 /**
- * Whether a snoozed agent wakes early: only a request for the user or a fresh
- * failure ends a snooze before its time. A finished turn never does, so a
- * snoozed long job stays out of the way until the user asked to see it.
- */
-/**
  * agentActedSince for a subagent on its parent's row: a working one that
  * shows new signs of work (a note, a commit) counts too, since its `since`
  * stays at the start of its work.
@@ -180,11 +163,6 @@ export function agentActedSince(card: AgentBoardCard, at: number): boolean {
 function subagentActedSince(card: AgentBoardCard, at: number): boolean {
   if (card.bucket === "working" && (card.activeAt ?? 0) > at) return true;
   return agentActedSince(card, at);
-}
-
-export function snoozeEndsEarly(card: AgentBoardCard, at: number): boolean {
-  if (!(card.since > at)) return false;
-  return card.bucket === "needs-you" || card.tone === "danger";
 }
 
 export interface AgentInboxReconcile {
@@ -195,10 +173,9 @@ export interface AgentInboxReconcile {
 }
 
 /**
- * Applies what happened since the last look: wakes snoozes that are due or
- * cut short, brings back settled agents that acted, and settles finished
- * agents whose pull request merged. Returns the same prefs object when
- * nothing changed.
+ * Applies what happened since the last look: brings back settled agents
+ * that acted, and settles finished agents whose pull request merged.
+ * Returns the same prefs object when nothing changed.
  */
 export function reconcileAgentInbox(
   model: AgentBoardModel,
@@ -210,22 +187,17 @@ export function reconcileAgentInbox(
     next ??= {
       ...prefs,
       settled: { ...prefs.settled },
-      snoozed: { ...prefs.snoozed },
       autoSettled: { ...prefs.autoSettled },
     };
     return next;
   };
   const autoSettled: AgentInboxReconcile["autoSettled"] = [];
-  const present = new Set<string>();
   // A subagent sits on its parent's row, so a settled coordinator comes back
   // when one of its subagents starts or shows new work. One that waits on the
   // user does not wake it: it is a row of its own (groupAgentInboxCards).
-  const { children } = groupAgentInboxCards(model, prefs, context.now);
+  const { children } = groupAgentInboxCards(model, prefs);
   for (const card of allCards(model)) {
-    present.add(card.key);
     const kids = children.get(card.key) ?? [];
-    const snooze = prefs.snoozed[card.key];
-    if (snooze && (context.now >= snooze.until || snoozeEndsEarly(card, snooze.at))) delete edit().snoozed[card.key];
     const pr = context.pullRequests[card.workspaceId];
     const settle = prefs.settled[card.key];
     if (settle && (agentActedSince(card, settle.at) || kids.some((kid) => subagentActedSince(kid, settle.at)))) {
@@ -241,13 +213,7 @@ export function reconcileAgentInbox(
     const target = edit();
     target.settled[card.key] = { at: context.now, auto: ref };
     target.autoSettled[card.key] = ref;
-    delete target.snoozed[card.key];
     autoSettled.push({ key: card.key, ref, number: pr.number });
-  }
-  // A snooze whose time passed is spent, even for an agent that is not on
-  // the board right now (its terminal reconnects later).
-  for (const [key, snooze] of Object.entries((next ?? prefs).snoozed)) {
-    if (!present.has(key) && context.now >= snooze.until) delete edit().snoozed[key];
   }
   return { prefs: next ?? prefs, changed: next !== null, autoSettled };
 }
@@ -279,7 +245,6 @@ export interface AgentInboxRow {
   /** +/- line counts belong only to a finished agent's pull request. */
   showDiff: boolean;
   mergeReady: boolean;
-  snoozedUntil: number | null;
   settledAt: number | null;
   /**
    * Background agents this agent started, listed behind a chip on its row
@@ -288,13 +253,25 @@ export interface AgentInboxRow {
   subagents: AgentInboxRow[];
 }
 
+export type AgentInboxSectionId = "needs" | "working" | "done" | "settled";
+
+/**
+ * The view's sections, top to bottom. Everything that lists or walks them
+ * (the list, its arrow keys, counts) follows this order.
+ */
+export const AGENT_INBOX_SECTIONS: readonly { id: AgentInboxSectionId; label: string }[] = [
+  { id: "needs", label: "Needs you" },
+  { id: "working", label: "Working" },
+  { id: "done", label: "Done" },
+  { id: "settled", label: "Settled" },
+];
+
 export interface AgentInboxView {
   /** Asking for input or stopped, pinned first: the Needs you section. */
   needs: AgentInboxRow[];
+  working: AgentInboxRow[];
   /** Finished and not yet settled, pinned first: the Done section. */
   done: AgentInboxRow[];
-  working: AgentInboxRow[];
-  snoozed: AgentInboxRow[];
   settled: AgentInboxRow[];
   /** Rows that wait on the user: the switch's badge and the Needs you count. */
   needsYou: number;
@@ -337,7 +314,6 @@ function row(card: AgentBoardCard, prefs: AgentInboxPrefs, context: AgentInboxCo
     pullRequest: pr,
     showDiff: Boolean(pr) && card.bucket === "done" && card.tone !== "danger",
     mergeReady: isMergeReady(pr),
-    snoozedUntil: prefs.snoozed[card.key]?.until ?? null,
     settledAt: prefs.settled[card.key]?.at ?? null,
     subagents: [],
   };
@@ -348,25 +324,19 @@ function row(card: AgentBoardCard, prefs: AgentInboxPrefs, context: AgentInboxCo
  * background agents each one started. A subagent whose parent is not on the
  * board (its session closed) stays a main agent, and so does one whose parent
  * is itself listed under another card, so no card is ever lost. A subagent
- * waiting on the user under a settled or snoozed parent stays a row too: the
- * user may put the parent away while it waits, and the question must still
- * show.
+ * waiting on the user under a settled parent stays a row too: the user may
+ * put the parent away while it waits, and the question must still show.
  */
 export function groupAgentInboxCards(
   model: AgentBoardModel,
-  prefs?: Pick<AgentInboxPrefs, "settled" | "snoozed">,
-  now = 0,
+  prefs?: Pick<AgentInboxPrefs, "settled">,
 ): {
   main: AgentBoardCard[];
   children: Map<string, AgentBoardCard[]>;
 } {
   const cards = allCards(model);
   const roots = new Set(cards.filter((card) => !card.parentKey).map((card) => card.key));
-  const away = (key: string): boolean => {
-    if (!prefs) return false;
-    const snooze = prefs.snoozed[key];
-    return Boolean(prefs.settled[key]) || Boolean(snooze && now < snooze.until);
-  };
+  const away = (key: string): boolean => Boolean(prefs?.settled[key]);
   const main: AgentBoardCard[] = [];
   const children = new Map<string, AgentBoardCard[]>();
   for (const card of cards) {
@@ -411,9 +381,8 @@ export function agentInboxSubagentChip(subagents: readonly AgentInboxRow[]): Age
 }
 
 /**
- * Sorts every agent into the inbox and the shelves. Expects prefs already
- * reconciled (reconcileAgentInbox); a snooze that is due still counts as
- * awake here, so the view is right between a tick and its reconcile.
+ * Sorts every agent into its section. Expects prefs already reconciled
+ * (reconcileAgentInbox).
  */
 export function buildAgentInbox(
   model: AgentBoardModel,
@@ -421,11 +390,10 @@ export function buildAgentInbox(
   context: AgentInboxContext,
 ): AgentInboxView {
   const needs: AgentInboxRow[] = [];
-  const done: AgentInboxRow[] = [];
   const working: AgentInboxRow[] = [];
-  const snoozed: AgentInboxRow[] = [];
+  const done: AgentInboxRow[] = [];
   const settled: AgentInboxRow[] = [];
-  const { main, children } = groupAgentInboxCards(model, prefs, context.now);
+  const { main, children } = groupAgentInboxCards(model, prefs);
   for (const card of main) {
     const entry = row(card, prefs, context);
     const kids = children.get(card.key) ?? [];
@@ -434,9 +402,7 @@ export function buildAgentInbox(
     // waits on the user lifts its parent into Needs you.
     entry.subagents = kids.map((kid) => row(kid, prefs, context));
     const waiting = kids.some((kid) => kid.bucket === "needs-you");
-    const snooze = prefs.snoozed[card.key];
     if (prefs.settled[card.key]) settled.push(entry);
-    else if (snooze && context.now < snooze.until) snoozed.push(entry);
     else if (card.bucket === "needs-you" || waiting) needs.push(entry);
     else if (card.bucket === "working") working.push(entry);
     else done.push(entry);
@@ -450,15 +416,13 @@ export function buildAgentInbox(
     return pa === pb ? 0 : pa < pb ? -1 : 1;
   };
   needs.sort(byPin);
-  done.sort(byPin);
   working.sort(byPin);
-  snoozed.sort((a, b) => (a.snoozedUntil ?? 0) - (b.snoozedUntil ?? 0));
+  done.sort(byPin);
   settled.sort((a, b) => (b.settledAt ?? 0) - (a.settledAt ?? 0));
   return {
     needs,
-    done,
     working,
-    snoozed,
+    done,
     settled,
     needsYou: needs.length,
     total: main.length,
@@ -473,7 +437,6 @@ export function buildAgentInbox(
 export interface AgentInboxSnapshot {
   key: string;
   settled?: AgentInboxSettle;
-  snoozed?: AgentInboxSnooze;
   pinned?: number;
   names?: string;
   unread?: number;
@@ -483,7 +446,6 @@ export function snapshotAgentInbox(prefs: AgentInboxPrefs, keys: readonly string
   return keys.map((key) => ({
     key,
     ...(prefs.settled[key] ? { settled: prefs.settled[key] } : {}),
-    ...(prefs.snoozed[key] ? { snoozed: prefs.snoozed[key] } : {}),
     ...(prefs.pinned[key] !== undefined ? { pinned: prefs.pinned[key] } : {}),
     ...(prefs.names[key] !== undefined ? { names: prefs.names[key] } : {}),
     ...(prefs.unread[key] !== undefined ? { unread: prefs.unread[key] } : {}),
@@ -497,7 +459,7 @@ export function snapshotAgentInbox(prefs: AgentInboxPrefs, keys: readonly string
 export function restoreAgentInbox(prefs: AgentInboxPrefs, snapshots: readonly AgentInboxSnapshot[]): AgentInboxPrefs {
   const next = clone(prefs);
   for (const snap of snapshots) {
-    for (const field of ["settled", "snoozed", "pinned", "names", "unread"] as const) {
+    for (const field of ["settled", "pinned", "names", "unread"] as const) {
       const value = snap[field];
       const map = next[field] as Record<string, unknown>;
       if (value === undefined) delete map[snap.key];
@@ -510,7 +472,6 @@ export function restoreAgentInbox(prefs: AgentInboxPrefs, snapshots: readonly Ag
 function clone(prefs: AgentInboxPrefs): AgentInboxPrefs {
   return {
     settled: { ...prefs.settled },
-    snoozed: { ...prefs.snoozed },
     pinned: { ...prefs.pinned },
     names: { ...prefs.names },
     unread: { ...prefs.unread },
@@ -521,7 +482,6 @@ function clone(prefs: AgentInboxPrefs): AgentInboxPrefs {
 export function settleAgent(prefs: AgentInboxPrefs, key: string, now: number): AgentInboxPrefs {
   const next = clone(prefs);
   next.settled[key] = { at: now };
-  delete next.snoozed[key];
   delete next.unread[key];
   return next;
 }
@@ -547,7 +507,6 @@ export function settleMergedAgent(prefs: AgentInboxPrefs, key: string, ref: stri
   const next = clone(prefs);
   next.settled[key] = { at: now, auto: ref };
   next.autoSettled[key] = ref;
-  delete next.snoozed[key];
   delete next.unread[key];
   return next;
 }
@@ -555,19 +514,6 @@ export function settleMergedAgent(prefs: AgentInboxPrefs, key: string, ref: stri
 export function unsettleAgent(prefs: AgentInboxPrefs, key: string): AgentInboxPrefs {
   const next = clone(prefs);
   delete next.settled[key];
-  return next;
-}
-
-export function snoozeAgent(prefs: AgentInboxPrefs, key: string, until: number, now: number): AgentInboxPrefs {
-  const next = clone(prefs);
-  next.snoozed[key] = { at: now, until };
-  delete next.settled[key];
-  return next;
-}
-
-export function wakeAgent(prefs: AgentInboxPrefs, key: string): AgentInboxPrefs {
-  const next = clone(prefs);
-  delete next.snoozed[key];
   return next;
 }
 
@@ -592,67 +538,4 @@ export function setAgentUnread(prefs: AgentInboxPrefs, key: string, unread: bool
   if (unread) next.unread[key] = now;
   else delete next.unread[key];
   return next;
-}
-
-// ---------------------------------------------------------------------------
-// Snooze presets
-// ---------------------------------------------------------------------------
-
-export interface AgentSnoozePreset {
-  id: "1h" | "3h" | "evening" | "tomorrow" | "next-week";
-  label: string;
-  /** The wake time as the menu shows it: "18:00", "Mon". */
-  when: string;
-  until: number;
-}
-
-const EVENING_HOUR = 18;
-const MORNING_HOUR = 9;
-const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-function clock(date: Date): string {
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
-function atLocal(base: Date, daysAhead: number, hour: number): Date {
-  const date = new Date(base.getFullYear(), base.getMonth(), base.getDate() + daysAhead, hour, 0, 0, 0);
-  return date;
-}
-
-/**
- * The snooze menu at `now`, in local time: in 1 hour, in 3 hours, this
- * evening (18:00, left out once it has passed), tomorrow 09:00 and next
- * Monday 09:00. Soonest first, one row per wake minute.
- */
-export function agentSnoozePresets(now: number): AgentSnoozePreset[] {
-  const base = new Date(now);
-  const hourLater = new Date(now + 60 * 60 * 1000);
-  const threeLater = new Date(now + 3 * 60 * 60 * 1000);
-  const evening = atLocal(base, 0, EVENING_HOUR);
-  const tomorrow = atLocal(base, 1, MORNING_HOUR);
-  const toMonday = ((8 - base.getDay()) % 7) || 7;
-  const monday = atLocal(base, toMonday, MORNING_HOUR);
-  const presets: AgentSnoozePreset[] = [
-    { id: "1h", label: "1 hour", when: clock(hourLater), until: hourLater.getTime() },
-    { id: "3h", label: "3 hours", when: clock(threeLater), until: threeLater.getTime() },
-  ];
-  if (evening.getTime() > now) presets.push({ id: "evening", label: "This evening", when: clock(evening), until: evening.getTime() });
-  presets.push({ id: "tomorrow", label: "Tomorrow", when: clock(tomorrow), until: tomorrow.getTime() });
-  presets.push({ id: "next-week", label: "Next week", when: WEEKDAYS[monday.getDay()], until: monday.getTime() });
-  // Two rows that wake on the same minute keep the one named for the time of
-  // day ("This evening" over "3 hours").
-  const byMinute = new Map<number, AgentSnoozePreset>();
-  for (const preset of presets) {
-    const minute = Math.floor(preset.until / 60_000);
-    const held = byMinute.get(minute);
-    if (!held || (held.id === "1h" || held.id === "3h")) byMinute.set(minute, preset);
-  }
-  return [...byMinute.values()].sort((a, b) => a.until - b.until);
-}
-
-/** When a snoozed row wakes, as its status slot says it: "18:00", "Tue 09:00". */
-export function agentSnoozeWakeLabel(until: number, now: number): string {
-  const wake = new Date(until);
-  if (wake.toDateString() === new Date(now).toDateString()) return clock(wake);
-  return `${WEEKDAYS[wake.getDay()]} ${clock(wake)}`;
 }

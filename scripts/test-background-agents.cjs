@@ -62,6 +62,7 @@ function creatorCard(bucket = "working") {
     workspaceId: "ws-ai",
     workspaceName: "AI Continous Improvment",
     workspaceColor: "#888",
+    workspaceOwnColor: "#888",
     workspaceIcon: null,
     runtime: "claude",
     agentLabel: "Claude Code",
@@ -182,6 +183,14 @@ test("an unknown or missing client is not called Claude; a Pi coordinator reads 
   const pi = { ...creatorCard(), runtime: "pi", agentLabel: "Pi" };
   assert.equal(cards(mod, { worktrees: [worktree()], cards: [pi] })[0].agentLabel, "Cora subagent");
   assert.equal(label({ paneId: "p-gone", client: "pi" }), "Cora subagent");
+});
+
+test("a background card wears its project's own colour, or none when the project has none", ({ mod }) => {
+  const [plain] = cards(mod, { worktrees: [worktree()] });
+  assert.equal(plain.workspaceOwnColor, null, "a project with no colour keeps the muted tile");
+  const coloured = new Map(WORKSPACES.map((workspace) => [workspace.id, workspace.id === "ws-cloud" ? { ...workspace, color: "#7FB3FF" } : workspace]));
+  const [card] = cards(mod, { worktrees: [worktree()], workspaces: coloured });
+  assert.equal(card.workspaceOwnColor, "#7FB3FF", "the project's colour, as its rail tile wears it");
 });
 
 test("a worktree made from its own project gets no card: its creator shows on the row already", ({ mod }) => {

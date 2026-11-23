@@ -12,8 +12,8 @@ import { join } from "node:path";
 // answered; then it stops with an error (Failed), finishes with its last
 // message, and opening the row brings its pane back. A seeded blocked Cora
 // chat waits as Input with Cora's mark; the switch works from the keyboard
-// and is remembered on reload. agent-inbox.spec.ts covers the shelves,
-// settle, snooze, undo and merge.
+// and is remembered on reload. agent-inbox.spec.ts covers the sections,
+// settle, undo and merge.
 
 const MINUTE = 60_000;
 const RUN_ID = "run-agents-view";

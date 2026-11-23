@@ -16,6 +16,7 @@
 // it without the app.
 
 import {
+  agentBoardOwnColor,
   agentBoardRuntimeLabel,
   agentBoardWorkspaceColor,
   type AgentBoardCard,
@@ -161,6 +162,7 @@ export function backgroundAgentCards(input: BackgroundAgentInput): AgentBoardCar
       // The Agents tab names the project; the worktree's branch is its third line.
       workspaceName: project?.name ?? workspace.name,
       workspaceColor: agentBoardWorkspaceColor(project ?? workspace),
+      workspaceOwnColor: agentBoardOwnColor(project ?? workspace),
       workspaceIcon: (project ?? workspace).icon ?? null,
       runtime,
       agentLabel: found ? backgroundAgentLabel(found) : BACKGROUND_AGENT_LABEL,

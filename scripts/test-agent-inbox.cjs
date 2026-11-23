@@ -1,14 +1,13 @@
 // Unit tests for the Agents tab as an inbox (src/shared/agent-inbox.ts):
 //
-//   1. Grouping: which agents sit in the inbox and which on the Working,
-//      Snoozed and Settled shelves, pinned first, the status word and the
-//      age, read titles, the agent mark only for a non-default agent, +/-
-//      only on a finished pull request, Merge only when ready.
-//   2. Shelves over time: a settled agent comes back when it acts, a snooze
-//      wakes on time or when the agent asks something, never for a finished
-//      turn.
-//   3. Snooze presets in local time: 1 h, 3 h, this evening, tomorrow and
-//      next week, with this evening gone once 18:00 has passed.
+//   1. Grouping: the sections in their order (Needs you, Working, Done,
+//      Settled), pinned first, the status word and the age, read titles, the
+//      agent mark only for a non-default agent, +/- only on a finished pull
+//      request, Merge only when ready.
+//   2. Sections over time: a settled agent comes back when it acts.
+//   3. Snooze is gone: nothing exports it, and stored prefs that still carry
+//      a `snoozed` map load, show those agents in their normal section and
+//      drop the map on the next save.
 //   4. A merged pull request settles finished agents once, never twice, and
 //      never a pinned or working one.
 //   5. Undo puts a key back as it was, and an undone auto-settle stays put.
@@ -112,7 +111,7 @@ function pr(overrides = {}) {
 }
 
 const keys = (rows) => rows.map((row) => row.key);
-const SECTIONS = ["needs", "done", "working", "snoozed", "settled"];
+const SECTIONS = ["needs", "working", "done", "settled"];
 // What sat in the old unlabelled list on top, now two headed sections.
 const top = (view) => [...view.needs, ...view.done];
 
@@ -125,11 +124,9 @@ function testGrouping(I) {
     card("pane:old", { since: NOW - 3 * HOUR - 20 * MIN, runtime: "codex", workspaceId: "ws-c" }),
     card("pane:busy", { bucket: "working", status: "Working", tone: "info", since: NOW - 18 * MIN }),
     card("run:plan", { bucket: "working", status: "Planning", tone: "info", since: NOW - MIN / 2, runtime: "cora" }),
-    card("pane:snoozed", { unseen: true }),
     card("pane:settled", {}),
   ];
   const prefs = I.emptyAgentInboxPrefs();
-  prefs.snoozed["pane:snoozed"] = { at: NOW - HOUR, until: NOW + HOUR };
   prefs.settled["pane:settled"] = { at: NOW - MIN };
   prefs.pinned["pane:old"] = NOW - HOUR;
   const context = {
@@ -138,13 +135,15 @@ function testGrouping(I) {
     branches: { "ws-a": "usage-panel-hairlines", "ws-b": "fix/model", "ws-c": null },
   };
   const view = I.buildAgentInbox(model(cards), prefs, context);
+  check("the sections run Needs you, Working, Done, Settled", JSON.stringify(I.AGENT_INBOX_SECTIONS.map((section) => section.id)) === JSON.stringify(SECTIONS), I.AGENT_INBOX_SECTIONS);
+  check("their headings read so", JSON.stringify(I.AGENT_INBOX_SECTIONS.map((section) => section.label)) === JSON.stringify(["Needs you", "Working", "Done", "Settled"]));
+  check("the view lists its sections in that order", JSON.stringify(Object.keys(view).filter((field) => Array.isArray(view[field]))) === JSON.stringify(SECTIONS), Object.keys(view));
   check("Needs you holds the agents that ask or stopped", JSON.stringify(keys(view.needs)) === JSON.stringify(["pane:ask", "pane:stopped"]), keys(view.needs));
   check("Done holds the finished agents, pinned first", JSON.stringify(keys(view.done)) === JSON.stringify(["pane:old", "pane:fresh"]), keys(view.done));
   const placed = SECTIONS.flatMap((section) => keys(view[section]));
   check("every agent sits in exactly one headed section", placed.length === cards.length && new Set(placed).size === cards.length && cards.every((c) => placed.includes(c.key)), placed);
   check("the sections hold nothing outside a heading", Object.keys(view).every((field) => SECTIONS.includes(field) || !Array.isArray(view[field])), Object.keys(view));
   check("working agents sit on the Working shelf", JSON.stringify(keys(view.working)) === JSON.stringify(["pane:busy", "run:plan"]), keys(view.working));
-  check("a snoozed agent sits on the Snoozed shelf until it wakes", JSON.stringify(keys(view.snoozed)) === JSON.stringify(["pane:snoozed"]));
   check("a settled agent sits on the Settled shelf", JSON.stringify(keys(view.settled)) === JSON.stringify(["pane:settled"]));
   check("the badge counts the agents that wait on you, the Needs you heading's count", view.needsYou === 2 && view.needsYou === view.needs.length, view.needsYou);
   const by = Object.fromEntries([...top(view), ...view.working].map((row) => [row.key, row]));
@@ -175,7 +174,7 @@ function testGrouping(I) {
 }
 
 function testShelvesOverTime(I) {
-  console.log("shelves over time");
+  console.log("sections over time");
   const empty = { now: NOW, pullRequests: {} };
   let prefs = I.settleAgent(I.emptyAgentInboxPrefs(), "pane:a", NOW);
   const same = I.reconcileAgentInbox(model([card("pane:a", { since: NOW - MIN })]), prefs, empty);
@@ -189,55 +188,43 @@ function testShelvesOverTime(I) {
   const asks = I.settleAgent(I.emptyAgentInboxPrefs(), "pane:q", NOW);
   const stillAsks = I.reconcileAgentInbox(model([card("pane:q", { bucket: "needs-you", tone: "warn", since: NOW - MIN })]), asks, empty);
   check("a question it already asked when settled keeps it settled", !stillAsks.changed);
-
-  prefs = I.snoozeAgent(I.emptyAgentInboxPrefs(), "pane:s", NOW + HOUR, NOW);
-  const s = card("pane:s", { since: NOW - MIN });
-  let r = I.reconcileAgentInbox(model([s]), prefs, { ...empty, now: NOW + 59 * MIN });
-  check("a snooze holds until its time", !r.changed);
-  check("the view keeps it snoozed before its time", I.buildAgentInbox(model([s]), prefs, { ...empty, now: NOW + 59 * MIN }).snoozed.length === 1);
-  r = I.reconcileAgentInbox(model([s]), prefs, { ...empty, now: NOW + HOUR });
-  check("a snooze wakes at its time", r.changed && !r.prefs.snoozed["pane:s"]);
-  check("the view wakes it at its time even before the reconcile", top(I.buildAgentInbox(model([s]), prefs, { ...empty, now: NOW + HOUR })).length === 1);
-  r = I.reconcileAgentInbox(model([card("pane:s", { since: NOW + MIN, unseen: true })]), prefs, { ...empty, now: NOW + 2 * MIN });
-  check("a finished turn never ends a snooze early", !r.changed);
-  r = I.reconcileAgentInbox(model([card("pane:s", { bucket: "needs-you", tone: "warn", since: NOW + MIN })]), prefs, { ...empty, now: NOW + 2 * MIN });
-  check("a question ends a snooze early", r.changed && !r.prefs.snoozed["pane:s"]);
-  r = I.reconcileAgentInbox(model([card("pane:s", { tone: "danger", since: NOW + MIN })]), prefs, { ...empty, now: NOW + 2 * MIN });
-  check("a fresh failure ends a snooze early", r.changed && !r.prefs.snoozed["pane:s"]);
-  r = I.reconcileAgentInbox(model([]), prefs, { ...empty, now: NOW + 2 * HOUR });
-  check("a spent snooze of an agent not on the board is dropped", r.changed && !r.prefs.snoozed["pane:s"]);
-  r = I.reconcileAgentInbox(model([]), prefs, { ...empty, now: NOW + MIN });
-  check("a running snooze of an agent not on the board is kept", !r.changed);
-
-  const settledThenSnoozed = I.snoozeAgent(I.settleAgent(I.emptyAgentInboxPrefs(), "pane:x", NOW), "pane:x", NOW + HOUR, NOW);
-  check("snoozing a settled agent un-settles it", !settledThenSnoozed.settled["pane:x"] && settledThenSnoozed.snoozed["pane:x"]);
-  const snoozedThenSettled = I.settleAgent(settledThenSnoozed, "pane:x", NOW);
-  check("settling a snoozed agent ends the snooze", !snoozedThenSettled.snoozed["pane:x"] && snoozedThenSettled.settled["pane:x"]);
 }
 
-function testSnoozePresets(I) {
-  console.log("snooze presets");
-  const at14 = I.agentSnoozePresets(NOW - HOUR);
-  const ids = at14.map((p) => p.id);
-  check("five presets at 14:00, soonest first", JSON.stringify(ids) === JSON.stringify(["1h", "3h", "evening", "tomorrow", "next-week"]), ids);
-  const by = Object.fromEntries(at14.map((p) => [p.id, p]));
-  check("1 hour wakes at 15:00", by["1h"].until === NOW && by["1h"].when === "15:00");
-  check("3 hours wakes at 17:00", by["3h"].when === "17:00");
-  check("this evening is 18:00 today", by.evening.until === Date.parse("2026-10-29T18:00:00.000Z") && by.evening.when === "18:00");
-  check("tomorrow is 09:00 on Friday", by.tomorrow.until === Date.parse("2026-10-30T09:00:00.000Z") && by.tomorrow.when === "09:00");
-  check("next week is Monday 09:00", by["next-week"].until === Date.parse("2026-11-02T09:00:00.000Z") && by["next-week"].when === "Mon");
-  const at15 = I.agentSnoozePresets(NOW).map((p) => p.id);
-  check("at 15:00, 3 hours and this evening are one row, named this evening", JSON.stringify(at15) === JSON.stringify(["1h", "evening", "tomorrow", "next-week"]), at15);
-  const at16 = I.agentSnoozePresets(Date.parse("2026-10-29T16:00:00.000Z"));
-  check("one row per wake minute", at16.length === new Set(at16.map((p) => Math.floor(p.until / MIN))).size);
-  const late = I.agentSnoozePresets(Date.parse("2026-10-29T19:30:00.000Z"));
-  check("this evening is left out once 18:00 has passed", !late.some((p) => p.id === "evening"));
-  const monday = I.agentSnoozePresets(Date.parse("2026-11-02T08:00:00.000Z"));
-  check("on a Monday, next week is the Monday after", monday.find((p) => p.id === "next-week").until === Date.parse("2026-11-09T09:00:00.000Z"));
-  const sunday = I.agentSnoozePresets(Date.parse("2026-11-01T10:00:00.000Z"));
-  check("on a Sunday, tomorrow and next week are one row: Monday 09:00", sunday.filter((p) => p.until === Date.parse("2026-11-02T09:00:00.000Z")).length === 1 && !sunday.some((p) => p.id === "next-week"));
-  check("a wake today reads as its time", I.agentSnoozeWakeLabel(Date.parse("2026-10-29T18:00:00.000Z"), NOW) === "18:00");
-  check("a wake on another day reads with the weekday", I.agentSnoozeWakeLabel(Date.parse("2026-10-30T09:00:00.000Z"), NOW) === "Fri 09:00");
+function testNoSnooze(I) {
+  console.log("no snooze");
+  const gone = Object.keys(I).filter((name) => /snooz|wake/i.test(name));
+  check("nothing about snooze is exported", gone.length === 0, gone);
+  check("fresh prefs have no snoozed map", !("snoozed" in I.emptyAgentInboxPrefs()));
+  const stored = {
+    settled: { "pane:s": { at: NOW - HOUR } },
+    snoozed: { "pane:z": { at: NOW - HOUR, until: NOW + HOUR }, "pane:s": { at: NOW - 2 * HOUR, until: NOW + HOUR } },
+    pinned: {},
+    names: {},
+    unread: {},
+    autoSettled: {},
+  };
+  let prefs;
+  let threw = null;
+  try {
+    prefs = I.parseAgentInboxPrefs(JSON.parse(JSON.stringify(stored)), NOW);
+  } catch (err) {
+    threw = String(err);
+  }
+  check("prefs saved with a snoozed map load without error", threw === null && Boolean(prefs), threw);
+  check("the snoozed map is not loaded", !("snoozed" in prefs), Object.keys(prefs));
+  check("the rest of what was saved still loads", Boolean(prefs.settled["pane:s"]));
+  const saved = JSON.parse(JSON.stringify(I.setAgentPinned(prefs, "pane:p", true, NOW)));
+  check("the next save drops the snoozed map", !("snoozed" in saved), Object.keys(saved));
+  const reconciled = I.reconcileAgentInbox(model([card("pane:z", { unseen: true })]), prefs, { now: NOW, pullRequests: {} });
+  check("a reconcile never brings it back", !("snoozed" in reconciled.prefs));
+  const view = I.buildAgentInbox(
+    model([card("pane:z", { unseen: true }), card("pane:w", { bucket: "working", tone: "info" }), card("pane:s")]),
+    prefs,
+    { now: NOW, pullRequests: {} },
+  );
+  check("a card that was snoozed shows again in its normal section", keys(view.done).includes("pane:z"), keys(view.done));
+  check("a card that was settled and snoozed stays settled", keys(view.settled).includes("pane:s"), keys(view.settled));
+  check("no row carries a snooze time", SECTIONS.flatMap((section) => view[section]).every((row) => !("snoozedUntil" in row)));
 }
 
 function testAutoSettle(I) {
@@ -248,16 +235,14 @@ function testAutoSettle(I) {
     card("pane:busy", { bucket: "working", tone: "info" }),
     card("pane:pinned"),
     card("pane:asks", { bucket: "needs-you", tone: "warn" }),
-    card("pane:snoozed"),
     card("pane:elsewhere", { workspaceId: "ws-b" }),
   ];
-  let prefs = I.setAgentPinned(I.emptyAgentInboxPrefs(), "pane:pinned", true, NOW);
-  prefs = I.snoozeAgent(prefs, "pane:snoozed", NOW + HOUR, NOW);
+  const prefs = I.setAgentPinned(I.emptyAgentInboxPrefs(), "pane:pinned", true, NOW);
   const r = I.reconcileAgentInbox(model(cards), prefs, merged);
   const settled = Object.keys(r.prefs.settled).sort();
-  check("a merged pull request settles its finished agents, snoozed ones too", JSON.stringify(settled) === JSON.stringify(["pane:done", "pane:snoozed"]), settled);
+  check("a merged pull request settles its finished agents", JSON.stringify(settled) === JSON.stringify(["pane:done"]), settled);
   check("the settle says which pull request", r.prefs.settled["pane:done"].auto === "codara-solutions/codara-studio#61");
-  check("it reports what it settled for the undo line", r.autoSettled.length === 2 && r.autoSettled[0].number === 61);
+  check("it reports what it settled for the undo line", r.autoSettled.length === 1 && r.autoSettled[0].number === 61);
   check("a working, waiting, pinned or other agent is left alone", !r.prefs.settled["pane:busy"] && !r.prefs.settled["pane:asks"] && !r.prefs.settled["pane:pinned"] && !r.prefs.settled["pane:elsewhere"]);
   check("an open pull request settles nothing", !I.reconcileAgentInbox(model(cards), I.emptyAgentInboxPrefs(), { now: NOW, pullRequests: { "ws-a": pr() } }).changed);
   const view = I.buildAgentInbox(model(cards), r.prefs, merged);
@@ -313,11 +298,9 @@ function testUndo(I) {
   check("one asking for input does not", !I.settlesOnMerge(card("pane:ask", { bucket: "needs-you" })));
   check("one back at work does not", !I.settlesOnMerge(card("pane:busy", { bucket: "working" })));
 
-  let prefs = I.snoozeAgent(I.emptyAgentInboxPrefs(), "pane:a", NOW + HOUR, NOW);
-  const snapshot = I.snapshotAgentInbox(prefs, ["pane:a"]);
-  prefs = I.settleAgent(prefs, "pane:a", NOW);
-  const restored = I.restoreAgentInbox(prefs, snapshot);
-  check("undo of a settle restores the snooze it replaced", !restored.settled["pane:a"] && restored.snoozed["pane:a"].until === NOW + HOUR);
+  const pinned = I.setAgentPinned(I.emptyAgentInboxPrefs(), "pane:a", true, NOW);
+  const restored = I.restoreAgentInbox(I.settleAgent(pinned, "pane:a", NOW), I.snapshotAgentInbox(pinned, ["pane:a"]));
+  check("undo of a settle leaves the rest of the row as it was", !restored.settled["pane:a"] && restored.pinned["pane:a"] === NOW);
   const unread = I.setAgentUnread(I.emptyAgentInboxPrefs(), "pane:b", true, NOW);
   const settledUnread = I.settleAgent(unread, "pane:b", NOW);
   check("settling clears a manual unread", settledUnread.unread["pane:b"] === undefined);
@@ -333,16 +316,15 @@ function testStoredAndMerge(I) {
   console.log("stored prefs and merge");
   const raw = {
     settled: { "pane:a": { at: NOW - HOUR, auto: "x#1" }, "pane:old": { at: NOW - 40 * 24 * HOUR }, "bad key": { at: NOW }, "pane:nan": { at: "x" } },
-    snoozed: { "run:r1": { at: NOW, until: NOW + HOUR }, "run:r2": { at: NOW } },
     pinned: { "pane:p": NOW, "pane:q": -1 },
     names: { "pane:n": " Named\n", "pane:e": "   " },
     unread: { "pane:u": NOW },
     autoSettled: { "pane:a": "x#1", "pane:z": 5 },
   };
   const prefs = I.parseAgentInboxPrefs(raw, NOW);
-  check("valid records load", prefs.settled["pane:a"].auto === "x#1" && prefs.snoozed["run:r1"].until === NOW + HOUR && prefs.pinned["pane:p"] === NOW && prefs.unread["pane:u"] === NOW && prefs.autoSettled["pane:a"] === "x#1");
+  check("valid records load", prefs.settled["pane:a"].auto === "x#1" && prefs.pinned["pane:p"] === NOW && prefs.unread["pane:u"] === NOW && prefs.autoSettled["pane:a"] === "x#1");
   check("records older than the TTL are dropped", !prefs.settled["pane:old"]);
-  check("malformed keys and values are dropped", !prefs.settled["bad key"] && !prefs.settled["pane:nan"] && !prefs.snoozed["run:r2"] && prefs.pinned["pane:q"] === undefined && prefs.autoSettled["pane:z"] === undefined);
+  check("malformed keys and values are dropped", !prefs.settled["bad key"] && !prefs.settled["pane:nan"] && prefs.pinned["pane:q"] === undefined && prefs.autoSettled["pane:z"] === undefined);
   check("names are cleaned, empty ones dropped", prefs.names["pane:n"] === "Named" && prefs.names["pane:e"] === undefined);
   check("garbage loads as empty", JSON.stringify(I.parseAgentInboxPrefs("nope", NOW)) === JSON.stringify(I.emptyAgentInboxPrefs()));
   const big = { settled: {} };
@@ -409,20 +391,8 @@ function testSubagents(I) {
   const settledAt = NOW - 30 * MIN;
   const quietPrefs = I.emptyAgentInboxPrefs();
   quietPrefs.settled["pane:three"] = { at: settledAt };
-  quietPrefs.snoozed["pane:one"] = { at: settledAt, until: NOW + HOUR };
   const quiet2 = I.reconcileAgentInbox(model(cards), quietPrefs, { now: NOW, pullRequests: {} });
   check("a subagent that starts work brings its settled parent back", !quiet2.prefs.settled["pane:three"], quiet2.prefs.settled);
-  check("a working subagent does not end its parent's snooze", Boolean(quiet2.prefs.snoozed["pane:one"]));
-  const asking = cards.map((entry) => (entry.key === "worktree:a" ? { ...entry, bucket: "needs-you", tone: "warn", since: NOW - MIN } : entry));
-  const woken = I.reconcileAgentInbox(model(asking), quietPrefs, { now: NOW, pullRequests: {} });
-  check("a subagent that asks does not end its parent's snooze", Boolean(woken.prefs.snoozed["pane:one"]), woken.prefs.snoozed);
-  const snoozedView = I.buildAgentInbox(model(asking), woken.prefs, context);
-  check(
-    "snoozed parent, subagent waiting: the subagent is its own Needs you row",
-    keys(snoozedView.needs).includes("worktree:a") && keys(snoozedView.snoozed).includes("pane:one") &&
-      snoozedView.snoozed.find((entry) => entry.key === "pane:one").subagents.length === 0,
-    { needs: keys(snoozedView.needs), snoozed: keys(snoozedView.snoozed) },
-  );
   const stillPrefs = I.emptyAgentInboxPrefs();
   stillPrefs.settled["pane:three"] = { at: NOW };
   const still = I.reconcileAgentInbox(model(cards), stillPrefs, { now: NOW, pullRequests: {} });
@@ -460,7 +430,7 @@ async function main() {
   const I = await load();
   testGrouping(I);
   testShelvesOverTime(I);
-  testSnoozePresets(I);
+  testNoSnooze(I);
   testAutoSettle(I);
   testUndo(I);
   testStoredAndMerge(I);

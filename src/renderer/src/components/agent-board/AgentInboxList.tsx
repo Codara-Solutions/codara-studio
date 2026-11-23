@@ -3,9 +3,8 @@
  *
  * Design source: T3 Code's thread sidebar (github.com/pingdotgg/t3code, MIT,
  * by Theo / Ping Labs): three-line rows with no box, a status word top right,
- * Working, Snoozed and Settled shelves, Snooze and Settle on
- * hover, a merged pull request that settles itself, and undo as one quiet
- * line in the footer. The look and the behaviour follow T3 Code; this code is
+ * Working and Settled shelves, Settle on hover, a merged pull request that
+ * settles itself, and undo as one quiet line in the footer. The look and the behaviour follow T3 Code; this code is
  * Codara's own. Merge PR in the menu is our addition, and so are the Needs
  * you and Done headings: every row sits under a heading whose count is its
  * rows. See DESIGN.md, "Agents tab".
@@ -14,15 +13,14 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import {
-  agentSnoozeWakeLabel,
+  AGENT_INBOX_SECTIONS,
   renameAgent,
   setAgentPinned,
   setAgentUnread,
   settleAgent,
-  snoozeAgent,
   unsettleAgent,
-  wakeAgent,
   type AgentInboxRow as Row,
+  type AgentInboxSectionId,
   type AgentInboxView,
 } from "@shared/agent-inbox";
 import type { GitHubMergeResult } from "@shared/github";
@@ -51,19 +49,19 @@ const MergePullRequestDialog = lazy(() =>
   import("../git/GitHubSection").then((module) => ({ default: module.MergePullRequestDialog })),
 );
 
-type ShelfId = "needs" | "done" | "working" | "snoozed" | "settled";
+type ShelfId = AgentInboxSectionId;
 // Needs you and Done hold what the unlabelled top list used to hold: their
 // rows act as inbox rows, and the sections are open until the user folds
-// them. Snoozed and Settled start folded.
-const SHELVES: { id: ShelfId; label: string; shelf: AgentInboxShelf }[] = [
-  { id: "needs", label: "Needs you", shelf: "inbox" },
-  { id: "done", label: "Done", shelf: "inbox" },
-  { id: "working", label: "Working", shelf: "working" },
-  { id: "snoozed", label: "Snoozed", shelf: "snoozed" },
-  { id: "settled", label: "Settled", shelf: "settled" },
-];
+// them. Settled starts folded.
+const SHELF_KIND: Record<ShelfId, AgentInboxShelf> = {
+  needs: "inbox",
+  working: "working",
+  done: "inbox",
+  settled: "settled",
+};
+const SHELVES = AGENT_INBOX_SECTIONS.map((section) => ({ ...section, shelf: SHELF_KIND[section.id] }));
 const SHELVES_KEY = "codara.rail.agents.shelves";
-const DEFAULT_OPEN: Record<ShelfId, boolean> = { needs: true, done: true, working: true, snoozed: false, settled: false };
+const DEFAULT_OPEN: Record<ShelfId, boolean> = { needs: true, working: true, done: true, settled: false };
 
 function readShelves(): Record<ShelfId, boolean> {
   try {
@@ -85,10 +83,9 @@ interface Props extends AgentBoardState {
 interface MenuState {
   key: string;
   view: AgentInboxMenuView;
-  openedAt: number;
 }
 
-export default function AgentInboxList({ view, activeKey, navigate, now }: Props) {
+export default function AgentInboxList({ view, activeKey, navigate }: Props) {
   const [shelves, setShelves] = useState(readShelves);
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -152,12 +149,8 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
     updateAgentInbox((current) => settleAgent(current, row.key, Date.now()), { keys: [row.key], text: "Settled" });
   }, []);
   const onRestore = useCallback((row: Row) => {
-    const latest = getAgentInboxPrefs();
-    if (latest.settled[row.key]) {
-      updateAgentInbox((current) => unsettleAgent(current, row.key), { keys: [row.key], text: "Un-settled" });
-    } else if (latest.snoozed[row.key]) {
-      updateAgentInbox((current) => wakeAgent(current, row.key), { keys: [row.key], text: "Woken" });
-    }
+    if (!getAgentInboxPrefs().settled[row.key]) return;
+    updateAgentInbox((current) => unsettleAgent(current, row.key), { keys: [row.key], text: "Un-settled" });
   }, []);
   const openMenu = useCallback((row: Row, at: { x: number; y: number } | null, view: AgentInboxMenuView = "main") => {
     if (at) {
@@ -168,14 +161,9 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
       menuAnchor.current =
         listRef.current?.querySelector<HTMLElement>(`[data-agent-card="${CSS.escape(row.key)}"]`) ?? null;
     }
-    setMenu({ key: row.key, view, openedAt: Date.now() });
+    setMenu({ key: row.key, view });
   }, []);
   const onMenu = useCallback((row: Row, at: { x: number; y: number } | null) => openMenu(row, at), [openMenu]);
-  const onSnooze = useCallback((row: Row, anchor: HTMLElement) => {
-    setPoint(null);
-    menuAnchor.current = anchor;
-    setMenu({ key: row.key, view: "snooze", openedAt: Date.now() });
-  }, []);
   const onToggleSubagents = useCallback((key: string) => {
     setSubagentsOpen((current) => {
       const next = new Set(current);
@@ -213,11 +201,6 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
       merge: startMerge,
       settle: onSettle,
       restore: onRestore,
-      snooze: (row, until) =>
-        updateAgentInbox((current) => snoozeAgent(current, row.key, until, Date.now()), {
-          keys: [row.key],
-          text: `Snoozed until ${agentSnoozeWakeLabel(until, Date.now())}`,
-        }),
       pin: (row, pinned) => updateAgentInbox((current) => setAgentPinned(current, row.key, pinned, Date.now())),
       rename: (row) => setRenaming(row.key),
       unread: (row, unread) => updateAgentInbox((current) => setAgentUnread(current, row.key, unread, Date.now())),
@@ -284,7 +267,6 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
           key={row.key}
           row={row}
           shelf={shelf}
-          now={now}
           active={row.key === activeKey}
           focusable={row.key === tabStop}
           merging={merging.has(row.key)}
@@ -293,7 +275,6 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
           onToggleSubagents={onToggleSubagents}
           onOpen={onOpen}
           onMenu={onMenu}
-          onSnooze={onSnooze}
           onSettle={onSettle}
           onRestore={onRestore}
           onRename={onRename}
@@ -392,9 +373,7 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
         view={menu?.view ?? "main"}
         onView={(next) => setMenu((current) => (current ? { ...current, view: next } : current))}
         settled={menuEntry?.shelf === "settled"}
-        snoozed={menuEntry?.shelf === "snoozed"}
         unread={Boolean(menu && prefs.unread[menu.key] !== undefined)}
-        openedAt={menu?.openedAt ?? 0}
         onClose={() => setMenu(null)}
         actions={actions}
       />
