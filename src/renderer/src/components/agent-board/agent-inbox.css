@@ -108,6 +108,13 @@
   color: var(--ink-dim);
 }
 
+/* The rail's resting workspace tile: its colour on a faint well of itself. */
+.agent-inbox-row__tile.is-tinted {
+  color: var(--tile-accent);
+  background: color-mix(in oklab, var(--tile-accent) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tile-accent) 24%, transparent);
+}
+
 .agent-inbox-row__ws,
 .agent-inbox-row__branch,
 .agent-inbox-row__title {
@@ -154,7 +161,6 @@
 }
 
 .agent-inbox-row__age,
-.agent-inbox-row__status.is-snoozed,
 .agent-inbox-row__status.is-busy {
   color: var(--muted);
 }
@@ -501,12 +507,6 @@
 
 .agent-inbox-row.is-settled .agent-inbox-row__actions {
   top: 5px;
-}
-
-/* A snoozed row keeps its three lines, quieter. */
-.agent-inbox-row.is-snoozed .agent-inbox-row__title {
-  font-weight: 400;
-  color: var(--ink-dim);
 }
 
 /* ── Shelves ─────────────────────────────────────────────────────────────── */

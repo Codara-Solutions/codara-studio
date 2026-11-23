@@ -9,25 +9,33 @@ import { join } from "node:path";
 // home. Main's per-pane activity, the pull request watcher and GitHub are
 // stood in for from the main process, so the rows are a fixed, realistic day
 // with no real agent, account or network: every row under its heading
-// (Needs you, Done, Working, Snoozed, Settled), hover actions, the menu,
-// snooze, settle with undo, one-click merge into a non-main base, the
-// confirmation for main, and a merged pull request that settles itself.
+// (Needs you, Working, Done, Settled), each row's icon in its workspace's
+// colour, hover actions, the menu, settle with undo, one-click merge into a
+// non-main base, the confirmation for main, and a merged pull request that
+// settles itself.
 //
-// AGENT_INBOX_SHOTS=<dir> saves the screenshots the pull request shows.
+// AGENT_INBOX_SHOTS=<dir> saves the screenshots the pull request shows, the
+// full view in the dark and the light theme among them.
 
 const MIN = 60_000;
 const SHOTS = process.env.AGENT_INBOX_SHOTS;
 
+// Kitchen has no colour of its own: its rows keep the muted tile.
 const WORKSPACES = [
-  { id: "ws-cos", name: "Finance", branch: "main", icon: "layers" },
-  { id: "ws-sub", name: "Gateway", branch: "fix/model-fallback", icon: "cloud" },
-  { id: "ws-studio", name: "Codara Studio", branch: "usage-panel-hairlines", icon: "code" },
-  { id: "ws-trading", name: "Research", branch: "funding-rate-backtest", icon: "package" },
-  { id: "ws-cora", name: "Codara Studio", branch: "Cora", icon: "code" },
-  { id: "ws-aici", name: "Kitchen", branch: "main", icon: "brain" },
-  { id: "ws-ctrlt", name: "Codara Studio", branch: "fix-ctrl-t", icon: "code" },
-  { id: "ws-planner", name: "Finance", branch: "planner-sync", icon: "layers" },
+  { id: "ws-cos", name: "Finance", branch: "main", icon: "layers", color: "#FF5C2B" },
+  { id: "ws-sub", name: "Gateway", branch: "fix/model-fallback", icon: "cloud", color: "#7FB3FF" },
+  { id: "ws-studio", name: "Codara Studio", branch: "usage-panel-hairlines", icon: "code", color: "#2AA298" },
+  { id: "ws-trading", name: "Research", branch: "funding-rate-backtest", icon: "package", color: "#C99BFF" },
+  { id: "ws-cora", name: "Codara Studio", branch: "Cora", icon: "code", color: "#2AA298" },
+  { id: "ws-aici", name: "Kitchen", branch: "main", icon: "brain", color: "" },
+  { id: "ws-ctrlt", name: "Codara Studio", branch: "fix-ctrl-t", icon: "code", color: "#2AA298" },
+  { id: "ws-planner", name: "Finance", branch: "planner-sync", icon: "layers", color: "#FF8FB1" },
 ];
+
+function rgb(hex: string): string {
+  const value = Number.parseInt(hex.slice(1), 16);
+  return `rgb(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255})`;
+}
 
 interface Fixture {
   root: string;
@@ -58,7 +66,7 @@ async function prepare(): Promise<Fixture> {
         id: workspace.id,
         name: workspace.name,
         cwd: cwd[workspace.id],
-        color: "#34D3C3",
+        color: workspace.color,
         icon: workspace.icon,
         workers: [],
       })),
@@ -259,10 +267,19 @@ async function headingsAgree(page: Page): Promise<void> {
     return { sections, outside };
   });
   expect(layout.outside, "rows outside any heading").toBe(0);
-  expect(layout.sections.map((section) => section.id)).toEqual(["needs", "done", "working", "snoozed", "settled"]);
+  expect(layout.sections.map((section) => section.id)).toEqual(["needs", "working", "done", "settled"]);
   for (const section of layout.sections) {
     expect(section.rows, `rows under ${section.id}`).toBe(section.open ? section.count : 0);
   }
+}
+
+async function setTheme(page: Page, mode: "dark" | "light"): Promise<void> {
+  await page.evaluate((next) => {
+    const root = document.documentElement;
+    root.dataset.theme = next === "light" ? "codara-daylight" : "codara-classic";
+    root.dataset.themeMode = next;
+    root.classList.toggle("light", next === "light");
+  }, mode);
 }
 
 async function railShot(page: Page, name: string, extra?: { height?: number }): Promise<void> {
@@ -276,7 +293,7 @@ async function railShot(page: Page, name: string, extra?: { height?: number }): 
   });
 }
 
-test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", async () => {
+test("the Agents tab is an inbox with sections, settle, undo and merge", async () => {
   test.setTimeout(150_000);
   const fixture = await prepare();
   const app = await electron.launch({ args: ["."], env: fixture.env });
@@ -306,6 +323,13 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
     const sourceControl = page.getByTitle(/^Collapse source control$/i);
     if (await sourceControl.count()) await sourceControl.first().click();
 
+    // The rail's own tile for Finance, to hold the Agents view's icon to.
+    const railTile = page.locator('[data-workspace-id="ws-cos"] [data-testid="workspace-icon-tile"]').first();
+    await expect(railTile).toBeVisible({ timeout: 15_000 });
+    // The tile eases into its colour: read it once the transition settled.
+    await expect(railTile).toHaveCSS("color", rgb("#FF5C2B"));
+    const railTileColor = await railTile.evaluate((tile) => getComputedStyle(tile).color);
+
     await test.step("the switch counts what waits on you", async () => {
       await expect(viewTab(page, "Agents")).toHaveAccessibleName("Agents, 2 need you", { timeout: 15_000 });
       await viewTab(page, "Agents").click();
@@ -334,7 +358,20 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
       await expect(row(page, "p-invoice").locator("[data-agent-card-open]")).toHaveAttribute("title", /October hosting invoice/);
     });
 
-    await test.step("every row sits under Needs you, Done, Working, Snoozed or Settled", async () => {
+    await test.step("each row's icon wears its workspace's colour, as the rail draws it", async () => {
+      const tile = (paneId: string) => row(page, paneId).locator(".agent-inbox-row__tile");
+      const color = (paneId: string) => tile(paneId).evaluate((element) => getComputedStyle(element).color);
+      expect(await color("p-invoice")).toBe(rgb("#FF5C2B"));
+      expect(await color("p-invoice")).toBe(railTileColor);
+      expect(await color("p-pr30")).toBe(rgb("#7FB3FF"));
+      expect(await color("p-forge")).toBe(rgb("#C99BFF"));
+      await expect(tile("p-invoice")).toHaveClass(/is-tinted/);
+      // No colour of its own: the muted tile, not a borrowed accent.
+      await expect(tile("p-retro")).not.toHaveClass(/is-tinted/);
+      expect(await color("p-retro")).not.toBe(await color("p-e2e"));
+    });
+
+    await test.step("every row sits under Needs you, Working, Done or Settled", async () => {
       await expect(shelf(page, "Needs you")).toHaveAccessibleName("Needs you, 2");
       await expect(shelf(page, "Done")).toHaveAccessibleName("Done, 3");
       await expect(page.locator('[data-agent-section="needs"] [data-agent-card]')).toHaveCount(2);
@@ -368,31 +405,41 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
       await expect(page.locator(".agent-inbox__notice")).toHaveText(/^Settled, #59 merged, (Ctrl\+Z|⌘Z) to undo$/);
     });
 
-    await test.step("snooze one for an hour from the menu", async () => {
-      await row(page, "p-planner").locator("[data-agent-card-open]").click({ button: "right" });
-      const menu = page.getByRole("menu", { name: "Actions for Planner sync" });
-      await expect(menu).toBeVisible();
-      await menu.getByRole("menuitem", { name: /^Snooze/ }).click();
-      await expect(menu.getByRole("menuitem", { name: /^1 hour/ })).toBeVisible();
-      await expect(menu.getByRole("menuitem", { name: /^Tomorrow\s*09:00$/ })).toBeVisible();
-      await expect(menu.getByRole("menuitem", { name: /^Next week\s*Mon$/ })).toBeVisible();
-      await menu.getByRole("menuitem", { name: /^1 hour/ }).click();
-      await expect(row(page, "p-planner")).toHaveCount(0);
-      await expect(shelf(page, "Snoozed")).toHaveAccessibleName("Snoozed, 1");
-      await expect(page.locator(".agent-inbox__notice")).toHaveText(/^Snoozed until \d\d:\d\d, /);
+    await test.step("arrow keys walk the rows in the sections' order", async () => {
+      const rows = await page.locator(".agent-inbox [data-agent-card-open]").evaluateAll((buttons) =>
+        buttons.map((button) => ({
+          key: button.getAttribute("data-agent-card-open") ?? "",
+          section: button.closest<HTMLElement>("[data-agent-section]")?.dataset.agentSection ?? "",
+        })),
+      );
+      const sections = rows.map((entry) => entry.section).filter((id, index, all) => all.indexOf(id) === index);
+      expect(sections).toEqual(["needs", "working", "done"]);
+      const lastNeeds = rows.filter((entry) => entry.section === "needs").at(-1)?.key ?? "";
+      const firstWorking = rows.find((entry) => entry.section === "working")?.key ?? "";
+      const lastWorking = rows.filter((entry) => entry.section === "working").at(-1)?.key ?? "";
+      const firstDone = rows.find((entry) => entry.section === "done")?.key ?? "";
+      const button = (key: string) => page.locator(`.agent-inbox [data-agent-card-open="${key}"]`);
+      await button(lastNeeds).focus();
+      await page.keyboard.press("ArrowDown");
+      await expect(button(firstWorking)).toBeFocused();
+      await button(lastWorking).focus();
+      await page.keyboard.press("ArrowDown");
+      await expect(button(firstDone)).toBeFocused();
+      await page.keyboard.press("ArrowUp");
+      await expect(button(lastWorking)).toBeFocused();
     });
 
     await page.mouse.move(900, 600);
     await page.locator("body").evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await railShot(page, "agents-list.png");
 
-    await test.step("hover turns the status into Snooze and Settle", async () => {
+    await test.step("hover turns the status into Settle, with no snooze", async () => {
       await row(page, "p-usage").hover();
       const settle = row(page, "p-usage").getByRole("button", { name: "Settle Usage panel (hairlines)" });
       await expect(settle).toBeVisible();
-      await expect(row(page, "p-usage").getByRole("button", { name: "Snooze Usage panel (hairlines)" })).toBeVisible();
+      await expect(row(page, "p-usage").getByRole("button", { name: /^Snooze/ })).toHaveCount(0);
       await expect(row(page, "p-usage").locator(".agent-inbox-row__status")).toBeHidden();
-      await railShot(page, "agents-hover.png", { height: 260 });
+      if (SHOTS) await row(page, "p-usage").screenshot({ path: join(SHOTS, "agents-hover.png") });
     });
 
     await test.step("the menu offers Merge only for a ready pull request", async () => {
@@ -410,7 +457,6 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
         "Open",
         "Merge PR #61",
         "Settle",
-        "Snooze",
         "Pin",
         "Rename",
         "Mark read",
@@ -482,6 +528,41 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
       await railShot(page, "agents-settled.png");
     });
 
+    await test.step("every section holds a row, in both themes", async () => {
+      for (const id of ["needs", "working", "done", "settled"]) {
+        expect(await page.locator(`[data-agent-section="${id}"] [data-agent-card]`).count(), `rows under ${id}`).toBeGreaterThan(0);
+      }
+      await page.locator("body").evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      const theme = await page.evaluate(() => {
+        const root = document.documentElement;
+        return { theme: root.dataset.theme ?? null, mode: root.dataset.themeMode ?? null, light: root.classList.contains("light") };
+      });
+      for (const mode of ["dark", "light"] as const) {
+        await setTheme(page, mode);
+        await railShot(page, `agents-view-${mode}.png`);
+      }
+      if (SHOTS) {
+        // The open row's surface and a hovered row, where the tinted tiles
+        // sit on the strongest backgrounds the view draws.
+        await row(page, "p-pr30").evaluate((element) => element.classList.add("is-active"));
+        await row(page, "p-invoice").locator("[data-agent-card-open]").hover();
+        for (const mode of ["dark", "light"] as const) {
+          await setTheme(page, mode);
+          await railShot(page, `agents-states-${mode}.png`, { height: 220 });
+        }
+        await row(page, "p-pr30").evaluate((element) => element.classList.remove("is-active"));
+        await page.mouse.move(0, 0);
+      }
+      await page.evaluate((saved) => {
+        const root = document.documentElement;
+        if (saved.theme === null) delete root.dataset.theme;
+        else root.dataset.theme = saved.theme;
+        if (saved.mode === null) delete root.dataset.themeMode;
+        else root.dataset.themeMode = saved.mode;
+        root.classList.toggle("light", saved.light);
+      }, theme);
+    });
+
     await test.step("undoing an auto-settle keeps the agent out of the shelf", async () => {
       await row(page, "p-ctrlt").locator("[data-agent-card-open]").click({ button: "right" });
       await page.getByRole("menu", { name: "Actions for Ctrl+T new tab fix" }).getByRole("menuitem", { name: /^Un-settle/ }).click();
@@ -517,8 +598,8 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
       await standIns(app, fixture);
       await boardChanged(app);
       await expect(row(page, "p-forge").locator(".agent-inbox-row__title")).toHaveText("Backtest 2026", { timeout: 15_000 });
-      await expect(shelf(page, "Snoozed")).toHaveAccessibleName("Snoozed, 1");
       await expect(row(page, "p-usage")).toHaveAttribute("data-agent-shelf", "settled");
+      await expect(shelf(page, "Snoozed")).toHaveCount(0);
     });
   } finally {
     await app.close();

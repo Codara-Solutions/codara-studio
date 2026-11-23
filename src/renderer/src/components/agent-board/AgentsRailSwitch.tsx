@@ -10,9 +10,9 @@ import "./rail-view-switch.css";
 
 // The top of the rail's Workspaces section: a switch between the workspace
 // list in the user's own order and the Agents view, an inbox of every agent
-// terminal and Cora chat of every workspace (what needs you or finished on
-// top, then the Working, Snoozed and Settled shelves). Beside it, the button
-// that opens the session picker on this workspace's past sessions.
+// terminal and Cora chat of every workspace (Needs you, Working, Done and
+// Settled). Beside it, the button that opens the session picker on this
+// workspace's past sessions.
 // The rail renders its own list under this when the switch says Workspaces.
 
 const VIEWS: { id: RailView; label: string }[] = [
@@ -39,7 +39,7 @@ export default function AgentsRailSwitch({
   // The workspace rows' agent lines come from the same board.
   usePublishAgentLines(board.model);
   const inbox = useAgentInbox(board.model, board.now);
-  // Snoozed and settled agents wait quietly: the badge counts the inbox only.
+  // Settled agents wait quietly: the badge counts Needs you only.
   const needsYou = inbox.needsYou;
   const tabRefs = useRef(new Map<RailView, HTMLButtonElement>());
 

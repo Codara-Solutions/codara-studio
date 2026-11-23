@@ -303,6 +303,8 @@ async function testBuilder() {
   // its id, never from which workspace is active or where the card sits.
   check("working is the fixed info tone, not the workspace accent", board.terminalAgentPlacement("working").tone === "info");
   check("a workspace without a colour gets one from its id", find("pane:p-moved")?.workspaceColor === board.agentBoardWorkspaceColor({ id: "ws-b" }));
+  check("a card carries the workspace's own colour for its row icon", blocked.workspaceOwnColor === "#3366ff");
+  check("a workspace without a colour has no own colour, so its row icon stays muted", find("pane:p-moved")?.workspaceOwnColor === null);
   check(
     "the fallback colour is stable and from the palette",
     board.agentBoardWorkspaceColor({ id: "ws-b" }) === board.agentBoardWorkspaceColor({ id: "ws-b", color: "  " }) &&

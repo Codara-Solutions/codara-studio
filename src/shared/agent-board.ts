@@ -100,6 +100,11 @@ export interface AgentBoardWorkspace {
   icon?: string;
 }
 
+/** The workspace's own colour, trimmed; null when it has none. */
+export function agentBoardOwnColor(workspace: { color?: string | null }): string | null {
+  return workspace.color?.trim() || null;
+}
+
 /**
  * The colour a workspace wears on its cards: its own, the one the Workspaces
  * list shows, or, when it has none, one picked from its id. Never anything
@@ -149,6 +154,11 @@ export interface AgentBoardCard {
   workspaceName: string;
   /** Always set: see agentBoardWorkspaceColor. */
   workspaceColor: string;
+  /**
+   * The colour the workspace's rail tile wears, null when it has none: the
+   * Agents view tints its row icon with this, never with a picked colour.
+   */
+  workspaceOwnColor: string | null;
   workspaceIcon: string | null;
   runtime: AgentBoardRuntime;
   agentLabel: string;
@@ -465,6 +475,7 @@ function coraCard(
     workspaceId: workspace.id,
     workspaceName: workspace.name,
     workspaceColor: agentBoardWorkspaceColor(workspace),
+    workspaceOwnColor: agentBoardOwnColor(workspace),
     workspaceIcon: workspace.icon ?? null,
     runtime: "cora",
     agentLabel: agentBoardRuntimeLabel("cora"),
@@ -567,6 +578,7 @@ function terminalCard(
     workspaceId: workspace.id,
     workspaceName: workspace.name,
     workspaceColor: agentBoardWorkspaceColor(workspace),
+    workspaceOwnColor: agentBoardOwnColor(workspace),
     workspaceIcon: workspace.icon ?? null,
     runtime: pane.runtime,
     agentLabel: agentBoardRuntimeLabel(pane.runtime),
@@ -602,6 +614,7 @@ function sleepingCard(pane: MergedPane, workspace: AgentBoardWorkspace, input: A
     workspaceId: workspace.id,
     workspaceName: workspace.name,
     workspaceColor: agentBoardWorkspaceColor(workspace),
+    workspaceOwnColor: agentBoardOwnColor(workspace),
     workspaceIcon: workspace.icon ?? null,
     runtime: pane.runtime,
     agentLabel: agentBoardRuntimeLabel(pane.runtime),
