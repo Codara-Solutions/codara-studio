@@ -1200,8 +1200,8 @@ own sleeping tab card (`bp-asleep`).
   it, and its text can still be selected and copied.
 - One visible action, Resume. Resume and keep running has no button of its
   own: Shift+click or Shift+Enter on Resume, named in its tooltip ("Resume.
-  Shift+click: resume and never let it sleep again"). The toolbar's Keep
-  running sun still pins it after a resume.
+  Shift+click: resume and never let it sleep on its own"; Sleep now still
+  works on it). The toolbar's Keep running sun still pins it after a resume.
 - The last request is the pill's tooltip, not a second line.
 - Narrow panes drop from the right, measured on the pane's own box: the
   memory freed (under 380 px), then how long it sleeps (under 300 px); a long

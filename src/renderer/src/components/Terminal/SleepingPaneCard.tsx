@@ -16,7 +16,7 @@ const RUNTIME_NAME: Record<TerminalLeafHibernation["runtime"], string> = {
   pi: "Pi",
 };
 
-export const RESUME_TITLE = "Resume. Shift+click: resume and never let it sleep again";
+export const RESUME_TITLE = "Resume. Shift+click: resume and never let it sleep on its own";
 
 // Pane widths (px, the pane's own box) under which the pill drops a part:
 // the memory freed, then how long it sleeps, then everything but Resume.

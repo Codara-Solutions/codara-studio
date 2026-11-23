@@ -61,7 +61,7 @@ async function main() {
   assert.ok(asleep.indexOf("pane-sleeping-moon") < asleep.indexOf("pane-sleeping-pill"), "the moon sits above the pill");
   assert.match(asleep, /role="group" aria-label="Claude Code asleep: Fix the zebra parser"/);
   assert.match(asleep, /data-testid="pane-sleeping-pill" title="now add the tests"/, "the last request is the pill's tooltip");
-  assert.equal(RESUME_TITLE, "Resume. Shift+click: resume and never let it sleep again");
+  assert.equal(RESUME_TITLE, "Resume. Shift+click: resume and never let it sleep on its own");
   assert.match(asleep, new RegExp(`title="${RESUME_TITLE.replace(/[.+]/g, "\\$&")}"`));
   assert.match(asleep, /aria-keyshortcuts="Shift\+Enter"/);
   assert.match(asleep, /data-testid="pane-sleeping-scrim"[^>]*pointer-events:none/, "the wheel reaches the output");

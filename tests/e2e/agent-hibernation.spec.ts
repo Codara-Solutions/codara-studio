@@ -571,7 +571,7 @@ test("a sleeping pane shows the moon and one pill centred at any size, and Shift
       await expect(sleepingChip(page)).toHaveAttribute("aria-label", "CLAUDE sleeping", { timeout: 3_000 });
     }).toPass({ timeout: 30_000 });
     expect(
-      logs.filter((line) => line.includes(`pane=${PANE_ID} Sleep now refused:`)).every((line) => /agent-busy \(output \d+s ago\)|in-flight/.test(line)),
+      logs.filter((line) => line.includes(`pane=${PANE_ID} Sleep now refused:`)).every((line) => /recent-output \(output \d+s ago\)|in-flight/.test(line)),
       logs.join("\n"),
     ).toBe(true);
     await expectAsleep(page, logs, first);
@@ -609,7 +609,7 @@ test("a sleeping pane shows the moon and one pill centred at any size, and Shift
 
     // Shift+click on Resume: resumes and pins Keep running.
     const resume = sleepingCard(page).getByTestId("pane-resume");
-    await expect(resume).toHaveAttribute("title", "Resume. Shift+click: resume and never let it sleep again");
+    await expect(resume).toHaveAttribute("title", "Resume. Shift+click: resume and never let it sleep on its own");
     await resume.click({ modifiers: ["Shift"] });
     await waitForLaunches(fixture, 2);
     await expect(sleepingCard(page)).toHaveCount(0, { timeout: 30_000 });
