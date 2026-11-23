@@ -244,9 +244,18 @@ async function newestDayFolders(sessionsRoot: string, limit: number): Promise<st
 }
 
 export interface LocatedCodexRollout {
+  /** The session's newest file: the one Codex writes now. */
   path: string;
-  size: number;
+  /**
+   * The largest of the session's files. A fresh continuation segment can be
+   * tiny while the conversation lives in an older one, so this, not the
+   * newest file's size, says whether there is anything to resume.
+   */
+  largestSize: number;
 }
+
+// Rollouts below this hold no conversation (a stillborn session's header).
+export const CODEX_RESUMABLE_MIN_BYTES = 1_024;
 
 async function statRollout(path: string): Promise<{ size: number; mtimeMs: number } | null> {
   const stat = await fs.lstat(path).catch(() => null);
@@ -255,7 +264,8 @@ async function statRollout(path: string): Promise<{ size: number; mtimeMs: numbe
 
 /**
  * Find a Codex session's rollout in the selected home: the stored path when
- * it still validates there, else the newest file named for the session id
+ * it still validates there and holds a conversation, else the newest file
+ * named for the session id
  * (plain or `_<segment>`) in the day folders its id, the stored path and the
  * hint times name, plus the newest RECENT_DAY_FOLDERS folders. Day and file
  * symlinks are skipped, and every hit passes resolveCodexTranscriptPath.
@@ -279,7 +289,7 @@ export async function locateCodexRollout(input: {
       path = null;
     }
     const stat = path ? await statRollout(path) : null;
-    if (path && stat) return { path, size: stat.size };
+    if (path && stat && stat.size >= CODEX_RESUMABLE_MIN_BYTES) return { path, largestSize: stat.size };
   }
   const folders = new Set<string>();
   const storedDay = stored ? DAY_FOLDER_RE.exec(stored) : null;
@@ -289,7 +299,8 @@ export async function locateCodexRollout(input: {
     for (const offset of [-DAY_MS, 0, DAY_MS]) folders.add(dayFolder(new Date(ms + offset)));
   }
   for (const folder of await newestDayFolders(sessionsRoot, RECENT_DAY_FOLDERS)) folders.add(folder);
-  let best: { path: string; size: number; mtimeMs: number } | null = null;
+  let best: { path: string; mtimeMs: number } | null = null;
+  let largestSize = 0;
   for (const folder of folders) {
     let dir: string;
     try {
@@ -308,10 +319,12 @@ export async function locateCodexRollout(input: {
         continue;
       }
       const stat = await statRollout(candidate);
-      if (stat && (!best || stat.mtimeMs > best.mtimeMs)) best = { path: candidate, ...stat };
+      if (!stat) continue;
+      largestSize = Math.max(largestSize, stat.size);
+      if (!best || stat.mtimeMs > best.mtimeMs) best = { path: candidate, mtimeMs: stat.mtimeMs };
     }
   }
-  return best ? { path: best.path, size: best.size } : null;
+  return best ? { path: best.path, largestSize } : null;
 }
 
 // Compare paths case-insensitively with separators unified so a Windows

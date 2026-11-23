@@ -108,7 +108,12 @@ import {
   repairClaudeTranscriptTail,
   resolveSafeClaudeTranscriptPath,
 } from "./orchestration/claude-paths";
-import { discoverRolloutForCwd, extractSessionUuid, locateCodexRollout } from "./orchestration/codex-sessions";
+import {
+  CODEX_RESUMABLE_MIN_BYTES,
+  discoverRolloutForCwd,
+  extractSessionUuid,
+  locateCodexRollout,
+} from "./orchestration/codex-sessions";
 import {
   discoverGrokSessionForCwd,
   grokSessionTranscriptPath,
@@ -3858,7 +3863,8 @@ export function registerIpc(): void {
       // spelled in another home's path, or an earlier segment, so the rollout
       // is found again by its session id in the home `codex resume` will use.
       // Size floor stands in for the message scan (rollout formats vary): a
-      // stillborn rollout is a few hundred bytes.
+      // stillborn rollout is a few hundred bytes. It is judged on the largest
+      // of the session's files, since a new segment starts small.
       const execution = await resolveFrozenNativeCodexProfile(
         args.nativeCodexProfileId,
       );
@@ -3872,7 +3878,7 @@ export function registerIpc(): void {
       if (!found) return { exists: false };
       return {
         exists: true,
-        resumable: found.size >= 1_024,
+        resumable: found.largestSize >= CODEX_RESUMABLE_MIN_BYTES,
         transcriptPath: found.path,
       };
     },

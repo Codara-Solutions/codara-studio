@@ -1,6 +1,6 @@
 import { test, expect, type ElectronApplication, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
-import { chmod, mkdir, mkdtemp, readFile, realpath, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 
@@ -169,6 +169,34 @@ test("a Codex session whose files are gone says so with its id instead of openin
     // The pane prints the same notice its restore log line records.
     await expect.poll(() => readFile(join(fixture.userData, "logs", "main.log"), "utf8"), { timeout: 20_000 })
       .toContain(`pane=restore-pane notice: Codex session ${GONE} was not found on this computer`);
+    expect((await fixture.launches()).filter((entry) => entry[0] === "resume")).toEqual([]);
+  } finally {
+    await app?.close();
+  }
+});
+
+test("a Codex check that fails at boot keeps the pointer and says how to retry", async () => {
+  test.skip(process.platform === "win32", "Fixture uses a Unix CLI wrapper.");
+  test.setTimeout(60_000);
+  const fixture = await prepare();
+  // A Codex home that is a symbolic link is refused, so the check throws.
+  const linkedHome = join(dirname(fixture.workspace), "codex-home-link");
+  await symlink(fixture.env.CODEX_HOME, linkedHome, "dir");
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({ args: ["."], env: { ...fixture.env, CODEX_HOME: linkedHome } });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await seedCodexPane(page, fixture.workspace, { sessionId: THIRD });
+    await page.reload();
+    await expect.poll(() => readFile(join(fixture.userData, "logs", "main.log"), "utf8"), { timeout: 20_000 })
+      .toMatch(new RegExp(`plan codex id=${THIRD} .* -> keep error=`));
+    await expect.poll(() => readFile(join(fixture.userData, "logs", "main.log"), "utf8"))
+      .toContain(`pane=restore-pane notice: couldn't check codex session ${THIRD}`);
+    await page.waitForTimeout(1_500);
+    const kept = await page.evaluate(() => JSON.parse(localStorage.getItem("spark.tabs:ws-restore") ?? "{}"));
+    expect(kept.tabs?.[0]?.root?.agentSession?.sessionId).toBe(THIRD);
+    expect(kept.tabs?.[0]?.root?.agentSession?.active).toBe(true);
     expect((await fixture.launches()).filter((entry) => entry[0] === "resume")).toEqual([]);
   } finally {
     await app?.close();

@@ -157,6 +157,21 @@ async function main() {
       /session root.*symbolic link/i,
     );
 
+    // The user's own home keeps the strict rule for shell snapshots too;
+    // only a Codara-managed home may link it.
+    const unsafeSnapshotsHome = path.join(TMP, "unsafe-snapshots-home");
+    fs.mkdirSync(unsafeSnapshotsHome);
+    fs.mkdirSync(path.join(homeA, "shell_snapshots"), { recursive: true });
+    fs.symlinkSync(
+      path.join(homeA, "shell_snapshots"),
+      path.join(unsafeSnapshotsHome, "shell_snapshots"),
+      "dir",
+    );
+    assert.throws(
+      () => paths.resolveCodexHomePaths(unsafeSnapshotsHome),
+      /shell-snapshot root.*symbolic link/i,
+    );
+
     const unsafeMemoriesHome = path.join(TMP, "unsafe-memories-home");
     const externalMemories = path.join(TMP, "external-memories");
     fs.mkdirSync(unsafeMemoriesHome);
@@ -222,6 +237,35 @@ async function main() {
       assert.equal(read(managedPaths.historyPath), '{"id":"H"}\n');
       assert.equal(managedPaths.shellSnapshotsRoot, path.join(managedHome, "shell_snapshots"));
       await checkLocateRollout(sessions, managedHome);
+
+      // A link Codara did not make (pointing anywhere but the same name in
+      // the System home) is refused even inside a managed home.
+      for (const [index, name] of ["sessions", "shell_snapshots", "memories"].entries()) {
+        const plantedHome = path.join(codaraHome, "codex-cli", "accounts", `4444444${index}-4444-4444-8444-444444444444`);
+        fs.mkdirSync(plantedHome, { recursive: true, mode: 0o700 });
+        for (const shared of ["memories", "sessions", "shell_snapshots"]) {
+          const elsewhere = path.join(TMP, `planted-${name}-${shared}`);
+          fs.mkdirSync(elsewhere, { recursive: true });
+          fs.symlinkSync(
+            shared === name ? elsewhere : path.join(personalCodexHome, shared),
+            path.join(plantedHome, shared),
+            "dir",
+          );
+        }
+        assert.throws(
+          () => paths.resolveCodexHomePaths(plantedHome),
+          /links outside the System Codex home/,
+          `a planted ${name} link is refused`,
+        );
+      }
+      const plantedConfigHome = path.join(codaraHome, "codex-cli", "accounts", "55555555-5555-4555-8555-555555555555");
+      fs.mkdirSync(plantedConfigHome, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(TMP, "planted-config.toml"), "model = \"planted\"\n");
+      fs.symlinkSync(path.join(TMP, "planted-config.toml"), path.join(plantedConfigHome, "config.toml"));
+      assert.throws(
+        () => paths.resolveCodexHomePaths(plantedConfigHome),
+        /config links outside the System Codex home/,
+      );
     } finally {
       if (previousCodaraHome === undefined) delete process.env.CODARA_HOME_DIR;
       else process.env.CODARA_HOME_DIR = previousCodaraHome;
@@ -249,19 +293,26 @@ async function checkLocateRollout(sessions, managedHome) {
     return file;
   };
   const plain = write(path.join(day, `rollout-2026-11-22T10-00-00-${plainId}.jsonl`), 2048, 1_000);
-  write(path.join(day, `rollout-2026-11-22T14-50-32-${segmentId}.jsonl`), 2048, 2_000);
+  write(path.join(day, `rollout-2026-11-22T14-50-32-${segmentId}.jsonl`), 4096, 2_000);
+  // A continuation segment Codex just started: newest, but still tiny.
   const segment = write(
     path.join(later, `rollout-2026-11-23T08-00-00-${segmentId}_01a2047c-9506-7701-891c-609b4d962adb.jsonl`),
-    4096,
+    300,
     3_000,
   );
   const managedSpelling = (file) =>
     path.join(managedHome, "sessions", path.relative(path.join(personalCodexHome, "sessions"), file));
 
   const plainHit = await sessions.locateCodexRollout({ sessionId: plainId, codexHome: managedHome });
-  assert.deepEqual(plainHit, { path: managedSpelling(plain), size: 2048 }, "a plain rollout is found by id");
+  assert.deepEqual(plainHit, { path: managedSpelling(plain), largestSize: 2048 }, "a plain rollout is found by id");
   const segmentHit = await sessions.locateCodexRollout({ sessionId: segmentId, codexHome: managedHome });
-  assert.deepEqual(segmentHit, { path: managedSpelling(segment), size: 4096 }, "the newest segment wins");
+  assert.deepEqual(
+    segmentHit,
+    { path: managedSpelling(segment), largestSize: 4096 },
+    "the newest segment is the path, the largest file decides resumability",
+  );
+  const tinyStored = await sessions.locateCodexRollout({ sessionId: segmentId, codexHome: personalCodexHome, transcriptPath: segment });
+  assert.deepEqual(tinyStored, { path: segment, largestSize: 4096 }, "a tiny stored segment still finds the conversation");
   const stale = await sessions.locateCodexRollout({
     sessionId: segmentId,
     codexHome: managedHome,
@@ -273,7 +324,7 @@ async function checkLocateRollout(sessions, managedHome) {
     codexHome: personalCodexHome,
     transcriptPath: plain,
   });
-  assert.deepEqual(kept, { path: plain, size: 2048 }, "a valid stored path is used as is");
+  assert.deepEqual(kept, { path: plain, largestSize: 2048 }, "a valid stored path is used as is");
   const wrongId = await sessions.locateCodexRollout({
     sessionId: "019a0b1c-2d3e-7f40-8a51-b62c73d84e00",
     codexHome: personalCodexHome,
@@ -292,7 +343,7 @@ async function checkLocateRollout(sessions, managedHome) {
     "a session that lives only in another home is not found in this one",
   );
   assert.equal(
-    (await sessions.locateCodexRollout({ sessionId: otherId, codexHome: otherHome }))?.size,
+    (await sessions.locateCodexRollout({ sessionId: otherId, codexHome: otherHome }))?.largestSize,
     2048,
   );
 

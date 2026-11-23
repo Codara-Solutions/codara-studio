@@ -3315,10 +3315,33 @@ export function useTerminalSession({
         const plan = await computeResumePlan(session, sessionId);
         if (disposed) return;
         session = adoptPlanSession(session, plan);
+        if (!plan.resumeCommand && plan.keepPointer) {
+          // The check failed, so the session may well be there: bring the pane
+          // back as a shell the printed resume command can be typed into.
+          try {
+            await window.spark.pty.spawn({
+              id: sessionId,
+              shell,
+              cwd: session.cwd,
+              cols: Math.max(1, term.cols),
+              rows: Math.max(1, term.rows),
+              env: extraEnv,
+              nativeCodexProfileId: session.nativeCodexProfileId ?? nativeCodexProfileId,
+              nativeClaudeProfileId: session.nativeClaudeProfileId ?? nativeClaudeProfileId,
+              nativeGrokProfileId: session.nativeGrokProfileId ?? nativeGrokProfileId,
+            });
+            if (disposed) return;
+            term.options.disableStdin = false;
+          } catch (err) {
+            term.write(`\r\n\x1b[31mfailed to start a shell: ${(err as Error).message}\x1b[0m\r\n`);
+          }
+          if (plan.fallbackNotice) term.write(`\x1b[2m[${plan.fallbackNotice}]\x1b[0m\r\n`);
+          return;
+        }
         if (!plan.resumeCommand) {
           // Codex with an unresumable rollout → nothing deterministic to relaunch.
           if (plan.fallbackNotice) term.write(`\x1b[2m[${plan.fallbackNotice}]\x1b[0m\r\n`);
-          if (!plan.keepPointer) onResumeUnavailableRef.current?.();
+          onResumeUnavailableRef.current?.();
           return;
         }
         // Re-enable the input the onExit handler disabled, and announce it.
