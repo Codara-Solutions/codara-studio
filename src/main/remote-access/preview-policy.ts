@@ -16,7 +16,7 @@ export const REMOTE_PREVIEW_VIEWPORTS = {
   desktop: { width: 1280, height: 800 },
 } as const;
 
-export const PREVIEW_ACTION_BURST = 24;
+export const PREVIEW_ACTION_BURST = 32;
 export const PREVIEW_ACTION_REFILL_MS = 500;
 
 export type RemotePreviewViewportMode = "mobile" | "desktop";
@@ -82,6 +82,23 @@ function hasExactKeys(
   );
 }
 
+const DISALLOWED_PREVIEW_TITLE_SCHEMES = new Set([
+  "file:",
+  "javascript:",
+  "data:",
+  "chrome:",
+  "devtools:",
+  "about:",
+  "electron:",
+]);
+
+function stripAsciiControlChars(value: string): string {
+  return value
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim();
+}
+
 export function sanitizeRemotePreviewUrl(rawUrl: unknown): string | null {
   if (typeof rawUrl !== "string") return null;
   const trimmed = rawUrl.trim();
@@ -104,6 +121,44 @@ export function sanitizeRemotePreviewUrl(rawUrl: unknown): string | null {
     return null;
   }
   return sanitized;
+}
+
+// Untitled or error pages frequently mirror the raw URL (including embedded
+// basic-auth credentials or disallowed schemes) into the document title.
+export function sanitizeRemotePreviewTitle(
+  rawTitle: unknown,
+  fallbackUrl: string,
+  rawUrl?: unknown,
+): string {
+  const cleaned =
+    typeof rawTitle === "string" ? stripAsciiControlChars(rawTitle) : "";
+  if (!cleaned) {
+    return truncateUtf8(fallbackUrl, MAX_REMOTE_PREVIEW_TITLE_BYTES);
+  }
+  const cleanedRawUrl =
+    typeof rawUrl === "string" ? stripAsciiControlChars(rawUrl) : "";
+  if (cleanedRawUrl && cleaned === cleanedRawUrl) {
+    return truncateUtf8(
+      sanitizeRemotePreviewUrl(cleaned) ?? fallbackUrl,
+      MAX_REMOTE_PREVIEW_TITLE_BYTES,
+    );
+  }
+  try {
+    const parsed = new URL(cleaned);
+    const protocol = parsed.protocol.toLowerCase();
+    const isHttpOrHttps = protocol === "http:" || protocol === "https:";
+    const hasCredentials = Boolean(parsed.username || parsed.password);
+    const isDisallowedScheme = DISALLOWED_PREVIEW_TITLE_SCHEMES.has(protocol);
+    if (isHttpOrHttps || hasCredentials || isDisallowedScheme) {
+      return truncateUtf8(
+        sanitizeRemotePreviewUrl(cleaned) ?? fallbackUrl,
+        MAX_REMOTE_PREVIEW_TITLE_BYTES,
+      );
+    }
+  } catch {
+    // Plain non-URL title; keep as-is after control-char stripping.
+  }
+  return truncateUtf8(cleaned, MAX_REMOTE_PREVIEW_TITLE_BYTES);
 }
 
 export function isValidRemotePreviewInteractAction(
@@ -244,14 +299,15 @@ export function projectRemotePreviewTabs(
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const entry = raw as Record<string, unknown>;
     if (entry.workspaceId !== workspaceId) continue;
+    // Sleeping desktop tabs stay asleep until the desktop user wakes them.
+    if (entry.asleep === true) continue;
     if (typeof entry.id !== "string") continue;
     const tabId = entry.id.trim();
     if (!tabId || tabId.length > 128 || seen.has(tabId)) continue;
     const url = sanitizeRemotePreviewUrl(entry.url);
     if (!url) continue;
     seen.add(tabId);
-    const rawTitle = typeof entry.title === "string" ? entry.title.trim() : "";
-    const title = truncateUtf8(rawTitle || url, MAX_REMOTE_PREVIEW_TITLE_BYTES);
+    const title = sanitizeRemotePreviewTitle(entry.title, url, entry.url);
     const viewportMode = viewportModes?.get(tabId);
     tabs.push({
       tabId,

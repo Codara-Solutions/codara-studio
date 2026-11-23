@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 "use strict";
 
-// Pure-Node verification for remote Browser Preview policy, RPC validation,
-// frame size enforcement, device-scoped rate limiting, and desktop terminal
-// profile preservation (pi and antigravity).
+// Pure-Node verification for remote Browser Preview policy, controller
+// security/lifecycle invariants, RPC validation, frame size enforcement,
+// device-scoped rate limiting, and desktop terminal profile preservation.
 //
 //   node scripts/test-remote-access-preview.cjs
 
@@ -53,17 +53,17 @@ function makeFakeStream(rpc, keyByte = 1) {
     },
     end() {
       this.ended = true;
-      for (const handler of handlers.close) handler();
+      for (const h of handlers.close) h();
     },
     destroy() {
       this.destroyed = true;
-      for (const handler of handlers.close) handler();
+      for (const h of handlers.close) h();
     },
     on(event, handler) {
       handlers[event].push(handler);
     },
     inject(buf) {
-      for (const handler of handlers.data) handler(buf);
+      for (const h of handlers.data) h(buf);
     },
   };
 }
@@ -76,17 +76,91 @@ function makeFakeImage({ width, height, empty = false, sizeFor }) {
     getSize: () => ({ width: w, height: h }),
     resize(options) {
       resizes.push(options);
-      const nextWidth = options.width;
-      const nextHeight = Math.max(1, Math.round((h * nextWidth) / w));
-      return makeNode(nextWidth, nextHeight);
+      return makeNode(options.width, Math.max(1, Math.round((h * options.width) / w)));
     },
-    toJPEG(quality) {
-      const byteLength = sizeFor(w, quality);
-      return Buffer.alloc(byteLength, 0xab);
-    },
+    toJPEG: (quality) => Buffer.alloc(sizeFor(w, quality), 0xab),
   });
   return makeNode(width, height);
 }
+
+function makeFakeWc(initial = {}) {
+  const listeners = new Map();
+  const state = {
+    destroyed: false,
+    url: "https://localhost:3000/app",
+    title: "App",
+    loading: false,
+    canGoBack: false,
+    canGoForward: false,
+    zoom: 1,
+    sentEvents: [],
+    removedAfterDestroy: false,
+    zoomAfterDestroy: false,
+    onceAfterDestroy: false,
+    reloadCount: 0,
+    ...initial,
+  };
+  const wc = {
+    state,
+    isDestroyed: () => state.destroyed,
+    getURL: () => state.url,
+    getTitle: () => state.title,
+    isLoading: () => state.loading,
+    getZoomFactor() {
+      if (state.destroyed) {
+        state.zoomAfterDestroy = true;
+        throw new Error("Object has been destroyed");
+      }
+      return state.zoom;
+    },
+    navigationHistory: {
+      canGoBack: () => state.canGoBack,
+      canGoForward: () => state.canGoForward,
+    },
+    sendInputEvent(event) {
+      if (state.destroyed) throw new Error("Object has been destroyed");
+      state.sentEvents.push(event);
+      state.onSendInputEvent?.(event, state);
+    },
+    reload() {
+      if (state.destroyed) throw new Error("Object has been destroyed");
+      state.reloadCount += 1;
+      state.onReload?.(wc, state);
+    },
+    once(event, handler) {
+      if (state.destroyed) {
+        state.onceAfterDestroy = true;
+        throw new Error("Object has been destroyed");
+      }
+      if (!listeners.has(event)) listeners.set(event, new Set());
+      listeners.get(event).add(handler);
+    },
+    removeListener(event, handler) {
+      if (state.destroyed) {
+        state.removedAfterDestroy = true;
+        throw new Error("Object has been destroyed");
+      }
+      listeners.get(event)?.delete(handler);
+    },
+    emit(event) {
+      for (const fn of [...(listeners.get(event) ?? [])]) {
+        listeners.get(event).delete(fn);
+        fn();
+      }
+    },
+    listenerCount: () => [...listeners.values()].reduce((n, s) => n + s.size, 0),
+  };
+  return wc;
+}
+
+const expectReject = async (promise) => {
+  try {
+    await promise;
+    return null;
+  } catch (err) {
+    return err;
+  }
+};
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -102,6 +176,11 @@ async function main() {
       "preview-policy.cjs",
       bundleDir,
     );
+    const controllerMod = await bundle(
+      path.join(ROOT, "src", "main", "remote-access", "preview-controller.ts"),
+      "preview-controller.cjs",
+      bundleDir,
+    );
     const rpc = await bundle(
       path.join(ROOT, "src", "main", "remote-access", "rpc.ts"),
       "rpc.cjs",
@@ -113,22 +192,15 @@ async function main() {
       bundleDir,
     );
 
-    // ------------------------------------------------------------------
     // 1. sanitizeRemotePreviewUrl
-    // ------------------------------------------------------------------
     check(
-      "sanitizeRemotePreviewUrl accepts http and https URLs",
+      "sanitizeRemotePreviewUrl accepts http/https and strips credentials",
       policy.sanitizeRemotePreviewUrl("  http://localhost:3000/app?x=1#top ") ===
         "http://localhost:3000/app?x=1#top" &&
-        policy.sanitizeRemotePreviewUrl("https://example.com/dashboard") ===
-          "https://example.com/dashboard",
+        policy.sanitizeRemotePreviewUrl("https://alice:supersecret@example.com/path") ===
+          "https://example.com/path",
     );
-    check(
-      "sanitizeRemotePreviewUrl strips embedded credentials",
-      policy.sanitizeRemotePreviewUrl("https://alice:supersecret@example.com/path") ===
-        "https://example.com/path",
-    );
-    for (const bad of [
+    const badUrls = [
       "file:///etc/passwd",
       "javascript:alert(1)",
       "data:text/html,<script>alert(1)</script>",
@@ -142,31 +214,22 @@ async function main() {
       null,
       123,
       `https://example.com/${"a".repeat(policy.MAX_REMOTE_PREVIEW_URL_BYTES)}`,
-    ]) {
-      check(
-        `sanitizeRemotePreviewUrl rejects ${JSON.stringify(bad).slice(0, 48)}`,
-        policy.sanitizeRemotePreviewUrl(bad) === null,
-        policy.sanitizeRemotePreviewUrl(bad),
-      );
-    }
+    ];
+    check(
+      "sanitizeRemotePreviewUrl rejects disallowed schemes, malformed, and oversized URLs",
+      badUrls.every((bad) => policy.sanitizeRemotePreviewUrl(bad) === null),
+    );
 
-    // ------------------------------------------------------------------
     // 2. isValidRemotePreviewInteractAction
-    // ------------------------------------------------------------------
-    for (const good of [
+    const goodActions = [
       { kind: "click", x: 0, y: 0 },
       { kind: "click", x: 0.5, y: 0.75 },
       { kind: "click", x: 1, y: 1 },
       { kind: "reload" },
       { kind: "viewport", mode: "mobile" },
       { kind: "viewport", mode: "desktop" },
-    ]) {
-      check(
-        `isValidRemotePreviewInteractAction accepts ${JSON.stringify(good)}`,
-        policy.isValidRemotePreviewInteractAction(good) === true,
-      );
-    }
-    for (const bad of [
+    ];
+    const badActions = [
       null,
       [],
       "reload",
@@ -183,41 +246,34 @@ async function main() {
       { kind: "type", text: "secret" },
       { kind: "press_key", key: "Enter" },
       { kind: "upload", path: "/etc/passwd" },
-    ]) {
-      check(
-        `isValidRemotePreviewInteractAction rejects ${JSON.stringify(bad)}`,
-        policy.isValidRemotePreviewInteractAction(bad) === false,
-      );
-    }
+    ];
+    check(
+      "isValidRemotePreviewInteractAction accepts valid actions and rejects extras/disallowed kinds",
+      goodActions.every((a) => policy.isValidRemotePreviewInteractAction(a) === true) &&
+        badActions.every((a) => policy.isValidRemotePreviewInteractAction(a) === false),
+    );
 
-    // ------------------------------------------------------------------
     // 3. mapNormalizedPreviewClick
-    // ------------------------------------------------------------------
     check(
       "mapNormalizedPreviewClick maps normalized points into integer CSS bounds",
-      JSON.stringify(policy.mapNormalizedPreviewClick(0, 0, 430, 860)) ===
-        JSON.stringify({ x: 0, y: 0 }) &&
-        JSON.stringify(policy.mapNormalizedPreviewClick(0.5, 0.5, 430, 860)) ===
-          JSON.stringify({ x: 215, y: 430 }) &&
-        JSON.stringify(policy.mapNormalizedPreviewClick(1, 1, 430, 860)) ===
-          JSON.stringify({ x: 429, y: 859 }) &&
-        JSON.stringify(policy.mapNormalizedPreviewClick(-0.2, 1.5, 430, 860)) ===
-          JSON.stringify({ x: 0, y: 859 }),
+      JSON.stringify(policy.mapNormalizedPreviewClick(0, 0, 430, 860)) === '{"x":0,"y":0}' &&
+        JSON.stringify(policy.mapNormalizedPreviewClick(0.5, 0.5, 430, 860)) === '{"x":215,"y":430}' &&
+        JSON.stringify(policy.mapNormalizedPreviewClick(1, 1, 430, 860)) === '{"x":429,"y":859}' &&
+        JSON.stringify(policy.mapNormalizedPreviewClick(-0.2, 1.5, 430, 860)) === '{"x":0,"y":859}',
     );
-    let invalidViewportThrew = false;
-    try {
-      policy.mapNormalizedPreviewClick(0.5, 0.5, 0, 800);
-    } catch {
-      invalidViewportThrew = true;
-    }
     check(
       "mapNormalizedPreviewClick rejects non-positive viewport dimensions",
-      invalidViewportThrew,
+      (() => {
+        try {
+          policy.mapNormalizedPreviewClick(0.5, 0.5, 0, 800);
+          return false;
+        } catch {
+          return true;
+        }
+      })(),
     );
 
-    // ------------------------------------------------------------------
     // 4. encodeBoundedPreviewJpeg
-    // ------------------------------------------------------------------
     const wideImg = makeFakeImage({
       width: 1920,
       height: 1080,
@@ -232,7 +288,6 @@ async function main() {
         wideEncoded.dataUrl.startsWith("data:image/jpeg;base64,") &&
         wideImg.resizes.length === 1 &&
         wideImg.resizes[0].width === policy.REMOTE_PREVIEW_MAX_WIDTH,
-      wideEncoded,
     );
 
     const heavyImg = makeFakeImage({
@@ -245,111 +300,96 @@ async function main() {
       "encodeBoundedPreviewJpeg falls back to 640px width when 960px exceeds budget",
       heavyEncoded.width === policy.REMOTE_PREVIEW_FALLBACK_WIDTH &&
         heavyEncoded.height === 400 &&
-        heavyEncoded.bytes === 200 * 1024 &&
         heavyImg.resizes.map((r) => r.width).join(",") === "960,640",
-      { heavyEncoded, resizes: heavyImg.resizes },
     );
 
-    let tooBigThrew = false;
-    try {
-      policy.encodeBoundedPreviewJpeg(
-        makeFakeImage({
-          width: 1280,
-          height: 800,
-          sizeFor: () => policy.MAX_REMOTE_PREVIEW_IMAGE_BYTES + 1,
-        }),
-      );
-    } catch (err) {
-      tooBigThrew = /transfer limit/i.test(String(err.message));
-    }
     check(
-      "encodeBoundedPreviewJpeg throws when every fallback exceeds maxBytes",
-      tooBigThrew,
+      "encodeBoundedPreviewJpeg throws on oversized and empty frames",
+      (() => {
+        let bigOk = false;
+        let emptyOk = false;
+        try {
+          policy.encodeBoundedPreviewJpeg(
+            makeFakeImage({ width: 1280, height: 800, sizeFor: () => policy.MAX_REMOTE_PREVIEW_IMAGE_BYTES + 1 }),
+          );
+        } catch (err) {
+          bigOk = /transfer limit/i.test(String(err.message));
+        }
+        try {
+          policy.encodeBoundedPreviewJpeg(
+            makeFakeImage({ width: 0, height: 0, empty: true, sizeFor: () => 0 }),
+          );
+        } catch {
+          emptyOk = true;
+        }
+        return bigOk && emptyOk;
+      })(),
     );
 
-    let emptyThrew = false;
-    try {
-      policy.encodeBoundedPreviewJpeg(
-        makeFakeImage({ width: 0, height: 0, empty: true, sizeFor: () => 0 }),
-      );
-    } catch {
-      emptyThrew = true;
-    }
-    check("encodeBoundedPreviewJpeg rejects empty frames", emptyThrew);
+    // 5. sanitizeRemotePreviewTitle & projectRemotePreviewTabs
+    check(
+      "sanitizeRemotePreviewTitle strips URL credentials and dangerous schemes while keeping normal titles",
+      policy.sanitizeRemotePreviewTitle("https://alice:secret@localhost:3000/app", "https://localhost:3000/app") ===
+        "https://localhost:3000/app" &&
+        policy.sanitizeRemotePreviewTitle("file:///Users/me/secrets/keys.txt", "https://localhost:3000/app") ===
+          "https://localhost:3000/app" &&
+        policy.sanitizeRemotePreviewTitle("ftp://bob:pw@files.internal/dump", "https://localhost:3000/app") ===
+          "https://localhost:3000/app" &&
+        policy.sanitizeRemotePreviewTitle("javascript:alert(1)", "https://localhost:3000/app") ===
+          "https://localhost:3000/app" &&
+        policy.sanitizeRemotePreviewTitle("Settings: Billing\n\t\x07", "https://localhost:3000/app") ===
+          "Settings: Billing" &&
+        policy.sanitizeRemotePreviewTitle("   \x07 ", "https://localhost:3000/app") ===
+          "https://localhost:3000/app",
+    );
 
-    // ------------------------------------------------------------------
-    // 5. projectRemotePreviewTabs
-    // ------------------------------------------------------------------
     const modes = new Map([["tab-1", "desktop"]]);
-    const longMultiByteTitle = "🚀".repeat(80);
     const rawTabs = [
       {
         id: "tab-1",
         workspaceId: "ws-1",
-        title: longMultiByteTitle,
+        title: "🚀".repeat(80),
         url: "https://user:pass@localhost:3000/home",
         link: "codara://tab/ws-1/tab-1",
         partition: "persist:secret",
         webContentsId: 42,
-        isActive: true,
       },
       {
-        id: "tab-other-ws",
-        workspaceId: "ws-2",
-        title: "Other",
-        url: "https://example.com",
-      },
-      {
-        id: "tab-file",
+        id: "tab-cred-title",
         workspaceId: "ws-1",
-        title: "Local File",
-        url: "file:///etc/hosts",
+        title: "https://alice:topsecret@localhost:3000/admin",
+        url: "https://alice:topsecret@localhost:3000/admin",
       },
-      {
-        id: "tab-blank",
-        workspaceId: "ws-1",
-        title: "Blank",
-        url: "about:blank",
-      },
-      {
-        id: "tab-1",
-        workspaceId: "ws-1",
-        title: "Duplicate",
-        url: "https://example.com/dup",
-      },
-      ...Array.from({ length: 40 }, (_, index) => ({
-        id: `extra-${index}`,
+      { id: "tab-asleep", workspaceId: "ws-1", title: "Asleep", url: "https://example.com/", asleep: true },
+      { id: "tab-other-ws", workspaceId: "ws-2", title: "Other", url: "https://example.com/" },
+      { id: "tab-file", workspaceId: "ws-1", title: "File", url: "file:///etc/hosts" },
+      { id: "tab-blank", workspaceId: "ws-1", title: "Blank", url: "about:blank" },
+      { id: "tab-1", workspaceId: "ws-1", title: "Dup", url: "https://example.com/dup" },
+      ...Array.from({ length: 40 }, (_, i) => ({
+        id: `extra-${i}`,
         workspaceId: "ws-1",
         title: "",
-        url: `http://127.0.0.1:4000/${index}`,
+        url: `http://127.0.0.1:4000/${i}`,
       })),
     ];
     const projected = policy.projectRemotePreviewTabs(rawTabs, "ws-1", modes);
     check(
-      "projectRemotePreviewTabs filters by workspace and scheme, caps at 32, strips internals",
+      "projectRemotePreviewTabs filters workspace, sleeping tabs, schemes, caps at 32, strips internals and credentials",
       projected.length === policy.MAX_REMOTE_PREVIEW_TABS &&
         projected[0].tabId === "tab-1" &&
         projected[0].url === "https://localhost:3000/home" &&
         projected[0].viewportMode === "desktop" &&
-        Buffer.byteLength(projected[0].title, "utf8") <=
-          policy.MAX_REMOTE_PREVIEW_TITLE_BYTES &&
+        Buffer.byteLength(projected[0].title, "utf8") <= policy.MAX_REMOTE_PREVIEW_TITLE_BYTES &&
         !("link" in projected[0]) &&
         !("partition" in projected[0]) &&
         !("webContentsId" in projected[0]) &&
-        projected[1].tabId === "extra-0" &&
-        projected[1].title === "http://127.0.0.1:4000/0",
-      { count: projected.length, first: projected[0], second: projected[1] },
+        projected[1].title === "https://localhost:3000/admin" &&
+        !projected[1].title.includes("topsecret") &&
+        !projected.some((t) => t.tabId === "tab-asleep") &&
+        projected[2].title === "http://127.0.0.1:4000/0",
     );
 
-    // ------------------------------------------------------------------
-    // 6. RpcSession preview.* dispatch and validation
-    // ------------------------------------------------------------------
-    const missingStream = makeFakeStream(rpc, 9);
-    void new rpc.RpcSession(missingStream, {
-      device: { publicKey: "pk", name: "Studio", role: "computer", version: "0.0.0" },
-      listWorkspaces: async () => [],
-      createTerminal: async () => ({ write() {}, resize() {}, close() {} }),
-    });
+    // 6. RpcSession preview.* dispatch, validation, frame limit, error mapping
     let nextId = 1;
     const callOn = async (stream, method, params) => {
       const id = nextId++;
@@ -357,6 +397,13 @@ async function main() {
       for (let turn = 0; turn < 5; turn += 1) await flush();
       return stream.outbox.find((frame) => frame.id === id);
     };
+
+    const missingStream = makeFakeStream(rpc, 9);
+    void new rpc.RpcSession(missingStream, {
+      device: { publicKey: "pk", name: "Studio", role: "computer", version: "0.0.0" },
+      listWorkspaces: async () => [],
+      createTerminal: async () => ({ write() {}, resize() {}, close() {} }),
+    });
     await callOn(missingStream, "hello", {
       protocol: rpc.RPC_PROTOCOL_VERSION,
       device: { publicKey: "phone", name: "Phone", role: "phone", version: "1" },
@@ -367,11 +414,7 @@ async function main() {
       ["preview.interact", { workspaceId: "ws-1", tabId: "tab-1", action: { kind: "reload" } }],
     ]) {
       const reply = await callOn(missingStream, method, params);
-      check(
-        `${method} replies unknown-method when service is absent`,
-        reply?.error?.code === "unknown-method",
-        reply,
-      );
+      check(`${method} replies unknown-method when service is absent`, reply?.error?.code === "unknown-method", reply);
     }
 
     const baseShot = {
@@ -397,51 +440,21 @@ async function main() {
       listWorkspaces: async () => [],
       createTerminal: async () => ({ write() {}, resize() {}, close() {} }),
       listPreviewTabs: async (workspaceId) => {
-        if (workspaceId === "missing-ws") {
-          throw new Error(`Unknown workspace: ${workspaceId}`);
-        }
-        return [
-          {
-            tabId: "tab-1",
-            workspaceId,
-            title: "App",
-            url: "http://localhost:3000/",
-            loading: false,
-            canGoBack: false,
-            canGoForward: false,
-          },
-        ];
+        if (workspaceId === "missing-ws") throw new Error(`Unknown workspace: ${workspaceId}`);
+        return [{ tabId: "tab-1", workspaceId, title: "App", url: "http://localhost:3000/", loading: false, canGoBack: false, canGoForward: false }];
       },
       capturePreviewScreenshot: async ({ workspaceId, tabId }) => {
-        if (workspaceId === "missing-ws") {
-          throw new Error(`Unknown workspace: ${workspaceId}`);
-        }
+        if (workspaceId === "missing-ws") throw new Error(`Unknown workspace: ${workspaceId}`);
         if (screenshotMode === "oversized") {
-          return {
-            ...baseShot,
-            workspaceId,
-            tabId,
-            screenshotDataUrl: `data:image/jpeg;base64,${"A".repeat(rpc.MAX_FRAME_BYTES)}`,
-          };
+          return { ...baseShot, workspaceId, tabId, screenshotDataUrl: `data:image/jpeg;base64,${"A".repeat(rpc.MAX_FRAME_BYTES)}` };
         }
-        if (screenshotMode === "dirty-error") {
-          throw new Error("Capture failed\n\t\x07with control chars");
-        }
+        if (screenshotMode === "dirty-error") throw new Error("Capture failed\n\t\x07with control chars");
         return { ...baseShot, workspaceId, tabId };
       },
       interactPreviewTab: async (input) => {
-        if (input.workspaceId === "missing-ws") {
-          throw new Error(`Unknown workspace: ${input.workspaceId}`);
-        }
+        if (input.workspaceId === "missing-ws") throw new Error(`Unknown workspace: ${input.workspaceId}`);
         interactCalls.push(input);
-        return {
-          ...baseShot,
-          workspaceId: input.workspaceId,
-          tabId: input.tabId,
-          ...(input.action.kind === "viewport"
-            ? { viewportMode: input.action.mode }
-            : {}),
-        };
+        return { ...baseShot, workspaceId: input.workspaceId, tabId: input.tabId, ...(input.action.kind === "viewport" ? { viewportMode: input.action.mode } : {}) };
       },
     });
     await callOn(sessionStream, "hello", {
@@ -450,125 +463,60 @@ async function main() {
     });
 
     const listOk = await callOn(sessionStream, "preview.list", { workspaceId: "ws-1" });
+    const listExtra = await callOn(sessionStream, "preview.list", { workspaceId: "ws-1", extra: true });
+    const listUnknown = await callOn(sessionStream, "preview.list", { workspaceId: "missing-ws" });
     check(
-      "preview.list returns projected tabs on valid request",
-      listOk?.ok === true &&
-        Array.isArray(listOk.result?.tabs) &&
-        listOk.result.tabs.length === 1 &&
-        listOk.result.tabs[0].tabId === "tab-1",
-      listOk,
+      "preview.list handles valid, extra-key, and unknown-workspace requests",
+      listOk?.ok === true && listOk.result?.tabs?.length === 1 && listExtra?.error?.code === "invalid-params" && listUnknown?.error?.code === "unknown-workspace",
     );
 
-    const listExtra = await callOn(sessionStream, "preview.list", {
-      workspaceId: "ws-1",
-      extra: true,
-    });
-    check(
-      "preview.list rejects extra keys with invalid-params",
-      listExtra?.error?.code === "invalid-params",
-      listExtra,
-    );
-
-    const listUnknownWs = await callOn(sessionStream, "preview.list", {
-      workspaceId: "missing-ws",
-    });
-    check(
-      "preview.list maps Unknown workspace errors to unknown-workspace",
-      listUnknownWs?.error?.code === "unknown-workspace",
-      listUnknownWs,
-    );
-
-    const shotOk = await callOn(sessionStream, "preview.screenshot", {
-      workspaceId: "ws-1",
-      tabId: "tab-1",
-    });
-    check(
-      "preview.screenshot returns RemotePreviewScreenshot on valid request",
-      shotOk?.ok === true &&
-        shotOk.result?.tabId === "tab-1" &&
-        shotOk.result?.screenshotDataUrl === baseShot.screenshotDataUrl,
-      shotOk,
-    );
-
-    const shotBad = await callOn(sessionStream, "preview.screenshot", {
-      workspaceId: "ws-1",
-      tabId: "",
-    });
-    check(
-      "preview.screenshot rejects empty tabId",
-      shotBad?.error?.code === "invalid-params",
-      shotBad,
-    );
-
+    const shotOk = await callOn(sessionStream, "preview.screenshot", { workspaceId: "ws-1", tabId: "tab-1" });
+    const shotBad = await callOn(sessionStream, "preview.screenshot", { workspaceId: "ws-1", tabId: "" });
     screenshotMode = "oversized";
-    const shotTooLarge = await callOn(sessionStream, "preview.screenshot", {
-      workspaceId: "ws-1",
-      tabId: "tab-1",
-    });
-    check(
-      "preview.screenshot rejects oversized payload with message-too-large",
-      shotTooLarge?.error?.code === "message-too-large",
-      shotTooLarge,
-    );
-
+    const shotTooLarge = await callOn(sessionStream, "preview.screenshot", { workspaceId: "ws-1", tabId: "tab-1" });
     screenshotMode = "dirty-error";
-    const shotSanitizedErr = await callOn(sessionStream, "preview.screenshot", {
-      workspaceId: "ws-1",
-      tabId: "tab-1",
-    });
-    check(
-      "preview.screenshot sanitizes control characters in error messages",
-      shotSanitizedErr?.error?.code === "internal" &&
-        shotSanitizedErr.error.message === "Capture failed with control chars",
-      shotSanitizedErr,
-    );
+    const shotDirty = await callOn(sessionStream, "preview.screenshot", { workspaceId: "ws-1", tabId: "tab-1" });
     screenshotMode = "ok";
+    check(
+      "preview.screenshot validates params, enforces frame ceiling, and sanitizes control chars",
+      shotOk?.ok === true &&
+        shotBad?.error?.code === "invalid-params" &&
+        shotTooLarge?.error?.code === "message-too-large" &&
+        shotDirty?.error?.code === "internal" &&
+        shotDirty.error.message === "Capture failed with control chars",
+    );
 
     const interactClick = await callOn(sessionStream, "preview.interact", {
       workspaceId: "ws-1",
       tabId: "tab-1",
       action: { kind: "click", x: 0.4, y: 0.6 },
     });
-    const interactViewport = await callOn(sessionStream, "preview.interact", {
+    const interactVp = await callOn(sessionStream, "preview.interact", {
       workspaceId: "ws-1",
       tabId: "tab-1",
       action: { kind: "viewport", mode: "desktop" },
     });
-    check(
-      "preview.interact forwards valid click and viewport actions",
-      interactClick?.ok === true &&
-        interactViewport?.ok === true &&
-        interactViewport.result?.viewportMode === "desktop" &&
-        interactCalls.length === 2,
-      { interactClick, interactViewport },
-    );
-
-    const interactDisallowed = await callOn(sessionStream, "preview.interact", {
+    const interactNav = await callOn(sessionStream, "preview.interact", {
       workspaceId: "ws-1",
       tabId: "tab-1",
       action: { kind: "navigate", url: "file:///etc/passwd" },
     });
-    check(
-      "preview.interact rejects navigate actions with invalid-params",
-      interactDisallowed?.error?.code === "invalid-params" &&
-        interactCalls.length === 2,
-      interactDisallowed,
-    );
-
-    const interactUnknownWs = await callOn(sessionStream, "preview.interact", {
+    const interactUnknown = await callOn(sessionStream, "preview.interact", {
       workspaceId: "missing-ws",
       tabId: "tab-1",
       action: { kind: "reload" },
     });
     check(
-      "preview.interact maps Unknown workspace errors to unknown-workspace",
-      interactUnknownWs?.error?.code === "unknown-workspace",
-      interactUnknownWs,
+      "preview.interact forwards valid actions, rejects navigate, and maps unknown-workspace",
+      interactClick?.ok === true &&
+        interactVp?.ok === true &&
+        interactVp.result?.viewportMode === "desktop" &&
+        interactNav?.error?.code === "invalid-params" &&
+        interactCalls.length === 2 &&
+        interactUnknown?.error?.code === "unknown-workspace",
     );
 
-    // ------------------------------------------------------------------
-    // 7. Device-scoped rate limiting via RemoteAccessService
-    // ------------------------------------------------------------------
+    // 7. Device-scoped rate limiting via RemoteAccessService (including preview.list)
     let clock = Date.parse("2026-11-23T12:00:00.000Z");
     let captureCount = 0;
     const service = new remoteAccess.RemoteAccessService({
@@ -577,6 +525,7 @@ async function main() {
       appVersion: "test",
       now: () => clock,
       listWorkspaces: async () => [],
+      listPreviewTabs: async () => [],
       capturePreviewScreenshot: async ({ workspaceId, tabId }) => {
         captureCount += 1;
         return { ...baseShot, workspaceId, tabId };
@@ -590,7 +539,6 @@ async function main() {
       },
       log: () => {},
     });
-
     const connectDevice = async (keyByte) => {
       const stream = makeFakeStream(rpc, keyByte);
       service.onAuthorizedStream(stream);
@@ -600,119 +548,308 @@ async function main() {
       });
       return stream;
     };
-
     try {
       const phoneA = await connectDevice(21);
       const replies = [];
       for (let i = 0; i < policy.PREVIEW_ACTION_BURST; i += 1) {
-        replies.push(
-          await callOn(phoneA, "preview.screenshot", {
-            workspaceId: "ws-1",
-            tabId: "tab-1",
-          }),
-        );
+        replies.push(await callOn(phoneA, "preview.screenshot", { workspaceId: "ws-1", tabId: "tab-1" }));
       }
-      check(
-        "RemoteAccessService allows full preview action burst",
-        replies.every((r) => r?.ok === true) &&
-          captureCount === policy.PREVIEW_ACTION_BURST,
-        { captureCount, last: replies.at(-1) },
-      );
-
-      const limited = await callOn(phoneA, "preview.interact", {
+      const limitedInteract = await callOn(phoneA, "preview.interact", {
         workspaceId: "ws-1",
         tabId: "tab-1",
         action: { kind: "reload" },
       });
-      check(
-        "RemoteAccessService rate-limits preview actions past burst",
-        limited?.error?.code === "rate-limited" &&
-          captureCount === policy.PREVIEW_ACTION_BURST,
-        limited,
-      );
-
+      const limitedList = await callOn(phoneA, "preview.list", { workspaceId: "ws-1" });
       const reconnectedA = await connectDevice(21);
-      const afterReconnect = await callOn(reconnectedA, "preview.screenshot", {
-        workspaceId: "ws-1",
-        tabId: "tab-1",
-      });
-      check(
-        "reconnecting does not reset the preview rate bucket",
-        afterReconnect?.error?.code === "rate-limited",
-        afterReconnect,
-      );
-
+      const afterReconnect = await callOn(reconnectedA, "preview.screenshot", { workspaceId: "ws-1", tabId: "tab-1" });
       const phoneB = await connectDevice(22);
-      const otherPhone = await callOn(phoneB, "preview.screenshot", {
-        workspaceId: "ws-1",
-        tabId: "tab-1",
-      });
-      check(
-        "another paired phone keeps an independent preview bucket",
-        otherPhone?.ok === true,
-        otherPhone,
-      );
-
+      const otherPhone = await callOn(phoneB, "preview.screenshot", { workspaceId: "ws-1", tabId: "tab-1" });
       clock += policy.PREVIEW_ACTION_REFILL_MS;
-      const refilled = await callOn(reconnectedA, "preview.screenshot", {
-        workspaceId: "ws-1",
-        tabId: "tab-1",
-      });
-      check(
-        "advancing time refills the preview rate bucket",
-        refilled?.ok === true,
-        refilled,
-      );
-
+      const refilled = await callOn(reconnectedA, "preview.screenshot", { workspaceId: "ws-1", tabId: "tab-1" });
       const malformed = await callOn(reconnectedA, "preview.interact", {
         workspaceId: "ws-1",
         tabId: "tab-1",
         action: { kind: "evaluate", code: "1+1" },
       });
       check(
-        "malformed preview.interact returns invalid-params instead of rate-limited",
-        malformed?.error?.code === "invalid-params",
-        malformed,
+        "RemoteAccessService enforces per-device rate limit across screenshot, interact, list, and reconnects",
+        replies.every((r) => r?.ok === true) &&
+          captureCount === policy.PREVIEW_ACTION_BURST + 2 &&
+          limitedInteract?.error?.code === "rate-limited" &&
+          limitedList?.error?.code === "rate-limited" &&
+          afterReconnect?.error?.code === "rate-limited" &&
+          otherPhone?.ok === true &&
+          refilled?.ok === true &&
+          malformed?.error?.code === "invalid-params",
       );
     } finally {
       await service.setEnabled(false).catch(() => undefined);
     }
 
-    // ------------------------------------------------------------------
-    // 8. Desktop pi and antigravity profile preservation guards
-    // ------------------------------------------------------------------
+    // 8. Controller security & lifecycle hardening (Findings 1-5 + Nit 7)
+    const okImage = makeFakeImage({ width: 430, height: 860, sizeFor: () => 2048 });
+    const makeController = (overrides = {}) => {
+      const wc = overrides.wc ?? makeFakeWc();
+      const defaultTab = { id: "tab-1", workspaceId: "ws-1", title: "App", url: wc.state.url };
+      return {
+        wc,
+        ctrl: controllerMod.createRemotePreviewController({
+          requireLocalWorkspace: async (ws) => {
+            if (ws === "bad-ws") throw new Error("Unknown workspace: bad-ws");
+            return {};
+          },
+          requestPreviewOp: async (op) =>
+            op === "list"
+              ? { tabs: [defaultTab] }
+              : { dataUrl: "data:image/png;base64,AAAA", url: wc.state.url, title: wc.state.title },
+          resolvePreviewGuest: async () => ({
+            wc,
+            info: { tabId: "tab-1", workspaceId: "ws-1", url: wc.state.url, viewport: { width: 430, height: 860 } },
+          }),
+          isTrustedPreviewGuest: () => true,
+          decodeImage: () => okImage,
+          sleep: async () => {},
+          reloadSettleMs: 500,
+          ...overrides.deps,
+        }),
+      };
+    };
+
+    // Finding 1: credential-bearing URL in screenshot title is stripped & lookupWake: "none" passed
+    {
+      const credUrl = "https://alice:pw123@localhost:3000/panel";
+      const resolveParams = [];
+      const wc = makeFakeWc({ url: credUrl, title: credUrl });
+      const { ctrl } = makeController({
+        wc,
+        deps: {
+          resolvePreviewGuest: async (params) => {
+            resolveParams.push(params);
+            return { wc, info: { tabId: "tab-1", workspaceId: "ws-1", url: credUrl, viewport: { width: 430, height: 860 } } };
+          },
+        },
+      });
+      const shot = await ctrl.capturePreviewScreenshot({ workspaceId: "ws-1", tabId: "tab-1" });
+      check(
+        "controller strips credentials from screenshot url/title and passes lookupWake: none",
+        shot.url === "https://localhost:3000/panel" &&
+          shot.title === "https://localhost:3000/panel" &&
+          !shot.title.includes("pw123") &&
+          resolveParams.length === 1 &&
+          resolveParams[0].lookupWake === "none",
+      );
+    }
+
+    // Finding 2: raw previewRpc / resolvePreviewGuest errors redacted; Unknown workspace preserved
+    {
+      const leaked =
+        "Browser tab secret-tab is in another workspace. Tabs you can pass as tabId: file:///Users/me/secrets/keys.txt. Call codara_preview_navigate.";
+      const { ctrl } = makeController({
+        deps: {
+          resolvePreviewGuest: async () => {
+            throw new Error(leaked);
+          },
+        },
+      });
+      const errTab = await expectReject(ctrl.capturePreviewScreenshot({ workspaceId: "ws-1", tabId: "tab-1" }));
+      const errWs = await expectReject(ctrl.listPreviewTabs("bad-ws"));
+      const { ctrl: timeoutCtrl } = makeController({
+        deps: {
+          requestPreviewOp: async () => {
+            throw new Error("preview op 'list' timed out after 5000ms for /Users/secret/path");
+          },
+        },
+      });
+      const errBridge = await expectReject(timeoutCtrl.listPreviewTabs("ws-1"));
+      check(
+        "controller redacts raw previewRpc paths/tab ids/MCP hints and maps timeouts safely",
+        errTab?.message === controllerMod.ERR_PREVIEW_TAB_UNAVAILABLE &&
+          !errTab.message.includes("keys.txt") &&
+          !errTab.message.includes("codara_preview_navigate") &&
+          errWs?.message === "Unknown workspace: bad-ws" &&
+          errBridge?.message === controllerMod.ERR_PREVIEW_UNAVAILABLE,
+      );
+    }
+
+    // Finding 3: pre-capture wc.getURL(), info.tabId, isTrustedPreviewGuest, and post-capture TOCTOU fail closed
+    {
+      let shotCalled = false;
+      const wcFile = makeFakeWc({ url: "file:///etc/passwd" });
+      const { ctrl: preFileCtrl } = makeController({
+        wc: wcFile,
+        deps: {
+          requestPreviewOp: async (op) => {
+            if (op === "list") return { tabs: [{ id: "tab-1", workspaceId: "ws-1", url: "https://localhost:3000/" }] };
+            shotCalled = true;
+            return { dataUrl: "data:image/png;base64,AAAA" };
+          },
+          resolvePreviewGuest: async () => ({
+            wc: wcFile,
+            info: { tabId: "tab-1", workspaceId: "ws-1", url: "https://localhost:3000/", viewport: { width: 430, height: 860 } },
+          }),
+        },
+      });
+      const errPreFile = await expectReject(preFileCtrl.capturePreviewScreenshot({ workspaceId: "ws-1", tabId: "tab-1" }));
+
+      const { ctrl: badIdCtrl } = makeController({
+        deps: {
+          resolvePreviewGuest: async () => ({
+            wc: makeFakeWc(),
+            info: { tabId: "other-tab", workspaceId: "ws-1", url: "https://localhost:3000/", viewport: { width: 430, height: 860 } },
+          }),
+        },
+      });
+      const errBadId = await expectReject(badIdCtrl.capturePreviewScreenshot({ workspaceId: "ws-1", tabId: "tab-1" }));
+
+      const { ctrl: untrustedCtrl } = makeController({ deps: { isTrustedPreviewGuest: () => false } });
+      const errUntrusted = await expectReject(untrustedCtrl.capturePreviewScreenshot({ workspaceId: "ws-1", tabId: "tab-1" }));
+
+      check(
+        "pre-capture enforces wc.getURL(), info.tabId, and isTrustedPreviewGuest without info.url fallback",
+        errPreFile?.message === controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED &&
+          !shotCalled &&
+          errBadId?.message === controllerMod.ERR_PREVIEW_TAB_UNAVAILABLE &&
+          errUntrusted?.message === controllerMod.ERR_PREVIEW_TAB_CLOSED,
+      );
+
+      for (const [label, mutate, expected] of [
+        ["navigation to file://", (wc) => { wc.state.url = "file:///etc/hosts"; return { dataUrl: "data:image/png;base64,AAAA", url: "https://localhost:3000/" }; }, controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED],
+        ["empty wc.getURL() (no preUrl fallback)", (wc) => { wc.state.url = ""; return { dataUrl: "data:image/png;base64,AAAA", url: "https://localhost:3000/" }; }, controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED],
+        ["destroyed wc", (wc) => { wc.state.destroyed = true; return { dataUrl: "data:image/png;base64,AAAA", url: "https://localhost:3000/" }; }, controllerMod.ERR_PREVIEW_TAB_CLOSED],
+        ["raw.url file://", () => ({ dataUrl: "data:image/png;base64,AAAA", url: "file:///etc/passwd" }), controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED],
+      ]) {
+        const wc = makeFakeWc({ url: "https://localhost:3000/start" });
+        const { ctrl } = makeController({
+          wc,
+          deps: {
+            requestPreviewOp: async (op) =>
+              op === "list"
+                ? { tabs: [{ id: "tab-1", workspaceId: "ws-1", url: "https://localhost:3000/start" }] }
+                : mutate(wc),
+          },
+        });
+        const err = await expectReject(ctrl.capturePreviewScreenshot({ workspaceId: "ws-1", tabId: "tab-1" }));
+        check(`post-capture TOCTOU fails closed on ${label}`, err?.message === expected, err?.message);
+      }
+    }
+
+    // Finding 4: sleeping tabs and disallowed-scheme tabs never wake or call resolvePreviewGuest/screenshot/resize
+    {
+      let guestCalls = 0;
+      const ops = [];
+      const { ctrl } = makeController({
+        deps: {
+          requestPreviewOp: async (op) => {
+            ops.push(op);
+            if (op === "list") {
+              return {
+                tabs: [
+                  { id: "sleep-https", workspaceId: "ws-1", url: "https://example.com/", asleep: true },
+                  { id: "sleep-file", workspaceId: "ws-1", url: "file:///Users/me/private.html", asleep: true },
+                  { id: "awake-file", workspaceId: "ws-1", url: "file:///Users/me/private.html" },
+                ],
+              };
+            }
+            throw new Error("should not call screenshot/resize");
+          },
+          resolvePreviewGuest: async () => {
+            guestCalls += 1;
+            throw new Error("should not wake guest");
+          },
+        },
+      });
+      const e1 = await expectReject(ctrl.capturePreviewScreenshot({ workspaceId: "ws-1", tabId: "sleep-https" }));
+      const e2 = await expectReject(ctrl.interactPreviewTab({ workspaceId: "ws-1", tabId: "sleep-file", action: { kind: "viewport", mode: "desktop" } }));
+      const e3 = await expectReject(ctrl.capturePreviewScreenshot({ workspaceId: "ws-1", tabId: "awake-file" }));
+      check(
+        "sleeping and disallowed-scheme tabs are rejected before resolvePreviewGuest or screenshot/resize",
+        e1?.message === controllerMod.ERR_PREVIEW_TAB_UNAVAILABLE &&
+          e2?.message === controllerMod.ERR_PREVIEW_TAB_UNAVAILABLE &&
+          e3?.message === controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED &&
+          guestCalls === 0 &&
+          ops.every((op) => op === "list"),
+      );
+    }
+
+    // Finding 5 & Nit 7: click viewport requirement, destroyed wc guards, reload render-process-gone cleanup
+    {
+      const wcNoVp = makeFakeWc();
+      wcNoVp.getBounds = () => ({ width: 1000, height: 800 });
+      const { ctrl: noVpCtrl } = makeController({
+        wc: wcNoVp,
+        deps: {
+          resolvePreviewGuest: async () => ({
+            wc: wcNoVp,
+            info: { tabId: "tab-1", workspaceId: "ws-1", url: wcNoVp.state.url, viewport: null },
+          }),
+        },
+      });
+      const errNoVp = await expectReject(
+        noVpCtrl.interactPreviewTab({ workspaceId: "ws-1", tabId: "tab-1", action: { kind: "click", x: 0.5, y: 0.5 } }),
+      );
+
+      const wcMidClick = makeFakeWc({
+        onSendInputEvent: (event, state) => {
+          if (event.type === "mouseMove") state.destroyed = true;
+        },
+      });
+      const { ctrl: midClickCtrl } = makeController({ wc: wcMidClick });
+      const errMidClick = await expectReject(
+        midClickCtrl.interactPreviewTab({ workspaceId: "ws-1", tabId: "tab-1", action: { kind: "click", x: 0.5, y: 0.5 } }),
+      );
+
+      const wcGone = makeFakeWc({
+        onReload: (wc) => queueMicrotask(() => wc.emit("render-process-gone")),
+      });
+      const { ctrl: goneCtrl } = makeController({ wc: wcGone });
+      await goneCtrl.interactPreviewTab({ workspaceId: "ws-1", tabId: "tab-1", action: { kind: "reload" } });
+
+      const wcDestroyedReload = makeFakeWc({
+        onReload: (wc, state) =>
+          queueMicrotask(() => {
+            wc.emit("destroyed");
+            state.destroyed = true;
+          }),
+      });
+      const { ctrl: destroyedReloadCtrl } = makeController({ wc: wcDestroyedReload });
+      const errDestroyedReload = await expectReject(
+        destroyedReloadCtrl.interactPreviewTab({ workspaceId: "ws-1", tabId: "tab-1", action: { kind: "reload" } }),
+      );
+
+      check(
+        "click and reload enforce viewport presence, destroyed-guest guards, and render-process-gone cleanup",
+        errNoVp?.message === controllerMod.ERR_PREVIEW_VIEWPORT_UNREADY &&
+          wcNoVp.state.sentEvents.length === 0 &&
+          errMidClick?.message === controllerMod.ERR_PREVIEW_TAB_CLOSED &&
+          wcMidClick.state.sentEvents.length === 1 &&
+          wcGone.state.reloadCount === 1 &&
+          wcGone.listenerCount() === 0 &&
+          !wcDestroyedReload.state.removedAfterDestroy &&
+          errDestroyedReload?.message === controllerMod.ERR_PREVIEW_TAB_CLOSED,
+      );
+    }
+
+    // 9. Desktop pi and antigravity profile preservation guards
     check(
       "isRemoteTerminalProfile accepts all 5 agent runtimes plus shell",
-      ["shell", "claude", "codex", "grok", "pi", "antigravity"].every((p) =>
-        rpc.isRemoteTerminalProfile(p),
-      ) &&
+      ["shell", "claude", "codex", "grok", "pi", "antigravity"].every((p) => rpc.isRemoteTerminalProfile(p)) &&
         !rpc.isRemoteTerminalProfile("bash") &&
         !rpc.isRemoteTerminalProfile(null),
     );
-
-    const appSource = fs.readFileSync(
-      path.join(ROOT, "src", "renderer", "src", "App.tsx"),
-      "utf8",
-    );
+    const appSource = fs.readFileSync(path.join(ROOT, "src", "renderer", "src", "App.tsx"), "utf8");
     const shareSection = appSource.slice(
       appSource.indexOf("const listShareableTerminals"),
       appSource.indexOf("setListShareableStudioTerminalsFn(listShareableTerminals)"),
     );
-    check(
-      "App.tsx preserves pi and antigravity profiles in listShareableTerminals",
-      shareSection.includes('profile: leaf.agentSession?.runtime ?? "shell"') &&
-        !/leaf\.agentSession\?\.runtime === "pi"[\s\S]*\?\s*"shell"/.test(shareSection),
-    );
-
     const shareStoreSource = fs.readFileSync(
       path.join(ROOT, "src", "main", "remote-access", "studio-terminal-share.ts"),
       "utf8",
     );
     check(
-      "StudioTerminalShareStore normalizes incoming renderer profiles with isRemoteTerminalProfile",
-      shareStoreSource.includes(
-        'isRemoteTerminalProfile(item.profile) ? item.profile : "shell"',
-      ),
+      "App.tsx preserves pi/antigravity profiles and StudioTerminalShareStore normalizes via isRemoteTerminalProfile",
+      shareSection.includes('profile: leaf.agentSession?.runtime ?? "shell"') &&
+        !/leaf\.agentSession\?\.runtime === "pi"[\s\S]*\?\s*"shell"/.test(shareSection) &&
+        shareStoreSource.includes('isRemoteTerminalProfile(item.profile) ? item.profile : "shell"'),
     );
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });

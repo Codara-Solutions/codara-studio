@@ -1,4 +1,4 @@
-import type { RemoteTerminalProfile } from "./rpc";
+import type { RemoteTerminalProfile } from "./terminal-profiles";
 
 // What a phone-created terminal runs for each profile. These must stay the
 // exact commands the desktop's pane menu launches

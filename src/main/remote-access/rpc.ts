@@ -67,6 +67,10 @@ import {
 import type { RemoteWorkerTerminalControlStore } from "./worker-terminal-controls";
 import { MAX_REMOTE_TERMINALS_PER_DEVICE } from "./terminal-leases";
 import {
+  isRemoteTerminalProfile,
+  type RemoteTerminalProfile,
+} from "./terminal-profiles";
+import {
   isValidRemotePreviewInteractAction,
   type RemotePreviewInteractAction,
   type RemotePreviewScreenshot,
@@ -74,7 +78,9 @@ import {
   type RemotePreviewViewportMode,
 } from "./preview-policy";
 
+export { isRemoteTerminalProfile };
 export type {
+  RemoteTerminalProfile,
   RemotePreviewInteractAction,
   RemotePreviewScreenshot,
   RemotePreviewTab,
@@ -1257,29 +1263,6 @@ export interface RemoteTerminalHandle {
   // falls back to dropping output. See MAX_PENDING_EVENT_BYTES.
   pause?(): void;
   resume?(): void;
-}
-
-// A server-owned launch profile: the phone names one, Studio picks the
-// command (terminal-launch.ts), so no command line ever crosses the wire.
-export type RemoteTerminalProfile =
-  | "shell"
-  | "claude"
-  | "codex"
-  | "grok"
-  | "pi"
-  | "antigravity";
-
-const REMOTE_TERMINAL_PROFILES: readonly string[] = [
-  "shell",
-  "claude",
-  "codex",
-  "grok",
-  "pi",
-  "antigravity",
-] satisfies readonly RemoteTerminalProfile[];
-
-export function isRemoteTerminalProfile(value: unknown): value is RemoteTerminalProfile {
-  return typeof value === "string" && REMOTE_TERMINAL_PROFILES.includes(value);
 }
 
 export interface RemoteTerminalCreateRequest {
@@ -4490,6 +4473,17 @@ export class RpcSession {
               id,
               "invalid-params",
               "preview.list needs workspaceId.",
+            );
+            return;
+          }
+          if (
+            this.services.allowPreviewAction &&
+            !this.services.allowPreviewAction()
+          ) {
+            this.replyError(
+              id,
+              "rate-limited",
+              "Browser preview requests are arriving too quickly. Try again shortly.",
             );
             return;
           }
