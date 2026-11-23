@@ -134,6 +134,8 @@ import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useAgentHibernation } from "./lib/useAgentHibernation";
 import { sleepingPaneIds } from "./lib/agentHibernation";
 import { railTabCount, type RailTabCount } from "./tabs/railTabCount";
+import { closeOthersTargets } from "./tabs/closeConfirm";
+import { CloseAgentConfirmHost, confirmUserClose, setCloseConfirmWorkingPanes } from "./tabs/CloseAgentConfirm";
 import type { TerminalLeafHibernation } from "./tabs/types";
 import { useChatSurfaces } from "./tabs/chatSurfaces";
 import {
@@ -1567,6 +1569,13 @@ export default function App() {
     }
     return m;
   }, [workspaces, globalRuns.runs, terminalWorking, terminalAgents, busyShellPaneIds, tabs.tabs, tabs.tabsWorkspaceId, tabs.inactiveWorkspaceLayouts]);
+
+  const terminalWorkingRef = useRef(terminalWorking);
+  terminalWorkingRef.current = terminalWorking;
+  useEffect(() => {
+    setCloseConfirmWorkingPanes(() => Object.assign({}, ...Object.values(terminalWorkingRef.current)));
+    return () => setCloseConfirmWorkingPanes(() => undefined);
+  }, []);
 
   // Reclaim activity-spin records for workspaces that no longer exist: a
   // workspace deleted while a hidden pane was mid-turn never receives a
@@ -3775,12 +3784,18 @@ export default function App() {
       const target = workspaces.find((w) => w.id === id);
       // Copy-branch workspaces own a worktree on disk — confirm + remove it
       // rather than orphaning the directory.
-      if (target?.copyBranch) {
-        setCopyDeleteError(null);
-        setPendingCopyDelete(target);
-        return;
-      }
-      removeWorkspaceFromState(id);
+      const current = tabsRef.current;
+      const layoutTabs = id === current.tabsWorkspaceId
+        ? current.tabs
+        : current.inactiveWorkspaceLayouts.find((layout) => layout.workspaceId === id)?.tabs ?? [];
+      confirmUserClose(layoutTabs, layoutTabs.map((tab) => ({ tabId: tab.id })), () => {
+        if (target?.copyBranch) {
+          setCopyDeleteError(null);
+          setPendingCopyDelete(target);
+          return;
+        }
+        removeWorkspaceFromState(id);
+      });
     },
     [workspaces, removeWorkspaceFromState],
   );
@@ -6309,15 +6324,29 @@ export default function App() {
         // closeTab no-ops on chat tabs by design. Everything else closes
         // through the generic path.
         if (active?.kind === "terminal" && countTerminalPanes(active.root) > 1) {
-          tabs.closeTerminalPane(active.id, active.activePaneId);
+          const paneId = active.activePaneId;
+          confirmUserClose(tabs.tabs, [{ tabId: active.id, paneId }], () => tabs.closeTerminalPane(active.id, paneId));
         } else if (active?.kind === "chat") {
           handleCloseChatTab(active.id);
         } else {
-          tabs.closeTab(activeVisibleTabId);
+          const tabId = activeVisibleTabId;
+          confirmUserClose(tabs.tabs, [{ tabId }], () => tabs.closeTab(tabId));
         }
       },
       "tab.closeOthers": () => {
-        if (activeVisibleTabId) tabs.closeOthers(activeVisibleTabId);
+        const keepId = activeVisibleTabId;
+        if (!keepId) return;
+        // A confirmed close stops only the tabs the question listed, never one
+        // that opened while it was asked.
+        const targets = closeOthersTargets(tabs.tabs, keepId);
+        confirmUserClose(tabs.tabs, targets, (confirmed) => {
+          if (!confirmed) {
+            tabs.closeOthers(keepId);
+            return;
+          }
+          for (const target of targets) tabs.closeTab(target.tabId);
+          if (tabsRef.current.tabs.some((tab) => tab.id === keepId)) tabs.setActiveTab(keepId);
+        });
       },
       "tab.cycleNext": () => {
         // Tabs folded into a collapsed group are skipped, as in Chrome.
@@ -6365,7 +6394,8 @@ export default function App() {
       "terminal.closePane": () => {
         const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
         if (!active || active.kind !== "terminal") return;
-        tabs.closeTerminalPane(active.id, active.activePaneId);
+        const paneId = active.activePaneId;
+        confirmUserClose(tabs.tabs, [{ tabId: active.id, paneId }], () => tabs.closeTerminalPane(active.id, paneId));
       },
       "terminal.toggleZoom": () => {
         const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
@@ -7546,6 +7576,7 @@ export default function App() {
           signal={switchSignal}
           holdMs={preferences.workspaceSwitchHudMs ?? DEFAULT_WORKSPACE_SWITCH_HUD_MS}
         />
+        <CloseAgentConfirmHost />
         <ToastHost
           navigateTo={navigateToNotifyTarget}
           resolveQuestion={resolveRunQuestion}
@@ -8143,6 +8174,10 @@ const Workspace = React.memo(function Workspace({
   );
   const topStripTabsRef = useRef(topStripTabs);
   topStripTabsRef.current = topStripTabs;
+  // The user's close gestures read the layout at the moment they happen and
+  // stay stable for the memoized strip and stacks.
+  const layoutTabsRef = useRef(tabs.tabs);
+  layoutTabsRef.current = tabs.tabs;
   // Stable for the strip's React.memo: every action is a stable useTabs
   // callback, and closing reads the strip through a ref. Closing a group
   // closes the tabs the user sees in it, each the way its own × would.
@@ -8157,11 +8192,13 @@ const Workspace = React.memo(function Workspace({
       toggleCollapsed: toggleTabGroupCollapsed,
       ungroup: ungroupTabGroup,
       close: (groupId) => {
-        for (const tab of topStripTabsRef.current) {
-          if (tab.group?.id !== groupId) continue;
-          if (tab.kind === "chat") onCloseChat(tab.id);
-          else closeTab(tab.id);
-        }
+        const members = topStripTabsRef.current.filter((tab) => tab.group?.id === groupId);
+        confirmUserClose(layoutTabsRef.current, members.map((tab) => ({ tabId: tab.id })), () => {
+          for (const tab of members) {
+            if (tab.kind === "chat") onCloseChat(tab.id);
+            else closeTab(tab.id);
+          }
+        });
       },
     }),
     [
@@ -8507,7 +8544,7 @@ const Workspace = React.memo(function Workspace({
   // its surfaces is already on screen.
   const handleTabSelect = selectTopStripTab;
   const handleTabClose = useCallback(
-    (id: TabId) => closeTab(id),
+    (id: TabId) => confirmUserClose(layoutTabsRef.current, [{ tabId: id }], () => closeTab(id)),
     [closeTab],
   );
   const handleEditorDirty = useCallback(
@@ -8561,7 +8598,8 @@ const Workspace = React.memo(function Workspace({
     [moveTerminalPane],
   );
   const handleClosePane = useCallback(
-    (tabId: string, paneId: string) => closeTerminalPane(tabId, paneId),
+    (tabId: string, paneId: string) =>
+      confirmUserClose(layoutTabsRef.current, [{ tabId, paneId }], () => closeTerminalPane(tabId, paneId)),
     [closeTerminalPane],
   );
   const handlePaneZoomToggle = useCallback(
@@ -8627,7 +8665,7 @@ const Workspace = React.memo(function Workspace({
   // The × on a dock cell closes the TAB (same meaning it has everywhere else);
   // undocking is the separate, non-destructive control beside it.
   const handleCloseDockedTab = useCallback(
-    (dockedTabId: string) => closeTab(dockedTabId),
+    (dockedTabId: string) => confirmUserClose(layoutTabsRef.current, [{ tabId: dockedTabId }], () => closeTab(dockedTabId)),
     [closeTab],
   );
 
