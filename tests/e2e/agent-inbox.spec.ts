@@ -326,6 +326,8 @@ test("the Agents tab is an inbox with sections, settle, undo and merge", async (
     // The rail's own tile for Finance, to hold the Agents view's icon to.
     const railTile = page.locator('[data-workspace-id="ws-cos"] [data-testid="workspace-icon-tile"]').first();
     await expect(railTile).toBeVisible({ timeout: 15_000 });
+    // The tile eases into its colour: read it once the transition settled.
+    await expect(railTile).toHaveCSS("color", rgb("#FF5C2B"));
     const railTileColor = await railTile.evaluate((tile) => getComputedStyle(tile).color);
 
     await test.step("the switch counts what waits on you", async () => {
@@ -531,6 +533,10 @@ test("the Agents tab is an inbox with sections, settle, undo and merge", async (
         expect(await page.locator(`[data-agent-section="${id}"] [data-agent-card]`).count(), `rows under ${id}`).toBeGreaterThan(0);
       }
       await page.locator("body").evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      const theme = await page.evaluate(() => {
+        const root = document.documentElement;
+        return { theme: root.dataset.theme ?? null, mode: root.dataset.themeMode ?? null, light: root.classList.contains("light") };
+      });
       for (const mode of ["dark", "light"] as const) {
         await setTheme(page, mode);
         await railShot(page, `agents-view-${mode}.png`);
@@ -547,7 +553,14 @@ test("the Agents tab is an inbox with sections, settle, undo and merge", async (
         await row(page, "p-pr30").evaluate((element) => element.classList.remove("is-active"));
         await page.mouse.move(0, 0);
       }
-      await setTheme(page, "dark");
+      await page.evaluate((saved) => {
+        const root = document.documentElement;
+        if (saved.theme === null) delete root.dataset.theme;
+        else root.dataset.theme = saved.theme;
+        if (saved.mode === null) delete root.dataset.themeMode;
+        else root.dataset.themeMode = saved.mode;
+        root.classList.toggle("light", saved.light);
+      }, theme);
     });
 
     await test.step("undoing an auto-settle keeps the agent out of the shelf", async () => {

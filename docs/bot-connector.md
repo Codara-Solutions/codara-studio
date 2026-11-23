@@ -204,7 +204,8 @@ Which sessions are waiting on the operator, working, or done.
 
 Source: `buildAgentBoard` in `src/shared/agent-board.ts`, then the
 inbox settle prefs in `src/shared/agent-inbox.ts`. The three buckets
-match the Agents tab, listed in its order (`AGENT_INBOX_SECTIONS`):
+are the board's own and are listed here in the Agents tab's order
+(Needs you, Working, Done):
 
 | Bot bucket | Board bucket | What the operator sees |
 |---|---|---|
@@ -212,7 +213,8 @@ match the Agents tab, listed in its order (`AGENT_INBOX_SECTIONS`):
 | `working` | `working` | Working, including background, stalled, starting |
 | `done` | `done` | Finished, inside the same done window the board uses |
 
-Settled cards are left out, as they are on the open Agents sections. A background card with no session of its own is listed, and
+Settled cards are left out, as they are on the open Agents sections.
+A background card with no session of its own is listed, and
 the transcript call for it returns `not-allowed` rather than a guessed
 file.
 
