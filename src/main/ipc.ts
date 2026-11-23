@@ -108,8 +108,7 @@ import {
   repairClaudeTranscriptTail,
   resolveSafeClaudeTranscriptPath,
 } from "./orchestration/claude-paths";
-import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex-sessions";
-import { resolveCodexTranscriptPath } from "./orchestration/codex-home";
+import { discoverRolloutForCwd, extractSessionUuid, locateCodexRollout } from "./orchestration/codex-sessions";
 import {
   discoverGrokSessionForCwd,
   grokSessionTranscriptPath,
@@ -3748,6 +3747,7 @@ export function registerIpc(): void {
         sessionId: string;
         cwd: string;
         transcriptPath?: string;
+        capturedAt?: string;
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
         nativeGrokProfileId?: string;
@@ -3759,6 +3759,8 @@ export function registerIpc(): void {
       transcriptPath?: string;
       cwd?: string;
     }> => {
+      // A throw here reaches the renderer as a rejected probe, which keeps
+      // the pointer: "could not look" must never read as "the session is gone".
       if (!args.sessionId) return { exists: false };
       if (args.runtime === "pi") {
         // `pi --session <id>` looks the id up in the pane's cwd. Pi writes a
@@ -3775,11 +3777,13 @@ export function registerIpc(): void {
           args.sessionId,
           execution.env.GROK_HOME ?? null,
         );
+        // Throws only for an unsafe or unreadable store: an error, not a
+        // missing session, so it must not start a fresh one over the pointer.
         const path = await resolveSafeGrokTranscriptPath(
           args.cwd,
           args.sessionId,
           execution.env.GROK_HOME ?? null,
-        ).catch(() => null);
+        );
         if (!path) return { exists: false, transcriptPath: expectedPath };
         const stat = await fs.stat(path).catch(() => null);
         if (!stat) return { exists: false, transcriptPath: path };
@@ -3849,28 +3853,28 @@ export function registerIpc(): void {
         const { repairable } = await inspectClaudeTranscriptTail(path);
         return { exists: true, resumable: true, repairable, transcriptPath: path, ...where };
       }
-      // Codex: sessions are date-bucketed, not addressable by cwd, so rely on the
-      // transcript path captured at launch. Size floor stands in for the message
-      // scan (rollout formats vary): a stillborn rollout is a few hundred bytes.
-      const path = args.transcriptPath;
-      if (path) {
-        const execution = await resolveFrozenNativeCodexProfile(
-          args.nativeCodexProfileId,
-        );
-        const safePath = resolveCodexTranscriptPath(
-          path,
-          execution.stateHome,
-        );
-        const stat = await fs.stat(safePath).catch(() => null);
-        if (stat) {
-          return {
-            exists: true,
-            resumable: stat.size >= 1_024,
-            transcriptPath: safePath,
-          };
-        }
-      }
-      return { exists: false };
+      // Codex: rollouts are date-bucketed, not addressable by cwd. The path
+      // captured at launch can be missing (a pane resumed from the picker),
+      // spelled in another home's path, or an earlier segment, so the rollout
+      // is found again by its session id in the home `codex resume` will use.
+      // Size floor stands in for the message scan (rollout formats vary): a
+      // stillborn rollout is a few hundred bytes.
+      const execution = await resolveFrozenNativeCodexProfile(
+        args.nativeCodexProfileId,
+      );
+      const capturedAt = args.capturedAt ? Date.parse(args.capturedAt) : NaN;
+      const found = await locateCodexRollout({
+        sessionId: args.sessionId,
+        transcriptPath: args.transcriptPath,
+        codexHome: execution.stateHome,
+        hintTimesMs: [Number.isFinite(capturedAt) ? capturedAt : null],
+      });
+      if (!found) return { exists: false };
+      return {
+        exists: true,
+        resumable: found.size >= 1_024,
+        transcriptPath: found.path,
+      };
     },
   );
 

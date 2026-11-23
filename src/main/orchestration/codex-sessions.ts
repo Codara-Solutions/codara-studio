@@ -204,6 +204,116 @@ export async function readRolloutMetadata(
   }
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+// A session that ran at quit wrote its newest segment recently, so only this
+// many of the newest day folders are read unless a hint names an older one.
+const RECENT_DAY_FOLDERS = 31;
+const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DAY_FOLDER_RE = /[\\/]sessions[\\/](\d{4})[\\/](\d{2})[\\/](\d{2})[\\/][^\\/]+$/;
+
+/** When a UUIDv7 was minted (its first 48 bits), else null. */
+export function uuidV7TimeMs(id: string): number | null {
+  if (!UUID_V7_RE.test(id)) return null;
+  const ms = Number.parseInt(id.slice(0, 8) + id.slice(9, 13), 16);
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+function dayFolder(date: Date): string {
+  return join(String(date.getFullYear()), pad2(date.getMonth() + 1), pad2(date.getDate()));
+}
+
+async function newestDayFolders(sessionsRoot: string, limit: number): Promise<string[]> {
+  const out: string[] = [];
+  const children = async (dir: string, pattern: RegExp): Promise<string[]> => {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [] as Dirent[]);
+    return entries
+      .filter((entry) => entry.isDirectory() && pattern.test(entry.name))
+      .map((entry) => entry.name)
+      .sort()
+      .reverse();
+  };
+  for (const year of await children(sessionsRoot, /^\d{4}$/)) {
+    for (const month of await children(join(sessionsRoot, year), /^\d{2}$/)) {
+      for (const day of await children(join(sessionsRoot, year, month), /^\d{2}$/)) {
+        out.push(join(year, month, day));
+        if (out.length >= limit) return out;
+      }
+    }
+  }
+  return out;
+}
+
+export interface LocatedCodexRollout {
+  path: string;
+  size: number;
+}
+
+async function statRollout(path: string): Promise<{ size: number; mtimeMs: number } | null> {
+  const stat = await fs.lstat(path).catch(() => null);
+  return stat && stat.isFile() && !stat.isSymbolicLink() ? { size: stat.size, mtimeMs: stat.mtimeMs } : null;
+}
+
+/**
+ * Find a Codex session's rollout in the selected home: the stored path when
+ * it still validates there, else the newest file named for the session id
+ * (plain or `_<segment>`) in the day folders its id, the stored path and the
+ * hint times name, plus the newest RECENT_DAY_FOLDERS folders. Day and file
+ * symlinks are skipped, and every hit passes resolveCodexTranscriptPath.
+ * Null means the session has no file in this home; a home that cannot be
+ * resolved throws, so the caller can tell an error from a missing session.
+ */
+export async function locateCodexRollout(input: {
+  sessionId: string;
+  transcriptPath?: string | null;
+  codexHome?: string | null;
+  hintTimesMs?: readonly (number | null | undefined)[];
+}): Promise<LocatedCodexRollout | null> {
+  const { sessionsRoot } = resolveCodexHomePaths(input.codexHome);
+  const id = input.sessionId.toLowerCase();
+  const stored = input.transcriptPath;
+  if (stored && extractSessionUuid(stored)?.toLowerCase() === id) {
+    let path: string | null = null;
+    try {
+      path = resolveCodexTranscriptPath(stored, input.codexHome, { requireExisting: true });
+    } catch {
+      path = null;
+    }
+    const stat = path ? await statRollout(path) : null;
+    if (path && stat) return { path, size: stat.size };
+  }
+  const folders = new Set<string>();
+  const storedDay = stored ? DAY_FOLDER_RE.exec(stored) : null;
+  if (storedDay) folders.add(join(storedDay[1], storedDay[2], storedDay[3]));
+  for (const ms of [uuidV7TimeMs(id), ...(input.hintTimesMs ?? [])]) {
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) continue;
+    for (const offset of [-DAY_MS, 0, DAY_MS]) folders.add(dayFolder(new Date(ms + offset)));
+  }
+  for (const folder of await newestDayFolders(sessionsRoot, RECENT_DAY_FOLDERS)) folders.add(folder);
+  let best: { path: string; size: number; mtimeMs: number } | null = null;
+  for (const folder of folders) {
+    let dir: string;
+    try {
+      dir = resolveCodexSessionDirectoryPath(join(sessionsRoot, folder), input.codexHome);
+    } catch {
+      continue;
+    }
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [] as Dirent[]);
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.startsWith("rollout-")) continue;
+      if (extractSessionUuid(entry.name)?.toLowerCase() !== id) continue;
+      const candidate = join(dir, entry.name);
+      try {
+        resolveCodexTranscriptPath(candidate, input.codexHome, { requireExisting: true });
+      } catch {
+        continue;
+      }
+      const stat = await statRollout(candidate);
+      if (stat && (!best || stat.mtimeMs > best.mtimeMs)) best = { path: candidate, ...stat };
+    }
+  }
+  return best ? { path: best.path, size: best.size } : null;
+}
+
 // Compare paths case-insensitively with separators unified so a Windows
 // drive-letter/backslash mismatch doesn't cause a false miss.
 function normalizePath(p: string): string {

@@ -71,6 +71,7 @@ import {
   decideResume,
   mergeSessionStart,
   pruneAttempts,
+  refreshCodexTranscriptPath,
   relocateResumePointer,
   type ResumeProbe,
   type SessionStartRecord,
@@ -252,6 +253,9 @@ interface ResumePlan {
   fallbackSession: TerminalAgentSession | null;
   // True when this plan took the one-per-run `agy --continue` claim.
   tookAntigravityClaim?: boolean;
+  // The probe failed: the pointer stays as it is (never cleared or replaced)
+  // and fallbackNotice says how to retry.
+  keepPointer?: boolean;
 }
 
 // Heal a pane's restore pointer from the SessionStart hook trail before any
@@ -324,23 +328,45 @@ async function computeResumePlan(
       sessionId: restore.sessionId,
       cwd: restore.cwd,
       transcriptPath: restore.transcriptPath ?? undefined,
+      capturedAt: restore.capturedAt,
       nativeCodexProfileId: restore.nativeCodexProfileId,
       nativeClaudeProfileId: restore.nativeClaudeProfileId,
       nativeGrokProfileId: restore.nativeGrokProfileId,
     })
-    .catch(() => ({ exists: false as const }));
+    .catch((error: unknown): ResumeProbe => ({
+      exists: false,
+      error: (error instanceof Error ? error.message : String(error)).replace(/^Error invoking remote method '[^']+': /, "") || "unknown error",
+    }));
   const decision = decideResume(probe as ResumeProbe, restore.runtime);
   const p = probe as ResumeProbe;
   const relocated = relocateResumePointer(restore, p);
+  const refreshed = refreshCodexTranscriptPath(restore, p);
   logRestore(
     `plan ${restore.runtime} id=${restore.sessionId} cwd=${restore.cwd} ` +
       `probe(exists=${p.exists} resumable=${p.resumable ?? "-"} repairable=${p.repairable ?? "-"}) -> ${decision.kind}` +
-      (relocated ? ` from start cwd=${relocated.cwd}` : ""),
+      (relocated ? ` from start cwd=${relocated.cwd}` : "") +
+      (refreshed ? (restore.transcriptPath ? " (rollout found by id, path updated)" : " (rollout found by id)") : "") +
+      (p.error ? ` error=${p.error.slice(0, 300)}` : ""),
   );
+  if (decision.kind === "keep") {
+    // The check failed, so nothing is known about the session: keep the
+    // pointer for the next try instead of clearing or replacing it.
+    const retry = buildAgentResumeCommand(restore);
+    return {
+      session: restore,
+      resumeCommand: null,
+      resumeIsFreshFallback: false,
+      fallbackNotice:
+        `couldn't check ${restore.runtime} session ${restore.sessionId} (${p.error}); it is kept. ` +
+        `Run ${retry} to open it, or restart Codara to try again`,
+      fallbackSession: null,
+      keepPointer: true,
+    };
+  }
   if (decision.kind === "resume" || decision.kind === "repair-resume") {
     // `claude --resume` only finds a session from the directory it was
     // started in, so a pointer that recorded a later cwd resumes from there.
-    const target = relocated ?? restore;
+    const target = relocated ?? refreshed ?? restore;
     if (target.runtime === "claude" && decision.kind === "repair-resume") {
       // The transcript's last line is a truncated partial write (sleep/crash).
       // Repair it in place (keeps a .bak) so `claude --resume` accepts it and
@@ -412,12 +438,14 @@ async function computeResumePlan(
     };
   }
   // Codex can't force session ids, so there's nothing to relaunch
-  // deterministically — surface the notice, clear the pointer, plain shell.
+  // deterministically: surface the notice, clear the pointer, plain shell.
   return {
     session: restore,
     resumeCommand: null,
     resumeIsFreshFallback: false,
-    fallbackNotice: "previous Codex session couldn't be resumed",
+    fallbackNotice: p.exists
+      ? `Codex session ${restore.sessionId} has no conversation to resume, so this pane is a plain shell`
+      : `Codex session ${restore.sessionId} was not found on this computer (its files were deleted or moved), so this pane is a plain shell`,
     fallbackSession: null,
   };
 }
@@ -3246,9 +3274,11 @@ export function useTerminalSession({
         plan: ResumePlan,
       ): TerminalAgentSession => {
         if (plan.session === from) return from;
-        logRestore(
-          `pane=${sessionId} ${from.runtime} id=${from.sessionId} cwd moved to its start cwd (${from.cwd} -> ${plan.session.cwd})`,
-        );
+        if (plan.session.cwd !== from.cwd) {
+          logRestore(
+            `pane=${sessionId} ${from.runtime} id=${from.sessionId} cwd moved to its start cwd (${from.cwd} -> ${plan.session.cwd})`,
+          );
+        }
         agentSessionRef.current = plan.session;
         onResumeFallbackRef.current?.(plan.session);
         return plan.session;
@@ -3288,7 +3318,7 @@ export function useTerminalSession({
         if (!plan.resumeCommand) {
           // Codex with an unresumable rollout → nothing deterministic to relaunch.
           if (plan.fallbackNotice) term.write(`\x1b[2m[${plan.fallbackNotice}]\x1b[0m\r\n`);
-          onResumeUnavailableRef.current?.();
+          if (!plan.keepPointer) onResumeUnavailableRef.current?.();
           return;
         }
         // Re-enable the input the onExit handler disabled, and announce it.
@@ -3373,6 +3403,8 @@ export function useTerminalSession({
           const plan = session ? await computeResumePlan(session, sessionId) : null;
           if (disposed) return;
           if (session && plan) session = adoptPlanSession(session, plan);
+          // A failed check leaves the pane asleep: its card offers Resume again.
+          if (plan?.keepPointer) throw new Error(plan.fallbackNotice ?? "the session could not be checked");
           const command = plan?.resumeCommand ?? null;
           logRestore(`pane=${sessionId} waking from sleep (${session?.runtime ?? "no session"}) cmd=${command ?? "none"}`);
           if (session && command && !plan?.resumeIsFreshFallback) {
@@ -3544,6 +3576,7 @@ export function useTerminalSession({
       let resumeIsFreshFallback = false;
       let fallbackNotice: string | null = null;
       let fallbackSession: TerminalAgentSession | null = null;
+      let keepPointer = false;
       // The one-per-run `agy --continue` claim this restore took. Given back
       // when the pane never runs it: closed before its spawn, or the spawn
       // failed or did not deliver the command.
@@ -3672,6 +3705,7 @@ export function useTerminalSession({
             resumeIsFreshFallback = plan.resumeIsFreshFallback;
             fallbackNotice = plan.fallbackNotice;
             fallbackSession = plan.fallbackSession;
+            keepPointer = plan.keepPointer === true;
           } else {
             logRestore(`pane=${sessionId} process registry confirms the session was closed`);
           }
@@ -3898,10 +3932,11 @@ export function useTerminalSession({
       if (!resumeUndelivered) {
         if (fallbackNotice) {
           term.write(`\x1b[2m[${fallbackNotice}]\x1b[0m\r\n`);
+          logRestore(`pane=${sessionId} notice: ${fallbackNotice}`);
         }
         if (fallbackSession) {
           onResumeFallbackRef.current?.(fallbackSession);
-        } else if (fallbackNotice) {
+        } else if (fallbackNotice && !keepPointer) {
           onResumeUnavailableRef.current?.();
         }
       } else if (!attachedExistingSession) {

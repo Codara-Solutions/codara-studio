@@ -150,9 +150,10 @@ export function resolveCodexHomePaths(
   const historyPath = join(homeDir, "history.jsonl");
   const memoriesRoot = join(homeDir, "memories");
   const shellSnapshotsRoot = join(homeDir, "shell_snapshots");
-  // config/sessions/history/memories are shared-state names inside managed
-  // homes and may legitimately be Codara's own links; shell_snapshots is
-  // per-account and keeps the strict rule.
+  // A managed home links every top-level name of the System home except its
+  // private ones (CODEX_PRIVATE_STATE_NAMES), so these may legitimately be
+  // Codara's own links there. Refusing one fails every session lookup for
+  // that account, which once made restore drop live Codex sessions.
   assertSharedNodeAllowingManagedLink(
     homeDir,
     configPath,
@@ -177,7 +178,8 @@ export function resolveCodexHomePaths(
     "Native Codex memories root",
     "directory",
   );
-  assertExistingNodeNotSymlink(
+  assertSharedNodeAllowingManagedLink(
+    homeDir,
     shellSnapshotsRoot,
     "Native Codex shell-snapshot root",
     "directory",
