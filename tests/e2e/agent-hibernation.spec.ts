@@ -214,6 +214,9 @@ test("a pane asleep when the window reloads stays asleep and resumes on Resume",
         spark: { preferences: { set: (key: string, value: boolean) => Promise<unknown> } };
       }).spark.preferences.set("restoreAgentSessions", false),
     );
+    // The layout Codara itself saved, with no session pointer in it now:
+    // the reload must not get the seeded one back.
+    await page.evaluate(() => sessionStorage.setItem("codara-e2e-keep-layout", "1"));
     await page.reload();
     await page.waitForLoadState("domcontentloaded");
     await page.locator('[data-workspace-id="ws-a"]').evaluate((row) => (row as HTMLElement).click());
@@ -427,6 +430,7 @@ async function launch(
     : restored;
   await page.addInitScript(
     ({ root, activePaneId }) => {
+      if (sessionStorage.getItem("codara-e2e-keep-layout")) return;
       localStorage.setItem(
         "spark.tabs:ws-a",
         JSON.stringify({

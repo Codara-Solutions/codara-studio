@@ -3572,21 +3572,33 @@ export function useTerminalSession({
       // stop dropped the pty with its tail and backlog): a view restored from
       // its own snapshot above gets only what it never received, an empty one
       // (after a window reload) the pane's newest output. Asked for every
-      // agent pane, not only marked ones: after a reload the leaf has lost
-      // its runtime-only mark, and a plain spawn here would bring the pane
-      // back as a shell without its agent.
-      const sleepCandidate = agentSessionRef.current ?? agentSession;
-      if (
-        !readOnlyRef.current &&
-        !inputBlockedRef.current &&
-        (sleepingAtMount || (sleepCandidate?.sessionId && isAgentHibernationRuntime(sleepCandidate.runtime)))
-      ) {
+      // pane that takes input, not only marked ones or ones with a session
+      // pointer: after a reload the leaf has lost its runtime-only mark, and
+      // with session restore off its pointer too, and a plain spawn here
+      // would bring the pane back as a shell without its agent.
+      if (!readOnlyRef.current && !inputBlockedRef.current) {
         const asleep = await window.spark.agentHibernation
           ?.sleepingPane?.(sessionId, { freshView: !liveSnapshot })
           .catch(() => null);
         if (disposed) return;
         if (asleep) {
           if (asleep.output && asleep.output.byteLength > 0) term.write(asleep.output);
+          // No pointer left on the leaf (session restore off, then a reload):
+          // main kept the one the pane fell asleep with.
+          const kept = asleep.session as Partial<TerminalAgentSession> | null;
+          if (
+            !(agentSessionRef.current ?? agentSession)?.sessionId &&
+            kept &&
+            kept.runtime === asleep.runtime &&
+            typeof kept.sessionId === "string" &&
+            kept.sessionId.length > 0 &&
+            typeof kept.cwd === "string"
+          ) {
+            const adopted = kept as TerminalAgentSession;
+            agentSessionRef.current = adopted;
+            onResumeFallbackRef.current?.(adopted);
+            logRestore(`pane=${sessionId} session pointer kept by main adopted for the wake`);
+          }
           if (!sleepingAtMount) {
             sleepingAtMount = true;
             logRestore(`pane=${sessionId} mounts asleep (${asleep.runtime}), marked from main`);

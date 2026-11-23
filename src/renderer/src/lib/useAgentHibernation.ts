@@ -118,6 +118,7 @@ export function useAgentHibernation(input: Input): void {
           runtime: session.runtime,
           placement: candidate.placement,
           transcriptPath: probe.transcriptPath ?? session.transcriptPath ?? undefined,
+          session: { ...session },
         })
         .catch(() => null);
       // Marked whatever the user did meanwhile: the agent is stopped either

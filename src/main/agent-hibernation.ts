@@ -59,6 +59,7 @@ import {
   type AgentHibernationResult,
   type AgentRestoredAsleepPane,
   type AgentSleepingPane,
+  type AgentSleepingSession,
   type AgentSleepSummary,
 } from "@shared/agent-hibernation";
 
@@ -269,6 +270,7 @@ interface SleepingEntry {
   unsent: Buffer | null;
   summary: AgentSleepSummary | null;
   freedBytes: number | null;
+  session: AgentSleepingSession | null;
   // Restored asleep at launch: kept without a placement until this time.
   placementGraceUntil: number;
   offExit: (() => void) | null;
@@ -403,6 +405,7 @@ export function takeSleepingPane(paneId: string, freshView = false): AgentSleepi
     output: output ? new Uint8Array(output) : null,
     summary: entry.summary,
     freedBytes: entry.freedBytes,
+    session: entry.session,
   };
 }
 
@@ -427,6 +430,8 @@ export function registerRestoredAsleep(input: unknown, now = Date.now()): boolea
     unsent: null,
     summary: validSleepSummary(value.summary),
     freedBytes: null,
+    // Restored from the layout, which has its pointer.
+    session: null,
     placementGraceUntil: now + RESTORED_PLACEMENT_GRACE_MS,
     offExit: null,
   };
@@ -437,6 +442,20 @@ export function registerRestoredAsleep(input: unknown, now = Date.now()): boolea
 }
 
 const PLACEMENTS: ReadonlySet<AgentHibernationPlacement> = new Set(["visible", "hidden-tab", "background-workspace"]);
+
+// A plain, small JSON object: kept and handed back, never interpreted here.
+const MAX_SLEEPING_SESSION_CHARS = 32 * 1024;
+
+function validSleepingSession(value: unknown): AgentSleepingSession | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  try {
+    const text = JSON.stringify(value);
+    if (typeof text !== "string" || text.length > MAX_SLEEPING_SESSION_CHARS) return null;
+    return JSON.parse(text) as AgentSleepingSession;
+  } catch {
+    return null;
+  }
+}
 
 function validRequest(input: unknown): AgentHibernationRequest | null {
   if (!input || typeof input !== "object") return null;
@@ -450,11 +469,13 @@ function validRequest(input: unknown): AgentHibernationRequest | null {
     typeof value.transcriptPath === "string" && value.transcriptPath.length > 0 && value.transcriptPath.length <= 4096
       ? value.transcriptPath
       : undefined;
+  const session = validSleepingSession(value.session);
   return {
     paneId: value.paneId,
     runtime: value.runtime,
     placement: value.placement as AgentHibernationPlacement,
     ...(transcriptPath ? { transcriptPath } : {}),
+    ...(session ? { session } : {}),
   };
 }
 
@@ -607,6 +628,7 @@ async function decide(
     unsent: kept?.unsent ?? null,
     summary: null,
     freedBytes: census.memoryBytes,
+    session: request.session ?? null,
     placementGraceUntil: 0,
     offExit: null,
   };

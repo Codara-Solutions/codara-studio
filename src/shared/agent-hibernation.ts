@@ -72,7 +72,15 @@ export interface AgentHibernationRequest {
   // The session's transcript as the resume probe found it: read for the
   // card's line only, and only when the hook trail names none.
   transcriptPath?: string;
+  // The pane's session pointer, as the renderer holds it. Main keeps it with
+  // the sleeping record and hands it back unread: with session restore off
+  // the layout on disk has no pointer, and a reloaded window would otherwise
+  // have nothing to resume the agent with.
+  session?: AgentSleepingSession;
 }
+
+/** A session pointer in the renderer's own shape; main never reads its fields. */
+export type AgentSleepingSession = Record<string, unknown>;
 
 export type AgentHibernationRefusal =
   | "off"
@@ -164,6 +172,7 @@ export interface AgentSleepingPane {
   output: Uint8Array | null;
   summary: AgentSleepSummary | null;
   freedBytes: number | null;
+  session: AgentSleepingSession | null;
 }
 
 /** A pane that was asleep when Codara quit and comes back asleep (restoreAsleep). */
