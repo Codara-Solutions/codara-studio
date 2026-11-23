@@ -11,7 +11,7 @@ import { readGitHubReviewPage, submitGitHubReview } from "../github-review";
 // remote-access/ allowed to import the rest of the main process; everything
 // else stays plain Node so tests and the e2e harness can run it directly.
 
-import { BrowserWindow, app, shell } from "electron";
+import { BrowserWindow, app, nativeImage, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { open, readdir, realpath } from "node:fs/promises";
@@ -192,6 +192,7 @@ import {
   remoteTerminalLaunchCommand,
   remoteTerminalProfileLabel,
 } from "./terminal-launch";
+import type { RemotePreviewController } from "./preview-controller";
 import {
   isStudioExplorerIgnoredDirectory,
   phoneWorkspaceRefusal,
@@ -273,7 +274,31 @@ let workspaceMutation: Promise<void> = Promise.resolve();
 const coraRunMutations = new KeyedSerialQueue();
 const fileMutations = new KeyedSerialQueue();
 const capabilityMutations = new KeyedSerialQueue();
+let remotePreviewControllerPromise: Promise<RemotePreviewController> | null = null;
 let lastRemoteImagePruneAt = 0;
+
+function getRemotePreviewController(): Promise<RemotePreviewController> {
+  remotePreviewControllerPromise ??= Promise.all([
+    import("./preview-controller"),
+    import("../preview-bridge"),
+    import("../browser/preview-guest"),
+    import("../main-window-trust"),
+  ])
+    .then(([controller, previewBridge, previewGuest, mainWindowTrust]) =>
+      controller.createRemotePreviewController({
+        requireLocalWorkspace,
+        requestPreviewOp: previewBridge.requestPreviewOp,
+        resolvePreviewGuest: previewGuest.resolvePreviewGuest,
+        isTrustedPreviewGuest: mainWindowTrust.isTrustedPreviewGuest,
+        decodeImage: (dataUrl) => nativeImage.createFromDataURL(dataUrl),
+      }),
+    )
+    .catch((err) => {
+      remotePreviewControllerPromise = null;
+      throw err;
+    });
+  return remotePreviewControllerPromise;
+}
 
 // DTO budgets deliberately leave generous headroom under the 1 MiB frame
 // ceiling for JSON escaping and the response envelope.
@@ -413,6 +438,12 @@ export function getRemoteAccessService(): RemoteAccessService {
       registerNotifications: registerNotificationsForRemote,
       listNotificationHistory: (devicePublicKey) => getPhoneNotifyStore().listHistory(devicePublicKey),
       beginImageUpload: beginImageUploadForRemote,
+      listPreviewTabs: async (workspaceId) =>
+        (await getRemotePreviewController()).listPreviewTabs(workspaceId),
+      capturePreviewScreenshot: async (input) =>
+        (await getRemotePreviewController()).capturePreviewScreenshot(input),
+      interactPreviewTab: async (input) =>
+        (await getRemotePreviewController()).interactPreviewTab(input),
       attachWorkerTerminal: attachRemoteWorkerTerminal,
       studioTerminalLeases: new StudioTerminalShareStore({
         onTerminalsChanged: scheduleTerminalsChangedPush,

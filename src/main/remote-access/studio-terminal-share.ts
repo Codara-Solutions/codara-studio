@@ -9,9 +9,8 @@ import type {
   RemoteTerminalLeaseStore,
   RemoteTerminalLeaseSubscriber,
 } from "./terminal-leases";
-import type {
-  RemoteTerminalCreateRequest,
-} from "./rpc";
+import type { RemoteTerminalCreateRequest } from "./rpc";
+import { isRemoteTerminalProfile } from "./terminal-profiles";
 
 const MAX_REPLAY_BYTES = 1024 * 1024;
 
@@ -272,6 +271,7 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
       }
       const terminalId = this.terminalIdForPane(item.paneId);
       visibleIds.add(terminalId);
+      const profile = isRemoteTerminalProfile(item.profile) ? item.profile : "shell";
       const existing = this.records.get(terminalId);
       if (existing) {
         existing.descriptor = {
@@ -280,7 +280,7 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
           desktopTabId: item.tabId,
           desktopPaneId: item.paneId,
           title: item.title,
-          profile: item.profile,
+          profile,
           phase: "live",
         };
         continue;
@@ -291,7 +291,7 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
         workspaceId: item.workspaceId,
         kind: "interactive",
         phase: "live",
-        profile: item.profile,
+        profile,
         desktopTabId: item.tabId,
         desktopPaneId: item.paneId,
         title: item.title,

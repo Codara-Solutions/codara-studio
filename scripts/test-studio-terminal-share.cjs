@@ -363,6 +363,42 @@ async function main() {
     },
   );
 
+  await test(
+    "preserves pi and antigravity profiles and normalizes malformed profiles to shell",
+    async () => {
+      const pty = fakePtyManager();
+      globalThis.__studioSharePty = pty;
+      let inventory = [
+        inventoryItem("pane-pi", { profile: "pi" }),
+        inventoryItem("pane-agy", { profile: "antigravity" }),
+        inventoryItem("pane-bad", { profile: "bash" }),
+      ];
+      globalThis.__studioShareBridge = {
+        requestTerminalOp: async () => inventory,
+      };
+      pty.open("pane-pi");
+      pty.open("pane-agy");
+      pty.open("pane-bad");
+      const store = new StudioTerminalShareStore();
+      const listed = await store.list("phone-a");
+      const byPane = new Map(listed.map((item) => [item.desktopPaneId, item.profile]));
+      assert.equal(byPane.get("pane-pi"), "pi");
+      assert.equal(byPane.get("pane-agy"), "antigravity");
+      assert.equal(byPane.get("pane-bad"), "shell");
+
+      // Updating an existing record with an invalid profile also normalizes.
+      inventory = [
+        inventoryItem("pane-pi", { profile: "antigravity" }),
+        inventoryItem("pane-agy", { profile: "unknown-cli" }),
+      ];
+      const updated = await store.list("phone-a");
+      const updatedByPane = new Map(updated.map((item) => [item.desktopPaneId, item.profile]));
+      assert.equal(updatedByPane.get("pane-pi"), "antigravity");
+      assert.equal(updatedByPane.get("pane-agy"), "shell");
+      store.shutdown();
+    },
+  );
+
   console.log(`${passed} studio-terminal-share tests passed.`);
 }
 

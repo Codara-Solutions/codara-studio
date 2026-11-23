@@ -5933,12 +5933,9 @@ export default function App() {
               ...(leaf.cwd ? { cwd: leaf.cwd } : {}),
               ...(tab.group ? { group: tab.group.name, groupId: tab.group.id } : {}),
               ...(leaf.agentOwner ? { agentOwner: leaf.agentOwner } : {}),
-              // The phone protocol has no Pi or Antigravity profile; such a
-              // pane is shared as the shell it runs in.
-              profile:
-                leaf.agentSession?.runtime === "pi" || leaf.agentSession?.runtime === "antigravity"
-                  ? "shell"
-                  : leaf.agentSession?.runtime ?? "shell",
+              // Preserve all five agent runtimes (including pi and antigravity)
+              // so paired phones render the matching engine identity.
+              profile: leaf.agentSession?.runtime ?? "shell",
             });
           });
         }

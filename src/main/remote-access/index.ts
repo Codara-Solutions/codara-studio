@@ -61,6 +61,10 @@ import {
 } from "./rpc";
 import { DeviceRateLimiter } from "./device-rate-limit";
 import { DurableMutationLedger } from "./mutation-ledger";
+import {
+  PREVIEW_ACTION_BURST,
+  PREVIEW_ACTION_REFILL_MS,
+} from "./preview-policy";
 import { stableRemoteAccessPortCandidates } from "./stable-port";
 import {
   RemoteTerminalLeaseRegistry,
@@ -98,6 +102,7 @@ const MAX_TOTAL_SESSIONS = 16;
 // derive the session keys to send a real hello, so it never becomes proven;
 // this deadline is what stops such phantom sessions from lingering.
 const SESSION_HELLO_DEADLINE_MS = 15_000;
+export { PREVIEW_ACTION_BURST, PREVIEW_ACTION_REFILL_MS };
 // cora.send budget per paired device: 20 at once, then one every 3 seconds.
 export const CORA_SEND_BURST = 20;
 export const CORA_SEND_REFILL_MS = 3_000;
@@ -197,6 +202,9 @@ export interface RemoteAccessDeps {
   ) => Promise<void>;
   listNotificationHistory?: (devicePublicKey: string) => Promise<RemotePhoneNotification[]>;
   beginImageUpload?: RemoteRpcServices["beginImageUpload"];
+  listPreviewTabs?: RemoteRpcServices["listPreviewTabs"];
+  capturePreviewScreenshot?: RemoteRpcServices["capturePreviewScreenshot"];
+  interactPreviewTab?: RemoteRpcServices["interactPreviewTab"];
   attachWorkerTerminal?: RemoteRpcServices["attachWorkerTerminal"];
   createTerminal(
     request: RemoteTerminalCreateRequest,
@@ -272,12 +280,20 @@ export class RemoteAccessService {
   // person does not send more than a few messages a minute, and an outbox
   // flushed after a reconnect fits in the burst; a looping phone does not.
   private readonly coraSendLimiter: DeviceRateLimiter;
+  // Remote preview captures and interactions render Chromium frames; bound
+  // them per paired device so reconnecting cannot reset the bucket.
+  private readonly previewActionLimiter: DeviceRateLimiter;
 
   constructor(private readonly deps: RemoteAccessDeps) {
     this.devices = new PairedDeviceStore(deps.remoteDir);
     this.coraSendLimiter = new DeviceRateLimiter({
       burst: CORA_SEND_BURST,
       refillMs: CORA_SEND_REFILL_MS,
+      now: deps.now,
+    });
+    this.previewActionLimiter = new DeviceRateLimiter({
+      burst: PREVIEW_ACTION_BURST,
+      refillMs: PREVIEW_ACTION_REFILL_MS,
       now: deps.now,
     });
     this.terminalLeases = new RemoteTerminalLeaseRegistry({
@@ -750,6 +766,7 @@ export class RemoteAccessService {
     this.terminalLeases.revokeOwner(publicKeyB64);
     this.workerTerminalControls.revokeOwner(publicKeyB64);
     this.coraSendLimiter.forget(publicKeyB64);
+    this.previewActionLimiter.forget(publicKeyB64);
     const sessions = this.sessions.get(publicKeyB64);
     if (sessions) {
       for (const session of sessions) {
@@ -1074,6 +1091,10 @@ export class RemoteAccessService {
         ? () => this.deps.listNotificationHistory!(keyB64)
         : undefined,
       beginImageUpload: this.deps.beginImageUpload,
+      listPreviewTabs: this.deps.listPreviewTabs,
+      capturePreviewScreenshot: this.deps.capturePreviewScreenshot,
+      interactPreviewTab: this.deps.interactPreviewTab,
+      allowPreviewAction: () => this.previewActionLimiter.take(keyB64),
       attachWorkerTerminal: this.deps.attachWorkerTerminal,
       terminalLeases: this.terminalLeases,
       studioTerminalLeases: this.deps.studioTerminalLeases,
