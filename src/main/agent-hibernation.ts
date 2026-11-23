@@ -96,6 +96,8 @@ const MEMORY_READ_MS = 15_000;
 // Reading what the pane's processes hold (agent-hibernation-census.ts) is a
 // few /proc reads; the sleep never waits on it longer than this.
 const TREE_MEMORY_TIMEOUT_MS = 2_000;
+// Sleep now on an agent known only from its screen: this long without output.
+const MANUAL_QUIET_MS = 5_000;
 
 export interface AgentHibernationDeps {
   now: () => number;
@@ -513,10 +515,21 @@ function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, 
     const detail = stateRefusal === "scheduled-work" ? evidence?.scheduledWork : null;
     return { ok: false, result: { ok: false, reason: stateRefusal, ...(detail ? { detail } : {}) } };
   }
-  // Sleep now: the user asked for it, so how long the pane was quiet does
-  // not matter; everything above and the census still do.
-  if (request.manual) return { ok: true, session };
   const now = deps.now();
+  // Sleep now: the user asked for it, so how long the pane was quiet does
+  // not matter; everything above and the census still do. An agent read
+  // from its screen alone may have painted a working frame the patterns
+  // missed: output in the last few seconds keeps it running.
+  if (request.manual) {
+    if (outputRestartsIdleClock(evidence)) {
+      const lastOutput = Math.max(session.lastOutputAt, evidence?.lastOutputAt ?? 0);
+      if (now - lastOutput < MANUAL_QUIET_MS) {
+        const detail = `output ${Math.max(0, Math.round((now - lastOutput) / 1000))}s ago`;
+        return { ok: false, result: { ok: false, reason: "agent-busy", detail } };
+      }
+    }
+    return { ok: true, session };
+  }
   // The idle clock: the newest of these starts the idle period. With
   // structured evidence of a settled agent (outputRestartsIdleClock), the
   // pane's output is its TUI repainting and stays off the clock, and so does
@@ -621,6 +634,9 @@ function runDecision(paneId: string, run: () => Promise<AgentHibernationResult>)
  * pane to say in words.
  */
 async function sleepNow(request: AgentHibernationRequest, deps: AgentHibernationDeps): Promise<AgentHibernationResult> {
+  // Read before the in-flight check: nothing is awaited between that check
+  // and registering this decision, so a timer request cannot slip in.
+  const policy = await deps.policy();
   // A decision already running for the pane (the timer's) settles first; if
   // it put the pane to sleep, that is the answer.
   const running = inFlight.get(request.paneId);
@@ -629,7 +645,6 @@ async function sleepNow(request: AgentHibernationRequest, deps: AgentHibernation
     if (earlier?.ok) return earlier;
     if (inFlight.has(request.paneId)) return { ok: false, reason: "in-flight" };
   }
-  const policy = await deps.policy();
   return runDecision(request.paneId, async () => {
     const decided = await decide(request, deps, policy);
     const result = "result" in decided ? decided.result : decided;

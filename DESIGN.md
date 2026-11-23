@@ -1206,9 +1206,13 @@ at once and the pane shows its card, as the idle timer would.
 - No idle clock, no idle-time setting and no on-screen rule: the user asked.
   Every other refusal stands (working, waiting for an answer, unsent text in
   the box, another program in the terminal, open on the phone, remote).
-- A refusal is never silent: one solid line under the toolbar ("Still running:
-  There is unsent text in its box.") for six seconds, and the same words on
-  the button's tooltip. Same surface as the card (`--panel-2`, `--rule`).
+- A refusal is never silent: one solid line under the toolbar for six
+  seconds, one complete plain sentence with no fixed prefix ("There is unsent
+  text in its box, so it keeps running."), the same words on the button's
+  tooltip, and an always-mounted status region for screen readers. Same
+  surface as the card (`--panel-2`, `--rule`).
+- After a sleep the focus moves to the card's Resume (the button it came from
+  is gone); a held Enter's key repeats do not press it.
 - A pane pinned Keep running can be put to sleep by hand; the pin stays, so
   once resumed it is never put to sleep by the timer.
 - Same 20 px `spark-icon-btn` as the sun, `aria-label="Sleep now"`, reachable

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
-import { KeepAwakeButton, SleepingPaneChip, SleepNowButton, SleepNowNotice } from "../components/Terminal/AgentSleepControls";
+import { KeepAwakeButton, SleepingPaneChip, SleepNowAnnouncer, SleepNowButton, SleepNowNotice } from "../components/Terminal/AgentSleepControls";
 import { isAgentHibernationRuntime, sleepNowRefusalMessage } from "@shared/agent-hibernation";
 import { requestAgentSleep } from "../lib/requestAgentSleep";
 import type { TerminalLeafHibernation } from "./types";
@@ -203,7 +203,9 @@ interface Props {
   // Agent hibernation (lib/agentHibernation.ts): a sleeping pane came back,
   // and the user flipped a pane's "Keep running" pin.
   onPaneWoke?: (tabId: TabId, paneId: string) => void;
-  onPaneAsleep?: (tabId: TabId, paneId: string, hibernation: TerminalLeafHibernation) => void;
+  // fillOnly: Sleep now's answer, which fills an existing mark and never
+  // creates one (the user may have resumed the pane meanwhile).
+  onPaneAsleep?: (tabId: TabId, paneId: string, hibernation: TerminalLeafHibernation, fillOnly?: boolean) => void;
   onPaneKeepAwake?: (tabId: TabId, paneId: string, keepAwake: boolean) => void;
   // The user asked for a sleeping pane's agent back (its card, Enter in the
   // pane), optionally pinning it awake; or that resume failed.
@@ -238,6 +240,7 @@ type Bundle = {
   onBootResumeConsumed: () => void;
   onWoke: () => void;
   onAsleep: (hibernation: TerminalLeafHibernation) => void;
+  onSleepAnswer: (hibernation: TerminalLeafHibernation) => void;
   onKeepAwake: (keepAwake: boolean) => void;
   onResumeRequest: () => void;
   onResumeKeepRunning: () => void;
@@ -475,6 +478,7 @@ function TerminalStack({
           onBootResumeConsumed: () => bootResumeConsumedRef.current(tabId, paneId),
           onWoke: () => wokeRef.current?.(tabId, paneId),
           onAsleep: (hibernation) => asleepRef.current?.(tabId, paneId, hibernation),
+          onSleepAnswer: (hibernation) => asleepRef.current?.(tabId, paneId, hibernation, true),
           onKeepAwake: (keepAwake) => keepAwakeRef.current?.(tabId, paneId, keepAwake),
           onResumeRequest: () => resumeRequestRef.current?.(tabId, paneId, false),
           onResumeKeepRunning: () => resumeRequestRef.current?.(tabId, paneId, true),
@@ -2431,12 +2435,30 @@ function sleepNowFor(leaf: TerminalLeaf, bundle: Bundle): PaneToolbarProps["slee
       const outcome = await requestAgentSleep({ paneId: leaf.paneId, session, placement: "visible", manual: true });
       if (!outcome) return sleepNowRefusalMessage("stop-failed", runtime);
       if (outcome.ok) {
-        bundle.onAsleep(outcome.hibernation);
+        bundle.onSleepAnswer(outcome.hibernation);
         return null;
       }
       return sleepNowRefusalMessage(outcome.reason, isAgentHibernationRuntime(outcome.runtime) ? outcome.runtime : runtime);
     },
   };
+}
+
+// After Sleep now the button is gone and the focus with it: hand it to the
+// sleeping card's Resume, so the keyboard stays in the pane. Only when the
+// focus is nowhere else (the user may have moved on while main decided).
+function focusResumeWhenShown(pane: HTMLElement): void {
+  const startedAt = performance.now();
+  const step = () => {
+    const active = document.activeElement;
+    if (active && active !== document.body && !pane.contains(active)) return;
+    const resume = pane.querySelector<HTMLButtonElement>('[data-testid="pane-resume"]');
+    if (resume) {
+      resume.focus({ preventScroll: true });
+      return;
+    }
+    if (performance.now() - startedAt < 2_000) window.requestAnimationFrame(step);
+  };
+  step();
 }
 
 // How long Sleep now's refusal stays in the pane.
@@ -2487,6 +2509,7 @@ function PaneToolbar({
   const onSleepNow = useCallback(() => {
     const action = sleepNowRef.current;
     if (!action) return;
+    const pane = wrapRef.current?.closest<HTMLElement>("[data-terminal-pane-id]") ?? null;
     setRefusal(null);
     setSleeping(true);
     void action
@@ -2495,6 +2518,7 @@ function PaneToolbar({
       .then((message) => {
         setSleeping(false);
         setRefusal(message);
+        if (message === null && pane) focusResumeWhenShown(pane);
       });
   }, []);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -2665,6 +2689,7 @@ function PaneToolbar({
         )}
       </div>
       {refusal && !sleeping ? <SleepNowNotice message={refusal} onDismiss={() => setRefusal(null)} /> : null}
+      <SleepNowAnnouncer message={sleeping ? null : refusal} />
     </>
   );
 }

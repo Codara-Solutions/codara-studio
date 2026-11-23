@@ -162,26 +162,34 @@ export function SleepNowButton({
 }
 
 /**
+ * Sleep now's answer for screen readers: always mounted, so a change of its
+ * text is announced (a status region that mounts with its text often is not).
+ */
+export function SleepNowAnnouncer({ message }: { message: string | null }) {
+  return (
+    <span className="spark-sr-only" role="status" aria-live="polite" data-testid="pane-sleep-now-status">
+      {message ?? ""}
+    </span>
+  );
+}
+
+/**
  * Why Sleep now left the agent running: one line under the pane toolbar,
- * solid like the rest of the pane's chrome. It goes away on its own, on a
- * click, or with Escape while it has the focus.
+ * solid like the rest of the pane's chrome. It goes away on its own or on a
+ * click. Screen readers hear it from SleepNowAnnouncer, so this copy is
+ * hidden from them.
  */
 export function SleepNowNotice({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   return (
     <div
       className="spark-fade-in"
-      role="status"
-      aria-live="polite"
+      aria-hidden="true"
       data-testid="pane-sleep-now-notice"
-      tabIndex={-1}
       onMouseDown={(event) => event.stopPropagation()}
       onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => {
         event.stopPropagation();
         onDismiss();
-      }}
-      onKeyDown={(event) => {
-        if (event.key === "Escape") onDismiss();
       }}
       style={{
         position: "absolute",
@@ -206,10 +214,7 @@ export function SleepNowNotice({ message, onDismiss }: { message: string; onDism
       <span style={{ display: "inline-flex", color: "var(--muted)", flex: "none" }}>
         <MoonIcon size={12} />
       </span>
-      <span style={{ minWidth: 0 }}>
-        <span style={{ color: "var(--ink-dim)" }}>Still running: </span>
-        {message}
-      </span>
+      <span style={{ minWidth: 0 }}>{message}</span>
     </div>
   );
 }
@@ -225,7 +230,7 @@ export function KeepAwakeButton({
   pinned: boolean;
   onToggle: () => void;
 }) {
-  const title = pinned ? "Keep running is on: this agent never sleeps" : "Keep running";
+  const title = pinned ? "Keep running is on: this agent never sleeps on its own" : "Keep running";
   return (
     <button
       type="button"

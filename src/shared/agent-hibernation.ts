@@ -370,6 +370,25 @@ const RUNTIME_NAMES: Record<AgentHibernationRuntime, string> = {
 };
 
 /**
+ * A sleep's answer arriving at a pane's sleeping mark. The pane's own
+ * hibernated exit creates the mark; Sleep now's answer lands after it (main
+ * waits up to SUMMARY_TIMEOUT_MS for the summary) and only fills in the
+ * card's line and the memory freed. With no mark there, the user resumed
+ * the pane meanwhile: the answer creates nothing, or the card would come
+ * back stuck on "Waking…".
+ */
+export function fillSleepMark<T extends { summary?: AgentSleepSummary | null; freedBytes?: number | null }>(
+  current: T | null,
+  answer: { summary?: AgentSleepSummary | null; freedBytes?: number | null },
+): T | null {
+  if (!current) return current;
+  const summary = current.summary ?? answer.summary ?? null;
+  const freedBytes = current.freedBytes ?? answer.freedBytes ?? null;
+  if (summary === (current.summary ?? null) && freedBytes === (current.freedBytes ?? null)) return current;
+  return { ...current, summary, freedBytes };
+}
+
+/**
  * Why Sleep now left the agent running, in the words the pane shows. Every
  * refusal has a sentence: the button never fails without saying why.
  */
@@ -377,24 +396,24 @@ export function sleepNowRefusalMessage(reason: AgentHibernationRefusal | "cannot
   const name = RUNTIME_NAMES[runtime] ?? "The agent";
   switch (reason) {
     case "agent-busy":
-      return `${name} is still working.`;
+      return `${name} is still working, so it was not put to sleep.`;
     case "waiting-on-user":
-      return `${name} is waiting for your answer.`;
+      return `${name} is waiting for your answer, so it keeps running.`;
     case "unsent-input":
-      return `There is unsent text in its box.`;
+      return "There is unsent text in its box, so it keeps running.";
     case "scheduled-work":
-      return "It has a scheduled wake-up.";
+      return "It has a scheduled wake-up, so it keeps running.";
     case "other-processes":
-      return "Another program is running in this terminal.";
+      return "Another program is running in this terminal, so it keeps running.";
     case "watched-on-phone":
-      return "It is open on your phone.";
+      return "It is open on your phone, so it keeps running.";
     case "remote":
-      return "Agents on another machine cannot sleep.";
+      return "Agents on another machine cannot be put to sleep.";
     case "no-session":
     case "no-agent-process":
-      return `${name} is not running in this terminal.`;
+      return `${name} is not running here.`;
     case "cannot-resume":
-      return `Its session could not be resumed afterwards, so ${name} keeps running.`;
+      return "Codara could not confirm this session can be resumed, so it keeps running.";
     case "in-flight":
       return "It is already being put to sleep.";
     case "stop-failed":
@@ -405,8 +424,18 @@ export function sleepNowRefusalMessage(reason: AgentHibernationRefusal | "cannot
     case "runtime-mismatch":
     case "unknown-state":
       return `Codara cannot tell what ${name} is doing yet. Try again in a moment.`;
-    default:
+    // Never a manual request's answer (Sleep now skips the policy and the
+    // idle clock), but said plainly should one ever arrive.
+    case "off":
+    case "exempt":
+    case "not-idle-long-enough":
+    case "bad-request":
       return `${name} could not be put to sleep. Try again.`;
+    default: {
+      // A new refusal must be given its own sentence here.
+      const unhandled: never = reason;
+      return `${name} could not be put to sleep (${String(unhandled)}). Try again.`;
+    }
   }
 }
 

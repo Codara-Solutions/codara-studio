@@ -491,7 +491,14 @@ async function main() {
     const manual = (extra = {}) => request({ placement: "visible", manual: true, ...extra });
     const fresh = (t) => {
       t.state.session = { ...t.state.session, lastInputAt: NOW - 5_000, lastOutputAt: NOW - 1_000 };
-      Object.assign(t.state.evidence, { lastUserInputAt: NOW - 5_000, lastComposerEditAt: NOW - 5_000, lastSubmitAt: NOW - 5_000, lastOutputAt: NOW - 1_000 });
+      Object.assign(t.state.evidence, {
+        lastUserInputAt: NOW - 5_000,
+        lastComposerEditAt: NOW - 5_000,
+        lastSubmitAt: NOW - 5_000,
+        lastOutputAt: NOW - 1_000,
+        structured: true,
+        settledAt: NOW - 5_000,
+      });
     };
     r = await run(fresh, manual());
     check("Sleep now skips the idle clock", r.result.ok === true && r.calls.stop.length === 1, r.result);
@@ -508,7 +515,21 @@ async function main() {
     r = await run((t) => { t.state.processes = [...t.state.processes, { pid: 103, parentPid: 100, startMs: NOW - 300 * MIN, command: "node vite" }]; }, manual());
     check("Sleep now refuses another program in the terminal", r.result.reason === "other-processes" && r.calls.stop.length === 0, r.result);
     r = await run((t) => { t.state.session = { ...t.state.session, remote: true }; }, manual());
-    check("Sleep now refuses a remote pane", r.result.ok === false && r.calls.stop.length === 0, r.result);
+    check("Sleep now refuses a remote pane", r.result.reason === "remote" && r.calls.stop.length === 0, r.result);
+    // Known only from its screen: a working frame the patterns missed looks
+    // like idle output, so output in the last seconds keeps it running.
+    r = await run((t) => { fresh(t); Object.assign(t.state.evidence, { structured: false, settledAt: 0 }); }, manual());
+    check(
+      "Sleep now leaves a screen-only agent that printed a moment ago running",
+      r.result.reason === "agent-busy" && /^output 1s ago$/.test(r.result.detail ?? "") && r.calls.stop.length === 0,
+      r.result,
+    );
+    r = await run((t) => {
+      fresh(t);
+      Object.assign(t.state.evidence, { structured: false, settledAt: 0, lastOutputAt: NOW - 10_000 });
+      t.state.session = { ...t.state.session, lastOutputAt: NOW - 10_000 };
+    }, manual());
+    check("and puts it to sleep once it has been quiet a few seconds", r.result.ok === true, r.result);
 
     // A held census verdict is not reused: the dev server may have ended.
     ah.resetAgentHibernationForTests();
@@ -536,6 +557,32 @@ async function main() {
       { timerResult, pressedResult, stops: w.calls.stop.length },
     );
 
+    // A timer request that starts while Sleep now reads the settings: Sleep
+    // now still sees it and waits for it, one decision, one stop.
+    ah.resetAgentHibernationForTests();
+    const raced = makeDeps();
+    const policyOf = raced.deps.policy;
+    let policyCalls = 0;
+    raced.deps.policy = async () => {
+      policyCalls += 1;
+      if (policyCalls === 1) await new Promise((resolve) => setTimeout(resolve, 20));
+      return policyOf();
+    };
+    // The timer's census is still running when Sleep now's read returns.
+    const listOf = raced.deps.listProcesses;
+    raced.deps.listProcesses = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return listOf();
+    };
+    const byHand = ah.hibernateAgentPane(manual(), raced.deps);
+    const byTimer = ah.hibernateAgentPane(request(), raced.deps);
+    const [handResult, timerOutcome] = await Promise.all([byHand, byTimer]);
+    check(
+      "a timer request during Sleep now's settings read is waited for, not raced",
+      handResult.ok === true && timerOutcome.ok === true && raced.calls.stop.length === 1,
+      { handResult, timerOutcome, stops: raced.calls.stop.length },
+    );
+
     const said = [];
     ah.resetAgentHibernationForTests();
     const logged = makeDeps({ log: (line) => said.push(line) });
@@ -550,7 +597,7 @@ async function main() {
   }
 
   // ── Census backoff ──
-  const devServer ={ pid: 103, parentPid: 100, startMs: NOW - 300 * MIN, command: "node vite" };
+  const devServer = { pid: 103, parentPid: 100, startMs: NOW - 300 * MIN, command: "node vite" };
   {
     ah.resetAgentHibernationForTests();
     const t = makeDeps();
