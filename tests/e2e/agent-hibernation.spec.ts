@@ -584,21 +584,17 @@ test("a sleeping pane shows the moon and one pill centred at any size, and Shift
       };
     };
     const atFirst = await offCentre();
-    expect(atFirst.x).toBeLessThanOrEqual(2);
-    expect(atFirst.y).toBeLessThanOrEqual(2);
-    expect(atFirst.pillX).toBeLessThanOrEqual(2);
+    expect(Math.max(atFirst.x, atFirst.y, atFirst.pillX), JSON.stringify(atFirst)).toBeLessThanOrEqual(2);
     if (shots) await shootBothThemes(page, shots, "pill-split");
 
-    // Another size: the window grows, the pane with it, the pill follows.
+    // Another size: the window changes, the pane with it, the pill follows.
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1100, 760));
     await expect
       .poll(async () => Math.abs((await offCentre()).width - atFirst.width), { timeout: 10_000 })
       .toBeGreaterThan(50);
     await page.waitForTimeout(300);
     const atSecond = await offCentre();
-    expect(atSecond.x).toBeLessThanOrEqual(2);
-    expect(atSecond.y).toBeLessThanOrEqual(2);
-    expect(atSecond.pillX).toBeLessThanOrEqual(2);
+    expect(Math.max(atSecond.x, atSecond.y, atSecond.pillX), JSON.stringify(atSecond)).toBeLessThanOrEqual(2);
     if (shots) await shootBothThemes(page, shots, "pill-split-larger");
 
     // Shift+click on Resume: resumes and pins Keep running.
