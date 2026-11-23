@@ -201,7 +201,12 @@ export class ScheduledWork {
         if (fire === null) {
           until = now + ONE_SHOT_UNKNOWN_HOLD_MS;
           note = "one-shot cron time unreadable: kept awake 24 h at most";
-        } else until = fire + SCHEDULED_WAKE_MARGIN_MS;
+        } else {
+          // A time already past when the answer arrives matches again a day
+          // or a year later: never hold longer than a recurring cron would.
+          until = Math.min(fire, now + RECURRING_CRON_HOLD_MS) + SCHEDULED_WAKE_MARGIN_MS;
+          if (fire > now + RECURRING_CRON_HOLD_MS) note = "one-shot cron fires more than a week away: kept awake a week at most";
+        }
       }
       const id = cronId(response, asFields(response)?.content, asFields(response)?.data) ?? `unnamed-${++this.standIns}`;
       this.crons.set(id, { until });
@@ -218,6 +223,16 @@ export class ScheduledWork {
 
   /** The turn ended: a CronCreate still unanswered was denied or interrupted. */
   turnEnded(): void {
+    this.pendingCreates = [];
+  }
+
+  /**
+   * The same session came back in a new process (--resume, --continue). The
+   * runtime restores its cron jobs but not a pending wake-up, so the crons
+   * stay held (each still ends on its own) and the wake-up goes.
+   */
+  resumed(): void {
+    this.wakeUntil = 0;
     this.pendingCreates = [];
   }
 

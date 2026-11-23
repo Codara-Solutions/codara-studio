@@ -256,6 +256,8 @@ interface PaneWatcher {
   // A ScheduleWakeup or cron job the Claude session set up (hooks): the agent
   // waits for its next tick and must not be stopped between ticks.
   scheduled: ScheduledWork;
+  // The session those holds belong to, as its SessionStart named it.
+  scheduledSession: string | null;
   // A dialog on screen in a hook-owned Claude with no tool call waiting (an
   // MCP server approval at startup): no hook announces it. Noticed only in
   // the startup window (dialogWindowUntil), when it was first seen; open
@@ -444,6 +446,7 @@ export function syncTerminalNotifyPanes(input: {
       lastSubmitAt: 0,
       lastComposerClearAt: 0,
       scheduled: new ScheduledWork(),
+      scheduledSession: null,
       screenDialogAt: 0,
       dialogWindowUntil: 0,
       lastInterruptKeyAt: 0,
@@ -647,6 +650,10 @@ function resetAgentSession(w: PaneWatcher): void {
   w.hookFollowUp = false;
   clearBackground(w);
   w.backgroundSessionId = null;
+  // Another agent in this pane inherits nothing the last one scheduled.
+  w.scheduled.clear();
+  w.scheduledSession = null;
+  w.dialogWindowUntil = 0;
   w.lastProgramState = null;
   w.lastTurnEnd = null;
   w.codexAnnouncedTurnIds = [];
@@ -1428,10 +1435,17 @@ export function noteTerminalHookEvent(
       closeTurnSilently(w, now, `session ${source || "start"}`);
       w.turn = null;
       w.pendingToolCalls = 0;
-      // A new process (startup, resume) starts with nothing scheduled. After
-      // /clear the same process may keep its wake-ups and crons (not checked
-      // on the real CLI), so they stay: every such hold ends on its own.
-      if (source !== "clear") w.scheduled.clear();
+      // A resume of the same session restores its cron jobs (Claude Code's
+      // scheduled-tasks docs) but not a pending wake-up: keep the crons held.
+      // After /clear the same process may keep its wake-ups and crons (not
+      // checked on the real CLI), so they stay. Any other start has nothing
+      // scheduled. Every hold kept here still ends on its own.
+      if (source === "resume" && sessionId && (w.scheduledSession === null || w.scheduledSession === sessionId)) {
+        w.scheduled.resumed();
+      } else if (source !== "clear") {
+        w.scheduled.clear();
+      }
+      w.scheduledSession = sessionId ?? null;
       w.screenDialogAt = 0;
       w.dialogWindowUntil = source === "startup" || source === "" ? now + STARTUP_DIALOG_WINDOW_MS : 0;
       noteActivity(w, { tool: null });

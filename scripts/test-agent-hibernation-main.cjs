@@ -477,6 +477,12 @@ async function main() {
     check("cron: next year", fire("0 9 1 1 *", T0) === new Date(2027, 0, 1, 9, 0).getTime());
     const monday = new Date(fire("0 9 * * 1", T0) ?? 0);
     check("cron: a weekday", monday.getDay() === 1 && monday.getHours() === 9 && monday.getTime() > T0);
+    s = new scheduledWork.ScheduledWork();
+    cron({ cron: "0 9 1 1 *", prompt: "once", recurring: false }, { id: "c9" });
+    check(
+      "a one-shot cron far away (or already past, so next year) holds a week at most",
+      s.describe(T0 + 7 * 24 * 60 * MIN + MARGIN - 1) !== null && s.describe(T0 + 7 * 24 * 60 * MIN + MARGIN) === null,
+    );
     check("cron: nonsense", fire("every day", T0) === null && fire("61 * * * *", T0) === null);
   }
 
@@ -906,8 +912,13 @@ async function main() {
     hook("Stop", {});
     check("a cron denied at its prompt (no Post hook) is dropped at the turn's end", scheduled() === null, scheduled());
     tool("CronCreate", { cron: "0 * * * *" }, { id: "cron-8b" });
+    tool("ScheduleWakeup", { delaySeconds: 600 });
     hook("SessionStart", { source: "resume" });
-    check("a new process (resume) starts with nothing scheduled", scheduled() === null, scheduled());
+    check("a resume of the same session keeps its cron (the runtime restores it) and drops the wake-up", scheduled() === "a cron job", scheduled());
+    notify.noteTerminalHookEvent("n3", "SessionStart", { session_id: "s-other", source: "resume" });
+    check("a resume of another session starts with nothing scheduled", scheduled() === null, scheduled());
+    // Back to this block's session for the checks below.
+    hook("SessionStart", { source: "startup" });
   }
   {
     // A startup dialog no hook announces (an MCP server approval): kept
