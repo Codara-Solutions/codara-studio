@@ -257,9 +257,15 @@ interface PaneWatcher {
   // waits for its next tick and must not be stopped between ticks.
   scheduled: ScheduledWork;
   // A dialog on screen in a hook-owned Claude with no tool call waiting (an
-  // MCP server approval at startup, a trust prompt): no hook announces it.
-  // Open until the user presses a key or a turn starts.
+  // MCP server approval at startup): no hook announces it. Noticed only in
+  // the startup window (dialogWindowUntil), when it was first seen; open
+  // until a key, a turn, the prompt's footer or SCREEN_DIALOG_HOLD_MS.
   screenDialogAt: number;
+  // From a SessionStart(startup) until the prompt's footer is drawn, at most
+  // STARTUP_DIALOG_WINDOW_MS: the only time a dialog-looking screen in a
+  // hook-owned pane is taken for a dialog. Any other time it is transcript
+  // text (claude --resume prints the whole transcript at every relaunch).
+  dialogWindowUntil: number;
   lastInterruptKeyAt: number;
   lastHookEventAt: number;
   // Claude tool calls announced by PreToolUse and not yet answered by
@@ -439,6 +445,7 @@ export function syncTerminalNotifyPanes(input: {
       lastComposerClearAt: 0,
       scheduled: new ScheduledWork(),
       screenDialogAt: 0,
+      dialogWindowUntil: 0,
       lastInterruptKeyAt: 0,
       lastHookEventAt: 0,
       pendingToolCalls: 0,
@@ -1154,8 +1161,21 @@ function ctrlCEmptiesComposer(w: PaneWatcher, data: string | undefined): boolean
   );
 }
 
-function screenDialogOpen(w: PaneWatcher): boolean {
-  return w.screenDialogAt > Math.max(w.lastUserInputAt, w.lastTurnStartedAt);
+// A startup dialog holds a pane this long at most: sleeping one loses
+// nothing (the dialog comes back on --resume), so it never holds for good.
+const SCREEN_DIALOG_HOLD_MS = 10 * 60_000;
+const STARTUP_DIALOG_WINDOW_MS = 2 * 60_000;
+// Claude Code's footer under its input box (agent-patterns.ts's UI anchors
+// without the launch banner): only drawn while the prompt is up.
+const CLAUDE_PROMPT_FOOTER_RE =
+  /\?\s*for\s*shortcuts|shift\s*\+?\s*tab\s*to\s*cycle|\b(?:manual|auto|plan)\s*mode\s*on\b|\baccept\s*edits\s*on\b|\bbypass\s*permissions\s*on\b/i;
+
+function screenDialogOpen(w: PaneWatcher, now = Date.now()): boolean {
+  return (
+    w.screenDialogAt > 0 &&
+    w.screenDialogAt > Math.max(w.lastUserInputAt, w.lastTurnStartedAt) &&
+    now - w.screenDialogAt < SCREEN_DIALOG_HOLD_MS
+  );
 }
 
 // User keystrokes / injected input reached this pane's pty. A submit starts a
@@ -1355,12 +1375,16 @@ export function noteTerminalHookEvent(
     case "PostToolUse":
     case "PostToolUseFailure":
       w.pendingToolCalls = Math.max(0, w.pendingToolCalls - 1);
-      w.scheduled.toolFinished(
-        hookToolName(payload),
-        payload?.tool_input ?? payload?.toolInput,
-        payload?.tool_response ?? payload?.toolResponse,
-        hookName === "PostToolUseFailure",
-      );
+      {
+        const scheduledNote = w.scheduled.toolFinished(
+          hookToolName(payload),
+          payload?.tool_input ?? payload?.toolInput,
+          payload?.tool_response ?? payload?.toolResponse,
+          hookName === "PostToolUseFailure",
+          now,
+        );
+        if (scheduledNote) tanLog(`pane=${w.paneId} ${scheduledNote}`);
+      }
       // The board shows the tool running now, not the last one that ran.
       if (w.pendingToolCalls === 0 && w.activity.tool !== null) noteActivity(w, { tool: null });
       if (w.signals.programStatus) return;
@@ -1385,6 +1409,7 @@ export function noteTerminalHookEvent(
     case "Stop":
     case "StopFailure":
       if (agentId) return;
+      w.scheduled.turnEnded();
       handleClaudeStop(w, now, hookName, payload);
       return;
     case "SubagentStop":
@@ -1403,7 +1428,12 @@ export function noteTerminalHookEvent(
       closeTurnSilently(w, now, `session ${source || "start"}`);
       w.turn = null;
       w.pendingToolCalls = 0;
-      w.scheduled.clear();
+      // A new process (startup, resume) starts with nothing scheduled. After
+      // /clear the same process may keep its wake-ups and crons (not checked
+      // on the real CLI), so they stay: every such hold ends on its own.
+      if (source !== "clear") w.scheduled.clear();
+      w.screenDialogAt = 0;
+      w.dialogWindowUntil = source === "startup" || source === "" ? now + STARTUP_DIALOG_WINDOW_MS : 0;
       noteActivity(w, { tool: null });
       followBackgroundSession(w, sessionId, now);
       w.hookFollowUp = false;
@@ -2117,6 +2147,14 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       }
     }
 
+    // Claude's prompt footer is up: no startup dialog is on screen, and none
+    // comes. The launch banner is not enough, it is drawn above a dialog too.
+    if (w.runtime === "claude" && (w.dialogWindowUntil > 0 || w.screenDialogAt > 0) && CLAUDE_PROMPT_FOOTER_RE.test(plain.slice(fresh))) {
+      if (w.screenDialogAt > 0) tanLog(`pane=${w.paneId} prompt is up: the startup dialog is gone`);
+      w.dialogWindowUntil = 0;
+      w.screenDialogAt = 0;
+    }
+
     // Only pattern matches that END in the freshly arrived bytes count.
     const cls =
       applyProblem || w.codexScreen || programOwned
@@ -2128,11 +2166,11 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       if (!hookOwned || w.pendingToolCalls > 0) {
         if (w.state !== "blocked") tanLog(`pane=${w.paneId} screen shows a prompt (was ${w.state})`);
         needsYou(w, now, hookOwned && w.lastToolDetail ? `Permission for ${w.lastToolDetail}` : null, "screen prompt");
-      } else if (!turnActive(w)) {
-        // Not a needs-you (it may be transcript text), but enough to keep
-        // hibernation off the pane until the user answers or a turn starts:
-        // a startup dialog has no hook of its own.
-        if (!screenDialogOpen(w)) tanLog(`pane=${w.paneId} screen shows a dialog with no tool call waiting`);
+      } else if (!turnActive(w) && now < w.dialogWindowUntil && !screenDialogOpen(w, now)) {
+        // Not a needs-you, but enough to keep hibernation off the pane for a
+        // while: a startup dialog (MCP server approval) has no hook of its
+        // own. Only in the startup window: later it is transcript text.
+        tanLog(`pane=${w.paneId} screen shows a startup dialog with no tool call waiting`);
         w.screenDialogAt = now;
       }
     } else if (cls === "working") {

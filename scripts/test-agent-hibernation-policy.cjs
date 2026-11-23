@@ -162,7 +162,7 @@ async function main() {
   check("no chip state yet: stays awake", judge(idleEvidence({ chipState: null }), "claude") === "unknown-state");
   check("a pending tool call keeps it awake", judge(idleEvidence({ pendingToolCalls: 1 }), "claude") === "agent-busy");
   check("background tasks keep it awake", judge(idleEvidence({ backgroundRunning: 2 }), "claude") === "agent-busy");
-  check("a scheduled wake-up keeps it awake", judge(idleEvidence({ scheduledWork: "a wake-up within 30 min" }), "claude") === "scheduled-work");
+  check("a scheduled wake-up keeps it awake", judge(idleEvidence({ scheduledWork: "a wake-up by 20:31" }), "claude") === "scheduled-work");
   check("nothing scheduled says nothing", judge(idleEvidence({ scheduledWork: null }), "claude") === null);
   check(
     "a chip working in the background keeps it awake",
