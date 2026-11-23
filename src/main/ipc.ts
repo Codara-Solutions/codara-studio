@@ -40,6 +40,7 @@ import {
 import { createMachinesService, readLocalStats } from "./remote/machines";
 import type { MachinesSnapshot } from "@shared/machines";
 import { isRemotePath } from "@shared/remote";
+import { RUN_ID_SHAPE } from "@shared/run-delete-guard";
 import type { LaneChanges } from "@shared/source-lanes";
 import type { WorkerActivity, WorkerFeedSnapshot } from "@shared/worker-feed";
 import { MUTE_KEY_PATTERN } from "@shared/notify-center";
@@ -3071,9 +3072,11 @@ export function registerIpc(): void {
     return readWorkerReport(path);
   });
 
-  handle("orchestration:deleteRun", async (_e, runId: string): Promise<void> => {
+  handle("orchestration:deleteRun", async (_e, runId: unknown, options?: { refuseLive?: unknown }): Promise<void> => {
+    // The id names a folder under runs/ that is removed whole.
+    if (typeof runId !== "string" || !RUN_ID_SHAPE.test(runId)) throw new Error("Not a run id.");
     const { deleteRun } = await getRunStore();
-    await deleteRun(runId);
+    await deleteRun(runId, { refuseLive: options?.refuseLive === true });
   });
 
   // ── Cora Board ──────────────────────────────────────────────────────────

@@ -34,8 +34,8 @@ own resume command (`claude --resume <id>`, `codex resume <id>`,
 `grok --resume <id>`, `pi --session <id>`), in the workspace whose folder
 the session ran in. When no workspace has that folder, the deepest workspace
 holding it is used, and when none does, the folder is added as a new
-workspace. A Cora session opens its chat. A session already running in a pane
-is gone to instead, because two agents on one transcript would corrupt it.
+workspace. A session already running in a pane is gone to instead, because
+two agents on one transcript would corrupt it. Cora rows are described below.
 
 When a session's folder is no longer on the computer, it cannot be resumed:
 the row says **folder gone**, and clicking it opens its transcript, read
@@ -73,11 +73,62 @@ grouped as Pinned, Today, Yesterday, This week and Older.
 
 **Split here** resumes the session in a new pane beside the focused one, when
 its folder belongs to the workspace on screen. The **...** menu pins, renames,
-copies the id, reveals the transcript and deletes. Delete asks first, is only
-offered for Claude, Codex and Grok sessions not running in a pane, and removes
-the same files as Settings, Sessions. A session that list does not have (an
-archived Codex session, one in another account's home) says it can't be deleted
-from here before asking anything.
+copies the id, reveals the transcript and deletes. Delete asks first. For
+Claude, Codex and Grok sessions not running in a pane it removes the same files
+as Settings, Sessions. A session that list does not have (an archived Codex
+session, one in another account's home) says it can't be deleted from here
+before asking anything. Cora runs have their own rule, below.
+
+### Cora rows
+
+A Cora row is a run in Codara's `runs/` folder, and the picker reads the run
+when the row is selected, so its detail says what it is under **Kind**:
+
+| Kind | What it is | Enter |
+|---|---|---|
+| Cora chat | A chat you had with Cora | **Open chat**, or **Go to its tab** when a tab shows it |
+| Loom pass | One pass of a Loom (`automationId`, run directly by one worker) | **Open pass in Automations**: the Loom, with that pass open in its history and its run peeked |
+| Automation run | A pass of an older managed automation | **Open run in Automations** |
+| Workflow run | A run a workflow script drove | **Open run in Automations**, on its Workflows view |
+
+A pass its Loom no longer lists (the Loom was deleted, or **Remove** took the
+pass out of its history) has nowhere else to be shown: the button reads
+**View**, and Enter opens its transcript in the picker, read only, with a line
+saying why. So does a run whose folder is already gone. **Whole transcript**
+works for every Cora row.
+
+The **...** menu offers **Delete...** for a Cora run that is finished, that
+no Loom still uses, and that no tab shows. These have no Delete, and the
+detail says why:
+
+- a run that is working: planning, running, reviewing, or stopped with a
+  worker still going;
+- a run a Loom holds as its current run. Unless a Loom isolates its passes,
+  every pass of a cycle runs in the same run, which reads as finished between
+  passes, and a paused Loom or one waiting on your answer keeps it too.
+  Deleting it would stop the Loom, so stop the Loom first. When the Looms
+  cannot be listed, Delete is not offered either;
+- a run open in a tab: its chat, its Runs tab or its workers' tab.
+
+The confirm says what goes: "Deletes this run and its saved output from this
+computer, with what Cora learned from it", then that its Loom and its other
+passes stay. When several passes of a Loom ran in this one run, it says
+"Deletes these N passes". The picker reads the run again just before
+deleting, and main checks the same rule once more in the run's own queue
+(`deleteRun(runId, { refuseLive: true })`), so a pass that starts in the
+meantime is refused, not cut off. A refusal says why in the status line.
+
+Delete is the run store's own delete (`orchestration:deleteRun`, the one the
+chat list and Settings, All runs use without that check; the handler only
+takes ids of the run store's own `run-...` shape). It removes the run's folder
+(`run.json`, its event log, prompts, worker logs and saved output), the run's
+own checkpoint refs in its repository, its outcome record and quotes in
+learned memory, and the throwaway sandbox worktrees its own workers used. It
+refuses, and changes nothing, while one of those worktrees holds changes not
+confirmed merged back. It never touches the Loom or automation (its settings
+and history stay as they are), other runs or passes, your own worktrees, or
+other runs' checkpoints. The row leaves the list at once and the index on the
+pass the delete starts.
 
 ### Names and pins
 

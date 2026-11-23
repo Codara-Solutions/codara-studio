@@ -96,6 +96,7 @@ import {
   resumeBlockingRunQuestion,
   unresolvedRunQuestions,
 } from "@shared/run-questions";
+import { RUN_IS_WORKING, liveRunDeleteRefusal } from "@shared/run-delete-guard";
 import { makeId } from "@shared/ids";
 import {
   forgetPastedKeys,
@@ -1406,6 +1407,37 @@ async function purgeTerminalRunForRetention(runId: string): Promise<void> {
   }
 }
 
+// Checked in the run's mutation queue, as retention does, so a commit that
+// makes the run live again lands either before the check or never.
+async function deleteRunUnlessLive(runId: string): Promise<void> {
+  const previous = runMutationQueues.get(runId) ?? Promise.resolve();
+  const next = previous
+    .catch(() => {
+      /* an earlier failed commit must not wedge the delete */
+    })
+    .then(async () => {
+      const latest = await requireRun(runId);
+      const { listJobs } = await import("./scheduler");
+      // A running workflow script writes progress through this same queue,
+      // and discard waits for the script to end: deleting it here could hang.
+      const inFlight =
+        (!!latest.workflow && !!workflowRunControls?.isActive(runId)) ||
+        activeWorkersForRun(runId).length > 0 ||
+        [...activeAutopilotCycles.keys()].some((key) => key.startsWith(`${runId}:`)) ||
+        activeAutopilotPlans.has(runId) ||
+        activeAutopilotReviews.has(runId);
+      const refusal = inFlight ? RUN_IS_WORKING : liveRunDeleteRefusal(latest, await listJobs());
+      if (refusal) throw new Error(refusal);
+      await deleteRun(runId);
+    });
+  runMutationQueues.set(runId, next);
+  try {
+    await next;
+  } finally {
+    if (runMutationQueues.get(runId) === next) runMutationQueues.delete(runId);
+  }
+}
+
 function unreconciledSandboxAttempts(run: RunState): WorkerAttempt[] {
   return run.workerAttempts.filter(
     (attempt) =>
@@ -2075,6 +2107,8 @@ export interface WorkflowRunControls {
   cancel(runId: string, reason: string): Promise<void>;
   /** The run is being deleted: end its script without touching run state. */
   discard(runId: string): Promise<void>;
+  /** Its script is running in this session. */
+  isActive(runId: string): boolean;
 }
 
 let workflowRunControls: WorkflowRunControls | null = null;
@@ -15921,7 +15955,16 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   return run;
 }
 
-export async function deleteRun(runId: string): Promise<void> {
+/**
+ * refuseLive: refuse a run that is working or that a Loom still holds as its
+ * current run (it adds its next pass to that run). The session picker's
+ * cleanup asks for it; the chat list and Settings delete as before.
+ */
+export async function deleteRun(runId: string, options: { refuseLive?: boolean } = {}): Promise<void> {
+  if (options.refuseLive) {
+    await deleteRunUnlessLive(runId);
+    return;
+  }
   const run = await requireRun(runId);
   if (run.workflow && workflowRunControls) await workflowRunControls.discard(run.id);
   const sandboxBlockers = unreconciledSandboxAttempts(run);

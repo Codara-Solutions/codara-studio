@@ -1156,8 +1156,9 @@ const api = {
       ipcRenderer.invoke("orchestration:launchWorkerAttempt", input),
     readWorkerReport: (path: string): Promise<WorkerReport | null> =>
       ipcRenderer.invoke("orchestration:readWorkerReport", path),
-    deleteRun: (runId: string): Promise<void> =>
-      ipcRenderer.invoke("orchestration:deleteRun", runId),
+    // refuseLive: refuse a run that is working or that a Loom still holds (the session picker's cleanup).
+    deleteRun: (runId: string, options?: { refuseLive?: boolean }): Promise<void> =>
+      ipcRenderer.invoke("orchestration:deleteRun", runId, options),
     // Main coalesces token-cadence stream events into one IPC message on
     // "orchestration:events-batch" (see event-log.ts broadcast). Fan it back out
     // one event at a time, in journal order, so subscribers keep the same

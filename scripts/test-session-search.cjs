@@ -43,6 +43,8 @@ async function load(work) {
         'export * from "./src/main/session-search/antigravity-summaries";',
         'export * from "./src/shared/session-search";',
         'export * from "./src/renderer/src/workers/session-resume";',
+        'export * from "./src/renderer/src/components/session-search/cora-runs";',
+        'export * from "./src/shared/run-delete-guard";',
         'export { buildAgentForkCommand, buildAgentResumeCommand, runtimeFromAgentSessionLaunchCommand, workerSessionsRuntime } from "./src/renderer/src/workers/launch-commands";',
       ].join("\n"),
       resolveDir: ROOT,
@@ -858,6 +860,90 @@ async function pickerTests(m, work) {
     assert.equal(find(leaf({ worker: { state: "done" } })), null);
     assert.ok(find({ kind: "split", a: leaf({ paneId: "p0", agentSession: null }), b: leaf({ hibernation: { at: 1 } }) }));
     assert.equal(m.findOpenSessionPane(layout(leaf({ hibernation: { at: 1 } })), "codex", id), null);
+  });
+
+  await check("a Cora row: what it is, where opening lands, and when it may be deleted", () => {
+    const run = (extra = {}) => ({ id: "run-a", status: "complete", workerAttempts: [], ...extra });
+    const loom = { automationId: "loom-1", executionMode: "direct" };
+    const jobs = (history, currentRunId) => [{ id: "loom-1", history: history.map((runId) => ({ runId })), state: { status: "idle", currentRunId } }];
+    assert.equal(m.coraRunKind(run()), "chat");
+    assert.equal(m.coraRunKind(run(loom)), "loom-pass");
+    assert.equal(m.coraRunKind(run({ automationId: "a" })), "automation-run");
+    assert.equal(m.coraRunKind(run({ workflow: { name: "w" } })), "workflow-run");
+
+    // A chat opens as its chat, and goes to its tab when one shows it.
+    assert.deepEqual(m.coraPrimary(m.coraRunFacts(run(), null, false)), { action: "open-chat", label: "Open chat" });
+    assert.equal(m.coraPrimary(m.coraRunFacts(run(), null, true)).label, "Go to its tab");
+    // A pass its Loom still lists opens in the hub; one it does not is read here.
+    const listed = m.coraRunFacts(run(loom), jobs(["run-a"]), false);
+    assert.deepEqual(m.coraPrimary(listed), { action: "open-hub", label: "Open pass in Automations" });
+    const orphan = m.coraPrimary(m.coraRunFacts(run(loom), jobs(["run-b"]), false));
+    assert.equal(orphan.action, "view");
+    assert.equal(orphan.label, "View");
+    assert.match(orphan.notice, /Its Loom no longer lists it/);
+    const deleted = m.coraPrimary(m.coraRunFacts(run(loom), [], false));
+    assert.equal(deleted.action, "view");
+    assert.match(deleted.notice, /Its Loom was deleted/);
+    assert.equal(m.coraPrimary(m.coraRunFacts(run({ workflow: { name: "w" } }), null, false)).action, "open-hub");
+    const gone = m.coraRunFacts(null, null, false);
+    assert.equal(m.coraPrimary(gone).action, "view");
+
+    // Delete: finished and closed only.
+    assert.equal(m.coraDeleteBlock(listed), null);
+    assert.equal(m.coraDeleteBlock(m.coraRunFacts(run(), null, false)), null);
+    assert.match(m.coraDeleteBlock(m.coraRunFacts(run(), null, true)), /Open in a tab/);
+    for (const status of ["planning", "running", "reviewing"]) {
+      assert.match(m.coraDeleteBlock(m.coraRunFacts(run({ ...loom, status }), jobs(["run-a"]), false)), /Working now/, status);
+    }
+    const stillWorking = run({ ...loom, status: "paused", workerAttempts: [{ status: "running" }] });
+    assert.match(m.coraDeleteBlock(m.coraRunFacts(stillWorking, null, false)), /Working now/);
+    const settled = run({ status: "paused", workerAttempts: [{ status: "succeeded" }, { status: "failed" }] });
+    assert.equal(m.coraDeleteBlock(m.coraRunFacts(settled, null, false)), null);
+    assert.ok(m.coraDeleteBlock(gone), "nothing left to delete");
+
+    // A Loom adds its next pass to its current run, which reads as finished in between,
+    // and keeps it through a pause or a question: deleting it would stop the Loom.
+    const held = m.coraRunFacts(run(loom), jobs(["run-a"], "run-a"), false);
+    assert.equal(m.coraDeleteBlock(held), "Its Loom is still using this run. Stop the Loom first.");
+    assert.equal(m.coraDeleteBlock(m.coraRunFacts(run(loom), jobs(["run-a"], "run-z"), false)), null);
+    // Looms that could not be listed are not read as "no Loom".
+    const unknown = m.coraRunFacts(run(loom), null, false);
+    assert.match(m.coraDeleteBlock(unknown), /Could not read its Loom/);
+    assert.equal(m.coraPrimary(unknown).action, "view");
+    assert.match(m.coraPrimary(unknown).notice, /could not be read/, "an unread list is not called a deleted Loom");
+    assert.equal(m.coraDeleteBlock(m.coraRunFacts(run(), null, false)), null, "a chat needs no Loom list");
+
+    // The confirm names what goes: every pass that ran in this run, and what Cora learned.
+    assert.equal(
+      m.coraDeleteConfirm(listed),
+      "Deletes this run and its saved output from this computer, with what Cora learned from it. Its Loom and its other passes stay.",
+    );
+    const shared = m.coraRunFacts(run(loom), jobs(["run-a", "run-b", "run-a", "run-a"]), false);
+    assert.equal(shared.passCount, 3);
+    assert.equal(
+      m.coraDeleteConfirm(shared),
+      "Deletes these 3 passes, which ran in this one run, and their saved output from this computer, with what Cora learned from them. Its Loom stays.",
+    );
+    assert.match(m.coraDeleteConfirm(m.coraRunFacts(run({ workflow: { name: "w" } }), null, false)), /Its workflow and its other runs stay/);
+    assert.match(m.coraDeleteConfirm(m.coraRunFacts(run(), null, false)), /^Deletes this chat/);
+    assert.match(m.coraDeleteConfirm(m.coraRunFacts(run(loom), [], false)), /learned from it\. Its other passes stay\.$/, "a deleted Loom is not said to stay");
+
+    // Main refuses the same shapes under the run's queue.
+    assert.equal(m.liveRunDeleteRefusal(run({ status: "running" }), []), m.RUN_IS_WORKING);
+    assert.equal(m.liveRunDeleteRefusal(run(), jobs([], "run-a")), m.LOOM_HOLDS_RUN);
+    assert.equal(m.liveRunDeleteRefusal(run(), jobs([], undefined)), null);
+    assert.ok(m.RUN_ID_SHAPE.test("run-mabc12-x9y8z7"));
+    for (const bad of ["../run-a", "run-a/..", "run-", "x-run-a", "run-a b", `run-${"a".repeat(129)}`]) {
+      assert.equal(m.RUN_ID_SHAPE.test(bad), false, bad);
+    }
+  });
+
+  await check("a tab shows a run: its chat, its Runs tab or its workers, in any workspace", () => {
+    const layouts = (tabs) => [{ workspaceId: "w0", tabs: [] }, { workspaceId: "w1", tabs }];
+    assert.equal(m.runShownInTab(layouts([{ id: "run-a", kind: "chat" }]), "run-a"), true);
+    assert.equal(m.runShownInTab(layouts([{ id: "t", kind: "runs", runId: "run-a" }]), "run-a"), true);
+    assert.equal(m.runShownInTab(layouts([{ id: "t", kind: "terminal", scope: { kind: "workers", runId: "run-a" } }]), "run-a"), true);
+    assert.equal(m.runShownInTab(layouts([{ id: "run-b", kind: "chat" }, { id: "t", kind: "terminal" }]), "run-a"), false);
   });
 }
 
