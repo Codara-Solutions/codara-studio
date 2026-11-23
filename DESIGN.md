@@ -696,10 +696,10 @@ finished.
 ## Agents tab (2026-10)
 
 **Chosen:** D′, "straight T3 Code, a bit nicer and more minimal". The Agents
-tab is an inbox after T3 Code's thread sidebar: what needs you or finished on
-top, then Working, Snoozed and Settled shelves with plain counts (since
-2026-11 the top list has headings too, see the rules below). Each row has no
-box and three lines: the project, then the title,
+tab is an inbox after T3 Code's thread sidebar: Needs you, Working, Done and
+Settled sections with plain counts (the order and the missing Snoozed shelf
+are from 2026-11, see "Order, no snooze, coloured icons" below). Each row has
+no box and three lines: the project, then the title,
 then the branch and pull request. A status word sits top right (Input,
 Failed, Done, Working with a live timer) and gives way to the age once the
 row is seen. Etienne picked D from four variants on the real rows (D straight
@@ -715,29 +715,27 @@ own; the header of `AgentInboxList.tsx` names the source too.
 harness mark, a workspace tile in its colour, a status phrase and often a
 reply box, so five agents filled the rail and finished work never left.
 T3 Code's rule is that every agent is either working or out of the way:
-settle what is done, snooze what can wait, and a merged pull request settles
-itself.
+settle what is done, and a merged pull request settles itself.
 
 **References:** T3 Code's sidebar (`SidebarThreadRow`, its collapsible
-section headers, the snooze presets and the undo notice in the footer).
+section headers and the undo notice in the footer).
 
 **Rules:**
 
 - Fewer marks per row than T3 Code: the agent's mark only when it is not
-  Claude Code, project tiles in muted ink (no workspace colour), +/- line
-  counts only on a finished agent's pull request, the check as Studio's ✓ ✕
-  or a dot.
-- Colour is for state only: the status word and its icon (`--warn` Input,
-  `--danger` Failed, `--ok` Done, `--info` Working), the check glyph, +/-.
-  A seen row's title is dimmed (`--ink-dim`); only the open row gets a
-  surface (`--hover-strong`).
-- Hover, or keyboard focus, turns the status slot into Snooze and ✓ Settle.
-  E settles the focused row. Snooze offers 1 hour, 3 hours, this evening
-  (18:00, gone once passed), tomorrow 09:00 and next Monday 09:00; two that
-  land on the same minute keep the named one.
+  Claude Code, +/- line counts only on a finished agent's pull request, the
+  check as Studio's ✓ ✕ or a dot.
+- The project tile at the left of a row wears its workspace's colour, drawn
+  as the rail's resting workspace tile draws it (the glyph in the colour on
+  a 14% well of it with a 24% inset edge); a workspace with no colour keeps
+  the muted tile. Otherwise colour is for state only: the status word and
+  its icon (`--warn` Input, `--danger` Failed, `--ok` Done, `--info`
+  Working), the check glyph, +/-. A seen row's title is dimmed
+  (`--ink-dim`); only the open row gets a surface (`--hover-strong`).
+- Hover, or keyboard focus, turns the status slot into ✓ Settle. E settles
+  the focused row.
 - A settled agent comes back when it does something new (starts working,
-  asks, or finishes a turn the user has not seen); a snooze ends early only
-  for a question or a fresh failure, never for a finished turn.
+  asks, or finishes a turn the user has not seen).
 - A merged pull request settles its workspace's finished agents once. Undo,
   or new work after the merge, keeps the agent in view for that merge.
   Pinned, working and waiting agents are never auto-settled.
@@ -745,8 +743,8 @@ section headers, the snooze presets and the undo notice in the footer).
   seconds; Ctrl+Z (⌘Z) works while focus is in the list.
 - The right-click menu is T3 Code's, trimmed: Open, Merge PR (our one
   addition, only while the pull request is open with passing checks),
-  Settle, Snooze ›, Pin, Rename, Mark unread, Copy link, Delete. Snooze's
-  times and Delete's confirmation replace the list in place.
+  Settle, Pin, Rename, Mark unread, Copy link, Delete. Delete's confirmation
+  replaces the list in place.
 - Merge PR re-reads GitHub first. Into main, master or the repository's
   default branch it opens the Git panel's merge confirmation; into any other
   base it squash-merges on the click, pinned to the head commit, and settles
@@ -754,7 +752,9 @@ section headers, the snooze presets and the undo notice in the footer).
 - Rows do not answer questions in place: opening the row goes to the agent.
   The question is the row's tooltip.
 - Every row sits under a heading, and each heading's count is its rows:
-  Needs you, Done, Working, Snoozed, Settled, in that order. T3 Code leaves
+  Needs you, Working, Done, Settled, in that order (`AGENT_INBOX_SECTIONS`
+  in `src/shared/agent-inbox.ts`; the list, its arrow keys and the counts
+  all follow it). T3 Code leaves
   what needs you and what finished as an unlabelled list above shelves pinned
   to the bottom; in use that list read as rows with no section (2026-11), so
   it became the Needs you and Done sections, open by default. Needs you's
@@ -766,11 +766,29 @@ section headers, the snooze presets and the undo notice in the footer).
   place: title and time, the branch on hover. An orphan (its session
   closed) stays a normal row; every count is main agents only. A subagent
   waiting on the user lifts its parent into Needs you (its count and the
-  tab's badge). Under a settled or snoozed parent it is its own Needs you
+  tab's badge). Under a settled parent it is its own Needs you
   row instead, so the parent can be put away while it waits. A settled row
   is one line with no chip; a subagent that starts or shows new work brings
   its settled parent back. Etienne: "I
   mostly want to see the main agents only, not the sub agents".
+
+**Order, no snooze, coloured icons (2026-11-23).** The owner asked: "this
+should show Needs you / Working / Done / Snoozed / Settled ... and what is
+even snoozed? we can delete that no? from anywhere... also the logos to the
+left should have the colour of their workspace like the workspace does!"
+
+- Order: Needs you, Working, Done, Settled. What is still running sits
+  right under what waits on the user; finished work follows.
+- Snooze is removed everywhere: the Snoozed section, the hover clock, the
+  menu's Snooze › with its presets, the wake-early rule and its timer. Nobody
+  used it, and an agent that is put to sleep is now its own state (a
+  sleeping terminal agent stays with the finished ones and resumes when
+  opened), so a second, timed kind of "asleep" only confused. Saved
+  preferences that still hold a `snoozed` map load as before; the map is
+  ignored and gone on the next save, and a card that was snoozed shows in
+  its normal section again.
+- The workspace tile takes the workspace's colour, the rail's way (see the
+  first rules above), replacing the muted-ink tiles of 2026-10.
 
 ## Merged worktrees leave on their own (2026-11)
 
@@ -1175,3 +1193,31 @@ own sleeping tab card (`bp-asleep`).
   resumes. Under about 420 px the card keeps the title and Resume only.
 - The waking key is swallowed, never typed into the shell that comes up.
 - A failed resume stays on the card, in the danger color, with Try again.
+
+## Closing a working agent (2026-11)
+
+**Chosen:** closing a terminal tab or pane whose agent is working asks first,
+in a small centered dialog on a solid surface (`--panel`, `--rule`, a deep
+shadow; the explorer's and the rail's confirm layout, no glass): "Close Claude
+in api? It is still working and its work will stop." with Cancel and Close
+(`spark-btn is-danger`). The owner asked for it on 2026-11-23, after Ctrl+W
+closed an agent mid-turn without a word.
+
+**Rules:**
+
+- Working is what the tab chip, the Agents view and the rail's running count
+  already read (`terminalAgentPlacement` over the pane's worker, then main's
+  working flag): mid-turn, in the background, quiet, plus waiting for the
+  user's answer ("It is waiting for your answer and its work will stop.").
+  Idle, finished, starting and sleeping agents, plain shells and every other
+  tab close at once, as before.
+- Cancel has the focus; Escape and a click on the scrim cancel; Enter on a
+  focused Close confirms; Tab stays on the two buttons.
+- Every user close gesture asks: the shortcut, the tab's ×, middle click,
+  Close other tabs, closing a split pane, closing a tab group and deleting a
+  workspace. A bulk close asks once: "Close 2 working agents?" with one line
+  per agent.
+- Closes that are not the user's gesture never ask: an agent's `codara_tab`
+  or `codara_terminal_close`, worktree removal, a shell that exits. Quit keeps
+  its own native prompt for live work.
+- No "don't ask again" and no setting.

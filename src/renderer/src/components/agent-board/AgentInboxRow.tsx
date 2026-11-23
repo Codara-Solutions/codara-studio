@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef } from "react";
-import type { KeyboardEvent, MouseEvent } from "react";
-import { agentInboxSubagentChip, agentSnoozeWakeLabel, type AgentInboxRow as Row } from "@shared/agent-inbox";
+import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
+import { agentInboxSubagentChip, type AgentInboxRow as Row } from "@shared/agent-inbox";
 import { CodaraMark, RuntimeMark } from "../BrandMarks";
 import { WorkspaceIconGlyph } from "../workspace-icons";
 import { agentBrandColor } from "../../lib/agent-brand";
@@ -8,7 +8,6 @@ import { usePullRequestDiff } from "./agentInboxActions";
 import {
   CheckIcon,
   ChevronRightIcon,
-  ClockIcon,
   DoneIcon,
   FailedIcon,
   InputIcon,
@@ -18,16 +17,15 @@ import {
 
 // One agent on the Agents tab, as T3 Code draws a thread: no box, three
 // lines (where, what, branch and pull request) and a status word in the top
-// right. On hover or focus the status slot gives way to Snooze and Settle.
+// right. On hover or focus the status slot gives way to Settle.
 // A settled agent is one greyed line. The row is a button that opens the
 // agent; its actions are siblings, never nested inside it.
 
-export type AgentInboxShelf = "inbox" | "working" | "snoozed" | "settled";
+export type AgentInboxShelf = "inbox" | "working" | "settled";
 
 interface Props {
   row: Row;
   shelf: AgentInboxShelf;
-  now: number;
   active: boolean;
   focusable: boolean;
   merging: boolean;
@@ -37,7 +35,6 @@ interface Props {
   onToggleSubagents: (key: string) => void;
   onOpen: (row: Row) => void;
   onMenu: (row: Row, at: { x: number; y: number } | null) => void;
-  onSnooze: (row: Row, anchor: HTMLElement) => void;
   onSettle: (row: Row) => void;
   onRestore: (row: Row) => void;
   onRename: (row: Row, name: string | null) => void;
@@ -51,20 +48,12 @@ const STATUS_ICON = {
   working: WorkingIcon,
 } as const;
 
-function StatusSlot({ row, shelf, now, merging }: { row: Row; shelf: AgentInboxShelf; now: number; merging: boolean }) {
+function StatusSlot({ row, shelf, merging }: { row: Row; shelf: AgentInboxShelf; merging: boolean }) {
   if (merging) {
     return (
       <span className="agent-inbox-row__status is-busy">
         <WorkingIcon />
         Merging…
-      </span>
-    );
-  }
-  if (shelf === "snoozed" && row.snoozedUntil !== null) {
-    return (
-      <span className="agent-inbox-row__status is-snoozed" title="Snoozed until">
-        <ClockIcon />
-        {agentSnoozeWakeLabel(row.snoozedUntil, now)}
       </span>
     );
   }
@@ -77,6 +66,21 @@ function StatusSlot({ row, shelf, now, merging }: { row: Row; shelf: AgentInboxS
       <Icon />
       {row.statusWord}
       {row.status === "working" && row.time ? <span className="agent-inbox-row__timer">{row.time}</span> : null}
+    </span>
+  );
+}
+
+// The workspace's glyph in its own colour, drawn as the rail's resting tile
+// draws it; a workspace with no colour keeps the muted tile.
+function WorkspaceTile({ row }: { row: Row }) {
+  const color = row.card.workspaceOwnColor;
+  return (
+    <span
+      className={color ? "agent-inbox-row__tile is-tinted" : "agent-inbox-row__tile"}
+      style={color ? ({ "--tile-accent": color } as CSSProperties) : undefined}
+      aria-hidden
+    >
+      <WorkspaceIconGlyph icon={row.card.workspaceIcon ?? undefined} size={10} />
     </span>
   );
 }
@@ -211,7 +215,7 @@ function SubagentList({
             data-agent-status={kid.status}
             tabIndex={focusable ? 0 : -1}
             title={[kid.card.agentLabel, kid.branch].filter(Boolean).join(" \u00b7 ")}
-            aria-label={[kid.title, spokenStatus(kid, "inbox", 0), kid.branch ? `branch ${kid.branch}` : null]
+            aria-label={[kid.title, spokenStatus(kid, "inbox"), kid.branch ? `branch ${kid.branch}` : null]
               .filter(Boolean)
               .join(", ")}
             onClick={() => onOpen(kid)}
@@ -227,9 +231,8 @@ function SubagentList({
   );
 }
 
-function spokenStatus(row: Row, shelf: AgentInboxShelf, now: number): string {
+function spokenStatus(row: Row, shelf: AgentInboxShelf): string {
   if (shelf === "settled") return "settled";
-  if (shelf === "snoozed" && row.snoozedUntil !== null) return `snoozed until ${agentSnoozeWakeLabel(row.snoozedUntil, now)}`;
   if (row.status === "working") return `working ${row.time}`;
   if (row.statusWord) return row.statusWord === "Input" ? "needs your input" : row.statusWord.toLowerCase();
   return row.time ? `${row.time} ago` : "";
@@ -238,7 +241,6 @@ function spokenStatus(row: Row, shelf: AgentInboxShelf, now: number): string {
 function AgentInboxRowView({
   row,
   shelf,
-  now,
   active,
   focusable,
   merging,
@@ -247,7 +249,6 @@ function AgentInboxRowView({
   onToggleSubagents,
   onOpen,
   onMenu,
-  onSnooze,
   onSettle,
   onRestore,
   onRename,
@@ -260,7 +261,7 @@ function AgentInboxRowView({
   const third = row.branch ?? row.card.tool ?? row.card.detail ?? row.card.message;
   const spoken = [
     row.title,
-    spokenStatus(row, shelf, now),
+    spokenStatus(row, shelf),
     `${row.card.agentLabel} in ${row.card.workspaceName}`,
     row.pinned ? "pinned" : null,
     row.branch ? `branch ${row.branch}` : null,
@@ -282,7 +283,6 @@ function AgentInboxRowView({
     if (settled) onRestore(row);
     else onSettle(row);
   };
-  const restoreLabel = settled ? "Un-settle" : "Wake";
   return (
     <li
       className={[
@@ -317,26 +317,22 @@ function AgentInboxRowView({
         >
           {settled ? (
             <span className="agent-inbox-row__line is-one">
-              <span className="agent-inbox-row__tile" aria-hidden>
-                <WorkspaceIconGlyph icon={row.card.workspaceIcon ?? undefined} size={10} />
-              </span>
+              <WorkspaceTile row={row} />
               <span className="agent-inbox-row__title">{row.title}</span>
               <PullRequestBits row={row} withDiff={false} />
-              <StatusSlot row={row} shelf={shelf} now={now} merging={merging} />
+              <StatusSlot row={row} shelf={shelf} merging={merging} />
             </span>
           ) : (
             <>
               <span className="agent-inbox-row__line is-where">
-                <span className="agent-inbox-row__tile" aria-hidden>
-                  <WorkspaceIconGlyph icon={row.card.workspaceIcon ?? undefined} size={10} />
-                </span>
+                <WorkspaceTile row={row} />
                 <span className="agent-inbox-row__ws">{row.card.workspaceName}</span>
                 {row.pinned && (
                   <span className="agent-inbox-row__pin" title="Pinned" aria-hidden>
                     <PinIcon size={10} />
                   </span>
                 )}
-                <StatusSlot row={row} shelf={shelf} now={now} merging={merging} />
+                <StatusSlot row={row} shelf={shelf} merging={merging} />
               </span>
               <span className="agent-inbox-row__line is-what">
                 {renaming ? <span className="agent-inbox-row__title is-renaming" /> : <span className="agent-inbox-row__title">{row.title}</span>}
@@ -385,40 +381,27 @@ function AgentInboxRowView({
       )}
       {!merging && !renaming && (
         <span className="agent-inbox-row__actions">
-          {shelf === "snoozed" || settled ? (
+          {settled ? (
             <button
               type="button"
               className="agent-inbox-row__act is-word"
               tabIndex={-1}
-              aria-label={`${restoreLabel} ${row.title}`}
+              aria-label={`Un-settle ${row.title}`}
               onClick={() => onRestore(row)}
             >
-              {restoreLabel}
+              Un-settle
             </button>
           ) : (
-            <>
-              <button
-                type="button"
-                className="agent-inbox-row__act"
-                tabIndex={-1}
-                title="Snooze"
-                aria-label={`Snooze ${row.title}`}
-                aria-haspopup="menu"
-                onClick={(event) => onSnooze(row, event.currentTarget)}
-              >
-                <ClockIcon />
-              </button>
-              <button
-                type="button"
-                className="agent-inbox-row__act is-word"
-                tabIndex={-1}
-                aria-label={`Settle ${row.title}`}
-                onClick={() => onSettle(row)}
-              >
-                <CheckIcon />
-                Settle
-              </button>
-            </>
+            <button
+              type="button"
+              className="agent-inbox-row__act is-word"
+              tabIndex={-1}
+              aria-label={`Settle ${row.title}`}
+              onClick={() => onSettle(row)}
+            >
+              <CheckIcon />
+              Settle
+            </button>
           )}
         </span>
       )}

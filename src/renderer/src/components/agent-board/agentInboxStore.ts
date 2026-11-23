@@ -9,7 +9,7 @@ import {
 } from "@shared/agent-inbox";
 
 // What the user decided about each agent on the Agents tab (settled,
-// snoozed, pinned, renamed, marked unread), kept in localStorage like the
+// pinned, renamed, marked unread), kept in localStorage like the
 // rest of the rail's layout, plus the last actions undo can take back and
 // the quiet line in the footer that offers it. One store for the window.
 

@@ -1,12 +1,8 @@
-import { useMemo } from "react";
 import type { ReactNode, RefObject } from "react";
-import { agentSnoozePresets, type AgentInboxRow } from "@shared/agent-inbox";
+import type { AgentInboxRow } from "@shared/agent-inbox";
 import AnchoredMenu from "../chat/composer/AnchoredMenu";
 import {
   CheckIcon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  ClockIcon,
   CopyIcon,
   MergeIcon,
   OpenIcon,
@@ -17,19 +13,17 @@ import {
 } from "./agentInboxIcons";
 
 // The Agents tab's right-click menu: T3 Code's thread menu, trimmed to Open,
-// Merge PR (ours, only while the pull request is ready), Settle, Snooze ›,
-// Pin, Rename, Mark unread, Copy link and Delete. Snooze's times and
-// Delete's confirmation replace the list in place, so the menu never opens a
-// second floating panel.
+// Merge PR (ours, only while the pull request is ready), Settle, Pin, Rename,
+// Mark unread, Copy link and Delete. Delete's confirmation replaces the list
+// in place, so the menu never opens a second floating panel.
 
-export type AgentInboxMenuView = "main" | "snooze" | "delete";
+export type AgentInboxMenuView = "main" | "delete";
 
 export interface AgentInboxMenuActions {
   open: (row: AgentInboxRow) => void;
   merge: (row: AgentInboxRow) => void;
   settle: (row: AgentInboxRow) => void;
   restore: (row: AgentInboxRow) => void;
-  snooze: (row: AgentInboxRow, until: number) => void;
   pin: (row: AgentInboxRow, pinned: boolean) => void;
   rename: (row: AgentInboxRow) => void;
   unread: (row: AgentInboxRow, unread: boolean) => void;
@@ -44,11 +38,8 @@ interface Props {
   view: AgentInboxMenuView;
   onView: (view: AgentInboxMenuView) => void;
   settled: boolean;
-  snoozed: boolean;
   unread: boolean;
   onClose: () => void;
-  /** When this menu was opened; the snooze times are read from it. */
-  openedAt: number;
   actions: AgentInboxMenuActions;
 }
 
@@ -89,35 +80,16 @@ export default function AgentInboxMenu({
   view,
   onView,
   settled,
-  snoozed,
   unread,
   onClose,
-  openedAt,
   actions,
 }: Props) {
-  // Read when the menu opens, so "this evening" goes once it has passed.
-  const presets = useMemo(() => agentSnoozePresets(openedAt), [openedAt]);
   const run = (action: () => void) => () => {
     onClose();
     action();
   };
   let body: ReactNode = null;
-  if (row && view === "snooze") {
-    body = (
-      <>
-        <Item icon={<ChevronLeftIcon />} label="Snooze" onSelect={() => onView("main")} />
-        <Separator />
-        {presets.map((preset) => (
-          <Item
-            key={preset.id}
-            label={preset.label}
-            hint={preset.when}
-            onSelect={run(() => actions.snooze(row, preset.until))}
-          />
-        ))}
-      </>
-    );
-  } else if (row && view === "delete") {
+  if (row && view === "delete") {
     const terminal = row.card.source === "terminal";
     body = (
       <div className="agent-inbox-menu__confirm">
@@ -143,11 +115,6 @@ export default function AgentInboxMenu({
           <Item icon={<CheckIcon />} label="Un-settle" hint="E" onSelect={run(() => actions.restore(row))} />
         ) : (
           <Item icon={<CheckIcon />} label="Settle" hint="E" onSelect={run(() => actions.settle(row))} />
-        )}
-        {snoozed ? (
-          <Item icon={<ClockIcon />} label="Wake" onSelect={run(() => actions.restore(row))} />
-        ) : (
-          <Item icon={<ClockIcon />} label="Snooze" hint={<ChevronRightIcon />} onSelect={() => onView("snooze")} />
         )}
         <Item icon={<PinIcon />} label={row.pinned ? "Unpin" : "Pin"} onSelect={run(() => actions.pin(row, !row.pinned))} />
         <Separator />
