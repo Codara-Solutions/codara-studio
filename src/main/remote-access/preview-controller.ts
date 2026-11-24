@@ -2,6 +2,7 @@ import { KeyedSerialQueue } from "./cora-policy";
 import {
   encodeBoundedPreviewJpeg,
   mapNormalizedPreviewClick,
+  MAX_REMOTE_PREVIEW_TABS,
   projectRemotePreviewTabs,
   REMOTE_PREVIEW_VIEWPORTS,
   sanitizeRemotePreviewTitle,
@@ -21,6 +22,8 @@ const MAX_PREVIEW_VIEWPORT_MODES = 256;
 const LIST_TIMEOUT_MS = 5_000;
 const SCREENSHOT_TIMEOUT_MS = 12_000;
 const RESIZE_TIMEOUT_MS = 8_000;
+const OPEN_TIMEOUT_MS = 20_000;
+const CLOSE_TIMEOUT_MS = 8_000;
 const CLICK_SETTLE_MS = 180;
 const VIEWPORT_SETTLE_MS = 150;
 const RELOAD_SETTLE_MS = 1_500;
@@ -31,6 +34,7 @@ export const ERR_PREVIEW_SCHEME_DISALLOWED = "Only http and https browser previe
 export const ERR_PREVIEW_TAB_CLOSED = "Browser preview tab is no longer open.";
 export const ERR_PREVIEW_VIEWPORT_UNREADY = "Browser preview viewport is not ready.";
 export const ERR_PREVIEW_FRAME_TOO_LARGE = "Browser preview frame exceeded the remote transfer limit.";
+export const ERR_PREVIEW_TAB_LIMIT = "Too many browser preview tabs are already open in this workspace.";
 
 export class RemotePreviewError extends Error {
   readonly remoteSafe = true;
@@ -80,7 +84,7 @@ export interface RemotePreviewControllerDeps<
 > {
   requireLocalWorkspace(workspaceId: string): Promise<unknown>;
   requestPreviewOp<T = unknown>(
-    op: "list" | "screenshot" | "resize",
+    op: "list" | "screenshot" | "resize" | "navigate" | "close",
     params: Record<string, unknown>,
     opts?: { timeoutMs?: number },
   ): Promise<T>;
@@ -94,6 +98,8 @@ export interface RemotePreviewControllerDeps<
 
 export interface RemotePreviewController {
   listPreviewTabs(workspaceId: string): Promise<RemotePreviewTab[]>;
+  openPreviewTab(input: { workspaceId: string; url: string }): Promise<RemotePreviewTab>;
+  closePreviewTab(input: { workspaceId: string; tabId: string }): Promise<{ closed: true }>;
   capturePreviewScreenshot(input: { workspaceId: string; tabId: string }): Promise<RemotePreviewScreenshot>;
   interactPreviewTab(input: {
     workspaceId: string;
@@ -137,6 +143,7 @@ export function createRemotePreviewController<
   TWebContents extends PreviewWebContentsLike = PreviewWebContentsLike,
 >(deps: RemotePreviewControllerDeps<TWebContents>): RemotePreviewController {
   const tabOps = new KeyedSerialQueue();
+  const workspaceOpenOps = new KeyedSerialQueue();
   const viewportModes = new Map<string, RemotePreviewViewportMode>();
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? (() => new Date());
@@ -255,6 +262,73 @@ export function createRemotePreviewController<
         deps.requestPreviewOp<{ tabs?: unknown[] }>("list", { workspaceId }, { timeoutMs: LIST_TIMEOUT_MS }),
       );
       return projectRemotePreviewTabs(Array.isArray(result?.tabs) ? result.tabs : [], workspaceId, viewportModes);
+    },
+
+    async openPreviewTab(input: { workspaceId: string; url: string }): Promise<RemotePreviewTab> {
+      await deps.requireLocalWorkspace(input.workspaceId);
+      const safeUrl = sanitizeRemotePreviewUrl(input.url);
+      if (!safeUrl) {
+        throw new RemotePreviewError(ERR_PREVIEW_SCHEME_DISALLOWED);
+      }
+      return workspaceOpenOps.run(input.workspaceId, async () => {
+        const listed = await runBridgeCall("list", () =>
+          deps.requestPreviewOp<{ tabs?: unknown[] }>("list", { workspaceId: input.workspaceId }, { timeoutMs: LIST_TIMEOUT_MS }),
+        );
+        const existingCount = Array.isArray(listed?.tabs)
+          ? listed.tabs.filter(
+              (raw) =>
+                Boolean(raw) &&
+                typeof raw === "object" &&
+                !Array.isArray(raw) &&
+                (raw as Record<string, unknown>).workspaceId === input.workspaceId,
+            ).length
+          : 0;
+        if (existingCount >= MAX_REMOTE_PREVIEW_TABS) {
+          throw new RemotePreviewError(ERR_PREVIEW_TAB_LIMIT);
+        }
+        const raw = await runBridgeCall("tab", () =>
+          deps.requestPreviewOp<{ tabId?: unknown; url?: unknown; title?: unknown; loading?: unknown }>(
+            "navigate",
+            { workspaceId: input.workspaceId, url: safeUrl, fresh: true },
+            { timeoutMs: OPEN_TIMEOUT_MS },
+          ),
+        );
+        const tabId = typeof raw?.tabId === "string" ? raw.tabId.trim() : "";
+        if (!tabId || tabId.length > 128) {
+          throw new RemotePreviewError(ERR_PREVIEW_UNAVAILABLE);
+        }
+        const rawUrl = typeof raw?.url === "string" ? raw.url.trim() : "";
+        const finalUrl = rawUrl ? sanitizeRemotePreviewUrl(rawUrl) : safeUrl;
+        if (!finalUrl) {
+          await deps
+            .requestPreviewOp("close", { workspaceId: input.workspaceId, tabId }, { timeoutMs: CLOSE_TIMEOUT_MS })
+            .catch(() => undefined);
+          throw new RemotePreviewError(ERR_PREVIEW_SCHEME_DISALLOWED);
+        }
+        const title = sanitizeRemotePreviewTitle(raw?.title, finalUrl, raw?.url);
+        return {
+          tabId,
+          workspaceId: input.workspaceId,
+          title,
+          url: finalUrl,
+          loading: raw?.loading === true,
+          canGoBack: false,
+          canGoForward: false,
+          updatedAt: now().toISOString(),
+        };
+      });
+    },
+
+    async closePreviewTab(input: { workspaceId: string; tabId: string }): Promise<{ closed: true }> {
+      await deps.requireLocalWorkspace(input.workspaceId);
+      return tabOps.run(input.tabId, async () => {
+        await assertAwakeAllowedTab(input.workspaceId, input.tabId);
+        await runBridgeCall("tab", () =>
+          deps.requestPreviewOp("close", { workspaceId: input.workspaceId, tabId: input.tabId }, { timeoutMs: CLOSE_TIMEOUT_MS }),
+        );
+        viewportModes.delete(input.tabId);
+        return { closed: true };
+      });
     },
 
     async capturePreviewScreenshot(input: { workspaceId: string; tabId: string }): Promise<RemotePreviewScreenshot> {

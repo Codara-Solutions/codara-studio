@@ -829,6 +829,138 @@ async function main() {
       );
     }
 
+    // 8b. preview.open and preview.close controller + RPC checks
+    {
+      const openOps = [];
+      const closeOps = [];
+      const { ctrl } = makeController({
+        deps: {
+          requestPreviewOp: async (op, params) => {
+            if (op === "navigate") {
+              openOps.push(params);
+              return { tabId: "tab-new", url: params.url, title: "https://alice:secret@localhost:3000/home", loading: false };
+            }
+            if (op === "list") {
+              return {
+                tabs: [
+                  { id: "tab-1", workspaceId: "ws-1", title: "App", url: "https://localhost:3000/app" },
+                  { id: "tab-other", workspaceId: "ws-2", title: "Other", url: "https://localhost:3001/" },
+                  { id: "tab-file", workspaceId: "ws-1", title: "Local", url: "file:///etc/passwd" },
+                  { id: "tab-asleep", workspaceId: "ws-1", title: "Asleep", url: "https://localhost:3002/", asleep: true },
+                  { id: "tab-nourl", workspaceId: "ws-1", title: "Blank", url: "" },
+                ],
+              };
+            }
+            if (op === "close") {
+              closeOps.push(params);
+              return { ok: true, tabId: params.tabId, closed: true };
+            }
+            return { dataUrl: "data:image/png;base64,AAAA" };
+          },
+        },
+      });
+
+      const opened = await ctrl.openPreviewTab({ workspaceId: "ws-1", url: "https://alice:secret@localhost:3000/home" });
+      const errOpenScheme = await expectReject(ctrl.openPreviewTab({ workspaceId: "ws-1", url: "javascript:alert(1)" }));
+      const errOpenFile = await expectReject(ctrl.openPreviewTab({ workspaceId: "ws-1", url: "file:///etc/passwd" }));
+      const errOpenBadWs = await expectReject(ctrl.openPreviewTab({ workspaceId: "bad-ws", url: "https://localhost:3000/" }));
+      const redirectClosed = [];
+      const { ctrl: redirectCtrl } = makeController({
+        deps: {
+          requestPreviewOp: async (op, params) => {
+            if (op === "navigate") return { tabId: "tab-redir", url: "file:///etc/shadow", title: "shadow" };
+            if (op === "close") { redirectClosed.push(params); return { ok: true, closed: true }; }
+            return { tabs: [] };
+          },
+        },
+      });
+      const errOpenRedirect = await expectReject(redirectCtrl.openPreviewTab({ workspaceId: "ws-1", url: "https://localhost:3000/" }));
+      const { ctrl: capCtrl } = makeController({
+        deps: {
+          requestPreviewOp: async (op) =>
+            op === "list"
+              ? { tabs: Array.from({ length: policy.MAX_REMOTE_PREVIEW_TABS }, (_, i) => ({ id: `t-${i}`, workspaceId: "ws-1", url: "https://localhost:3000/" })) }
+              : { tabId: "should-not-open" },
+        },
+      });
+      const errOpenCap = await expectReject(capCtrl.openPreviewTab({ workspaceId: "ws-1", url: "https://localhost:3000/" }));
+      const { ctrl: leakedOpenCtrl } = makeController({
+        deps: { requestPreviewOp: async () => { throw new Error("Failed opening /Users/me/secret.html via codara_preview_navigate"); } },
+      });
+      const errOpenLeaked = await expectReject(leakedOpenCtrl.openPreviewTab({ workspaceId: "ws-1", url: "https://localhost:3000/" }));
+
+      const closed = await ctrl.closePreviewTab({ workspaceId: "ws-1", tabId: "tab-1" });
+      const errCloseOtherWs = await expectReject(ctrl.closePreviewTab({ workspaceId: "ws-1", tabId: "tab-other" }));
+      const errCloseMissing = await expectReject(ctrl.closePreviewTab({ workspaceId: "ws-1", tabId: "tab-missing" }));
+      const errCloseFile = await expectReject(ctrl.closePreviewTab({ workspaceId: "ws-1", tabId: "tab-file" }));
+      const errCloseAsleep = await expectReject(ctrl.closePreviewTab({ workspaceId: "ws-1", tabId: "tab-asleep" }));
+      const errCloseNoUrl = await expectReject(ctrl.closePreviewTab({ workspaceId: "ws-1", tabId: "tab-nourl" }));
+
+      check(
+        "openPreviewTab strips credentials, enforces cap/schemes, cleans up redirected orphans, and redacts raw errors",
+        opened.tabId === "tab-new" && opened.workspaceId === "ws-1" &&
+          opened.url === "https://localhost:3000/home" && opened.title === "https://localhost:3000/home" &&
+          !opened.title.includes("secret") && openOps.length === 1 &&
+          openOps[0].fresh === true && openOps[0].url === "https://localhost:3000/home" &&
+          errOpenScheme?.message === controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED &&
+          errOpenFile?.message === controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED &&
+          errOpenBadWs?.message === "Unknown workspace: bad-ws" &&
+          errOpenRedirect?.message === controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED &&
+          redirectClosed.length === 1 && redirectClosed[0].tabId === "tab-redir" &&
+          errOpenCap?.message === controllerMod.ERR_PREVIEW_TAB_LIMIT &&
+          errOpenLeaked?.message === controllerMod.ERR_PREVIEW_UNAVAILABLE &&
+          !errOpenLeaked.message.includes("secret.html"),
+      );
+      check(
+        "closePreviewTab enforces awake/allowed/owned tab checks and rejects sleeping or missing-URL tabs",
+        closed.closed === true && closeOps.length === 1 &&
+          closeOps[0].workspaceId === "ws-1" && closeOps[0].tabId === "tab-1" &&
+          errCloseOtherWs?.message === controllerMod.ERR_PREVIEW_TAB_UNAVAILABLE &&
+          errCloseMissing?.message === controllerMod.ERR_PREVIEW_TAB_UNAVAILABLE &&
+          errCloseFile?.message === controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED &&
+          errCloseAsleep?.message === controllerMod.ERR_PREVIEW_TAB_UNAVAILABLE &&
+          errCloseNoUrl?.message === controllerMod.ERR_PREVIEW_SCHEME_DISALLOWED,
+      );
+
+      const rpcOpenCalls = [];
+      const rpcCloseCalls = [];
+      let allowPreview = true;
+      const openCloseStream = makeFakeStream(rpc, 31);
+      void new rpc.RpcSession(openCloseStream, {
+        device: { publicKey: "pk", name: "Studio", role: "computer", version: "0.0.0" },
+        listWorkspaces: async () => [],
+        allowPreviewAction: () => allowPreview,
+        openPreviewTab: async (input) => {
+          rpcOpenCalls.push(input);
+          return { tabId: "tab-rpc-1", workspaceId: input.workspaceId, title: "Local", url: input.url, loading: false, canGoBack: false, canGoForward: false };
+        },
+        closePreviewTab: async (input) => { rpcCloseCalls.push(input); return { closed: true }; },
+        createTerminal: async () => { throw new Error("not used"); },
+      });
+      await callOn(openCloseStream, "hello", {
+        protocol: rpc.RPC_PROTOCOL_VERSION,
+        device: { publicKey: "phone", name: "Phone", role: "phone", version: "1" },
+      });
+      const rpcOpenOk = await callOn(openCloseStream, "preview.open", { workspaceId: "ws-1", url: "https://user:pw@localhost:3000/page" });
+      const rpcOpenExtra = await callOn(openCloseStream, "preview.open", { workspaceId: "ws-1", url: "https://localhost:3000/", extra: true });
+      const rpcOpenBadScheme = await callOn(openCloseStream, "preview.open", { workspaceId: "ws-1", url: "file:///etc/passwd" });
+      const rpcCloseOk = await callOn(openCloseStream, "preview.close", { workspaceId: "ws-1", tabId: "tab-rpc-1" });
+      const rpcCloseExtra = await callOn(openCloseStream, "preview.close", { workspaceId: "ws-1", tabId: "tab-rpc-1", force: true });
+      allowPreview = false;
+      const rpcOpenLimited = await callOn(openCloseStream, "preview.open", { workspaceId: "ws-1", url: "https://localhost:3000/" });
+      const rpcCloseLimited = await callOn(openCloseStream, "preview.close", { workspaceId: "ws-1", tabId: "tab-rpc-1" });
+      check(
+        "preview.open and preview.close RPCs enforce exact keys, scheme sanitization, and preview rate limiter",
+        rpcOpenOk?.ok === true && rpcOpenOk.result?.tabId === "tab-rpc-1" &&
+          rpcOpenOk.result?.url === "https://localhost:3000/page" &&
+          rpcOpenCalls.length === 1 && rpcOpenCalls[0].url === "https://localhost:3000/page" &&
+          rpcOpenExtra?.error?.code === "invalid-params" && rpcOpenBadScheme?.error?.code === "invalid-params" &&
+          rpcCloseOk?.ok === true && rpcCloseOk.result?.closed === true && rpcCloseCalls.length === 1 &&
+          rpcCloseExtra?.error?.code === "invalid-params" &&
+          rpcOpenLimited?.error?.code === "rate-limited" && rpcCloseLimited?.error?.code === "rate-limited",
+      );
+    }
+
     // 9. Desktop pi and antigravity profile preservation guards
     check(
       "isRemoteTerminalProfile accepts all 5 agent runtimes plus shell",
@@ -846,8 +978,10 @@ async function main() {
       "utf8",
     );
     check(
-      "App.tsx preserves pi/antigravity profiles and StudioTerminalShareStore normalizes via isRemoteTerminalProfile",
-      shareSection.includes('profile: leaf.agentSession?.runtime ?? "shell"') &&
+      "App.tsx shares manual desktop workers, preserves all 5 agent profiles, and StudioTerminalShareStore normalizes via isRemoteTerminalProfile",
+      shareSection.includes('if (leaf.origin || (leaf.worker && leaf.worker.source !== "manual")) return;') &&
+        shareSection.includes("leaf.agentSession?.active === true") &&
+        shareSection.includes('leaf.worker?.runtime ?? leaf.agentSession?.runtime ?? "shell"') &&
         !/leaf\.agentSession\?\.runtime === "pi"[\s\S]*\?\s*"shell"/.test(shareSection) &&
         shareStoreSource.includes('isRemoteTerminalProfile(item.profile) ? item.profile : "shell"'),
     );

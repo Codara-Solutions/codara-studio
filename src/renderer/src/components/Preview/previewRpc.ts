@@ -414,15 +414,16 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     // The tab this call's lookups picked (and may have woken on a blank
     // page), even if the user switched tabs since and the pick would now
     // differ. Main sets lookupTabId, never the agent.
+    const fresh = params.fresh === true;
     const lookupTabId = readString(params, "lookupTabId");
-    const looked = lookupTabId ? pickPreviewTab(lookupTabId, null, workspaceId, callerPaneId) : null;
-    const reusable = looked ?? findReusablePreviewTab(runId, workspaceId, callerPaneId);
+    const looked = !fresh && lookupTabId ? pickPreviewTab(lookupTabId, null, workspaceId, callerPaneId) : null;
+    const reusable = fresh ? null : (looked ?? findReusablePreviewTab(runId, workspaceId, callerPaneId));
     if (reusable) assertDriverAllowed(reusable.id, driver);
     if (looked) ({ tab, opened } = { tab: looked, opened: false });
     else ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId, group, {
       sessionId: readString(params, "callerSessionId"),
       process: readString(params, "callerProcess"),
-    }));
+    }, fresh ? { fresh: true } : undefined));
   } else {
     throw new Error("navigate requires 'url'");
   }

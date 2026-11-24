@@ -677,21 +677,33 @@ async function folderExists(path: string | null, memo: Map<string, Promise<boole
   return known;
 }
 
+export interface SearchSessionsOptions {
+  scopeKeys?: readonly string[] | null;
+  allowedWorkspaceIds?: readonly string[];
+  includeUnboundAntigravity?: boolean;
+}
+
 export async function searchSessions(
   raw: SessionSearchRequest,
   snippetTokens = RAIL_SNIPPET_TOKENS,
+  options?: SearchSessionsOptions,
 ): Promise<SessionSearchResult> {
   const t0 = Date.now();
   if (!preferences().enabled) return { hits: [], hasMore: false, tookMs: 0, status: sessionSearchStatus() };
   try {
-    return await searchIndex(raw, snippetTokens, t0);
+    return await searchIndex(raw, snippetTokens, t0, options);
   } catch (err) {
     setStatus({ phase: "error", error: messageOf(err) });
     return { hits: [], hasMore: false, tookMs: Date.now() - t0, status: sessionSearchStatus() };
   }
 }
 
-async function searchIndex(raw: SessionSearchRequest, snippetTokens: number, t0: number): Promise<SessionSearchResult> {
+async function searchIndex(
+  raw: SessionSearchRequest,
+  snippetTokens: number,
+  t0: number,
+  options?: SearchSessionsOptions,
+): Promise<SessionSearchResult> {
   const request = raw && typeof raw === "object" ? raw : ({} as SessionSearchRequest);
   const scope: SessionSearchScope =
     request.scope === "workspace" || request.scope === "project" ? request.scope : "all";
@@ -699,12 +711,16 @@ async function searchIndex(raw: SessionSearchRequest, snippetTokens: number, t0:
   const limit = Math.max(1, Math.min(SEARCH_LIMIT_MAX, Math.floor(Number(request.limit) || 40)));
   const offset = Math.max(0, Math.floor(Number(request.offset) || 0));
   await ensureOpen();
+  const resolvedScopeKeys =
+    options?.scopeKeys !== undefined ? [...(options.scopeKeys ?? [])] : await scopeKeysFor(scope, cwd);
   const found = await call<{ hits: Omit<SessionSearchHit, "cwdExists">[]; hasMore: boolean }>({
     type: "search",
     input: {
       query: typeof request.query === "string" ? request.query.slice(0, 512) : "",
       agents: selectedAgents(request.agents),
-      scopeKeys: await scopeKeysFor(scope, cwd),
+      scopeKeys: options?.scopeKeys === null ? null : resolvedScopeKeys,
+      ...(options?.allowedWorkspaceIds ? { allowedWorkspaceIds: [...options.allowedWorkspaceIds] } : {}),
+      ...(options?.includeUnboundAntigravity ? { includeUnboundAntigravity: true } : {}),
       limit,
       offset,
       now: Date.now(),
@@ -723,6 +739,16 @@ async function sessionRecord(key: unknown): Promise<IndexSessionRecord | null> {
   if (typeof key !== "string" || key.length > 300 || !preferences().enabled) return null;
   await ensureOpen();
   return call<IndexSessionRecord | null>({ type: "session", key });
+}
+
+export async function lookupIndexedSession(
+  agent: SessionSearchAgent,
+  sessionId: string,
+): Promise<{ agent: SessionSearchAgent; sessionId: string; cwd: string | null } | null> {
+  const record = await sessionRecord(`${agent}:${sessionId}`).catch(() => null);
+  return record && record.agent === agent && record.sessionId === sessionId
+    ? { agent: record.agent, sessionId: record.sessionId, cwd: record.cwd ?? null }
+    : null;
 }
 
 /** The transcript file, only when it sits inside a folder the index reads. */

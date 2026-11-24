@@ -147,6 +147,10 @@ export interface IndexSearchInput {
   agents: readonly SessionSearchAgent[];
   /** Folder keys (sessionCwdKey) a session's folder must equal or sit under; null is every folder. */
   scopeKeys: readonly string[] | null;
+  /** Optional local workspace ids allowed alongside scopeKeys (for Cora runs). */
+  allowedWorkspaceIds?: readonly string[];
+  /** When scopeKeys is set, also admit unbound Antigravity chats (cwd_key IS NULL). */
+  includeUnboundAntigravity?: boolean;
   limit: number;
   offset: number;
   now: number;
@@ -161,6 +165,7 @@ export interface IndexSessionRecord {
   agent: SessionSearchAgent;
   sessionId: string;
   transcriptPath: string | null;
+  cwd?: string | null;
 }
 
 type Row = Record<string, unknown>;
@@ -932,7 +937,9 @@ export class SessionIndex {
     };
   }
 
-  private filterClause(input: Pick<IndexSearchInput, "agents" | "scopeKeys">): { sql: string; params: SqlValue[] } {
+  private filterClause(
+    input: Pick<IndexSearchInput, "agents" | "scopeKeys" | "allowedWorkspaceIds" | "includeUnboundAntigravity">,
+  ): { sql: string; params: SqlValue[] } {
     const clauses = ["s.message_count > 0"];
     const params: SqlValue[] = [];
     clauses.push(`s.agent IN (${input.agents.map(() => "?").join(", ") || "NULL"})`);
@@ -941,8 +948,16 @@ export class SessionIndex {
       const keys = input.scopeKeys.filter(Boolean);
       if (keys.length === 0 || !keys.includes("/")) {
         const ors = keys.map(() => "(s.cwd_key = ? OR substr(s.cwd_key, 1, ?) = ?)");
-        clauses.push(ors.length > 0 ? `(${ors.join(" OR ")})` : "0");
         for (const key of keys) params.push(key, key.length + 1, `${key}/`);
+        const wsIds = (input.allowedWorkspaceIds ?? []).filter(Boolean);
+        if (wsIds.length > 0) {
+          ors.push(`s.workspace_id IN (${wsIds.map(() => "?").join(", ")})`);
+          params.push(...wsIds);
+        }
+        if (input.includeUnboundAntigravity) {
+          ors.push("(s.agent = 'antigravity' AND s.cwd_key IS NULL AND s.workspace_id IS NULL)");
+        }
+        clauses.push(ors.length > 0 ? `(${ors.join(" OR ")})` : "0");
       }
     }
     return { sql: clauses.join(" AND "), params };
@@ -1086,9 +1101,14 @@ export class SessionIndex {
   session(key: string): IndexSessionRecord | null {
     const parsed = parseSessionKey(key);
     if (!parsed) return null;
-    const row = this.stmt("SELECT transcript FROM sessions WHERE agent = ? AND session_id = ?").get(parsed.agent, parsed.sessionId);
+    const row = this.stmt("SELECT transcript, cwd FROM sessions WHERE agent = ? AND session_id = ? AND message_count > 0").get(parsed.agent, parsed.sessionId);
     if (!row) return null;
-    return { agent: parsed.agent, sessionId: parsed.sessionId, transcriptPath: strOrNull(row.transcript) };
+    return {
+      agent: parsed.agent,
+      sessionId: parsed.sessionId,
+      transcriptPath: strOrNull(row.transcript),
+      cwd: strOrNull(row.cwd),
+    };
   }
 
   /** The session's messages as indexed, oldest first, for a read-only view. */

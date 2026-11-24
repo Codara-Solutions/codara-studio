@@ -9,6 +9,7 @@
 
 import {
   closeAgentTerminal,
+  closeShareableTerminalPane,
   createAgentTerminal,
   forgetExternalTerminalSize,
   listDeliverablePanes,
@@ -104,6 +105,8 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return create(req.params);
     case "destroy":
       return destroy(req.params);
+    case "closePane":
+      return closePane(req.params);
     case "resize":
       return resize(req.params);
     case "overlay":
@@ -242,6 +245,15 @@ async function destroy(params: Record<string, unknown>): Promise<unknown> {
   if (paneId) forgetExternalTerminalSize(paneId);
   closeAgentTerminal(tabId);
   return { ok: true };
+}
+
+async function closePane(params: Record<string, unknown>): Promise<unknown> {
+  const workspaceId = readString(params, "workspaceId");
+  const paneId = readString(params, "paneId");
+  if (!workspaceId || !paneId) throw new Error("closePane requires 'workspaceId' and 'paneId'");
+  const result = closeShareableTerminalPane({ workspaceId, paneId });
+  if (result.closed) forgetExternalTerminalSize(paneId);
+  return result;
 }
 
 async function resize(params: Record<string, unknown>): Promise<unknown> {

@@ -64,6 +64,11 @@ export function paneAgentNote(paneId: string): string | null {
   return notes?.get(paneNoteKey(paneId))?.entry.note ?? null;
 }
 
+/** Read-only snapshot of live agent notes without initializing the book. */
+export function listAgentNotesSnapshot(): AgentNoteMap {
+  return notes ? notes.list() : {};
+}
+
 function workspaceStatusStore(): WorkspaceStatusStore {
   if (store) return store;
   store = createWorkspaceStatusStore({ file: join(codaraHome(), "workspace-status.json") });

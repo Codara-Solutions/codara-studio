@@ -92,9 +92,10 @@ async function loadStore() {
 function fakePtyManager() {
   const sessions = new Map();
   const api = {
-    open(id, tail = []) {
+    open(id, tail = [], opts = {}) {
       sessions.set(id, {
         createdAt: Date.now(),
+        remote: opts.remote === true,
         tail,
         taps: new Set(),
         exits: new Set(),
@@ -117,6 +118,7 @@ function fakePtyManager() {
       sessions: [...sessions].map(([id, session]) => ({
         id,
         createdAt: session.createdAt,
+        remote: session.remote,
       })),
     }),
     readTailChunks: (id, _maxBytes) => {
@@ -396,6 +398,113 @@ async function main() {
       assert.equal(updatedByPane.get("pane-pi"), "antigravity");
       assert.equal(updatedByPane.get("pane-agy"), "shell");
       store.shutdown();
+    },
+  );
+
+  await test(
+    "closeDesktopTab marks descriptors closeable, requires live attachment, and closes cleanly",
+    async () => {
+      const pty = fakePtyManager();
+      globalThis.__studioSharePty = pty;
+      const inventory = [inventoryItem("pane-close", { tabId: "tab-close", workspaceId: "ws-close", profile: "claude" })];
+      globalThis.__studioShareBridge = {
+        requestTerminalOp: async () => inventory,
+      };
+      pty.open("pane-close", ["ready"]);
+      const closedCalls = [];
+      const changedPings = [];
+      const logs = [];
+      let releaseClose;
+      const store = new StudioTerminalShareStore({
+        onTerminalsChanged: () => changedPings.push("ping"),
+        closeDesktopTab: async (descriptor) => {
+          closedCalls.push(descriptor);
+          await new Promise((resolve) => {
+            releaseClose = resolve;
+          });
+        },
+        log: (line) => logs.push(line),
+      });
+
+      const listed = await store.list("phone-a");
+      assert.equal(listed.length, 1);
+      assert.equal(listed[0].closeable, true);
+
+      const sinkA = subscriber();
+      const sinkB = subscriber();
+      const attachedA = store.attach("phone-a", "studio-pane-close", 0, "sub-a", sinkA.callbacks);
+      store.attach("phone-b", "studio-pane-close", 0, "sub-b", sinkB.callbacks);
+
+      // Unattached caller or stale attachment must be rejected without closing.
+      await assert.rejects(
+        () => store.close("phone-a", "studio-pane-close", "sub-unknown", attachedA.attachmentId, "req-bad-1"),
+        /attachment is no longer current/i,
+      );
+      await assert.rejects(
+        () => store.close("phone-a", "studio-pane-close", "sub-a", "wrong-attachment", "req-bad-2"),
+        /attachment is no longer current/i,
+      );
+      assert.equal(closedCalls.length, 0);
+      assert.equal(changedPings.length, 0);
+
+      // Valid attached close awaits desktop close, detaches caller, ends record,
+      // notifies other subscribers, and blocks resurrection while PTY winds down.
+      const closingPromise = store.close("phone-a", "studio-pane-close", "sub-a", attachedA.attachmentId, "req-close-1");
+      await new Promise((resolve) => setImmediate(resolve));
+      releaseClose();
+      await closingPromise;
+      assert.deepEqual(closedCalls, [
+        { workspaceId: "ws-close", desktopTabId: "tab-close", desktopPaneId: "pane-close" },
+      ]);
+      assert.equal(changedPings.length, 1);
+      assert.equal(sinkA.events.some((event) => event.type === "exit"), false);
+      assert.equal(sinkB.events.some((event) => event.type === "exit"), true);
+      assert.equal(studioPaneWatchedFromPhone("pane-close"), false);
+      // Even if the PTY is still tearing down and renderer lists the pane,
+      // synchronize() must not resurrect it.
+      assert.equal((await store.list("phone-a")).length, 0);
+      pty.emitExit("pane-close");
+
+      // Failing closeDesktopTab while PTY is still alive rejects and preserves record.
+      pty.open("pane-fail");
+      const failStore = new StudioTerminalShareStore({
+        closeDesktopTab: async () => {
+          throw new Error("desktop bridge unavailable");
+        },
+        log: (line) => logs.push(line),
+      });
+      globalThis.__studioShareBridge = {
+        requestTerminalOp: async () => [inventoryItem("pane-fail")],
+      };
+      await failStore.list("phone-a");
+      const failSink = subscriber();
+      const attFail = failStore.attach("phone-a", "studio-pane-fail", 0, "sub-fail", failSink.callbacks);
+      await assert.rejects(
+        () => failStore.close("phone-a", "studio-pane-fail", "sub-fail", attFail.attachmentId, "req-fail"),
+        /desktop bridge unavailable/i,
+      );
+      assert.equal(failSink.events.some((event) => event.type === "exit"), false);
+      assert.equal(studioPaneWatchedFromPhone("pane-fail"), true);
+      assert.equal((await failStore.list("phone-a")).length, 1);
+
+      // SSH/remote PTYs and ssh:// cwd panes are never shared remotely.
+      pty.open("pane-ssh-flag", [], { remote: true });
+      pty.open("pane-ssh-cwd");
+      pty.open("pane-local-ok");
+      globalThis.__studioShareBridge = {
+        requestTerminalOp: async () => [
+          inventoryItem("pane-ssh-flag", { cwd: "/tmp/local" }),
+          inventoryItem("pane-ssh-cwd", { cwd: "ssh://prod/srv/app" }),
+          inventoryItem("pane-local-ok", { cwd: "/tmp/local" }),
+        ],
+      };
+      const sshStore = new StudioTerminalShareStore();
+      const sshListed = await sshStore.list("phone-a");
+      assert.deepEqual(sshListed.map((d) => d.desktopPaneId), ["pane-local-ok"]);
+
+      store.shutdown();
+      failStore.shutdown();
+      sshStore.shutdown();
     },
   );
 

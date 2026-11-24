@@ -70,13 +70,24 @@ import {
   isRemoteTerminalProfile,
   type RemoteTerminalProfile,
 } from "./terminal-profiles";
+import { isSafeSessionId } from "@shared/session-search";
 import {
   isValidRemotePreviewInteractAction,
+  MAX_REMOTE_PREVIEW_URL_BYTES,
+  sanitizeRemotePreviewUrl,
   type RemotePreviewInteractAction,
   type RemotePreviewScreenshot,
   type RemotePreviewTab,
   type RemotePreviewViewportMode,
 } from "./preview-policy";
+import {
+  parseRemoteSessionSearchParams,
+  type RemoteSessionSearchAgent,
+  type RemoteSessionSearchHit,
+  type RemoteSessionSearchRequest,
+  type RemoteSessionSearchResult,
+  type RemoteSessionSearchScope,
+} from "./session-search-remote";
 
 export { isRemoteTerminalProfile };
 export type {
@@ -85,6 +96,11 @@ export type {
   RemotePreviewScreenshot,
   RemotePreviewTab,
   RemotePreviewViewportMode,
+  RemoteSessionSearchAgent,
+  RemoteSessionSearchHit,
+  RemoteSessionSearchRequest,
+  RemoteSessionSearchResult,
+  RemoteSessionSearchScope,
 };
 
 /* -------------------------------------------------------------------------- */
@@ -103,6 +119,31 @@ export interface DeviceInfo {
   version: string;
 }
 
+export interface RemoteWorkspaceWorktreeInfo {
+  branch: string;
+  baseBranch?: string;
+  createdAt?: string;
+  createdBy?: {
+    kind: "user" | "agent";
+    client?: string;
+    fromWorkspaceName?: string;
+  };
+  merged?: boolean;
+}
+
+export interface RemoteWorkspacePullRequestInfo {
+  number: number;
+  phase: "open" | "draft" | "merged" | "closed";
+  checks: "none" | "pending" | "passing" | "failing";
+}
+
+export interface RemoteWorkspaceAgentStatus {
+  state: "needs-you" | "working" | "done" | "idle";
+  label?: string;
+  since?: number;
+  note?: string;
+}
+
 export interface RemoteWorkspaceInfo {
   id: string;
   name: string;
@@ -116,6 +157,10 @@ export interface RemoteWorkspaceInfo {
   branch?: string;
   sessionCount?: number;
   lastActiveAt?: number;
+  parentWorkspaceId?: string;
+  worktree?: RemoteWorkspaceWorktreeInfo;
+  pullRequest?: RemoteWorkspacePullRequestInfo;
+  agentStatus?: RemoteWorkspaceAgentStatus;
 }
 
 export interface RemoteFleetWorkspaceOverview {
@@ -1532,6 +1577,14 @@ export interface RemoteRpcServices {
     input: RemoteImageUploadRequest,
   ): Promise<RemoteImageUploadHandle>;
   listPreviewTabs?(workspaceId: string): Promise<RemotePreviewTab[]>;
+  openPreviewTab?(input: {
+    workspaceId: string;
+    url: string;
+  }): Promise<RemotePreviewTab>;
+  closePreviewTab?(input: {
+    workspaceId: string;
+    tabId: string;
+  }): Promise<{ closed: true }>;
   capturePreviewScreenshot?(input: {
     workspaceId: string;
     tabId: string;
@@ -1544,6 +1597,12 @@ export interface RemoteRpcServices {
   // Spends one browser preview action from the authenticated phone's budget;
   // false when it is empty. Keyed by the Noise peer key in RemoteAccessService.
   allowPreviewAction?(): boolean;
+  searchSessions?(
+    input: RemoteSessionSearchRequest,
+  ): Promise<RemoteSessionSearchResult>;
+  // Spends one session search from the authenticated phone's budget;
+  // false when it is empty. Keyed by the Noise peer key in RemoteAccessService.
+  allowSessionSearch?(): boolean;
   attachWorkerTerminal?(
     request: RemoteWorkerTerminalOpenRequest,
   ): Promise<RemoteTerminalHandle>;
@@ -4430,7 +4489,7 @@ export class RpcSession {
               );
               return;
             }
-            this.terminalLeaseStoreFor(p.terminalId).close(
+            await this.terminalLeaseStoreFor(p.terminalId).close(
               this.terminalLeaseOwnerKey(),
               p.terminalId,
               this.terminalLeaseSubscriberId,
@@ -4628,6 +4687,108 @@ export class RpcSession {
               err,
               "Could not interact with the browser preview.",
             );
+          }
+          return;
+        }
+        case "preview.open": {
+          if (!this.services.openPreviewTab) {
+            this.replyError(id, "unknown-method", "Browser preview is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; url?: unknown };
+          if (
+            !isPlainRecord(params) ||
+            !hasExactlyKeys(params, ["workspaceId", "url"]) ||
+            !isBoundedString(p.workspaceId, 256) ||
+            !isBoundedString(p.url, MAX_REMOTE_PREVIEW_URL_BYTES)
+          ) {
+            this.replyError(id, "invalid-params", "preview.open needs workspaceId and url.");
+            return;
+          }
+          const sanitizedUrl = sanitizeRemotePreviewUrl(p.url);
+          if (!sanitizedUrl) {
+            this.replyError(id, "invalid-params", "Only http and https browser preview URLs can be opened remotely.");
+            return;
+          }
+          if (this.services.allowPreviewAction && !this.services.allowPreviewAction()) {
+            this.replyError(id, "rate-limited", "Browser preview requests are arriving too quickly. Try again shortly.");
+            return;
+          }
+          try {
+            const result = await this.services.openPreviewTab({ workspaceId: p.workspaceId, url: sanitizedUrl });
+            if (jsonUtf8Bytes(result) > MAX_FRAME_BYTES - 4096) {
+              this.replyError(id, "message-too-large", "Browser preview tab response exceeded the remote transfer limit.");
+              return;
+            }
+            this.reply(id, result);
+          } catch (err) {
+            this.replyPreviewError(id, err, "Could not open the browser preview tab.");
+          }
+          return;
+        }
+        case "preview.close": {
+          if (!this.services.closePreviewTab) {
+            this.replyError(id, "unknown-method", "Browser preview is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; tabId?: unknown };
+          if (
+            !isPlainRecord(params) ||
+            !hasExactlyKeys(params, ["workspaceId", "tabId"]) ||
+            !isBoundedString(p.workspaceId, 256) ||
+            !isBoundedString(p.tabId, 128)
+          ) {
+            this.replyError(id, "invalid-params", "preview.close needs workspaceId and tabId.");
+            return;
+          }
+          if (this.services.allowPreviewAction && !this.services.allowPreviewAction()) {
+            this.replyError(id, "rate-limited", "Browser preview requests are arriving too quickly. Try again shortly.");
+            return;
+          }
+          try {
+            const result = await this.services.closePreviewTab({ workspaceId: p.workspaceId, tabId: p.tabId });
+            this.reply(id, result);
+          } catch (err) {
+            this.replyPreviewError(id, err, "Could not close the browser preview tab.");
+          }
+          return;
+        }
+        case "sessions.search": {
+          if (!this.services.searchSessions) {
+            this.replyError(id, "unknown-method", "Session search is not available.");
+            return;
+          }
+          const parsed = parseRemoteSessionSearchParams(params ?? {});
+          if (!parsed) {
+            this.replyError(id, "invalid-params", "sessions.search received invalid query or filter parameters.");
+            return;
+          }
+          if (this.services.allowSessionSearch && !this.services.allowSessionSearch()) {
+            this.replyError(id, "rate-limited", "Session search requests are arriving too quickly. Try again shortly.");
+            return;
+          }
+          try {
+            const result = await this.services.searchSessions(parsed);
+            if (jsonUtf8Bytes(result) > MAX_FRAME_BYTES - 4096) {
+              this.replyError(id, "message-too-large", "Session search results exceeded the remote transfer limit.");
+              return;
+            }
+            this.reply(id, result);
+          } catch (err) {
+            const raw = err instanceof Error ? err.message : "";
+            const cleaned = raw.replace(/[\r\n\t]+/g, " ").replace(/[\x00-\x1f\x7f]/g, "").trim();
+            if (/^Unknown workspace:/i.test(cleaned)) {
+              this.replyError(id, "unknown-workspace", cleaned.slice(0, 240));
+            } else if (
+              Boolean(err) &&
+              typeof err === "object" &&
+              (err as { remoteSafe?: unknown }).remoteSafe === true &&
+              cleaned
+            ) {
+              this.replyError(id, "internal", cleaned.slice(0, 240));
+            } else {
+              this.replyError(id, "internal", "Could not search sessions.");
+            }
           }
           return;
         }
@@ -5303,14 +5464,15 @@ export class RpcSession {
     }
     if (
       p.resumeSessionId !== undefined &&
-      (typeof p.resumeSessionId !== "string" ||
-        !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(p.resumeSessionId) ||
-        (p.profile !== "claude" && p.profile !== "codex"))
+      (!isSafeSessionId(p.resumeSessionId) ||
+        !p.profile ||
+        p.profile === "shell" ||
+        (p.profile === "antigravity" && p.resumeSessionId === "continue"))
     ) {
       this.replyError(
         id,
         "invalid-params",
-        "terminal.create resumeSessionId requires a Claude or Codex profile.",
+        "terminal.create resumeSessionId requires an agent profile and a valid session id.",
       );
       return;
     }

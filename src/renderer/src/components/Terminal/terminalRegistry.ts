@@ -172,6 +172,30 @@ export function closeAgentTerminal(tabId: string): void {
   closeAgentTerminalFn(tabId);
 }
 
+type CloseShareableTerminalPaneFn = (input: {
+  workspaceId: string;
+  paneId: string;
+}) => { closed: boolean };
+let closeShareableTerminalPaneFn: CloseShareableTerminalPaneFn | null = null;
+
+export function setCloseShareableTerminalPaneFn(
+  fn: CloseShareableTerminalPaneFn | null,
+): void {
+  closeShareableTerminalPaneFn = fn;
+}
+
+export function closeShareableTerminalPane(input: {
+  workspaceId: string;
+  paneId: string;
+}): { closed: boolean } {
+  if (!closeShareableTerminalPaneFn) {
+    throw new Error(
+      "Codara is not ready to close terminal panes yet (renderer not mounted). Retry in a moment.",
+    );
+  }
+  return closeShareableTerminalPaneFn(input);
+}
+
 type ExternalTerminalSize = { cols: number; rows: number };
 type ExternalTerminalSizeHandler = (size: ExternalTerminalSize) => void;
 
