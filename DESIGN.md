@@ -141,8 +141,13 @@ pages) it still showed a share button that could never work.
   the mapping and its tests. Everything still asks first.
 - Under the choice, one line says what the reach includes. Opening new tabs
   keeps its own switch and stays off until the user turns it on.
-- No tab ids in the main view. The id and its copy button sit under
-  **Details** for the current tab.
+- A tab's id copies in one click (owner, 24 Nov 2026: naming a tab to an
+  agent is how he says "use this one", and a fold in the way was a nuisance).
+  The current tab shows its id with **Copy tab id**; each shared row has a
+  copy button with the id in its tooltip, not as text, so the title keeps
+  the room. No id is offered for a blocked site.
+- A long title ends in an ellipsis and never widens the popup: every section
+  is one grid column that may shrink (`minmax(0, 1fr)`).
 - A page no extension may touch, or a site on the blocked list, shows one
   line saying why and no switch, details or cookie row: never a control that
   cannot work.

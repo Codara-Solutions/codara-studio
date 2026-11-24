@@ -113,13 +113,31 @@ test("the popup offers one switch per tab, a reach that maps to the old switches
     await expect(popup.locator("#reach-note")).toContainText("In this window, only the tabs you switch on. Other windows stay off.");
     await expect(popup.locator("#allow-open")).not.toBeChecked();
     expect(await sharing(worker)).toEqual({ shareAll: false, shareWindows: [], shareTabs: [], allowOpen: false });
-    // The tab id is in Details, not in the main view.
+    // The tab id only shows once Codara is connected: an id is no use before.
     await expect(popup.locator("#tab-id")).toBeHidden();
     await expect(popup.locator("#tab-details")).toBeHidden();
 
     await popup.locator("#share-tab").check();
     await expect.poll(async () => (await sharing(worker)).shareTabs).toEqual([webTab]);
     await expect(popup.locator("#shared-label")).toHaveText("Shared, 1 tab");
+    // Each shared row carries its tab id, copied by one click, and a long
+    // title ends in an ellipsis instead of widening the popup.
+    await expect(popup.locator("#shared-list li .idchip")).toHaveAttribute("data-id", /^chrome:\d+$/);
+    const widths = await popup.evaluate(() => {
+      const title = document.querySelector("#shared-list li .ttl") as HTMLElement;
+      const before = title.textContent;
+      title.textContent = "Consulta de Autorizaciones de una Empresa en la Sede Electronica ".repeat(4);
+      const list = document.getElementById("shared-list") as HTMLElement;
+      const out = {
+        page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        list: list.scrollWidth - list.clientWidth,
+        clipped: title.scrollWidth > title.clientWidth,
+        chip: (document.querySelector("#shared-list li .idchip") as HTMLElement).getBoundingClientRect().right <= list.getBoundingClientRect().right + 0.5,
+      };
+      title.textContent = before;
+      return out;
+    });
+    expect(widths).toEqual({ page: 0, list: 0, clipped: true, chip: true });
     await expect(popup.locator("#storage-row")).toBeVisible();
     // The switch covers the browser's cookie and storage commands, not what the page's scripts can read.
     await expect(popup.locator("#storage-note")).toHaveText("Even when off, agents see site storage, non-HttpOnly cookies and requests, sign-in headers included.");

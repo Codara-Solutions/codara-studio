@@ -19,8 +19,9 @@ tools it uses for its own browser tabs.
    only when they match.
 4. In the popup, turn on the switch next to the tab's title for each tab
    agents may use, or pick how far sharing reaches under **Agents may use**.
-   Agents find shared tabs on their own; the tab's id (`chrome:<tabId>`) and
-   its copy button are under **Details**.
+   Agents find shared tabs on their own; the tab's id (`chrome:<tabId>`) is
+   shown under the tab's title with **Copy tab id**, and on each row of the
+   shared tabs list (the copy button on the row).
 
 ## How it connects
 
