@@ -233,3 +233,53 @@ test("the popup offers one switch per tab, a reach that maps to the old switches
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// Every text the popup can show, far longer than it should ever be, with and
+// without spaces: nothing may reach past the popup's 340px or widen it. The
+// markup and styles are what is under test, so the page is opened as a file
+// and its rows are built the way popup.js builds them.
+test("no text, however long, widens the popup or runs past its edge", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const colorScheme of ["light", "dark"] as const) {
+      for (const kind of ["words", "solid"] as const) {
+        const page = await browser.newPage({ viewport: { width: 800, height: 600 }, colorScheme });
+        await page.goto(`file://${join(EXTENSION, "popup.html")}`);
+        const out = await page.evaluate((kind) => {
+          const long = kind === "words" ? "Consulta de Autorizaciones de una Empresa en la Sede Electronica y unas cuantas palabras de sobra para pasarse de largo" : "Unapalabralarguisimasinningunespacio_".repeat(6);
+          const $ = (id: string) => document.getElementById(id) as HTMLElement;
+          for (const el of Array.from(document.querySelectorAll<HTMLElement>("[hidden]"))) el.hidden = false;
+          const name = kind === "solid" ? long : "A coordinator agent with a long session name";
+          const text: Record<string, string> = { "status-text": `Studio 1.0.0-beta.123+build.4567 ${kind === "solid" ? long : ""}`, "connect-error": long, "pairing-code": "123456", "tab-title": long, "tab-host": long, "tab-note": long, "tab-agent-name": name, "tab-usage": `took a screenshot, 3 s ago ${long}`, "tab-id": "chrome:20193493501234567890", "reach-note": long, "ask-text": long, "shared-label": "Shared, 123 tabs" };
+          for (const [id, value] of Object.entries(text)) $(id).textContent = value;
+          $("tab-note").className = "note why";
+          const make = (tag: string, className: string, content = "") => Object.assign(document.createElement(tag), { className, textContent: content });
+          for (const label of ["Give back", "Waiting for Codara"]) {
+            const item = make("li", "row");
+            item.append(make("span", "grow", `You stopped ${name} on this tab.`), make("button", "btn", label));
+            $("tab-stopped").append(item);
+          }
+          for (let index = 0; index < 4; index += 1) {
+            const item = make("li", "row");
+            item.append(make("span", "fav", "GO"), make("span", "grow ttl", index % 2 ? long : "Short"));
+            if (index < 2) item.append(make("span", "agentchip"));
+            item.append(make("button", "idchip"), make("button", "btn ghost", "Stop"));
+            $("shared-list").append(item);
+          }
+          const edge = document.body.getBoundingClientRect().right;
+          const describe = (el: Element) => `${el.tagName.toLowerCase()}#${el.id}.${el.className}`;
+          const all = Array.from(document.body.querySelectorAll<HTMLElement>("*"));
+          return {
+            width: document.body.getBoundingClientRect().width,
+            past: all.filter((el) => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().right > edge + 0.5).map(describe),
+            spilling: all.filter((el) => el.clientWidth > 0 && el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflowX === "visible").map(describe),
+          };
+        }, kind);
+        expect(out, `${colorScheme}, ${kind}`).toEqual({ width: 340, past: [], spilling: [] });
+        await page.close();
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+});
