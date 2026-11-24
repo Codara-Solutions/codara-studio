@@ -60,10 +60,20 @@ function initials(tab) {
   return words.slice(0, 2).map((word) => word[0]).join("").toUpperCase() || "?";
 }
 
+// The browser may refuse the clipboard (the popup lost focus).
+async function writeClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function copy(text, button) {
-  await navigator.clipboard.writeText(text);
+  const copied = await writeClipboard(text);
   const label = button.textContent;
-  button.textContent = "Copied";
+  button.textContent = copied ? "Copied" : "Could not copy";
   setTimeout(() => {
     button.textContent = label;
   }, 1200);
@@ -125,7 +135,8 @@ function renderShared(list) {
       chip.append(dot);
       item.append(chip);
     }
-    if (tab.agentId) {
+    // No id for a blocked site: an agent could not use it.
+    if (tab.agentId && !tab.blocked) {
       // What an agent is told to use this tab: one click copies it.
       const id = document.createElement("button");
       id.type = "button";
@@ -135,12 +146,15 @@ function renderShared(list) {
       id.title = `Copy tab id ${tab.agentId}`;
       id.setAttribute("aria-label", `Copy the tab id of ${title.textContent}`);
       id.addEventListener("click", async () => {
-        await navigator.clipboard.writeText(tab.agentId);
-        id.classList.add("done");
-        id.title = "Copied";
+        const copied = await writeClipboard(tab.agentId);
+        const label = id.getAttribute("aria-label");
+        id.classList.toggle("done", copied);
+        id.title = copied ? "Copied" : "Could not copy";
+        id.setAttribute("aria-label", id.title);
         setTimeout(() => {
           id.classList.remove("done");
           id.title = `Copy tab id ${tab.agentId}`;
+          id.setAttribute("aria-label", label);
         }, 1200);
       });
       item.append(id);
