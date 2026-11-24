@@ -89,6 +89,11 @@ function ask(text, yesLabel) {
   });
 }
 
+// Two sheets: copy. A tick replaces it for a moment once the id is copied.
+const COPY_ICON =
+  '<svg class="i-copy" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>' +
+  '<svg class="i-done" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
 function renderShared(list) {
   // The list redraws only when it changed, so a focused Stop keeps its focus
   // across the 1 s refresh.
@@ -108,6 +113,8 @@ function renderShared(list) {
     const title = document.createElement("span");
     title.className = "grow ttl";
     title.textContent = tab.blocked ? "Blocked site" : tab.title || tab.url;
+    // The row ends a long title in an ellipsis; the whole of it is here.
+    title.title = title.textContent;
     item.append(fav, title);
     if (tab.usage) {
       const chip = document.createElement("span");
@@ -117,6 +124,26 @@ function renderShared(list) {
       dot.style.setProperty("--c", agentColorVar(tab.usage.runtime));
       chip.append(dot);
       item.append(chip);
+    }
+    if (tab.agentId) {
+      // What an agent is told to use this tab: one click copies it.
+      const id = document.createElement("button");
+      id.type = "button";
+      id.className = "idchip";
+      id.dataset.id = tab.agentId;
+      id.innerHTML = COPY_ICON;
+      id.title = `Copy tab id ${tab.agentId}`;
+      id.setAttribute("aria-label", `Copy the tab id of ${title.textContent}`);
+      id.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(tab.agentId);
+        id.classList.add("done");
+        id.title = "Copied";
+        setTimeout(() => {
+          id.classList.remove("done");
+          id.title = `Copy tab id ${tab.agentId}`;
+        }, 1200);
+      });
+      item.append(id);
     }
     const stop = document.createElement("button");
     stop.type = "button";

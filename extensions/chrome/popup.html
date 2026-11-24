@@ -39,13 +39,11 @@
       </div>
       <p id="tab-paused" class="note why" hidden>Shared tabs were paused after a problem reading saved stops: share each tab again.</p>
       <ul id="tab-stopped" class="stopped" hidden></ul>
-      <details id="tab-details" class="details">
-        <summary>Details</summary>
-        <div class="row">
-          <code id="tab-id"></code>
-          <button id="copy-id" type="button" class="btn">Copy tab id</button>
-        </div>
-      </details>
+      <div id="tab-details" class="row idrow">
+        <span class="dim">Tab id</span>
+        <code id="tab-id" class="grow"></code>
+        <button id="copy-id" type="button" class="btn">Copy tab id</button>
+      </div>
     </section>
 
     <section id="reach" class="sec" hidden>
