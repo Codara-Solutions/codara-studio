@@ -146,8 +146,12 @@ pages) it still showed a share button that could never work.
   The current tab shows its id with **Copy tab id**; each shared row has a
   copy button with the id in its tooltip, not as text, so the title keeps
   the room. No id is offered for a blocked site.
-- A long title ends in an ellipsis and never widens the popup: every section
-  is one grid column that may shrink (`minmax(0, 1fr)`).
+- No text widens the popup or runs past its edge, however long: every
+  section is one grid column that may shrink (`minmax(0, 1fr)`), one-line
+  texts (title, host, status, agent name, what it did last) end in an
+  ellipsis with the whole text in a tooltip, and the rest wraps, breaking a
+  word with no spaces where it must. A test fills every text with over-long
+  content and fails on any overflow.
 - A page no extension may touch, or a site on the blocked list, shows one
   line saying why and no switch, details or cookie row: never a control that
   cannot work.

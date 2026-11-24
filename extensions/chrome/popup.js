@@ -210,6 +210,8 @@ function renderTab(tab, connected) {
   if (usage) {
     $("tab-agent-dot").style.setProperty("--c", agentColorVar(usage.runtime));
     $("tab-agent-name").textContent = usage.name ?? usage.agent;
+    // The row ends a long name in an ellipsis; the whole of it is here.
+    $("tab-agent-name").title = $("tab-agent-name").textContent;
     $("tab-usage").textContent = `${toolVerb(usage.tool)}, ${ago(usage.at)}`;
     $("tab-usage").title = usage.tool;
   }
