@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Codara",
   "short_name": "Codara",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Let the agents you run in Codara use the Firefox tabs you share, with your signed-in sessions.",
   "browser_specific_settings": {
     "gecko": {
