@@ -155,6 +155,31 @@ export async function removeLinkEntry(absolute: string): Promise<boolean> {
 }
 
 /**
+ * Moves an entry to `to` only when nothing is there, without the gap a
+ * check before a rename leaves: a hard link of the entry itself (never what
+ * it points at) fails on anything at `to`, then the old name goes. Where
+ * the disk has no hard links (Windows junctions, some file systems), a
+ * rename after a last look. False when it stayed where it was.
+ */
+export async function moveNoReplace(from: string, to: string): Promise<boolean> {
+  try {
+    await fsp.link(from, to);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "EEXIST" || code === "ENOENT") return false;
+    if ((await fsp.lstat(to).catch(() => null)) !== null) return false;
+    try {
+      await fsp.rename(from, to);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  await fsp.unlink(from).catch(() => undefined);
+  return true;
+}
+
+/**
  * An untracked entry git lists that is only a link to installed packages: a
  * node_modules link made by hand, or by a setup whose `node_modules/` ignore
  * rule (folders only) does not cover a link. Nothing of anyone's is in it.
@@ -219,9 +244,11 @@ export async function releaseWorktreeLinks(worktreePath: string, dependencyLinks
     const moved = await fsp.lstat(held).catch(() => null);
     const text = moved?.isSymbolicLink() ? await fsp.readlink(held).catch(() => null) : null;
     if (!moved || moved.ino !== before.ino || moved.dev !== before.dev || text !== pointsAt) {
-      await fsp.rename(held, absolute).catch(() => undefined);
+      const back = await moveNoReplace(held, absolute);
       await restoreWorktreeLinks(worktreePath, released);
-      throw new Error(`${path} changed while it was being taken out before removing the worktree, so nothing was removed.`);
+      throw new Error(
+        `${path} changed while it was being taken out before removing the worktree, so nothing was removed.${back ? "" : ` What was there is kept at ${held}.`}`,
+      );
     }
     released.push({ path, target, exact: pointsAt, held });
   }
@@ -273,19 +300,23 @@ export async function prepareWorktreeRemoval(worktreePath: string, dependencyLin
   return released;
 }
 
-/** Puts back links released for a removal that then failed. */
-export async function restoreWorktreeLinks(worktreePath: string, links: readonly SetupManifestLink[]): Promise<void> {
+/**
+ * Puts back links released for a removal that then failed. Returns where
+ * each held link stayed because something took its place.
+ */
+export async function restoreWorktreeLinks(worktreePath: string, links: readonly SetupManifestLink[]): Promise<string[]> {
+  const kept: string[] = [];
   for (const link of links) {
     if (!safeRelative(link.path)) continue;
     const absolute = join(worktreePath, ...link.path.split("/"));
+    if (link.held) {
+      // The link itself comes back, never over anything; else it stays held.
+      if (await moveNoReplace(link.held, absolute)) await fsp.rmdir(dirname(link.held)).catch(() => undefined);
+      else kept.push(link.held);
+      continue;
+    }
     if (await fsp.lstat(absolute).catch(() => null)) continue;
     try {
-      if (link.held) {
-        // The link itself comes back; if it cannot, it stays where it was held.
-        await fsp.rename(link.held, absolute);
-        await fsp.rmdir(dirname(link.held)).catch(() => undefined);
-        continue;
-      }
       const target = await fsp.stat(link.target).catch(() => null);
       if (!target?.isDirectory()) continue;
       await fsp.symlink(link.target, absolute, process.platform === "win32" ? "junction" : "dir");
@@ -293,6 +324,7 @@ export async function restoreWorktreeLinks(worktreePath: string, links: readonly
       // Best effort: the worktree still works, only without that folder.
     }
   }
+  return kept;
 }
 
 /** Once the worktree is gone: deletes the user's links held for its removal (the links, never what they point at). */

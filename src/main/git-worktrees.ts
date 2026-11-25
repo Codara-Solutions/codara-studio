@@ -940,11 +940,16 @@ export async function removeCopyWorktree(
   } catch (err) {
     return { ok: false, error: errorText(err) };
   }
+  // A link that could not go back, something being in its place, is named.
+  const linksBack = async (where: string): Promise<string> => {
+    const kept = await restoreWorktreeLinks(where, releasedLinks).catch(() => [] as string[]);
+    return kept.length ? ` Its node_modules links are kept at ${kept.join(", ")}.` : "";
+  };
   let work = input;
   if (input.aside) {
     const aside = asidePathFor(original);
     const fail = async (error: string, changed = false): Promise<GitRemoveWorktreeResult> => {
-      await restoreWorktreeLinks(original, releasedLinks).catch(() => undefined);
+      error += await linksBack(original);
       return changed ? { ok: false, changed: true, error } : { ok: false, error };
     };
     if (!(await pathIsAbsent(aside))) {
@@ -976,8 +981,7 @@ export async function removeCopyWorktree(
       const back = await putBackAside(input.repoCwd, aside, original);
       if (!back.ok) {
         // It stays where it was moved: its links come back there.
-        await restoreWorktreeLinks(aside, releasedLinks).catch(() => undefined);
-        return { ok: false, changed: true, error: `${reason} ${back.error}` };
+        return { ok: false, changed: true, error: `${reason} ${back.error}${await linksBack(aside)}` };
       }
       return fail(reason, true);
     }
@@ -1004,15 +1008,18 @@ export async function removeCopyWorktree(
   }
   if (!removed) {
     const stuck = await putBack();
-    await restoreWorktreeLinks(stuck ? work.worktreePath : original, releasedLinks).catch(() => undefined);
-    return { ok: false, error: `${lastError}${stuck}` };
+    return { ok: false, error: `${lastError}${stuck}${await linksBack(stuck ? work.worktreePath : original)}` };
   }
 
   await discardHeldLinks(releasedLinks).catch(() => undefined);
   // Best-effort: only this worktree's own registration, if one was left.
   await dropMissingWorktreeRegistration(input.repoCwd, work.worktreePath);
   if (work !== input) await clearAsideNote(input.repoCwd, work.worktreePath);
-  return finishBranch(input);
+  const done = await finishBranch(input);
+  // What each of the user's links read, for the audit log: the one thing
+  // of theirs that went with the folder.
+  const userLinks = releasedLinks.flatMap((link) => (link.exact !== undefined ? [{ path: link.path, text: link.exact }] : []));
+  return done.ok && userLinks.length ? { ...done, links: userLinks } : done;
 }
 
 async function pathIsAbsent(path: string): Promise<boolean> {

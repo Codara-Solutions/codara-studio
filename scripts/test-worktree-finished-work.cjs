@@ -201,6 +201,30 @@ async function main() {
       assert.equal(await inspect.longLivedTargetStillHolds(repo, onMainFacts, "origin/main"), true, "the default branch is not asked");
     });
 
+    await check("staging: a squash found in origin's staging names the commit it was found in", async () => {
+      const squash = add("squash", "feat/squash");
+      const squashTip = commitFile(squash, "squash.txt", "squashed\n", "squash me");
+      git(hub, ["fetch", "-q", "origin"]);
+      git(hub, ["checkout", "-q", "-B", "staging", "origin/staging"]);
+      fs.writeFileSync(path.join(hub, "squash.txt"), "squashed\n");
+      git(hub, ["add", "squash.txt"]);
+      git(hub, ["commit", "-q", "-m", "Squash (#22)"]);
+      git(hub, ["push", "-q", "origin", "staging"]);
+      git(repo, ["fetch", "-q", "origin"]);
+      const tracked = git(repo, ["rev-parse", "origin/staging"]);
+      // origin moves on past what this clone fetched.
+      commitFile(hub, "later.txt", "later\n", "later on staging");
+      git(hub, ["push", "-q", "origin", "staging"]);
+      const live = git(hub, ["rev-parse", "HEAD"]);
+      git(repo, ["fetch", "-q", "origin", `${live}`]);
+      const facts = await inspect.mergeFacts(repoContext([]), squashTip, "feat/squash", { name: "origin/staging", commit: tracked });
+      assert.deepEqual([facts.state, facts.proof, facts.targetCommit], ["merged", "content-in-target", live], JSON.stringify(facts));
+      git(hub, ["push", "-q", "-f", "origin", `${main}:refs/heads/staging`]);
+      assert.equal(await inspect.longLivedTargetStillHolds(repo, facts, "origin/main"), false, "rewound past the squash");
+      git(hub, ["push", "-q", "-f", "origin", `${live}:refs/heads/staging`]);
+      git(repo, ["worktree", "remove", "--force", squash]);
+    });
+
     // ── The cleanup harness ────────────────────────────────────────────────
     const infra = add("infra", "feat/infra");
     const linked = add("linked", "feat/linked");
@@ -315,6 +339,26 @@ async function main() {
       assert.ok(entry.localWork?.ignored.includes("infra/.terraform/") || codes(entry).length > 0, "no modules.json");
       fs.writeFileSync(manifest, written);
       assert.equal((await checkOf(infra)).localWork, null);
+    });
+
+    await check("terraform: a modules.json that is no file, or a state with resources, is asked about", async () => {
+      const modulesDir = path.join(infra, "infra", ".terraform", "modules");
+      const manifest = path.join(modulesDir, "modules.json");
+      const written = fs.readFileSync(manifest, "utf8");
+      fs.rmSync(manifest);
+      fs.mkdirSync(manifest);
+      fs.writeFileSync(path.join(manifest, "notes.txt"), "mine\n");
+      let entry = await checkOf(infra);
+      assert.ok(entry.localWork?.ignored.includes("infra/.terraform/") || codes(entry).length > 0, JSON.stringify(entry.localWork));
+      fs.rmSync(manifest, { recursive: true, force: true });
+      fs.writeFileSync(manifest, written);
+      const state = path.join(infra, "infra", ".terraform", "terraform.tfstate");
+      fs.writeFileSync(state, JSON.stringify({ version: 4, resources: [{ type: "aws_s3_bucket", name: "mine" }] }));
+      entry = await checkOf(infra);
+      assert.ok(entry.localWork?.ignored.includes("infra/.terraform/"), "a local state");
+      fs.writeFileSync(state, JSON.stringify({ version: 3, backend: { type: "s3", config: { bucket: "b" } }, modules: [{ path: ["root"], resources: {} }] }));
+      assert.equal((await checkOf(infra)).localWork, null, "the backend record init writes");
+      fs.rmSync(state);
     });
 
     await check("terraform: a module sharing git metadata with another folder is a checkout", async () => {
@@ -530,6 +574,10 @@ async function main() {
       });
       assert.equal(result.outcomes[0].status, "removed", JSON.stringify(result.outcomes[0]));
       assert.equal(fs.readFileSync(path.join(packages, "left-pad", "index.js"), "utf8"), "module.exports = 1;\n");
+      // What the link read is in the audit log.
+      const lines = fs.readFileSync(path.join(home, "logs", "worktree-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      const last = lines.filter((line) => line.path === nested && line.outcome === "removed").pop();
+      assert.deepEqual(last?.links, [{ path: "pkg/node_modules", text: packages }], JSON.stringify(last));
     });
 
     await check("link: a link a failed removal took out comes back exactly, dangling or relative", async () => {
@@ -549,6 +597,18 @@ async function main() {
       await links.discardHeldLinks(again);
       assert.equal(!!fs.lstatSync(again[0].held, { throwIfNoEntry: false }), false);
       assert.equal(fs.existsSync(path.dirname(again[0].held)), false);
+    });
+
+    await check("link: a held link never goes back over something new in its place", async () => {
+      const dir = path.join(scratch, "held-over");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.symlinkSync("../gone/node_modules", path.join(dir, "node_modules"));
+      const released = await links.prepareWorktreeRemoval(dir, ["node_modules"]);
+      fs.writeFileSync(path.join(dir, "node_modules"), "new\n");
+      const kept = await links.restoreWorktreeLinks(dir, released);
+      assert.equal(fs.readFileSync(path.join(dir, "node_modules"), "utf8"), "new\n", "the new file stays");
+      assert.deepEqual(kept, [released[0].held]);
+      assert.equal(fs.readlinkSync(released[0].held), "../gone/node_modules", "the link is kept where it was held");
     });
 
     await check("link: only an untracked link in the worktree's own folder is taken out", async () => {

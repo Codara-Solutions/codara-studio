@@ -185,6 +185,8 @@ export interface AgentWorktreeAuditEntry {
   givenUp?: { pr: number; remoteCommit: string } | null;
   /** What the user was told, when a press ended before the removal. */
   message?: string | null;
+  /** The user's node_modules links that went with a removed folder, as each read. */
+  links?: Array<{ path: string; text: string }>;
 }
 
 export interface AgentWorktreeDeps {
@@ -825,9 +827,12 @@ function terraformOutputOnly(absolute: string): boolean {
   }
   const modules = entries(join(absolute, "modules"));
   if (!modules) return false;
-  const folders = modules.filter((child) => child.name !== "modules.json");
-  if (!folders.length) return true;
-  const named = moduleFolders(join(absolute, "modules", "modules.json"));
+  // Its manifest, when there, is the file terraform writes and reads.
+  const manifest = modules.find((child) => child.name === "modules.json");
+  const named = manifest ? (manifest.isFile() ? moduleFolders(join(absolute, "modules", "modules.json")) : null) : new Set<string>();
+  if (!named) return false;
+  const folders = modules.filter((child) => child !== manifest);
+  if (!folders.length) return terraformFilesOnly(absolute);
   return (
     !!named &&
     folders.every(
@@ -841,8 +846,43 @@ function terraformOutputOnly(absolute: string): boolean {
             return false;
           }
         })(),
-    )
+    ) &&
+    terraformFilesOnly(absolute)
   );
+}
+
+// The files init writes at the top of .terraform/: terraform.tfstate only
+// as the backend record it is there (a backend and no resources: a state
+// with resources is someone's), environment the workspace's name,
+// plugin_path a list of folders.
+function terraformFilesOnly(absolute: string): boolean {
+  const read = (name: string): string | null | undefined => {
+    try {
+      const stat = lstatSync(join(absolute, name));
+      if (!stat.isFile()) return null;
+      return readFileSync(join(absolute, name), "utf8");
+    } catch (err) {
+      return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? undefined : null;
+    }
+  };
+  const state = read("terraform.tfstate");
+  if (state === null) return false;
+  if (state !== undefined) {
+    try {
+      const parsed = JSON.parse(state) as { backend?: unknown; resources?: unknown; modules?: Array<{ resources?: unknown }> };
+      if (!parsed || typeof parsed.backend !== "object" || parsed.backend === null) return false;
+      const holds = (value: unknown) =>
+        Array.isArray(value) ? value.length > 0 : !!value && typeof value === "object" && Object.keys(value).length > 0;
+      if (holds(parsed.resources)) return false;
+      if (Array.isArray(parsed.modules) && parsed.modules.some((module) => holds(module?.resources))) return false;
+    } catch {
+      return false;
+    }
+  }
+  for (const name of ["environment", "plugin_path"]) {
+    if (read(name) === null) return false;
+  }
+  return true;
 }
 
 // The folders under .terraform/modules/ that terraform's modules.json names
@@ -3991,6 +4031,8 @@ async function removeLocked(
         recoveryRef,
       });
     }
+    // The user's own node_modules links went with it: what each read is said.
+    for (const link of removed.links ?? []) warnings.push(`the link ${link.path} (to ${cleanText(link.text, 200)}) went with it`);
   } else {
     const dropped = await dropMissingWorktreeRegistration(repo, workspace.cwd);
     if (!dropped.ok) warnings.push(`the stale worktree registration was kept: ${cleanText(dropped.error, 200)}`);
@@ -4469,6 +4511,9 @@ export function createWorktreeAuditLog(
       recoveryRef: entry.recoveryRef ?? null,
       ...(entry.givenUp ? { givenUp: { pr: entry.givenUp.pr, remoteCommit: entry.givenUp.remoteCommit } } : {}),
       ...(entry.message ? { message: cleanText(entry.message, 300) } : {}),
+      ...(entry.links?.length
+        ? { links: entry.links.slice(0, 50).map((link) => ({ path: cleanText(link.path, 1_000), text: cleanText(link.text, 1_000) })) }
+        : {}),
     });
     const write = chain.then(async () => {
       await fsp.mkdir(dirname(file), { recursive: true });

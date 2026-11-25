@@ -757,12 +757,12 @@ export async function mergeFacts(
   const longLivedTarget = PROTECTED_BRANCHES.has(targetShort) && targetShort !== defaultShort;
   // What the target holds for the proofs below that read its content.
   const judged = longLivedTarget ? await liveCommit(targetShort) : target.commit;
+  // A proof read from it names the commit it was made against, which the
+  // removal asks origin about again.
+  const judgedFacts = async () =>
+    judged && judged !== target.commit ? { target: target.name, targetCommit: judged, ...(await aheadBehind(repo.root, judged, head)) } : facts;
   if (judged && (longLivedTarget || ahead === 0) && (await isAncestor(repo.root, head, judged))) {
-    // Against what origin holds, which the removal asks again.
-    if (longLivedTarget && judged !== target.commit) {
-      return { state: "merged", proof: "ancestor", target: target.name, targetCommit: judged, ...(await aheadBehind(repo.root, judged, head)) };
-    }
-    return { state: "merged", proof: "ancestor", ...facts };
+    return { state: "merged", proof: "ancestor", ...(await judgedFacts()) };
   }
   // A base that is not the default branch (a stacked pull request's branch,
   // often deleted once merged) can lag behind where the work went. The
@@ -828,7 +828,7 @@ export async function mergeFacts(
     }
   }
   if (judged && (await contentInTarget(repo.root, head, judged)) === true) {
-    return { state: "merged", proof: "content-in-target", ...facts };
+    return { state: "merged", proof: "content-in-target", ...(await judgedFacts()) };
   }
   return { state: "unmerged", ...facts };
 }

@@ -363,6 +363,7 @@ async function removeOne(
     status: "refused",
     branchDeleted: false,
   };
+  let removedLinks: Array<{ path: string; text: string }> | undefined;
   const audit = (result: "removed" | "refused", extra: { code?: string; recoveryRef?: string | null } = {}) =>
     deps
       .audit({
@@ -379,6 +380,7 @@ async function removeOne(
         proof: check.merge.proof ?? null,
         blockers: check.blockers.map((entry) => entry.code),
         recoveryRef: extra.recoveryRef ?? null,
+        ...(removedLinks ? { links: removedLinks } : {}),
       })
       .catch(() => undefined);
   const refuse = async (code: WorktreeCleanupOutcome["code"], message: string): Promise<RemovalWork> => {
@@ -529,6 +531,7 @@ async function removeOne(
       };
     }
     outcome.status = "removed";
+    if (removed.links) removedLinks = removed.links;
     if (archived) outcome.archived = archived;
   } else {
     const dropped = await dropMissingWorktreeRegistration(repo.root, check.path);
