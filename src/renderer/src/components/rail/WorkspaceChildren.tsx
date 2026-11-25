@@ -10,7 +10,7 @@ import { formatAgentSpan } from "@shared/agent-board";
 import type { WorktreeRailExternal } from "@shared/worktree-cleanup";
 import { useAgentNotes } from "../workspace-status/agentNotesStore";
 import { AgentLineItem, useMinuteClock } from "../workspace-status/WorkspaceAgentsLine";
-import { CleanUpConfirm, RailCleanUpNotices, useRailCleanUp, type RailCleanUpEntry } from "./RailCleanUp";
+import { CleanUpConfirm, RailCleanUpNotices, RailRemovingContext, useRailCleanUp, type RailCleanUpEntry } from "./RailCleanUp";
 import "./workspace-children.css";
 
 // What hangs under a project in the workspace rail (DESIGN.md, "Worktrees in
@@ -120,7 +120,7 @@ export function MergedFold({ merged }: { merged: MergedWorktrees }) {
           onConfirm={cleanUp.confirmHolding}
         />
       )}
-      {merged.open && merged.rows}
+      {merged.open && <RailRemovingContext.Provider value={cleanUp.working}>{merged.rows}</RailRemovingContext.Provider>}
     </>
   );
 }
@@ -144,6 +144,7 @@ export function WorktreeAgentLine({
   baseBranch,
   active,
   appRunsHere = false,
+  removing = false,
 }: {
   agents: readonly AgentLine[];
   merged: boolean;
@@ -152,10 +153,19 @@ export function WorktreeAgentLine({
   active: boolean;
   /** This Codara runs from it: said in place of "No agent", since no Clean up can take it. */
   appRunsHere?: boolean;
+  /** Its Clean up is under way: said at once, until the row leaves. */
+  removing?: boolean;
 }) {
   const now = useMinuteClock(agents.length > 0);
   const first = agents[0];
   const muted = active ? "var(--ink-dim)" : "var(--muted)";
+  if (removing) {
+    return (
+      <span data-testid="worktree-agent-line" data-state="removing" className="rail-child-line2" style={{ color: muted }} role="status">
+        <span className="rail-child-note">Removing…</span>
+      </span>
+    );
+  }
   if (!first) {
     const text = appRunsHere
       ? "Codara runs from here"

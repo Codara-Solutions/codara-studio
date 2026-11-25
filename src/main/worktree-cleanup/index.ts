@@ -86,11 +86,25 @@ async function fetchPullRequests(root: string): Promise<RepoPullRequests> {
   };
 }
 
+// Asks running now, per repository: the fold checks its rows all at once,
+// and they share one call to GitHub.
+const pullRequestsAsked = new Map<string, Promise<RepoPullRequests>>();
+
 // Cached per repository. A failed refresh answers with the last known lists,
 // so a removal judges merges by the same facts its confirm step showed.
-async function pullRequests(root: string): Promise<RepoPullRequests> {
+function pullRequests(root: string): Promise<RepoPullRequests> {
   const cached = pullRequestCache.get(root);
-  if (cached && Date.now() - cached.at < PULL_REQUEST_TTL_MS) return cached.value;
+  if (cached && Date.now() - cached.at < PULL_REQUEST_TTL_MS) return Promise.resolve(cached.value);
+  let asked = pullRequestsAsked.get(root);
+  if (!asked) {
+    asked = refreshPullRequests(root).finally(() => pullRequestsAsked.delete(root));
+    pullRequestsAsked.set(root, asked);
+  }
+  return asked;
+}
+
+async function refreshPullRequests(root: string): Promise<RepoPullRequests> {
+  const cached = pullRequestCache.get(root);
   let timer: NodeJS.Timeout | null = null;
   try {
     const value = await Promise.race([

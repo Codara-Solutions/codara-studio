@@ -42,14 +42,22 @@ async function main() {
   try {
     await esbuild.build({
       stdin: {
-        contents: `import React, { useState } from "react";
+        contents: `import React, { useContext, useState } from "react";
           import { createRoot } from "react-dom/client";
           import { WorkspaceChildren } from "./src/renderer/src/components/rail/WorkspaceChildren";
+          import { RailRemovingContext } from "./src/renderer/src/components/rail/RailCleanUp";
+          // Stands for a merged row: it reads whether its removal is under way.
+          function Row({ name }) {
+            const removing = useContext(RailRemovingContext).has(name);
+            return <div data-testid="harness-row" data-name={name}>{removing ? name + ": Removing…" : name}</div>;
+          }
           import { keyInsideModal } from "./src/renderer/src/shortcuts/modal-keys";
           window.keyInsideModal = keyInsideModal;
           function Harness() {
             const [names, setNames] = useState(["widgets · feat/old", "widgets · feat/older"]);
+            const [open, setOpen] = useState(false);
             window.setMergedNames = setNames;
+            window.setFoldOpen = setOpen;
             window.cleaned = window.cleaned || [];
             return (
               <WorkspaceChildren
@@ -58,7 +66,7 @@ async function main() {
                 active={[]}
                 merged={{
                   count: names.length,
-                  open: false,
+                  open,
                   onToggle: () => {},
                   cleanUps: names.map((name) => ({
                     id: name,
@@ -66,6 +74,11 @@ async function main() {
                     cleanUp: async (answer = {}) => {
                       window.answers = window.answers || [];
                       window.answers.push([name, answer]);
+                      // Checks that wait together until the test lets them answer.
+                      if (answer.preview && window.holdPreviews) {
+                        window.previewStarted.push(name);
+                        await (window.previewGate ||= new Promise((done) => (window.releasePreviews = done)));
+                      }
                       // "held" stays with a reason; "secret" asks about its
                       // .env and "server" about its leftover until the
                       // question's fingerprint comes back.
@@ -80,11 +93,11 @@ async function main() {
                       if (answer.preview) return { status: "confirm", code: "READY", branchDeleted: false };
                       window.cleaned.push(name);
                       // A removal that waits for the test to let it finish.
-                      if (window.hold) await new Promise((done) => (window.release = done));
+                      if (window.hold) await new Promise((done) => (window.releases[name] = done));
                       return { status: "removed", branchDeleted: true };
                     },
                   })),
-                  rows: [],
+                  rows: names.map((name) => <Row key={name} name={name} />),
                 }}
               />
             );
@@ -259,22 +272,50 @@ async function main() {
         ["plain", {}],
       ]);
 
-    // The button says so at once, before the first removal is done, and
-    // counts through them.
-    await page.evaluate(() => window.setMergedNames(["one", "two"]));
-    await page.evaluate(() => (window.hold = true));
+    // Several rows are checked all at once: every check is asked before
+    // any has answered, and the button says so from the click.
+    await page.evaluate(() => {
+      window.setMergedNames(["a", "b", "c", "d"]);
+      window.previewStarted = [];
+      window.previewGate = null;
+      window.holdPreviews = true;
+    });
     await cleanUp.click();
+    await expect(cleanUp).toHaveText("Checking…");
+    await expect.poll(() => page.evaluate(() => window.previewStarted.slice().sort())).toEqual(["a", "b", "c", "d"]);
+    await page.evaluate(() => {
+      window.holdPreviews = false;
+      window.releasePreviews();
+    });
+    await expect(confirm).toContainText("Clean up 4 merged worktrees?");
+
+    // On yes, before any removal has finished, the button counts and the
+    // rows being removed say so; three go at once, and each row leaves as
+    // soon as its own removal is done.
+    await page.evaluate(() => {
+      window.hold = true;
+      window.releases = {};
+      window.cleaned = [];
+      window.setFoldOpen(true);
+    });
+    const rows = page.getByTestId("harness-row");
     await confirm.getByRole("button", { name: "Clean up" }).click();
-    await expect(cleanUp).toHaveText("Cleaning 1 of 2…");
+    await expect(cleanUp).toHaveText("Cleaning 1 of 4…");
     await expect(cleanUp).toBeDisabled();
-    assert.deepEqual(await page.evaluate(() => window.cleaned.slice(-1)), ["one"], "the first removal is still running");
-    await page.evaluate(() => window.release());
-    await expect(cleanUp).toHaveText("Cleaning 2 of 2…");
+    await expect(rows).toHaveText(["a: Removing…", "b: Removing…", "c: Removing…", "d"]);
+    assert.deepEqual(await page.evaluate(() => Object.keys(window.releases).sort()), ["a", "b", "c"], "three at once, none finished");
+    await page.evaluate(() => {
+      window.releases.b();
+      window.setMergedNames((names) => names.filter((name) => name !== "b"));
+    });
+    await expect(cleanUp).toHaveText("Cleaning 2 of 4…");
+    await expect(rows).toHaveText(["a: Removing…", "c: Removing…", "d: Removing…"]);
     await page.evaluate(() => {
       window.hold = false;
-      window.release();
+      for (const name of ["a", "c", "d"]) window.releases[name]();
     });
     await expect(cleanUp).toHaveText("Clean up");
+    await expect(rows).toHaveText(["a", "c", "d"]);
     assert.deepEqual(errors, []);
     console.log("PASS the merged fold's Clean up confirm");
   } finally {

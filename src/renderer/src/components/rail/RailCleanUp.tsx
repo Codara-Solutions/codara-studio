@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   leftoverText,
@@ -13,6 +13,15 @@ import {
 // (programs left running inside), or a short line says what holds a worktree
 // back and what to do about it. A toast alone sat in the far corner for a
 // few seconds, and the button looked like it did nothing.
+
+/** The worktrees whose removal is under way: their rows show it until they leave. */
+export const RailRemovingContext = createContext<ReadonlySet<string>>(new Set());
+
+/**
+ * How many removals main is asked for at once. Its repository lock still
+ * takes git's changes one at a time; meanwhile the next ones are checked.
+ */
+export const REMOVALS_AT_ONCE = 3;
 
 /** What the user answered, sent back with the next try: the fingerprints of what they saw. */
 export type RailCleanUpAnswer = Pick<WorktreeRailCleanupRequest, "confirmIgnored" | "confirmStop" | "preview">;
@@ -64,6 +73,7 @@ export function useRailCleanUp(liveIds: readonly string[]) {
   const [progress, setProgress] = useState<RailCleanUpProgress | null>(null);
   const [notices, setNotices] = useState<RailCleanUpNotice[]>([]);
   const [holding, setHolding] = useState<Holding[]>([]);
+  const [working, setWorking] = useState<ReadonlySet<string>>(() => new Set());
   const busy = useRef(false);
 
   // preview: ask main what each would need first, remove nothing, and put
@@ -81,9 +91,10 @@ export function useRailCleanUp(liveIds: readonly string[]) {
       setNotices(others);
       const asks: Holding[] = [];
       const told: RailCleanUpNotice[] = [];
-      try {
-        for (const [index, entry] of entries.entries()) {
-          if (!preview) setProgress({ phase: "cleaning", done: index, total: entries.length });
+      let done = 0;
+      const one = async (entry: RailCleanUpEntry) => {
+        if (!preview) setWorking((current) => new Set(current).add(entry.id));
+        try {
           const result = await entry
             .cleanUp(preview ? { preview: true } : answers.get(entry.id))
             .catch((cause: unknown) => ({
@@ -105,10 +116,34 @@ export function useRailCleanUp(liveIds: readonly string[]) {
           if (notice) told.push(notice);
           // Each line shows as soon as its worktree is done.
           if (notice) setNotices((current) => [...others(current).filter((item) => item.id !== notice.id), ...told]);
+        } finally {
+          done += 1;
+          if (!preview) {
+            setProgress({ phase: "cleaning", done, total: entries.length });
+            setWorking((current) => {
+              const next = new Set(current);
+              next.delete(entry.id);
+              return next;
+            });
+          }
         }
+      };
+      try {
+        // Checks read only: all at once. Removals a few at a time.
+        const queue = [...entries];
+        const lanes = preview ? entries.length : Math.min(REMOVALS_AT_ONCE, entries.length);
+        await Promise.all(
+          Array.from({ length: lanes }, async () => {
+            for (let entry = queue.shift(); entry; entry = queue.shift()) await one(entry);
+          }),
+        );
+        // Asked in the order shown, whatever order they came back in.
+        asks.sort((a, b) => entries.indexOf(a.entry) - entries.indexOf(b.entry));
+        told.sort((a, b) => entries.findIndex((entry) => entry.id === a.id) - entries.findIndex((entry) => entry.id === b.id));
       } finally {
         busy.current = false;
         setProgress(null);
+        setWorking(new Set());
         setNotices((current) => [...others(current), ...told]);
         setHolding(asks);
       }
@@ -147,6 +182,8 @@ export function useRailCleanUp(liveIds: readonly string[]) {
   return {
     cleaning: progress !== null,
     label: progressLabel(progress),
+    /** The worktrees being removed right now. */
+    working,
     notices: notices.filter((notice) => live.has(notice.id)),
     holding: stale ? [] : holding,
     start,
