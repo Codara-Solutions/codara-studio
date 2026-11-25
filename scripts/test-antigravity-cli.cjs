@@ -276,10 +276,15 @@ async function main() {
       fs.chmodSync(path.join(bin, "agy"), 0o755);
       fs.symlinkSync(path.join(bin, "agy"), path.join(bin, "antigravity"));
       const held = fs.openSync(path.join(store, "conv-w.lock"), "w");
-      const holder = require("node:child_process").spawn(path.join(bin, "antigravity"), ["30"], { stdio: ["ignore", held, "ignore"] });
+      // argv0 "sleep": a multi-call sleep (busybox) picks its program by it.
+      const holder = require("node:child_process").spawn(path.join(bin, "antigravity"), ["30"], {
+        argv0: "sleep",
+        stdio: ["ignore", held, "ignore"],
+      });
       fs.closeSync(held);
       try {
         await new Promise((resolve) => setTimeout(resolve, 200));
+        assert.equal(holder.exitCode, null, "the lock holder must still run");
         process.env.HOME = home;
         const listed = async () => [{ pid: holder.pid, command: `${path.join(bin, "antigravity")} 30` }];
         assert.equal(
