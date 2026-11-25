@@ -1421,7 +1421,7 @@ const api = {
     // (has a real user message; stillborn transcripts make `--resume` refuse)
     // — before resuming it.
     probe: (args: {
-      runtime: "claude" | "codex" | "grok" | "pi";
+      runtime: "claude" | "codex" | "grok" | "pi" | "antigravity";
       sessionId: string;
       cwd: string;
       transcriptPath?: string;

@@ -206,6 +206,7 @@ async function main() {
   const notify = await bundle(dir, path.join(MAIN_DIR, "terminal-agent-notify.ts"), "terminal-agent-notify");
   const shared = await bundle(dir, path.join(MAIN_DIR, "..", "shared", "agent-hibernation.ts"), "shared-agent-hibernation");
   const scheduledWork = await bundle(dir, path.join(MAIN_DIR, "agent-scheduled-work.ts"), "agent-scheduled-work");
+  const presence = await bundle(dir, path.join(MAIN_DIR, "antigravity-presence.ts"), "antigravity-presence");
   const H = globalThis.__AH;
 
   let failures = 0;
@@ -267,6 +268,76 @@ async function main() {
     r = await run(undefined, request({ placement }));
     check(`a quiet pane may sleep wherever it is (${placement})`, r.result.ok === true, r.result);
   }
+
+  // ── Antigravity: agy's screen, plus the conversation its process holds
+  // open and agy's own busy flag for it and its subagents ──
+  const agyRun = (mutate, extra = {}) =>
+    run(
+      (t) => {
+        t.state.processes = [
+          { pid: 100, parentPid: 1, startMs: NOW - 200 * MIN, command: "/usr/bin/zsh -f -ic agy; exec zsh -i" },
+          { pid: 101, parentPid: 100, startMs: NOW - 200 * MIN, command: "/home/u/.local/bin/agy --continue" },
+          { pid: 102, parentPid: 101, startMs: NOW - 200 * MIN + 2_000, command: "node /srv/mcp/index.js" },
+        ];
+        t.state.evidence.runtime = "antigravity";
+        t.state.open = ["conv-1"];
+        t.state.activity = { known: true, busy: null };
+        t.deps.antigravity = (pid, command, conversationId) =>
+          presence.antigravitySleepVerdict(pid, command, conversationId, {
+            open: async (openPid) => {
+              t.calls.openPid = openPid;
+              return t.state.open;
+            },
+            activity: () => t.state.activity,
+          });
+        mutate?.(t);
+      },
+      request({ runtime: "antigravity", conversationId: "conv-1", ...extra }),
+    );
+  r = await agyRun();
+  check("an idle agy holding the pane's conversation sleeps", r.result.ok === true && r.calls.stop.length === 1, r.result);
+  check("it reads the open conversation off the agy process the census found", r.calls.openPid === 101, r.calls);
+  r = await agyRun(undefined, { manual: true });
+  check("Sleep now puts an idle agy to sleep too", r.result.ok === true, r.result);
+  const agyRefusals = [
+    ["agy working on screen", (t) => Object.assign(t.state.evidence, { state: "working", chipState: "working" }), {}, "agent-busy"],
+    ["agy marking the conversation working", (t) => (t.state.activity = { known: true, busy: "conversation" }), {}, "agent-busy"],
+    ["a subagent agy marks working", (t) => (t.state.activity = { known: true, busy: "subagent" }), {}, "agent-busy"],
+    ["the placeholder id of agy --continue", null, { conversationId: "continue" }, "conversation-unknown"],
+    ["no conversation id", null, { conversationId: undefined }, "conversation-unknown"],
+    ["agy holding another conversation than the pane names", (t) => (t.state.open = ["conv-2"]), {}, "conversation-unknown"],
+    ["agy holding a second conversation (a subagent's, another one's)", (t) => (t.state.open = ["conv-1", "conv-sub"]), {}, "conversation-unknown"],
+    ["agy holding none", (t) => (t.state.open = []), {}, "conversation-unknown"],
+    ["agy's open files unreadable", (t) => (t.state.open = null), {}, "conversation-unknown"],
+    ["agy's conversation list unreadable", (t) => (t.state.activity = undefined), {}, "conversation-unknown"],
+    ["agy's conversation list without its busy flag", (t) => (t.state.activity = null), {}, "unknown-state"],
+    ["a conversation agy does not list", (t) => (t.state.activity = { known: false, busy: null }), {}, "conversation-unknown"],
+    ["text typed and not sent", (t) => (t.state.evidence.lastComposerEditAt = NOW - 80 * MIN), {}, "unsent-input"],
+    ["a command agy started after boot", (t) => t.state.processes.push({ pid: 103, parentPid: 101, startMs: NOW - 20 * MIN, command: "npm run dev" }), {}, "other-processes"],
+    ["a program beside agy in the pane", (t) => t.state.processes.push({ pid: 104, parentPid: 100, startMs: NOW - 20 * MIN, command: "vim notes" }), {}, "other-processes"],
+    ["agy in print mode", (t) => (t.state.processes[1].command = "agy -p summarize"), {}, "other-processes"],
+    ["agy with a remote connection", (t) => (t.state.processes[1].command = "agy --remote-control"), {}, "other-processes"],
+    ["no way to check agy at all", (t) => delete t.deps.antigravity, {}, "conversation-unknown"],
+  ];
+  for (const [name, mutate, extra, reason] of agyRefusals) {
+    for (const manual of [false, true]) {
+      r = await agyRun(mutate ?? undefined, { ...extra, ...(manual ? { manual: true } : {}) });
+      check(
+        `${manual ? "Sleep now: " : ""}${name} keeps agy awake (${reason})`,
+        r.result.ok === false && r.result.reason === reason && r.calls.stop.length === 0,
+        r.result,
+      );
+    }
+  }
+  r = await agyRun((t) => (t.state.activity = { known: true, busy: "subagent" }));
+  check("the refusal says a subagent works", r.result.detail === "a subagent is working", r.result);
+  r = await agyRun(undefined, { conversationId: "continue" });
+  check("a pane without a conversation id is refused before any process listing", r.calls.list === 0, r.calls);
+  r = await agyRun((t) => {
+    t.state.processes[1].command = "agy";
+    t.state.evidence.runtime = "claude";
+  });
+  check("an agy pane the notifier knows as another agent is refused", r.result.reason === "runtime-mismatch", r.result);
 
   // ── A settled agent that repaints (Claude Code's status line) ──
   const repainting = (t, extra = {}) => {
@@ -752,7 +823,7 @@ async function main() {
     check("a pane that already runs is not recorded", ah.registerRestoredAsleep({ paneId: "r4", runtime: "claude", sleptAt: 1 }) === false);
     check(
       "malformed records are refused",
-      [null, "r5", {}, { paneId: "", runtime: "claude" }, { paneId: "r5", runtime: "antigravity" }, { paneId: "x".repeat(257), runtime: "claude" }].every(
+      [null, "r5", {}, { paneId: "", runtime: "claude" }, { paneId: "r5", runtime: "aider" }, { paneId: "x".repeat(257), runtime: "claude" }].every(
         (input) => ah.registerRestoredAsleep(input) === false,
       ),
     );
@@ -870,6 +941,16 @@ async function main() {
     ev,
   );
   check("an unknown pane has no evidence", notify.terminalAgentHibernationEvidence("nope") === null);
+  notify.syncTerminalNotifyPanes({
+    workspaceId: "ws-agy",
+    workspaceName: "A",
+    panes: [{ paneId: "na", tabId: "ta", tabTitle: "T", excluded: false, runtimeHint: "antigravity" }],
+  });
+  check(
+    "an Antigravity pane's evidence names its agent, so main can judge it",
+    notify.terminalAgentHibernationEvidence("na")?.runtime === "antigravity",
+    notify.terminalAgentHibernationEvidence("na"),
+  );
   check("an excluded pane says so", notify.terminalAgentHibernationEvidence("nx")?.excluded === true);
   notify.noteTerminalUserInput("n1", "hel");
   ev = notify.terminalAgentHibernationEvidence("n1");

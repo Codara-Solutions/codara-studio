@@ -44,7 +44,7 @@ export type ResumeDecision =
 // PTY, no IPC, and no filesystem.
 export function decideResume(
   probe: ResumeProbe,
-  runtime: "claude" | "codex" | "grok" | "pi",
+  runtime: "claude" | "codex" | "grok" | "pi" | "antigravity",
 ): ResumeDecision {
   if (probe.error) return { kind: "keep" };
   const resumable = probe.exists && probe.resumable !== false;

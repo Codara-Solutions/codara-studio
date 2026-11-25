@@ -1059,6 +1059,30 @@ async function antigravityTests(m, work) {
     assert.equal(m.sameFolder(null, "/work/app"), false);
   });
 
+  await check("Antigravity sleep: the pane sleeps with the conversation its agy holds, wakes with agy --conversation, never onto a shared one", () => {
+    const pointer = (sessionId) => ({ runtime: "antigravity", sessionId, cwd: "/w", capturedAt: "now", active: true });
+    const typed = m.antigravitySleepPointer(pointer("continue"), "conv-9", ["conv-1"]);
+    assert.equal(typed.session?.sessionId, "conv-9", "a typed agy takes the conversation it holds open");
+    assert.equal(m.buildAgentResumeCommand(typed.session), "agy --conversation conv-9", "waking reopens that conversation");
+    assert.equal(m.antigravitySleepPointer(pointer("conv-2"), "conv-9", []).session?.sessionId, "conv-9", "a pane whose agy moved on takes the open one");
+    const same = pointer("conv-9");
+    assert.equal(m.antigravitySleepPointer(same, "conv-9", []).session, same, "an unchanged pointer is kept as it is");
+    for (const [name, open, named] of [
+      ["unknown open conversation", null, []],
+      ["the placeholder", "continue", []],
+      ["an id that is not one", "-p hi", []],
+      ["a conversation another pane names", "conv-1", ["conv-1"]],
+    ]) {
+      assert.ok("skip" in m.antigravitySleepPointer(pointer("continue"), open, named), name);
+    }
+    assert.equal(m.antigravityWakeRefusal("conv-9", ["conv-1"], false), null);
+    assert.match(m.antigravityWakeRefusal("continue", [], false), /does not know which Antigravity conversation/, "the placeholder would reopen agy's latest");
+    assert.match(m.antigravityWakeRefusal(null, [], false), /does not know/);
+    assert.match(m.antigravityWakeRefusal("conv-9", ["conv-9"], false), /Another tab has this Antigravity conversation/);
+    assert.match(m.antigravityWakeRefusal("conv-9", [], true), /open in another terminal/, "an agy outside Codara holds it");
+    assert.match(m.antigravityWakeRefusal("conv-9", [], null), /could not check/, "unknown is not free");
+  });
+
   await check("Antigravity: a missing database or a table of another shape lists nothing and fails nothing", async () => {
     const empty = path.join(work, "agy-empty");
     const odd = path.join(work, "agy-odd");

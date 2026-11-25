@@ -540,6 +540,8 @@ import {
 } from "./terminal-scrollback";
 import { agentPaneAsleep, onAgentHibernationMessage, registerAgentHibernationIpc } from "./agent-hibernation";
 import { registerAntigravityIpc } from "./antigravity-cli";
+import { isAntigravityConversationId } from "./antigravity-presence";
+import { currentAntigravityConversations } from "./session-search/antigravity-summaries";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
 import { registerCrossWorkspaceIpc } from "./cross-workspace-ipc";
 import { registerTabActionIpc } from "./tab-action-ipc";
@@ -3751,7 +3753,7 @@ export function registerIpc(): void {
     async (
       _e,
       args: {
-        runtime: "claude" | "codex" | "grok" | "pi";
+        runtime: "claude" | "codex" | "grok" | "pi" | "antigravity";
         sessionId: string;
         cwd: string;
         transcriptPath?: string;
@@ -3770,6 +3772,15 @@ export function registerIpc(): void {
       // A throw here reaches the renderer as a rejected probe, which keeps
       // the pointer: "could not look" must never read as "the session is gone".
       if (!args.sessionId) return { exists: false };
+      if (args.runtime === "antigravity") {
+        // agy keeps no transcript Codara reads: a conversation in its own
+        // list reopens with `agy --conversation <id>`. An unreadable list is
+        // an error, never "gone".
+        if (!isAntigravityConversationId(args.sessionId)) return { exists: false };
+        const conversations = currentAntigravityConversations();
+        if (!conversations) throw new Error("agy's conversation list could not be read");
+        return conversations.some((item) => item.id === args.sessionId) ? { exists: true, resumable: true } : { exists: false };
+      }
       if (args.runtime === "pi") {
         // `pi --session <id>` looks the id up in the pane's cwd. Pi writes a
         // session file only once it has a reply, so a file is resumable.

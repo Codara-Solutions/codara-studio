@@ -224,6 +224,60 @@ export function readLiveAntigravityConversations(
   }
 }
 
+export interface AntigravityConversationActivity {
+  /** The id is a top-level conversation in agy's list. */
+  known: boolean;
+  /** It, or a subagent conversation under it, is marked not fully idle by agy. */
+  busy: "conversation" | "subagent" | null;
+}
+
+/**
+ * What agy itself says about one conversation and every subagent
+ * conversation under it (parent_conversation_id, followed down). Null when
+ * the table lacks a column this needs: then nothing can be shown. Throws
+ * when the file cannot be read, like the readers above.
+ */
+export function readAntigravityConversationActivity(
+  dbPath: string,
+  conversationId: string,
+  openReadOnly: (path: string) => SummaryDatabase = openSummaryDatabase,
+): AntigravityConversationActivity | null {
+  const db = openReadOnly(dbPath);
+  try {
+    const present = new Set(db.prepare("PRAGMA table_info(conversation_summaries)").all().map((row) => row.name));
+    if (!["conversation_id", "parent_conversation_id", "nesting_depth", "not_fully_idle"].every((column) => present.has(column))) {
+      return null;
+    }
+    // UNION, not UNION ALL: a parent loop in the table ends the walk.
+    const rows = db
+      .prepare(
+        `WITH RECURSIVE tree(id) AS (
+           SELECT conversation_id FROM conversation_summaries WHERE conversation_id = ?
+           UNION SELECT c.conversation_id FROM conversation_summaries c JOIN tree t ON c.parent_conversation_id = t.id
+         )
+         SELECT s.conversation_id, s.nesting_depth, s.parent_conversation_id, s.not_fully_idle
+         FROM conversation_summaries s JOIN tree ON s.conversation_id = tree.id LIMIT ?`,
+      )
+      .all(conversationId, MAX_CONVERSATIONS);
+    const busyFlag = (value: unknown) => value === 1 || value === 1n || value === "true" || value === "TRUE";
+    let known = false;
+    let busy: AntigravityConversationActivity["busy"] = null;
+    for (const row of rows) {
+      if (row.conversation_id === conversationId) {
+        known ||= Number(row.nesting_depth) === 0 && (row.parent_conversation_id === null || row.parent_conversation_id === "");
+        if (busyFlag(row.not_fully_idle)) busy = "conversation";
+      } else if (busyFlag(row.not_fully_idle)) {
+        busy ??= "subagent";
+      }
+    }
+    // A walk cut at the limit may have left a busy subagent unread.
+    if (rows.length >= MAX_CONVERSATIONS) return null;
+    return { known, busy };
+  } finally {
+    db.close();
+  }
+}
+
 /** The conversations a running agy works in now; empty when the database cannot be read. */
 export function currentLiveAntigravityConversations(): string[] {
   try {

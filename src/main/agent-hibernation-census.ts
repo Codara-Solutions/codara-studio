@@ -69,7 +69,9 @@ const LOGIN_COMMAND_SHELL_RE = /^\s*\S*(?:zsh|bash|sh|dash|ksh|fish)(?:\.exe)?\s
 // from the `cmd /c npx …` an MCP server is started with, which must not count.
 const WINDOWS_POWERSHELL_TOOL_RE = /chcp(?:\.com)?"?\s+65001\b[\s\S]*\b(?:pwsh|powershell)(?:\.exe)?\b/i;
 // npm-installed CLIs on Windows run as `node …\@scope\pkg\cli.js`.
-const PACKAGE_PATHS: Record<AgentHibernationRuntime, RegExp> = {
+// Antigravity's `agy` is one native binary with no npm package: only its
+// exact name counts (runtimeFromProcessCommand).
+const PACKAGE_PATHS: Record<Exclude<AgentHibernationRuntime, "antigravity">, RegExp> = {
   claude: /[\\/]@anthropic-ai[\\/]claude-code[\\/]/i,
   codex: /[\\/]@openai[\\/]codex[\\/]/i,
   grok: /[\\/]@xai-official[\\/]grok[\\/]/i,
@@ -100,6 +102,9 @@ export function commandRunsAgent(command: string, runtime: AgentHibernationRunti
   const normalized = normalizeCommandForMatch(command);
   if (!normalized) return false;
   if (SHELL_NAME_RE.test(executableName(command))) return false;
+  // agy is a native binary: the process itself is named agy. A script that
+  // only carries the name (`node tools/agy.js`) is some other program.
+  if (runtime === "antigravity") return executableName(command).replace(/\.exe$/, "") === "agy";
   if (runtimeFromProcessCommand(normalized) === runtime) return true;
   if (runtime !== "pi" && commandRunsNativeCli(runtime, normalized)) return true;
   const name = executableName(command).replace(/\.exe$/, "");

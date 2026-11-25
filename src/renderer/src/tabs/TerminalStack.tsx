@@ -2432,7 +2432,13 @@ function sleepNowFor(leaf: TerminalLeaf, bundle: Bundle): PaneToolbarProps["slee
   const runtime = session.runtime;
   return {
     onSleep: async () => {
-      const outcome = await requestAgentSleep({ paneId: leaf.paneId, session, placement: "visible", manual: true });
+      const outcome = await requestAgentSleep({
+        paneId: leaf.paneId,
+        session,
+        placement: "visible",
+        manual: true,
+        adoptSession: bundle.onResumeFallback,
+      });
       if (!outcome) return sleepNowRefusalMessage("stop-failed", runtime);
       if (outcome.ok) {
         bundle.onSleepAnswer(outcome.hibernation);

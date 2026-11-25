@@ -897,6 +897,7 @@ export default function App() {
     inactiveLayouts: tabs.inactiveWorkspaceLayouts,
     settingsKey: `${preferences.agentHibernationMinutes}|${JSON.stringify(preferences.agentHibernationWorkspaces ?? {})}`,
     markPaneAsleep,
+    setPaneAgentSession: tabs.setPaneAgentSession,
   });
 
   // One shared git status/log poll per active workspace — feeds the Source
