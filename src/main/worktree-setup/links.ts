@@ -10,7 +10,7 @@
 // and their tests bundle them without the rest of the setup code.
 
 import { promises as fsp } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 export const SETUP_DIR_NAME = "codara-setup";
 export const SETUP_MANIFEST_FILE = "manifest.json";
@@ -147,17 +147,36 @@ export async function removeLinkEntry(absolute: string): Promise<boolean> {
 }
 
 /**
- * Takes out the folder links setup made, so removing the worktree can never
- * reach into the main checkout through them. A link or junction at a path
- * setup linked goes even when something repointed it since: git for Windows
- * follows any junction while deleting, whatever it points at. Removing a
- * link never touches what it points at; each comes back with the target it
- * had when the removal fails.
+ * An untracked entry git lists that is only a link to installed packages: a
+ * node_modules link made by hand, or by a setup whose `node_modules/` ignore
+ * rule (folders only) does not cover a link. Nothing of anyone's is in it.
  */
-export async function releaseWorktreeLinks(worktreePath: string): Promise<SetupManifestLink[]> {
+export async function isDependencyLink(worktreePath: string, relative: string): Promise<boolean> {
+  if (!safeRelative(relative) || basename(relative) !== "node_modules") return false;
+  return (await linkTarget(join(worktreePath, ...relative.split("/")))) !== null;
+}
+
+/**
+ * Takes out the folder links setup made, and the untracked dependency links
+ * named (isDependencyLink), so removing the worktree can never reach into
+ * the main checkout through them. A link or junction at a path setup linked
+ * goes even when something repointed it since: git for Windows follows any
+ * junction while deleting, whatever it points at. Removing a link never
+ * touches what it points at; each comes back with the target it had when
+ * the removal fails.
+ */
+export async function releaseWorktreeLinks(worktreePath: string, dependencyLinks: readonly string[] = []): Promise<SetupManifestLink[]> {
   const manifest = await readSetupManifest(worktreePath).catch(() => null);
-  if (!manifest) return [];
   const released: SetupManifestLink[] = [];
+  for (const path of dependencyLinks) {
+    if (!(await isDependencyLink(worktreePath, path))) continue;
+    const absolute = join(worktreePath, ...path.split("/"));
+    const pointsAt = await linkTarget(absolute);
+    if (pointsAt === null) continue;
+    const target = resolve(dirname(absolute), withoutLongPathPrefix(pointsAt));
+    if (await removeLinkEntry(absolute)) released.push({ path, target });
+  }
+  if (!manifest) return released;
   for (const link of manifest.links) {
     if (!safeRelative(link.path)) continue;
     const absolute = join(worktreePath, ...link.path.split("/"));
@@ -185,11 +204,11 @@ export function setBeforeWorktreeRemoval(hook: ((worktreePath: string) => Promis
  * link it made is still there: git for Windows can follow a junction while
  * deleting the worktree and empty the main checkout's folder.
  */
-export async function prepareWorktreeRemoval(worktreePath: string): Promise<SetupManifestLink[]> {
+export async function prepareWorktreeRemoval(worktreePath: string, dependencyLinks: readonly string[] = []): Promise<SetupManifestLink[]> {
   if (beforeRemoval && !(await beforeRemoval(worktreePath).catch(() => false))) {
     throw new Error("The worktree's setup did not stop in time. Stop it from the setup tray, then remove the worktree again.");
   }
-  const released = await releaseWorktreeLinks(worktreePath);
+  const released = await releaseWorktreeLinks(worktreePath, dependencyLinks);
   const manifest = await readSetupManifest(worktreePath).catch(() => null);
   for (const link of manifest?.links ?? []) {
     if (!safeRelative(link.path)) continue;

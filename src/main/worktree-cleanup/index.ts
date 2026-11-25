@@ -37,7 +37,7 @@ import type { AgentCleanupDeps, ApprovalAsker } from "./agent-tool";
 import { pruneWorktreeArchive, worktreeArchiveRoot } from "./archive";
 import type { RepoPullRequests, WorktreeCleanupDeps } from "./inspect";
 import { systemLeftovers } from "./leftovers";
-import { pullRequestReader } from "./pull-request-reads";
+import { pullRequestReader, readRepoPullRequests } from "./pull-request-reads";
 import type { AutoRemoveMergedOptions } from "./rail";
 import type { ScannedWorktree } from "./scan";
 import type { SizeMeasurer, SizeStore } from "./space";
@@ -68,29 +68,7 @@ function broadcast(channel: string, payload: unknown): void {
 
 async function fetchPullRequests(root: string): Promise<RepoPullRequests> {
   const { createGitHubCliAdapter } = await import("../github-cli");
-  const adapter = (githubAdapter ??= createGitHubCliAdapter());
-  const repository = await adapter.resolveRepository(root);
-  // Both settle before the read does: one failing must not free the shared
-  // read while the other still runs (a second caller would start it again).
-  const [openRead, mergedRead] = await Promise.allSettled([
-    adapter.listOpenPullRequests ? adapter.listOpenPullRequests(root, repository) : Promise.resolve([]),
-    adapter.listMergedPullRequests ? adapter.listMergedPullRequests(root, 100) : Promise.resolve([]),
-  ]);
-  if (openRead.status === "rejected") throw openRead.reason;
-  if (mergedRead.status === "rejected") throw mergedRead.reason;
-  const open = openRead.value;
-  const merged = mergedRead.value;
-  return {
-    open: open.map((pr) => ({
-      number: pr.number,
-      url: pr.url,
-      title: pr.title,
-      headBranch: pr.headBranch,
-      isDraft: pr.isDraft,
-      ...(pr.isCrossRepository !== undefined ? { isCrossRepository: pr.isCrossRepository } : {}),
-    })),
-    merged,
-  };
+  return readRepoPullRequests((githubAdapter ??= createGitHubCliAdapter()), root);
 }
 
 function pullRequests(root: string): Promise<RepoPullRequests> {

@@ -7,7 +7,7 @@ import type { GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult } from
 import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
 import { parseWorktreePorcelain, type WorktreeRegistration } from "./git-worktree-porcelain";
-import { prepareWorktreeRemoval, restoreWorktreeLinks } from "./worktree-setup/links";
+import { isDependencyLink, prepareWorktreeRemoval, restoreWorktreeLinks } from "./worktree-setup/links";
 import { reservedDirNames, rowFolders } from "./worktree-folders";
 
 export type { WorktreeRegistration };
@@ -841,6 +841,20 @@ async function tryRemoveWorktreeOnce(
   }
 }
 
+// Untracked node_modules links (isDependencyLink): taken out with setup's
+// links, so a removal never reaches through one. None when git cannot say.
+async function untrackedDependencyLinks(worktreePath: string): Promise<string[]> {
+  const out = await runGit(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=normal"]).then(
+    (result) => result.stdout,
+    () => "",
+  );
+  const links: string[] = [];
+  for (const field of out.split("\0")) {
+    if (field.startsWith("?? ") && (await isDependencyLink(worktreePath, field.slice(3)))) links.push(field.slice(3));
+  }
+  return links;
+}
+
 export async function removeCopyWorktree(
   input: RemoveCopyWorktreeInput,
   hooks?: RemoveCopyWorktreeHooks,
@@ -889,7 +903,7 @@ export async function removeCopyWorktree(
   // setup is stopped by the folder's own name, before any move.
   let releasedLinks: Awaited<ReturnType<typeof prepareWorktreeRemoval>>;
   try {
-    releasedLinks = await prepareWorktreeRemoval(original);
+    releasedLinks = await prepareWorktreeRemoval(original, await untrackedDependencyLinks(original));
   } catch (err) {
     return { ok: false, error: errorText(err) };
   }

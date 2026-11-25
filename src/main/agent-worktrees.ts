@@ -329,6 +329,8 @@ export const REGENERABLE_IGNORED_PATTERNS: readonly string[] = [
   ".DS_Store",
   "*.tsbuildinfo",
   ".eslintcache",
+  // terraform init downloads providers and modules here (TOOL_OUTPUT_DIRS).
+  ".terraform/",
 ];
 
 export const WORKTREE_MESSAGES: Record<WorktreeCode, string> = {
@@ -780,14 +782,24 @@ const PACKAGE_MANIFESTS = [
   "deno.json",
 ];
 
-/** Tells whether a folder of the worktree at `root` holds a package manifest. */
-export function packageRootTester(root: string): (dir: string) => boolean {
+// Folders a tool writes again beside its own configuration, at any depth:
+// Terraform's .terraform/ next to the lock file terraform init writes. Only
+// beside that file, so a hand-made folder of that name elsewhere is asked about.
+const TOOL_OUTPUT_DIRS: Readonly<Record<string, readonly string[]>> = {
+  ".terraform": [".terraform.lock.hcl"],
+};
+
+/** Tells whether a folder of the worktree at `root` holds a package manifest, or one of `manifests` when given. */
+export type PackageRootTester = (dir: string, manifests?: readonly string[]) => boolean;
+
+export function packageRootTester(root: string): PackageRootTester {
   const known = new Map<string, boolean>();
-  return (dir) => {
-    let found = known.get(dir);
+  return (dir, manifests = PACKAGE_MANIFESTS) => {
+    const key = `${dir}\0${manifests.join("\0")}`;
+    let found = known.get(key);
     if (found === undefined) {
-      found = PACKAGE_MANIFESTS.some((name) => existsSync(join(root, dir, name)));
-      known.set(dir, found);
+      found = manifests.some((name) => existsSync(join(root, dir, name)));
+      known.set(key, found);
     }
     return found;
   };
@@ -802,7 +814,7 @@ export function packageRootTester(root: string): (dir: string) => boolean {
 export function isRegenerableIgnored(
   entry: string,
   extra: readonly string[] = [],
-  isPackageRoot?: (dir: string) => boolean,
+  isPackageRoot?: PackageRootTester,
 ): boolean {
   const normalized = entry.replace(/\\/g, "/");
   const isDir = normalized.endsWith("/");
@@ -811,6 +823,8 @@ export function isRegenerableIgnored(
   const last = segments[segments.length - 1];
   if (!isSecretFile(last) && isRegenerableCachePath(segments, isDir)) return true;
   const parent = segments.slice(0, -1).join("/");
+  const beside = Object.hasOwn(TOOL_OUTPUT_DIRS, last) ? TOOL_OUTPUT_DIRS[last] : null;
+  if (isDir && beside && parent && isPackageRoot?.(parent, beside) === true) return true;
   const atPackageRoot = parent === "" || isPackageRoot?.(parent) === true;
   const patterns = !isDir && isSecretFile(last) ? extra : [...REGENERABLE_IGNORED_PATTERNS, ...extra];
   for (const pattern of patterns) {
@@ -831,7 +845,7 @@ export function isRegenerableIgnored(
 
 // The entry is the path's folder or inside it, the path taken from the
 // worktree's root or from a package root above the entry.
-function underPath(segments: readonly string[], path: readonly string[], isPackageRoot?: (dir: string) => boolean): boolean {
+function underPath(segments: readonly string[], path: readonly string[], isPackageRoot?: PackageRootTester): boolean {
   for (let start = 0; start + path.length <= segments.length; start += 1) {
     if (start > 0 && isPackageRoot?.(segments.slice(0, start).join("/")) !== true) continue;
     if (path.every((part, index) => globToRegExp(part).test(segments[start + index]))) return true;
@@ -880,12 +894,47 @@ interface NestedScan {
 // reports every file under a folder that is not regenerable (path, size,
 // mtime, in a stable order): a confirmation of those folders is tied to
 // what they held, not only to their names.
+// Where terraform init clones a module: <dir>/.terraform/modules/<name>/.
+const TERRAFORM_MODULE = /^(?:(.+)\/)?\.terraform\/modules\/[^/]+\/$/;
+
+/**
+ * A clone terraform init made of a module, with nothing of anyone's in it:
+ * its own .git folder (not a worktree's or submodule's pointer file), no
+ * change, untracked or ignored file, and no commit, stash or branch that a
+ * remote branch or tag of the clone does not hold. Anything unclear is a
+ * checkout, which blocks.
+ */
+async function isPristineModuleDownload(
+  root: string,
+  relative: string,
+  extra: readonly string[],
+  isPackageRoot: PackageRootTester,
+): Promise<boolean> {
+  const match = TERRAFORM_MODULE.exec(relative);
+  if (!match || !isRegenerableIgnored(`${match[1] ? `${match[1]}/` : ""}.terraform/`, extra, isPackageRoot)) return false;
+  const clone = join(root, relative);
+  const dotGit = join(clone, ".git");
+  if (!(await fsp.lstat(dotGit).catch(() => null))?.isDirectory()) return false;
+  try {
+    // git walks up past a .git folder it cannot use; the worktree's own
+    // status must never answer for the clone.
+    const gitDir = await fsp.realpath((await runGit(clone, ["rev-parse", "--absolute-git-dir"])).stdout.trim());
+    if (gitDir !== (await fsp.realpath(dotGit))) return false;
+    const status = await runGit(clone, ["-c", "core.fsmonitor=false", "status", "--porcelain", "--ignored", "--untracked-files=all"]);
+    if (status.stdout.trim()) return false;
+    const own = await runGit(clone, ["rev-list", "--count", "--all", "--not", "--remotes", "--tags"]);
+    return own.stdout.trim() === "0";
+  } catch {
+    return false;
+  }
+}
+
 export async function checkoutsInIgnored(
   root: string,
   entries: readonly string[],
   extra: readonly string[],
   maxDirs = NESTED_SCAN_MAX_DIRS,
-  options: { isPackageRoot?: (dir: string) => boolean; describe?: (line: string) => void } = {},
+  options: { isPackageRoot?: PackageRootTester; describe?: (line: string) => void } = {},
 ): Promise<NestedScan> {
   const isPackageRoot = options.isPackageRoot ?? packageRootTester(root);
   const found: string[] = [];
@@ -896,7 +945,9 @@ export async function checkoutsInIgnored(
   const visit = async (relative: string, described: boolean): Promise<{ dirs: string[]; lines: string[] } | null> => {
     const absolute = join(root, relative);
     if (existsSync(join(absolute, ".git"))) {
-      found.push(resolve(absolute));
+      // A module terraform init cloned, untouched since, comes back with
+      // the next init: it is that tool's output, not a checkout of anyone's.
+      if (!(await isPristineModuleDownload(root, relative, extra, isPackageRoot))) found.push(resolve(absolute));
       return { dirs: [], lines: [] };
     }
     const children = await fsp

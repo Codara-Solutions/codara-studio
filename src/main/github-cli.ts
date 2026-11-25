@@ -70,6 +70,11 @@ const UNSAFE_GITHUB_TEXT =
   /[\u0000-\u001f\u007f-\u009f]|\p{Bidi_Control}/u;
 export const GITHUB_ISSUE_LIST_LIMIT = 12;
 export const GITHUB_PULL_REQUEST_LIST_LIMIT = 12;
+// Every open pull request of a repository, for the worktree cleanup rows: one
+// `gh pr list` (gh pages through them, 100 per GitHub request) with only the
+// fields that tell a branch's pull request apart.
+export const GITHUB_OPEN_PULL_REQUEST_HEADS_LIMIT = 300;
+const OPEN_PULL_REQUEST_HEAD_JSON_FIELDS = "number,title,url,state,isDraft,baseRefName,headRefName,isCrossRepository,headRefOid";
 /** Minimum `gh` release that accepts `baseRefOid` in `gh pr view --json`. */
 export const GITHUB_CLI_MIN_IMPORT_VERSION = "2.63";
 
@@ -232,6 +237,12 @@ export interface GitHubCliAdapter {
     repository?: GitHubRepositoryIdentity,
   ): Promise<GitHubIssueSummary[]>;
   listOpenPullRequests?(
+    cwd: string,
+    repository: GitHubRepositoryIdentity,
+  ): Promise<GitHubPullRequestSummary[]>;
+  // Every open pull request (up to GITHUB_OPEN_PULL_REQUEST_HEADS_LIMIT),
+  // without checks or reviews.
+  listOpenPullRequestHeads?(
     cwd: string,
     repository: GitHubRepositoryIdentity,
   ): Promise<GitHubPullRequestSummary[]>;
@@ -763,6 +774,25 @@ export function createGitHubCliAdapter(
         PULL_REQUEST_SUMMARY_JSON_FIELDS,
       ]);
       return parsePullRequestSummaries(stdout, repository);
+    },
+
+    async listOpenPullRequestHeads(
+      cwd: string,
+      repository: GitHubRepositoryIdentity,
+    ): Promise<GitHubPullRequestSummary[]> {
+      const stdout = await runRead(cwd, [
+        "pr",
+        "list",
+        "--state",
+        "open",
+        "--limit",
+        String(GITHUB_OPEN_PULL_REQUEST_HEADS_LIMIT),
+        "--repo",
+        repositorySelector(repository),
+        "--json",
+        OPEN_PULL_REQUEST_HEAD_JSON_FIELDS,
+      ]);
+      return parsePullRequestSummaries(stdout, repository, GITHUB_OPEN_PULL_REQUEST_HEADS_LIMIT);
     },
 
     async listPullRequestsForHead(
@@ -1474,6 +1504,7 @@ function mergeCommitOid(value: unknown): string | null {
 function parsePullRequestSummaries(
   stdout: string,
   repository: GitHubRepositoryIdentity,
+  limit = GITHUB_PULL_REQUEST_LIST_LIMIT,
 ): GitHubPullRequestSummary[] {
   let value: unknown;
   try {
@@ -1483,7 +1514,7 @@ function parsePullRequestSummaries(
   }
   if (
     !Array.isArray(value) ||
-    value.length > GITHUB_PULL_REQUEST_LIST_LIMIT
+    value.length > limit
   ) {
     throw invalidResponse("GitHub CLI returned an invalid pull request list.");
   }

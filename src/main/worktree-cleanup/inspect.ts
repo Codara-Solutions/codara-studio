@@ -43,9 +43,9 @@ import {
   resolveMergeDefaultBranch,
 } from "../git-worktrees";
 import { proveByMergedPullRequestStack } from "../merged-pull-request-stack";
-import { isKeptBranch } from "./kept-branches";
+import { isKeptBranch, PROTECTED_BRANCHES } from "./kept-branches";
 import type { LeftoverSystem } from "./leftovers";
-import { setupProvidedEntries } from "../worktree-setup/links";
+import { isDependencyLink, setupProvidedEntries } from "../worktree-setup/links";
 import { folderIdentity } from "../worktree-folders";
 
 // Facts about every worktree of the repositories behind the user's
@@ -748,20 +748,26 @@ export async function mergeFacts(
     // Only as origin has it now: a stale tracking ref may still hold a merge
     // the branch lost (deleted unmerged, force-pushed). Its commit must be
     // here too, or the merge cannot be found in it.
-    const ownCommit = async (): Promise<string | null> => {
-      if (!ownBase) return null;
-      const now = await remoteHead(repo, ownBase);
+    const liveCommit = async (base: string): Promise<string | null> => {
+      const now = await remoteHead(repo, base);
       return now && (await revParse(repo.root, `${now}^{commit}`)) ? now : null;
     };
+    // A long-lived branch other than the default (staging, release) is where
+    // some repositories merge first. Its copy on origin now counts as well,
+    // but only for a pull request whose head is exactly this tip: a folder
+    // with commits past what was merged stays unmerged.
+    const defaultShort = fallback ? shortBranch(fallback.name) : null;
+    const longLived = new Set([...PROTECTED_BRANCHES].filter((name) => name !== ownBase && name !== defaultShort));
     for (const name of branches) {
       const stacked = await proveByMergedPullRequestStack({
         repo: repo.root,
         tip: head,
         branch: name,
         mergedFor: async (headName) => all.filter((pr) => pr.headRefName === headName),
-        landedBases: new Set(fallback ? [shortBranch(fallback.name)] : []),
+        landedBases: new Set(defaultShort ? [defaultShort] : []),
         defaultCommit: fallback?.commit ?? null,
-        remoteCommit: async (base) => (ownBase !== null && base === ownBase ? ownCommit() : null),
+        remoteCommit: async (base) => (base === ownBase || longLived.has(base) ? liveCommit(base) : null),
+        exactTipBases: longLived,
       });
       if (!stacked) continue;
       // Judged against where it landed, never a local-only base (the rail's
@@ -814,9 +820,26 @@ export function parseStatus(output: string): StatusCounts {
   return { tracked, untracked, raw: output };
 }
 
+// An untracked node_modules link (isDependencyLink) is no one's work: the
+// removal takes the link out first, never what it points at. It is left out
+// of the counts and of the raw status a confirmation is tied to.
 export async function readStatus(path: string, untracked: "all" | "normal"): Promise<StatusCounts> {
   const { stdout } = await runGit(path, ["status", "--porcelain=v1", "-z", `--untracked-files=${untracked}`]);
-  return parseStatus(stdout);
+  const status = parseStatus(stdout);
+  const links = new Set<string>();
+  for (const entry of status.untracked) if (await isDependencyLink(path, entry)) links.add(entry);
+  if (!links.size) return status;
+  const fields = stdout.split("\0");
+  const kept: string[] = [];
+  for (let i = 0; i < fields.length; i += 1) {
+    const field = fields[i];
+    const code = field.slice(0, 2);
+    if (code === "??" && links.has(field.slice(3))) continue;
+    kept.push(field);
+    // A rename or copy carries its old path in the next field.
+    if (field.length >= 4 && (code[0] === "R" || code[0] === "C") && i + 1 < fields.length) kept.push(fields[++i]);
+  }
+  return parseStatus(kept.join("\0"));
 }
 
 export async function lastActivity(path: string, head: string | null, root: string): Promise<number | null> {
