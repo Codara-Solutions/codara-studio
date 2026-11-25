@@ -272,21 +272,26 @@ async function main() {
       const bin = path.join(dir, "wake-bin");
       fs.mkdirSync(store, { recursive: true });
       fs.mkdirSync(bin, { recursive: true });
-      fs.copyFileSync(require("node:child_process").execFileSync("sh", ["-c", "command -v sleep"], { encoding: "utf8" }).trim(), path.join(bin, "agy"));
-      fs.chmodSync(path.join(bin, "agy"), 0o755);
+      // A program whose file is named agy: this node, linked or copied (a
+      // copied sleep may be a multi-call binary that will not run renamed).
+      try {
+        fs.linkSync(process.execPath, path.join(bin, "agy"));
+      } catch {
+        fs.copyFileSync(process.execPath, path.join(bin, "agy"));
+        fs.chmodSync(path.join(bin, "agy"), 0o755);
+      }
       fs.symlinkSync(path.join(bin, "agy"), path.join(bin, "antigravity"));
       const held = fs.openSync(path.join(store, "conv-w.lock"), "w");
-      // argv0 "sleep": a multi-call sleep (busybox) picks its program by it.
-      const holder = require("node:child_process").spawn(path.join(bin, "antigravity"), ["30"], {
-        argv0: "sleep",
+      const holder = require("node:child_process").spawn(path.join(bin, "antigravity"), ["-e", "setTimeout(() => {}, 30000)"], {
         stdio: ["ignore", held, "ignore"],
+        env: {},
       });
       fs.closeSync(held);
       try {
         await new Promise((resolve) => setTimeout(resolve, 200));
         assert.equal(holder.exitCode, null, "the lock holder must still run");
         process.env.HOME = home;
-        const listed = async () => [{ pid: holder.pid, command: `${path.join(bin, "antigravity")} 30` }];
+        const listed = async () => [{ pid: holder.pid, command: `${path.join(bin, "antigravity")} -e setTimeout` }];
         assert.equal(
           await presence.antigravityConversationHeld("conv-w", () => ({ known: true, busy: null }), listed),
           true,
