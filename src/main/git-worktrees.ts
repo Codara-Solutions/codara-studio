@@ -714,6 +714,8 @@ export async function worktreeFingerprint(
   // change nothing without a ref, a log or the index changing too.
   const walkGitState = async (code: string, relative: string, info: Awaited<ReturnType<typeof statOf>>): Promise<void> => {
     if (!info?.isDirectory()) return walk(code, relative, info);
+    // Present at all, as for any checkout made in a regenerable folder.
+    hash.update(`${code}\0${relative}\0checkout\0`);
     const names = (await fingerprintFs.readdir(join(worktreePath, relative))).sort();
     for (const name of names) {
       if (name === "objects") continue;
