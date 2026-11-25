@@ -249,7 +249,8 @@ async function main() {
       assert.equal(presence.MAYBE_AGY_RE.test(command), looked, `wake scan of ${command}`);
     }
     assert.equal(await presence.antigravityOpenConversations(123, "win32"), null, "Windows has no way to read it: unknown");
-    assert.deepEqual(await presence.antigravityOpenConversations(2 ** 31, "linux"), [], "a process gone since the listing holds nothing");
+    // The folder is passed: this machine may have no agy at all (CI).
+    assert.deepEqual(await presence.antigravityOpenConversations(2 ** 31, "linux", presenceDir), [], "a process gone since the listing holds nothing");
     // A pane without a real conversation id never sleeps, whatever agy holds.
     const idle = { open: async () => ["continue"], activity: () => ({ known: true, busy: null }) };
     for (const id of ["continue", undefined, "-p hi"]) {
