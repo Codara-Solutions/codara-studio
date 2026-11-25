@@ -265,9 +265,14 @@ function liveRemoteHead(root: string, branch: string): Promise<string | null> {
  * commit the proof was made against. Asked again right before deletion; no
  * answer is a no. Any other proof is unchanged by this.
  */
-export async function longLivedTargetStillHolds(root: string, merge: MergeFacts, defaultBranch: string | null): Promise<boolean> {
-  if (merge.state !== "merged" || !merge.target?.startsWith("origin/")) return true;
-  const name = merge.target.slice("origin/".length);
+export async function longLivedTargetStillHolds(
+  root: string,
+  merge: Pick<MergeFacts, "state" | "target" | "targetCommit">,
+  defaultBranch: string | null,
+): Promise<boolean> {
+  if (merge.state !== "merged" || !merge.target) return true;
+  // origin/staging or the local staging it was judged by: origin's either way.
+  const name = merge.target.startsWith("origin/") ? merge.target.slice("origin/".length) : merge.target;
   if (!PROTECTED_BRANCHES.has(name) || name === (defaultBranch ? shortBranch(defaultBranch) : null)) return true;
   const live = await liveRemoteHead(root, name);
   if (!live || !merge.targetCommit || !(await revParse(root, `${live}^{commit}`))) return false;
@@ -867,7 +872,7 @@ export async function readStatus(path: string, untracked: "all" | "normal"): Pro
   const folders = untracked === "normal" ? status.untracked.filter((entry) => entry.endsWith("/")) : [];
   if (folders.length <= COLLAPSED_LINK_FOLDERS) {
     for (const folder of folders) {
-      const inside = await runGit(path, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", folder]).then(
+      const inside = await runGit(path, ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", folder]).then(
         (result) => parseStatus(result.stdout),
         () => null,
       );
@@ -1050,6 +1055,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     state: merge.state,
     ...(merge.proof ? { proof: merge.proof } : {}),
     ...(merge.target ? { target: merge.target } : {}),
+    ...(merge.state === "merged" && merge.targetCommit ? { targetCommit: merge.targetCommit } : {}),
     ...(merge.via ? { via: merge.via } : {}),
   };
   if (merge.state === "unmerged" || merge.state === "unknown") {

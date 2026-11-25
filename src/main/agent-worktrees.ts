@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, promises as fsp, readdirSync } from "node:fs";
+import { existsSync, lstatSync, promises as fsp, readdirSync, readFileSync } from "node:fs";
 import { readlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { devNull } from "node:os";
@@ -798,9 +798,9 @@ const TOOL_OUTPUT_WALK_LIMIT = 5_000;
 // What terraform init writes below .terraform/: provider binaries
 // (terraform-provider-*, with lock.json in the old plugins/ layout) or links
 // into its plugin cache under providers/ and plugins/, and under modules/
-// its modules.json beside one folder per module (a clone is checked on its
-// own: isPristineModuleDownload). Anything else, or a walk cut short, is
-// someone's.
+// its modules.json beside one folder per module that file names, each a
+// clone (checked on its own: isPristineModuleDownload). Anything else, or a
+// walk cut short, is someone's.
 function terraformOutputOnly(absolute: string): boolean {
   let budget = TOOL_OUTPUT_WALK_LIMIT;
   const entries = (dir: string) => {
@@ -824,7 +824,43 @@ function terraformOutputOnly(absolute: string): boolean {
     }
   }
   const modules = entries(join(absolute, "modules"));
-  return !!modules && modules.every((child) => child.isDirectory() || child.name === "modules.json");
+  if (!modules) return false;
+  const folders = modules.filter((child) => child.name !== "modules.json");
+  if (!folders.length) return true;
+  const named = moduleFolders(join(absolute, "modules", "modules.json"));
+  return (
+    !!named &&
+    folders.every(
+      (child) =>
+        child.isDirectory() &&
+        named.has(child.name) &&
+        (() => {
+          try {
+            return lstatSync(join(absolute, "modules", child.name, ".git")).isDirectory();
+          } catch {
+            return false;
+          }
+        })(),
+    )
+  );
+}
+
+// The folders under .terraform/modules/ that terraform's modules.json names
+// (its Dir entries); null when it cannot be read.
+function moduleFolders(manifest: string): Set<string> | null {
+  try {
+    const parsed = JSON.parse(readFileSync(manifest, "utf8")) as { Modules?: Array<{ Dir?: unknown }> };
+    if (!Array.isArray(parsed?.Modules)) return null;
+    const names = new Set<string>();
+    for (const module of parsed.Modules) {
+      const dir = typeof module?.Dir === "string" ? module.Dir.replace(/\\/g, "/") : "";
+      const match = /^\.terraform\/modules\/([^/]+)(?:\/|$)/.exec(dir);
+      if (match) names.add(match[1]);
+    }
+    return names;
+  } catch {
+    return null;
+  }
 }
 
 const TOOL_OUTPUT_DIRS: Readonly<Record<string, ToolOutputDir>> = {
@@ -1015,21 +1051,25 @@ async function isPristineModuleDownload(
   const dotGit = join(clone, ".git");
   if (!(await fsp.lstat(dotGit).catch(() => null))?.isDirectory()) return false;
   if (!(await plainCloneConfig(dotGit))) return false;
-  // Its own config only: no global, system or environment config, where a
-  // filter its tracked .gitattributes names could be defined.
+  // Git metadata of its own and no one else's: none taken from another
+  // folder (commondir), and no worktree of its own registered elsewhere,
+  // whose .git would point into this one.
+  for (const name of ["commondir", "worktrees"]) {
+    if ((await fsp.lstat(join(dotGit, name)).catch(() => null)) !== null) return false;
+  }
+  // Its own config only, and only what git needs to run: no global, system
+  // or environment config, where a filter its tracked .gitattributes names
+  // could be defined, and no GIT_* setting of the app's.
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
     GIT_CONFIG_GLOBAL: devNull,
     GIT_CONFIG_SYSTEM: devNull,
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_ATTR_NOSYSTEM: "1",
+    GIT_CEILING_DIRECTORIES: dirname(clone),
   };
-  for (const name of Object.keys(env)) {
-    if (name === "GIT_CONFIG_PARAMETERS" || name === "GIT_CONFIG_COUNT" || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(name)) delete env[name];
+  for (const name of ["PATH", "Path", "SystemRoot", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL"]) {
+    if (process.env[name] !== undefined) env[name] = process.env[name];
   }
-  delete env.GIT_DIR;
-  delete env.GIT_WORK_TREE;
-  delete env.GIT_INDEX_FILE;
   const git = (args: string[]) =>
     runGit(clone, ["-c", "core.fsmonitor=false", "-c", `core.hooksPath=${devNull}`, "-c", `core.attributesFile=${devNull}`, ...args], { env });
   try {

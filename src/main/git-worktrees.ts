@@ -1,13 +1,13 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, readlink, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult } from "@shared/types";
 import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
 import { parseWorktreePorcelain, type WorktreeRegistration } from "./git-worktree-porcelain";
-import { isDependencyLink, prepareWorktreeRemoval, restoreWorktreeLinks } from "./worktree-setup/links";
+import { discardHeldLinks, isDependencyLink, prepareWorktreeRemoval, restoreWorktreeLinks } from "./worktree-setup/links";
 import { reservedDirNames, rowFolders } from "./worktree-folders";
 
 export type { WorktreeRegistration };
@@ -613,8 +613,8 @@ const FINGERPRINT_MAX_ENTRIES = 500_000;
 // same digest twice, so its removal was always put back. The fingerprint
 // reads the disk as it is through Electron's unpatched fs, where an archive
 // is one file like any other; plain Node has no such layer.
-const fingerprintFs: { lstat: typeof lstat; readdir: (path: string) => Promise<string[]> } =
-  (process.getBuiltinModule?.("original-fs") as typeof import("node:fs") | undefined)?.promises ?? { lstat, readdir };
+const fingerprintFs: { lstat: typeof lstat; readdir: (path: string) => Promise<string[]>; readlink: (path: string) => Promise<string> } =
+  (process.getBuiltinModule?.("original-fs") as typeof import("node:fs") | undefined)?.promises ?? { lstat, readdir, readlink };
 
 /**
  * The ignored entries a fresh checkout brings back (installed packages,
@@ -675,6 +675,8 @@ export async function worktreeFingerprint(
     relative: string,
     info: Awaited<ReturnType<typeof statOf>>,
     regenerated = false,
+    // Inside a checkout made in a regenerable folder: its links count too.
+    inCheckout = false,
   ): Promise<void> => {
     budget -= 1;
     if (budget < 0) throw new Error("It holds too many files to check again before deleting it.");
@@ -690,7 +692,11 @@ export async function worktreeFingerprint(
       hash.update(`${code}\0${relative}\0-\0`);
       return;
     }
-    if (info.isSymbolicLink()) return;
+    if (info.isSymbolicLink()) {
+      // By what it reads, never followed; one that cannot be read fails it.
+      if (inCheckout) hash.update(`${code}\0${relative}\0link:${await fingerprintFs.readlink(join(worktreePath, relative))}\0`);
+      return;
+    }
     if (!info.isDirectory()) {
       // The change time and inode too: a write that keeps the size and sets
       // the old modification time back, or a file replaced by another,
@@ -707,7 +713,7 @@ export async function worktreeFingerprint(
     const checkout = regenerated && names.some((name) => name.toLowerCase() === ".git");
     for (const [index, name] of names.entries()) {
       if (checkout && name.toLowerCase() === ".git") await walkGitState(code, join(relative, name), infos[index]);
-      else await walk(code, join(relative, name), infos[index], regenerated && !checkout);
+      else await walk(code, join(relative, name), infos[index], regenerated && !checkout, inCheckout || checkout);
     }
   };
   // All of a nested checkout's .git but its objects, which only grow and
@@ -719,7 +725,7 @@ export async function worktreeFingerprint(
     const names = (await fingerprintFs.readdir(join(worktreePath, relative))).sort();
     for (const name of names) {
       if (name === "objects") continue;
-      await walk(code, join(relative, name), await statOf(join(worktreePath, relative, name)));
+      await walk(code, join(relative, name), await statOf(join(worktreePath, relative, name)), false, true);
     }
   };
   for (let index = 0; index < records.length; index += 1) {
@@ -1002,6 +1008,7 @@ export async function removeCopyWorktree(
     return { ok: false, error: `${lastError}${stuck}` };
   }
 
+  await discardHeldLinks(releasedLinks).catch(() => undefined);
   // Best-effort: only this worktree's own registration, if one was left.
   await dropMissingWorktreeRegistration(input.repoCwd, work.worktreePath);
   if (work !== input) await clearAsideNote(input.repoCwd, work.worktreePath);

@@ -18,6 +18,8 @@ export interface WorktreeMergeFacts {
   state: WorktreeMergeState;
   proof?: WorktreeMergeProof;
   target?: string;
+  /** The target's commit the proof was made against: a long-lived target is asked again for it before deletion. */
+  targetCommit?: string;
   /** With a pull-request proof: the stacked pull requests that carried it into the base, nearest first. */
   via?: number[];
 }

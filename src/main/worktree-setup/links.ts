@@ -26,8 +26,14 @@ export interface SetupManifestCopy {
 export interface SetupManifestLink {
   path: string;
   target: string;
-  /** A link the user made, put back exactly as it read (its text), even when what it names is gone. */
+  /** A link the user made, as it read (its text). */
   exact?: string;
+  /**
+   * Where that link itself was moved, outside the worktree, for the
+   * removal: moved back on a failure, so it returns exactly as it was (its
+   * kind, its text), and deleted only once the worktree is gone.
+   */
+  held?: string;
 }
 
 export interface SetupManifest {
@@ -189,13 +195,35 @@ async function linkMayRemain(absolute: string): Promise<boolean> {
 export async function releaseWorktreeLinks(worktreePath: string, dependencyLinks: readonly string[] = []): Promise<SetupManifestLink[]> {
   const manifest = await readSetupManifest(worktreePath).catch(() => null);
   const released: SetupManifestLink[] = [];
+  let holding: string | null = null;
   for (const path of dependencyLinks) {
     if (!(await isDependencyLink(worktreePath, path))) continue;
     const absolute = join(worktreePath, ...path.split("/"));
+    const before = await fsp.lstat(absolute).catch(() => null);
     const pointsAt = await linkTarget(absolute);
-    if (pointsAt === null) continue;
+    if (!before?.isSymbolicLink() || pointsAt === null) continue;
     const target = resolve(dirname(absolute), withoutLongPathPrefix(pointsAt));
-    if (await removeLinkEntry(absolute)) released.push({ path, target, exact: pointsAt });
+    // Moved, never deleted here: beside the worktree, out of the removal's
+    // way, and checked to be the very link that was read.
+    try {
+      holding ??= await fsp.mkdtemp(`${resolve(worktreePath)}.links-`);
+    } catch {
+      continue;
+    }
+    const held = join(holding, String(released.length));
+    try {
+      await fsp.rename(absolute, held);
+    } catch {
+      continue;
+    }
+    const moved = await fsp.lstat(held).catch(() => null);
+    const text = moved?.isSymbolicLink() ? await fsp.readlink(held).catch(() => null) : null;
+    if (!moved || moved.ino !== before.ino || moved.dev !== before.dev || text !== pointsAt) {
+      await fsp.rename(held, absolute).catch(() => undefined);
+      await restoreWorktreeLinks(worktreePath, released);
+      throw new Error(`${path} changed while it was being taken out before removing the worktree, so nothing was removed.`);
+    }
+    released.push({ path, target, exact: pointsAt, held });
   }
   if (!manifest) return released;
   for (const link of manifest.links) {
@@ -252,11 +280,10 @@ export async function restoreWorktreeLinks(worktreePath: string, links: readonly
     const absolute = join(worktreePath, ...link.path.split("/"));
     if (await fsp.lstat(absolute).catch(() => null)) continue;
     try {
-      if (link.exact !== undefined) {
-        // As it read, dangling or relative alike; Windows makes a junction
-        // only to a full path, one that may be gone as well.
-        if (process.platform === "win32") await fsp.symlink(resolve(dirname(absolute), withoutLongPathPrefix(link.exact)), absolute, "junction");
-        else await fsp.symlink(link.exact, absolute);
+      if (link.held) {
+        // The link itself comes back; if it cannot, it stays where it was held.
+        await fsp.rename(link.held, absolute);
+        await fsp.rmdir(dirname(link.held)).catch(() => undefined);
         continue;
       }
       const target = await fsp.stat(link.target).catch(() => null);
@@ -265,6 +292,15 @@ export async function restoreWorktreeLinks(worktreePath: string, links: readonly
     } catch {
       // Best effort: the worktree still works, only without that folder.
     }
+  }
+}
+
+/** Once the worktree is gone: deletes the user's links held for its removal (the links, never what they point at). */
+export async function discardHeldLinks(links: readonly SetupManifestLink[]): Promise<void> {
+  for (const link of links) {
+    if (!link.held) continue;
+    await removeLinkEntry(link.held);
+    await fsp.rmdir(dirname(link.held)).catch(() => undefined);
   }
 }
 

@@ -190,6 +190,13 @@ async function main() {
       assert.equal(await inspect.longLivedTargetStillHolds(repo, facts, "origin/main"), false, "rewound since the check");
       git(hub, ["push", "-q", "-f", "origin", "staging"]);
       assert.equal(await inspect.longLivedTargetStillHolds(repo, facts, "origin/main"), true);
+      // Judged by the local staging label: origin's staging all the same.
+      const local = { state: "merged", proof: "ancestor", target: "staging", targetCommit: facts.targetCommit };
+      assert.equal(await inspect.longLivedTargetStillHolds(repo, local, "origin/main"), true);
+      assert.equal(await inspect.longLivedTargetStillHolds(repo, { ...local, targetCommit: undefined }, "origin/main"), false, "no commit to ask about");
+      git(hub, ["push", "-q", "-f", "origin", "origin/main:refs/heads/staging"]);
+      assert.equal(await inspect.longLivedTargetStillHolds(repo, local, "origin/main"), false);
+      git(hub, ["push", "-q", "-f", "origin", "staging"]);
       const onMainFacts = { state: "merged", proof: "ancestor", target: "origin/main", targetCommit: main };
       assert.equal(await inspect.longLivedTargetStillHolds(repo, onMainFacts, "origin/main"), true, "the default branch is not asked");
     });
@@ -243,7 +250,10 @@ async function main() {
     // As terraform init does it: a clone, checked out at the tag asked for.
     execFileSync("git", ["clone", "-q", moduleSource, vpc]);
     git(vpc, ["checkout", "-q", "v1.0.0"]);
-    fs.writeFileSync(path.join(infra, "infra", ".terraform", "modules", "modules.json"), "{}\n");
+    fs.writeFileSync(
+      path.join(infra, "infra", ".terraform", "modules", "modules.json"),
+      JSON.stringify({ Modules: [{ Key: "", Source: "", Dir: "." }, { Key: "vpc", Source: "git::https://example.invalid/vpc.git?ref=v1.0.0", Dir: ".terraform/modules/vpc" }] }),
+    );
     fs.mkdirSync(path.join(infra, "infra", ".terraform", "providers"), { recursive: true });
     fs.writeFileSync(path.join(infra, "infra", ".terraform", "providers", "terraform-provider-null_v3"), "binary\n");
 
@@ -251,6 +261,8 @@ async function main() {
       const entry = await checkOf(infra);
       assert.deepEqual(codes(entry), [], JSON.stringify(entry.blockers));
       assert.equal(entry.localWork, null, JSON.stringify(entry.localWork));
+      // The commit the proof was made against reaches the removal.
+      assert.deepEqual([entry.merge.state, entry.merge.targetCommit], ["merged", main]);
       assert.equal(agent.isRegenerableIgnored("infra/.terraform/", [], agent.packageRootTester(infra)), true);
       const rooted = path.join(scratch, "rooted");
       fs.mkdirSync(path.join(rooted, ".terraform", "providers"), { recursive: true });
@@ -281,6 +293,41 @@ async function main() {
       fs.writeFileSync(path.join(infra, "infra", ".terraform", "providers", "terraform-provider-aws_v5"), "binary\n");
       assert.equal((await checkOf(infra)).localWork, null, "a provider binary is init's");
       fs.rmSync(path.join(infra, "infra", ".terraform", "providers", "terraform-provider-aws_v5"));
+    });
+
+    await check("terraform: a module folder modules.json does not name, or one that is no clone, is asked about", async () => {
+      const hand = path.join(infra, "infra", ".terraform", "modules", "handwritten");
+      fs.mkdirSync(hand);
+      fs.writeFileSync(path.join(hand, "notes.txt"), "mine\n");
+      let entry = await checkOf(infra);
+      assert.ok(entry.localWork?.ignored.includes("infra/.terraform/"), JSON.stringify(entry.localWork));
+      fs.rmSync(hand, { recursive: true, force: true });
+      const manifest = path.join(infra, "infra", ".terraform", "modules", "modules.json");
+      const written = fs.readFileSync(manifest, "utf8");
+      fs.writeFileSync(manifest, JSON.stringify({ Modules: [{ Key: "vpc", Dir: ".terraform/modules/vpc" }, { Key: "x", Dir: ".terraform/modules/x" }] }));
+      fs.mkdirSync(path.join(infra, "infra", ".terraform", "modules", "x"));
+      fs.writeFileSync(path.join(infra, "infra", ".terraform", "modules", "x", "main.tf"), "# no clone\n");
+      entry = await checkOf(infra);
+      assert.ok(entry.localWork?.ignored.includes("infra/.terraform/"), "named but no clone");
+      fs.rmSync(path.join(infra, "infra", ".terraform", "modules", "x"), { recursive: true, force: true });
+      fs.rmSync(manifest);
+      entry = await checkOf(infra);
+      assert.ok(entry.localWork?.ignored.includes("infra/.terraform/") || codes(entry).length > 0, "no modules.json");
+      fs.writeFileSync(manifest, written);
+      assert.equal((await checkOf(infra)).localWork, null);
+    });
+
+    await check("terraform: a module sharing git metadata with another folder is a checkout", async () => {
+      fs.writeFileSync(path.join(vpc, ".git", "commondir"), "../../elsewhere/.git\n");
+      assert.ok(codes(await checkOf(infra)).includes("NESTED_CHECKOUT"), "commondir");
+      fs.rmSync(path.join(vpc, ".git", "commondir"));
+      const outside = path.join(scratch, "module-linked");
+      git(vpc, ["worktree", "add", "-q", "--detach", outside, "v1.0.0"]);
+      assert.ok(codes(await checkOf(infra)).includes("NESTED_CHECKOUT"), "a worktree of its own elsewhere");
+      git(vpc, ["worktree", "remove", "--force", outside]);
+      fs.rmSync(path.join(vpc, ".git", "worktrees"), { recursive: true, force: true });
+      git(vpc, ["reflog", "expire", "--expire=now", "--all"]);
+      assert.deepEqual(codes(await checkOf(infra)), []);
     });
 
     await check("terraform: a commit only a module's reflog holds makes it a checkout", async () => {
@@ -357,6 +404,10 @@ async function main() {
       fs.writeFileSync(path.join(vpc, ".git", "info", "attributes"), "* -text\n");
       assert.notEqual(await gitWorktrees.worktreeFingerprint(infra, undefined, regenerable), settled, "anything in its .git");
       fs.rmSync(path.join(vpc, ".git", "info", "attributes"));
+      const linkless = await gitWorktrees.worktreeFingerprint(infra, undefined, regenerable);
+      fs.symlinkSync("main.tf", path.join(vpc, "alias.tf"));
+      assert.notEqual(await gitWorktrees.worktreeFingerprint(infra, undefined, regenerable), linkless, "a link made in it");
+      fs.rmSync(path.join(vpc, "alias.tf"));
       assert.deepEqual(codes(await checkOf(infra)), []);
     });
 
@@ -462,9 +513,17 @@ async function main() {
       fs.symlinkSync(packages, path.join(nested, "pkg", "node_modules"), "dir");
       const entry = await checkOf(nested);
       assert.deepEqual(codes(entry), [], JSON.stringify(entry.blockers));
-      const { scan } = await scanMod.scanWorktreeCleanup(deps);
-      const row = scan.rows.find((item) => item.path === nested || item.id === nested);
+      let { scan } = await scanMod.scanWorktreeCleanup(deps);
+      let row = scan.rows.find((item) => item.path === nested || item.id === nested);
       assert.deepEqual(row.dirty, { tracked: 0, untracked: 0, inProgress: null }, "the overview agrees");
+      // A folder whose name reads as a pathspec magic word is itself looked at.
+      const magic = path.join(nested, ":(glob)pkg");
+      fs.mkdirSync(magic);
+      fs.writeFileSync(path.join(magic, "notes.txt"), "mine\n");
+      ({ scan } = await scanMod.scanWorktreeCleanup(deps));
+      row = scan.rows.find((item) => item.path === nested || item.id === nested);
+      assert.equal(row.dirty.untracked, 1, JSON.stringify(row.dirty));
+      fs.rmSync(magic, { recursive: true, force: true });
       const result = await removeMod.removeCleanupWorktrees(deps, {
         items: [{ repoRoot: repo, path: nested, fingerprint: entry.fingerprint, confirmDirty: false, confirmUnmerged: false }],
         deleteMergedBranches: true,
@@ -477,10 +536,19 @@ async function main() {
       const dir = path.join(scratch, "links");
       fs.mkdirSync(dir, { recursive: true });
       fs.symlinkSync("../gone/node_modules", path.join(dir, "node_modules"));
+      const inode = fs.lstatSync(path.join(dir, "node_modules")).ino;
       const released = await links.prepareWorktreeRemoval(dir, ["node_modules"]);
-      assert.equal(fs.existsSync(path.join(dir, "node_modules")) || !!fs.lstatSync(path.join(dir, "node_modules"), { throwIfNoEntry: false }), false);
+      assert.equal(!!fs.lstatSync(path.join(dir, "node_modules"), { throwIfNoEntry: false }), false);
+      assert.ok(released[0].held && !released[0].held.startsWith(dir + path.sep), "held outside the worktree");
       await links.restoreWorktreeLinks(dir, released);
       assert.equal(fs.readlinkSync(path.join(dir, "node_modules")), "../gone/node_modules");
+      assert.equal(fs.lstatSync(path.join(dir, "node_modules")).ino, inode, "the very same entry");
+      assert.equal(fs.existsSync(path.dirname(released[0].held)), false, "nothing left beside it");
+      // Once the worktree is gone, only the held link goes.
+      const again = await links.prepareWorktreeRemoval(dir, ["node_modules"]);
+      await links.discardHeldLinks(again);
+      assert.equal(!!fs.lstatSync(again[0].held, { throwIfNoEntry: false }), false);
+      assert.equal(fs.existsSync(path.dirname(again[0].held)), false);
     });
 
     await check("link: only an untracked link in the worktree's own folder is taken out", async () => {
