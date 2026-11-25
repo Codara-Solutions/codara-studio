@@ -600,10 +600,6 @@ async function paneTabs(deps: WorktreeCleanupDeps): Promise<Map<number, string>>
   return tabs;
 }
 
-function leftoversText(list: readonly Leftover[]): string {
-  return list.map((entry) => `${entry.program} (pid ${entry.pid})`).join(", ");
-}
-
 async function cleanUpRegistered(
   deps: WorktreeCleanupDeps,
   repo: RepoContext,
@@ -622,19 +618,22 @@ async function cleanUpRegistered(
   const makerElsewhereOk = request.mode === "manual" && !(await freshlyMade(deps, repo, workspace, path));
   // Processes left running inside are judged apart (leftovers.ts) when they
   // can be stopped; the removal itself never accepts one.
-  const stopper = !missing && request.mode !== "auto" ? deps.leftovers : undefined;
-  // Once anything was stopped, what runs in it must be read in full before
-  // it goes: an unreadable scan is never "nothing left".
+  // Only a click stops anything.
+  const stopper = !missing && request.mode === "manual" ? deps.leftovers : undefined;
+  // From a yes to stopping, through the removal, what runs in it must be
+  // read in full: an unreadable scan is never "nothing left".
+  const stopAnswered = Boolean(request.confirmStop);
   let stopped = false;
   const judge = async (allow: ReadonlySet<WorktreeInUseKind> | undefined) => {
     const [check] = await checkCleanupTargets(deps, [{ repoRoot: repo.root, path }], {
       allowInUse: allow,
-      requireKnownUsage: requireKnownUsage || stopped,
+      requireKnownUsage: requireKnownUsage || stopAnswered || stopped,
       makerElsewhereOk,
     });
     if (!check) return refused("The worktree could not be checked.", workspace.name, "CHECK_FAILED");
-    if (stopped && check.blockers.some((entry) => entry.code === "UNCHECKED" && entry.message.startsWith("What is running in it"))) {
-      return refused("Its programs were stopped, but what runs in it could not be read in full, so it was kept. Try Clean up again.", workspace.name, "UNCHECKED");
+    if ((stopAnswered || stopped) && check.blockers.some((entry) => entry.code === "UNCHECKED" && entry.message.startsWith("What is running in it"))) {
+      const what = stopped ? "Its programs were stopped, but what" : "What";
+      return refused(`${what} runs in it could not be read in full, so it was kept. Try Clean up again.`, workspace.name, "UNCHECKED");
     }
     // Neither automatic mode goes ahead on a branch git could not read: the
     // one the check judged (the worktree may have switched) and the row's.
@@ -666,11 +665,6 @@ async function cleanUpRegistered(
       const why = blocked.map((entry) => `${entry.program} (pid ${entry.pid}) runs in it, and ${entry.blocked}.`).join(" ");
       return refused(why, workspace.name, "IN_USE");
     }
-    // Nobody is asked in the unattended mode: it stops only what nothing
-    // leads to any more, and everything else waits for a click.
-    if (request.mode === "auto-merged" && described.some((entry) => !entry.orphan)) {
-      return refused(`Stop ${leftoversText(described.filter((entry) => !entry.orphan))} in it first.`, workspace.name, "IN_USE");
-    }
     leftovers = described;
   }
   const holdsIgnored = !check.alreadyRemoved && check.localWork !== null;
@@ -692,11 +686,6 @@ async function cleanUpRegistered(
     }
   }
   if (check.leftoverPids?.length) {
-    if (leftovers.length && request.mode === "auto-merged") {
-      // Asked before anything is stopped, as again before the removal.
-      const late = await lastMomentRefusal(deps, workspace, path);
-      if (late) return refused(late, workspace.name, "IN_USE");
-    }
     stopped = leftovers.length > 0;
     const failed = stopped ? await stopLeftovers(stopper!, real, leftovers) : [];
     if (failed.length) {
@@ -723,7 +712,7 @@ async function cleanUpRegistered(
   }
   return removeChecked(deps, repo, workspace, path, request, options, check, {
     allowInUse,
-    requireKnownUsage: requireKnownUsage || stopped,
+    requireKnownUsage: requireKnownUsage || stopAnswered || stopped,
     makerElsewhereOk,
   });
 }

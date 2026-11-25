@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { promises as fsp } from "node:fs";
+import { promises as fsp, readFileSync } from "node:fs";
 import { basename } from "node:path";
 import type { WorktreeLeftoverProcess } from "@shared/worktree-cleanup";
 import { cleanText } from "../agent-worktrees";
@@ -8,13 +8,15 @@ import { psTimeEnvironment, readProcFile } from "../owned-process-tree";
 
 // Processes left running in a merged worktree (a dev server an agent started
 // and never stopped), which the rail's Clean up names and, on a yes, stops.
-// Only the confirmed processes are signalled, each by its own pid, never a
-// group (a member forked after the question was never confirmed), and only
-// when right before the signal it is the same process (pid, start time and
-// command line, read on both sides of its folder) and still works inside the
-// worktree. A read that fails is never taken for an exit. Codara's own
-// processes, the shells of terminal panes and what the user runs in a pane
-// are never stopped: they are named, and the worktree stays.
+// The rule: a signal goes only to a process the user confirmed, each by its
+// own pid (never a group), and only while it is that process: the same pid,
+// start time and argument list the question showed (read on both sides of
+// its folder, and on Linux the start read again in the same instant as the
+// signal), still working inside the worktree. Anything that cannot be read
+// is unknown, never "gone": nothing is signalled for it and the worktree
+// stays. Codara's own processes, the shells of terminal panes and what the
+// user runs in a pane are never stopped: they are named, and the worktree
+// stays. Only a click stops anything; the unattended mode never does.
 
 // Real POSIX paths as the system gives them, compared exactly: a backslash
 // is part of a name here, and a case-sensitive volume has "a" and "A".
@@ -29,14 +31,16 @@ export interface ProcessFacts {
   parentPid: number;
   /** When it started, as the system spells it: a reused pid has another. */
   start: string;
+  /** Its arguments as started, the program first. */
+  argv: string[];
+  /** False when the system gives them only flattened into one line (macOS). */
+  argvExact: boolean;
   startedAtMs: number | null;
   /** Null when it cannot be read. */
   cwd: string | null;
   command: string;
   /** Exited, waiting for its parent to collect it. */
   zombie: boolean;
-  /** Linux: its control group, which an orphan keeps from where it was started. Null elsewhere. */
-  cgroup: string | null;
 }
 
 export interface LeftoverSystem {
@@ -47,7 +51,11 @@ export interface LeftoverSystem {
   facts(pid: number): Promise<ProcessFacts | null>;
   /** Every process's pid and parent; null when they cannot be listed. */
   table(): Promise<ReadonlyArray<{ pid: number; parentPid: number }> | null>;
-  signal(pid: number, signal: "SIGTERM" | "SIGKILL"): void;
+  /**
+   * Signals `pid` only if it still started at `start`, checked as close to
+   * the signal as the system allows; false when it was not sent.
+   */
+  signal(pid: number, signal: "SIGTERM" | "SIGKILL", start: string): boolean;
   wait(ms: number): Promise<void>;
   now(): number;
   /** How long SIGTERM gets before SIGKILL. */
@@ -56,14 +64,8 @@ export interface LeftoverSystem {
 
 export interface Leftover extends WorktreeLeftoverProcess {
   start: string;
-  /** Its command line, hashed: with the start, what makes it the same process. */
+  /** Its argument list, hashed: with the pid and start, what makes it the same process. */
   commandKey: string;
-  /**
-   * It lost its parent below Codara: now a child of init or the user's
-   * service manager, still in Codara's control group, and no tab leads to it.
-   * A service started on purpose has a group of its own. Never on macOS.
-   */
-  orphan: boolean;
   /** Why it is not stopped; the worktree then stays. */
   blocked?: string;
 }
@@ -78,26 +80,30 @@ function nameOf(word: string | undefined): string {
   return cleanText(basename((word ?? "").replace(/^-/, "")), 40);
 }
 
-/** "node server.js", "npm run dev", "vite": the program and its script, never other arguments. */
-export function programOf(command: string): string {
-  const words = command.trim().split(/\s+/).filter(Boolean);
-  const name = nameOf(words[0]) || "a program";
-  // Only a script right after the program: past any option, a word may be
-  // that option's value (--eval CODE, -p TOKEN).
-  const [first, second] = words.slice(1);
-  if (PACKAGE_RUNNERS.has(name) && first && WORD.test(first) && !first.startsWith("-")) {
-    if ((first === "run" || first === "exec") && second && WORD.test(second) && !second.startsWith("-")) return `${name} ${first} ${second}`;
+/**
+ * "node server.js", "npm run dev", "vite": the program and its script, never
+ * other arguments. Only from exact arguments, and only a script right after
+ * the program: past any option a word may be that option's value, and from a
+ * flattened line no word can be placed.
+ */
+export function programOf(argv: readonly string[], exact = true): string {
+  const name = nameOf(argv[0]) || "a program";
+  if (!exact) return name;
+  const [first, second] = argv.slice(1);
+  const plain = (word: string | undefined): word is string => Boolean(word) && WORD.test(word!) && !word!.startsWith("-");
+  if (PACKAGE_RUNNERS.has(name) && plain(first)) {
+    if ((first === "run" || first === "exec") && plain(second)) return `${name} ${first} ${second}`;
     return `${name} ${first}`;
   }
-  if (RUNNERS.has(name) && first && !first.startsWith("-")) {
+  if (RUNNERS.has(name) && first !== undefined && !first.startsWith("-")) {
     const script = basename(first);
-    if (WORD.test(script)) return `${name} ${script}`;
+    if (WORD.test(script) && script === first.slice(first.length - script.length)) return `${name} ${script}`;
   }
   return name;
 }
 
-function keyOf(command: string): string {
-  return createHash("sha256").update(command).digest("hex").slice(0, 16);
+function keyOf(argv: readonly string[]): string {
+  return createHash("sha256").update(argv.join("\0")).digest("hex").slice(0, 16);
 }
 
 function isAgentCommand(command: string): boolean {
@@ -126,14 +132,13 @@ export async function describeLeftovers(
   const app = new Set<number>();
   for (let pid: number | undefined = system.appPid; pid !== undefined && pid > 1 && !app.has(pid); pid = parentOf.get(pid)) app.add(pid);
   const tabOf = (pid: number) => panes.get(pid) ?? "a terminal tab";
-  const appGroup = (await system.facts(system.appPid).catch(() => null))?.cgroup ?? null;
   const out: Leftover[] = [];
   for (const pid of [...new Set(pids)]) {
     let facts: ProcessFacts | null;
     try {
       facts = await system.facts(pid);
     } catch {
-      out.push({ pid, start: "", commandKey: "", program: "a program", orphan: false, blocked: "it could not be read" });
+      out.push({ pid, start: "", commandKey: "", program: "a program", blocked: "it could not be read" });
       continue;
     }
     if (!facts || facts.zombie) continue;
@@ -142,8 +147,9 @@ export async function describeLeftovers(
       ancestors.push(up);
     }
     const session = ancestors.find((up) => sessions.has(up));
-    // Below Codara itself, not merely below what started it: an orphan's
-    // new parent (the user's service manager) is often Codara's ancestor.
+    // Below Codara itself, not merely below what started it: a process that
+    // lost its parent now hangs from init or the service manager, often
+    // Codara's own ancestors.
     const appAt = ancestors.indexOf(system.appPid);
     const sessionAt = session === undefined ? -1 : ancestors.indexOf(session);
     let blocked: string | undefined;
@@ -166,23 +172,14 @@ export async function describeLeftovers(
     if (!blocked && (facts.cwd === null || !isAtOrUnder(facts.cwd, real))) {
       blocked = facts.cwd === null ? "its folder cannot be read" : "it only has a file open in it. Close that file first";
     }
-    let orphan = false;
-    if (session === undefined && appAt < 0 && appGroup !== null && facts.cgroup === appGroup) {
-      if (facts.parentPid === 1) orphan = true;
-      else {
-        const parent = await system.facts(facts.parentPid).catch(() => null);
-        orphan = Boolean(parent && nameOf(parent.command.split(/\s+/)[0]) === "systemd" && /--user\b/.test(parent.command));
-      }
-    }
     const runningMs = facts.startedAtMs === null ? undefined : Math.max(0, system.now() - facts.startedAtMs);
     out.push({
       pid,
       start: facts.start,
-      commandKey: keyOf(facts.command),
-      program: programOf(facts.command),
+      commandKey: keyOf(facts.argv),
+      program: programOf(facts.argv, facts.argvExact),
       ...(runningMs !== undefined ? { runningMs } : {}),
       ...(startedBy ? { startedBy } : {}),
-      orphan,
       ...(blocked ? { blocked } : {}),
     });
   }
@@ -191,7 +188,7 @@ export async function describeLeftovers(
 
 /** What a confirmation of these processes is tied to: each one's pid and start, in this worktree. */
 export function leftoverFingerprint(real: string, list: readonly Leftover[]): string {
-  const ids = list.map((entry) => `${entry.pid}:${entry.start}`).sort();
+  const ids = list.map((entry) => `${entry.pid}:${entry.start}:${entry.commandKey}`).sort();
   return createHash("sha256").update(`${real}\0${ids.join("\0")}`).digest("hex").slice(0, 32);
 }
 
@@ -229,7 +226,9 @@ export async function stopLeftovers(
     } catch {
       return "unknown";
     }
-    if (!facts || facts.zombie || facts.start !== entry.start || keyOf(facts.command) !== entry.commandKey) return "gone";
+    if (!facts || facts.zombie || facts.start !== entry.start || keyOf(facts.argv) !== entry.commandKey) return "gone";
+    // Alive and the same, but where it works cannot be read: unknown.
+    if (facts.cwd === null) return "unknown";
     return facts;
   };
   const inside = (seen: Seen) => typeof seen === "object" && seen.cwd !== null && isAtOrUnder(seen.cwd, real);
@@ -237,7 +236,7 @@ export async function stopLeftovers(
     for (const entry of targets) {
       if (!inside(await look(entry))) continue;
       try {
-        system.signal(entry.pid, signal);
+        system.signal(entry.pid, signal, entry.start);
       } catch {
         /* Gone between the check and the signal. */
       }
@@ -323,26 +322,30 @@ async function linuxStatOf(pid: number): Promise<NonNullable<ReturnType<typeof l
 async function linuxFacts(pid: number): Promise<ProcessFacts | null> {
   const before = await linuxStatOf(pid);
   if (!before) return null;
-  const [cwd, argv, cgroup, boot] = await Promise.all([
+  const [cwd, argv, boot] = await Promise.all([
     fsp.readlink(`/proc/${pid}/cwd`).catch(() => null),
-    readProcFile(`/proc/${pid}/cmdline`).catch(() => Buffer.alloc(0)),
-    readProcFile(`/proc/${pid}/cgroup`).then((text) => text.toString("utf8").trim(), () => null),
+    // Unreadable arguments make it unknown, never another process.
+    readProcFile(`/proc/${pid}/cmdline`),
     linuxBoot(),
   ]);
   // Read on both sides: a pid reused between the reads is not this process.
   const after = await linuxStatOf(pid);
   if (!after) return null;
   if (after.ticks !== before.ticks) throw new Error(`process ${pid} changed while it was read`);
-  const words = argv.toString("utf8").split("\0").filter(Boolean);
+  const words = argv.toString("utf8").split("\0");
+  if (words.at(-1) === "") words.pop();
   return {
     pid,
     parentPid: after.parentPid,
     start: after.ticks,
     startedAtMs: boot === null ? null : (boot + Number(after.ticks) / CLOCK_TICKS_PER_SECOND) * 1000,
-    cwd: cwd ? cwd.replace(/ \(deleted\)$/, "") : null,
+    // As the kernel gives it: a folder removed since reads "<path> (deleted)",
+    // which is not inside anything, and a real name may end the same way.
+    cwd,
     command: words.length ? words.join(" ") : `[${after.name}]`,
+    argv: words.length ? words : [`[${after.name}]`],
+    argvExact: true,
     zombie: after.state === "Z" || after.state === "X",
-    cgroup: cgroup || null,
   };
 }
 
@@ -394,8 +397,9 @@ async function macFacts(pid: number): Promise<ProcessFacts | null> {
     startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : null,
     cwd,
     command: after.command,
+    argv: after.command.split(/\s+/).filter(Boolean),
+    argvExact: false,
     zombie: after.state.includes("Z"),
-    cgroup: null,
   };
 }
 
@@ -419,10 +423,24 @@ export function systemLeftovers(options: { appPid: number; sessionPids: () => re
     sessionPids: options.sessionPids,
     facts: linux ? linuxFacts : macFacts,
     table: linux ? linuxTable : macTable,
-    signal: (pid, signal) => {
+    signal: (pid, signal, start) => {
       // One process, never a group, init or Codara itself.
-      if (!Number.isSafeInteger(pid) || pid <= 1 || pid === options.appPid) return;
+      if (!Number.isSafeInteger(pid) || pid <= 1 || pid === options.appPid) return false;
+      if (linux) {
+        // Read in the same instant as the signal, with nothing awaited in
+        // between: a pid freed and reused has a later start. (Node offers no
+        // pidfd to bind it closer.) macOS gives no such read; the checks
+        // just before stand.
+        let now: ReturnType<typeof linuxStat>;
+        try {
+          now = linuxStat(readFileSync(`/proc/${pid}/stat`, "utf8"));
+        } catch {
+          return false;
+        }
+        if (!now || now.ticks !== start) return false;
+      }
       process.kill(pid, signal);
+      return true;
     },
     wait: (ms) => new Promise((done) => setTimeout(done, ms)),
     now: () => Date.now(),

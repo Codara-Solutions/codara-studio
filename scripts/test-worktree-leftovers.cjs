@@ -64,16 +64,19 @@ function fakeSystem() {
     sessionPids: () => [...system.sessions],
     facts: async (pid) => {
       if (system.unreadable.has(pid)) throw new Error("EACCES");
-      return procs.has(pid) ? { ...procs.get(pid) } : null;
+      const entry = procs.get(pid);
+      if (!entry) return null;
+      return { ...entry, argv: entry.argv ?? entry.command.split(/\s+/), argvExact: entry.argvExact ?? true };
     },
     unreadable: new Set(),
     table: async () => [...procs.values()].map(({ pid, parentPid }) => ({ pid, parentPid })),
-    signal: (pid, signal) => {
+    // As the real one: sent only while the pid still has that start.
+    signal: (pid, signal, start) => {
+      const entry = procs.get(pid);
+      if (!entry || entry.start !== start) return false;
       signals.push([pid, signal]);
-      for (const entry of [procs.get(pid)].filter(Boolean)) {
-        if (entry.unkillable || (signal === "SIGTERM" && entry.ignoresTerm)) continue;
-        procs.delete(entry.pid);
-      }
+      if (!(entry.unkillable || (signal === "SIGTERM" && entry.ignoresTerm))) procs.delete(pid);
+      return true;
     },
     wait: async (ms) => {
       clock += ms;
@@ -90,12 +93,11 @@ function fakeSystem() {
       cwd: "/nowhere",
       command: "node server.js --token=FAKE_SECRET",
       zombie: false,
-      cgroup: "0::/app.scope",
       ...extra,
     });
   // Codara runs under the user's service manager, where orphans land too.
-  procs.set(50, { pid: 50, parentPid: 1, start: "sd", startedAtMs: 0, cwd: "/", command: "/usr/lib/systemd/systemd --user", zombie: false, cgroup: "0::/init.scope" });
-  procs.set(100, { pid: 100, parentPid: 50, start: "app", startedAtMs: 0, cwd: "/", command: "codara", zombie: false, cgroup: "0::/app.scope" });
+  procs.set(50, { pid: 50, parentPid: 1, start: "sd", startedAtMs: 0, cwd: "/", command: "/usr/lib/systemd/systemd --user", zombie: false });
+  procs.set(100, { pid: 100, parentPid: 50, start: "app", startedAtMs: 0, cwd: "/", command: "codara", zombie: false });
   return { system, procs, signals, add };
 }
 
@@ -120,13 +122,18 @@ async function main() {
   try {
     // ── The stop helper alone ───────────────────────────────────────────
     await check("program names keep the script, never other arguments", async () => {
-      assert.equal(leftovers.programOf("/usr/bin/node /srv/app/server.js --token=FAKE_SECRET"), "node server.js");
-      assert.equal(leftovers.programOf("npm run dev -- --port 3000"), "npm run dev");
-      assert.equal(leftovers.programOf("node -e setInterval(()=>{},1000)"), "node");
-      assert.equal(leftovers.programOf("/opt/bin/vite --host"), "vite");
+      assert.equal(leftovers.programOf(["/usr/bin/node", "/srv/app/server.js", "--token=FAKE_SECRET"]), "node server.js");
+      assert.equal(leftovers.programOf(["npm", "run", "dev", "--", "--port", "3000"]), "npm run dev");
+      assert.equal(leftovers.programOf(["node", "-e", "setInterval(()=>{},1000)"]), "node");
+      assert.equal(leftovers.programOf(["/opt/bin/vite", "--host"]), "vite");
       // Past an option, a word may be its value: only the program then.
-      assert.equal(leftovers.programOf("node --eval=run() FAKE_TOKEN"), "node");
-      assert.equal(leftovers.programOf("python3 -c FAKE_TOKEN"), "python3");
+      assert.equal(leftovers.programOf(["node", "--eval=run()", "FAKE_TOKEN"]), "node");
+      assert.equal(leftovers.programOf(["python3", "-c", "FAKE_TOKEN"]), "python3");
+      // By the real argument boundaries: a blank script name hides nothing behind it.
+      assert.equal(leftovers.programOf(["node", " ", "FAKE_TOKEN"]), "node");
+      assert.equal(leftovers.programOf(["node", "dir/ FAKE_TOKEN"]), "node");
+      // From a flattened line (macOS), no word can be placed: the program only.
+      assert.equal(leftovers.programOf(["node", "server.js"], false), "node");
     });
 
     const W = "/work/tree";
@@ -141,21 +148,40 @@ async function main() {
       assert.equal(procs.has(501), true);
     });
 
-    await check("the same pid and start with another command line is not signalled", async () => {
+    await check("the same pid and start with another command line is not signalled, nor confirmed", async () => {
       const { system, procs, signals, add } = fakeSystem();
-      add(509, { cwd: W });
+      add(509, { cwd: W, command: "node before.js" });
       const [entry] = await leftovers.describeLeftovers(system, W, [509], new Map());
-      procs.get(509).command = "node other.js";
+      const asked = leftovers.leftoverFingerprint(W, [entry]);
+      procs.get(509).command = "node after.js";
       await leftovers.stopLeftovers(system, W, [entry]);
       assert.deepEqual(signals, []);
+      const [now] = await leftovers.describeLeftovers(system, W, [509], new Map());
+      assert.notEqual(leftovers.leftoverFingerprint(W, [now]), asked, "a yes to before.js is not a yes to after.js");
+    });
+
+    await check("a pid that changes hands at the signal itself is not signalled", async () => {
+      const { system, procs, signals, add } = fakeSystem();
+      add(512, { cwd: W });
+      const [entry] = await leftovers.describeLeftovers(system, W, [512], new Map());
+      // Every read before agrees; the start differs only at delivery.
+      const realSignal = system.signal;
+      system.signal = (pid, signal, start) => {
+        procs.get(pid).start = "reused";
+        return realSignal(pid, signal, start);
+      };
+      await leftovers.stopLeftovers(system, W, [entry]);
+      assert.deepEqual(signals, []);
+      assert.equal(procs.has(512), true);
     });
 
     await check("a path that only looks inside (a backslash, another case) is not inside", async () => {
       const { system, add } = fakeSystem();
       add(530, { cwd: "/work/tree\\other" });
       add(531, { cwd: "/work/Tree" });
-      const list = await leftovers.describeLeftovers(system, W, [530, 531], new Map());
-      assert.deepEqual(list.map((entry) => Boolean(entry.blocked)), [true, true]);
+      add(532, { cwd: "/work/tree (deleted)" });
+      const list = await leftovers.describeLeftovers(system, W, [530, 531, 532], new Map());
+      assert.deepEqual(list.map((entry) => Boolean(entry.blocked)), [true, true, true]);
     });
 
     await check("a read that fails is never taken for an exit", async () => {
@@ -163,13 +189,26 @@ async function main() {
       add(540, { cwd: W, ignoresTerm: true });
       const list = await leftovers.describeLeftovers(system, W, [540], new Map());
       const realSignal = system.signal;
-      system.signal = (pid, signal) => {
-        realSignal(pid, signal);
+      system.signal = (pid, signal, start) => {
+        const sent = realSignal(pid, signal, start);
         system.unreadable.add(pid);
+        return sent;
       };
       const failed = await leftovers.stopLeftovers(system, W, list);
       assert.deepEqual(failed.map(({ entry, why }) => [entry.pid, why]), [[540, "whether it stopped could not be read"]]);
       assert.deepEqual(signals, [[540, "SIGTERM"]], "nothing more is sent to what cannot be read");
+      // Alive and the same, but its folder no longer reads: unknown too.
+      const second = fakeSystem();
+      second.add(542, { cwd: W, ignoresTerm: true });
+      const listed = await leftovers.describeLeftovers(second.system, W, [542], new Map());
+      const sendTerm = second.system.signal;
+      second.system.signal = (pid, signal, start) => {
+        const sent = sendTerm(pid, signal, start);
+        second.procs.get(pid).cwd = null;
+        return sent;
+      };
+      const unknown = await leftovers.stopLeftovers(second.system, W, listed);
+      assert.deepEqual(unknown.map(({ why }) => why), ["whether it stopped could not be read"]);
       system.unreadable.add(541);
       const [unread] = await leftovers.describeLeftovers(system, W, [541], new Map());
       assert.equal(unread.blocked, "it could not be read");
@@ -222,18 +261,13 @@ async function main() {
       assert.equal(by[601].blocked, "it runs in the tab “shell” in Repo. Stop it there first");
       assert.equal(by[702].blocked, undefined);
       assert.equal(by[702].startedBy, "started by an agent that is still open: the tab “agent” in Other");
-      assert.equal(by[702].orphan, false);
       assert.equal(by[800].blocked, "it is part of Codara");
       assert.equal(by[900].blocked, "it only has a file open in it. Close that file first");
       assert.equal(by[4040], undefined, "a process already gone is left out");
+      // One that lost its parent hangs beside Codara, not below it.
       add(950, { cwd: W, parentPid: 50 });
-      const [orphan] = await leftovers.describeLeftovers(system, W, [950], panes);
-      assert.deepEqual([orphan.blocked, orphan.orphan], [undefined, true], "an orphan beside Codara is not Codara's");
-      // A service the user runs from the worktree on purpose has its own group.
-      add(951, { cwd: W, parentPid: 50, cgroup: "0::/user.slice/dev.service" });
-      add(952, { cwd: W, parentPid: 1, cgroup: null });
-      const others = await leftovers.describeLeftovers(system, W, [951, 952], panes);
-      assert.deepEqual(others.map((entry) => entry.orphan), [false, false]);
+      const [beside] = await leftovers.describeLeftovers(system, W, [950], panes);
+      assert.equal(beside.blocked, undefined, "a process beside Codara is not Codara's");
     });
 
     // ── Clean up from the rail ──────────────────────────────────────────
@@ -416,28 +450,38 @@ async function main() {
       assert.equal(fs.existsSync(dirty), true);
     });
 
-    await check("on its own, it stops only orphans; anything a tab leads to waits for a click", async () => {
+    await check("on its own, it stops nothing: whatever runs in it waits for a click", async () => {
       const ON = { autoRemoveMerged: { enabled: true, minUptimeMs: 0 } };
       const auto = (id) => rail.cleanUpRailWorkspace(deps, { workspaceId: id, mode: "auto-merged" }, ON);
       const led = merged("led");
       fake.add(9001, { cwd: led, parentPid: 8000 });
-      const stays = await auto("led");
-      assert.equal(stays.status, "refused");
-      assert.equal(fs.existsSync(led), true);
-      assert.equal(fake.procs.has(9001), true);
-      const held = merged("held");
-      fake.add(9003, { cwd: held, parentPid: 1 });
-      deps.workspaceHeld = async (id) => id === "held";
-      const kept = await auto("held");
-      deps.workspaceHeld = async () => false;
-      assert.equal(kept.status, "refused");
-      assert.equal(fake.procs.has(9003), true, "the window is asked before anything is stopped");
       const orphaned = merged("orphaned");
       fake.add(9002, { cwd: orphaned, parentPid: 1 });
-      const gone = await auto("orphaned");
-      assert.equal(gone.status, "removed", gone.message);
-      assert.equal(fake.procs.has(9002), false);
-      assert.equal(fs.existsSync(orphaned), false);
+      const signalled = fake.signals.length;
+      for (const [id, dir, pid] of [["led", led, 9001], ["orphaned", orphaned, 9002]]) {
+        const stays = await auto(id);
+        assert.equal(stays.status, "refused");
+        assert.equal(fs.existsSync(dir), true);
+        assert.equal(fake.procs.has(pid), true);
+      }
+      assert.equal(fake.signals.length, signalled);
+    });
+
+    await check("after a yes to stopping, an unreadable scan stops and removes nothing", async () => {
+      const unseen = merged("unseen");
+      fake.add(6262, { cwd: unseen });
+      const ask = await click("unseen");
+      const original = deps.processesUnderCwds;
+      deps.processesUnderCwds = async (dirs) => Object.assign(await original(dirs), { openFilesUnknown: true });
+      try {
+        const result = await click("unseen", { confirmStop: ask.stopFingerprint });
+        assert.equal(result.status, "refused");
+        assert.match(result.message, /could not be read in full, so it was kept/);
+        assert.equal(fake.procs.has(6262), true);
+        assert.equal(fs.existsSync(unseen), true);
+      } finally {
+        deps.processesUnderCwds = original;
+      }
     });
 
     // ── A real process ──────────────────────────────────────────────────
@@ -455,8 +499,13 @@ async function main() {
         await new Promise((done) => setTimeout(done, 300));
         const list = await leftovers.describeLeftovers(real, dir, [child.pid], new Map());
         assert.equal(list.length, 1);
-        assert.equal(list[0].program, "node server.js");
+        assert.equal(list[0].program, process.platform === "linux" ? "node server.js" : "node");
         assert.equal(list[0].blocked, undefined);
+        // Bound to its start at the signal itself: another start sends nothing.
+        assert.equal(real.signal(child.pid, "SIGTERM", "not-its-start"), false);
+        await new Promise((done) => setTimeout(done, 100));
+        assert.equal(child.exitCode, null);
+        assert.equal(child.signalCode, null);
         const exited = new Promise((done) => child.once("exit", done));
         assert.deepEqual(await leftovers.stopLeftovers(real, dir, list), []);
         await exited;

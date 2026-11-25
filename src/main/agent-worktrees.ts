@@ -517,9 +517,11 @@ async function realpathOrResolve(path: string): Promise<string> {
   }
 }
 
+// A backslash separates folders only on Windows; elsewhere it is part of a name.
 function isAtOrUnder(candidate: string, dir: string): boolean {
-  const a = candidate.replace(/\\/g, "/").replace(/\/+$/, "");
-  const b = dir.replace(/\\/g, "/").replace(/\/+$/, "");
+  const key = (path: string) => (process.platform === "win32" ? path.replace(/\\/g, "/") : path).replace(/\/+$/, "");
+  const a = key(candidate);
+  const b = key(dir);
   return a === b || a.startsWith(`${b}/`);
 }
 
